@@ -1,1 +1,6 @@
+# Core TradingAgents engine (pulls pyproject.toml dependencies).
 .
+
+# contrib/hyperliquid_perp (Phase 1) — optional perp module.
+hyperliquid-python-sdk>=0.22
+PyYAML>=6.0

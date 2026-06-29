@@ -1,0 +1,37 @@
+# Hyperliquid perp — example config. Copy to hyperliquid.local.yaml and fill in.
+# The .local.yaml is gitignored; it holds the PUBLIC wallet address + network
+# only. Secrets (OPENROUTER_API_KEY, the Phase-3 agent-wallet key) live in env
+# vars, never here (phase1-spec decision #9).
+
+network: mainnet              # Phase 1/2 = mainnet (read-only); testnet reserved for Phase 3 order testing
+network_timeout_s: 30         # HTTP timeout (seconds) per Hyperliquid request; a stalled read fails instead of hanging forever
+wallet_address: "0xYOUR..."   # read-only mainnet address; only needed for account/position reads, NOT for --context-only
+coins: [BTC]                  # single coin for Phase 1; add more later
+
+market_data:
+  candle_interval: "4h"
+  candle_lookback: 200             # candles for indicator warm-up
+  funding_zscore_window_days: 30
+
+indicators: [rsi_14, ema_20, ema_50, atr_14, macd]   # computed by context_builder
+
+engine:
+  llm_provider: openrouter
+  deep_think_llm: "anthropic/claude-sonnet-4-6"
+  quick_think_llm: "deepseek/deepseek-chat"
+  selected_analysts: [market, social, news]
+
+adapter:
+  target_size_pct:             # rating tier -> target % of net value (signed: +long / -short)
+    buy: 20                    # full long conviction
+    overweight: 10             # partial long
+    underweight: -10           # mild short, mirrors overweight (gated by allow_short)
+    sell: -20                  # full short
+  allow_short: true            # bearish tiers (Sell/Underweight) may short; false forces them to flat
+  rebalance_deadband_pct: 2    # |target - current| within this -> hold (avoid churn)
+  no_direct_flip: true         # opposite-sign target closes first; no one-step flip
+  entry_band_pct: 0.5          # entry_zone = entry_price +/- this %
+  confidence:                  # rating tier -> confidence
+    full: 0.8                  # Buy / Sell
+    partial: 0.6               # Overweight / Underweight
+    hold: 0.4

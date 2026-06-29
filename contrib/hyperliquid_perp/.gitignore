@@ -1,0 +1,6 @@
+# Local config — holds the public wallet address + network only (decision #9).
+# Never commit; secrets (API keys, agent-wallet private key) live in env vars.
+*.local.yaml
+
+# Environment files with secrets
+.env

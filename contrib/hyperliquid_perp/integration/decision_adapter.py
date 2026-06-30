@@ -329,7 +329,7 @@ def _parse_price(
 
 
 def rating_to_target(
-    rating: str, current_pct: float, targets: dict[str, float], allow_short: bool
+    rating: str, current_pct: float, targets: Mapping[str, float], allow_short: bool
 ) -> float:
     """Signed target exposure ``T`` (% of net value) for a rating tier.
 
@@ -433,7 +433,7 @@ def rebalance(
     return Intent.HOLD, None
 
 
-def confidence_for(rating: str, conf: dict[str, float]) -> float:
+def confidence_for(rating: str, conf: Mapping[str, float]) -> float:
     """Rating tier strength -> confidence (Buy/Sell high, OW/UW medium, Hold low)."""
     key = rating.lower()
     if key in _FULL:

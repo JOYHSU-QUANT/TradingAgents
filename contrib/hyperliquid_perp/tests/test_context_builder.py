@@ -235,10 +235,11 @@ def test_build_market_context_funding_window_days_plumbs_to_zscore(
     meta_and_asset_ctxs, candle_snapshot, funding_history
 ):
     # The funding_window_days config value must actually reach the z-score window. A
-    # full 30d window computes a z-score over the in-window points; a 0d window collapses
-    # the window to empty (cutoff == as_of_ms) and yields None with n=0. A regression
-    # that ignored the param would leave the z-score unchanged between the two and
-    # silently suppress (or fix) the window — invisible in the rendered prompt.
+    # wide 30d window sees every fixture point; a narrow 1d window sees only the most
+    # recent day's worth, so the in-window sample count is strictly smaller. A regression
+    # that ignored the param would leave the sample count (and the recorded window)
+    # unchanged between the two — invisible in the rendered prompt. (A sub-1-day window
+    # is rejected at construction; see test_schema's funding_window_days guard test.)
     snapshot = mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC")
     candles = mapper.map_candles(candle_snapshot)
     funding = mapper.map_funding_history(funding_history)
@@ -257,11 +258,13 @@ def test_build_market_context_funding_window_days_plumbs_to_zscore(
     wide = _ctx_with_window(30)
     assert wide.funding_zscore_30d is not None
     assert wide.funding_sample_count >= MIN_FUNDING_SAMPLES
+    assert wide.funding_window_days == 30  # the param is recorded on the context
 
-    collapsed = _ctx_with_window(0)
-    assert collapsed.funding_zscore_30d is None
-    assert collapsed.funding_sample_count == 0
-    assert collapsed.funding_window_days == 0  # the param is recorded on the context
+    narrow = _ctx_with_window(1)
+    assert narrow.funding_window_days == 1
+    # The narrow window reaches the computation: it keeps strictly fewer points than the
+    # wide one, proving funding_window_days is plumbed through rather than ignored.
+    assert narrow.funding_sample_count < wide.funding_sample_count
 
 
 def test_context_indicators_are_read_only(meta_and_asset_ctxs, candle_snapshot, funding_history):

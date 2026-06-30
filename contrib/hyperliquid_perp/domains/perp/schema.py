@@ -123,6 +123,13 @@ class MarketSnapshot:
                 raise ValueError(f"MarketSnapshot.{name} must be > 0, got {value}")
         if self.mid_price is not None and self.mid_price <= 0:
             raise ValueError(f"MarketSnapshot.mid_price must be > 0, got {self.mid_price}")
+        # ``prev_day_price`` is a price but guarded ``>= 0`` (not ``> 0`` like mark/oracle)
+        # on purpose: Hyperliquid returns ``prevDayPx = "0"`` for a freshly-listed coin
+        # with no 24h-ago reference, and rejecting that would refuse an otherwise-valid
+        # snapshot. ``0`` here means "no reference price"; the only consumer
+        # (``context_builder._day_change_pct``) already special-cases ``prev_day == 0`` and
+        # emits ``day_change_pct = None``, so a zero never reaches a division. Open interest
+        # and volume are genuine magnitudes (>= 0).
         for name in ("prev_day_price", "open_interest", "day_ntl_volume"):
             value = getattr(self, name)
             if value < 0:
@@ -279,6 +286,21 @@ class PerpMarketContext:
         if self.candle_count < 0:
             raise ValueError(
                 f"PerpMarketContext.candle_count must be >= 0, got {self.candle_count}"
+            )
+        # ``funding_window_days`` is the look-back width for the funding z-score; a value
+        # < 1 makes the window filter (``cutoff <= p.time < as_of_ms``) keep nothing and
+        # silently degrade the z-score to ``None`` — indistinguishable from a genuine
+        # data shortage. Reject a misconfigured window here rather than mask it downstream.
+        if self.funding_window_days < 1:
+            raise ValueError(
+                f"PerpMarketContext.funding_window_days must be >= 1, got {self.funding_window_days}"
+            )
+        # ``funding_sample_count`` is a count of surviving funding points; negative is
+        # structurally impossible (it comes from ``len(...)``), so guard it like candle_count.
+        if self.funding_sample_count < 0:
+            raise ValueError(
+                f"PerpMarketContext.funding_sample_count must be >= 0, "
+                f"got {self.funding_sample_count}"
             )
         # A naive ``as_of`` would serialize to an ISO string with no offset that looks
         # UTC on a UTC host but is wrong elsewhere (build_log_record rejects naive

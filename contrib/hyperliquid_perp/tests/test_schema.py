@@ -187,6 +187,19 @@ def test_perp_market_context_rejects_negative_candle_count():
         PerpMarketContext(**_context(candle_count=-1))
 
 
+@pytest.mark.parametrize("bad", [0, -1])
+def test_perp_market_context_rejects_subunit_funding_window(bad):
+    # A funding_window_days < 1 makes the z-score window keep nothing and silently
+    # degrade to None — indistinguishable from a real data shortage. Reject it.
+    with pytest.raises(ValueError, match="funding_window_days"):
+        PerpMarketContext(**_context(funding_window_days=bad))
+
+
+def test_perp_market_context_rejects_negative_funding_sample_count():
+    with pytest.raises(ValueError, match="funding_sample_count"):
+        PerpMarketContext(**_context(funding_sample_count=-1))
+
+
 @pytest.mark.parametrize("bad", ["", "   "])
 def test_perp_market_context_rejects_empty_coin(bad):
     with pytest.raises(ValueError, match="coin"):

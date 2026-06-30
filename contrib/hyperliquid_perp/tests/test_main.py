@@ -429,6 +429,24 @@ def test_run_engine_aborts_on_malformed_propagate_shape(monkeypatch, capsys):
     assert "unexpected shape" in capsys.readouterr().err
 
 
+def test_run_engine_reports_engine_failure_when_propagate_raises(monkeypatch, capsys):
+    # An engine-side exception (LLM rate-limit/timeout, a LangGraph crash) must be
+    # classified as an engine-run failure: exit 1 with an actionable message, not fall
+    # through to main's last-resort handler as an opaque exit-2 "unexpected error".
+    _stub_engine(monkeypatch)
+
+    class _RaisingGraph:
+        def propagate(self, *a, **k):
+            raise RuntimeError("provider rate-limited (429)")
+
+    monkeypatch.setattr(main_mod, "build_graph", lambda **k: _RaisingGraph())
+    rc = main_mod.run_engine({}, "BTC")
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "engine run failed" in err
+    assert "429" in err  # the original cause is surfaced, not swallowed
+
+
 def test_run_engine_aborts_on_non_dict_final_state(monkeypatch, capsys):
     # A crashed engine can return a non-dict final_state (e.g. None); to_perp_decision
     # indexes it as a dict, so run_engine must fail clean (exit 1) with a clear message

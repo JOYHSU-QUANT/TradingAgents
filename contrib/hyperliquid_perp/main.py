@@ -221,7 +221,16 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     ``backend_url`` stays ``None`` so the OpenRouter client uses its own default
     endpoint (``https://openrouter.ai/api/v1``).
     """
-    from tradingagents.default_config import DEFAULT_CONFIG
+    try:
+        from tradingagents.default_config import DEFAULT_CONFIG
+    except ImportError as exc:
+        # Deferred so --context-only stays import-light, but if the engine package is
+        # missing/moved this surfaces a clear cause instead of a generic top-level
+        # "unexpected error" (mirrors decision_adapter.resolve_rating's import guard).
+        raise RuntimeError(
+            "tradingagents.default_config.DEFAULT_CONFIG is not importable — "
+            "is the tradingagents package installed?"
+        ) from exc
 
     eng_cfg = config.get("engine", {})
     engine_config = dict(DEFAULT_CONFIG)
@@ -323,7 +332,22 @@ def run_engine(config: dict, coin: str) -> int:
         f"(analysts: {', '.join(selected_analysts)})...",
         file=sys.stderr,
     )
-    propagated = graph.propagate(coin, trade_date, asset_type="crypto")
+    try:
+        propagated = graph.propagate(coin, trade_date, asset_type="crypto")
+    except Exception as exc:  # noqa: BLE001 — classify engine-side failures distinctly
+        # ``propagate`` drives the unmodified engine (LLM calls, LangGraph state machine).
+        # A failure here (provider rate-limit/timeout, an agent raising, a LangGraph error)
+        # is an *engine run* failure, not a bug in this adapter — surface it with an
+        # actionable message and exit 1 like every other external call, rather than letting
+        # it fall through to main's last-resort handler as an opaque exit-2 "unexpected
+        # error". The full traceback is still logged for a post-mortem.
+        logger.exception("engine.propagate failed for %s", coin)
+        print(
+            f"error: engine run failed ({type(exc).__name__}: {exc}) — check the LLM "
+            "provider status/credentials and retry. No decision was produced or logged.",
+            file=sys.stderr,
+        )
+        return 1
     if not isinstance(propagated, (tuple, list)) or len(propagated) < 2:
         # ``propagate`` is the seam to the unmodified engine — the most likely place
         # for a version drift to change the return contract. A bad shape would

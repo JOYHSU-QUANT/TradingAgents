@@ -115,6 +115,33 @@ def _parse_timestamp(ts_raw: str | None) -> datetime:
         return datetime.now(timezone.utc)
 
 
+def _unique_path(directory: Path, coin: str, timestamp: datetime) -> Path:
+    """A not-yet-existing path for this coin/timestamp under ``directory``.
+
+    The millisecond-stamped name from :func:`_filename` normally suffices, but two
+    decisions for the same coin in the same millisecond (e.g. a retry loop or a
+    batch run on a low-resolution clock) would collide — and the atomic rename in
+    :func:`write_decision_log` would then silently overwrite, destroying the earlier
+    audit record. Append a ``_1``/``_2``/... counter on collision so no record is
+    ever lost, warning so the (unexpected) collision is visible.
+    """
+    base = _filename(coin, timestamp)
+    path = directory / base
+    if not path.exists():
+        return path
+    stem, suffix = path.stem, path.suffix
+    n = 1
+    while (candidate := directory / f"{stem}_{n}{suffix}").exists():
+        n += 1
+    logger.warning(
+        "audit filename %s already exists — writing %s instead to avoid overwriting "
+        "an earlier decision record",
+        base,
+        candidate.name,
+    )
+    return candidate
+
+
 def write_decision_log(
     record: dict[str, Any],
     results_dir: str | Path,
@@ -133,7 +160,7 @@ def write_decision_log(
 
     directory = Path(results_dir) / "perp_decisions"
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / _filename(coin, timestamp)
+    path = _unique_path(directory, coin, timestamp)
     # Write to a sibling temp file then atomically rename into place. A crash or a
     # serialization error mid-write (e.g. a non-JSON-able value in ``record``) would
     # otherwise leave a truncated/zero-length file at ``path``, silently corrupting

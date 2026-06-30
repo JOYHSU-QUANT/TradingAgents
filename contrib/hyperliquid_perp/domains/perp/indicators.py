@@ -34,8 +34,12 @@ _STOCKSTATS_COLUMN = {
     "macd": "macd",
 }
 
-# Roughly how many candles each indicator needs before its value is meaningful.
-# Below this we report ``None`` rather than a warm-up artifact.
+# The *minimum usable* candle count per indicator — below this we report ``None``
+# rather than an obvious warm-up artifact. NOTE: these are minimums, not full
+# convergence. An EMA/MACD computed at exactly its period still carries meaningful
+# seed weight (e.g. EMA(50) at 50 candles anchors ~14% on the first close), so the
+# value is usable-but-not-settled at the boundary; callers wanting a fully converged
+# reading should warm up well beyond the period (a ~2x-period budget is typical).
 _MIN_CANDLES = {
     "rsi_14": 15,
     "ema_20": 20,

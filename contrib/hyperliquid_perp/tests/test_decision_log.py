@@ -154,6 +154,24 @@ def test_write_decision_log_roundtrip(tmp_path):
     assert loaded == record
 
 
+def test_write_decision_log_same_timestamp_does_not_overwrite(tmp_path, caplog):
+    # Two decisions for the same coin at the same (millisecond) timestamp must not
+    # collide-and-overwrite: the second write lands on a counter-suffixed name so the
+    # first audit record survives. A silent overwrite would destroy an audit record.
+    record = build_log_record(
+        coin="BTC", decision=_decision(), prompt="ctx", models=_MODELS, rating="Buy", timestamp=_TS
+    )
+    first = write_decision_log(record, tmp_path, timestamp=_TS)
+    with caplog.at_level("WARNING"):
+        second = write_decision_log(record, tmp_path, timestamp=_TS)
+
+    assert first.name == "BTC_20260627_174500_000.json"
+    assert second.name == "BTC_20260627_174500_000_1.json"
+    assert first != second
+    assert first.exists() and second.exists()  # the first record was not destroyed
+    assert "already exists" in caplog.text
+
+
 def test_filename_sanitizes_coin_and_falls_back_to_unknown():
     # A coin with path separators must not produce a nested/invalid path, and an
     # empty/all-symbol coin falls back to UNKNOWN rather than an empty name.

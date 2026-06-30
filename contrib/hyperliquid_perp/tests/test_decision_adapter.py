@@ -188,24 +188,43 @@ def test_rebalance_deadband_boundary(current, target, expected_intent):
 
 
 def test_current_exposure_long_is_positive():
-    exposure = current_exposure_pct(_pos(pct=10, long=True), _ACCOUNT_VALUE, Decimal("60000"))
+    exposure = current_exposure_pct(_pos(pct=10, long=True), _ACCOUNT_VALUE)
     assert exposure == pytest.approx(10.0)
 
 
 def test_current_exposure_short_is_negative():
     # A short must report negative exposure; an inverted sign would make the
     # rebalancer treat every short as a long.
-    exposure = current_exposure_pct(_pos(pct=10, long=False), _ACCOUNT_VALUE, Decimal("60000"))
+    exposure = current_exposure_pct(_pos(pct=10, long=False), _ACCOUNT_VALUE)
     assert exposure == pytest.approx(-10.0)
 
 
 def test_current_exposure_flat_or_unknown_is_zero():
-    assert current_exposure_pct(None, _ACCOUNT_VALUE, Decimal("60000")) == 0.0
-    assert current_exposure_pct(_pos(pct=10), Decimal("0"), Decimal("60000")) == 0.0
+    assert current_exposure_pct(None, _ACCOUNT_VALUE) == 0.0
+    assert current_exposure_pct(_pos(pct=10), Decimal("0")) == 0.0
 
 
-def test_current_exposure_falls_back_to_size_times_mark_without_position_value():
-    # When the exchange omits positionValue, exposure = |size| * mark / account.
+@pytest.mark.parametrize("position_value", [None, Decimal("0")])
+def test_current_exposure_unknown_notional_returns_none(position_value, caplog):
+    # Decision C: a sized position whose exchange-reported notional is missing or 0 has
+    # an undeterminable exposure. Estimating from |size|*mark drifts on aged positions and
+    # a reported 0 would read as flat (-> pyramiding), so the function returns None and the
+    # caller (build_decision) forces HOLD rather than sizing against a guess.
+    pos = PerpPosition(
+        coin="BTC",
+        size=Decimal("0.01"),
+        entry_price=Decimal("60000"),
+        unrealized_pnl=Decimal("0"),
+        position_value=position_value,
+    )
+    with caplog.at_level(logging.WARNING):
+        assert current_exposure_pct(pos, _ACCOUNT_VALUE) is None
+    assert any("unreliable" in r.message for r in caplog.records)
+
+
+def test_unknown_notional_forces_hold_through_build_decision(caplog):
+    # End-to-end: a Buy on a sized position with no usable notional must not size up — it
+    # is forced to HOLD with a reason recorded in key_risks for the audit trail.
     pos = PerpPosition(
         coin="BTC",
         size=Decimal("0.01"),
@@ -213,20 +232,11 @@ def test_current_exposure_falls_back_to_size_times_mark_without_position_value()
         unrealized_pnl=Decimal("0"),
         position_value=None,
     )
-    # |0.01| * 60000 = 600 notional; 600 / 1000 * 100 = 60%.
-    assert current_exposure_pct(pos, _ACCOUNT_VALUE, Decimal("60000")) == pytest.approx(60.0)
-
-
-def test_current_exposure_short_without_position_value_is_negative():
-    # The fallback must still carry the short's sign (from is_long), not abs().
-    pos = PerpPosition(
-        coin="BTC",
-        size=Decimal("-0.01"),
-        entry_price=Decimal("60000"),
-        unrealized_pnl=Decimal("0"),
-        position_value=None,
-    )
-    assert current_exposure_pct(pos, _ACCOUNT_VALUE, Decimal("60000")) == pytest.approx(-60.0)
+    with caplog.at_level(logging.WARNING):
+        decision = _adapter(pos).build_decision("Buy", {}, {})
+    assert decision.intent == Intent.HOLD
+    assert decision.target_size_pct is None
+    assert any("forced to HOLD" in r for r in decision.key_risks)
 
 
 # --------------------------------------------------------------------------
@@ -355,6 +365,41 @@ def test_adapter_rejects_out_of_range_confidence():
     # must be rejected at the config seam, not silently corrupt that gate later.
     with pytest.raises(ValueError, match="out of range"):
         _adapter(None, adapter_config={"confidence": {"full": 1.5}})
+
+
+def test_adapter_rejects_target_tier_over_100pct():
+    # Decision F: a tier magnitude > 100% of net value is unreachable here (leverage is
+    # the order planner's concern) and almost always a fat-fingered config; reject it at
+    # the seam rather than instruct Phase 2 to size a multiple of net value.
+    with pytest.raises(ValueError, match="exceed"):
+        _adapter(None, adapter_config={"target_size_pct": {"buy": 500.0}})
+
+
+def test_adapter_rejects_negative_target_tier_over_100pct():
+    # The bound is on the magnitude, so a deep negative short tier is rejected too.
+    with pytest.raises(ValueError, match="exceed"):
+        _adapter(None, adapter_config={"target_size_pct": {"sell": -150.0}})
+
+
+def test_build_decision_degraded_rating_source_forces_hold(caplog):
+    # Decision E: build_decision is public; a non-EXPLICIT rating_source is a degraded
+    # parse (engine failure), so it must force HOLD regardless of the rating word — a
+    # direct caller (Phase 2/tests) without main.py's own rating_source gate must not act
+    # on it. The hold-tier confidence makes the forced hold legible, not a confident Buy.
+    with caplog.at_level(logging.WARNING):
+        decision = _adapter(None).build_decision(
+            "Buy", {}, {}, rating_source=RatingSource.PARSE_FALLBACK
+        )
+    assert decision.intent == Intent.HOLD
+    assert decision.confidence == 0.4  # hold tier, not the Buy/full tier
+    assert any("degraded" in r.message.lower() for r in caplog.records)
+
+
+def test_build_decision_default_rating_source_is_explicit():
+    # The default rating_source is EXPLICIT, so existing callers (and a clean rating) act
+    # normally — a Buy from flat opens long.
+    decision = _adapter(None).build_decision("Buy", {}, {})
+    assert decision.intent == Intent.OPEN_LONG
 
 
 def test_adapter_rejects_negative_deadband():

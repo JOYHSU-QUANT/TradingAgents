@@ -12,8 +12,10 @@ without touching the filesystem; :func:`write_decision_log` does the I/O.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -115,31 +117,38 @@ def _parse_timestamp(ts_raw: str | None) -> datetime:
         return datetime.now(timezone.utc)
 
 
-def _unique_path(directory: Path, coin: str, timestamp: datetime) -> Path:
-    """A not-yet-existing path for this coin/timestamp under ``directory``.
+def _claim_unique_path(directory: Path, coin: str, timestamp: datetime) -> Path:
+    """Atomically claim a not-yet-existing path for this coin/timestamp.
 
     The millisecond-stamped name from :func:`_filename` normally suffices, but two
-    decisions for the same coin in the same millisecond (e.g. a retry loop or a
-    batch run on a low-resolution clock) would collide — and the atomic rename in
-    :func:`write_decision_log` would then silently overwrite, destroying the earlier
-    audit record. Append a ``_1``/``_2``/... counter on collision so no record is
-    ever lost, warning so the (unexpected) collision is visible.
+    decisions for the same coin in the same millisecond (a retry loop, a batch run on a
+    low-resolution clock, or a second *process*) would collide. A plain
+    ``exists()``-then-write is a TOCTOU race: between the check and the atomic rename in
+    :func:`write_decision_log` a concurrent writer can create the same path, and the
+    rename then silently overwrites it, destroying an audit record. Instead, claim each
+    candidate with ``O_CREAT | O_EXCL`` (an empty placeholder) so only one writer can ever
+    own a given name; on collision try ``_1``/``_2``/... Warn when a counter suffix was
+    needed so the (unexpected) collision stays visible.
     """
     base = _filename(coin, timestamp)
-    path = directory / base
-    if not path.exists():
-        return path
-    stem, suffix = path.stem, path.suffix
-    n = 1
-    while (candidate := directory / f"{stem}_{n}{suffix}").exists():
-        n += 1
-    logger.warning(
-        "audit filename %s already exists — writing %s instead to avoid overwriting "
-        "an earlier decision record",
-        base,
-        candidate.name,
-    )
-    return candidate
+    stem, suffix = Path(base).stem, Path(base).suffix
+    names = itertools.chain([base], (f"{stem}_{n}{suffix}" for n in itertools.count(1)))
+    for i, name in enumerate(names):
+        candidate = directory / name
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        if i:
+            logger.warning(
+                "audit filename %s already exists — claimed %s instead to avoid "
+                "overwriting an earlier decision record",
+                base,
+                name,
+            )
+        return candidate
+    raise AssertionError("unreachable: itertools.count is infinite")  # pragma: no cover
 
 
 def write_decision_log(
@@ -160,11 +169,15 @@ def write_decision_log(
 
     directory = Path(results_dir) / "perp_decisions"
     directory.mkdir(parents=True, exist_ok=True)
-    path = _unique_path(directory, coin, timestamp)
-    # Write to a sibling temp file then atomically rename into place. A crash or a
-    # serialization error mid-write (e.g. a non-JSON-able value in ``record``) would
-    # otherwise leave a truncated/zero-length file at ``path``, silently corrupting
-    # the audit trail; the rename only happens once the full record is on disk.
+    # Atomically claim the final path (an empty placeholder) so a concurrent writer can
+    # never overwrite this record — see _claim_unique_path.
+    path = _claim_unique_path(directory, coin, timestamp)
+    # Write to a sibling temp file then atomically rename over our own placeholder. A
+    # crash or a serialization error mid-write (e.g. a non-JSON-able value in ``record``)
+    # would otherwise leave a truncated/zero-length file at ``path``, silently corrupting
+    # the audit trail; the rename only happens once the full record is on disk. On failure
+    # remove both the temp file and the empty placeholder we claimed, so the audit
+    # directory never holds a partial or zero-length record.
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
         with tmp.open("w", encoding="utf-8") as fh:
@@ -172,6 +185,7 @@ def write_decision_log(
         tmp.replace(path)
     except BaseException:
         tmp.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
         raise
     return path
 

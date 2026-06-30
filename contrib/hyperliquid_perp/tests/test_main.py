@@ -393,6 +393,26 @@ def test_run_engine_aborts_when_all_indicators_fail(monkeypatch, capsys):
     assert "every technical indicator failed" in capsys.readouterr().err
 
 
+def test_run_engine_aborts_when_only_atr_fails(monkeypatch, capsys):
+    # Decision B: a *single* dead indicator (atr_14) slips past the all-dead guard, but
+    # atr_14 is load-bearing — classify_regime would silently default to RANGING and the
+    # ATR stop-loss would be disabled. run_engine must abort before the LLM call rather
+    # than trade on a fabricated-calm regime with no stop.
+    _stub_engine(monkeypatch)
+
+    class _AtrDeadCtx:
+        candle_count = 200  # past the warm-up gate
+        indicators = {"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0, "atr_14": None}
+
+    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (_AtrDeadCtx(), object()))
+    calls = []
+    monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
+    rc = main_mod.run_engine({}, "BTC")
+    assert rc == 1
+    assert calls == []  # engine never built — no LLM spend
+    assert "atr_14 failed to compute" in capsys.readouterr().err
+
+
 def test_run_engine_aborts_on_malformed_propagate_shape(monkeypatch, capsys):
     # An engine version drift can change propagate's return contract. A non-(2+)-tuple
     # would otherwise blow up as an opaque unpack ValueError in the last-resort handler;

@@ -58,10 +58,27 @@ class HyperliquidMarketData:
 
     def get_candles(self, coin: str, interval: str, lookback: int) -> list[Candle]:
         end = _now_ms()
-        # Pad the window so we comfortably clear `lookback` closed candles.
+        # Pad the window so we comfortably clear `lookback` closed candles (the +1
+        # absorbs the still-forming bar dropped just below).
         start = end - (lookback + 1) * interval_to_ms(interval)
         raw = call_sdk(self._info.candles_snapshot, coin, interval, start, end)
         candles = mapper.map_candles(raw)
+        # ``candleSnapshot`` is end-inclusive, so the most recent bar is usually the
+        # *currently-forming* one (``open_time <= end < close_time``): its OHLCV is
+        # partial, which understates ATR and skews RSI/EMA, and its future close_time
+        # would set the context's ``as_of`` ahead of now. Indicators must run on closed
+        # candles only — the live price is carried separately by ``mark_price``. Drop any
+        # bar whose close is still in the future.
+        settled = [c for c in candles if c.close_time <= end]
+        dropped_live = len(candles) - len(settled)
+        if dropped_live:
+            logger.debug(
+                "dropped %d unsettled (still-forming) candle(s) for %s/%s",
+                dropped_live,
+                coin,
+                interval,
+            )
+        candles = settled
         trimmed = candles[-lookback:] if lookback and len(candles) > lookback else candles
         if lookback and len(trimmed) < lookback:
             # A short return (newly listed coin, too-recent startTime, or SDK-side

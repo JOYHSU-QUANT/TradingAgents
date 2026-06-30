@@ -63,6 +63,11 @@ _DEFAULT_TARGETS = {"buy": 20.0, "overweight": 10.0, "underweight": -10.0, "sell
 _DEFAULT_CONFIDENCE = {"full": 0.8, "partial": 0.6, "hold": 0.4}
 _DEFAULT_DEADBAND = 2.0
 _DEFAULT_ENTRY_BAND = 0.5
+# Upper bound on a tier's |target| (% of net value committed as margin). The notional
+# can exceed net value through the order planner's leverage, but the margin fraction
+# itself cannot — a value past this is unreachable here and almost always a typo
+# (e.g. ``buy: 500`` sizing 5x net value), so reject it at the config seam.
+_TARGET_MAX_MAGNITUDE_PCT = 100.0
 
 # |z| below this is "no meaningful funding tilt" -> neutral, regardless of side.
 _FUNDING_NEUTRAL_BAND = 0.5
@@ -132,6 +137,15 @@ class AdapterConfig:
             )
         if self.entry_band_pct < 0:
             raise ValueError(f"entry_band_pct must be >= 0, got {self.entry_band_pct}")
+        # A tier magnitude is a % of net value committed as margin; beyond ~100% is
+        # unreachable here (leverage is the order planner's concern) and is almost always
+        # a fat-fingered config. Reject it at the seam rather than instruct Phase 2 to
+        # size a multiple of net value. Runs before the read-only wrapping below.
+        over = {k: v for k, v in self.target_size_pct.items() if abs(v) > _TARGET_MAX_MAGNITUDE_PCT}
+        if over:
+            raise ValueError(
+                f"target_size_pct tier(s) exceed {_TARGET_MAX_MAGNITUDE_PCT}% of net value: {over}"
+            )
         # ``frozen=True`` blocks reassignment but not in-place mutation of a plain dict
         # (e.g. ``config.target_size_pct["buy"] = 0.0`` silently zeroing long sizing for
         # the rest of the run). Mirror PerpMarketContext.indicators: wrap both tier maps
@@ -340,29 +354,28 @@ def rating_to_target(
     return target
 
 
-def current_exposure_pct(
-    position: PerpPosition | None, account_value: Decimal, mark_price: Decimal
-) -> float:
+def current_exposure_pct(position: PerpPosition | None, account_value: Decimal) -> float | None:
     """Current signed exposure as a % of account net value (+long / -short).
 
-    Uses the position's notional value when the exchange reports it, else
-    ``|size| * mark_price``. Returns ``0.0`` for a flat or unknown account.
+    Returns ``0.0`` for a flat or unknown-value account. Returns ``None`` when a
+    *sized* position carries no usable exchange-reported notional (``position_value``
+    missing or non-positive): its true exposure can't be determined, so the caller must
+    not size against a guess — :meth:`DecisionAdapter.build_decision` turns ``None`` into
+    a forced HOLD. (Estimating from ``|size| * mark`` drifts on aged positions, and a
+    reported ``0`` would read as flat and pyramid the position.)
     """
     if position is None or account_value <= 0:
         return 0.0
     notional = position.position_value
-    if notional is None:
-        # The exchange-reported notional is missing, so approximate it from the live
-        # mark — but warn: for an aged position the mark can drift materially from the
-        # true (entry-based) notional the exchange would report, so the exposure % here
-        # is an estimate, not an authoritative reading.
-        notional = abs(position.size) * mark_price
+    if notional is None or notional <= 0:
         logger.warning(
-            "position_value missing — approximating notional from |size| * mark_price "
-            "(%s * %s); exposure %% is an estimate and may drift on aged positions",
-            abs(position.size),
-            mark_price,
+            "position_value is %s for a sized %s position — exposure is unreliable "
+            "(estimating from |size|*mark drifts on aged positions, and a reported 0 "
+            "would read as flat); forcing HOLD rather than sizing against a guess",
+            notional,
+            position.coin,
         )
+        return None
     exposure = float(abs(notional) / account_value * 100)
     return exposure if position.is_long else -exposure
 
@@ -650,7 +663,7 @@ class DecisionAdapter:
             )
         decision_fields = extract_fields(decision_md)
         trader_fields = extract_fields(trader_md)
-        decision = self.build_decision(rating, decision_fields, trader_fields)
+        decision = self.build_decision(rating, decision_fields, trader_fields, rating_source)
         return decision, rating, rating_source
 
     def to_perp_decision(self, final_state: dict) -> PerpTradeDecision:
@@ -663,19 +676,46 @@ class DecisionAdapter:
         rating: str,
         decision_fields: dict[str, str],
         trader_fields: dict[str, str],
+        rating_source: RatingSource = RatingSource.EXPLICIT,
     ) -> PerpTradeDecision:
         """Pure assembly from a rating + already-parsed markdown fields.
 
         Split out from :meth:`to_perp_decision` so tests can exercise the full
         rating->decision mapping with synthetic fields and no engine import.
+
+        Two conditions force a HOLD regardless of the rating, so a direct caller can
+        never act on a degraded input. This method is public; ``main.py`` has its own
+        ``rating_source`` gate (it aborts before logging a non-EXPLICIT decision), but a
+        Phase 2 / test caller does not, so the guard lives here too:
+
+        - ``rating_source`` is not ``EXPLICIT`` — a defaulted / parse-fallback rating is
+          an engine failure, not a real signal (decision E);
+        - current exposure is unknown — ``current_exposure_pct`` returned ``None`` for a
+          sized position with no usable notional (decision C).
         """
-        current = current_exposure_pct(self.position, self.account_value, self.ctx.mark_price)
-        target = rating_to_target(
-            rating, current, self.config.target_size_pct, self.config.allow_short
-        )
-        intent, target_magnitude = rebalance(
-            current, target, self.config.rebalance_deadband_pct, self.config.no_direct_flip
-        )
+        current = current_exposure_pct(self.position, self.account_value)
+        degraded = rating_source != RatingSource.EXPLICIT
+        exposure_unknown = current is None
+        forced_hold = degraded or exposure_unknown
+        if forced_hold:
+            if degraded:
+                logger.warning(
+                    "rating_source=%s is a degraded parse, not a real rating — forcing "
+                    "HOLD so it is not acted on as a deliberate decision",
+                    getattr(rating_source, "value", rating_source),
+                )
+            intent = Intent.HOLD
+            target_magnitude: float | None = None
+            # ``target`` only feeds the funding bias below; 0.0 lets ``_bias_sign`` read
+            # the live position's side (or neutral when flat).
+            target = current if current is not None else 0.0
+        else:
+            target = rating_to_target(
+                rating, current, self.config.target_size_pct, self.config.allow_short
+            )
+            intent, target_magnitude = rebalance(
+                current, target, self.config.rebalance_deadband_pct, self.config.no_direct_flip
+            )
 
         entry_price = _parse_price(
             trader_fields.get("entry price"), self.ctx.mark_price, field="entry price"
@@ -705,15 +745,37 @@ class DecisionAdapter:
                 "rationale defaulting to placeholder"
             )
 
+        # A forced HOLD must read as such in the audit trail: prepend the reason so a
+        # post-mortem can tell it from a deliberate Hold. ``_key_risks`` already caps at
+        # 3 and is never empty, so re-cap after prepending.
+        key_risks = _key_risks(self.ctx, self.position, funding_view, intent)
+        if forced_hold:
+            reason = (
+                "degraded engine rating"
+                if degraded
+                else "position exposure could not be determined"
+            )
+            key_risks = (f"Decision forced to HOLD: {reason} — not a deliberate hold.", *key_risks)[
+                :3
+            ]
+
+        # A forced HOLD is a non-decision; score it at the hold tier rather than carry
+        # the (now-unused) rating's own confidence, which would read as a confident hold.
+        confidence = (
+            self.config.confidence.get("hold", _DEFAULT_CONFIDENCE["hold"])
+            if forced_hold
+            else confidence_for(rating, self.config.confidence)
+        )
+
         return PerpTradeDecision(
             intent=intent,
-            confidence=confidence_for(rating, self.config.confidence),
+            confidence=confidence,
             target_size_pct=target_magnitude,
             entry_zone=entry_zone,
             invalidation_price=invalidation,
             urgency=urgency,
             rationale=rationale,
-            key_risks=_key_risks(self.ctx, self.position, funding_view, intent),
+            key_risks=key_risks,
             market_regime=self.ctx.market_regime,
             funding_view=funding_view,
         )

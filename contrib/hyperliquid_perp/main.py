@@ -144,18 +144,25 @@ def _load_position(
         return None, Decimal(0), True
     try:
         account = HyperliquidAccount(client).get_account_snapshot(addr)
-    except (ExchangeError, ValueError) as exc:
-        # ExchangeError covers request/malformed-feed failures; ValueError covers a
-        # structurally-unusable snapshot the schema rejects at construction — e.g. a
-        # zero/negative accountValue (a just-funded or fully-withdrawn wallet) or a
-        # duplicate-coin payload. Both mean "no usable position read", so report a
-        # clean failed lookup (ok=False -> exit 1) rather than letting the ValueError
-        # escape to main's last-resort handler and surface as exit 2 "unexpected error".
-        # Emit to the structured log as well as stderr: an operator capturing only
-        # stdout (or scraping the log stream) would otherwise never see that the
-        # position read failed and the run is proceeding without it.
-        logger.warning("account lookup failed for %s: %s", coin, exc)
-        print(f"(account lookup skipped: {exc})", file=sys.stderr)
+    except ExchangeError as exc:
+        # A request/malformed-feed failure — transient or infrastructure, not an
+        # account state. Emit to the structured log as well as stderr: an operator
+        # capturing only stdout (or scraping the log stream) would otherwise never see
+        # that the position read failed and the run is proceeding without it.
+        logger.warning("Hyperliquid account request failed for %s: %s", coin, exc)
+        print(f"(account lookup skipped — request failed: {exc})", file=sys.stderr)
+        return None, Decimal(0), False
+    except ValueError as exc:
+        # A structurally-unusable snapshot the schema rejects at construction — e.g. a
+        # zero/negative accountValue (a margin-called or fully-withdrawn wallet) or a
+        # duplicate-coin payload. This is a real *account state*, not a network failure;
+        # log it distinctly so an operator isn't sent chasing a phantom outage. Caught
+        # here (rather than escaping to main's last-resort handler as exit 2 "unexpected
+        # error") so it reports the same clean failed lookup (ok=False -> exit 1).
+        logger.warning(
+            "account snapshot rejected for %s (margin-called / empty / invalid?): %s", coin, exc
+        )
+        print(f"(account lookup skipped — snapshot unusable: {exc})", file=sys.stderr)
         return None, Decimal(0), False
     return account.position_for(coin), account.account_value, True
 
@@ -273,6 +280,20 @@ def run_engine(config: dict, coin: str) -> int:
             f"{ctx.candle_count} candles — the indicator engine (stockstats) is likely "
             "broken or incompatible. Refusing to run the engine on a fully-dead "
             "indicator set.",
+            file=sys.stderr,
+        )
+        return 1
+    # atr_14 is load-bearing beyond being "one missing number": classify_regime falls
+    # back to RANGING (hiding a volatile market) and the ATR stop-loss is disabled when
+    # it is absent. Past the warm-up gate there are enough candles to compute it, so a
+    # None atr_14 here means stockstats failed on that column specifically — and a
+    # single dead indicator slips past the all-dead guard above. Refuse the run rather
+    # than trade on a fabricated-calm regime with no stop.
+    if "atr_14" in ctx.indicators and ctx.indicators["atr_14"] is None:
+        print(
+            f"error: atr_14 failed to compute for {coin} despite {ctx.candle_count} "
+            "candles — the regime would silently default to RANGING and the ATR "
+            "stop-loss would be disabled. Refusing to run the engine without a usable ATR.",
             file=sys.stderr,
         )
         return 1

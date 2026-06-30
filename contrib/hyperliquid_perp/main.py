@@ -144,7 +144,13 @@ def _load_position(
         return None, Decimal(0), True
     try:
         account = HyperliquidAccount(client).get_account_snapshot(addr)
-    except ExchangeError as exc:
+    except (ExchangeError, ValueError) as exc:
+        # ExchangeError covers request/malformed-feed failures; ValueError covers a
+        # structurally-unusable snapshot the schema rejects at construction — e.g. a
+        # zero/negative accountValue (a just-funded or fully-withdrawn wallet) or a
+        # duplicate-coin payload. Both mean "no usable position read", so report a
+        # clean failed lookup (ok=False -> exit 1) rather than letting the ValueError
+        # escape to main's last-resort handler and surface as exit 2 "unexpected error".
         # Emit to the structured log as well as stderr: an operator capturing only
         # stdout (or scraping the log stream) would otherwise never see that the
         # position read failed and the run is proceeding without it.

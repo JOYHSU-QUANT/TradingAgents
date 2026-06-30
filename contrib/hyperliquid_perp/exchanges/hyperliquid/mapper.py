@@ -30,6 +30,14 @@ from .errors import MalformedResponseError, UnknownCoinError
 
 logger = logging.getLogger(__name__)
 
+# Conservative ceiling on the fraction of bars/points a single response may drop
+# before the whole series is treated as a systematic feed fault rather than a
+# transient glitch. The per-element drop+warn handling below tolerates the
+# occasional bad bar, but indicators (ATR/RSI/EMA) and the funding z-score are
+# computed over the survivor set as if it were contiguous — a silently gappy
+# series skews them with no abort. Callers can override per-call (e.g. from config).
+_MAX_DROP_FRACTION = 0.10
+
 
 def _dec(value: Any, *, field: str) -> Decimal:
     """Parse a required HL numeric string into Decimal, or fail loudly."""
@@ -134,8 +142,13 @@ def map_market_snapshot(meta_and_asset_ctxs: Any, coin: str) -> MarketSnapshot:
 # --------------------------------------------------------------------------
 
 
-def map_candles(raw_candles: Any) -> list[Candle]:
-    """Map a ``candleSnapshot`` list to ``Candle`` objects, oldest first."""
+def map_candles(raw_candles: Any, *, max_drop_fraction: float = _MAX_DROP_FRACTION) -> list[Candle]:
+    """Map a ``candleSnapshot`` list to ``Candle`` objects, oldest first.
+
+    Drops individual malformed bars (transient glitch), but raises
+    :class:`MalformedResponseError` if more than ``max_drop_fraction`` of the bars
+    are bad — a gappy series silently skews the downstream indicators.
+    """
     if raw_candles is None:
         # A null payload is an anomaly, not "no candles" — fail loud so the run
         # aborts instead of reasoning over silently-empty market data.
@@ -180,6 +193,16 @@ def map_candles(raw_candles: Any) -> list[Candle]:
         raise MalformedResponseError(
             f"all {len(raw_candles)} candleSnapshot bars were malformed — feed appears broken"
         )
+    if dropped and dropped / len(raw_candles) > max_drop_fraction:
+        # Too many bars dropped to treat as a transient glitch: the survivor set has
+        # silent gaps, so ATR/RSI/EMA would be computed over a non-contiguous series
+        # without warning. Fail loud rather than return a misleadingly-short window
+        # that still clears the warm-up count gate downstream.
+        raise MalformedResponseError(
+            f"dropped {dropped}/{len(raw_candles)} candleSnapshot bars "
+            f"({round(dropped * 100 / len(raw_candles))}%) exceeds "
+            f"{round(max_drop_fraction * 100)}% threshold — feed appears systematically malformed"
+        )
     if dropped:
         # Per-bar warnings can scroll past; an aggregate line makes a *systematic*
         # fault visible. Dropping a large fraction is not a transient glitch — the
@@ -200,8 +223,15 @@ def map_candles(raw_candles: Any) -> list[Candle]:
 # --------------------------------------------------------------------------
 
 
-def map_funding_history(raw: Any) -> list[FundingPoint]:
-    """Map a ``fundingHistory`` list to ``FundingPoint`` objects, oldest first."""
+def map_funding_history(
+    raw: Any, *, max_drop_fraction: float = _MAX_DROP_FRACTION
+) -> list[FundingPoint]:
+    """Map a ``fundingHistory`` list to ``FundingPoint`` objects, oldest first.
+
+    Drops individual malformed points (transient glitch), but raises
+    :class:`MalformedResponseError` if more than ``max_drop_fraction`` of the points
+    are bad — a truncated window silently skews the funding z-score.
+    """
     if raw is None:
         # A null payload is an anomaly, not "no history" — fail loud (see map_candles).
         raise MalformedResponseError("fundingHistory is None — expected a list")
@@ -236,6 +266,15 @@ def map_funding_history(raw: Any) -> list[FundingPoint]:
         # corruption as a benign "no funding data" and degrade the z-score to None).
         raise MalformedResponseError(
             f"all {len(raw)} fundingHistory points were malformed — feed appears broken"
+        )
+    if dropped and dropped / len(raw) > max_drop_fraction:
+        # Too many points dropped to treat as a glitch: a truncated window compresses
+        # the funding z-score's stddev and can make an extreme current rate look
+        # normal. Fail loud rather than silently degrade the funding view.
+        raise MalformedResponseError(
+            f"dropped {dropped}/{len(raw)} fundingHistory points "
+            f"({round(dropped * 100 / len(raw))}%) exceeds "
+            f"{round(max_drop_fraction * 100)}% threshold — feed appears systematically malformed"
         )
     if dropped:
         logger.warning(

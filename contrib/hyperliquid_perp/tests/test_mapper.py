@@ -101,8 +101,10 @@ def test_candles_missing_field_dropped_with_warning_not_keyerror(caplog):
         {"t": 1000, "T": 1999, "o": "1", "h": "2", "l": "1", "c": "1", "v": "1"},
         {"T": 2999, "o": "1", "h": "2", "l": "1", "c": "1", "v": "9"},  # no "t"
     ]
+    # max_drop_fraction=1.0 isolates the per-bar drop mechanism from the aggregate
+    # drop-fraction guard (a 2-element list with 1 drop is 50%, above the default 10%).
     with caplog.at_level(logging.WARNING):
-        candles = mapper.map_candles(raw)
+        candles = mapper.map_candles(raw, max_drop_fraction=1.0)
     assert [c.open_time for c in candles] == [1000]
     assert "dropping malformed candleSnapshot[1]" in caplog.text
 
@@ -114,8 +116,9 @@ def test_funding_history_missing_field_point_dropped_keeping_valid(caplog):
         {"time": 1000, "fundingRate": "0.00001", "premium": "0"},
         {"fundingRate": "0.00002", "premium": "0"},  # no "time"
     ]
+    # max_drop_fraction=1.0: isolate the per-point drop mechanism from the aggregate guard.
     with caplog.at_level(logging.WARNING):
-        points = mapper.map_funding_history(raw)
+        points = mapper.map_funding_history(raw, max_drop_fraction=1.0)
     assert [p.time for p in points] == [1000]
     assert "dropping malformed fundingHistory[1]" in caplog.text
 
@@ -169,12 +172,53 @@ def test_candles_malformed_ohlc_dropped_with_warning(caplog):
         {"t": 1000, "T": 1999, "o": "1", "h": "2", "l": "1", "c": "1", "v": "1"},
         {"t": 2000, "T": 2999, "o": "5", "h": "1", "l": "9", "c": "5", "v": "1"},
     ]
+    # max_drop_fraction=1.0: isolate per-bar drop + aggregate-warning behavior from the
+    # drop-fraction abort guard (1/2 = 50% would otherwise trip it).
     with caplog.at_level(logging.WARNING):
-        candles = mapper.map_candles(raw)
+        candles = mapper.map_candles(raw, max_drop_fraction=1.0)
     assert [c.open_time for c in candles] == [1000]
     assert "dropping malformed candleSnapshot[1]" in caplog.text
     # An aggregate line makes a systematic fault visible beyond the per-bar warnings.
     assert "dropped 1/2 candleSnapshot bars (50%)" in caplog.text
+
+
+def _ok_candle(t):
+    return {"t": t, "T": t + 999, "o": "1", "h": "2", "l": "1", "c": "1", "v": "1"}
+
+
+def test_candles_excessive_drop_fraction_raises():
+    # Above the default 10% drop ceiling (2 of 10 bad = 20%), the survivor set has too
+    # many silent gaps to feed indicators safely — fail loud rather than return a short,
+    # non-contiguous window that still clears the downstream warm-up count gate.
+    raw = [_ok_candle(i * 1000) for i in range(8)] + [{"o": "1"}, {"o": "1"}]  # 2 missing "t"
+    with pytest.raises(MalformedResponseError, match="exceeds 10% threshold"):
+        mapper.map_candles(raw)
+
+
+def test_candles_drop_fraction_at_threshold_survives(caplog):
+    # Exactly at the threshold (1 of 10 = 10%, not strictly above) stays a tolerable
+    # glitch: drop and warn, do not raise.
+    raw = [_ok_candle(i * 1000) for i in range(9)] + [{"o": "1"}]  # 1 missing "t"
+    with caplog.at_level(logging.WARNING):
+        candles = mapper.map_candles(raw)
+    assert len(candles) == 9
+    assert "dropped 1/10 candleSnapshot bars (10%)" in caplog.text
+
+
+def test_candles_drop_fraction_override_tolerates_more():
+    # A caller can raise the ceiling (e.g. from config) so a 20% drop is tolerated.
+    raw = [_ok_candle(i * 1000) for i in range(8)] + [{"o": "1"}, {"o": "1"}]
+    candles = mapper.map_candles(raw, max_drop_fraction=0.5)
+    assert len(candles) == 8
+
+
+def test_funding_excessive_drop_fraction_raises():
+    # Mirror of the candle guard: a truncated funding window compresses the z-score's
+    # stddev (an extreme rate looks normal), so above the 10% ceiling fail loud.
+    raw = [{"time": i * 1000, "fundingRate": "0.00001", "premium": "0"} for i in range(8)]
+    raw += [{"fundingRate": "0.00002"}, {"fundingRate": "0.00002"}]  # 2 missing "time"
+    with pytest.raises(MalformedResponseError, match="exceeds 10% threshold"):
+        mapper.map_funding_history(raw)
 
 
 def test_candles_all_bars_malformed_raises():
@@ -192,8 +236,9 @@ def test_candles_negative_volume_dropped(caplog):
         {"t": 1000, "T": 1999, "o": "1", "h": "2", "l": "1", "c": "1", "v": "1"},
         {"t": 2000, "T": 2999, "o": "1", "h": "2", "l": "1", "c": "1", "v": "-3"},
     ]
+    # max_drop_fraction=1.0: isolate the per-bar drop mechanism from the aggregate guard.
     with caplog.at_level(logging.WARNING):
-        candles = mapper.map_candles(raw)
+        candles = mapper.map_candles(raw, max_drop_fraction=1.0)
     assert len(candles) == 1
 
 

@@ -136,6 +136,25 @@ def test_load_position_exchange_error_returns_not_ok(monkeypatch, capsys):
     assert "account lookup skipped" in capsys.readouterr().err
 
 
+def test_load_position_schema_value_error_returns_not_ok(monkeypatch, capsys):
+    # A structurally-unusable snapshot (e.g. a zero accountValue the schema rejects at
+    # construction) raises ValueError, not ExchangeError. It must still be reported as a
+    # clean failed lookup (ok=False -> exit 1), not escape to main's last-resort handler
+    # and surface as exit 2 "unexpected error".
+    monkeypatch.setattr(
+        main_mod,
+        "HyperliquidAccount",
+        _FakeAccount(ValueError("AccountSnapshot.account_value must be > 0, got 0")),
+    )
+    position, account_value, ok = main_mod._load_position(
+        client=object(), addr="0xReadOnlyAddress", coin="BTC"
+    )
+    assert position is None
+    assert account_value == Decimal(0)
+    assert ok is False
+    assert "account lookup skipped" in capsys.readouterr().err
+
+
 def test_load_position_success_returns_position_and_value(monkeypatch):
     pos = PerpPosition(
         coin="BTC",

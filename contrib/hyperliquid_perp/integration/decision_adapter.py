@@ -725,6 +725,14 @@ class DecisionAdapter:
 
         ``null`` when closing/reducing/holding, when urgency is high (take market),
         or when the trader gave no entry price.
+
+        The band is **symmetric** for both longs and shorts: ``[entry - band,
+        entry + band]``. Phase 1 emits this as the acceptable-entry *range*, not a
+        directional limit. Phase 2's RiskGate must read it that way — for a short,
+        ``high`` (> entry) is the worst acceptable fill, not a "fill up to here"
+        trigger. If Phase 2's contract instead treats ``high`` as a marketable
+        limit, this band should become directional then (deferred until that
+        contract exists — see review round 2).
         """
         if intent not in (Intent.OPEN_LONG, Intent.OPEN_SHORT):
             return None

@@ -67,6 +67,22 @@ def test_zscore_known_value():
     assert z == pytest.approx(2.408, abs=0.005)
 
 
+def test_zscore_negative_when_current_below_mean():
+    end = 1_700_000_000_000
+    # Same window as the positive pin, but ``current`` sits *below* the mean -> the sign
+    # must flip. funding_zscore feeds funding_view_for via ``zscore * bias_sign``, so a
+    # sign inversion in the formula would flip every side's FundingView while the
+    # positive test stayed green. current=0 is mean(0.00002) - 0.00002, the mirror of
+    # the +0.00004 case, so the magnitude must match at the opposite sign.
+    rates = [0.00001, 0.00002, 0.00003] * 10
+    pts = _points(rates, end)
+    z, count = funding_zscore(pts, Decimal("0.0"), end, 30)
+    assert z is not None
+    assert count == 30
+    assert z < 0
+    assert z == pytest.approx(-2.408, abs=0.005)
+
+
 def test_zscore_excludes_points_outside_window():
     end = 1_700_000_000_000
     inside = _points([0.00001, 0.00002, 0.00003] * 10, end)

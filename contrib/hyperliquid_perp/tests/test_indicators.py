@@ -4,10 +4,23 @@ from __future__ import annotations
 
 import math
 
-from contrib.hyperliquid_perp.domains.perp.indicators import compute_indicators
+from contrib.hyperliquid_perp.domains.perp.indicators import _clean, compute_indicators
 from contrib.hyperliquid_perp.exchanges.hyperliquid import mapper
 
 NAMES = ["rsi_14", "ema_20", "ema_50", "atr_14", "macd"]
+
+
+def test_clean_non_numeric_cell_returns_none():
+    # _clean guards the stockstats read: a cell that isn't float-coercible (a string
+    # like "N/A", or a non-numeric object) makes float() raise ValueError/TypeError, and
+    # a NaN/inf cell must not leak into the prompt. Each must degrade to None rather than
+    # crash the whole compute pass or emit a non-finite indicator.
+    assert _clean("N/A") is None  # ValueError branch
+    assert _clean(object()) is None  # TypeError branch
+    assert _clean(float("nan")) is None  # NaN guard
+    assert _clean(float("inf")) is None  # inf guard
+    assert _clean(None) is None
+    assert _clean("3.5") == 3.5  # a numeric string still parses through
 
 
 def test_all_indicators_computed_with_enough_candles(candle_snapshot):

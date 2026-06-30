@@ -104,12 +104,32 @@ def test_from_config_null_network_timeout_falls_back_to_default(monkeypatch):
 
 
 def test_info_typeerror_is_translated_to_exchange_error(monkeypatch):
-    # An SDK-shape mismatch (e.g. an older sdk whose Info() rejects timeout/spot_meta)
-    # surfaces as a clear ExchangeError naming the incompatibility, not a bare
-    # TypeError that main.py would report as a generic "unexpected error".
-    def _reject(**kwargs):
-        raise TypeError("__init__() got an unexpected keyword argument 'timeout'")
+    # An SDK-shape mismatch (an older sdk whose Info() signature lacks spot_meta/timeout)
+    # surfaces as a clear ExchangeError naming the incompatibility, not a bare TypeError
+    # that main.py would report as a generic "unexpected error". The stub mirrors a real
+    # old SDK: its __init__ signature genuinely omits the kwargs we pass, so calling it
+    # raises TypeError — and the signature check identifies that as a version mismatch.
+    class _OldInfo:
+        def __init__(self, *, base_url, skip_ws):  # no spot_meta / timeout
+            pass
 
-    monkeypatch.setattr("contrib.hyperliquid_perp.exchanges.hyperliquid.sdk_client.Info", _reject)
+    monkeypatch.setattr("contrib.hyperliquid_perp.exchanges.hyperliquid.sdk_client.Info", _OldInfo)
     with pytest.raises(ExchangeError, match="incompatible"):
+        HyperliquidClient("mainnet")
+
+
+def test_info_internal_typeerror_is_not_mislabeled_as_version_mismatch(monkeypatch):
+    # A TypeError raised *inside* a compatible Info.__init__ (a data fault, not a
+    # signature rejection) must surface unchanged — relabeling it "incompatible SDK
+    # version?" would send the operator to upgrade the SDK while the real cause hides.
+    # The signature check, not the message text, decides this: Info accepts every kwarg
+    # we pass, so the wrapper must re-raise the original TypeError, not an ExchangeError.
+    class _InternalBoom:
+        def __init__(self, *, base_url, skip_ws, spot_meta, timeout):
+            raise TypeError("'NoneType' object is not subscriptable")
+
+    monkeypatch.setattr(
+        "contrib.hyperliquid_perp.exchanges.hyperliquid.sdk_client.Info", _InternalBoom
+    )
+    with pytest.raises(TypeError, match="not subscriptable"):
         HyperliquidClient("mainnet")

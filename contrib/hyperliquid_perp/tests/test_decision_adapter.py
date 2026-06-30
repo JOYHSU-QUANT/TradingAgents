@@ -735,6 +735,18 @@ def test_underwater_risk_omitted_when_closing_that_position():
     assert decision.key_risks  # still never empty (falls back to standard risk)
 
 
+def test_key_risks_falls_back_to_standard_risk_string():
+    # No position, neutral funding (z=0), and a non-volatile regime -> none of the
+    # specific risk branches fire, so key_risks carries the deterministic fallback. Pin
+    # the exact text (not just non-empty): it interpolates ctx.market_regime.value, so a
+    # `.value` drop would render "MarketRegime.ranging" and an emptied branch would slip
+    # past a bare truthiness check — both invisible without a content assertion.
+    decision = _adapter(None, ctx=_ctx(regime="ranging", zscore=0.0)).build_decision("Hold", {}, {})
+    assert decision.key_risks == (
+        "Standard market risk; ranging regime with no acute funding tilt.",
+    )
+
+
 def test_underwater_risk_kept_when_holding_that_position():
     # Overweight on a 10% long sits within the deadband -> HOLD; the underwater
     # position is being kept, so the risk should be reported.

@@ -276,6 +276,19 @@ def test_market_snapshot_non_dict_asset_ctx_raises():
         mapper.map_market_snapshot([meta, [None]], "BTC")
 
 
+def test_account_snapshot_missing_withdrawable_raises_naming_it():
+    # `withdrawable` lives at the top level of clearinghouseState (not in marginSummary).
+    # If the API drops it, the mapper must fail loud naming the field rather than
+    # defaulting it to 0 and trading on a wrong free-margin figure. Mirrors the
+    # missing-marginSummary guard above for the sibling required field.
+    state = {
+        "marginSummary": {"accountValue": "5000", "totalMarginUsed": "100"},
+        "assetPositions": [],
+    }
+    with pytest.raises(MalformedResponseError, match="withdrawable"):
+        mapper.map_account_snapshot(state)
+
+
 def test_account_snapshot_non_dict_position_entry_raises():
     # A truthy non-dict assetPositions entry would AttributeError inside
     # _map_position and, not being an ExchangeError, slip past _load_position's

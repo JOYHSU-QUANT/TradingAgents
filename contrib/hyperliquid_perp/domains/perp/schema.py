@@ -105,10 +105,11 @@ class MarketSnapshot:
     premium: Decimal | None = None
 
     def __post_init__(self) -> None:
-        # A price must be strictly positive: a zero/negative mark would make
-        # current_exposure_pct silently report 0% exposure (|size| * 0) rather than
-        # fail, and a zero oracle/mark can become a divisor downstream. Open interest
-        # and volume are magnitudes (>= 0). ``funding`` and ``premium`` are signed
+        # A price must be strictly positive: a zero/negative mark/oracle is a divisor
+        # downstream (classify_regime's atr/price, _day_change_pct, indicator math) and
+        # is serialized verbatim into the prompt, so a bad price would poison decision
+        # sizing rather than fail loudly. Open interest and volume are magnitudes (>= 0).
+        # ``funding`` and ``premium`` are signed
         # (a negative funding rate is normal), so they carry no sign guard. Reject the
         # malformed feed here rather than let a bad price poison decision sizing.
         # ``coin`` keys the position lookup (``AccountSnapshot.position_for``) and the
@@ -135,6 +136,14 @@ class FundingPoint:
     time: int
     rate: Decimal
     premium: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        # ``time`` is a UTC epoch-ms timestamp. A non-positive value is a structurally
+        # corrupt record that ``funding_zscore``'s window filter (``cutoff <= p.time <
+        # as_of_ms``) would silently drop, biasing the z-score sample with no warning.
+        # Reject it at construction, matching the boundary guards on Candle/MarketSnapshot.
+        if self.time <= 0:
+            raise ValueError(f"FundingPoint.time must be > 0 (UTC epoch ms), got {self.time}")
 
 
 @dataclass(frozen=True)
@@ -279,17 +288,20 @@ class PerpMarketContext:
         # Validate ``candle_interval`` against the single source of truth
         # (:class:`CandleInterval`) so an unsupported value fails here at
         # construction — cheap to spot — rather than later inside ``interval_to_ms``.
-        # We check membership but keep the raw string instead of coercing to the
-        # enum: a ``(str, Enum)`` member renders as ``CandleInterval.H4`` (not
-        # ``4h``) through an f-string under 3.12, which would corrupt the rendered
-        # prompt, so the stored value stays a plain, render-safe ``str``.
         try:
-            CandleInterval(self.candle_interval)
+            interval = CandleInterval(self.candle_interval)
         except ValueError:
             valid = [i.value for i in CandleInterval]
             raise ValueError(
                 f"unsupported candle_interval {self.candle_interval!r}; choose from {valid}"
             ) from None
+        # Store the plain ``.value`` string ("4h"), never the enum member: a caller
+        # passing ``CandleInterval.H4`` itself would otherwise be stored as a
+        # ``(str, Enum)`` member that renders as ``"CandleInterval.H4"`` (not ``"4h"``)
+        # through an f-string under 3.12, corrupting the rendered prompt. Coercing to
+        # ``.value`` makes the stored form render-safe whether a ``str`` or an enum
+        # member was passed in.
+        object.__setattr__(self, "candle_interval", interval.value)
         # ``frozen=True`` blocks reassignment but not in-place mutation of a plain
         # dict, so wrap ``indicators`` in a read-only proxy over a private copy —
         # the immutability the frozen flag advertises now actually holds.

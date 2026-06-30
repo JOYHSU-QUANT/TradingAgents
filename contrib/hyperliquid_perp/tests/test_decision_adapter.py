@@ -24,6 +24,7 @@ from contrib.hyperliquid_perp.domains.perp.schema import (
     PerpPosition,
 )
 from contrib.hyperliquid_perp.integration.decision_adapter import (
+    AdapterConfig,
     DecisionAdapter,
     RatingSource,
     _bias_sign,
@@ -37,7 +38,7 @@ from contrib.hyperliquid_perp.integration.decision_adapter import (
     rebalance,
 )
 
-_ACCOUNT_VALUE = Decimal("1000")  # so a position_value of 100 == 10% exposure
+_ACCOUNT_VALUE = Decimal("1000")  # so a margin_used of 100 == 10% exposure
 
 
 def _ctx(
@@ -66,15 +67,15 @@ def _ctx(
 
 
 def _pos(*, pct, long=True, upnl="0") -> PerpPosition:
-    """A position whose notional is ``pct`` % of _ACCOUNT_VALUE."""
-    value = _ACCOUNT_VALUE * Decimal(str(pct)) / 100
-    size = value / Decimal("60000")
+    """A position whose committed margin is ``pct`` % of _ACCOUNT_VALUE."""
+    margin = _ACCOUNT_VALUE * Decimal(str(pct)) / 100
+    size = margin / Decimal("60000")
     return PerpPosition(
         coin="BTC",
         size=size if long else -size,
         entry_price=Decimal("60000"),
         unrealized_pnl=Decimal(str(upnl)),
-        position_value=value,
+        margin_used=margin,
     )
 
 
@@ -204,33 +205,33 @@ def test_current_exposure_flat_or_unknown_is_zero():
     assert current_exposure_pct(_pos(pct=10), Decimal("0")) == 0.0
 
 
-@pytest.mark.parametrize("position_value", [None, Decimal("0")])
-def test_current_exposure_unknown_notional_returns_none(position_value, caplog):
-    # Decision C: a sized position whose exchange-reported notional is missing or 0 has
-    # an undeterminable exposure. Estimating from |size|*mark drifts on aged positions and
-    # a reported 0 would read as flat (-> pyramiding), so the function returns None and the
-    # caller (build_decision) forces HOLD rather than sizing against a guess.
+@pytest.mark.parametrize("margin_used", [None, Decimal("0")])
+def test_current_exposure_unknown_margin_returns_none(margin_used, caplog):
+    # Decision C: a sized position whose committed margin is missing or 0 has an
+    # undeterminable exposure. A reported 0 would read as flat (-> pyramiding), so the
+    # function returns None and the caller (build_decision) forces HOLD rather than
+    # sizing against a guess.
     pos = PerpPosition(
         coin="BTC",
         size=Decimal("0.01"),
         entry_price=Decimal("60000"),
         unrealized_pnl=Decimal("0"),
-        position_value=position_value,
+        margin_used=margin_used,
     )
     with caplog.at_level(logging.WARNING):
         assert current_exposure_pct(pos, _ACCOUNT_VALUE) is None
     assert any("unreliable" in r.message for r in caplog.records)
 
 
-def test_unknown_notional_forces_hold_through_build_decision(caplog):
-    # End-to-end: a Buy on a sized position with no usable notional must not size up — it
+def test_unknown_margin_forces_hold_through_build_decision(caplog):
+    # End-to-end: a Buy on a sized position with no usable margin must not size up — it
     # is forced to HOLD with a reason recorded in key_risks for the audit trail.
     pos = PerpPosition(
         coin="BTC",
         size=Decimal("0.01"),
         entry_price=Decimal("60000"),
         unrealized_pnl=Decimal("0"),
-        position_value=None,
+        margin_used=None,
     )
     with caplog.at_level(logging.WARNING):
         decision = _adapter(pos).build_decision("Buy", {}, {})
@@ -358,6 +359,14 @@ def test_adapter_rejects_bool_tier_value():
     # bool is an int subclass but is never a valid tier value.
     with pytest.raises(ValueError, match="non-numeric"):
         _adapter(None, adapter_config={"confidence": {"full": True}})
+
+
+def test_adapter_config_direct_construction_rejects_out_of_range_confidence():
+    # The range check lives in __post_init__ (not only from_dict), so a *direct*
+    # AdapterConfig(...) call — bypassing from_dict — can't hold an out-of-range tier
+    # that would silently corrupt the RiskGate later.
+    with pytest.raises(ValueError, match="out of range"):
+        AdapterConfig(confidence={"full": 1.5, "partial": 0.6, "hold": 0.4})
 
 
 def test_adapter_rejects_out_of_range_confidence():

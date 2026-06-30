@@ -21,7 +21,11 @@ def test_market_snapshot_picks_correct_coin(meta_and_asset_ctxs):
     # ETH ctx is index 1 — confirm we didn't read BTC's row.
     assert snap.mark_price == Decimal("3400.5")
     assert isinstance(snap.mark_price, Decimal)
-    assert isinstance(snap.funding, Decimal)
+    # Pin the funding *value*, not just its type: funding is the live input to
+    # funding_zscore(history, snapshot.funding, ...), so a wrong field read (e.g.
+    # "premium" instead of "funding") or a scaling slip would silently shift every
+    # z-score. ETH's row carries 0.00000980; reading BTC's row would give 0.00001527.
+    assert snap.funding == Decimal("0.00000980")
     assert snap.mid_price == Decimal("3400.7")
 
 

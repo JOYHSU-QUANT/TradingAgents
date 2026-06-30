@@ -9,6 +9,8 @@ import pytest
 
 from contrib.hyperliquid_perp.domains.perp.schema import (
     AccountSnapshot,
+    CandleInterval,
+    FundingPoint,
     MarketSnapshot,
     PerpMarketContext,
     PerpPosition,
@@ -196,3 +198,27 @@ def test_perp_market_context_rejects_naive_as_of():
     # host but is wrong elsewhere (build_log_record rejects naive timestamps too).
     with pytest.raises(ValueError, match="timezone-aware"):
         PerpMarketContext(**_context(as_of=datetime(2026, 6, 29, 12, 0)))
+
+
+def test_perp_market_context_coerces_enum_interval_to_value():
+    # A caller passing the CandleInterval *member* (not the "4h" string) must be stored
+    # as the plain ".value" string — otherwise a (str, Enum) member renders as
+    # "CandleInterval.H4" through an f-string under 3.12, corrupting the rendered prompt.
+    ctx = PerpMarketContext(**_context(candle_interval=CandleInterval.H4))
+    assert ctx.candle_interval == "4h"
+    assert type(ctx.candle_interval) is str  # the plain string, not the enum member
+    assert f"{ctx.candle_interval}" == "4h"  # render-safe
+
+
+def test_perp_market_context_rejects_unknown_interval():
+    with pytest.raises(ValueError, match="unsupported candle_interval"):
+        PerpMarketContext(**_context(candle_interval="7m"))
+
+
+def test_funding_point_rejects_nonpositive_time():
+    # time is a UTC epoch-ms timestamp; a non-positive value is a corrupt record that
+    # funding_zscore's window filter would silently drop, biasing the sample.
+    FundingPoint(time=1, rate=Decimal("0.0001"))  # smallest valid time builds
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match="FundingPoint.time must be > 0"):
+            FundingPoint(time=bad, rate=Decimal("0.0001"))

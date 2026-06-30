@@ -9,6 +9,7 @@ import pytest
 
 from contrib.hyperliquid_perp.domains.perp.context_builder import (
     MIN_FUNDING_SAMPLES,
+    _day_change_pct,
     build_market_context,
     classify_regime,
     funding_zscore,
@@ -262,3 +263,26 @@ def test_context_indicators_are_read_only(meta_and_asset_ctxs, candle_snapshot, 
     )
     with pytest.raises(TypeError):
         ctx.indicators["rsi_14"] = 99.9
+
+
+@pytest.mark.parametrize(
+    "mark, prev_day, expected",
+    [
+        (Decimal("110"), Decimal("100"), 10.0),  # +10% up
+        (Decimal("90"), Decimal("100"), -10.0),  # -10% down (sign must not flip)
+        (Decimal("100"), Decimal("100"), 0.0),  # unchanged
+        (Decimal("150"), Decimal("120"), 25.0),  # non-round denominator
+    ],
+)
+def test_day_change_pct_formula(mark, prev_day, expected):
+    # The prompt renders this as "24h change: X.XX%", read by the LLM as a directional
+    # signal. The end-to-end build/prompt tests inject a hardcoded value and never call
+    # this formula, so pin it directly: (mark - prev_day) / prev_day * 100. A swapped
+    # denominator or inverted numerator would silently misstate the 24h move.
+    assert _day_change_pct(mark, prev_day) == pytest.approx(expected)
+
+
+def test_day_change_pct_zero_prev_day_is_none():
+    # A zero prior price can't yield a percentage change; return None rather than
+    # divide-by-zero, so the renderer omits the field instead of crashing.
+    assert _day_change_pct(Decimal("100"), Decimal("0")) is None

@@ -74,8 +74,11 @@ call deterministically.
 
 ### Rating → signed target exposure `T`
 
-Each rating maps to a **bounded target** position (% of net value, signed:
-+long / −short). The numbers live in `adapter.target_size_pct` config.
+Each rating maps to a **bounded target** position (% of net value **committed as
+margin**, signed: +long / −short). The numbers live in `adapter.target_size_pct`
+config. Because margin can't exceed equity, a target is naturally ≤ 100% and a
+tier like `buy=20` permits a leveraged position whose margin is 20% of equity —
+it does **not** cap gross notional at 20% (which would forbid leverage).
 
 | `PortfolioDecision.rating` | Target exposure `T` |
 |---|---|
@@ -100,7 +103,8 @@ Each rating maps to a **bounded target** position (% of net value, signed:
 > `no_direct_flip` means an opposite-sign target closes first rather than
 > flipping in one step.
 
-Let `C` = current signed exposure (from `PerpPosition`), `d` = deadband:
+Let `C` = current signed exposure — the position's committed margin as a % of net
+value (`margin_used / account_value`, from `PerpPosition`), `d` = deadband:
 
 | Condition | `intent` |
 |---|---|

@@ -137,6 +137,12 @@ class AdapterConfig:
             )
         if self.entry_band_pct < 0:
             raise ValueError(f"entry_band_pct must be >= 0, got {self.entry_band_pct}")
+        # confidence is a 0-1 probability the RiskGate gates on. Validate it here at the
+        # construction seam (not only in from_dict) so a direct ``AdapterConfig(...)``
+        # call can't hold an out-of-range tier that silently corrupts the gate later.
+        out_of_range = {k: v for k, v in self.confidence.items() if not 0.0 <= v <= 1.0}
+        if out_of_range:
+            raise ValueError(f"confidence tier(s) out of range [0, 1]: {out_of_range}")
         # A tier magnitude is a % of net value committed as margin; beyond ~100% is
         # unreachable here (leverage is the order planner's concern) and is almost always
         # a fat-fingered config. Reject it at the seam rather than instruct Phase 2 to
@@ -166,11 +172,8 @@ class AdapterConfig:
         cfg = cfg or {}
         targets = _merge_tiers(_DEFAULT_TARGETS, cfg.get("target_size_pct"), "target_size_pct")
         confidence = _merge_tiers(_DEFAULT_CONFIDENCE, cfg.get("confidence"), "confidence")
-        # confidence is a 0-1 probability the RiskGate gates on; reject an out-of-range
-        # tier here at the seam rather than let it silently corrupt that gate later.
-        out_of_range = {k: v for k, v in confidence.items() if not 0.0 <= v <= 1.0}
-        if out_of_range:
-            raise ValueError(f"confidence tier(s) out of range [0, 1]: {out_of_range}")
+        # The confidence-range [0, 1] check now lives in ``__post_init__`` (the single
+        # construction seam), so the ``cls(...)`` below enforces it for this path too.
         # ``.get(key, default)`` only falls back when the key is *absent*; a key present
         # but blank in YAML parses to ``None``. For the booleans that makes ``bool(None)``
         # silently ``False`` — inverting the default and e.g. disabling shorts or enabling
@@ -357,26 +360,33 @@ def rating_to_target(
 def current_exposure_pct(position: PerpPosition | None, account_value: Decimal) -> float | None:
     """Current signed exposure as a % of account net value (+long / -short).
 
+    Exposure is the position's **committed margin** as a fraction of net value
+    (``margin_used / account_value``), matching ``target_size_pct``'s documented
+    "% of net value committed as margin" semantics. A tier like ``buy=20`` therefore
+    permits a leveraged position whose margin is 20% of equity, rather than capping
+    *gross notional* at 20% of equity (which would treat any leveraged position as
+    over-exposed and trim it toward sub-1x every round). Margin can't exceed equity,
+    so this exposure is naturally bounded at 100%.
+
     Returns ``0.0`` for a flat or unknown-value account. Returns ``None`` when a
-    *sized* position carries no usable exchange-reported notional (``position_value``
-    missing or non-positive): its true exposure can't be determined, so the caller must
-    not size against a guess — :meth:`DecisionAdapter.build_decision` turns ``None`` into
-    a forced HOLD. (Estimating from ``|size| * mark`` drifts on aged positions, and a
-    reported ``0`` would read as flat and pyramid the position.)
+    *sized* position carries no usable ``margin_used`` (missing or non-positive): its
+    true exposure can't be determined, so the caller must not size against a guess —
+    :meth:`DecisionAdapter.build_decision` turns ``None`` into a forced HOLD. (A
+    reported ``0`` margin would read as flat and pyramid the position.)
     """
     if position is None or account_value <= 0:
         return 0.0
-    notional = position.position_value
-    if notional is None or notional <= 0:
+    margin = position.margin_used
+    if margin is None or margin <= 0:
         logger.warning(
-            "position_value is %s for a sized %s position — exposure is unreliable "
-            "(estimating from |size|*mark drifts on aged positions, and a reported 0 "
-            "would read as flat); forcing HOLD rather than sizing against a guess",
-            notional,
+            "margin_used is %s for a sized %s position — exposure is unreliable "
+            "(a reported 0 would read as flat and pyramid the position); forcing "
+            "HOLD rather than sizing against a guess",
+            margin,
             position.coin,
         )
         return None
-    exposure = float(abs(notional) / account_value * 100)
+    exposure = float(margin / account_value * 100)
     return exposure if position.is_long else -exposure
 
 

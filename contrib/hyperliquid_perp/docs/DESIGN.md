@@ -107,7 +107,7 @@ model reads context rather than re-deriving it.
 }
 ```
 
-**Open long** — `target_size_pct` is a target % of net value; real size comes from RiskGate:
+**Open long** — `target_size_pct` is a target % of net value committed as margin; real size comes from RiskGate:
 
 ```json
 {

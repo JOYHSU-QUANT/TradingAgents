@@ -22,7 +22,7 @@ engine:
   selected_analysts: [market, social, news]
 
 adapter:
-  target_size_pct:             # rating tier -> target % of net value (signed: +long / -short)
+  target_size_pct:             # rating tier -> target % of net value committed as margin (signed: +long / -short; <=100%)
     buy: 20                    # full long conviction
     overweight: 10             # partial long
     underweight: -10           # mild short, mirrors overweight (gated by allow_short)

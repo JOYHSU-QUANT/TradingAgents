@@ -11,10 +11,16 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 
+import pytest
+
 from contrib.hyperliquid_perp import main as main_mod
 from contrib.hyperliquid_perp.domains.perp.decision import Intent
 from contrib.hyperliquid_perp.domains.perp.schema import AccountSnapshot, PerpPosition
-from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeError
+from contrib.hyperliquid_perp.exchanges.hyperliquid.account import HyperliquidAccount
+from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
+    ExchangeError,
+    MalformedResponseError,
+)
 
 # --------------------------------------------------------------------------
 # _build_engine_config — overlay the perp ``engine`` block onto DEFAULT_CONFIG
@@ -153,6 +159,41 @@ def test_load_position_schema_value_error_returns_not_ok(monkeypatch, capsys):
     assert account_value == Decimal(0)
     assert ok is False
     assert "account lookup skipped" in capsys.readouterr().err
+
+
+class _FakeInfo:
+    """Minimal SDK ``Info`` stand-in: ``user_state`` returns a canned payload."""
+
+    def __init__(self, state):
+        self._state = state
+
+    def user_state(self, _addr):
+        return self._state
+
+
+class _FakeClient:
+    def __init__(self, state):
+        self.info = _FakeInfo(state)
+
+
+def test_get_account_snapshot_zero_value_raises_bare_value_error():
+    # End-to-end guarantee behind test_load_position_schema_value_error_*: a zero
+    # accountValue must propagate from AccountSnapshot.__post_init__ through the real
+    # HyperliquidAccount.get_account_snapshot as a *bare* ValueError — NOT re-wrapped
+    # as the exchange layer's MalformedResponseError (which is an ExchangeError, not a
+    # ValueError). _load_position's `except (ExchangeError, ValueError)` relies on this:
+    # if the chain ever re-wrapped it as some non-caught type the zero-balance path
+    # would regress to exit 2. The mock-based test above only exercises the handler.
+    state = {
+        "marginSummary": {"accountValue": "0", "totalMarginUsed": "0"},
+        "withdrawable": "0",
+        "assetPositions": [],
+    }
+    account = HyperliquidAccount(_FakeClient(state))
+    with pytest.raises(ValueError) as exc_info:
+        account.get_account_snapshot("0xReadOnlyAddress")
+    assert not isinstance(exc_info.value, MalformedResponseError)
+    assert "account_value must be > 0" in str(exc_info.value)
 
 
 def test_load_position_success_returns_position_and_value(monkeypatch):

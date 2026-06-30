@@ -11,6 +11,7 @@ without touching the filesystem; :func:`write_decision_log` does the I/O.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import itertools
 import json
@@ -184,8 +185,12 @@ def write_decision_log(
             json.dump(record, fh, indent=2, ensure_ascii=False)
         tmp.replace(path)
     except BaseException:
-        tmp.unlink(missing_ok=True)
-        path.unlink(missing_ok=True)
+        # Best-effort cleanup: a secondary unlink failure (e.g. a Windows file
+        # lock on the temp file, or a read-only filesystem) must not replace the
+        # original write error — that is the one the caller needs to see.
+        for leftover in (tmp, path):
+            with contextlib.suppress(OSError):
+                leftover.unlink(missing_ok=True)
         raise
     return path
 

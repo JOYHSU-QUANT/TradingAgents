@@ -221,6 +221,23 @@ def test_write_decision_log_cleans_tmp_on_serialization_failure(tmp_path):
     assert not list(directory.glob("*.json"))  # no partial record left in place
 
 
+def test_write_decision_log_cleanup_unlink_failure_preserves_original_error(tmp_path, monkeypatch):
+    # Double fault: the write fails AND cleanup's unlink itself fails (e.g. a Windows
+    # file lock on the temp file). The secondary OSError must not replace the original
+    # write error — the caller needs to see *why the write failed*, not why cleanup did.
+    record = build_log_record(
+        coin="BTC", decision=_decision(), prompt="ctx", models=_MODELS, rating="Buy", timestamp=_TS
+    )
+    record["unserializable"] = object()
+
+    def _locked_unlink(self, *args, **kwargs):
+        raise OSError("temp file is locked")
+
+    monkeypatch.setattr("pathlib.Path.unlink", _locked_unlink)
+    with pytest.raises(TypeError):  # the original serialization error, not OSError
+        write_decision_log(record, tmp_path)
+
+
 def test_log_decision_builds_and_writes(tmp_path):
     record, path = log_decision(
         coin="BTC",

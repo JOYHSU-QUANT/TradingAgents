@@ -783,6 +783,26 @@ def test_decide_reports_rating_source(decision_md, expected_rating, expected_sou
     assert isinstance(rating_source, RatingSource)
 
 
+@pytest.mark.parametrize("bad_state", [None, [], "final_trade_decision", 42])
+def test_decide_rejects_non_dict_final_state(bad_state):
+    # final_state comes from the external engine; a None/non-dict (schema drift or an
+    # agent crash) must fail loud at this seam with a clear domain error rather than a
+    # bare AttributeError on .get() with no audit context.
+    with pytest.raises(ValueError, match="final_state must be a dict"):
+        _adapter(None).decide(bad_state)
+
+
+def test_adapter_config_tier_maps_are_immutable():
+    # frozen=True blocks reassignment but not in-place dict mutation; the tier maps are
+    # wrapped in a read-only proxy so a stray ``config.target_size_pct["buy"] = 0.0``
+    # cannot silently corrupt sizing for the rest of the run.
+    config = _adapter(None).config
+    with pytest.raises(TypeError):
+        config.target_size_pct["buy"] = 0.0
+    with pytest.raises(TypeError):
+        config.confidence["full"] = 0.0
+
+
 def test_volatile_regime_risk_string_present():
     # A Buy in a volatile regime must surface the volatile-regime risk to the
     # downstream Risk Manager; a silently-missing string hides the slippage warning.

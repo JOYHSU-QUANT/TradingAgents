@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from enum import Enum
+from types import MappingProxyType
 from typing import Any
 
 from ..domains.perp.decision import (
@@ -112,8 +114,8 @@ class AdapterConfig:
     behaviour is unchanged.
     """
 
-    target_size_pct: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_TARGETS))
-    confidence: dict[str, float] = field(default_factory=lambda: dict(_DEFAULT_CONFIDENCE))
+    target_size_pct: Mapping[str, float] = field(default_factory=lambda: dict(_DEFAULT_TARGETS))
+    confidence: Mapping[str, float] = field(default_factory=lambda: dict(_DEFAULT_CONFIDENCE))
     allow_short: bool = True
     no_direct_flip: bool = True
     rebalance_deadband_pct: float = _DEFAULT_DEADBAND
@@ -130,6 +132,12 @@ class AdapterConfig:
             )
         if self.entry_band_pct < 0:
             raise ValueError(f"entry_band_pct must be >= 0, got {self.entry_band_pct}")
+        # ``frozen=True`` blocks reassignment but not in-place mutation of a plain dict
+        # (e.g. ``config.target_size_pct["buy"] = 0.0`` silently zeroing long sizing for
+        # the rest of the run). Mirror PerpMarketContext.indicators: wrap both tier maps
+        # in a read-only proxy over a private copy so the advertised immutability holds.
+        object.__setattr__(self, "target_size_pct", MappingProxyType(dict(self.target_size_pct)))
+        object.__setattr__(self, "confidence", MappingProxyType(dict(self.confidence)))
 
     @classmethod
     def from_dict(cls, cfg: dict | None) -> AdapterConfig:
@@ -612,6 +620,12 @@ class DecisionAdapter:
         can freeze a position that should move. Warn here so a direct caller cannot
         act on a degraded decision unaware.
         """
+        # ``final_state`` comes from the external TradingAgents engine. A schema drift
+        # or agent crash that hands back ``None``/a non-dict would otherwise raise a
+        # bare ``AttributeError`` on ``.get`` below with no domain context; fail loud at
+        # the seam instead (mirroring _coerce_engine_text's fail-loud handling).
+        if not isinstance(final_state, dict):
+            raise ValueError(f"final_state must be a dict, got {type(final_state).__name__}")
         decision_md = _coerce_engine_text(
             final_state.get("final_trade_decision"), field="final_trade_decision"
         )

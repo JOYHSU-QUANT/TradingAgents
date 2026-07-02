@@ -1,50 +1,48 @@
-# Integration — driving TradingAgents
+# Integration — 驅動 TradingAgents
 
-How this module drives the **unmodified** TradingAgents engine (Direction 2:
-plugin, zero changes to `tradingagents/`), and which models run which roles.
+本模組如何驅動**未修改的** TradingAgents 引擎（Direction 2：plugin、
+`tradingagents/` 零修改），以及哪些模型跑哪些角色。
 
 ---
 
-# Part 1 — How it attaches
+# Part 1 — 如何掛接
 
-## Principle
+## 原則
 
-`tradingagents/` is a black-box dependency. We never edit it. Two existing,
-overridable extension points carry perp data *in* and the engine's rating *out*:
+`tradingagents/` 是黑盒依賴，我們永不修改它。兩個既有、可 override 的
+extension points 負責把 perp 資料送*進去*、把引擎的決策讀*出來*：
 
-1. **Context in** — subclass `TradingAgentsGraph` and override
-   `resolve_instrument_context()` to append the live perp snapshot. The base
-   class injects that string into the initial state, where it "reaches the whole
-   graph", so every analyst, the trader, and the portfolio manager can reason
-   about funding / OI / position.
-2. **Rating out** — `propagate()` returns the engine's normal output: a
-   `final_state` whose `PortfolioDecision` carries a 5-tier rating. The
-   **decision adapter** maps that into a `PerpTradeDecision`.
+1. **Context 進** —— 子類別化 `TradingAgentsGraph` 並 override
+   `resolve_instrument_context()`，附加即時 perp snapshot。基底類別會把該字串
+   注入 initial state，「觸及整個 graph」，因此每個 analyst、trader 與
+   portfolio manager 都能對 funding / OI / position 推理。
+2. **決策出** —— `propagate()` 回傳引擎的正常輸出：`final_state`，其中
+   `PortfolioDecision` 帶 5-tier rating（Phase 1；Phase 2 起改為 structured
+   target JSON）。**decision adapter** 將其映射為 `PerpTradeDecision`。
 
-Everything from the adapter onward (rating→intent, sizing, SL/TP, leverage,
-order params) is deterministic.
+從 adapter 往下的一切（決策映射、sizing、SL/TP、槓桿、下單參數）都是確定性的。
 
-## Engine surface we depend on
+## 依賴的引擎介面
 
-From `tradingagents/graph/trading_graph.py` and
-`tradingagents/agents/schemas.py` — stable public behaviour:
+來自 `tradingagents/graph/trading_graph.py` 與
+`tradingagents/agents/schemas.py` —— 穩定的公開行為：
 
-| Symbol | Role | We use it as |
+| Symbol | 角色 | 我們的用法 |
 |---|---|---|
-| `TradingAgentsGraph(selected_analysts, config, …)` | Constructor | Subclassed. |
-| `.resolve_instrument_context(ticker, asset_type) -> str` | Builds the per-instrument context string injected into every agent. | **Override point** — append perp snapshot. |
-| `._create_tool_nodes() -> dict[str, ToolNode]` | Registers the tools each analyst can call. | **Optional override** — add a live HL tool for Phase 3. |
-| `.propagate(company_name, trade_date, asset_type) -> (final_state, signal)` | Runs the graph. | Called with `asset_type="crypto"`. |
-| `final_state["final_trade_decision"]` | Rendered `PortfolioDecision` markdown (`**Rating**: …`). | Adapter input. |
-| `final_state["trader_investment_plan"]` | Rendered `TraderProposal` (`action`, `entry_price`, `stop_loss`, `position_sizing`). | Adapter input — price levels. |
-| `PortfolioDecision` | `rating` (Buy/Overweight/Hold/Underweight/Sell), `executive_summary`, `investment_thesis`, `price_target`, `time_horizon`. | Source of `intent`/`rationale`. |
-| `signal` (2nd return value) | `parse_rating(...)` → one of the 5 tiers. | Convenience; same rating. |
+| `TradingAgentsGraph(selected_analysts, config, …)` | 建構子 | 子類別化。 |
+| `.resolve_instrument_context(ticker, asset_type) -> str` | 建立注入每個 agent 的 per-instrument context 字串。 | **Override 點**——附加 perp snapshot。 |
+| `._create_tool_nodes() -> dict[str, ToolNode]` | 註冊每個 analyst 可呼叫的 tools。 | **可選 override**——Phase 3 加即時 HL tool。 |
+| `.propagate(company_name, trade_date, asset_type) -> (final_state, signal)` | 跑整個 graph。 | 以 `asset_type="crypto"` 呼叫。 |
+| `final_state["final_trade_decision"]` | 渲染後的 `PortfolioDecision` markdown（`**Rating**: …`）。 | Adapter 輸入。 |
+| `final_state["trader_investment_plan"]` | 渲染後的 `TraderProposal`（`action`、`entry_price`、`stop_loss`、`position_sizing`）。 | Adapter 輸入——價格水位。 |
+| `PortfolioDecision` | `rating`（Buy/Overweight/Hold/Underweight/Sell）、`executive_summary`、`investment_thesis`、`price_target`、`time_horizon`。 | `intent`/`rationale` 的來源。 |
+| `signal`（第二個回傳值） | `parse_rating(...)` → 5 tiers 之一。 | 便利用途；同一個 rating。 |
 
-> The engine reasons in **prose + a 5-tier rating**; it does not natively emit
-> perp fields like `funding_view` or `target_size_pct`. The adapter supplies
-> those deterministically from the `PerpMarketContext` this module fetched.
+> 引擎以**散文 + 5-tier rating** 推理；它不會原生輸出 `funding_view` 或
+> `target_size_pct` 這類 perp 欄位。這些由 adapter 依本模組抓取的
+> `PerpMarketContext` 確定性補上。
 
-## Run flow
+## 執行流程
 
 ```
 contrib main.py
@@ -65,6 +63,11 @@ contrib main.py
 ```
 
 ## `PortfolioDecision → PerpTradeDecision` mapping
+
+> **Phase 2 note:** 本節的 rating → target 映射是 Phase 1 管線。Phase 2 起引擎改為直接輸出
+> structured target JSON（`decision_mode` / `target_side` / `requested_target_margin_pct`），
+> 不再使用 5-tier rating 與下表；新契約見 [DESIGN](./DESIGN.md) Part 2 與
+> [phase2-spec](./phase2-spec.md)。本節保留供 Phase 1 對照。
 
 The adapter does **not** read the rating in isolation: it diffs the engine's
 *desired direction* against the *current* `PerpPosition` to pick an intent. The
@@ -135,7 +138,7 @@ value (`margin_used / account_value`, from `PerpPosition`), `d` = deadband:
 | `market_regime` | Computed by `context_builder.py`, not the LLM. |
 | `funding_view` | Deterministic from the funding z-score in `PerpMarketContext`. |
 
-## Subclass sketch (illustrative)
+## 子類別示意（illustrative）
 
 ```python
 # contrib/hyperliquid_perp/integration/trading_graph.py
@@ -173,53 +176,50 @@ class DecisionAdapter:
         ...
 ```
 
-> These two files are the **entire** integration surface. No file under
-> `tradingagents/` is touched, so the module stays current with upstream.
+> 這兩個檔案就是**全部的**整合面。`tradingagents/` 之下沒有任何檔案被動到，
+> 模組因此能持續跟上 upstream。
 
-## Natively using funding later (Phase 3)
+## 之後原生使用 funding（Phase 3）
 
-Override `_create_tool_nodes()` in the same subclass to add a live Hyperliquid
-tool to the relevant analyst's tool node — still additive, still zero core edits.
-Until then, the injected context text is enough for the agents to factor funding
-/ OI into their prose, and the adapter fills the precise perp fields
-deterministically.
+在同一個子類別 override `_create_tool_nodes()`，把即時 Hyperliquid tool 加進
+相關 analyst 的 tool node——仍然是純附加、零核心修改。在那之前，注入的 context
+文字已足夠讓 agents 在散文中把 funding / OI 納入考量，精確的 perp 欄位由
+adapter 確定性補齊。
 
 ---
 
-# Part 2 — Roles & model assignment
+# Part 2 — 角色與模型分工
 
-> **What the engine supports today:** `TradingAgentsGraph` builds exactly **two**
-> LLM clients — `deep_thinking_llm` and `quick_thinking_llm` — from
-> `config["llm_provider"]` + `deep_think_llm` / `quick_think_llm`, and hands only
-> those two to every agent. There is **no per-agent model slot**. Under
-> Direction 2 we do not edit the engine, so **Option B is the supported path**.
-> Option A is a possible *future* upstream change, not something this module
-> relies on.
+> **引擎今天支援什麼：** `TradingAgentsGraph` 只建立**兩個** LLM clients——
+> `deep_thinking_llm` 與 `quick_thinking_llm`——由 `config["llm_provider"]` +
+> `deep_think_llm` / `quick_think_llm` 決定，並且只把這兩個交給所有 agents。
+> **沒有 per-agent model slot**。Direction 2 之下我們不修改引擎，所以
+> **Option B 是受支援的路徑**。Option A 是可能的*未來* upstream 變更，
+> 本模組不依賴它。
 
-## Option A — patch the source (future / upstream change)
+## Option A —— 修改上游（future / upstream change）
 
-> Not used by this module. Requires editing `GraphSetup` and each agent factory
-> to accept a per-agent model — a core change to `tradingagents/`, which
-> Direction 2 avoids. The table below is still useful as a *target*: it says
-> which roles deserve the `deep` model.
+> 本模組不使用。需要修改 `GraphSetup` 與每個 agent factory 以接受 per-agent
+> model——這是對 `tradingagents/` 的核心修改，Direction 2 避免這件事。下表
+> 仍然有用，作為*目標*：它說明哪些角色值得用 `deep` 模型。
 
-| Agent role | Responsibility | Best fit | Alternatives |
+| Agent 角色 | 職責 | 最佳選擇 | 替代 |
 |---|---|---|---|
-| News Analyst | Read news, find market narratives, summarize key events | Gemini Flash | Grok / Qwen |
-| Sentiment Analyst | Judge market sentiment and social-media direction | Grok | Gemini / Qwen |
-| Technical Analyst | Read candles, RSI, MACD and other indicators | DeepSeek V3 | Qwen / Gemini Flash |
-| Fundamental Analyst | Read filings, earnings calls, fundamentals | Gemini Pro | Claude Sonnet |
-| Bull Researcher | Argue hard for buying | DeepSeek R1 | Qwen |
-| Bear Researcher | Argue hard for selling/shorting risk | Claude Sonnet | DeepSeek R1 |
-| Trader | Synthesize all analysis into a trade proposal | OpenAI GPT | Claude Sonnet |
-| Risk Manager | Review leverage, position, stop loss for compliance | Claude Sonnet | OpenAI GPT |
-| Portfolio Manager | Final approve/reject of the trade proposal | OpenAI GPT | Claude Sonnet |
-| Reflection / Memory | Post-mortem decisions, update memory | Claude Sonnet | MiniMax / DeepSeek |
-| Market Data | Provide price, candles, raw technical indicators | Alpha Vantage | Hyperliquid API |
+| News Analyst | 讀新聞、找市場敘事、摘要重點事件 | Gemini Flash | Grok / Qwen |
+| Sentiment Analyst | 判斷市場情緒與社群輿論方向 | Grok | Gemini / Qwen |
+| Technical Analyst | 讀 K 線、RSI、MACD 等指標 | DeepSeek V3 | Qwen / Gemini Flash |
+| Fundamental Analyst | 讀 filings、財報電話會、基本面 | Gemini Pro | Claude Sonnet |
+| Bull Researcher | 全力論證買進 | DeepSeek R1 | Qwen |
+| Bear Researcher | 全力論證賣出／做空風險 | Claude Sonnet | DeepSeek R1 |
+| Trader | 綜合所有分析成交易提案 | OpenAI GPT | Claude Sonnet |
+| Risk Manager | 審查槓桿、倉位、stop loss 合規 | Claude Sonnet | OpenAI GPT |
+| Portfolio Manager | 最終核准／否決交易提案 | OpenAI GPT | Claude Sonnet |
+| Reflection / Memory | 決策 post-mortem、更新 memory | Claude Sonnet | MiniMax / DeepSeek |
+| Market Data | 提供價格、K 線、原始技術指標 | Alpha Vantage | Hyperliquid API |
 
-## Option B — two models, deep + quick (supported path)
+## Option B —— 兩個模型，deep + quick（受支援路徑）
 
-Which roles run on `deep` vs `quick`:
+哪些角色跑 `deep`、哪些跑 `quick`：
 
 | `deep_think_llm` | `quick_think_llm` |
 |---|---|
@@ -234,6 +234,5 @@ config["deep_think_llm"]  = "anthropic/claude-sonnet-4-6"
 config["quick_think_llm"] = "deepseek/deepseek-chat"
 ```
 
-The critical roles (Risk Manager / Trader / Portfolio Manager) run on the deep
-model while cheap analysis runs on the quick model — ~80% of the spirit of the
-per-agent table, with zero core changes.
+關鍵角色（Risk Manager / Trader / Portfolio Manager）跑 deep 模型，便宜的分析
+跑 quick 模型——用零核心修改拿到 per-agent 分工表約八成的精神。

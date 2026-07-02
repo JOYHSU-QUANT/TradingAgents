@@ -1,123 +1,117 @@
-# Setup & run (Phase 1)
+# Setup & run（Phase 1）
 
-A practical runbook: how to install, configure, and run. For **why** it is
-designed this way, see [phase1-spec](./phase1-spec.md); this page is just the
-"do this" steps.
+實用 runbook：怎麼安裝、設定、執行。想知道**為什麼**這樣設計，見
+[phase1-spec](./phase1-spec.md)；本頁只有「照做」的步驟。
 
-Run every command from the repo root, `TradingAgents/`.
+所有指令都從 repo 根目錄 `TradingAgents/` 執行。
 
 ---
 
-## 1. Requirements
+## 1. 需求
 
 - Python 3.10+
-- Hyperliquid public market data needs no key; reading the account/position
-  needs a **public wallet address** (read-only, never a private key).
-- `OPENROUTER_API_KEY` is only needed for a full engine run; `--context-only`
-  does not need it.
+- Hyperliquid 公開市場資料不需要 key；讀取帳戶／倉位需要**公開 wallet address**
+  （唯讀，永遠不需要 private key）。
+- `OPENROUTER_API_KEY` 只有跑完整引擎時才需要；`--context-only` 不需要。
 
-## 2. Install
+## 2. 安裝
 
 ```bash
 pip install -r requirements.txt
 ```
 
-This installs the core engine (`langchain-*` / `langgraph`, etc.) plus this
-module's own deps, `hyperliquid-python-sdk` and `PyYAML`.
+這會安裝核心引擎（`langchain-*` / `langgraph` 等）以及本模組自己的依賴：
+`hyperliquid-python-sdk` 與 `PyYAML`。
 
-Verify the install:
+驗證安裝：
 
 ```bash
 python -m pytest contrib/hyperliquid_perp/tests/ -q
 ```
 
-## 3. Configure
+## 3. 設定
 
-Copy the example into a `*.local.yaml` (the `.local.yaml` is gitignored, so it
-**never enters version control**):
+把 example 複製成 `*.local.yaml`（`.local.yaml` 已被 gitignore，**永遠不會進版控**）：
 
 ```bash
 cp contrib/hyperliquid_perp/configs/hyperliquid.example.yaml \
    contrib/hyperliquid_perp/configs/hyperliquid.local.yaml
 ```
 
-Then edit `hyperliquid.local.yaml`. Key fields:
+然後編輯 `hyperliquid.local.yaml`。主要欄位：
 
-| Field | Meaning |
+| 欄位 | 意義 |
 |---|---|
-| `network` | `mainnet` (Phase 1/2 read mainnet read-only; testnet is reserved for Phase 3). |
-| `network_timeout_s` | HTTP timeout (seconds) per Hyperliquid request; default `30`. A stalled read fails loud instead of hanging the run forever. |
-| `wallet_address` | Read-only mainnet address, used only to read position/margin. **Leaving the `0xYOUR...` placeholder = treated as unset**, and the run assumes a flat account. |
-| `coins` | Single coin for Phase 1, default `[BTC]`. |
-| `market_data` | `candle_interval` (4h; must be one of `1m`/`5m`/`15m`/`1h`/`4h`/`1d`) / `candle_lookback` (200) / `funding_zscore_window_days` (30). |
-| `indicators` | `rsi_14, ema_20, ema_50, atr_14, macd`, computed by `context_builder`. |
-| `engine` | `llm_provider: openrouter`, `deep_think_llm`, `quick_think_llm`, `selected_analysts: [market, social, news]`. |
-| `adapter` | rating→target tier numbers, `deadband`, `no_direct_flip`, `allow_short`, `entry_band_pct`, `confidence` (per-tier, each in `[0, 1]`). |
+| `network` | `mainnet`（Phase 1/2 唯讀 mainnet；testnet 保留給 Phase 3）。 |
+| `network_timeout_s` | 每個 Hyperliquid request 的 HTTP timeout（秒），預設 `30`。卡住的讀取會大聲失敗，而不是讓整輪執行掛住。 |
+| `wallet_address` | 唯讀 mainnet address，只用來讀倉位／margin。**留著 `0xYOUR...` 佔位符 = 視為未設定**，該輪執行會當作空倉帳戶。 |
+| `coins` | Phase 1 單一標的，預設 `[BTC]`。 |
+| `market_data` | `candle_interval`（4h；必須是 `1m`/`5m`/`15m`/`1h`/`4h`/`1d` 之一）／`candle_lookback`（200）／`funding_zscore_window_days`（30）。 |
+| `indicators` | `rsi_14, ema_20, ema_50, atr_14, macd`，由 `context_builder` 計算。 |
+| `engine` | `llm_provider: openrouter`、`deep_think_llm`、`quick_think_llm`、`selected_analysts: [market, social, news]`。 |
+| `adapter` | rating→target 各 tier 數值、`deadband`、`no_direct_flip`、`allow_short`、`entry_band_pct`、`confidence`（逐 tier，皆在 `[0, 1]`）。 |
 
-> When no `*.local.yaml` exists the loader falls back to
-> `hyperliquid.example.yaml`, so `--context-only` works without copying anything.
+> 沒有任何 `*.local.yaml` 時，loader 會退回 `hyperliquid.example.yaml`，
+> 所以 `--context-only` 不用複製任何東西就能跑。
 
-### Secrets (decision #9: env vars only, never in any yaml)
+### Secrets（decision #9：只放環境變數，絕不放任何 yaml）
 
-| Variable | When needed |
+| 變數 | 何時需要 |
 |---|---|
-| `OPENROUTER_API_KEY` | For a full engine run. One key covers every OpenRouter model. |
-| `HYPERLIQUID_AGENT_KEY` | **Phase 3 only** — not needed in Phase 1. |
+| `OPENROUTER_API_KEY` | 跑完整引擎時。一把 key 涵蓋所有 OpenRouter 模型。 |
+| `HYPERLIQUID_AGENT_KEY` | **只有 Phase 3**——Phase 1 不需要。 |
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-...
 ```
 
-Both `*.local.yaml` and `.env` are gitignored. **A private key must never go in
-any yaml or any file that enters version control.**
+`*.local.yaml` 與 `.env` 都已被 gitignore。**Private key 絕不能放進任何 yaml
+或任何會進版控的檔案。**
 
-## 4. Run
+## 4. 執行
 
-### A. Context only (no key, dev loop)
+### A. 只建 context（不需要 key，開發迴圈用）
 
-Connects to mainnet, reads data, computes indicators and the funding z-score,
-and prints the `PerpMarketContext`. No LLM call, no cost.
+連 mainnet、讀資料、計算 indicators 與 funding z-score，然後印出
+`PerpMarketContext`。不呼叫 LLM、零成本。
 
 ```bash
 python -m contrib.hyperliquid_perp.main --context-only --coin BTC
 ```
 
-If `wallet_address` is a real address, it also prints the current position
-(or `flat`).
+若 `wallet_address` 是真實地址，也會印出目前倉位（或 `flat`）。
 
-### B. Full Phase 1 round (key required)
+### B. 完整 Phase 1 一輪（需要 key）
 
-Build context → inject the **unmodified** TradingAgents engine → engine emits a
-5-tier rating → the adapter maps it to a `PerpTradeDecision` → write the audit
-log → print to stdout.
+建 context → 注入**未修改的** TradingAgents 引擎 → 引擎輸出 5-tier rating →
+adapter 映射成 `PerpTradeDecision` → 寫 audit log → 印到 stdout。
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-...
 python -m contrib.hyperliquid_perp.main --coin BTC
 ```
 
-Without `OPENROUTER_API_KEY` it fails cleanly **before any network call** and
-points you at `--context-only`.
+沒有 `OPENROUTER_API_KEY` 時會在**任何網路呼叫之前**乾淨地失敗，並提示你改用
+`--context-only`。
 
-Common flags:
+常用 flags：
 
-| Flag | Default | Meaning |
+| Flag | 預設 | 意義 |
 |---|---|---|
-| `--coin BTC` | first of config `coins` | Coin to analyze. |
-| `--context-only` | off | Build context only, skip the engine. |
-| `--config PATH` | `*.local.yaml` → example | Use a different config YAML. |
+| `--coin BTC` | config `coins` 的第一個 | 要分析的標的。 |
+| `--context-only` | 關 | 只建 context，跳過引擎。 |
+| `--config PATH` | `*.local.yaml` → example | 改用其他 config YAML。 |
 
-## 5. Where output goes
+## 5. 輸出去哪裡
 
-A full round writes the decision as JSON:
+完整一輪會把 decision 寫成 JSON：
 
 ```
 <results_dir>/perp_decisions/BTC_<YYYYmmdd_HHMMSS_fff>.json
 ```
 
-`results_dir` comes from the engine's `DEFAULT_CONFIG` (default
-`~/.tradingagents/logs`, overridable via `TRADINGAGENTS_RESULTS_DIR`). File
-contents (synthetic example):
+`results_dir` 來自引擎的 `DEFAULT_CONFIG`（預設 `~/.tradingagents/logs`，
+可用 `TRADINGAGENTS_RESULTS_DIR` 覆寫）。檔案內容（合成範例）：
 
 ```json
 {
@@ -148,18 +142,17 @@ contents (synthetic example):
 }
 ```
 
-`prompt_hash` is the sha256 of the perp context text the engine read; together
-with `models` and `timestamp` it lets you reconstruct and post-mortem any single
-decision. The `decision` fields are defined in
-[DESIGN](./DESIGN.md#schema--perptradedecision).
+`prompt_hash` 是引擎當時讀到的 perp context 文字的 sha256；配合 `models` 與
+`timestamp`，任何一筆 decision 都能重建並做 post-mortem。`decision` 各欄位的
+定義見 [DESIGN](./DESIGN.md)。
 
-> Phase 1 stops at "write log + print decision". **It places no orders and runs
-> no RiskGate** — that is Phase 2+.
+> Phase 1 到「寫 log + 印出 decision」為止。**不下任何單、不跑 RiskGate**——
+> 那是 Phase 2+ 的事。
 
-## 6. Tests
+## 6. 測試
 
 ```bash
-# All module tests (pure functions — no key, no network)
+# 本模組全部測試（純函式——不需要 key、不連網）
 python -m pytest contrib/hyperliquid_perp/tests/ -q
 
 # Lint
@@ -168,10 +161,10 @@ python -m ruff check contrib/hyperliquid_perp/
 
 ## 7. Troubleshooting
 
-| Symptom | Fix |
+| 症狀 | 解法 |
 |---|---|
-| `ModuleNotFoundError: langchain` (or similar) | Core deps not installed → `pip install -r requirements.txt`. |
-| `OPENROUTER_API_KEY is not set …` | A full run needs a key; `export` it, or use `--context-only`. |
-| Position always shows `flat` / no account read | `wallet_address` is still the `0xYOUR...` placeholder; set a real read-only address. |
-| `config not found …` | Copy `hyperliquid.example.yaml` to `hyperliquid.local.yaml`. |
-| Want a cheap acceptance run first | Temporarily point `engine.deep_think_llm` / `quick_think_llm` at a cheap/free OpenRouter model to confirm the pipeline emits a `PerpTradeDecision` and writes a log, then switch back. |
+| `ModuleNotFoundError: langchain`（或類似） | 核心依賴沒裝 → `pip install -r requirements.txt`。 |
+| `OPENROUTER_API_KEY is not set …` | 完整一輪需要 key；`export` 它，或改用 `--context-only`。 |
+| 倉位永遠顯示 `flat`／讀不到帳戶 | `wallet_address` 還是 `0xYOUR...` 佔位符；填一個真實的唯讀地址。 |
+| `config not found …` | 把 `hyperliquid.example.yaml` 複製成 `hyperliquid.local.yaml`。 |
+| 想先便宜地跑一次驗收 | 暫時把 `engine.deep_think_llm` / `quick_think_llm` 指到便宜／免費的 OpenRouter 模型，確認 pipeline 會輸出 `PerpTradeDecision` 並寫 log，再切回來。 |

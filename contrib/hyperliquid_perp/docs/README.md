@@ -1,41 +1,40 @@
-# Hyperliquid Perp Trading Agents — Design Docs
+# Hyperliquid Perp Trading Agents — 設計文件
 
-An optional `contrib/` module that drives the **unmodified** TradingAgents
-engine against the [Hyperliquid](https://hyperliquid.gitbook.io/hyperliquid-docs)
-perpetuals exchange. TradingAgents runs as-is and emits its usual
-`PortfolioDecision` (a 5-tier rating + thesis); a thin **adapter** in this module
-maps that into a `PerpTradeDecision` (a perp intent), and a deterministic risk
-gate + order planner turn the intent into actual exchange actions.
+一個可選的 `contrib/` 模組，驅動**未修改的** TradingAgents 引擎對接
+[Hyperliquid](https://hyperliquid.gitbook.io/hyperliquid-docs) 永續合約交易所。
+TradingAgents 原樣運行並輸出決策（Phase 1 為 5-tier rating + thesis；Phase 2 起
+為 structured target JSON）；本模組的 **adapter** 將其映射為 perp 交易意圖，再由
+確定性的 risk gate + 執行層轉成實際的交易所動作。
 
-> **Integration stance (Direction 2 — plugin, zero core changes):** nothing in
-> `tradingagents/` is edited. Perp market context is injected by *subclassing*
-> `TradingAgentsGraph` and overriding its existing extension points; the perp
-> intent is produced *after* the engine by an adapter.
+> **整合立場（Direction 2 — plugin，零核心修改）：** `tradingagents/` 內的任何
+> 檔案都不修改。Perp market context 透過*子類別化* `TradingAgentsGraph` 並
+> override 既有 extension points 注入；perp 意圖在引擎跑完*之後*由 adapter 產生。
 
-## Documents
+## 文件
 
-**Design reference** (stable — how it works):
+**設計參考**（穩定——描述系統如何運作）：
 
-| Doc | Contents |
+| 文件 | 內容 |
 |---|---|
-| [DESIGN](./DESIGN.md) | The module's data contracts: Hyperliquid API reference (inputs) and the `PerpTradeDecision` schema + order flow (output). |
-| [INTEGRATION](./INTEGRATION.md) | How it drives the unmodified engine (subclass override points, `PortfolioDecision → PerpTradeDecision` mapping) and which models run which roles. |
+| [DESIGN](./DESIGN.md) | 本模組的資料契約：Hyperliquid API 與交易規則參考（輸入），以及決策契約——Phase 2 structured target 與 Phase 1 legacy `PerpTradeDecision`（輸出）。 |
+| [INTEGRATION](./INTEGRATION.md) | 如何驅動未修改的引擎（子類別 override 點、`PortfolioDecision → PerpTradeDecision` 映射）以及模型分工。 |
+| [phase2-execution](./phase2-execution.md) | Phase 2 執行與模擬設計：TWAP / flip、SL / TP、paper 成交模型與模擬數值公式。 |
+| [phase2-data](./phase2-data.md) | Phase 2 資料 schema：SQLite tables 與八張 CSV export 的欄位定義。 |
 
-**Specs** (actionable — what to build):
+**規格**（可執行——描述要蓋什麼）：
 
-| Doc | Contents |
+| 文件 | 內容 |
 |---|---|
-| [phase1-spec](./phase1-spec.md) | Phase 1 decisions log, config schema, secrets, setup & run, build order. |
+| [phase1-spec](./phase1-spec.md) | Phase 1 決策記錄、config schema、secrets、setup & run、build order。 |
+| [phase2-spec](./phase2-spec.md) | Phase 2 目標、風控參數、cycle 排程、第一版取捨、驗收標準、建置順序。 |
 
 ---
 
-## Architecture
+## 架構
 
-Perp data flows up into the **unmodified** TradingAgents engine via a subclass
-override; the engine's rating flows back down through an adapter, a risk gate,
-and into execution. Each layer is labelled with the phase in which it is built.
-Boxes marked `contrib` live entirely in this module; the engine box is upstream
-code we do not edit.
+Perp 資料經由子類別 override 向上流入**未修改的** TradingAgents 引擎；引擎的
+決策向下流經 adapter、risk gate，進入執行層。每一層都標注它在哪個 phase 建置。
+標 `contrib` 的方塊完全住在本模組內；引擎方塊是上游程式碼，我們不修改。
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -88,19 +87,23 @@ code we do not edit.
         telegram.py (fills · liquidation alerts · daily PnL)
 ```
 
-**Key invariant:** `tradingagents/` is never edited. The only non-deterministic
-part is the engine, which we drive through a subclass (context in) and read as a
-`PortfolioDecision` (rating out). Everything from the adapter onward —
-rating→intent mapping, sizing, SL/TP, leverage, final order params — is
-deterministic and lives in this module's adapter + RiskGate + OrderPlanner.
+**核心不變量：** `tradingagents/` 永不修改。唯一非確定性的部分是引擎——我們透過
+子類別把 context 餵進去、把決策讀出來。從 adapter 往下的一切——決策映射、
+sizing、SL/TP、槓桿、最終下單參數——都是確定性的，住在本模組的 adapter +
+RiskGate + 執行層。
+
+> **Phase 2 note:** 上圖與本段描述的 rating→intent 管線是 Phase 1 行為。Phase 2 起引擎改為
+> 直接輸出 structured target JSON（見 [DESIGN](./DESIGN.md) Part 2），執行層為 TWAP paper
+> engine + SQLite accounting（見 [phase2-execution](./phase2-execution.md) /
+> [phase2-data](./phase2-data.md)），而非圖中的 `order_planner.py` / `paper_executor.py`；
+> paper taker fee 為 0.045%（非圖中的 0.035%）。
 
 ---
 
-## Project layout
+## 專案結構
 
-`tradingagents/` is **not edited** — the whole integration lives under
-`contrib/hyperliquid_perp/`, with `integration/` holding the subclass and adapter
-that bridge to the engine.
+`tradingagents/` **不修改**——整個整合住在 `contrib/hyperliquid_perp/` 之下，
+`integration/` 放橋接引擎的子類別與 adapter。
 
 ```
 TradingAgents/
@@ -129,53 +132,53 @@ TradingAgents/
         └── README.md
 ```
 
-`🔒 gitignored` files hold the public wallet address + network only. **Secrets
-(API keys, the Phase-3 agent-wallet private key) live in environment variables,
-never in any yaml.** See [phase1-spec](./phase1-spec.md#secrets--keys).
+`🔒 gitignored` 檔案只保存公開 wallet address 與 network。**Secrets（API keys、
+Phase 3 的 agent-wallet private key）一律放環境變數，絕不放進任何 yaml。**
+見 [phase1-spec](./phase1-spec.md#secrets--keys)。
 
-## Implementation phases
+## 實作 phases
 
-Legend: ✅ open-source · ⚠️ framework open-source, specifics kept private · 🔒 gitignored.
+圖例：✅ 開源 · ⚠️ 框架開源、細節私有 · 🔒 gitignored。
 
-### Phase 1 — runnable, no real orders
+### Phase 1 — 可運行、不下真單
 
-| File | Status | Notes |
+| 檔案 | 狀態 | 說明 |
 |---|---|---|
-| `ports.py` | ✅ | `ExchangeMarketData` / `ExchangeAccount` interface definitions — write this first. |
-| `exchanges/hyperliquid/sdk_client.py` | ✅ | Official SDK init, testnet/mainnet config loading. |
-| `exchanges/hyperliquid/market_data.py` | ✅ | SDK Info → market snapshot. |
-| `exchanges/hyperliquid/account.py` | ✅ | SDK Info → account / position snapshot. |
-| `exchanges/hyperliquid/mapper.py` | ✅ | SDK raw response → internal schema. |
-| `exchanges/hyperliquid/errors.py` | ✅ | SDK error → domain error. |
-| `domains/perp/schema.py` | ✅ | `PerpMarketContext` · `PerpPosition` · `AccountSnapshot`. |
-| `domains/perp/context_builder.py` | ✅ | `market_data + account → PerpMarketContext`; computes indicators + funding z-score. |
-| `domains/perp/prompt_context.py` | ⚠️ | Structure open; the exact wording is kept private (funding-rate framing is your alpha). |
-| `domains/perp/decision.py` | ✅ | `PerpTradeDecision` schema — intent, not order. |
-| `integration/trading_graph.py` | ✅ | `HyperliquidTradingGraph(TradingAgentsGraph)` — overrides `resolve_instrument_context()`. No core edits. |
-| `integration/decision_adapter.py` | ✅ | Maps `PortfolioDecision` + `PerpMarketContext` + `PerpPosition` → `PerpTradeDecision`. |
-| `audit/decision_log.py` | ✅ | prompt hash · model · full decision JSON · timestamp. |
-| `configs/hyperliquid.example.yaml` | ✅ | Format example. |
-| `configs/hyperliquid.local.yaml` | 🔒 | network + wallet address (public). |
+| `ports.py` | ✅ | `ExchangeMarketData` / `ExchangeAccount` 介面定義——最先寫這個。 |
+| `exchanges/hyperliquid/sdk_client.py` | ✅ | 官方 SDK 初始化、testnet/mainnet 設定載入。 |
+| `exchanges/hyperliquid/market_data.py` | ✅ | SDK Info → market snapshot。 |
+| `exchanges/hyperliquid/account.py` | ✅ | SDK Info → account / position snapshot。 |
+| `exchanges/hyperliquid/mapper.py` | ✅ | SDK 原始回應 → 內部 schema。 |
+| `exchanges/hyperliquid/errors.py` | ✅ | SDK error → domain error。 |
+| `domains/perp/schema.py` | ✅ | `PerpMarketContext` · `PerpPosition` · `AccountSnapshot`。 |
+| `domains/perp/context_builder.py` | ✅ | `market_data + account → PerpMarketContext`；計算 indicators 與 funding z-score。 |
+| `domains/perp/prompt_context.py` | ⚠️ | 結構開源；確切措辭私有（funding-rate 的表述方式是你的 alpha）。 |
+| `domains/perp/decision.py` | ✅ | `PerpTradeDecision` schema——意圖，不是 order。 |
+| `integration/trading_graph.py` | ✅ | `HyperliquidTradingGraph(TradingAgentsGraph)`——override `resolve_instrument_context()`，零核心修改。 |
+| `integration/decision_adapter.py` | ✅ | `PortfolioDecision` + `PerpMarketContext` + `PerpPosition` → `PerpTradeDecision`。 |
+| `audit/decision_log.py` | ✅ | prompt hash · model · 完整 decision JSON · timestamp。 |
+| `configs/hyperliquid.example.yaml` | ✅ | 格式範例。 |
+| `configs/hyperliquid.local.yaml` | 🔒 | network + wallet address（公開資訊）。 |
 
-### Phase 2 — paper-trading validation
+### Phase 2 — paper trading 驗證
 
-| File | Status | Notes |
+設計定稿於 [phase2-spec](./phase2-spec.md)（建置順序見其 §6）；下表檔名為暫定，實作時以 spec 為準。
+
+| 檔案 | 狀態 | 說明 |
 |---|---|---|
-| `risk/perp_risk_gate.py` | ⚠️ | Framework open; params read from `risk.local.yaml` (max leverage · max notional · stop loss %). |
-| `risk/hard_limits.py` | ⚠️ | Framework open; trigger conditions kept (daily loss · stale data · liquidation → freeze). |
-| `risk/kill_switch.py` | ⚠️ | Framework open; thresholds kept (orphan order → cancel all · halt conditions). |
-| `execution/order_planner.py` | ✅ | `PerpTradeDecision → ExchangeOrderRequest`, deterministic. |
-| `execution/paper_executor.py` | ✅ | Simulates taker fee 0.035% · funding · slippage · SL/TP triggers. |
-| `audit/order_log.py` | ✅ | planned orders · paper fills · RiskGate rejections · position before/after. |
-| `configs/risk.example.yaml` | ✅ | Format example. |
-| `configs/risk.local.yaml` | 🔒 | Actual risk-control parameters. |
+| decision contract 遷移 | planned | structured target schema · fail-closed 驗證 · prompt 改版（DESIGN Part 2）。 |
+| `risk/risk_gate.py` | planned | `max_target_margin_pct` clamp · step / `min_confidence` 檢查 · effective leverage（phase2-spec §2）。 |
+| `execution/paper_engine.py` | planned | `paper_market` · TWAP / flip plan · SL/TP lifecycle · 30s market monitor（phase2-execution §1–5）。 |
+| `accounting/ledger.py` | planned | fills · fees（taker 0.045%）· funding exactly-once · margin / 清算價模型（phase2-execution §6）。 |
+| `persistence/db.py` | planned | SQLite source of truth · 八張 CSV atomic export（phase2-data）。 |
+| `scheduler.py` | planned | 4h rolling cycle · 3-attempt retry · 重啟 reconciliation（phase2-spec §3）。 |
 
 ### Phase 3 — live execution
 
-| File | Status | Notes |
+| 檔案 | 狀態 | 說明 |
 |---|---|---|
-| `exchanges/hyperliquid/execution.py` | ✅ | SDK Exchange → submit / cancel. |
-| `exchanges/hyperliquid/websocket.py` | ✅ | SDK WebSocket wrapper / callbacks. |
-| `execution/live_executor.py` | ✅ | Wraps `HyperliquidExecution`. |
-| `execution/reconciliation.py` | ✅ | HL actual state vs local `PerpState`. |
-| `notifications/telegram.py` | ✅ | Fills · liquidation alerts · daily PnL. |
+| `exchanges/hyperliquid/execution.py` | ✅ | SDK Exchange → submit / cancel。 |
+| `exchanges/hyperliquid/websocket.py` | ✅ | SDK WebSocket wrapper / callbacks。 |
+| `execution/live_executor.py` | ✅ | 包裝 `HyperliquidExecution`。 |
+| `execution/reconciliation.py` | ✅ | HL 實際狀態 vs 本地 `PerpState` 對帳。 |
+| `notifications/telegram.py` | ✅ | 成交、清算警報、每日 PnL 通知。 |

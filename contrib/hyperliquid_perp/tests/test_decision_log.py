@@ -9,10 +9,11 @@ from decimal import Decimal
 import pytest
 
 from contrib.hyperliquid_perp.audit.decision_log import (
-    _VALID_RATING_SOURCES,
     _filename,
     build_log_record,
+    build_target_log_record,
     log_decision,
+    log_target_decision,
     prompt_hash,
     write_decision_log,
 )
@@ -106,34 +107,6 @@ def test_build_log_record_rejects_unknown_rating_source(bad_source):
             timestamp=_TS,
             rating_source=bad_source,
         )
-
-
-def test_valid_rating_sources_stays_in_sync_with_enum():
-    # ``_VALID_RATING_SOURCES`` is a hardcoded copy of ``RatingSource``'s values, kept
-    # in the audit layer so it takes no *runtime* dependency on the integration layer
-    # (RatingSource is only TYPE_CHECKING-imported there). This test is the safety net:
-    # if a future RatingSource member is added without updating the set, build_log_record
-    # would raise on that valid value at runtime — catch the drift here in CI instead.
-    from contrib.hyperliquid_perp.integration.decision_adapter import RatingSource
-
-    assert {member.value for member in RatingSource} == _VALID_RATING_SOURCES
-
-
-def test_build_log_record_accepts_rating_source_enum_and_serializes_value():
-    # A RatingSource enum is accepted and flattened to its string value in the record.
-    from contrib.hyperliquid_perp.integration.decision_adapter import RatingSource
-
-    record = build_log_record(
-        coin="BTC",
-        decision=_decision(),
-        prompt="ctx",
-        models=_MODELS,
-        rating="Buy",
-        timestamp=_TS,
-        rating_source=RatingSource.PARSE_FALLBACK,
-    )
-    assert record["rating_source"] == "parse_fallback"
-    json.dumps(record)  # no enum leak that would break json.dump
 
 
 def test_write_decision_log_roundtrip(tmp_path):
@@ -250,3 +223,71 @@ def test_log_decision_builds_and_writes(tmp_path):
     )
     assert path.exists()
     assert record["decision"]["target_size_pct"] == 20.0
+
+
+# --------------------------------------------------------------------------
+# Phase 2 — structured target records
+# --------------------------------------------------------------------------
+
+
+def _target_fixtures():
+    from contrib.hyperliquid_perp.domains.perp.risk_gate import (
+        CurrentPositionState,
+        RiskConfig,
+        evaluate,
+    )
+    from contrib.hyperliquid_perp.domains.perp.target_decision import (
+        DecisionConfig,
+        parse_target_decision,
+    )
+
+    raw = (
+        'Final answer:\n```json\n{"decision_mode": "set_target", "target_side": "long", '
+        '"requested_target_margin_pct": 61, "confidence": 0.7, '
+        '"rationale": "Trend up.", "key_risks": ["Funding"]}\n```'
+    )
+    parsed = parse_target_decision(raw, DecisionConfig())
+    result = evaluate(
+        parsed,
+        account_equity=Decimal("1000"),
+        current=CurrentPositionState.flat(),
+        risk=RiskConfig(),
+        decision_cfg=DecisionConfig(),
+    )
+    return raw, parsed, result
+
+
+def test_log_target_decision_roundtrip_preserves_raw_response(tmp_path):
+    raw, parsed, result = _target_fixtures()
+    record, path = log_target_decision(
+        coin="BTC",
+        parsed=parsed,
+        risk_result=result,
+        prompt="ctx",
+        models=_MODELS,
+        results_dir=tmp_path,
+        timestamp=_TS,
+    )
+    with path.open(encoding="utf-8") as fh:
+        loaded = json.load(fh)
+    assert loaded == record
+    assert loaded["schema_version"] == 3
+    assert loaded["raw_response"] == raw  # verbatim, never reconstructed
+    assert loaded["parse"] == {"is_valid": True, "invalid_reason": None}
+    assert loaded["decision"]["requested_target_margin_pct"] == 61
+    assert loaded["risk"]["risk_action"] == "clamped"
+    assert loaded["risk"]["approved_target_margin_pct"] == 60
+    assert loaded["prompt_hash"] == prompt_hash("ctx")
+
+
+def test_build_target_log_record_rejects_naive_timestamp():
+    _raw, parsed, result = _target_fixtures()
+    with pytest.raises(ValueError, match="timezone-aware"):
+        build_target_log_record(
+            coin="BTC",
+            parsed=parsed,
+            risk_result=result,
+            prompt="ctx",
+            models=_MODELS,
+            timestamp=datetime(2026, 6, 27, 17, 45, 0),  # naive, no tzinfo
+        )

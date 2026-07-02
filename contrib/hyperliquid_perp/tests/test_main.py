@@ -14,7 +14,6 @@ from decimal import Decimal
 import pytest
 
 from contrib.hyperliquid_perp import main as main_mod
-from contrib.hyperliquid_perp.domains.perp.decision import Intent
 from contrib.hyperliquid_perp.domains.perp.schema import AccountSnapshot, PerpPosition
 from contrib.hyperliquid_perp.exchanges.hyperliquid.account import HyperliquidAccount
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
@@ -242,6 +241,23 @@ def test_load_position_success_flat_when_coin_absent(monkeypatch):
 # --------------------------------------------------------------------------
 
 
+# A well-formed Phase 2 structured target the stubbed engine returns by default;
+# the real parse + RiskGate seams then run un-stubbed, exactly as in production.
+_VALID_DECISION_TEXT = """After weighing the debate, here is the final decision.
+
+```json
+{
+  "decision_mode": "set_target",
+  "target_side": "long",
+  "requested_target_margin_pct": 35,
+  "confidence": 0.78,
+  "rationale": "Trend and funding support a long.",
+  "key_risks": ["Funding is rising"]
+}
+```
+"""
+
+
 def _stub_engine(
     monkeypatch,
     *,
@@ -254,13 +270,14 @@ def _stub_engine(
 
     ``account_value`` defaults to a funded account (a configured wallet with net
     value) so the happy path reaches logging; pass ``Decimal(0)`` to exercise the
-    zero-account guard (no wallet / empty account).
+    zero-equity fail-closed path (no wallet / empty account).
     """
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
 
     class _Ctx:
         candle_count = 200  # comfortably above any indicator warm-up need
         indicators = {"rsi_14": 55.0, "ema_20": 100.0}  # at least one live signal
+        mark_price = Decimal("60000")  # current_position_state values at mark
 
     monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (_Ctx(), object()))
     monkeypatch.setattr(main_mod, "render_market_context", lambda ctx: "ctx text")
@@ -273,37 +290,16 @@ def _stub_engine(
 
     class _Graph:
         def propagate(self, *a, **k):
-            return final_state or {"final_trade_decision": "**Rating**: Buy"}, None
+            return final_state or {"final_trade_decision": _VALID_DECISION_TEXT}, None
 
     monkeypatch.setattr(main_mod, "build_graph", lambda **k: _Graph())
-
-    class _Decision:
-        intent = Intent.OPEN_LONG  # a non-Hold intent — matches the to_dict below
-
-        def to_dict(self):
-            return {"intent": "open_long", "confidence": 0.8}
-
-    class _Adapter:
-        def __init__(self, *a, **k):
-            pass
-
-        def decide(self, final_state):
-            # Exercise the real rating seam so rating_source flows through main exactly
-            # as in production (single parse); the decision object itself is stubbed.
-            from contrib.hyperliquid_perp.integration.decision_adapter import resolve_rating
-
-            md = final_state.get("final_trade_decision", "") or ""
-            rating, rating_source = resolve_rating(md)
-            return _Decision(), rating, rating_source
-
-    monkeypatch.setattr(main_mod, "DecisionAdapter", _Adapter)
 
     if audit_error is not None:
 
         def _raise(**_kw):
             raise audit_error
 
-        monkeypatch.setattr(main_mod, "log_decision", _raise)
+        monkeypatch.setattr(main_mod, "log_target_decision", _raise)
 
 
 def test_run_engine_aborts_when_position_lookup_fails(monkeypatch, capsys):
@@ -357,19 +353,19 @@ def test_run_engine_prints_decision_then_reports_audit_failure(monkeypatch, caps
     rc = main_mod.run_engine({}, "BTC")
     captured = capsys.readouterr()
     assert rc == 1
-    assert '"intent": "open_long"' in captured.out  # decision printed, not lost
+    assert '"decision_mode": "set_target"' in captured.out  # decision printed, not lost
     assert "audit log write failed" in captured.err
 
 
 def test_run_engine_reports_audit_failure_on_unicode_error(monkeypatch, capsys):
-    # A lone surrogate in the engine rationale can make the JSON write raise
+    # A lone surrogate in the engine response can make the JSON write raise
     # UnicodeEncodeError; it must be caught like any other audit failure (decision
     # still printed, loud error, rc==1), not escape to the generic "fatal" handler.
     _stub_engine(monkeypatch, audit_error=UnicodeEncodeError("utf-8", "\ud800", 0, 1, "bad"))
     rc = main_mod.run_engine({}, "BTC")
     captured = capsys.readouterr()
     assert rc == 1
-    assert '"intent": "open_long"' in captured.out  # decision printed, not lost
+    assert '"decision_mode": "set_target"' in captured.out  # decision printed, not lost
     assert "audit log write failed" in captured.err
 
 
@@ -468,67 +464,76 @@ def test_run_engine_success_writes_log_and_returns_zero(monkeypatch, capsys):
     _stub_engine(monkeypatch)
     monkeypatch.setattr(
         main_mod,
-        "log_decision",
+        "log_target_decision",
         lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
     )
     rc = main_mod.run_engine({}, "BTC")
     assert rc == 0
     assert written["coin"] == "BTC"
+    assert written["parsed"].is_valid
+    assert written["risk_result"].risk_action.value == "approved"
     assert "decision log written to" in capsys.readouterr().err
 
 
-def test_run_engine_aborts_on_empty_engine_output(monkeypatch, capsys):
-    # An empty final_trade_decision (DEFAULT) is indistinguishable from an engine that
-    # crashed before populating the key — a real Hold emits the word "Hold". Abort the
-    # round (exit 1, mirroring PARSE_FALLBACK) rather than persist a Hold that would
-    # freeze a live position on what may be an engine failure. Nothing is logged.
+def test_run_engine_fails_closed_on_empty_engine_output(monkeypatch, capsys):
+    # An empty final_trade_decision carries no structured target: the Phase 2
+    # contract fails closed to maintain_current (invalid_output) and the round IS
+    # recorded — the raw (empty) response and the fail-closed verdict are exactly
+    # what the validation counters need. No order can result.
     written = {}
     _stub_engine(monkeypatch, final_state={"final_trade_decision": ""})
     monkeypatch.setattr(
         main_mod,
-        "log_decision",
+        "log_target_decision",
         lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
     )
     rc = main_mod.run_engine({}, "BTC")
-    assert rc == 1
-    assert "empty final_trade_decision" in capsys.readouterr().err
-    assert written == {}  # aborted before log_decision — nothing persisted
+    assert rc == 0
+    assert "failing closed" in capsys.readouterr().err
+    assert written["parsed"].is_valid is False
+    assert written["parsed"].invalid_reason == "invalid_output"
+    result = written["risk_result"]
+    assert result.risk_action.value == "invalid_fail_closed"
+    assert result.order_created is False
 
 
-def test_run_engine_aborts_on_non_hold_decision_with_zero_account(monkeypatch, capsys):
+def test_run_engine_fails_closed_on_zero_account_equity(monkeypatch, capsys):
     # No wallet configured (or a genuinely empty account) -> account_value == 0. A
-    # non-Hold decision (here OPEN_LONG from a Buy rating) can't be sized against $0 of
-    # net value, so run_engine must abort (exit 1) and persist nothing rather than emit
-    # an order against a zero account.
+    # directional set_target can't be sized against $0 of net value; the RiskGate
+    # fail-closes it (no_account_equity) so no order can ever be created, and the
+    # round is still recorded for the audit trail.
     written = {}
     _stub_engine(monkeypatch, account_value=Decimal(0))
     monkeypatch.setattr(
         main_mod,
-        "log_decision",
+        "log_target_decision",
         lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
     )
     rc = main_mod.run_engine({}, "BTC")
-    assert rc == 1
-    assert "refusing to act" in capsys.readouterr().err
-    assert written == {}  # aborted before log_decision — nothing persisted
+    assert rc == 0
+    result = written["risk_result"]
+    assert result.risk_action.value == "invalid_fail_closed"
+    assert result.risk_reason == "no_account_equity"
+    assert result.order_created is False
 
 
-def test_run_engine_aborts_on_unparseable_engine_output(monkeypatch, capsys):
-    # A non-empty engine output with no recognized rating (PARSE_FALLBACK) is a
-    # malformed response, not a deliberate Hold. run_engine must abort the round
-    # (exit 1) rather than emit an actionable Hold — against a live position that Hold
-    # would silently mask a would-be CLOSE — and must NOT persist it to the audit log.
+def test_run_engine_fails_closed_on_unparseable_engine_output(monkeypatch, capsys):
+    # A non-empty engine output with no structured JSON target is a malformed
+    # response, not a deliberate maintain: the contract fails closed to
+    # maintain_current, records the raw response verbatim, and creates no order.
     written = {}
     _stub_engine(monkeypatch, final_state={"final_trade_decision": "I cannot help with that."})
     monkeypatch.setattr(
         main_mod,
-        "log_decision",
+        "log_target_decision",
         lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
     )
     rc = main_mod.run_engine({}, "BTC")
-    assert rc == 1
-    assert "error" in capsys.readouterr().err
-    assert written == {}  # aborted before log_decision — nothing persisted
+    assert rc == 0
+    assert "failing closed" in capsys.readouterr().err
+    assert written["parsed"].is_valid is False
+    assert written["parsed"].raw_response == "I cannot help with that."
+    assert written["risk_result"].order_created is False
 
 
 # --------------------------------------------------------------------------

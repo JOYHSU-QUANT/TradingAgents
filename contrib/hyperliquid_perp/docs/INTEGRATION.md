@@ -56,11 +56,15 @@ contrib main.py
    │     └─ UNCHANGED engine: analysts → researchers → trader → PM
    │        → PortfolioDecision (rating + thesis)
    │
-   ├─ decision = DecisionAdapter(ctx, position).to_perp_decision(final_state)
-   │     └─ PerpTradeDecision (intent, target_size_pct, funding_view, …)
+   ├─ parsed = parse_target_decision(final_state["final_trade_decision"], cfg)
+   │     └─ structured target JSON（DESIGN Part 2）；invalid → fail-closed maintain_current
    │
-   └─ RiskGate.check(decision) → OrderPlanner → executor       (Phase 2+)
+   └─ risk_gate.evaluate(parsed, account_equity, current, …)   (domains/perp/risk_gate.py)
+         └─ 核准/clamp/fail-close ＋ sizing → PR 3 的執行引擎消費
 ```
+
+> **Phase 2 note:** Phase 1 的 `DecisionAdapter(ctx, position).to_perp_decision(...)`
+> rating 映射已退役，由上面的 structured target 解析 ＋ 確定性 RiskGate 取代。
 
 ## `PortfolioDecision → PerpTradeDecision` mapping
 
@@ -160,24 +164,19 @@ class HyperliquidTradingGraph(TradingAgentsGraph):
 ```
 
 ```python
-# contrib/hyperliquid_perp/integration/decision_adapter.py
-from tradingagents.agents.utils.rating import parse_rating
+# Phase 2 的決策出口（domains/perp — 不在 integration/ 之下）：
+from contrib.hyperliquid_perp.domains.perp import risk_gate
+from contrib.hyperliquid_perp.domains.perp.target_decision import parse_target_decision
 
-
-class DecisionAdapter:
-    def __init__(self, perp_context, position):
-        self.ctx = perp_context
-        self.position = position
-
-    def to_perp_decision(self, final_state) -> "PerpTradeDecision":
-        rating = parse_rating(final_state["final_trade_decision"])
-        # rating + self.position → intent; fill the rest from self.ctx and
-        # final_state["trader_investment_plan"] per the mapping table above.
-        ...
+parsed = parse_target_decision(final_state["final_trade_decision"], decision_cfg)
+result = risk_gate.evaluate(
+    parsed, account_equity=equity, current=current, risk=risk_cfg, decision_cfg=decision_cfg
+)
 ```
 
-> 這兩個檔案就是**全部的**整合面。`tradingagents/` 之下沒有任何檔案被動到，
-> 模組因此能持續跟上 upstream。
+> `integration/trading_graph.py` 就是**全部的**整合面（Phase 1 的
+> `decision_adapter.py` 已隨 Phase 2 契約遷移退役）。`tradingagents/` 之下
+> 沒有任何檔案被動到，模組因此能持續跟上 upstream。
 
 ## 之後原生使用 funding（Phase 3）
 

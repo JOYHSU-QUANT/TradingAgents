@@ -114,8 +114,7 @@ TradingAgents/
         ├── exchanges/
         ├── domains/
         ├── integration/                 # bridge to the unmodified engine
-        │   ├── trading_graph.py         #   HyperliquidTradingGraph subclass
-        │   └── decision_adapter.py      #   PortfolioDecision → PerpTradeDecision
+        │   └── trading_graph.py         #   HyperliquidTradingGraph subclass
         ├── risk/
         ├── execution/
         ├── audit/
@@ -155,7 +154,7 @@ Phase 3 的 agent-wallet private key）一律放環境變數，絕不放進任�
 | `domains/perp/prompt_context.py` | ⚠️ | 結構開源；確切措辭私有（funding-rate 的表述方式是你的 alpha）。 |
 | `domains/perp/decision.py` | ✅ | `PerpTradeDecision` schema——意圖，不是 order。 |
 | `integration/trading_graph.py` | ✅ | `HyperliquidTradingGraph(TradingAgentsGraph)`——override `resolve_instrument_context()`，零核心修改。 |
-| `integration/decision_adapter.py` | ✅ | `PortfolioDecision` + `PerpMarketContext` + `PerpPosition` → `PerpTradeDecision`。 |
+| `integration/decision_adapter.py` | ✅ | `PortfolioDecision` → `PerpTradeDecision` rating 映射。**Phase 2 起退役刪除**，由 `domains/perp/target_decision.py` ＋ `domains/perp/risk_gate.py`（structured target 契約 ＋ RiskGate）取代。 |
 | `audit/decision_log.py` | ✅ | prompt hash · model · 完整 decision JSON · timestamp。 |
 | `configs/hyperliquid.example.yaml` | ✅ | 格式範例。 |
 | `configs/hyperliquid.local.yaml` | 🔒 | network + wallet address（公開資訊）。 |

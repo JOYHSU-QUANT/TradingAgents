@@ -4,10 +4,11 @@ Two paths:
 
 - ``--context-only`` (Milestone A): connect to mainnet read-only, build and print
   the :class:`PerpMarketContext`. No API key, no wallet required.
-- full run (Milestone B): build the context, drive the **unmodified** TradingAgents
-  engine with that context injected, map the engine's rating into a
-  :class:`PerpTradeDecision`, write the audit log, and print the decision. Needs
-  ``OPENROUTER_API_KEY``.
+- full run: build the context, drive the **unmodified** TradingAgents engine with
+  that context (and the Phase 2 output-format contract) injected, parse the
+  structured target JSON out of ``final_trade_decision``, run the deterministic
+  RiskGate, write the audit record (raw response preserved), and print the
+  outcome. Needs ``OPENROUTER_API_KEY``.
 
     python -m contrib.hyperliquid_perp.main --context-only --coin BTC
     python -m contrib.hyperliquid_perp.main --coin BTC
@@ -23,18 +24,22 @@ import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from .audit.decision_log import log_decision
+from .audit.decision_log import log_target_decision
 from .config import load_config, wallet_address
+from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context
-from .domains.perp.decision import Intent
 from .domains.perp.indicators import required_candles, supported_indicators
 from .domains.perp.prompt_context import render_market_context
 from .domains.perp.schema import PerpMarketContext, PerpPosition
+from .domains.perp.target_decision import (
+    DecisionConfig,
+    decision_format_instructions,
+    parse_target_decision,
+)
 from .exchanges.hyperliquid.account import HyperliquidAccount
 from .exchanges.hyperliquid.errors import ExchangeError
 from .exchanges.hyperliquid.market_data import HyperliquidMarketData
 from .exchanges.hyperliquid.sdk_client import HyperliquidClient
-from .integration.decision_adapter import DecisionAdapter, RatingSource
 from .integration.trading_graph import build_graph
 
 logger = logging.getLogger(__name__)
@@ -46,7 +51,7 @@ _DEFAULT_ANALYSTS = ["market", "social", "news"]
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="python -m contrib.hyperliquid_perp.main",
-        description="Hyperliquid perp — Phase 1 (data + context + engine).",
+        description="Hyperliquid perp — Phase 2 (structured target contract + RiskGate).",
     )
     parser.add_argument(
         "--context-only",
@@ -226,7 +231,7 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     except ImportError as exc:
         # Deferred so --context-only stays import-light, but if the engine package is
         # missing/moved this surfaces a clear cause instead of a generic top-level
-        # "unexpected error" (mirrors decision_adapter.resolve_rating's import guard).
+        # "unexpected error".
         raise RuntimeError(
             "tradingagents.default_config.DEFAULT_CONFIG is not importable — "
             "is the tradingagents package installed?"
@@ -255,7 +260,7 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
 
 
 def run_engine(config: dict, coin: str) -> int:
-    """Full Phase-1 run: context -> engine -> adapter -> decision -> log."""
+    """Full run: context -> engine -> structured target parse -> RiskGate -> log."""
     if not os.environ.get("OPENROUTER_API_KEY"):
         raise SystemExit(
             "OPENROUTER_API_KEY is not set — needed for the engine run. "
@@ -319,11 +324,17 @@ def run_engine(config: dict, coin: str) -> int:
         )
         return 1
 
+    # Parse the Phase 2 config blocks up front: a malformed risk:/decision: block
+    # must abort here, before any LLM spend, not after the engine run.
+    risk_cfg = risk_gate.RiskConfig.from_dict(config.get("risk"))
+    decision_cfg = DecisionConfig.from_dict(config.get("decision"))
+
     engine_config, selected_analysts = _build_engine_config(config)
     graph = build_graph(
         perp_context_text=ctx_text,
         config=engine_config,
         selected_analysts=selected_analysts,
+        output_format_text=decision_format_instructions(decision_cfg),
     )
 
     trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -362,7 +373,7 @@ def run_engine(config: dict, coin: str) -> int:
         return 1
     final_state, _signal = propagated[0], propagated[1]
     if not isinstance(final_state, dict):
-        # ``to_perp_decision`` indexes ``final_state`` as a dict; a non-dict (e.g.
+        # The parse seam reads ``final_state`` as a dict; a non-dict (e.g.
         # ``None`` from an engine crash) would otherwise surface as an opaque
         # ``AttributeError`` in the last-resort handler. Fail clean instead.
         print(
@@ -372,80 +383,60 @@ def run_engine(config: dict, coin: str) -> int:
         )
         return 1
 
-    adapter = DecisionAdapter(ctx, position, account_value, config.get("adapter"))
-    # ``decide`` returns the rating + rating_source from the *same* parse that built
-    # the decision, so the audit log is stamped from a single source of truth — no
-    # second parse here with a separate sentinel that could drift. PARSE_FALLBACK
-    # (non-empty output, no recognized rating) and DEFAULT (empty final_trade_decision,
-    # e.g. the engine crashed before populating the key) are both non-decisions: abort
-    # the round fail-closed rather than emit an actionable Hold — against a live
-    # position a Hold would silently mask a would-be CLOSE, and persisting it would
-    # record an engine failure as if it were a deliberate decision. Only EXPLICIT
-    # proceeds to logging.
-    decision, rating, rating_source = adapter.decide(final_state)
-    if rating_source == RatingSource.PARSE_FALLBACK:
+    # Phase 2 contract: parse the structured target JSON out of the engine's
+    # final_trade_decision. Any invalid output — no JSON, bad schema, illegal
+    # cross-field combination — fails closed to maintain_current inside the
+    # parse seam; the raw response is preserved for the audit record either way.
+    parsed = parse_target_decision(final_state.get("final_trade_decision"), decision_cfg)
+    if not parsed.is_valid:
         print(
-            "error: engine returned a non-empty final_trade_decision with no "
-            "recognized rating — aborting the round rather than acting on a malformed "
-            "response. No decision was produced or logged.",
+            f"warning: engine output failed the structured-target contract "
+            f"({parsed.invalid_reason}) — failing closed to maintain_current.",
             file=sys.stderr,
         )
-        return 1
-    if rating_source == RatingSource.DEFAULT:
-        # An empty final_trade_decision is indistinguishable from an engine that
-        # crashed/never populated the key — a real Hold emits the word "Hold". Abort
-        # fail-closed (mirroring PARSE_FALLBACK) rather than persist a Hold that would
-        # freeze a live position on what may be an engine failure.
-        print(
-            "error: engine returned an empty final_trade_decision — aborting the round "
-            "rather than persisting a Hold that may mask an engine failure (a real Hold "
-            "emits the word 'Hold'). No decision was produced or logged.",
-            file=sys.stderr,
-        )
-        return 1
-    # A zero/unknown account value (no wallet configured, or a genuinely empty account)
-    # cannot size a position. Refuse to act on a non-Hold decision rather than emit an
-    # OPEN/REDUCE/CLOSE computed against $0 of net value; a Hold is harmless and still
-    # logged for the audit trail.
-    if account_value <= 0 and decision.intent != Intent.HOLD:
-        print(
-            f"error: account value is {account_value} (no wallet configured or an empty "
-            f"account) — refusing to act on a '{decision.intent.value}' decision sized "
-            "against a zero account. No decision was logged.",
-            file=sys.stderr,
-        )
-        return 1
+
+    # The deterministic RiskGate sizes and checks the target against the live
+    # account state (mark-based valuation). A zero-equity account fail-closes
+    # any directional target inside the gate (risk_reason=no_account_equity).
+    current = risk_gate.current_position_state(position, account_value, ctx.mark_price)
+    result = risk_gate.evaluate(
+        parsed,
+        account_equity=account_value,
+        current=current,
+        risk=risk_cfg,
+        decision_cfg=decision_cfg,
+    )
+
     models = {
         "provider": engine_config["llm_provider"],
         "deep": engine_config["deep_think_llm"],
         "quick": engine_config["quick_think_llm"],
     }
-    # Print the decision *before* persisting it, so a later audit-write failure can
+    # Print the outcome *before* persisting it, so a later audit-write failure can
     # never make a decision the engine already produced vanish silently.
     print("\n" + "=" * 64)
-    print(f"PerpTradeDecision - {coin} (engine rating: {rating})")
+    print(f"TargetDecision - {coin} (risk_action: {result.risk_action.value})")
     print("=" * 64)
-    print(json.dumps(decision.to_dict(), indent=2, ensure_ascii=False))
+    print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
     print("=" * 64)
 
     try:
-        _record, path = log_decision(
+        _record, path = log_target_decision(
             coin=coin,
-            decision=decision,
+            parsed=parsed,
+            risk_result=result,
             prompt=ctx_text,
             models=models,
-            rating=rating,
-            rating_source=rating_source,
             results_dir=engine_config["results_dir"],
         )
     except (OSError, ValueError, TypeError, UnicodeError, OverflowError) as exc:
         # OSError: filesystem failure. ValueError/TypeError: a non-serializable
         # record or an unset results_dir (Path(None)). UnicodeError: a lone
-        # surrogate in the engine rationale failing to encode on write.
+        # surrogate in the engine response failing to encode on write.
         # OverflowError: a float('inf') in the record overflowing json.dump.
-        # Either way
-        # the decision was already printed above, so report the persistence failure
-        # loudly rather than letting it surface as a generic "fatal" exit.
+        # Either way the outcome was already printed above, so report the
+        # persistence failure loudly rather than letting it surface as a generic
+        # "fatal" exit.
         print(
             f"ERROR: audit log write failed — the decision above was NOT persisted: {exc}",
             file=sys.stderr,

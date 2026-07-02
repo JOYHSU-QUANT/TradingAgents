@@ -21,17 +21,17 @@ engine:
   quick_think_llm: "deepseek/deepseek-chat"
   selected_analysts: [market, social, news]
 
-adapter:
-  target_size_pct:             # rating tier -> target % of net value committed as margin (signed: +long / -short; <=100%)
-    buy: 20                    # full long conviction
-    overweight: 10             # partial long
-    underweight: -10           # mild short, mirrors overweight (gated by allow_short)
-    sell: -20                  # full short
-  allow_short: true            # bearish tiers (Sell/Underweight) may short; false forces them to flat
-  rebalance_deadband_pct: 2    # |target - current| within this -> hold (avoid churn)
-  no_direct_flip: true         # opposite-sign target closes first; no one-step flip
-  entry_band_pct: 0.5          # entry_zone = entry_price +/- this %
-  confidence:                  # rating tier -> confidence
-    full: 0.8                  # Buy / Sell
-    partial: 0.6               # Overweight / Underweight
-    hold: 0.4
+# Phase 2 structured target contract (phase2-spec.md §2). The Phase 1 rating
+# adapter block is retired — the engine now outputs the structured JSON target
+# directly and the deterministic RiskGate below sizes/checks it.
+risk:
+  leverage: 1                  # Phase 2 first version is 1x (spec §2.1)
+  margin_mode: cross           # Phase 2 is cross-only (spec §2.2)
+  max_target_margin_pct: 60    # RiskGate clamp ceiling; requested 61-100 -> approved 60 (spec §2.3)
+
+decision:
+  ai_target_margin_min_pct: 0    # legal requested_target_margin_pct grid: {min, min+step, ..., max}
+  ai_target_margin_max_pct: 100
+  target_margin_step_pct: 1      # integer percent steps; off-grid values fail closed (no rounding)
+  rebalance_deadband_pct: 1      # same-side |approved - current| < this -> no order (flip/flat exempt)
+  min_confidence: 0.3            # set_target below this fails closed; confidence never scales sizing

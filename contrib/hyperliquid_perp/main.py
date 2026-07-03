@@ -389,6 +389,14 @@ def run_engine(config: dict, coin: str) -> int:
     # parse seam; the raw response is preserved for the audit record either way.
     parsed = parse_target_decision(final_state.get("final_trade_decision"), decision_cfg)
     if not parsed.is_valid:
+        # Emit to the structured log as well as stderr (mirroring _load_position):
+        # repeated contract failures are the model-drift signal logger-based
+        # alerting must see; the run still exits 0 (the cycle completed fail-closed).
+        logger.warning(
+            "engine output failed the structured-target contract for %s: %s",
+            coin,
+            parsed.invalid_reason,
+        )
         print(
             f"warning: engine output failed the structured-target contract "
             f"({parsed.invalid_reason}) — failing closed to maintain_current.",

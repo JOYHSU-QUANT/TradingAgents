@@ -1,11 +1,20 @@
-"""Write each :class:`PerpTradeDecision` to a durable JSON audit record.
+"""Write each trade decision to a durable JSON audit record.
 
-One file per decision under ``<results_dir>/perp_decisions/``. The record pins
-the four things a post-mortem needs (phase1-spec build order 9): the **prompt
-hash** the engine reasoned over, the **models** used, the full **decision**, and
-a **timestamp**.
+One file per decision under ``<results_dir>/perp_decisions/``, in one of two
+formats distinguished by ``schema_version``:
 
-:func:`build_log_record` is pure (timestamp injected) so it is unit-tested
+- **Phase 2 structured-target records** (:func:`build_target_log_record` /
+  :func:`log_target_decision`, ``TARGET_SCHEMA_VERSION``) — the format
+  ``main.py`` actually writes. Beyond the prompt hash / models / timestamp
+  header it persists the raw engine response, the parse verdict
+  (``is_valid`` / ``invalid_reason``), and the full RiskGate outcome — the
+  fields a post-mortem of the structured-target contract needs.
+- **Phase 1 records** (:class:`PerpTradeDecision` via :func:`build_log_record` /
+  :func:`log_decision`, ``SCHEMA_VERSION``) — the retired rating pipeline's
+  format, preserved so old records stay readable; no longer produced by the
+  entry point.
+
+The ``build_*`` functions are pure (timestamp injected) so they are unit-tested
 without touching the filesystem; :func:`write_decision_log` does the I/O.
 """
 

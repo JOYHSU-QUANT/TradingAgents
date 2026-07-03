@@ -184,7 +184,7 @@ class RiskGateResult:
 
         return {
             "decision_mode": self.decision_mode.value,
-            "target_side": self.target_side.value if self.target_side else None,
+            "target_side": self.target_side.value if self.target_side is not None else None,
             "requested_target_margin_pct": self.requested_target_margin_pct,
             "approved_target_margin_pct": self.approved_target_margin_pct,
             "risk_action": self.risk_action.value,
@@ -311,7 +311,16 @@ def evaluate(
         return _fail_closed(risk_reason=parsed.invalid_reason, current=current, risk=risk)
     invalid = validate_target_decision(decision, decision_cfg)
     if invalid is not None:
-        return _fail_closed(risk_reason=invalid, current=current, risk=risk)
+        # Preserve what the (hand-built) decision asked for, like every other
+        # rejection path, so the flip re-run's audit row is not all-None.
+        return _fail_closed(
+            risk_reason=invalid,
+            current=current,
+            risk=risk,
+            requested=decision.requested_target_margin_pct,
+            target_side=decision.target_side,
+            confidence=decision.confidence,
+        )
 
     # 2. A valid maintain_current: keep the position, no target, no order.
     if decision.decision_mode is DecisionMode.MAINTAIN_CURRENT:
@@ -357,42 +366,49 @@ def evaluate(
     # independent account-state checks — the approved value is the most
     # conservative of the three, snapped *down* to the grid, with the binding
     # constraint recorded.
-    approved = requested
-    risk_action = RiskAction.APPROVED
-    risk_reason: str | None = None
-
-    if approved > risk.max_target_margin_pct:
-        # Snapped like the other caps so the approved value always sits on the
-        # decision grid even when max_target_margin_pct itself is off it.
-        approved = _snap_down_to_grid(Decimal(risk.max_target_margin_pct), decision_cfg)
-        risk_action = RiskAction.CLAMPED
-        risk_reason = RISK_REASON_MAX_TARGET_MARGIN
-
+    # Every cap is snapped *down* to the decision grid (so the approved value
+    # always sits on it, even when the cap itself is off-grid), then applied in
+    # order against the shrinking ``approved`` value — the recorded reason is
+    # always the last (most binding) cap that fired.
+    caps: list[tuple[int, str]] = [
+        (
+            _snap_down_to_grid(Decimal(risk.max_target_margin_pct), decision_cfg),
+            RISK_REASON_MAX_TARGET_MARGIN,
+        )
+    ]
     if account_equity > 0:
         # Available margin: this target's margin plus what other symbols already
         # commit must fit inside equity (cross margin, spec §2.3 independence).
         available = account_equity - other_used_margin
-        available_pct_cap = _snap_down_to_grid(
-            max(available, Decimal(0)) / account_equity * 100, decision_cfg
+        caps.append(
+            (
+                _snap_down_to_grid(max(available, Decimal(0)) / account_equity * 100, decision_cfg),
+                RISK_REASON_AVAILABLE_MARGIN,
+            )
         )
-        if approved > available_pct_cap:
-            approved = available_pct_cap
-            risk_action = RiskAction.CLAMPED
-            risk_reason = RISK_REASON_AVAILABLE_MARGIN
 
         # Effective leverage: projected total notional over equity must stay
         # within the configured leverage (execution §6.1), independent of the
         # allocation cap.
-        max_total_notional = account_equity * risk.leverage
-        headroom_notional = max_total_notional - other_positions_notional
-        leverage_pct_cap = _snap_down_to_grid(
-            max(headroom_notional, Decimal(0)) / risk.leverage / account_equity * 100,
-            decision_cfg,
+        headroom_notional = account_equity * risk.leverage - other_positions_notional
+        caps.append(
+            (
+                _snap_down_to_grid(
+                    max(headroom_notional, Decimal(0)) / risk.leverage / account_equity * 100,
+                    decision_cfg,
+                ),
+                RISK_REASON_EFFECTIVE_LEVERAGE,
+            )
         )
-        if approved > leverage_pct_cap:
-            approved = leverage_pct_cap
+
+    approved = requested
+    risk_action = RiskAction.APPROVED
+    risk_reason: str | None = None
+    for cap, reason in caps:
+        if approved > cap:
+            approved = cap
             risk_action = RiskAction.CLAMPED
-            risk_reason = RISK_REASON_EFFECTIVE_LEVERAGE
+            risk_reason = reason
 
     if side is not TargetSide.FLAT and approved == 0:
         # The clamp chain found no legal grid capacity for a directional target

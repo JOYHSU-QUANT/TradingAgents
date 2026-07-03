@@ -291,6 +291,38 @@ def test_zero_equity_directional_target_fails_closed():
     assert result.order_created is False
 
 
+@pytest.mark.parametrize("equity", [Decimal(0), Decimal("-5")])
+def test_flat_close_executes_with_zero_or_negative_equity(equity):
+    # Closing must never be blocked by a broken/zero equity read: the equity
+    # gate exempts flat, and the zero-capacity fail-close applies only to
+    # directional targets. A position that cannot be closed is the worst
+    # possible failure mode of a tightened guard.
+    result = _evaluate(
+        _parsed(side="flat", margin=0), current=_long_state("35", "350"), equity=equity
+    )
+    assert result.risk_action is RiskAction.APPROVED
+    assert result.order_created is True
+    assert result.target_signed_notional == Decimal(0)
+    assert result.delta_notional == Decimal("-350")
+
+
+def test_clamp_chain_composes_to_tightest_cap():
+    # All three caps simultaneously tighter than the request: allocation 80,
+    # available margin 40 ((1000-600)/1000), leverage headroom 25
+    # ((2*1000-1500)/2/1000). The chain must compose against the shrinking
+    # approved value and record the tightest cap as the binding constraint.
+    risk = RiskConfig(leverage=Decimal(2), max_target_margin_pct=80)
+    result = _evaluate(
+        _parsed(margin=90),
+        risk=risk,
+        other_used_margin=Decimal("600"),
+        other_positions_notional=Decimal("1500"),
+    )
+    assert result.risk_action is RiskAction.CLAMPED
+    assert result.approved_target_margin_pct == 25
+    assert result.risk_reason == risk_gate.RISK_REASON_EFFECTIVE_LEVERAGE
+
+
 # --------------------------------------------------------------------------
 # Independent available-margin / effective-leverage checks (spec §2.3)
 # --------------------------------------------------------------------------

@@ -183,7 +183,7 @@ class TargetDecision:
         """
         return {
             "decision_mode": self.decision_mode.value,
-            "target_side": self.target_side.value if self.target_side else None,
+            "target_side": self.target_side.value if self.target_side is not None else None,
             "requested_target_margin_pct": self.requested_target_margin_pct,
             "confidence": str(self.confidence) if self.confidence is not None else None,
             "rationale": self.rationale,
@@ -196,9 +196,10 @@ class ParsedDecision:
     """Outcome of parsing one engine response.
 
     ``decision`` is the validated :class:`TargetDecision` when ``is_valid``,
-    otherwise the fail-closed maintain-current stand-in. ``raw_response`` always
-    preserves the original engine text verbatim for the audit trail — an invalid
-    output is recorded, never reconstructed.
+    otherwise the fail-closed maintain-current stand-in. ``raw_response``
+    preserves the original engine text verbatim for the audit trail (a non-str
+    under engine schema drift is preserved as its ``repr``) — an invalid output
+    is recorded, never reconstructed.
     """
 
     decision: TargetDecision
@@ -345,10 +346,14 @@ def parse_target_decision(raw: object, config: DecisionConfig) -> ParsedDecision
 
     ``raw`` is whatever ``final_state["final_trade_decision"]`` held — a non-str
     (engine schema drift) or empty text fails closed like any other invalid
-    output. ``invalid_reason`` is a stable machine tag (e.g. ``invalid_output``,
-    ``margin_off_step_grid``) recorded alongside the preserved raw response.
+    output; a non-str's ``repr`` is preserved as the raw response so the audit
+    record can distinguish "engine returned nothing" from "engine returned a
+    differently-shaped object". ``invalid_reason`` is a stable machine tag (e.g.
+    ``invalid_output``, ``margin_off_step_grid``) recorded alongside the
+    preserved raw response.
     """
-    raw_text = raw if isinstance(raw, str) else ""
+    is_str = isinstance(raw, str)
+    raw_text = raw if is_str else ("" if raw is None else repr(raw))
 
     def _invalid(reason: str) -> ParsedDecision:
         return ParsedDecision(
@@ -358,7 +363,9 @@ def parse_target_decision(raw: object, config: DecisionConfig) -> ParsedDecision
             raw_response=raw_text,
         )
 
-    if not raw_text.strip():
+    if not is_str or not raw_text.strip():
+        # A non-str always fails closed here, *before* extraction — its repr may
+        # embed a JSON-looking span that must never be parsed as a live decision.
         return _invalid("invalid_output")
 
     source = extract_json_block(raw_text)

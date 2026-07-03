@@ -190,6 +190,38 @@ def test_invalid_confidence_not_numeric():
     _assert_fail_closed(parsed, "confidence_not_numeric")
 
 
+def test_invalid_confidence_boolean_is_not_numeric():
+    parsed = parse_target_decision(_text(confidence=True), _CFG)
+    _assert_fail_closed(parsed, "confidence_not_numeric")
+
+
+def test_nonfinite_margin_fails_closed():
+    # json.loads accepts the nonstandard Infinity/NaN literals as floats; the
+    # finiteness check must fail them closed instead of feeding Decimal math.
+    parsed = parse_target_decision(_text(requested_target_margin_pct=float("inf")), _CFG)
+    _assert_fail_closed(parsed, "margin_not_numeric")
+
+
+def test_nan_confidence_fails_closed():
+    parsed = parse_target_decision(_text(confidence=float("nan")), _CFG)
+    _assert_fail_closed(parsed, "confidence_not_numeric")
+
+
+def test_maintain_current_with_out_of_range_confidence_fails_closed():
+    # The confidence-range check runs before the mode dispatch, so even a
+    # maintain_current carrying a nonsense confidence is rejected.
+    parsed = parse_target_decision(
+        _text(
+            decision_mode="maintain_current",
+            target_side=None,
+            requested_target_margin_pct=None,
+            confidence=1.5,
+        ),
+        _CFG,
+    )
+    _assert_fail_closed(parsed, "confidence_out_of_range")
+
+
 def test_invalid_confidence_above_one():
     parsed = parse_target_decision(_text(confidence=1.2), _CFG)
     _assert_fail_closed(parsed, "confidence_out_of_range")
@@ -253,6 +285,23 @@ def test_non_string_output_fails_closed():
     assert parsed.raw_response == ""
 
 
+def test_non_string_output_preserves_repr_in_raw_response():
+    # A non-None non-str keeps a repr in the audit record so a post-mortem can
+    # tell "engine returned nothing" from "engine returned a different shape".
+    drifted = {"chunks": ["not", "text"]}
+    parsed = parse_target_decision(drifted, _CFG)
+    _assert_fail_closed(parsed, "invalid_output")
+    assert parsed.raw_response == repr(drifted)
+
+
+def test_non_string_output_with_embedded_json_still_fails_closed():
+    # Even when the repr of a drifted object embeds a fully valid decision JSON,
+    # it must never be parsed as a live decision — non-str always fails closed.
+    embedded = [f"```json\n{json.dumps(_payload())}\n```"]
+    parsed = parse_target_decision(embedded, _CFG)
+    _assert_fail_closed(parsed, "invalid_output")
+
+
 def test_missing_field_fails_closed():
     payload = _payload()
     del payload["confidence"]
@@ -293,6 +342,15 @@ def test_extract_prefers_last_fenced_object():
     first = '{"decision_mode": "maintain_current"}'
     last = '{"decision_mode": "set_target"}'
     text = f"Example:\n```json\n{first}\n```\nFinal:\n```json\n{last}\n```"
+    assert extract_json_block(text) == last
+
+
+def test_bare_brace_fallback_prefers_last_object():
+    # The unfenced fallback follows the same "final answer comes last" rule as
+    # the fenced path.
+    first = '{"decision_mode": "maintain_current"}'
+    last = '{"decision_mode": "set_target"}'
+    text = f"Draft: {first}\nFinal: {last}"
     assert extract_json_block(text) == last
 
 
@@ -357,6 +415,8 @@ def test_decision_config_rejects_bad_grid():
         DecisionConfig(target_margin_step_pct=0)
     with pytest.raises(ValueError, match="min_confidence"):
         DecisionConfig(min_confidence=Decimal("1.5"))
+    with pytest.raises(ValueError, match="rebalance_deadband_pct"):
+        DecisionConfig(rebalance_deadband_pct=Decimal("-1"))
 
 
 def test_decision_config_from_dict_nulls_fall_back():

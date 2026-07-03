@@ -19,6 +19,25 @@ _EXAMPLE = _CONFIG_DIR / "hyperliquid.example.yaml"
 # Sentinel placeholder in the example file — treated as "no wallet configured".
 _WALLET_PLACEHOLDER = "0xYOUR..."
 
+# The complete set of recognised top-level config keys. Unknown keys are
+# rejected (not ignored): a typo in a *block name* — e.g. ``riks:`` — would
+# otherwise silently drop the whole block and fall back to defaults, and for the
+# ``risk:`` block that means trading at the permissive default caps. Keys inside
+# each block are validated by that block's own parser.
+_ALLOWED_TOP_LEVEL_KEYS = frozenset(
+    {
+        "network",
+        "network_timeout_s",
+        "wallet_address",
+        "coins",
+        "market_data",
+        "indicators",
+        "engine",
+        "risk",
+        "decision",
+    }
+)
+
 
 def config_path() -> Path:
     """The config file that :func:`load_config` will read."""
@@ -33,7 +52,16 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
             f"config not found at {resolved}. Copy {_EXAMPLE.name} to {_LOCAL.name} and fill it in."
         )
     with resolved.open(encoding="utf-8") as fh:
-        return yaml.safe_load(fh) or {}
+        config = yaml.safe_load(fh) or {}
+    if not isinstance(config, dict):
+        raise ValueError("config must be a YAML mapping at the top level")
+    unknown = set(config) - _ALLOWED_TOP_LEVEL_KEYS
+    if unknown:
+        raise ValueError(
+            f"unknown top-level config key(s): {', '.join(map(repr, sorted(unknown)))}. "
+            f"Allowed: {', '.join(sorted(_ALLOWED_TOP_LEVEL_KEYS))}."
+        )
+    return config
 
 
 def wallet_address(config: dict[str, Any]) -> str | None:

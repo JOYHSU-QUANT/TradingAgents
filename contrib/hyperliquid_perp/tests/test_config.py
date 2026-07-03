@@ -43,3 +43,19 @@ def test_load_config_reads_example_by_default():
 def test_load_config_missing_path_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_config(tmp_path / "does-not-exist.yaml")
+
+
+def test_load_config_rejects_unknown_top_level_key(tmp_path):
+    # A typo'd block name (`riks:`) would otherwise silently drop the whole
+    # risk: block and trade at default caps — reject it loudly instead.
+    bad = tmp_path / "typo.yaml"
+    bad.write_text("riks:\n  leverage: 1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="unknown top-level config key"):
+        load_config(bad)
+
+
+def test_load_config_rejects_non_mapping(tmp_path):
+    bad = tmp_path / "list.yaml"
+    bad.write_text("- a\n- b\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="mapping"):
+        load_config(bad)

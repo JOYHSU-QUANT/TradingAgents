@@ -449,6 +449,20 @@ def test_risk_config_from_dict_rejects_yaml_boolean_and_normalises_margin_mode()
     assert cfg.margin_mode == "cross"
 
 
+def test_risk_config_from_dict_rejects_unknown_key():
+    # A typo like `max_target_margin_pt` silently reverts the cap to the default
+    # (60) — reject it loudly so a safety limit is never dropped unnoticed.
+    with pytest.raises(ValueError, match="unknown config key"):
+        RiskConfig.from_dict({"max_target_margin_pt": 20})
+
+
+def test_risk_config_from_dict_rejects_non_scalar_value():
+    # A list value (YAML indentation slip) must surface as a named ValueError,
+    # not a TypeError that escapes main's config-error handler.
+    with pytest.raises(ValueError, match="max_target_margin_pct"):
+        RiskConfig.from_dict({"max_target_margin_pct": [60]})
+
+
 def test_risk_gate_result_rejects_illegal_combinations():
     # evaluate() only builds legal shapes; a hand-built inconsistent result
     # (PR 3 fixture, flip re-run) must die at construction, not in sizing math.
@@ -459,8 +473,11 @@ def test_risk_gate_result_rejects_illegal_combinations():
         replace(ok, order_created=True, no_order_reason="x")
     with pytest.raises(ValueError, match="sized target"):
         replace(ok, target_margin=None)
+    # Genuinely clamped (approved 60 < requested 61) so dropping risk_reason
+    # isolates the reason-coupling check, not the strict-reduce invariant below.
+    clamped = _evaluate(_parsed(margin=61))
     with pytest.raises(ValueError, match="risk_reason"):
-        replace(ok, risk_action=RiskAction.CLAMPED, risk_reason=None)
+        replace(clamped, risk_reason=None)
 
     maintain = _evaluate(_parsed(mode="maintain_current", side=None, margin=None, confidence=None))
     with pytest.raises(ValueError, match="sized target"):
@@ -473,6 +490,28 @@ def test_risk_gate_result_rejects_illegal_combinations():
     failed = _evaluate(_invalid_parsed())
     with pytest.raises(ValueError, match="name why"):
         replace(failed, risk_reason=None)
+
+
+def test_risk_gate_result_rejects_sign_and_margin_inconsistencies():
+    # Completed invariants (mirroring CurrentPositionState): the signed notional's
+    # sign must match target_side, risk can only shrink the request, and a flat
+    # target carries zero margin/notional. A hand-built flip re-run (PR 3) that
+    # violates any of these must die at construction, not in order-sizing math.
+    from dataclasses import replace
+
+    ok = _evaluate(_parsed(margin=20))  # LONG, approved == requested == 20, +notional
+    with pytest.raises(ValueError, match="short target must carry a negative"):
+        replace(ok, target_side=TargetSide.SHORT)
+    with pytest.raises(ValueError, match="flat target carries zero"):
+        replace(ok, target_side=TargetSide.FLAT)
+    with pytest.raises(ValueError, match="approved margin can never exceed requested"):
+        replace(ok, approved_target_margin_pct=99)
+    with pytest.raises(ValueError, match="keeps approved == requested"):
+        replace(ok, approved_target_margin_pct=10)
+
+    clamped = _evaluate(_parsed(margin=61))  # requested 61 -> approved 60, CLAMPED
+    with pytest.raises(ValueError, match="strictly reduce"):
+        replace(clamped, approved_target_margin_pct=61)
 
 
 def test_current_position_state_rejects_inconsistent_fields():

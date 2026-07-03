@@ -73,7 +73,13 @@ def int_from_yaml(value: object) -> int:
         if not value.is_integer():
             raise ValueError(f"expected an integer, got {value!r}")
         return int(value)
-    return int(value)  # int passes through; a non-numeric string raises loudly
+    try:
+        return int(value)  # int/numeric string passes through
+    except (TypeError, ValueError):
+        # A non-numeric string raises ValueError; a list/dict (YAML indentation
+        # slip) raises TypeError. Normalise both to ValueError so config_overrides
+        # surfaces a named config error instead of leaking an unnamed TypeError.
+        raise ValueError(f"expected an integer, got {value!r}") from None
 
 
 def config_overrides(
@@ -87,8 +93,15 @@ def config_overrides(
     default — each default is declared exactly once, on the field. A value the
     converter rejects re-raises with the config key named, so the operator
     sees *which* setting is bad.
+
+    An unrecognised key inside the block is *rejected*, not ignored: a typo like
+    ``max_target_margin_pt`` would otherwise silently drop the intended value and
+    leave a safety-critical limit on its permissive default with no signal.
     """
     cfg = cfg or {}
+    unknown = set(cfg) - set(converters)
+    if unknown:
+        raise ValueError(f"unknown config key(s): {', '.join(map(repr, sorted(unknown)))}")
     out: dict[str, Any] = {}
     for key, conv in converters.items():
         raw = cfg.get(key)

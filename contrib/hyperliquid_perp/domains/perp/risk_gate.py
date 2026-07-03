@@ -232,6 +232,34 @@ class RiskGateResult:
                 raise ValueError("a set_target result must carry a fully sized target")
             if self.risk_action is RiskAction.INVALID_FAIL_CLOSED:
                 raise ValueError("a fail-closed result must collapse to maintain_current")
+            # The signed notional's sign must agree with target_side, mirroring
+            # CurrentPositionState — PR 3's flip re-run hand-builds this result and
+            # a sign mismatch would silently corrupt order sizing downstream.
+            signed = self.target_signed_notional
+            if self.target_side is TargetSide.LONG and signed <= 0:
+                raise ValueError("a long target must carry a positive signed notional")
+            if self.target_side is TargetSide.SHORT and signed >= 0:
+                raise ValueError("a short target must carry a negative signed notional")
+            if self.target_side is TargetSide.FLAT and (
+                signed != 0
+                or self.requested_target_margin_pct != 0
+                or self.approved_target_margin_pct != 0
+            ):
+                raise ValueError("a flat target carries zero signed notional and zero margin")
+            # Risk can only shrink the request, never grow it, and the action must
+            # match the numeric relationship it claims.
+            if self.approved_target_margin_pct > self.requested_target_margin_pct:
+                raise ValueError("approved margin can never exceed requested")
+            if (
+                self.risk_action is RiskAction.CLAMPED
+                and self.approved_target_margin_pct >= self.requested_target_margin_pct
+            ):
+                raise ValueError("a clamped result must strictly reduce the approved margin")
+            if (
+                self.risk_action is RiskAction.APPROVED
+                and self.approved_target_margin_pct != self.requested_target_margin_pct
+            ):
+                raise ValueError("an approved (unclamped) result keeps approved == requested")
         else:  # MAINTAIN_CURRENT — valid maintain or any fail-closed rejection
             if (
                 self.approved_target_margin_pct is not None

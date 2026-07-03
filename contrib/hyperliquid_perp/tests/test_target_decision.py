@@ -461,3 +461,16 @@ def test_config_from_dict_accepts_integral_float():
     # 80.0 in YAML is unambiguous for an int field; only fractions are rejected.
     cfg = DecisionConfig.from_dict({"ai_target_margin_max_pct": 80.0})
     assert cfg.ai_target_margin_max_pct == 80
+
+
+def test_config_from_dict_rejects_unknown_key():
+    # A typo'd key must fail loud, not silently leave the field on its default.
+    with pytest.raises(ValueError, match="unknown config key"):
+        DecisionConfig.from_dict({"min_confidance": 0.5})
+
+
+def test_config_from_dict_rejects_non_scalar_value():
+    # A YAML indentation slip turns a scalar into a list; a bare int() would raise
+    # a TypeError that escapes the config-error handler — normalise to ValueError.
+    with pytest.raises(ValueError, match="target_margin_step_pct"):
+        DecisionConfig.from_dict({"target_margin_step_pct": [2]})

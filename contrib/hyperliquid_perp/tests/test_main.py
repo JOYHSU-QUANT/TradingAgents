@@ -570,6 +570,18 @@ def test_main_exchange_error_returns_exit_code_1(monkeypatch, capsys):
     assert "error: bad read" in capsys.readouterr().err
 
 
+def test_main_invalid_config_returns_exit_code_1(monkeypatch, capsys):
+    # A ValueError out of load_config (typo'd top-level block, non-mapping YAML)
+    # is an actionable operator error — a named exit 1, not the exit-2 bucket.
+    def _bad(path):
+        raise ValueError("unknown top-level config key(s): 'riks'.")
+
+    monkeypatch.setattr(main_mod, "load_config", _bad)
+    rc = main_mod.main(["--coin", "BTC"])
+    assert rc == 1
+    assert "invalid config" in capsys.readouterr().err
+
+
 def test_main_unexpected_error_returns_exit_code_2(monkeypatch, capsys, caplog):
     monkeypatch.setattr(main_mod, "load_config", lambda path: {})
 

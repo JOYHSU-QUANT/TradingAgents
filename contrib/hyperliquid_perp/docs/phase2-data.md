@@ -303,7 +303,7 @@ AI input
 | `delta_notional` | 目標與目前倉位差額 |
 | `confidence` | AI 信心，範圍 `0–1` |
 | `decision_reason` | AI 決策摘要，不得為空 |
-| `key_risks` | 最多 3 項主要風險；CSV 可存 JSON array string |
+| `key_risks` | 1–3 項主要風險（至少 1 項）；CSV 可存 JSON array string |
 | `order_created` | 本 output 是否產生 rebalance / flip order |
 | `no_order_reason` | `maintain_current` / `within_deadband` / `invalid_fail_closed` / 其他；有 order 時留空 |
 

@@ -185,6 +185,20 @@ def test_same_side_within_deadband_creates_no_order():
     assert result.delta_notional == Decimal("-5")  # still reported
 
 
+def test_clamped_target_can_still_land_within_deadband():
+    # A request clamped down to max (100 -> 60) whose approved allocation sits
+    # within the deadband of the current same-side position: risk_action stays
+    # CLAMPED (the clamp really happened) while order_created is False. Both the
+    # "clamped" verdict and the "no order" outcome must be reported together.
+    current = _long_state(margin_pct="60", notional="600")
+    result = _evaluate(_parsed(margin=100), current=current)
+    assert result.risk_action is RiskAction.CLAMPED
+    assert result.approved_target_margin_pct == 60
+    assert result.requested_target_margin_pct == 100
+    assert result.order_created is False
+    assert result.no_order_reason == risk_gate.NO_ORDER_WITHIN_DEADBAND
+
+
 def test_same_side_outside_deadband_creates_order():
     current = _long_state(margin_pct="30", notional="300")
     result = _evaluate(_parsed(margin=35), current=current)
@@ -350,8 +364,11 @@ def test_effective_leverage_check_is_independent_of_allocation_cap():
 
 
 def test_negative_other_state_is_rejected():
+    # Either cross-margin input going negative is a corrupt account read.
     with pytest.raises(ValueError, match="must be >= 0"):
         _evaluate(_parsed(), other_used_margin=Decimal("-1"))
+    with pytest.raises(ValueError, match="must be >= 0"):
+        _evaluate(_parsed(), other_positions_notional=Decimal("-1"))
 
 
 def test_no_capacity_fails_closed_instead_of_full_close():

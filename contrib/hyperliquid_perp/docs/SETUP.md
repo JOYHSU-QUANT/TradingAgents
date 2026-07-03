@@ -53,8 +53,8 @@ cp contrib/hyperliquid_perp/configs/hyperliquid.example.yaml \
 | `market_data` | `candle_interval`（4h；必須是 `1m`/`5m`/`15m`/`1h`/`4h`/`1d` 之一）／`candle_lookback`（200）／`funding_zscore_window_days`（30）。 |
 | `indicators` | `rsi_14, ema_20, ema_50, atr_14, macd`，由 `context_builder` 計算。 |
 | `engine` | `llm_provider: openrouter`、`deep_think_llm`、`quick_think_llm`、`selected_analysts: [market, social, news]`。 |
-| `risk` | Phase 2 RiskGate：`leverage`（Phase 2 = 1x）、`margin_mode`（cross-only）、`max_target_margin_pct`（clamp 上限，requested 61–100 → approved 60）。 |
-| `decision` | 決策契約 grid：`ai_target_margin_min_pct`／`ai_target_margin_max_pct`／`target_margin_step_pct`（合法 `requested_target_margin_pct` = {min, min+step, …, max}；off-grid 直接 fail closed，不四捨五入）、`rebalance_deadband_pct`（同向 \|approved − current\| 小於此值 → 不下單；flip/flat 例外）、`min_confidence`（低於此值的 set_target fail closed；confidence 永不縮放 sizing）。 |
+| `risk` | Phase 2 RiskGate：`leverage`（Phase 2 = 1x）、`margin_mode`（cross-only）、`max_target_margin_pct`（clamp 上限，requested 61–100 → approved 60）。若 `max_target_margin_pct` snap 到 grid 後 ≤ 0（低於 grid 最小值，或 grid 由 0 起算但 cap 小於一個 step）→ 每個方向性 target 都會 clamp 成 0 fail-closed，config load 時具名 exit 1，不靜默上線。 |
+| `decision` | 決策契約 grid：`ai_target_margin_min_pct`／`ai_target_margin_max_pct`／`target_margin_step_pct`（合法 `requested_target_margin_pct` = {min, min+step, …, max}；off-grid 直接 fail closed，不四捨五入；`(max − min)` 必須為 `step` 的整數倍，否則廣告的 `max` 落在 grid 外、config load 時 exit 1）、`rebalance_deadband_pct`（同向 \|approved − current\| 小於此值 → 不下單；flip/flat 例外）、`min_confidence`（低於此值的 set_target fail closed；confidence 永不縮放 sizing）。 |
 
 > 沒有任何 `*.local.yaml` 時，loader 會退回 `hyperliquid.example.yaml`，
 > 所以 `--context-only` 不用複製任何東西就能跑。

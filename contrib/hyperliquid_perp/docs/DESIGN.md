@@ -273,7 +273,7 @@ Phase 2 使用 structured target 作為唯一決策來源，不再使用 `Buy` /
 | `decision_mode` | `set_target` / `maintain_current` | AI 是否建立新 target |
 | `target_side` | `long` / `short` / `flat` / `null` | 最終目標方向 |
 | `requested_target_margin_pct` | `0–100` / `null` | AI 建議的 account-equity margin allocation |
-| `confidence` | `0–1` | AI 對決策的信心；`set_target` 且低於 `min_confidence` 時 fail-closed 成 `maintain_current`（見 phase2-spec.md 2.4） |
+| `confidence` | `0–1` | AI 對決策的信心；`set_target` 且低於 `min_confidence` 時被風控拒絕成 `maintain_current`（`risk_action = rejected`，見 phase2-spec.md 2.4） |
 | `rationale` | non-empty string | 決策理由 |
 | `key_risks` | 1–3 項 | 主要風險（至少 1 項；空陣列 fail-closed） |
 

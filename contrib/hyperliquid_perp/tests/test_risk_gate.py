@@ -145,13 +145,15 @@ def test_exactly_max_is_approved_not_clamped():
 # --------------------------------------------------------------------------
 
 
-def test_low_confidence_set_target_fails_closed():
+def test_low_confidence_set_target_is_rejected():
+    # A schema-valid but under-confident set_target is REJECTED (normal risk
+    # operation), not INVALID_FAIL_CLOSED (the contract-violation/drift tag).
     result = _evaluate(_parsed(margin=40, confidence="0.29"))
-    assert result.risk_action is RiskAction.INVALID_FAIL_CLOSED
+    assert result.risk_action is RiskAction.REJECTED
     assert result.risk_reason == risk_gate.RISK_REASON_LOW_CONFIDENCE
     assert result.decision_mode is DecisionMode.MAINTAIN_CURRENT
     assert result.order_created is False
-    assert result.no_order_reason == risk_gate.NO_ORDER_INVALID_FAIL_CLOSED
+    assert result.no_order_reason == risk_gate.NO_ORDER_REJECTED
     # The audit row still shows what the AI asked for; no sized target leaves.
     assert result.requested_target_margin_pct == 40
     assert result.approved_target_margin_pct is None
@@ -251,6 +253,37 @@ def test_same_target_zero_delta_creates_no_order():
     assert result.no_order_reason == risk_gate.NO_ORDER_ZERO_DELTA
 
 
+def test_deadband_disabled_on_leverage_mismatch():
+    # A manually opened 5x position under risk.leverage=1: margin 10% carries
+    # ~50%-of-equity notional, while a 10% target at 1x means 10% notional.
+    # Equal margin%% must NOT be swallowed by the deadband — the order executes
+    # and delta_notional converges the true exposure to the target.
+    current = CurrentPositionState(
+        side=TargetSide.LONG,
+        signed_notional=Decimal("500"),
+        margin_pct=Decimal("10"),
+        leverage=Decimal(5),
+    )
+    result = _evaluate(_parsed(margin=10), current=current)
+    assert result.order_created is True
+    assert result.no_order_reason is None
+    assert result.delta_notional == Decimal("-400")  # 100 target - 500 actual
+
+
+def test_deadband_applies_when_leverage_matches():
+    # Same-side rebalance inside the band with a verified matching leverage:
+    # the churn optimisation still applies.
+    current = CurrentPositionState(
+        side=TargetSide.LONG,
+        signed_notional=Decimal("355"),
+        margin_pct=Decimal("35.5"),
+        leverage=Decimal(1),
+    )
+    result = _evaluate(_parsed(margin=35), current=current)
+    assert result.order_created is False
+    assert result.no_order_reason == risk_gate.NO_ORDER_WITHIN_DEADBAND
+
+
 # --------------------------------------------------------------------------
 # maintain_current and fail-closed passthrough shapes (data §7)
 # --------------------------------------------------------------------------
@@ -298,9 +331,9 @@ def test_gate_revalidates_hand_built_decision():
     assert result.risk_reason == "directional_side_with_zero_margin"
 
 
-def test_zero_equity_directional_target_fails_closed():
+def test_zero_equity_directional_target_is_rejected():
     result = _evaluate(_parsed(margin=40), equity=Decimal(0))
-    assert result.risk_action is RiskAction.INVALID_FAIL_CLOSED
+    assert result.risk_action is RiskAction.REJECTED
     assert result.risk_reason == risk_gate.RISK_REASON_NO_EQUITY
     assert result.order_created is False
 
@@ -371,24 +404,24 @@ def test_negative_other_state_is_rejected():
         _evaluate(_parsed(), other_positions_notional=Decimal("-1"))
 
 
-def test_no_capacity_fails_closed_instead_of_full_close():
+def test_no_capacity_is_rejected_instead_of_full_close():
     # Cross margin fully committed elsewhere: the cap snaps to 0. A directional
-    # target must fail closed — not approve long+0, which would emit an order
-    # that closes the whole position on a "stay long" request.
+    # target must be rejected — not approved as long+0, which would emit an
+    # order that closes the whole position on a "stay long" request.
     current = _long_state(margin_pct="35", notional="350")
     result = _evaluate(_parsed(margin=40), current=current, other_used_margin=Decimal("1000"))
-    assert result.risk_action is RiskAction.INVALID_FAIL_CLOSED
+    assert result.risk_action is RiskAction.REJECTED
     assert result.risk_reason == risk_gate.RISK_REASON_AVAILABLE_MARGIN
     assert result.order_created is False
     assert result.target_margin is None
 
 
-def test_cap_below_grid_minimum_fails_closed_not_snapped_up():
+def test_cap_below_grid_minimum_rejects_not_snapped_up():
     # min=10 but only 5% of equity is genuinely available: snapping up to the
     # grid minimum would approve margin that does not exist.
     cfg = DecisionConfig(ai_target_margin_min_pct=10)
     result = _evaluate(_parsed(margin=40), cfg=cfg, other_used_margin=Decimal("950"))
-    assert result.risk_action is RiskAction.INVALID_FAIL_CLOSED
+    assert result.risk_action is RiskAction.REJECTED
     assert result.risk_reason == risk_gate.RISK_REASON_AVAILABLE_MARGIN
 
 
@@ -414,11 +447,13 @@ def test_current_position_state_uses_mark_and_committed_margin():
         entry_price=Decimal("59000"),
         unrealized_pnl=Decimal("10"),
         margin_used=Decimal("350"),
+        leverage=Decimal(5),
     )
     state = current_position_state(position, _EQUITY, mark_price=Decimal("60000"))
     assert state.side is TargetSide.LONG
     assert state.signed_notional == Decimal("600")  # size * mark, not entry
     assert state.margin_pct == Decimal("35")  # committed margin / equity
+    assert state.leverage == Decimal(5)  # real leverage passed through for the deadband guard
 
 
 def test_current_position_state_short_and_unknown_margin():
@@ -489,23 +524,47 @@ def test_risk_config_from_dict_rejects_non_mapping_block():
 
 def test_validate_risk_decision_config_rejects_unusable_pair():
     # Each block is individually valid, but the cap snaps below the grid so every
-    # directional target would clamp to 0 and fail closed — reject the pairing.
+    # directional target would clamp to 0 and be rejected — reject the pairing.
     # (a) cap below a non-zero grid minimum.
-    with pytest.raises(ValueError, match="fail closed"):
+    with pytest.raises(ValueError, match="no legal directional grid value"):
         risk_gate.validate_risk_decision_config(
             RiskConfig(max_target_margin_pct=5),
             DecisionConfig(ai_target_margin_min_pct=10, ai_target_margin_max_pct=100),
         )
     # (b) grid starts at 0 but the cap is below one step (snaps to 0).
-    with pytest.raises(ValueError, match="fail closed"):
+    with pytest.raises(ValueError, match="no legal directional grid value"):
         risk_gate.validate_risk_decision_config(
             RiskConfig(max_target_margin_pct=3),
             DecisionConfig(
                 ai_target_margin_min_pct=0, ai_target_margin_max_pct=100, target_margin_step_pct=5
             ),
         )
-    # A cap that snaps onto a real grid value is fine (no raise).
+    # A cap that lands on a real grid value is fine (no raise).
     risk_gate.validate_risk_decision_config(RiskConfig(), DecisionConfig())
+
+
+def test_validate_risk_decision_config_rejects_off_grid_cap():
+    # step=25, cap=60: the effective cap would silently tighten to 50 — the
+    # operator configured 60 and could never deploy more. Reject the
+    # misalignment at load instead of silently shrinking the cap.
+    with pytest.raises(ValueError, match="not on the decision grid"):
+        risk_gate.validate_risk_decision_config(
+            RiskConfig(max_target_margin_pct=60),
+            DecisionConfig(target_margin_step_pct=25),
+        )
+
+
+def test_effective_max_target_margin_pct_is_min_of_grid_and_cap():
+    # Defaults: grid max 100, cap 60 -> the prompt must advertise 60.
+    assert risk_gate.effective_max_target_margin_pct(RiskConfig(), DecisionConfig()) == 60
+    # Cap at/above the grid ceiling: the grid ceiling stays the advertised max.
+    assert (
+        risk_gate.effective_max_target_margin_pct(
+            RiskConfig(max_target_margin_pct=100),
+            DecisionConfig(ai_target_margin_max_pct=40),
+        )
+        == 40
+    )
 
 
 def test_risk_gate_result_rejects_illegal_combinations():
@@ -530,11 +589,18 @@ def test_risk_gate_result_rejects_illegal_combinations():
     with pytest.raises(ValueError, match="never creates an order"):
         replace(maintain, order_created=True, no_order_reason=None)
 
-    # A fail-closed result must name why, symmetric with the CLAMPED guard — else a
-    # contradictory ParsedDecision could produce a fail-closed row with a null reason.
+    # A rejected/fail-closed result must name why, symmetric with the CLAMPED guard —
+    # else a contradictory ParsedDecision could produce such a row with a null reason.
     failed = _evaluate(_invalid_parsed())
     with pytest.raises(ValueError, match="name why"):
         replace(failed, risk_reason=None)
+    rejected = _evaluate(_parsed(margin=40, confidence="0.1"))
+    with pytest.raises(ValueError, match="name why"):
+        replace(rejected, risk_reason=None)
+    # And neither REJECTED nor INVALID_FAIL_CLOSED may ride on a sized set_target.
+    ok_sized = _evaluate(_parsed(margin=20))
+    with pytest.raises(ValueError, match="collapse to maintain_current"):
+        replace(ok_sized, risk_action=RiskAction.REJECTED, risk_reason="low_confidence")
 
 
 def test_risk_gate_result_rejects_sign_and_margin_inconsistencies():
@@ -578,6 +644,18 @@ def test_current_position_state_rejects_inconsistent_fields():
     with pytest.raises(ValueError, match="margin_pct"):
         CurrentPositionState(
             side=TargetSide.LONG, signed_notional=Decimal(500), margin_pct=Decimal(-1)
+        )
+    # A flat position carries no leverage, and a known leverage must be > 0.
+    with pytest.raises(ValueError, match="flat"):
+        CurrentPositionState(
+            side=None, signed_notional=Decimal(0), margin_pct=None, leverage=Decimal(1)
+        )
+    with pytest.raises(ValueError, match="leverage"):
+        CurrentPositionState(
+            side=TargetSide.LONG,
+            signed_notional=Decimal(500),
+            margin_pct=Decimal(10),
+            leverage=Decimal(0),
         )
 
 

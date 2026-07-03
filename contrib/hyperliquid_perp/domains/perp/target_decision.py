@@ -543,12 +543,18 @@ def parse_target_decision(raw: object, config: DecisionConfig) -> ParsedDecision
 # --------------------------------------------------------------------------
 
 
-def decision_format_instructions(config: DecisionConfig) -> str:
+def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None = None) -> str:
     """The output-format contract text injected at the tail of the engine context.
 
     Rendered from the live :class:`DecisionConfig` so the legal margin grid and
     the ``min_confidence`` threshold in the prompt can never drift from what the
-    parser and RiskGate actually enforce.
+    parser and RiskGate actually enforce. ``max_pct`` (when given) advertises the
+    *effective* ceiling — ``risk_gate.effective_max_target_margin_pct``, the
+    grid ceiling capped by ``risk.max_target_margin_pct`` — so the model is
+    never told a margin is legal that the gate deterministically clamps; a
+    ``clamped`` audit record then means the risk gate genuinely intervened, not
+    business as usual. Requests above ``max_pct`` but on the grid stay
+    schema-valid (they clamp rather than fail closed).
 
     The worked example is deliberately a ``maintain_current``: models routinely
     echo format examples verbatim, and :func:`extract_json_block` takes the last
@@ -556,7 +562,8 @@ def decision_format_instructions(config: DecisionConfig) -> str:
     target, while an echoed ``maintain_current`` is a harmless no-op (the same
     outcome as fail-closed).
     """
-    lo, hi = config.ai_target_margin_min_pct, config.ai_target_margin_max_pct
+    lo = config.ai_target_margin_min_pct
+    hi = config.ai_target_margin_max_pct if max_pct is None else max_pct
     step = config.target_margin_step_pct
     return f"""## Required final decision output format
 

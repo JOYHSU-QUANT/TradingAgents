@@ -48,7 +48,7 @@ Perp 資料經由子類別 override 向上流入**未修改的** TradingAgents �
         │
 [Ph 1]  Perp domain layer                                       (contrib)
         HL raw response → clean schema. Builds PerpMarketContext + PerpPosition.
-        schema.py · context_builder.py · prompt_context.py · decision.py
+        schema.py · context_builder.py · prompt_context.py
         │
         ▼  injected as instrument-context text (no core change)
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -56,14 +56,14 @@ Perp 資料經由子類別 override 向上流入**未修改的** TradingAgents �
 │  HyperliquidTradingGraph(TradingAgentsGraph)  ← contrib subclass       │
 │   · overrides resolve_instrument_context() → injects perp context      │
 │   · runs analysts → researchers → trader → portfolio manager           │
-│   · emits PortfolioDecision: rating (Buy/Overweight/Hold/Under/Sell)    │
+│   · emits the structured TargetDecision JSON block (Ph 2 contract)     │
 └──────────────────────────────────────────────────────────────────────┘
-        │  final_state + signal (the 5-tier rating)
+        │  final_state (raw response containing the decision JSON)
         ▼
-[Ph 1/2] Decision adapter                                       (contrib)
-        PortfolioDecision + PerpMarketContext + PerpPosition
-        → PerpTradeDecision (intent, target_size_pct, funding_view, …)
-        decision_log.py logs prompt hash · model · full decision JSON
+[Ph 2]  Decision contract                                       (contrib)
+        raw response → parse_target_decision (invalid output fails closed
+        to maintain_current) → TargetDecision (side, margin %, confidence)
+        decision_log.py logs prompt hash · model · raw response · verdict
         │
 [Ph 1/2] RiskGate                                               (contrib)
         Deterministic hard gate: schema check → soft risk → hard limits →
@@ -150,7 +150,7 @@ Phase 3 的 agent-wallet private key）一律放環境變數，絕不放進任�
 | `domains/perp/schema.py` | ✅ | `PerpMarketContext` · `PerpPosition` · `AccountSnapshot`。 |
 | `domains/perp/context_builder.py` | ✅ | `market_data + account → PerpMarketContext`；計算 indicators 與 funding z-score。 |
 | `domains/perp/prompt_context.py` | ⚠️ | 結構開源；確切措辭私有（funding-rate 的表述方式是你的 alpha）。 |
-| `domains/perp/decision.py` | ✅ | `PerpTradeDecision` schema——意圖，不是 order。 |
+| `domains/perp/decision.py` | ~~✅~~ 已刪除 | `PerpTradeDecision` schema（Phase 1 意圖決策）。**Phase 2 起退役刪除**——舊 audit 紀錄（schema_version 2）仍可讀，但寫入路徑由 `target_decision.py` 的 structured target 契約取代。 |
 | `integration/trading_graph.py` | ✅ | `HyperliquidTradingGraph(TradingAgentsGraph)`——override `resolve_instrument_context()`，零核心修改。 |
 | `integration/decision_adapter.py` | ~~✅~~ 已刪除 | `PortfolioDecision` → `PerpTradeDecision` rating 映射。**Phase 2 起退役刪除**，由 `domains/perp/target_decision.py` ＋ `domains/perp/risk_gate.py`（structured target 契約 ＋ RiskGate）取代。 |
 | `audit/decision_log.py` | ✅ | prompt hash · model · 完整 decision JSON · timestamp。 |

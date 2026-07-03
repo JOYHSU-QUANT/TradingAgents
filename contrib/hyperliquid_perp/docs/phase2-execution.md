@@ -477,7 +477,7 @@ target_margin = 1,000 * 20 / 100 = 200 USDC
 target_notional = 200 * 5 = 1,000 USDC
 ```
 
-> 相容性說明：現行 Phase 1 adapter 已使用 `position.margin_used / account_value` 計算目前 signed margin allocation，與本節的 margin-based 定義一致。Phase 2 實作時仍需將舊欄位 `target_size_pct` 拆分為 `requested_target_margin_pct` 與 `approved_target_margin_pct`。
+> 相容性說明：RiskGate 以 `position.margin_used / account_value` 計算目前 margin allocation，與本節的 margin-based 定義一致——但此等式只在倉位**實際槓桿**等於 `configured_leverage` 時才代表名目曝險。RiskGate 對已知的槓桿不匹配（例如手動開的倉）會停用 rebalance deadband（見 phase2-spec.md §2.4），讓訂單把真實名目收斂到 target。
 
 ---
 

@@ -293,7 +293,7 @@ AI input
 | `target_side` | `long` / `short` / `flat` / 空 |
 | `requested_target_margin_pct` | AI 要求的 account equity margin allocation 比例；合法範圍 `0–100` |
 | `approved_target_margin_pct` | RiskGate 核准後用於下單的比例；目前上限 `60` |
-| `risk_action` | `approved` / `clamped` / `invalid_fail_closed` |
+| `risk_action` | `approved` / `clamped` / `rejected`（契約合法但被風控拒絕：low confidence、無淨值、無 grid 容量）/ `invalid_fail_closed`（契約違規，model-drift 告警訊號） |
 | `risk_reason` | RiskGate 調整或拒絕的原因；未調整可留空 |
 | `target_margin` | `account_equity * approved_target_margin_pct / 100` |
 | `configured_leverage` | 本次目標倉位使用的槓桿 |
@@ -305,7 +305,7 @@ AI input
 | `decision_reason` | AI 決策摘要，不得為空 |
 | `key_risks` | 1–3 項主要風險（至少 1 項）；CSV 可存 JSON array string |
 | `order_created` | 本 output 是否產生 rebalance / flip order |
-| `no_order_reason` | `maintain_current` / `within_deadband` / `invalid_fail_closed` / 其他；有 order 時留空 |
+| `no_order_reason` | `maintain_current` / `within_deadband` / `rejected` / `invalid_fail_closed` / 其他；有 order 時留空 |
 
 `maintain_current` 的 requested / approved target、target margin / notional 與 target side 皆為空，`delta_notional = 0`，並記錄 `order_created = false` 與 `no_order_reason = maintain_current`。`flat` 則有明確 target：`target_side = flat`、requested / approved margin = `0`、`target_signed_notional = 0`。
 

@@ -99,14 +99,16 @@ decision:
 abs(approved_target_margin_pct - current_margin_pct) < rebalance_deadband_pct
 ```
 
-則不建立 order，記 `order_created = false`、`no_order_reason = within_deadband`。**Flip 與 flat 平倉不適用 deadband**——方向相反或要求歸零時，再小的差距都必須執行。本節是 phase2-data.md 的 `ai_outputs.csv` 一章 `no_order_reason = within_deadband` 的正式定義。
+則不建立 order，記 `order_created = false`、`no_order_reason = within_deadband`。**Flip 與 flat 平倉不適用 deadband**——方向相反或要求歸零時，再小的差距都必須執行。Deadband 也只在倉位**實際槓桿**與 `risk.leverage` 一致（或交易所未回報）時適用：margin% 只有在槓桿一致時才代表名目曝險，已知不一致（例如手動開的倉）時 deadband 停用，讓訂單執行、把真實名目收斂到 target。本節是 phase2-data.md 的 `ai_outputs.csv` 一章 `no_order_reason = within_deadband` 的正式定義。
 
 **信心門檻（`min_confidence`）**：`confidence` 僅作記錄與事後分析，**不參與 sizing**——`approved_target_margin_pct` 不得乘上 `confidence`。驗證規則：
 
 ```text
 confidence 非數字或超出 0–1                        → invalid decision，fail-closed 成 maintain_current
-decision_mode = set_target 且 confidence < 0.3     → invalid decision，fail-closed 成 maintain_current，
-                                                     記 risk_action = invalid_fail_closed、risk_reason = low_confidence
+decision_mode = set_target 且 confidence < 0.3     → 契約合法但被風控拒絕：maintain_current，
+                                                     記 risk_action = rejected、risk_reason = low_confidence
+                                                     （rejected 是正常風控運作；invalid_fail_closed
+                                                     保留給契約違規，供 model-drift 告警使用）
 ```
 
 理由：LLM 的 confidence 未經校準，直接乘進 sizing 會把噪音放大成倉位；AI 的 conviction 應直接反映在 `requested_target_margin_pct`，prompt 必須明確要求兩者一致。本門檻只負責擋下「高倉位、低信心」這類自相矛盾的輸出。是否引入 confidence-aware sizing，待 Phase 2 paper 累積的 confidence 與績效資料驗證其預測力後，於 Phase 3+ 再議。

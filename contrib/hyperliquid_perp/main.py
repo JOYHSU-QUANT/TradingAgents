@@ -40,7 +40,7 @@ from .exchanges.hyperliquid.account import HyperliquidAccount
 from .exchanges.hyperliquid.errors import ExchangeError
 from .exchanges.hyperliquid.market_data import HyperliquidMarketData
 from .exchanges.hyperliquid.sdk_client import HyperliquidClient
-from .integration.trading_graph import build_graph
+from .integration.trading_graph import build_graph, inject_perp_context
 
 logger = logging.getLogger(__name__)
 
@@ -295,8 +295,8 @@ def run_engine(config: dict, coin: str) -> int:
     # fully-None known-indicator set is not under-warm — it means the indicator
     # engine (stockstats) failed on every column (version drift, bad frame). That
     # set is indistinguishable from a warm-up dict downstream: the regime silently
-    # defaults to RANGING and the ATR stop-loss is disabled. Refuse it the same way,
-    # before spending an LLM call on signals that are all dead.
+    # defaults to RANGING. Refuse it the same way, before spending an LLM call on
+    # signals that are all dead.
     _known = set(supported_indicators())
     _computed = [v for k, v in ctx.indicators.items() if k in _known]
     if _computed and all(v is None for v in _computed):
@@ -309,16 +309,16 @@ def run_engine(config: dict, coin: str) -> int:
         )
         return 1
     # atr_14 is load-bearing beyond being "one missing number": classify_regime falls
-    # back to RANGING (hiding a volatile market) and the ATR stop-loss is disabled when
-    # it is absent. Past the warm-up gate there are enough candles to compute it, so a
-    # None atr_14 here means stockstats failed on that column specifically — and a
-    # single dead indicator slips past the all-dead guard above. Refuse the run rather
-    # than trade on a fabricated-calm regime with no stop.
+    # back to RANGING (hiding a volatile market) when it is absent. Past the warm-up
+    # gate there are enough candles to compute it, so a None atr_14 here means
+    # stockstats failed on that column specifically — and a single dead indicator
+    # slips past the all-dead guard above. Refuse the run rather than trade on a
+    # fabricated-calm regime.
     if "atr_14" in ctx.indicators and ctx.indicators["atr_14"] is None:
         print(
             f"error: atr_14 failed to compute for {coin} despite {ctx.candle_count} "
-            "candles — the regime would silently default to RANGING and the ATR "
-            "stop-loss would be disabled. Refusing to run the engine without a usable ATR.",
+            "candles — the regime would silently default to RANGING, hiding a "
+            "volatile market. Refusing to run the engine without a usable ATR.",
             file=sys.stderr,
         )
         return 1
@@ -372,12 +372,20 @@ def run_engine(config: dict, coin: str) -> int:
         )
         return 1
 
+    # Advertise the *effective* margin ceiling (grid max capped by the risk
+    # allocation cap) so the model is never told a margin is legal that the
+    # gate deterministically clamps — a clamped audit record then means the
+    # risk gate genuinely intervened, not business as usual.
+    output_format_text = decision_format_instructions(
+        decision_cfg,
+        max_pct=risk_gate.effective_max_target_margin_pct(risk_cfg, decision_cfg),
+    )
     engine_config, selected_analysts = _build_engine_config(config)
     graph = build_graph(
         perp_context_text=ctx_text,
         config=engine_config,
         selected_analysts=selected_analysts,
-        output_format_text=decision_format_instructions(decision_cfg),
+        output_format_text=output_format_text,
     )
 
     trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -433,7 +441,9 @@ def run_engine(config: dict, coin: str) -> int:
     parsed = parse_target_decision(final_state.get("final_trade_decision"), decision_cfg)
     if not parsed.is_valid:
         # Repeated contract failures are the model-drift signal alerting must
-        # see; the run still exits 0 (the cycle completed fail-closed).
+        # see: the cycle still completes fail-closed (gate + audit record
+        # below), but the run exits 3 at the end so a naive scheduler can
+        # alert on the exit code instead of log-scraping.
         _warn_dual(
             "engine output failed the structured-target contract for %s: %s",
             coin,
@@ -448,6 +458,25 @@ def run_engine(config: dict, coin: str) -> int:
     # account state (mark-based valuation). A zero-equity account fail-closes
     # any directional target inside the gate (risk_reason=no_account_equity).
     current = risk_gate.current_position_state(position, account_value, ctx.mark_price)
+    if current.leverage is not None and current.leverage != risk_cfg.leverage:
+        # margin% only tracks notional when the position's real leverage matches
+        # the configured risk.leverage (e.g. a manually opened 5x position under
+        # ``leverage: 1``). The gate disables the rebalance deadband on this
+        # mismatch so the order converges the true notional to the target — make
+        # the condition visible to the operator here.
+        _warn_dual(
+            "position leverage %s differs from configured risk.leverage %s for %s — "
+            "rebalance deadband disabled for this cycle so true exposure converges "
+            "to the target",
+            current.leverage,
+            risk_cfg.leverage,
+            coin,
+            stderr=(
+                f"warning: position leverage {current.leverage} != configured "
+                f"risk.leverage {risk_cfg.leverage} — rebalance deadband disabled "
+                "for this cycle."
+            ),
+        )
     result = risk_gate.evaluate(
         parsed,
         account_equity=account_value,
@@ -470,11 +499,17 @@ def run_engine(config: dict, coin: str) -> int:
     print("=" * 64)
 
     try:
+        # ``prompt_hash`` covers everything this adapter injected — the market
+        # context AND the output-format contract (which embeds the live margin
+        # grid / min_confidence), assembled exactly as resolve_instrument_context
+        # appends it — so two records with different decision:/risk: config can
+        # never carry the same hash. The engine's own base instrument context is
+        # engine-internal and not captured.
         _record, path = log_target_decision(
             coin=coin,
             parsed=parsed,
             risk_result=result,
-            prompt=ctx_text,
+            prompt=inject_perp_context("", ctx_text, output_format_text),
             models=models,
             results_dir=engine_config["results_dir"],
         )
@@ -492,6 +527,12 @@ def run_engine(config: dict, coin: str) -> int:
         )
         return 1
     print(f"decision log written to {path}", file=sys.stderr)
+    if not parsed.is_valid:
+        # Exit codes: 0 = success (including healthy risk rejections), 1 =
+        # config/env/engine errors, 2 = unexpected error, 3 = the model's output
+        # failed the structured-target contract (cycle completed fail-closed).
+        # The distinct code lets a naive scheduler alert on model drift.
+        return 3
     return 0
 
 

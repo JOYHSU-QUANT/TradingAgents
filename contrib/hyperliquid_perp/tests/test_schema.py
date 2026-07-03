@@ -254,7 +254,7 @@ def test_perp_market_context_rejects_empty_coin(bad):
 
 def test_perp_market_context_rejects_naive_as_of():
     # A naive as_of serializes to an offset-less ISO string that looks UTC on a UTC
-    # host but is wrong elsewhere (build_log_record rejects naive timestamps too).
+    # host but is wrong elsewhere (the audit log rejects naive timestamps too).
     with pytest.raises(ValueError, match="timezone-aware"):
         PerpMarketContext(**_context(as_of=datetime(2026, 6, 29, 12, 0)))
 

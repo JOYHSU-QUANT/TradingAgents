@@ -447,6 +447,15 @@ def test_format_instructions_reflect_config():
     assert parse_target_decision(text, cfg).is_valid
 
 
+def test_format_instructions_advertise_effective_cap():
+    # main.py passes the effective ceiling (grid max capped by the risk
+    # allocation cap) so the model is never told a margin is legal that the
+    # gate deterministically clamps: under the defaults 60, not 100.
+    text = decision_format_instructions(DecisionConfig(), max_pct=60)
+    assert "from 0 to 60 in steps of 1" in text
+    assert "from 0 to 100" not in text
+
+
 def test_decision_config_rejects_bad_grid():
     with pytest.raises(ValueError, match="ai_target_margin_min_pct"):
         DecisionConfig(ai_target_margin_min_pct=50, ai_target_margin_max_pct=40)

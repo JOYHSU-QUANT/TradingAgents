@@ -104,11 +104,16 @@ python -m contrib.hyperliquid_perp.main --coin BTC
 - 沒有設定 funded wallet／`account_value` 讀到 0——RiskGate 無法對零淨值 sizing，
   每個方向性 target 都會 fail closed，所以直接擋下、不白花 LLM 成本（要純診斷就用
   `--context-only`）。
-- context 暖身不足、指標全滅、或 `atr_14` 算不出來（會退化成假的 RANGING 且無停損）。
+- context 暖身不足、指標全滅、或 `atr_14` 算不出來（regime 會退化成假的 RANGING，掩蓋波動市況）。
 - `risk:`／`decision:` config 區塊格式錯誤——含未知／打錯的 key、打錯的頂層區塊名、
   或非 mapping 的區塊。這些都會具名 exit 1（不會靜默退回預設值，以免一個 typo 讓
   安全上限悄悄變回寬鬆的預設）。
 - 倉位讀取失敗（帳戶狀態未知，拒絕在其上下單）。
+
+Exit codes：`0` = 成功（含健康的風控拒絕，例如 low confidence）；`1` = config／環境／
+引擎錯誤（上述各項）；`2` = 未預期錯誤；`3` = 引擎輸出不符合 structured-target 契約
+（該輪已 fail-closed 成 `maintain_current` 並寫入 audit 紀錄）——scheduler 對非零
+exit code 告警即可同時抓到故障與 model drift。
 
 常用 flags：
 

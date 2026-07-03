@@ -1,20 +1,17 @@
 """Write each trade decision to a durable JSON audit record.
 
-One file per decision under ``<results_dir>/perp_decisions/``, in one of two
-formats distinguished by ``schema_version``:
+One file per decision under ``<results_dir>/perp_decisions/``: the Phase 2
+structured-target record (:func:`build_target_log_record` /
+:func:`log_target_decision`, ``TARGET_SCHEMA_VERSION``). Beyond the prompt
+hash / models / timestamp header it persists the raw engine response, the
+parse verdict (``is_valid`` / ``invalid_reason``), and the full RiskGate
+outcome — the fields a post-mortem of the structured-target contract needs.
 
-- **Phase 2 structured-target records** (:func:`build_target_log_record` /
-  :func:`log_target_decision`, ``TARGET_SCHEMA_VERSION``) — the format
-  ``main.py`` actually writes. Beyond the prompt hash / models / timestamp
-  header it persists the raw engine response, the parse verdict
-  (``is_valid`` / ``invalid_reason``), and the full RiskGate outcome — the
-  fields a post-mortem of the structured-target contract needs.
-- **Phase 1 records** (:class:`PerpTradeDecision` via :func:`build_log_record` /
-  :func:`log_decision`, ``SCHEMA_VERSION``) — the retired rating pipeline's
-  format, preserved so old records stay readable; no longer produced by the
-  entry point.
+Records from the retired Phase 1 rating pipeline (``schema_version: 2``) may
+still exist on disk; old JSON needs no writer to stay readable, so that write
+path was deleted rather than maintained alongside the live format.
 
-The ``build_*`` functions are pure (timestamp injected) so they are unit-tested
+``build_target_log_record`` is pure (timestamp injected) so it is unit-tested
 without touching the filesystem; :func:`write_decision_log` does the I/O.
 """
 
@@ -28,9 +25,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
-
-from ..domains.perp.decision import PerpTradeDecision
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     # Type-only imports (annotations are strings under ``from __future__``) so the
@@ -41,23 +36,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
-
 # Phase 2 structured-target records carry their own version so a reader can
-# tell the two formats apart without sniffing fields.
+# tell them apart from retired Phase 1 records (schema_version 2) still on
+# disk without sniffing fields.
 TARGET_SCHEMA_VERSION = 3
-
-# The valid ``rating_source`` tags from the retired Phase 1 rating pipeline.
-# The Phase 1 record format is preserved (phase2 keeps the format but never
-# reads old ratings as an execution fallback). The Literal gives static
-# checkers the closed vocabulary; the runtime frozenset check below still
-# guards dynamic callers.
-RatingSource = Literal["explicit", "parse_fallback", "default"]
-_VALID_RATING_SOURCES = frozenset({"explicit", "parse_fallback", "default"})
 
 
 def prompt_hash(prompt: str) -> str:
-    """``sha256:<hex>`` of the exact prompt text the engine reasoned over."""
+    """``sha256:<hex>`` of the prompt text the caller hands in.
+
+    ``main.py`` passes the full adapter-injected text — the rendered market
+    context *and* the output-format contract (which embeds the live margin grid
+    and ``min_confidence``) — so records produced under different
+    ``decision:``/``risk:`` config never share a hash. The engine's own base
+    instrument context is engine-internal and not captured.
+    """
     digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
 
@@ -88,38 +81,6 @@ def _record_header(
         "prompt_hash": prompt_hash(prompt),
         "models": models,
     }
-
-
-def build_log_record(
-    *,
-    coin: str,
-    decision: PerpTradeDecision,
-    prompt: str,
-    models: dict[str, str],
-    rating: str,
-    timestamp: datetime,
-    rating_source: RatingSource = "explicit",
-) -> dict[str, Any]:
-    """Assemble the JSON-ready Phase 1 audit record (pure — no clock, no I/O)."""
-    # ``rating_source`` is the one record field not derived from a validated domain
-    # object — a caller passing a wrong-case ("EXPLICIT") or unknown ("fallback")
-    # tag would otherwise write a silently corrupt audit field.
-    if rating_source not in _VALID_RATING_SOURCES:
-        raise ValueError(
-            f"build_log_record: unknown rating_source {rating_source!r}; "
-            f"must be one of {sorted(_VALID_RATING_SOURCES)}"
-        )
-    record = _record_header(
-        schema_version=SCHEMA_VERSION, coin=coin, prompt=prompt, models=models, timestamp=timestamp
-    )
-    record.update(
-        {
-            "rating": rating,
-            "rating_source": rating_source,
-            "decision": decision.to_dict(),
-        }
-    )
-    return record
 
 
 def _filename(coin: str, timestamp: datetime) -> str:
@@ -229,38 +190,6 @@ def write_decision_log(
                 leftover.unlink(missing_ok=True)
         raise
     return path
-
-
-def log_decision(
-    *,
-    coin: str,
-    decision: PerpTradeDecision,
-    prompt: str,
-    models: dict[str, str],
-    rating: str,
-    results_dir: str | Path,
-    timestamp: datetime | None = None,
-    rating_source: RatingSource = "explicit",
-) -> tuple[dict[str, Any], Path]:
-    """Build the record and write it; returns ``(record, path)``.
-
-    Convenience wrapper for :func:`build_log_record` + :func:`write_decision_log`,
-    retained for the retired Phase 1 rating pipeline (``main.py`` now writes Phase 2
-    target records via :func:`log_target_decision`). ``timestamp`` defaults to now
-    (UTC).
-    """
-    timestamp = timestamp or datetime.now(timezone.utc)
-    record = build_log_record(
-        coin=coin,
-        decision=decision,
-        prompt=prompt,
-        models=models,
-        rating=rating,
-        timestamp=timestamp,
-        rating_source=rating_source,
-    )
-    path = write_decision_log(record, results_dir, coin=coin, timestamp=timestamp)
-    return record, path
 
 
 # --------------------------------------------------------------------------

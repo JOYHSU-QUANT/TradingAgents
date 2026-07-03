@@ -46,6 +46,7 @@ __all__ = [
     "RiskConfig",
     "RiskGateResult",
     "current_position_state",
+    "effective_max_target_margin_pct",
     "evaluate",
 ]
 
@@ -59,15 +60,25 @@ RISK_REASON_NO_EQUITY = "no_account_equity"
 NO_ORDER_MAINTAIN_CURRENT = "maintain_current"
 NO_ORDER_WITHIN_DEADBAND = "within_deadband"
 NO_ORDER_INVALID_FAIL_CLOSED = "invalid_fail_closed"
+NO_ORDER_REJECTED = "rejected"
 NO_ORDER_ALREADY_FLAT = "already_flat"
 NO_ORDER_ZERO_DELTA = "zero_delta"
 
 
 class RiskAction(str, Enum):
-    """How the gate disposed of the requested target (phase2-data.md §7)."""
+    """How the gate disposed of the requested target (phase2-data.md §7).
+
+    ``INVALID_FAIL_CLOSED`` is reserved for contract violations — output the
+    parse seam or re-validation could not accept. ``REJECTED`` is a
+    schema-valid ``set_target`` the gate refused (``risk_reason`` names why:
+    low confidence, no equity, no grid capacity under the binding cap).
+    Keeping them distinct lets alerting treat REJECTED as normal operation
+    and INVALID_FAIL_CLOSED as the model-drift alarm.
+    """
 
     APPROVED = "approved"
     CLAMPED = "clamped"
+    REJECTED = "rejected"
     INVALID_FAIL_CLOSED = "invalid_fail_closed"
 
 
@@ -129,17 +140,26 @@ class CurrentPositionState:
     margin, not gross notional); ``None`` when a sized position carries no
     usable ``margin_used``, in which case the deadband cannot be evaluated and
     is skipped (the order executes — the deadband is a churn optimisation, not
-    a safety check).
+    a safety check). ``leverage`` is the position's *actual* leverage from the
+    exchange (``None`` when unreported): margin%% only tracks notional when it
+    matches the configured ``risk.leverage``, so ``evaluate`` disables the
+    deadband on a known mismatch (e.g. a manually opened position) rather than
+    report a 5x-larger true exposure as "target achieved".
     """
 
     side: TargetSide | None
     signed_notional: Decimal
     margin_pct: Decimal | None
+    leverage: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.side is None:
-            if self.signed_notional != 0 or self.margin_pct is not None:
-                raise ValueError("a flat position carries no notional and no margin_pct")
+            if (
+                self.signed_notional != 0
+                or self.margin_pct is not None
+                or self.leverage is not None
+            ):
+                raise ValueError("a flat position carries no notional, margin_pct, or leverage")
         elif self.side is TargetSide.FLAT:
             # A *position* is long/short or absent; FLAT is a target, not a state.
             raise ValueError("position side must be long/short, or None when flat")
@@ -156,6 +176,8 @@ class CurrentPositionState:
         # negative (mirrors the >= 0 magnitude guards on AccountSnapshot).
         if self.margin_pct is not None and self.margin_pct < 0:
             raise ValueError("margin_pct is a magnitude and must be >= 0")
+        if self.leverage is not None and self.leverage <= 0:
+            raise ValueError("position leverage must be > 0 when known")
 
     @classmethod
     def flat(cls) -> CurrentPositionState:
@@ -170,7 +192,8 @@ def current_position_state(
     ``signed_notional = size * mark_price`` (execution §6.1 — sizing and
     valuation use **mark**, never mid). ``margin_pct`` comes from the position's
     committed margin; unknown margin on a sized position yields ``None`` rather
-    than a guess.
+    than a guess. ``leverage`` is passed through from the exchange read so the
+    deadband can verify the margin%%-tracks-notional assumption.
     """
     if position is None:
         return CurrentPositionState.flat()
@@ -182,6 +205,7 @@ def current_position_state(
         side=TargetSide.LONG if position.is_long else TargetSide.SHORT,
         signed_notional=signed_notional,
         margin_pct=margin_pct,
+        leverage=position.leverage,
     )
 
 
@@ -230,8 +254,8 @@ class RiskGateResult:
                 or any(v is None for v in sized)
             ):
                 raise ValueError("a set_target result must carry a fully sized target")
-            if self.risk_action is RiskAction.INVALID_FAIL_CLOSED:
-                raise ValueError("a fail-closed result must collapse to maintain_current")
+            if self.risk_action in (RiskAction.INVALID_FAIL_CLOSED, RiskAction.REJECTED):
+                raise ValueError("a rejected/fail-closed result must collapse to maintain_current")
             # The signed notional's sign must agree with target_side, mirroring
             # CurrentPositionState — PR 3's flip re-run hand-builds this result and
             # a sign mismatch would silently corrupt order sizing downstream.
@@ -275,11 +299,14 @@ class RiskGateResult:
             raise ValueError("a clamped result must name the binding cap in risk_reason")
         if self.risk_action is RiskAction.APPROVED and self.risk_reason is not None:
             raise ValueError("an approved result carries no risk_reason")
-        if self.risk_action is RiskAction.INVALID_FAIL_CLOSED and self.risk_reason is None:
-            # Symmetric with the CLAMPED guard: a fail-closed audit row must record
-            # *why* it rejected. A contradictory ``ParsedDecision`` (is_valid False,
+        if (
+            self.risk_action in (RiskAction.INVALID_FAIL_CLOSED, RiskAction.REJECTED)
+            and self.risk_reason is None
+        ):
+            # Symmetric with the CLAMPED guard: a rejected/fail-closed audit row must
+            # record *why*. A contradictory ``ParsedDecision`` (is_valid False,
             # invalid_reason None) would otherwise reach here with a null reason.
-            raise ValueError("a fail-closed result must name why in risk_reason")
+            raise ValueError("a rejected/fail-closed result must name why in risk_reason")
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready dict; Decimals become strings so no precision is lost."""
@@ -369,6 +396,33 @@ def _fail_closed(
     )
 
 
+def _rejected(
+    *,
+    risk_reason: str | None,
+    current: CurrentPositionState,
+    risk: RiskConfig,
+    requested: int | None = None,
+    target_side: TargetSide | None = None,
+    confidence: Decimal | None = None,
+) -> RiskGateResult:
+    """A schema-valid ``set_target`` the gate refused — maintain-current, no order.
+
+    Distinct from :func:`_fail_closed` so audit consumers can split "the model
+    broke the contract" (``invalid_fail_closed``, the drift alarm) from "the
+    model followed the contract but risk said no" (normal operation).
+    """
+    return _no_target_result(
+        risk_action=RiskAction.REJECTED,
+        risk_reason=risk_reason,
+        no_order_reason=NO_ORDER_REJECTED,
+        current=current,
+        risk=risk,
+        requested=requested,
+        target_side=target_side,
+        confidence=confidence,
+    )
+
+
 def _snap_down_to_grid(pct: Decimal, decision_cfg: DecisionConfig) -> int:
     """Largest grid value <= ``pct``, or ``0`` when no grid value fits under it.
 
@@ -388,25 +442,51 @@ def _snap_down_to_grid(pct: Decimal, decision_cfg: DecisionConfig) -> int:
 
 
 def validate_risk_decision_config(risk: RiskConfig, decision: DecisionConfig) -> None:
-    """Reject a risk/decision pair that would silently brick directional trading.
+    """Reject a risk/decision pair whose combination silently misbehaves.
 
     ``risk.max_target_margin_pct`` and the ``decision`` margin grid each validate
-    in isolation, but their *combination* can be quietly unusable: the allocation
-    cap is snapped down to the grid in :func:`evaluate`, and when that snap yields
-    ``0`` — the cap sits below the grid minimum, or below one step when the grid
-    starts at 0 — every directional target clamps to ``approved == 0`` and fails
-    closed. No order ever fires and nothing errors at load. Catch it here, at the
-    config seam, before any LLM spend (mirrors ``validate_target_decision``'s role
-    for a parsed decision).
+    in isolation, but their *combination* can go quietly wrong two ways. The
+    allocation cap is snapped down to the grid in :func:`evaluate`, so a cap that
+    snaps to ``0`` — below the grid minimum, or below one step when the grid
+    starts at 0 — clamps every directional target to ``approved == 0`` and
+    rejects it: directional trading is bricked with no error at load. And a cap
+    that is merely *off-grid* (e.g. ``60`` on a step-25 grid) would silently
+    tighten to the next grid value below it (``50``) — the operator configured 60
+    and never gets more than 50. Both are config mistakes; reject them here, at
+    the config seam, before any LLM spend (mirrors ``validate_target_decision``'s
+    role for a parsed decision, and the grid-must-reach-max check in
+    ``DecisionConfig``).
     """
-    if _snap_down_to_grid(Decimal(risk.max_target_margin_pct), decision) <= 0:
+    snapped = _snap_down_to_grid(Decimal(risk.max_target_margin_pct), decision)
+    if snapped <= 0:
         raise ValueError(
             f"risk.max_target_margin_pct ({risk.max_target_margin_pct}) leaves no legal "
             "directional grid value: it snaps below the decision grid "
             f"(ai_target_margin_min_pct={decision.ai_target_margin_min_pct}, "
             f"target_margin_step_pct={decision.target_margin_step_pct}), so every long/short "
-            "target would clamp to 0 and fail closed"
+            "target would clamp to 0 and be rejected"
         )
+    if snapped != risk.max_target_margin_pct:
+        raise ValueError(
+            f"risk.max_target_margin_pct ({risk.max_target_margin_pct}) is not on the "
+            f"decision grid (ai_target_margin_min_pct={decision.ai_target_margin_min_pct}, "
+            f"target_margin_step_pct={decision.target_margin_step_pct}): the effective cap "
+            f"would silently be {snapped}. Align the cap to the grid."
+        )
+
+
+def effective_max_target_margin_pct(risk: RiskConfig, decision: DecisionConfig) -> int:
+    """The largest margin%% a ``set_target`` can actually be approved at.
+
+    The smaller of the decision grid ceiling and the allocation cap. Rendered
+    into the prompt (``decision_format_instructions``) so the model is never
+    advertised a ceiling the gate deterministically clamps — under the defaults
+    (grid max 100, cap 60) a confident model would otherwise emit a steady
+    stream of ``clamped`` records and "clamped" would stop meaning "the risk
+    gate intervened". Assumes the pair passed
+    :func:`validate_risk_decision_config` (the cap is on-grid).
+    """
+    return min(decision.ai_target_margin_max_pct, risk.max_target_margin_pct)
 
 
 def evaluate(
@@ -468,7 +548,7 @@ def evaluate(
 
     # 3. min_confidence gates set_target only; it never scales sizing (§2.4).
     if confidence < decision_cfg.min_confidence:
-        return _fail_closed(
+        return _rejected(
             risk_reason=RISK_REASON_LOW_CONFIDENCE,
             current=current,
             risk=risk,
@@ -480,7 +560,7 @@ def evaluate(
     # 4. Sizing needs positive equity; a zero/unknown account cannot host a
     # directional target. (An explicit flat close of nothing is a no-op below.)
     if account_equity <= 0 and side is not TargetSide.FLAT:
-        return _fail_closed(
+        return _rejected(
             risk_reason=RISK_REASON_NO_EQUITY,
             current=current,
             risk=risk,
@@ -545,9 +625,9 @@ def evaluate(
         # The clamp chain found no legal grid capacity for a directional target
         # (allocation cap / available margin / leverage headroom below the grid
         # minimum). Approving long/short + 0 would violate the contract
-        # invariant and turn a "stay long" request into a full close — fail
-        # closed with the binding constraint instead.
-        return _fail_closed(
+        # invariant and turn a "stay long" request into a full close — reject
+        # with the binding constraint instead.
+        return _rejected(
             risk_reason=risk_reason,
             current=current,
             risk=risk,
@@ -575,9 +655,20 @@ def evaluate(
         # Part 2) — not a deadband case, so record its own reason.
         order_created = False
         no_order_reason = NO_ORDER_ALREADY_FLAT
-    elif side is current.side and current.margin_pct is not None:
+    elif (
+        side is current.side
+        and current.margin_pct is not None
+        and (current.leverage is None or current.leverage == risk.leverage)
+    ):
         # Deadband applies only to same-side rebalances (spec §2.4); flips and
-        # flat closes execute no matter how small the difference is.
+        # flat closes execute no matter how small the difference is. It compares
+        # margin percentages, which only track notional when the position's real
+        # leverage matches the configured ``risk.leverage`` the target is sized
+        # with — on a known mismatch (e.g. a manually opened 5x position under
+        # ``leverage: 1``) the deadband is disabled so the rebalance executes and
+        # ``delta_notional`` converges the true exposure to the target. An
+        # unknown leverage (``None``) keeps the deadband: it is a churn
+        # optimisation, and Phase-2-opened positions always match.
         if abs(Decimal(approved) - current.margin_pct) < decision_cfg.rebalance_deadband_pct:
             order_created = False
             no_order_reason = NO_ORDER_WITHIN_DEADBAND

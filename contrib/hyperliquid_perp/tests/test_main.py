@@ -387,8 +387,8 @@ def test_run_engine_reports_audit_failure_on_unicode_error(monkeypatch, capsys):
 def test_run_engine_aborts_when_all_indicators_fail(monkeypatch, capsys):
     # Enough candles to clear the warm-up gate, but every known indicator is None:
     # stockstats failed on every column. This is indistinguishable from a warm-up
-    # dict downstream (regime -> RANGING, ATR stop disabled), so run_engine must
-    # abort before the LLM call rather than trade on a fully-dead indicator set.
+    # dict downstream (regime -> RANGING), so run_engine must abort before the LLM
+    # call rather than trade on a fully-dead indicator set.
     _stub_engine(monkeypatch)
 
     class _DeadCtx:
@@ -406,9 +406,9 @@ def test_run_engine_aborts_when_all_indicators_fail(monkeypatch, capsys):
 
 def test_run_engine_aborts_when_only_atr_fails(monkeypatch, capsys):
     # Decision B: a *single* dead indicator (atr_14) slips past the all-dead guard, but
-    # atr_14 is load-bearing — classify_regime would silently default to RANGING and the
-    # ATR stop-loss would be disabled. run_engine must abort before the LLM call rather
-    # than trade on a fabricated-calm regime with no stop.
+    # atr_14 is load-bearing — classify_regime would silently default to RANGING,
+    # hiding a volatile market. run_engine must abort before the LLM call rather
+    # than trade on a fabricated-calm regime.
     _stub_engine(monkeypatch)
 
     class _AtrDeadCtx:
@@ -487,6 +487,11 @@ def test_run_engine_success_writes_log_and_returns_zero(monkeypatch, capsys):
     assert written["coin"] == "BTC"
     assert written["parsed"].is_valid
     assert written["risk_result"].risk_action.value == "approved"
+    # prompt_hash must cover everything the adapter injected: the market
+    # context AND the output-format contract (whose grid/min_confidence come
+    # from the live config), so config changes always change the hash.
+    assert "## Perpetual market context\nctx text" in written["prompt"]
+    assert "## Required final decision output format" in written["prompt"]
     assert "decision log written to" in capsys.readouterr().err
 
 
@@ -494,7 +499,8 @@ def test_run_engine_fails_closed_on_empty_engine_output(monkeypatch, capsys):
     # An empty final_trade_decision carries no structured target: the Phase 2
     # contract fails closed to maintain_current (invalid_output) and the round IS
     # recorded — the raw (empty) response and the fail-closed verdict are exactly
-    # what the validation counters need. No order can result.
+    # what the validation counters need. No order can result, and the run exits 3
+    # (distinct from success) so a naive scheduler can alert on model drift.
     written = {}
     _stub_engine(monkeypatch, final_state={"final_trade_decision": ""})
     monkeypatch.setattr(
@@ -503,7 +509,7 @@ def test_run_engine_fails_closed_on_empty_engine_output(monkeypatch, capsys):
         lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
     )
     rc = main_mod.run_engine({}, "BTC")
-    assert rc == 0
+    assert rc == 3
     assert "failing closed" in capsys.readouterr().err
     assert written["parsed"].is_valid is False
     assert written["parsed"].invalid_reason == "invalid_output"
@@ -534,10 +540,45 @@ def test_run_engine_aborts_before_llm_when_no_account_equity(monkeypatch, capsys
     assert "no usable account equity" in capsys.readouterr().err
 
 
+def test_run_engine_warns_on_position_leverage_mismatch(monkeypatch, capsys):
+    # A live position whose real leverage differs from risk.leverage (e.g. a
+    # manually opened 5x position under the default leverage: 1) disables the
+    # rebalance deadband inside the gate — the operator must see that condition
+    # named on stderr, not discover it from an unexpected order. The fixture
+    # pins current margin_pct == the requested 35%, the exact case a matching
+    # leverage would have swallowed as within_deadband.
+    written = {}
+    _stub_engine(monkeypatch)
+    position = PerpPosition(
+        coin="BTC",
+        size=Decimal("0.29"),  # ~17400 notional at mark 60000 (a real 5x position)
+        entry_price=Decimal("59000"),
+        unrealized_pnl=Decimal("10"),
+        margin_used=Decimal("3500"),  # margin_pct = 35 == the stubbed request
+        leverage=Decimal(5),
+    )
+    monkeypatch.setattr(
+        main_mod, "_load_position", lambda *a, **k: (position, Decimal("10000"), True)
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "log_target_decision",
+        lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
+    )
+    rc = main_mod.run_engine({}, "BTC")
+    assert rc == 0  # the mismatch is a warning, not an abort
+    err = capsys.readouterr().err
+    assert "position leverage 5 != configured risk.leverage 1" in err
+    result = written["risk_result"]
+    assert result.order_created is True  # deadband disabled — not within_deadband
+    assert result.no_order_reason is None
+
+
 def test_run_engine_fails_closed_on_unparseable_engine_output(monkeypatch, capsys):
     # A non-empty engine output with no structured JSON target is a malformed
     # response, not a deliberate maintain: the contract fails closed to
-    # maintain_current, records the raw response verbatim, and creates no order.
+    # maintain_current, records the raw response verbatim, creates no order,
+    # and exits 3 so the contract failure is visible to a scheduler.
     written = {}
     _stub_engine(monkeypatch, final_state={"final_trade_decision": "I cannot help with that."})
     monkeypatch.setattr(
@@ -546,7 +587,7 @@ def test_run_engine_fails_closed_on_unparseable_engine_output(monkeypatch, capsy
         lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
     )
     rc = main_mod.run_engine({}, "BTC")
-    assert rc == 0
+    assert rc == 3
     assert "failing closed" in capsys.readouterr().err
     assert written["parsed"].is_valid is False
     assert written["parsed"].raw_response == "I cannot help with that."

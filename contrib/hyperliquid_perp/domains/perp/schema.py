@@ -320,8 +320,9 @@ class PerpMarketContext:
                 f"got {self.funding_sample_count}"
             )
         # A naive ``as_of`` would serialize to an ISO string with no offset that looks
-        # UTC on a UTC host but is wrong elsewhere (build_log_record rejects naive
-        # timestamps for the same reason); require tz-awareness at construction.
+        # UTC on a UTC host but is wrong elsewhere (the audit log's _record_header
+        # rejects naive timestamps for the same reason); require tz-awareness at
+        # construction.
         if self.as_of.tzinfo is None:
             raise ValueError("PerpMarketContext.as_of must be timezone-aware (UTC)")
         # Validate ``candle_interval`` against the single source of truth

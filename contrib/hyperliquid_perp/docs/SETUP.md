@@ -1,7 +1,11 @@
-# Setup & run（Phase 1）
+# Setup & run
 
 實用 runbook：怎麼安裝、設定、執行。想知道**為什麼**這樣設計，見
-[phase1-spec](./phase1-spec.md)；本頁只有「照做」的步驟。
+[phase1-spec](./phase1-spec.md) 與 [phase2-spec](./phase2-spec.md)；本頁只有「照做」的步驟。
+
+> 目前狀態：market context + 未修改的引擎 + **Phase 2 structured target 契約 +
+> 確定性 RiskGate** 已能端到端執行（寫出 schema v3 的 target audit log）。實際下單
+> （paper／live 執行）仍是 Phase 3+。
 
 所有指令都從 repo 根目錄 `TradingAgents/` 執行。
 
@@ -49,7 +53,8 @@ cp contrib/hyperliquid_perp/configs/hyperliquid.example.yaml \
 | `market_data` | `candle_interval`（4h；必須是 `1m`/`5m`/`15m`/`1h`/`4h`/`1d` 之一）／`candle_lookback`（200）／`funding_zscore_window_days`（30）。 |
 | `indicators` | `rsi_14, ema_20, ema_50, atr_14, macd`，由 `context_builder` 計算。 |
 | `engine` | `llm_provider: openrouter`、`deep_think_llm`、`quick_think_llm`、`selected_analysts: [market, social, news]`。 |
-| `adapter` | rating→target 各 tier 數值、`deadband`、`no_direct_flip`、`allow_short`、`entry_band_pct`、`confidence`（逐 tier，皆在 `[0, 1]`）。 |
+| `risk` | Phase 2 RiskGate：`leverage`（Phase 2 = 1x）、`margin_mode`（cross-only）、`max_target_margin_pct`（clamp 上限，requested 61–100 → approved 60）。 |
+| `decision` | 決策契約 grid：`ai_target_margin_min_pct`／`ai_target_margin_max_pct`／`target_margin_step_pct`（合法 `requested_target_margin_pct` = {min, min+step, …, max}；off-grid 直接 fail closed，不四捨五入）、`rebalance_deadband_pct`（同向 \|approved − current\| 小於此值 → 不下單；flip/flat 例外）、`min_confidence`（低於此值的 set_target fail closed；confidence 永不縮放 sizing）。 |
 
 > 沒有任何 `*.local.yaml` 時，loader 會退回 `hyperliquid.example.yaml`，
 > 所以 `--context-only` 不用複製任何東西就能跑。
@@ -81,18 +86,27 @@ python -m contrib.hyperliquid_perp.main --context-only --coin BTC
 
 若 `wallet_address` 是真實地址，也會印出目前倉位（或 `flat`）。
 
-### B. 完整 Phase 1 一輪（需要 key）
+### B. 完整一輪（需要 key）
 
-建 context → 注入**未修改的** TradingAgents 引擎 → 引擎輸出 5-tier rating →
-adapter 映射成 `PerpTradeDecision` → 寫 audit log → 印到 stdout。
+建 context → 注入**未修改的** TradingAgents 引擎 → 引擎輸出**結構化 JSON target**
+→ `parse_target_decision` 解析＋驗證（任何無效輸出 fail-closed 成 `maintain_current`，
+原始回應照留）→ 確定性 `RiskGate` 依帳戶淨值 sizing／clamp／deadband → 寫 audit log
+（schema v3）→ 印到 stdout。
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-...
 python -m contrib.hyperliquid_perp.main --coin BTC
 ```
 
-沒有 `OPENROUTER_API_KEY` 時會在**任何網路呼叫之前**乾淨地失敗，並提示你改用
-`--context-only`。
+在**跑引擎（花 LLM 成本）之前**就會先擋下這些情況，乾淨地 exit 1：
+
+- 沒有 `OPENROUTER_API_KEY`（提示改用 `--context-only`）。
+- 沒有設定 funded wallet／`account_value` 讀到 0——RiskGate 無法對零淨值 sizing，
+  每個方向性 target 都會 fail closed，所以直接擋下、不白花 LLM 成本（要純診斷就用
+  `--context-only`）。
+- context 暖身不足、指標全滅、或 `atr_14` 算不出來（會退化成假的 RANGING 且無停損）。
+- `risk:`／`decision:` config 區塊格式錯誤。
+- 倉位讀取失敗（帳戶狀態未知，拒絕在其上下單）。
 
 常用 flags：
 
@@ -115,7 +129,7 @@ python -m contrib.hyperliquid_perp.main --coin BTC
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "coin": "BTC",
   "timestamp": "2026-06-27T17:45:00+00:00",
   "timestamp_ms": 1782668700000,
@@ -125,29 +139,45 @@ python -m contrib.hyperliquid_perp.main --coin BTC
     "deep": "anthropic/claude-sonnet-4-6",
     "quick": "deepseek/deepseek-chat"
   },
-  "rating": "Buy",
-  "rating_source": "explicit",
+  "raw_response": "```json\n{ …引擎原始回應照留… }\n```",
+  "parse": { "is_valid": true, "invalid_reason": null },
   "decision": {
-    "intent": "open_long",
-    "confidence": 0.8,
-    "target_size_pct": 20.0,
-    "entry_zone": { "low": "62685.0", "high": "63315.0" },
-    "invalidation_price": "61800.0",
-    "urgency": "low",
+    "decision_mode": "set_target",
+    "target_side": "long",
+    "requested_target_margin_pct": 35,
+    "confidence": "0.78",
     "rationale": "…",
-    "key_risks": ["…"],
-    "market_regime": "trending",
-    "funding_view": "neutral"
+    "key_risks": ["…"]
+  },
+  "risk": {
+    "decision_mode": "set_target",
+    "target_side": "long",
+    "requested_target_margin_pct": 35,
+    "approved_target_margin_pct": 35,
+    "risk_action": "approved",
+    "risk_reason": null,
+    "order_created": true,
+    "no_order_reason": null,
+    "target_margin": "350",
+    "target_notional": "350",
+    "target_signed_notional": "350",
+    "current_signed_notional": "0",
+    "delta_notional": "350",
+    "configured_leverage": "1",
+    "confidence": "0.78"
   }
 }
 ```
 
-`prompt_hash` 是引擎當時讀到的 perp context 文字的 sha256；配合 `models` 與
-`timestamp`，任何一筆 decision 都能重建並做 post-mortem。`decision` 各欄位的
-定義見 [DESIGN](./DESIGN.md)。
+`raw_response` 照留引擎的原始回應（DESIGN Part 2：無效輸出只記錄、絕不重建）；
+`parse` 是解析判定；`decision` 是解析出的結構化 target；`risk` 是 RiskGate 的
+sizing／clamp／下單判定（`target_*` 皆 mark 定價，`approved 35% × equity 1000 = 350`）。
+`prompt_hash` 是引擎當時讀到的 perp context 文字的 sha256，配合 `models` 與
+`timestamp`，任何一筆 decision 都能重建並做 post-mortem。各欄位定義見
+[DESIGN](./DESIGN.md) Part 2 與 [phase2-spec](./phase2-spec.md)。
 
-> Phase 1 到「寫 log + 印出 decision」為止。**不下任何單、不跑 RiskGate**——
-> 那是 Phase 2+ 的事。
+> 這一輪跑到「parse → RiskGate → 寫 log + 印出 decision」為止；RiskGate 會 sizing／
+> clamp／fail-close，但**仍不下任何真實單**——實際 paper／live 執行是 Phase 3+ 的事。
 
 ## 6. 測試
 
@@ -167,4 +197,4 @@ python -m ruff check contrib/hyperliquid_perp/
 | `OPENROUTER_API_KEY is not set …` | 完整一輪需要 key；`export` 它，或改用 `--context-only`。 |
 | 倉位永遠顯示 `flat`／讀不到帳戶 | `wallet_address` 還是 `0xYOUR...` 佔位符；填一個真實的唯讀地址。 |
 | `config not found …` | 把 `hyperliquid.example.yaml` 複製成 `hyperliquid.local.yaml`。 |
-| 想先便宜地跑一次驗收 | 暫時把 `engine.deep_think_llm` / `quick_think_llm` 指到便宜／免費的 OpenRouter 模型，確認 pipeline 會輸出 `PerpTradeDecision` 並寫 log，再切回來。 |
+| 想先便宜地跑一次驗收 | 暫時把 `engine.deep_think_llm` / `quick_think_llm` 指到便宜／免費的 OpenRouter 模型，確認 pipeline 會 parse target → 跑 RiskGate → 寫 log（schema v3），再切回來。 |

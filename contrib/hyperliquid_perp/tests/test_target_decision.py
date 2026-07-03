@@ -264,6 +264,13 @@ def test_invalid_non_string_key_risk():
     _assert_fail_closed(parsed, "invalid_key_risks")
 
 
+def test_invalid_empty_key_risks():
+    # At least one risk is required — an empty list must not slip through the
+    # ``all([])``-is-True gap (a valid decision has to name a concrete risk).
+    parsed = parse_target_decision(_text(key_risks=[]), _CFG)
+    _assert_fail_closed(parsed, "invalid_key_risks")
+
+
 # --------------------------------------------------------------------------
 # Parse failures — no JSON / missing fields / extra fields
 # --------------------------------------------------------------------------
@@ -347,6 +354,22 @@ def test_parsed_decision_rejects_contradictory_validity():
         ParsedDecision(
             decision=stub, is_valid=True, invalid_reason="invalid_output", raw_response="raw"
         )
+
+
+def test_parsed_decision_rejects_invalid_with_live_target():
+    # An invalid parse must carry the fail-closed stand-in, never a sized
+    # set_target — the audit layer serializes ``decision`` unconditionally, so a
+    # live target behind is_valid=False would misreport the rejected round.
+    live = TargetDecision(
+        decision_mode=DecisionMode.SET_TARGET,
+        target_side=TargetSide.LONG,
+        requested_target_margin_pct=50,
+        confidence=Decimal("0.9"),
+        rationale="hand-built",
+        key_risks=("r",),
+    )
+    with pytest.raises(ValueError, match="fail-closed"):
+        ParsedDecision(decision=live, is_valid=False, invalid_reason="x", raw_response="raw")
 
 
 # --------------------------------------------------------------------------
@@ -433,6 +456,22 @@ def test_decision_config_rejects_bad_grid():
         DecisionConfig(min_confidence=Decimal("1.5"))
     with pytest.raises(ValueError, match="rebalance_deadband_pct"):
         DecisionConfig(rebalance_deadband_pct=Decimal("-1"))
+
+
+def test_decision_config_rejects_grid_step_not_reaching_max():
+    # step must divide (max - min) so the advertised max is actually on the grid;
+    # otherwise a model that requests the max fails closed off-grid.
+    with pytest.raises(ValueError, match="multiple of"):
+        DecisionConfig(
+            ai_target_margin_min_pct=0, ai_target_margin_max_pct=100, target_margin_step_pct=7
+        )
+    # An aligned custom grid is accepted (25/50/75/100).
+    assert (
+        DecisionConfig(
+            ai_target_margin_max_pct=100, target_margin_step_pct=25
+        ).ai_target_margin_max_pct
+        == 100
+    )
 
 
 def test_decision_config_from_dict_nulls_fall_back():

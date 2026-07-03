@@ -470,6 +470,27 @@ def test_risk_config_from_dict_rejects_non_mapping_block():
         RiskConfig.from_dict(60)
 
 
+def test_validate_risk_decision_config_rejects_unusable_pair():
+    # Each block is individually valid, but the cap snaps below the grid so every
+    # directional target would clamp to 0 and fail closed — reject the pairing.
+    # (a) cap below a non-zero grid minimum.
+    with pytest.raises(ValueError, match="fail closed"):
+        risk_gate.validate_risk_decision_config(
+            RiskConfig(max_target_margin_pct=5),
+            DecisionConfig(ai_target_margin_min_pct=10, ai_target_margin_max_pct=100),
+        )
+    # (b) grid starts at 0 but the cap is below one step (snaps to 0).
+    with pytest.raises(ValueError, match="fail closed"):
+        risk_gate.validate_risk_decision_config(
+            RiskConfig(max_target_margin_pct=3),
+            DecisionConfig(
+                ai_target_margin_min_pct=0, ai_target_margin_max_pct=100, target_margin_step_pct=5
+            ),
+        )
+    # A cap that snaps onto a real grid value is fine (no raise).
+    risk_gate.validate_risk_decision_config(RiskConfig(), DecisionConfig())
+
+
 def test_risk_gate_result_rejects_illegal_combinations():
     # evaluate() only builds legal shapes; a hand-built inconsistent result
     # (PR 3 fixture, flip re-run) must die at construction, not in sizing math.

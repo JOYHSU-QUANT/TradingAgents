@@ -177,6 +177,19 @@ class DecisionConfig:
                 "need 0 <= ai_target_margin_min_pct < ai_target_margin_max_pct <= 100, "
                 f"got min={self.ai_target_margin_min_pct} max={self.ai_target_margin_max_pct}"
             )
+        # The grid must actually reach ``ai_target_margin_max_pct``: the prompt
+        # advertises ``max`` as a legal value, but if ``step`` does not divide the
+        # span the top grid point is the largest multiple below it (e.g. min=0,
+        # max=100, step=7 tops out at 98), so a model requesting the advertised
+        # max is rejected off-grid and fails closed. Reject the misaligned config
+        # at load rather than silently shrink the reachable ceiling.
+        span = self.ai_target_margin_max_pct - self.ai_target_margin_min_pct
+        if span % self.target_margin_step_pct != 0:
+            raise ValueError(
+                "the margin grid must reach ai_target_margin_max_pct: "
+                f"(max - min) = {span} is not a multiple of "
+                f"target_margin_step_pct = {self.target_margin_step_pct}"
+            )
         if self.rebalance_deadband_pct < 0:
             raise ValueError(
                 f"rebalance_deadband_pct must be >= 0, got {self.rebalance_deadband_pct}"
@@ -271,6 +284,17 @@ class ParsedDecision:
         # ``risk_reason`` is null. Enforce the coupling at construction.
         if self.is_valid == (self.invalid_reason is not None):
             raise ValueError("is_valid must be True with no invalid_reason, or False with one")
+        # An invalid parse must carry the fail-closed maintain-current stand-in,
+        # never a live ``set_target``: the audit layer serializes ``decision``
+        # unconditionally, so an invalid record paired with a sized target would
+        # misreport the rejected round as having asked to open a position. The
+        # parse seam only ever pairs invalid with ``fail_closed()``; pin the
+        # invariant here so a hand-built instance cannot break it (mirrors the
+        # cross-field guards on ``RiskGateResult``/``CurrentPositionState``).
+        if not self.is_valid and self.decision != TargetDecision.fail_closed():
+            raise ValueError(
+                "an invalid parse must carry the fail-closed maintain_current decision"
+            )
 
 
 # --------------------------------------------------------------------------
@@ -489,7 +513,11 @@ def parse_target_decision(raw: object, config: DecisionConfig) -> ParsedDecision
         return _invalid("missing_rationale")
 
     raw_risks = payload["key_risks"]
-    if not isinstance(raw_risks, list) or len(raw_risks) > _MAX_KEY_RISKS:
+    if not isinstance(raw_risks, list) or not 1 <= len(raw_risks) <= _MAX_KEY_RISKS:
+        # At least one risk is required (an empty list slips through a bare
+        # ``len > MAX`` check because ``all([])`` is vacuously True) and at most
+        # ``_MAX_KEY_RISKS``: a valid decision must name a concrete risk, not an
+        # empty gesture, for the audit trail to be meaningful.
         return _invalid("invalid_key_risks")
     if not all(isinstance(r, str) and r.strip() for r in raw_risks):
         return _invalid("invalid_key_risks")
@@ -559,7 +587,7 @@ never repaired or rounded):
 - "confidence": a number between 0 and 1. A set_target with confidence below
   {config.min_confidence} is rejected; make your conviction consistent with
   the margin you request — confidence is recorded but never scales the size.
-- "rationale": non-empty. "key_risks": at most {_MAX_KEY_RISKS} short strings.
+- "rationale": non-empty. "key_risks": 1 to {_MAX_KEY_RISKS} short strings (at least one).
 
 Legal combinations — anything else is invalid:
 

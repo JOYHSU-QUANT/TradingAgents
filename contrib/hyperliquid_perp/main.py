@@ -361,6 +361,10 @@ def run_engine(config: dict, coin: str) -> int:
     try:
         risk_cfg = risk_gate.RiskConfig.from_dict(config.get("risk"))
         decision_cfg = DecisionConfig.from_dict(config.get("decision"))
+        # Cross-block check: each block is individually valid, but a max_target
+        # margin cap that snaps below the decision grid would silently clamp every
+        # directional target to 0 and fail closed. Reject that pairing loudly here.
+        risk_gate.validate_risk_decision_config(risk_cfg, decision_cfg)
     except ValueError as exc:
         print(
             f"error: invalid risk:/decision: config — {exc}. Fix the YAML block and re-run.",

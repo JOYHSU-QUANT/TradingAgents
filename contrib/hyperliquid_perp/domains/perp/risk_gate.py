@@ -387,6 +387,28 @@ def _snap_down_to_grid(pct: Decimal, decision_cfg: DecisionConfig) -> int:
     return int(low + steps * step)
 
 
+def validate_risk_decision_config(risk: RiskConfig, decision: DecisionConfig) -> None:
+    """Reject a risk/decision pair that would silently brick directional trading.
+
+    ``risk.max_target_margin_pct`` and the ``decision`` margin grid each validate
+    in isolation, but their *combination* can be quietly unusable: the allocation
+    cap is snapped down to the grid in :func:`evaluate`, and when that snap yields
+    ``0`` — the cap sits below the grid minimum, or below one step when the grid
+    starts at 0 — every directional target clamps to ``approved == 0`` and fails
+    closed. No order ever fires and nothing errors at load. Catch it here, at the
+    config seam, before any LLM spend (mirrors ``validate_target_decision``'s role
+    for a parsed decision).
+    """
+    if _snap_down_to_grid(Decimal(risk.max_target_margin_pct), decision) <= 0:
+        raise ValueError(
+            f"risk.max_target_margin_pct ({risk.max_target_margin_pct}) leaves no legal "
+            "directional grid value: it snaps below the decision grid "
+            f"(ai_target_margin_min_pct={decision.ai_target_margin_min_pct}, "
+            f"target_margin_step_pct={decision.target_margin_step_pct}), so every long/short "
+            "target would clamp to 0 and fail closed"
+        )
+
+
 def evaluate(
     parsed: ParsedDecision,
     *,
@@ -473,8 +495,12 @@ def evaluate(
     # constraint recorded.
     # Every cap is snapped *down* to the decision grid (so the approved value
     # always sits on it, even when the cap itself is off-grid), then applied in
-    # order against the shrinking ``approved`` value — the recorded reason is
-    # always the last (most binding) cap that fired.
+    # order against the shrinking ``approved`` value. A cap overwrites the reason
+    # only when it *strictly* reduces ``approved`` (an equal cap leaves both the
+    # value and the reason untouched — so an unclamped request never records a
+    # reason or gets marked CLAMPED). When several caps tie at the same binding
+    # value the earliest in list order keeps the reason; the approved value is
+    # identical either way, so this is audit attribution only.
     caps: list[tuple[int, str]] = [
         (
             _snap_down_to_grid(Decimal(risk.max_target_margin_pct), decision_cfg),

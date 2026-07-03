@@ -496,7 +496,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_config(args.config)
     except ValueError as exc:
-        print(f"error: invalid config — {exc} Fix the YAML and re-run.", file=sys.stderr)
+        print(f"error: invalid config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
         return 1
     coin = _resolve_coin(args, config)
 

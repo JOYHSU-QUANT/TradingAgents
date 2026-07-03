@@ -105,7 +105,9 @@ python -m contrib.hyperliquid_perp.main --coin BTC
   每個方向性 target 都會 fail closed，所以直接擋下、不白花 LLM 成本（要純診斷就用
   `--context-only`）。
 - context 暖身不足、指標全滅、或 `atr_14` 算不出來（會退化成假的 RANGING 且無停損）。
-- `risk:`／`decision:` config 區塊格式錯誤。
+- `risk:`／`decision:` config 區塊格式錯誤——含未知／打錯的 key、打錯的頂層區塊名、
+  或非 mapping 的區塊。這些都會具名 exit 1（不會靜默退回預設值，以免一個 typo 讓
+  安全上限悄悄變回寬鬆的預設）。
 - 倉位讀取失敗（帳戶狀態未知，拒絕在其上下單）。
 
 常用 flags：
@@ -197,4 +199,5 @@ python -m ruff check contrib/hyperliquid_perp/
 | `OPENROUTER_API_KEY is not set …` | 完整一輪需要 key；`export` 它，或改用 `--context-only`。 |
 | 倉位永遠顯示 `flat`／讀不到帳戶 | `wallet_address` 還是 `0xYOUR...` 佔位符；填一個真實的唯讀地址。 |
 | `config not found …` | 把 `hyperliquid.example.yaml` 複製成 `hyperliquid.local.yaml`。 |
+| `invalid config — unknown … key` / `unknown top-level config key` | config 有打錯的 key（如 `max_target_margin_pt`）或頂層區塊名（如 `riks:`）；strict 解析會擋下不讓它靜默退回預設值。對照 `hyperliquid.example.yaml` 的 key 名修正。 |
 | 想先便宜地跑一次驗收 | 暫時把 `engine.deep_think_llm` / `quick_think_llm` 指到便宜／免費的 OpenRouter 模型，確認 pipeline 會 parse target → 跑 RiskGate → 寫 log（schema v3），再切回來。 |

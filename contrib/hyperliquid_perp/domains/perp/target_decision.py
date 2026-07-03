@@ -99,6 +99,11 @@ def config_overrides(
     leave a safety-critical limit on its permissive default with no signal.
     """
     cfg = cfg or {}
+    if not isinstance(cfg, dict):
+        # A truthy non-mapping block (``risk: 60``) would otherwise raise a
+        # TypeError from ``set(cfg)`` that escapes main's ValueError config-error
+        # handler and exits 2 — surface it as a named config error instead.
+        raise ValueError(f"expected a mapping, got {cfg!r}")
     unknown = set(cfg) - set(converters)
     if unknown:
         raise ValueError(f"unknown config key(s): {', '.join(map(repr, sorted(unknown)))}")

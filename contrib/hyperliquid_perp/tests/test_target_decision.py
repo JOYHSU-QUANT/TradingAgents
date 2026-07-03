@@ -474,3 +474,10 @@ def test_config_from_dict_rejects_non_scalar_value():
     # a TypeError that escapes the config-error handler — normalise to ValueError.
     with pytest.raises(ValueError, match="target_margin_step_pct"):
         DecisionConfig.from_dict({"target_margin_step_pct": [2]})
+
+
+def test_config_from_dict_rejects_non_mapping_block():
+    # A whole block that isn't a mapping (`decision: 0.3`) must be a named
+    # ValueError, not a TypeError from set(cfg) that escapes the exit-1 handler.
+    with pytest.raises(ValueError, match="mapping"):
+        DecisionConfig.from_dict("0.3")

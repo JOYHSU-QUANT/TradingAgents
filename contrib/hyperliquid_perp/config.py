@@ -59,7 +59,7 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     if unknown:
         raise ValueError(
             f"unknown top-level config key(s): {', '.join(map(repr, sorted(unknown)))}. "
-            f"Allowed: {', '.join(sorted(_ALLOWED_TOP_LEVEL_KEYS))}."
+            f"Allowed: {', '.join(sorted(_ALLOWED_TOP_LEVEL_KEYS))}"
         )
     return config
 

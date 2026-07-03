@@ -463,6 +463,13 @@ def test_risk_config_from_dict_rejects_non_scalar_value():
         RiskConfig.from_dict({"max_target_margin_pct": [60]})
 
 
+def test_risk_config_from_dict_rejects_non_mapping_block():
+    # A whole block that isn't a mapping (`risk: 60`) must be a named ValueError,
+    # not a TypeError from set(cfg) that escapes the exit-1 config-error handler.
+    with pytest.raises(ValueError, match="mapping"):
+        RiskConfig.from_dict(60)
+
+
 def test_risk_gate_result_rejects_illegal_combinations():
     # evaluate() only builds legal shapes; a hand-built inconsistent result
     # (PR 3 fixture, flip re-run) must die at construction, not in sizing math.

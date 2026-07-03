@@ -244,8 +244,10 @@ def log_decision(
 ) -> tuple[dict[str, Any], Path]:
     """Build the record and write it; returns ``(record, path)``.
 
-    Convenience wrapper for :func:`build_log_record` + :func:`write_decision_log`
-    used by ``main.py``. ``timestamp`` defaults to now (UTC).
+    Convenience wrapper for :func:`build_log_record` + :func:`write_decision_log`,
+    retained for the retired Phase 1 rating pipeline (``main.py`` now writes Phase 2
+    target records via :func:`log_target_decision`). ``timestamp`` defaults to now
+    (UTC).
     """
     timestamp = timestamp or datetime.now(timezone.utc)
     record = build_log_record(

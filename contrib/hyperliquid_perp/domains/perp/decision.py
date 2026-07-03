@@ -1,10 +1,12 @@
-"""The :class:`PerpTradeDecision` — the adapter's output contract.
+"""The :class:`PerpTradeDecision` — the Phase 1 rating adapter's output contract.
 
 A ``PerpTradeDecision`` describes **intent and direction**, never a concrete
-order (see ``docs/DESIGN.md`` part 2). The unmodified TradingAgents engine emits
-a 5-tier rating; the decision adapter maps that — together with the live
-:class:`PerpMarketContext` and :class:`PerpPosition` — into this schema. RiskGate
-and OrderPlanner (Phase 2+) turn the intent into a real order.
+order (see ``docs/DESIGN.md`` part 2). This is Phase 1 legacy: the rating adapter
+that mapped the engine's 5-tier rating (together with the live
+:class:`PerpMarketContext` and :class:`PerpPosition`) into this schema was retired
+in the Phase 2 contract migration. The type is retained only so the audit log can
+still read older Phase 1 records; the live Phase 2 path uses
+:class:`~.target_decision.TargetDecision` and the RiskGate instead.
 
 Kept as plain dataclasses + enums (no pydantic) to match the rest of the perp
 domain. :meth:`PerpTradeDecision.to_dict` produces a JSON-ready dict for the

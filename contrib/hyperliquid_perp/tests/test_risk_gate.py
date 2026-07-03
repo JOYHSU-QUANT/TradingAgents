@@ -468,12 +468,33 @@ def test_risk_gate_result_rejects_illegal_combinations():
     with pytest.raises(ValueError, match="never creates an order"):
         replace(maintain, order_created=True, no_order_reason=None)
 
+    # A fail-closed result must name why, symmetric with the CLAMPED guard — else a
+    # contradictory ParsedDecision could produce a fail-closed row with a null reason.
+    failed = _evaluate(_invalid_parsed())
+    with pytest.raises(ValueError, match="name why"):
+        replace(failed, risk_reason=None)
+
 
 def test_current_position_state_rejects_inconsistent_fields():
     with pytest.raises(ValueError, match="flat"):
         CurrentPositionState(side=None, signed_notional=Decimal(1), margin_pct=None)
     with pytest.raises(ValueError, match="long/short"):
         CurrentPositionState(side=TargetSide.FLAT, signed_notional=Decimal(0), margin_pct=None)
+    # side/sign disagreement corrupts delta_notional sizing — long is positive, short
+    # negative — so reject a mismatch (and a zero) at construction.
+    with pytest.raises(ValueError, match="long position must have positive"):
+        CurrentPositionState(
+            side=TargetSide.LONG, signed_notional=Decimal(-500), margin_pct=Decimal(10)
+        )
+    with pytest.raises(ValueError, match="short position must have negative"):
+        CurrentPositionState(
+            side=TargetSide.SHORT, signed_notional=Decimal(500), margin_pct=Decimal(10)
+        )
+    # margin_pct is a magnitude (>= 0).
+    with pytest.raises(ValueError, match="margin_pct"):
+        CurrentPositionState(
+            side=TargetSide.LONG, signed_notional=Decimal(500), margin_pct=Decimal(-1)
+        )
 
 
 def test_result_to_dict_is_json_ready():

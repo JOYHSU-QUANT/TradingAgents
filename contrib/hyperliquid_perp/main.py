@@ -335,6 +335,24 @@ def run_engine(config: dict, coin: str) -> int:
         )
         return 1
 
+    # RiskGate sizes every target against net account value. A successful lookup
+    # always yields account_value > 0 (a zero/negative snapshot is rejected at
+    # construction and reported above as a failed lookup), so account_value == 0
+    # here means no funded wallet is configured. Against zero equity every
+    # directional target fail-closes to no_account_equity and no order can ever be
+    # created — abort now, before the engine build and its LLM spend, rather than
+    # pay for a decision the gate is guaranteed to reject. Use --context-only for a
+    # keyless diagnostic run.
+    if account_value <= 0:
+        print(
+            "error: no usable account equity (account_value = 0) — RiskGate cannot "
+            "size any order, so every directional target would fail closed. Configure "
+            "a funded wallet_address, or use --context-only for a keyless diagnostic "
+            "run. Refusing to spend an LLM call on an unusable account state.",
+            file=sys.stderr,
+        )
+        return 1
+
     # Parse the Phase 2 config blocks up front: a malformed risk:/decision: block
     # must abort here, before any LLM spend, not after the engine run. Caught as
     # a config error (exit 1, like the API-key and warm-up checks) rather than

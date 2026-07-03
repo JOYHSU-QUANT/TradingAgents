@@ -143,6 +143,19 @@ class CurrentPositionState:
         elif self.side is TargetSide.FLAT:
             # A *position* is long/short or absent; FLAT is a target, not a state.
             raise ValueError("position side must be long/short, or None when flat")
+        else:
+            # ``signed_notional`` feeds ``delta_notional`` sizing in ``evaluate``; a
+            # side/sign disagreement (hand-built by PR 3's flip re-run) would silently
+            # corrupt the order size rather than fail loud. Long is positive, short
+            # negative — and ``size != 0`` (PerpPosition) makes zero impossible.
+            if self.side is TargetSide.LONG and self.signed_notional <= 0:
+                raise ValueError("a long position must have positive signed_notional")
+            if self.side is TargetSide.SHORT and self.signed_notional >= 0:
+                raise ValueError("a short position must have negative signed_notional")
+        # ``margin_pct`` is a committed-margin percentage — a magnitude, never
+        # negative (mirrors the >= 0 magnitude guards on AccountSnapshot).
+        if self.margin_pct is not None and self.margin_pct < 0:
+            raise ValueError("margin_pct is a magnitude and must be >= 0")
 
     @classmethod
     def flat(cls) -> CurrentPositionState:
@@ -234,6 +247,11 @@ class RiskGateResult:
             raise ValueError("a clamped result must name the binding cap in risk_reason")
         if self.risk_action is RiskAction.APPROVED and self.risk_reason is not None:
             raise ValueError("an approved result carries no risk_reason")
+        if self.risk_action is RiskAction.INVALID_FAIL_CLOSED and self.risk_reason is None:
+            # Symmetric with the CLAMPED guard: a fail-closed audit row must record
+            # *why* it rejected. A contradictory ``ParsedDecision`` (is_valid False,
+            # invalid_reason None) would otherwise reach here with a null reason.
+            raise ValueError("a fail-closed result must name why in risk_reason")
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready dict; Decimals become strings so no precision is lost."""

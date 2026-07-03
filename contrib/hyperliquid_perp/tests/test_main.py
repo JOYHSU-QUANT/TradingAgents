@@ -270,7 +270,7 @@ def _stub_engine(
 
     ``account_value`` defaults to a funded account (a configured wallet with net
     value) so the happy path reaches logging; pass ``Decimal(0)`` to exercise the
-    zero-equity fail-closed path (no wallet / empty account).
+    no-equity pre-engine abort (no funded wallet configured).
     """
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
 
@@ -512,24 +512,26 @@ def test_run_engine_fails_closed_on_empty_engine_output(monkeypatch, capsys):
     assert result.order_created is False
 
 
-def test_run_engine_fails_closed_on_zero_account_equity(monkeypatch, capsys):
-    # No wallet configured (or a genuinely empty account) -> account_value == 0. A
-    # directional set_target can't be sized against $0 of net value; the RiskGate
-    # fail-closes it (no_account_equity) so no order can ever be created, and the
-    # round is still recorded for the audit trail.
+def test_run_engine_aborts_before_llm_when_no_account_equity(monkeypatch, capsys):
+    # No funded wallet -> account_value == 0 (a live snapshot of 0 is rejected at
+    # construction and surfaces as a failed lookup instead). RiskGate would
+    # fail-close every directional target against zero equity, so running the engine
+    # is guaranteed-wasted LLM spend: run_engine aborts (exit 1) before building the
+    # graph, and writes no decision log.
+    built = []
     written = {}
     _stub_engine(monkeypatch, account_value=Decimal(0))
+    monkeypatch.setattr(main_mod, "build_graph", lambda **k: built.append("built") or object())
     monkeypatch.setattr(
         main_mod,
         "log_target_decision",
         lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
     )
     rc = main_mod.run_engine({}, "BTC")
-    assert rc == 0
-    result = written["risk_result"]
-    assert result.risk_action.value == "invalid_fail_closed"
-    assert result.risk_reason == "no_account_equity"
-    assert result.order_created is False
+    assert rc == 1
+    assert built == []  # aborted before the engine build / LLM spend
+    assert written == {}  # nothing was logged
+    assert "no usable account equity" in capsys.readouterr().err
 
 
 def test_run_engine_fails_closed_on_unparseable_engine_output(monkeypatch, capsys):

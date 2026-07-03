@@ -245,6 +245,15 @@ class ParsedDecision:
     invalid_reason: str | None
     raw_response: str
 
+    def __post_init__(self) -> None:
+        # ``is_valid`` and ``invalid_reason`` are two halves of one fact: a valid
+        # parse names no reason, an invalid one must. ``evaluate()`` trusts
+        # ``is_valid`` before re-checking the decision, so a contradictory pair
+        # (invalid with no reason) would yield a fail-closed record whose
+        # ``risk_reason`` is null. Enforce the coupling at construction.
+        if self.is_valid == (self.invalid_reason is not None):
+            raise ValueError("is_valid must be True with no invalid_reason, or False with one")
+
 
 # --------------------------------------------------------------------------
 # JSON extraction

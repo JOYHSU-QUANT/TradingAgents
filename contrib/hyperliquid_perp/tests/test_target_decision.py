@@ -15,6 +15,8 @@ import pytest
 from contrib.hyperliquid_perp.domains.perp.target_decision import (
     DecisionConfig,
     DecisionMode,
+    ParsedDecision,
+    TargetDecision,
     TargetSide,
     decision_format_instructions,
     extract_json_block,
@@ -331,6 +333,20 @@ def test_missing_fields_never_inferred_from_prose():
     text = f"Go long with 40% margin!\n```json\n{json.dumps(payload)}\n```"
     parsed = parse_target_decision(text, _CFG)
     _assert_fail_closed(parsed, "missing_fields")
+
+
+def test_parsed_decision_rejects_contradictory_validity():
+    # is_valid and invalid_reason are two halves of one fact — evaluate() trusts
+    # is_valid before re-checking, so a contradictory pair must die at construction.
+    stub = TargetDecision.fail_closed()
+    with pytest.raises(ValueError, match="is_valid"):
+        # invalid, but no reason recorded
+        ParsedDecision(decision=stub, is_valid=False, invalid_reason=None, raw_response="raw")
+    with pytest.raises(ValueError, match="is_valid"):
+        # valid, yet carrying a rejection reason
+        ParsedDecision(
+            decision=stub, is_valid=True, invalid_reason="invalid_output", raw_response="raw"
+        )
 
 
 # --------------------------------------------------------------------------

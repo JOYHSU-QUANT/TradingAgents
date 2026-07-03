@@ -24,8 +24,8 @@ class MarketRegime(str, Enum):
     """Computed by ``context_builder``, carried through for the Reflection agent.
 
     Held as an enum (not a free string) so an unknown regime fails at context
-    construction — where it is cheap to spot — rather than deep in the decision
-    adapter where it would burn an engine run before raising.
+    construction — where it is cheap to spot — rather than deep in an engine run
+    where it would burn an LLM call before raising.
     """
 
     TRENDING = "trending"
@@ -185,6 +185,23 @@ class PerpPosition:
         # construction rather than serialize a nonsensical entry that looks valid.
         if self.entry_price <= 0:
             raise ValueError(f"PerpPosition.entry_price must be > 0, got {self.entry_price}")
+        # Optional margin/valuation fields the audit log and ``current_position_state``
+        # margin math consume. The mapper's ``_opt_dec`` already drops absent/garbage
+        # values to ``None`` ("not applicable" arrives as null), so a value that
+        # survives to here must be well-formed: a non-positive leverage/liquidation
+        # price or a negative margin/value is a structurally corrupt record, not an
+        # absent field. Reject it at construction (mirrors ``entry_price > 0`` and the
+        # MarketSnapshot/AccountSnapshot magnitude guards) rather than divide by it.
+        if self.leverage is not None and self.leverage <= 0:
+            raise ValueError(f"PerpPosition.leverage must be > 0, got {self.leverage}")
+        if self.liquidation_price is not None and self.liquidation_price <= 0:
+            raise ValueError(
+                f"PerpPosition.liquidation_price must be > 0, got {self.liquidation_price}"
+            )
+        if self.margin_used is not None and self.margin_used < 0:
+            raise ValueError(f"PerpPosition.margin_used must be >= 0, got {self.margin_used}")
+        if self.position_value is not None and self.position_value < 0:
+            raise ValueError(f"PerpPosition.position_value must be >= 0, got {self.position_value}")
 
     @property
     def is_long(self) -> bool:

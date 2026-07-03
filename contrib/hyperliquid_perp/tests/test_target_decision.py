@@ -426,3 +426,22 @@ def test_decision_config_from_dict_nulls_fall_back():
     assert cfg.ai_target_margin_max_pct == 100
     assert cfg.min_confidence == Decimal("0.3")
     assert cfg.target_margin_step_pct == 2
+
+
+def test_config_from_dict_rejects_yaml_booleans_and_fractions():
+    # YAML 1.1 reads no/yes as booleans; int()/Decimal() would silently turn
+    # them into 0/1 (or die opaquely) — each must fail loud, naming the key.
+    with pytest.raises(ValueError, match="ai_target_margin_min_pct"):
+        DecisionConfig.from_dict({"ai_target_margin_min_pct": False})
+    with pytest.raises(ValueError, match="target_margin_step_pct"):
+        DecisionConfig.from_dict({"target_margin_step_pct": 5.9})  # no silent truncation
+    with pytest.raises(ValueError, match="min_confidence"):
+        DecisionConfig.from_dict({"min_confidence": True})
+    with pytest.raises(ValueError, match="rebalance_deadband_pct"):
+        DecisionConfig.from_dict({"rebalance_deadband_pct": "not-a-number"})
+
+
+def test_config_from_dict_accepts_integral_float():
+    # 80.0 in YAML is unambiguous for an int field; only fractions are rejected.
+    cfg = DecisionConfig.from_dict({"ai_target_margin_max_pct": 80.0})
+    assert cfg.ai_target_margin_max_pct == 80

@@ -25,7 +25,7 @@ import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
@@ -38,6 +38,7 @@ __all__ = [
     "config_overrides",
     "decimal_from_yaml",
     "decision_format_instructions",
+    "int_from_yaml",
     "extract_json_block",
     "parse_target_decision",
     "validate_target_decision",
@@ -45,8 +46,34 @@ __all__ = [
 
 
 def decimal_from_yaml(value: object) -> Decimal:
-    """Coerce a YAML scalar to Decimal via ``str`` so no float digits are lost."""
-    return Decimal(str(value))
+    """Coerce a YAML scalar to Decimal via ``str`` so no float digits are lost.
+
+    Booleans are rejected: YAML 1.1 reads ``yes``/``no`` as bools, and
+    ``Decimal(str(True))`` would otherwise die as an opaque
+    ``InvalidOperation`` instead of a config error naming the value.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"expected a number, got a YAML boolean ({value!r})")
+    try:
+        return Decimal(str(value))
+    except InvalidOperation:
+        raise ValueError(f"expected a number, got {value!r}") from None
+
+
+def int_from_yaml(value: object) -> int:
+    """Coerce a YAML scalar to int, rejecting bools and non-integral numbers.
+
+    A bare ``int()`` would silently accept ``no``/``yes`` (YAML bools → 0/1)
+    and truncate ``59.9`` to ``59`` — for risk-limit fields a config typo must
+    fail loud, never silently shift the limit.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"expected an integer, got a YAML boolean ({value!r})")
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise ValueError(f"expected an integer, got {value!r}")
+        return int(value)
+    return int(value)  # int passes through; a non-numeric string raises loudly
 
 
 def config_overrides(
@@ -57,10 +84,21 @@ def config_overrides(
     The single YAML-coercion seam shared by :class:`DecisionConfig` and
     ``risk_gate.RiskConfig``. Only keys that are present *and* non-null are
     returned, so an absent or blank YAML key falls back to the dataclass field
-    default — each default is declared exactly once, on the field.
+    default — each default is declared exactly once, on the field. A value the
+    converter rejects re-raises with the config key named, so the operator
+    sees *which* setting is bad.
     """
     cfg = cfg or {}
-    return {key: conv(cfg[key]) for key, conv in converters.items() if cfg.get(key) is not None}
+    out: dict[str, Any] = {}
+    for key, conv in converters.items():
+        raw = cfg.get(key)
+        if raw is None:
+            continue
+        try:
+            out[key] = conv(raw)
+        except ValueError as exc:
+            raise ValueError(f"config key {key!r}: {exc}") from None
+    return out
 
 
 class DecisionMode(str, Enum):
@@ -135,9 +173,9 @@ class DecisionConfig:
             **config_overrides(
                 cfg,
                 {
-                    "ai_target_margin_min_pct": int,
-                    "ai_target_margin_max_pct": int,
-                    "target_margin_step_pct": int,
+                    "ai_target_margin_min_pct": int_from_yaml,
+                    "ai_target_margin_max_pct": int_from_yaml,
+                    "target_margin_step_pct": int_from_yaml,
                     "rebalance_deadband_pct": decimal_from_yaml,
                     "min_confidence": decimal_from_yaml,
                 },

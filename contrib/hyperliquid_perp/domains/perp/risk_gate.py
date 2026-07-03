@@ -35,11 +35,13 @@ from .target_decision import (
     TargetSide,
     config_overrides,
     decimal_from_yaml,
+    int_from_yaml,
     validate_target_decision,
 )
 
 __all__ = [
     "CurrentPositionState",
+    "MarginMode",
     "RiskAction",
     "RiskConfig",
     "RiskGateResult",
@@ -69,23 +71,35 @@ class RiskAction(str, Enum):
     INVALID_FAIL_CLOSED = "invalid_fail_closed"
 
 
+class MarginMode(str, Enum):
+    """The exchange margin modes this module can size for.
+
+    Phase 2 is cross-only (spec §2.2); ``ISOLATED`` is added when its sizing
+    math exists, so an isolated config can never silently run cross math.
+    """
+
+    CROSS = "cross"
+
+
 @dataclass(frozen=True)
 class RiskConfig:
     """Typed view of the YAML ``risk:`` block (phase2-spec.md §2 defaults)."""
 
     leverage: Decimal = Decimal(1)
-    margin_mode: str = "cross"
+    margin_mode: MarginMode = MarginMode.CROSS
     max_target_margin_pct: int = 60
 
     def __post_init__(self) -> None:
         if self.leverage <= 0:
             raise ValueError(f"risk.leverage must be > 0, got {self.leverage}")
-        if self.margin_mode != "cross":
-            # Phase 2 is cross-only (spec §2.2); reject rather than silently run
-            # isolated-margin sizing math that does not exist yet.
+        try:
+            # Accept the YAML string form and normalise it to the enum, so the
+            # field is always a MarginMode after construction.
+            object.__setattr__(self, "margin_mode", MarginMode(self.margin_mode))
+        except ValueError:
             raise ValueError(
                 f"risk.margin_mode must be 'cross' in Phase 2, got {self.margin_mode!r}"
-            )
+            ) from None
         if not 0 < self.max_target_margin_pct <= 100:
             raise ValueError(
                 f"risk.max_target_margin_pct must be in (0, 100], got {self.max_target_margin_pct}"
@@ -100,7 +114,7 @@ class RiskConfig:
                 {
                     "leverage": decimal_from_yaml,
                     "margin_mode": str,
-                    "max_target_margin_pct": int,
+                    "max_target_margin_pct": int_from_yaml,
                 },
             )
         )
@@ -121,6 +135,14 @@ class CurrentPositionState:
     side: TargetSide | None
     signed_notional: Decimal
     margin_pct: Decimal | None
+
+    def __post_init__(self) -> None:
+        if self.side is None:
+            if self.signed_notional != 0 or self.margin_pct is not None:
+                raise ValueError("a flat position carries no notional and no margin_pct")
+        elif self.side is TargetSide.FLAT:
+            # A *position* is long/short or absent; FLAT is a target, not a state.
+            raise ValueError("position side must be long/short, or None when flat")
 
     @classmethod
     def flat(cls) -> CurrentPositionState:
@@ -175,6 +197,43 @@ class RiskGateResult:
     delta_notional: Decimal
     configured_leverage: Decimal
     confidence: Decimal | None
+
+    def __post_init__(self) -> None:
+        """Reject illegal field combinations at construction.
+
+        ``evaluate()`` only builds legal shapes, but PR 3's execution engine
+        consumes this type directly and the flip re-run hand-builds inputs —
+        an inconsistent result must die here, not deep in order-sizing math.
+        """
+        if self.order_created == (self.no_order_reason is not None):
+            raise ValueError("exactly one of order_created / no_order_reason must be set")
+        sized = (self.target_margin, self.target_notional, self.target_signed_notional)
+        if self.decision_mode is DecisionMode.SET_TARGET:
+            if (
+                self.target_side is None
+                or self.requested_target_margin_pct is None
+                or self.approved_target_margin_pct is None
+                or self.confidence is None
+                or any(v is None for v in sized)
+            ):
+                raise ValueError("a set_target result must carry a fully sized target")
+            if self.risk_action is RiskAction.INVALID_FAIL_CLOSED:
+                raise ValueError("a fail-closed result must collapse to maintain_current")
+        else:  # MAINTAIN_CURRENT — valid maintain or any fail-closed rejection
+            if (
+                self.approved_target_margin_pct is not None
+                or any(v is not None for v in sized)
+                or self.delta_notional != 0
+            ):
+                raise ValueError("a maintain_current result must not carry a sized target")
+            if self.order_created:
+                raise ValueError("maintain_current never creates an order")
+            if self.risk_action is RiskAction.CLAMPED:
+                raise ValueError("clamping applies only to set_target results")
+        if self.risk_action is RiskAction.CLAMPED and self.risk_reason is None:
+            raise ValueError("a clamped result must name the binding cap in risk_reason")
+        if self.risk_action is RiskAction.APPROVED and self.risk_reason is not None:
+            raise ValueError("an approved result carries no risk_reason")
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready dict; Decimals become strings so no precision is lost."""

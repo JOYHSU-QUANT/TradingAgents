@@ -302,6 +302,21 @@ def _stub_engine(
         monkeypatch.setattr(main_mod, "log_target_decision", _raise)
 
 
+def test_run_engine_reports_bad_config_as_config_error(monkeypatch, capsys):
+    # A malformed risk:/decision: block is an operator typo — exit 1 with the
+    # offending key named (like the API-key / warm-up checks), before any
+    # engine build or LLM spend, not exit-2 "unexpected error".
+    calls = []
+    _stub_engine(monkeypatch)
+    monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
+    rc = main_mod.run_engine({"risk": {"max_target_margin_pct": 150}}, "BTC")
+    assert rc == 1
+    assert calls == []  # aborted before the engine was built
+    err = capsys.readouterr().err
+    assert "invalid risk:/decision: config" in err
+    assert "max_target_margin_pct" in err
+
+
 def test_run_engine_aborts_when_position_lookup_fails(monkeypatch, capsys):
     # A failed wallet lookup must abort before the engine runs (no LLM spend) and
     # exit non-zero — never trade against guessed-flat state.

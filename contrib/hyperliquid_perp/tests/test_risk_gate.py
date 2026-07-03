@@ -439,6 +439,43 @@ def test_risk_config_from_dict_nulls_fall_back():
     assert cfg.max_target_margin_pct == 60
 
 
+def test_risk_config_from_dict_rejects_yaml_boolean_and_normalises_margin_mode():
+    # `max_target_margin_pct: yes` (YAML bool) must fail loud, not become 1.
+    with pytest.raises(ValueError, match="max_target_margin_pct"):
+        RiskConfig.from_dict({"max_target_margin_pct": True})
+    # The YAML string form normalises to the enum and stays str-comparable.
+    cfg = RiskConfig.from_dict({"margin_mode": "cross"})
+    assert cfg.margin_mode is risk_gate.MarginMode.CROSS
+    assert cfg.margin_mode == "cross"
+
+
+def test_risk_gate_result_rejects_illegal_combinations():
+    # evaluate() only builds legal shapes; a hand-built inconsistent result
+    # (PR 3 fixture, flip re-run) must die at construction, not in sizing math.
+    from dataclasses import replace
+
+    ok = _evaluate(_parsed(margin=20))
+    with pytest.raises(ValueError, match="no_order_reason"):
+        replace(ok, order_created=True, no_order_reason="x")
+    with pytest.raises(ValueError, match="sized target"):
+        replace(ok, target_margin=None)
+    with pytest.raises(ValueError, match="risk_reason"):
+        replace(ok, risk_action=RiskAction.CLAMPED, risk_reason=None)
+
+    maintain = _evaluate(_parsed(mode="maintain_current", side=None, margin=None, confidence=None))
+    with pytest.raises(ValueError, match="sized target"):
+        replace(maintain, target_margin=Decimal(1))
+    with pytest.raises(ValueError, match="never creates an order"):
+        replace(maintain, order_created=True, no_order_reason=None)
+
+
+def test_current_position_state_rejects_inconsistent_fields():
+    with pytest.raises(ValueError, match="flat"):
+        CurrentPositionState(side=None, signed_notional=Decimal(1), margin_pct=None)
+    with pytest.raises(ValueError, match="long/short"):
+        CurrentPositionState(side=TargetSide.FLAT, signed_notional=Decimal(0), margin_pct=None)
+
+
 def test_result_to_dict_is_json_ready():
     import json
 

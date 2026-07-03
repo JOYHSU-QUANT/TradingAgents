@@ -28,7 +28,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from ..domains.perp.decision import PerpTradeDecision
 
@@ -49,7 +49,10 @@ TARGET_SCHEMA_VERSION = 3
 
 # The valid ``rating_source`` tags from the retired Phase 1 rating pipeline.
 # The Phase 1 record format is preserved (phase2 keeps the format but never
-# reads old ratings as an execution fallback).
+# reads old ratings as an execution fallback). The Literal gives static
+# checkers the closed vocabulary; the runtime frozenset check below still
+# guards dynamic callers.
+RatingSource = Literal["explicit", "parse_fallback", "default"]
 _VALID_RATING_SOURCES = frozenset({"explicit", "parse_fallback", "default"})
 
 
@@ -95,7 +98,7 @@ def build_log_record(
     models: dict[str, str],
     rating: str,
     timestamp: datetime,
-    rating_source: str = "explicit",
+    rating_source: RatingSource = "explicit",
 ) -> dict[str, Any]:
     """Assemble the JSON-ready Phase 1 audit record (pure — no clock, no I/O)."""
     # ``rating_source`` is the one record field not derived from a validated domain
@@ -237,7 +240,7 @@ def log_decision(
     rating: str,
     results_dir: str | Path,
     timestamp: datetime | None = None,
-    rating_source: str = "explicit",
+    rating_source: RatingSource = "explicit",
 ) -> tuple[dict[str, Any], Path]:
     """Build the record and write it; returns ``(record, path)``.
 

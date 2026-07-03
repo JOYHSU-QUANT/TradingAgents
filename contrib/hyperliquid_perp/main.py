@@ -336,9 +336,19 @@ def run_engine(config: dict, coin: str) -> int:
         return 1
 
     # Parse the Phase 2 config blocks up front: a malformed risk:/decision: block
-    # must abort here, before any LLM spend, not after the engine run.
-    risk_cfg = risk_gate.RiskConfig.from_dict(config.get("risk"))
-    decision_cfg = DecisionConfig.from_dict(config.get("decision"))
+    # must abort here, before any LLM spend, not after the engine run. Caught as
+    # a config error (exit 1, like the API-key and warm-up checks) rather than
+    # falling through to main's exit-2 "unexpected error" bucket — an operator
+    # typo is expected/actionable, not a bug.
+    try:
+        risk_cfg = risk_gate.RiskConfig.from_dict(config.get("risk"))
+        decision_cfg = DecisionConfig.from_dict(config.get("decision"))
+    except ValueError as exc:
+        print(
+            f"error: invalid risk:/decision: config — {exc}. Fix the YAML block and re-run.",
+            file=sys.stderr,
+        )
+        return 1
 
     engine_config, selected_analysts = _build_engine_config(config)
     graph = build_graph(

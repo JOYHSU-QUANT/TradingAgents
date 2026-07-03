@@ -48,6 +48,17 @@ _DEFAULT_INDICATORS = ["rsi_14", "ema_20", "ema_50", "atr_14", "macd"]
 _DEFAULT_ANALYSTS = ["market", "social", "news"]
 
 
+def _warn_dual(log_msg: str, *args: object, stderr: str) -> None:
+    """One warning, both channels: the structured log and stderr.
+
+    An operator scraping only the log stream (or only capturing stderr) must
+    still see the condition — every warning site in this file goes through
+    here so the two channels cannot silently drift apart.
+    """
+    logger.warning(log_msg, *args)
+    print(stderr, file=sys.stderr)
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="python -m contrib.hyperliquid_perp.main",
@@ -151,11 +162,13 @@ def _load_position(
         account = HyperliquidAccount(client).get_account_snapshot(addr)
     except ExchangeError as exc:
         # A request/malformed-feed failure — transient or infrastructure, not an
-        # account state. Emit to the structured log as well as stderr: an operator
-        # capturing only stdout (or scraping the log stream) would otherwise never see
-        # that the position read failed and the run is proceeding without it.
-        logger.warning("Hyperliquid account request failed for %s: %s", coin, exc)
-        print(f"(account lookup skipped — request failed: {exc})", file=sys.stderr)
+        # account state.
+        _warn_dual(
+            "Hyperliquid account request failed for %s: %s",
+            coin,
+            exc,
+            stderr=f"(account lookup skipped — request failed: {exc})",
+        )
         return None, Decimal(0), False
     except ValueError as exc:
         # A structurally-unusable snapshot the schema rejects at construction — e.g. a
@@ -164,10 +177,12 @@ def _load_position(
         # log it distinctly so an operator isn't sent chasing a phantom outage. Caught
         # here (rather than escaping to main's last-resort handler as exit 2 "unexpected
         # error") so it reports the same clean failed lookup (ok=False -> exit 1).
-        logger.warning(
-            "account snapshot rejected for %s (margin-called / empty / invalid?): %s", coin, exc
+        _warn_dual(
+            "account snapshot rejected for %s (margin-called / empty / invalid?): %s",
+            coin,
+            exc,
+            stderr=f"(account lookup skipped — snapshot unusable: {exc})",
         )
-        print(f"(account lookup skipped — snapshot unusable: {exc})", file=sys.stderr)
         return None, Decimal(0), False
     return account.position_for(coin), account.account_value, True
 
@@ -188,20 +203,16 @@ def run_context_only(config: dict, coin: str) -> int:
     # not mistaken for a live signal (run_engine hard-aborts on the same condition).
     needed = _warmup_threshold(config)
     if ctx.candle_count < needed:
-        # Emit to the structured log as well as stderr (mirroring _load_position): an
-        # operator scraping only the log stream would otherwise never see that the
-        # rendered context is under-warmed and must not be read as live signal.
-        logger.warning(
+        _warn_dual(
             "under-warmed context for %s: %d candles available, indicators need %d",
             coin,
             ctx.candle_count,
             needed,
-        )
-        print(
-            f"warning: only {ctx.candle_count} candles available for {coin}, but the "
-            f"configured indicators need {needed}. The indicators and regime above are "
-            "under-warmed (degraded) — do not read them as live signal.",
-            file=sys.stderr,
+            stderr=(
+                f"warning: only {ctx.candle_count} candles available for {coin}, but the "
+                f"configured indicators need {needed}. The indicators and regime above are "
+                "under-warmed (degraded) — do not read them as live signal."
+            ),
         )
 
     # Optional: if a real wallet is configured, also report the current position.
@@ -389,18 +400,16 @@ def run_engine(config: dict, coin: str) -> int:
     # parse seam; the raw response is preserved for the audit record either way.
     parsed = parse_target_decision(final_state.get("final_trade_decision"), decision_cfg)
     if not parsed.is_valid:
-        # Emit to the structured log as well as stderr (mirroring _load_position):
-        # repeated contract failures are the model-drift signal logger-based
-        # alerting must see; the run still exits 0 (the cycle completed fail-closed).
-        logger.warning(
+        # Repeated contract failures are the model-drift signal alerting must
+        # see; the run still exits 0 (the cycle completed fail-closed).
+        _warn_dual(
             "engine output failed the structured-target contract for %s: %s",
             coin,
             parsed.invalid_reason,
-        )
-        print(
-            f"warning: engine output failed the structured-target contract "
-            f"({parsed.invalid_reason}) — failing closed to maintain_current.",
-            file=sys.stderr,
+            stderr=(
+                f"warning: engine output failed the structured-target contract "
+                f"({parsed.invalid_reason}) — failing closed to maintain_current."
+            ),
         )
 
     # The deterministic RiskGate sizes and checks the target against the live

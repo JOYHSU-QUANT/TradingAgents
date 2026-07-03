@@ -59,3 +59,22 @@ def test_load_config_rejects_non_mapping(tmp_path):
     bad.write_text("- a\n- b\n", encoding="utf-8")
     with pytest.raises(ValueError, match="mapping"):
         load_config(bad)
+
+
+@pytest.mark.parametrize("text", ["market_data: 5\n", "engine:\n  - a\n"])
+def test_load_config_rejects_non_mapping_block(tmp_path, text):
+    # A container block that isn't a mapping would blow up deep in the run
+    # (`5.get(...)`) instead of a clean exit-1 — reject it at load time.
+    bad = tmp_path / "block.yaml"
+    bad.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="must be a mapping"):
+        load_config(bad)
+
+
+def test_load_config_rejects_non_list_coins(tmp_path):
+    # `coins: BTC` (scalar, not a list) would otherwise silently resolve to the
+    # first character "B" — reject it as a config error instead.
+    bad = tmp_path / "coins.yaml"
+    bad.write_text("coins: BTC\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="'coins' must be a list"):
+        load_config(bad)

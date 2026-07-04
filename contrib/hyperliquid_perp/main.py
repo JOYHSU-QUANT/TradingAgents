@@ -111,6 +111,28 @@ def _warmup_threshold(config: dict) -> int:
     return required_candles(_indicator_names(config))
 
 
+def _load_risk_decision(config: dict) -> tuple[risk_gate.RiskConfig, DecisionConfig] | None:
+    """Parse + cross-validate the ``risk:``/``decision:`` blocks; ``None`` if invalid.
+
+    A malformed block — unknown/typo'd keys, bad values, or a max_target margin
+    cap that snaps below the decision grid (which would clamp every directional
+    target to 0 and risk-reject it) — is reported as a named config error and
+    the caller exits 1. Shared by the engine path and ``--context-only`` so the
+    free smoke run validates exactly what the paid run will consume.
+    """
+    try:
+        risk_cfg = risk_gate.RiskConfig.from_dict(config.get("risk"))
+        decision_cfg = DecisionConfig.from_dict(config.get("decision"))
+        risk_gate.validate_risk_decision_config(risk_cfg, decision_cfg)
+    except ValueError as exc:
+        print(
+            f"error: invalid risk:/decision: config — {exc}. Fix the YAML block and re-run.",
+            file=sys.stderr,
+        )
+        return None
+    return risk_cfg, decision_cfg
+
+
 def _build_context(config: dict, coin: str) -> tuple[PerpMarketContext, HyperliquidClient]:
     """Fetch market data and assemble the :class:`PerpMarketContext` for ``coin``."""
     md_cfg = config.get("market_data", {})
@@ -189,6 +211,11 @@ def _load_position(
 
 def run_context_only(config: dict, coin: str) -> int:
     """Build and print the market context for ``coin``."""
+    # The parsed configs aren't consumed here — the validation runs purely for
+    # its named exit-1 side effect, before any network fetch (see the docstring
+    # for why the smoke run validates at all).
+    if _load_risk_decision(config) is None:
+        return 1
     ctx, client = _build_context(config, coin)
 
     print("\n" + "=" * 64)
@@ -339,38 +366,28 @@ def run_engine(config: dict, coin: str) -> int:
     # always yields account_value > 0 (a zero/negative snapshot is rejected at
     # construction and reported above as a failed lookup), so account_value == 0
     # here means no funded wallet is configured. Against zero equity every
-    # directional target fail-closes to no_account_equity and no order can ever be
-    # created — abort now, before the engine build and its LLM spend, rather than
+    # directional target is risk-rejected (no_account_equity) and no order can ever
+    # be created — abort now, before the engine build and its LLM spend, rather than
     # pay for a decision the gate is guaranteed to reject. Use --context-only for a
     # keyless diagnostic run.
     if account_value <= 0:
         print(
             "error: no usable account equity (account_value = 0) — RiskGate cannot "
-            "size any order, so every directional target would fail closed. Configure "
-            "a funded wallet_address, or use --context-only for a keyless diagnostic "
-            "run. Refusing to spend an LLM call on an unusable account state.",
+            "size any order, so every directional target would be risk-rejected "
+            "(no_account_equity). Configure a funded wallet_address, or use "
+            "--context-only for a keyless diagnostic run. Refusing to spend an LLM "
+            "call on an unusable account state.",
             file=sys.stderr,
         )
         return 1
 
-    # Parse the Phase 2 config blocks up front: a malformed risk:/decision: block
-    # must abort here, before any LLM spend, not after the engine run. Caught as
-    # a config error (exit 1, like the API-key and warm-up checks) rather than
-    # falling through to main's exit-2 "unexpected error" bucket — an operator
-    # typo is expected/actionable, not a bug.
-    try:
-        risk_cfg = risk_gate.RiskConfig.from_dict(config.get("risk"))
-        decision_cfg = DecisionConfig.from_dict(config.get("decision"))
-        # Cross-block check: each block is individually valid, but a max_target
-        # margin cap that snaps below the decision grid would silently clamp every
-        # directional target to 0 and fail closed. Reject that pairing loudly here.
-        risk_gate.validate_risk_decision_config(risk_cfg, decision_cfg)
-    except ValueError as exc:
-        print(
-            f"error: invalid risk:/decision: config — {exc}. Fix the YAML block and re-run.",
-            file=sys.stderr,
-        )
+    # Named config error (exit 1, like the API-key and warm-up checks), not
+    # main's exit-2 "unexpected error" bucket — an operator typo is expected,
+    # not a bug; and it must abort here, before any LLM spend.
+    cfgs = _load_risk_decision(config)
+    if cfgs is None:
         return 1
+    risk_cfg, decision_cfg = cfgs
 
     # Advertise the *effective* margin ceiling (grid max capped by the risk
     # allocation cap) so the model is never told a margin is legal that the
@@ -455,19 +472,20 @@ def run_engine(config: dict, coin: str) -> int:
         )
 
     # The deterministic RiskGate sizes and checks the target against the live
-    # account state (mark-based valuation). A zero-equity account fail-closes
+    # account state (mark-based valuation). A zero-equity account risk-rejects
     # any directional target inside the gate (risk_reason=no_account_equity).
     current = risk_gate.current_position_state(position, account_value, ctx.mark_price)
     if current.leverage is not None and current.leverage != risk_cfg.leverage:
         # margin% only tracks notional when the position's real leverage matches
         # the configured risk.leverage (e.g. a manually opened 5x position under
         # ``leverage: 1``). The gate disables the rebalance deadband on this
-        # mismatch so the order converges the true notional to the target — make
-        # the condition visible to the operator here.
+        # mismatch so any rebalance this cycle converges the true notional to the
+        # target — make the condition visible to the operator here. (Warned on
+        # every mismatched cycle, even when the decision ends up producing no
+        # order — the mismatch itself is the operator-actionable state.)
         _warn_dual(
             "position leverage %s differs from configured risk.leverage %s for %s — "
-            "rebalance deadband disabled for this cycle so true exposure converges "
-            "to the target",
+            "rebalance deadband disabled for this cycle",
             current.leverage,
             risk_cfg.leverage,
             coin,

@@ -71,6 +71,52 @@ def test_load_config_rejects_non_mapping_block(tmp_path, text):
         load_config(bad)
 
 
+def test_load_config_drops_blank_top_level_keys(tmp_path):
+    # ``market_data:`` with nothing after it (a normal state when an operator
+    # comments out a block's contents) parses to None, not a missing key. It is
+    # treated exactly like absent — dropped — so every consumer's default applies
+    # instead of crashing on ``None.get(...)`` deep in the run.
+    blank = tmp_path / "blank.yaml"
+    blank.write_text("network:\nmarket_data:\nengine:\ncoins: [BTC]\n", encoding="utf-8")
+    config = load_config(blank)
+    assert "network" not in config
+    assert "market_data" not in config
+    assert "engine" not in config
+    assert config["coins"] == ["BTC"]
+
+
+@pytest.mark.parametrize(
+    ("text", "match"),
+    [
+        ("network: mainet\n", "'network' must be"),
+        ("network: 5\n", "'network' must be"),
+        ("network_timeout_s: abc\n", "'network_timeout_s' must be a number"),
+        ("network_timeout_s: [30]\n", "'network_timeout_s' must be a number"),
+        ("wallet_address: 123\n", "'wallet_address' must be a string"),
+    ],
+)
+def test_load_config_rejects_bad_phase1_values(tmp_path, text, match):
+    # These values are consumed by the Phase-1 client deep inside the run; a bad
+    # value there surfaces as an exit-2 traceback instead of a named config error.
+    # Rejecting at load keeps operator typos in the CONFIG_LOAD_ERRORS lane.
+    bad = tmp_path / "value.yaml"
+    bad.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match=match):
+        load_config(bad)
+
+
+def test_load_config_accepts_phase1_value_spellings_the_client_accepts(tmp_path):
+    # Mixed-case network and a numeric string timeout are both legal downstream
+    # (sdk_client strips/lowers and float()s) — load_config must not be stricter
+    # than the consumer it fronts.
+    good = tmp_path / "good.yaml"
+    good.write_text(
+        'network: TestNet\nnetwork_timeout_s: "15"\nwallet_address: "0xabc"\n',
+        encoding="utf-8",
+    )
+    assert load_config(good)["network"] == "TestNet"
+
+
 def test_load_config_rejects_non_list_coins(tmp_path):
     # `coins: BTC` (scalar, not a list) would otherwise silently resolve to the
     # first character "B" — reject it as a config error instead.

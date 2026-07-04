@@ -16,11 +16,12 @@ extension points 負責把 perp 資料送*進去*、把引擎的決策讀*出來
    `resolve_instrument_context()`，附加即時 perp snapshot。基底類別會把該字串
    注入 initial state，「觸及整個 graph」，因此每個 analyst、trader 與
    portfolio manager 都能對 funding / OI / position 推理。
-2. **決策出** —— `propagate()` 回傳引擎的正常輸出：`final_state`，其中
-   `PortfolioDecision` 帶 5-tier rating（Phase 1；Phase 2 起改為 structured
-   target JSON）。**decision adapter** 將其映射為 `PerpTradeDecision`。
+2. **決策出** —— `propagate()` 回傳引擎的正常輸出：`final_state`。Phase 2 起
+   `final_trade_decision` 內含 structured target JSON，由
+   `parse_target_decision` 解析＋驗證（Phase 1 曾由 decision adapter 把 5-tier
+   rating 映射為 `PerpTradeDecision`，已退役）。
 
-從 adapter 往下的一切（決策映射、sizing、SL/TP、槓桿、下單參數）都是確定性的。
+從解析 seam 往下的一切（parse、RiskGate sizing／clamp、audit 記錄）都是確定性的。
 
 ## 依賴的引擎介面
 
@@ -38,9 +39,10 @@ extension points 負責把 perp 資料送*進去*、把引擎的決策讀*出來
 | `PortfolioDecision` | `rating`（Buy/Overweight/Hold/Underweight/Sell）、`executive_summary`、`investment_thesis`、`price_target`、`time_horizon`。 | `intent`/`rationale` 的來源。 |
 | `signal`（第二個回傳值） | `parse_rating(...)` → 5 tiers 之一。 | 便利用途；同一個 rating。 |
 
-> 引擎以**散文 + 5-tier rating** 推理；它不會原生輸出 `funding_view` 或
-> `target_size_pct` 這類 perp 欄位。這些由 adapter 依本模組抓取的
-> `PerpMarketContext` 確定性補上。
+> 引擎本身不會原生輸出 perp 專屬欄位。Phase 2 由注入的 output-format 契約要求
+> 引擎直接輸出 structured target JSON，再由確定性 RiskGate sizing／檢查
+>（Phase 1 曾由 adapter 依 `PerpMarketContext` 確定性補上 `funding_view`／
+> `target_size_pct`，已退役）。
 
 ## 執行流程
 
@@ -60,7 +62,7 @@ contrib main.py
    │     └─ structured target JSON（DESIGN Part 2）；invalid → fail-closed maintain_current
    │
    └─ risk_gate.evaluate(parsed, account_equity, current, …)   (domains/perp/risk_gate.py)
-         └─ 核准/clamp/fail-close；PR 3 的執行引擎消費核准的 margin%，
+         └─ 核准/clamp/風控拒絕(REJECTED)/fail-close(契約違規)；PR 3 的執行引擎消費核准的 margin%，
             下單數量於 plan-build 以新鮮 snapshot 重算（execution §6.2），
             gate 的 notional 欄位屬 audit-only
 ```

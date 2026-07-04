@@ -34,4 +34,4 @@ decision:
   ai_target_margin_max_pct: 100
   target_margin_step_pct: 1      # integer percent steps; off-grid values fail closed (no rounding)
   rebalance_deadband_pct: 1      # same-side |approved - current| < this -> no order (flip/flat exempt)
-  min_confidence: 0.3            # set_target below this fails closed; confidence never scales sizing
+  min_confidence: 0.3            # set_target below this is risk-REJECTED (flat included); confidence never scales sizing

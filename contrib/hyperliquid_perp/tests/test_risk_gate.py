@@ -165,6 +165,19 @@ def test_confidence_at_threshold_passes():
     assert result.risk_action is RiskAction.APPROVED
 
 
+def test_low_confidence_gates_flat_target_too():
+    # Decided semantics: min_confidence gates FLAT as well — an under-confident
+    # "close the position" request is risk-REJECTED and the position stays open.
+    # Every other gate step (grid, equity, approved==0, deadband) exempts FLAT;
+    # this asymmetry is deliberate: closing a position needs conviction too.
+    current = _long_state(margin_pct="35", notional="350")
+    result = _evaluate(_parsed(side="flat", margin=0, confidence="0.1"), current=current)
+    assert result.risk_action is RiskAction.REJECTED
+    assert result.risk_reason == risk_gate.RISK_REASON_LOW_CONFIDENCE
+    assert result.order_created is False
+    assert result.no_order_reason == risk_gate.NO_ORDER_REJECTED
+
+
 def test_low_confidence_does_not_gate_maintain_current():
     # The threshold only blocks "high target, low conviction" contradictions;
     # maintain_current has no target to block.
@@ -199,6 +212,16 @@ def test_clamped_target_can_still_land_within_deadband():
     assert result.requested_target_margin_pct == 100
     assert result.order_created is False
     assert result.no_order_reason == risk_gate.NO_ORDER_WITHIN_DEADBAND
+
+
+def test_deadband_boundary_at_exact_distance_creates_order():
+    # The deadband comparison is strict `<`: a same-side distance exactly equal
+    # to rebalance_deadband_pct (default 1) is NOT "within" it — order created.
+    current = _long_state(margin_pct="34", notional="340")
+    result = _evaluate(_parsed(margin=35), current=current)
+    assert result.order_created is True
+    assert result.no_order_reason is None
+    assert result.delta_notional == Decimal("10")
 
 
 def test_same_side_outside_deadband_creates_order():

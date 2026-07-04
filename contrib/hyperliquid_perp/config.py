@@ -67,6 +67,15 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
             f"unknown top-level config key(s): {', '.join(map(repr, sorted(unknown)))}. "
             f"Allowed: {', '.join(sorted(_ALLOWED_TOP_LEVEL_KEYS))}"
         )
+    # A present-but-blank key (``market_data:`` with nothing after it — a normal
+    # state when an operator comments out a block's contents) parses to None, not
+    # a missing key, so every ``config.get(key, default)`` downstream would return
+    # None instead of its default and crash on the first attribute access. Treat
+    # blank exactly like absent — drop the key here so one rule covers every
+    # top-level-key consumer, current and future. (Nulls *inside* a block, e.g.
+    # ``candle_lookback:`` left blank, stay with each consumer's per-site default.)
+    for key in [k for k, v in config.items() if v is None]:
+        del config[key]
     # Validate the shape of container blocks up front. Without this a malformed
     # block (``market_data: 5``, ``coins: BTC``) survives key validation and then
     # blows up deep in the run — ``5.get(...)`` (AttributeError) or ``"BTC"[0]``
@@ -79,6 +88,29 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     coins = config.get("coins")
     if coins is not None and not isinstance(coins, list):
         raise ValueError(f"'coins' must be a list, got {coins!r}")
+    # These three values are consumed by the Phase-1 client deep inside the run
+    # (sdk_client from_config/__init__, wallet_address()); a bad value there
+    # surfaces as an exit-2 traceback instead of a named config error. Validate
+    # up front so an operator typo stays in the CONFIG_LOAD_ERRORS lane —
+    # sdk_client's own ValueError remains the standalone defense. The legal
+    # network set is duplicated here (not imported) to keep this module free of
+    # the heavy SDK import that --context-only relies on being cheap.
+    network = config.get("network")
+    if network is not None and (
+        not isinstance(network, str) or network.strip().lower() not in ("mainnet", "testnet")
+    ):
+        raise ValueError(f"'network' must be 'mainnet' or 'testnet', got {network!r}")
+    timeout = config.get("network_timeout_s")
+    if timeout is not None:
+        try:
+            float(timeout)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"'network_timeout_s' must be a number (seconds), got {timeout!r}"
+            ) from None
+    addr = config.get("wallet_address")
+    if addr is not None and not isinstance(addr, str):
+        raise ValueError(f"'wallet_address' must be a string, got {addr!r}")
     return config
 
 

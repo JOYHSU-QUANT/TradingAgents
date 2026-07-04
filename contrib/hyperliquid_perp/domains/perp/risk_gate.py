@@ -359,9 +359,9 @@ def _no_target_result(
 ) -> RiskGateResult:
     """A no-target outcome: maintain-current shape, no sized target, no order.
 
-    The one constructor behind both the valid ``maintain_current`` result and
-    every fail-closed rejection, so a future ``RiskGateResult`` field is
-    threaded through a single site.
+    The one constructor behind the valid ``maintain_current`` result, every
+    healthy risk rejection (REJECTED), and every fail-closed contract violation,
+    so a future ``RiskGateResult`` field is threaded through a single site.
     """
     return RiskGateResult(
         decision_mode=DecisionMode.MAINTAIN_CURRENT,

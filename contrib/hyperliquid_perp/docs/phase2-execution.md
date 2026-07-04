@@ -457,7 +457,7 @@ position == 0 and no active plan/order    → stop 30-second polling
 | 數值 | 公式 | 說明 |
 | --- | --- | --- |
 | `requested_target_margin_pct` | AI decision 輸出，合法範圍 `0–100` | AI 要求的 unsigned margin allocation 比例 |
-| `approved_target_margin_pct` | `min(requested_target_margin_pct, max_target_margin_pct)` | RiskGate 實際核准的 margin allocation 比例 |
+| `approved_target_margin_pct` | `min(requested_target_margin_pct, max_target_margin_pct)` | RiskGate 實際核准的 margin allocation 比例（此為 allocation cap；available margin 與 effective leverage 檢查可再往下 clamp，見 spec §2.3） |
 | `target_margin` | `account_equity * approved_target_margin_pct / 100` | RiskGate 核准用於目標倉位的 margin |
 | `target_notional` | `target_margin * configured_leverage` | 套用槓桿後的目標名目倉位 magnitude |
 | `target_signed_notional` | `direction * target_notional` | long 為正、short 為負的目標名目倉位 |

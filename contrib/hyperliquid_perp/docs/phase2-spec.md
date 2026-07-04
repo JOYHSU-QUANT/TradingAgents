@@ -76,7 +76,7 @@ approved_target_margin_pct = min(requested_target_margin_pct, max_target_margin_
 
 AI 可在 `0–100%` 內提出 requested target。若 requested target 介於 `61–100%`，RiskGate 必須 clamp 為 `60%`，並同時保留 requested / approved 數值與 `risk_action = clamped`。負數、超過 `100%`、非數字或與 `target_side` 不一致的輸出視為 invalid decision，fail-closed 成 `maintain_current`。
 
-RiskGate 仍必須獨立檢查 `effective_leverage` 與 available margin，不能只依賴 margin allocation 上限。在 Phase 2 預設 `account_equity = 1,000 USDC` 與 `leverage = 1` 下，`60%` 上限對應 `600 USDC` target margin 與 `600 USDC` target notional。
+RiskGate 仍必須獨立檢查 `effective_leverage` 與 available margin，不能只依賴 margin allocation 上限；這兩個檢查同樣以 clamp 方式進一步收緊 `approved_target_margin_pct`（`risk_action = clamped`，`risk_reason` 分別為 `effective_leverage_cap`／`insufficient_available_margin`），因此上式的 `min(...)` 只是 allocation cap 這一關，最終 approved 是三個 cap 取最緊。在 Phase 2 預設 `account_equity = 1,000 USDC` 與 `leverage = 1` 下，`60%` 上限對應 `600 USDC` target margin 與 `600 USDC` target notional。
 
 ---
 

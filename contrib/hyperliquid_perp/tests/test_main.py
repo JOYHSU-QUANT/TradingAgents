@@ -361,6 +361,22 @@ def test_run_context_only_warns_on_under_warmed_candles(monkeypatch, capsys):
     assert "under-warmed" in capsys.readouterr().err
 
 
+def test_run_context_only_rejects_bad_risk_decision_config(monkeypatch, capsys):
+    # --context-only runs the same risk:/decision: validation as the paid run:
+    # a broken config fails the free smoke run (named exit 1, before any network
+    # fetch) instead of surfacing only on the next paid cycle.
+    fetched = []
+    monkeypatch.setattr(
+        main_mod,
+        "_build_context",
+        lambda config, coin: fetched.append("fetched") or (object(), object()),
+    )
+    rc = main_mod.run_context_only({"risk": {"max_target_margin_pct": 150}}, "BTC")
+    assert rc == 1
+    assert fetched == []  # aborted before any network fetch
+    assert "invalid risk:/decision: config" in capsys.readouterr().err
+
+
 def test_run_engine_prints_decision_then_reports_audit_failure(monkeypatch, capsys):
     # The Critical case: the decision is generated, then the audit write fails. The
     # decision must still reach stdout and the failure must be loud + non-zero.
@@ -512,6 +528,29 @@ def test_run_engine_success_writes_log_and_returns_zero(monkeypatch, capsys):
     assert "decision log written to" in capsys.readouterr().err
 
 
+def test_run_engine_healthy_risk_rejection_exits_zero(monkeypatch, capsys):
+    # A contract-valid decision the gate risk-REJECTS (low confidence) is a
+    # healthy outcome: the round completes, the audit record is written, and the
+    # run exits 0 — non-zero codes are reserved for contract failures (3) and
+    # config/env/audit errors (1, 2).
+    written = {}
+    low_conf = _VALID_DECISION_TEXT.replace('"confidence": 0.78', '"confidence": 0.1')
+    _stub_engine(monkeypatch, final_state={"final_trade_decision": low_conf})
+    monkeypatch.setattr(
+        main_mod,
+        "log_target_decision",
+        lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
+    )
+    rc = main_mod.run_engine({}, "BTC")
+    assert rc == 0
+    assert written["parsed"].is_valid  # the contract was honoured
+    result = written["risk_result"]
+    assert result.risk_action.value == "rejected"
+    assert result.risk_reason == "low_confidence"
+    assert result.order_created is False
+    assert "decision log written to" in capsys.readouterr().err
+
+
 def test_run_engine_fails_closed_on_empty_engine_output(monkeypatch, capsys):
     # An empty final_trade_decision carries no structured target: the Phase 2
     # contract fails closed to maintain_current (invalid_output) and the round IS
@@ -542,9 +581,9 @@ def test_run_engine_fails_closed_on_empty_engine_output(monkeypatch, capsys):
 def test_run_engine_aborts_before_llm_when_no_account_equity(monkeypatch, capsys):
     # No funded wallet -> account_value == 0 (a live snapshot of 0 is rejected at
     # construction and surfaces as a failed lookup instead). RiskGate would
-    # fail-close every directional target against zero equity, so running the engine
-    # is guaranteed-wasted LLM spend: run_engine aborts (exit 1) before building the
-    # graph, and writes no decision log.
+    # risk-reject (no_account_equity) every directional target against zero equity,
+    # so running the engine is guaranteed-wasted LLM spend: run_engine aborts
+    # (exit 1) before building the graph, and writes no decision log.
     built = []
     written = {}
     _stub_engine(monkeypatch, account_value=Decimal(0))
@@ -664,6 +703,19 @@ def test_main_missing_config_path_returns_exit_code_1(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "invalid config" in err
     assert "config not found" in err
+
+
+def test_main_bad_phase1_config_value_returns_exit_code_1(tmp_path, capsys):
+    # End-to-end pin for the load-time value guards: a typo'd network value is a
+    # ValueError from load_config, so it rides the CONFIG_LOAD_ERRORS lane to a
+    # named exit 1 — not an exit-2 traceback from deep inside the SDK client.
+    bad = tmp_path / "value.yaml"
+    bad.write_text("network: mainet\ncoins: [BTC]\n", encoding="utf-8")
+    rc = main_mod.main(["--config", str(bad), "--coin", "BTC"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "invalid config" in err
+    assert "'network' must be" in err
 
 
 def test_main_unexpected_error_returns_exit_code_2(monkeypatch, capsys, caplog):

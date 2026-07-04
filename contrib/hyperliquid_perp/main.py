@@ -41,6 +41,7 @@ from .exchanges.hyperliquid.errors import ExchangeError
 from .exchanges.hyperliquid.market_data import HyperliquidMarketData
 from .exchanges.hyperliquid.sdk_client import HyperliquidClient
 from .integration.trading_graph import build_graph, inject_perp_context
+from .paper.config import PaperTradingConfig
 
 logger = logging.getLogger(__name__)
 
@@ -112,21 +113,26 @@ def _warmup_threshold(config: dict) -> int:
 
 
 def _load_risk_decision(config: dict) -> tuple[risk_gate.RiskConfig, DecisionConfig] | None:
-    """Parse + cross-validate the ``risk:``/``decision:`` blocks; ``None`` if invalid.
+    """Parse + cross-validate the ``risk:``/``decision:``/``paper_trading:`` blocks.
 
-    A malformed block — unknown/typo'd keys, bad values, or a max_target margin
-    cap that snaps below the decision grid (which would clamp every directional
-    target to 0 and risk-reject it) — is reported as a named config error and
-    the caller exits 1. Shared by the engine path and ``--context-only`` so the
-    free smoke run validates exactly what the paid run will consume.
+    Returns ``None`` if any is invalid. A malformed block — unknown/typo'd keys,
+    bad values, or a max_target margin cap that snaps below the decision grid
+    (which would clamp every directional target to 0 and risk-reject it) — is
+    reported as a named config error and the caller exits 1. Shared by the engine
+    path and ``--context-only`` so the free smoke run validates exactly what the
+    paid run will consume. The ``paper_trading`` block is parsed here for its
+    validation side effect (bad fee/balance/slippage fail fast) even though PR 2
+    does not yet consume it — the paper engine (PR 3) reads the same block.
     """
     try:
         risk_cfg = risk_gate.RiskConfig.from_dict(config.get("risk"))
         decision_cfg = DecisionConfig.from_dict(config.get("decision"))
         risk_gate.validate_risk_decision_config(risk_cfg, decision_cfg)
+        PaperTradingConfig.from_dict(config.get("paper_trading"))
     except ValueError as exc:
         print(
-            f"error: invalid risk:/decision: config — {exc}. Fix the YAML block and re-run.",
+            f"error: invalid risk:/decision:/paper_trading: config — {exc}. "
+            "Fix the YAML block and re-run.",
             file=sys.stderr,
         )
         return None

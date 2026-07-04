@@ -35,3 +35,19 @@ decision:
   target_margin_step_pct: 1      # integer percent steps; off-grid values fail closed (no rounding)
   rebalance_deadband_pct: 1      # same-side |approved - current| < this -> no order (flip/flat exempt)
   min_confidence: 0.3            # set_target below this is risk-REJECTED (flat included); confidence never scales sizing
+
+# Phase 2 paper-trading engine defaults (phase2-execution.md §5.4). initial
+# balance / positions apply only when a NEW run_id is created; a restart recovers
+# from the recorded SQLite accounting events, never resets to these.
+paper_trading:
+  account:
+    initial_balance_usdc: 1000   # opening paper wallet balance
+    initial_positions: []        # seed positions: [{coin: BTC, size: 0.01, entry_price: 60000}]
+  execution:
+    taker_fee_rate: 0.00045      # 0.045% taker fee on every simulated fill (§6.5)
+    min_notional_usdc: 10        # min per-order notional for TWAP slicing (PR 3, §1.2)
+    market_monitor:
+      interval_seconds: 30       # 30s poll cadence for the position-aware monitor (PR 3, §5.5)
+      request_timeout_seconds: 5 # per-request market-data timeout (§1.1)
+    fill_model:
+      slippage_bps: 5            # simulated slippage applied to mid on every fill (§5.2)

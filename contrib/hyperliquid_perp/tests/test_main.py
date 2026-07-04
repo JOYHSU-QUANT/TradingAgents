@@ -313,7 +313,7 @@ def test_run_engine_reports_bad_config_as_config_error(monkeypatch, capsys):
     assert rc == 1
     assert calls == []  # aborted before the engine was built
     err = capsys.readouterr().err
-    assert "invalid risk:/decision: config" in err
+    assert "invalid risk:/decision:/paper_trading: config" in err
     assert "max_target_margin_pct" in err
 
 
@@ -374,7 +374,7 @@ def test_run_context_only_rejects_bad_risk_decision_config(monkeypatch, capsys):
     rc = main_mod.run_context_only({"risk": {"max_target_margin_pct": 150}}, "BTC")
     assert rc == 1
     assert fetched == []  # aborted before any network fetch
-    assert "invalid risk:/decision: config" in capsys.readouterr().err
+    assert "invalid risk:/decision:/paper_trading: config" in capsys.readouterr().err
 
 
 def test_run_engine_prints_decision_then_reports_audit_failure(monkeypatch, capsys):

@@ -7,8 +7,10 @@
 
 > 狀態：市場 context + 未修改的引擎 + **Phase 2 structured target 契約 + 確定性
 > RiskGate** 已能端到端執行，寫出 schema v3 的 target audit log（見
-> [SETUP](./docs/SETUP.md)）；Phase 2 剩餘的 paper 執行／accounting／persistence／
-> scheduler 層仍待實作（設計見 [phase2-spec](./docs/phase2-spec.md)）。
+> [SETUP](./docs/SETUP.md)）；**Phase 2 SQLite persistence 與 paper accounting／
+> 清算模型**（fills · fees · funding exactly-once · margin/liquidation · accounting
+> replay）已實作，剩餘的 paper 執行引擎（TWAP/flip · SL/TP · market monitor）與
+> scheduler／CSV export 層仍待實作（設計見 [phase2-spec](./docs/phase2-spec.md)）。
 
 ## 文件
 

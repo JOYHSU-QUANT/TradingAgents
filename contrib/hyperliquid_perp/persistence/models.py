@@ -1,0 +1,83 @@
+"""Typed views of the mutable ``current_*`` state (pure, all-Decimal).
+
+The paper accounting layer reads and writes two materialized tables — the
+per-symbol :class:`PositionState` (``current_positions``) and the account-level
+:class:`AccountLedger` (``current_account_state``). These dataclasses are the
+in-memory shape the accounting math works with; the repository (de)serializes
+them to/from SQLite (Decimals stored as TEXT). Derived values that depend on the
+*current mark price* (equity, margin, effective leverage) are recomputed at
+snapshot time from these ledgers plus a mark, never stored raw here.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from decimal import Decimal
+
+__all__ = ["AccountLedger", "PositionState"]
+
+
+@dataclass(frozen=True)
+class PositionState:
+    """A symbol's materialized position: signed size, average entry, realized PnL.
+
+    ``size`` is signed (positive long, negative short); ``0`` means flat, and a
+    flat position carries no ``entry_price`` (``None``). ``realized_pnl`` is the
+    symbol's cumulative fill-realized PnL and is retained across a flat interval
+    (a closed position keeps its realized total for the next open), which is why a
+    flat state is a ``size = 0`` row here rather than an absent one.
+    """
+
+    coin: str
+    size: Decimal
+    entry_price: Decimal | None
+    realized_pnl: Decimal = Decimal(0)
+
+    def __post_init__(self) -> None:
+        if not self.coin or not self.coin.strip():
+            raise ValueError("PositionState.coin must be a non-empty string")
+        if self.size == 0:
+            if self.entry_price is not None:
+                raise ValueError("a flat PositionState (size 0) carries no entry_price")
+        else:
+            if self.entry_price is None:
+                raise ValueError("a non-flat PositionState must carry an entry_price")
+            if self.entry_price <= 0:
+                raise ValueError(f"PositionState.entry_price must be > 0, got {self.entry_price}")
+
+    @property
+    def is_flat(self) -> bool:
+        return self.size == 0
+
+    @property
+    def is_long(self) -> bool:
+        return self.size > 0
+
+    @property
+    def is_short(self) -> bool:
+        return self.size < 0
+
+    @classmethod
+    def flat(cls, coin: str, realized_pnl: Decimal = Decimal(0)) -> PositionState:
+        return cls(coin=coin, size=Decimal(0), entry_price=None, realized_pnl=realized_pnl)
+
+
+@dataclass(frozen=True)
+class AccountLedger:
+    """The account-level accumulators — the paper ledger's source of truth.
+
+    ``wallet_balance`` already folds in realized PnL, fees and funding (execution
+    §6.1/§6.5: realized PnL, fees and funding are posted to ``wallet_balance``),
+    so ``account_equity = wallet_balance + total_unrealized_pnl`` and nothing is
+    double-counted. ``realized_pnl`` / ``total_fees`` / ``net_funding_pnl`` are
+    kept alongside as reportable running totals (audit + replay reconciliation).
+    """
+
+    wallet_balance: Decimal
+    realized_pnl: Decimal = Decimal(0)
+    total_fees: Decimal = Decimal(0)
+    net_funding_pnl: Decimal = Decimal(0)
+
+    def __post_init__(self) -> None:
+        if self.total_fees < 0:
+            raise ValueError(f"AccountLedger.total_fees must be >= 0, got {self.total_fees}")

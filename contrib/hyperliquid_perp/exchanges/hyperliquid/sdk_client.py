@@ -111,6 +111,8 @@ class HyperliquidClient:
             # ``dict.get(key, default)`` only falls back when the key is absent; a
             # present-but-null value (YAML ``network_timeout_s:`` left blank) returns
             # None, so treat null like absent rather than crashing on ``float(None)``.
+            # (Configs from load_config can no longer carry that null — it drops
+            # blank top-level keys — so this branch is standalone-caller defense.)
             raw = config.get("network_timeout_s")
             timeout = float(raw) if raw is not None else 30.0
         return cls(network=config.get("network", "mainnet"), timeout=timeout)

@@ -22,15 +22,22 @@ if TYPE_CHECKING:  # import only for type checkers; avoids the heavy dep at runt
 logger = logging.getLogger(__name__)
 
 
-def inject_perp_context(base: str, perp_context_text: str) -> str:
-    """Append the perp snapshot to the engine's base instrument context.
+def inject_perp_context(base: str, perp_context_text: str, output_format_text: str = "") -> str:
+    """Append the perp snapshot — and the decision output contract — to the base context.
 
     Pure string assembly, split out so it is unit-testable without importing the
-    heavy engine. An empty ``perp_context_text`` leaves ``base`` untouched.
+    heavy engine. An empty ``perp_context_text`` / ``output_format_text`` leaves
+    that section out. The output-format text goes at the very **tail** so the
+    structured-JSON requirement (Phase 2 contract, DESIGN Part 2) is the last
+    instruction the engine reads; the upstream ``tradingagents`` package itself
+    stays unmodified.
     """
-    if not perp_context_text:
-        return base
-    return f"{base}\n\n## Perpetual market context\n{perp_context_text}"
+    out = base
+    if perp_context_text:
+        out = f"{out}\n\n## Perpetual market context\n{perp_context_text}"
+    if output_format_text:
+        out = f"{out}\n\n{output_format_text}"
+    return out
 
 
 def build_graph(
@@ -39,6 +46,7 @@ def build_graph(
     config: dict[str, Any],
     selected_analysts: list[str],
     debug: bool = False,
+    output_format_text: str = "",
 ) -> TradingAgentsGraph:
     """Construct a :class:`HyperliquidTradingGraph`.
 
@@ -51,8 +59,15 @@ def build_graph(
     class HyperliquidTradingGraph(TradingAgentsGraph):
         """Drive the unmodified engine with Hyperliquid perp context injected."""
 
-        def __init__(self, *args: Any, perp_context_text: str = "", **kwargs: Any) -> None:
+        def __init__(
+            self,
+            *args: Any,
+            perp_context_text: str = "",
+            output_format_text: str = "",
+            **kwargs: Any,
+        ) -> None:
             self._perp_context_text = perp_context_text
+            self._output_format_text = output_format_text
             super().__init__(*args, **kwargs)
 
         def resolve_instrument_context(self, ticker: str, asset_type: str = "stock") -> str:
@@ -65,11 +80,12 @@ def build_graph(
                 # original exception from any caller matching on a specific type.
                 logger.exception("base resolve_instrument_context failed for %r", ticker)
                 raise
-            return inject_perp_context(base, self._perp_context_text)
+            return inject_perp_context(base, self._perp_context_text, self._output_format_text)
 
     return HyperliquidTradingGraph(
         selected_analysts=selected_analysts,
         debug=debug,
         config=config,
         perp_context_text=perp_context_text,
+        output_format_text=output_format_text,
     )

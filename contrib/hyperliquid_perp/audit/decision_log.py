@@ -1,11 +1,18 @@
-"""Write each :class:`PerpTradeDecision` to a durable JSON audit record.
+"""Write each trade decision to a durable JSON audit record.
 
-One file per decision under ``<results_dir>/perp_decisions/``. The record pins
-the four things a post-mortem needs (phase1-spec build order 9): the **prompt
-hash** the engine reasoned over, the **models** used, the full **decision**, and
-a **timestamp**.
+One file per decision under ``<results_dir>/perp_decisions/``: the Phase 2
+structured-target record (:func:`build_target_log_record` /
+:func:`log_target_decision`, ``TARGET_SCHEMA_VERSION``). Beyond the prompt
+hash / models / timestamp header it persists the raw engine response, the
+parse verdict (``is_valid`` / ``invalid_reason``), the full RiskGate outcome,
+and the decision-time sizing inputs (``mark_price`` / ``account_equity``) —
+the fields a post-mortem of the structured-target contract needs.
 
-:func:`build_log_record` is pure (timestamp injected) so it is unit-tested
+Records from the retired Phase 1 rating pipeline (``schema_version: 2``) may
+still exist on disk; old JSON needs no writer to stay readable, so that write
+path was deleted rather than maintained alongside the live format.
+
+``build_target_log_record`` is pure (timestamp injected) so it is unit-tested
 without touching the filesystem; :func:`write_decision_log` does the I/O.
 """
 
@@ -18,71 +25,64 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..domains.perp.decision import PerpTradeDecision
-
 if TYPE_CHECKING:
-    # Type-only import (annotations are strings under ``from __future__``) so the
-    # audit layer documents the constrained value set without taking a runtime
-    # dependency on the integration layer.
-    from ..integration.decision_adapter import RatingSource
+    # Type-only imports (annotations are strings under ``from __future__``) so the
+    # audit layer documents the value shapes without a runtime dependency on the
+    # domain decision modules.
+    from decimal import Decimal
+
+    from ..domains.perp.risk_gate import RiskGateResult
+    from ..domains.perp.target_decision import ParsedDecision
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
-
-# The valid ``rating_source`` tags, mirroring ``RatingSource`` in the integration
-# layer. Duplicated as plain strings (not the enum) because that import is
-# TYPE_CHECKING-only here — a runtime ``isinstance`` would force a circular import.
-_VALID_RATING_SOURCES = frozenset({"explicit", "parse_fallback", "default"})
+# Phase 2 structured-target records carry their own version so a reader can
+# tell them apart from retired Phase 1 records (schema_version 2) still on
+# disk without sniffing fields.
+TARGET_SCHEMA_VERSION = 3
 
 
 def prompt_hash(prompt: str) -> str:
-    """``sha256:<hex>`` of the exact prompt text the engine reasoned over."""
+    """``sha256:<hex>`` of the prompt text the caller hands in.
+
+    ``main.py`` passes the full adapter-injected text — the rendered market
+    context *and* the output-format contract (which embeds the live margin grid
+    and ``min_confidence``) — so records produced under different
+    ``decision:``/``risk:`` config never share a hash. The engine's own base
+    instrument context is engine-internal and not captured.
+    """
     digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
 
 
-def build_log_record(
+def _record_header(
     *,
+    schema_version: int,
     coin: str,
-    decision: PerpTradeDecision,
     prompt: str,
     models: dict[str, str],
-    rating: str,
     timestamp: datetime,
-    rating_source: str | RatingSource = "explicit",
 ) -> dict[str, Any]:
-    """Assemble the JSON-ready audit record (pure — no clock, no I/O)."""
+    """The fields every audit record format shares (pure — no clock, no I/O).
+
+    Guards against a naive timestamp here, once for both formats: a naive
+    datetime makes ``timestamp.timestamp()`` interpret the value in the host's
+    local zone, so ``timestamp_ms`` would be silently off by the UTC offset
+    (e.g. 8h on a UTC+8 box) while the ISO ``timestamp`` string looks fine — a
+    corrupt audit record that no test on a UTC machine would catch.
+    """
     if timestamp.tzinfo is None:
-        # A naive datetime makes ``timestamp.timestamp()`` interpret the value in the
-        # host's local zone, so ``timestamp_ms`` would be silently off by the UTC
-        # offset (e.g. 8h on a UTC+8 box) while the ISO ``timestamp`` string looks
-        # fine — a corrupt audit record that no test on a UTC machine would catch.
-        raise ValueError("build_log_record requires a timezone-aware timestamp")
-    # ``rating_source`` is the one record field not derived from a validated domain
-    # object — a caller passing a wrong-case ("EXPLICIT") or unknown ("fallback")
-    # tag would otherwise write a silently corrupt audit field. A ``RatingSource``
-    # (a ``str`` enum) compares/serialises as its value, so check the string form.
-    rs_value = rating_source.value if isinstance(rating_source, Enum) else rating_source
-    if rs_value not in _VALID_RATING_SOURCES:
-        raise ValueError(
-            f"build_log_record: unknown rating_source {rating_source!r}; "
-            f"must be one of {sorted(_VALID_RATING_SOURCES)}"
-        )
+        raise ValueError("audit records require a timezone-aware timestamp")
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema_version,
         "coin": coin,
         "timestamp": timestamp.isoformat(),
         "timestamp_ms": int(timestamp.timestamp() * 1000),
         "prompt_hash": prompt_hash(prompt),
         "models": models,
-        "rating": rating,
-        "rating_source": rs_value,
-        "decision": decision.to_dict(),
     }
 
 
@@ -195,31 +195,87 @@ def write_decision_log(
     return path
 
 
-def log_decision(
+# --------------------------------------------------------------------------
+# Phase 2 — structured target contract records
+# --------------------------------------------------------------------------
+
+
+def build_target_log_record(
     *,
     coin: str,
-    decision: PerpTradeDecision,
+    parsed: ParsedDecision,
+    risk_result: RiskGateResult,
+    mark_price: Decimal,
+    account_equity: Decimal,
     prompt: str,
     models: dict[str, str],
-    rating: str,
-    results_dir: str | Path,
-    timestamp: datetime | None = None,
-    rating_source: str | RatingSource = "explicit",
-) -> tuple[dict[str, Any], Path]:
-    """Build the record and write it; returns ``(record, path)``.
+    timestamp: datetime,
+) -> dict[str, Any]:
+    """Assemble the Phase 2 audit record (pure — no clock, no I/O).
 
-    Convenience wrapper for :func:`build_log_record` + :func:`write_decision_log`
-    used by ``main.py``. ``timestamp`` defaults to now (UTC).
+    Preserves the engine's **raw response verbatim** (DESIGN Part 2: an invalid
+    output is recorded, never reconstructed) next to the parse verdict and the
+    RiskGate outcome, so a post-mortem can replay exactly what the model said
+    and what the deterministic layer did with it.
+
+    ``mark_price`` / ``account_equity`` are the decision-time sizing inputs the
+    gate worked from, captured so every row — including REJECTED /
+    maintain_current, whose ``target_*`` fields are all ``None`` — stays
+    reproducible as a coin quantity after the fact (execution §6.2).
     """
-    timestamp = timestamp or datetime.now(timezone.utc)
-    record = build_log_record(
+    record = _record_header(
+        schema_version=TARGET_SCHEMA_VERSION,
         coin=coin,
-        decision=decision,
         prompt=prompt,
         models=models,
-        rating=rating,
         timestamp=timestamp,
-        rating_source=rating_source,
+    )
+    record.update(
+        {
+            "raw_response": parsed.raw_response,
+            "parse": {
+                "is_valid": parsed.is_valid,
+                "invalid_reason": parsed.invalid_reason,
+            },
+            "decision": parsed.decision.to_dict(),
+            "risk": risk_result.to_dict(),
+            # Decimals become strings, matching RiskGateResult.to_dict.
+            "mark_price": str(mark_price),
+            "account_equity": str(account_equity),
+        }
+    )
+    return record
+
+
+def log_target_decision(
+    *,
+    coin: str,
+    parsed: ParsedDecision,
+    risk_result: RiskGateResult,
+    mark_price: Decimal,
+    account_equity: Decimal,
+    prompt: str,
+    models: dict[str, str],
+    results_dir: str | Path,
+    timestamp: datetime | None = None,
+) -> tuple[dict[str, Any], Path]:
+    """Build the Phase 2 record and write it; returns ``(record, path)``.
+
+    Convenience wrapper for :func:`build_target_log_record` +
+    :func:`write_decision_log` used by ``main.py``. ``timestamp`` defaults to
+    now (UTC). Files land in the same ``perp_decisions/`` directory as Phase 1
+    records; ``schema_version`` distinguishes the two formats.
+    """
+    timestamp = timestamp or datetime.now(timezone.utc)
+    record = build_target_log_record(
+        coin=coin,
+        parsed=parsed,
+        risk_result=risk_result,
+        mark_price=mark_price,
+        account_equity=account_equity,
+        prompt=prompt,
+        models=models,
+        timestamp=timestamp,
     )
     path = write_decision_log(record, results_dir, coin=coin, timestamp=timestamp)
     return record, path

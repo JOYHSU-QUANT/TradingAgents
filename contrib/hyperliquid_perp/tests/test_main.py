@@ -14,7 +14,6 @@ from decimal import Decimal
 import pytest
 
 from contrib.hyperliquid_perp import main as main_mod
-from contrib.hyperliquid_perp.domains.perp.decision import Intent
 from contrib.hyperliquid_perp.domains.perp.schema import AccountSnapshot, PerpPosition
 from contrib.hyperliquid_perp.exchanges.hyperliquid.account import HyperliquidAccount
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
@@ -242,6 +241,23 @@ def test_load_position_success_flat_when_coin_absent(monkeypatch):
 # --------------------------------------------------------------------------
 
 
+# A well-formed Phase 2 structured target the stubbed engine returns by default;
+# the real parse + RiskGate seams then run un-stubbed, exactly as in production.
+_VALID_DECISION_TEXT = """After weighing the debate, here is the final decision.
+
+```json
+{
+  "decision_mode": "set_target",
+  "target_side": "long",
+  "requested_target_margin_pct": 35,
+  "confidence": 0.78,
+  "rationale": "Trend and funding support a long.",
+  "key_risks": ["Funding is rising"]
+}
+```
+"""
+
+
 def _stub_engine(
     monkeypatch,
     *,
@@ -254,13 +270,14 @@ def _stub_engine(
 
     ``account_value`` defaults to a funded account (a configured wallet with net
     value) so the happy path reaches logging; pass ``Decimal(0)`` to exercise the
-    zero-account guard (no wallet / empty account).
+    no-equity pre-engine abort (no funded wallet configured).
     """
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
 
     class _Ctx:
         candle_count = 200  # comfortably above any indicator warm-up need
         indicators = {"rsi_14": 55.0, "ema_20": 100.0}  # at least one live signal
+        mark_price = Decimal("60000")  # current_position_state values at mark
 
     monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (_Ctx(), object()))
     monkeypatch.setattr(main_mod, "render_market_context", lambda ctx: "ctx text")
@@ -273,37 +290,31 @@ def _stub_engine(
 
     class _Graph:
         def propagate(self, *a, **k):
-            return final_state or {"final_trade_decision": "**Rating**: Buy"}, None
+            return final_state or {"final_trade_decision": _VALID_DECISION_TEXT}, None
 
     monkeypatch.setattr(main_mod, "build_graph", lambda **k: _Graph())
-
-    class _Decision:
-        intent = Intent.OPEN_LONG  # a non-Hold intent — matches the to_dict below
-
-        def to_dict(self):
-            return {"intent": "open_long", "confidence": 0.8}
-
-    class _Adapter:
-        def __init__(self, *a, **k):
-            pass
-
-        def decide(self, final_state):
-            # Exercise the real rating seam so rating_source flows through main exactly
-            # as in production (single parse); the decision object itself is stubbed.
-            from contrib.hyperliquid_perp.integration.decision_adapter import resolve_rating
-
-            md = final_state.get("final_trade_decision", "") or ""
-            rating, rating_source = resolve_rating(md)
-            return _Decision(), rating, rating_source
-
-    monkeypatch.setattr(main_mod, "DecisionAdapter", _Adapter)
 
     if audit_error is not None:
 
         def _raise(**_kw):
             raise audit_error
 
-        monkeypatch.setattr(main_mod, "log_decision", _raise)
+        monkeypatch.setattr(main_mod, "log_target_decision", _raise)
+
+
+def test_run_engine_reports_bad_config_as_config_error(monkeypatch, capsys):
+    # A malformed risk:/decision: block is an operator typo — exit 1 with the
+    # offending key named (like the API-key / warm-up checks), before any
+    # engine build or LLM spend, not exit-2 "unexpected error".
+    calls = []
+    _stub_engine(monkeypatch)
+    monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
+    rc = main_mod.run_engine({"risk": {"max_target_margin_pct": 150}}, "BTC")
+    assert rc == 1
+    assert calls == []  # aborted before the engine was built
+    err = capsys.readouterr().err
+    assert "invalid risk:/decision: config" in err
+    assert "max_target_margin_pct" in err
 
 
 def test_run_engine_aborts_when_position_lookup_fails(monkeypatch, capsys):
@@ -350,6 +361,22 @@ def test_run_context_only_warns_on_under_warmed_candles(monkeypatch, capsys):
     assert "under-warmed" in capsys.readouterr().err
 
 
+def test_run_context_only_rejects_bad_risk_decision_config(monkeypatch, capsys):
+    # --context-only runs the same risk:/decision: validation as the paid run:
+    # a broken config fails the free smoke run (named exit 1, before any network
+    # fetch) instead of surfacing only on the next paid cycle.
+    fetched = []
+    monkeypatch.setattr(
+        main_mod,
+        "_build_context",
+        lambda config, coin: fetched.append("fetched") or (object(), object()),
+    )
+    rc = main_mod.run_context_only({"risk": {"max_target_margin_pct": 150}}, "BTC")
+    assert rc == 1
+    assert fetched == []  # aborted before any network fetch
+    assert "invalid risk:/decision: config" in capsys.readouterr().err
+
+
 def test_run_engine_prints_decision_then_reports_audit_failure(monkeypatch, capsys):
     # The Critical case: the decision is generated, then the audit write fails. The
     # decision must still reach stdout and the failure must be loud + non-zero.
@@ -357,27 +384,41 @@ def test_run_engine_prints_decision_then_reports_audit_failure(monkeypatch, caps
     rc = main_mod.run_engine({}, "BTC")
     captured = capsys.readouterr()
     assert rc == 1
-    assert '"intent": "open_long"' in captured.out  # decision printed, not lost
+    assert '"decision_mode": "set_target"' in captured.out  # decision printed, not lost
     assert "audit log write failed" in captured.err
 
 
 def test_run_engine_reports_audit_failure_on_unicode_error(monkeypatch, capsys):
-    # A lone surrogate in the engine rationale can make the JSON write raise
+    # A lone surrogate in the engine response can make the JSON write raise
     # UnicodeEncodeError; it must be caught like any other audit failure (decision
     # still printed, loud error, rc==1), not escape to the generic "fatal" handler.
     _stub_engine(monkeypatch, audit_error=UnicodeEncodeError("utf-8", "\ud800", 0, 1, "bad"))
     rc = main_mod.run_engine({}, "BTC")
     captured = capsys.readouterr()
     assert rc == 1
-    assert '"intent": "open_long"' in captured.out  # decision printed, not lost
+    assert '"decision_mode": "set_target"' in captured.out  # decision printed, not lost
     assert "audit log write failed" in captured.err
+
+
+def test_run_engine_audit_failure_takes_precedence_over_contract_exit_3(monkeypatch, capsys):
+    # Both alarms in one round: the model broke the contract AND the audit write
+    # failed. Exit 1 wins (infrastructure failure is the louder alarm), so a
+    # scheduler alerting specifically on exit 3 must also cover exit 1.
+    _stub_engine(
+        monkeypatch,
+        final_state={"final_trade_decision": ""},
+        audit_error=OSError("disk full"),
+    )
+    rc = main_mod.run_engine({}, "BTC")
+    assert rc == 1
+    assert "audit log write failed" in capsys.readouterr().err
 
 
 def test_run_engine_aborts_when_all_indicators_fail(monkeypatch, capsys):
     # Enough candles to clear the warm-up gate, but every known indicator is None:
     # stockstats failed on every column. This is indistinguishable from a warm-up
-    # dict downstream (regime -> RANGING, ATR stop disabled), so run_engine must
-    # abort before the LLM call rather than trade on a fully-dead indicator set.
+    # dict downstream (regime -> RANGING), so run_engine must abort before the LLM
+    # call rather than trade on a fully-dead indicator set.
     _stub_engine(monkeypatch)
 
     class _DeadCtx:
@@ -395,9 +436,9 @@ def test_run_engine_aborts_when_all_indicators_fail(monkeypatch, capsys):
 
 def test_run_engine_aborts_when_only_atr_fails(monkeypatch, capsys):
     # Decision B: a *single* dead indicator (atr_14) slips past the all-dead guard, but
-    # atr_14 is load-bearing — classify_regime would silently default to RANGING and the
-    # ATR stop-loss would be disabled. run_engine must abort before the LLM call rather
-    # than trade on a fabricated-calm regime with no stop.
+    # atr_14 is load-bearing — classify_regime would silently default to RANGING,
+    # hiding a volatile market. run_engine must abort before the LLM call rather
+    # than trade on a fabricated-calm regime.
     _stub_engine(monkeypatch)
 
     class _AtrDeadCtx:
@@ -468,67 +509,183 @@ def test_run_engine_success_writes_log_and_returns_zero(monkeypatch, capsys):
     _stub_engine(monkeypatch)
     monkeypatch.setattr(
         main_mod,
-        "log_decision",
+        "log_target_decision",
         lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
     )
     rc = main_mod.run_engine({}, "BTC")
     assert rc == 0
     assert written["coin"] == "BTC"
+    assert written["parsed"].is_valid
+    assert written["risk_result"].risk_action.value == "approved"
+    # Decision-time sizing inputs must reach the audit record (values from _stub_engine).
+    assert written["mark_price"] == Decimal("60000")
+    assert written["account_equity"] == Decimal("10000")
+    # prompt_hash must cover everything the adapter injected: the market
+    # context AND the output-format contract (whose grid/min_confidence come
+    # from the live config), so config changes always change the hash.
+    assert "## Perpetual market context\nctx text" in written["prompt"]
+    assert "## Required final decision output format" in written["prompt"]
     assert "decision log written to" in capsys.readouterr().err
 
 
-def test_run_engine_aborts_on_empty_engine_output(monkeypatch, capsys):
-    # An empty final_trade_decision (DEFAULT) is indistinguishable from an engine that
-    # crashed before populating the key — a real Hold emits the word "Hold". Abort the
-    # round (exit 1, mirroring PARSE_FALLBACK) rather than persist a Hold that would
-    # freeze a live position on what may be an engine failure. Nothing is logged.
+def test_run_engine_healthy_risk_rejection_exits_zero(monkeypatch, capsys):
+    # A contract-valid decision the gate risk-REJECTS (low confidence) is a
+    # healthy outcome: the round completes, the audit record is written, and the
+    # run exits 0 — non-zero codes are reserved for contract failures (3) and
+    # config/env/audit errors (1, 2).
+    written = {}
+    low_conf = _VALID_DECISION_TEXT.replace('"confidence": 0.78', '"confidence": 0.1')
+    _stub_engine(monkeypatch, final_state={"final_trade_decision": low_conf})
+    monkeypatch.setattr(
+        main_mod,
+        "log_target_decision",
+        lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
+    )
+    rc = main_mod.run_engine({}, "BTC")
+    assert rc == 0
+    assert written["parsed"].is_valid  # the contract was honoured
+    result = written["risk_result"]
+    assert result.risk_action.value == "rejected"
+    assert result.risk_reason == "low_confidence"
+    assert result.order_created is False
+    assert "decision log written to" in capsys.readouterr().err
+
+
+def test_run_engine_fails_closed_on_empty_engine_output(monkeypatch, capsys):
+    # An empty final_trade_decision carries no structured target: the Phase 2
+    # contract fails closed to maintain_current (invalid_output) and the round IS
+    # recorded — the raw (empty) response and the fail-closed verdict are exactly
+    # what the validation counters need. No order can result, and the run exits 3
+    # (distinct from success) so a naive scheduler can alert on model drift.
     written = {}
     _stub_engine(monkeypatch, final_state={"final_trade_decision": ""})
     monkeypatch.setattr(
         main_mod,
-        "log_decision",
+        "log_target_decision",
         lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
     )
     rc = main_mod.run_engine({}, "BTC")
-    assert rc == 1
-    assert "empty final_trade_decision" in capsys.readouterr().err
-    assert written == {}  # aborted before log_decision — nothing persisted
+    assert rc == 3
+    assert "failing closed" in capsys.readouterr().err
+    assert written["parsed"].is_valid is False
+    assert written["parsed"].invalid_reason == "invalid_output"
+    result = written["risk_result"]
+    assert result.risk_action.value == "invalid_fail_closed"
+    assert result.order_created is False
+    # Sizing inputs must reach the record even on fail-closed rounds — they are
+    # what makes a no-order record (target_* all None) reconstructible later.
+    assert written["mark_price"] == Decimal("60000")
+    assert written["account_equity"] == Decimal("10000")
 
 
-def test_run_engine_aborts_on_non_hold_decision_with_zero_account(monkeypatch, capsys):
-    # No wallet configured (or a genuinely empty account) -> account_value == 0. A
-    # non-Hold decision (here OPEN_LONG from a Buy rating) can't be sized against $0 of
-    # net value, so run_engine must abort (exit 1) and persist nothing rather than emit
-    # an order against a zero account.
+def test_run_engine_aborts_before_llm_when_no_account_equity(monkeypatch, capsys):
+    # No funded wallet -> account_value == 0 (a live snapshot of 0 is rejected at
+    # construction and surfaces as a failed lookup instead). RiskGate would
+    # risk-reject (no_account_equity) every directional target against zero equity,
+    # so running the engine is guaranteed-wasted LLM spend: run_engine aborts
+    # (exit 1) before building the graph, and writes no decision log.
+    built = []
     written = {}
     _stub_engine(monkeypatch, account_value=Decimal(0))
+    monkeypatch.setattr(main_mod, "build_graph", lambda **k: built.append("built") or object())
     monkeypatch.setattr(
         main_mod,
-        "log_decision",
+        "log_target_decision",
         lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
     )
     rc = main_mod.run_engine({}, "BTC")
     assert rc == 1
-    assert "refusing to act" in capsys.readouterr().err
-    assert written == {}  # aborted before log_decision — nothing persisted
+    assert built == []  # aborted before the engine build / LLM spend
+    assert written == {}  # nothing was logged
+    assert "no usable account equity" in capsys.readouterr().err
 
 
-def test_run_engine_aborts_on_unparseable_engine_output(monkeypatch, capsys):
-    # A non-empty engine output with no recognized rating (PARSE_FALLBACK) is a
-    # malformed response, not a deliberate Hold. run_engine must abort the round
-    # (exit 1) rather than emit an actionable Hold — against a live position that Hold
-    # would silently mask a would-be CLOSE — and must NOT persist it to the audit log.
+def test_run_engine_warns_on_position_leverage_mismatch(monkeypatch, capsys):
+    # A live position whose real leverage differs from risk.leverage (e.g. a
+    # manually opened 5x position under the default leverage: 1) disables the
+    # rebalance deadband inside the gate — the operator must see that condition
+    # named on stderr, not discover it from an unexpected order. The fixture
+    # pins current margin_pct == the requested 35%, the exact case a matching
+    # leverage would have swallowed as within_deadband.
+    written = {}
+    _stub_engine(monkeypatch)
+    position = PerpPosition(
+        coin="BTC",
+        size=Decimal("0.29"),  # ~17400 notional at mark 60000 (a real 5x position)
+        entry_price=Decimal("59000"),
+        unrealized_pnl=Decimal("10"),
+        margin_used=Decimal("3500"),  # margin_pct = 35 == the stubbed request
+        leverage=Decimal(5),
+    )
+    monkeypatch.setattr(
+        main_mod, "_load_position", lambda *a, **k: (position, Decimal("10000"), True)
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "log_target_decision",
+        lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
+    )
+    rc = main_mod.run_engine({}, "BTC")
+    assert rc == 0  # the mismatch is a warning, not an abort
+    err = capsys.readouterr().err
+    assert "position leverage 5 != configured risk.leverage 1" in err
+    result = written["risk_result"]
+    assert result.order_created is True  # deadband disabled — not within_deadband
+    assert result.no_order_reason is None
+
+
+def test_run_engine_warns_on_unusable_position_margin(monkeypatch, capsys):
+    # A sized position with no usable margin_used (degraded account read) means
+    # the gate cannot evaluate the rebalance deadband, so the same-side rebalance
+    # executes unconditionally — the operator must see that condition named on
+    # stderr, same visibility contract as the leverage-mismatch warning above.
+    # leverage stays None (unreported) so only the margin warning fires.
+    written = {}
+    _stub_engine(monkeypatch)
+    position = PerpPosition(
+        coin="BTC",
+        size=Decimal("0.058"),  # ~3480 notional at mark 60000 (~1x sizing)
+        entry_price=Decimal("59000"),
+        unrealized_pnl=Decimal("10"),
+        margin_used=None,  # exchange read carried no usable committed margin
+        leverage=None,
+    )
+    monkeypatch.setattr(
+        main_mod, "_load_position", lambda *a, **k: (position, Decimal("10000"), True)
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "log_target_decision",
+        lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
+    )
+    rc = main_mod.run_engine({}, "BTC")
+    assert rc == 0  # the degraded read is a warning, not an abort
+    err = capsys.readouterr().err
+    assert "position margin_used is unusable" in err
+    assert "position leverage" not in err  # unreported leverage stays un-warned
+    result = written["risk_result"]
+    assert result.order_created is True  # deadband skipped — not within_deadband
+    assert result.no_order_reason is None
+
+
+def test_run_engine_fails_closed_on_unparseable_engine_output(monkeypatch, capsys):
+    # A non-empty engine output with no structured JSON target is a malformed
+    # response, not a deliberate maintain: the contract fails closed to
+    # maintain_current, records the raw response verbatim, creates no order,
+    # and exits 3 so the contract failure is visible to a scheduler.
     written = {}
     _stub_engine(monkeypatch, final_state={"final_trade_decision": "I cannot help with that."})
     monkeypatch.setattr(
         main_mod,
-        "log_decision",
+        "log_target_decision",
         lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
     )
     rc = main_mod.run_engine({}, "BTC")
-    assert rc == 1
-    assert "error" in capsys.readouterr().err
-    assert written == {}  # aborted before log_decision — nothing persisted
+    assert rc == 3
+    assert "failing closed" in capsys.readouterr().err
+    assert written["parsed"].is_valid is False
+    assert written["parsed"].raw_response == "I cannot help with that."
+    assert written["risk_result"].order_created is False
 
 
 # --------------------------------------------------------------------------
@@ -546,6 +703,53 @@ def test_main_exchange_error_returns_exit_code_1(monkeypatch, capsys):
     rc = main_mod.main(["--coin", "BTC"])
     assert rc == 1
     assert "error: bad read" in capsys.readouterr().err
+
+
+def test_main_invalid_config_returns_exit_code_1(monkeypatch, capsys):
+    # A ValueError out of load_config (typo'd top-level block, non-mapping YAML)
+    # is an actionable operator error — a named exit 1, not the exit-2 bucket.
+    def _bad(path):
+        raise ValueError("unknown top-level config key(s): 'riks'.")
+
+    monkeypatch.setattr(main_mod, "load_config", _bad)
+    rc = main_mod.main(["--coin", "BTC"])
+    assert rc == 1
+    assert "invalid config" in capsys.readouterr().err
+
+
+def test_main_yaml_syntax_error_returns_exit_code_1(tmp_path, capsys):
+    # A YAML syntax error (the most common config mistake of all) must land in
+    # the same named exit-1 bucket as validation failures — yaml.YAMLError is
+    # not a ValueError, so without the explicit catch it would escape main()
+    # as a raw traceback.
+    bad = tmp_path / "broken.yaml"
+    bad.write_text("risk: {leverage: 1\n", encoding="utf-8")  # unclosed mapping
+    rc = main_mod.main(["--config", str(bad), "--coin", "BTC"])
+    assert rc == 1
+    assert "invalid config" in capsys.readouterr().err
+
+
+def test_main_missing_config_path_returns_exit_code_1(tmp_path, capsys):
+    # Same contract for a bad --config path: FileNotFoundError is an OSError,
+    # caught and named, keeping load_config's helpful copy-the-example message.
+    rc = main_mod.main(["--config", str(tmp_path / "nope.yaml"), "--coin", "BTC"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "invalid config" in err
+    assert "config not found" in err
+
+
+def test_main_bad_phase1_config_value_returns_exit_code_1(tmp_path, capsys):
+    # End-to-end pin for the load-time value guards: a typo'd network value is a
+    # ValueError from load_config, so it rides the CONFIG_LOAD_ERRORS lane to a
+    # named exit 1 — not an exit-2 traceback from deep inside the SDK client.
+    bad = tmp_path / "value.yaml"
+    bad.write_text("network: mainet\ncoins: [BTC]\n", encoding="utf-8")
+    rc = main_mod.main(["--config", str(bad), "--coin", "BTC"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "invalid config" in err
+    assert "'network' must be" in err
 
 
 def test_main_unexpected_error_returns_exit_code_2(monkeypatch, capsys, caplog):

@@ -130,6 +130,52 @@ def test_perp_position_valid_short_with_negative_size_builds():
     assert pos.is_short and pos.entry_price == Decimal("60000")
 
 
+def test_perp_position_rejects_zero_size():
+    # size == 0 is a third state is_long/is_short both call False — a flat account
+    # must be None, never a zero-size instance. Enforced at construction so no path
+    # can sneak one past the mapper's None-for-flat mapping.
+    with pytest.raises(ValueError, match="non-zero"):
+        PerpPosition(**_position(size=Decimal("0")))
+
+
+@pytest.mark.parametrize("field", ["leverage", "liquidation_price"])
+@pytest.mark.parametrize("bad", [Decimal("0"), Decimal("-1")])
+def test_perp_position_rejects_nonpositive_leverage_and_liquidation(field, bad):
+    # leverage/liquidation_price are optional, but a value that survives the mapper's
+    # _opt_dec is well-formed by definition — a non-positive one is a corrupt record,
+    # not an absent field. Mirror the entry_price > 0 guard.
+    with pytest.raises(ValueError, match=field):
+        PerpPosition(**_position(**{field: bad}))
+
+
+@pytest.mark.parametrize("field", ["margin_used", "position_value"])
+def test_perp_position_rejects_negative_magnitude(field):
+    # margin_used/position_value are magnitudes (>= 0); margin_used in particular
+    # feeds current_position_state's margin_pct division. A negative value is corrupt.
+    with pytest.raises(ValueError, match=field):
+        PerpPosition(**_position(**{field: Decimal("-1")}))
+
+
+def test_perp_position_allows_zero_magnitudes():
+    # Zero margin_used/position_value is legal (>= 0), unlike the strict price guards.
+    pos = PerpPosition(**_position(margin_used=Decimal("0"), position_value=Decimal("0")))
+    assert pos.margin_used == Decimal("0") and pos.position_value == Decimal("0")
+
+
+def test_account_snapshot_rejects_duplicate_coin():
+    # position_for returns the first match, so a duplicate coin would silently drop
+    # the second position and misreport exposure — the exchange never reports two
+    # positions for one coin, so reject it at construction.
+    dupes = (PerpPosition(**_position()), PerpPosition(**_position(size=Decimal("2"))))
+    with pytest.raises(ValueError, match="duplicate coin"):
+        AccountSnapshot(
+            account_value=Decimal("1000"),
+            withdrawable=Decimal("500"),
+            total_margin_used=Decimal("500"),
+            positions=dupes,
+        )
+
+
 @pytest.mark.parametrize("bad", ["", "   "])
 def test_market_snapshot_rejects_empty_coin(bad):
     # An empty/whitespace coin keys position_for() and the audit filename; it would
@@ -208,7 +254,7 @@ def test_perp_market_context_rejects_empty_coin(bad):
 
 def test_perp_market_context_rejects_naive_as_of():
     # A naive as_of serializes to an offset-less ISO string that looks UTC on a UTC
-    # host but is wrong elsewhere (build_log_record rejects naive timestamps too).
+    # host but is wrong elsewhere (the audit log rejects naive timestamps too).
     with pytest.raises(ValueError, match="timezone-aware"):
         PerpMarketContext(**_context(as_of=datetime(2026, 6, 29, 12, 0)))
 

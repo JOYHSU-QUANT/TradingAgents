@@ -122,11 +122,10 @@ def compute_indicators(candles: Sequence[Candle], names: Sequence[str]) -> dict[
         except Exception as exc:  # noqa: BLE001 — a bad column shouldn't crash the build
             # Leave a trace: a silently-missing indicator is otherwise invisible. Call
             # out atr_14 specifically — its absence is not just "one missing number":
-            # classify_regime falls back to RANGING (hiding a volatile market) and
-            # _invalidation_price returns None (no ATR stop-loss), so a bare "failed"
-            # would understate the blast radius.
+            # classify_regime falls back to RANGING (hiding a volatile market), so a
+            # bare "failed" would understate the blast radius.
             consequence = (
-                " — regime will default to RANGING and the ATR stop-loss is disabled"
+                " — regime will default to RANGING, hiding a volatile market"
                 if name == "atr_14"
                 else ""
             )

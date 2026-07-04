@@ -4,10 +4,11 @@ Two paths:
 
 - ``--context-only`` (Milestone A): connect to mainnet read-only, build and print
   the :class:`PerpMarketContext`. No API key, no wallet required.
-- full run (Milestone B): build the context, drive the **unmodified** TradingAgents
-  engine with that context injected, map the engine's rating into a
-  :class:`PerpTradeDecision`, write the audit log, and print the decision. Needs
-  ``OPENROUTER_API_KEY``.
+- full run: build the context, drive the **unmodified** TradingAgents engine with
+  that context (and the Phase 2 output-format contract) injected, parse the
+  structured target JSON out of ``final_trade_decision``, run the deterministic
+  RiskGate, write the audit record (raw response preserved), and print the
+  outcome. Needs ``OPENROUTER_API_KEY``.
 
     python -m contrib.hyperliquid_perp.main --context-only --coin BTC
     python -m contrib.hyperliquid_perp.main --coin BTC
@@ -23,19 +24,23 @@ import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from .audit.decision_log import log_decision
-from .config import load_config, wallet_address
+from .audit.decision_log import log_target_decision
+from .config import CONFIG_LOAD_ERRORS, load_config, wallet_address
+from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context
-from .domains.perp.decision import Intent
 from .domains.perp.indicators import required_candles, supported_indicators
 from .domains.perp.prompt_context import render_market_context
 from .domains.perp.schema import PerpMarketContext, PerpPosition
+from .domains.perp.target_decision import (
+    DecisionConfig,
+    decision_format_instructions,
+    parse_target_decision,
+)
 from .exchanges.hyperliquid.account import HyperliquidAccount
 from .exchanges.hyperliquid.errors import ExchangeError
 from .exchanges.hyperliquid.market_data import HyperliquidMarketData
 from .exchanges.hyperliquid.sdk_client import HyperliquidClient
-from .integration.decision_adapter import DecisionAdapter, RatingSource
-from .integration.trading_graph import build_graph
+from .integration.trading_graph import build_graph, inject_perp_context
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +48,21 @@ _DEFAULT_INDICATORS = ["rsi_14", "ema_20", "ema_50", "atr_14", "macd"]
 _DEFAULT_ANALYSTS = ["market", "social", "news"]
 
 
+def _warn_dual(log_msg: str, *args: object, stderr: str) -> None:
+    """One warning, both channels: the structured log and stderr.
+
+    An operator scraping only the log stream (or only capturing stderr) must
+    still see the condition — every warning site in this file goes through
+    here so the two channels cannot silently drift apart.
+    """
+    logger.warning(log_msg, *args)
+    print(stderr, file=sys.stderr)
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="python -m contrib.hyperliquid_perp.main",
-        description="Hyperliquid perp — Phase 1 (data + context + engine).",
+        description="Hyperliquid perp — Phase 2 (structured target contract + RiskGate).",
     )
     parser.add_argument(
         "--context-only",
@@ -93,6 +109,28 @@ def _warmup_threshold(config: dict) -> int:
     path (hard abort) and ``--context-only`` (warn) so a future caller can't drift.
     """
     return required_candles(_indicator_names(config))
+
+
+def _load_risk_decision(config: dict) -> tuple[risk_gate.RiskConfig, DecisionConfig] | None:
+    """Parse + cross-validate the ``risk:``/``decision:`` blocks; ``None`` if invalid.
+
+    A malformed block — unknown/typo'd keys, bad values, or a max_target margin
+    cap that snaps below the decision grid (which would clamp every directional
+    target to 0 and risk-reject it) — is reported as a named config error and
+    the caller exits 1. Shared by the engine path and ``--context-only`` so the
+    free smoke run validates exactly what the paid run will consume.
+    """
+    try:
+        risk_cfg = risk_gate.RiskConfig.from_dict(config.get("risk"))
+        decision_cfg = DecisionConfig.from_dict(config.get("decision"))
+        risk_gate.validate_risk_decision_config(risk_cfg, decision_cfg)
+    except ValueError as exc:
+        print(
+            f"error: invalid risk:/decision: config — {exc}. Fix the YAML block and re-run.",
+            file=sys.stderr,
+        )
+        return None
+    return risk_cfg, decision_cfg
 
 
 def _build_context(config: dict, coin: str) -> tuple[PerpMarketContext, HyperliquidClient]:
@@ -146,11 +184,13 @@ def _load_position(
         account = HyperliquidAccount(client).get_account_snapshot(addr)
     except ExchangeError as exc:
         # A request/malformed-feed failure — transient or infrastructure, not an
-        # account state. Emit to the structured log as well as stderr: an operator
-        # capturing only stdout (or scraping the log stream) would otherwise never see
-        # that the position read failed and the run is proceeding without it.
-        logger.warning("Hyperliquid account request failed for %s: %s", coin, exc)
-        print(f"(account lookup skipped — request failed: {exc})", file=sys.stderr)
+        # account state.
+        _warn_dual(
+            "Hyperliquid account request failed for %s: %s",
+            coin,
+            exc,
+            stderr=f"(account lookup skipped — request failed: {exc})",
+        )
         return None, Decimal(0), False
     except ValueError as exc:
         # A structurally-unusable snapshot the schema rejects at construction — e.g. a
@@ -159,16 +199,23 @@ def _load_position(
         # log it distinctly so an operator isn't sent chasing a phantom outage. Caught
         # here (rather than escaping to main's last-resort handler as exit 2 "unexpected
         # error") so it reports the same clean failed lookup (ok=False -> exit 1).
-        logger.warning(
-            "account snapshot rejected for %s (margin-called / empty / invalid?): %s", coin, exc
+        _warn_dual(
+            "account snapshot rejected for %s (margin-called / empty / invalid?): %s",
+            coin,
+            exc,
+            stderr=f"(account lookup skipped — snapshot unusable: {exc})",
         )
-        print(f"(account lookup skipped — snapshot unusable: {exc})", file=sys.stderr)
         return None, Decimal(0), False
     return account.position_for(coin), account.account_value, True
 
 
 def run_context_only(config: dict, coin: str) -> int:
     """Build and print the market context for ``coin``."""
+    # The parsed configs aren't consumed here — the validation runs purely for
+    # its named exit-1 side effect, before any network fetch (see the docstring
+    # for why the smoke run validates at all).
+    if _load_risk_decision(config) is None:
+        return 1
     ctx, client = _build_context(config, coin)
 
     print("\n" + "=" * 64)
@@ -183,20 +230,16 @@ def run_context_only(config: dict, coin: str) -> int:
     # not mistaken for a live signal (run_engine hard-aborts on the same condition).
     needed = _warmup_threshold(config)
     if ctx.candle_count < needed:
-        # Emit to the structured log as well as stderr (mirroring _load_position): an
-        # operator scraping only the log stream would otherwise never see that the
-        # rendered context is under-warmed and must not be read as live signal.
-        logger.warning(
+        _warn_dual(
             "under-warmed context for %s: %d candles available, indicators need %d",
             coin,
             ctx.candle_count,
             needed,
-        )
-        print(
-            f"warning: only {ctx.candle_count} candles available for {coin}, but the "
-            f"configured indicators need {needed}. The indicators and regime above are "
-            "under-warmed (degraded) — do not read them as live signal.",
-            file=sys.stderr,
+            stderr=(
+                f"warning: only {ctx.candle_count} candles available for {coin}, but the "
+                f"configured indicators need {needed}. The indicators and regime above are "
+                "under-warmed (degraded) — do not read them as live signal."
+            ),
         )
 
     # Optional: if a real wallet is configured, also report the current position.
@@ -226,7 +269,7 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     except ImportError as exc:
         # Deferred so --context-only stays import-light, but if the engine package is
         # missing/moved this surfaces a clear cause instead of a generic top-level
-        # "unexpected error" (mirrors decision_adapter.resolve_rating's import guard).
+        # "unexpected error".
         raise RuntimeError(
             "tradingagents.default_config.DEFAULT_CONFIG is not importable — "
             "is the tradingagents package installed?"
@@ -255,7 +298,7 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
 
 
 def run_engine(config: dict, coin: str) -> int:
-    """Full Phase-1 run: context -> engine -> adapter -> decision -> log."""
+    """Full run: context -> engine -> structured target parse -> RiskGate -> log."""
     if not os.environ.get("OPENROUTER_API_KEY"):
         raise SystemExit(
             "OPENROUTER_API_KEY is not set — needed for the engine run. "
@@ -279,8 +322,8 @@ def run_engine(config: dict, coin: str) -> int:
     # fully-None known-indicator set is not under-warm — it means the indicator
     # engine (stockstats) failed on every column (version drift, bad frame). That
     # set is indistinguishable from a warm-up dict downstream: the regime silently
-    # defaults to RANGING and the ATR stop-loss is disabled. Refuse it the same way,
-    # before spending an LLM call on signals that are all dead.
+    # defaults to RANGING. Refuse it the same way, before spending an LLM call on
+    # signals that are all dead.
     _known = set(supported_indicators())
     _computed = [v for k, v in ctx.indicators.items() if k in _known]
     if _computed and all(v is None for v in _computed):
@@ -293,16 +336,16 @@ def run_engine(config: dict, coin: str) -> int:
         )
         return 1
     # atr_14 is load-bearing beyond being "one missing number": classify_regime falls
-    # back to RANGING (hiding a volatile market) and the ATR stop-loss is disabled when
-    # it is absent. Past the warm-up gate there are enough candles to compute it, so a
-    # None atr_14 here means stockstats failed on that column specifically — and a
-    # single dead indicator slips past the all-dead guard above. Refuse the run rather
-    # than trade on a fabricated-calm regime with no stop.
+    # back to RANGING (hiding a volatile market) when it is absent. Past the warm-up
+    # gate there are enough candles to compute it, so a None atr_14 here means
+    # stockstats failed on that column specifically — and a single dead indicator
+    # slips past the all-dead guard above. Refuse the run rather than trade on a
+    # fabricated-calm regime.
     if "atr_14" in ctx.indicators and ctx.indicators["atr_14"] is None:
         print(
             f"error: atr_14 failed to compute for {coin} despite {ctx.candle_count} "
-            "candles — the regime would silently default to RANGING and the ATR "
-            "stop-loss would be disabled. Refusing to run the engine without a usable ATR.",
+            "candles — the regime would silently default to RANGING, hiding a "
+            "volatile market. Refusing to run the engine without a usable ATR.",
             file=sys.stderr,
         )
         return 1
@@ -319,11 +362,47 @@ def run_engine(config: dict, coin: str) -> int:
         )
         return 1
 
+    # RiskGate sizes every target against net account value. A successful lookup
+    # always yields account_value > 0 (a zero/negative snapshot is rejected at
+    # construction and reported above as a failed lookup), so account_value == 0
+    # here means no funded wallet is configured. Against zero equity every
+    # directional target is risk-rejected (no_account_equity) and no order can ever
+    # be created — abort now, before the engine build and its LLM spend, rather than
+    # pay for a decision the gate is guaranteed to reject. Use --context-only for a
+    # keyless diagnostic run.
+    if account_value <= 0:
+        print(
+            "error: no usable account equity (account_value = 0) — RiskGate cannot "
+            "size any order, so every directional target would be risk-rejected "
+            "(no_account_equity). Configure a funded wallet_address, or use "
+            "--context-only for a keyless diagnostic run. Refusing to spend an LLM "
+            "call on an unusable account state.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Named config error (exit 1, like the API-key and warm-up checks), not
+    # main's exit-2 "unexpected error" bucket — an operator typo is expected,
+    # not a bug; and it must abort here, before any LLM spend.
+    cfgs = _load_risk_decision(config)
+    if cfgs is None:
+        return 1
+    risk_cfg, decision_cfg = cfgs
+
+    # Advertise the *effective* margin ceiling (grid max capped by the risk
+    # allocation cap) so the model is never told a margin is legal that the
+    # gate deterministically clamps — a clamped audit record then means the
+    # risk gate genuinely intervened, not business as usual.
+    output_format_text = decision_format_instructions(
+        decision_cfg,
+        max_pct=risk_gate.effective_max_target_margin_pct(risk_cfg, decision_cfg),
+    )
     engine_config, selected_analysts = _build_engine_config(config)
     graph = build_graph(
         perp_context_text=ctx_text,
         config=engine_config,
         selected_analysts=selected_analysts,
+        output_format_text=output_format_text,
     )
 
     trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -362,7 +441,7 @@ def run_engine(config: dict, coin: str) -> int:
         return 1
     final_state, _signal = propagated[0], propagated[1]
     if not isinstance(final_state, dict):
-        # ``to_perp_decision`` indexes ``final_state`` as a dict; a non-dict (e.g.
+        # The parse seam reads ``final_state`` as a dict; a non-dict (e.g.
         # ``None`` from an engine crash) would otherwise surface as an opaque
         # ``AttributeError`` in the last-resort handler. Fail clean instead.
         print(
@@ -372,92 +451,134 @@ def run_engine(config: dict, coin: str) -> int:
         )
         return 1
 
-    adapter = DecisionAdapter(ctx, position, account_value, config.get("adapter"))
-    # ``decide`` returns the rating + rating_source from the *same* parse that built
-    # the decision, so the audit log is stamped from a single source of truth — no
-    # second parse here with a separate sentinel that could drift. PARSE_FALLBACK
-    # (non-empty output, no recognized rating) and DEFAULT (empty final_trade_decision,
-    # e.g. the engine crashed before populating the key) are both non-decisions: abort
-    # the round fail-closed rather than emit an actionable Hold — against a live
-    # position a Hold would silently mask a would-be CLOSE, and persisting it would
-    # record an engine failure as if it were a deliberate decision. Only EXPLICIT
-    # proceeds to logging.
-    decision, rating, rating_source = adapter.decide(final_state)
-    if rating_source == RatingSource.PARSE_FALLBACK:
-        print(
-            "error: engine returned a non-empty final_trade_decision with no "
-            "recognized rating — aborting the round rather than acting on a malformed "
-            "response. No decision was produced or logged.",
-            file=sys.stderr,
+    # Phase 2 contract: parse the structured target JSON out of the engine's
+    # final_trade_decision. Any invalid output — no JSON, bad schema, illegal
+    # cross-field combination — fails closed to maintain_current inside the
+    # parse seam; the raw response is preserved for the audit record either way.
+    parsed = parse_target_decision(final_state.get("final_trade_decision"), decision_cfg)
+    if not parsed.is_valid:
+        # Repeated contract failures are the model-drift signal alerting must
+        # see: the cycle still completes fail-closed (gate + audit record
+        # below), but the run exits 3 at the end so a naive scheduler can
+        # alert on the exit code instead of log-scraping.
+        _warn_dual(
+            "engine output failed the structured-target contract for %s: %s",
+            coin,
+            parsed.invalid_reason,
+            stderr=(
+                f"warning: engine output failed the structured-target contract "
+                f"({parsed.invalid_reason}) — failing closed to maintain_current."
+            ),
         )
-        return 1
-    if rating_source == RatingSource.DEFAULT:
-        # An empty final_trade_decision is indistinguishable from an engine that
-        # crashed/never populated the key — a real Hold emits the word "Hold". Abort
-        # fail-closed (mirroring PARSE_FALLBACK) rather than persist a Hold that would
-        # freeze a live position on what may be an engine failure.
-        print(
-            "error: engine returned an empty final_trade_decision — aborting the round "
-            "rather than persisting a Hold that may mask an engine failure (a real Hold "
-            "emits the word 'Hold'). No decision was produced or logged.",
-            file=sys.stderr,
+
+    # The deterministic RiskGate sizes and checks the target against the live
+    # account state (mark-based valuation). A zero-equity account risk-rejects
+    # any directional target inside the gate (risk_reason=no_account_equity).
+    current = risk_gate.current_position_state(position, account_value, ctx.mark_price)
+    if current.leverage is not None and current.leverage != risk_cfg.leverage:
+        # margin% only tracks notional when the position's real leverage matches
+        # the configured risk.leverage (e.g. a manually opened 5x position under
+        # ``leverage: 1``). The gate disables the rebalance deadband on this
+        # mismatch so any rebalance this cycle converges the true notional to the
+        # target — make the condition visible to the operator here. (Warned on
+        # every mismatched cycle, even when the decision ends up producing no
+        # order — the mismatch itself is the operator-actionable state.)
+        _warn_dual(
+            "position leverage %s differs from configured risk.leverage %s for %s — "
+            "rebalance deadband disabled for this cycle",
+            current.leverage,
+            risk_cfg.leverage,
+            coin,
+            stderr=(
+                f"warning: position leverage {current.leverage} != configured "
+                f"risk.leverage {risk_cfg.leverage} — rebalance deadband disabled "
+                "for this cycle."
+            ),
         )
-        return 1
-    # A zero/unknown account value (no wallet configured, or a genuinely empty account)
-    # cannot size a position. Refuse to act on a non-Hold decision rather than emit an
-    # OPEN/REDUCE/CLOSE computed against $0 of net value; a Hold is harmless and still
-    # logged for the audit trail.
-    if account_value <= 0 and decision.intent != Intent.HOLD:
-        print(
-            f"error: account value is {account_value} (no wallet configured or an empty "
-            f"account) — refusing to act on a '{decision.intent.value}' decision sized "
-            "against a zero account. No decision was logged.",
-            file=sys.stderr,
+    if current.side is not None and current.margin_pct is None:
+        # A sized position with no usable margin_used (degraded account read):
+        # the gate cannot evaluate the rebalance deadband, so a same-side
+        # rebalance executes unconditionally this cycle. Same operator-visibility
+        # contract as the leverage-mismatch warning above — warned every cycle
+        # the degraded read persists.
+        _warn_dual(
+            "position margin_used unusable for %s — rebalance deadband skipped this cycle",
+            coin,
+            stderr=(
+                "warning: position margin_used is unusable — rebalance deadband "
+                "skipped for this cycle."
+            ),
         )
-        return 1
+    result = risk_gate.evaluate(
+        parsed,
+        account_equity=account_value,
+        current=current,
+        risk=risk_cfg,
+        decision_cfg=decision_cfg,
+    )
+
     models = {
         "provider": engine_config["llm_provider"],
         "deep": engine_config["deep_think_llm"],
         "quick": engine_config["quick_think_llm"],
     }
-    # Print the decision *before* persisting it, so a later audit-write failure can
+    # Print the outcome *before* persisting it, so a later audit-write failure can
     # never make a decision the engine already produced vanish silently.
     print("\n" + "=" * 64)
-    print(f"PerpTradeDecision - {coin} (engine rating: {rating})")
+    print(f"TargetDecision - {coin} (risk_action: {result.risk_action.value})")
     print("=" * 64)
-    print(json.dumps(decision.to_dict(), indent=2, ensure_ascii=False))
+    print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
     print("=" * 64)
 
     try:
-        _record, path = log_decision(
+        # ``prompt_hash`` covers everything this adapter injected — the market
+        # context AND the output-format contract (which embeds the live margin
+        # grid / min_confidence), assembled exactly as resolve_instrument_context
+        # appends it — so two records with different decision:/risk: config can
+        # never carry the same hash. The engine's own base instrument context is
+        # engine-internal and not captured.
+        _record, path = log_target_decision(
             coin=coin,
-            decision=decision,
-            prompt=ctx_text,
+            parsed=parsed,
+            risk_result=result,
+            mark_price=ctx.mark_price,
+            account_equity=account_value,
+            prompt=inject_perp_context("", ctx_text, output_format_text),
             models=models,
-            rating=rating,
-            rating_source=rating_source,
             results_dir=engine_config["results_dir"],
         )
     except (OSError, ValueError, TypeError, UnicodeError, OverflowError) as exc:
         # OSError: filesystem failure. ValueError/TypeError: a non-serializable
         # record or an unset results_dir (Path(None)). UnicodeError: a lone
-        # surrogate in the engine rationale failing to encode on write.
+        # surrogate in the engine response failing to encode on write.
         # OverflowError: a float('inf') in the record overflowing json.dump.
-        # Either way
-        # the decision was already printed above, so report the persistence failure
-        # loudly rather than letting it surface as a generic "fatal" exit.
+        # Either way the outcome was already printed above, so report the
+        # persistence failure loudly rather than letting it surface as a generic
+        # "fatal" exit.
         print(
             f"ERROR: audit log write failed — the decision above was NOT persisted: {exc}",
             file=sys.stderr,
         )
         return 1
     print(f"decision log written to {path}", file=sys.stderr)
+    if not parsed.is_valid:
+        # Exit codes: 0 = success (including healthy risk rejections), 1 =
+        # config/env/engine errors, 2 = unexpected error, 3 = the model's output
+        # failed the structured-target contract (cycle completed fail-closed).
+        # The distinct code lets a naive scheduler alert on model drift.
+        return 3
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    config = load_config(args.config)
+    try:
+        config = load_config(args.config)
+    except CONFIG_LOAD_ERRORS as exc:
+        # Missing/unreadable path, YAML syntax error, or failed validation — all
+        # operator config mistakes, all the same named exit 1, never a traceback.
+        print(f"error: invalid config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
+        return 1
     coin = _resolve_coin(args, config)
 
     try:

@@ -34,10 +34,10 @@ extension points 負責把 perp 資料送*進去*、把引擎的決策讀*出來
 | `.resolve_instrument_context(ticker, asset_type) -> str` | 建立注入每個 agent 的 per-instrument context 字串。 | **Override 點**——附加 perp snapshot。 |
 | `._create_tool_nodes() -> dict[str, ToolNode]` | 註冊每個 analyst 可呼叫的 tools。 | **可選 override**——Phase 3 加即時 HL tool。 |
 | `.propagate(company_name, trade_date, asset_type) -> (final_state, signal)` | 跑整個 graph。 | 以 `asset_type="crypto"` 呼叫。 |
-| `final_state["final_trade_decision"]` | 渲染後的 `PortfolioDecision` markdown（`**Rating**: …`）。 | Adapter 輸入。 |
-| `final_state["trader_investment_plan"]` | 渲染後的 `TraderProposal`（`action`、`entry_price`、`stop_loss`、`position_sizing`）。 | Adapter 輸入——價格水位。 |
-| `PortfolioDecision` | `rating`（Buy/Overweight/Hold/Underweight/Sell）、`executive_summary`、`investment_thesis`、`price_target`、`time_horizon`。 | `intent`/`rationale` 的來源。 |
-| `signal`（第二個回傳值） | `parse_rating(...)` → 5 tiers 之一。 | 便利用途；同一個 rating。 |
+| `final_state["final_trade_decision"]` | 渲染後的 `PortfolioDecision` markdown（`**Rating**: …`）；注入 output-format 契約後結尾帶 structured target JSON。 | `parse_target_decision` 的輸入。 |
+| `final_state["trader_investment_plan"]` | 渲染後的 `TraderProposal`（`action`、`entry_price`、`stop_loss`、`position_sizing`）。 | Phase 2 不再讀取（Phase 1 adapter 的價格水位輸入，已退役）。 |
+| `PortfolioDecision` | `rating`（Buy/Overweight/Hold/Underweight/Sell）、`executive_summary`、`investment_thesis`、`price_target`、`time_horizon`。 | Phase 2 不再直接消費（Phase 1 `intent`/`rationale` 來源，已退役）；rationale 現由 target JSON 自帶。 |
+| `signal`（第二個回傳值） | `parse_rating(...)` → 5 tiers 之一。 | Phase 2 不再使用（Phase 1 便利用途，已退役）。 |
 
 > 引擎本身不會原生輸出 perp 專屬欄位。Phase 2 由注入的 output-format 契約要求
 > 引擎直接輸出 structured target JSON，再由確定性 RiskGate sizing／檢查
@@ -186,8 +186,8 @@ result = risk_gate.evaluate(
 
 在同一個子類別 override `_create_tool_nodes()`，把即時 Hyperliquid tool 加進
 相關 analyst 的 tool node——仍然是純附加、零核心修改。在那之前，注入的 context
-文字已足夠讓 agents 在散文中把 funding / OI 納入考量，精確的 perp 欄位由
-adapter 確定性補齊。
+文字已足夠讓 agents 在散文中把 funding / OI 納入考量，精確的 perp 決策欄位
+由注入的 output-format 契約要求引擎直接輸出（structured target JSON）。
 
 ---
 

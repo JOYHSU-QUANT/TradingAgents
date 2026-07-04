@@ -495,6 +495,20 @@ def run_engine(config: dict, coin: str) -> int:
                 "for this cycle."
             ),
         )
+    if current.side is not None and current.margin_pct is None:
+        # A sized position with no usable margin_used (degraded account read):
+        # the gate cannot evaluate the rebalance deadband, so a same-side
+        # rebalance executes unconditionally this cycle. Same operator-visibility
+        # contract as the leverage-mismatch warning above — warned every cycle
+        # the degraded read persists.
+        _warn_dual(
+            "position margin_used unusable for %s — rebalance deadband skipped this cycle",
+            coin,
+            stderr=(
+                "warning: position margin_used is unusable — rebalance deadband "
+                "skipped for this cycle."
+            ),
+        )
     result = risk_gate.evaluate(
         parsed,
         account_equity=account_value,

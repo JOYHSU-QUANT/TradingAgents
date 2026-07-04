@@ -634,6 +634,40 @@ def test_run_engine_warns_on_position_leverage_mismatch(monkeypatch, capsys):
     assert result.no_order_reason is None
 
 
+def test_run_engine_warns_on_unusable_position_margin(monkeypatch, capsys):
+    # A sized position with no usable margin_used (degraded account read) means
+    # the gate cannot evaluate the rebalance deadband, so the same-side rebalance
+    # executes unconditionally — the operator must see that condition named on
+    # stderr, same visibility contract as the leverage-mismatch warning above.
+    # leverage stays None (unreported) so only the margin warning fires.
+    written = {}
+    _stub_engine(monkeypatch)
+    position = PerpPosition(
+        coin="BTC",
+        size=Decimal("0.058"),  # ~3480 notional at mark 60000 (~1x sizing)
+        entry_price=Decimal("59000"),
+        unrealized_pnl=Decimal("10"),
+        margin_used=None,  # exchange read carried no usable committed margin
+        leverage=None,
+    )
+    monkeypatch.setattr(
+        main_mod, "_load_position", lambda *a, **k: (position, Decimal("10000"), True)
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "log_target_decision",
+        lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
+    )
+    rc = main_mod.run_engine({}, "BTC")
+    assert rc == 0  # the degraded read is a warning, not an abort
+    err = capsys.readouterr().err
+    assert "position margin_used is unusable" in err
+    assert "position leverage" not in err  # unreported leverage stays un-warned
+    result = written["risk_result"]
+    assert result.order_created is True  # deadband skipped — not within_deadband
+    assert result.no_order_reason is None
+
+
 def test_run_engine_fails_closed_on_unparseable_engine_output(monkeypatch, capsys):
     # A non-empty engine output with no structured JSON target is a malformed
     # response, not a deliberate maintain: the contract fails closed to

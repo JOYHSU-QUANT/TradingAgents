@@ -384,6 +384,20 @@ def test_run_engine_reports_audit_failure_on_unicode_error(monkeypatch, capsys):
     assert "audit log write failed" in captured.err
 
 
+def test_run_engine_audit_failure_takes_precedence_over_contract_exit_3(monkeypatch, capsys):
+    # Both alarms in one round: the model broke the contract AND the audit write
+    # failed. Exit 1 wins (infrastructure failure is the louder alarm), so a
+    # scheduler alerting specifically on exit 3 must also cover exit 1.
+    _stub_engine(
+        monkeypatch,
+        final_state={"final_trade_decision": ""},
+        audit_error=OSError("disk full"),
+    )
+    rc = main_mod.run_engine({}, "BTC")
+    assert rc == 1
+    assert "audit log write failed" in capsys.readouterr().err
+
+
 def test_run_engine_aborts_when_all_indicators_fail(monkeypatch, capsys):
     # Enough candles to clear the warm-up gate, but every known indicator is None:
     # stockstats failed on every column. This is indistinguishable from a warm-up
@@ -519,6 +533,10 @@ def test_run_engine_fails_closed_on_empty_engine_output(monkeypatch, capsys):
     result = written["risk_result"]
     assert result.risk_action.value == "invalid_fail_closed"
     assert result.order_created is False
+    # Sizing inputs must reach the record even on fail-closed rounds — they are
+    # what makes a no-order record (target_* all None) reconstructible later.
+    assert written["mark_price"] == Decimal("60000")
+    assert written["account_equity"] == Decimal("10000")
 
 
 def test_run_engine_aborts_before_llm_when_no_account_equity(monkeypatch, capsys):
@@ -624,6 +642,28 @@ def test_main_invalid_config_returns_exit_code_1(monkeypatch, capsys):
     rc = main_mod.main(["--coin", "BTC"])
     assert rc == 1
     assert "invalid config" in capsys.readouterr().err
+
+
+def test_main_yaml_syntax_error_returns_exit_code_1(tmp_path, capsys):
+    # A YAML syntax error (the most common config mistake of all) must land in
+    # the same named exit-1 bucket as validation failures — yaml.YAMLError is
+    # not a ValueError, so without the explicit catch it would escape main()
+    # as a raw traceback.
+    bad = tmp_path / "broken.yaml"
+    bad.write_text("risk: {leverage: 1\n", encoding="utf-8")  # unclosed mapping
+    rc = main_mod.main(["--config", str(bad), "--coin", "BTC"])
+    assert rc == 1
+    assert "invalid config" in capsys.readouterr().err
+
+
+def test_main_missing_config_path_returns_exit_code_1(tmp_path, capsys):
+    # Same contract for a bad --config path: FileNotFoundError is an OSError,
+    # caught and named, keeping load_config's helpful copy-the-example message.
+    rc = main_mod.main(["--config", str(tmp_path / "nope.yaml"), "--coin", "BTC"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "invalid config" in err
+    assert "config not found" in err
 
 
 def test_main_unexpected_error_returns_exit_code_2(monkeypatch, capsys, caplog):

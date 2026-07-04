@@ -554,6 +554,18 @@ def test_validate_risk_decision_config_rejects_off_grid_cap():
         )
 
 
+def test_validate_risk_decision_config_allows_cap_at_or_above_grid_ceiling():
+    # A cap at or above the grid ceiling can never bind (the effective limit is
+    # min(grid ceiling, cap)), so it is legal slack regardless of grid alignment —
+    # lowering only the grid ceiling must not force a matching cap edit. 70 is
+    # deliberately off the 0/20/40/60 grid; 60 pins the == boundary.
+    for cap in (60, 70, 80, 100):
+        risk_gate.validate_risk_decision_config(
+            RiskConfig(max_target_margin_pct=cap),
+            DecisionConfig(ai_target_margin_max_pct=60, target_margin_step_pct=20),
+        )
+
+
 def test_effective_max_target_margin_pct_is_min_of_grid_and_cap():
     # Defaults: grid max 100, cap 60 -> the prompt must advertise 60.
     assert risk_gate.effective_max_target_margin_pct(RiskConfig(), DecisionConfig()) == 60
@@ -625,6 +637,38 @@ def test_risk_gate_result_rejects_sign_and_margin_inconsistencies():
         replace(clamped, approved_target_margin_pct=61)
 
 
+def test_risk_gate_result_rejects_cross_field_math_mismatch():
+    # The sized fields are one quantity in three encodings (margin, notional,
+    # signed notional) plus its delta against the current position; a hand-built
+    # result (PR 3 flip re-run) whose encodings disagree must die at
+    # construction, not corrupt order sizing downstream. Each replace() below
+    # breaks exactly one identity, leaving the others intact.
+    from dataclasses import replace
+
+    ok = _evaluate(_parsed(margin=20))  # LONG on a flat book: delta == signed notional
+    with pytest.raises(ValueError, match="configured_leverage"):
+        replace(ok, target_margin=ok.target_margin * 2)
+    with pytest.raises(ValueError, match="magnitude"):
+        replace(
+            ok,
+            target_signed_notional=ok.target_signed_notional * 2,
+            delta_notional=ok.target_signed_notional * 2 - ok.current_signed_notional,
+        )
+    with pytest.raises(ValueError, match="delta_notional must equal"):
+        replace(ok, delta_notional=ok.delta_notional + 1)
+    # FLAT completion: zeroing the pct fields and signed notional is not enough —
+    # the margin/notional encodings must be zero too.
+    with pytest.raises(ValueError, match="flat target carries zero"):
+        replace(
+            ok,
+            target_side=TargetSide.FLAT,
+            requested_target_margin_pct=0,
+            approved_target_margin_pct=0,
+            target_signed_notional=Decimal(0),
+            delta_notional=Decimal(0) - ok.current_signed_notional,
+        )
+
+
 def test_current_position_state_rejects_inconsistent_fields():
     with pytest.raises(ValueError, match="flat"):
         CurrentPositionState(side=None, signed_notional=Decimal(1), margin_pct=None)
@@ -669,3 +713,24 @@ def test_result_to_dict_is_json_ready():
     assert payload["requested_target_margin_pct"] == 61
     assert payload["approved_target_margin_pct"] == 60
     assert payload["target_margin"] == "600"
+
+
+def test_result_to_dict_is_json_ready_for_no_order_variants():
+    import json
+
+    # The audit record serializes to_dict() for every outcome, so the
+    # None-heavy shapes (rejected / invalid_fail_closed / maintain) must be
+    # JSON-ready too, not just the sized happy path.
+    variants = {
+        "rejected": _evaluate(_parsed(margin=40, confidence="0.29")),
+        "invalid_fail_closed": _evaluate(_invalid_parsed()),
+        "approved": _evaluate(
+            _parsed(mode="maintain_current", side=None, margin=None, confidence=None)
+        ),
+    }
+    for action, result in variants.items():
+        payload = result.to_dict()
+        json.dumps(payload)  # no Decimal leak on the None-populated shape
+        assert payload["risk_action"] == action
+        assert payload["target_margin"] is None
+        assert payload["approved_target_margin_pct"] is None

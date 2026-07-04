@@ -19,6 +19,12 @@ _EXAMPLE = _CONFIG_DIR / "hyperliquid.example.yaml"
 # Sentinel placeholder in the example file — treated as "no wallet configured".
 _WALLET_PLACEHOLDER = "0xYOUR..."
 
+# Everything load_config can raise for an operator config mistake — a missing or
+# unreadable path (OSError), a YAML syntax error, or a failed validation below.
+# Callers turn any of these into a named exit, never a raw traceback; the list
+# lives here so a parser swap updates it next to the code that raises.
+CONFIG_LOAD_ERRORS = (ValueError, OSError, yaml.YAMLError)
+
 # The complete set of recognised top-level config keys. Unknown keys are
 # rejected (not ignored): a typo in a *block name* — e.g. ``riks:`` — would
 # otherwise silently drop the whole block and fall back to defaults, and for the

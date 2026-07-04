@@ -268,8 +268,21 @@ class RiskGateResult:
                 signed != 0
                 or self.requested_target_margin_pct != 0
                 or self.approved_target_margin_pct != 0
+                or self.target_margin != 0
+                or self.target_notional != 0
             ):
                 raise ValueError("a flat target carries zero signed notional and zero margin")
+            # The sized fields are one quantity in three encodings, so they must
+            # agree exactly — evaluate() computes them with pure Decimal math and
+            # PR 3's hand-built flip legs get no rounding slack either.
+            if self.target_notional != self.target_margin * self.configured_leverage:
+                raise ValueError("target_notional must equal target_margin * configured_leverage")
+            if abs(self.target_signed_notional) != self.target_notional:
+                raise ValueError("target_signed_notional magnitude must equal target_notional")
+            if self.delta_notional != self.target_signed_notional - self.current_signed_notional:
+                raise ValueError(
+                    "delta_notional must equal target_signed_notional - current_signed_notional"
+                )
             # Risk can only shrink the request, never grow it, and the action must
             # match the numeric relationship it claims.
             if self.approved_target_margin_pct > self.requested_target_margin_pct:
@@ -456,7 +469,14 @@ def validate_risk_decision_config(risk: RiskConfig, decision: DecisionConfig) ->
     the config seam, before any LLM spend (mirrors ``validate_target_decision``'s
     role for a parsed decision, and the grid-must-reach-max check in
     ``DecisionConfig``).
+
+    A cap at or above the grid ceiling is legal slack, not a mistake: the
+    effective limit is ``min(grid ceiling, cap)``, so such a cap never binds and
+    its grid alignment is moot — lowering only the grid ceiling must not force a
+    matching cap edit. Alignment is enforced exactly when the cap can bind.
     """
+    if risk.max_target_margin_pct >= decision.ai_target_margin_max_pct:
+        return
     snapped = _snap_down_to_grid(Decimal(risk.max_target_margin_pct), decision)
     if snapped <= 0:
         raise ValueError(
@@ -484,7 +504,7 @@ def effective_max_target_margin_pct(risk: RiskConfig, decision: DecisionConfig) 
     (grid max 100, cap 60) a confident model would otherwise emit a steady
     stream of ``clamped`` records and "clamped" would stop meaning "the risk
     gate intervened". Assumes the pair passed
-    :func:`validate_risk_decision_config` (the cap is on-grid).
+    :func:`validate_risk_decision_config` (any cap that can bind is on-grid).
     """
     return min(decision.ai_target_margin_max_pct, risk.max_target_margin_pct)
 

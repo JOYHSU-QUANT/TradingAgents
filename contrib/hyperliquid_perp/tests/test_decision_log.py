@@ -138,7 +138,7 @@ def test_write_decision_log_cleanup_unlink_failure_preserves_original_error(tmp_
 # --------------------------------------------------------------------------
 
 
-def _target_fixtures():
+def _target_fixtures(margin=61, confidence=0.7):
     from contrib.hyperliquid_perp.domains.perp.risk_gate import (
         CurrentPositionState,
         RiskConfig,
@@ -151,7 +151,7 @@ def _target_fixtures():
 
     raw = (
         'Final answer:\n```json\n{"decision_mode": "set_target", "target_side": "long", '
-        '"requested_target_margin_pct": 61, "confidence": 0.7, '
+        f'"requested_target_margin_pct": {margin}, "confidence": {confidence}, '
         '"rationale": "Trend up.", "key_risks": ["Funding"]}\n```'
     )
     parsed = parse_target_decision(raw, DecisionConfig())
@@ -165,8 +165,7 @@ def _target_fixtures():
     return raw, parsed, result
 
 
-def test_log_target_decision_roundtrip_preserves_raw_response(tmp_path):
-    raw, parsed, result = _target_fixtures()
+def _log_and_load(tmp_path, parsed, result):
     record, path = log_target_decision(
         coin="BTC",
         parsed=parsed,
@@ -180,6 +179,12 @@ def test_log_target_decision_roundtrip_preserves_raw_response(tmp_path):
     )
     with path.open(encoding="utf-8") as fh:
         loaded = json.load(fh)
+    return record, loaded
+
+
+def test_log_target_decision_roundtrip_preserves_raw_response(tmp_path):
+    raw, parsed, result = _target_fixtures()
+    record, loaded = _log_and_load(tmp_path, parsed, result)
     assert loaded == record
     assert loaded["schema_version"] == 3
     assert loaded["raw_response"] == raw  # verbatim, never reconstructed
@@ -189,6 +194,19 @@ def test_log_target_decision_roundtrip_preserves_raw_response(tmp_path):
     assert loaded["risk"]["approved_target_margin_pct"] == 60
     assert loaded["prompt_hash"] == prompt_hash("ctx")
     # Decision-time sizing inputs, persisted as strings like the risk Decimals.
+    assert loaded["mark_price"] == "60000"
+    assert loaded["account_equity"] == "1000"
+
+
+def test_log_target_decision_rejected_record_keeps_sizing_inputs(tmp_path):
+    # A risk-rejected round produces a record whose target_* fields are all None
+    # (construction invariant, pinned by the to_dict variant tests); mark_price /
+    # account_equity are what make it reconstructible as coin quantity later, so
+    # they must survive the JSON roundtrip on this shape too.
+    _raw, parsed, result = _target_fixtures(margin=40, confidence=0.1)
+    record, loaded = _log_and_load(tmp_path, parsed, result)
+    assert loaded == record
+    assert loaded["risk"]["risk_action"] == "rejected"
     assert loaded["mark_price"] == "60000"
     assert loaded["account_equity"] == "1000"
 

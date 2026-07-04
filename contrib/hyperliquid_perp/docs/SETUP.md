@@ -53,7 +53,7 @@ cp contrib/hyperliquid_perp/configs/hyperliquid.example.yaml \
 | `market_data` | `candle_interval`（4h；必須是 `1m`/`5m`/`15m`/`1h`/`4h`/`1d` 之一）／`candle_lookback`（200）／`funding_zscore_window_days`（30）。 |
 | `indicators` | `rsi_14, ema_20, ema_50, atr_14, macd`，由 `context_builder` 計算。 |
 | `engine` | `llm_provider: openrouter`、`deep_think_llm`、`quick_think_llm`、`selected_analysts: [market, social, news]`。 |
-| `risk` | Phase 2 RiskGate：`leverage`（Phase 2 = 1x）、`margin_mode`（cross-only）、`max_target_margin_pct`（clamp 上限，requested 61–100 → approved 60）。若 `max_target_margin_pct` snap 到 grid 後 ≤ 0（低於 grid 最小值，或 grid 由 0 起算但 cap 小於一個 step）→ 每個方向性 target 都會 clamp 成 0 fail-closed，config load 時具名 exit 1，不靜默上線。 |
+| `risk` | Phase 2 RiskGate：`leverage`（Phase 2 = 1x）、`margin_mode`（cross-only）、`max_target_margin_pct`（clamp 上限，requested 61–100 → approved 60）。cap 低於 decision grid 上限（也就是會實際生效）時必須落在 grid 上，否則有效上限會被靜默收緊 → config load 時具名 exit 1；cap 等於或高於 grid 上限則一律合法——它永遠不生效（有效上限 = min(grid 上限, cap) 由 grid 綁住），只是後備上限，不要求 grid 對齊。若 cap snap 到 grid 後 ≤ 0（低於 grid 最小值，或 grid 由 0 起算但 cap 小於一個 step）→ 每個方向性 target 都會 clamp 成 0 fail-closed，同樣 load 時 exit 1，不靜默上線。 |
 | `decision` | 決策契約 grid：`ai_target_margin_min_pct`／`ai_target_margin_max_pct`／`target_margin_step_pct`（合法 `requested_target_margin_pct` = {min, min+step, …, max}；off-grid 直接 fail closed，不四捨五入；`(max − min)` 必須為 `step` 的整數倍，否則廣告的 `max` 落在 grid 外、config load 時 exit 1）、`rebalance_deadband_pct`（同向 \|approved − current\| 小於此值 → 不下單；flip/flat 例外）、`min_confidence`（低於此值的 set_target fail closed；confidence 永不縮放 sizing）。 |
 
 > 沒有任何 `*.local.yaml` 時，loader 會退回 `hyperliquid.example.yaml`，
@@ -107,13 +107,16 @@ python -m contrib.hyperliquid_perp.main --coin BTC
 - context 暖身不足、指標全滅、或 `atr_14` 算不出來（regime 會退化成假的 RANGING，掩蓋波動市況）。
 - `risk:`／`decision:` config 區塊格式錯誤——含未知／打錯的 key、打錯的頂層區塊名、
   或非 mapping 的區塊。這些都會具名 exit 1（不會靜默退回預設值，以免一個 typo 讓
-  安全上限悄悄變回寬鬆的預設）。
+  安全上限悄悄變回寬鬆的預設）。`--config` 路徑不存在或 YAML 語法錯誤（如引號未閉合）
+  也走同一個具名 exit 1，不會噴 raw traceback。
 - 倉位讀取失敗（帳戶狀態未知，拒絕在其上下單）。
 
 Exit codes：`0` = 成功（含健康的風控拒絕，例如 low confidence）；`1` = config／環境／
 引擎錯誤（上述各項）；`2` = 未預期錯誤；`3` = 引擎輸出不符合 structured-target 契約
 （該輪已 fail-closed 成 `maintain_current` 並寫入 audit 紀錄）——scheduler 對非零
-exit code 告警即可同時抓到故障與 model drift。
+exit code 告警即可同時抓到故障與 model drift。同一輪同時發生契約失敗與 audit 寫入
+失敗時，exit `1` 優先於 `3`（基礎設施故障是更大聲的警報）；只對 exit 3 告警的
+scheduler 要一併涵蓋 exit 1。
 
 常用 flags：
 

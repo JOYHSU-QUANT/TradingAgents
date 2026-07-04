@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from .audit.decision_log import log_target_decision
-from .config import load_config, wallet_address
+from .config import CONFIG_LOAD_ERRORS, load_config, wallet_address
 from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context
 from .domains.perp.indicators import required_candles, supported_indicators
@@ -542,7 +542,9 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
         config = load_config(args.config)
-    except ValueError as exc:
+    except CONFIG_LOAD_ERRORS as exc:
+        # Missing/unreadable path, YAML syntax error, or failed validation — all
+        # operator config mistakes, all the same named exit 1, never a traceback.
         print(f"error: invalid config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
         return 1
     coin = _resolve_coin(args, config)

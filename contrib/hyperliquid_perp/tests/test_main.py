@@ -487,6 +487,9 @@ def test_run_engine_success_writes_log_and_returns_zero(monkeypatch, capsys):
     assert written["coin"] == "BTC"
     assert written["parsed"].is_valid
     assert written["risk_result"].risk_action.value == "approved"
+    # Decision-time sizing inputs must reach the audit record (values from _stub_engine).
+    assert written["mark_price"] == Decimal("60000")
+    assert written["account_equity"] == Decimal("10000")
     # prompt_hash must cover everything the adapter injected: the market
     # context AND the output-format contract (whose grid/min_confidence come
     # from the live config), so config changes always change the hash.

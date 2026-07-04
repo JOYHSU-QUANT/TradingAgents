@@ -509,6 +509,8 @@ def run_engine(config: dict, coin: str) -> int:
             coin=coin,
             parsed=parsed,
             risk_result=result,
+            mark_price=ctx.mark_price,
+            account_equity=account_value,
             prompt=inject_perp_context("", ctx_text, output_format_text),
             models=models,
             results_dir=engine_config["results_dir"],

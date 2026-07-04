@@ -50,7 +50,7 @@ timeout / request 錯誤 / mid 或 mark 無效 → 該 slice 留空不成交
 - `min_notional`：設定的單筆 order 最小名目價值；預設 `10` USDC（見 5.4 的 `min_notional_usdc`）。
 - `mid`：建立 TWAP plan 時觀察到的當下公開 mid price。
 - `ceil_to_step`：把數量向上湊整到該 asset 合法的 `szDecimals` step。
-- `raw_total_qty`：target-position 調整所需、尚未湊整的數量。
+- `raw_total_qty`：target-position 調整所需、尚未湊整的數量；於 plan-build 依 6.2 節公式重算。
 - `qty_step = 10 ^ (-szDecimals)`，`total_qty = floor_to_step(raw_total_qty)`。
 
 ```text
@@ -463,7 +463,15 @@ position == 0 and no active plan/order    → stop 30-second polling
 | `target_signed_notional` | `direction * target_notional` | long 為正、short 為負的目標名目倉位 |
 | `current_signed_notional` | `position_size * mark_price` | 目前方向性倉位；long 為正，short 為負 |
 | `delta_notional` | `target_signed_notional - current_signed_notional` | 目標倉位與目前倉位的差額 |
-| `order_qty` | `abs(delta_notional) / mark_price` | 為達到目標倉位需要下單的數量 |
+
+上表的 `target_margin` / `target_notional` / `target_signed_notional` / `delta_notional` 是 RiskGate 以**決策當下**的 `mark_price` 與 `account_equity` 算出的 snapshot，寫進 audit record 供事後重現，屬 **audit-only**——執行層不得沿用它們換算下單數量。4h 決策與 plan 建立（`active_from`）之間價格會漂移；`approved_target_margin_pct` 以**執行時價格**兌現，下單數量在 plan-build 時對新鮮 snapshot 重算：
+
+```text
+# plan-build（見 1.2 的 raw_total_qty）：以新鮮 snapshot 重算，不沿用決策時的 delta_notional
+fresh_target_notional        = account_equity_fresh × approved_target_margin_pct / 100 × configured_leverage
+fresh_target_signed_notional = direction × fresh_target_notional
+raw_total_qty                = abs(fresh_target_signed_notional / mark_fresh − position_size)
+```
 
 `requested_target_margin_pct` 是帳戶淨值中 AI 建議分配為目標倉位 margin 的比例，而不是名目曝險比例。AI 可輸出 `0–100%`，但真正用於下單的數值必須是 RiskGate 產生的 `approved_target_margin_pct`。方向不寫在百分比的正負號中，由 `target_side` 提供。
 

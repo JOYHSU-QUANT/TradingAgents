@@ -60,7 +60,9 @@ contrib main.py
    │     └─ structured target JSON（DESIGN Part 2）；invalid → fail-closed maintain_current
    │
    └─ risk_gate.evaluate(parsed, account_equity, current, …)   (domains/perp/risk_gate.py)
-         └─ 核准/clamp/fail-close ＋ sizing → PR 3 的執行引擎消費
+         └─ 核准/clamp/fail-close；PR 3 的執行引擎消費核准的 margin%，
+            下單數量於 plan-build 以新鮮 snapshot 重算（execution §6.2），
+            gate 的 notional 欄位屬 audit-only
 ```
 
 > **Phase 2 note:** Phase 1 的 `DecisionAdapter(ctx, position).to_perp_decision(...)`

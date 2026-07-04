@@ -301,6 +301,8 @@ AI input
 | `target_signed_notional` | 套用 `target_side` 後的目標名目倉位；long 為正、short 為負、flat 為 `0` |
 | `current_signed_notional` | 決策當下目前方向性倉位 |
 | `delta_notional` | 目標與目前倉位差額 |
+| `mark_price` | 決策當下的 mark price（sizing 輸入；事後重現幣量用） |
+| `account_equity` | 決策當下的帳戶淨值（sizing 輸入；事後重現幣量用） |
 | `confidence` | AI 信心，範圍 `0–1` |
 | `decision_reason` | AI 決策摘要，不得為空 |
 | `key_risks` | 1–3 項主要風險（至少 1 項）；CSV 可存 JSON array string |

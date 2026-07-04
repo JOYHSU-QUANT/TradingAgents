@@ -172,13 +172,17 @@ exit code 告警即可同時抓到故障與 model drift。
     "delta_notional": "350",
     "configured_leverage": "1",
     "confidence": "0.78"
-  }
+  },
+  "mark_price": "65000",
+  "account_equity": "1000"
 }
 ```
 
 `raw_response` 照留引擎的原始回應（DESIGN Part 2：無效輸出只記錄、絕不重建）；
 `parse` 是解析判定；`decision` 是解析出的結構化 target；`risk` 是 RiskGate 的
-sizing／clamp／下單判定（`target_*` 皆 mark 定價，`approved 35% × equity 1000 = 350`）。
+sizing／clamp／下單判定（`target_*` 皆 mark 定價，`approved 35% × equity 1000 = 350`）；
+`mark_price`／`account_equity` 是決策當下的 sizing 輸入——沒有它們，REJECTED／
+maintain_current 紀錄（`target_*` 全為 null）無法事後重現成幣量。
 `prompt_hash` 是引擎當時讀到的 perp context 文字的 sha256，配合 `models` 與
 `timestamp`，任何一筆 decision 都能重建並做 post-mortem。各欄位定義見
 [DESIGN](./DESIGN.md) Part 2 與 [phase2-spec](./phase2-spec.md)。

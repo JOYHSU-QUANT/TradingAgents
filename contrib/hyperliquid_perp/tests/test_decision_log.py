@@ -171,6 +171,8 @@ def test_log_target_decision_roundtrip_preserves_raw_response(tmp_path):
         coin="BTC",
         parsed=parsed,
         risk_result=result,
+        mark_price=Decimal("60000"),
+        account_equity=Decimal("1000"),
         prompt="ctx",
         models=_MODELS,
         results_dir=tmp_path,
@@ -186,6 +188,9 @@ def test_log_target_decision_roundtrip_preserves_raw_response(tmp_path):
     assert loaded["risk"]["risk_action"] == "clamped"
     assert loaded["risk"]["approved_target_margin_pct"] == 60
     assert loaded["prompt_hash"] == prompt_hash("ctx")
+    # Decision-time sizing inputs, persisted as strings like the risk Decimals.
+    assert loaded["mark_price"] == "60000"
+    assert loaded["account_equity"] == "1000"
 
 
 def test_build_target_log_record_rejects_naive_timestamp():
@@ -195,6 +200,8 @@ def test_build_target_log_record_rejects_naive_timestamp():
             coin="BTC",
             parsed=parsed,
             risk_result=result,
+            mark_price=Decimal("60000"),
+            account_equity=Decimal("1000"),
             prompt="ctx",
             models=_MODELS,
             timestamp=datetime(2026, 6, 27, 17, 45, 0),  # naive, no tzinfo

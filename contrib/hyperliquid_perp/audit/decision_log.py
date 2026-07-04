@@ -4,8 +4,9 @@ One file per decision under ``<results_dir>/perp_decisions/``: the Phase 2
 structured-target record (:func:`build_target_log_record` /
 :func:`log_target_decision`, ``TARGET_SCHEMA_VERSION``). Beyond the prompt
 hash / models / timestamp header it persists the raw engine response, the
-parse verdict (``is_valid`` / ``invalid_reason``), and the full RiskGate
-outcome — the fields a post-mortem of the structured-target contract needs.
+parse verdict (``is_valid`` / ``invalid_reason``), the full RiskGate outcome,
+and the decision-time sizing inputs (``mark_price`` / ``account_equity``) —
+the fields a post-mortem of the structured-target contract needs.
 
 Records from the retired Phase 1 rating pipeline (``schema_version: 2``) may
 still exist on disk; old JSON needs no writer to stay readable, so that write
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
     # Type-only imports (annotations are strings under ``from __future__``) so the
     # audit layer documents the value shapes without a runtime dependency on the
     # domain decision modules.
+    from decimal import Decimal
+
     from ..domains.perp.risk_gate import RiskGateResult
     from ..domains.perp.target_decision import ParsedDecision
 
@@ -202,6 +205,8 @@ def build_target_log_record(
     coin: str,
     parsed: ParsedDecision,
     risk_result: RiskGateResult,
+    mark_price: Decimal,
+    account_equity: Decimal,
     prompt: str,
     models: dict[str, str],
     timestamp: datetime,
@@ -212,6 +217,11 @@ def build_target_log_record(
     output is recorded, never reconstructed) next to the parse verdict and the
     RiskGate outcome, so a post-mortem can replay exactly what the model said
     and what the deterministic layer did with it.
+
+    ``mark_price`` / ``account_equity`` are the decision-time sizing inputs the
+    gate worked from, captured so every row — including REJECTED /
+    maintain_current, whose ``target_*`` fields are all ``None`` — stays
+    reproducible as a coin quantity after the fact (execution §6.2).
     """
     record = _record_header(
         schema_version=TARGET_SCHEMA_VERSION,
@@ -229,6 +239,9 @@ def build_target_log_record(
             },
             "decision": parsed.decision.to_dict(),
             "risk": risk_result.to_dict(),
+            # Decimals become strings, matching RiskGateResult.to_dict.
+            "mark_price": str(mark_price),
+            "account_equity": str(account_equity),
         }
     )
     return record
@@ -239,6 +252,8 @@ def log_target_decision(
     coin: str,
     parsed: ParsedDecision,
     risk_result: RiskGateResult,
+    mark_price: Decimal,
+    account_equity: Decimal,
     prompt: str,
     models: dict[str, str],
     results_dir: str | Path,
@@ -256,6 +271,8 @@ def log_target_decision(
         coin=coin,
         parsed=parsed,
         risk_result=risk_result,
+        mark_price=mark_price,
+        account_equity=account_equity,
         prompt=prompt,
         models=models,
         timestamp=timestamp,

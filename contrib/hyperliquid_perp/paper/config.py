@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from ..domains.perp.target_decision import (
+from ..domains.perp.config_coercion import (
     config_overrides,
     decimal_from_yaml,
     int_from_yaml,

@@ -31,9 +31,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, localcontext
 
 from ..domains.perp.margin import MarginSchedule
+from ..persistence.models import DECIMAL_CONTEXT
 
 __all__ = [
     "LIQUIDATION_MODEL_VERSION",
@@ -107,10 +108,16 @@ class LiquidationEstimate:
     price: Decimal | None
     already_liquidatable: bool
 
+    def __post_init__(self) -> None:
+        # The documented contract: already_liquidatable means there is no
+        # forward-looking price — a caller matching on ``price is not None`` to
+        # place an SL must never see both.
+        if self.already_liquidatable and self.price is not None:
+            raise ValueError("an already-liquidatable LiquidationEstimate carries no price")
+
 
 def _round_to_tick(price: Decimal, tick: Decimal, *, up: bool) -> Decimal:
-    if tick <= 0:
-        return price
+    # tick validity is enforced at the estimated_liquidation_price boundary.
     steps = (price / tick).to_integral_value(rounding=ROUND_CEILING if up else ROUND_FLOOR)
     return steps * tick
 
@@ -152,6 +159,10 @@ def estimated_liquidation_price(
         raise ValueError("liquidation price is undefined for a flat position")
     if entry_price <= 0 or mark_price <= 0:
         raise ValueError("entry_price and mark_price must be > 0")
+    if tick_size <= 0:
+        # Fail loud (like every other malformed input here): a zero/negative tick
+        # from a bad szDecimals lookup must not silently yield an off-grid price.
+        raise ValueError(f"tick_size must be > 0, got {tick_size}")
 
     abs_size = abs(size)
 
@@ -160,26 +171,27 @@ def estimated_liquidation_price(
         total_maint = schedule.maintenance_margin(abs_size * p) + other_positions_maintenance_margin
         return equity - total_maint
 
-    if f(mark_price) <= 0:
-        return LiquidationEstimate(price=None, already_liquidatable=True)
+    with localcontext(DECIMAL_CONTEXT):
+        if f(mark_price) <= 0:
+            return LiquidationEstimate(price=None, already_liquidatable=True)
 
-    if size > 0:
-        # Long: f increases with p. If it is still positive at p -> 0 there is no
-        # positive liquidation price.
-        if f(Decimal(0)) > 0:
-            return LiquidationEstimate(price=None, already_liquidatable=False)
-        root = _bisect(f, Decimal(0), mark_price)
-        price = _round_to_tick(root, tick_size, up=True)
-    else:
-        # Short: f decreases with p. Expand the upper bound until f <= 0, then bisect.
-        hi = mark_price * 2
-        for _ in range(_BISECT_ITERATIONS):
-            if f(hi) <= 0:
-                break
-            hi *= 2
-        else:  # pragma: no cover - short f -> -inf, so a bracket is always found
-            return LiquidationEstimate(price=None, already_liquidatable=False)
-        root = _bisect(f, mark_price, hi)
-        price = _round_to_tick(root, tick_size, up=False)
+        if size > 0:
+            # Long: f increases with p. If it is still positive at p -> 0 there is no
+            # positive liquidation price.
+            if f(Decimal(0)) > 0:
+                return LiquidationEstimate(price=None, already_liquidatable=False)
+            root = _bisect(f, Decimal(0), mark_price)
+            price = _round_to_tick(root, tick_size, up=True)
+        else:
+            # Short: f decreases with p. Expand the upper bound until f <= 0, then bisect.
+            hi = mark_price * 2
+            for _ in range(_BISECT_ITERATIONS):
+                if f(hi) <= 0:
+                    break
+                hi *= 2
+            else:  # pragma: no cover - short f -> -inf, so a bracket is always found
+                return LiquidationEstimate(price=None, already_liquidatable=False)
+            root = _bisect(f, mark_price, hi)
+            price = _round_to_tick(root, tick_size, up=False)
 
     return LiquidationEstimate(price=price, already_liquidatable=False)

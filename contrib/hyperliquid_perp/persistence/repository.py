@@ -19,16 +19,18 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from typing import Any
 
-from .models import AccountLedger, PositionState
+from .ids import _canonical_instant
+from .models import DECIMAL_CONTEXT, AccountLedger, PositionState, Side
 
 __all__ = [
     "get_all_current_positions",
     "get_current_account_state",
     "get_current_position",
     "get_run",
+    "get_run_seed_positions",
     "get_scheduler_state",
     "insert_account_snapshot",
     "insert_ai_input",
@@ -40,6 +42,7 @@ __all__ = [
     "insert_order",
     "insert_position_snapshot",
     "insert_run",
+    "insert_run_seed_position",
     "iter_fills",
     "iter_funding_events",
     "get_funding_event",
@@ -49,6 +52,51 @@ __all__ = [
     "upsert_scheduler_state",
 ]
 
+# Enumerable storage values validated at the write boundary (fail loud on a typo
+# rather than persisting it). ``Side`` carries the fill/order direction; these
+# small sets cover the columns that don't warrant a full enum yet (their typed
+# writers land in PR3).
+_MODES = frozenset({"paper", "live"})
+_LIQUIDITY_TYPES = frozenset({"maker", "taker", "simulated"})
+_FLIP_LEGS = frozenset({"open", "close"})
+_FUNDING_STATUSES = frozenset({"pending", "posted"})
+
+
+def _check_enum(value: str, allowed: frozenset[str], *, name: str) -> None:
+    if value not in allowed:
+        raise ValueError(f"{name} must be one of {sorted(allowed)}, got {value!r}")
+
+
+def _check_funding_identities(
+    *,
+    position_size: Decimal | None,
+    mark_price: Decimal | None,
+    signed_position_notional: Decimal | None,
+    funding_rate: Decimal | None,
+    funding_pnl: Decimal | None,
+) -> None:
+    """Reject a funding row whose stored derived columns contradict their inputs.
+
+    Only checks identities whose operands are all present — a ``pending`` row
+    legitimately carries no notional/rate/pnl yet, and ``set_funding_status``
+    passes ``None`` for anything it isn't updating.
+    """
+    with localcontext(DECIMAL_CONTEXT):  # round exactly like the producing math
+        if None not in (position_size, mark_price, signed_position_notional):
+            expected = position_size * mark_price
+            if signed_position_notional != expected:
+                raise ValueError(
+                    f"signed_position_notional {signed_position_notional} != "
+                    f"position_size * mark_price {expected}"
+                )
+        if None not in (signed_position_notional, funding_rate, funding_pnl):
+            expected = -signed_position_notional * funding_rate
+            if funding_pnl != expected:
+                raise ValueError(
+                    f"funding_pnl {funding_pnl} != "
+                    f"-signed_position_notional * funding_rate {expected}"
+                )
+
 
 def _iso_utc(value: datetime) -> str:
     """Canonical ISO-8601 UTC string for a datetime; rejects naive datetimes.
@@ -57,13 +105,11 @@ def _iso_utc(value: datetime) -> str:
     dedup key ``(run_id, symbol, funding_timestamp)`` and the deterministic
     ``funding_event_id`` both derive from the stored/serialized timestamp, so a
     naive-vs-aware or non-UTC-offset representation of the *same* instant would
-    produce different keys and let a settlement post twice. Normalising here — and
-    refusing a naive datetime outright, as the audit log does — keeps every path
-    on one canonical form.
+    produce different keys and let a settlement post twice. Delegates to the one
+    canonicalization rule in :mod:`.ids` so storage and id derivation can never
+    drift apart.
     """
-    if value.tzinfo is None:
-        raise ValueError("datetime values must be timezone-aware (UTC) before storage")
-    return value.astimezone(timezone.utc).isoformat()
+    return _canonical_instant(value, name="datetime value")
 
 
 def _encode(value: Any) -> Any:
@@ -115,6 +161,7 @@ def insert_run(
     config_json: str | None = None,
     created_at: datetime | None = None,
 ) -> None:
+    _check_enum(mode, _MODES, name="mode")
     _insert(
         conn,
         "runs",
@@ -131,6 +178,43 @@ def insert_run(
 
 def get_run(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+
+
+def insert_run_seed_position(
+    conn: sqlite3.Connection, run_id: str, position: PositionState
+) -> None:
+    """Record one seed position as applied at run creation (the replay genesis).
+
+    Append-once alongside ``insert_run``: replay reads its starting positions from
+    here (plus ``runs.initial_balance_usdc``) instead of trusting the caller's
+    current config, so a YAML edited after run creation cannot shift the baseline.
+    """
+    _insert(
+        conn,
+        "run_seed_positions",
+        {
+            "run_id": run_id,
+            "symbol": position.coin,
+            "size": position.size,
+            "entry_price": position.entry_price,
+            "realized_pnl": position.realized_pnl,
+        },
+    )
+
+
+def get_run_seed_positions(conn: sqlite3.Connection, run_id: str) -> list[PositionState]:
+    rows = conn.execute(
+        "SELECT * FROM run_seed_positions WHERE run_id = ? ORDER BY symbol", (run_id,)
+    ).fetchall()
+    return [
+        PositionState(
+            coin=r["symbol"],
+            size=Decimal(r["size"]),
+            entry_price=_dec(r["entry_price"]),
+            realized_pnl=Decimal(r["realized_pnl"]),
+        )
+        for r in rows
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -284,7 +368,28 @@ def insert_fill(
     restarted TWAP slice re-derives the same id (see :mod:`.ids`) and the insert
     is rejected instead of double-posting. ``paper_market`` / SL / TP fills pass
     ``slice_id=None`` (NULLs are distinct under UNIQUE).
+
+    ``fill_notional`` and ``fee`` are stored derived values and must equal
+    ``abs(fill_qty * fill_price)`` and ``fill_notional * fee_rate``: replay
+    recomputes them from the raw fields and ignores these columns, so a desynced
+    value would never surface in the replay consistency check — reject it here
+    instead. (``realized_pnl_delta`` depends on prior position state and cannot
+    be re-derived row-locally; it stays the caller's responsibility.)
     """
+    side = Side.parse(side)
+    _check_enum(liquidity_type, _LIQUIDITY_TYPES, name="liquidity_type")
+    if flip_leg is not None:
+        _check_enum(flip_leg, _FLIP_LEGS, name="flip_leg")
+    _check_enum(mode, _MODES, name="mode")
+    with localcontext(DECIMAL_CONTEXT):  # round exactly like the producing math
+        expected_notional = abs(fill_qty * fill_price)
+        if fill_notional != expected_notional:
+            raise ValueError(
+                f"fill_notional {fill_notional} != |fill_qty * fill_price| {expected_notional}"
+            )
+        expected_fee = fill_notional * fee_rate
+        if fee != expected_fee:
+            raise ValueError(f"fee {fee} != fill_notional * fee_rate {expected_fee}")
     _insert(
         conn,
         "fills",
@@ -301,7 +406,7 @@ def insert_fill(
             "exchange_fill_id": exchange_fill_id,
             "exchange_order_id": exchange_order_id,
             "symbol": symbol,
-            "side": side,
+            "side": side.value,
             "fill_qty": fill_qty,
             "fill_price": fill_price,
             "fill_notional": fill_notional,
@@ -348,7 +453,22 @@ def insert_funding_event(
     settlement is rejected. A ``pending`` row (rate unavailable) is later moved to
     ``posted`` via :func:`set_funding_status`, which is where the wallet posting
     happens — never at insert.
+
+    ``signed_position_notional`` / ``funding_pnl`` are stored derived values and,
+    when supplied, must match ``position_size * mark_price`` and
+    ``-signed_position_notional * funding_rate`` (same rationale as
+    :func:`insert_fill`: replay ignores the stored columns, so a desync would go
+    undetected).
     """
+    _check_enum(status, _FUNDING_STATUSES, name="status")
+    _check_enum(mode, _MODES, name="mode")
+    _check_funding_identities(
+        position_size=position_size,
+        mark_price=mark_price,
+        signed_position_notional=signed_position_notional,
+        funding_rate=funding_rate,
+        funding_pnl=funding_pnl,
+    )
     _insert(
         conn,
         "funding_events",
@@ -391,8 +511,19 @@ def set_funding_status(
 
     Only the provided fields are written; ``None`` leaves the stored value
     untouched, so moving ``pending -> posted`` can fill in the rate/pnl learned
-    from the funding-history backfill without clobbering the rest.
+    from the funding-history backfill without clobbering the rest. When the
+    pnl identity's operands are all supplied they must agree (see
+    :func:`insert_funding_event`); identities involving the *stored* size are the
+    accounting layer's to uphold (it reads the pending row before posting).
     """
+    _check_enum(status, _FUNDING_STATUSES, name="status")
+    _check_funding_identities(
+        position_size=None,
+        mark_price=mark_price,
+        signed_position_notional=signed_position_notional,
+        funding_rate=funding_rate,
+        funding_pnl=funding_pnl,
+    )
     sets = ["status = ?"]
     params: list[Any] = [status]
     for col, val in (

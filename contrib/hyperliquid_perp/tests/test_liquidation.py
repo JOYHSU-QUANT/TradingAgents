@@ -19,12 +19,15 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier
 from contrib.hyperliquid_perp.exchanges.hyperliquid.mapper import (
     map_margin_schedule,
     map_position,
 )
 from contrib.hyperliquid_perp.paper.liquidation import (
+    LiquidationEstimate,
     estimated_liquidation_price,
     maintenance_snapshot,
     price_tick_from_sz_decimals,
@@ -154,6 +157,28 @@ def test_already_liquidatable_reports_no_sl():
     )
     assert est.already_liquidatable
     assert est.price is None
+
+
+def test_invalid_tick_size_raises():
+    # A zero/negative tick (bad szDecimals lookup) must fail loud, not silently
+    # return an unrounded, off-grid price.
+    for bad_tick in (Decimal("0"), Decimal("-0.5")):
+        with pytest.raises(ValueError, match="tick_size"):
+            estimated_liquidation_price(
+                size=Decimal("0.05"),
+                entry_price=Decimal("60000"),
+                mark_price=Decimal("60000"),
+                wallet_balance=Decimal("426"),
+                schedule=_single(),
+                tick_size=bad_tick,
+            )
+
+
+def test_liquidation_estimate_enforces_contract():
+    # already_liquidatable  =>  no forward-looking price; the type refuses the
+    # illegal fourth combination outright.
+    with pytest.raises(ValueError, match="already-liquidatable"):
+        LiquidationEstimate(price=Decimal("50000"), already_liquidatable=True)
 
 
 def test_cross_tier_liquidation_reselects_tier():

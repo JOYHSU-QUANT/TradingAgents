@@ -25,16 +25,17 @@ total_unrealized_pnl`` — nothing is double-counted.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 from ..domains.perp.margin import MarginSchedule
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.ids import funding_event_id
-from ..persistence.models import AccountLedger, PositionState
+from ..persistence.models import DECIMAL_CONTEXT, AccountLedger, PositionState, Side
 
 __all__ = [
     "AccountMetrics",
@@ -61,8 +62,7 @@ __all__ = [
     "used_initial_margin",
 ]
 
-_BUY = "buy"
-_SELL = "sell"
+logger = logging.getLogger(__name__)
 
 
 def _utcnow() -> datetime:
@@ -94,15 +94,16 @@ def available_balance(equity: Decimal, used_initial_margin_total: Decimal) -> De
     return equity - used_initial_margin_total
 
 
-def effective_leverage(total_position_notional: Decimal, equity: Decimal) -> Decimal:
-    """``total_notional / equity`` (§6.1); ``0`` on a non-positive equity.
+def effective_leverage(total_position_notional: Decimal, equity: Decimal) -> Decimal | None:
+    """``total_notional / equity`` (§6.1); ``None`` on a non-positive equity.
 
-    A non-positive equity means a margin-called / liquidatable account; reporting
-    ``0`` (rather than dividing) keeps the snapshot writable — the liquidation
-    model, not this ratio, is what flags the danger.
+    A non-positive equity means a margin-called / liquidatable account, where
+    leverage is undefined. ``None`` (stored NULL) rather than ``0``: a ``0``
+    would read downstream (AI prompt, CSV) as "no exposure" — the opposite of
+    the truth — with no way to tell the two states apart.
     """
     if equity <= 0:
-        return Decimal(0)
+        return None
     return total_position_notional / equity
 
 
@@ -165,11 +166,24 @@ class FillEffect:
     fill_notional: Decimal
     wallet_delta: Decimal
 
+    def __post_init__(self) -> None:
+        # The documented identities, enforced at construction so a hand-built
+        # (test/mock) instance can't quietly disagree with the fill math.
+        if self.fee < 0:
+            raise ValueError(f"FillEffect.fee must be >= 0, got {self.fee}")
+        if self.fill_notional < 0:
+            raise ValueError(f"FillEffect.fill_notional must be >= 0, got {self.fill_notional}")
+        if self.wallet_delta != self.realized_pnl_delta - self.fee:
+            raise ValueError(
+                f"FillEffect.wallet_delta {self.wallet_delta} != "
+                f"realized_pnl_delta - fee {self.realized_pnl_delta - self.fee}"
+            )
+
 
 def compute_fill_effect(
     position: PositionState,
     *,
-    side: str,
+    side: Side | str,
     qty: Decimal,
     price: Decimal,
     fee_rate: Decimal,
@@ -183,8 +197,7 @@ def compute_fill_effect(
     ``price > entry``); a reduce/close credits it to the wallet along with the
     (always-subtracted) fee.
     """
-    if side not in (_BUY, _SELL):
-        raise ValueError(f"fill side must be {_BUY!r} or {_SELL!r}, got {side!r}")
+    side = Side.parse(side)
     if qty <= 0:
         raise ValueError(f"fill qty must be > 0, got {qty}")
     if price <= 0:
@@ -192,50 +205,51 @@ def compute_fill_effect(
     if fee_rate < 0:
         raise ValueError(f"fee_rate must be >= 0, got {fee_rate}")
 
-    signed_fill = qty if side == _BUY else -qty
-    old_size = position.size
-    old_entry = position.entry_price
-    new_size = old_size + signed_fill
+    with localcontext(DECIMAL_CONTEXT):
+        signed_fill = qty if side is Side.BUY else -qty
+        old_size = position.size
+        old_entry = position.entry_price
+        new_size = old_size + signed_fill
 
-    fill_notional = abs(qty * price)
-    fee = fee_for_notional(fill_notional, fee_rate)
+        fill_notional = abs(qty * price)
+        fee = fee_for_notional(fill_notional, fee_rate)
 
-    realized_delta = Decimal(0)
-    reducing = old_size != 0 and (signed_fill > 0) != (old_size > 0)
-    if reducing:
-        assert old_entry is not None  # a non-flat position always has an entry
-        closed_qty = min(abs(old_size), qty)
-        direction = Decimal(1) if old_size > 0 else Decimal(-1)
-        realized_delta = closed_qty * (price - old_entry) * direction
+        realized_delta = Decimal(0)
+        reducing = old_size != 0 and (signed_fill > 0) != (old_size > 0)
+        if reducing:
+            assert old_entry is not None  # a non-flat position always has an entry
+            closed_qty = min(abs(old_size), qty)
+            direction = Decimal(1) if old_size > 0 else Decimal(-1)
+            realized_delta = closed_qty * (price - old_entry) * direction
 
-    if new_size == 0:
-        new_entry: Decimal | None = None
-    elif old_size == 0:
-        new_entry = price  # opening from flat
-    elif (new_size > 0) == (old_size > 0):
-        # Same side after the fill: adding grows the average entry, reducing keeps it.
-        if abs(new_size) > abs(old_size):
-            assert old_entry is not None
-            new_entry = (abs(old_size) * old_entry + qty * price) / abs(new_size)
+        if new_size == 0:
+            new_entry: Decimal | None = None
+        elif old_size == 0:
+            new_entry = price  # opening from flat
+        elif (new_size > 0) == (old_size > 0):
+            # Same side after the fill: adding grows the average entry, reducing keeps it.
+            if abs(new_size) > abs(old_size):
+                assert old_entry is not None
+                new_entry = (abs(old_size) * old_entry + qty * price) / abs(new_size)
+            else:
+                new_entry = old_entry
         else:
-            new_entry = old_entry
-    else:
-        # Crossed zero into the opposite side: the remainder is a fresh open.
-        new_entry = price
+            # Crossed zero into the opposite side: the remainder is a fresh open.
+            new_entry = price
 
-    new_position = PositionState(
-        coin=position.coin,
-        size=new_size,
-        entry_price=new_entry,
-        realized_pnl=position.realized_pnl + realized_delta,
-    )
-    return FillEffect(
-        position=new_position,
-        realized_pnl_delta=realized_delta,
-        fee=fee,
-        fill_notional=fill_notional,
-        wallet_delta=realized_delta - fee,
-    )
+        new_position = PositionState(
+            coin=position.coin,
+            size=new_size,
+            entry_price=new_entry,
+            realized_pnl=position.realized_pnl + realized_delta,
+        )
+        return FillEffect(
+            position=new_position,
+            realized_pnl_delta=realized_delta,
+            fee=fee,
+            fill_notional=fill_notional,
+            wallet_delta=realized_delta - fee,
+        )
 
 
 # --------------------------------------------------------------------------
@@ -263,7 +277,7 @@ class AccountMetrics:
     total_position_notional: Decimal
     used_initial_margin: Decimal
     total_maintenance_margin: Decimal
-    effective_leverage: Decimal
+    effective_leverage: Decimal | None
     margin_ratio: Decimal | None
 
 
@@ -274,32 +288,35 @@ def summarize_account(
     leverage: Decimal,
 ) -> AccountMetrics:
     """Aggregate the account-level metrics from the ledger and open positions."""
-    total_unrealized = Decimal(0)
-    total_notional = Decimal(0)
-    total_maint = Decimal(0)
-    notionals: list[Decimal] = []
-    for v in valuations:
-        if v.position.is_flat:
-            continue
-        assert v.position.entry_price is not None
-        notional = position_notional(v.position.size, v.mark_price)
-        total_notional += notional
-        notionals.append(notional)
-        total_unrealized += unrealized_pnl(v.position.size, v.mark_price, v.position.entry_price)
-        total_maint += maintenance_margin(v.schedule, v.position.size, v.mark_price)
-    equity = account_equity(ledger.wallet_balance, total_unrealized)
-    used_im = used_initial_margin(notionals, leverage)
-    return AccountMetrics(
-        wallet_balance=ledger.wallet_balance,
-        account_equity=equity,
-        available_balance=available_balance(equity, used_im),
-        unrealized_pnl=total_unrealized,
-        total_position_notional=total_notional,
-        used_initial_margin=used_im,
-        total_maintenance_margin=total_maint,
-        effective_leverage=effective_leverage(total_notional, equity),
-        margin_ratio=margin_ratio(equity, total_maint),
-    )
+    with localcontext(DECIMAL_CONTEXT):
+        total_unrealized = Decimal(0)
+        total_notional = Decimal(0)
+        total_maint = Decimal(0)
+        notionals: list[Decimal] = []
+        for v in valuations:
+            if v.position.is_flat:
+                continue
+            assert v.position.entry_price is not None
+            notional = position_notional(v.position.size, v.mark_price)
+            total_notional += notional
+            notionals.append(notional)
+            total_unrealized += unrealized_pnl(
+                v.position.size, v.mark_price, v.position.entry_price
+            )
+            total_maint += maintenance_margin(v.schedule, v.position.size, v.mark_price)
+        equity = account_equity(ledger.wallet_balance, total_unrealized)
+        used_im = used_initial_margin(notionals, leverage)
+        return AccountMetrics(
+            wallet_balance=ledger.wallet_balance,
+            account_equity=equity,
+            available_balance=available_balance(equity, used_im),
+            unrealized_pnl=total_unrealized,
+            total_position_notional=total_notional,
+            used_initial_margin=used_im,
+            total_maintenance_margin=total_maint,
+            effective_leverage=effective_leverage(total_notional, equity),
+            margin_ratio=margin_ratio(equity, total_maint),
+        )
 
 
 # --------------------------------------------------------------------------
@@ -322,7 +339,20 @@ def initialize_run(
 
     Applies the §5.4 initial balance / positions exactly once, at run creation;
     a normal restart must *not* call this (it recovers from the committed state).
+    The seeds are also persisted to ``run_seed_positions`` — the replay genesis —
+    so :func:`replay` never depends on the caller's (possibly since-edited) config.
+
+    Solvency is not enforced here (margin feasibility needs marks and a margin
+    schedule, which live in the PR3 engine's pre-trade checks); an obviously
+    insolvent genesis is only warned about, never blocked — simulating a
+    near-liquidation account is a legitimate scenario.
     """
+    if initial_balance_usdc <= 0:
+        logger.warning(
+            "run %s starts with a non-positive initial balance (%s USDC)",
+            run_id,
+            initial_balance_usdc,
+        )
     now = created_at or _utcnow()
     with db.transaction() as conn:
         repo.insert_run(
@@ -339,6 +369,7 @@ def initialize_run(
         )
         for pos in initial_positions:
             repo.upsert_current_position(conn, run_id, pos, updated_at=now)
+            repo.insert_run_seed_position(conn, run_id, pos)
 
 
 def post_fill(
@@ -349,7 +380,7 @@ def post_fill(
     fill_id: str,
     order_id: str,
     symbol: str,
-    side: str,
+    side: Side | str,
     qty: Decimal,
     price: Decimal,
     fee_rate: Decimal,
@@ -367,7 +398,13 @@ def post_fill(
     the fill row and both materialized ``current_*`` rows in one transaction. A
     duplicate ``slice_id`` raises ``sqlite3.IntegrityError`` and rolls the whole
     unit back, so a retried slice can never double-post.
+
+    Solvency is deliberately not enforced (pre-trade checks are the PR3 engine's
+    job, and driving an account into liquidation is a scenario the paper model
+    must be able to express) — but a fill that leaves the account insolvent at
+    its own price is warned about, so it never happens silently.
     """
+    side = Side.parse(side)  # parse once; compute/insert below accept the enum as-is
     now = timestamp or _utcnow()
     with db.transaction() as conn:
         position = repo.get_current_position(conn, run_id, symbol) or PositionState.flat(symbol)
@@ -376,6 +413,26 @@ def post_fill(
             raise ValueError(f"run {run_id!r} has no account state; call initialize_run first")
 
         effect = compute_fill_effect(position, side=side, qty=qty, price=price, fee_rate=fee_rate)
+
+        new_wallet = ledger.wallet_balance + effect.wallet_delta
+        # Equity proxy at the fill's own price (other symbols' marks are unknown
+        # here); a definitive margin check is the engine's, this is the ledger's
+        # last-line audit trail.
+        new_pos = effect.position
+        equity_at_fill_price = new_wallet + (
+            Decimal(0)
+            if new_pos.is_flat
+            else unrealized_pnl(new_pos.size, price, new_pos.entry_price)
+        )
+        if new_wallet < 0 or equity_at_fill_price <= 0:
+            logger.warning(
+                "fill %s leaves run %s insolvent at its own price: wallet %s, "
+                "equity(at fill price) %s",
+                fill_id,
+                run_id,
+                new_wallet,
+                equity_at_fill_price,
+            )
 
         # Insert the fill first: its slice_id UNIQUE constraint is the exactly-once
         # guard, so a duplicate aborts before any state moves.
@@ -406,7 +463,7 @@ def post_fill(
             conn,
             run_id,
             AccountLedger(
-                wallet_balance=ledger.wallet_balance + effect.wallet_delta,
+                wallet_balance=new_wallet,
                 realized_pnl=ledger.realized_pnl + effect.realized_pnl_delta,
                 total_fees=ledger.total_fees + effect.fee,
                 net_funding_pnl=ledger.net_funding_pnl,
@@ -445,7 +502,10 @@ def record_funding(
       ``posted``. The settlement basis (position size + mark) comes from the
       pending row on a backfill, otherwise from the call arguments.
     - rate unavailable → record (or leave) the event ``pending`` with no wallet
-      move; a later call with the backfilled rate transitions it to ``posted``.
+      move — ``mark_price`` is required here, so the settlement basis is captured
+      complete; a later call with the backfilled rate transitions it to
+      ``posted`` using the *stored* basis only (a mixed old-size/fresh-mark
+      notional must never be fabricated).
     - already ``posted`` → no-op (a retry never double-posts).
 
     The wallet moves only on the transition into ``posted``, inside the same
@@ -454,11 +514,17 @@ def record_funding(
     # Canonicalise the settlement instant so the exactly-once key is stable: a
     # naive-vs-aware (or non-UTC-offset) representation of the same hour would
     # otherwise derive a different id and dedup key and let funding post twice.
+    # Then floor to the settlement hour: the scheduler computes top-of-hour
+    # instants but a fundingHistory backfill carries the venue's ms-epoch stamp
+    # (usually, not contractually, exactly on the hour) — a sub-hour skew must
+    # not split one settlement into two "different" events.
     if funding_timestamp.tzinfo is None:
         raise ValueError("funding_timestamp must be timezone-aware (UTC)")
-    funding_timestamp = funding_timestamp.astimezone(timezone.utc)
+    funding_timestamp = funding_timestamp.astimezone(timezone.utc).replace(
+        minute=0, second=0, microsecond=0
+    )
 
-    fe_id = funding_event_id(run_id, symbol, funding_timestamp.isoformat())
+    fe_id = funding_event_id(run_id, symbol, funding_timestamp)
     now = recorded_at or _utcnow()
     with db.transaction() as conn:
         existing = repo.get_funding_event(conn, fe_id)
@@ -466,8 +532,13 @@ def record_funding(
             return FundingResult("already_posted", fe_id, None)
 
         # Rate still unavailable: keep/record a pending event, never fabricate a
-        # rate (execution §6.5). Wallet untouched.
+        # rate (execution §6.5). Wallet untouched. The mark is required now —
+        # the snapshot that told us the hour elapsed knows it — so the stored
+        # settlement basis (size + mark) is complete and the backfill can never
+        # be tempted to substitute a later, wrong-instant mark.
         if funding_rate is None:
+            if mark_price is None:
+                raise ValueError("a pending funding event must record its settlement mark_price")
             if existing is None:
                 repo.insert_funding_event(
                     conn,
@@ -485,22 +556,28 @@ def record_funding(
             return FundingResult("pending", fe_id, None)
 
         # Funding basis = the position and mark *at the settlement hour*. On a
-        # pending backfill those were captured on the pending row when the hour
-        # elapsed — use them, not the caller's current values, so a position
-        # change between pending and backfill can't post funding on the wrong
-        # notional (the caller may no longer know the historical size). A fresh
-        # live posting (no pending row) uses the caller's settlement-time values.
+        # pending backfill both were captured on the pending row when the hour
+        # elapsed — use them, never the caller's current values, so a position
+        # or mark change between pending and backfill can't post funding on a
+        # basis that never actually existed. A fresh live posting (no pending
+        # row) uses the caller's settlement-time values.
         if existing is None:
             basis_size, basis_mark = position_size, mark_price
+            if basis_mark is None:
+                raise ValueError("a mark_price is required to post funding with a known rate")
         else:
             basis_size = Decimal(existing["position_size"])
             stored_mark = existing["mark_price"]
-            basis_mark = Decimal(stored_mark) if stored_mark is not None else mark_price
-        if basis_mark is None:
-            raise ValueError("a mark_price is required to post funding with a known rate")
+            if stored_mark is None:  # pre-guard legacy/corrupt row: refuse to guess
+                raise ValueError(
+                    f"pending funding event {fe_id!r} has no stored mark_price; "
+                    "cannot post on a fabricated basis"
+                )
+            basis_mark = Decimal(stored_mark)
 
-        signed_notional = basis_size * basis_mark
-        pnl = funding_pnl(signed_notional, funding_rate)
+        with localcontext(DECIMAL_CONTEXT):
+            signed_notional = basis_size * basis_mark
+            pnl = funding_pnl(signed_notional, funding_rate)
 
         if existing is None:
             repo.insert_funding_event(
@@ -574,47 +651,55 @@ class ReplayResult:
         return not self.position_mismatches and self.account_matches
 
 
-def replay(
-    db: Database,
-    *,
-    run_id: str,
-    initial_balance: Decimal,
-    initial_positions: Iterable[PositionState] = (),
-) -> ReplayResult:
+def replay(db: Database, *, run_id: str) -> ReplayResult:
     """Rebuild positions/ledger from committed fills + posted funding; compare to current.
+
+    The genesis — opening balance and seed positions — is read from the run's own
+    committed rows (``runs.initial_balance_usdc`` + ``run_seed_positions``), not
+    taken from the caller: replay must trust nothing but the DB (phase2-data §1),
+    and a config edited after run creation would otherwise shift the baseline and
+    misreport (or mask) a mismatch.
 
     Recomputes purely from each fill's ``(side, qty, price, fee_rate)`` and the
     posted funding events, independent of the stored per-row realized/fee — so a
     corrupted materialized ``current_*`` row surfaces as a mismatch rather than
     being trusted. Deterministic: the same committed events always rebuild the
-    same state.
+    same state (the decimal context is pinned, so an ambient-precision change
+    cannot perturb the arithmetic).
     """
-    positions: dict[str, PositionState] = {p.coin: p for p in initial_positions}
-    wallet = initial_balance
-    realized_total = Decimal(0)
-    total_fees = Decimal(0)
-
     conn = db.conn
-    for fill in repo.iter_fills(conn, run_id):
-        symbol = fill["symbol"]
-        current = positions.get(symbol) or PositionState.flat(symbol)
-        effect = compute_fill_effect(
-            current,
-            side=fill["side"],
-            qty=Decimal(fill["fill_qty"]),
-            price=Decimal(fill["fill_price"]),
-            fee_rate=Decimal(fill["fee_rate"]),
-        )
-        positions[symbol] = effect.position
-        wallet += effect.wallet_delta
-        realized_total += effect.realized_pnl_delta
-        total_fees += effect.fee
+    run = repo.get_run(conn, run_id)
+    if run is None:
+        raise ValueError(f"run {run_id!r} does not exist; nothing to replay")
 
-    net_funding = Decimal(0)
-    for event in repo.iter_funding_events(conn, run_id, status="posted"):
-        pnl = Decimal(event["funding_pnl"])
-        wallet += pnl
-        net_funding += pnl
+    with localcontext(DECIMAL_CONTEXT):
+        positions: dict[str, PositionState] = {
+            p.coin: p for p in repo.get_run_seed_positions(conn, run_id)
+        }
+        wallet = Decimal(run["initial_balance_usdc"])
+        realized_total = Decimal(0)
+        total_fees = Decimal(0)
+
+        for fill in repo.iter_fills(conn, run_id):
+            symbol = fill["symbol"]
+            current = positions.get(symbol) or PositionState.flat(symbol)
+            effect = compute_fill_effect(
+                current,
+                side=fill["side"],
+                qty=Decimal(fill["fill_qty"]),
+                price=Decimal(fill["fill_price"]),
+                fee_rate=Decimal(fill["fee_rate"]),
+            )
+            positions[symbol] = effect.position
+            wallet += effect.wallet_delta
+            realized_total += effect.realized_pnl_delta
+            total_fees += effect.fee
+
+        net_funding = Decimal(0)
+        for event in repo.iter_funding_events(conn, run_id, status="posted"):
+            pnl = Decimal(event["funding_pnl"])
+            wallet += pnl
+            net_funding += pnl
 
     ledger = AccountLedger(
         wallet_balance=wallet,

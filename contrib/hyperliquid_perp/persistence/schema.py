@@ -2,8 +2,9 @@
 
 SQLite is the single source of truth (phase2-data §1). This module owns the DDL:
 the eight export logical tables (§5–§12, one-to-one with the CSV exports) and the
-six internal runtime tables (§1.2). ``db.apply_migrations`` runs these in version
-order and records each in ``schema_migrations``.
+seven internal runtime tables (§1.2, plus ``run_seed_positions`` — the persisted
+replay genesis). ``db.apply_migrations`` runs these in version order and records
+each in ``schema_migrations``.
 
 Storage conventions (phase2-data §1 footnote "SQLite 存字串或整數最小單位，避免
 REAL 浮點污染"):
@@ -147,7 +148,8 @@ CREATE TABLE orders (
     status            TEXT NOT NULL,
     status_reason     TEXT,
     reduce_only       INTEGER NOT NULL DEFAULT 0,
-    active_from       TEXT
+    active_from       TEXT,
+    updated_at        TEXT NOT NULL
 )
 """
 
@@ -211,7 +213,9 @@ CREATE TABLE account_snapshots (
     total_fees               TEXT NOT NULL,
     net_funding_pnl          TEXT NOT NULL,
     total_position_notional  TEXT NOT NULL,
-    effective_leverage       TEXT NOT NULL,
+    -- NULL when account_equity <= 0: leverage is undefined on a blown-up
+    -- account, and 0 would read as "no exposure" — the opposite of the truth.
+    effective_leverage       TEXT,
     used_initial_margin      TEXT NOT NULL,
     total_maintenance_margin TEXT NOT NULL,
     margin_ratio             TEXT
@@ -318,6 +322,21 @@ CREATE TABLE current_account_state (
 )
 """
 
+# The run's seed positions as applied at creation (phase2-data §1.2 genesis).
+# Replay reads its genesis from here + runs.initial_balance_usdc rather than
+# trusting the caller's current config: a YAML edited after run creation must
+# not shift the replay baseline (it would misreport — or mask — a mismatch).
+_RUN_SEED_POSITIONS = """
+CREATE TABLE run_seed_positions (
+    run_id       TEXT NOT NULL,
+    symbol       TEXT NOT NULL,
+    size         TEXT NOT NULL,
+    entry_price  TEXT,
+    realized_pnl TEXT NOT NULL DEFAULT '0',
+    PRIMARY KEY (run_id, symbol)
+)
+"""
+
 # schema_migrations is created by ``db.apply_migrations`` before any migration
 # runs (it is the bookkeeping table that records which migrations ran), so it is
 # intentionally separate from the versioned statement list below.
@@ -344,5 +363,6 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         _EXECUTION_PLANS,
         _CURRENT_POSITIONS,
         _CURRENT_ACCOUNT_STATE,
+        _RUN_SEED_POSITIONS,
     ),
 }

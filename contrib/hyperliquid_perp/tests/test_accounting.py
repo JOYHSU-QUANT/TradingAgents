@@ -141,7 +141,9 @@ def test_account_formulas_and_62_example():
     assert eq == Decimal("1050")
     assert acc.available_balance(eq, Decimal("200")) == Decimal("850")
     assert acc.effective_leverage(Decimal("1000"), eq) == Decimal("1000") / Decimal("1050")
-    assert acc.effective_leverage(Decimal("1000"), Decimal("0")) == 0  # non-positive equity
+    # Non-positive equity: leverage is undefined (None/NULL), never a misleading 0.
+    assert acc.effective_leverage(Decimal("1000"), Decimal("0")) is None
+    assert acc.effective_leverage(Decimal("1000"), Decimal("-5")) is None
     assert acc.margin_ratio(eq, Decimal("0")) is None  # no maintenance -> undefined
     assert acc.margin_ratio(Decimal("1050"), Decimal("30")) == Decimal("35")
 
@@ -331,6 +333,7 @@ def test_funding_pending_then_backfilled_posts_once():
         funding_timestamp=_TS,
         position_size=Decimal("0.05"),
         funding_rate=None,
+        mark_price=Decimal("60000"),
     )
     assert pend.status == "pending"
     assert repo.get_current_account_state(db.conn, "r1").wallet_balance == Decimal(
@@ -431,6 +434,172 @@ def test_funding_rejects_naive_timestamp():
     db.close()
 
 
+def test_funding_pending_requires_mark():
+    # The pending row is the stored settlement basis; it must be captured complete.
+    db = _db()
+    _init(db)
+    with pytest.raises(ValueError, match="pending funding event must record"):
+        acc.record_funding(
+            db,
+            run_id="r1",
+            mode="paper",
+            symbol="BTC",
+            funding_timestamp=_TS,
+            position_size=Decimal("0.05"),
+            funding_rate=None,
+        )
+    db.close()
+
+
+def _record_btc_funding(db, ts, *, size="0.05", rate="0.00001", mark="60000"):
+    return acc.record_funding(
+        db,
+        run_id="r1",
+        mode="paper",
+        symbol="BTC",
+        funding_timestamp=ts,
+        position_size=Decimal(size),
+        funding_rate=Decimal(rate),
+        mark_price=Decimal(mark),
+    )
+
+
+def test_funding_dedups_same_instant_across_utc_offsets():
+    # The same settlement expressed in a +05:00 offset must hit the same
+    # exactly-once key — the wallet moves once, not twice.
+    db = _db()
+    _init(db)
+    first = _record_btc_funding(db, _TS)
+    assert first.status == "posted"
+    wallet_after = repo.get_current_account_state(db.conn, "r1").wallet_balance
+    offset_view = _TS.astimezone(timezone(timedelta(hours=5)))
+    second = _record_btc_funding(db, offset_view)
+    assert second.status == "already_posted"
+    assert second.funding_event_id == first.funding_event_id
+    assert repo.get_current_account_state(db.conn, "r1").wallet_balance == wallet_after
+    db.close()
+
+
+def test_funding_floors_to_settlement_hour():
+    # A backfill stamped a few seconds past the hour (fundingHistory ms epochs)
+    # is the same settlement as the scheduler's top-of-hour instant.
+    db = _db()
+    _init(db)
+    first = _record_btc_funding(db, _TS)
+    skewed = _TS + timedelta(seconds=37, microseconds=250)
+    second = _record_btc_funding(db, skewed)
+    assert second.status == "already_posted"
+    assert second.funding_event_id == first.funding_event_id
+    ev = repo.get_funding_event(db.conn, first.funding_event_id)
+    assert ev["funding_timestamp"] == _TS.isoformat()  # stored floored
+    db.close()
+
+
+def test_funding_backfill_refuses_legacy_pending_without_mark():
+    # A pre-guard pending row (mark NULL) must fail loud on backfill, never
+    # settle on a fabricated basis mixing the stored size with a fresh mark.
+    db = _db()
+    _init(db)
+    with db.transaction() as conn:
+        from contrib.hyperliquid_perp.persistence.ids import funding_event_id
+
+        repo.insert_funding_event(
+            conn,
+            funding_event_id=funding_event_id("r1", "BTC", _TS),
+            mode="paper",
+            run_id="r1",
+            symbol="BTC",
+            funding_timestamp=_TS,
+            position_size=Decimal("0.05"),
+            status="pending",
+        )
+    with pytest.raises(ValueError, match="no stored mark_price"):
+        _record_btc_funding(db, _TS)
+    db.close()
+
+
+def test_replay_is_immune_to_ambient_decimal_context():
+    # The pinned DECIMAL_CONTEXT means a consumer shrinking the global precision
+    # cannot perturb replay's arithmetic and fake a mismatch.
+    import decimal
+
+    db = _db()
+    _run_series(db)
+    baseline = acc.replay(db, run_id="r1")
+    assert baseline.is_consistent
+    original = decimal.getcontext().prec
+    try:
+        decimal.getcontext().prec = 6
+        perturbed = acc.replay(db, run_id="r1")
+    finally:
+        decimal.getcontext().prec = original
+    assert perturbed.is_consistent
+    assert perturbed.ledger == baseline.ledger
+    db.close()
+
+
+def test_summarize_account_reports_none_leverage_when_insolvent():
+    sched = MarginSchedule(tiers=(MarginTier(Decimal(0), Decimal(50)),))
+    ledger = AccountLedger(wallet_balance=Decimal("-100"))
+    val = acc.PositionValuation(
+        position=_long("0.05", "60000"), mark_price=Decimal("60000"), schedule=sched
+    )
+    m = acc.summarize_account(ledger, [val], leverage=Decimal("1"))
+    assert m.account_equity < 0
+    assert m.effective_leverage is None
+
+
+def test_fill_effect_enforces_wallet_identity():
+    with pytest.raises(ValueError, match="wallet_delta"):
+        acc.FillEffect(
+            position=_long("0.01", "100"),
+            realized_pnl_delta=Decimal("1"),
+            fee=Decimal("0.1"),
+            fill_notional=Decimal("1"),
+            wallet_delta=Decimal("5"),  # != 1 - 0.1
+        )
+
+
+def test_post_fill_warns_when_wallet_goes_negative(caplog):
+    import logging
+
+    db = _db()
+    _init(db, balance="0.1")  # fee 0.27 on the fill below exceeds the wallet
+    with caplog.at_level(logging.WARNING):
+        acc.post_fill(
+            db,
+            run_id="r1",
+            mode="paper",
+            fill_id="f1",
+            order_id="o1",
+            symbol="BTC",
+            side="buy",
+            qty=Decimal("0.01"),
+            price=Decimal("60000"),
+            fee_rate=_FEE,
+        )
+    assert "insolvent" in caplog.text
+    # Warned, not blocked: the fill still posted.
+    assert repo.get_current_account_state(db.conn, "r1").wallet_balance < 0
+    db.close()
+
+
+def test_initialize_run_warns_on_nonpositive_balance(caplog):
+    import logging
+
+    db = _db()
+    with caplog.at_level(logging.WARNING):
+        acc.initialize_run(
+            db,
+            run_id="r0",
+            mode="paper",
+            initial_balance_usdc=Decimal("0"),
+            schema_version=1,
+        )
+    assert "non-positive initial balance" in caplog.text
+    db.close()
+
+
 # --------------------------------------------------------------------------
 # accounting replay (spec §5)
 # --------------------------------------------------------------------------
@@ -477,8 +646,8 @@ def _run_series(db):
 def test_replay_is_consistent_and_deterministic():
     db = _db()
     _run_series(db)
-    r1 = acc.replay(db, run_id="r1", initial_balance=Decimal("1000"))
-    r2 = acc.replay(db, run_id="r1", initial_balance=Decimal("1000"))
+    r1 = acc.replay(db, run_id="r1")
+    r2 = acc.replay(db, run_id="r1")
     assert r1.is_consistent
     assert r1.ledger == r2.ledger and r1.positions == r2.positions  # deterministic
     # replayed ledger equals the materialized one
@@ -492,7 +661,7 @@ def test_replay_detects_corrupted_materialized_state():
     # Corrupt the materialized wallet out of band.
     with db.transaction() as conn:
         conn.execute("UPDATE current_account_state SET wallet_balance = '0' WHERE run_id = 'r1'")
-    result = acc.replay(db, run_id="r1", initial_balance=Decimal("1000"))
+    result = acc.replay(db, run_id="r1")
     assert not result.account_matches
     assert not result.is_consistent
     db.close()
@@ -503,7 +672,7 @@ def test_replay_detects_corrupted_position():
     _run_series(db)
     with db.transaction() as conn:
         conn.execute("UPDATE current_positions SET size = '99' WHERE run_id = 'r1'")
-    result = acc.replay(db, run_id="r1", initial_balance=Decimal("1000"))
+    result = acc.replay(db, run_id="r1")
     assert "BTC" in result.position_mismatches
     db.close()
 
@@ -512,10 +681,18 @@ def test_replay_with_initial_positions():
     db = _db()
     seed = _long("0.01", "50000")
     _init(db, positions=[seed])
-    # No fills: replay should reproduce the seed position and opening balance.
-    result = acc.replay(db, run_id="r1", initial_balance=Decimal("1000"), initial_positions=[seed])
+    # No fills: replay rebuilds the seed position and opening balance from the
+    # run's own committed genesis rows — no caller-supplied config involved.
+    result = acc.replay(db, run_id="r1")
     assert result.is_consistent
     assert result.positions["BTC"] == seed
+    db.close()
+
+
+def test_replay_missing_run_raises():
+    db = _db()
+    with pytest.raises(ValueError, match="does not exist"):
+        acc.replay(db, run_id="ghost")
     db.close()
 
 

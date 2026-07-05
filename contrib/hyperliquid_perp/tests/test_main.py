@@ -317,6 +317,22 @@ def test_run_engine_reports_bad_config_as_config_error(monkeypatch, capsys):
     assert "max_target_margin_pct" in err
 
 
+def test_run_engine_reports_bad_paper_trading_block_as_config_error(monkeypatch, capsys):
+    # The paper_trading: gate itself, end to end: an actually-invalid block (not
+    # just a bad risk:) must abort pre-engine with exit 1 and name the bad key —
+    # if the PaperTradingConfig.from_dict call were dropped or reordered after
+    # build_graph, this test fails.
+    calls = []
+    _stub_engine(monkeypatch)
+    monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
+    rc = main_mod.run_engine({"paper_trading": {"execution": {"taker_fee_rate": -1}}}, "BTC")
+    assert rc == 1
+    assert calls == []  # aborted before the engine was built
+    err = capsys.readouterr().err
+    assert "invalid risk:/decision:/paper_trading: config" in err
+    assert "taker_fee_rate" in err
+
+
 def test_run_engine_aborts_when_position_lookup_fails(monkeypatch, capsys):
     # A failed wallet lookup must abort before the engine runs (no LLM spend) and
     # exit non-zero — never trade against guessed-flat state.

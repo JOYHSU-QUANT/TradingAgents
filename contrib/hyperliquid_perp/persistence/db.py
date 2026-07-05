@@ -34,18 +34,28 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# PR3 runs a 30s market-monitor loop and a 4h scheduler cycle against the same
+# store; WAL lets a reader overlap a writer and busy_timeout turns a residual
+# lock collision into a bounded wait instead of an immediate SQLITE_BUSY.
+_BUSY_TIMEOUT_MS = 5000
+
+
 def connect(path: str | Path) -> sqlite3.Connection:
     """Open a SQLite connection tuned for this store.
 
     Autocommit mode (``isolation_level = None``) hands transaction control to
     :class:`Database`; ``foreign_keys`` is enabled defensively even though the
     schema keeps referential links soft (the accounting layer resolves them), and
-    ``Row`` gives name-addressable rows to the repository.
+    ``Row`` gives name-addressable rows to the repository. WAL + ``busy_timeout``
+    set the concurrency posture (an in-memory DB ignores WAL — fine, it is never
+    shared across connections).
     """
     # ``str(path)`` so a Path (incl. the special ":memory:" string) both work.
     conn = sqlite3.connect(str(path), isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
     return conn
 
 

@@ -124,6 +124,18 @@ def test_map_schedule_unresolvable_table_id_raises():
         map_margin_schedule([meta, []], "BTC")
 
 
+def test_map_schedule_resolved_table_with_unusable_tiers_raises():
+    # The table id resolves but its marginTiers are empty -> fail loud; a silent
+    # fallback to the single maxLeverage tier would under-state maintenance
+    # margin (non-conservative) for the asset.
+    meta = {
+        "universe": [{"name": "BTC", "maxLeverage": 40, "marginTableId": 7}],
+        "marginTables": [[7, {"marginTiers": []}]],
+    }
+    with pytest.raises(MalformedResponseError, match="has no usable marginTiers"):
+        map_margin_schedule([meta, []], "BTC")
+
+
 def test_map_schedule_no_table_id_falls_back():
     # No marginTableId at all -> the single-tier maxLeverage fallback is correct.
     meta = {"universe": [{"name": "BTC", "maxLeverage": 40}]}

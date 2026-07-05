@@ -14,13 +14,27 @@ duplicate instead of double-applying it:
 Ids are readable ``|``-joined composites, not hashes, so a row's provenance is
 legible in the DB and CSV export. Components are normalised to ``str`` and must
 not themselves contain ``|`` (guarded here) so the composite stays unambiguous.
+
+Timestamp components are taken as aware ``datetime`` and canonicalised to UTC
+ISO-8601 *here*, so two representations of the same instant (``Z`` vs ``+05:00``
+offset) cannot derive different ids and defeat the UNIQUE dedup constraints —
+the guarantee must not depend on every caller remembering to normalise.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 __all__ = ["decision_attempt_id", "funding_event_id", "slice_id"]
 
 _SEP = "|"
+
+
+def _canonical_instant(value: datetime, *, name: str) -> str:
+    """UTC ISO form of an aware datetime; a naive one is rejected outright."""
+    if value.tzinfo is None:
+        raise ValueError(f"{name} must be timezone-aware (UTC)")
+    return value.astimezone(timezone.utc).isoformat()
 
 
 def _part(value: object, *, name: str) -> str:
@@ -47,17 +61,27 @@ def slice_id(run_id: str, plan_id: str, flip_leg: str | None, slice_index: int) 
     )
 
 
-def funding_event_id(run_id: str, symbol: str, funding_timestamp: str) -> str:
-    """Unique key for one hourly funding settlement (exactly-once posting)."""
+def funding_event_id(run_id: str, symbol: str, funding_timestamp: datetime) -> str:
+    """Unique key for one hourly funding settlement (exactly-once posting).
+
+    The caller is responsible for the *settlement-hour* semantics (flooring to
+    the hour — see ``record_funding``); this derivation only pins the tz form.
+    """
+    ts = _canonical_instant(funding_timestamp, name="funding_timestamp")
     return _SEP.join(
         (
             _part(run_id, name="run_id"),
             _part(symbol, name="symbol"),
-            _part(funding_timestamp, name="funding_timestamp"),
+            _part(ts, name="funding_timestamp"),
         )
     )
 
 
-def decision_attempt_id(run_id: str, scheduled_at: str) -> str:
+def decision_attempt_id(run_id: str, scheduled_at: datetime) -> str:
     """Unique key for one scheduled decision cycle (retry state survives restart)."""
-    return _SEP.join((_part(run_id, name="run_id"), _part(scheduled_at, name="scheduled_at")))
+    return _SEP.join(
+        (
+            _part(run_id, name="run_id"),
+            _part(_canonical_instant(scheduled_at, name="scheduled_at"), name="scheduled_at"),
+        )
+    )

@@ -7,14 +7,43 @@ in-memory shape the accounting math works with; the repository (de)serializes
 them to/from SQLite (Decimals stored as TEXT). Derived values that depend on the
 *current mark price* (equity, margin, effective leverage) are recomputed at
 snapshot time from these ledgers plus a mark, never stored raw here.
+
+:class:`Side` is the persistence layer's fill/order direction vocabulary — the
+storage form of the ``fills.side`` / ``orders.side`` columns. It mirrors the
+codebase's enum convention (``TargetSide``, ``DecisionMode``, ...) so a typo like
+``"Buy"`` is rejected at the write boundary, not deep inside the fill math.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Context, Decimal
+from enum import Enum
 
-__all__ = ["AccountLedger", "PositionState"]
+__all__ = ["AccountLedger", "DECIMAL_CONTEXT", "PositionState", "Side"]
+
+# The one decimal context for money math and its consistency checks. Replay's
+# "same committed events -> bit-for-bit same state" guarantee must not depend on
+# the ambient (mutable, global) decimal context, and the repository's derived-
+# value identity checks must round exactly like the accounting layer that
+# produced the values. 28 significant digits — the decimal default — with
+# default traps.
+DECIMAL_CONTEXT = Context(prec=28)
+
+
+class Side(str, Enum):
+    """A fill/order direction as stored in SQLite (``"buy"`` / ``"sell"``)."""
+
+    BUY = "buy"
+    SELL = "sell"
+
+    @classmethod
+    def parse(cls, value: str | Side) -> Side:
+        """Coerce a raw string (or pass an enum through), failing loud on a typo."""
+        try:
+            return cls(value)
+        except ValueError:
+            raise ValueError(f"fill side must be 'buy' or 'sell', got {value!r}") from None
 
 
 @dataclass(frozen=True)

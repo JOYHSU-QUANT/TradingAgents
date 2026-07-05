@@ -77,6 +77,7 @@ def test_all_tables_exist(tmp_path):
         "execution_plans",
         "current_positions",
         "current_account_state",
+        "run_seed_positions",
         "schema_migrations",
     ):
         assert expected in names
@@ -171,7 +172,7 @@ def test_null_slice_ids_are_distinct(tmp_path):
 
 def test_duplicate_funding_key_rejected(tmp_path):
     db = Database(tmp_path / "p.db")
-    fid = funding_event_id("r1", "BTC", _TS.isoformat())
+    fid = funding_event_id("r1", "BTC", _TS)
     with db.transaction() as conn:
         repo.insert_funding_event(
             conn,
@@ -200,7 +201,7 @@ def test_duplicate_funding_key_rejected(tmp_path):
 
 def test_duplicate_decision_attempt_rejected(tmp_path):
     db = Database(tmp_path / "p.db")
-    aid = decision_attempt_id("r1", _TS.isoformat())
+    aid = decision_attempt_id("r1", _TS)
     row = {
         "decision_attempt_id": aid,
         "timestamp": _TS,
@@ -289,6 +290,7 @@ def test_thin_inserts_align_with_schema_columns(tmp_path):
             type="paper_market",
             qty=Decimal("0.01"),
             status="filled",
+            updated_at=_TS,
         )
         repo.insert_account_snapshot(
             conn,
@@ -354,6 +356,152 @@ def test_scheduler_state_round_trip(tmp_path):
     assert row["last_output_id"] == "o1"
     assert row["next_decision_at"] == _TS.isoformat()
     db.close()
+
+
+# --------------------------------------------------------------------------
+# write-boundary validation (typos and desynced derived values fail loud)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("side", "Buy", "side"),
+        ("mode", "papertrade", "mode"),
+        ("liquidity_type", "takerr", "liquidity_type"),
+        ("fill_notional", Decimal("601"), "fill_notional"),
+        ("fee", Decimal("0.28"), "fee"),
+    ],
+)
+def test_insert_fill_rejects_bad_values(tmp_path, field, value, match):
+    db = Database(tmp_path / "p.db")
+    kwargs = {**_fill_kwargs(), field: value}
+    with pytest.raises(ValueError, match=match), db.transaction() as conn:
+        repo.insert_fill(conn, **kwargs)
+    assert len(repo.iter_fills(db.conn, "r1")) == 0
+    db.close()
+
+
+def test_insert_fill_rejects_bad_flip_leg(tmp_path):
+    db = Database(tmp_path / "p.db")
+    with pytest.raises(ValueError, match="flip_leg"), db.transaction() as conn:
+        repo.insert_fill(conn, **{**_fill_kwargs(), "flip_leg": "opening"})
+    db.close()
+
+
+def test_insert_funding_event_rejects_desynced_derived_values(tmp_path):
+    db = Database(tmp_path / "p.db")
+    base = {
+        "funding_event_id": funding_event_id("r1", "BTC", _TS),
+        "mode": "paper",
+        "run_id": "r1",
+        "symbol": "BTC",
+        "funding_timestamp": _TS,
+        "position_size": Decimal("0.05"),
+        "status": "posted",
+        "mark_price": Decimal("60000"),
+        "funding_rate": Decimal("0.0001"),
+    }
+    with pytest.raises(ValueError, match="signed_position_notional"), db.transaction() as conn:
+        repo.insert_funding_event(
+            conn, **base, signed_position_notional=Decimal("9999"), funding_pnl=Decimal("-0.3")
+        )
+    with pytest.raises(ValueError, match="funding_pnl"), db.transaction() as conn:
+        repo.insert_funding_event(
+            conn, **base, signed_position_notional=Decimal("3000"), funding_pnl=Decimal("0.3")
+        )
+    with pytest.raises(ValueError, match="status"), db.transaction() as conn:
+        repo.insert_funding_event(conn, **{**base, "status": "settled"})
+    db.close()
+
+
+def test_set_funding_status_rejects_desynced_pnl(tmp_path):
+    db = Database(tmp_path / "p.db")
+    with pytest.raises(ValueError, match="funding_pnl"), db.transaction() as conn:
+        repo.set_funding_status(
+            conn,
+            "whatever",
+            status="posted",
+            signed_position_notional=Decimal("3000"),
+            funding_rate=Decimal("0.0001"),
+            funding_pnl=Decimal("0.3"),  # should be -0.3
+        )
+    db.close()
+
+
+def test_insert_run_rejects_bad_mode(tmp_path):
+    db = Database(tmp_path / "p.db")
+    with pytest.raises(ValueError, match="mode"), db.transaction() as conn:
+        repo.insert_run(
+            conn,
+            run_id="r1",
+            mode="dry-run",
+            initial_balance_usdc=Decimal("1000"),
+            schema_version=1,
+        )
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# run seed positions (replay genesis)
+# --------------------------------------------------------------------------
+
+
+def test_run_seed_positions_round_trip(tmp_path):
+    db = Database(tmp_path / "p.db")
+    seed = PositionState(coin="BTC", size=Decimal("0.01"), entry_price=Decimal("50000"))
+    with db.transaction() as conn:
+        repo.insert_run_seed_position(conn, "r1", seed)
+    assert repo.get_run_seed_positions(db.conn, "r1") == [seed]
+    assert repo.get_run_seed_positions(db.conn, "other") == []
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# migration failure atomicity + connection posture
+# --------------------------------------------------------------------------
+
+
+def test_partial_migration_rolls_back_whole_version(tmp_path, monkeypatch):
+    # A version whose DDL fails partway must leave neither its earlier tables
+    # nor a schema_migrations row behind — the exact guarantee a future v2 needs.
+    from contrib.hyperliquid_perp.persistence import db as db_mod
+
+    broken = dict(db_mod.MIGRATIONS)
+    broken[2] = ("CREATE TABLE v2_ok (x TEXT)", "CREATE BOGUS SYNTAX")
+    monkeypatch.setattr(db_mod, "MIGRATIONS", broken)
+    conn = connect(tmp_path / "p.db")
+    with pytest.raises(sqlite3.OperationalError):
+        db_mod.apply_migrations(conn)
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "v2_ok" not in tables  # the version's earlier statement rolled back
+    versions = [r[0] for r in conn.execute("SELECT version FROM schema_migrations")]
+    assert versions == [1]  # v1 applied, v2 not recorded
+    conn.close()
+
+
+def test_connect_enables_wal_and_busy_timeout(tmp_path):
+    conn = connect(tmp_path / "p.db")
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    conn.close()
+
+
+# --------------------------------------------------------------------------
+# id canonicalization (dedup keys must not depend on the caller's tz form)
+# --------------------------------------------------------------------------
+
+
+def test_ids_canonicalize_timestamp_representation():
+    from datetime import timedelta
+
+    offset_view = _TS.astimezone(timezone(timedelta(hours=5)))
+    assert funding_event_id("r1", "BTC", offset_view) == funding_event_id("r1", "BTC", _TS)
+    assert decision_attempt_id("r1", offset_view) == decision_attempt_id("r1", _TS)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        decision_attempt_id("r1", datetime(2026, 7, 1))
+    with pytest.raises(ValueError, match="timezone-aware"):
+        funding_event_id("r1", "BTC", datetime(2026, 7, 1))
 
 
 def test_naive_datetime_rejected_on_write(tmp_path):

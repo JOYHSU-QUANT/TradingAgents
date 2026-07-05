@@ -563,6 +563,23 @@ def test_funding_backfill_stamps_updated_at_and_keeps_recorded_at():
     db.close()
 
 
+def test_posting_is_immune_to_ambient_decimal_context():
+    # The dual of the replay-immunity test: fills/funding *written* under a
+    # perturbed ambient context must persist the same pinned arithmetic that
+    # replay re-derives — the wallet sum must not round on the way in.
+    import decimal
+
+    db = _db()
+    original = decimal.getcontext().prec
+    try:
+        decimal.getcontext().prec = 6
+        _run_series(db)
+    finally:
+        decimal.getcontext().prec = original
+    assert acc.replay(db, run_id="r1").is_consistent
+    db.close()
+
+
 def test_replay_is_immune_to_ambient_decimal_context():
     # The pinned DECIMAL_CONTEXT means a consumer shrinking the global precision
     # cannot perturb replay's arithmetic and fake a mismatch.

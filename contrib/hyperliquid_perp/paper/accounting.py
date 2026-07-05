@@ -411,16 +411,25 @@ def post_fill(
 
         effect = compute_fill_effect(position, side=side, qty=qty, price=price, fee_rate=fee_rate)
 
-        new_wallet = ledger.wallet_balance + effect.wallet_delta
-        # Equity proxy at the fill's own price (other symbols' marks are unknown
-        # here); a definitive margin check is the engine's, this is the ledger's
-        # last-line audit trail.
-        new_pos = effect.position
-        equity_at_fill_price = new_wallet + (
-            Decimal(0)
-            if new_pos.is_flat
-            else unrealized_pnl(new_pos.size, price, new_pos.entry_price)
-        )
+        # Pinned: these sums are persisted (and re-derived under the same pin by
+        # replay), so they must not round under a perturbed ambient context.
+        with localcontext(DECIMAL_CONTEXT):
+            new_wallet = ledger.wallet_balance + effect.wallet_delta
+            # Equity proxy at the fill's own price (other symbols' marks are
+            # unknown here); a definitive margin check is the engine's, this is
+            # the ledger's last-line audit trail.
+            new_pos = effect.position
+            equity_at_fill_price = new_wallet + (
+                Decimal(0)
+                if new_pos.is_flat
+                else unrealized_pnl(new_pos.size, price, new_pos.entry_price)
+            )
+            new_ledger = AccountLedger(
+                wallet_balance=new_wallet,
+                realized_pnl=ledger.realized_pnl + effect.realized_pnl_delta,
+                total_fees=ledger.total_fees + effect.fee,
+                net_funding_pnl=ledger.net_funding_pnl,
+            )
         if new_wallet < 0 or equity_at_fill_price <= 0:
             logger.warning(
                 "fill %s leaves run %s insolvent at its own price: wallet %s, "
@@ -456,17 +465,7 @@ def post_fill(
             timestamp=now,
         )
         repo.upsert_current_position(conn, run_id, effect.position, updated_at=now)
-        repo.upsert_current_account_state(
-            conn,
-            run_id,
-            AccountLedger(
-                wallet_balance=new_wallet,
-                realized_pnl=ledger.realized_pnl + effect.realized_pnl_delta,
-                total_fees=ledger.total_fees + effect.fee,
-                net_funding_pnl=ledger.net_funding_pnl,
-            ),
-            updated_at=now,
-        )
+        repo.upsert_current_account_state(conn, run_id, new_ledger, updated_at=now)
     return effect
 
 
@@ -611,17 +610,16 @@ def record_funding(
         ledger = repo.get_current_account_state(conn, run_id)
         if ledger is None:
             raise ValueError(f"run {run_id!r} has no account state; call initialize_run first")
-        repo.upsert_current_account_state(
-            conn,
-            run_id,
-            AccountLedger(
+        # Pinned for the same reason as post_fill's ledger sums: the persisted
+        # wallet must match what replay re-derives under DECIMAL_CONTEXT.
+        with localcontext(DECIMAL_CONTEXT):
+            new_ledger = AccountLedger(
                 wallet_balance=ledger.wallet_balance + pnl,
                 realized_pnl=ledger.realized_pnl,
                 total_fees=ledger.total_fees,
                 net_funding_pnl=ledger.net_funding_pnl + pnl,
-            ),
-            updated_at=now,
-        )
+            )
+        repo.upsert_current_account_state(conn, run_id, new_ledger, updated_at=now)
     return FundingResult("posted", fe_id, pnl)
 
 

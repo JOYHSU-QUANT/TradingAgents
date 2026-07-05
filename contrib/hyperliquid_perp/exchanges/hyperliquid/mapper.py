@@ -231,7 +231,7 @@ def map_margin_schedule(meta_and_asset_ctxs: Any, coin: str) -> MarginSchedule:
                 f"margin table {table_id!r} for {coin!r} has no usable marginTiers"
             )
         try:
-            return MarginSchedule(tiers=tuple(tiers))
+            return MarginSchedule(coin=coin, tiers=tuple(tiers))
         except ValueError as exc:
             raise MalformedResponseError(f"margin table {table_id!r} for {coin!r}: {exc}") from exc
 
@@ -239,14 +239,18 @@ def map_margin_schedule(meta_and_asset_ctxs: Any, coin: str) -> MarginSchedule:
     # the asset's max leverage (read from meta, never hardcoded).
     try:
         return MarginSchedule(
+            coin=coin,
             tiers=(
                 MarginTier(
                     lower_bound=Decimal(0),
                     max_leverage=_dec(entry.get("maxLeverage"), field="maxLeverage"),
                 ),
-            )
+            ),
         )
-    except ValueError as exc:
+    except (ValueError, MalformedResponseError) as exc:
+        # ``_dec`` raises MalformedResponseError (not ValueError) on a missing /
+        # non-numeric maxLeverage; catch it too so the coin-context prefix is
+        # added on that path as well, matching the tiered-table branch above.
         raise MalformedResponseError(f"maxLeverage for {coin!r}: {exc}") from exc
 
 

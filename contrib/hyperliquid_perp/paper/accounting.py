@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 from types import MappingProxyType
 
+from ..domains.perp.enum_guard import check_enum
 from ..domains.perp.margin import (
     MarginSchedule,
     account_equity,
@@ -267,6 +268,16 @@ class PositionValuation:
         # flow into equity / maintenance-margin figures as silent nonsense.
         if self.mark_price <= 0:
             raise ValueError(f"PositionValuation.mark_price must be > 0, got {self.mark_price}")
+        # A position must be valued against its *own* asset's margin schedule.
+        # summarize_account trusts the caller (PR3's engine) to zip each open
+        # position with its coin's schedule; a mismatched pairing would silently
+        # value the position against another asset's tier table (wrong
+        # maintenance margin / liquidation estimate), so reject it at construction.
+        if self.position.coin != self.schedule.coin:
+            raise ValueError(
+                "PositionValuation.position and .schedule must be the same asset, got "
+                f"position {self.position.coin!r} vs schedule {self.schedule.coin!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -552,7 +563,7 @@ class FundingResult:
         # (FillEffect, LiquidationEstimate): a hand-built instance must not be
         # able to pair a non-posted status with a pnl (or a posted one without),
         # since callers branch on status while trusting funding_pnl's presence.
-        repo._check_enum(self.status, _FUNDING_RESULT_STATUSES, name="FundingResult.status")
+        check_enum(self.status, _FUNDING_RESULT_STATUSES, name="FundingResult.status")
         if (self.funding_pnl is not None) != (self.status == "posted"):
             raise ValueError(
                 "FundingResult.funding_pnl must be present exactly when status "

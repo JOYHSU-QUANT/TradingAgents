@@ -158,7 +158,12 @@ class Database:
         try:
             yield self._conn
         except BaseException:
-            self._conn.execute("ROLLBACK")
+            # Suppress a secondary ROLLBACK error (e.g. a lock/busy hiccup that
+            # also broke this unit) so the original body exception is what
+            # propagates — mirrors the COMMIT-failure branch below and
+            # apply_migrations, so a rollback-time error can't mask the real cause.
+            with suppress(Exception):
+                self._conn.execute("ROLLBACK")
             raise
         else:
             try:

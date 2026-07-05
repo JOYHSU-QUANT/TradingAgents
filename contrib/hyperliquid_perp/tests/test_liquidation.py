@@ -38,7 +38,7 @@ _TICK = Decimal("0.1")  # BTC: szDecimals 5 -> tick 0.1
 
 
 def _single(lev="50") -> MarginSchedule:
-    return MarginSchedule(tiers=(MarginTier(Decimal(0), Decimal(lev)),))
+    return MarginSchedule(coin="BTC", tiers=(MarginTier(Decimal(0), Decimal(lev)),))
 
 
 def _make_f(size, entry, wallet, schedule, other_un=Decimal(0), other_maint=Decimal(0)):
@@ -109,7 +109,8 @@ def test_maintenance_snapshot_single_tier():
 
 def test_maintenance_snapshot_multi_tier():
     sched = MarginSchedule(
-        tiers=(MarginTier(Decimal(0), Decimal(50)), MarginTier(Decimal(10_000), Decimal(25)))
+        coin="BTC",
+        tiers=(MarginTier(Decimal(0), Decimal(50)), MarginTier(Decimal(10_000), Decimal(25))),
     )
     # notional 20000 (0.2 * 100000) -> tier 1
     snap = maintenance_snapshot(sched, Decimal("0.2"), Decimal("100000"))
@@ -215,7 +216,8 @@ def test_liquidation_estimate_rejects_non_positive_price():
 def test_cross_tier_liquidation_reselects_tier():
     # Two tiers; the position is large enough that its notional spans a boundary.
     sched = MarginSchedule(
-        tiers=(MarginTier(Decimal(0), Decimal(50)), MarginTier(Decimal(2000), Decimal(20)))
+        coin="BTC",
+        tiers=(MarginTier(Decimal(0), Decimal(50)), MarginTier(Decimal(2000), Decimal(20))),
     )
     size, entry, wallet = Decimal("0.1"), Decimal("60000"), Decimal("300")
     est = estimated_liquidation_price(
@@ -356,7 +358,8 @@ def test_liquidation_math_is_immune_to_ambient_decimal_context():
     import decimal
 
     sched = MarginSchedule(
-        tiers=(MarginTier(Decimal(0), Decimal(50)), MarginTier(Decimal(10_000), Decimal(25)))
+        coin="BTC",
+        tiers=(MarginTier(Decimal(0), Decimal(50)), MarginTier(Decimal(10_000), Decimal(25))),
     )
     kwargs = {
         "size": Decimal("0.5"),

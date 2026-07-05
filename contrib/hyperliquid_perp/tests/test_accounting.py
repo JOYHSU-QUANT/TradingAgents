@@ -156,7 +156,7 @@ def test_funding_pnl_sign():
 
 
 def test_summarize_account():
-    sched = MarginSchedule(tiers=(MarginTier(Decimal(0), Decimal(50)),))
+    sched = MarginSchedule(coin="BTC", tiers=(MarginTier(Decimal(0), Decimal(50)),))
     ledger = AccountLedger(wallet_balance=Decimal("1000"))
     val = acc.PositionValuation(
         position=_long("0.05", "60000"), mark_price=Decimal("61000"), schedule=sched
@@ -601,7 +601,7 @@ def test_replay_is_immune_to_ambient_decimal_context():
 
 
 def test_summarize_account_reports_none_leverage_when_insolvent():
-    sched = MarginSchedule(tiers=(MarginTier(Decimal(0), Decimal(50)),))
+    sched = MarginSchedule(coin="BTC", tiers=(MarginTier(Decimal(0), Decimal(50)),))
     ledger = AccountLedger(wallet_balance=Decimal("-100"))
     val = acc.PositionValuation(
         position=_long("0.05", "60000"), mark_price=Decimal("60000"), schedule=sched
@@ -921,9 +921,17 @@ def test_account_metrics_invariants_enforced():
 
 
 def test_position_valuation_rejects_non_positive_mark():
-    sched = MarginSchedule(tiers=(MarginTier(Decimal(0), Decimal(50)),))
+    sched = MarginSchedule(coin="BTC", tiers=(MarginTier(Decimal(0), Decimal(50)),))
     with pytest.raises(ValueError, match="mark_price must be > 0"):
         acc.PositionValuation(_long("0.01", "60000"), Decimal("0"), sched)
+
+
+def test_position_valuation_rejects_coin_mismatch():
+    # _long is a BTC position; pairing it with an ETH schedule would value it
+    # against the wrong asset's tier table — rejected at construction.
+    sched = MarginSchedule(coin="ETH", tiers=(MarginTier(Decimal(0), Decimal(50)),))
+    with pytest.raises(ValueError, match="must be the same asset"):
+        acc.PositionValuation(_long("0.01", "60000"), Decimal("60000"), sched)
 
 
 def test_replay_result_positions_mapping_is_immutable():
@@ -943,7 +951,7 @@ def test_replay_result_positions_mapping_is_immutable():
 def test_summarize_account_is_immune_to_ambient_decimal_context():
     import decimal
 
-    sched = MarginSchedule(tiers=(MarginTier(Decimal(0), Decimal(50)),))
+    sched = MarginSchedule(coin="BTC", tiers=(MarginTier(Decimal(0), Decimal(50)),))
     ledger = AccountLedger(wallet_balance=Decimal("1234.56789"))
     vals = [acc.PositionValuation(_long("0.0123", "61234.5"), Decimal("61999.875"), sched)]
     baseline = acc.summarize_account(ledger, vals, leverage=Decimal("3"))

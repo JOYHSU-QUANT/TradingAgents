@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 from typing import Any
 
+from ..domains.perp.enum_guard import check_enum
 from .ids import _canonical_instant
 from .models import DECIMAL_CONTEXT, AccountLedger, PositionState, Side
 
@@ -60,11 +61,6 @@ _MODES = frozenset({"paper", "live"})
 _LIQUIDITY_TYPES = frozenset({"maker", "taker", "simulated"})
 _FLIP_LEGS = frozenset({"open", "close"})
 _FUNDING_STATUSES = frozenset({"pending", "posted"})
-
-
-def _check_enum(value: str, allowed: frozenset[str], *, name: str) -> None:
-    if value not in allowed:
-        raise ValueError(f"{name} must be one of {sorted(allowed)}, got {value!r}")
 
 
 def _check_funding_identities(
@@ -188,7 +184,7 @@ def insert_run(
     config_json: str | None = None,
     created_at: datetime | None = None,
 ) -> None:
-    _check_enum(mode, _MODES, name="mode")
+    check_enum(mode, _MODES, name="mode")
     _insert(
         conn,
         "runs",
@@ -404,10 +400,10 @@ def insert_fill(
     be re-derived row-locally; it stays the caller's responsibility.)
     """
     side = Side.parse(side)
-    _check_enum(liquidity_type, _LIQUIDITY_TYPES, name="liquidity_type")
+    check_enum(liquidity_type, _LIQUIDITY_TYPES, name="liquidity_type")
     if flip_leg is not None:
-        _check_enum(flip_leg, _FLIP_LEGS, name="flip_leg")
-    _check_enum(mode, _MODES, name="mode")
+        check_enum(flip_leg, _FLIP_LEGS, name="flip_leg")
+    check_enum(mode, _MODES, name="mode")
     with localcontext(DECIMAL_CONTEXT):  # round exactly like the producing math
         expected_notional = abs(fill_qty * fill_price)
         if fill_notional != expected_notional:
@@ -495,8 +491,8 @@ def insert_funding_event(
     absent. A ``posted`` row missing its math would silently satisfy
     ``record_funding``'s already-posted short-circuit and drop the settlement.
     """
-    _check_enum(status, _FUNDING_STATUSES, name="status")
-    _check_enum(mode, _MODES, name="mode")
+    check_enum(status, _FUNDING_STATUSES, name="status")
+    check_enum(mode, _MODES, name="mode")
     if status == "posted":
         _check_posted_settlement_math(
             mark_price=mark_price,
@@ -581,7 +577,7 @@ def set_funding_status(
     actually happened — ``recorded_at`` keeps the pending-insert time, so a
     live posting and an hours-later backfill stay distinguishable.
     """
-    _check_enum(status, _FUNDING_STATUSES, name="status")
+    check_enum(status, _FUNDING_STATUSES, name="status")
     # Caller-supplied identities first (pure, no row needed) so an internally
     # inconsistent update is rejected identically whether or not the row exists.
     _check_funding_identities(

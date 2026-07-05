@@ -98,6 +98,10 @@ class MarginTier:
 class MarginSchedule:
     """An asset's ordered maintenance-margin tiers with continuity deductions.
 
+    ``coin`` names the asset this schedule belongs to, so a position can be
+    verified against its *own* asset's schedule (see ``PositionValuation``) rather
+    than being silently valued against another asset's tier table.
+
     Tiers must be sorted by ascending ``lower_bound``, start at ``0`` (every
     positive notional maps to a tier), and never *increase* max leverage as
     notional grows (the schedule only ever tightens). The per-tier deduction that
@@ -105,11 +109,15 @@ class MarginSchedule:
     construction and cached in ``_deductions``.
     """
 
+    coin: str
     tiers: tuple[MarginTier, ...]
-    # Derived: cumulative deduction per tier, index-parallel to ``tiers``.
-    _deductions: tuple[Decimal, ...] = field(default=(), compare=False, repr=False)
+    # Derived: cumulative deduction per tier, index-parallel to ``tiers`` (never
+    # caller-supplied — always recomputed in __post_init__).
+    _deductions: tuple[Decimal, ...] = field(init=False, default=(), compare=False, repr=False)
 
     def __post_init__(self) -> None:
+        if not self.coin:
+            raise ValueError("MarginSchedule.coin must be non-empty")
         if not self.tiers:
             raise ValueError("MarginSchedule needs at least one tier")
         if self.tiers[0].lower_bound != 0:

@@ -124,6 +124,26 @@ def test_map_schedule_unresolvable_table_id_raises():
         map_margin_schedule([meta, []], "BTC")
 
 
+def test_margin_math_is_immune_to_ambient_decimal_context():
+    # Tier rate/deduction/margin feed the §12.2 reproducibility snapshot fields;
+    # a consumer shrinking the global precision must not perturb them.
+    import decimal
+
+    tiers = (MarginTier(Decimal(0), Decimal(7)), MarginTier(Decimal(10_000), Decimal(3)))
+    baseline = MarginSchedule(tiers=tiers)
+    base_rate = baseline.maintenance_margin_rate(Decimal("20000"))
+    base_margin = baseline.maintenance_margin(Decimal("20000"))
+    original = decimal.getcontext().prec
+    try:
+        decimal.getcontext().prec = 4
+        perturbed = MarginSchedule(tiers=tiers)  # deductions baked at construction
+        assert perturbed.maintenance_margin_rate(Decimal("20000")) == base_rate
+        assert perturbed.maintenance_margin(Decimal("20000")) == base_margin
+        assert perturbed._deductions == baseline._deductions
+    finally:
+        decimal.getcontext().prec = original
+
+
 def test_map_schedule_resolved_table_with_unusable_tiers_raises():
     # The table id resolves but its marginTiers are empty -> fail loud; a silent
     # fallback to the single maxLeverage tier would under-state maintenance

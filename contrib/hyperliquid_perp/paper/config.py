@@ -74,7 +74,15 @@ class InitialPosition:
 def _parse_initial_positions(raw: object) -> tuple[InitialPosition, ...]:
     if not isinstance(raw, list):
         raise ValueError(f"initial_positions must be a list, got {raw!r}")
-    return tuple(InitialPosition.from_dict(item) for item in raw)
+    positions = tuple(InitialPosition.from_dict(item) for item in raw)
+    # One seed per coin: a duplicate would otherwise pass validation here and
+    # only surface at run creation as an opaque run_seed_positions PK violation.
+    seen: set[str] = set()
+    for pos in positions:
+        if pos.coin in seen:
+            raise ValueError(f"duplicate initial position for coin {pos.coin!r}")
+        seen.add(pos.coin)
+    return positions
 
 
 @dataclass(frozen=True)

@@ -17,18 +17,15 @@ codebase's enum convention (``TargetSide``, ``DecisionMode``, ...) so a typo lik
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Context, Decimal
+from decimal import Decimal
 from enum import Enum
 
-__all__ = ["AccountLedger", "DECIMAL_CONTEXT", "PositionState", "Side"]
+# Re-exported so the persistence layer's writers/consumers can pin the same
+# money-math context without each reaching into the domain layer; the canonical
+# definition (and rationale) lives with the base money math in margin.py.
+from ..domains.perp.margin import DECIMAL_CONTEXT
 
-# The one decimal context for money math and its consistency checks. Replay's
-# "same committed events -> bit-for-bit same state" guarantee must not depend on
-# the ambient (mutable, global) decimal context, and the repository's derived-
-# value identity checks must round exactly like the accounting layer that
-# produced the values. 28 significant digits — the decimal default — with
-# default traps.
-DECIMAL_CONTEXT = Context(prec=28)
+__all__ = ["AccountLedger", "DECIMAL_CONTEXT", "PositionState", "Side"]
 
 
 class Side(str, Enum):

@@ -72,6 +72,22 @@ def test_initial_position_validation():
         InitialPosition.from_dict({"coin": "BTC", "size": "0.01", "entry_price": 1, "x": 1})
 
 
+def test_duplicate_initial_position_coin_rejected():
+    # A copy-paste duplicate must fail as a named config error here, not as an
+    # opaque run_seed_positions PRIMARY KEY violation at run creation.
+    with pytest.raises(ValueError, match="duplicate initial position for coin 'BTC'"):
+        PaperTradingConfig.from_dict(
+            {
+                "account": {
+                    "initial_positions": [
+                        {"coin": "BTC", "size": "0.01", "entry_price": 60000},
+                        {"coin": "BTC", "size": "0.02", "entry_price": 61000},
+                    ]
+                }
+            }
+        )
+
+
 def test_non_mapping_block_rejected():
     with pytest.raises(ValueError, match="expected a mapping"):
         PaperTradingConfig.from_dict({"account": 5})

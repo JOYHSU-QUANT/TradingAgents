@@ -25,9 +25,18 @@ The mapper (:mod:`...exchanges.hyperliquid.mapper`) builds a schedule from the
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Context, Decimal, localcontext
 
-__all__ = ["MarginTier", "MarginSchedule"]
+__all__ = ["DECIMAL_CONTEXT", "MarginTier", "MarginSchedule"]
+
+# The one decimal context for money math and its consistency checks, defined in
+# this base domain module so every layer (margin tiers, accounting, liquidation,
+# repository identity checks) pins the *same* arithmetic. Replay's "same
+# committed events -> bit-for-bit same state" guarantee — and the §12.2
+# reproducibility fields recorded on snapshots — must not depend on the ambient
+# (mutable, global) decimal context. 28 significant digits — the decimal
+# default — with default traps.
+DECIMAL_CONTEXT = Context(prec=28)
 
 
 @dataclass(frozen=True)
@@ -51,7 +60,8 @@ class MarginTier:
     @property
     def maintenance_margin_rate(self) -> Decimal:
         """``1 / (2 * max_leverage)`` — half the tier's initial-margin fraction."""
-        return Decimal(1) / (Decimal(2) * self.max_leverage)
+        with localcontext(DECIMAL_CONTEXT):  # recomputed per access; pin the division
+            return Decimal(1) / (Decimal(2) * self.max_leverage)
 
 
 @dataclass(frozen=True)
@@ -90,12 +100,15 @@ class MarginSchedule:
         # Continuity deduction: at each boundary the maintenance margin computed
         # with the lower and upper tier must agree, so
         # ded_i = ded_{i-1} + lower_bound_i * (rate_i - rate_{i-1}). ded_0 = 0.
-        deductions: list[Decimal] = [Decimal(0)]
-        for prev, cur in zip(self.tiers, self.tiers[1:], strict=False):
-            deductions.append(
-                deductions[-1]
-                + cur.lower_bound * (cur.maintenance_margin_rate - prev.maintenance_margin_rate)
-            )
+        # Pinned: these are baked in at construction (often outside any pinned
+        # accounting scope) and later compared against pinned arithmetic.
+        with localcontext(DECIMAL_CONTEXT):
+            deductions: list[Decimal] = [Decimal(0)]
+            for prev, cur in zip(self.tiers, self.tiers[1:], strict=False):
+                deductions.append(
+                    deductions[-1]
+                    + cur.lower_bound * (cur.maintenance_margin_rate - prev.maintenance_margin_rate)
+                )
         object.__setattr__(self, "_deductions", tuple(deductions))
 
     def _tier_index(self, notional: Decimal) -> int:
@@ -131,4 +144,5 @@ class MarginSchedule:
         """
         i = self._tier_index(notional)
         tier = self.tiers[i]
-        return notional * tier.maintenance_margin_rate - self._deductions[i]
+        with localcontext(DECIMAL_CONTEXT):
+            return notional * tier.maintenance_margin_rate - self._deductions[i]

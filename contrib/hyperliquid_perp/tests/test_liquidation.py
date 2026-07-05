@@ -28,6 +28,7 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.mapper import (
 )
 from contrib.hyperliquid_perp.paper.liquidation import (
     LiquidationEstimate,
+    MaintenanceSnapshot,
     estimated_liquidation_price,
     maintenance_snapshot,
     price_tick_from_sz_decimals,
@@ -76,6 +77,26 @@ def test_price_tick_from_sz_decimals():
 # --------------------------------------------------------------------------
 # maintenance snapshot fields (§12.2)
 # --------------------------------------------------------------------------
+
+
+def test_maintenance_snapshot_rejects_invalid_fields():
+    # Reproducibility fields a valid tier always yields non-negative; a hand-built
+    # or deserialized snapshot must not carry a negative figure or an empty tier id.
+    ok = {
+        "margin_tier_id": "0",
+        "maintenance_margin_rate": Decimal("0.05"),
+        "maintenance_deduction": Decimal("0"),
+        "maintenance_margin": Decimal("300"),
+    }
+    MaintenanceSnapshot(**ok)  # valid accepted
+    with pytest.raises(ValueError, match="margin_tier_id"):
+        MaintenanceSnapshot(**{**ok, "margin_tier_id": ""})
+    with pytest.raises(ValueError, match="maintenance_margin_rate"):
+        MaintenanceSnapshot(**{**ok, "maintenance_margin_rate": Decimal("-0.01")})
+    with pytest.raises(ValueError, match="maintenance_deduction"):
+        MaintenanceSnapshot(**{**ok, "maintenance_deduction": Decimal("-1")})
+    with pytest.raises(ValueError, match="maintenance_margin"):
+        MaintenanceSnapshot(**{**ok, "maintenance_margin": Decimal("-1")})
 
 
 def test_maintenance_snapshot_single_tier():

@@ -301,6 +301,24 @@ class AccountMetrics:
                 f"total_maintenance_margin == 0 (margin {self.total_maintenance_margin}, "
                 f"ratio {self.margin_ratio})"
             )
+        # The two arithmetic identities the ledger convention rests on (module
+        # docstring; account_equity()/available_balance() in margin.py), enforced
+        # like FillEffect's wallet_delta check so a hand-built or deserialized
+        # instance can't silently disagree with the account math. Recomputed under
+        # the same pinned context summarize_account used, so equality is exact.
+        with localcontext(DECIMAL_CONTEXT):
+            expected_equity = self.wallet_balance + self.unrealized_pnl
+            expected_available = self.account_equity - self.used_initial_margin
+        if self.account_equity != expected_equity:
+            raise ValueError(
+                f"AccountMetrics.account_equity {self.account_equity} != "
+                f"wallet_balance + unrealized_pnl {expected_equity}"
+            )
+        if self.available_balance != expected_available:
+            raise ValueError(
+                f"AccountMetrics.available_balance {self.available_balance} != "
+                f"account_equity - used_initial_margin {expected_available}"
+            )
 
 
 def summarize_account(
@@ -389,6 +407,15 @@ def initialize_run(
         )
     now = created_at or _utcnow()
     with db.transaction() as conn:
+        # Re-initializing an existing run is a lifecycle error (a restart replays,
+        # it does not re-init). Surface it as the same clean domain error the
+        # missing-run path gives (_require_ledger), not the raw sqlite3.IntegrityError
+        # a bare insert_run PK conflict would raise.
+        if repo.get_run(conn, run_id) is not None:
+            raise ValueError(
+                f"run {run_id!r} is already initialized; replay or post fills to "
+                "continue it — do not call initialize_run again"
+            )
         repo.insert_run(
             conn,
             run_id=run_id,
@@ -731,6 +758,12 @@ def replay(db: Database, *, run_id: str) -> ReplayResult:
         if run is None:
             raise ValueError(f"run {run_id!r} does not exist; nothing to replay")
 
+        # Fold-order invariant: the live ledger accrued its deltas chronologically
+        # interleaved (each post_fill/record_funding did wallet += delta), while
+        # replay sums all fills then all funding. Decimal addition at prec=28 is
+        # only order-sensitive when operands span more than 28 significant figures;
+        # USDC balances and per-event deltas never do, so both fold orders yield the
+        # identical wallet and the bit-for-bit equality check below holds exactly.
         with localcontext(DECIMAL_CONTEXT):
             positions: dict[str, PositionState] = {
                 p.coin: p for p in repo.get_run_seed_positions(conn, run_id)

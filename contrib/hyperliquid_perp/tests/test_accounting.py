@@ -803,11 +803,11 @@ def test_funding_result_couples_pnl_to_posted_status():
         acc.FundingResult("settled", "fe", None)
 
 
-def test_account_metrics_none_couplings_enforced():
+def test_account_metrics_invariants_enforced():
     kwargs = {
         "wallet_balance": Decimal("1000"),
-        "account_equity": Decimal("1000"),
-        "available_balance": Decimal("900"),
+        "account_equity": Decimal("1000"),  # == wallet + upnl
+        "available_balance": Decimal("900"),  # == equity - used_im
         "unrealized_pnl": Decimal("0"),
         "total_position_notional": Decimal("500"),
         "used_initial_margin": Decimal("100"),
@@ -816,6 +816,7 @@ def test_account_metrics_none_couplings_enforced():
         "margin_ratio": Decimal("100"),
     }
     acc.AccountMetrics(**kwargs)  # valid pairing accepted
+    # None-couplings
     with pytest.raises(ValueError, match="effective_leverage"):
         acc.AccountMetrics(**{**kwargs, "account_equity": Decimal("-5")})
     with pytest.raises(ValueError, match="effective_leverage"):
@@ -824,6 +825,15 @@ def test_account_metrics_none_couplings_enforced():
         acc.AccountMetrics(**{**kwargs, "total_maintenance_margin": Decimal("0")})
     with pytest.raises(ValueError, match="margin_ratio"):
         acc.AccountMetrics(**{**kwargs, "margin_ratio": None})
+    # Arithmetic identities: equity = wallet + upnl, available = equity - used_im.
+    # (equity kept > 0 and maint != 0 so the None-couplings still pass and it is
+    # the identity check that fires.)
+    with pytest.raises(ValueError, match="account_equity"):
+        acc.AccountMetrics(
+            **{**kwargs, "account_equity": Decimal("1234"), "available_balance": Decimal("1134")}
+        )
+    with pytest.raises(ValueError, match="available_balance"):
+        acc.AccountMetrics(**{**kwargs, "available_balance": Decimal("777")})
 
 
 def test_position_valuation_rejects_non_positive_mark():
@@ -870,7 +880,9 @@ def test_summarize_account_is_immune_to_ambient_decimal_context():
 def test_initialize_run_rejects_duplicate_run_id_and_rolls_back():
     db = _db()
     _init(db, "1000", positions=[_long("0.01", "60000")])
-    with pytest.raises(sqlite3.IntegrityError):
+    # Re-initializing an existing run is a lifecycle error surfaced as a clean
+    # domain error (not a raw sqlite3.IntegrityError), matching the missing-run path.
+    with pytest.raises(ValueError, match="already initialized"):
         acc.initialize_run(
             db,
             run_id="r1",

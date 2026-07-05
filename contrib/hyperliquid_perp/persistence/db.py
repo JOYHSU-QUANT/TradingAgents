@@ -19,6 +19,7 @@ idempotent and a future schema change is an append to ``MIGRATIONS``.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
@@ -28,6 +29,8 @@ from pathlib import Path
 from .schema import MIGRATIONS, SCHEMA_MIGRATIONS_DDL
 
 __all__ = ["Database", "apply_migrations", "connect"]
+
+logger = logging.getLogger(__name__)
 
 
 def _utcnow_iso() -> str:
@@ -54,7 +57,21 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
+    # WAL can silently fall back to the prior journal mode when the underlying
+    # VFS lacks shared-memory support (some network mounts / exclusive-locking
+    # setups) — no error is raised either way. An in-memory DB legitimately
+    # ignores WAL and is never shared, so only a file-backed store that failed
+    # to switch is worth flagging. Warn rather than raise: the store is still
+    # correct, just degraded to serialized reader/writer access, which busy_timeout
+    # keeps bounded — the concurrency posture PR3 relies on, not correctness.
+    applied_mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+    if str(path) != ":memory:" and str(applied_mode).lower() != "wal":
+        logger.warning(
+            "journal_mode is %r (not WAL) for %s; reader/writer overlap is "
+            "degraded to serialized access (busy_timeout still bounds lock waits).",
+            applied_mode,
+            path,
+        )
     conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
     return conn
 
@@ -87,7 +104,12 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
             )
             conn.execute("COMMIT")
         except BaseException:
-            conn.execute("ROLLBACK")
+            # Mirror Database.transaction(): suppress a secondary ROLLBACK error
+            # (e.g. a lock/busy condition that also broke the migration) so the
+            # original migration failure is what propagates, not a rollback-time
+            # error masking the real root cause.
+            with suppress(Exception):
+                conn.execute("ROLLBACK")
             raise
     return latest
 

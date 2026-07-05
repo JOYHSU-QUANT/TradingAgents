@@ -35,6 +35,26 @@ def test_indicator_names_handles_null_and_empty():
     assert main_mod._indicator_names({"indicators": ["rsi_14"]}) == ["rsi_14"]
 
 
+def test_resolve_coin_warns_when_multiple_configured(capsys):
+    # No --coin against a multi-coin config trades only the first; warn so the
+    # ignored coins are not a silent selection (pass --coin to choose explicitly).
+    import argparse
+
+    coin = main_mod._resolve_coin(argparse.Namespace(coin=None), {"coins": ["btc", "eth", "sol"]})
+    assert coin == "BTC"
+    err = capsys.readouterr().err
+    assert "3 coins configured" in err
+    assert "ETH" in err and "SOL" in err
+
+
+def test_resolve_coin_silent_for_single_coin(capsys):
+    import argparse
+
+    coin = main_mod._resolve_coin(argparse.Namespace(coin=None), {"coins": ["btc"]})
+    assert coin == "BTC"
+    assert capsys.readouterr().err == ""
+
+
 def test_build_engine_config_defaults():
     engine_config, selected = main_mod._build_engine_config({})
 
@@ -276,7 +296,10 @@ def _stub_engine(
 
     class _Ctx:
         candle_count = 200  # comfortably above any indicator warm-up need
-        indicators = {"rsi_14": 55.0, "ema_20": 100.0}  # at least one live signal
+        # Live signals including the regime-critical ATR: run_engine now requires a
+        # usable atr_14 (else the regime silently defaults to RANGING), so a normal
+        # healthy context carries it.
+        indicators = {"rsi_14": 55.0, "ema_20": 100.0, "atr_14": 250.0}
         mark_price = Decimal("60000")  # current_position_state values at mark
 
     monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (_Ctx(), object()))
@@ -467,7 +490,27 @@ def test_run_engine_aborts_when_only_atr_fails(monkeypatch, capsys):
     rc = main_mod.run_engine({}, "BTC")
     assert rc == 1
     assert calls == []  # engine never built — no LLM spend
-    assert "atr_14 failed to compute" in capsys.readouterr().err
+    assert "atr_14 is unavailable" in capsys.readouterr().err
+
+
+def test_run_engine_aborts_when_atr_not_configured(monkeypatch, capsys):
+    # Decision B: requiring atr_14 for the regime is not conditional on it being in
+    # the configured indicator set. A user who drops atr_14 from `indicators:` gets
+    # a context with no atr_14 key at all — run_engine must still refuse rather than
+    # trade on a silently-RANGING regime.
+    _stub_engine(monkeypatch)
+
+    class _NoAtrCtx:
+        candle_count = 200
+        indicators = {"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0}  # no atr_14 key
+
+    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (_NoAtrCtx(), object()))
+    calls = []
+    monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
+    rc = main_mod.run_engine({}, "BTC")
+    assert rc == 1
+    assert calls == []  # engine never built — no LLM spend
+    assert "atr_14 is unavailable" in capsys.readouterr().err
 
 
 def test_run_engine_aborts_on_malformed_propagate_shape(monkeypatch, capsys):

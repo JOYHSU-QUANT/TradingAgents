@@ -78,6 +78,29 @@ class MaintenanceSnapshot:
     maintenance_deduction: Decimal
     maintenance_margin: Decimal
 
+    def __post_init__(self) -> None:
+        # Reproducibility fields persisted alongside a position snapshot (§6.6.1):
+        # guard the non-negativity a valid tier always yields — like the sibling
+        # LiquidationEstimate below — so a hand-built or deserialized snapshot
+        # can't carry a negative rate/deduction/margin or an empty tier id.
+        if not self.margin_tier_id:
+            raise ValueError("MaintenanceSnapshot.margin_tier_id must be non-empty")
+        if self.maintenance_margin_rate < 0:
+            raise ValueError(
+                "MaintenanceSnapshot.maintenance_margin_rate must be >= 0, "
+                f"got {self.maintenance_margin_rate}"
+            )
+        if self.maintenance_deduction < 0:
+            raise ValueError(
+                "MaintenanceSnapshot.maintenance_deduction must be >= 0, "
+                f"got {self.maintenance_deduction}"
+            )
+        if self.maintenance_margin < 0:
+            raise ValueError(
+                "MaintenanceSnapshot.maintenance_margin must be >= 0, "
+                f"got {self.maintenance_margin}"
+            )
+
 
 def maintenance_snapshot(
     schedule: MarginSchedule, size: Decimal, mark_price: Decimal

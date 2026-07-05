@@ -164,6 +164,27 @@ def test_map_schedule_no_table_id_falls_back():
     assert sched.tiers[0].max_leverage == Decimal(40)
 
 
+def test_map_schedule_table_id_without_tables_raises():
+    # The entry references a tier table but meta carries no marginTables list
+    # (absent, or a non-list shape) -> the id is unresolvable; silently falling
+    # back to the single maxLeverage tier would under-state maintenance margin.
+    entry = {"name": "BTC", "maxLeverage": 40, "marginTableId": 7}
+    with pytest.raises(MalformedResponseError, match="no marginTables list"):
+        map_margin_schedule([{"universe": [entry]}, []], "BTC")
+    with pytest.raises(MalformedResponseError, match="no marginTables list"):
+        map_margin_schedule([{"universe": [entry], "marginTables": {"7": {}}}, []], "BTC")
+
+
+def test_tier_details_matches_individual_lookups():
+    sched = _multi_tier()
+    for n in (Decimal(0), Decimal(9_999), Decimal(10_000), Decimal(60_000)):
+        index, tier, deduction, margin = sched.tier_details(n)
+        assert tier is sched.tier_for_notional(n)
+        assert sched.tiers[index] is tier
+        assert deduction == sched.maintenance_deduction(n)
+        assert margin == sched.maintenance_margin(n)
+
+
 def test_map_schedule_unknown_coin(meta_and_asset_ctxs):
     with pytest.raises(UnknownCoinError):
         map_margin_schedule(meta_and_asset_ctxs, "DOGE")

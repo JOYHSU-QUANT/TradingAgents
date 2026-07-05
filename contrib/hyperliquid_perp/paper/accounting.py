@@ -26,10 +26,12 @@ total_unrealized_pnl`` — nothing is double-counted.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Sequence
+import sqlite3
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
+from types import MappingProxyType
 
 from ..domains.perp.margin import (
     MarginSchedule,
@@ -258,6 +260,14 @@ class PositionValuation:
     mark_price: Decimal
     schedule: MarginSchedule
 
+    def __post_init__(self) -> None:
+        # Same boundary rule as every other mark-price entry point
+        # (compute_fill_effect, estimated_liquidation_price): a zero/negative
+        # mark — say a market-data gap's placeholder — must fail here, not
+        # flow into equity / maintenance-margin figures as silent nonsense.
+        if self.mark_price <= 0:
+            raise ValueError(f"PositionValuation.mark_price must be > 0, got {self.mark_price}")
+
 
 @dataclass(frozen=True)
 class AccountMetrics:
@@ -272,6 +282,25 @@ class AccountMetrics:
     total_maintenance_margin: Decimal
     effective_leverage: Decimal | None
     margin_ratio: Decimal | None
+
+    def __post_init__(self) -> None:
+        # The documented None-couplings (see effective_leverage / margin_ratio
+        # above), enforced at construction so a hand-built instance — a test
+        # double, or a future deserializer rebuilding metrics from a stored
+        # snapshot — can't pair a blown-up equity with a "real" leverage (which
+        # downstream reads as exposure truth) or vice versa.
+        if (self.effective_leverage is None) != (self.account_equity <= 0):
+            raise ValueError(
+                "AccountMetrics.effective_leverage must be None exactly when "
+                f"account_equity <= 0 (equity {self.account_equity}, "
+                f"leverage {self.effective_leverage})"
+            )
+        if (self.margin_ratio is None) != (self.total_maintenance_margin == 0):
+            raise ValueError(
+                "AccountMetrics.margin_ratio must be None exactly when "
+                f"total_maintenance_margin == 0 (margin {self.total_maintenance_margin}, "
+                f"ratio {self.margin_ratio})"
+            )
 
 
 def summarize_account(
@@ -315,6 +344,14 @@ def summarize_account(
 # --------------------------------------------------------------------------
 # Transactional posting
 # --------------------------------------------------------------------------
+
+
+def _require_ledger(conn: sqlite3.Connection, run_id: str) -> AccountLedger:
+    """The run's current ledger — fail loud when ``initialize_run`` never ran."""
+    ledger = repo.get_current_account_state(conn, run_id)
+    if ledger is None:
+        raise ValueError(f"run {run_id!r} has no account state; call initialize_run first")
+    return ledger
 
 
 def initialize_run(
@@ -405,9 +442,7 @@ def post_fill(
     now = timestamp or _utcnow()
     with db.transaction() as conn:
         position = repo.get_current_position(conn, run_id, symbol) or PositionState.flat(symbol)
-        ledger = repo.get_current_account_state(conn, run_id)
-        if ledger is None:
-            raise ValueError(f"run {run_id!r} has no account state; call initialize_run first")
+        ledger = _require_ledger(conn, run_id)
 
         effect = compute_fill_effect(position, side=side, qty=qty, price=price, fee_rate=fee_rate)
 
@@ -469,13 +504,33 @@ def post_fill(
     return effect
 
 
+_FUNDING_RESULT_STATUSES = frozenset({"posted", "pending", "already_posted"})
+
+
 @dataclass(frozen=True)
 class FundingResult:
-    """Outcome of a funding settlement attempt (exactly-once)."""
+    """Outcome of a funding settlement attempt (exactly-once).
+
+    ``funding_pnl`` is present exactly when this call moved the wallet
+    (``status == "posted"``); a retry against an already-posted event reports
+    ``already_posted`` with no pnl (nothing moved *this* time).
+    """
 
     status: str  # "posted" | "pending" | "already_posted"
     funding_event_id: str
     funding_pnl: Decimal | None
+
+    def __post_init__(self) -> None:
+        # Same construction-time coupling as the sibling result dataclasses
+        # (FillEffect, LiquidationEstimate): a hand-built instance must not be
+        # able to pair a non-posted status with a pnl (or a posted one without),
+        # since callers branch on status while trusting funding_pnl's presence.
+        repo._check_enum(self.status, _FUNDING_RESULT_STATUSES, name="FundingResult.status")
+        if (self.funding_pnl is not None) != (self.status == "posted"):
+            raise ValueError(
+                "FundingResult.funding_pnl must be present exactly when status "
+                f"== 'posted' (status {self.status!r}, funding_pnl {self.funding_pnl})"
+            )
 
 
 def record_funding(
@@ -607,9 +662,7 @@ def record_funding(
                 updated_at=now,
             )
 
-        ledger = repo.get_current_account_state(conn, run_id)
-        if ledger is None:
-            raise ValueError(f"run {run_id!r} has no account state; call initialize_run first")
+        ledger = _require_ledger(conn, run_id)
         # Pinned for the same reason as post_fill's ledger sums: the persisted
         # wallet must match what replay re-derives under DECIMAL_CONTEXT.
         with localcontext(DECIMAL_CONTEXT):
@@ -637,10 +690,17 @@ class ReplayResult:
     ``is_consistent`` is the spec §5 acceptance signal (both must agree).
     """
 
-    positions: dict[str, PositionState]
+    positions: Mapping[str, PositionState]
     ledger: AccountLedger
     position_mismatches: tuple[str, ...]
     account_matches: bool
+
+    def __post_init__(self) -> None:
+        # frozen=True only blocks attribute reassignment; wrap the mapping so
+        # the rebuilt-from-committed-events result is deep-immutable like its
+        # sibling ``position_mismatches`` tuple — a caller mutating
+        # ``result.positions`` would silently corrupt the §5 acceptance signal.
+        object.__setattr__(self, "positions", MappingProxyType(dict(self.positions)))
 
     @property
     def is_consistent(self) -> bool:
@@ -656,65 +716,74 @@ def replay(db: Database, *, run_id: str) -> ReplayResult:
     and a config edited after run creation would otherwise shift the baseline and
     misreport (or mask) a mismatch.
 
-    Recomputes purely from each fill's ``(side, qty, price, fee_rate)`` and the
-    posted funding events, independent of the stored per-row realized/fee — so a
-    corrupted materialized ``current_*`` row surfaces as a mismatch rather than
-    being trusted. Deterministic: the same committed events always rebuild the
-    same state (the decimal context is pinned, so an ambient-precision change
-    cannot perturb the arithmetic).
+    Recomputes purely from each event's *basis* fields — a fill's ``(side, qty,
+    price, fee_rate)``, a posted funding's ``(position_size, mark_price,
+    funding_rate)`` — never the stored derived columns (per-row realized/fee,
+    ``funding_pnl``), so corruption of a derived column or a materialized
+    ``current_*`` row surfaces as a mismatch rather than being trusted.
+    Deterministic: the same committed events always rebuild the same state (the
+    decimal context is pinned, so an ambient-precision change cannot perturb
+    the arithmetic). All reads run in one snapshot (``read_transaction``), so a
+    write committed mid-replay cannot fabricate — or mask — a mismatch.
     """
-    conn = db.conn
-    run = repo.get_run(conn, run_id)
-    if run is None:
-        raise ValueError(f"run {run_id!r} does not exist; nothing to replay")
+    with db.read_transaction() as conn:
+        run = repo.get_run(conn, run_id)
+        if run is None:
+            raise ValueError(f"run {run_id!r} does not exist; nothing to replay")
 
-    with localcontext(DECIMAL_CONTEXT):
-        positions: dict[str, PositionState] = {
-            p.coin: p for p in repo.get_run_seed_positions(conn, run_id)
-        }
-        wallet = Decimal(run["initial_balance_usdc"])
-        realized_total = Decimal(0)
-        total_fees = Decimal(0)
+        with localcontext(DECIMAL_CONTEXT):
+            positions: dict[str, PositionState] = {
+                p.coin: p for p in repo.get_run_seed_positions(conn, run_id)
+            }
+            wallet = Decimal(run["initial_balance_usdc"])
+            realized_total = Decimal(0)
+            total_fees = Decimal(0)
 
-        for fill in repo.iter_fills(conn, run_id):
-            symbol = fill["symbol"]
-            current = positions.get(symbol) or PositionState.flat(symbol)
-            effect = compute_fill_effect(
-                current,
-                side=fill["side"],
-                qty=Decimal(fill["fill_qty"]),
-                price=Decimal(fill["fill_price"]),
-                fee_rate=Decimal(fill["fee_rate"]),
-            )
-            positions[symbol] = effect.position
-            wallet += effect.wallet_delta
-            realized_total += effect.realized_pnl_delta
-            total_fees += effect.fee
+            for fill in repo.iter_fills(conn, run_id):
+                symbol = fill["symbol"]
+                current = positions.get(symbol) or PositionState.flat(symbol)
+                effect = compute_fill_effect(
+                    current,
+                    side=fill["side"],
+                    qty=Decimal(fill["fill_qty"]),
+                    price=Decimal(fill["fill_price"]),
+                    fee_rate=Decimal(fill["fee_rate"]),
+                )
+                positions[symbol] = effect.position
+                wallet += effect.wallet_delta
+                realized_total += effect.realized_pnl_delta
+                total_fees += effect.fee
 
-        net_funding = Decimal(0)
-        for event in repo.iter_funding_events(conn, run_id, status="posted"):
-            pnl = Decimal(event["funding_pnl"])
-            wallet += pnl
-            net_funding += pnl
+            net_funding = Decimal(0)
+            for event in repo.iter_funding_events(conn, run_id, status="posted"):
+                # From the stored settlement basis, symmetric with the fill
+                # loop above — the write boundary guarantees a posted row
+                # carries all three basis fields.
+                pnl = funding_pnl(
+                    Decimal(event["position_size"]) * Decimal(event["mark_price"]),
+                    Decimal(event["funding_rate"]),
+                )
+                wallet += pnl
+                net_funding += pnl
 
-    ledger = AccountLedger(
-        wallet_balance=wallet,
-        realized_pnl=realized_total,
-        total_fees=total_fees,
-        net_funding_pnl=net_funding,
-    )
-
-    # Compare to the materialized state over the union of symbols.
-    materialized = {p.coin: p for p in repo.get_all_current_positions(conn, run_id)}
-    mismatches = tuple(
-        sorted(
-            symbol
-            for symbol in set(positions) | set(materialized)
-            if positions.get(symbol) != materialized.get(symbol)
+        ledger = AccountLedger(
+            wallet_balance=wallet,
+            realized_pnl=realized_total,
+            total_fees=total_fees,
+            net_funding_pnl=net_funding,
         )
-    )
-    current_ledger = repo.get_current_account_state(conn, run_id)
-    account_matches = current_ledger == ledger
+
+        # Compare to the materialized state over the union of symbols.
+        materialized = {p.coin: p for p in repo.get_all_current_positions(conn, run_id)}
+        mismatches = tuple(
+            sorted(
+                symbol
+                for symbol in set(positions) | set(materialized)
+                if positions.get(symbol) != materialized.get(symbol)
+            )
+        )
+        current_ledger = repo.get_current_account_state(conn, run_id)
+        account_matches = current_ledger == ledger
     return ReplayResult(
         positions=positions,
         ledger=ledger,

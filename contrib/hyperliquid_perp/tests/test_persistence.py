@@ -12,6 +12,7 @@ from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database, connect
 from contrib.hyperliquid_perp.persistence.ids import (
     decision_attempt_id,
+    fill_id,
     funding_event_id,
     slice_id,
 )
@@ -624,4 +625,133 @@ def test_naive_datetime_rejected_on_write(tmp_path):
     naive = datetime(2026, 7, 1)  # no tzinfo
     with pytest.raises(ValueError, match="timezone-aware"), db.transaction() as conn:
         repo.insert_fill(conn, **{**_fill_kwargs("f1", None), "timestamp": naive})
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# fill_id: deterministic exactly-once key for slice-less fills
+# --------------------------------------------------------------------------
+
+
+def test_fill_id_is_deterministic_and_guarded():
+    assert fill_id("r1", "o1") == "r1|o1|0"
+    assert fill_id("r1", "o1") == fill_id("r1", "o1")  # a retry re-derives the same id
+    assert fill_id("r1", "o1", 1) != fill_id("r1", "o1")
+    with pytest.raises(ValueError, match="must not contain"):
+        fill_id("r|1", "o1")
+    with pytest.raises(ValueError, match="must not be empty"):
+        fill_id("r1", "")
+
+
+def test_duplicate_derived_fill_id_rejected_by_primary_key(tmp_path):
+    # A slice-less (paper_market / SL / TP) fill has no slice_id; the PK on the
+    # derived fill_id is what stops a crash-retry from double-posting it.
+    db = Database(tmp_path / "p.db")
+    fid = fill_id("r1", "o1")
+    with db.transaction() as conn:
+        repo.insert_fill(conn, **{**_fill_kwargs(fid, None), "timestamp": _TS})
+    with pytest.raises(sqlite3.IntegrityError), db.transaction() as conn:
+        repo.insert_fill(conn, **{**_fill_kwargs(fid, None), "timestamp": _TS})
+    count = db.conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
+    assert count == 1
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# scheduler_state: patch-style upsert semantics
+# --------------------------------------------------------------------------
+
+
+def test_scheduler_state_patch_upsert_preserves_unsupplied_fields(tmp_path):
+    db = Database(tmp_path / "p.db")
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(
+            conn,
+            "r1",
+            last_decision_at=_TS,
+            next_decision_at=_TS,
+            last_input_id="in1",
+            last_output_id="out1",
+            current_attempt_id="a1",
+        )
+    before = repo.get_scheduler_state(db.conn, "r1")
+    later = datetime(2026, 7, 1, 4, tzinfo=timezone.utc)
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(conn, "r1", next_decision_at=later)
+    row = repo.get_scheduler_state(db.conn, "r1")
+    assert row["next_decision_at"] != before["next_decision_at"]  # advanced
+    assert row["last_decision_at"] == before["last_decision_at"]  # preserved
+    assert row["last_input_id"] == "in1"  # crash-recovery breadcrumbs preserved
+    assert row["last_output_id"] == "out1"
+    assert row["current_attempt_id"] == "a1"
+    # An explicit None is a deliberate clear, distinct from "not supplied".
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(conn, "r1", current_attempt_id=None)
+    row = repo.get_scheduler_state(db.conn, "r1")
+    assert row["current_attempt_id"] is None
+    assert row["last_input_id"] == "in1"
+    db.close()
+
+
+def test_scheduler_state_fresh_partial_insert_leaves_rest_null(tmp_path):
+    db = Database(tmp_path / "p.db")
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(conn, "r2", next_decision_at=_TS)
+    row = repo.get_scheduler_state(db.conn, "r2")
+    assert row["next_decision_at"] is not None
+    assert row["last_decision_at"] is None
+    assert row["last_input_id"] is None
+    assert row["updated_at"] is not None  # always stamped
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# read_transaction: one consistent snapshot, reads only
+# --------------------------------------------------------------------------
+
+
+def test_read_transaction_pins_a_snapshot(tmp_path):
+    path = tmp_path / "p.db"
+    db = Database(path)
+    with db.transaction() as conn:
+        repo.insert_fill(conn, **{**_fill_kwargs("f1", None), "timestamp": _TS})
+    writer = connect(path)
+    with db.read_transaction() as conn:
+        before = conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
+        # A commit landing on another connection mid-read must stay invisible
+        # to this snapshot (WAL lets it proceed without blocking).
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute(
+            "INSERT INTO fills (fill_id, timestamp, mode, run_id, order_id, symbol, side,"
+            " fill_qty, fill_price, fill_notional, fee, fee_rate, realized_pnl_delta,"
+            " liquidity_type) VALUES ('f2', 't', 'paper', 'r1', 'o1', 'BTC', 'buy',"
+            " '1', '1', '1', '0', '0', '0', 'simulated')"
+        )
+        writer.execute("COMMIT")
+        after = conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
+        assert before == after == 1
+    # Outside the snapshot the new row is visible.
+    assert db.conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 2
+    writer.close()
+    db.close()
+
+
+def test_read_transaction_rejects_writes_and_nesting(tmp_path):
+    db = Database(tmp_path / "p.db")
+    insert_run = (
+        "INSERT INTO runs (run_id, mode, created_at, initial_balance_usdc, schema_version)"
+        " VALUES ('r', 'paper', 't', '1', 1)"
+    )
+    with db.read_transaction() as conn:
+        with pytest.raises(sqlite3.OperationalError):  # query_only: writes fail loud
+            conn.execute(insert_run)
+        with pytest.raises(RuntimeError, match="nested"), db.transaction():
+            pass
+    # query_only is restored: a normal write transaction works afterwards, and
+    # nesting is rejected in the other direction too.
+    with db.transaction() as conn:
+        conn.execute(insert_run)
+        with pytest.raises(RuntimeError, match="nested"), db.read_transaction():
+            pass
+    assert db.conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
     db.close()

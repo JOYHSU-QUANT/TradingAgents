@@ -296,3 +296,52 @@ def test_fixture_formula_matches_recorded_liquidation_px_within_tolerance(
     )
     assert est.price is not None
     assert abs(est.price - recorded) <= tolerance
+
+
+# --------------------------------------------------------------------------
+# input guards + ambient-context immunity
+# --------------------------------------------------------------------------
+
+
+def test_liquidation_input_guards():
+    kwargs = {
+        "entry_price": Decimal("100"),
+        "mark_price": Decimal("100"),
+        "wallet_balance": Decimal("1000"),
+        "schedule": _single(),
+        "tick_size": _TICK,
+    }
+    with pytest.raises(ValueError, match="flat position"):
+        estimated_liquidation_price(size=Decimal("0"), **kwargs)
+    with pytest.raises(ValueError, match="must be > 0"):
+        estimated_liquidation_price(size=Decimal("1"), **{**kwargs, "entry_price": Decimal("0")})
+    with pytest.raises(ValueError, match="must be > 0"):
+        estimated_liquidation_price(size=Decimal("1"), **{**kwargs, "mark_price": Decimal("-1")})
+
+
+def test_liquidation_math_is_immune_to_ambient_decimal_context():
+    # The estimate and the §12.2 snapshot fields must be bit-for-bit
+    # reproducible regardless of the (mutable, global) ambient context.
+    import decimal
+
+    sched = MarginSchedule(
+        tiers=(MarginTier(Decimal(0), Decimal(50)), MarginTier(Decimal(10_000), Decimal(25)))
+    )
+    kwargs = {
+        "size": Decimal("0.5"),
+        "entry_price": Decimal("60000"),
+        "mark_price": Decimal("60000"),
+        "wallet_balance": Decimal("2000"),
+        "schedule": sched,
+        "tick_size": _TICK,
+    }
+    baseline = estimated_liquidation_price(**kwargs)
+    assert baseline.price is not None  # a real root, so the search actually ran
+    snap_base = maintenance_snapshot(sched, Decimal("0.5"), Decimal("60000"))
+    original = decimal.getcontext().prec
+    try:
+        decimal.getcontext().prec = 4
+        assert estimated_liquidation_price(**kwargs) == baseline
+        assert maintenance_snapshot(sched, Decimal("0.5"), Decimal("60000")) == snap_base
+    finally:
+        decimal.getcontext().prec = original

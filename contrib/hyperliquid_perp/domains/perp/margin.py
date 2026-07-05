@@ -165,6 +165,19 @@ class MarginSchedule:
         """The continuity deduction applicable at ``notional``."""
         return self._deductions[self._tier_index(notional)]
 
+    def tier_details(self, notional: Decimal) -> tuple[int, MarginTier, Decimal, Decimal]:
+        """``(index, tier, deduction, maintenance margin)`` at ``notional`` — one search.
+
+        The snapshot writer needs all four figures for the same notional;
+        deriving them here from a single ``_tier_index`` lookup keeps them
+        mutually consistent by construction (and spares three re-scans).
+        """
+        i = self._tier_index(notional)
+        tier = self.tiers[i]
+        with localcontext(DECIMAL_CONTEXT):
+            margin = notional * tier.maintenance_margin_rate - self._deductions[i]
+        return i, tier, self._deductions[i], margin
+
     def maintenance_margin(self, notional: Decimal) -> Decimal:
         """Continuous maintenance margin: ``notional * rate - deduction`` at its tier.
 
@@ -172,7 +185,4 @@ class MarginSchedule:
         exceed ``notional * rate`` (that is exactly what the continuity
         construction guarantees), and the value only grows above the bound.
         """
-        i = self._tier_index(notional)
-        tier = self.tiers[i]
-        with localcontext(DECIMAL_CONTEXT):
-            return notional * tier.maintenance_margin_rate - self._deductions[i]
+        return self.tier_details(notional)[3]

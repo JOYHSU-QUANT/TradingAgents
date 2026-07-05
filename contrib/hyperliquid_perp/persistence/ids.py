@@ -6,6 +6,10 @@ duplicate instead of double-applying it:
 
 - ``slice_id`` = ``run_id + plan_id + flip_leg + slice_index`` (phase2-data §1)
   — one TWAP slice may produce at most one fill;
+- ``fill_id`` = ``run_id + order_id + fill_index`` — a ``paper_market`` / SL /
+  TP fill carries no ``slice_id``, so the ``fills`` PRIMARY KEY is its only
+  exactly-once guard; a deterministic derivation keeps that guarantee uniform
+  instead of depending on the caller minting a fresh id per retry;
 - ``funding_event_id`` = ``run_id + symbol + funding_timestamp`` (phase2-data §10)
   — funding posts exactly once per hourly settlement;
 - ``decision_attempt_id`` = ``run_id + scheduled_at`` (phase2-spec §3.1) — a
@@ -25,7 +29,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-__all__ = ["decision_attempt_id", "funding_event_id", "slice_id"]
+__all__ = ["decision_attempt_id", "fill_id", "funding_event_id", "slice_id"]
 
 _SEP = "|"
 
@@ -57,6 +61,25 @@ def slice_id(run_id: str, plan_id: str, flip_leg: str | None, slice_index: int) 
             # fixed 4-field shape) rather than the string "None".
             "" if flip_leg is None else _part(flip_leg, name="flip_leg"),
             _part(slice_index, name="slice_index"),
+        )
+    )
+
+
+def fill_id(run_id: str, order_id: str, fill_index: int = 0) -> str:
+    """Unique key for one simulated fill of an order (exactly-once on retry).
+
+    TWAP slice fills are already deduplicated by their ``slice_id`` UNIQUE
+    constraint; ``paper_market`` / SL / TP fills have no slice, so their only
+    guard is the ``fills`` PRIMARY KEY itself. Deriving the id from the logical
+    inputs means a crash-retry re-derives the *same* id and the PK rejects the
+    double-post. ``fill_index`` is ``0`` for the single-fill simulation paths
+    and counts up if a future model ever splits one order into several fills.
+    """
+    return _SEP.join(
+        (
+            _part(run_id, name="run_id"),
+            _part(order_id, name="order_id"),
+            _part(fill_index, name="fill_index"),
         )
     )
 

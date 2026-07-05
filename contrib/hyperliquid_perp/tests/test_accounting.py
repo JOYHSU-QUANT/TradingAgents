@@ -785,3 +785,138 @@ def test_funding_events_across_timestamps_are_distinct():
     assert a.funding_event_id != b.funding_event_id
     assert len(repo.iter_funding_events(db.conn, "r1", status="posted")) == 2
     db.close()
+
+
+# --------------------------------------------------------------------------
+# construction-time invariants on the result/value dataclasses
+# --------------------------------------------------------------------------
+
+
+def test_funding_result_couples_pnl_to_posted_status():
+    acc.FundingResult("posted", "fe", Decimal("1"))  # valid pairings accepted
+    acc.FundingResult("already_posted", "fe", None)
+    with pytest.raises(ValueError, match="exactly when status"):
+        acc.FundingResult("pending", "fe", Decimal("1"))
+    with pytest.raises(ValueError, match="exactly when status"):
+        acc.FundingResult("posted", "fe", None)
+    with pytest.raises(ValueError, match="status must be one of"):
+        acc.FundingResult("settled", "fe", None)
+
+
+def test_account_metrics_none_couplings_enforced():
+    kwargs = {
+        "wallet_balance": Decimal("1000"),
+        "account_equity": Decimal("1000"),
+        "available_balance": Decimal("900"),
+        "unrealized_pnl": Decimal("0"),
+        "total_position_notional": Decimal("500"),
+        "used_initial_margin": Decimal("100"),
+        "total_maintenance_margin": Decimal("10"),
+        "effective_leverage": Decimal("0.5"),
+        "margin_ratio": Decimal("100"),
+    }
+    acc.AccountMetrics(**kwargs)  # valid pairing accepted
+    with pytest.raises(ValueError, match="effective_leverage"):
+        acc.AccountMetrics(**{**kwargs, "account_equity": Decimal("-5")})
+    with pytest.raises(ValueError, match="effective_leverage"):
+        acc.AccountMetrics(**{**kwargs, "effective_leverage": None})
+    with pytest.raises(ValueError, match="margin_ratio"):
+        acc.AccountMetrics(**{**kwargs, "total_maintenance_margin": Decimal("0")})
+    with pytest.raises(ValueError, match="margin_ratio"):
+        acc.AccountMetrics(**{**kwargs, "margin_ratio": None})
+
+
+def test_position_valuation_rejects_non_positive_mark():
+    sched = MarginSchedule(tiers=(MarginTier(Decimal(0), Decimal(50)),))
+    with pytest.raises(ValueError, match="mark_price must be > 0"):
+        acc.PositionValuation(_long("0.01", "60000"), Decimal("0"), sched)
+
+
+def test_replay_result_positions_mapping_is_immutable():
+    db = _db()
+    _run_series(db)
+    result = acc.replay(db, run_id="r1")
+    with pytest.raises(TypeError):
+        result.positions["BTC"] = PositionState.flat("BTC")  # type: ignore[index]
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# summarize_account ambient-context immunity (matches the sibling money paths)
+# --------------------------------------------------------------------------
+
+
+def test_summarize_account_is_immune_to_ambient_decimal_context():
+    import decimal
+
+    sched = MarginSchedule(tiers=(MarginTier(Decimal(0), Decimal(50)),))
+    ledger = AccountLedger(wallet_balance=Decimal("1234.56789"))
+    vals = [acc.PositionValuation(_long("0.0123", "61234.5"), Decimal("61999.875"), sched)]
+    baseline = acc.summarize_account(ledger, vals, leverage=Decimal("3"))
+    original = decimal.getcontext().prec
+    try:
+        decimal.getcontext().prec = 4
+        perturbed = acc.summarize_account(ledger, vals, leverage=Decimal("3"))
+    finally:
+        decimal.getcontext().prec = original
+    assert perturbed == baseline
+
+
+# --------------------------------------------------------------------------
+# initialize_run: the genesis must apply exactly once, atomically
+# --------------------------------------------------------------------------
+
+
+def test_initialize_run_rejects_duplicate_run_id_and_rolls_back():
+    db = _db()
+    _init(db, "1000", positions=[_long("0.01", "60000")])
+    with pytest.raises(sqlite3.IntegrityError):
+        acc.initialize_run(
+            db,
+            run_id="r1",
+            mode="paper",
+            initial_balance_usdc=Decimal("999"),
+            schema_version=1,
+        )
+    # First genesis intact: the retry must not have moved the opening state.
+    assert repo.get_current_account_state(db.conn, "r1").wallet_balance == Decimal("1000")
+    assert len(repo.get_run_seed_positions(db.conn, "r1")) == 1
+    db.close()
+
+
+def test_initialize_run_rejects_duplicate_seed_coins_atomically():
+    db = _db()
+    dup = [_long("0.01", "60000"), _long("0.02", "50000")]  # both BTC
+    with pytest.raises(sqlite3.IntegrityError):
+        acc.initialize_run(
+            db,
+            run_id="r1",
+            mode="paper",
+            initial_balance_usdc=Decimal("1000"),
+            schema_version=1,
+            initial_positions=dup,
+        )
+    # The whole genesis rolled back: no run row, no partial seed/current rows.
+    assert repo.get_run(db.conn, "r1") is None
+    assert len(repo.get_run_seed_positions(db.conn, "r1")) == 0
+    assert repo.get_current_account_state(db.conn, "r1") is None
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# replay rebuilds funding from the stored basis, not the derived column
+# --------------------------------------------------------------------------
+
+
+def test_replay_recomputes_funding_from_stored_basis():
+    db = _db()
+    _run_series(db)
+    assert acc.replay(db, run_id="r1").is_consistent  # sanity before corruption
+    # Corrupt the derived column behind the API's back: replay must rebuild the
+    # ledger from (position_size, mark_price, funding_rate) and still match the
+    # materialized state — symmetric with how fills are recomputed from basis.
+    db.conn.execute("UPDATE funding_events SET funding_pnl = '999999'")
+    result = acc.replay(db, run_id="r1")
+    assert result.account_matches
+    assert result.is_consistent
+    db.close()

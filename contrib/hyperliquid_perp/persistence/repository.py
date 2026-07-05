@@ -686,40 +686,55 @@ def insert_execution_plan(conn: sqlite3.Connection, **fields: Any) -> None:
     _insert(conn, "execution_plans", fields)
 
 
+class _Unset:
+    """Sentinel type: a keyword the caller did not supply (vs an explicit ``None``)."""
+
+
+_UNSET = _Unset()
+
+
 def upsert_scheduler_state(
     conn: sqlite3.Connection,
     run_id: str,
     *,
-    last_decision_at: datetime | None = None,
-    next_decision_at: datetime | None = None,
-    last_input_id: str | None = None,
-    last_output_id: str | None = None,
-    current_attempt_id: str | None = None,
+    last_decision_at: datetime | None | _Unset = _UNSET,
+    next_decision_at: datetime | None | _Unset = _UNSET,
+    last_input_id: str | None | _Unset = _UNSET,
+    last_output_id: str | None | _Unset = _UNSET,
+    current_attempt_id: str | None | _Unset = _UNSET,
     updated_at: datetime | None = None,
 ) -> None:
+    """Patch-style upsert: only the columns actually supplied change.
+
+    An omitted keyword leaves the stored value untouched (NULL on a fresh row);
+    an explicit ``None`` clears the column. Full-row replace semantics would
+    force a caller advancing just ``next_decision_at`` to re-supply every other
+    field — one forgotten keyword and the crash-recovery breadcrumbs
+    (``last_input_id`` / ``current_attempt_id``) this table exists to keep
+    would be silently NULLed. ``updated_at`` is always stamped.
+    """
+    provided: dict[str, Any] = {}
+    if not isinstance(last_decision_at, _Unset):
+        provided["last_decision_at"] = _encode(last_decision_at)
+    if not isinstance(next_decision_at, _Unset):
+        provided["next_decision_at"] = _encode(next_decision_at)
+    if not isinstance(last_input_id, _Unset):
+        provided["last_input_id"] = _encode(last_input_id)
+    if not isinstance(last_output_id, _Unset):
+        provided["last_output_id"] = _encode(last_output_id)
+    if not isinstance(current_attempt_id, _Unset):
+        provided["current_attempt_id"] = _encode(current_attempt_id)
+    provided["updated_at"] = _iso_utc(updated_at or datetime.now(timezone.utc))
+
+    # Column names come from the fixed keyword list above, never caller data.
+    columns = ["run_id", *provided]
+    placeholders = ", ".join("?" for _ in columns)
+    assignments = ", ".join(f"{col} = excluded.{col}" for col in provided)
     conn.execute(
-        """
-        INSERT INTO scheduler_state
-            (run_id, last_decision_at, next_decision_at, last_input_id,
-             last_output_id, current_attempt_id, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(run_id) DO UPDATE SET
-            last_decision_at = excluded.last_decision_at,
-            next_decision_at = excluded.next_decision_at,
-            last_input_id = excluded.last_input_id,
-            last_output_id = excluded.last_output_id,
-            current_attempt_id = excluded.current_attempt_id,
-            updated_at = excluded.updated_at
-        """,
-        (
-            run_id,
-            _encode(last_decision_at),
-            _encode(next_decision_at),
-            last_input_id,
-            last_output_id,
-            current_attempt_id,
-            _iso_utc(updated_at or datetime.now(timezone.utc)),
-        ),
+        f"INSERT INTO scheduler_state ({', '.join(columns)}) "
+        f"VALUES ({placeholders}) "
+        f"ON CONFLICT(run_id) DO UPDATE SET {assignments}",
+        (run_id, *provided.values()),
     )
 
 

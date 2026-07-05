@@ -90,13 +90,12 @@ def maintenance_snapshot(
     """
     with localcontext(DECIMAL_CONTEXT):  # §12.2 reproducibility fields — pin the math
         notional = position_notional(size, mark_price)
-        tier = schedule.tier_for_notional(notional)
-        tier_index = next(i for i, t in enumerate(schedule.tiers) if t is tier)
+        tier_index, tier, deduction, margin = schedule.tier_details(notional)
         return MaintenanceSnapshot(
             margin_tier_id=str(tier_index),
             maintenance_margin_rate=tier.maintenance_margin_rate,
-            maintenance_deduction=schedule.maintenance_deduction(notional),
-            maintenance_margin=schedule.maintenance_margin(notional),
+            maintenance_deduction=deduction,
+            maintenance_margin=margin,
         )
 
 

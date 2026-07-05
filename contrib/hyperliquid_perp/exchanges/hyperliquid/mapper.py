@@ -196,14 +196,23 @@ def map_margin_schedule(meta_and_asset_ctxs: Any, coin: str) -> MarginSchedule:
         known = ", ".join(a.get("name", "?") for a in universe[:10] if isinstance(a, dict))
         raise UnknownCoinError(f"coin {coin!r} not in perp universe (e.g. {known})")
 
-    # Explicit tier table, when the response carries one. A present-but-
+    # Explicit tier table, when the entry references one. A present-but-
     # unresolvable table id is a data anomaly, not a reason to silently fall back
     # to the single-tier maxLeverage form — that would apply the lowest rate to
     # all notional and under-state maintenance margin (non-conservative), so we
-    # fail loud like every other corrupt-field path in this module.
+    # fail loud like every other corrupt-field path in this module. That includes
+    # the id pointing at a missing/malformed ``marginTables`` container, not just
+    # a missing list entry. The converse — tables present but this entry carries
+    # no ``marginTableId`` — is the normal shape for an untiered asset in a mixed
+    # universe, and falls through to the maxLeverage fallback below.
     raw_tables = (meta or {}).get("marginTables")
     table_id = entry.get("marginTableId")
-    if isinstance(raw_tables, list) and table_id is not None:
+    if table_id is not None:
+        if not isinstance(raw_tables, list):
+            raise MalformedResponseError(
+                f"universe entry for {coin!r} carries marginTableId {table_id!r} "
+                "but meta has no marginTables list to resolve it against"
+            )
         matched = next(
             (
                 pair[1]

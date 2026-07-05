@@ -153,6 +153,35 @@ class Database:
         finally:
             self._in_transaction = False
 
+    @contextmanager
+    def read_transaction(self) -> Iterator[sqlite3.Connection]:
+        """Give every read inside one consistent snapshot (no write lock taken).
+
+        A deferred ``BEGIN``: the snapshot is pinned at the first SELECT and
+        WAL lets it overlap the PR3 writer loops without blocking them. Replay
+        needs this — its six reads compared against each other would otherwise
+        interleave with a concurrent COMMIT and report a spurious (or masked)
+        mismatch. Reads only: ``PRAGMA query_only`` makes a stray write inside
+        the block fail loud instead of being silently discarded by the closing
+        ROLLBACK. Nesting is rejected for the same reason as ``transaction``.
+        """
+        if self._in_transaction:
+            raise RuntimeError("Database.read_transaction() cannot be nested")
+        self._conn.execute("PRAGMA query_only = ON")
+        try:
+            self._conn.execute("BEGIN")
+            self._in_transaction = True
+            try:
+                yield self._conn
+            finally:
+                self._in_transaction = False
+                # A read transaction has nothing to persist; ROLLBACK simply
+                # releases the snapshot (and is what makes query_only safe).
+                with suppress(Exception):
+                    self._conn.execute("ROLLBACK")
+        finally:
+            self._conn.execute("PRAGMA query_only = OFF")
+
     def close(self) -> None:
         self._conn.close()
 

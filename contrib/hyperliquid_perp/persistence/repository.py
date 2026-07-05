@@ -98,6 +98,33 @@ def _check_funding_identities(
                 )
 
 
+def _check_posted_settlement_math(
+    *,
+    mark_price: Decimal | None,
+    signed_position_notional: Decimal | None,
+    funding_rate: Decimal | None,
+    funding_pnl: Decimal | None,
+) -> None:
+    """The one definition of "a posted funding row is complete".
+
+    ``posted`` means the wallet moved, so all four settlement fields must be
+    present. Shared by both write paths (direct posted insert and the
+    ``pending -> posted`` transition) so the two can never drift.
+    """
+    missing = sorted(
+        name
+        for name, value in {
+            "mark_price": mark_price,
+            "signed_position_notional": signed_position_notional,
+            "funding_rate": funding_rate,
+            "funding_pnl": funding_pnl,
+        }.items()
+        if value is None
+    )
+    if missing:
+        raise ValueError(f"a posted funding event requires its settlement math; missing {missing}")
+
+
 def _iso_utc(value: datetime) -> str:
     """Canonical ISO-8601 UTC string for a datetime; rejects naive datetimes.
 
@@ -459,9 +486,38 @@ def insert_funding_event(
     ``-signed_position_notional * funding_rate`` (same rationale as
     :func:`insert_fill`: replay ignores the stored columns, so a desync would go
     undetected).
+
+    The status implies which fields exist — enforced here so a row can never
+    contradict its own status: ``posted`` means the wallet moved, so the full
+    settlement math (mark / notional / rate / pnl) must be present; ``pending``
+    means only the basis was captured, so the mark is required (the backfill
+    must never fabricate one) and the not-yet-learned rate/pnl/notional must be
+    absent. A ``posted`` row missing its math would silently satisfy
+    ``record_funding``'s already-posted short-circuit and drop the settlement.
     """
     _check_enum(status, _FUNDING_STATUSES, name="status")
     _check_enum(mode, _MODES, name="mode")
+    if status == "posted":
+        _check_posted_settlement_math(
+            mark_price=mark_price,
+            signed_position_notional=signed_position_notional,
+            funding_rate=funding_rate,
+            funding_pnl=funding_pnl,
+        )
+    else:  # pending
+        if mark_price is None:
+            raise ValueError("a pending funding event must record its settlement mark_price")
+        premature = sorted(
+            name
+            for name, value in {
+                "signed_position_notional": signed_position_notional,
+                "funding_rate": funding_rate,
+                "funding_pnl": funding_pnl,
+            }.items()
+            if value is not None
+        )
+        if premature:
+            raise ValueError(f"a pending funding event cannot already carry {premature}")
     _check_funding_identities(
         position_size=position_size,
         mark_price=mark_price,
@@ -469,12 +525,14 @@ def insert_funding_event(
         funding_rate=funding_rate,
         funding_pnl=funding_pnl,
     )
+    stamped = recorded_at or datetime.now(timezone.utc)
     _insert(
         conn,
         "funding_events",
         {
             "funding_event_id": funding_event_id,
-            "recorded_at": recorded_at or datetime.now(timezone.utc),
+            "recorded_at": stamped,
+            "updated_at": stamped,
             "funding_timestamp": funding_timestamp,
             "mode": mode,
             "run_id": run_id,
@@ -506,17 +564,26 @@ def set_funding_status(
     signed_position_notional: Decimal | None = None,
     mark_price: Decimal | None = None,
     source: str | None = None,
+    updated_at: datetime | None = None,
 ) -> None:
-    """Update a funding event's status and (on posting) its computed amounts.
+    """Post a pending funding event — the one legal transition (``pending -> posted``).
 
     Only the provided fields are written; ``None`` leaves the stored value
-    untouched, so moving ``pending -> posted`` can fill in the rate/pnl learned
-    from the funding-history backfill without clobbering the rest. When the
-    pnl identity's operands are all supplied they must agree (see
-    :func:`insert_funding_event`); identities involving the *stored* size are the
-    accounting layer's to uphold (it reads the pending row before posting).
+    untouched, so posting can fill in the rate/pnl learned from the
+    funding-history backfill without clobbering the rest. The state machine is
+    enforced here, not left to callers: the row must exist and still be
+    ``pending`` (a ``posted`` event is immutable — re-posting or reverting it
+    would let the same settlement move the wallet twice, defeating the
+    exactly-once guarantee ``record_funding`` builds on this function), and the
+    row must come out of the update with its settlement math complete and
+    consistent with the *stored* basis (``position_size``, and the stored mark
+    when none is supplied here). ``updated_at`` stamps when the transition
+    actually happened — ``recorded_at`` keeps the pending-insert time, so a
+    live posting and an hours-later backfill stay distinguishable.
     """
     _check_enum(status, _FUNDING_STATUSES, name="status")
+    # Caller-supplied identities first (pure, no row needed) so an internally
+    # inconsistent update is rejected identically whether or not the row exists.
     _check_funding_identities(
         position_size=None,
         mark_price=mark_price,
@@ -524,8 +591,31 @@ def set_funding_status(
         funding_rate=funding_rate,
         funding_pnl=funding_pnl,
     )
-    sets = ["status = ?"]
-    params: list[Any] = [status]
+    row = get_funding_event(conn, funding_event_id)
+    if row is None:
+        raise ValueError(f"funding event {funding_event_id!r} does not exist")
+    if row["status"] == "posted":
+        raise ValueError(f"funding event {funding_event_id!r} is already posted and immutable")
+    if status != "posted":
+        raise ValueError("set_funding_status only performs the pending -> posted transition")
+    effective_mark = _dec(row["mark_price"]) if mark_price is None else mark_price
+    _check_posted_settlement_math(
+        mark_price=effective_mark,
+        signed_position_notional=signed_position_notional,
+        funding_rate=funding_rate,
+        funding_pnl=funding_pnl,
+    )
+    # Re-check with the stored basis folded in: the notional must be the stored
+    # size at the effective mark, not whatever basis the caller had in hand.
+    _check_funding_identities(
+        position_size=Decimal(row["position_size"]),
+        mark_price=effective_mark,
+        signed_position_notional=signed_position_notional,
+        funding_rate=funding_rate,
+        funding_pnl=funding_pnl,
+    )
+    sets = ["status = ?", "updated_at = ?"]
+    params: list[Any] = [status, _iso_utc(updated_at or datetime.now(timezone.utc))]
     for col, val in (
         ("funding_rate", funding_rate),
         ("funding_pnl", funding_pnl),

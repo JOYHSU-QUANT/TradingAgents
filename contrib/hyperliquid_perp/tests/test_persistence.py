@@ -144,6 +144,37 @@ def test_transaction_cannot_nest(tmp_path):
     db.close()
 
 
+def test_transaction_begin_failure_does_not_brick(tmp_path):
+    # A BEGIN that itself dies (here: a lock timeout against a concurrent
+    # writer) must not leave the nesting flag stuck — every later unit of work
+    # would be misdiagnosed as nested and rejected forever.
+    path = tmp_path / "p.db"
+    db1 = Database(path)
+    db2 = Database(path)
+    db1.conn.execute("PRAGMA busy_timeout = 1")
+    # db2's write lock must be held while db1's BEGIN fails — keep the nesting.
+    with db2.transaction():  # noqa: SIM117
+        with pytest.raises(sqlite3.OperationalError), db1.transaction():
+            pass  # pragma: no cover — BEGIN IMMEDIATE fails before the body
+    with db1.transaction() as conn:  # the failed BEGIN left no open transaction
+        conn.execute("SELECT 1")
+    db1.close()
+    db2.close()
+
+
+def test_failed_migration_closes_connection(tmp_path, monkeypatch):
+    # If a migration fails inside Database.__init__ the caller never gets an
+    # instance to close, so the constructor itself must release the connection
+    # (an open handle would keep the file locked on Windows).
+    from contrib.hyperliquid_perp.persistence import db as db_module
+
+    monkeypatch.setitem(db_module.MIGRATIONS, SCHEMA_VERSION + 1, ["THIS IS NOT SQL"])
+    path = tmp_path / "p.db"
+    with pytest.raises(sqlite3.OperationalError):
+        Database(path)
+    path.unlink()  # fails on Windows if the connection leaked
+
+
 # --------------------------------------------------------------------------
 # unique constraints (dedup / exactly-once keys)
 # --------------------------------------------------------------------------
@@ -183,6 +214,7 @@ def test_duplicate_funding_key_rejected(tmp_path):
             funding_timestamp=_TS,
             position_size=Decimal("0.01"),
             status="pending",
+            mark_price=Decimal("60000"),
         )
     with pytest.raises(sqlite3.IntegrityError), db.transaction() as conn:
         # same (run_id, symbol, funding_timestamp) but a different id string
@@ -195,6 +227,7 @@ def test_duplicate_funding_key_rejected(tmp_path):
             funding_timestamp=_TS,
             position_size=Decimal("0.01"),
             status="pending",
+            mark_price=Decimal("60000"),
         )
     db.close()
 
@@ -426,6 +459,87 @@ def test_set_funding_status_rejects_desynced_pnl(tmp_path):
             funding_rate=Decimal("0.0001"),
             funding_pnl=Decimal("0.3"),  # should be -0.3
         )
+    db.close()
+
+
+def test_insert_funding_event_enforces_status_field_coupling(tmp_path):
+    db = Database(tmp_path / "p.db")
+    base = {
+        "mode": "paper",
+        "run_id": "r1",
+        "symbol": "BTC",
+        "funding_timestamp": _TS,
+        "position_size": Decimal("0.05"),
+    }
+    # pending must capture its settlement mark ...
+    with pytest.raises(ValueError, match="mark_price"), db.transaction() as conn:
+        repo.insert_funding_event(conn, funding_event_id="p1", status="pending", **base)
+    # ... and cannot already carry the not-yet-learned settlement math ...
+    with pytest.raises(ValueError, match="cannot already carry"), db.transaction() as conn:
+        repo.insert_funding_event(
+            conn,
+            funding_event_id="p2",
+            status="pending",
+            mark_price=Decimal("60000"),
+            funding_rate=Decimal("0.0001"),
+            **base,
+        )
+    # ... while posted means the wallet moved, so the math must be complete.
+    with pytest.raises(ValueError, match="missing"), db.transaction() as conn:
+        repo.insert_funding_event(
+            conn,
+            funding_event_id="p3",
+            status="posted",
+            mark_price=Decimal("60000"),
+            signed_position_notional=Decimal("3000"),
+            funding_rate=Decimal("0.0001"),  # funding_pnl missing
+            **base,
+        )
+    db.close()
+
+
+def test_set_funding_status_is_pending_to_posted_only(tmp_path):
+    db = Database(tmp_path / "p.db")
+    fid = funding_event_id("r1", "BTC", _TS)
+    # No mark_price supplied: posting must fall back to the stored basis mark.
+    posting = {
+        "status": "posted",
+        "funding_rate": Decimal("0.0001"),
+        "funding_pnl": Decimal("-0.3"),
+        "signed_position_notional": Decimal("3000"),
+    }
+    with pytest.raises(ValueError, match="does not exist"), db.transaction() as conn:
+        repo.set_funding_status(conn, "missing", **posting)
+    with db.transaction() as conn:
+        repo.insert_funding_event(
+            conn,
+            funding_event_id=fid,
+            mode="paper",
+            run_id="r1",
+            symbol="BTC",
+            funding_timestamp=_TS,
+            position_size=Decimal("0.05"),
+            status="pending",
+            mark_price=Decimal("60000"),
+        )
+    with pytest.raises(ValueError, match="pending -> posted"), db.transaction() as conn:
+        repo.set_funding_status(conn, fid, status="pending")
+    # The posted notional must be the stored basis (0.05 * 60000), not the
+    # caller's own idea of it.
+    with pytest.raises(ValueError, match="signed_position_notional"), db.transaction() as conn:
+        repo.set_funding_status(
+            conn,
+            fid,
+            **{
+                **posting,
+                "signed_position_notional": Decimal("9999"),
+                "funding_pnl": Decimal("-0.9999"),
+            },
+        )
+    with db.transaction() as conn:
+        repo.set_funding_status(conn, fid, **posting)
+    with pytest.raises(ValueError, match="already posted"), db.transaction() as conn:
+        repo.set_funding_status(conn, fid, **posting)
     db.close()
 
 

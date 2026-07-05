@@ -6,8 +6,8 @@ seven internal runtime tables (§1.2, plus ``run_seed_positions`` — the persis
 replay genesis). ``db.apply_migrations`` runs these in version order and records
 each in ``schema_migrations``.
 
-Storage conventions (phase2-data §1 footnote "SQLite 存字串或整數最小單位，避免
-REAL 浮點污染"):
+Storage conventions (this module's rule, so no money value ever passes through
+a REAL float):
 
 - money / price / quantity / rate values are stored as **TEXT** — the string form
   of a :class:`~decimal.Decimal`, so no precision is lost to a REAL float;
@@ -183,6 +183,7 @@ _FUNDING_EVENTS = """
 CREATE TABLE funding_events (
     funding_event_id         TEXT PRIMARY KEY,
     recorded_at              TEXT NOT NULL,
+    updated_at               TEXT NOT NULL,
     funding_timestamp        TEXT NOT NULL,
     mode                     TEXT NOT NULL,
     run_id                   TEXT NOT NULL,

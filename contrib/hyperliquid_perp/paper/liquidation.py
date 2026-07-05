@@ -33,7 +33,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, localcontext
 
-from ..domains.perp.margin import MarginSchedule
+from ..domains.perp.margin import (
+    MarginSchedule,
+    account_equity,
+    position_notional,
+    unrealized_pnl,
+)
 from ..persistence.models import DECIMAL_CONTEXT
 
 __all__ = [
@@ -84,7 +89,7 @@ def maintenance_snapshot(
     (the liquidation search re-selects per candidate price separately).
     """
     with localcontext(DECIMAL_CONTEXT):  # §12.2 reproducibility fields — pin the math
-        notional = abs(size) * mark_price
+        notional = position_notional(size, mark_price)
         tier = schedule.tier_for_notional(notional)
         tier_index = next(i for i, t in enumerate(schedule.tiers) if t is tier)
         return MaintenanceSnapshot(
@@ -165,11 +170,15 @@ def estimated_liquidation_price(
         # from a bad szDecimals lookup must not silently yield an off-grid price.
         raise ValueError(f"tick_size must be > 0, got {tick_size}")
 
-    abs_size = abs(size)
-
     def f(p: Decimal) -> Decimal:
-        equity = wallet_balance + size * (p - entry_price) + other_positions_unrealized_pnl
-        total_maint = schedule.maintenance_margin(abs_size * p) + other_positions_maintenance_margin
+        equity = account_equity(
+            wallet_balance,
+            unrealized_pnl(size, p, entry_price) + other_positions_unrealized_pnl,
+        )
+        total_maint = (
+            schedule.maintenance_margin(position_notional(size, p))
+            + other_positions_maintenance_margin
+        )
         return equity - total_maint
 
     with localcontext(DECIMAL_CONTEXT):

@@ -27,7 +27,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import Context, Decimal, localcontext
 
-__all__ = ["DECIMAL_CONTEXT", "MarginTier", "MarginSchedule"]
+__all__ = [
+    "DECIMAL_CONTEXT",
+    "MarginTier",
+    "MarginSchedule",
+    "account_equity",
+    "position_notional",
+    "unrealized_pnl",
+]
 
 # The one decimal context for money math and its consistency checks, defined in
 # this base domain module so every layer (margin tiers, accounting, liquidation,
@@ -37,6 +44,29 @@ __all__ = ["DECIMAL_CONTEXT", "MarginTier", "MarginSchedule"]
 # (mutable, global) decimal context. 28 significant digits — the decimal
 # default — with default traps.
 DECIMAL_CONTEXT = Context(prec=28)
+
+
+# Base pure formulas (execution §6), defined here — not in ``paper/accounting``
+# — because the liquidation search needs them too and must stay free of the
+# accounting layer's persistence imports. One definition each: an inline
+# re-derivation that drifted (say, a future contract multiplier applied to one
+# copy) would silently disagree between account metrics and the liquidation
+# estimate. Callers pin ``DECIMAL_CONTEXT``; these stay plain arithmetic.
+
+
+def position_notional(size: Decimal, mark_price: Decimal) -> Decimal:
+    """``abs(size * mark_price)`` — a single position's notional (§6.1)."""
+    return abs(size * mark_price)
+
+
+def unrealized_pnl(size: Decimal, mark_price: Decimal, entry_price: Decimal) -> Decimal:
+    """``size * (mark - entry)`` — signed, long positive on a rise (§6.3)."""
+    return size * (mark_price - entry_price)
+
+
+def account_equity(wallet_balance: Decimal, total_unrealized_pnl: Decimal) -> Decimal:
+    """``wallet_balance + total_unrealized_pnl`` (§6.1)."""
+    return wallet_balance + total_unrealized_pnl
 
 
 @dataclass(frozen=True)

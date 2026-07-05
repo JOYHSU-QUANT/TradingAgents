@@ -74,8 +74,10 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
         if version in applied:
             continue
         # Each version is one atomic step: either every statement and the
-        # bookkeeping row commit together, or none do.
-        conn.execute("BEGIN")
+        # bookkeeping row commit together, or none do. IMMEDIATE for the same
+        # reason as Database.transaction(): this is a write transaction, so
+        # take the write lock up front and let busy_timeout bound the wait.
+        conn.execute("BEGIN IMMEDIATE")
         try:
             for statement in MIGRATIONS[version]:
                 conn.execute(statement)
@@ -96,7 +98,13 @@ class Database:
     def __init__(self, path: str | Path) -> None:
         self._conn = connect(path)
         self._in_transaction = False
-        apply_migrations(self._conn)
+        try:
+            apply_migrations(self._conn)
+        except BaseException:
+            # The caller never receives the instance, so nothing else can
+            # release the already-open connection.
+            self._conn.close()
+            raise
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -110,11 +118,21 @@ class Database:
         Rejects nesting: the accounting layer commits one fill/funding event per
         transaction, and a nested ``BEGIN`` would silently no-op and let an inner
         failure leave a partially-applied outer transaction committed.
+
+        ``BEGIN IMMEDIATE``: every unit of work here writes, and a deferred
+        ``BEGIN`` would take a read snapshot first and only upgrade to the write
+        lock at the first INSERT — an upgrade that fails *immediately* with
+        ``SQLITE_BUSY_SNAPSHOT`` (not subject to ``busy_timeout``) if another
+        writer committed meanwhile. Taking the write lock up front turns that
+        collision into the bounded ``busy_timeout`` wait ``connect`` promises.
+        The nesting flag is only set once ``BEGIN`` succeeds: a failed ``BEGIN``
+        (e.g. a lock timeout) leaves no transaction open, so it must not leave
+        the flag stuck and brick every later unit of work.
         """
         if self._in_transaction:
             raise RuntimeError("Database.transaction() cannot be nested")
+        self._conn.execute("BEGIN IMMEDIATE")
         self._in_transaction = True
-        self._conn.execute("BEGIN")
         try:
             yield self._conn
         except BaseException:

@@ -498,23 +498,68 @@ def test_funding_floors_to_settlement_hour():
 def test_funding_backfill_refuses_legacy_pending_without_mark():
     # A pre-guard pending row (mark NULL) must fail loud on backfill, never
     # settle on a fabricated basis mixing the stored size with a fresh mark.
+    # insert_funding_event itself now rejects creating such a row, so the
+    # legacy/corrupt store is simulated with raw SQL.
     db = _db()
     _init(db)
     with db.transaction() as conn:
         from contrib.hyperliquid_perp.persistence.ids import funding_event_id
 
-        repo.insert_funding_event(
-            conn,
-            funding_event_id=funding_event_id("r1", "BTC", _TS),
-            mode="paper",
-            run_id="r1",
-            symbol="BTC",
-            funding_timestamp=_TS,
-            position_size=Decimal("0.05"),
-            status="pending",
+        conn.execute(
+            "INSERT INTO funding_events (funding_event_id, recorded_at, updated_at,"
+            " funding_timestamp, mode, run_id, symbol, position_size, status)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                funding_event_id("r1", "BTC", _TS),
+                _TS.isoformat(),
+                _TS.isoformat(),
+                _TS.isoformat(),
+                "paper",
+                "r1",
+                "BTC",
+                "0.05",
+                "pending",
+            ),
         )
     with pytest.raises(ValueError, match="no stored mark_price"):
         _record_btc_funding(db, _TS)
+    db.close()
+
+
+def test_funding_backfill_stamps_updated_at_and_keeps_recorded_at():
+    # recorded_at keeps the pending-insert time; updated_at moves to the
+    # posting instant, so a live posting and an hours-later backfill stay
+    # distinguishable (and backfill latency stays measurable).
+    db = _db()
+    _init(db)
+    pending = acc.record_funding(
+        db,
+        run_id="r1",
+        mode="paper",
+        symbol="BTC",
+        funding_timestamp=_TS,
+        position_size=Decimal("0.05"),
+        funding_rate=None,
+        mark_price=Decimal("60000"),
+        recorded_at=_TS,
+    )
+    assert pending.status == "pending"
+    later = _TS + timedelta(hours=3)
+    posted = acc.record_funding(
+        db,
+        run_id="r1",
+        mode="paper",
+        symbol="BTC",
+        funding_timestamp=_TS,
+        position_size=Decimal("0.05"),
+        funding_rate=Decimal("0.00001"),
+        mark_price=Decimal("61000"),  # ignored: the stored basis settles
+        recorded_at=later,
+    )
+    assert posted.status == "posted"
+    ev = repo.get_funding_event(db.conn, posted.funding_event_id)
+    assert ev["recorded_at"] == _TS.isoformat()
+    assert ev["updated_at"] == later.isoformat()
     db.close()
 
 

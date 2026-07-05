@@ -31,7 +31,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 
-from ..domains.perp.margin import MarginSchedule
+from ..domains.perp.margin import (
+    MarginSchedule,
+    account_equity,
+    position_notional,
+    unrealized_pnl,
+)
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.ids import funding_event_id
@@ -72,21 +77,9 @@ def _utcnow() -> datetime:
 # --------------------------------------------------------------------------
 # Pure formulas (execution §6)
 # --------------------------------------------------------------------------
-
-
-def position_notional(size: Decimal, mark_price: Decimal) -> Decimal:
-    """``abs(size * mark_price)`` — a single position's notional (§6.1)."""
-    return abs(size * mark_price)
-
-
-def unrealized_pnl(size: Decimal, mark_price: Decimal, entry_price: Decimal) -> Decimal:
-    """``size * (mark - entry)`` — signed, long positive on a rise (§6.3)."""
-    return size * (mark_price - entry_price)
-
-
-def account_equity(wallet_balance: Decimal, total_unrealized_pnl: Decimal) -> Decimal:
-    """``wallet_balance + total_unrealized_pnl`` (§6.1)."""
-    return wallet_balance + total_unrealized_pnl
+# ``position_notional`` / ``unrealized_pnl`` / ``account_equity`` live in
+# ``domains.perp.margin`` (the liquidation search shares them) and are
+# re-exported here so accounting stays the one-stop module for the §6 formulas.
 
 
 def available_balance(equity: Decimal, used_initial_margin_total: Decimal) -> Decimal:
@@ -345,7 +338,11 @@ def initialize_run(
     Solvency is not enforced here (margin feasibility needs marks and a margin
     schedule, which live in the PR3 engine's pre-trade checks); an obviously
     insolvent genesis is only warned about, never blocked — simulating a
-    near-liquidation account is a legitimate scenario.
+    near-liquidation account is a legitimate scenario for direct callers
+    (tests, liquidation studies). The YAML boundary is deliberately stricter:
+    ``PaperAccountConfig`` rejects a non-positive opening balance outright,
+    because there it is almost certainly an operator typo — a stressed genesis
+    is still expressible in config via adverse seed positions.
     """
     if initial_balance_usdc <= 0:
         logger.warning(
@@ -608,6 +605,7 @@ def record_funding(
                 signed_position_notional=signed_notional,
                 mark_price=basis_mark,
                 source=source,
+                updated_at=now,
             )
 
         ledger = repo.get_current_account_state(conn, run_id)

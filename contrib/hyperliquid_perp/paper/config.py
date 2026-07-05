@@ -87,7 +87,13 @@ def _parse_initial_positions(raw: object) -> tuple[InitialPosition, ...]:
 
 @dataclass(frozen=True)
 class PaperAccountConfig:
-    """``paper_trading.account`` — initial balance and seed positions (§5.4)."""
+    """``paper_trading.account`` — initial balance and seed positions (§5.4).
+
+    Stricter than ``accounting.initialize_run`` on purpose: a non-positive
+    opening balance in YAML is almost certainly an operator typo, so it is a
+    config error here even though the accounting layer itself only warns (a
+    stressed genesis is still expressible via adverse seed positions).
+    """
 
     initial_balance_usdc: Decimal = Decimal("1000")
     initial_positions: tuple[InitialPosition, ...] = ()

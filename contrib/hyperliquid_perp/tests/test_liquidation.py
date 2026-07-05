@@ -202,6 +202,16 @@ def test_liquidation_estimate_enforces_contract():
         LiquidationEstimate(price=Decimal("50000"), already_liquidatable=True)
 
 
+def test_liquidation_estimate_rejects_non_positive_price():
+    # A forward-looking liquidation price is a price: the type sign-guards it like
+    # its sibling money-bearing dataclasses, so a hand-built instance can't claim
+    # a non-positive liquidation level.
+    with pytest.raises(ValueError, match="must be > 0"):
+        LiquidationEstimate(price=Decimal("0"), already_liquidatable=False)
+    with pytest.raises(ValueError, match="must be > 0"):
+        LiquidationEstimate(price=Decimal("-5"), already_liquidatable=False)
+
+
 def test_cross_tier_liquidation_reselects_tier():
     # Two tiers; the position is large enough that its notional spans a boundary.
     sched = MarginSchedule(

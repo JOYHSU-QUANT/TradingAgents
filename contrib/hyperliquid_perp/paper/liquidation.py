@@ -142,6 +142,12 @@ class LiquidationEstimate:
         # place an SL must never see both.
         if self.already_liquidatable and self.price is not None:
             raise ValueError("an already-liquidatable LiquidationEstimate carries no price")
+        # A forward-looking liquidation price is a price: sign-guard it like every
+        # other money-bearing result dataclass in this layer (MaintenanceSnapshot,
+        # PositionValuation, FillEffect), so a hand-built instance can't claim a
+        # non-positive liquidation level.
+        if self.price is not None and self.price <= 0:
+            raise ValueError(f"LiquidationEstimate.price must be > 0, got {self.price}")
 
 
 def _round_to_tick(price: Decimal, tick: Decimal, *, up: bool) -> Decimal:

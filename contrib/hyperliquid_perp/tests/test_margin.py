@@ -144,6 +144,39 @@ def test_margin_math_is_immune_to_ambient_decimal_context():
         decimal.getcontext().prec = original
 
 
+def test_map_schedule_corrupt_tier_value_raises():
+    # A present, non-empty marginTiers list whose entry carries a bad value
+    # (non-positive maxLeverage) must fail loud with an indexed message, not
+    # silently drop the tier and under-state maintenance margin.
+    meta = {
+        "universe": [{"name": "BTC", "maxLeverage": 40, "marginTableId": 7}],
+        "marginTables": [
+            [
+                7,
+                {
+                    "marginTiers": [
+                        {"lowerBound": "0", "maxLeverage": 50},
+                        {"lowerBound": "10000", "maxLeverage": 0},  # corrupt
+                    ]
+                },
+            ]
+        ],
+    }
+    with pytest.raises(MalformedResponseError, match=r"marginTiers\[1\]"):
+        map_margin_schedule([meta, []], "BTC")
+
+
+def test_map_schedule_non_dict_tier_raises():
+    # A non-dict item inside an otherwise-present marginTiers list is corrupt
+    # exchange data — fail loud with the tier index, don't coerce or skip it.
+    meta = {
+        "universe": [{"name": "BTC", "maxLeverage": 40, "marginTableId": 7}],
+        "marginTables": [[7, {"marginTiers": [{"lowerBound": "0", "maxLeverage": 50}, "garbage"]}]],
+    }
+    with pytest.raises(MalformedResponseError, match=r"marginTiers\[1\] is str"):
+        map_margin_schedule([meta, []], "BTC")
+
+
 def test_map_schedule_resolved_table_with_unusable_tiers_raises():
     # The table id resolves but its marginTiers are empty -> fail loud; a silent
     # fallback to the single maxLeverage tier would under-state maintenance

@@ -622,6 +622,90 @@ def test_fill_effect_enforces_wallet_identity():
         )
 
 
+def test_fill_effect_rejects_negative_fee_and_notional():
+    # The sibling invariants on the same dataclass (a fee is a cost, a traded
+    # notional is a magnitude) reject a hand-built instance that disagrees.
+    with pytest.raises(ValueError, match="fee must be >= 0"):
+        acc.FillEffect(
+            position=_long("0.01", "100"),
+            realized_pnl_delta=Decimal("0"),
+            fee=Decimal("-0.1"),
+            fill_notional=Decimal("1"),
+            wallet_delta=Decimal("0.1"),
+        )
+    with pytest.raises(ValueError, match="fill_notional must be >= 0"):
+        acc.FillEffect(
+            position=_long("0.01", "100"),
+            realized_pnl_delta=Decimal("0"),
+            fee=Decimal("0"),
+            fill_notional=Decimal("-1"),
+            wallet_delta=Decimal("0"),
+        )
+
+
+def test_initial_margin_rejects_non_positive_leverage():
+    with pytest.raises(ValueError, match="leverage must be > 0"):
+        acc.initial_margin(Decimal("1000"), Decimal("0"))
+    with pytest.raises(ValueError, match="leverage must be > 0"):
+        acc.initial_margin(Decimal("1000"), Decimal("-5"))
+
+
+def test_position_state_enforces_invariants():
+    with pytest.raises(ValueError, match="coin must be a non-empty"):
+        PositionState(coin="", size=Decimal("0"), entry_price=None)
+    with pytest.raises(ValueError, match="must carry an entry_price"):
+        PositionState(coin="BTC", size=Decimal("1"), entry_price=None)
+    with pytest.raises(ValueError, match="entry_price must be > 0"):
+        PositionState(coin="BTC", size=Decimal("1"), entry_price=Decimal("0"))
+
+
+def test_record_funding_requires_initialized_run():
+    # record_funding inserts the funding row before reading the ledger; an
+    # uninitialized run must raise on the ledger check AND roll the row back.
+    db = _db()
+    with pytest.raises(ValueError, match="no account state"):
+        acc.record_funding(
+            db,
+            run_id="r1",
+            mode="paper",
+            symbol="BTC",
+            funding_timestamp=_TS,
+            position_size=Decimal("0.05"),
+            funding_rate=Decimal("0.0001"),
+            mark_price=Decimal("60000"),
+        )
+    fe_id = acc.funding_event_id("r1", "BTC", _TS)
+    assert repo.get_funding_event(db.conn, fe_id) is None  # rolled back, not committed
+    db.close()
+
+
+def test_post_fill_warns_when_equity_underwater_but_wallet_positive(caplog):
+    import logging
+
+    db = _db()
+    # A tiny reduce at a crushed price keeps the wallet positive but leaves the
+    # residual position deeply underwater at that price — exercises the
+    # equity_at_fill_price <= 0 disjunct, distinct from the wallet < 0 one.
+    _init(db, balance="10", positions=[_long("1", "100")])
+    with caplog.at_level(logging.WARNING):
+        acc.post_fill(
+            db,
+            run_id="r1",
+            mode="paper",
+            fill_id="f1",
+            order_id="o1",
+            symbol="BTC",
+            side="sell",
+            qty=Decimal("0.01"),
+            price=Decimal("5"),
+            fee_rate=Decimal("0"),
+        )
+    # Wallet stays >= 0 (the wallet<0 disjunct did NOT fire) yet the warning fired.
+    assert repo.get_current_account_state(db.conn, "r1").wallet_balance >= 0
+    assert "insolvent" in caplog.text
+    db.close()
+
+
 def test_post_fill_warns_when_wallet_goes_negative(caplog):
     import logging
 

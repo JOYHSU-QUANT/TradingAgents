@@ -120,7 +120,7 @@ TradingAgents/
         ├── audit/
         ├── notifications/
         ├── configs/
-        │   ├── hyperliquid.example.yaml   # network/wallet + risk:/decision: 區塊
+        │   ├── hyperliquid.example.yaml   # network/wallet + risk:/decision:/paper_trading: 區塊
         │   └── hyperliquid.local.yaml     🔒 gitignored
         ├── docs/
         ├── ports.py

@@ -338,7 +338,15 @@ def summarize_account(
     *,
     leverage: Decimal,
 ) -> AccountMetrics:
-    """Aggregate the account-level metrics from the ledger and open positions."""
+    """Aggregate the account-level metrics from the ledger and open positions.
+
+    ``valuations`` must cover *every* open position for the run: this is a pure
+    aggregation and cannot tell a deliberately-flat account from one missing a
+    position, so an incomplete sequence silently under-reports notional / margin /
+    leverage. The PR3 snapshot writer owns fetching the full set
+    (``get_all_current_positions``) before calling this — completeness is that
+    caller's responsibility, not enforced here.
+    """
     with localcontext(DECIMAL_CONTEXT):
         total_unrealized = Decimal(0)
         total_notional = Decimal(0)

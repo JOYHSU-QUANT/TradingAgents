@@ -572,8 +572,9 @@ def set_funding_status(
     would let the same settlement move the wallet twice, defeating the
     exactly-once guarantee ``record_funding`` builds on this function), and the
     row must come out of the update with its settlement math complete and
-    consistent with the *stored* basis (``position_size``, and the stored mark
-    when none is supplied here). ``updated_at`` stamps when the transition
+    consistent with the *stored* basis (``position_size``, and the stored mark —
+    the settlement mark is immutable, so a re-supplied ``mark_price`` must match
+    the stored one and can never override it). ``updated_at`` stamps when the transition
     actually happened — ``recorded_at`` keeps the pending-insert time, so a
     live posting and an hours-later backfill stay distinguishable.
     """
@@ -594,7 +595,20 @@ def set_funding_status(
         raise ValueError(f"funding event {funding_event_id!r} is already posted and immutable")
     if status != "posted":
         raise ValueError("set_funding_status only performs the pending -> posted transition")
-    effective_mark = _dec(row["mark_price"]) if mark_price is None else mark_price
+    # The settlement mark is immutable once record_funding fixed it on the pending
+    # row (a pending event requires a mark). A caller may re-supply mark_price, but
+    # only matching the stored basis — never override it after the fact, or a
+    # position/price change between pending and backfill would silently rewrite
+    # settlement history (loop-1 decision #3: backfill uses ONLY the stored
+    # pending-row basis). record_funding already never supplies a divergent mark;
+    # this makes the guarantee live at the boundary, not just in that convention.
+    stored_mark = _dec(row["mark_price"])
+    if mark_price is not None and mark_price != stored_mark:
+        raise ValueError(
+            f"funding event {funding_event_id!r}: supplied mark_price {mark_price} "
+            f"differs from the immutable stored settlement mark {stored_mark}"
+        )
+    effective_mark = stored_mark if mark_price is None else mark_price
     _check_posted_settlement_math(
         mark_price=effective_mark,
         signed_position_notional=signed_position_notional,

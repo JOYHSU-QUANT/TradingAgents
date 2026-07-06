@@ -55,6 +55,7 @@ cp contrib/hyperliquid_perp/configs/hyperliquid.example.yaml \
 | `engine` | `llm_provider: openrouter`、`deep_think_llm`、`quick_think_llm`、`selected_analysts: [market, social, news]`。 |
 | `risk` | Phase 2 RiskGate：`leverage`（Phase 2 = 1x）、`margin_mode`（cross-only）、`max_target_margin_pct`（clamp 上限，requested 61–100 → approved 60）。cap 低於 decision grid 上限（也就是會實際生效）時必須落在 grid 上，否則有效上限會被靜默收緊 → config load 時具名 exit 1；cap 等於或高於 grid 上限則一律合法——它永遠不生效（有效上限 = min(grid 上限, cap) 由 grid 綁住），只是後備上限，不要求 grid 對齊。若 cap snap 到 grid 後 ≤ 0（低於 grid 最小值，或 grid 由 0 起算但 cap 小於一個 step）→ 每個方向性 target 都會 clamp 成 0 被風控拒絕（REJECTED），同樣 load 時 exit 1，不靜默上線。 |
 | `decision` | 決策契約 grid：`ai_target_margin_min_pct`／`ai_target_margin_max_pct`／`target_margin_step_pct`（合法 `requested_target_margin_pct` = {min, min+step, …, max}；off-grid 直接 fail closed，不四捨五入；`(max − min)` 必須為 `step` 的整數倍，否則廣告的 `max` 落在 grid 外、config load 時 exit 1）、`rebalance_deadband_pct`（同向 \|approved − current\| 小於此值 → 不下單；flip/flat 例外）、`min_confidence`（低於此值的 set_target 被風控拒絕 REJECTED——包含 flat 請求；confidence 永不縮放 sizing）。 |
+| `paper_trading` | Phase 2 紙上帳戶＋撮合模型：`initial_balance_usdc`（開帳淨值，必須 > 0）、`initial_positions`（可選種倉）、`execution.fill_model.slippage_bps`／`execution.market_monitor.interval_seconds`／`request_timeout_seconds`、`taker_fee_rate` 等。整個區塊在 config load 時就驗證——未知／打錯的 key、非 mapping、或無效值（如非正的 `initial_balance_usdc`、負費率）都具名 exit 1，不靜默套預設。 |
 
 > 沒有任何 `*.local.yaml` 時，loader 會退回 `hyperliquid.example.yaml`，
 > 所以 `--context-only` 不用複製任何東西就能跑。
@@ -85,8 +86,8 @@ python -m contrib.hyperliquid_perp.main --context-only --coin BTC
 ```
 
 若 `wallet_address` 是真實地址，也會印出目前倉位（或 `flat`）。
-`--context-only` 也會用與完整輪相同的檢查先驗證 `risk:`／`decision:` 區塊——
-壞掉的 config 在這個免費 smoke 階段就具名 exit 1，不會等到付費輪才爆。
+`--context-only` 也會用與完整輪相同的檢查先驗證 `risk:`／`decision:`／`paper_trading:`
+區塊——壞掉的 config 在這個免費 smoke 階段就具名 exit 1，不會等到付費輪才爆。
 
 ### B. 完整一輪（需要 key）
 
@@ -108,8 +109,10 @@ python -m contrib.hyperliquid_perp.main --coin BTC
   LLM 成本（要純診斷就用 `--context-only`）。
 - context 暖身不足、指標全滅、或 `atr_14` 不可用（未列入 `indicators` 設定、或算不出來——
   兩種情況都會讓 regime 退化成假的 RANGING，掩蓋波動市況，所以一律擋下）。
-- `risk:`／`decision:` config 區塊格式錯誤——含未知／打錯的 key、打錯的頂層區塊名、
-  或非 mapping 的區塊。這些都會具名 exit 1（不會靜默退回預設值，以免一個 typo 讓
+- `risk:`／`decision:`／`paper_trading:` config 區塊格式錯誤——含未知／打錯的 key、
+  打錯的頂層區塊名、或非 mapping 的區塊（`paper_trading:` 另含無效值，如非正的
+  `initial_balance_usdc`、負的 `taker_fee_rate`／`slippage_bps`、非正的 monitor
+  interval／timeout）。這些都會具名 exit 1（不會靜默退回預設值，以免一個 typo 讓
   安全上限悄悄變回寬鬆的預設）。頂層已知 key 的值錯誤——`network` 不是
   `mainnet`/`testnet`、`network_timeout_s` 不是數字、`wallet_address` 不是字串——
   也在 config load 時具名 exit 1；留空白的 key（如 `market_data:` 後面沒內容）

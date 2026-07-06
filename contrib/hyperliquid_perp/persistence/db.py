@@ -115,7 +115,16 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
 
 
 class Database:
-    """A migrated SQLite store with an explicit, non-nesting transaction boundary."""
+    """A migrated SQLite store with an explicit, non-nesting transaction boundary.
+
+    Concurrency contract (PR2): one :class:`Database` wraps one connection opened
+    with the sqlite3 default ``check_same_thread=True``, and both the nesting flag
+    and ``BEGIN``/``COMMIT`` sequencing assume a single owning thread — cross-thread
+    use fails loud rather than racing the check-then-``BEGIN``. When PR3 adds its
+    30s monitor and 4h scheduler loops it owns the concurrency model (a per-loop
+    ``Database`` each with its own connection, an explicit lock, or a cooperative
+    single thread); this class deliberately does not pick one yet.
+    """
 
     def __init__(self, path: str | Path) -> None:
         self._conn = connect(path)
@@ -207,7 +216,11 @@ class Database:
                 with suppress(Exception):
                     self._conn.execute("ROLLBACK")
         finally:
-            self._conn.execute("PRAGMA query_only = OFF")
+            # Same masking guard as the ROLLBACKs above: if turning query_only
+            # back off itself raised while a body exception is propagating, it
+            # would replace the original with a less useful PRAGMA error.
+            with suppress(Exception):
+                self._conn.execute("PRAGMA query_only = OFF")
 
     def close(self) -> None:
         self._conn.close()

@@ -544,6 +544,56 @@ def test_set_funding_status_is_pending_to_posted_only(tmp_path):
     db.close()
 
 
+def test_set_funding_status_rejects_overriding_stored_mark(tmp_path):
+    # The settlement mark is fixed when the pending row is stored; a backfill
+    # posting may re-supply mark_price only if it MATCHES — never override it, or a
+    # price move between pending and backfill would silently rewrite the basis.
+    db = Database(tmp_path / "p.db")
+    fid = funding_event_id("r1", "BTC", _TS)
+    with db.transaction() as conn:
+        repo.insert_funding_event(
+            conn,
+            funding_event_id=fid,
+            mode="paper",
+            run_id="r1",
+            symbol="BTC",
+            funding_timestamp=_TS,
+            position_size=Decimal("0.05"),
+            status="pending",
+            mark_price=Decimal("60000"),
+        )
+    # A divergent mark is rejected at the boundary (its own internally-consistent
+    # settlement math — 0.05 * 61000 — does not save it).
+    with (
+        pytest.raises(ValueError, match="immutable stored settlement mark"),
+        db.transaction() as conn,
+    ):
+        repo.set_funding_status(
+            conn,
+            fid,
+            status="posted",
+            mark_price=Decimal("61000"),
+            signed_position_notional=Decimal("3050"),
+            funding_rate=Decimal("0.0001"),
+            funding_pnl=Decimal("-0.305"),
+        )
+    # Re-supplying the SAME stored mark is allowed (it overrides nothing).
+    with db.transaction() as conn:
+        repo.set_funding_status(
+            conn,
+            fid,
+            status="posted",
+            mark_price=Decimal("60000"),
+            signed_position_notional=Decimal("3000"),
+            funding_rate=Decimal("0.0001"),
+            funding_pnl=Decimal("-0.3"),
+        )
+    row = repo.get_funding_event(db.conn, fid)
+    assert row["status"] == "posted"
+    assert Decimal(row["mark_price"]) == Decimal("60000")
+    db.close()
+
+
 def test_insert_run_rejects_bad_mode(tmp_path):
     db = Database(tmp_path / "p.db")
     with pytest.raises(ValueError, match="mode"), db.transaction() as conn:

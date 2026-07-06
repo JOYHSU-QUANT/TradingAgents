@@ -52,6 +52,7 @@ __all__ = [
     "PositionValuation",
     "ReplayResult",
     "account_equity",
+    "apply_fill",
     "available_balance",
     "compute_fill_effect",
     "effective_leverage",
@@ -484,59 +485,19 @@ def post_fill(
     must be able to express) — but a fill that leaves the account insolvent at
     its own price is warned about, so it never happens silently.
     """
-    side = Side.parse(side)  # parse once; compute/insert below accept the enum as-is
     now = timestamp or _utcnow()
     with db.transaction() as conn:
-        position = repo.get_current_position(conn, run_id, symbol) or PositionState.flat(symbol)
-        ledger = _require_ledger(conn, run_id)
-
-        effect = compute_fill_effect(position, side=side, qty=qty, price=price, fee_rate=fee_rate)
-
-        # Pinned: these sums are persisted (and re-derived under the same pin by
-        # replay), so they must not round under a perturbed ambient context.
-        with localcontext(DECIMAL_CONTEXT):
-            new_wallet = ledger.wallet_balance + effect.wallet_delta
-            # Equity proxy at the fill's own price (other symbols' marks are
-            # unknown here); a definitive margin check is the engine's, this is
-            # the ledger's last-line audit trail.
-            new_pos = effect.position
-            equity_at_fill_price = new_wallet + (
-                Decimal(0)
-                if new_pos.is_flat
-                else unrealized_pnl(new_pos.size, price, new_pos.entry_price)
-            )
-            new_ledger = AccountLedger(
-                wallet_balance=new_wallet,
-                realized_pnl=ledger.realized_pnl + effect.realized_pnl_delta,
-                total_fees=ledger.total_fees + effect.fee,
-                net_funding_pnl=ledger.net_funding_pnl,
-            )
-        if new_wallet < 0 or equity_at_fill_price <= 0:
-            logger.warning(
-                "fill %s leaves run %s insolvent at its own price: wallet %s, "
-                "equity(at fill price) %s",
-                fill_id,
-                run_id,
-                new_wallet,
-                equity_at_fill_price,
-            )
-
-        # Insert the fill first: its slice_id UNIQUE constraint is the exactly-once
-        # guard, so a duplicate aborts before any state moves.
-        repo.insert_fill(
+        return apply_fill(
             conn,
-            fill_id=fill_id,
-            mode=mode,
             run_id=run_id,
+            mode=mode,
+            fill_id=fill_id,
             order_id=order_id,
             symbol=symbol,
             side=side,
-            fill_qty=qty,
-            fill_price=price,
-            fill_notional=effect.fill_notional,
-            fee=effect.fee,
+            qty=qty,
+            price=price,
             fee_rate=fee_rate,
-            realized_pnl_delta=effect.realized_pnl_delta,
             liquidity_type=liquidity_type,
             slice_id=slice_id,
             plan_id=plan_id,
@@ -545,8 +506,99 @@ def post_fill(
             fill_reason=fill_reason,
             timestamp=now,
         )
-        repo.upsert_current_position(conn, run_id, effect.position, updated_at=now)
-        repo.upsert_current_account_state(conn, run_id, new_ledger, updated_at=now)
+
+
+def apply_fill(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    mode: str,
+    fill_id: str,
+    order_id: str,
+    symbol: str,
+    side: Side | str,
+    qty: Decimal,
+    price: Decimal,
+    fee_rate: Decimal,
+    liquidity_type: str = "simulated",
+    slice_id: str | None = None,
+    plan_id: str | None = None,
+    flip_leg: str | None = None,
+    slice_index: int | None = None,
+    fill_reason: str | None = None,
+    timestamp: datetime | None = None,
+) -> FillEffect:
+    """Write one fill + its position/ledger updates on a **caller-owned** transaction.
+
+    The transactional core of :func:`post_fill`, exposed so the PR3 execution
+    engine can bundle the *same fill's* order / plan / protection writes into the
+    one ``db.transaction()`` (phase2-execution §5.3 / PR3 requirement 8: every
+    change caused by one fill commits atomically). ``post_fill`` is the standalone
+    single-fill entry point that opens its own transaction around this; the engine
+    calls this directly inside its tick transaction. Callers must already be inside
+    a ``db.transaction()``.
+    """
+    side = Side.parse(side)  # parse once; compute/insert below accept the enum as-is
+    now = timestamp or _utcnow()
+    position = repo.get_current_position(conn, run_id, symbol) or PositionState.flat(symbol)
+    ledger = _require_ledger(conn, run_id)
+
+    effect = compute_fill_effect(position, side=side, qty=qty, price=price, fee_rate=fee_rate)
+
+    # Pinned: these sums are persisted (and re-derived under the same pin by
+    # replay), so they must not round under a perturbed ambient context.
+    with localcontext(DECIMAL_CONTEXT):
+        new_wallet = ledger.wallet_balance + effect.wallet_delta
+        # Equity proxy at the fill's own price (other symbols' marks are
+        # unknown here); a definitive margin check is the engine's, this is
+        # the ledger's last-line audit trail.
+        new_pos = effect.position
+        equity_at_fill_price = new_wallet + (
+            Decimal(0)
+            if new_pos.is_flat
+            else unrealized_pnl(new_pos.size, price, new_pos.entry_price)
+        )
+        new_ledger = AccountLedger(
+            wallet_balance=new_wallet,
+            realized_pnl=ledger.realized_pnl + effect.realized_pnl_delta,
+            total_fees=ledger.total_fees + effect.fee,
+            net_funding_pnl=ledger.net_funding_pnl,
+        )
+    if new_wallet < 0 or equity_at_fill_price <= 0:
+        logger.warning(
+            "fill %s leaves run %s insolvent at its own price: wallet %s, equity(at fill price) %s",
+            fill_id,
+            run_id,
+            new_wallet,
+            equity_at_fill_price,
+        )
+
+    # Insert the fill first: its slice_id UNIQUE constraint is the exactly-once
+    # guard, so a duplicate aborts before any state moves.
+    repo.insert_fill(
+        conn,
+        fill_id=fill_id,
+        mode=mode,
+        run_id=run_id,
+        order_id=order_id,
+        symbol=symbol,
+        side=side,
+        fill_qty=qty,
+        fill_price=price,
+        fill_notional=effect.fill_notional,
+        fee=effect.fee,
+        fee_rate=fee_rate,
+        realized_pnl_delta=effect.realized_pnl_delta,
+        liquidity_type=liquidity_type,
+        slice_id=slice_id,
+        plan_id=plan_id,
+        flip_leg=flip_leg,
+        slice_index=slice_index,
+        fill_reason=fill_reason,
+        timestamp=now,
+    )
+    repo.upsert_current_position(conn, run_id, effect.position, updated_at=now)
+    repo.upsert_current_account_state(conn, run_id, new_ledger, updated_at=now)
     return effect
 
 

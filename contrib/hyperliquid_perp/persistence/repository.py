@@ -30,6 +30,9 @@ __all__ = [
     "get_all_current_positions",
     "get_current_account_state",
     "get_current_position",
+    "get_execution_plan",
+    "get_funding_event",
+    "get_order",
     "get_run",
     "get_run_seed_positions",
     "get_scheduler_state",
@@ -46,8 +49,10 @@ __all__ = [
     "insert_run_seed_position",
     "iter_fills",
     "iter_funding_events",
-    "get_funding_event",
     "set_funding_status",
+    "set_position_protection",
+    "update_execution_plan",
+    "update_order",
     "upsert_current_account_state",
     "upsert_current_position",
     "upsert_scheduler_state",
@@ -167,6 +172,16 @@ def _insert(conn: sqlite3.Connection, table: str, values: dict[str, Any]) -> Non
 def _dec(value: Any) -> Decimal | None:
     """Decode a stored TEXT value back to Decimal; ``None`` stays ``None``."""
     return None if value is None else Decimal(value)
+
+
+class _Unset:
+    """Sentinel type: a keyword the caller did not supply (vs an explicit ``None``)."""
+
+
+# Defined near the top so every patch-style writer below (orders, execution
+# plans, scheduler state) can use it as a default argument value — defaults are
+# bound at function-definition (import) time, so the sentinel must exist first.
+_UNSET = _Unset()
 
 
 # --------------------------------------------------------------------------
@@ -678,10 +693,6 @@ def insert_ai_output(conn: sqlite3.Connection, **fields: Any) -> None:
     _insert(conn, "ai_outputs", fields)
 
 
-def insert_order(conn: sqlite3.Connection, **fields: Any) -> None:
-    _insert(conn, "orders", fields)
-
-
 def insert_decision_attempt(conn: sqlite3.Connection, **fields: Any) -> None:
     """Insert a decision attempt. Raises on a duplicate ``(run_id, scheduled_at)``.
 
@@ -692,15 +703,266 @@ def insert_decision_attempt(conn: sqlite3.Connection, **fields: Any) -> None:
     _insert(conn, "decision_attempts", fields)
 
 
-def insert_execution_plan(conn: sqlite3.Connection, **fields: Any) -> None:
-    _insert(conn, "execution_plans", fields)
+# --------------------------------------------------------------------------
+# orders (phase2-data §8) — typed insert + patch update, first used by PR3
+# --------------------------------------------------------------------------
+
+_ORDER_ROLES = frozenset({"entry", "rebalance", "stop_loss", "take_profit"})
+_ORDER_TYPES = frozenset({"paper_market", "paper_twap_slice", "stop_market", "take_market"})
+_ORDER_STATUSES = frozenset(
+    {"pending_market_data", "open", "partially_filled", "filled", "canceled", "rejected"}
+)
+# Execution-plan lifecycle: ``active`` / ``paused_market_data`` are live; the rest
+# are terminal (execution §1.1 / §1.3 / §4.1).
+_PLAN_STATUSES = frozenset(
+    {
+        "active",
+        "paused_market_data",
+        "completed",
+        "canceled",
+        "canceled_restart",
+        "expired",
+        "failed",
+        "flip_incomplete",
+        "rejected",
+        "residual",
+    }
+)
 
 
-class _Unset:
-    """Sentinel type: a keyword the caller did not supply (vs an explicit ``None``)."""
+def insert_order(
+    conn: sqlite3.Connection,
+    *,
+    order_id: str,
+    mode: str,
+    run_id: str,
+    symbol: str,
+    order_role: str,
+    side: str,
+    order_type: str,
+    qty: Decimal,
+    status: str,
+    output_id: str | None = None,
+    exchange_order_id: str | None = None,
+    client_order_id: str | None = None,
+    parent_order_id: str | None = None,
+    flip_plan_id: str | None = None,
+    flip_leg: str | None = None,
+    price: Decimal | None = None,
+    trigger_price: Decimal | None = None,
+    filled_qty: Decimal = Decimal(0),
+    remaining_qty: Decimal | None = None,
+    status_reason: str | None = None,
+    reduce_only: bool = False,
+    active_from: datetime | None = None,
+    timestamp: datetime | None = None,
+    updated_at: datetime | None = None,
+) -> None:
+    """Insert one order row (phase2-data §8). Enums validated at the write boundary."""
+    check_enum(mode, _MODES, name="mode")
+    check_enum(order_role, _ORDER_ROLES, name="order_role")
+    check_enum(order_type, _ORDER_TYPES, name="type")
+    check_enum(status, _ORDER_STATUSES, name="status")
+    if flip_leg is not None:
+        check_enum(flip_leg, _FLIP_LEGS, name="flip_leg")
+    now = timestamp or datetime.now(timezone.utc)
+    _insert(
+        conn,
+        "orders",
+        {
+            "order_id": order_id,
+            "timestamp": now,
+            "mode": mode,
+            "run_id": run_id,
+            "output_id": output_id,
+            "exchange_order_id": exchange_order_id,
+            "client_order_id": client_order_id,
+            "parent_order_id": parent_order_id,
+            "flip_plan_id": flip_plan_id,
+            "flip_leg": flip_leg,
+            "symbol": symbol,
+            "order_role": order_role,
+            "side": Side.parse(side).value,
+            "type": order_type,
+            "price": price,
+            "trigger_price": trigger_price,
+            "qty": qty,
+            "filled_qty": filled_qty,
+            "remaining_qty": remaining_qty,
+            "status": status,
+            "status_reason": status_reason,
+            "reduce_only": reduce_only,
+            "active_from": active_from,
+            "updated_at": updated_at or now,
+        },
+    )
 
 
-_UNSET = _Unset()
+def get_order(conn: sqlite3.Connection, order_id: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,)).fetchone()
+
+
+def update_order(
+    conn: sqlite3.Connection,
+    order_id: str,
+    *,
+    filled_qty: Decimal | _Unset = _UNSET,
+    remaining_qty: Decimal | None | _Unset = _UNSET,
+    status: str | _Unset = _UNSET,
+    status_reason: str | None | _Unset = _UNSET,
+    exchange_order_id: str | None | _Unset = _UNSET,
+    updated_at: datetime | None = None,
+) -> None:
+    """Patch-update an order's mutable columns; always stamp ``updated_at``.
+
+    Only supplied columns change (an omitted keyword is left untouched, an explicit
+    ``None`` clears — same convention as :func:`upsert_scheduler_state`). The row
+    must exist (an order is always inserted before it is updated).
+    """
+    if not isinstance(status, _Unset):
+        check_enum(status, _ORDER_STATUSES, name="status")
+    if get_order(conn, order_id) is None:
+        raise ValueError(f"order {order_id!r} does not exist")
+    provided: dict[str, Any] = {}
+    for col, val in (
+        ("filled_qty", filled_qty),
+        ("remaining_qty", remaining_qty),
+        ("status", status),
+        ("status_reason", status_reason),
+        ("exchange_order_id", exchange_order_id),
+    ):
+        if not isinstance(val, _Unset):
+            provided[col] = _encode(val)
+    provided["updated_at"] = _iso_utc(updated_at or datetime.now(timezone.utc))
+    assignments = ", ".join(f"{col} = ?" for col in provided)
+    conn.execute(
+        f"UPDATE orders SET {assignments} WHERE order_id = ?",
+        (*provided.values(), order_id),
+    )
+
+
+# --------------------------------------------------------------------------
+# execution_plans (phase2-data §1.2) — typed insert + patch update
+# --------------------------------------------------------------------------
+
+
+def insert_execution_plan(
+    conn: sqlite3.Connection,
+    *,
+    plan_id: str,
+    run_id: str,
+    symbol: str,
+    status: str,
+    created_at: datetime,
+    output_id: str | None = None,
+    flip_plan_id: str | None = None,
+    flip_leg: str | None = None,
+    deadline_at: datetime | None = None,
+    planned_slices: int | None = None,
+    total_qty: Decimal | None = None,
+    remaining_qty: Decimal | None = None,
+    residual_qty: Decimal | None = None,
+    rounding_residual_qty: Decimal | None = None,
+    status_reason: str | None = None,
+    updated_at: datetime | None = None,
+) -> None:
+    """Insert one execution-plan row (phase2-data §1.2 internal table)."""
+    check_enum(status, _PLAN_STATUSES, name="status")
+    if flip_leg is not None:
+        check_enum(flip_leg, _FLIP_LEGS, name="flip_leg")
+    _insert(
+        conn,
+        "execution_plans",
+        {
+            "plan_id": plan_id,
+            "run_id": run_id,
+            "output_id": output_id,
+            "flip_plan_id": flip_plan_id,
+            "flip_leg": flip_leg,
+            "symbol": symbol,
+            "status": status,
+            "created_at": created_at,
+            "deadline_at": deadline_at,
+            "planned_slices": planned_slices,
+            "total_qty": total_qty,
+            "remaining_qty": remaining_qty,
+            "residual_qty": residual_qty,
+            "rounding_residual_qty": rounding_residual_qty,
+            "status_reason": status_reason,
+            "updated_at": updated_at or created_at,
+        },
+    )
+
+
+def get_execution_plan(conn: sqlite3.Connection, plan_id: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM execution_plans WHERE plan_id = ?", (plan_id,)).fetchone()
+
+
+def update_execution_plan(
+    conn: sqlite3.Connection,
+    plan_id: str,
+    *,
+    status: str | _Unset = _UNSET,
+    remaining_qty: Decimal | None | _Unset = _UNSET,
+    residual_qty: Decimal | None | _Unset = _UNSET,
+    status_reason: str | None | _Unset = _UNSET,
+    updated_at: datetime | None = None,
+) -> None:
+    """Patch-update a plan's mutable columns; always stamp ``updated_at``."""
+    if not isinstance(status, _Unset):
+        check_enum(status, _PLAN_STATUSES, name="status")
+    if get_execution_plan(conn, plan_id) is None:
+        raise ValueError(f"execution plan {plan_id!r} does not exist")
+    provided: dict[str, Any] = {}
+    for col, val in (
+        ("status", status),
+        ("remaining_qty", remaining_qty),
+        ("residual_qty", residual_qty),
+        ("status_reason", status_reason),
+    ):
+        if not isinstance(val, _Unset):
+            provided[col] = _encode(val)
+    provided["updated_at"] = _iso_utc(updated_at or datetime.now(timezone.utc))
+    assignments = ", ".join(f"{col} = ?" for col in provided)
+    conn.execute(
+        f"UPDATE execution_plans SET {assignments} WHERE plan_id = ?",
+        (*provided.values(), plan_id),
+    )
+
+
+def set_position_protection(
+    conn: sqlite3.Connection,
+    run_id: str,
+    symbol: str,
+    *,
+    stop_loss_price: Decimal | None,
+    take_profit_price: Decimal | None,
+    updated_at: datetime | None = None,
+) -> None:
+    """Set (or clear, with ``None``) a position's SL/TP prices (execution §2–§4).
+
+    ``upsert_current_position`` deliberately leaves these columns alone on a fill
+    (it preserves active protection); this is the one writer that moves them, so
+    the protection lifecycle stays explicit. The position row must already exist.
+    """
+    cur = conn.execute(
+        """
+        UPDATE current_positions
+        SET stop_loss_price = ?, take_profit_price = ?, updated_at = ?
+        WHERE run_id = ? AND symbol = ?
+        """,
+        (
+            _encode(stop_loss_price),
+            _encode(take_profit_price),
+            _iso_utc(updated_at or datetime.now(timezone.utc)),
+            run_id,
+            symbol,
+        ),
+    )
+    if cur.rowcount == 0:
+        raise ValueError(
+            f"no current_positions row for run {run_id!r} symbol {symbol!r} to protect"
+        )
 
 
 def upsert_scheduler_state(

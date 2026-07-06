@@ -9,8 +9,10 @@
 > RiskGate** 已能端到端執行，寫出 schema v3 的 target audit log（見
 > [SETUP](./docs/SETUP.md)）；**Phase 2 SQLite persistence 與 paper accounting／
 > 清算模型**（fills · fees · funding exactly-once · margin/liquidation · accounting
-> replay）已實作，剩餘的 paper 執行引擎（TWAP/flip · SL/TP · market monitor）與
-> scheduler／CSV export 層仍待實作（設計見 [phase2-spec](./docs/phase2-spec.md)）。
+> replay）以及 **paper 執行引擎**（TWAP/flip · SL/TP · paper 成交模擬 · market-data
+> 新鮮度／pause／gap-stop · market monitor，注入式 clock ＋ snapshot provider）皆已
+> 實作，剩餘的 scheduler／CLI／CSV export／驗收器層仍待實作（設計見
+> [phase2-spec](./docs/phase2-spec.md)）。
 
 ## 文件
 

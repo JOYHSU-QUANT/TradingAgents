@@ -321,7 +321,7 @@ def test_thin_inserts_align_with_schema_columns(tmp_path):
             symbol="BTC",
             order_role="entry",
             side="buy",
-            type="paper_market",
+            order_type="paper_market",
             qty=Decimal("0.01"),
             status="filled",
             updated_at=_TS,

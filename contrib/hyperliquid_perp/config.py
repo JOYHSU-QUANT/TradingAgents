@@ -41,6 +41,7 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset(
         "engine",
         "risk",
         "decision",
+        "paper_trading",
     }
 )
 
@@ -81,7 +82,7 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     # blows up deep in the run — ``5.get(...)`` (AttributeError) or ``"BTC"[0]``
     # silently taking the first character — instead of a clean exit-1 here. The
     # ``risk:``/``decision:`` blocks are shape-checked by their own from_dict.
-    for key in ("market_data", "engine"):
+    for key in ("market_data", "engine", "paper_trading"):
         val = config.get(key)
         if val is not None and not isinstance(val, dict):
             raise ValueError(f"{key!r} must be a mapping, got {val!r}")

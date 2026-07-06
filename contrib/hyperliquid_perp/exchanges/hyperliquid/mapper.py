@@ -19,6 +19,7 @@ import logging
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from ...domains.perp.margin import MarginSchedule, MarginTier
 from ...domains.perp.schema import (
     AccountSnapshot,
     Candle,
@@ -135,6 +136,122 @@ def map_market_snapshot(meta_and_asset_ctxs: Any, coin: str) -> MarketSnapshot:
         mid_price=_opt_dec(ctx.get("midPx"), field="midPx"),
         premium=_opt_dec(ctx.get("premium"), field="premium"),
     )
+
+
+# --------------------------------------------------------------------------
+# meta -> MarginSchedule
+# --------------------------------------------------------------------------
+
+
+def _margin_tiers_from_table(table: Any) -> list[MarginTier] | None:
+    """Build tiers from one ``marginTables`` entry's ``marginTiers`` list.
+
+    Returns ``None`` when the table has no usable ``marginTiers`` (so the caller
+    falls back to the single-tier ``maxLeverage`` form) and raises only on a
+    present-but-corrupt tier, matching the fail-loud stance of the other mappers.
+    """
+    if not isinstance(table, dict):
+        return None
+    raw_tiers = table.get("marginTiers")
+    if not isinstance(raw_tiers, list) or not raw_tiers:
+        return None
+    tiers: list[MarginTier] = []
+    for i, raw in enumerate(raw_tiers):
+        if not isinstance(raw, dict):
+            raise MalformedResponseError(f"marginTiers[{i}] is {type(raw).__name__}, expected dict")
+        try:
+            tiers.append(
+                MarginTier(
+                    lower_bound=_dec(raw.get("lowerBound"), field=f"marginTiers[{i}].lowerBound"),
+                    max_leverage=_dec(
+                        raw.get("maxLeverage"), field=f"marginTiers[{i}].maxLeverage"
+                    ),
+                )
+            )
+        except ValueError as exc:
+            # A bad tier value (non-positive leverage, negative bound) is corrupt
+            # exchange data — keep it in the mapper's MalformedResponseError contract.
+            raise MalformedResponseError(f"marginTiers[{i}]: {exc}") from exc
+    return tiers
+
+
+def map_margin_schedule(meta_and_asset_ctxs: Any, coin: str) -> MarginSchedule:
+    """Extract ``coin``'s maintenance-margin schedule from ``metaAndAssetCtxs``.
+
+    Prefers the explicit tiered table: ``meta["marginTables"]`` (a list of
+    ``[id, table]`` pairs) keyed by the universe entry's ``marginTableId``. When
+    no tier table is present — the common case for the recorded fixtures and
+    older ``meta`` responses — falls back to a single tier spanning all notional
+    from the asset's ``maxLeverage`` (execution §6.6.1 forbids hardcoding it, so
+    it is always read from the response, never assumed).
+    """
+    if not isinstance(meta_and_asset_ctxs, (list, tuple)) or not meta_and_asset_ctxs:
+        raise MalformedResponseError("metaAndAssetCtxs must be [meta, assetCtxs]")
+    meta = meta_and_asset_ctxs[0]
+    universe = (meta or {}).get("universe")
+    if not isinstance(universe, list):
+        raise MalformedResponseError("meta missing universe list")
+    entry = next((a for a in universe if isinstance(a, dict) and a.get("name") == coin), None)
+    if entry is None:
+        known = ", ".join(a.get("name", "?") for a in universe[:10] if isinstance(a, dict))
+        raise UnknownCoinError(f"coin {coin!r} not in perp universe (e.g. {known})")
+
+    # Explicit tier table, when the entry references one. A present-but-
+    # unresolvable table id is a data anomaly, not a reason to silently fall back
+    # to the single-tier maxLeverage form — that would apply the lowest rate to
+    # all notional and under-state maintenance margin (non-conservative), so we
+    # fail loud like every other corrupt-field path in this module. That includes
+    # the id pointing at a missing/malformed ``marginTables`` container, not just
+    # a missing list entry. The converse — tables present but this entry carries
+    # no ``marginTableId`` — is the normal shape for an untiered asset in a mixed
+    # universe, and falls through to the maxLeverage fallback below.
+    raw_tables = (meta or {}).get("marginTables")
+    table_id = entry.get("marginTableId")
+    if table_id is not None:
+        if not isinstance(raw_tables, list):
+            raise MalformedResponseError(
+                f"universe entry for {coin!r} carries marginTableId {table_id!r} "
+                "but meta has no marginTables list to resolve it against"
+            )
+        matched = next(
+            (
+                pair[1]
+                for pair in raw_tables
+                if isinstance(pair, (list, tuple)) and len(pair) == 2 and pair[0] == table_id
+            ),
+            None,
+        )
+        if matched is None:
+            raise MalformedResponseError(
+                f"marginTableId {table_id!r} for {coin!r} not found in marginTables"
+            )
+        tiers = _margin_tiers_from_table(matched)
+        if not tiers:
+            raise MalformedResponseError(
+                f"margin table {table_id!r} for {coin!r} has no usable marginTiers"
+            )
+        try:
+            return MarginSchedule(coin=coin, tiers=tuple(tiers))
+        except ValueError as exc:
+            raise MalformedResponseError(f"margin table {table_id!r} for {coin!r}: {exc}") from exc
+
+    # Fallback: no tier table for this asset — one tier covering all notional at
+    # the asset's max leverage (read from meta, never hardcoded).
+    try:
+        return MarginSchedule(
+            coin=coin,
+            tiers=(
+                MarginTier(
+                    lower_bound=Decimal(0),
+                    max_leverage=_dec(entry.get("maxLeverage"), field="maxLeverage"),
+                ),
+            ),
+        )
+    except (ValueError, MalformedResponseError) as exc:
+        # ``_dec`` raises MalformedResponseError (not ValueError) on a missing /
+        # non-numeric maxLeverage; catch it too so the coin-context prefix is
+        # added on that path as well, matching the tiered-table branch above.
+        raise MalformedResponseError(f"maxLeverage for {coin!r}: {exc}") from exc
 
 
 # --------------------------------------------------------------------------

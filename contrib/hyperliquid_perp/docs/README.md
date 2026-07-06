@@ -120,7 +120,7 @@ TradingAgents/
         ├── audit/
         ├── notifications/
         ├── configs/
-        │   ├── hyperliquid.example.yaml   # network/wallet + risk:/decision: 區塊
+        │   ├── hyperliquid.example.yaml   # network/wallet + risk:/decision:/paper_trading: 區塊
         │   └── hyperliquid.local.yaml     🔒 gitignored
         ├── docs/
         ├── ports.py
@@ -165,10 +165,14 @@ Phase 3 的 agent-wallet private key）一律放環境變數，絕不放進任�
 |---|---|---|
 | `domains/perp/target_decision.py` | ✅ | structured target schema · fail-closed 驗證 · prompt 改版（DESIGN Part 2）。 |
 | `domains/perp/risk_gate.py` | ✅ | `max_target_margin_pct` clamp · step / `min_confidence` 檢查 · effective leverage（phase2-spec §2）。 |
-| `execution/paper_engine.py` | planned | `paper_market` · TWAP / flip plan · SL/TP lifecycle · 30s market monitor（phase2-execution §1–5）。 |
-| `accounting/ledger.py` | planned | fills · fees（taker 0.045%）· funding exactly-once · margin / 清算價模型（phase2-execution §6）。 |
-| `persistence/db.py` | planned | SQLite source of truth · 八張 CSV atomic export（phase2-data）。 |
-| `scheduler.py` | planned | 4h rolling cycle · 3-attempt retry · 重啟 reconciliation（phase2-spec §3）。 |
+| `domains/perp/config_coercion.py` | ✅ | 共用 YAML-coercion helpers（`config_overrides` · `decimal_from_yaml` · `int_from_yaml`），供 `RiskConfig` / `DecisionConfig` / `PaperTradingConfig` 三方使用。 |
+| `domains/perp/margin.py` | ✅ | Hyperliquid maintenance-margin tier model（rate · continuity deduction · tier 選擇；phase2-execution §6.6.1）。 |
+| `persistence/` | ✅ | SQLite source of truth · transaction · migrations · dedup 去重鍵 · typed repository（phase2-data §1／§5–§12）。CSV atomic export 延後至 PR4。 |
+| `paper/accounting.py` | ✅ | fills · fees（taker 0.045%）· funding exactly-once · account 公式 · accounting replay（phase2-execution §6）。 |
+| `paper/liquidation.py` | ✅ | paper estimated liquidation price · margin tier bisection（phase2-execution §6.6.1）。 |
+| `paper/config.py` | ✅ | typed `paper_trading:` block（phase2-execution §5.4）。 |
+| `paper/engine.py` | planned | `paper_market` · TWAP / flip plan · SL/TP lifecycle · 30s market monitor（phase2-execution §1–5）。 |
+| `paper/scheduler.py` | planned | 4h rolling cycle · 3-attempt retry · 重啟 reconciliation · CSV export（phase2-spec §3／phase2-data §1.1）。 |
 
 ### Phase 3 — live execution
 

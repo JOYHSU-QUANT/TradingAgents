@@ -41,6 +41,7 @@ from .exchanges.hyperliquid.errors import ExchangeError
 from .exchanges.hyperliquid.market_data import HyperliquidMarketData
 from .exchanges.hyperliquid.sdk_client import HyperliquidClient
 from .integration.trading_graph import build_graph, inject_perp_context
+from .paper.config import PaperTradingConfig
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,16 @@ def _resolve_coin(args: argparse.Namespace, config: dict) -> str:
     coins = config.get("coins") or []
     if not coins:
         raise SystemExit("no coin given and config has no 'coins' list.")
+    if len(coins) > 1:
+        # A single decision runs against one coin; picking coins[0] silently would
+        # hide that the rest of a multi-coin config is ignored. Surface it (pass
+        # --coin to choose explicitly) rather than let the selection pass unseen.
+        ignored = ", ".join(str(c).upper() for c in coins[1:])
+        print(
+            f"warning: {len(coins)} coins configured but no --coin given; trading "
+            f"only {str(coins[0]).upper()} and ignoring {ignored}.",
+            file=sys.stderr,
+        )
     return str(coins[0]).upper()
 
 
@@ -112,21 +123,26 @@ def _warmup_threshold(config: dict) -> int:
 
 
 def _load_risk_decision(config: dict) -> tuple[risk_gate.RiskConfig, DecisionConfig] | None:
-    """Parse + cross-validate the ``risk:``/``decision:`` blocks; ``None`` if invalid.
+    """Parse + cross-validate the ``risk:``/``decision:``/``paper_trading:`` blocks.
 
-    A malformed block — unknown/typo'd keys, bad values, or a max_target margin
-    cap that snaps below the decision grid (which would clamp every directional
-    target to 0 and risk-reject it) — is reported as a named config error and
-    the caller exits 1. Shared by the engine path and ``--context-only`` so the
-    free smoke run validates exactly what the paid run will consume.
+    Returns ``None`` if any is invalid. A malformed block — unknown/typo'd keys,
+    bad values, or a max_target margin cap that snaps below the decision grid
+    (which would clamp every directional target to 0 and risk-reject it) — is
+    reported as a named config error and the caller exits 1. Shared by the engine
+    path and ``--context-only`` so the free smoke run validates exactly what the
+    paid run will consume. The ``paper_trading`` block is parsed here for its
+    validation side effect (bad fee/balance/slippage fail fast) even though PR 2
+    does not yet consume it — the paper engine (PR 3) reads the same block.
     """
     try:
         risk_cfg = risk_gate.RiskConfig.from_dict(config.get("risk"))
         decision_cfg = DecisionConfig.from_dict(config.get("decision"))
         risk_gate.validate_risk_decision_config(risk_cfg, decision_cfg)
+        PaperTradingConfig.from_dict(config.get("paper_trading"))
     except ValueError as exc:
         print(
-            f"error: invalid risk:/decision: config — {exc}. Fix the YAML block and re-run.",
+            f"error: invalid risk:/decision:/paper_trading: config — {exc}. "
+            "Fix the YAML block and re-run.",
             file=sys.stderr,
         )
         return None
@@ -335,16 +351,18 @@ def run_engine(config: dict, coin: str) -> int:
             file=sys.stderr,
         )
         return 1
-    # atr_14 is load-bearing beyond being "one missing number": classify_regime falls
-    # back to RANGING (hiding a volatile market) when it is absent. Past the warm-up
-    # gate there are enough candles to compute it, so a None atr_14 here means
-    # stockstats failed on that column specifically — and a single dead indicator
-    # slips past the all-dead guard above. Refuse the run rather than trade on a
-    # fabricated-calm regime.
-    if "atr_14" in ctx.indicators and ctx.indicators["atr_14"] is None:
+    # atr_14 is load-bearing beyond being "one missing number": classify_regime
+    # falls back to RANGING (hiding a volatile market) when it is absent, so the
+    # regime this engine trades on is only trustworthy with a usable ATR. Refuse
+    # whether atr_14 was dropped from the configured indicator set entirely or
+    # computed to None (stockstats failing on that column past the warm-up gate —
+    # a single dead indicator slipping past the all-dead guard above); either way,
+    # do not trade on a fabricated-calm regime.
+    if ctx.indicators.get("atr_14") is None:
         print(
-            f"error: atr_14 failed to compute for {coin} despite {ctx.candle_count} "
-            "candles — the regime would silently default to RANGING, hiding a "
+            f"error: atr_14 is unavailable for {coin} (not in the configured "
+            f"indicator set, or it failed to compute despite {ctx.candle_count} "
+            "candles) — the regime would silently default to RANGING, hiding a "
             "volatile market. Refusing to run the engine without a usable ATR.",
             file=sys.stderr,
         )

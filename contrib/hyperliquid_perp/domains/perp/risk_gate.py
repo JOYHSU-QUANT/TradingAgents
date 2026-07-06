@@ -27,15 +27,13 @@ from decimal import ROUND_FLOOR, Decimal
 from enum import Enum
 from typing import Any
 
+from .config_coercion import config_overrides, decimal_from_yaml, int_from_yaml
 from .schema import PerpPosition
 from .target_decision import (
     DecisionConfig,
     DecisionMode,
     ParsedDecision,
     TargetSide,
-    config_overrides,
-    decimal_from_yaml,
-    int_from_yaml,
     validate_target_decision,
 )
 

@@ -111,6 +111,11 @@ def maintenance_snapshot(
     position snapshot; the tier is selected from the notional at the current mark
     (the liquidation search re-selects per candidate price separately).
     """
+    if mark_price <= 0:
+        # Parity with estimated_liquidation_price: abs() inside position_notional
+        # would mask a negative mark (positive notional passes __post_init__) and a
+        # zero mark yields margin==0 — both silent nonsense. Fail loud instead.
+        raise ValueError(f"mark_price must be > 0, got {mark_price}")
     with localcontext(DECIMAL_CONTEXT):  # §12.2 reproducibility fields — pin the math
         notional = position_notional(size, mark_price)
         tier_index, tier, deduction, margin = schedule.tier_details(notional)

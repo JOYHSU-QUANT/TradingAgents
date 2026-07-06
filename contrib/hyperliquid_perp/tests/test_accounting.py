@@ -451,6 +451,61 @@ def test_funding_pending_requires_mark():
     db.close()
 
 
+def test_funding_rejects_nonpositive_mark():
+    # Parity with compute_fill_effect / estimated_liquidation_price: a mark <= 0 must
+    # never enter the settlement basis. A zero mark would post pnl=0 once, permanently
+    # dropping the real settlement; a negative mark posts a wrong-sign consistent pnl.
+    db = _db()
+    _init(db)
+    with pytest.raises(ValueError, match="mark_price must be > 0"):  # pending-store path
+        acc.record_funding(
+            db,
+            run_id="r1",
+            mode="paper",
+            symbol="BTC",
+            funding_timestamp=_TS,
+            position_size=Decimal("0.05"),
+            funding_rate=None,
+            mark_price=Decimal("0"),
+        )
+    with pytest.raises(ValueError, match="mark_price must be > 0"):  # posting-basis path
+        acc.record_funding(
+            db,
+            run_id="r1",
+            mode="paper",
+            symbol="BTC",
+            funding_timestamp=_TS,
+            position_size=Decimal("0.05"),
+            funding_rate=Decimal("0.00001"),
+            mark_price=Decimal("-60000"),
+        )
+    db.close()
+
+
+def test_funding_negative_wallet_warns(caplog):
+    # Same warn-never-block breadcrumb as post_fill / initialize_run: funding driving
+    # the wallet negative must not happen silently.
+    import logging
+
+    db = _db()
+    _init(db, "1")  # small positive balance -> no init-time warn
+    with caplog.at_level(logging.WARNING):
+        result = acc.record_funding(
+            db,
+            run_id="r1",
+            mode="paper",
+            symbol="BTC",
+            funding_timestamp=_TS,
+            position_size=Decimal("1"),  # long pays funding on a positive rate
+            funding_rate=Decimal("0.001"),
+            mark_price=Decimal("60000"),
+        )
+    assert result.status == "posted"
+    assert repo.get_current_account_state(db.conn, "r1").wallet_balance < 0
+    assert "negative wallet" in caplog.text
+    db.close()
+
+
 def _record_btc_funding(db, ts, *, size="0.05", rate="0.00001", mark="60000"):
     return acc.record_funding(
         db,

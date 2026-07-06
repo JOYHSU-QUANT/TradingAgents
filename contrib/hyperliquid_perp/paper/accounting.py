@@ -628,6 +628,12 @@ def record_funding(
         if funding_rate is None:
             if mark_price is None:
                 raise ValueError("a pending funding event must record its settlement mark_price")
+            if mark_price <= 0:
+                # Parity with compute_fill_effect / estimated_liquidation_price: a
+                # non-positive mark must never enter the settlement basis. A stored
+                # pending row with mark<=0 would later post internally-consistent but
+                # nonsense pnl (mark=0 -> pnl=0, posted-once, permanently dropped).
+                raise ValueError(f"funding settlement mark_price must be > 0, got {mark_price}")
             if existing is None:
                 repo.insert_funding_event(
                     conn,
@@ -663,6 +669,9 @@ def record_funding(
                     "cannot post on a fabricated basis"
                 )
             basis_mark = Decimal(stored_mark)
+
+        if basis_mark <= 0:  # pre-guard legacy row / fresh caller: refuse a non-positive basis
+            raise ValueError(f"funding settlement mark_price must be > 0, got {basis_mark}")
 
         with localcontext(DECIMAL_CONTEXT):
             signed_notional = basis_size * basis_mark
@@ -709,6 +718,16 @@ def record_funding(
                 realized_pnl=ledger.realized_pnl,
                 total_fees=ledger.total_fees,
                 net_funding_pnl=ledger.net_funding_pnl + pnl,
+            )
+        if new_ledger.wallet_balance < 0:
+            # Same warn-never-block breadcrumb as post_fill / initialize_run: funding
+            # is the most realistic recurring driver of paper-account insolvency, so
+            # crossing negative here must not happen silently. Hard checks are PR3's.
+            logger.warning(
+                "funding %s leaves run %s with a negative wallet: %s",
+                fe_id,
+                run_id,
+                new_ledger.wallet_balance,
             )
         repo.upsert_current_account_state(conn, run_id, new_ledger, updated_at=now)
     return FundingResult("posted", fe_id, pnl)

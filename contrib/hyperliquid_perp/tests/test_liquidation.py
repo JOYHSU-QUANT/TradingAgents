@@ -99,6 +99,16 @@ def test_maintenance_snapshot_rejects_invalid_fields():
         MaintenanceSnapshot(**{**ok, "maintenance_margin": Decimal("-1")})
 
 
+def test_maintenance_snapshot_rejects_nonpositive_mark():
+    # Parity with estimated_liquidation_price: abs() inside position_notional would
+    # mask a negative mark (positive notional passes __post_init__) and a zero mark
+    # yields margin==0 — both must fail loud, not pass as a silent reproducibility row.
+    with pytest.raises(ValueError, match="mark_price must be > 0"):
+        maintenance_snapshot(_single(), Decimal("0.05"), Decimal("0"))
+    with pytest.raises(ValueError, match="mark_price must be > 0"):
+        maintenance_snapshot(_single(), Decimal("0.05"), Decimal("-60000"))
+
+
 def test_maintenance_snapshot_single_tier():
     snap = maintenance_snapshot(_single(), Decimal("0.05"), Decimal("60000"))
     assert snap.margin_tier_id == "0"

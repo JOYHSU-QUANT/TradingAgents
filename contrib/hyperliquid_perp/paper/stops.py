@@ -16,7 +16,7 @@ Stop loss (execution §3):
   (§3.3 / §3.4) — a rounding that leaves the band also yields ``CLOSE_NOW``;
 - when there is no positive liquidation price (``estimated_liquidation_price =
   null``, execution §6.6.1), the SL uses the entry-based band only, with no
-  liquidation buffer and no gate (§3.7 note).
+  liquidation buffer and no gate (the §6.6.1 null-estimate note).
 
 Take profit (execution §4.2) is a flat percentage off entry.
 
@@ -194,7 +194,7 @@ def stop_loss_decision(
     ``side`` is the *position* direction (``buy`` = long, ``sell`` = short). A
     ``None`` ``liquidation_price`` means the §6.6.1 estimate had no positive root:
     the SL falls back to the entry-based band with no liquidation buffer and no
-    gate (execution §3.7 note).
+    gate (execution §6.6.1 null-estimate note).
     """
     side = Side.parse(side)
     cfg = config or StopConfig()

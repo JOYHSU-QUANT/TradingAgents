@@ -805,3 +805,120 @@ def test_read_transaction_rejects_writes_and_nesting(tmp_path):
             pass
     assert db.conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
     db.close()
+
+
+# --------------------------------------------------------------------------
+# order / plan patch-writers: fail-loud + patch semantics (PR3 engine seam)
+# --------------------------------------------------------------------------
+
+
+def _order_kwargs(order_id="ord1", **overrides):
+    base = {
+        "order_id": order_id,
+        "timestamp": _TS,
+        "mode": "paper",
+        "run_id": "r1",
+        "symbol": "BTC",
+        "order_role": "entry",
+        "side": "buy",
+        "order_type": "paper_market",
+        "qty": Decimal("0.01"),
+        "status": "open",
+        "remaining_qty": Decimal("0.01"),
+    }
+    base.update(overrides)
+    return base
+
+
+def test_update_order_rejects_missing_row(tmp_path):
+    db = Database(tmp_path / "p.db")
+    with db.transaction() as conn, pytest.raises(ValueError, match="does not exist"):
+        repo.update_order(conn, "nope", status="filled")
+    db.close()
+
+
+def test_update_execution_plan_rejects_missing_row(tmp_path):
+    db = Database(tmp_path / "p.db")
+    with db.transaction() as conn, pytest.raises(ValueError, match="does not exist"):
+        repo.update_execution_plan(conn, "nope", status="expired")
+    db.close()
+
+
+def test_set_position_protection_rejects_missing_row(tmp_path):
+    db = Database(tmp_path / "p.db")
+    with db.transaction() as conn, pytest.raises(ValueError, match="no current_positions"):
+        repo.set_position_protection(
+            conn, "r1", "BTC", stop_loss_price=None, take_profit_price=None
+        )
+    db.close()
+
+
+def test_update_order_patch_preserves_unsupplied_columns(tmp_path):
+    db = Database(tmp_path / "p.db")
+    with db.transaction() as conn:
+        repo.insert_order(conn, **_order_kwargs(filled_qty=Decimal("0.004")))
+        repo.update_order(conn, "ord1", status="canceled", status_reason="deadline")
+    row = db.conn.execute("SELECT * FROM orders WHERE order_id = 'ord1'").fetchone()
+    assert (row["status"], row["status_reason"]) == ("canceled", "deadline")
+    # Omitted keywords are untouched — not nulled, not zeroed.
+    assert Decimal(row["filled_qty"]) == Decimal("0.004")
+    assert Decimal(row["remaining_qty"]) == Decimal("0.01")
+    db.close()
+
+
+def test_update_order_rejects_bad_status(tmp_path):
+    db = Database(tmp_path / "p.db")
+    with db.transaction() as conn:
+        repo.insert_order(conn, **_order_kwargs())
+        with pytest.raises(ValueError, match="status"):
+            repo.update_order(conn, "ord1", status="not_a_status")
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# restart-guard helpers: max_engine_seq + get_position_protection
+# --------------------------------------------------------------------------
+
+
+def test_max_engine_seq_scans_orders_plans_and_flip_ids(tmp_path):
+    db = Database(tmp_path / "p.db")
+    with db.transaction() as conn:
+        repo.insert_order(conn, **_order_kwargs(order_id="r1:ord:3"))
+        repo.insert_execution_plan(
+            conn,
+            plan_id="r1:plan:7",
+            run_id="r1",
+            symbol="BTC",
+            status="completed",
+            created_at=_TS,
+            flip_plan_id="r1:flip:9",
+        )
+        # Another run's ids and non-engine ids are ignored.
+        repo.insert_order(conn, **_order_kwargs(order_id="other:ord:99", run_id="r2"))
+        repo.insert_order(conn, **_order_kwargs(order_id="manual-id"))
+    assert repo.max_engine_seq(db.conn, "r1") == 9
+    assert repo.max_engine_seq(db.conn, "fresh") == 0
+    db.close()
+
+
+def test_get_position_protection_distinguishes_missing_row_from_cleared(tmp_path):
+    db = Database(tmp_path / "p.db")
+    assert repo.get_position_protection(db.conn, "r1", "BTC") is None
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn, "r1", PositionState(coin="BTC", size=Decimal("0.01"), entry_price=Decimal(50000))
+        )
+    assert repo.get_position_protection(db.conn, "r1", "BTC") == (None, None)
+    with db.transaction() as conn:
+        repo.set_position_protection(
+            conn,
+            "r1",
+            "BTC",
+            stop_loss_price=Decimal("46250"),
+            take_profit_price=Decimal("60000"),
+        )
+    assert repo.get_position_protection(db.conn, "r1", "BTC") == (
+        Decimal("46250"),
+        Decimal("60000"),
+    )
+    db.close()

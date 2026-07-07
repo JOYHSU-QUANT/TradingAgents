@@ -289,11 +289,12 @@ def split_flip_budget(
     """Split the shared slice budget between a flip's close and open legs (§1.3).
 
     Slices are apportioned by leg quantity, so the larger leg gets the larger
-    share, and the two shares sum to exactly ``total_budget``. Each leg is
-    guaranteed at least one slice when its quantity is positive (a leg that must
-    trade is never starved to zero budget); a zero-quantity leg gets zero. The
-    per-leg :func:`build_slice_plan` still floors the share to what the leg's own
-    ``min_order_qty`` can legally fund.
+    share, and the two shares sum to exactly ``total_budget``. With a budget of
+    at least 2, each leg is guaranteed one slice when its quantity is positive (a
+    leg that must trade is never starved to zero budget); a zero-quantity leg
+    gets zero, and a budget of 1 goes entirely to the close leg (the engine
+    always passes the full 120). The per-leg :func:`build_slice_plan` still
+    floors the share to what the leg's own ``min_order_qty`` can legally fund.
     """
     if not 1 <= total_budget <= MAX_SLICES:
         raise ValueError(f"total_budget must be in 1..{MAX_SLICES}, got {total_budget}")

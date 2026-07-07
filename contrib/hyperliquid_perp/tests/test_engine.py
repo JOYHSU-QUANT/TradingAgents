@@ -23,6 +23,7 @@ from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.paper.config import PaperTradingConfig
 from contrib.hyperliquid_perp.paper.engine import AssetSpec, PaperExecutionEngine, TickEvent
 from contrib.hyperliquid_perp.paper.market_feed import ScriptedSnapshotProvider, SnapshotOutcome
+from contrib.hyperliquid_perp.paper.stops import StopConfig
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.models import PositionState
@@ -97,6 +98,28 @@ def _snap(mark=_MARK, mid=_MARK):
 def _size(db) -> Decimal:
     pos = repo.get_current_position(db.conn, "r", "BTC")
     return D(0) if pos is None else pos.size
+
+
+def _plan_status(db, plan_id) -> tuple[str, str | None]:
+    row = db.conn.execute(
+        "SELECT status, status_reason FROM execution_plans WHERE plan_id = ?", (plan_id,)
+    ).fetchone()
+    return row["status"], row["status_reason"]
+
+
+def _order_status(db, order_id) -> tuple[str, str | None]:
+    row = db.conn.execute(
+        "SELECT status, status_reason FROM orders WHERE order_id = ?", (order_id,)
+    ).fetchone()
+    return row["status"], row["status_reason"]
+
+
+class _ConstFunding:
+    def __init__(self, rate: Decimal):
+        self._rate = rate
+
+    def rate_at(self, coin, ts):
+        return self._rate
 
 
 # --------------------------------------------------------------------------
@@ -248,6 +271,11 @@ def test_start_plan_pending_when_no_snapshot(tmp_path):
     start = engine.start_plan(_decision("long", 2))
     assert start.plan_id is None
     assert start.reason == "pending_market_data"
+    # No snapshot -> no gate ran at all: nothing is priced at a fabricated mark
+    # and nothing is persisted; the caller retries when data returns.
+    assert start.gate is None
+    assert db.conn.execute("SELECT COUNT(*) FROM execution_plans").fetchone()[0] == 0
+    assert db.conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 0
     db.close()
 
 
@@ -279,11 +307,7 @@ def test_start_plan_no_order_on_maintain_current(tmp_path):
 
 
 def test_funding_posted_within_tick(tmp_path):
-    class _Funding:
-        def rate_at(self, coin, ts):
-            return D("0.0001")
-
-    db, clock, engine, _ = _engine(tmp_path, funding=_Funding())
+    db, clock, engine, _ = _engine(tmp_path, funding=_ConstFunding(D("0.0001")))
     _provider(engine, [_snap(), _snap(), _snap()])
     engine.start_plan(_decision("long", 1))
     clock.advance(30)
@@ -439,4 +463,346 @@ def test_has_active_work_reflects_state(tmp_path):
     clock.advance(30)
     engine.tick()
     assert engine.has_active_work()  # open position
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# liquidation / emergency close during an active plan (execution §5.3 step 3, §3.6)
+# --------------------------------------------------------------------------
+
+_BIG_SEED = (PositionState(coin="BTC", size=D("0.1"), entry_price=D(50000)),)
+
+
+def test_liquidation_close_during_active_plan(tmp_path):
+    # Seeded 0.1 BTC on a 1000 wallet: liquidatable near mark 40400. A reduce
+    # plan is mid-flight when the mark dives to 40000 — liquidation (step 3)
+    # must close everything before the SL (step 4) or the due slice (step 6).
+    db, clock, engine, _ = _engine(tmp_path, seed=_BIG_SEED)
+    _provider(engine, [_snap(), _snap(), _snap(mark=40000, mid=40000)])
+    start = engine.start_plan(_decision("long", 10))  # reduce toward 10% margin
+    assert start.plan_id is not None
+    plan_id = engine._leg.plan_id
+    order_id = engine._leg.order_id
+    clock.advance(30)
+    engine.tick()  # slice 0 fills, SL set
+    clock.advance(30)
+    r = engine.tick()
+    assert r.has(TickEvent.LIQUIDATION_CLOSE)
+    assert not r.has(TickEvent.STOP_LOSS_FILL)
+    assert r.has(TickEvent.PLAN_TERMINAL)
+    assert _size(db) == D(0)
+    assert _plan_status(db, plan_id) == ("canceled", "risk_exit")
+    # The leg's own order row reaches a terminal status in the same transaction.
+    assert _order_status(db, order_id) == ("canceled", "risk_exit")
+    pos_row = db.conn.execute(
+        "SELECT stop_loss_price, take_profit_price FROM current_positions WHERE run_id='r'"
+    ).fetchone()
+    assert pos_row["stop_loss_price"] is None and pos_row["take_profit_price"] is None
+    db.close()
+
+
+def test_emergency_close_when_no_safe_sl(tmp_path):
+    # A liq_buffer wide enough that the post-fill SL recompute finds no legal
+    # band above liq*(1+buffer) -> CLOSE_NOW: the same tick's fill is followed by
+    # a synchronous emergency close (§3.6), cancelling the plan.
+    db, clock, engine, _ = _engine(
+        tmp_path, seed=_BIG_SEED, stop_config=StopConfig(liq_buffer=D("0.2"))
+    )
+    _provider(engine, [_snap(), _snap()])
+    engine.start_plan(_decision("long", 10))
+    plan_id = engine._leg.plan_id
+    clock.advance(30)
+    r = engine.tick()  # slice 0 fills -> recompute -> no safe SL -> emergency close
+    assert r.has(TickEvent.SLICE_FILL)
+    assert r.has(TickEvent.LIQUIDATION_CLOSE)
+    assert r.has(TickEvent.PLAN_TERMINAL)
+    assert _size(db) == D(0)
+    assert _plan_status(db, plan_id) == ("canceled", "no_safe_sl")
+    # The emergency order records no trigger price — its just-invalidated SL
+    # never triggered; fills.fill_reason carries the why.
+    order_row = db.conn.execute(
+        "SELECT trigger_price, order_role, type FROM orders WHERE order_id IN "
+        "(SELECT order_id FROM fills WHERE fill_reason = 'emergency_close')"
+    ).fetchone()
+    assert order_row is not None
+    assert order_row["trigger_price"] is None
+    assert (order_row["order_role"], order_row["type"]) == ("stop_loss", "stop_market")
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# plan deadline expiry (execution §1.2 / §4.1: expired is a TP-reconciled terminal)
+# --------------------------------------------------------------------------
+
+
+def test_plan_expires_at_deadline_with_tp_and_order_canceled(tmp_path):
+    db, clock, engine, _ = _engine(tmp_path)
+    _provider(engine, [_snap(), _snap(), _snap()])
+    engine.start_plan(_decision("long", 5))  # 5 slices
+    plan_id = engine._leg.plan_id
+    order_id = engine._leg.order_id
+    clock.advance(30)
+    engine.tick()  # slice 0 fills
+    clock.set(_T0.replace(hour=13, second=1))  # past the 1h deadline
+    r = engine.tick()  # one more slice fills, then the plan expires
+    assert r.has(TickEvent.PLAN_TERMINAL)
+    assert _plan_status(db, plan_id) == ("expired", "deadline")
+    residual = db.conn.execute(
+        "SELECT residual_qty FROM execution_plans WHERE plan_id = ?", (plan_id,)
+    ).fetchone()[0]
+    assert D(residual) > 0
+    assert _order_status(db, order_id) == ("canceled", "deadline")
+    # §4.1 lists expired among the TP-reconciled terminals.
+    assert engine._protection.take_profit is not None
+    db.close()
+
+
+def test_plan_expiry_during_outage_still_creates_tp(tmp_path):
+    # The deadline tick itself has NO market data: the expiry must still create
+    # the TP (its math needs only entry price + tick size), or the surviving
+    # position would run without one for the rest of the process's life.
+    db, clock, engine, _ = _engine(tmp_path)
+    _provider(engine, [_snap(), _snap(), SnapshotOutcome.TIMEOUT])
+    engine.start_plan(_decision("long", 5))
+    plan_id = engine._leg.plan_id
+    clock.advance(30)
+    engine.tick()  # slice 0 fills -> non-flat position
+    clock.set(_T0.replace(hour=13, second=1))
+    r = engine.tick()  # no-data tick at the deadline
+    assert r.has(TickEvent.PENDING_MARKET_DATA)
+    assert r.has(TickEvent.PLAN_TERMINAL)
+    assert _plan_status(db, plan_id) == ("expired", "deadline")
+    assert engine._protection.take_profit is not None
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# flip abnormal terminals get their TP (execution §4.1: flip_incomplete included)
+# --------------------------------------------------------------------------
+
+
+def test_flip_incomplete_close_leg_leaves_position_with_tp(tmp_path):
+    # Flip close leg = 2 slices; slice 0 is missed in an outage, slice 1 fills.
+    # The close leg terminates without reaching flat -> flip_incomplete — and the
+    # surviving 0.001 position must regain a TP (it was cancelled at plan start).
+    seed = (PositionState(coin="BTC", size=D("0.002"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _provider(engine, [_snap(), SnapshotOutcome.TIMEOUT, _snap()])
+    engine.start_plan(_decision("short", 5))
+    clock.advance(30)
+    engine.tick()  # slice 0 missed
+    clock.advance(30)
+    r = engine.tick()  # slice 1 fills; close leg terminal but position non-flat
+    assert r.has(TickEvent.SLICE_FILL)
+    assert engine._flip is None
+    assert _size(db) == D("0.001")
+    row = db.conn.execute(
+        "SELECT status_reason FROM execution_plans WHERE status = 'flip_incomplete'"
+    ).fetchone()
+    assert row["status_reason"] == "close_leg_incomplete"
+    assert engine._protection.take_profit is not None
+    db.close()
+
+
+def test_flip_incomplete_when_open_leg_gate_rejected(tmp_path):
+    # The open leg re-runs the deterministic RiskGate; if it declines (here:
+    # confidence mutated below min_confidence between legs), the reverse position
+    # must never open and the flip records open_leg_gate_rejected.
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _provider(engine, [_snap(), _snap()])
+    engine.start_plan(_decision("short", 5))
+    assert engine._flip is not None
+    engine._flip.parsed = _decision("short", 5, conf="0.1")  # below min_confidence
+    clock.advance(30)
+    engine.tick()  # close leg fills to flat; open-leg gate declines
+    assert _size(db) == D(0)
+    assert engine._flip is None
+    row = db.conn.execute(
+        "SELECT status_reason FROM execution_plans WHERE status = 'flip_incomplete'"
+    ).fetchone()
+    assert row["status_reason"] == "open_leg_gate_rejected"
+    db.close()
+
+
+def test_flip_open_leg_inherits_close_leg_deadline(tmp_path):
+    # §1.3: both legs share one envelope — the open leg must NOT restart its own
+    # hour at close-leg terminal.
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _provider(engine, [_snap()] * 4)
+    engine.start_plan(_decision("short", 5))
+    clock.advance(30)
+    engine.tick()  # close leg fills to flat; open leg registers the same tick
+    rows = db.conn.execute(
+        "SELECT flip_leg, deadline_at FROM execution_plans"
+        " WHERE flip_leg IN ('close', 'open') ORDER BY flip_leg"
+    ).fetchall()
+    assert [r["flip_leg"] for r in rows] == ["close", "open"]
+    assert rows[0]["deadline_at"] == rows[1]["deadline_at"]
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# funding: multi-hour catch-up + funding-driven SL refresh (§6.5 / §6.6.1)
+# --------------------------------------------------------------------------
+
+
+def test_multi_hour_funding_catchup_posts_each_hour(tmp_path):
+    db, clock, engine, _ = _engine(tmp_path, funding=_ConstFunding(D("0.0001")))
+    _provider(engine, [_snap(), _snap(), _snap()])
+    engine.start_plan(_decision("long", 1))
+    clock.advance(30)
+    engine.tick()  # opens position; establishes the funding baseline hour
+    clock.advance(3 * 3600)  # jump three settlement hours in one gap
+    r = engine.tick()
+    assert r.has(TickEvent.FUNDING_POSTED)
+    events = repo.iter_funding_events(db.conn, "r", status="posted")
+    assert len(events) == 3  # exactly one per crossed hour — no double post
+    db.close()
+
+
+def test_funding_post_refreshes_stop_loss(tmp_path):
+    # Funding erodes the wallet hourly, moving the liquidation price toward
+    # entry; with a liq-bound SL, the post-funding recompute must move the SL
+    # (§6.6.1 lists funding posting among the must-recompute events).
+    db, clock, engine, _ = _engine(
+        tmp_path,
+        seed=_BIG_SEED,
+        funding=_ConstFunding(D("0.01")),  # long pays 1%/h -> ~50 USDC on 5000 notional
+        stop_config=StopConfig(liq_buffer=D("0.15")),
+    )
+    _provider(engine, [_snap(), _snap(), _snap()])
+    engine.start_plan(_decision("long", 10))  # reduce plan, many slices
+    clock.advance(30)
+    engine.tick()  # slice 0 fills -> liq-bound SL placed
+    sl_before = engine._protection.stop_loss
+    assert sl_before is not None
+    clock.advance(3600)
+    r = engine.tick()
+    assert r.has(TickEvent.FUNDING_POSTED)
+    assert r.has(TickEvent.PROTECTION_UPDATED)
+    assert engine._protection.stop_loss > sl_before
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# snapshots are written on material events only (§11.1 / §12.1)
+# --------------------------------------------------------------------------
+
+
+def test_snapshots_written_on_fills_not_idle_ticks(tmp_path):
+    db, clock, engine, _ = _engine(tmp_path)
+    _provider(engine, [_snap(), _snap(), _snap()])
+    engine.start_plan(_decision("long", 2))  # 2-slice TWAP: nothing due before 30s
+    clock.advance(10)
+    r_idle = engine.tick()
+    assert r_idle.has(TickEvent.IDLE)
+    counts = db.conn.execute(
+        "SELECT (SELECT COUNT(*) FROM account_snapshots), (SELECT COUNT(*) FROM position_snapshots)"
+    ).fetchone()
+    assert tuple(counts) == (0, 0)
+    clock.advance(20)
+    r_fill = engine.tick()
+    assert r_fill.has(TickEvent.SLICE_FILL)
+    counts = db.conn.execute(
+        "SELECT (SELECT COUNT(*) FROM account_snapshots), (SELECT COUNT(*) FROM position_snapshots)"
+    ).fetchone()
+    assert tuple(counts) == (1, 1)
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# a new decision supersedes a live plan (one live plan max)
+# --------------------------------------------------------------------------
+
+
+def test_new_plan_supersedes_active_plan(tmp_path):
+    db, clock, engine, _ = _engine(tmp_path)
+    _provider(engine, [_snap(), _snap(), _snap()])
+    engine.start_plan(_decision("long", 5))  # 5-slice plan A
+    plan_a = engine._leg.plan_id
+    order_a = engine._leg.order_id
+    clock.advance(30)
+    engine.tick()  # slice 0 fills
+    start_b = engine.start_plan(_decision("long", 30))
+    assert start_b.plan_id is not None and start_b.plan_id != plan_a
+    assert _plan_status(db, plan_a) == ("canceled", "superseded")
+    residual = db.conn.execute(
+        "SELECT residual_qty FROM execution_plans WHERE plan_id = ?", (plan_a,)
+    ).fetchone()[0]
+    assert D(residual) > 0
+    assert _order_status(db, order_a) == ("canceled", "superseded")
+    assert engine._leg.plan_id == start_b.plan_id
+    db.close()
+
+
+def test_supersede_by_rejected_plan_restores_tp(tmp_path):
+    # Plan B cancelled the TP for its duration; a new decision whose plan is
+    # REJECT supersedes B with nothing replacing it — the surviving position
+    # must regain its TP (§4.1: canceled is a TP-reconciled terminal).
+    db, clock, engine, _ = _engine(tmp_path, leverage="1")
+    _provider(engine, [_snap()] * 4)
+    engine.start_plan(_decision("long", 5))  # notional 50 -> one min slice
+    clock.advance(30)
+    engine.tick()  # paper_market open -> terminal -> TP created
+    assert engine._protection.take_profit is not None
+    engine.start_plan(_decision("long", 30))  # plan B: TP cancelled for the plan
+    plan_b = engine._leg.plan_id
+    assert engine._protection.take_profit is None
+    # 7% vs current ~5%: outside the 1-point deadband, but the delta (~0.0004)
+    # floors below one 0.001 step -> REJECT, superseding B.
+    start_c = engine.start_plan(_decision("long", 7))
+    assert start_c.disposition is not None and start_c.disposition.value == "reject"
+    assert _plan_status(db, plan_b) == ("canceled", "superseded")
+    assert engine._protection.take_profit is not None
+    db.close()
+
+
+def test_non_flip_decision_clears_stale_flip(tmp_path):
+    # A flip's close leg is live when a plain same-side rebalance arrives: the
+    # old leg is superseded AND the flip bookkeeping is dropped, so
+    # has_active_work can go quiet once everything later closes.
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _provider(engine, [_snap(), _snap()])
+    engine.start_plan(_decision("short", 5))  # flip: close leg active
+    assert engine._flip is not None
+    old_plan = engine._leg.plan_id
+    engine.start_plan(_decision("long", 30))  # same-side vs current long -> not a flip
+    assert engine._flip is None
+    assert _plan_status(db, old_plan) == ("canceled", "superseded")
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# restart guards: id continuity + protection hydration (execution §2)
+# --------------------------------------------------------------------------
+
+
+def test_engine_rebuild_hydrates_protection_and_continues_ids(tmp_path):
+    db, clock, engine, asset = _engine(tmp_path)
+    _provider(engine, [_snap(), _snap()])
+    engine.start_plan(_decision("long", 1))
+    clock.advance(30)
+    engine.tick()  # open + terminal -> SL and TP live on current_positions
+    sl, tp = engine._protection.stop_loss, engine._protection.take_profit
+    assert sl is not None and tp is not None
+    # Rebuild over the same run: protection must hydrate and the id sequence
+    # must resume above the persisted maximum (no PK collision on the first plan).
+    engine2 = PaperExecutionEngine(
+        db=db,
+        run_id="r",
+        asset=asset,
+        clock=ManualClock(clock.now()),
+        provider=ScriptedSnapshotProvider("BTC", [_snap()]),
+        risk_config=RiskConfig(leverage=D("5"), max_target_margin_pct=60),
+        decision_config=DecisionConfig(),
+        paper_config=PaperTradingConfig.from_dict(None),
+    )
+    assert engine2._protection.stop_loss == sl
+    assert engine2._protection.take_profit == tp
+    assert engine2.has_active_work()
+    start = engine2.start_plan(_decision("long", 30))  # would IntegrityError on seq reset
+    assert start.plan_id is not None
     db.close()

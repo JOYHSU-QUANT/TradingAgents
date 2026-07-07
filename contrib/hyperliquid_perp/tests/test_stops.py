@@ -108,6 +108,30 @@ def test_short_sl_risk_gate_closes_when_liq_too_close():
 
 
 # --------------------------------------------------------------------------
+# post-rounding out-of-band (§3.2 / §3.6: the rounded SL leaves the legal band)
+# --------------------------------------------------------------------------
+
+
+def test_long_sl_out_of_range_after_rounding():
+    # tick 8: target 92.5 rounds up to 96 > band_hi 95 -> market close, never an
+    # illegal SL placement.
+    d = stop_loss_decision(
+        side=Side.BUY, entry_price=D(100), liquidation_price=None, tick_size=D(8)
+    )
+    assert d.action is StopAction.CLOSE_NOW
+    assert d.reason == "sl_out_of_range"
+
+
+def test_short_sl_out_of_range_after_rounding():
+    # tick 8: target 107.5 rounds down to 104 < band_lo 105 -> market close.
+    d = stop_loss_decision(
+        side=Side.SELL, entry_price=D(100), liquidation_price=None, tick_size=D(8)
+    )
+    assert d.action is StopAction.CLOSE_NOW
+    assert d.reason == "sl_out_of_range"
+
+
+# --------------------------------------------------------------------------
 # Take profit (§4.2)
 # --------------------------------------------------------------------------
 

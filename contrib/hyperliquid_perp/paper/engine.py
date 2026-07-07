@@ -192,14 +192,24 @@ class PlanStartResult:
     no plan built (``disposition is None`` → ``plan_id is None``, a ``reason``);
     a rejected plan (``disposition is REJECT`` → a ``plan_id`` *and* a ``reason``);
     an executing plan (``PAPER_MARKET``/``TWAP`` → a ``plan_id``, no ``reason``).
+
+    ``gate`` is ``None`` exactly when no gate ran at all — the
+    ``pending_market_data`` shape: without a fresh snapshot the RiskGate is never
+    evaluated (its notionals would be priced at a fabricated mark), the decision
+    is not persisted, and the caller retries when data returns.
     """
 
-    gate: RiskGateResult
+    gate: RiskGateResult | None
     plan_id: str | None
     disposition: PlanDisposition | None
     reason: str | None  # no_order_reason / rejected / pending_market_data
 
     def __post_init__(self) -> None:
+        if self.gate is None and (self.disposition is not None or self.reason is None):
+            raise ValueError(
+                "a gateless PlanStartResult is the pending_market_data shape: "
+                "no disposition, a reason"
+            )
         if self.disposition is None:
             if self.plan_id is not None or self.reason is None:
                 raise ValueError("a no-plan PlanStartResult carries no plan_id and a reason")
@@ -269,12 +279,18 @@ class _Leg:
 
 @dataclass
 class _FlipState:
-    """A sequential flip in progress (execution §1.3): close leg then open leg."""
+    """A sequential flip in progress (execution §1.3): close leg then open leg.
+
+    ``deadline`` is the flip's single one-hour envelope — the two legs share the
+    execution budget *and* the wall clock (§1.3: 合計 120 slices / 一小時), so the
+    open leg inherits this deadline instead of restarting its own hour.
+    """
 
     flip_plan_id: str
     output_id: str | None
     parsed: ParsedDecision
     open_budget: int
+    deadline: datetime
     open_started: bool = False
 
 
@@ -322,12 +338,18 @@ class PaperExecutionEngine:
 
         self._leg: _Leg | None = None
         self._flip: _FlipState | None = None
-        self._protection = _Protection()
         self._consecutive_md_failures = 0
         self._paused = False
         self._resume_pending_gap_check = False
         self._last_funding_hour: datetime | None = None
-        self._order_seq = 0
+        # Constructed over an existing run (crash / restart), the engine must
+        # never mint an id that collides with a persisted row, and must not
+        # forget a live SL/TP (execution §2). Full restart reconciliation
+        # (§1.2 steps — canceled_restart, residual handling) is PR4's; these two
+        # reads are the silent-corruption guards a bare rebuild needs regardless.
+        self._order_seq = repo.max_engine_seq(db.conn, run_id)
+        protection = repo.get_position_protection(db.conn, run_id, asset.coin)
+        self._protection = _Protection(*protection) if protection is not None else _Protection()
 
     # -- config-derived shortcuts -----------------------------------------
 
@@ -434,11 +456,11 @@ class PaperExecutionEngine:
         now = self._clock.now()
         result = self._provider.fetch(self._coin, requested_at=now, timeout_seconds=self._timeout)
         if not result.is_valid:
+            # No fresh snapshot: run no gate (it would price its notionals at a
+            # fabricated mark) and persist nothing; the caller retries when data
+            # returns (PR4's scheduler owns the cadence).
             return PlanStartResult(
-                gate=self._gate_only(parsed, mark=None),
-                plan_id=None,
-                disposition=None,
-                reason="pending_market_data",
+                gate=None, plan_id=None, disposition=None, reason="pending_market_data"
             )
         snap = result.snapshot
         assert snap is not None  # is_valid guarantees a snapshot (SnapshotResult invariant)
@@ -466,21 +488,6 @@ class PaperExecutionEngine:
                 parsed, gate, position, snap.mark_price, snap.mid_price, output_id
             )
         return self._start_rebalance(gate, position, snap.mark_price, snap.mid_price, output_id)
-
-    def _gate_only(self, parsed: ParsedDecision, *, mark: Decimal | None) -> RiskGateResult:
-        # Used only to report a gate outcome when no snapshot is available; sizes
-        # against the last known state at the given mark (or a flat proxy).
-        position = self._read_position()
-        m = mark or (position.entry_price if not position.is_flat else Decimal(1))
-        equity = self._equity(position, m)
-        current = self._current_position_state(position, m, equity)
-        return evaluate(
-            parsed,
-            account_equity=equity,
-            current=current,
-            risk=self._risk,
-            decision_cfg=self._decision,
-        )
 
     def _current_position_state(
         self, position: PositionState, mark: Decimal, equity: Decimal
@@ -548,8 +555,16 @@ class PaperExecutionEngine:
             open_qty = abs(gate.target_signed_notional / mark)
         close_budget, open_budget = split_flip_budget(close_qty, open_qty)
         flip_plan_id = self._next_order_id("flip")
+        # One envelope for the whole flip (§1.3): both legs share the 120-slice
+        # budget AND the wall clock, so the open leg inherits this deadline
+        # rather than restarting its own hour at close-leg terminal.
+        flip_deadline = self._clock.now() + _PLAN_LIFETIME
         self._flip = _FlipState(
-            flip_plan_id=flip_plan_id, output_id=output_id, parsed=parsed, open_budget=open_budget
+            flip_plan_id=flip_plan_id,
+            output_id=output_id,
+            parsed=parsed,
+            open_budget=open_budget,
+            deadline=flip_deadline,
         )
         close_side = Side.SELL if position.size > 0 else Side.BUY
         plan = build_slice_plan(
@@ -568,6 +583,7 @@ class PaperExecutionEngine:
             order_role="rebalance",
             flip_plan_id=flip_plan_id,
             flip_leg="close",
+            deadline=flip_deadline,
         )
 
     def _register_leg(
@@ -580,13 +596,21 @@ class PaperExecutionEngine:
         order_role: str,
         flip_plan_id: str | None,
         flip_leg: str | None,
+        deadline: datetime | None = None,
     ) -> PlanStartResult:
         now = self._clock.now()
         plan_id = self._next_order_id("plan")
+        # A plan from a NEW decision (not a leg of the in-flight flip) replaces
+        # that flip's bookkeeping the moment it registers — never earlier: a
+        # decision that registers nothing (zero_delta / pending) leaves the flip
+        # running, matching the supersede-on-registration rule for the leg itself.
+        if self._flip is not None and flip_plan_id != self._flip.flip_plan_id:
+            self._flip = None
         if not plan.is_executable:
             # No legal slice fits: record a rejected plan with the whole qty residual
             # (execution §1.2 — never round up to a too-large position).
             with self._db.transaction() as conn:
+                superseded = self._supersede_active_leg(conn, now)
                 repo.insert_execution_plan(
                     conn,
                     plan_id=plan_id,
@@ -606,6 +630,11 @@ class PaperExecutionEngine:
                 )
             if flip_leg == "close":
                 self._flip = None  # a flip whose close leg cannot execute never opens
+            if superseded:
+                # The superseded plan ended ``canceled`` with nothing replacing it
+                # (this plan is REJECT): reconcile like every other canceled
+                # terminal (§4.1).
+                self._reconcile_protection_after_terminal()
             return PlanStartResult(gate, plan_id, PlanDisposition.REJECT, "no_legal_slice")
         order_id = self._next_order_id("ord")
         order_type = (
@@ -613,8 +642,10 @@ class PaperExecutionEngine:
             if plan.disposition is PlanDisposition.PAPER_MARKET
             else "paper_twap_slice"
         )
-        deadline = now + _PLAN_LIFETIME
+        if deadline is None:
+            deadline = now + _PLAN_LIFETIME
         with self._db.transaction() as conn:
+            self._supersede_active_leg(conn, now)
             repo.insert_execution_plan(
                 conn,
                 plan_id=plan_id,
@@ -707,6 +738,15 @@ class PaperExecutionEngine:
         if self._maybe_close_all(now, snap, position, events):
             return self._finish_tick(now, result, events)
 
+        # 3.5 funding moved the wallet, so the liquidation estimate moved
+        # (§6.6.1 lists funding posting among the must-recompute events):
+        # refresh the SL so the §3.6 no-safe-SL gate stays live between fills
+        # instead of drifting until outright liquidatability. At most hourly.
+        if TickEvent.FUNDING_POSTED in events and not position.is_flat:
+            if self._recompute_stop_loss(now, snap, position, events):
+                return self._finish_tick(now, result, events)
+            events.append(TickEvent.PROTECTION_UPDATED)
+
         # 4. stop loss (incl. gap_stop after a resume; the gap flag is consumed
         # inside _maybe_stop_loss on every exit path).
         if self._maybe_stop_loss(now, snap, position, events):
@@ -720,7 +760,7 @@ class PaperExecutionEngine:
         self._maybe_execute_slice(now, snap, events)
 
         # deadline + flip advancement
-        self._maybe_expire_plan(now, snap, events)
+        self._maybe_expire_plan(now, events)
         self._maybe_advance_flip(now, snap, events)
 
         if not events or events == [TickEvent.PRICE_UPDATED]:
@@ -746,7 +786,7 @@ class PaperExecutionEngine:
             events.append(TickEvent.PAUSED)
             if self._leg is not None and not self._leg.terminal:
                 self._patch_plan(self._leg.plan_id, status="paused_market_data")
-        self._maybe_expire_plan(now, None, events)
+        self._maybe_expire_plan(now, events)
         return self._finish_tick(now, result, events)
 
     def _finish_tick(
@@ -866,6 +906,7 @@ class PaperExecutionEngine:
             position,
             fill_reason=reason,
             order_role="stop_loss",
+            trigger_price=sl,
             plan_terminal_status="canceled",
             plan_terminal_reason="stop_loss",
             end_flip=True,
@@ -891,6 +932,7 @@ class PaperExecutionEngine:
             position,
             fill_reason="take_profit",
             order_role="take_profit",
+            trigger_price=tp,
         )
         events.append(TickEvent.TAKE_PROFIT_FILL)
         return True
@@ -940,7 +982,7 @@ class PaperExecutionEngine:
         else:
             self._set_protection(None, None)
         if leg.consumed >= leg.planned or leg.remaining_qty <= 0:
-            self._terminate_leg(now, snap, events)
+            self._terminate_leg(now, events)
 
     def _post_slice_fill(
         self, now, leg: _Leg, *, size, price, slice_id, fill_id, slice_index
@@ -987,6 +1029,7 @@ class PaperExecutionEngine:
         *,
         fill_reason: str,
         order_role: str,
+        trigger_price: Decimal | None = None,
         plan_terminal_status: str | None = None,
         plan_terminal_reason: str | None = None,
         end_flip: bool = False,
@@ -998,8 +1041,11 @@ class PaperExecutionEngine:
         termination all commit in **one** ``db.transaction()``. This is what keeps a
         flattening fill from leaving, on a crash, a flat position with a stale SL/TP
         (violating §2's "position_size == 0 → no active SL/TP") or an "active" plan.
-        Returns whether it terminated an active plan (so the caller can emit the
-        ``PLAN_TERMINAL`` event only when a plan was actually cancelled).
+        ``trigger_price`` is recorded only when this close *was* a triggered stop —
+        an SL/TP fill passes its trigger; liquidation and emergency closes pass
+        ``None`` (an emergency close's just-invalidated SL never triggered and must
+        not be exported as if it had). Returns whether it terminated an active plan
+        (so the caller can emit ``PLAN_TERMINAL`` only when a plan was cancelled).
         """
         side = Side.SELL if position.size > 0 else Side.BUY
         qty = abs(position.size)
@@ -1010,11 +1056,6 @@ class PaperExecutionEngine:
             "stop_loss": "stop_market",
             "take_profit": "take_market",
         }.get(order_role, "paper_market")
-        trigger = None
-        if order_role == "stop_loss":
-            trigger = self._protection.stop_loss
-        elif order_role == "take_profit":
-            trigger = self._protection.take_profit
         leg = self._leg
         terminated = plan_terminal_status is not None and leg is not None and not leg.terminal
         with self._db.transaction() as conn:
@@ -1030,7 +1071,7 @@ class PaperExecutionEngine:
                 qty=qty,
                 status="filled",
                 price=None,
-                trigger_price=trigger,
+                trigger_price=trigger_price,
                 filled_qty=qty,
                 remaining_qty=Decimal(0),
                 reduce_only=True,
@@ -1064,15 +1105,13 @@ class PaperExecutionEngine:
             if terminated:
                 assert leg is not None
                 assert plan_terminal_status is not None  # `terminated` implies it
-                leg.terminal = True
-                repo.update_execution_plan(
+                self._write_leg_terminal(
                     conn,
-                    leg.plan_id,
+                    leg,
+                    now,
                     status=plan_terminal_status,
-                    remaining_qty=leg.remaining_qty,
-                    residual_qty=max(leg.remaining_qty, Decimal(0)),
-                    status_reason=plan_terminal_reason,
-                    updated_at=now,
+                    plan_reason=plan_terminal_reason,
+                    order_reason=plan_terminal_reason,
                 )
         self._protection = _Protection(None, None)
         if end_flip:
@@ -1099,6 +1138,9 @@ class PaperExecutionEngine:
             config=self._stop,
         )
         if decision.action is StopAction.CLOSE_NOW:
+            # trigger_price stays None: the old SL was just judged unsafe and
+            # never triggered — recording it would fabricate a trigger in the
+            # audit trail (fills.fill_reason="emergency_close" carries the why).
             terminated = self._close_position(
                 now,
                 snap,
@@ -1133,29 +1175,99 @@ class PaperExecutionEngine:
 
     # -- plan / flip terminal handling ------------------------------------
 
-    def _terminate_leg(self, now, snap, events) -> None:
-        leg = self._leg
-        if leg is None or leg.terminal:
-            return
+    def _finalize_leg_order(self, conn, leg: _Leg, now, *, reason: str | None) -> None:
+        """Terminal-close the leg's order row alongside its plan (phase2-data §8).
+
+        A fully-filled order is already ``filled`` (stamped by its last slice's
+        update); anything still unfilled when the plan dies becomes ``canceled``
+        with the plan's reason, in the same transaction — the orders table must
+        never keep an ``open``/``partially_filled`` row under a terminal plan
+        (PR4's CSV export and Phase 3 reconciliation read ``orders.status``).
+        """
+        if leg.remaining_qty > 0:
+            repo.update_order(
+                conn, leg.order_id, status="canceled", status_reason=reason, updated_at=now
+            )
+
+    def _write_leg_terminal(
+        self,
+        conn,
+        leg: _Leg,
+        now,
+        *,
+        status: str,
+        plan_reason: str | None,
+        order_reason: str | None,
+    ) -> None:
+        """Persist one leg's terminal transition: plan row and order row together.
+
+        Every terminal path shares this write pair — the plan patched terminal
+        with its residual recorded, the unfilled order canceled — inside the
+        caller's transaction; only the status/reason vocabulary differs per path.
+        """
         leg.terminal = True
         remaining = leg.remaining_qty
-        status = "completed" if remaining <= 0 else "residual"
-        self._patch_plan(
+        repo.update_execution_plan(
+            conn,
             leg.plan_id,
             status=status,
             remaining_qty=remaining,
             residual_qty=max(remaining, Decimal(0)),
+            status_reason=plan_reason,
+            updated_at=now,
         )
-        events.append(TickEvent.PLAN_TERMINAL)
-        # Non-flip rebalance and a flip's open leg create the TP now (§4.1 step 3);
-        # a flip's close leg defers TP to the open leg's terminal (§4.1 flip note).
-        if leg.flip_leg == "close":
-            return
+        self._finalize_leg_order(conn, leg, now, reason=order_reason)
+
+    def _reconcile_protection_after_terminal(self) -> None:
+        """§4.1 terminal reconciliation: a surviving position regains its TP.
+
+        Plan start cancels the TP for the plan's duration, so every TP-reconciled
+        terminal (completed / residual / canceled / expired / flip_incomplete)
+        funnels here. TP math needs only entry price + tick size — never this
+        tick's market data. A flat position instead clears any lingering
+        protection (§2: no position → no SL/TP).
+        """
         position = self._read_position()
         if not position.is_flat:
             self._create_take_profit(position)
         else:
             self._set_protection(None, None)
+
+    def _supersede_active_leg(self, conn, now) -> bool:
+        """Cancel a still-live leg before a new plan registers (one live plan max).
+
+        A new decision replaces the old target (§1.2: no old plan may keep
+        slicing alongside a newer ``output_id``), so the old plan terminates as
+        ``canceled``/``superseded`` with its residual recorded — in the same
+        transaction that inserts the new plan, never as an orphaned ``active``
+        row. Normal 4h cadence never triggers this (plans die within the hour);
+        a scheduler retry or an operator restart of the decision flow does.
+        Returns whether a leg was actually cancelled (the REJECT path uses this
+        to TP-reconcile a position the dead plan leaves behind).
+        """
+        leg = self._leg
+        if leg is None or leg.terminal:
+            return False
+        self._write_leg_terminal(
+            conn, leg, now, status="canceled", plan_reason="superseded", order_reason="superseded"
+        )
+        return True
+
+    def _terminate_leg(self, now, events) -> None:
+        leg = self._leg
+        if leg is None or leg.terminal:
+            return
+        status = "completed" if leg.remaining_qty <= 0 else "residual"
+        with self._db.transaction() as conn:
+            self._write_leg_terminal(
+                conn, leg, now, status=status, plan_reason=None, order_reason="residual"
+            )
+        events.append(TickEvent.PLAN_TERMINAL)
+        # Non-flip rebalance and a flip's open leg create the TP now (§4.1 step 3);
+        # a flip's close leg defers TP to the open leg's terminal (§4.1 flip note).
+        if leg.flip_leg == "close":
+            return
+        self._reconcile_protection_after_terminal()
 
     def _create_take_profit(self, position: PositionState) -> None:
         side = Side.BUY if position.size > 0 else Side.SELL
@@ -1167,28 +1279,28 @@ class PaperExecutionEngine:
         )
         self._set_protection(self._protection.stop_loss, tp)
 
-    def _maybe_expire_plan(self, now, snap, events) -> None:
+    def _maybe_expire_plan(self, now, events) -> None:
         leg = self._leg
         if leg is None or leg.terminal:
             return
         if now >= leg.deadline:
-            leg.terminal = True
-            remaining = leg.remaining_qty
-            self._patch_plan(
-                leg.plan_id,
-                status="expired",
-                remaining_qty=remaining,
-                residual_qty=max(remaining, Decimal(0)),
-                status_reason="deadline",
-            )
+            with self._db.transaction() as conn:
+                self._write_leg_terminal(
+                    conn,
+                    leg,
+                    now,
+                    status="expired",
+                    plan_reason="deadline",
+                    order_reason="deadline",
+                )
             events.append(TickEvent.PLAN_TERMINAL)
             # An expired flip close leg that never fully closed cannot open (§1.3).
             if leg.flip_leg == "close" and self._flip is not None:
                 self._record_flip_incomplete("close_leg_expired")
             elif leg.flip_leg != "close":
-                position = self._read_position()
-                if snap is not None and not position.is_flat:
-                    self._create_take_profit(position)
+                # A deadline hit during an outage must not strand the position
+                # without its TP — reconciliation is snapshot-independent.
+                self._reconcile_protection_after_terminal()
 
     def _maybe_advance_flip(self, now, snap, events) -> None:
         flip = self._flip
@@ -1247,6 +1359,7 @@ class PaperExecutionEngine:
             order_role="entry",
             flip_plan_id=flip.flip_plan_id,
             flip_leg="open",
+            deadline=flip.deadline,
         )
         if res.disposition is PlanDisposition.REJECT:
             self._record_flip_incomplete("open_leg_no_legal_slice")
@@ -1272,6 +1385,11 @@ class PaperExecutionEngine:
                     status_reason=reason,
                 )
         self._flip = None
+        # §4.1 lists flip_incomplete among the TP-reconciled terminal states: a
+        # surviving (partially-closed) position must regain its TP here — no
+        # other path would ever recreate it. The open-leg failure reasons
+        # arrive with a flat position, which reconciles to cleared protection.
+        self._reconcile_protection_after_terminal()
 
     # -- persistence helpers ----------------------------------------------
 

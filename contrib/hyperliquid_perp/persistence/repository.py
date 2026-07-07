@@ -33,6 +33,7 @@ __all__ = [
     "get_execution_plan",
     "get_funding_event",
     "get_order",
+    "get_position_protection",
     "get_run",
     "get_run_seed_positions",
     "get_scheduler_state",
@@ -49,6 +50,7 @@ __all__ = [
     "insert_run_seed_position",
     "iter_fills",
     "iter_funding_events",
+    "max_engine_seq",
     "set_funding_status",
     "set_position_protection",
     "update_execution_plan",
@@ -368,6 +370,27 @@ def get_all_current_positions(conn: sqlite3.Connection, run_id: str) -> list[Pos
         "SELECT * FROM current_positions WHERE run_id = ? ORDER BY symbol", (run_id,)
     ).fetchall()
     return [_row_to_position(r) for r in rows]
+
+
+def get_position_protection(
+    conn: sqlite3.Connection, run_id: str, symbol: str
+) -> tuple[Decimal | None, Decimal | None] | None:
+    """The persisted ``(stop_loss_price, take_profit_price)`` of a position row.
+
+    Returns ``None`` when no ``current_positions`` row exists at all (as opposed
+    to a row whose protection is cleared, which returns ``(None, None)``). This is
+    the read side of :func:`set_position_protection` — the engine hydrates its
+    live trigger state from here when constructed over an existing run, so a
+    restart never silently forgets an active SL/TP (execution §2).
+    """
+    row = conn.execute(
+        "SELECT stop_loss_price, take_profit_price FROM current_positions"
+        " WHERE run_id = ? AND symbol = ?",
+        (run_id, symbol),
+    ).fetchone()
+    if row is None:
+        return None
+    return _dec(row["stop_loss_price"]), _dec(row["take_profit_price"])
 
 
 # --------------------------------------------------------------------------
@@ -800,6 +823,33 @@ def insert_order(
 
 def get_order(conn: sqlite3.Connection, order_id: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,)).fetchone()
+
+
+def max_engine_seq(conn: sqlite3.Connection, run_id: str) -> int:
+    """The highest ``<run_id>:<tag>:<n>`` suffix already persisted for a run.
+
+    The paper engine mints its order/plan/flip ids from a monotonic in-memory
+    counter; an engine constructed over an existing run must resume *above* the
+    persisted maximum or its first insert dies on (at best) a PRIMARY KEY
+    collision. Scans ``orders.order_id``, ``execution_plans.plan_id`` and the
+    ``flip_plan_id`` columns; ids not shaped like the engine's (no numeric tail
+    after the run prefix) are ignored. Returns 0 for a fresh run.
+    """
+    prefix = f"{run_id}:"
+    best = 0
+    for sql in (
+        "SELECT order_id FROM orders WHERE run_id = ?",
+        "SELECT flip_plan_id FROM orders WHERE run_id = ? AND flip_plan_id IS NOT NULL",
+        "SELECT plan_id FROM execution_plans WHERE run_id = ?",
+        "SELECT flip_plan_id FROM execution_plans WHERE run_id = ? AND flip_plan_id IS NOT NULL",
+    ):
+        for (ident,) in conn.execute(sql, (run_id,)):
+            if not ident.startswith(prefix):
+                continue
+            tail = ident.rsplit(":", 1)[-1]
+            if tail.isdigit():
+                best = max(best, int(tail))
+    return best
 
 
 def update_order(

@@ -113,6 +113,17 @@ def test_zero_slices_rejects():
     assert not plan.is_executable
 
 
+def test_min_notional_reject_keeps_floored_total_qty():
+    # steps >= 1 but every slice is below min_notional: REJECT, and the floored
+    # quantity is preserved as the audit trail's rejected/residual amount.
+    plan = build_slice_plan(
+        D("0.001"), side=Side.BUY, qty_step=D("0.001"), min_notional=D(60), mid=D(50000)
+    )
+    assert plan.disposition is PlanDisposition.REJECT
+    assert plan.slice_sizes == ()
+    assert plan.total_qty == D("0.001")
+
+
 def test_one_slice_is_paper_market():
     # total_qty exactly one min_order_qty -> single paper_market fill.
     plan = build_slice_plan(

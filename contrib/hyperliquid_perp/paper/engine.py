@@ -31,7 +31,9 @@ Market-data freshness (§1.1): a scheduled slice needs a fresh snapshot within t
 timeout carrying both mid and mark; a failure leaves that slice unexecuted, three
 consecutive failures pause the plan (``paused_market_data``), a resumed snapshot
 whose mark has crossed the SL trigger fills a ``gap_stop_fill``, and missed slices
-are never re-run.
+are never re-run. A leg whose remaining slices are all exhausted by misses
+terminates as ``residual`` immediately (at/past the deadline the ``expired``
+label wins instead).
 
 Persistence (PR3 requirement 8): every change caused by one fill — the fill row,
 the position, the ledger, the order's filled/remaining/status, and the plan's
@@ -666,7 +668,7 @@ class PaperExecutionEngine:
             # (execution §1.2 — never round up to a too-large position).
             rejected_order_id = self._next_order_id("ord")
             with self._db.transaction() as conn:
-                superseded = self._supersede_active_leg(conn, now)
+                self._supersede_active_leg(conn, now)
                 repo.insert_execution_plan(
                     conn,
                     plan_id=plan_id,
@@ -710,10 +712,14 @@ class PaperExecutionEngine:
                 )
             if flip_leg == "close":
                 self._flip = None  # a flip whose close leg cannot execute never opens
-            if superseded:
-                # The superseded plan ended ``canceled`` with nothing replacing it
-                # (this plan is REJECT): reconcile like every other canceled
-                # terminal (§4.1).
+            if self._flip is None:
+                # Nothing replaces the plan this REJECT displaced, and no flip is
+                # pending — a pending flip being the only legal TP deferral (§4.1)
+                # — so restore the steady state now: a surviving position carries
+                # its TP. Covers a just-superseded live leg, an already-terminal
+                # leg whose stale flip died above (a miss-exhausted close leg),
+                # and the close-leg-REJECT case; idempotent otherwise (the TP is
+                # a pure function of entry price and tick size).
                 self._reconcile_protection_after_terminal()
             return PlanStartResult(gate, plan_id, PlanDisposition.REJECT, "no_legal_slice")
         order_id = self._next_order_id("ord")
@@ -1340,8 +1346,10 @@ class PaperExecutionEngine:
         transaction that inserts the new plan, never as an orphaned ``active``
         row. Normal 4h cadence never triggers this (plans die within the hour);
         a scheduler retry or an operator restart of the decision flow does.
-        Returns whether a leg was actually cancelled (the REJECT path uses this
-        to TP-reconcile a position the dead plan leaves behind).
+        Returns whether a leg was actually cancelled. (The REJECT path no longer
+        keys TP reconciliation on this — an already-terminal leg whose stale flip
+        died at registration needs the same reconcile — it reconciles whenever no
+        flip is left pending.)
         """
         leg = self._leg
         if leg is None or leg.terminal:

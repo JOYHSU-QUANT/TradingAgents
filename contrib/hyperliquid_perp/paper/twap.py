@@ -149,9 +149,12 @@ def rebalance_delta(
 class SlicePlan:
     """A concrete execution plan: how to split ``raw_total_qty`` into slices.
 
-    ``slice_sizes`` sums to exactly ``total_qty`` (empty for a REJECT). Sizes are
-    positive multiples of ``qty_step``; ``side`` is the fill direction for every
-    slice. ``rounding_residual_qty`` is the fraction dropped by flooring the raw
+    ``slice_sizes`` sums to exactly ``total_qty`` for an executable plan. A
+    REJECT has no slices but keeps the floored ``total_qty`` (possibly > 0 when
+    ``min_notional`` outlaws every slice) — that quantity is the audit trail's
+    rejected/residual amount, never executed. Sizes are positive multiples of
+    ``qty_step``; ``side`` is the fill direction for every slice.
+    ``rounding_residual_qty`` is the fraction dropped by flooring the raw
     quantity to the grid — recorded, never rounded up (execution §1.2).
     """
 
@@ -187,13 +190,16 @@ class SlicePlan:
             raise ValueError("every slice size must be > 0")
         # The whole point of integer-step allocation: the sizes reconstitute the
         # floored total exactly, so execution can never drift above the approved
-        # target or leave an unexplained gap.
-        with localcontext(DECIMAL_CONTEXT):
-            if sum(self.slice_sizes, Decimal(0)) != self.total_qty:
-                raise ValueError(
-                    f"slice sizes sum to {sum(self.slice_sizes, Decimal(0))}, "
-                    f"expected total_qty {self.total_qty}"
-                )
+        # target or leave an unexplained gap. A REJECT is exempt: it executes
+        # nothing, and its total_qty stays > 0 when min_notional outlawed every
+        # slice for a non-zero floored quantity.
+        if self.disposition is not PlanDisposition.REJECT:
+            with localcontext(DECIMAL_CONTEXT):
+                if sum(self.slice_sizes, Decimal(0)) != self.total_qty:
+                    raise ValueError(
+                        f"slice sizes sum to {sum(self.slice_sizes, Decimal(0))}, "
+                        f"expected total_qty {self.total_qty}"
+                    )
 
     @property
     def planned_slices(self) -> int:

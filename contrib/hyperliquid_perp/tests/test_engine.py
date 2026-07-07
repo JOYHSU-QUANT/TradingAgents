@@ -912,6 +912,36 @@ def test_rejected_plan_writes_rejected_order_row(tmp_path):
     db.close()
 
 
+def test_reject_after_missed_out_flip_close_leg_still_reconciles_tp(tmp_path):
+    # Compound case: a flip's close leg is miss-exhausted (terminal residual,
+    # flip still pending), then a NEW decision REJECTs (no_legal_slice) before
+    # any valid tick can advance the flip. The stale flip dies at registration,
+    # so the REJECT path must restore the surviving position's TP even though
+    # there was no live leg to supersede.
+    db, clock, engine, _ = _engine(
+        tmp_path,
+        min_notional="60",
+        seed=(PositionState(coin="BTC", size=D("-0.002"), entry_price=_MARK),),
+    )
+    _provider(engine, [_snap(), SnapshotOutcome.TIMEOUT, _snap()])
+    start = engine.start_plan(_decision("long", 1))  # flip; 1-slice close leg
+    assert start.plan_id is not None
+    assert engine._flip is not None
+    clock.advance(30)
+    r = engine.tick()  # the close leg's only slice is missed -> terminal residual
+    assert r.has(TickEvent.PLAN_TERMINAL)
+    assert engine._flip is not None  # flip still pending, close leg terminal
+    start2 = engine.start_plan(_decision("short", 1))  # delta 50 < min_notional 60
+    assert start2.reason == "no_legal_slice"
+    assert engine._flip is None  # stale flip dropped at registration
+    assert engine._protection.take_profit is not None  # steady state restored
+    row = db.conn.execute(
+        "SELECT take_profit_price FROM current_positions WHERE run_id='r'"
+    ).fetchone()
+    assert row["take_profit_price"] is not None
+    db.close()
+
+
 def test_close_position_rejects_reason_without_status(tmp_path):
     db, clock, engine, _ = _engine(tmp_path)
     with pytest.raises(ValueError, match="plan_terminal_reason requires"):

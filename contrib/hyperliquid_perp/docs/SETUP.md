@@ -4,8 +4,9 @@
 [phase1-spec](./phase1-spec.md) 與 [phase2-spec](./phase2-spec.md)；本頁只有「照做」的步驟。
 
 > 目前狀態：market context + 未修改的引擎 + **Phase 2 structured target 契約 +
-> 確定性 RiskGate** 已能端到端執行（寫出 schema v3 的 target audit log）。實際下單
-> （paper／live 執行）仍是 Phase 3+。
+> 確定性 RiskGate** 已能端到端執行（寫出 schema v3 的 target audit log）。Phase 2
+> 的 paper 執行引擎已實作但尚未接上本 runbook 的執行流程（剩 PR4 的 scheduler／
+> CLI）；一輪執行仍不下任何單——live 執行是 Phase 3 的事。
 
 所有指令都從 repo 根目錄 `TradingAgents/` 執行。
 
@@ -202,8 +203,9 @@ maintain_current 紀錄（`target_*` 全為 null）無法事後重現成幣量�
 [DESIGN](./DESIGN.md) Part 2 與 [phase2-spec](./phase2-spec.md)。
 
 > 這一輪跑到「parse → RiskGate → 寫 log + 印出 decision」為止；RiskGate 會 sizing／
-> clamp／風控拒絕（REJECTED）／fail-close（契約違規），但**仍不下任何真實單**——
-> 實際 paper／live 執行是 Phase 3+ 的事。
+> clamp／風控拒絕（REJECTED）／fail-close（契約違規），但**仍不下任何單**——paper
+> 執行引擎已實作、尚未接上這條 runbook 流程（PR4 scheduler／CLI）；live 執行是
+> Phase 3 的事。
 
 ## 6. 測試
 

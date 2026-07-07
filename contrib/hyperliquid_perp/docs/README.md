@@ -115,6 +115,8 @@ TradingAgents/
         ├── domains/
         ├── integration/                 # bridge to the unmodified engine
         │   └── trading_graph.py         #   HyperliquidTradingGraph subclass
+        ├── persistence/                 # Phase 2 SQLite source of truth
+        ├── paper/                       # Phase 2 paper accounting + execution engine
         ├── risk/
         ├── execution/
         ├── audit/
@@ -171,7 +173,7 @@ Phase 3 的 agent-wallet private key）一律放環境變數，絕不放進任�
 | `paper/accounting.py` | ✅ | fills · fees（taker 0.045%）· funding exactly-once · account 公式 · accounting replay（phase2-execution §6）。 |
 | `paper/liquidation.py` | ✅ | paper estimated liquidation price · margin tier bisection（phase2-execution §6.6.1）。 |
 | `paper/config.py` | ✅ | typed `paper_trading:` block（phase2-execution §5.4）。 |
-| `paper/engine.py` | planned | `paper_market` · TWAP / flip plan · SL/TP lifecycle · 30s market monitor（phase2-execution §1–5）。 |
+| `paper/engine.py`（+ `clock` / `fill_model` / `market_feed` / `stops` / `twap`） | ✅ | TWAP / flip plan · SL/TP lifecycle · paper 成交模擬 · market-data 新鮮度／pause／gap-stop · monitor tick 邏輯（外層 30s loop 屬 PR4 scheduler；phase2-execution §1–5）。 |
 | `paper/scheduler.py` | planned | 4h rolling cycle · 3-attempt retry · 重啟 reconciliation · CSV export（phase2-spec §3／phase2-data §1.1）。 |
 
 ### Phase 3 — live execution

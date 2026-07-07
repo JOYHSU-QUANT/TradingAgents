@@ -15,6 +15,8 @@ snapshot (the monitor and the due slice never double-fetch — §5.5):
     1. update mark / mid from this snapshot
     2. post any funding that came due at/under this snapshot
     3. liquidation / emergency close
+    3.5. after a funding post, refresh the SL (the liquidation estimate moved —
+         §6.6.1 lists funding among the must-recompute events)
     4. active stop loss
     5. active take profit
     6. if still executable, the due TWAP slice / paper_market fill

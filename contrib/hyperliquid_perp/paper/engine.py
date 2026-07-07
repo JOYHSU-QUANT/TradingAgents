@@ -44,6 +44,7 @@ exactly-once transaction (:func:`~.accounting.record_funding`).
 
 from __future__ import annotations
 
+import functools
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -93,6 +94,7 @@ from .twap import (
 
 __all__ = [
     "AssetSpec",
+    "EngineHaltedError",
     "FundingSource",
     "PaperExecutionEngine",
     "PlanStartResult",
@@ -101,6 +103,33 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+class EngineHaltedError(RuntimeError):
+    """The engine fail-stopped after an earlier public call raised.
+
+    An exception escaping mid-write can leave in-memory state (leg counters,
+    protection, flip bookkeeping) ahead of the rolled-back DB. Rather than
+    auditing every mutation site for commit-ordering, the engine refuses to
+    run again after any escaped exception: rebuild it over the run — the
+    constructor re-hydrates from the DB, which is the source of truth.
+    """
+
+
+def _fail_stop(method):
+    """Halt the engine permanently when a public entry point raises."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        self._ensure_not_halted()
+        try:
+            return method(self, *args, **kwargs)
+        except Exception:
+            self._halted = True
+            raise
+
+    return wrapper
+
 
 # The one-hour terminal deadline every plan must reach (execution §1.2).
 _PLAN_LIFETIME = timedelta(hours=1)
@@ -249,6 +278,9 @@ class _Leg:
     filled_qty: Decimal = Decimal(0)
     terminal: bool = False
 
+    def __post_init__(self) -> None:
+        self.validate()  # construction obeys the same invariants as every mutation
+
     @property
     def planned(self) -> int:
         return len(self.slice_sizes)
@@ -295,6 +327,12 @@ class _FlipState:
     deadline: datetime
     open_started: bool = False
 
+    def __post_init__(self) -> None:
+        if not self.flip_plan_id:
+            raise ValueError("_FlipState.flip_plan_id must be non-empty")
+        if self.open_budget < 1:  # split_flip_budget guarantees each leg >= 1 slice
+            raise ValueError(f"_FlipState.open_budget must be >= 1, got {self.open_budget}")
+
 
 @dataclass
 class _Protection:
@@ -302,6 +340,11 @@ class _Protection:
 
     stop_loss: Decimal | None = None
     take_profit: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        for name, price in (("stop_loss", self.stop_loss), ("take_profit", self.take_profit)):
+            if price is not None and price <= 0:
+                raise ValueError(f"_Protection.{name} must be > 0, got {price}")
 
 
 # --------------------------------------------------------------------------
@@ -340,6 +383,7 @@ class PaperExecutionEngine:
 
         self._leg: _Leg | None = None
         self._flip: _FlipState | None = None
+        self._halted = False
         self._consecutive_md_failures = 0
         self._paused = False
         self._resume_pending_gap_check = False
@@ -404,8 +448,16 @@ class PaperExecutionEngine:
         self._order_seq += 1
         return f"{self._run_id}:{tag}:{self._order_seq}"
 
+    def _ensure_not_halted(self) -> None:
+        if self._halted:
+            raise EngineHaltedError(
+                f"engine for run {self._run_id!r} halted after an earlier error; "
+                "rebuild it over the run to continue"
+            )
+
     def has_active_work(self) -> bool:
         """Whether the monitor must keep polling (execution §5.5)."""
+        self._ensure_not_halted()  # a halted engine's view may be stale — never poll on it
         if self._read_position().size != 0:
             return True
         if self._leg is not None and not self._leg.terminal:
@@ -445,6 +497,7 @@ class PaperExecutionEngine:
 
     # -- plan start (execution §1.2 / §1.3 / §6.2) ------------------------
 
+    @_fail_stop
     def start_plan(
         self, parsed: ParsedDecision, *, output_id: str | None = None
     ) -> PlanStartResult:
@@ -611,6 +664,7 @@ class PaperExecutionEngine:
         if not plan.is_executable:
             # No legal slice fits: record a rejected plan with the whole qty residual
             # (execution §1.2 — never round up to a too-large position).
+            rejected_order_id = self._next_order_id("ord")
             with self._db.transaction() as conn:
                 superseded = self._supersede_active_leg(conn, now)
                 repo.insert_execution_plan(
@@ -629,6 +683,30 @@ class PaperExecutionEngine:
                     residual_qty=plan.total_qty,
                     rounding_residual_qty=plan.rounding_residual_qty,
                     status_reason="no_legal_slice",
+                )
+                # §5.2: a validation failure before the fill flow still writes an
+                # orders row (status="rejected") — execution_plans is internal,
+                # while orders is the exported audit trail. The row never enters
+                # fill simulation (no active_from); paper_market is the degenerate
+                # shape the order would have taken had one legal slice existed.
+                repo.insert_order(
+                    conn,
+                    order_id=rejected_order_id,
+                    mode=_MODE,
+                    run_id=self._run_id,
+                    symbol=self._coin,
+                    order_role=order_role,
+                    side=plan.side.value,
+                    order_type="paper_market",
+                    qty=plan.total_qty,
+                    status="rejected",
+                    output_id=output_id,
+                    flip_plan_id=flip_plan_id,
+                    flip_leg=flip_leg,
+                    remaining_qty=plan.total_qty,
+                    status_reason="no_legal_slice",
+                    reduce_only=reduce_only,
+                    timestamp=now,
                 )
             if flip_leg == "close":
                 self._flip = None  # a flip whose close leg cannot execute never opens
@@ -708,6 +786,7 @@ class PaperExecutionEngine:
 
     # -- tick loop (execution §5.3) ---------------------------------------
 
+    @_fail_stop
     def tick(self) -> TickResult:
         """Process one 30-second logical tick against a single shared snapshot."""
         now = self._clock.now()
@@ -783,6 +862,14 @@ class PaperExecutionEngine:
                 self._leg.consumed = due
                 self._leg.validate()
                 events.append(TickEvent.SLICE_MISSED)
+                # Every slice consumed (all missed): the leg can never fill again,
+                # so terminate it as residual now — the same exhaustion rule the
+                # fill path applies — instead of sitting "active" until the 1h
+                # deadline. TP reconciliation is snapshot-independent (§4.1), so
+                # it is safe during the outage. At/past the deadline the expiry
+                # below owns the terminal instead (label "expired"/"deadline").
+                if self._leg.consumed >= self._leg.planned and now < self._leg.deadline:
+                    self._terminate_leg(now, events)
         if not self._paused and self._consecutive_md_failures >= 3:
             self._paused = True
             events.append(TickEvent.PAUSED)
@@ -794,6 +881,11 @@ class PaperExecutionEngine:
     def _finish_tick(
         self, now: datetime, result: SnapshotResult, events: list[TickEvent]
     ) -> TickResult:
+        # The gap flag is strictly tick-scoped. _maybe_stop_loss is its normal
+        # consumer, but steps 3 / 3.5 (liquidation, post-funding emergency close)
+        # can finish the tick before step 4 ever runs — the flag must not leak
+        # into a later tick and mislabel an unrelated SL fill as a gap stop.
+        self._resume_pending_gap_check = False
         position = self._read_position()
         # Record account/position snapshots when this tick materially changed state
         # (a fill or funding); idle polling ticks don't bloat the store (§11.1/§12.1).
@@ -1049,6 +1141,10 @@ class PaperExecutionEngine:
         not be exported as if it had). Returns whether it terminated an active plan
         (so the caller can emit ``PLAN_TERMINAL`` only when a plan was cancelled).
         """
+        if plan_terminal_reason is not None and plan_terminal_status is None:
+            # The reason would be silently dropped (termination is gated on the
+            # status alone) — reject the half-specified call instead.
+            raise ValueError("plan_terminal_reason requires plan_terminal_status")
         side = Side.SELL if position.size > 0 else Side.BUY
         qty = abs(position.size)
         price = fill_price(snap.mid_price, side, self._slippage_bps)

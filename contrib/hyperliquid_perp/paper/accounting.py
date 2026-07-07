@@ -536,8 +536,15 @@ def apply_fill(
     change caused by one fill commits atomically). ``post_fill`` is the standalone
     single-fill entry point that opens its own transaction around this; the engine
     calls this directly inside its tick transaction. Callers must already be inside
-    a ``db.transaction()``.
+    a ``db.transaction()`` — enforced below: a connection still in autocommit would
+    silently commit each write separately, losing exactly the atomicity this
+    function exists to provide.
     """
+    if not conn.in_transaction:
+        raise ValueError(
+            "apply_fill must run inside an open transaction (db.transaction()); "
+            "an autocommit connection would break the fill's atomicity contract"
+        )
     side = Side.parse(side)  # parse once; compute/insert below accept the enum as-is
     now = timestamp or _utcnow()
     position = repo.get_current_position(conn, run_id, symbol) or PositionState.flat(symbol)

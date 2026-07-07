@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import pytest
+
 from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier
 from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, RiskConfig
 from contrib.hyperliquid_perp.domains.perp.target_decision import (
@@ -21,12 +23,21 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
 from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.paper.config import PaperTradingConfig
-from contrib.hyperliquid_perp.paper.engine import AssetSpec, PaperExecutionEngine, TickEvent
+from contrib.hyperliquid_perp.paper.engine import (
+    AssetSpec,
+    EngineHaltedError,
+    PaperExecutionEngine,
+    TickEvent,
+    _FlipState,
+    _Leg,
+    _Protection,
+)
 from contrib.hyperliquid_perp.paper.market_feed import ScriptedSnapshotProvider, SnapshotOutcome
 from contrib.hyperliquid_perp.paper.stops import StopConfig
+from contrib.hyperliquid_perp.paper.twap import PlanDisposition
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
-from contrib.hyperliquid_perp.persistence.models import PositionState
+from contrib.hyperliquid_perp.persistence.models import PositionState, Side
 
 D = Decimal
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
@@ -806,3 +817,149 @@ def test_engine_rebuild_hydrates_protection_and_continues_ids(tmp_path):
     start = engine2.start_plan(_decision("long", 30))  # would IntegrityError on seq reset
     assert start.plan_id is not None
     db.close()
+
+
+# --------------------------------------------------------------------------
+# fail-stop contract, miss exhaustion, gap-flag tick scope, rejected order row
+# --------------------------------------------------------------------------
+
+
+class _RaisingProvider:
+    def fetch(self, coin, requested_at, timeout_seconds):
+        raise RuntimeError("boom")
+
+
+def test_engine_fail_stops_after_escaped_exception(tmp_path):
+    # A mid-tick exception may leave in-memory state ahead of the rolled-back
+    # DB: every later public call must refuse to run until a rebuild.
+    db, clock, engine, _ = _engine(tmp_path)
+    engine._provider = _RaisingProvider()
+    with pytest.raises(RuntimeError, match="boom"):
+        engine.tick()
+    with pytest.raises(EngineHaltedError):
+        engine.tick()
+    with pytest.raises(EngineHaltedError):
+        engine.start_plan(_decision("long", 1))
+    with pytest.raises(EngineHaltedError):
+        engine.has_active_work()
+    db.close()
+
+
+def test_all_slices_missed_terminates_plan_as_residual(tmp_path):
+    # A 1-slice paper_market plan whose only scheduled fill is missed can never
+    # fill again: it terminates as residual immediately instead of sitting
+    # "active" until the 1h deadline.
+    db, clock, engine, _ = _engine(tmp_path)
+    _provider(engine, [_snap(), SnapshotOutcome.TIMEOUT])
+    start = engine.start_plan(_decision("long", 1))
+    plan_id = start.plan_id
+    order_id = engine._leg.order_id
+    clock.advance(30)
+    r = engine.tick()  # the slice's window passes with no data
+    assert r.has(TickEvent.SLICE_MISSED)
+    assert r.has(TickEvent.PLAN_TERMINAL)
+    assert _plan_status(db, plan_id) == ("residual", None)
+    assert _order_status(db, order_id) == ("canceled", "residual")
+    residual = db.conn.execute(
+        "SELECT residual_qty, total_qty FROM execution_plans WHERE plan_id = ?", (plan_id,)
+    ).fetchone()
+    assert D(residual["residual_qty"]) == D(residual["total_qty"])
+    db.close()
+
+
+def test_gap_flag_cleared_when_liquidation_preempts_stop_check(tmp_path):
+    # On the resume tick, liquidation (step 3) finishes the tick before the SL
+    # check (step 4, the gap flag's normal consumer): the one-shot flag must
+    # not survive the tick, or a later unrelated SL fill would be mislabeled
+    # gap_stop_fill.
+    db, clock, engine, _ = _engine(tmp_path, seed=_BIG_SEED)
+    _provider(
+        engine,
+        [_snap(), _snap()]
+        + [SnapshotOutcome.TIMEOUT] * 3
+        + [_snap(mark=40000, mid=40000)],  # resume: liquidatable near 40400
+    )
+    engine.start_plan(_decision("long", 10))  # reduce plan, slices to spare
+    clock.advance(30)
+    engine.tick()  # slice 0 fills, SL set
+    for _ in range(3):
+        clock.advance(30)
+        engine.tick()  # 3 failures -> pause
+    clock.advance(30)
+    r = engine.tick()  # resume; liquidation fires before _maybe_stop_loss runs
+    assert r.has(TickEvent.RESUMED)
+    assert r.has(TickEvent.LIQUIDATION_CLOSE)
+    assert not r.has(TickEvent.GAP_STOP_FILL)
+    assert engine._resume_pending_gap_check is False
+    db.close()
+
+
+def test_rejected_plan_writes_rejected_order_row(tmp_path):
+    # §5.2: a validation failure before the fill flow still writes an orders
+    # row (status="rejected") — orders is the exported audit trail.
+    db, clock, engine, _ = _engine(tmp_path, leverage="1")
+    _provider(engine, [_snap()])
+    start = engine.start_plan(_decision("long", 1))
+    assert start.disposition.value == "reject"
+    row = db.conn.execute(
+        "SELECT status, status_reason, side, type, active_from FROM orders WHERE run_id='r'"
+    ).fetchone()
+    assert row is not None
+    assert (row["status"], row["status_reason"]) == ("rejected", "no_legal_slice")
+    assert row["side"] == "buy"
+    assert row["type"] == "paper_market"
+    assert row["active_from"] is None  # never enters the fill flow
+    db.close()
+
+
+def test_close_position_rejects_reason_without_status(tmp_path):
+    db, clock, engine, _ = _engine(tmp_path)
+    with pytest.raises(ValueError, match="plan_terminal_reason requires"):
+        engine._close_position(
+            _T0,
+            None,
+            PositionState(coin="BTC", size=D("0.001"), entry_price=_MARK),
+            fill_reason="stop_loss",
+            order_role="stop_loss",
+            plan_terminal_reason="oops",
+        )
+    db.close()
+
+
+def test_internal_state_guards_reject_invalid_construction():
+    with pytest.raises(ValueError, match="counters out of order"):
+        _Leg(
+            plan_id="p",
+            order_id="o",
+            output_id=None,
+            side=Side.BUY,
+            disposition=PlanDisposition.PAPER_MARKET,
+            slice_sizes=(D("0.001"),),
+            reduce_only=False,
+            order_role="entry",
+            flip_plan_id=None,
+            flip_leg=None,
+            active_from=_T0,
+            deadline=_T0,
+            executed=1,
+        )
+    with pytest.raises(ValueError, match="stop_loss"):
+        _Protection(stop_loss=D(0))
+    with pytest.raises(ValueError, match="take_profit"):
+        _Protection(take_profit=D(-5))
+    with pytest.raises(ValueError, match="open_budget"):
+        _FlipState(
+            flip_plan_id="f",
+            output_id=None,
+            parsed=_decision("long", 1),
+            open_budget=0,
+            deadline=_T0,
+        )
+    with pytest.raises(ValueError, match="flip_plan_id"):
+        _FlipState(
+            flip_plan_id="",
+            output_id=None,
+            parsed=_decision("long", 1),
+            open_budget=1,
+            deadline=_T0,
+        )

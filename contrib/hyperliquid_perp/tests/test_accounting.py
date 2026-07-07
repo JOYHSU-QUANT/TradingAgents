@@ -229,6 +229,28 @@ def test_post_fill_updates_position_and_ledger():
     db.close()
 
 
+def test_apply_fill_rejects_autocommit_connection():
+    # apply_fill's atomicity contract is caller-owned: a bare connection still
+    # in autocommit would commit each write separately, so it is rejected.
+    db = _db()
+    _init(db)
+    with pytest.raises(ValueError, match="open transaction"):
+        acc.apply_fill(
+            db.conn,
+            run_id="r1",
+            mode="paper",
+            fill_id="f1",
+            order_id="o1",
+            symbol="BTC",
+            side="buy",
+            qty=Decimal("0.01"),
+            price=Decimal("60000"),
+            fee_rate=_FEE,
+        )
+    assert db.conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
+    db.close()
+
+
 def test_post_fill_requires_initialized_run():
     db = _db()
     with pytest.raises(ValueError, match="no account state"):

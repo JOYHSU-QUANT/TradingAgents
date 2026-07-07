@@ -1056,3 +1056,30 @@ def test_write_cycle_snapshot_records_position_row(tmp_path):
     assert D(row["unrealized_pnl"]) == D("0.001") * (D(51000) - D("50025"))
     assert row["stop_loss_price"] is not None  # live protection captured
     db.close()
+
+
+def test_flat_restart_reports_no_active_work_for_gap_arming(tmp_path):
+    # The CLI arms flag_restart_gap() only when has_active_work() is true at
+    # restart: a flat store has no blind window to check, and an unconsumed
+    # flag would mislabel a NEW position's first SL (opened by the forced
+    # immediate cycle before any tick) as a restart gap fill.
+    db, clock, engine1, asset = _engine(tmp_path)
+    _provider(engine1, [_snap(), _snap(), _snap(mark=40000, mid=40000)])
+    engine1.start_plan(_decision("long", 1))
+    clock.advance(30)
+    engine1.tick()  # open
+    clock.advance(30)
+    engine1.tick()  # SL triggers -> flat again, protection cleared
+
+    engine2 = PaperExecutionEngine(
+        db=db,
+        run_id="r",
+        asset=asset,
+        clock=clock,
+        provider=ScriptedSnapshotProvider("BTC", []),
+        risk_config=RiskConfig(leverage=D(5), max_target_margin_pct=60),
+        decision_config=DecisionConfig(),
+        paper_config=PaperTradingConfig.from_dict(None),
+    )
+    assert not engine2.has_active_work()  # flat restart -> CLI must not arm the flag
+    db.close()

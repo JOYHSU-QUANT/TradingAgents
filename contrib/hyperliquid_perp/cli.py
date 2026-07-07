@@ -355,9 +355,14 @@ def _cmd_paper(argv: list[str]) -> int:
             paper_config=paper_cfg,
             funding_source=funding_source,
         )
-        if is_restart:
+        if is_restart and engine.has_active_work():
             # §1.2 step 6: the restart was a blind window — the first tick must
             # treat a crossed SL as a gap stop, not a normal trigger-price fill.
+            # Armed only when the blind window had something to watch (a position
+            # or live protection): on a flat restart the forced immediate cycle
+            # can open a NEW position via poll() before any tick ever runs, and
+            # an unconsumed flag would mislabel that fresh position's first real
+            # SL trigger as a restart gap fill.
             engine.flag_restart_gap()
         provider = _EngineDecisionProvider(
             config,

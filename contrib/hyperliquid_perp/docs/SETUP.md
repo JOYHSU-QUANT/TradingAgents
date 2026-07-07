@@ -3,10 +3,10 @@
 實用 runbook：怎麼安裝、設定、執行。想知道**為什麼**這樣設計，見
 [phase1-spec](./phase1-spec.md) 與 [phase2-spec](./phase2-spec.md)；本頁只有「照做」的步驟。
 
-> 目前狀態：market context + 未修改的引擎 + **Phase 2 structured target 契約 +
-> 確定性 RiskGate** 已能端到端執行（寫出 schema v3 的 target audit log）。Phase 2
-> 的 paper 執行引擎已實作但尚未接上本 runbook 的執行流程（剩 PR4 的 scheduler／
-> CLI）；一輪執行仍不下任何單——live 執行是 Phase 3 的事。
+> 目前狀態：Phase 2 已完整可跑——market context + 未修改的引擎 + structured
+> target 契約 + 確定性 RiskGate + paper 執行引擎 + 4h scheduler／CLI（§4C 的
+> `paper`／`export`／`validate` 子命令）。paper run 下的是**本地模擬單**（SQLite
+> paper orders/fills），不碰交易所下單 endpoint——live 執行是 Phase 3 的事。
 
 所有指令都從 repo 根目錄 `TradingAgents/` 執行。
 
@@ -135,6 +135,41 @@ scheduler 要一併涵蓋 exit 1。
 | `--coin BTC` | config `coins` 的第一個 | 要分析的標的。 |
 | `--context-only` | 關 | 只建 context，跳過引擎。 |
 | `--config PATH` | `*.local.yaml` → example | 改用其他 config YAML。 |
+
+### C. Phase 2 長駐 paper run（需要 key）
+
+PR 4 的 subcommand CLI（`python -m contrib.hyperliquid_perp <sub>`；非 subcommand
+的 argv 原樣走上面 A/B 的 legacy 路徑，行為不變）：
+
+```bash
+# 首次啟動（--create 才允許建立新 store／新 run——防走錯目錄靜默分叉歷史）：
+python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db --create
+
+# 之後重啟（不帶 --create；DB 或 run 不存在會具名報錯）。重啟時自動做
+# execution §1.2 的 reconciliation（取消舊 plan、補帳 pending funding、replay 驗證、
+# gap SL 檢查、立即開新 cycle），並比對 genesis config：換 coin 硬錯、
+# risk/decision/paper_trading 漂移警告。同一個 --run-id 續跑同一個 run。
+python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db
+
+# 手動全量 CSV export（八張 phase2-data §5–§12 CSV；.tmp → atomic replace）
+python -m contrib.hyperliquid_perp export --run-id paper-BTC --output-dir exports/
+
+# 驗收器：13 項 summary 指標 + 鏈路完整性 + 可進 Phase 3 判定
+python -m contrib.hyperliquid_perp validate --run-id paper-BTC
+```
+
+`paper` 每個 cycle 完成（含 `invalid_output`／`api_failed`）會先跑 accounting
+replay 再自動 export CSV；Ctrl-C 正常 shutdown 也會做最後一次 export。CSV 只是
+SQLite 的 view——export 失敗只記 `export_failed`，不影響交易 state 與 SL/TP。
+完整 AI payload JSON 存於 `<db 目錄>/payloads/<run_id>/`，`ai_inputs` 記其路徑與
+sha256。
+
+`validate` 的 exit code：`0` = 可進 Phase 3（`cycle_count >= 30` 且 orphan／
+snapshot／replay mismatch 全為 0）；`4` = 資料一致但尚未達標（繼續累積 cycles）；
+`5` = 有 integrity failures（orphan／mismatch——先調查再相信結果）；`1` = 操作
+錯誤（db／run 不存在）。`cycle_count` 只計 `completed`／`invalid_output`（
+`api_failed` 另計為 `api_failed_count`，不算進 30 輪門檻）。跑滿 30 cycles
+（約 5 天）後用它檢查驗收條件。
 
 ## 5. 輸出去哪裡
 

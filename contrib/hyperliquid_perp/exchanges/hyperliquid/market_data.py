@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import time
 
+from ...domains.perp.margin import MarginSchedule
 from ...domains.perp.schema import Candle, CandleInterval, FundingPoint, MarketSnapshot
 from . import mapper
 from .sdk_client import HyperliquidClient, call_sdk
@@ -55,6 +56,16 @@ class HyperliquidMarketData:
     def get_market_snapshot(self, coin: str) -> MarketSnapshot:
         raw = call_sdk(self._info.meta_and_asset_ctxs)
         return mapper.map_market_snapshot(raw, coin)
+
+    def get_asset_meta(self, coin: str) -> tuple[int, MarginSchedule]:
+        """``(szDecimals, MarginSchedule)`` for ``coin``, from one meta request.
+
+        The paper engine's :class:`AssetSpec` inputs (execution §1.2 / §6.6.1):
+        both come from the exchange meta, never hardcoded, and from the *same*
+        response so the pair cannot be internally inconsistent.
+        """
+        raw = call_sdk(self._info.meta_and_asset_ctxs)
+        return mapper.map_sz_decimals(raw, coin), mapper.map_margin_schedule(raw, coin)
 
     def get_candles(self, coin: str, interval: str, lookback: int) -> list[Candle]:
         end = _now_ms()

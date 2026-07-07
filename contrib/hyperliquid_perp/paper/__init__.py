@@ -14,6 +14,12 @@ Execution engine (PR3):
 - :mod:`.twap` — TWAP / flip slice-planning math (§1.2 / §6.2);
 - :mod:`.stops` — stop-loss / take-profit price + gate math (§2–§4);
 - :mod:`.engine` — the tick-driven orchestrator that composes them all (§1–§5).
+
+Scheduler / acceptance (PR4):
+
+- :mod:`.scheduler` — rolling 4h decision cycles + §3.1 retry (phase2-spec §3);
+- :mod:`.reconcile` — restart reconciliation (phase2-execution §1.2);
+- :mod:`.validation` — the spec §5 acceptance report and Phase-3 verdict.
 """
 
 from __future__ import annotations

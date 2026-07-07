@@ -230,18 +230,33 @@ class PlanStartResult:
     ``pending_market_data`` shape: without a fresh snapshot the RiskGate is never
     evaluated (its notionals would be priced at a fabricated mark), the decision
     is not persisted, and the caller retries when data returns.
+
+    ``mark_price`` / ``account_equity`` are the gate's own sizing inputs (the
+    fresh snapshot's mark and the equity valued at it), carried out so PR4's
+    scheduler can persist the ``ai_outputs`` audit row (phase2-data §7:
+    決策當下 sizing 輸入) with exactly the numbers the gate used — never a
+    re-fetched approximation. Present exactly when the gate ran.
     """
 
     gate: RiskGateResult | None
     plan_id: str | None
     disposition: PlanDisposition | None
     reason: str | None  # no_order_reason / rejected / pending_market_data
+    mark_price: Decimal | None = None
+    account_equity: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.gate is None and (self.disposition is not None or self.reason is None):
             raise ValueError(
                 "a gateless PlanStartResult is the pending_market_data shape: "
                 "no disposition, a reason"
+            )
+        if ((self.mark_price is None) != (self.gate is None)) or (
+            (self.account_equity is None) != (self.gate is None)
+        ):
+            raise ValueError(
+                "PlanStartResult.mark_price / account_equity must be present "
+                "exactly when a gate ran (they are the gate's sizing inputs)"
             )
         if self.disposition is None:
             if self.plan_id is not None or self.reason is None:
@@ -457,6 +472,32 @@ class PaperExecutionEngine:
                 "rebuild it over the run to continue"
             )
 
+    def flag_restart_gap(self) -> None:
+        """Arm the gap-SL check for the next tick (execution §1.2 step 6).
+
+        A restart is the same blind window as a market-data outage: the mark may
+        have crossed the active SL while no process was watching. PR4's restart
+        reconciliation calls this after rebuilding the engine over the run, so
+        the first tick's SL fill is labelled ``gap_stop_fill`` rather than
+        claiming the position closed at the (long-passed) trigger price. The
+        flag is one-shot and tick-scoped, exactly like the pause-resume path.
+        """
+        self._ensure_not_halted()
+        self._resume_pending_gap_check = True
+
+    @_fail_stop
+    def write_cycle_snapshot(self, mark: Decimal) -> None:
+        """Write the cycle-end account/position snapshots (phase2-data §11.1/§12.1).
+
+        Tick-driven snapshots only fire on material changes; a decision cycle
+        that produced no fill (maintain_current, deadband, rejection) would
+        otherwise leave no per-cycle record. PR4's scheduler calls this at each
+        cycle's completion with the decision's own mark price.
+        """
+        if mark <= 0:
+            raise ValueError(f"cycle snapshot mark must be > 0, got {mark}")
+        self._write_snapshots(self._clock.now(), mark, self._read_position())
+
     def has_active_work(self) -> bool:
         """Whether the monitor must keep polling (execution §5.5)."""
         self._ensure_not_halted()  # a halted engine's view may be stale — never poll on it
@@ -470,8 +511,12 @@ class PaperExecutionEngine:
 
     # -- liquidation estimate ---------------------------------------------
 
-    def _liquidation_price(self, position: PositionState, mark: Decimal) -> Decimal | None:
-        """Estimated liquidation price for a non-flat position, or ``None`` (execution §6.6.1)."""
+    def liquidation_price(self, position: PositionState, mark: Decimal) -> Decimal | None:
+        """Estimated liquidation price for a non-flat position, or ``None`` (execution §6.6.1).
+
+        Public: the scheduler's ``ai_inputs`` audit row reports the same estimate
+        the engine trades on, so both callers share this one derivation.
+        """
         if position.is_flat:
             return None
         est = estimated_liquidation_price(
@@ -532,7 +577,14 @@ class PaperExecutionEngine:
             decision_cfg=self._decision,
         )
         if not gate.order_created:
-            return PlanStartResult(gate, None, None, gate.no_order_reason)
+            return PlanStartResult(
+                gate,
+                None,
+                None,
+                gate.no_order_reason,
+                mark_price=snap.mark_price,
+                account_equity=equity,
+            )
 
         assert gate.target_signed_notional is not None
         is_flip = (
@@ -542,9 +594,11 @@ class PaperExecutionEngine:
         )
         if is_flip:
             return self._start_flip(
-                parsed, gate, position, snap.mark_price, snap.mid_price, output_id
+                parsed, gate, position, snap.mark_price, snap.mid_price, output_id, equity
             )
-        return self._start_rebalance(gate, position, snap.mark_price, snap.mid_price, output_id)
+        return self._start_rebalance(
+            gate, position, snap.mark_price, snap.mid_price, output_id, equity
+        )
 
     def _current_position_state(
         self, position: PositionState, mark: Decimal, equity: Decimal
@@ -570,6 +624,7 @@ class PaperExecutionEngine:
         mark: Decimal,
         mid: Decimal,
         output_id: str | None,
+        equity: Decimal,
     ) -> PlanStartResult:
         delta = rebalance_delta(
             target_signed_notional=gate.target_signed_notional,
@@ -577,7 +632,9 @@ class PaperExecutionEngine:
             position_size=position.size,
         )
         if delta.side is None:
-            return PlanStartResult(gate, None, None, "zero_delta")
+            return PlanStartResult(
+                gate, None, None, "zero_delta", mark_price=mark, account_equity=equity
+            )
         reduce_only = position.size != 0 and delta.signed_delta_size * position.size < 0
         role = "rebalance" if position.size != 0 else "entry"
         plan = build_slice_plan(
@@ -596,6 +653,8 @@ class PaperExecutionEngine:
             order_role=role,
             flip_plan_id=None,
             flip_leg=None,
+            mark=mark,
+            equity=equity,
         )
 
     def _start_flip(
@@ -606,6 +665,7 @@ class PaperExecutionEngine:
         mark: Decimal,
         mid: Decimal,
         output_id: str | None,
+        equity: Decimal,
     ) -> PlanStartResult:
         close_qty = abs(position.size)
         with localcontext(DECIMAL_CONTEXT):
@@ -641,6 +701,8 @@ class PaperExecutionEngine:
             flip_plan_id=flip_plan_id,
             flip_leg="close",
             deadline=flip_deadline,
+            mark=mark,
+            equity=equity,
         )
 
     def _register_leg(
@@ -654,6 +716,8 @@ class PaperExecutionEngine:
         flip_plan_id: str | None,
         flip_leg: str | None,
         deadline: datetime | None = None,
+        mark: Decimal,
+        equity: Decimal,
     ) -> PlanStartResult:
         now = self._clock.now()
         plan_id = self._next_order_id("plan")
@@ -721,7 +785,14 @@ class PaperExecutionEngine:
                 # and the close-leg-REJECT case; idempotent otherwise (the TP is
                 # a pure function of entry price and tick size).
                 self._reconcile_protection_after_terminal()
-            return PlanStartResult(gate, plan_id, PlanDisposition.REJECT, "no_legal_slice")
+            return PlanStartResult(
+                gate,
+                plan_id,
+                PlanDisposition.REJECT,
+                "no_legal_slice",
+                mark_price=mark,
+                account_equity=equity,
+            )
         order_id = self._next_order_id("ord")
         order_type = (
             "paper_market"
@@ -787,7 +858,12 @@ class PaperExecutionEngine:
         if self._protection.take_profit is not None:
             self._set_protection(self._protection.stop_loss, None)
         return PlanStartResult(
-            gate=gate, plan_id=plan_id, disposition=plan.disposition, reason=None
+            gate=gate,
+            plan_id=plan_id,
+            disposition=plan.disposition,
+            reason=None,
+            mark_price=mark,
+            account_equity=equity,
         )
 
     # -- tick loop (execution §5.3) ---------------------------------------
@@ -1233,7 +1309,7 @@ class PaperExecutionEngine:
         never left unprotected for a tick.
         """
         side = Side.BUY if position.size > 0 else Side.SELL
-        liq = self._liquidation_price(position, snap.mark_price)
+        liq = self.liquidation_price(position, snap.mark_price)
         decision = stop_loss_decision(
             side=side,
             entry_price=position.entry_price,
@@ -1466,6 +1542,8 @@ class PaperExecutionEngine:
             flip_plan_id=flip.flip_plan_id,
             flip_leg="open",
             deadline=flip.deadline,
+            mark=osnap.mark_price,
+            equity=equity,
         )
         if res.disposition is PlanDisposition.REJECT:
             self._record_flip_incomplete("open_leg_no_legal_slice")
@@ -1540,7 +1618,7 @@ class PaperExecutionEngine:
             )
             if not position.is_flat:
                 maint = maintenance_snapshot(self._asset.margin_schedule, position.size, mark)
-                liq = self._liquidation_price(position, mark)
+                liq = self.liquidation_price(position, mark)
                 with localcontext(DECIMAL_CONTEXT):
                     notional = position_notional(position.size, mark)
                     exposure = (

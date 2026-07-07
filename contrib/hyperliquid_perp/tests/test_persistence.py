@@ -47,17 +47,18 @@ def _fill_kwargs(fill_id="f1", slice_id_=None):
 
 def test_migrations_record_version(tmp_path):
     db = Database(tmp_path / "p.db")
-    rows = db.conn.execute("SELECT version FROM schema_migrations").fetchall()
-    assert [r[0] for r in rows] == [SCHEMA_VERSION]
+    rows = db.conn.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
+    # Every version up to the latest is recorded, and the latest IS SCHEMA_VERSION.
+    assert [r[0] for r in rows] == list(range(1, SCHEMA_VERSION + 1))
     db.close()
 
 
 def test_migrations_idempotent_on_reopen(tmp_path):
     path = tmp_path / "p.db"
     Database(path).close()
-    db = Database(path)  # reopen: must not re-run migration 1
+    db = Database(path)  # reopen: must not re-run any migration
     count = db.conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
-    assert count == 1
+    assert count == SCHEMA_VERSION
     db.close()
 
 

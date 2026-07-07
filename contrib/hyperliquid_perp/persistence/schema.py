@@ -26,7 +26,7 @@ from __future__ import annotations
 
 __all__ = ["MIGRATIONS", "SCHEMA_MIGRATIONS_DDL", "SCHEMA_VERSION"]
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # --------------------------------------------------------------------------
 # Export logical tables (phase2-data §5–§12) — one-to-one with CSV exports.
@@ -366,4 +366,10 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         _CURRENT_ACCOUNT_STATE,
         _RUN_SEED_POSITIONS,
     ),
+    # v2: the scheduler persists a successful AI response on its attempt row the
+    # moment it arrives, so a restart during the market-data-blocked gate phase
+    # resumes gating from the stored text instead of re-asking the AI (spec §3.1:
+    # a restart must never produce a duplicate AI decision). Internal column —
+    # cleared when the attempt terminalizes, never exported to CSV.
+    2: ("ALTER TABLE decision_attempts ADD COLUMN pending_raw_response TEXT",),
 }

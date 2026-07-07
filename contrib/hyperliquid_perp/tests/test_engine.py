@@ -993,3 +993,66 @@ def test_internal_state_guards_reject_invalid_construction():
             open_budget=1,
             deadline=_T0,
         )
+
+
+# --------------------------------------------------------------------------
+# PR4 seams: restart gap-SL arming + cycle-end snapshot content
+# --------------------------------------------------------------------------
+
+
+def test_flag_restart_gap_labels_first_tick_stop_as_gap(tmp_path):
+    # Process 1 opens a position; its SL persists on current_positions.
+    db, clock, engine1, asset = _engine(tmp_path)
+    _provider(engine1, [_snap(), _snap()])
+    engine1.start_plan(_decision("long", 1))
+    clock.advance(30)
+    engine1.tick()  # fill + SL persisted
+    sl = engine1._protection.stop_loss
+    assert sl is not None
+
+    # "Restart": a fresh engine hydrates protection from the store; the blind
+    # window is armed explicitly (execution §1.2 step 6). The mark has crossed
+    # the SL during the gap -> the first tick fills a gap stop, not a normal SL.
+    engine2 = PaperExecutionEngine(
+        db=db,
+        run_id="r",
+        asset=asset,
+        clock=clock,
+        provider=ScriptedSnapshotProvider("BTC", [_snap(mark=40000, mid=40000)]),
+        risk_config=RiskConfig(leverage=D(5), max_target_margin_pct=60),
+        decision_config=DecisionConfig(),
+        paper_config=PaperTradingConfig.from_dict(None),
+    )
+    assert engine2._protection.stop_loss == sl  # hydrated, not forgotten
+    engine2.flag_restart_gap()
+    clock.advance(30)
+    result = engine2.tick()
+    assert result.has(TickEvent.GAP_STOP_FILL)
+    assert not result.has(TickEvent.STOP_LOSS_FILL)
+    reason = db.conn.execute(
+        "SELECT fill_reason FROM fills WHERE run_id='r' ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()[0]
+    assert reason == "gap_stop_fill"
+    assert _size(db) == D(0)
+    db.close()
+
+
+def test_write_cycle_snapshot_records_position_row(tmp_path):
+    db, clock, engine, _ = _engine(tmp_path)
+    _provider(engine, [_snap(), _snap()])
+    engine.start_plan(_decision("long", 1))
+    clock.advance(30)
+    engine.tick()  # fill -> position 0.001 @ 50025
+    before = db.conn.execute("SELECT COUNT(*) FROM position_snapshots").fetchone()[0]
+    engine.write_cycle_snapshot(D(51000))
+    row = db.conn.execute("SELECT * FROM position_snapshots ORDER BY rowid DESC LIMIT 1").fetchone()
+    after = db.conn.execute("SELECT COUNT(*) FROM position_snapshots").fetchone()[0]
+    assert after == before + 1
+    assert row["side"] == "long"
+    assert D(row["position_size"]) == D("0.001")
+    assert D(row["mark_price"]) == D(51000)
+    assert D(row["position_notional"]) == D("0.001") * D(51000)
+    # unrealized = size * (mark - entry) under the pinned context
+    assert D(row["unrealized_pnl"]) == D("0.001") * (D(51000) - D("50025"))
+    assert row["stop_loss_price"] is not None  # live protection captured
+    db.close()

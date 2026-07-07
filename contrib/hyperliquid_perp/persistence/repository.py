@@ -27,9 +27,11 @@ from .ids import _canonical_instant
 from .models import DECIMAL_CONTEXT, AccountLedger, PositionState, Side
 
 __all__ = [
+    "find_in_progress_attempt",
     "get_all_current_positions",
     "get_current_account_state",
     "get_current_position",
+    "get_decision_attempt",
     "get_execution_plan",
     "get_funding_event",
     "get_order",
@@ -48,11 +50,14 @@ __all__ = [
     "insert_position_snapshot",
     "insert_run",
     "insert_run_seed_position",
+    "iter_execution_plans",
     "iter_fills",
     "iter_funding_events",
+    "iter_orders",
     "max_engine_seq",
     "set_funding_status",
     "set_position_protection",
+    "update_decision_attempt",
     "update_execution_plan",
     "update_order",
     "upsert_current_account_state",
@@ -716,6 +721,17 @@ def insert_ai_output(conn: sqlite3.Connection, **fields: Any) -> None:
     _insert(conn, "ai_outputs", fields)
 
 
+_ATTEMPT_STATUSES = frozenset({"in_progress", "completed", "api_failed", "invalid_output"})
+# The live/terminal split of each status vocabulary, defined HERE next to the
+# canonical sets so a future status addition updates both in one place — a
+# hand-copied subset in a consumer (reconcile's cancel sweep, the validator's
+# cycle counting) would silently miss the new member (check_enum can validate
+# membership, never completeness).
+TERMINAL_ATTEMPT_STATUSES: tuple[str, ...] = ("completed", "api_failed", "invalid_output")
+LIVE_PLAN_STATUSES: tuple[str, ...] = ("active", "paused_market_data")
+LIVE_ORDER_STATUSES: tuple[str, ...] = ("pending_market_data", "open", "partially_filled")
+
+
 def insert_decision_attempt(conn: sqlite3.Connection, **fields: Any) -> None:
     """Insert a decision attempt. Raises on a duplicate ``(run_id, scheduled_at)``.
 
@@ -723,7 +739,89 @@ def insert_decision_attempt(conn: sqlite3.Connection, **fields: Any) -> None:
     scheduled_at)`` keep one scheduled cycle to one attempt row across restarts
     (phase2-spec §3.1).
     """
+    if "status" in fields:
+        check_enum(fields["status"], _ATTEMPT_STATUSES, name="status")
     _insert(conn, "decision_attempts", fields)
+
+
+def get_decision_attempt(conn: sqlite3.Connection, decision_attempt_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM decision_attempts WHERE decision_attempt_id = ?",
+        (decision_attempt_id,),
+    ).fetchone()
+
+
+def find_in_progress_attempt(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row | None:
+    """The run's single non-terminal attempt, or ``None``.
+
+    The scheduler keeps at most one attempt ``in_progress`` (a new cycle is only
+    scheduled once the previous attempt reached a terminal status); two live rows
+    would mean the state machine broke, so fail loud rather than pick one.
+    """
+    rows = conn.execute(
+        "SELECT * FROM decision_attempts WHERE run_id = ? AND status = 'in_progress'"
+        " ORDER BY rowid",
+        (run_id,),
+    ).fetchall()
+    if len(rows) > 1:
+        ids = ", ".join(r["decision_attempt_id"] for r in rows)
+        raise ValueError(f"run {run_id!r} has {len(rows)} in-progress attempts ({ids})")
+    return rows[0] if rows else None
+
+
+def update_decision_attempt(
+    conn: sqlite3.Connection,
+    decision_attempt_id: str,
+    *,
+    input_id: str | None | _Unset = _UNSET,
+    output_id: str | None | _Unset = _UNSET,
+    attempt_count: int | _Unset = _UNSET,
+    first_attempt_at: datetime | _Unset = _UNSET,
+    last_attempt_at: datetime | _Unset = _UNSET,
+    status: str | _Unset = _UNSET,
+    error_type: str | None | _Unset = _UNSET,
+    error_message: str | None | _Unset = _UNSET,
+    next_decision_at: datetime | None | _Unset = _UNSET,
+    pending_raw_response: str | None | _Unset = _UNSET,
+    timestamp: datetime | None = None,
+) -> None:
+    """Patch-update one attempt row; always stamp ``timestamp`` (last state change).
+
+    Same convention as :func:`update_order`: an omitted keyword leaves the column
+    untouched, an explicit ``None`` clears it. A terminal row is immutable —
+    phase2-spec §3.1's exactly-once retry accounting depends on ``api_failed`` /
+    ``completed`` / ``invalid_output`` never being reopened or re-counted.
+    """
+    if not isinstance(status, _Unset):
+        check_enum(status, _ATTEMPT_STATUSES, name="status")
+    row = get_decision_attempt(conn, decision_attempt_id)
+    if row is None:
+        raise ValueError(f"decision attempt {decision_attempt_id!r} does not exist")
+    if row["status"] != "in_progress":
+        raise ValueError(
+            f"decision attempt {decision_attempt_id!r} is terminal ({row['status']}) and immutable"
+        )
+    provided: dict[str, Any] = {}
+    for col, val in (
+        ("input_id", input_id),
+        ("output_id", output_id),
+        ("attempt_count", attempt_count),
+        ("first_attempt_at", first_attempt_at),
+        ("last_attempt_at", last_attempt_at),
+        ("status", status),
+        ("error_type", error_type),
+        ("error_message", error_message),
+        ("next_decision_at", next_decision_at),
+        ("pending_raw_response", pending_raw_response),
+    ):
+        if not isinstance(val, _Unset):
+            provided[col] = _encode(val)
+    provided["timestamp"] = _iso_utc(timestamp or datetime.now(timezone.utc))
+    assignments = ", ".join(f"{col} = ?" for col in provided)
+    conn.execute(
+        f"UPDATE decision_attempts SET {assignments} WHERE decision_attempt_id = ?",
+        (*provided.values(), decision_attempt_id),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -751,6 +849,18 @@ _PLAN_STATUSES = frozenset(
         "residual",
     }
 )
+
+# The live/terminal splits above must stay subsets of their canonical sets —
+# checked at import so a renamed status can't leave a stale split member behind.
+for _split, _whole, _name in (
+    (TERMINAL_ATTEMPT_STATUSES, _ATTEMPT_STATUSES, "TERMINAL_ATTEMPT_STATUSES"),
+    (LIVE_PLAN_STATUSES, _PLAN_STATUSES, "LIVE_PLAN_STATUSES"),
+    (LIVE_ORDER_STATUSES, _ORDER_STATUSES, "LIVE_ORDER_STATUSES"),
+):
+    _extra = set(_split) - _whole
+    if _extra:
+        raise ValueError(f"{_name} contains statuses outside its vocabulary: {sorted(_extra)}")
+del _split, _whole, _name, _extra
 
 
 def insert_order(
@@ -946,6 +1056,41 @@ def insert_execution_plan(
 
 def get_execution_plan(conn: sqlite3.Connection, plan_id: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM execution_plans WHERE plan_id = ?", (plan_id,)).fetchone()
+
+
+def iter_execution_plans(
+    conn: sqlite3.Connection, run_id: str, *, statuses: tuple[str, ...] | None = None
+) -> list[sqlite3.Row]:
+    """A run's execution plans in insertion order, optionally filtered by status."""
+    if statuses is None:
+        return conn.execute(
+            "SELECT * FROM execution_plans WHERE run_id = ? ORDER BY rowid", (run_id,)
+        ).fetchall()
+    for status in statuses:
+        check_enum(status, _PLAN_STATUSES, name="status")
+    placeholders = ", ".join("?" for _ in statuses)
+    return conn.execute(
+        f"SELECT * FROM execution_plans WHERE run_id = ? AND status IN ({placeholders})"
+        " ORDER BY rowid",
+        (run_id, *statuses),
+    ).fetchall()
+
+
+def iter_orders(
+    conn: sqlite3.Connection, run_id: str, *, statuses: tuple[str, ...] | None = None
+) -> list[sqlite3.Row]:
+    """A run's orders in insertion order, optionally filtered by status."""
+    if statuses is None:
+        return conn.execute(
+            "SELECT * FROM orders WHERE run_id = ? ORDER BY rowid", (run_id,)
+        ).fetchall()
+    for status in statuses:
+        check_enum(status, _ORDER_STATUSES, name="status")
+    placeholders = ", ".join("?" for _ in statuses)
+    return conn.execute(
+        f"SELECT * FROM orders WHERE run_id = ? AND status IN ({placeholders}) ORDER BY rowid",
+        (run_id, *statuses),
+    ).fetchall()
 
 
 def update_execution_plan(

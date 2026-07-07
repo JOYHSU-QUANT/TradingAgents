@@ -254,6 +254,28 @@ def map_margin_schedule(meta_and_asset_ctxs: Any, coin: str) -> MarginSchedule:
         raise MalformedResponseError(f"maxLeverage for {coin!r}: {exc}") from exc
 
 
+def map_sz_decimals(meta_and_asset_ctxs: Any, coin: str) -> int:
+    """Extract ``coin``'s ``szDecimals`` from ``metaAndAssetCtxs``.
+
+    The paper engine derives its quantity step and price tick from this
+    (execution §1.2 — read from the exchange meta, never hardcoded).
+    """
+    if not isinstance(meta_and_asset_ctxs, (list, tuple)) or not meta_and_asset_ctxs:
+        raise MalformedResponseError("metaAndAssetCtxs must be [meta, assetCtxs]")
+    universe = (meta_and_asset_ctxs[0] or {}).get("universe")
+    if not isinstance(universe, list):
+        raise MalformedResponseError("meta missing universe list")
+    entry = next((a for a in universe if isinstance(a, dict) and a.get("name") == coin), None)
+    if entry is None:
+        known = ", ".join(a.get("name", "?") for a in universe[:10] if isinstance(a, dict))
+        raise UnknownCoinError(f"coin {coin!r} not in perp universe (e.g. {known})")
+    raw = entry.get("szDecimals")
+    # bool is an int subclass; True would silently become szDecimals=1.
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise MalformedResponseError(f"szDecimals for {coin!r} is not a non-negative int: {raw!r}")
+    return raw
+
+
 # --------------------------------------------------------------------------
 # candleSnapshot -> [Candle]
 # --------------------------------------------------------------------------

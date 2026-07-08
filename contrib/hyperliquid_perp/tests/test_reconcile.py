@@ -207,6 +207,7 @@ def test_pending_funding_stays_pending_without_rate(tmp_path):
 
 
 def test_replay_mismatch_fails_startup(tmp_path):
+    # FLAT run over corrupt books: nothing to protect, so refuse loudly.
     db = _init(tmp_path)
     with db.transaction() as conn:
         repo.upsert_current_account_state(
@@ -217,6 +218,49 @@ def test_replay_mismatch_fails_startup(tmp_path):
     with pytest.raises(ReconciliationError, match="accounting replay"):
         reconcile_on_restart(db, run_id="r", now=_T0)
     db.close()
+
+
+def test_replay_mismatch_with_open_position_reports_protection_only(tmp_path):
+    """Non-flat + corrupt books: report the mismatch, never exit-and-abandon the SL/TP.
+
+    Exiting would leave a live position with nobody watching its stops — worse
+    than the corruption. Step 8 (forced cycle) must be skipped: a new decision
+    would size against books the store cannot rebuild.
+    """
+    db = _init(tmp_path)
+    clock, plan_id = _engine_with_plan(db, slices_filled=1)  # non-flat position
+    with db.transaction() as conn:
+        repo.upsert_current_account_state(
+            conn,
+            "r",
+            AccountLedger(wallet_balance=D(123)),  # contradicts the replayed ledger
+        )
+    now = clock.now() + timedelta(minutes=5)
+    report = reconcile_on_restart(db, run_id="r", now=now)
+
+    assert report.replay_mismatch
+    assert "accounting replay" in report.replay_error
+    # Steps 1-3 still ran: the stale plan is canceled either way.
+    assert report.canceled_plan_ids == (plan_id,)
+    # Step 8 skipped despite the canceled plan.
+    assert not report.forced_immediate_cycle
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state is None or state["next_decision_at"] is None
+    db.close()
+
+
+def test_restart_reconciliation_rejects_mismatch_with_forced_cycle():
+    from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
+
+    with pytest.raises(ValueError, match="replay_error excludes"):
+        RestartReconciliation(
+            canceled_plan_ids=("p",),
+            canceled_order_ids=(),
+            funding_posted=0,
+            funding_still_pending=0,
+            forced_immediate_cycle=True,
+            replay_error="boom",
+        )
 
 
 def test_unknown_run_raises(tmp_path):

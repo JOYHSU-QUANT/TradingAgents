@@ -108,8 +108,13 @@ class ReconciliationError(RuntimeError):
     """The committed store contradicts its own materialized state.
 
     Raised when the accounting replay (execution §1.2 step 4 / spec §5) finds a
-    mismatch: trading on a store that cannot rebuild its own position/ledger
-    would compound the corruption, so startup must fail loud, not proceed.
+    mismatch AND the run is flat: trading on a store that cannot rebuild its
+    own position/ledger would compound the corruption, so startup must fail
+    loud, not proceed. With a non-flat position the mismatch is *reported*
+    instead (:attr:`RestartReconciliation.replay_error`) — refusing to start
+    would leave a live position with nobody watching its SL/TP, which is worse
+    than the corruption itself; the CLI then runs in protection-only mode
+    (engine ticks, new decision cycles stay halted).
     """
 
 
@@ -122,6 +127,9 @@ class RestartReconciliation:
     funding_posted: int
     funding_still_pending: int
     forced_immediate_cycle: bool
+    # Non-None when a non-flat position kept a mismatched startup alive
+    # (protection-only mode) — see ReconciliationError for the rationale.
+    replay_error: str | None = None
 
     def __post_init__(self) -> None:
         # Step 8 only fires for an abandoned target — a forced cycle with no
@@ -133,6 +141,20 @@ class RestartReconciliation:
             )
         if self.funding_posted < 0 or self.funding_still_pending < 0:
             raise ValueError("RestartReconciliation funding counters must be >= 0")
+        # A forced cycle sizes against the books; mismatched books must never
+        # force one (the mismatch path skips step 8 entirely).
+        if self.replay_error is not None and self.forced_immediate_cycle:
+            raise ValueError("RestartReconciliation.replay_error excludes forced_immediate_cycle")
+
+    @property
+    def replay_mismatch(self) -> bool:
+        """Whether startup continued over unverifiable books (protection-only)."""
+        return self.replay_error is not None
+
+    @property
+    def replay_status(self) -> str:
+        """The ``last_replay_*`` breadcrumb vocabulary for this outcome."""
+        return "mismatch" if self.replay_mismatch else "ok"
 
     @property
     def canceled_any_plan(self) -> bool:
@@ -190,21 +212,33 @@ def reconcile_on_restart(
     )
 
     # Steps 4 + 7 (store side): the committed events must rebuild exactly the
-    # materialized state — otherwise the store is corrupt and trading must stop.
+    # materialized state — otherwise the store is corrupt and NEW trading must
+    # stop. Flat: fail loud (nothing to protect). Non-flat: report the mismatch
+    # so the CLI keeps the engine ticking over the live position (SL/TP and the
+    # monitor must survive — exiting would leave the position unwatched, which
+    # is strictly worse than the corruption).
     replayed = accounting.replay(db, run_id=run_id)
+    replay_error: str | None = None
     if not replayed.is_consistent:
-        raise ReconciliationError(
-            f"run {run_id!r} failed accounting replay on restart: "
-            f"position mismatches {list(replayed.position_mismatches)!r}, "
-            f"account_matches={replayed.account_matches} — refusing to trade "
-            "on a store that cannot rebuild its own state"
-        )
+        detail = f"run {run_id!r} failed accounting replay on restart: {replayed.mismatch_detail}"
+        if all(p.is_flat for p in repo.get_all_current_positions(db.conn, run_id)):
+            raise ReconciliationError(
+                detail + " — refusing to trade on a store that cannot rebuild its own state"
+            )
+        replay_error = detail
+        logger.error("%s — continuing in protection-only mode", detail)
 
     # Step 8: a canceled plan means the old target is abandoned — the next AI
     # cycle starts immediately (spec §3). An in-progress attempt IS that cycle
     # (it resumes on the first poll), so only force the clock when none exists.
+    # Skipped over mismatched books: a forced cycle would size against a state
+    # the store cannot rebuild.
     forced = False
-    if canceled_plans and repo.find_in_progress_attempt(db.conn, run_id) is None:
+    if (
+        replay_error is None
+        and canceled_plans
+        and repo.find_in_progress_attempt(db.conn, run_id) is None
+    ):
         state = repo.get_scheduler_state(db.conn, run_id)
         raw_next = state["next_decision_at"] if state is not None else None
         if raw_next is None or parse_instant(raw_next) > now:
@@ -225,4 +259,5 @@ def reconcile_on_restart(
         funding_posted=posted,
         funding_still_pending=still_pending,
         forced_immediate_cycle=forced,
+        replay_error=replay_error,
     )

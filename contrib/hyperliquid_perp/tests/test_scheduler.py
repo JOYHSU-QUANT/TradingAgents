@@ -236,8 +236,12 @@ def test_not_due_polls_return_none(tmp_path):
 
 
 def test_retry_ladder_then_api_failed(tmp_path):
+    # The terminal api_failed tries a best-effort §11.1 snapshot; market data
+    # is down in the same outage here, so it must skip — never fabricate.
     db, clock, engine, scheduler, provider = _setup(
-        tmp_path, [_err("timeout"), _err("connection"), _err("server_error")], []
+        tmp_path,
+        [_err("timeout"), _err("connection"), _err("server_error")],
+        [SnapshotOutcome.ERROR],
     )
     r1 = scheduler.poll()
     assert r1.event is CycleEvent.RETRY_SCHEDULED
@@ -264,6 +268,9 @@ def test_retry_ladder_then_api_failed(tmp_path):
     # No target, no order, no AI output — position untouched (spec §3.1).
     assert db.conn.execute("SELECT COUNT(*) FROM ai_outputs").fetchone()[0] == 0
     assert db.conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 0
+    # And no cycle-end snapshot: market data failed too, and a snapshot would
+    # need a fabricated mark (execution §6.5).
+    assert db.conn.execute("SELECT COUNT(*) FROM account_snapshots").fetchone()[0] == 0
     assert provider.decide_calls == 3
     db.close()
 
@@ -344,7 +351,9 @@ def test_retry_counter_survives_restart(tmp_path):
 
 
 def test_interrupted_final_attempt_terminalizes_without_new_call(tmp_path):
-    db, clock, engine, scheduler, provider = _setup(tmp_path, [], [])
+    # Market data IS available here — the api_failed terminal still writes the
+    # best-effort §11.1 cycle-end snapshot at the fresh mark.
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [], [_snap()])
     # Simulate a crash after try 3's counter was persisted but before its outcome.
     with db.transaction() as conn:
         repo.insert_decision_attempt(
@@ -365,6 +374,8 @@ def test_interrupted_final_attempt_terminalizes_without_new_call(tmp_path):
     row = _attempt_row(db, "r|crash")
     assert row["status"] == "api_failed"
     assert row["error_type"] == "interrupted"
+    # Best-effort cycle-end snapshot written at the available fresh mark (§11.1).
+    assert db.conn.execute("SELECT COUNT(*) FROM account_snapshots").fetchone()[0] == 1
     db.close()
 
 

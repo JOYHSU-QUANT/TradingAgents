@@ -62,9 +62,9 @@ def test_migrations_idempotent_on_reopen(tmp_path):
     db.close()
 
 
-def test_v3_adds_scheduler_state_operational_columns(tmp_path):
-    # v3: the single-instance lease + CSV-export breadcrumbs live on
-    # scheduler_state; a fresh DB must carry them and record versions 1..3.
+def test_v3_v4_add_scheduler_state_operational_columns(tmp_path):
+    # v3: the single-instance lease + CSV-export breadcrumbs; v4: the replay
+    # breadcrumbs. A fresh DB must carry them all and record every version.
     db = Database(tmp_path / "p.db")
     cols = {r[1] for r in db.conn.execute("PRAGMA table_info(scheduler_state)")}
     for expected in (
@@ -73,12 +73,15 @@ def test_v3_adds_scheduler_state_operational_columns(tmp_path):
         "last_export_status",
         "last_export_error",
         "last_export_at",
+        "last_replay_status",
+        "last_replay_error",
+        "last_replay_at",
     ):
         assert expected in cols
     versions = [
         r[0] for r in db.conn.execute("SELECT version FROM schema_migrations ORDER BY version")
     ]
-    assert versions == [1, 2, 3]
+    assert versions == list(range(1, SCHEMA_VERSION + 1))
     db.close()
 
 
@@ -819,6 +822,32 @@ def test_upsert_scheduler_state_rejects_bad_export_status(tmp_path):
     with pytest.raises(ValueError, match="last_export_status"), db.transaction() as conn:
         repo.upsert_scheduler_state(conn, "r1", last_export_status="bogus")
     assert repo.get_scheduler_state(db.conn, "r1") is None  # nothing written
+    db.close()
+
+
+def test_scheduler_state_replay_breadcrumbs_patch_and_enum(tmp_path):
+    db = Database(tmp_path / "p.db")
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(
+            conn,
+            "r1",
+            last_replay_status="mismatch",
+            last_replay_error="pos BTC",
+            last_replay_at=_TS,
+        )
+    row = repo.get_scheduler_state(db.conn, "r1")
+    assert row["last_replay_status"] == "mismatch"
+    assert row["last_replay_error"] == "pos BTC"
+    assert row["last_replay_at"] == _TS.isoformat()
+    # Patch semantics: an unrelated update leaves the replay breadcrumbs alone.
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(conn, "r1", last_export_status="ok")
+    row = repo.get_scheduler_state(db.conn, "r1")
+    assert row["last_replay_status"] == "mismatch"
+    # Vocabulary enforced at the write boundary, like its export sibling.
+    with pytest.raises(ValueError, match="last_replay_status"), db.transaction() as conn:
+        repo.upsert_scheduler_state(conn, "r1", last_replay_status="bogus")
+    assert repo.get_scheduler_state(db.conn, "r1")["last_replay_status"] == "mismatch"
     db.close()
 
 

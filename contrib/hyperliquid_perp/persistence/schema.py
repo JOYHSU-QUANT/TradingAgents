@@ -26,7 +26,7 @@ from __future__ import annotations
 
 __all__ = ["MIGRATIONS", "SCHEMA_MIGRATIONS_DDL", "SCHEMA_VERSION"]
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # --------------------------------------------------------------------------
 # Export logical tables (phase2-data §5–§12) — one-to-one with CSV exports.
@@ -384,5 +384,16 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE scheduler_state ADD COLUMN last_export_status TEXT",
         "ALTER TABLE scheduler_state ADD COLUMN last_export_error TEXT",
         "ALTER TABLE scheduler_state ADD COLUMN last_export_at TEXT",
+    ),
+    # v4: replay-verification breadcrumbs, mirroring the last_export_* trio. A
+    # replay mismatch mid-run halts NEW decision cycles but the process keeps
+    # running (SL/TP protection stays live) — without a durable record, that
+    # halt (and any transient replay failure that healed before the next
+    # restart) would be invisible to a post-mortem once the process exits.
+    # Internal columns, never exported.
+    4: (
+        "ALTER TABLE scheduler_state ADD COLUMN last_replay_status TEXT",
+        "ALTER TABLE scheduler_state ADD COLUMN last_replay_error TEXT",
+        "ALTER TABLE scheduler_state ADD COLUMN last_replay_at TEXT",
     ),
 }

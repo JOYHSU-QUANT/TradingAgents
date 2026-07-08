@@ -150,7 +150,8 @@ python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db --crea
 # execution §1.2 的 reconciliation（取消舊 plan、補帳 pending funding、replay 驗證、
 # gap SL 檢查、立即開新 cycle），並比對 genesis config：換 coin 硬錯、
 # risk/decision/paper_trading 漂移警告。同一個 --run-id 續跑同一個 run。
-# 單實例鎖：同一 run 已有活著的 process（scheduler_state 心跳 < 900s）時啟動報錯。
+# 單實例鎖：同一 run 已有活著的 process（scheduler_state 心跳 < 900s）時啟動報錯；
+# 反向也守住——凍結後被接管的舊 process，下一次心跳會發現 lease 易主而具名退出。
 python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db
 
 # 手動全量 CSV export（八張 phase2-data §5–§12 CSV；.tmp → atomic replace；
@@ -163,11 +164,18 @@ python -m contrib.hyperliquid_perp validate --run-id paper-BTC
 
 `paper` 每個 cycle 完成（含 `invalid_output`／`api_failed`）會先跑 accounting
 replay 再自動 export CSV；Ctrl-C（SIGINT）與 SIGTERM（systemd／docker／`kill`）
-的正常 shutdown 都會做最後一次 export。CSV 只是 SQLite 的 view——export 失敗只記
-`export_failed`（stderr + `scheduler_state.last_export_status/error/at` 持久化），
-不影響交易 state 與 SL/TP。
+的正常 shutdown 都會做最後一次 export。自動 export 寫到
+`<db 目錄>/exports/<run_id>/`（`--export-dir` 可改）。CSV 只是 SQLite 的 view——
+export 失敗只記 `export_failed`（stderr + `scheduler_state.last_export_status/
+error/at` 持久化），不影響交易 state 與 SL/TP。replay 驗證結果同樣持久化在
+`scheduler_state.last_replay_status/error/at`；replay mismatch 時進
+protection-only 模式——停開新 decision cycle，但 engine 續 tick、SL/TP 與監控
+不中斷（重啟時 mismatch 且有倉位也是同一模式；空倉才直接拒絕啟動）。
 完整 AI payload JSON 存於 `<db 目錄>/payloads/<run_id>/`，`ai_inputs` 記其路徑與
 sha256。
+市場資料 warmup 不足（closed candle 數 < 門檻）會走 §3.1 retry ladder 後記
+`api_failed`（error_type=server_error、無 AI 花費）——太年輕的標的在暖機完成前
+每 4h 產生一筆，屬預期行為。
 
 `validate` 的 exit code：`0` = 可進 Phase 3（`cycle_count >= 30` 且 orphan／
 snapshot／replay mismatch 全為 0）；`4` = 資料一致但尚未達標（繼續累積 cycles）；

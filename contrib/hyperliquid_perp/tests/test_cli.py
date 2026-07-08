@@ -289,6 +289,62 @@ def test_post_cycle_export_persists_status_breadcrumbs(tmp_path, monkeypatch):
     db.close()
 
 
+def test_post_cycle_export_persists_replay_breadcrumbs(tmp_path, monkeypatch):
+    """Replay outcomes land durably on scheduler_state (ok/mismatch/failed lanes)."""
+    from contrib.hyperliquid_perp.cli import _post_cycle_export
+    from contrib.hyperliquid_perp.paper import accounting as acc_mod
+    from contrib.hyperliquid_perp.persistence.models import AccountLedger
+
+    path, db = _seed_db(tmp_path)
+    out = tmp_path / "exports"
+    assert _post_cycle_export(db, "r", out) is True
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["last_replay_status"] == "ok"
+    assert state["last_replay_error"] is None
+    assert state["last_replay_at"] is not None
+
+    # Corrupt the materialized ledger: replay now contradicts it (mismatch lane).
+    with db.transaction() as conn:
+        repo.upsert_current_account_state(conn, "r", AccountLedger(wallet_balance=D(123)))
+    assert _post_cycle_export(db, "r", out) is False
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["last_replay_status"] == "mismatch"
+    assert "account_matches" in state["last_replay_error"]
+
+    # Replay itself raising is the "failed" lane (books unverifiable).
+    def boom(db_, *, run_id):
+        raise RuntimeError("corrupt decimal text")
+
+    monkeypatch.setattr(acc_mod, "replay", boom)
+    assert _post_cycle_export(db, "r", out) is False
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["last_replay_status"] == "failed"
+    assert "corrupt decimal text" in state["last_replay_error"]
+    db.close()
+
+
+def test_history_funding_source_escalates_after_consecutive_failures(caplog):
+    """A chronic funding-history break logs ERROR, not an eternal WARNING."""
+    import logging
+
+    from contrib.hyperliquid_perp.cli import _HistoryFundingSource
+
+    class _BrokenMarket:
+        def get_funding_history(self, coin, days):
+            raise RuntimeError("endpoint gone")
+
+    source = _HistoryFundingSource(_BrokenMarket())
+    threshold = source._FAILURE_ESCALATION_THRESHOLD
+    when = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.cli"):
+        for _ in range(threshold):
+            assert source.rate_at("BTC", when) is None
+    levels = [r.levelno for r in caplog.records if "funding history fetch failed" in r.getMessage()]
+    assert len(levels) == threshold
+    assert all(lv == logging.WARNING for lv in levels[:-1])
+    assert levels[-1] == logging.ERROR
+
+
 def test_sigterm_shim_raises_keyboard_interrupt():
     # systemd/docker stop with SIGTERM; the handler must funnel it into the
     # KeyboardInterrupt shutdown-export path.

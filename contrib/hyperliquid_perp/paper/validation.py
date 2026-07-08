@@ -348,6 +348,9 @@ def validate_run(db: Database, *, run_id: str) -> ValidationReport:
         0 if replayed.account_matches else 1
     )
     with localcontext(DECIMAL_CONTEXT):
+        # The unrealized leg is valued at the LAST account snapshot's mark (up
+        # to ~one cycle stale): an offline validator has no fresh mark, and
+        # fetching one would make the report irreproducible against the store.
         unrealized = Decimal(last_unrealized[0]) if last_unrealized is not None else Decimal(0)
         total_pnl = (
             replayed.ledger.realized_pnl

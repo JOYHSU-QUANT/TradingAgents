@@ -513,6 +513,13 @@ class PaperScheduler:
                 current_attempt_id=None,
                 updated_at=now,
             )
+        # §11.1 best-effort cycle-end snapshot (after the terminal txn,
+        # mirroring _finalize); see engine.try_write_cycle_snapshot.
+        if not self._engine.try_write_cycle_snapshot():
+            logger.warning(
+                "api_failed cycle %s: no market data for a cycle-end snapshot; skipped",
+                attempt_id,
+            )
         return PollResult(
             event=CycleEvent.API_FAILED,
             decision_attempt_id=attempt_id,

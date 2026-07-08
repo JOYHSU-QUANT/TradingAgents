@@ -498,6 +498,24 @@ class PaperExecutionEngine:
             raise ValueError(f"cycle snapshot mark must be > 0, got {mark}")
         self._write_snapshots(self._clock.now(), mark, self._read_position())
 
+    @_fail_stop
+    def try_write_cycle_snapshot(self) -> bool:
+        """Best-effort cycle-end snapshot when no gate mark exists (§11.1).
+
+        An ``api_failed`` cycle terminates without a gate run, so there is no
+        decision mark to snapshot at — but data §11.1 still wants a per-cycle
+        record. Fetches a fresh snapshot and returns whether one was written:
+        when market data is also unavailable (commonly the same outage that
+        failed the decision) it skips rather than fabricate a mark
+        (execution §6.5).
+        """
+        now = self._clock.now()
+        result = self._provider.fetch(self._coin, requested_at=now, timeout_seconds=self._timeout)
+        if not result.is_valid or result.snapshot is None:
+            return False
+        self._write_snapshots(now, result.snapshot.mark_price, self._read_position())
+        return True
+
     def has_active_work(self) -> bool:
         """Whether the monitor must keep polling (execution §5.5)."""
         self._ensure_not_halted()  # a halted engine's view may be stale — never poll on it

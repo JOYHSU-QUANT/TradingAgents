@@ -244,8 +244,8 @@ def _cmd_paper(argv: list[str]) -> int:
     import signal
 
     # Heavy/engine imports deferred so `export`/`validate` stay light (the
-    # engine/scheduler stack is imported by _cmd_paper_locked once the lease
-    # is in hand).
+    # engine/scheduler stack is imported by _run_locked once the lease is in
+    # hand).
     from .exchanges.hyperliquid.errors import ExchangeError
     from .exchanges.hyperliquid.market_data import HyperliquidMarketData
     from .exchanges.hyperliquid.sdk_client import HyperliquidClient
@@ -335,6 +335,7 @@ def _cmd_paper(argv: list[str]) -> int:
             from .persistence.models import PositionState
             from .persistence.schema import SCHEMA_VERSION
 
+            trading_halted = False
             if not is_restart:
                 seeds = [
                     PositionState(coin=p.coin, size=p.size, entry_price=p.entry_price)
@@ -373,8 +374,23 @@ def _cmd_paper(argv: list[str]) -> int:
                         db, run_id=run_id, now=now, funding_source=funding_source
                     )
                 except ReconciliationError as exc:
+                    # Flat run over corrupt books: refuse to start — but leave
+                    # the durable breadcrumb first, so the refusal is visible
+                    # to a post-mortem even when stderr wasn't captured.
+                    _stamp_breadcrumb(db, run_id, "replay", "mismatch", str(exc))
                     print(f"error: {exc}", file=sys.stderr)
                     return 1
+                _stamp_breadcrumb(db, run_id, "replay", report.replay_status, report.replay_error)
+                trading_halted = report.replay_mismatch
+                if report.replay_mismatch:
+                    logger.error("restart over unverifiable books: %s", report.replay_error)
+                    print(
+                        "ERROR: accounting replay mismatch on restart — running in "
+                        "protection-only mode: SL/TP protection and the market "
+                        "monitor stay live, NEW decision cycles stay halted until "
+                        "the store verifies again.",
+                        file=sys.stderr,
+                    )
                 print(
                     f"restart reconciliation for {run_id!r}: "
                     f"{len(report.canceled_plan_ids)} plan(s) canceled, "
@@ -422,12 +438,30 @@ def _cmd_paper(argv: list[str]) -> int:
             interval = paper_cfg.execution.market_monitor.interval_seconds
             try:
                 _paper_loop(
-                    db, run_id, engine, scheduler, clock, interval, export_dir, funding_source
+                    db,
+                    run_id,
+                    engine,
+                    scheduler,
+                    clock,
+                    interval,
+                    export_dir,
+                    funding_source,
+                    trading_halted=trading_halted,
                 )
             except KeyboardInterrupt:
                 print("\nshutting down — final export...", file=sys.stderr)
                 _post_cycle_export(db, run_id, export_dir)
                 return 0
+            except RunLockError as exc:
+                # The lease was taken over while this process stalled: the
+                # successor already reconciled away this process's plans and
+                # owns the run now. Exit WITHOUT the shutdown export or any
+                # other store write — each one would corrupt the successor's
+                # view (the pid-guarded release below no-ops for the same
+                # reason).
+                logger.error("run lease lost: %s", exc)
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
             return 0
 
         try:
@@ -437,7 +471,16 @@ def _cmd_paper(argv: list[str]) -> int:
 
 
 def _paper_loop(
-    db, run_id, engine, scheduler, clock, interval: int, export_dir: Path, funding_source
+    db,
+    run_id,
+    engine,
+    scheduler,
+    clock,
+    interval: int,
+    export_dir: Path,
+    funding_source,
+    *,
+    trading_halted: bool,
 ) -> None:
     """The production loop: tick (when the monitor is on) → poll → sleep.
 
@@ -448,13 +491,17 @@ def _paper_loop(
     toward ``next_decision_at`` when everything is quiet, so an idle run
     issues no market-data requests.
 
-    A cycle-boundary replay mismatch stops NEW decisions (the books can no
-    longer be trusted for sizing) but keeps the engine ticking — SL/TP
-    protection and the market monitor must survive (spec §5 / data §1.1).
+    A replay mismatch stops NEW decisions (the books can no longer be trusted
+    for sizing) but keeps the engine ticking — SL/TP protection and the market
+    monitor must survive (spec §5 / data §1.1). ``trading_halted=True`` enters
+    that mode from the first iteration (a restart over mismatched books with a
+    live position).
 
     Every iteration refreshes the single-instance lease, so the sleep is
     capped at 60s (well inside ``LOCK_STALE_SECONDS``) — an idle iteration
-    still touches only SQLite, never market data.
+    still touches only SQLite, never market data. A superseded lease raises
+    :class:`~.paper.run_lock.RunLockError` out of the loop (see
+    :func:`~.paper.run_lock.heartbeat_run_lock`).
     """
     import os
 
@@ -463,7 +510,6 @@ def _paper_loop(
     from .paper.scheduler import CycleEvent
 
     pid = os.getpid()
-    trading_halted = False
     while True:
         heartbeat_run_lock(db, run_id, pid=pid, now=clock.now())
         if engine.has_active_work():
@@ -483,16 +529,28 @@ def _paper_loop(
                 )
                 if not _post_cycle_export(db, run_id, export_dir):
                     trading_halted = True
+                    logger.error(
+                        "halting NEW decision cycles for %s: accounting replay "
+                        "can no longer rebuild the books",
+                        run_id,
+                    )
                     print(
                         "ERROR: accounting replay can no longer rebuild this run's "
                         "books — halting NEW decision cycles. The engine keeps "
                         "ticking (SL/TP protection and monitor stay live). "
-                        "Investigate the store, then restart to resume.",
+                        "Investigate the store; a restart stays in this "
+                        "protection-only mode until the books verify again.",
                         file=sys.stderr,
                     )
             if result.event is CycleEvent.API_FAILED:
+                logger.warning(
+                    "decision API failed %s times for %s — holding position until the next cycle",
+                    result.attempt_count,
+                    run_id,
+                )
                 print(
-                    "decision API failed 3 times — holding position until the next cycle.",
+                    f"decision API failed {result.attempt_count} times — holding "
+                    "position until the next cycle.",
                     file=sys.stderr,
                 )
         now = clock.now()
@@ -508,6 +566,31 @@ def _paper_loop(
         time.sleep(min(delay, 60.0))
 
 
+def _stamp_breadcrumb(db, run_id: str, kind: str, status: str, error: str | None) -> None:
+    """Durably stamp a ``scheduler_state`` breadcrumb trio (``last_<kind>_*``).
+
+    Export failures and replay outcomes are warn-and-carry-on (the mid-run
+    replay halt only lives in process memory) — without this record neither
+    would leave any trace once the process exits. ``kind`` is a code-owned
+    literal ("export" / "replay"); the column vocabulary stays validated by
+    ``upsert_scheduler_state``'s fixed keyword signature.
+    """
+    from .persistence import repository as repo
+
+    stamp = datetime.now(timezone.utc)
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(
+            conn,
+            run_id,
+            updated_at=stamp,
+            **{
+                f"last_{kind}_status": status,
+                f"last_{kind}_error": error,
+                f"last_{kind}_at": stamp,
+            },
+        )
+
+
 def _post_cycle_export(db, run_id: str, export_dir: Path) -> bool:
     """Replay-verify then export (phase2-data §1.1); returns whether the books verified.
 
@@ -516,48 +599,41 @@ def _post_cycle_export(db, run_id: str, export_dir: Path) -> bool:
     (``last_export_status`` / ``last_export_error`` / ``last_export_at``), so a
     post-mortem can tell how long the CSV view had been stale even when stderr
     was not captured. A replay mismatch or replay *failure* returns ``False``
-    so the caller can stop opening new positions on unverifiable books.
+    so the caller can stop opening new positions on unverifiable books; both
+    outcomes (and healthy verifications) stamp the ``last_replay_*`` breadcrumb.
     """
     from .paper import accounting
-    from .persistence import repository as repo
     from .persistence.export import ExportError, export_run
-
-    def _record(status: str, error: str | None) -> None:
-        stamp = datetime.now(timezone.utc)
-        with db.transaction() as conn:
-            repo.upsert_scheduler_state(
-                conn,
-                run_id,
-                last_export_status=status,
-                last_export_error=error,
-                last_export_at=stamp,
-                updated_at=stamp,
-            )
 
     replay_ok = True
     try:
         replayed = accounting.replay(db, run_id=run_id)
         if not replayed.is_consistent:
             replay_ok = False
+            detail = replayed.mismatch_detail
+            logger.error("accounting replay mismatch for %s: %s", run_id, detail)
             print(
-                f"WARNING: accounting replay mismatch for {run_id!r}: "
-                f"positions {list(replayed.position_mismatches)!r}, "
-                f"account_matches={replayed.account_matches} — investigate before "
-                "trusting this run's results.",
+                f"WARNING: accounting replay mismatch for {run_id!r}: {detail} — "
+                "investigate before trusting this run's results.",
                 file=sys.stderr,
             )
+            _stamp_breadcrumb(db, run_id, "replay", "mismatch", detail)
+        else:
+            _stamp_breadcrumb(db, run_id, "replay", "ok", None)
     except Exception as exc:  # noqa: BLE001 — reconciliation must not kill the loop
         replay_ok = False  # unverifiable books are treated like inconsistent ones
+        logger.error("accounting replay failed for %s: %s", run_id, exc)
         print(f"WARNING: accounting replay failed: {exc}", file=sys.stderr)
+        _stamp_breadcrumb(db, run_id, "replay", "failed", str(exc))
     try:
         export_run(db, run_id=run_id, output_dir=export_dir)
-        _record("ok", None)
+        _stamp_breadcrumb(db, run_id, "export", "ok", None)
         print(f"exported CSVs to {export_dir}", file=sys.stderr)
     except ExportError as exc:
         # §1.1: record export_failed, keep the monitor and protections running.
         logger.error("export_failed for %s: %s", run_id, exc)
         print(f"WARNING: export_failed — {exc}", file=sys.stderr)
-        _record("failed", str(exc))
+        _stamp_breadcrumb(db, run_id, "export", "failed", str(exc))
     return replay_ok
 
 
@@ -579,11 +655,17 @@ class _HistoryFundingSource:
 
     _MIN_WINDOW_DAYS = 7
     _CACHE_TTL_SECONDS = 900
+    # After this many consecutive fetch failures the log escalates to ERROR: a
+    # chronic integration break (auth, endpoint drift) must read differently
+    # from the ordinary "rate not published yet" warning it otherwise mimics —
+    # events would pile up pending forever behind an easy-to-miss line.
+    _FAILURE_ESCALATION_THRESHOLD = 3
 
     def __init__(self, market) -> None:
         self._market = market
         # coin -> (fetched_at_monotonic, window_days_fetched, {hour: rate})
         self._cache: dict[str, tuple[float, int, dict[datetime, object]]] = {}
+        self._consecutive_failures: dict[str, int] = {}
 
     def rate_at(self, coin: str, funding_timestamp: datetime):
         hour = funding_timestamp.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
@@ -598,8 +680,21 @@ class _HistoryFundingSource:
             try:
                 points = self._market.get_funding_history(coin, needed_days)
             except Exception as exc:  # noqa: BLE001 — a rate fetch failure means "pending"
-                logger.warning("funding history fetch failed for %s: %s", coin, exc)
+                failures = self._consecutive_failures.get(coin, 0) + 1
+                self._consecutive_failures[coin] = failures
+                log = (
+                    logger.error
+                    if failures >= self._FAILURE_ESCALATION_THRESHOLD
+                    else logger.warning
+                )
+                log(
+                    "funding history fetch failed for %s (%d consecutive): %s",
+                    coin,
+                    failures,
+                    exc,
+                )
                 return None
+            self._consecutive_failures.pop(coin, None)
             by_hour = {}
             for point in points:
                 stamp = datetime.fromtimestamp(point.time / 1000, tz=timezone.utc)
@@ -644,8 +739,12 @@ class _EngineDecisionProvider:
             raise RetryableDecisionError("connection", str(exc)) from exc
         needed = _warmup_threshold(self._config)
         if ctx.candle_count < needed:
-            # Not enough closed candles for real signal — transient for a young
-            # listing / gappy feed, so let the §3.1 ladder retry then api_failed.
+            # Not enough closed candles for real signal. Deliberate (reviewed):
+            # this rides the §3.1 ladder as "server_error" → api_failed — the
+            # closed §6.2 vocabulary has no data-availability label. A gappy
+            # feed heals by the next try/cycle; a too-young listing produces a
+            # recurring api_failed cycle every 4h until it warms up (no AI
+            # spend — the failure precedes the call).
             raise RetryableDecisionError(
                 "server_error",
                 f"under-warmed market data: {ctx.candle_count} candles, need {needed}",

@@ -76,6 +76,36 @@ def test_heartbeat_refreshes_lease(db):
         acquire_run_lock(db, "r", pid=202, now=beat + timedelta(seconds=LOCK_STALE_SECONDS - 1))
 
 
+def test_heartbeat_by_superseded_pid_raises_and_leaves_successor_lease(db):
+    # A froze past the staleness window; B legitimately took over.
+    acquire_run_lock(db, "r", pid=101, now=_T0)
+    takeover_at = _T0 + timedelta(seconds=LOCK_STALE_SECONDS)
+    acquire_run_lock(db, "r", pid=202, now=takeover_at)
+    # A resumes and heartbeats: it must NOT steal the lease back silently —
+    # both processes driving one run is the corruption the lease prevents.
+    with pytest.raises(RunLockError, match="superseded"):
+        heartbeat_run_lock(db, "r", pid=101, now=takeover_at + timedelta(seconds=30))
+    row = _state(db)
+    assert row["lock_pid"] == 202  # successor's lease untouched
+    assert row["lock_heartbeat_at"] == takeover_at.isoformat()
+
+
+def test_heartbeat_after_release_raises(db):
+    # A cleanly released (or never held) — a late heartbeat must not recreate
+    # ownership out of thin air.
+    acquire_run_lock(db, "r", pid=101, now=_T0)
+    release_run_lock(db, "r", pid=101, now=_T0)
+    with pytest.raises(RunLockError):
+        heartbeat_run_lock(db, "r", pid=101, now=_T0 + timedelta(seconds=30))
+    assert _state(db)["lock_pid"] is None
+
+
+def test_heartbeat_on_missing_state_raises(db):
+    with pytest.raises(RunLockError):
+        heartbeat_run_lock(db, "never-locked", pid=101, now=_T0)
+    assert _state(db, "never-locked") is None  # and must not create a row
+
+
 def test_release_clears_only_when_pid_matches(db):
     acquire_run_lock(db, "r", pid=101, now=_T0)
     release_run_lock(db, "r", pid=202, now=_T0)  # wrong pid: no-op

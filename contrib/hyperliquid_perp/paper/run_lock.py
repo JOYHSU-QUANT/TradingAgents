@@ -14,8 +14,9 @@ needs no cleanup — its heartbeat simply goes stale. Freshness is the signal;
 the pid is a diagnostic breadcrumb (pids recycle). The paper loop must beat
 at least once per :data:`LOCK_STALE_SECONDS`; a crashed run is takeable after
 that window, and :func:`release_run_lock` clears the lease early on a clean
-shutdown (guarded by pid so a frozen-then-resumed process can never clear a
-successor's lease).
+shutdown. Both the per-iteration refresh and the release are guarded by pid,
+so a frozen-then-resumed process can neither clear nor silently reclaim a
+successor's lease — its next heartbeat raises instead.
 """
 
 from __future__ import annotations
@@ -80,8 +81,30 @@ def acquire_run_lock(db: Database, run_id: str, *, pid: int, now: datetime) -> N
 
 
 def heartbeat_run_lock(db: Database, run_id: str, *, pid: int, now: datetime) -> None:
-    """Refresh the lease. The caller must already hold it (acquire succeeded)."""
+    """Refresh the lease — only while ``pid`` is still the recorded holder.
+
+    Raises :class:`RunLockError` when the lease has been taken over: a process
+    frozen past :data:`LOCK_STALE_SECONDS` may have been legitimately superseded,
+    and an unguarded refresh would silently stamp its own pid back over the
+    successor's lease — the two processes would then flip-flop the lock every
+    iteration while BOTH keep driving the run. The check-and-write runs in one
+    ``BEGIN IMMEDIATE`` transaction, mirroring :func:`acquire_run_lock`; the
+    caller must treat the raise as fatal (stop the loop without touching the
+    store — the successor owns it now).
+    """
     with db.transaction() as conn:
+        # Narrow read: this runs every loop iteration, and the full row carries
+        # ever-growing breadcrumb text columns the check doesn't need.
+        row = conn.execute(
+            "SELECT lock_pid FROM scheduler_state WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        holder = None if row is None else row["lock_pid"]
+        if holder != pid:
+            raise RunLockError(
+                f"run {run_id!r} lease is no longer held by pid {pid} (current "
+                f"holder: {holder}) — this process was superseded while stalled "
+                "and must stop driving the run."
+            )
         repo.upsert_scheduler_state(
             conn, run_id, lock_pid=pid, lock_heartbeat_at=now, updated_at=now
         )

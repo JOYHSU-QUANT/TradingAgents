@@ -831,6 +831,16 @@ class ReplayResult:
     def is_consistent(self) -> bool:
         return not self.position_mismatches and self.account_matches
 
+    @property
+    def mismatch_detail(self) -> str:
+        """One canonical rendering of what mismatched — every reporter (restart
+        refusal, mid-run halt, breadcrumb) formats through here so the texts
+        stay grep-compatible."""
+        return (
+            f"position mismatches {list(self.position_mismatches)!r}, "
+            f"account_matches={self.account_matches}"
+        )
+
 
 def replay(db: Database, *, run_id: str) -> ReplayResult:
     """Rebuild positions/ledger from committed fills + posted funding; compare to current.

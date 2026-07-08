@@ -20,7 +20,9 @@ Retry (spec §3.1): one logical attempt per scheduled cycle, persisted **before*
 each AI call so a restart resumes the same ``decision_attempt_id`` with the
 counter intact. Up to three tries (10s, then 30s apart); the third failure
 terminalizes the attempt as ``api_failed`` — position held, no target, next
-cycle at ``scheduled_at + 4h``. A response that parses but violates the
+cycle at ``scheduled_at + 4h`` (anchored on the terminal instant instead when
+that stamp already lies in the past — a cycle that itself ran late must not
+chain catch-up ladders). A response that parses but violates the
 contract is ``invalid_output``: no re-ask, fail-closed maintain_current, the
 cycle counts as done.
 

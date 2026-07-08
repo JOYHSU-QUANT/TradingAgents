@@ -7,6 +7,7 @@ first scripted snapshot (its plan-build fetch); each ``tick`` consumes the next.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -1055,6 +1056,31 @@ def test_write_cycle_snapshot_records_position_row(tmp_path):
     # unrealized = size * (mark - entry) under the pinned context
     assert D(row["unrealized_pnl"]) == D("0.001") * (D(51000) - D("50025"))
     assert row["stop_loss_price"] is not None  # live protection captured
+    db.close()
+
+
+def test_write_cycle_snapshot_is_best_effort_on_write_failure(tmp_path, monkeypatch):
+    # A post-commit cycle-end snapshot write failure must NOT halt the engine or
+    # strand live SL/TP monitoring: it is logged, returns False, and a later
+    # snapshot re-takes cleanly (the api_failed path shares the same helper).
+    db, clock, engine, _ = _engine(tmp_path)
+    _provider(engine, [_snap(), _snap()])
+    engine.start_plan(_decision("long", 1))
+    clock.advance(30)
+    engine.tick()  # opens a position -> there is live protection to keep alive
+
+    def _boom(*_a, **_k):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(engine, "_write_snapshots", _boom)
+    assert engine.write_cycle_snapshot(D(51000)) is False
+    assert engine._halted is False  # protection survives a snapshot write error
+
+    monkeypatch.undo()  # the store recovers; the next snapshot writes normally
+    before = db.conn.execute("SELECT COUNT(*) FROM position_snapshots").fetchone()[0]
+    assert engine.write_cycle_snapshot(D(51000)) is True
+    after = db.conn.execute("SELECT COUNT(*) FROM position_snapshots").fetchone()[0]
+    assert after == before + 1
     db.close()
 
 

@@ -528,7 +528,7 @@ class PaperScheduler:
         # mirroring _finalize); see engine.try_write_cycle_snapshot.
         if not self._engine.try_write_cycle_snapshot():
             logger.warning(
-                "api_failed cycle %s: no market data for a cycle-end snapshot; skipped",
+                "api_failed cycle %s: cycle-end snapshot skipped (no market data or write failure)",
                 attempt_id,
             )
         return PollResult(
@@ -594,8 +594,15 @@ class PaperScheduler:
                 updated_at=now,
             )
         # Cycle-end snapshot (§11.1/§12.1) at the gate's own mark — after the
-        # audit transaction so a snapshot failure can't roll back the decision.
-        self._engine.write_cycle_snapshot(result.mark_price)
+        # audit transaction so a snapshot failure can't roll back the decision,
+        # and best-effort so a snapshot write error can't tear down the live
+        # SL/TP monitor (symmetric with the api_failed path; re-snapshots next
+        # tick).
+        if not self._engine.write_cycle_snapshot(result.mark_price):
+            logger.warning(
+                "completed cycle %s: cycle-end snapshot skipped; will re-snapshot next tick",
+                pending.attempt_id,
+            )
         self._pending = None
         return PollResult(
             event=CycleEvent.COMPLETED if pending.parsed.is_valid else CycleEvent.INVALID_OUTPUT,

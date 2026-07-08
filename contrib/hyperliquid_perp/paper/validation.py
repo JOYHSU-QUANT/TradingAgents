@@ -68,6 +68,15 @@ class ValidationReport:
     accounting_replay_mismatch_count: int
     max_exposure_pct: Decimal | None
     max_effective_leverage: Decimal | None
+    realized_pnl: Decimal
+    # Unrealized leg of ``total_pnl``, valued at ``unrealized_as_of`` (the last
+    # account snapshot's mark, up to ~one cycle stale) — surfaced separately so
+    # the headline ``total_pnl`` doesn't silently fold a stale/absent valuation.
+    # ``unrealized_as_of`` is None when the run has no account snapshot at all,
+    # in which case the unrealized leg is 0 (an open position reads as flat for
+    # PnL — the staleness the split makes explicit).
+    unrealized_pnl: Decimal
+    unrealized_as_of: str | None
     total_pnl: Decimal
     total_fees: Decimal
     net_funding_pnl: Decimal
@@ -124,6 +133,10 @@ class ValidationReport:
             f"accounting_replay_mismatch_count: {self.accounting_replay_mismatch_count}",
             f"max_exposure_pct: {_fmt(self.max_exposure_pct)}",
             f"max_effective_leverage: {_fmt(self.max_effective_leverage)}",
+            f"realized_pnl: {self.realized_pnl}",
+            f"unrealized_pnl: {self.unrealized_pnl}",
+            "unrealized_as_of: "
+            + (self.unrealized_as_of or "n/a (no account snapshot; valued at 0)"),
             f"total_pnl: {self.total_pnl}",
             f"total_fees: {self.total_fees}",
             f"net_funding_pnl: {self.net_funding_pnl}",
@@ -334,8 +347,8 @@ def validate_run(db: Database, *, run_id: str) -> ValidationReport:
             if max_leverage is None or value > max_leverage:
                 max_leverage = value
 
-        last_unrealized = conn.execute(
-            "SELECT unrealized_pnl FROM account_snapshots WHERE run_id = ?"
+        last_snapshot = conn.execute(
+            "SELECT unrealized_pnl, timestamp FROM account_snapshots WHERE run_id = ?"
             " ORDER BY rowid DESC LIMIT 1",
             (run_id,),
         ).fetchone()
@@ -347,11 +360,18 @@ def validate_run(db: Database, *, run_id: str) -> ValidationReport:
     replay_mismatch_count = len(replayed.position_mismatches) + (
         0 if replayed.account_matches else 1
     )
+    # The unrealized leg is valued at the LAST account snapshot's mark (up to
+    # ~one cycle stale): an offline validator has no fresh mark, and fetching one
+    # would make the report irreproducible against the store. The valuation
+    # instant is surfaced as ``unrealized_as_of`` and the leg is split out so a
+    # run ended holding a position can't misread as flat.
+    if last_snapshot is not None:
+        unrealized = Decimal(last_snapshot[0])
+        unrealized_as_of: str | None = last_snapshot[1]
+    else:
+        unrealized = Decimal(0)
+        unrealized_as_of = None
     with localcontext(DECIMAL_CONTEXT):
-        # The unrealized leg is valued at the LAST account snapshot's mark (up
-        # to ~one cycle stale): an offline validator has no fresh mark, and
-        # fetching one would make the report irreproducible against the store.
-        unrealized = Decimal(last_unrealized[0]) if last_unrealized is not None else Decimal(0)
         total_pnl = (
             replayed.ledger.realized_pnl
             - replayed.ledger.total_fees
@@ -382,6 +402,9 @@ def validate_run(db: Database, *, run_id: str) -> ValidationReport:
         accounting_replay_mismatch_count=replay_mismatch_count,
         max_exposure_pct=max_exposure,
         max_effective_leverage=max_leverage,
+        realized_pnl=replayed.ledger.realized_pnl,
+        unrealized_pnl=unrealized,
+        unrealized_as_of=unrealized_as_of,
         total_pnl=total_pnl,
         total_fees=replayed.ledger.total_fees,
         net_funding_pnl=replayed.ledger.net_funding_pnl,

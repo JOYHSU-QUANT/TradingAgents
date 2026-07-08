@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal, localcontext
@@ -485,36 +486,60 @@ class PaperExecutionEngine:
         self._ensure_not_halted()
         self._resume_pending_gap_check = True
 
-    @_fail_stop
-    def write_cycle_snapshot(self, mark: Decimal) -> None:
-        """Write the cycle-end account/position snapshots (phase2-data §11.1/§12.1).
+    def _best_effort_cycle_snapshot(self, now: datetime, mark: Decimal) -> bool:
+        """Write the post-commit cycle-end snapshot, tolerating a write failure.
+
+        These §11.1/§12.1 rows are audit records written AFTER the decision's own
+        transaction has committed, so a snapshot write error must NOT halt the
+        engine and strand the live SL/TP monitor — it is logged and swallowed and
+        the next tick re-snapshots. Deliberately NOT ``@_fail_stop`` (unlike the
+        tick-driven/trading writes): a genuine store failure still resurfaces
+        fatally at the next trading write, so nothing is hidden for long.
+        Returns whether the snapshot was written.
+        """
+        try:
+            self._write_snapshots(now, mark, self._read_position())
+        except (sqlite3.Error, OSError):
+            logger.warning(
+                "cycle-end snapshot write failed at mark %s; skipped, will re-snapshot next tick",
+                mark,
+                exc_info=True,
+            )
+            return False
+        return True
+
+    def write_cycle_snapshot(self, mark: Decimal) -> bool:
+        """Best-effort cycle-end account/position snapshot at the gate's own mark.
 
         Tick-driven snapshots only fire on material changes; a decision cycle
         that produced no fill (maintain_current, deadband, rejection) would
         otherwise leave no per-cycle record. PR4's scheduler calls this at each
-        cycle's completion with the decision's own mark price.
+        completed cycle with the decision's own mark price, AFTER the audit
+        transaction — a write failure here is non-fatal (see
+        :meth:`_best_effort_cycle_snapshot`) so it can never tear down live SL/TP
+        monitoring. Returns whether the snapshot was written.
         """
+        self._ensure_not_halted()
         if mark <= 0:
             raise ValueError(f"cycle snapshot mark must be > 0, got {mark}")
-        self._write_snapshots(self._clock.now(), mark, self._read_position())
+        return self._best_effort_cycle_snapshot(self._clock.now(), mark)
 
-    @_fail_stop
     def try_write_cycle_snapshot(self) -> bool:
         """Best-effort cycle-end snapshot when no gate mark exists (§11.1).
 
         An ``api_failed`` cycle terminates without a gate run, so there is no
         decision mark to snapshot at — but data §11.1 still wants a per-cycle
         record. Fetches a fresh snapshot and returns whether one was written:
-        when market data is also unavailable (commonly the same outage that
-        failed the decision) it skips rather than fabricate a mark
-        (execution §6.5).
+        skipped (``False``) when market data is unavailable (commonly the same
+        outage that failed the decision — never fabricate a mark, execution §6.5)
+        or when the write itself fails (non-fatal, as above).
         """
+        self._ensure_not_halted()
         now = self._clock.now()
         result = self._provider.fetch(self._coin, requested_at=now, timeout_seconds=self._timeout)
         if not result.is_valid or result.snapshot is None:
             return False
-        self._write_snapshots(now, result.snapshot.mark_price, self._read_position())
-        return True
+        return self._best_effort_cycle_snapshot(now, result.snapshot.mark_price)
 
     def has_active_work(self) -> bool:
         """Whether the monitor must keep polling (execution §5.5)."""

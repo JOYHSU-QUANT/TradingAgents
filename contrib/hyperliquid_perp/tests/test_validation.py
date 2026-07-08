@@ -139,6 +139,37 @@ def test_clean_single_cycle_run_validates_consistently(tmp_path):
     db.close()
 
 
+def test_report_splits_realized_and_unrealized_pnl(tmp_path):
+    # total_pnl folds an unrealized leg valued at the last snapshot's mark; the
+    # split fields surface that leg and its (possibly stale) valuation instant so
+    # a run ended holding a position can't silently misread as flat (Q2 decision).
+    db = _run_one_cycle_with_fill(tmp_path)
+    report = validate_run(db, run_id="r")
+    assert report.unrealized_as_of is not None  # a snapshot exists to value against
+    assert report.total_pnl == (
+        report.realized_pnl - report.total_fees + report.net_funding_pnl + report.unrealized_pnl
+    )
+    lines = report.summary_lines()
+    assert any(line.startswith("realized_pnl: ") for line in lines)
+    assert any(line.startswith("unrealized_pnl: ") for line in lines)
+    assert any(line.startswith("unrealized_as_of: ") for line in lines)
+    db.close()
+
+
+def test_report_unrealized_as_of_none_without_snapshot(tmp_path):
+    # No account snapshot at all: the unrealized leg is 0 and the valuation
+    # instant is explicitly n/a rather than a fabricated 0-valued position.
+    db = Database(tmp_path / "v.db")
+    accounting.initialize_run(
+        db, run_id="r", mode="paper", initial_balance_usdc=D(1000), schema_version=1
+    )
+    report = validate_run(db, run_id="r")
+    assert report.unrealized_as_of is None
+    assert report.unrealized_pnl == D(0)
+    assert "unrealized_as_of: n/a (no account snapshot; valued at 0)" in report.summary_lines()
+    db.close()
+
+
 def test_orphan_fill_detected(tmp_path):
     db = _run_one_cycle_with_fill(tmp_path)
     # post_fill keeps the ledger consistent but references a non-existent order.

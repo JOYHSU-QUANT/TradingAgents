@@ -26,6 +26,8 @@ from contrib.hyperliquid_perp.paper.validation import validate_run
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 
+from .conftest import insert_decision_attempts
+
 D = Decimal
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
 _MARK = D(50000)
@@ -264,4 +266,113 @@ def test_unknown_run_raises(tmp_path):
     db = Database(tmp_path / "empty.db")
     with pytest.raises(ValueError, match="does not exist"):
         validate_run(db, run_id="ghost")
+    db.close()
+
+
+def _bare_run(tmp_path):
+    """A run with genesis only — no cycles, orders, fills, or snapshots."""
+    db = Database(tmp_path / "v.db")
+    accounting.initialize_run(
+        db, run_id="r", mode="paper", initial_balance_usdc=D(1000), schema_version=1
+    )
+    return db
+
+
+def test_reduce_only_order_without_prior_fill_or_seed_is_orphan(tmp_path):
+    # Positive case for the system-order rule: a stop_loss with NO earlier
+    # same-symbol fill and NO seed position had no position to reduce — orphan.
+    db = _bare_run(tmp_path)
+    with db.transaction() as conn:
+        repo.insert_order(
+            conn,
+            order_id="sl-orphan",
+            mode="paper",
+            run_id="r",
+            symbol="BTC",
+            order_role="stop_loss",
+            side="sell",
+            order_type="stop_market",
+            qty=D("0.001"),
+            status="filled",
+            reduce_only=True,
+            timestamp=_T0,
+        )
+    report = validate_run(db, run_id="r")
+    assert report.orphan_order_count == 1
+    assert "orphan order sl-orphan" in report.failures
+    assert not report.phase3_ready
+    db.close()
+
+
+_ACCOUNT_SNAPSHOT_COLUMNS = (
+    "timestamp, mode, run_id, wallet_balance, account_equity, available_balance,"
+    " realized_pnl, unrealized_pnl, total_pnl, total_fees, net_funding_pnl,"
+    " total_position_notional, effective_leverage, used_initial_margin,"
+    " total_maintenance_margin, margin_ratio"
+)
+
+
+def test_duplicate_timestamp_account_snapshots_warn_not_fail(tmp_path):
+    # Two account snapshots sharing one timestamp make the same-instant
+    # exposure_pct companion ambiguous: reported as a warning (coverage loss is
+    # loud) but NOT a gating failure — the identical duplicate still passes its
+    # own arithmetic identities.
+    db = _run_one_cycle_with_fill(tmp_path)
+    with db.transaction() as conn:
+        ts = conn.execute(
+            "SELECT timestamp FROM position_snapshots"
+            " WHERE run_id = 'r' AND exposure_pct IS NOT NULL"
+        ).fetchone()[0]
+        conn.execute(
+            f"INSERT INTO account_snapshots ({_ACCOUNT_SNAPSHOT_COLUMNS})"
+            f" SELECT {_ACCOUNT_SNAPSHOT_COLUMNS} FROM account_snapshots"
+            " WHERE run_id = 'r' AND timestamp = ?",
+            (ts,),
+        )
+    report = validate_run(db, run_id="r")
+    assert any("exposure_pct unverifiable" in w for w in report.warnings)
+    assert report.snapshot_mismatch_count == 0
+    assert report.failures == ()
+    db.close()
+
+
+def test_thirty_completed_cycles_make_phase3_ready(tmp_path):
+    # invalid_output counts as a completed cycle (spec §3.1); api_failed never
+    # does — 28 + 1 + 1 = 30 despite three api_failed rows in between.
+    db = _bare_run(tmp_path)
+    insert_decision_attempts(
+        db, ["completed"] * 28 + ["invalid_output"] + ["api_failed"] * 3 + ["completed"], start=_T0
+    )
+    report = validate_run(db, run_id="r")
+    assert report.cycle_count == 30
+    assert report.api_failed_count == 3
+    assert report.failures == ()
+    assert report.phase3_ready
+    db.close()
+
+
+def test_twenty_nine_cycles_not_phase3_ready(tmp_path):
+    # The >=30 boundary: a consistent store one cycle short stays gated.
+    db = _bare_run(tmp_path)
+    insert_decision_attempts(db, ["completed"] * 29, start=_T0)
+    report = validate_run(db, run_id="r")
+    assert report.cycle_count == 29
+    assert report.failures == ()
+    assert not report.phase3_ready
+    db.close()
+
+
+def test_corrupted_account_state_reports_replay_mismatch(tmp_path):
+    # Corrupt the materialized books after real fills: replay recomputes from
+    # events and must disagree — a gating failure (the CLI's exit-5 lane keys
+    # off failures being non-empty).
+    db = _run_one_cycle_with_fill(tmp_path)
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE current_account_state SET wallet_balance = '123456' WHERE run_id = 'r'"
+        )
+    report = validate_run(db, run_id="r")
+    assert report.accounting_replay_mismatch_count == 1
+    assert "replay ledger mismatch: current_account_state disagrees" in report.failures
+    assert not report.phase3_ready
     db.close()

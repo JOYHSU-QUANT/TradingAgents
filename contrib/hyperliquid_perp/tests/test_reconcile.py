@@ -360,3 +360,31 @@ def test_engine_pending_funding_backfills_via_reconcile(tmp_path):
     assert ledger.wallet_balance == wallet_before + D("-0.005") * 2
     assert repo.iter_funding_events(db.conn, "r", status="pending") == []
     db.close()
+
+
+def test_in_progress_attempt_suppresses_forced_cycle(tmp_path):
+    # Step 8 inverse: an in-progress decision attempt IS the immediate cycle
+    # (it resumes on the first poll), so a canceled plan must NOT also force
+    # next_decision_at to now — that would double-schedule the boundary.
+    db = _init(tmp_path)
+    clock, plan_id = _engine_with_plan(db, slices_filled=1)
+    future = clock.now() + timedelta(hours=3)
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(conn, "r", next_decision_at=future, updated_at=clock.now())
+        repo.insert_decision_attempt(
+            conn,
+            decision_attempt_id="r|live",
+            timestamp=clock.now(),
+            mode="paper",
+            run_id="r",
+            scheduled_at=clock.now(),
+            attempt_count=1,
+            status="in_progress",
+        )
+    now = clock.now() + timedelta(minutes=5)
+    report = reconcile_on_restart(db, run_id="r", now=now)
+    assert report.canceled_plan_ids == (plan_id,)  # the plan still dies
+    assert not report.forced_immediate_cycle
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert parse_instant(state["next_decision_at"]) == future  # untouched
+    db.close()

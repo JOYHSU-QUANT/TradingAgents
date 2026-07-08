@@ -25,15 +25,22 @@ booleans), so exporting is lossless and repeatable.
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import os
 from contextlib import suppress
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .db import Database
 from .repository import get_run
 
-__all__ = ["EXPORT_SPECS", "ExportError", "export_run"]
+__all__ = ["EXPORT_SPECS", "MANIFEST_NAME", "ExportError", "export_run"]
+
+# Written LAST, after every CSV landed: per-file atomicity (§1.1) cannot make
+# the eight-file *set* atomic, so the manifest is the set-coherence marker a
+# reader checks before cross-file joins.
+MANIFEST_NAME = "manifest.json"
 
 logger = logging.getLogger(__name__)
 
@@ -272,22 +279,32 @@ for _table, _spec, _extra in EXPORT_SPECS:
 del _table, _spec, _extra, _cols
 
 
-def _write_csv_atomic(path: Path, header: tuple[str, ...], rows: list[tuple]) -> None:
-    """Write one CSV via the §1.1 tmp-then-replace dance; clean the tmp on failure."""
+def _write_atomic(path: Path, write_body) -> None:
+    """The §1.1 tmp-then-replace dance; clean the tmp on failure.
+
+    ``write_body(fh)`` writes the whole payload to the open tmp handle.
+    """
     tmp = path.with_name(path.name + ".tmp")
     try:
         with tmp.open("w", encoding="utf-8", newline="") as fh:
-            writer = csv.writer(fh)
-            writer.writerow(header)
-            writer.writerows(rows)
+            write_body(fh)
             fh.flush()
         os.replace(tmp, path)
     except BaseException:
-        # Never leave a stray .tmp behind on a failed export; the official CSV
+        # Never leave a stray .tmp behind on a failed export; the official file
         # (if any) is untouched either way — os.replace is all-or-nothing.
         with suppress(OSError):  # best-effort cleanup
             tmp.unlink(missing_ok=True)
         raise
+
+
+def _write_csv_atomic(path: Path, header: tuple[str, ...], rows: list[tuple]) -> None:
+    def body(fh) -> None:
+        writer = csv.writer(fh)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+    _write_atomic(path, body)
 
 
 def export_run(db: Database, *, run_id: str, output_dir: str | Path) -> list[Path]:
@@ -301,6 +318,7 @@ def export_run(db: Database, *, run_id: str, output_dir: str | Path) -> list[Pat
     try:
         out.mkdir(parents=True, exist_ok=True)
         written: list[Path] = []
+        row_counts: dict[str, int] = {}
         # One read snapshot across all eight tables: an export racing the
         # engine's writer loops must not show a fill whose account snapshot
         # is missing (or vice versa) across files.
@@ -316,6 +334,21 @@ def export_run(db: Database, *, run_id: str, output_dir: str | Path) -> list[Pat
                 path = out / f"{table}.csv"
                 _write_csv_atomic(path, columns, [tuple(r) for r in rows])
                 written.append(path)
+                row_counts[f"{table}.csv"] = len(rows)
+        # The set-coherence marker, written only after every CSV replaced
+        # successfully: a torn set (mid-set crash, disk full at table 5) leaves
+        # the previous manifest in place, whose row counts then disagree with
+        # the newer files — a detectable signal instead of phantom orphans.
+        manifest_path = out / MANIFEST_NAME
+        manifest = {
+            "run_id": run_id,
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "files": row_counts,
+        }
+        _write_atomic(
+            manifest_path, lambda fh: fh.write(json.dumps(manifest, ensure_ascii=False, indent=2))
+        )
+        written.append(manifest_path)
         return written
     except Exception as exc:
         # Uniform failure surface (§1.1): callers log export_failed and keep

@@ -62,6 +62,26 @@ def test_migrations_idempotent_on_reopen(tmp_path):
     db.close()
 
 
+def test_v3_adds_scheduler_state_operational_columns(tmp_path):
+    # v3: the single-instance lease + CSV-export breadcrumbs live on
+    # scheduler_state; a fresh DB must carry them and record versions 1..3.
+    db = Database(tmp_path / "p.db")
+    cols = {r[1] for r in db.conn.execute("PRAGMA table_info(scheduler_state)")}
+    for expected in (
+        "lock_pid",
+        "lock_heartbeat_at",
+        "last_export_status",
+        "last_export_error",
+        "last_export_at",
+    ):
+        assert expected in cols
+    versions = [
+        r[0] for r in db.conn.execute("SELECT version FROM schema_migrations ORDER BY version")
+    ]
+    assert versions == [1, 2, 3]
+    db.close()
+
+
 def test_all_tables_exist(tmp_path):
     db = Database(tmp_path / "p.db")
     names = {r[0] for r in db.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -753,6 +773,108 @@ def test_scheduler_state_fresh_partial_insert_leaves_rest_null(tmp_path):
     assert row["last_decision_at"] is None
     assert row["last_input_id"] is None
     assert row["updated_at"] is not None  # always stamped
+    db.close()
+
+
+def test_scheduler_state_patch_semantics_for_v3_columns(tmp_path):
+    db = Database(tmp_path / "p.db")
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(
+            conn,
+            "r1",
+            lock_pid=1234,
+            lock_heartbeat_at=_TS,
+            last_export_status="ok",
+            last_export_error=None,
+            last_export_at=_TS,
+        )
+    row = repo.get_scheduler_state(db.conn, "r1")
+    assert row["lock_pid"] == 1234
+    assert row["lock_heartbeat_at"] == _TS.isoformat()
+    assert row["last_export_status"] == "ok"
+    assert row["last_export_error"] is None
+    assert row["last_export_at"] == _TS.isoformat()
+    # Omitted keywords preserve the stored value; supplied ones change it.
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(
+            conn, "r1", last_export_status="failed", last_export_error="disk full"
+        )
+    row = repo.get_scheduler_state(db.conn, "r1")
+    assert row["lock_pid"] == 1234  # lease untouched by an export update
+    assert row["lock_heartbeat_at"] == _TS.isoformat()
+    assert row["last_export_status"] == "failed"
+    assert row["last_export_error"] == "disk full"
+    # An explicit None is a deliberate clear, distinct from "not supplied".
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(conn, "r1", lock_pid=None, lock_heartbeat_at=None)
+    row = repo.get_scheduler_state(db.conn, "r1")
+    assert row["lock_pid"] is None
+    assert row["lock_heartbeat_at"] is None
+    assert row["last_export_status"] == "failed"  # breadcrumbs untouched by release
+    db.close()
+
+
+def test_upsert_scheduler_state_rejects_bad_export_status(tmp_path):
+    db = Database(tmp_path / "p.db")
+    with pytest.raises(ValueError, match="last_export_status"), db.transaction() as conn:
+        repo.upsert_scheduler_state(conn, "r1", last_export_status="bogus")
+    assert repo.get_scheduler_state(db.conn, "r1") is None  # nothing written
+    db.close()
+
+
+def test_decision_attempt_error_type_validated_at_write_boundary(tmp_path):
+    db = Database(tmp_path / "p.db")
+    aid = decision_attempt_id("r1", _TS)
+    with db.transaction() as conn:
+        repo.insert_decision_attempt(
+            conn,
+            decision_attempt_id=aid,
+            timestamp=_TS,
+            mode="paper",
+            run_id="r1",
+            scheduled_at=_TS,
+            status="in_progress",
+        )
+    # The §6.2 vocabulary is exact — "Timeout" is a typo, not a variant.
+    with pytest.raises(ValueError, match="error_type"), db.transaction() as conn:
+        repo.update_decision_attempt(conn, aid, error_type="Timeout")
+    with db.transaction() as conn:
+        repo.update_decision_attempt(conn, aid, error_type="timeout")  # accepted
+    assert repo.get_decision_attempt(db.conn, aid)["error_type"] == "timeout"
+    with db.transaction() as conn:
+        repo.update_decision_attempt(conn, aid, error_type=None)  # explicit clear
+    assert repo.get_decision_attempt(db.conn, aid)["error_type"] is None
+    # The insert path guards the same vocabulary.
+    with pytest.raises(ValueError, match="error_type"), db.transaction() as conn:
+        repo.insert_decision_attempt(
+            conn,
+            decision_attempt_id="other",
+            timestamp=_TS,
+            mode="paper",
+            run_id="r1",
+            scheduled_at=datetime(2026, 7, 1, 4, tzinfo=timezone.utc),
+            status="in_progress",
+            error_type="Timeout",
+        )
+    db.close()
+
+
+def test_insert_funding_event_validates_source(tmp_path):
+    db = Database(tmp_path / "p.db")
+    base = {
+        "mode": "paper",
+        "run_id": "r1",
+        "symbol": "BTC",
+        "funding_timestamp": _TS,
+        "position_size": Decimal("0.05"),
+        "status": "pending",
+        "mark_price": Decimal("60000"),
+    }
+    with pytest.raises(ValueError, match="source"), db.transaction() as conn:
+        repo.insert_funding_event(conn, funding_event_id="f-bad", source="bogus", **base)
+    with db.transaction() as conn:
+        repo.insert_funding_event(conn, funding_event_id="f-ok", source="live_public_data", **base)
+    assert repo.get_funding_event(db.conn, "f-ok")["source"] == "live_public_data"
     db.close()
 
 

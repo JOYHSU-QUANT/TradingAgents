@@ -46,6 +46,13 @@ _SUBCOMMANDS = ("paper", "export", "validate")
 PROMPT_VERSION = "phase2-target-v1"
 
 
+def _raise_keyboard_interrupt(signum, frame) -> None:
+    """SIGTERM → the SIGINT path: systemd/docker/``kill`` stop with the default
+    TERM signal, and phase2-data §1.1's shutdown export must fire for them
+    exactly as it does for Ctrl-C."""
+    raise KeyboardInterrupt
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:]) if argv is None else list(argv)
     if not argv or argv[0] not in _SUBCOMMANDS:
@@ -234,22 +241,20 @@ def _cmd_paper(argv: list[str]) -> int:
         return 1
 
     import os
+    import signal
 
-    # Heavy/engine imports deferred so `export`/`validate` stay light.
+    # Heavy/engine imports deferred so `export`/`validate` stay light (the
+    # engine/scheduler stack is imported by _cmd_paper_locked once the lease
+    # is in hand).
     from .exchanges.hyperliquid.errors import ExchangeError
     from .exchanges.hyperliquid.market_data import HyperliquidMarketData
     from .exchanges.hyperliquid.sdk_client import HyperliquidClient
     from .main import _load_risk_decision, _resolve_coin
-    from .paper import accounting
     from .paper.clock import WallClock
     from .paper.config import PaperTradingConfig
-    from .paper.engine import AssetSpec, PaperExecutionEngine
-    from .paper.market_feed import PortSnapshotProvider
-    from .paper.reconcile import ReconciliationError, reconcile_on_restart
-    from .paper.scheduler import PaperScheduler
+    from .paper.engine import AssetSpec
+    from .paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
     from .persistence import repository as repo
-    from .persistence.models import PositionState
-    from .persistence.schema import SCHEMA_VERSION
 
     if not os.environ.get("OPENROUTER_API_KEY"):
         print(
@@ -296,98 +301,139 @@ def _cmd_paper(argv: list[str]) -> int:
                 file=sys.stderr,
             )
             return 1
-        if not is_restart:
-            seeds = [
-                PositionState(coin=p.coin, size=p.size, entry_price=p.entry_price)
-                for p in paper_cfg.account.initial_positions
-            ]
-            accounting.initialize_run(
-                db,
-                run_id=run_id,
-                mode="paper",
-                initial_balance_usdc=paper_cfg.account.initial_balance_usdc,
-                schema_version=SCHEMA_VERSION,
-                initial_positions=seeds,
-                # Only the behaviour-defining blocks — never network/wallet keys.
-                config_json=json.dumps(
-                    _run_config_subset(config, coin), ensure_ascii=False, default=str
-                ),
-                created_at=now,
-            )
-            print(f"created paper run {run_id!r} in {db_path}", file=sys.stderr)
-        else:
-            # Resuming an existing run under drifted config would silently
-            # change behaviour mid-run while every metric treats it as one
-            # homogeneous run: a coin mismatch is a hard error, parameter
-            # drift a loud warning.
-            run_row = repo.get_run(db.conn, run_id)
-            assert run_row is not None  # is_restart established the row exists
-            drift = _config_drift_report(run_row["config_json"], config, coin)
-            if drift is not None:
-                kind, message = drift
-                if kind == "coin":
-                    print(f"error: {message}", file=sys.stderr)
-                    return 1
-                print(f"WARNING: {message}", file=sys.stderr)
-            try:
-                report = reconcile_on_restart(
-                    db, run_id=run_id, now=now, funding_source=funding_source
-                )
-            except ReconciliationError as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                return 1
+        if is_restart and args.create:
+            # The flag exists to make store identity explicit in BOTH
+            # directions: silently resuming here would append to an old run
+            # (old position, old ledger, old schedule) when the operator
+            # plausibly meant a fresh acceptance run — contaminating every
+            # §5 metric without a word.
             print(
-                f"restart reconciliation for {run_id!r}: "
-                f"{len(report.canceled_plan_ids)} plan(s) canceled, "
-                f"{report.funding_posted} funding event(s) backfilled"
-                + (", immediate cycle forced" if report.forced_immediate_cycle else ""),
+                f"error: run {run_id!r} already exists in {db_path}. Drop --create "
+                "to resume it, or pick a new --run-id for a fresh run.",
                 file=sys.stderr,
             )
-
-        engine = PaperExecutionEngine(
-            db=db,
-            run_id=run_id,
-            asset=asset,
-            clock=clock,
-            provider=PortSnapshotProvider(market, clock),
-            risk_config=risk_cfg,
-            decision_config=decision_cfg,
-            paper_config=paper_cfg,
-            funding_source=funding_source,
-        )
-        if is_restart and engine.has_active_work():
-            # §1.2 step 6: the restart was a blind window — the first tick must
-            # treat a crossed SL as a gap stop, not a normal trigger-price fill.
-            # Armed only when the blind window had something to watch (a position
-            # or live protection): on a flat restart the forced immediate cycle
-            # can open a NEW position via poll() before any tick ever runs, and
-            # an unconsumed flag would mislabel that fresh position's first real
-            # SL trigger as a restart gap fill.
-            engine.flag_restart_gap()
-        provider = _EngineDecisionProvider(
-            config,
-            risk_cfg=risk_cfg,
-            decision_cfg=decision_cfg,
-            payload_dir=db_path.resolve().parent / "payloads" / run_id,
-        )
-        scheduler = PaperScheduler(
-            db=db,
-            run_id=run_id,
-            engine=engine,
-            clock=clock,
-            provider=provider,
-            asset=asset,
-            risk_config=risk_cfg,
-            decision_config=decision_cfg,
-        )
-        interval = paper_cfg.execution.market_monitor.interval_seconds
+            return 1
+        # One live process per run: taken BEFORE the destructive restart
+        # reconciliation, which assumes the previous process is dead.
         try:
-            _paper_loop(db, run_id, engine, scheduler, clock, interval, export_dir, funding_source)
-        except KeyboardInterrupt:
-            print("\nshutting down — final export...", file=sys.stderr)
-            _post_cycle_export(db, run_id, export_dir)
+            acquire_run_lock(db, run_id, pid=os.getpid(), now=now)
+        except RunLockError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        # From here the lease is ours; release it on every exit (the except
+        # paths below return, a crash leaves it to go stale on its own).
+        signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+
+        def _run_locked() -> int:
+            """The lease-holding tail of ``paper``: create/reconcile, then the loop."""
+            from .paper import accounting
+            from .paper.engine import PaperExecutionEngine
+            from .paper.market_feed import PortSnapshotProvider
+            from .paper.reconcile import ReconciliationError, reconcile_on_restart
+            from .paper.scheduler import PaperScheduler
+            from .persistence import repository as repo
+            from .persistence.models import PositionState
+            from .persistence.schema import SCHEMA_VERSION
+
+            if not is_restart:
+                seeds = [
+                    PositionState(coin=p.coin, size=p.size, entry_price=p.entry_price)
+                    for p in paper_cfg.account.initial_positions
+                ]
+                accounting.initialize_run(
+                    db,
+                    run_id=run_id,
+                    mode="paper",
+                    initial_balance_usdc=paper_cfg.account.initial_balance_usdc,
+                    schema_version=SCHEMA_VERSION,
+                    initial_positions=seeds,
+                    # Only the behaviour-defining blocks — never network/wallet keys.
+                    config_json=json.dumps(
+                        _run_config_subset(config, coin), ensure_ascii=False, default=str
+                    ),
+                    created_at=now,
+                )
+                print(f"created paper run {run_id!r} in {db_path}", file=sys.stderr)
+            else:
+                # Resuming an existing run under drifted config would silently
+                # change behaviour mid-run while every metric treats it as one
+                # homogeneous run: a coin mismatch is a hard error, parameter
+                # drift a loud warning.
+                run_row = repo.get_run(db.conn, run_id)
+                assert run_row is not None  # is_restart established the row exists
+                drift = _config_drift_report(run_row["config_json"], config, coin)
+                if drift is not None:
+                    kind, message = drift
+                    if kind == "coin":
+                        print(f"error: {message}", file=sys.stderr)
+                        return 1
+                    print(f"WARNING: {message}", file=sys.stderr)
+                try:
+                    report = reconcile_on_restart(
+                        db, run_id=run_id, now=now, funding_source=funding_source
+                    )
+                except ReconciliationError as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 1
+                print(
+                    f"restart reconciliation for {run_id!r}: "
+                    f"{len(report.canceled_plan_ids)} plan(s) canceled, "
+                    f"{report.funding_posted} funding event(s) backfilled"
+                    + (", immediate cycle forced" if report.forced_immediate_cycle else ""),
+                    file=sys.stderr,
+                )
+
+            engine = PaperExecutionEngine(
+                db=db,
+                run_id=run_id,
+                asset=asset,
+                clock=clock,
+                provider=PortSnapshotProvider(market, clock),
+                risk_config=risk_cfg,
+                decision_config=decision_cfg,
+                paper_config=paper_cfg,
+                funding_source=funding_source,
+            )
+            if is_restart and engine.has_active_work():
+                # §1.2 step 6: the restart was a blind window — the first tick must
+                # treat a crossed SL as a gap stop, not a normal trigger-price fill.
+                # Armed only when the blind window had something to watch (a position
+                # or live protection): on a flat restart the forced immediate cycle
+                # can open a NEW position via poll() before any tick ever runs, and
+                # an unconsumed flag would mislabel that fresh position's first real
+                # SL trigger as a restart gap fill.
+                engine.flag_restart_gap()
+            provider = _EngineDecisionProvider(
+                config,
+                risk_cfg=risk_cfg,
+                decision_cfg=decision_cfg,
+                payload_dir=db_path.resolve().parent / "payloads" / run_id,
+            )
+            scheduler = PaperScheduler(
+                db=db,
+                run_id=run_id,
+                engine=engine,
+                clock=clock,
+                provider=provider,
+                asset=asset,
+                risk_config=risk_cfg,
+                decision_config=decision_cfg,
+            )
+            interval = paper_cfg.execution.market_monitor.interval_seconds
+            try:
+                _paper_loop(
+                    db, run_id, engine, scheduler, clock, interval, export_dir, funding_source
+                )
+            except KeyboardInterrupt:
+                print("\nshutting down — final export...", file=sys.stderr)
+                _post_cycle_export(db, run_id, export_dir)
+                return 0
             return 0
-    return 0
+
+        try:
+            return _run_locked()
+        finally:
+            release_run_lock(db, run_id, pid=os.getpid(), now=clock.now())
 
 
 def _paper_loop(
@@ -405,12 +451,21 @@ def _paper_loop(
     A cycle-boundary replay mismatch stops NEW decisions (the books can no
     longer be trusted for sizing) but keeps the engine ticking — SL/TP
     protection and the market monitor must survive (spec §5 / data §1.1).
+
+    Every iteration refreshes the single-instance lease, so the sleep is
+    capped at 60s (well inside ``LOCK_STALE_SECONDS``) — an idle iteration
+    still touches only SQLite, never market data.
     """
+    import os
+
     from .paper.reconcile import backfill_pending_funding
+    from .paper.run_lock import heartbeat_run_lock
     from .paper.scheduler import CycleEvent
 
+    pid = os.getpid()
     trading_halted = False
     while True:
+        heartbeat_run_lock(db, run_id, pid=pid, now=clock.now())
         if engine.has_active_work():
             engine.tick()
         result = scheduler.poll() if not trading_halted else None
@@ -448,18 +503,36 @@ def _paper_loop(
             delay = 600.0
         else:
             delay = max(1.0, min((due - now).total_seconds(), 600.0))
-        time.sleep(delay)
+        # The 60s cap keeps the lease heartbeat fresh; waking early is a cheap
+        # SQLite poll (nothing above issues market requests while idle).
+        time.sleep(min(delay, 60.0))
 
 
 def _post_cycle_export(db, run_id: str, export_dir: Path) -> bool:
     """Replay-verify then export (phase2-data §1.1); returns whether the books verified.
 
     An export failure never stops trading (spec: record ``export_failed`` and
-    carry on); a replay mismatch or replay *failure* returns ``False`` so the
-    caller can stop opening new positions on unverifiable books.
+    carry on) — but it IS durably recorded on ``scheduler_state``
+    (``last_export_status`` / ``last_export_error`` / ``last_export_at``), so a
+    post-mortem can tell how long the CSV view had been stale even when stderr
+    was not captured. A replay mismatch or replay *failure* returns ``False``
+    so the caller can stop opening new positions on unverifiable books.
     """
     from .paper import accounting
+    from .persistence import repository as repo
     from .persistence.export import ExportError, export_run
+
+    def _record(status: str, error: str | None) -> None:
+        stamp = datetime.now(timezone.utc)
+        with db.transaction() as conn:
+            repo.upsert_scheduler_state(
+                conn,
+                run_id,
+                last_export_status=status,
+                last_export_error=error,
+                last_export_at=stamp,
+                updated_at=stamp,
+            )
 
     replay_ok = True
     try:
@@ -478,11 +551,13 @@ def _post_cycle_export(db, run_id: str, export_dir: Path) -> bool:
         print(f"WARNING: accounting replay failed: {exc}", file=sys.stderr)
     try:
         export_run(db, run_id=run_id, output_dir=export_dir)
+        _record("ok", None)
         print(f"exported CSVs to {export_dir}", file=sys.stderr)
     except ExportError as exc:
         # §1.1: record export_failed, keep the monitor and protections running.
         logger.error("export_failed for %s: %s", run_id, exc)
         print(f"WARNING: export_failed — {exc}", file=sys.stderr)
+        _record("failed", str(exc))
     return replay_ok
 
 

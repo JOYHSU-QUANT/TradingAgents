@@ -268,6 +268,53 @@ def test_retry_ladder_then_api_failed(tmp_path):
     db.close()
 
 
+class _SlowFailingProvider(_FakeProvider):
+    """The scripted call itself consumes clock time (a real timeout does)."""
+
+    def __init__(self, outcomes, clock, seconds):
+        super().__init__(outcomes)
+        self._clock = clock
+        self._seconds = seconds
+
+    def request_decision(self, decision_input: DecisionInput) -> ParsedDecision:
+        self._clock.advance(self._seconds)
+        return super().request_decision(decision_input)
+
+
+def test_retry_backoff_counts_from_failure_instant(tmp_path):
+    # §3.1's ladder counts from when the try FAILED, not when it started: a
+    # 45s in-flight timeout must still be followed by a full 10s wait.
+    db, clock, engine, _scheduler, _ = _setup(tmp_path, [], [_snap()])
+    provider = _SlowFailingProvider([_err("timeout"), _decision("long", 1)], clock, 45)
+    scheduler = PaperScheduler(
+        db=db,
+        run_id="r",
+        engine=engine,
+        clock=clock,
+        provider=provider,
+        asset=engine._asset,
+        risk_config=engine._risk,
+        decision_config=DecisionConfig(),
+    )
+    r1 = scheduler.poll()
+    assert r1.event is CycleEvent.RETRY_SCHEDULED
+    assert clock.now() == _T0 + timedelta(seconds=45)  # the call burned 45s
+    assert r1.retry_at == _T0 + timedelta(seconds=45 + 10)  # failure instant + 10s
+    # last_attempt_at was re-stamped to the failure instant, so a restart
+    # computes the same basis.
+    row = _attempt_row(db, r1.decision_attempt_id)
+    assert parse_instant(row["last_attempt_at"]) == _T0 + timedelta(seconds=45)
+
+    assert scheduler.poll() is None  # immediately after the failure: not due
+    clock.advance(9)
+    assert scheduler.poll() is None  # one second before retry_at: still waiting
+    clock.advance(1)
+    r2 = scheduler.poll()  # at retry_at: re-attempts
+    assert r2.event is CycleEvent.COMPLETED
+    assert provider.decide_calls == 2
+    db.close()
+
+
 def test_retry_counter_survives_restart(tmp_path):
     db, clock, engine, scheduler, provider = _setup(tmp_path, [_err()], [])
     r1 = scheduler.poll()
@@ -376,6 +423,19 @@ def test_pending_market_data_retries_gate_without_second_ai_call(tmp_path):
 # --------------------------------------------------------------------------
 # result-shape guards
 # --------------------------------------------------------------------------
+
+
+def test_decision_input_rejects_half_candle_window():
+    ctx = _ctx(_T0)
+    # The candle boundaries are one §5 audit pair — one without the other is
+    # malformed, not narrower.
+    with pytest.raises(ValueError, match="candle_start"):
+        DecisionInput(context=ctx, candle_start=_T0)
+    with pytest.raises(ValueError, match="candle_start"):
+        DecisionInput(context=ctx, candle_end=_T0)
+    # Both supplied (or both omitted) is fine.
+    DecisionInput(context=ctx, candle_start=_T0, candle_end=_T0 + timedelta(hours=4))
+    DecisionInput(context=ctx)
 
 
 def test_poll_result_shape_guards():

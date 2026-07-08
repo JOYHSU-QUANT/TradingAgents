@@ -127,11 +127,18 @@ class DecisionInput:
     def __post_init__(self) -> None:
         # Path and hash are two halves of one artifact (phase2-data §5: the
         # store keeps path + hash together); a provider supplying one without
-        # the other would persist an audit row that can't be verified.
+        # the other would persist an audit row that can't be verified. The
+        # candle window is the same kind of pair: one boundary without the
+        # other is a malformed §5 audit row, not a narrower one.
         if (self.input_payload_path is None) != (self.input_payload_hash is None):
             raise ValueError(
                 "DecisionInput.input_payload_path and input_payload_hash must be "
                 "provided together (or both omitted)"
+            )
+        if (self.candle_start is None) != (self.candle_end is None):
+            raise ValueError(
+                "DecisionInput.candle_start and candle_end must be provided "
+                "together (or both omitted)"
             )
 
 
@@ -385,7 +392,7 @@ class PaperScheduler:
             self._insert_ai_input(now, input_id, attempt_id, decision_input)
             parsed = self._provider.request_decision(decision_input)
         except RetryableDecisionError as exc:
-            return self._record_failure(now, attempt_id, scheduled_at, count, exc)
+            return self._record_failure(attempt_id, scheduled_at, count, exc)
         # Persist the response BEFORE gating: from here on, a crash or a
         # market-data-blocked gate resumes from this stored text instead of
         # spending another AI call (spec §3.1 — no duplicate decision).
@@ -427,7 +434,6 @@ class PaperScheduler:
 
     def _record_failure(
         self,
-        now: datetime,
         attempt_id: str,
         scheduled_at: datetime,
         count: int,
@@ -441,9 +447,16 @@ class PaperScheduler:
             exc.error_type,
             exc.message,
         )
+        # The §3.1 ladder counts from the *failure* instant ("attempt 1 失敗 →
+        # wait 10 seconds"), not from when the try started: a timing-out call
+        # burns its whole delay in flight, and basing retry_at on the pre-call
+        # stamp would fire the whole ladder back-to-back in exactly the outage
+        # the back-off exists for. ``last_attempt_at`` is re-stamped to the
+        # failure instant so a restarted process waits the same delay.
+        failed_at = self._clock.now()
         if count >= MAX_DECISION_ATTEMPTS:
             return self._terminalize_api_failed(
-                now,
+                failed_at,
                 attempt_id=attempt_id,
                 scheduled_at=scheduled_at,
                 attempt_count=count,
@@ -454,16 +467,17 @@ class PaperScheduler:
             repo.update_decision_attempt(
                 conn,
                 attempt_id,
+                last_attempt_at=failed_at,
                 error_type=exc.error_type,
                 error_message=exc.message,
-                timestamp=now,
+                timestamp=failed_at,
             )
         return PollResult(
             event=CycleEvent.RETRY_SCHEDULED,
             decision_attempt_id=attempt_id,
             scheduled_at=scheduled_at,
             attempt_count=count,
-            retry_at=now + timedelta(seconds=RETRY_DELAYS_SECONDS[count - 1]),
+            retry_at=failed_at + timedelta(seconds=RETRY_DELAYS_SECONDS[count - 1]),
         )
 
     def _terminalize_api_failed(

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import csv
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -12,7 +13,12 @@ import pytest
 from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.persistence import export as export_mod
 from contrib.hyperliquid_perp.persistence.db import Database
-from contrib.hyperliquid_perp.persistence.export import EXPORT_SPECS, ExportError, export_run
+from contrib.hyperliquid_perp.persistence.export import (
+    EXPORT_SPECS,
+    MANIFEST_NAME,
+    ExportError,
+    export_run,
+)
 
 D = Decimal
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
@@ -59,8 +65,9 @@ def test_exports_all_eight_csvs_with_contract_headers(tmp_path):
     out = tmp_path / "exports"
     paths = export_run(db, run_id="r", output_dir=out)
 
-    assert [p.name for p in paths] == [f"{t}.csv" for t in _EXPECTED_TABLES]
-    for (table, spec_cols, extra_cols), path in zip(EXPORT_SPECS, paths, strict=True):
+    # Eight CSVs plus the set-coherence manifest, written (and returned) LAST.
+    assert [p.name for p in paths] == [*(f"{t}.csv" for t in _EXPECTED_TABLES), MANIFEST_NAME]
+    for (table, spec_cols, extra_cols), path in zip(EXPORT_SPECS, paths[:-1], strict=True):
         with path.open(encoding="utf-8", newline="") as fh:
             header = next(csv.reader(fh))
         assert tuple(header) == (*spec_cols, *extra_cols), table
@@ -84,10 +91,51 @@ def test_export_is_repeatable_and_scoped_to_run(tmp_path):
     _post_one_fill(db)
     out = tmp_path / "exports"
     export_run(db, run_id="r", output_dir=out)
-    # Re-export replaces the files in place (same content, no stray tmp files).
+    # Re-export replaces the files in place (same content, no stray tmp files);
+    # the only non-CSV in the directory is the manifest itself.
     export_run(db, run_id="r", output_dir=out)
-    leftovers = [p for p in Path(out).iterdir() if p.suffix != ".csv"]
-    assert leftovers == []
+    leftovers = [p.name for p in Path(out).iterdir() if p.suffix != ".csv"]
+    assert leftovers == [MANIFEST_NAME]
+    db.close()
+
+
+def test_manifest_records_run_and_row_counts(tmp_path):
+    db = _init(tmp_path)
+    _post_one_fill(db)
+    out = tmp_path / "exports"
+    paths = export_run(db, run_id="r", output_dir=out)
+    assert paths[-1] == out / MANIFEST_NAME
+    manifest = json.loads((out / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert manifest["run_id"] == "r"
+    exported_at = datetime.fromisoformat(manifest["exported_at"])
+    assert exported_at.tzinfo is not None and exported_at.utcoffset() == timedelta(0)
+    # One entry per exported CSV, counting data rows (header excluded).
+    assert set(manifest["files"]) == {f"{t}.csv" for t in _EXPECTED_TABLES}
+    assert manifest["files"]["fills.csv"] == 1
+    for name, count in manifest["files"].items():
+        with (out / name).open(encoding="utf-8", newline="") as fh:
+            assert count == sum(1 for _ in csv.reader(fh)) - 1, name
+    db.close()
+
+
+def test_failed_manifest_write_leaves_no_tmp(tmp_path, monkeypatch):
+    db = _init(tmp_path)
+    _post_one_fill(db)
+    out = tmp_path / "exports"
+    real_replace = export_mod.os.replace
+
+    def _boom_on_manifest(src, dst):
+        if Path(dst).name == MANIFEST_NAME:
+            raise OSError("disk full")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(export_mod.os, "replace", _boom_on_manifest)
+    with pytest.raises(ExportError, match="disk full"):
+        export_run(db, run_id="r", output_dir=out)
+    # The eight CSVs landed; the torn set has no manifest and no stray .tmp.
+    assert sorted(p.name for p in Path(out).iterdir()) == sorted(
+        f"{t}.csv" for t in _EXPECTED_TABLES
+    )
     db.close()
 
 

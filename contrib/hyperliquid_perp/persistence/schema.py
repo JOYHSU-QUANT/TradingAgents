@@ -26,7 +26,7 @@ from __future__ import annotations
 
 __all__ = ["MIGRATIONS", "SCHEMA_MIGRATIONS_DDL", "SCHEMA_VERSION"]
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # --------------------------------------------------------------------------
 # Export logical tables (phase2-data §5–§12) — one-to-one with CSV exports.
@@ -372,4 +372,17 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     # a restart must never produce a duplicate AI decision). Internal column —
     # cleared when the attempt terminalizes, never exported to CSV.
     2: ("ALTER TABLE decision_attempts ADD COLUMN pending_raw_response TEXT",),
+    # v3: operational state on scheduler_state. The single-instance lease
+    # (lock_pid + lock_heartbeat_at — a second `paper` process on the same run
+    # must refuse to start while the holder's heartbeat is fresh) and the CSV
+    # export breadcrumbs (last_export_status/error/at — export failures are
+    # warn-and-carry-on, so without a durable record a post-mortem can't tell
+    # how long the CSV view had been stale). Internal columns, never exported.
+    3: (
+        "ALTER TABLE scheduler_state ADD COLUMN lock_pid INTEGER",
+        "ALTER TABLE scheduler_state ADD COLUMN lock_heartbeat_at TEXT",
+        "ALTER TABLE scheduler_state ADD COLUMN last_export_status TEXT",
+        "ALTER TABLE scheduler_state ADD COLUMN last_export_error TEXT",
+        "ALTER TABLE scheduler_state ADD COLUMN last_export_at TEXT",
+    ),
 }

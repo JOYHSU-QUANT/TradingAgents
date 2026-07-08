@@ -142,16 +142,19 @@ PR 4 的 subcommand CLI（`python -m contrib.hyperliquid_perp <sub>`；非 subco
 的 argv 原樣走上面 A/B 的 legacy 路徑，行為不變）：
 
 ```bash
-# 首次啟動（--create 才允許建立新 store／新 run——防走錯目錄靜默分叉歷史）：
+# 首次啟動（--create 才允許建立新 store／新 run——防走錯目錄靜默分叉歷史；
+# 反向也成立：run 已存在時帶 --create 會報錯，避免以為開新 run 其實在舊 run 續寫）：
 python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db --create
 
 # 之後重啟（不帶 --create；DB 或 run 不存在會具名報錯）。重啟時自動做
 # execution §1.2 的 reconciliation（取消舊 plan、補帳 pending funding、replay 驗證、
 # gap SL 檢查、立即開新 cycle），並比對 genesis config：換 coin 硬錯、
 # risk/decision/paper_trading 漂移警告。同一個 --run-id 續跑同一個 run。
+# 單實例鎖：同一 run 已有活著的 process（scheduler_state 心跳 < 900s）時啟動報錯。
 python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db
 
-# 手動全量 CSV export（八張 phase2-data §5–§12 CSV；.tmp → atomic replace）
+# 手動全量 CSV export（八張 phase2-data §5–§12 CSV；.tmp → atomic replace；
+# 最後寫 manifest.json 標記整組一致——讀取方先驗 manifest 再做跨檔 join）
 python -m contrib.hyperliquid_perp export --run-id paper-BTC --output-dir exports/
 
 # 驗收器：13 項 summary 指標 + 鏈路完整性 + 可進 Phase 3 判定
@@ -159,8 +162,10 @@ python -m contrib.hyperliquid_perp validate --run-id paper-BTC
 ```
 
 `paper` 每個 cycle 完成（含 `invalid_output`／`api_failed`）會先跑 accounting
-replay 再自動 export CSV；Ctrl-C 正常 shutdown 也會做最後一次 export。CSV 只是
-SQLite 的 view——export 失敗只記 `export_failed`，不影響交易 state 與 SL/TP。
+replay 再自動 export CSV；Ctrl-C（SIGINT）與 SIGTERM（systemd／docker／`kill`）
+的正常 shutdown 都會做最後一次 export。CSV 只是 SQLite 的 view——export 失敗只記
+`export_failed`（stderr + `scheduler_state.last_export_status/error/at` 持久化），
+不影響交易 state 與 SL/TP。
 完整 AI payload JSON 存於 `<db 目錄>/payloads/<run_id>/`，`ai_inputs` 記其路徑與
 sha256。
 

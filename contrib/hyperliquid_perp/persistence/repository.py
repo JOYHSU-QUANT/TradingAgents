@@ -73,6 +73,14 @@ _MODES = frozenset({"paper", "live"})
 _LIQUIDITY_TYPES = frozenset({"maker", "taker", "simulated"})
 _FLIP_LEGS = frozenset({"open", "close"})
 _FUNDING_STATUSES = frozenset({"pending", "posted"})
+# phase2-data §10 funding provenance vocabulary.
+_FUNDING_SOURCES = frozenset(
+    {"live_public_data", "funding_history_backfill", "exchange_user_funding"}
+)
+# The §6.2 retry vocabulary plus the scheduler's restart-interrupted marker.
+_ERROR_TYPES = frozenset({"timeout", "rate_limit", "connection", "server_error", "interrupted"})
+# scheduler_state CSV-export breadcrumb states (schema v3).
+_EXPORT_STATUSES = frozenset({"ok", "failed"})
 
 
 def _check_funding_identities(
@@ -536,6 +544,8 @@ def insert_funding_event(
     """
     check_enum(status, _FUNDING_STATUSES, name="status")
     check_enum(mode, _MODES, name="mode")
+    if source is not None:
+        check_enum(source, _FUNDING_SOURCES, name="source")
     if status == "posted":
         _check_posted_settlement_math(
             mark_price=mark_price,
@@ -622,6 +632,8 @@ def set_funding_status(
     live posting and an hours-later backfill stay distinguishable.
     """
     check_enum(status, _FUNDING_STATUSES, name="status")
+    if source is not None:
+        check_enum(source, _FUNDING_SOURCES, name="source")
     # Caller-supplied identities first (pure, no row needed) so an internally
     # inconsistent update is rejected identically whether or not the row exists.
     _check_funding_identities(
@@ -741,6 +753,8 @@ def insert_decision_attempt(conn: sqlite3.Connection, **fields: Any) -> None:
     """
     if "status" in fields:
         check_enum(fields["status"], _ATTEMPT_STATUSES, name="status")
+    if fields.get("error_type") is not None:
+        check_enum(fields["error_type"], _ERROR_TYPES, name="error_type")
     _insert(conn, "decision_attempts", fields)
 
 
@@ -794,6 +808,8 @@ def update_decision_attempt(
     """
     if not isinstance(status, _Unset):
         check_enum(status, _ATTEMPT_STATUSES, name="status")
+    if not isinstance(error_type, _Unset) and error_type is not None:
+        check_enum(error_type, _ERROR_TYPES, name="error_type")
     row = get_decision_attempt(conn, decision_attempt_id)
     if row is None:
         raise ValueError(f"decision attempt {decision_attempt_id!r} does not exist")
@@ -1169,6 +1185,11 @@ def upsert_scheduler_state(
     last_input_id: str | None | _Unset = _UNSET,
     last_output_id: str | None | _Unset = _UNSET,
     current_attempt_id: str | None | _Unset = _UNSET,
+    lock_pid: int | None | _Unset = _UNSET,
+    lock_heartbeat_at: datetime | None | _Unset = _UNSET,
+    last_export_status: str | None | _Unset = _UNSET,
+    last_export_error: str | None | _Unset = _UNSET,
+    last_export_at: datetime | None | _Unset = _UNSET,
     updated_at: datetime | None = None,
 ) -> None:
     """Patch-style upsert: only the columns actually supplied change.
@@ -1180,6 +1201,8 @@ def upsert_scheduler_state(
     (``last_input_id`` / ``current_attempt_id``) this table exists to keep
     would be silently NULLed. ``updated_at`` is always stamped.
     """
+    if not isinstance(last_export_status, _Unset) and last_export_status is not None:
+        check_enum(last_export_status, _EXPORT_STATUSES, name="last_export_status")
     provided: dict[str, Any] = {}
     if not isinstance(last_decision_at, _Unset):
         provided["last_decision_at"] = _encode(last_decision_at)
@@ -1191,6 +1214,16 @@ def upsert_scheduler_state(
         provided["last_output_id"] = _encode(last_output_id)
     if not isinstance(current_attempt_id, _Unset):
         provided["current_attempt_id"] = _encode(current_attempt_id)
+    if not isinstance(lock_pid, _Unset):
+        provided["lock_pid"] = _encode(lock_pid)
+    if not isinstance(lock_heartbeat_at, _Unset):
+        provided["lock_heartbeat_at"] = _encode(lock_heartbeat_at)
+    if not isinstance(last_export_status, _Unset):
+        provided["last_export_status"] = _encode(last_export_status)
+    if not isinstance(last_export_error, _Unset):
+        provided["last_export_error"] = _encode(last_export_error)
+    if not isinstance(last_export_at, _Unset):
+        provided["last_export_at"] = _encode(last_export_at)
     provided["updated_at"] = _iso_utc(updated_at or datetime.now(timezone.utc))
 
     # Column names come from the fixed keyword list above, never caller data.

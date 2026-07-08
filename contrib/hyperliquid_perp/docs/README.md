@@ -170,7 +170,7 @@ Phase 3 的 agent-wallet private key）一律放環境變數，絕不放進任�
 | `domains/perp/config_coercion.py` | ✅ | 共用 YAML-coercion helpers（`config_overrides` · `decimal_from_yaml` · `int_from_yaml`），供 `RiskConfig` / `DecisionConfig` / `PaperTradingConfig` 三方使用。 |
 | `domains/perp/margin.py` | ✅ | Hyperliquid maintenance-margin tier model（rate · continuity deduction · tier 選擇；phase2-execution §6.6.1）。 |
 | `persistence/` | ✅ | SQLite source of truth · transaction · migrations · dedup 去重鍵 · typed repository（phase2-data §1／§5–§12）。 |
-| `persistence/export.py` | ✅ | 每 cycle／shutdown／手動的 per-run 全量 CSV export · 欄位依 phase2-data §5–§12 · `.tmp` → atomic replace · `export_failed` 不回滾交易 state（phase2-data §1.1）。 |
+| `persistence/export.py` | ✅ | 每 cycle／shutdown／手動的 per-run 全量 CSV export · 欄位依 phase2-data §5–§12 · `.tmp` → atomic replace · 末尾 `manifest.json` 整組一致性標記 · `export_failed` 不回滾交易 state（phase2-data §1.1）。 |
 | `paper/accounting.py` | ✅ | fills · fees（taker 0.045%）· funding exactly-once · account 公式 · accounting replay（phase2-execution §6）。 |
 | `paper/liquidation.py` | ✅ | paper estimated liquidation price · margin tier bisection（phase2-execution §6.6.1）。 |
 | `paper/config.py` | ✅ | typed `paper_trading:` block（phase2-execution §5.4）。 |
@@ -178,7 +178,8 @@ Phase 3 的 agent-wallet private key）一律放環境變數，絕不放進任�
 | `paper/scheduler.py` | ✅ | 4h rolling cycle · deterministic `decision_attempt_id` · 3-attempt retry（10s/30s，跨重啟延續）· `invalid_output` fail-closed · `ai_inputs`/`ai_outputs`/`decision_attempts` audit rows（phase2-spec §3／§3.1）。 |
 | `paper/reconcile.py` | ✅ | 重啟 reconciliation 九步：canceled_restart + residual · pending funding 以 stored basis 補帳 · replay 不一致拒絕啟動 · 立即開新 cycle（phase2-execution §1.2）。 |
 | `paper/validation.py` | ✅ | 驗收器：13 項 summary 指標 · orphan／snapshot／replay 鏈路檢查 · 可進 Phase 3 判定（phase2-spec §5）。 |
-| `cli.py` + `__main__.py` | ✅ | `python -m contrib.hyperliquid_perp paper / export / validate`；其餘 argv 原樣委派 legacy `main.py`（`--context-only` 不變）。 |
+| `paper/run_lock.py` | ✅ | 單實例 lease（`scheduler_state` 的 pid + heartbeat）：同一 run 同時只允許一個 `paper` process，防重複啟動互相取消活單、雙倍 AI 花費。 |
+| `cli.py` + `__main__.py` | ✅ | `python -m contrib.hyperliquid_perp paper / export / validate`；其餘 argv 原樣委派 legacy `main.py`（`--context-only` 不變）；SIGTERM 與 Ctrl-C 同樣走收尾 export。 |
 
 ### Phase 3 — live execution
 

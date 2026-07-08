@@ -31,6 +31,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -213,6 +214,24 @@ def _config_drift_report(
     return None
 
 
+def _require_api_key() -> bool:
+    """True when OPENROUTER_API_KEY is set; else print the abort message.
+
+    Checked only on paths that will actually drive the AI engine — a fresh run
+    (always) and a healthy restart. A restart into protection-only mode never
+    polls the AI, so it is allowed to run keyless (the operator just wants
+    SL/TP protection and the monitor alive).
+    """
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return True
+    print(
+        "error: OPENROUTER_API_KEY is not set — the paper run drives the AI engine "
+        "every 4h. Use --context-only (legacy CLI) for a keyless dev loop.",
+        file=sys.stderr,
+    )
+    return False
+
+
 def _cmd_paper(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m contrib.hyperliquid_perp paper",
@@ -254,7 +273,6 @@ def _cmd_paper(argv: list[str]) -> int:
         )
         return 1
 
-    import os
     import signal
 
     # Heavy/engine imports deferred so `export`/`validate` stay light (the
@@ -270,13 +288,6 @@ def _cmd_paper(argv: list[str]) -> int:
     from .paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
     from .persistence import repository as repo
 
-    if not os.environ.get("OPENROUTER_API_KEY"):
-        print(
-            "error: OPENROUTER_API_KEY is not set — the paper run drives the AI engine "
-            "every 4h. Use --context-only (legacy CLI) for a keyless dev loop.",
-            file=sys.stderr,
-        )
-        return 1
     try:
         config = load_config(args.config)
     except CONFIG_LOAD_ERRORS as exc:
@@ -351,6 +362,12 @@ def _cmd_paper(argv: list[str]) -> int:
 
             trading_halted = False
             if not is_restart:
+                # A fresh run always drives the AI — demand the key before
+                # writing the run row, so a keyless ``--create`` fails cleanly
+                # instead of leaving a half-created run that the next attempt
+                # then rejects as "already exists".
+                if not _require_api_key():
+                    return 1
                 seeds = [
                     PositionState(coin=p.coin, size=p.size, entry_price=p.entry_price)
                     for p in paper_cfg.account.initial_positions
@@ -418,6 +435,11 @@ def _cmd_paper(argv: list[str]) -> int:
                     + (", immediate cycle forced" if report.forced_immediate_cycle else ""),
                     file=sys.stderr,
                 )
+                # A healthy restart will poll the AI, so it needs the key; a
+                # protection-only restart (trading_halted) never does — let it
+                # run keyless. Checked here, after reconcile settles the mode.
+                if not trading_halted and not _require_api_key():
+                    return 1
 
             engine = PaperExecutionEngine(
                 db=db,
@@ -523,8 +545,6 @@ def _paper_loop(
     :class:`~.paper.run_lock.RunLockError` out of the loop (see
     :func:`~.paper.run_lock.heartbeat_run_lock`).
     """
-    import os
-
     from .paper.reconcile import backfill_pending_funding
     from .paper.run_lock import heartbeat_run_lock
     from .paper.scheduler import CycleEvent
@@ -612,6 +632,38 @@ def _stamp_breadcrumb(db, run_id: str, kind: str, status: str, error: str | None
         )
 
 
+_UNVERIFIED_MARKER = "REPLAY_UNVERIFIED.json"
+
+
+def _mark_export_verification(
+    export_dir: Path, run_id: str, replay_ok: bool, reason: str | None
+) -> None:
+    """Record, in-band next to the CSVs, whether the exported set passed replay.
+
+    ``scheduler_state`` (which carries the ``last_replay_*`` breadcrumb) is NOT
+    one of the exported tables, so a consumer reading the CSVs alone cannot tell
+    a mismatch cycle's export from a healthy one. When replay did not verify we
+    drop ``REPLAY_UNVERIFIED.json`` beside the CSVs; when it verifies we remove
+    any stale marker a previous bad cycle left behind (the export dir is reused
+    every cycle). Best-effort: a marker failure is logged, never raised — the
+    loop must survive, and the ``last_replay_*`` breadcrumb remains authoritative.
+    """
+    marker = Path(export_dir) / _UNVERIFIED_MARKER
+    try:
+        if replay_ok:
+            marker.unlink(missing_ok=True)
+        else:
+            marker.write_text(
+                json.dumps(
+                    {"run_id": run_id, "replay_verified": False, "reason": reason},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+    except OSError as exc:
+        logger.error("failed to update replay-verification marker for %s: %s", run_id, exc)
+
+
 def _post_cycle_export(db, run_id: str, export_dir: Path) -> bool:
     """Replay-verify then export (phase2-data §1.1); returns whether the books verified.
 
@@ -627,11 +679,12 @@ def _post_cycle_export(db, run_id: str, export_dir: Path) -> bool:
     from .persistence.export import ExportError, export_run
 
     replay_ok = True
+    replay_detail: str | None = None
     try:
         replayed = accounting.replay(db, run_id=run_id)
         if not replayed.is_consistent:
             replay_ok = False
-            detail = replayed.mismatch_detail
+            detail = replay_detail = replayed.mismatch_detail
             logger.error("accounting replay mismatch for %s: %s", run_id, detail)
             print(
                 f"WARNING: accounting replay mismatch for {run_id!r}: {detail} — "
@@ -643,11 +696,14 @@ def _post_cycle_export(db, run_id: str, export_dir: Path) -> bool:
             _stamp_breadcrumb(db, run_id, "replay", "ok", None)
     except Exception as exc:  # noqa: BLE001 — reconciliation must not kill the loop
         replay_ok = False  # unverifiable books are treated like inconsistent ones
+        replay_detail = str(exc)
         logger.error("accounting replay failed for %s: %s", run_id, exc)
         print(f"WARNING: accounting replay failed: {exc}", file=sys.stderr)
         _stamp_breadcrumb(db, run_id, "replay", "failed", str(exc))
+    export_ok = False
     try:
         export_run(db, run_id=run_id, output_dir=export_dir)
+        export_ok = True
         _stamp_breadcrumb(db, run_id, "export", "ok", None)
         print(f"exported CSVs to {export_dir}", file=sys.stderr)
     except ExportError as exc:
@@ -655,6 +711,12 @@ def _post_cycle_export(db, run_id: str, export_dir: Path) -> bool:
         logger.error("export_failed for %s: %s", run_id, exc)
         print(f"WARNING: export_failed — {exc}", file=sys.stderr)
         _stamp_breadcrumb(db, run_id, "export", "failed", str(exc))
+    # Mark the freshly written set as unverified when replay didn't pass, so a
+    # consumer reading the CSVs alone isn't misled (see _mark_export_verification).
+    # Only when a full set was actually (re)written — a failed export leaves the
+    # previous set and its marker untouched.
+    if export_ok:
+        _mark_export_verification(export_dir, run_id, replay_ok, replay_detail)
     return replay_ok
 
 

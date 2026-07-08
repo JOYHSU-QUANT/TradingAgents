@@ -16,8 +16,11 @@ from types import SimpleNamespace
 import pytest
 
 from contrib.hyperliquid_perp.cli import (
+    _UNVERIFIED_MARKER,
     _classify_engine_error,
     _config_drift_report,
+    _mark_export_verification,
+    _post_cycle_export,
     _raise_keyboard_interrupt,
     _run_config_subset,
     main as cli_main,
@@ -176,12 +179,78 @@ def test_paper_unknown_run_without_create_exits_1(tmp_path, capsys, paper_seams)
     assert "--create" in err
 
 
-def test_paper_missing_api_key_exits_1(tmp_path, capsys, monkeypatch):
-    # Returns before any network/config work — no seams needed.
+def test_paper_fresh_run_missing_api_key_exits_1(tmp_path, capsys, monkeypatch, paper_seams):
+    # A fresh run always drives the AI, so a missing key still refuses — but the
+    # check now fires in the fresh-run branch, BEFORE the run row is written, so a
+    # retry with the key still sees a clean --create (no half-created run).
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    rc = cli_main(["paper", "--coin", "BTC", "--db", str(tmp_path / "new.db"), "--create"])
+    path = tmp_path / "new.db"
+    rc = cli_main(_paper_argv(path, run_id="fresh", config=paper_seams, create=True))
     assert rc == 1
     assert "OPENROUTER_API_KEY" in capsys.readouterr().err
+    db = Database(path)
+    assert repo.get_run(db.conn, "fresh") is None  # not created before the key check
+    db.close()
+
+
+def test_paper_healthy_restart_missing_api_key_exits_1(tmp_path, capsys, monkeypatch, paper_seams):
+    # A healthy restart will poll the AI, so it too needs the key — but only after
+    # reconcile settles the mode (a protection-only restart is allowed keyless).
+    path, db = _seed_db(tmp_path)
+    db.close()
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    assert "OPENROUTER_API_KEY" in capsys.readouterr().err
+
+
+def test_mark_export_verification_writes_and_clears(tmp_path):
+    export_dir = tmp_path / "exp"
+    export_dir.mkdir()
+    marker = export_dir / _UNVERIFIED_MARKER
+    # Replay did not verify -> in-band marker with the reason.
+    _mark_export_verification(export_dir, "r", replay_ok=False, reason="ledger drift")
+    assert marker.exists()
+    assert json.loads(marker.read_text(encoding="utf-8")) == {
+        "run_id": "r",
+        "replay_verified": False,
+        "reason": "ledger drift",
+    }
+    # A later healthy cycle reuses the dir and must clear the stale marker.
+    _mark_export_verification(export_dir, "r", replay_ok=True, reason=None)
+    assert not marker.exists()
+    # Clearing an already-absent marker is a no-op (missing_ok).
+    _mark_export_verification(export_dir, "r", replay_ok=True, reason=None)
+    assert not marker.exists()
+
+
+def test_post_cycle_export_marks_unverified_on_replay_mismatch(tmp_path, monkeypatch):
+    path, db = _seed_db(tmp_path)
+    export_dir = tmp_path / "exp"
+    from contrib.hyperliquid_perp.paper import accounting as acc_mod
+
+    # Force a replay inconsistency without corrupting the store.
+    monkeypatch.setattr(
+        acc_mod,
+        "replay",
+        lambda db, *, run_id: SimpleNamespace(is_consistent=False, mismatch_detail="boom"),
+    )
+    assert _post_cycle_export(db, "r", export_dir) is False
+    marker = export_dir / _UNVERIFIED_MARKER
+    assert marker.exists()
+    assert json.loads(marker.read_text(encoding="utf-8"))["reason"] == "boom"
+    # Post-mortem data is still published — all 8 CSVs written alongside the marker.
+    assert len(list(export_dir.glob("*.csv"))) == 8
+
+    # A subsequent healthy cycle re-exports and clears the marker.
+    monkeypatch.setattr(
+        acc_mod,
+        "replay",
+        lambda db, *, run_id: SimpleNamespace(is_consistent=True, mismatch_detail=None),
+    )
+    assert _post_cycle_export(db, "r", export_dir) is True
+    assert not marker.exists()
+    db.close()
 
 
 def test_paper_invalid_config_exits_1(tmp_path, capsys, monkeypatch):

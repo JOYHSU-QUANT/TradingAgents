@@ -11,9 +11,11 @@ Three subcommands plus full Phase 1/2 backward compatibility:
 - ``python -m contrib.hyperliquid_perp validate --run-id <id>`` — the spec §5
   acceptance report and Phase-3 verdict.
 
-Anything else — including the Phase 1 ``--context-only`` smoke run and the
-single-shot engine run — is delegated verbatim to :mod:`.main`, whose behaviour
-is unchanged.
+Empty argv and flag-style invocations (first argument starting with ``-``) —
+including the Phase 1 ``--context-only`` smoke run and the single-shot engine
+run — are delegated verbatim to :mod:`.main`, whose behaviour is unchanged.
+A bare first argument that is not a known subcommand is an error (exit 1):
+the legacy CLI takes no positionals, so it can only be a subcommand typo.
 
 Exit codes: ``0`` success (for ``validate``: Phase-3 ready), ``1`` named
 operator/config/environment errors, ``2`` unexpected error, ``4``
@@ -55,11 +57,23 @@ def _raise_keyboard_interrupt(signum, frame) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:]) if argv is None else list(argv)
-    if not argv or argv[0] not in _SUBCOMMANDS:
+    if not argv or argv[0].startswith("-"):
         # Phase 1/2 compatibility path: identical flags, identical behaviour.
+        # Legacy accepts no positionals, so flag-shaped/empty argv is lossless.
         from .main import main as legacy_main
 
         return legacy_main(argv)
+    if argv[0] not in _SUBCOMMANDS:
+        # A bare unknown word is almost certainly a subcommand typo; delegating
+        # it would surface the legacy parser's usage (which never mentions the
+        # subcommands) under exit code 2 ("unexpected error").
+        print(
+            f"error: unknown subcommand {argv[0]!r} (expected one of: "
+            f"{', '.join(_SUBCOMMANDS)}; legacy flag invocations like "
+            "--context-only pass through unchanged).",
+            file=sys.stderr,
+        )
+        return 1
     command, rest = argv[0], argv[1:]
     try:
         if command == "export":
@@ -363,12 +377,18 @@ def _cmd_paper(argv: list[str]) -> int:
                 run_row = repo.get_run(db.conn, run_id)
                 assert run_row is not None  # is_restart established the row exists
                 drift = _config_drift_report(run_row["config_json"], config, coin)
-                if drift is not None:
+                if drift is None:
+                    # Stamp clean resumes too, so a reverted config doesn't
+                    # leave a stale "drift" as the last word in the store.
+                    _stamp_breadcrumb(db, run_id, "config_drift", "ok", None)
+                else:
                     kind, message = drift
                     if kind == "coin":
                         print(f"error: {message}", file=sys.stderr)
                         return 1
+                    logger.warning("config drift on resume for %s: %s", run_id, message)
                     print(f"WARNING: {message}", file=sys.stderr)
+                    _stamp_breadcrumb(db, run_id, "config_drift", "drift", message)
                 try:
                     report = reconcile_on_restart(
                         db, run_id=run_id, now=now, funding_source=funding_source
@@ -569,11 +589,12 @@ def _paper_loop(
 def _stamp_breadcrumb(db, run_id: str, kind: str, status: str, error: str | None) -> None:
     """Durably stamp a ``scheduler_state`` breadcrumb trio (``last_<kind>_*``).
 
-    Export failures and replay outcomes are warn-and-carry-on (the mid-run
-    replay halt only lives in process memory) — without this record neither
-    would leave any trace once the process exits. ``kind`` is a code-owned
-    literal ("export" / "replay"); the column vocabulary stays validated by
-    ``upsert_scheduler_state``'s fixed keyword signature.
+    Export failures, replay outcomes, and config drift on resume are
+    warn-and-carry-on (the mid-run replay halt only lives in process memory) —
+    without this record none would leave any trace once the process exits.
+    ``kind`` is a code-owned literal ("export" / "replay" / "config_drift");
+    the column vocabulary stays validated by ``upsert_scheduler_state``'s
+    fixed keyword signature.
     """
     from .persistence import repository as repo
 

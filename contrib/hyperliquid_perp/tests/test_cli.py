@@ -350,3 +350,231 @@ def test_sigterm_shim_raises_keyboard_interrupt():
     # KeyboardInterrupt shutdown-export path.
     with pytest.raises(KeyboardInterrupt):
         _raise_keyboard_interrupt(signal.SIGTERM, None)
+
+
+# --------------------------------------------------------------------------
+# dispatch: legacy delegation vs unknown-subcommand typos
+# --------------------------------------------------------------------------
+
+
+def test_unknown_bare_word_is_an_error_not_legacy_usage(capsys):
+    # A subcommand typo must name the real subcommands under exit 1 — not fall
+    # through to the legacy parser's usage (which never mentions them) under
+    # exit 2 ("unexpected error").
+    assert cli_main(["expot"]) == 1
+    err = capsys.readouterr().err
+    assert "unknown subcommand 'expot'" in err
+    assert "paper" in err and "export" in err and "validate" in err
+
+
+def test_empty_and_flag_style_argv_delegate_to_legacy(monkeypatch):
+    # The Phase 1/2 compatibility promise: empty argv and flag invocations
+    # (legacy accepts no positionals) flow to .main verbatim.
+    from contrib.hyperliquid_perp import main as legacy_mod
+
+    seen = []
+
+    def fake_legacy(argv):
+        seen.append(argv)
+        return 7
+
+    monkeypatch.setattr(legacy_mod, "main", fake_legacy)
+    assert cli_main([]) == 7
+    assert cli_main(["--context-only", "--coin", "BTC"]) == 7
+    assert seen == [[], ["--context-only", "--coin", "BTC"]]
+
+
+def test_cli_main_wrapper_maps_interrupt_and_unexpected_error(monkeypatch, capsys):
+    # The documented top-level contract for the new subcommands: Ctrl-C -> 130,
+    # anything unexpected -> 2 (distinct from named operator errors -> 1).
+    import contrib.hyperliquid_perp.cli as cli_mod
+
+    def interrupt(argv):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod, "_cmd_validate", interrupt)
+    assert cli_main(["validate", "--run-id", "r"]) == 130
+    assert "interrupted" in capsys.readouterr().err
+
+    def boom(argv):
+        raise RuntimeError("wires crossed")
+
+    monkeypatch.setattr(cli_mod, "_cmd_export", boom)
+    assert cli_main(["export", "whatever"]) == 2
+    err = capsys.readouterr().err
+    assert "unexpected error" in err and "wires crossed" in err
+
+
+# --------------------------------------------------------------------------
+# config-drift breadcrumb (schema v5): resume outcomes land durably
+# --------------------------------------------------------------------------
+
+
+def test_config_drift_breadcrumb_roundtrip_and_vocabulary(tmp_path):
+    from contrib.hyperliquid_perp.cli import _stamp_breadcrumb
+
+    path, db = _seed_db(tmp_path)
+    _stamp_breadcrumb(db, "r", "config_drift", "drift", "risk differs")
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["last_config_drift_status"] == "drift"
+    assert state["last_config_drift_error"] == "risk differs"
+    assert state["last_config_drift_at"] is not None
+
+    _stamp_breadcrumb(db, "r", "config_drift", "ok", None)
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["last_config_drift_status"] == "ok"
+    assert state["last_config_drift_error"] is None
+
+    # The write boundary rejects off-vocabulary statuses like its siblings.
+    with pytest.raises(ValueError, match="last_config_drift_status"), db.transaction() as conn:
+        repo.upsert_scheduler_state(conn, "r", last_config_drift_status="weird")
+    db.close()
+
+
+def test_paper_resume_stamps_drift_breadcrumb(tmp_path, monkeypatch, capsys, paper_seams):
+    # Drive the real resume path (lease -> drift check -> reconcile) and stop
+    # at the loop seam: parameter drift must survive in the store, not only on
+    # a possibly-uncaptured stderr stream.
+    import contrib.hyperliquid_perp.cli as cli_mod
+
+    path = tmp_path / "cli.db"
+    db = Database(path)
+    accounting.initialize_run(
+        db,
+        run_id="r",
+        mode="paper",
+        initial_balance_usdc=D(1000),
+        schema_version=1,
+        config_json=json.dumps(
+            {"risk": {"leverage": 999}, "decision": None, "paper_trading": None, "coin": "BTC"}
+        ),
+    )
+    db.close()
+
+    def stop_loop(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod, "_paper_loop", stop_loop)
+    assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 0
+    assert "config drift on resume" in capsys.readouterr().err
+
+    db = Database(path)
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["last_config_drift_status"] == "drift"
+    assert "config drift on resume" in state["last_config_drift_error"]
+    assert state["last_config_drift_at"] is not None
+    db.close()
+
+
+def test_paper_resume_clean_stamps_ok_breadcrumb(tmp_path, monkeypatch, paper_seams):
+    # A clean resume overwrites any earlier "drift" verdict: a reverted config
+    # must not leave a stale drift as the store's last word.
+    import contrib.hyperliquid_perp.cli as cli_mod
+
+    path, db = _seed_db(tmp_path)  # no genesis config record -> nothing drifts
+    db.close()
+
+    def stop_loop(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod, "_paper_loop", stop_loop)
+    assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 0
+
+    db = Database(path)
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["last_config_drift_status"] == "ok"
+    assert state["last_config_drift_error"] is None
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# _paper_loop wiring: tick-before-poll, per-iteration heartbeat, halt latch
+# --------------------------------------------------------------------------
+
+
+def test_paper_loop_wiring_and_halt_latch(tmp_path, monkeypatch):
+    """Drive the production loop for two iterations with recording stubs.
+
+    Pins the wiring that only exists in ``_paper_loop`` itself: the heartbeat
+    fires every iteration, tick precedes poll, a cycle-terminal poll triggers
+    the funding backfill and the replay-verify export, and a failed
+    verification latches ``trading_halted`` (no further ``poll()`` calls).
+    """
+    from datetime import timedelta
+
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
+
+    path, db = _seed_db(tmp_path)
+    clock = ManualClock(_T0)
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        run_lock_mod,
+        "heartbeat_run_lock",
+        lambda db_, run_id, *, pid, now: calls.append("heartbeat"),
+    )
+    monkeypatch.setattr(
+        reconcile_mod,
+        "backfill_pending_funding",
+        lambda db_, *, run_id, now, funding_source: calls.append("backfill"),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_post_cycle_export",
+        lambda db_, run_id, export_dir: (calls.append("export"), False)[1],
+    )
+
+    terminal = PollResult(
+        event=CycleEvent.API_FAILED,
+        decision_attempt_id="r#001",
+        scheduled_at=_T0,
+        attempt_count=3,
+        next_decision_at=_T0 + timedelta(hours=4),
+    )
+
+    class _Engine:
+        def has_active_work(self):
+            return True
+
+        def tick(self):
+            calls.append("tick")
+
+    class _Scheduler:
+        def poll(self):
+            calls.append("poll")
+            return terminal
+
+        def next_due_at(self):  # pragma: no cover — halted branch skips it
+            raise AssertionError("next_due_at must not be consulted while halted")
+
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) >= 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod.time, "sleep", fake_sleep)
+
+    with pytest.raises(KeyboardInterrupt):
+        cli_mod._paper_loop(
+            db,
+            "r",
+            _Engine(),
+            _Scheduler(),
+            clock,
+            30,
+            tmp_path / "exports",
+            funding_source=None,
+            trading_halted=False,
+        )
+
+    # Iteration 1: heartbeat -> tick -> poll -> cycle-terminal work; the failed
+    # verification latches the halt, so iteration 2 ticks but never polls.
+    assert calls == ["heartbeat", "tick", "poll", "backfill", "export", "heartbeat", "tick"]
+    # Sleep stays inside the lease-freshness cap.
+    assert sleeps and all(s <= 60.0 for s in sleeps)
+    db.close()

@@ -84,6 +84,9 @@ _EXPORT_STATUSES = frozenset({"ok", "failed"})
 # Replay breadcrumb vocabulary: "mismatch" = replay ran and contradicted the
 # materialized state; "failed" = replay itself raised (books unverifiable).
 _REPLAY_STATUSES = frozenset({"ok", "mismatch", "failed"})
+# Config-drift-on-resume breadcrumb states (schema v5): "drift" = the resumed
+# run's risk/decision/paper_trading blocks differ from the genesis record.
+_CONFIG_DRIFT_STATUSES = frozenset({"ok", "drift"})
 
 
 def _check_funding_identities(
@@ -1196,6 +1199,9 @@ def upsert_scheduler_state(
     last_replay_status: str | None | _Unset = _UNSET,
     last_replay_error: str | None | _Unset = _UNSET,
     last_replay_at: datetime | None | _Unset = _UNSET,
+    last_config_drift_status: str | None | _Unset = _UNSET,
+    last_config_drift_error: str | None | _Unset = _UNSET,
+    last_config_drift_at: datetime | None | _Unset = _UNSET,
     updated_at: datetime | None = None,
 ) -> None:
     """Patch-style upsert: only the columns actually supplied change.
@@ -1211,6 +1217,10 @@ def upsert_scheduler_state(
         check_enum(last_export_status, _EXPORT_STATUSES, name="last_export_status")
     if not isinstance(last_replay_status, _Unset) and last_replay_status is not None:
         check_enum(last_replay_status, _REPLAY_STATUSES, name="last_replay_status")
+    if not isinstance(last_config_drift_status, _Unset) and last_config_drift_status is not None:
+        check_enum(
+            last_config_drift_status, _CONFIG_DRIFT_STATUSES, name="last_config_drift_status"
+        )
     provided: dict[str, Any] = {}
     if not isinstance(last_decision_at, _Unset):
         provided["last_decision_at"] = _encode(last_decision_at)
@@ -1238,6 +1248,12 @@ def upsert_scheduler_state(
         provided["last_replay_error"] = _encode(last_replay_error)
     if not isinstance(last_replay_at, _Unset):
         provided["last_replay_at"] = _encode(last_replay_at)
+    if not isinstance(last_config_drift_status, _Unset):
+        provided["last_config_drift_status"] = _encode(last_config_drift_status)
+    if not isinstance(last_config_drift_error, _Unset):
+        provided["last_config_drift_error"] = _encode(last_config_drift_error)
+    if not isinstance(last_config_drift_at, _Unset):
+        provided["last_config_drift_at"] = _encode(last_config_drift_at)
     provided["updated_at"] = _iso_utc(updated_at or datetime.now(timezone.utc))
 
     # Column names come from the fixed keyword list above, never caller data.

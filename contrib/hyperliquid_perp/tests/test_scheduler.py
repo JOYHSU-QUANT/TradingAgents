@@ -275,6 +275,37 @@ def test_retry_ladder_then_api_failed(tmp_path):
     db.close()
 
 
+def test_stale_api_failed_cycle_anchors_next_on_terminal_instant(tmp_path):
+    # A cycle that itself ran LATE (outage across schedule points) and then
+    # api_fails must not schedule its next cycle into the past: the literal
+    # scheduled_at + 4h would be immediately due, chaining one full paid retry
+    # ladder per missed interval (§3's non-backfill principle, extended to
+    # failed cycles — the completed path already anchors on completion).
+    db, clock, engine, scheduler, provider = _setup(
+        tmp_path,
+        [_decision("long", 1), _err("timeout"), _err("connection"), _err("server_error")],
+        [_snap(), SnapshotOutcome.ERROR],
+    )
+    scheduler.poll()  # cycle 1 completes at T0 -> next due T0+4h
+    late = _T0 + timedelta(hours=28)  # outage across six schedule points
+    clock.set(late)
+    r1 = scheduler.poll()
+    assert r1.event is CycleEvent.RETRY_SCHEDULED
+    assert r1.scheduled_at == _T0 + CYCLE_INTERVAL  # original stamp (§3)
+    clock.advance(10)
+    scheduler.poll()
+    clock.advance(30)
+    r3 = scheduler.poll()
+    assert r3.event is CycleEvent.API_FAILED
+    # Anchored on the terminal instant, not the stale stamp...
+    assert r3.next_decision_at == clock.now() + CYCLE_INTERVAL
+    # ...so the run is NOT immediately due again: no catch-up ladder chain.
+    assert scheduler.poll() is None
+    assert scheduler.next_due_at() == clock.now() + CYCLE_INTERVAL
+    assert db.conn.execute("SELECT COUNT(*) FROM decision_attempts").fetchone()[0] == 2
+    db.close()
+
+
 class _SlowFailingProvider(_FakeProvider):
     """The scripted call itself consumes clock time (a real timeout does)."""
 

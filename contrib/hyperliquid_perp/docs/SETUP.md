@@ -138,8 +138,9 @@ scheduler 要一併涵蓋 exit 1。
 
 ### C. Phase 2 長駐 paper run（需要 key）
 
-PR 4 的 subcommand CLI（`python -m contrib.hyperliquid_perp <sub>`；非 subcommand
-的 argv 原樣走上面 A/B 的 legacy 路徑，行為不變）：
+PR 4 的 subcommand CLI（`python -m contrib.hyperliquid_perp <sub>`；空 argv 或
+`-` 開頭的旗標式呼叫原樣走上面 A/B 的 legacy 路徑，行為不變；不認識的裸字
+——多半是 subcommand 打錯——具名報錯 exit 1，不會落進 legacy 的 usage）：
 
 ```bash
 # 首次啟動（--create 才允許建立新 store／新 run——防走錯目錄靜默分叉歷史；
@@ -149,7 +150,8 @@ python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db --crea
 # 之後重啟（不帶 --create；DB 或 run 不存在會具名報錯）。重啟時自動做
 # execution §1.2 的 reconciliation（取消舊 plan、補帳 pending funding、replay 驗證、
 # gap SL 檢查、立即開新 cycle），並比對 genesis config：換 coin 硬錯、
-# risk/decision/paper_trading 漂移警告。同一個 --run-id 續跑同一個 run。
+# risk/decision/paper_trading 漂移警告（同時落地 scheduler_state 的
+# last_config_drift_* breadcrumb，事後可從 store 還原）。同一個 --run-id 續跑同一個 run。
 # 單實例鎖：同一 run 已有活著的 process（scheduler_state 心跳 < 900s）時啟動報錯；
 # 反向也守住——凍結後被接管的舊 process，下一次心跳會發現 lease 易主而具名退出。
 python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db

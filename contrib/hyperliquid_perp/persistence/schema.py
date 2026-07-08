@@ -26,7 +26,7 @@ from __future__ import annotations
 
 __all__ = ["MIGRATIONS", "SCHEMA_MIGRATIONS_DDL", "SCHEMA_VERSION"]
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # --------------------------------------------------------------------------
 # Export logical tables (phase2-data §5–§12) — one-to-one with CSV exports.
@@ -395,5 +395,17 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE scheduler_state ADD COLUMN last_replay_status TEXT",
         "ALTER TABLE scheduler_state ADD COLUMN last_replay_error TEXT",
         "ALTER TABLE scheduler_state ADD COLUMN last_replay_at TEXT",
+    ),
+    # v5: config-drift breadcrumb, mirroring the last_export_*/last_replay_*
+    # trios. Parameter drift on resume is warn-and-carry-on (the run continues
+    # under changed risk/decision/paper_trading behaviour) — stderr is the only
+    # other witness, and a post-mortem over the store alone must be able to
+    # tell that (and when) a run stopped being parameter-homogeneous. Clean
+    # resumes stamp "ok" so a reverted config doesn't leave a stale "drift" as
+    # the store's last word. Internal columns, never exported.
+    5: (
+        "ALTER TABLE scheduler_state ADD COLUMN last_config_drift_status TEXT",
+        "ALTER TABLE scheduler_state ADD COLUMN last_config_drift_error TEXT",
+        "ALTER TABLE scheduler_state ADD COLUMN last_config_drift_at TEXT",
     ),
 }

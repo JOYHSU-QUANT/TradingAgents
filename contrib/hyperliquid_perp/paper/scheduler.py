@@ -494,8 +494,17 @@ class PaperScheduler:
 
         The previous AI output is deliberately not reused; existing SL/TP and
         the market monitor keep running untouched (the engine owns them).
+
+        A cycle that itself ran late (process outage across schedule points)
+        anchors on the terminal instant instead: the literal ``scheduled_at +
+        4h`` would land in the past and fire the next cycle immediately, so a
+        long outage over a failing API would chain one full retry ladder per
+        missed interval — §3's "missed intervals are never backfilled" extended
+        to failed cycles (the completed path already anchors on completion).
         """
         next_at = scheduled_at + CYCLE_INTERVAL
+        if next_at <= now:
+            next_at = now + CYCLE_INTERVAL
         with self._db.transaction() as conn:
             repo.update_decision_attempt(
                 conn,

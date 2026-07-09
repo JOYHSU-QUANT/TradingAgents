@@ -531,3 +531,116 @@ def test_in_progress_attempt_suppresses_forced_cycle(tmp_path):
     state = repo.get_scheduler_state(db.conn, "r")
     assert parse_instant(state["next_decision_at"]) == future  # untouched
     db.close()
+
+
+# --------------------------------------------------------------------------
+# protection-first containment: corrupt store data must not abort the restart
+# --------------------------------------------------------------------------
+
+
+def test_backfill_contains_corrupt_stored_row(tmp_path, caplog):
+    """One corrupt pending row must not abort the whole backfill pass.
+
+    ``record_funding`` fail-louds on a corrupt stored basis (mark missing) —
+    correct in isolation, but uncontained it would abort the restart BEFORE the
+    protection-only fork (live position unwatched, crash-loop on the same row
+    every retry) and kill the live loop at a cycle boundary. The event is
+    logged at ERROR, left pending, and the batch's other events still post.
+    """
+    from contrib.hyperliquid_perp.paper.reconcile import backfill_pending_funding
+
+    good_hour = _T0.replace(minute=0)
+    bad_hour = good_hour - timedelta(hours=1)
+    db = _init(tmp_path)
+    for hour in (bad_hour, good_hour):
+        accounting.record_funding(
+            db,
+            run_id="r",
+            mode="paper",
+            symbol="BTC",
+            funding_timestamp=hour,
+            position_size=D("0.001"),
+            funding_rate=None,  # pending, basis mark stored
+            mark_price=_MARK,
+        )
+    with db.transaction() as conn:  # simulate a legacy/corrupt stored basis
+        row = conn.execute(
+            "SELECT funding_event_id FROM funding_events ORDER BY funding_timestamp LIMIT 1"
+        ).fetchone()
+        conn.execute(
+            "UPDATE funding_events SET mark_price = NULL WHERE funding_event_id = ?",
+            (row["funding_event_id"],),
+        )
+
+    with caplog.at_level(logging.ERROR):
+        posted, still_pending = backfill_pending_funding(
+            db, run_id="r", now=good_hour, funding_source=_Rates(D("0.0001"))
+        )
+
+    assert (posted, still_pending) == (1, 1)
+    assert any("could not post" in r.getMessage() for r in caplog.records)
+    # The corrupt event got its own ERROR — not the "rate still unavailable"
+    # young-pending WARNING, which would misdirect the operator.
+    assert not any("still unavailable" in r.getMessage() for r in caplog.records)
+    # The good event moved the wallet exactly once; the corrupt one never did.
+    assert repo.get_current_account_state(db.conn, "r").wallet_balance == D("999.995")
+    db.close()
+
+
+def test_restart_replay_raise_with_open_position_reports_failed(tmp_path, monkeypatch):
+    """A replay that *raises* is unverifiable books one notch worse than a
+    mismatch — same protection-only fork, under the "failed" breadcrumb lane
+    (mirroring the mid-run verify in ``_post_cycle_export``)."""
+    db = _init(tmp_path)
+    clock, plan_id = _engine_with_plan(db, slices_filled=1)  # non-flat position
+
+    def boom(db_, *, run_id):
+        raise RuntimeError("corrupt decimal text")
+
+    monkeypatch.setattr(accounting, "replay", boom)
+    now = clock.now() + timedelta(minutes=5)
+    report = reconcile_on_restart(db, run_id="r", now=now)
+
+    assert report.replay_status == "failed"
+    assert "raised" in report.replay_error
+    # Steps 1-3 still ran, and a forced cycle is never claimed over books
+    # that could not verify.
+    assert report.canceled_plan_ids == (plan_id,)
+    assert not report.forced_immediate_cycle
+    db.close()
+
+
+def test_restart_replay_raise_flat_fails_startup_with_failed_status(tmp_path, monkeypatch):
+    # FLAT run + replay raise: nothing to protect, so refuse loudly — but under
+    # the "failed" lane so the CLI's breadcrumb names the right refusal.
+    db = _init(tmp_path)
+
+    def boom(db_, *, run_id):
+        raise RuntimeError("corrupt decimal text")
+
+    monkeypatch.setattr(accounting, "replay", boom)
+    with pytest.raises(ReconciliationError, match="replay raised") as excinfo:
+        reconcile_on_restart(db, run_id="r", now=_T0)
+    assert excinfo.value.replay_status == "failed"
+    db.close()
+
+
+def test_corrupt_next_decision_at_is_overwritten_not_fatal(tmp_path):
+    """A corrupt stored clock must not abort the restart (that abort would skip
+    the protection-only fork below it) — the step-8 force overwrite it receives
+    is also the repair."""
+    db = _init(tmp_path)
+    clock, plan_id = _engine_with_plan(db, slices_filled=1)  # live plan -> step 8
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(conn, "r", next_decision_at=_T0, updated_at=_T0)
+        conn.execute(
+            "UPDATE scheduler_state SET next_decision_at = 'garbage' WHERE run_id = ?",
+            ("r",),
+        )
+    now = clock.now() + timedelta(minutes=5)
+    report = reconcile_on_restart(db, run_id="r", now=now)
+    assert report.canceled_plan_ids == (plan_id,)
+    assert report.forced_immediate_cycle
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert parse_instant(state["next_decision_at"]) == now  # repaired in place
+    db.close()

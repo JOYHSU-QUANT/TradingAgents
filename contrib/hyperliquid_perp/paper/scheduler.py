@@ -276,7 +276,11 @@ class PaperScheduler:
         self._risk = risk_config
         # Needed to re-parse a persisted pending_raw_response on restart —
         # parse_target_decision is deterministic, so the resumed decision is
-        # identical to the one the crashed process held in memory.
+        # identical to the one the crashed process held in memory. If the
+        # operator changed the decision config across the restart (accepted
+        # parameter drift), the stored response is deliberately re-read under
+        # the CURRENT config: drifted parameters apply from resume onward,
+        # the same instant they would apply to any new cycle.
         self._decision_cfg = decision_config
         self._mode = mode
         self._pending: _PendingDecision | None = None

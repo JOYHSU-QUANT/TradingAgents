@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from ..persistence import repository as repo
 from ..persistence.db import Database
@@ -77,33 +77,58 @@ def backfill_pending_funding(
     run, not restart-only). Each posting uses the *stored* settlement basis and
     ``record_funding``'s exactly-once transition, so repeated passes can never
     double-post; a rate still unavailable simply stays pending for the next pass.
+
+    A corrupt stored basis (``record_funding``'s fail-loud ``ValueError`` guard,
+    e.g. a legacy row whose mark is missing) is contained *per event*: logged at
+    error level, left pending, and never allowed to abort the pass — at restart
+    that abort would fire before the protection-only fallback (live position
+    unwatched, permanent crash-loop on the same row), and mid-run it would kill
+    the loop that keeps SL/TP alive. Its funding P&L stays uncounted, never
+    fabricated.
     """
     posted = 0
-    still_pending = 0
+    young_pending = 0
     stale_pending = 0
+    corrupt = 0
     for event in repo.iter_funding_events(db.conn, run_id, status="pending"):
-        settlement = parse_instant(event["funding_timestamp"])
-        rate = (
-            funding_source.rate_at(event["symbol"], settlement)
-            if funding_source is not None
-            else None
-        )
-        if rate is None:
-            still_pending += 1
-            if now - settlement >= _STALE_PENDING_FUNDING:
-                stale_pending += 1
+        try:
+            settlement = parse_instant(event["funding_timestamp"])
+            rate = (
+                funding_source.rate_at(event["symbol"], settlement)
+                if funding_source is not None
+                else None
+            )
+            if rate is None:
+                if now - settlement >= _STALE_PENDING_FUNDING:
+                    stale_pending += 1
+                else:
+                    young_pending += 1
+                continue
+            res = accounting.record_funding(
+                db,
+                run_id=run_id,
+                mode=event["mode"],
+                symbol=event["symbol"],
+                funding_timestamp=settlement,
+                position_size=Decimal(event["position_size"]),  # stored basis wins anyway
+                funding_rate=rate,
+                source="funding_history_backfill",
+                recorded_at=now,
+            )
+        except (ValueError, InvalidOperation) as exc:
+            # Any corrupt stored field — timestamp, size, or the settlement
+            # basis record_funding guards — takes this one-event lane.
+            corrupt += 1
+            logger.error(
+                "funding backfill for %s could not post %s @ %s: %s — the event "
+                "stays pending and its funding P&L stays uncounted (corrupt "
+                "stored row; fix it in the store to resolve it)",
+                run_id,
+                event["symbol"],
+                event["funding_timestamp"],
+                exc,
+            )
             continue
-        res = accounting.record_funding(
-            db,
-            run_id=run_id,
-            mode=event["mode"],
-            symbol=event["symbol"],
-            funding_timestamp=settlement,
-            position_size=Decimal(event["position_size"]),  # stored basis wins anyway
-            funding_rate=rate,
-            source="funding_history_backfill",
-            recorded_at=now,
-        )
         if res.status == "posted":
             posted += 1
     # A stuck-forever pending event (its rate never resolves) resets the fetch
@@ -119,7 +144,8 @@ def backfill_pending_funding(
             stale_pending,
             _STALE_PENDING_FUNDING,
         )
-    young_pending = still_pending - stale_pending
+    # Corrupt-basis events already logged their own error above — only the
+    # genuinely rate-less remainder gets the "still unavailable" warning.
     if young_pending:
         logger.warning(
             "funding backfill for %s left %d event(s) pending (rate still "
@@ -127,21 +153,48 @@ def backfill_pending_funding(
             run_id,
             young_pending,
         )
-    return posted, still_pending
+    return posted, young_pending + stale_pending + corrupt
+
+
+def classify_replay(db: Database, *, run_id: str) -> tuple[str, str | None, Exception | None]:
+    """One replay verification in the ``last_replay_*`` breadcrumb vocabulary.
+
+    Returns ``("ok", None, None)``, ``("mismatch", detail, None)``, or
+    ``("failed", detail, exc)`` — the single classification kernel shared by
+    the restart fork below and the mid-run verify (``cli._post_cycle_export``),
+    so the two lanes can never drift apart. A replay that *raises* (corrupt
+    stored value, I/O error) is an unverifiable-books outcome, not a crash.
+    """
+    try:
+        replayed = accounting.replay(db, run_id=run_id)
+    except Exception as exc:  # noqa: BLE001 — unverifiable books are an outcome, not a crash
+        return "failed", str(exc), exc
+    if not replayed.is_consistent:
+        return "mismatch", replayed.mismatch_detail, None
+    return "ok", None, None
 
 
 class ReconciliationError(RuntimeError):
-    """The committed store contradicts its own materialized state.
+    """The committed store contradicts (or cannot verify) its own materialized state.
 
     Raised when the accounting replay (execution §1.2 step 4 / spec §5) finds a
-    mismatch AND the run is flat: trading on a store that cannot rebuild its
-    own position/ledger would compound the corruption, so startup must fail
-    loud, not proceed. With a non-flat position the mismatch is *reported*
-    instead (:attr:`RestartReconciliation.replay_error`) — refusing to start
-    would leave a live position with nobody watching its SL/TP, which is worse
-    than the corruption itself; the CLI then runs in protection-only mode
-    (engine ticks, new decision cycles stay halted).
+    mismatch — or raises outright (corrupt stored value, I/O error) — AND the
+    run is flat: trading on a store that cannot rebuild its own position/ledger
+    would compound the corruption, so startup must fail loud, not proceed. With
+    a non-flat position the outcome is *reported* instead
+    (:attr:`RestartReconciliation.replay_error`) — refusing to start would
+    leave a live position with nobody watching its SL/TP, which is worse than
+    the corruption itself; the CLI then runs in protection-only mode (engine
+    ticks, new decision cycles stay halted).
+
+    ``replay_status`` carries the ``last_replay_*`` breadcrumb vocabulary for
+    the refusal ("mismatch" for an inconsistent rebuild, "failed" for a replay
+    that raised), mirroring the mid-run verify's two lanes.
     """
+
+    def __init__(self, message: str, *, replay_status: str = "mismatch") -> None:
+        super().__init__(message)
+        self.replay_status = replay_status
 
 
 @dataclass(frozen=True)
@@ -153,9 +206,13 @@ class RestartReconciliation:
     funding_posted: int
     funding_still_pending: int
     forced_immediate_cycle: bool
-    # Non-None when a non-flat position kept a mismatched startup alive
+    # Non-None when a non-flat position kept an unverified startup alive
     # (protection-only mode) — see ReconciliationError for the rationale.
     replay_error: str | None = None
+    # The ``last_replay_*`` breadcrumb vocabulary for this outcome — the same
+    # shape ReconciliationError carries ("mismatch" = inconsistent rebuild,
+    # "failed" = the replay raised).
+    replay_status: str = "ok"
 
     def __post_init__(self) -> None:
         # Step 8 only fires for an abandoned target — a forced cycle with no
@@ -167,24 +224,21 @@ class RestartReconciliation:
             )
         if self.funding_posted < 0 or self.funding_still_pending < 0:
             raise ValueError("RestartReconciliation funding counters must be >= 0")
-        # A forced cycle sizes against the books; mismatched books must never
-        # force one (the mismatch path skips step 8 entirely).
+        # A forced cycle sizes against the books; unverified books must never
+        # force one (the mismatch/failed paths skip step 8 entirely).
         if self.replay_error is not None and self.forced_immediate_cycle:
             raise ValueError("RestartReconciliation.replay_error excludes forced_immediate_cycle")
+        if self.replay_status not in ("ok", "mismatch", "failed"):
+            raise ValueError(f"RestartReconciliation.replay_status invalid: {self.replay_status!r}")
+        # The status names the outcome the detail describes — one without the
+        # other is a self-contradicting report.
+        if (self.replay_status == "ok") != (self.replay_error is None):
+            raise ValueError("RestartReconciliation.replay_status must agree with replay_error")
 
     @property
     def replay_mismatch(self) -> bool:
         """Whether startup continued over unverifiable books (protection-only)."""
         return self.replay_error is not None
-
-    @property
-    def replay_status(self) -> str:
-        """The ``last_replay_*`` breadcrumb vocabulary for this outcome."""
-        return "mismatch" if self.replay_mismatch else "ok"
-
-    @property
-    def canceled_any_plan(self) -> bool:
-        return bool(self.canceled_plan_ids)
 
 
 def reconcile_on_restart(
@@ -250,7 +304,21 @@ def reconcile_on_restart(
         if canceled_plans and repo.find_in_progress_attempt(conn, run_id) is None:
             state = repo.get_scheduler_state(conn, run_id)
             raw_next = state["next_decision_at"] if state is not None else None
-            if raw_next is None or parse_instant(raw_next) > now:
+            try:
+                needs_force = raw_next is None or parse_instant(raw_next) > now
+            except ValueError:
+                # A corrupt stored clock must not abort the whole restart
+                # (that would skip the protection-only fork below, same
+                # principle as the replay guard) — the force overwrite it
+                # gets is also the repair.
+                logger.error(
+                    "corrupt next_decision_at %r for %s — overwriting with the "
+                    "forced immediate cycle",
+                    raw_next,
+                    run_id,
+                )
+                needs_force = True
+            if needs_force:
                 repo.upsert_scheduler_state(conn, run_id, next_decision_at=now, updated_at=now)
                 force_written = True
 
@@ -261,20 +329,26 @@ def reconcile_on_restart(
 
     # Steps 4 + 7 (store side): the committed events must rebuild exactly the
     # materialized state — otherwise the store is corrupt and NEW trading must
-    # stop. Flat: fail loud (nothing to protect). Non-flat: report the mismatch
+    # stop. Flat: fail loud (nothing to protect). Non-flat: report the outcome
     # so the CLI keeps the engine ticking over the live position (SL/TP and the
     # monitor must survive — exiting would leave the position unwatched, which
-    # is strictly worse than the corruption).
-    replayed = accounting.replay(db, run_id=run_id)
+    # is strictly worse than the corruption). A replay that *raises* (corrupt
+    # stored value, I/O error) is the same situation one notch worse —
+    # unverifiable books — so it takes the same fork under the "failed" label,
+    # exactly like the mid-run verify's failed lane (_post_cycle_export).
+    replay_status, detail, cause = classify_replay(db, run_id=run_id)
     replay_error: str | None = None
-    if not replayed.is_consistent:
-        detail = f"run {run_id!r} failed accounting replay on restart: {replayed.mismatch_detail}"
+    if replay_status == "failed":
+        replay_error = f"run {run_id!r} accounting replay raised on restart: {detail}"
+    elif replay_status == "mismatch":
+        replay_error = f"run {run_id!r} failed accounting replay on restart: {detail}"
+    if replay_error is not None:
         if all(p.is_flat for p in repo.get_all_current_positions(db.conn, run_id)):
             raise ReconciliationError(
-                detail + " — refusing to trade on a store that cannot rebuild its own state"
-            )
-        replay_error = detail
-        logger.error("%s — continuing in protection-only mode", detail)
+                replay_error + " — refusing to trade on a store that cannot rebuild its own state",
+                replay_status=replay_status,
+            ) from cause
+        logger.error("%s — continuing in protection-only mode", replay_error)
 
     # Step 8 report: the store-side force was committed above with the cancels.
     # It only counts as an immediate cycle when the books verified — a mismatch
@@ -296,4 +370,5 @@ def reconcile_on_restart(
         funding_still_pending=still_pending,
         forced_immediate_cycle=forced,
         replay_error=replay_error,
+        replay_status=replay_status,
     )

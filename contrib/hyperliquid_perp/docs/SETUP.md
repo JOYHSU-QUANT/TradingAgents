@@ -176,7 +176,7 @@ error/at` 持久化），不影響交易 state 與 SL/TP。replay 驗證結果�
 自動清除）。replay mismatch 時進 protection-only 模式——停開新 decision cycle，但
 engine 續 tick、SL/TP 與監控不中斷（重啟時 mismatch 且有倉位也是同一模式；空倉才
 直接拒絕啟動）。protection-only restart 不呼叫 AI，可無 `OPENROUTER_API_KEY` 啟動；
-新 run 與正常 resume 仍需 key，在 reconcile 之後才檢查。
+新 run 在建立 run row 前即檢查 key，正常 resume 則在 reconcile 定案模式之後才檢查。
 完整 AI payload JSON 存於 `<db 目錄>/payloads/<run_id>/`，`ai_inputs` 記其路徑與
 sha256。
 市場資料 warmup 不足（closed candle 數 < 門檻）會走 §3.1 retry ladder 後記

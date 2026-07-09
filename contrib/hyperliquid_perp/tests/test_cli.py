@@ -713,3 +713,149 @@ def test_paper_loop_wiring_and_halt_latch(tmp_path, monkeypatch):
     # Sleep stays inside the lease-freshness cap.
     assert sleeps and all(s <= 60.0 for s in sleeps)
     db.close()
+
+
+def test_paper_loop_halted_with_nothing_to_protect_exits_1(tmp_path, monkeypatch, capsys):
+    """Protection-only exists for the live position: once SL/TP closes it (no
+    active work left), the loop must export the final state (the closing fill
+    reaches the CSVs) and exit 1 — not idle as a zombie holding the lease.
+
+    ``scheduler=None`` pins the protection-only construction contract: a halted
+    start never builds the scheduler/decision provider, so the loop must never
+    touch it."""
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.paper.clock import ManualClock
+
+    path, db = _seed_db(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
+
+    def record_export(db_, run_id, export_dir):
+        calls.append("export")
+        return True
+
+    def forbid_sleep(seconds):
+        raise AssertionError("must exit before sleeping")
+
+    monkeypatch.setattr(cli_mod, "_post_cycle_export", record_export)
+    monkeypatch.setattr(cli_mod.time, "sleep", forbid_sleep)
+
+    class _Engine:
+        def __init__(self):
+            self.work = True
+
+        def has_active_work(self):
+            return self.work
+
+        def tick(self):
+            self.work = False  # this tick's SL/TP closes the position
+
+    rc = cli_mod._paper_loop(
+        db,
+        "r",
+        _Engine(),
+        None,  # protection-only never builds the scheduler
+        ManualClock(_T0),
+        30,
+        tmp_path / "exports",
+        funding_source=None,
+        trading_halted=True,
+    )
+    assert rc == 1
+    assert calls == ["export"]  # the final state (closing fill) was published
+    assert "nothing left to protect" in capsys.readouterr().err
+    db.close()
+
+
+def test_paper_protection_only_restart_skips_provider_and_stamps_failed(
+    tmp_path, monkeypatch, paper_seams
+):
+    """A protection-only restart must not require the decision stack at all: no
+    API key (settled), and — same principle — no ``_EngineDecisionProvider``
+    construction (its deep tradingagents import could only add failure modes to
+    a startup whose one job is keeping SL/TP alive). The replay-raise lane also
+    stamps the "failed" breadcrumb, mirroring the mid-run verify."""
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
+    from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
+
+    path, db = _seed_db(tmp_path)
+    db.close()
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        reconcile_mod,
+        "reconcile_on_restart",
+        lambda db_, *, run_id, now, funding_source: RestartReconciliation(
+            canceled_plan_ids=(),
+            canceled_order_ids=(),
+            funding_posted=0,
+            funding_still_pending=0,
+            forced_immediate_cycle=False,
+            replay_error="replay raised: boom",
+            replay_status="failed",
+        ),
+    )
+
+    def _forbid_provider(*args, **kwargs):
+        raise AssertionError("protection-only must not build the decision provider")
+
+    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _forbid_provider)
+    seen: dict[str, object] = {}
+
+    def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
+        seen["scheduler"] = scheduler
+        return 0
+
+    monkeypatch.setattr(cli_mod, "_paper_loop", fake_loop)
+    assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 0
+    assert seen["scheduler"] is None
+
+    db = Database(path)
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["last_replay_status"] == "failed"
+    assert "boom" in state["last_replay_error"]
+    db.close()
+
+
+def test_paper_corrupt_genesis_config_json_resumes_with_drift_warning(
+    tmp_path, monkeypatch, capsys, paper_seams
+):
+    # A genesis config_json this process cannot parse makes the homogeneity
+    # check impossible — that is breadcrumb-grade (warn like parameter drift),
+    # never a startup abort that would fire before the protection-only fork.
+    import contrib.hyperliquid_perp.cli as cli_mod
+
+    path, db = _seed_db(tmp_path)
+    with db.transaction() as conn:
+        conn.execute("UPDATE runs SET config_json = '{not json' WHERE run_id = 'r'")
+    db.close()
+
+    def stop_loop(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod, "_paper_loop", stop_loop)
+    assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 0
+    assert "could not verify config drift" in capsys.readouterr().err
+
+    db = Database(path)
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["last_config_drift_status"] == "drift"
+    assert "could not verify" in state["last_config_drift_error"]
+    db.close()
+
+
+def test_paper_bad_paper_trading_value_exits_1(tmp_path, capsys, paper_seams):
+    # A bad paper_trading: value is an operator config mistake — the named
+    # exit-1 lane (via _load_risk_decision's validation parse), never an
+    # exit-2 "unexpected error" traceback.
+    paper_seams.write_text(
+        "paper_trading:\n  account:\n    initial_balance_usdc: -5\n", encoding="utf-8"
+    )
+    path, db = _seed_db(tmp_path)
+    db.close()
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "paper_trading" in err
+    assert "Fix the YAML" in err

@@ -187,11 +187,22 @@ def _config_drift_report(
     instrument is a different run, not a resumption), ``("params", msg)`` for
     risk/decision/paper_trading drift (warning — behaviour changes mid-run but
     the operator may intend it), or ``None`` when nothing drifted or no record
-    exists (a pre-drift-check store).
+    exists (a pre-drift-check store). A genesis record this process cannot
+    parse also reports as ``("params", ...)``: the homogeneity check became
+    impossible, which is breadcrumb-grade — never a startup abort (that would
+    fire before the protection-only fork, leaving a live position unwatched).
     """
     if not stored_json:
         return None
-    stored = json.loads(stored_json)
+    try:
+        stored = json.loads(stored_json)
+    except ValueError as exc:
+        return ("params", f"could not verify config drift (corrupt stored config_json: {exc})")
+    if not isinstance(stored, dict):
+        return (
+            "params",
+            "could not verify config drift (corrupt stored config_json: not an object)",
+        )
     # Round-trip today's subset through JSON so both sides compare in the same
     # serialized shape (default=str stringifies any non-JSON scalar).
     current = json.loads(json.dumps(_run_config_subset(config, coin), default=str))
@@ -298,6 +309,8 @@ def _cmd_paper(argv: list[str]) -> int:
     if cfgs is None:
         return 1
     risk_cfg, decision_cfg = cfgs
+    # Cannot raise for operator input: _load_risk_decision above already parsed
+    # this same block inside its named exit-1 lane (bad values return None).
     paper_cfg = PaperTradingConfig.from_dict(config.get("paper_trading"))
 
     clock = WallClock()
@@ -411,10 +424,11 @@ def _cmd_paper(argv: list[str]) -> int:
                         db, run_id=run_id, now=now, funding_source=funding_source
                     )
                 except ReconciliationError as exc:
-                    # Flat run over corrupt books: refuse to start — but leave
-                    # the durable breadcrumb first, so the refusal is visible
-                    # to a post-mortem even when stderr wasn't captured.
-                    _stamp_breadcrumb(db, run_id, "replay", "mismatch", str(exc))
+                    # Flat run over corrupt/unverifiable books: refuse to start
+                    # — but leave the durable breadcrumb first ("mismatch" or
+                    # "failed" per the refusal's lane), so the refusal is
+                    # visible to a post-mortem even when stderr wasn't captured.
+                    _stamp_breadcrumb(db, run_id, "replay", exc.replay_status, str(exc))
                     print(f"error: {exc}", file=sys.stderr)
                     return 1
                 _stamp_breadcrumb(db, run_id, "replay", report.replay_status, report.replay_error)
@@ -422,10 +436,11 @@ def _cmd_paper(argv: list[str]) -> int:
                 if report.replay_mismatch:
                     logger.error("restart over unverifiable books: %s", report.replay_error)
                     print(
-                        "ERROR: accounting replay mismatch on restart — running in "
-                        "protection-only mode: SL/TP protection and the market "
-                        "monitor stay live, NEW decision cycles stay halted until "
-                        "the store verifies again.",
+                        "ERROR: accounting replay could not verify this run's "
+                        "books on restart — running in protection-only mode: "
+                        "SL/TP protection and the market monitor stay live, NEW "
+                        "decision cycles stay halted until the store verifies "
+                        "again.",
                         file=sys.stderr,
                     )
                 print(
@@ -461,25 +476,34 @@ def _cmd_paper(argv: list[str]) -> int:
                 # an unconsumed flag would mislabel that fresh position's first real
                 # SL trigger as a restart gap fill.
                 engine.flag_restart_gap()
-            provider = _EngineDecisionProvider(
-                config,
-                risk_cfg=risk_cfg,
-                decision_cfg=decision_cfg,
-                payload_dir=db_path.resolve().parent / "payloads" / run_id,
-            )
-            scheduler = PaperScheduler(
-                db=db,
-                run_id=run_id,
-                engine=engine,
-                clock=clock,
-                provider=provider,
-                asset=asset,
-                risk_config=risk_cfg,
-                decision_config=decision_cfg,
-            )
+            if trading_halted:
+                # Protection-only never polls the AI, and nothing ever un-halts
+                # a protection-only process — the loop never touches the
+                # scheduler. Skip building it (and the decision provider's deep
+                # tradingagents import behind it): each would only add failure
+                # modes to a startup whose one job is keeping SL/TP alive, the
+                # same principle that lets this mode start keyless.
+                scheduler = None
+            else:
+                provider = _EngineDecisionProvider(
+                    config,
+                    risk_cfg=risk_cfg,
+                    decision_cfg=decision_cfg,
+                    payload_dir=db_path.resolve().parent / "payloads" / run_id,
+                )
+                scheduler = PaperScheduler(
+                    db=db,
+                    run_id=run_id,
+                    engine=engine,
+                    clock=clock,
+                    provider=provider,
+                    asset=asset,
+                    risk_config=risk_cfg,
+                    decision_config=decision_cfg,
+                )
             interval = paper_cfg.execution.market_monitor.interval_seconds
             try:
-                _paper_loop(
+                return _paper_loop(
                     db,
                     run_id,
                     engine,
@@ -504,7 +528,6 @@ def _cmd_paper(argv: list[str]) -> int:
                 logger.error("run lease lost: %s", exc)
                 print(f"error: {exc}", file=sys.stderr)
                 return 1
-            return 0
 
         try:
             return _run_locked()
@@ -523,7 +546,7 @@ def _paper_loop(
     funding_source,
     *,
     trading_halted: bool,
-) -> None:
+) -> int:
     """The production loop: tick (when the monitor is on) → poll → sleep.
 
     Tick before poll so a restart handles liquidation / gap SL / TP on the
@@ -538,6 +561,13 @@ def _paper_loop(
     monitor must survive (spec §5 / data §1.1). ``trading_halted=True`` enters
     that mode from the first iteration (a restart over mismatched books with a
     live position).
+
+    Protection-only mode exists *for* that live position — once it is gone
+    (SL/TP closed it and nothing else is live), halted trading means there is
+    nothing left this process may ever do. Rather than idle as a zombie for
+    days (holding the lease, with the closing fill never reaching the CSVs),
+    it exports the final state and returns exit code 1 so a supervisor or
+    operator gets the signal to investigate the store.
 
     Every iteration refreshes the single-instance lease, so the sleep is
     capped at 60s (well inside ``LOCK_STALE_SECONDS``) — an idle iteration
@@ -593,12 +623,37 @@ def _paper_loop(
                     "position until the next cycle.",
                     file=sys.stderr,
                 )
+        # One post-tick/poll read serves both the exit check and the delay
+        # branch — nothing between them mutates the engine's work state.
+        active = engine.has_active_work()
+        if trading_halted and not active:
+            # Protection-only mode exists for a live position; with the
+            # position closed (or none left) and new cycles halted, no future
+            # iteration can ever do anything — a zombie would hold the lease
+            # for days while the closing fill never reaches the CSVs. Export
+            # the final state and exit loud so a supervisor/operator gets the
+            # signal.
+            logger.error(
+                "protection-only run %s has nothing left to protect — "
+                "exporting final state and exiting",
+                run_id,
+            )
+            print(
+                "protection-only mode has nothing left to protect (the "
+                "position is closed and new cycles stay halted) — exporting "
+                "the final state and exiting. The books never re-verified; "
+                "investigate the store before starting a new run.",
+                file=sys.stderr,
+            )
+            _post_cycle_export(db, run_id, export_dir)
+            return 1
         now = clock.now()
         due = scheduler.next_due_at() if not trading_halted else None
-        if engine.has_active_work() or (due is None and not trading_halted):
+        # Halted-with-work and pending-retry (due is None while not halted)
+        # both tick at the monitor interval; the halted-and-idle case exited
+        # above, so ``due is None`` can no longer mean "idle heartbeat".
+        if active or due is None:
             delay = float(interval)
-        elif due is None:  # halted and no market work: idle heartbeat
-            delay = 600.0
         else:
             delay = max(1.0, min((due - now).total_seconds(), 600.0))
         # The 60s cap keeps the lease heartbeat fresh; waking early is a cheap
@@ -675,31 +730,24 @@ def _post_cycle_export(db, run_id: str, export_dir: Path) -> bool:
     so the caller can stop opening new positions on unverifiable books; both
     outcomes (and healthy verifications) stamp the ``last_replay_*`` breadcrumb.
     """
-    from .paper import accounting
+    from .paper.reconcile import classify_replay
     from .persistence.export import ExportError, export_run
 
-    replay_ok = True
-    replay_detail: str | None = None
-    try:
-        replayed = accounting.replay(db, run_id=run_id)
-        if not replayed.is_consistent:
-            replay_ok = False
-            detail = replay_detail = replayed.mismatch_detail
-            logger.error("accounting replay mismatch for %s: %s", run_id, detail)
-            print(
-                f"WARNING: accounting replay mismatch for {run_id!r}: {detail} — "
-                "investigate before trusting this run's results.",
-                file=sys.stderr,
-            )
-            _stamp_breadcrumb(db, run_id, "replay", "mismatch", detail)
-        else:
-            _stamp_breadcrumb(db, run_id, "replay", "ok", None)
-    except Exception as exc:  # noqa: BLE001 — reconciliation must not kill the loop
-        replay_ok = False  # unverifiable books are treated like inconsistent ones
-        replay_detail = str(exc)
-        logger.error("accounting replay failed for %s: %s", run_id, exc)
-        print(f"WARNING: accounting replay failed: {exc}", file=sys.stderr)
-        _stamp_breadcrumb(db, run_id, "replay", "failed", str(exc))
+    # classify_replay contains a raising replay ("failed" — unverifiable books
+    # are treated like inconsistent ones), so this lane cannot kill the loop.
+    replay_status, replay_detail, _cause = classify_replay(db, run_id=run_id)
+    replay_ok = replay_status == "ok"
+    if replay_status == "mismatch":
+        logger.error("accounting replay mismatch for %s: %s", run_id, replay_detail)
+        print(
+            f"WARNING: accounting replay mismatch for {run_id!r}: {replay_detail} — "
+            "investigate before trusting this run's results.",
+            file=sys.stderr,
+        )
+    elif replay_status == "failed":
+        logger.error("accounting replay failed for %s: %s", run_id, replay_detail)
+        print(f"WARNING: accounting replay failed: {replay_detail}", file=sys.stderr)
+    _stamp_breadcrumb(db, run_id, "replay", replay_status, replay_detail)
     export_ok = False
     try:
         export_run(db, run_id=run_id, output_dir=export_dir)

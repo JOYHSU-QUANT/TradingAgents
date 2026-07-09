@@ -61,6 +61,17 @@ def test_invalid_values_rejected():
         PaperTradingConfig.from_dict({"execution": {"market_monitor": {"interval_seconds": 0}}})
 
 
+def test_market_monitor_interval_rejects_above_twap_slice_cadence():
+    # The TWAP executor fills at most one slice per tick on a 30s slice grid
+    # with a 1h plan deadline — an interval above the slice cadence would
+    # silently under-fill full-size plans, so config rejects it loudly.
+    with pytest.raises(ValueError, match="interval_seconds must be <= 30"):
+        PaperTradingConfig.from_dict({"execution": {"market_monitor": {"interval_seconds": 31}}})
+    # The boundary itself (== the slice cadence) stays legal.
+    cfg = PaperTradingConfig.from_dict({"execution": {"market_monitor": {"interval_seconds": 30}}})
+    assert cfg.execution.market_monitor.interval_seconds == 30
+
+
 def test_initial_position_validation():
     with pytest.raises(ValueError, match="size' must be non-zero"):
         InitialPosition.from_dict({"coin": "BTC", "size": 0, "entry_price": 60000})

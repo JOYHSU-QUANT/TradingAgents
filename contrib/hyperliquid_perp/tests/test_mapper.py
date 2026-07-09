@@ -592,3 +592,31 @@ def test_required_field_nan_raises():
     }
     with pytest.raises(MalformedResponseError, match=r"entryPx"):
         mapper.map_position(state, "BTC")
+
+
+# --------------------------------------------------------------------------
+# meta -> szDecimals (PR4: AssetSpec inputs read from meta, never hardcoded)
+# --------------------------------------------------------------------------
+
+
+def _meta_with(entry: dict) -> list:
+    return [{"universe": [entry]}, []]
+
+
+def test_map_sz_decimals_reads_universe_entry():
+    meta = _meta_with({"name": "BTC", "szDecimals": 3, "maxLeverage": "50"})
+    assert mapper.map_sz_decimals(meta, "BTC") == 3
+
+
+def test_map_sz_decimals_unknown_coin_raises():
+    meta = _meta_with({"name": "BTC", "szDecimals": 3})
+    with pytest.raises(UnknownCoinError):
+        mapper.map_sz_decimals(meta, "ETH")
+
+
+@pytest.mark.parametrize("bad", [None, "3", 3.0, -1, True])
+def test_map_sz_decimals_rejects_non_int(bad):
+    # bool is an int subclass: True must not silently become szDecimals=1.
+    meta = _meta_with({"name": "BTC", "szDecimals": bad})
+    with pytest.raises(MalformedResponseError, match=r"szDecimals"):
+        mapper.map_sz_decimals(meta, "BTC")

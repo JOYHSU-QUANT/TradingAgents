@@ -185,6 +185,9 @@ engine 續 tick、SL/TP 與監控不中斷（重啟時 mismatch 且有倉位也�
 key；倉位了結後同樣最後 export + exit 1）；空倉才直接具名 exit 1。
 完整 AI payload JSON 存於 `<db 目錄>/payloads/<run_id>/`，`ai_inputs` 記其路徑與
 sha256。
+`paper` 啟動時會配置 logging（INFO、stderr、含時間戳與 logger 名——多日 run 的
+corrupt funding row／快照寫失敗等診斷才有時間軸可查）；嵌入端已自行安裝 handler
+時不覆蓋（`basicConfig` no-op），`export`／`validate`／legacy 單發路徑刻意不配置。
 市場資料 warmup 不足（closed candle 數 < 門檻）會走 §3.1 retry ladder 後記
 `api_failed`（error_type=server_error、無 AI 花費）——太年輕的標的在暖機完成前
 每 4h 產生一筆，屬預期行為。

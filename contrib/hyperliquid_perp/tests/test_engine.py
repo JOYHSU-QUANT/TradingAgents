@@ -7,6 +7,7 @@ first scripted snapshot (its plan-build fetch); each ``tick`` consumes the next.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -993,3 +994,186 @@ def test_internal_state_guards_reject_invalid_construction():
             open_budget=1,
             deadline=_T0,
         )
+
+
+# --------------------------------------------------------------------------
+# PR4 seams: restart gap-SL arming + cycle-end snapshot content
+# --------------------------------------------------------------------------
+
+
+def test_flag_restart_gap_labels_first_tick_stop_as_gap(tmp_path):
+    # Process 1 opens a position; its SL persists on current_positions.
+    db, clock, engine1, asset = _engine(tmp_path)
+    _provider(engine1, [_snap(), _snap()])
+    engine1.start_plan(_decision("long", 1))
+    clock.advance(30)
+    engine1.tick()  # fill + SL persisted
+    sl = engine1._protection.stop_loss
+    assert sl is not None
+
+    # "Restart": a fresh engine hydrates protection from the store; the blind
+    # window is armed explicitly (execution §1.2 step 6). The mark has crossed
+    # the SL during the gap -> the first tick fills a gap stop, not a normal SL.
+    engine2 = PaperExecutionEngine(
+        db=db,
+        run_id="r",
+        asset=asset,
+        clock=clock,
+        provider=ScriptedSnapshotProvider("BTC", [_snap(mark=40000, mid=40000)]),
+        risk_config=RiskConfig(leverage=D(5), max_target_margin_pct=60),
+        decision_config=DecisionConfig(),
+        paper_config=PaperTradingConfig.from_dict(None),
+    )
+    assert engine2._protection.stop_loss == sl  # hydrated, not forgotten
+    engine2.flag_restart_gap()
+    clock.advance(30)
+    result = engine2.tick()
+    assert result.has(TickEvent.GAP_STOP_FILL)
+    assert not result.has(TickEvent.STOP_LOSS_FILL)
+    reason = db.conn.execute(
+        "SELECT fill_reason FROM fills WHERE run_id='r' ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()[0]
+    assert reason == "gap_stop_fill"
+    assert _size(db) == D(0)
+    db.close()
+
+
+def test_write_cycle_snapshot_records_position_row(tmp_path):
+    db, clock, engine, _ = _engine(tmp_path)
+    _provider(engine, [_snap(), _snap()])
+    engine.start_plan(_decision("long", 1))
+    clock.advance(30)
+    engine.tick()  # fill -> position 0.001 @ 50025
+    before = db.conn.execute("SELECT COUNT(*) FROM position_snapshots").fetchone()[0]
+    engine.write_cycle_snapshot(D(51000))
+    row = db.conn.execute("SELECT * FROM position_snapshots ORDER BY rowid DESC LIMIT 1").fetchone()
+    after = db.conn.execute("SELECT COUNT(*) FROM position_snapshots").fetchone()[0]
+    assert after == before + 1
+    assert row["side"] == "long"
+    assert D(row["position_size"]) == D("0.001")
+    assert D(row["mark_price"]) == D(51000)
+    assert D(row["position_notional"]) == D("0.001") * D(51000)
+    # unrealized = size * (mark - entry) under the pinned context
+    assert D(row["unrealized_pnl"]) == D("0.001") * (D(51000) - D("50025"))
+    assert row["stop_loss_price"] is not None  # live protection captured
+    db.close()
+
+
+def test_write_cycle_snapshot_is_best_effort_on_write_failure(tmp_path, monkeypatch):
+    # A post-commit cycle-end snapshot write failure must NOT halt the engine or
+    # strand live SL/TP monitoring: it is logged, returns False, and a later
+    # snapshot re-takes cleanly (the api_failed path shares the same helper).
+    db, clock, engine, _ = _engine(tmp_path)
+    _provider(engine, [_snap(), _snap()])
+    engine.start_plan(_decision("long", 1))
+    clock.advance(30)
+    engine.tick()  # opens a position -> there is live protection to keep alive
+
+    def _boom(*_a, **_k):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(engine, "_write_snapshots", _boom)
+    assert engine.write_cycle_snapshot(D(51000)) is False
+    assert engine._halted is False  # protection survives a snapshot write error
+
+    monkeypatch.undo()  # the store recovers; the next snapshot writes normally
+    before = db.conn.execute("SELECT COUNT(*) FROM position_snapshots").fetchone()[0]
+    assert engine.write_cycle_snapshot(D(51000)) is True
+    after = db.conn.execute("SELECT COUNT(*) FROM position_snapshots").fetchone()[0]
+    assert after == before + 1
+    db.close()
+
+
+def test_flat_restart_reports_no_active_work_for_gap_arming(tmp_path):
+    # The CLI arms flag_restart_gap() only when has_active_work() is true at
+    # restart: a flat store has no blind window to check, and an unconsumed
+    # flag would mislabel a NEW position's first SL (opened by the forced
+    # immediate cycle before any tick) as a restart gap fill.
+    db, clock, engine1, asset = _engine(tmp_path)
+    _provider(engine1, [_snap(), _snap(), _snap(mark=40000, mid=40000)])
+    engine1.start_plan(_decision("long", 1))
+    clock.advance(30)
+    engine1.tick()  # open
+    clock.advance(30)
+    engine1.tick()  # SL triggers -> flat again, protection cleared
+
+    engine2 = PaperExecutionEngine(
+        db=db,
+        run_id="r",
+        asset=asset,
+        clock=clock,
+        provider=ScriptedSnapshotProvider("BTC", []),
+        risk_config=RiskConfig(leverage=D(5), max_target_margin_pct=60),
+        decision_config=DecisionConfig(),
+        paper_config=PaperTradingConfig.from_dict(None),
+    )
+    assert not engine2.has_active_work()  # flat restart -> CLI must not arm the flag
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# cancel_active_plans (mid-run protection-only halt sweep)
+# --------------------------------------------------------------------------
+
+
+def test_cancel_active_plans_terminates_inflight_leg_and_restores_tp(tmp_path):
+    # The mid-run halt's analogue of restart reconciliation's cancel sweep: an
+    # in-flight TWAP leg stops filling, its rows terminate as canceled with the
+    # halt reason, and the surviving position regains its TP.
+    db, clock, engine, _ = _engine(tmp_path)
+    _provider(engine, [_snap(), _snap(), _snap()])
+    engine.start_plan(_decision("long", 2))  # 2-slice TWAP
+    plan_id = engine._leg.plan_id
+    order_id = engine._leg.order_id
+    clock.advance(30)
+    engine.tick()  # slice 1 of 2 fills
+    assert _size(db) == D("0.001")
+
+    assert engine.cancel_active_plans() is True
+    assert _plan_status(db, plan_id) == ("canceled", "trading_halted")
+    assert _order_status(db, order_id) == ("canceled", "trading_halted")
+    assert engine._protection.take_profit is not None
+    # The canceled plan never fills its remaining slice.
+    clock.advance(30)
+    engine.tick()
+    assert _size(db) == D("0.001")
+    db.close()
+
+
+def test_cancel_active_plans_records_pending_flip_incomplete(tmp_path):
+    # A flip caught between decision and completion must not open its reverse
+    # leg after the halt: the close leg cancels and the flip records
+    # flip_incomplete — the same outcome a kill-and-restart would produce.
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _provider(engine, [_snap()] * 3)
+    engine.start_plan(_decision("short", 5))  # flip: close leg registered
+    assert engine._flip is not None
+    close_plan_id = engine._leg.plan_id
+
+    assert engine.cancel_active_plans() is True
+    assert engine._flip is None
+    assert _plan_status(db, close_plan_id) == ("canceled", "trading_halted")
+    row = db.conn.execute(
+        "SELECT status_reason FROM execution_plans WHERE status = 'flip_incomplete'"
+    ).fetchone()
+    assert row["status_reason"] == "trading_halted"
+    # Nothing closes or opens afterward; the surviving position keeps its TP.
+    clock.advance(30)
+    engine.tick()
+    assert _size(db) == D("0.001")
+    assert engine._protection.take_profit is not None
+    db.close()
+
+
+def test_cancel_active_plans_with_nothing_inflight_is_a_noop(tmp_path):
+    db, clock, engine, _ = _engine(tmp_path)
+    assert engine.cancel_active_plans() is False  # nothing ever started
+    _provider(engine, [_snap(), _snap()])
+    engine.start_plan(_decision("long", 1))
+    plan_id = engine._leg.plan_id
+    clock.advance(30)
+    engine.tick()  # paper_market fill completes the plan
+    assert engine.cancel_active_plans() is False  # terminal leg: nothing to cancel
+    assert _plan_status(db, plan_id) == ("completed", None)
+    db.close()

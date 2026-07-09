@@ -66,6 +66,7 @@ __all__ = [
     "post_fill",
     "record_funding",
     "replay",
+    "replay_within",
     "summarize_account",
     "unrealized_pnl",
     "used_initial_margin",
@@ -830,6 +831,16 @@ class ReplayResult:
     def is_consistent(self) -> bool:
         return not self.position_mismatches and self.account_matches
 
+    @property
+    def mismatch_detail(self) -> str:
+        """One canonical rendering of what mismatched — every reporter (restart
+        refusal, mid-run halt, breadcrumb) formats through here so the texts
+        stay grep-compatible."""
+        return (
+            f"position mismatches {list(self.position_mismatches)!r}, "
+            f"account_matches={self.account_matches}"
+        )
+
 
 def replay(db: Database, *, run_id: str) -> ReplayResult:
     """Rebuild positions/ledger from committed fills + posted funding; compare to current.
@@ -851,69 +862,80 @@ def replay(db: Database, *, run_id: str) -> ReplayResult:
     write committed mid-replay cannot fabricate — or mask — a mismatch.
     """
     with db.read_transaction() as conn:
-        run = repo.get_run(conn, run_id)
-        if run is None:
-            raise ValueError(f"run {run_id!r} does not exist; nothing to replay")
+        return replay_within(conn, run_id=run_id)
 
-        # Fold-order invariant: the live ledger accrued its deltas chronologically
-        # interleaved (each post_fill/record_funding did wallet += delta), while
-        # replay sums all fills then all funding. Decimal addition at prec=28 is
-        # only order-sensitive when operands span more than 28 significant figures;
-        # USDC balances and per-event deltas never do, so both fold orders yield the
-        # identical wallet and the bit-for-bit equality check below holds exactly.
-        with localcontext(DECIMAL_CONTEXT):
-            positions: dict[str, PositionState] = {
-                p.coin: p for p in repo.get_run_seed_positions(conn, run_id)
-            }
-            wallet = Decimal(run["initial_balance_usdc"])
-            realized_total = Decimal(0)
-            total_fees = Decimal(0)
 
-            for fill in repo.iter_fills(conn, run_id):
-                symbol = fill["symbol"]
-                current = positions.get(symbol) or PositionState.flat(symbol)
-                effect = compute_fill_effect(
-                    current,
-                    side=fill["side"],
-                    qty=Decimal(fill["fill_qty"]),
-                    price=Decimal(fill["fill_price"]),
-                    fee_rate=Decimal(fill["fee_rate"]),
-                )
-                positions[symbol] = effect.position
-                wallet += effect.wallet_delta
-                realized_total += effect.realized_pnl_delta
-                total_fees += effect.fee
+def replay_within(conn: sqlite3.Connection, *, run_id: str) -> ReplayResult:
+    """The replay core, on a caller-owned read snapshot (semantics of :func:`replay`).
 
-            net_funding = Decimal(0)
-            for event in repo.iter_funding_events(conn, run_id, status="posted"):
-                # From the stored settlement basis, symmetric with the fill
-                # loop above — the write boundary guarantees a posted row
-                # carries all three basis fields.
-                pnl = funding_pnl(
-                    Decimal(event["position_size"]) * Decimal(event["mark_price"]),
-                    Decimal(event["funding_rate"]),
-                )
-                wallet += pnl
-                net_funding += pnl
+    Exposed so a consumer combining replay with its *own* reads (the spec §5
+    validator) can pin everything to one snapshot — two back-to-back
+    ``read_transaction``\\ s racing a live writer would otherwise mix two points
+    in time into one report.
+    """
+    run = repo.get_run(conn, run_id)
+    if run is None:
+        raise ValueError(f"run {run_id!r} does not exist; nothing to replay")
 
-        ledger = AccountLedger(
-            wallet_balance=wallet,
-            realized_pnl=realized_total,
-            total_fees=total_fees,
-            net_funding_pnl=net_funding,
-        )
+    # Fold-order invariant: the live ledger accrued its deltas chronologically
+    # interleaved (each post_fill/record_funding did wallet += delta), while
+    # replay sums all fills then all funding. Decimal addition at prec=28 is
+    # only order-sensitive when operands span more than 28 significant figures;
+    # USDC balances and per-event deltas never do, so both fold orders yield the
+    # identical wallet and the bit-for-bit equality check below holds exactly.
+    with localcontext(DECIMAL_CONTEXT):
+        positions: dict[str, PositionState] = {
+            p.coin: p for p in repo.get_run_seed_positions(conn, run_id)
+        }
+        wallet = Decimal(run["initial_balance_usdc"])
+        realized_total = Decimal(0)
+        total_fees = Decimal(0)
 
-        # Compare to the materialized state over the union of symbols.
-        materialized = {p.coin: p for p in repo.get_all_current_positions(conn, run_id)}
-        mismatches = tuple(
-            sorted(
-                symbol
-                for symbol in set(positions) | set(materialized)
-                if positions.get(symbol) != materialized.get(symbol)
+        for fill in repo.iter_fills(conn, run_id):
+            symbol = fill["symbol"]
+            current = positions.get(symbol) or PositionState.flat(symbol)
+            effect = compute_fill_effect(
+                current,
+                side=fill["side"],
+                qty=Decimal(fill["fill_qty"]),
+                price=Decimal(fill["fill_price"]),
+                fee_rate=Decimal(fill["fee_rate"]),
             )
+            positions[symbol] = effect.position
+            wallet += effect.wallet_delta
+            realized_total += effect.realized_pnl_delta
+            total_fees += effect.fee
+
+        net_funding = Decimal(0)
+        for event in repo.iter_funding_events(conn, run_id, status="posted"):
+            # From the stored settlement basis, symmetric with the fill
+            # loop above — the write boundary guarantees a posted row
+            # carries all three basis fields.
+            pnl = funding_pnl(
+                Decimal(event["position_size"]) * Decimal(event["mark_price"]),
+                Decimal(event["funding_rate"]),
+            )
+            wallet += pnl
+            net_funding += pnl
+
+    ledger = AccountLedger(
+        wallet_balance=wallet,
+        realized_pnl=realized_total,
+        total_fees=total_fees,
+        net_funding_pnl=net_funding,
+    )
+
+    # Compare to the materialized state over the union of symbols.
+    materialized = {p.coin: p for p in repo.get_all_current_positions(conn, run_id)}
+    mismatches = tuple(
+        sorted(
+            symbol
+            for symbol in set(positions) | set(materialized)
+            if positions.get(symbol) != materialized.get(symbol)
         )
-        current_ledger = repo.get_current_account_state(conn, run_id)
-        account_matches = current_ledger == ledger
+    )
+    current_ledger = repo.get_current_account_state(conn, run_id)
+    account_matches = current_ledger == ledger
     return ReplayResult(
         positions=positions,
         ledger=ledger,

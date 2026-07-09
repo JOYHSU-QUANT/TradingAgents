@@ -1,10 +1,16 @@
-"""Tests for market_data helpers that need no network (interval math)."""
+"""Tests for market_data helpers that need no network (interval math, meta)."""
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
-from contrib.hyperliquid_perp.exchanges.hyperliquid.market_data import interval_to_ms
+from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier
+from contrib.hyperliquid_perp.exchanges.hyperliquid.market_data import (
+    HyperliquidMarketData,
+    interval_to_ms,
+)
 
 
 def test_interval_to_ms_known_intervals():
@@ -18,3 +24,31 @@ def test_interval_to_ms_unknown_raises_valueerror():
     # silently selecting a wrong interval.
     with pytest.raises(ValueError):
         interval_to_ms("4H")
+
+
+class _MetaOnlyInfo:
+    def __init__(self, payload):
+        self._payload = payload
+        self.calls = 0
+
+    def meta_and_asset_ctxs(self):
+        self.calls += 1
+        return self._payload
+
+
+class _FakeClient:
+    def __init__(self, payload):
+        self.info = _MetaOnlyInfo(payload)
+
+
+def test_get_asset_meta_pair_from_one_meta_request(meta_and_asset_ctxs):
+    # AssetSpec's two exchange-derived inputs come from the SAME meta response —
+    # one request, so the (szDecimals, schedule) pair can never be internally
+    # inconsistent.
+    client = _FakeClient(meta_and_asset_ctxs)
+    market = HyperliquidMarketData(client)
+    sz_decimals, schedule = market.get_asset_meta("BTC")
+    assert client.info.calls == 1
+    assert sz_decimals == 5  # BTC's szDecimals, not ETH's 4
+    # No tier table in the fixture -> single tier from BTC's maxLeverage.
+    assert schedule == MarginSchedule(coin="BTC", tiers=(MarginTier(Decimal(0), Decimal(50)),))

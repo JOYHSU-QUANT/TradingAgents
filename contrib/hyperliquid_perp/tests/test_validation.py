@@ -423,6 +423,199 @@ def test_twenty_nine_cycles_not_phase3_ready(tmp_path):
     db.close()
 
 
+def test_replay_raise_contained_as_counted_integrity_failure(tmp_path):
+    # A store so corrupt the replay itself crashes (a fill cell Decimal() cannot
+    # read) must take the counted-failure exit-5 lane with a partial report —
+    # classify_replay's "unverifiable books are an outcome" rule — not escape as
+    # a generic crash. The ledger-derived metrics print n/a, never a fabricated 0.
+    db = _run_one_cycle_with_fill(tmp_path)
+    with db.transaction() as conn:
+        conn.execute("UPDATE fills SET fill_price = 'garbage' WHERE run_id = 'r'")
+    report = validate_run(db, run_id="r")
+    assert report.accounting_replay_mismatch_count == 1
+    assert any(f.startswith("accounting replay raised:") for f in report.failures)
+    assert report.realized_pnl is None
+    assert report.total_fees is None
+    assert report.net_funding_pnl is None
+    assert report.total_pnl is None
+    assert not report.phase3_ready
+    # Everything derivable before the raise still reports.
+    assert report.order_count == 1
+    assert report.fill_count == 1
+    lines = report.summary_lines()
+    assert "realized_pnl: n/a" in lines
+    assert "total_pnl: n/a" in lines
+    db.close()
+
+
+def test_unreadable_snapshot_row_is_counted_mismatch_not_crash(tmp_path):
+    # Per-row containment: a snapshot cell the checker cannot read is exactly
+    # the corruption the identity check exists to catch — counted, not crashed.
+    db = _run_one_cycle_with_fill(tmp_path)
+    with db.transaction() as conn:
+        conn.execute("UPDATE account_snapshots SET wallet_balance = 'xx' WHERE run_id = 'r'")
+    report = validate_run(db, run_id="r")
+    assert report.snapshot_mismatch_count >= 1
+    assert any("identity check raised" in f for f in report.failures)
+    assert not report.phase3_ready
+    db.close()
+
+
+def test_unreadable_exposure_cell_flags_row_and_omits_max(tmp_path):
+    # The max_exposure/max_leverage scans skip a cell Decimal() rejects instead
+    # of crashing; the rows themselves are already counted failures from the
+    # identity phase.
+    db = _run_one_cycle_with_fill(tmp_path)
+    with db.transaction() as conn:
+        conn.execute("UPDATE position_snapshots SET exposure_pct = 'bad' WHERE run_id = 'r'")
+        conn.execute("UPDATE account_snapshots SET effective_leverage = 'bad' WHERE run_id = 'r'")
+    report = validate_run(db, run_id="r")
+    assert report.max_exposure_pct is None  # every exposure cell was unreadable
+    assert report.max_effective_leverage is None  # same for the leverage scan
+    assert report.snapshot_mismatch_count >= 2  # both corrupted rows counted
+    assert not report.phase3_ready
+    db.close()
+
+
+def test_unreadable_unrealized_cell_reports_na_leg(tmp_path):
+    # The unrealized leg of total_pnl is unavailable (n/a), not zero, when the
+    # last snapshot's stored cell is unreadable — 0 would misread as flat.
+    db = _run_one_cycle_with_fill(tmp_path)
+    with db.transaction() as conn:
+        conn.execute("UPDATE account_snapshots SET unrealized_pnl = 'bad' WHERE run_id = 'r'")
+    report = validate_run(db, run_id="r")
+    assert report.unrealized_pnl is None
+    assert report.unrealized_as_of is not None  # a snapshot exists; its value doesn't
+    assert report.total_pnl is None
+    assert report.snapshot_mismatch_count >= 1
+    db.close()
+
+
+def test_report_rejects_partial_or_uncounted_ledger_absence():
+    # New invariants for the replay-raised shape: the ledger trio is absent only
+    # together, only as a counted failure, and total_pnl mirrors its components.
+    from contrib.hyperliquid_perp.paper.validation import ValidationReport
+
+    common = {
+        "run_id": "r",
+        "cycle_count": 0,
+        "api_failed_count": 0,
+        "order_count": 0,
+        "fill_count": 0,
+        "rejected_order_count": 0,
+        "orphan_order_count": 0,
+        "orphan_fill_count": 0,
+        "snapshot_mismatch_count": 0,
+        "max_exposure_pct": None,
+        "max_effective_leverage": None,
+        "unrealized_pnl": D(0),
+        "unrealized_as_of": "2026-07-06T12:00:00+00:00",
+    }
+    # Partial absence: realized missing but fees present.
+    with pytest.raises(ValueError, match="absent together"):
+        ValidationReport(
+            **common,
+            accounting_replay_mismatch_count=1,
+            realized_pnl=None,
+            total_fees=D(0),
+            net_funding_pnl=D(0),
+            total_pnl=None,
+            failures=("accounting replay raised: x — books unverifiable",),
+        )
+    # Absent ledger with a zero replay count: an uncounted integrity failure.
+    with pytest.raises(ValueError, match="uncounted integrity failure"):
+        ValidationReport(
+            **common,
+            accounting_replay_mismatch_count=0,
+            realized_pnl=None,
+            total_fees=None,
+            net_funding_pnl=None,
+            total_pnl=None,
+            failures=(),
+        )
+    # total_pnl present while a component is absent: self-contradicting.
+    with pytest.raises(ValueError, match="total_pnl must be absent"):
+        ValidationReport(
+            **common,
+            accounting_replay_mismatch_count=1,
+            realized_pnl=None,
+            total_fees=None,
+            net_funding_pnl=None,
+            total_pnl=D(0),
+            failures=("accounting replay raised: x — books unverifiable",),
+        )
+    # The legal replay-raised shape constructs fine.
+    ValidationReport(
+        **common,
+        accounting_replay_mismatch_count=1,
+        realized_pnl=None,
+        total_fees=None,
+        net_funding_pnl=None,
+        total_pnl=None,
+        failures=("accounting replay raised: x — books unverifiable",),
+    )
+
+
+def test_stale_pending_funding_warns_not_gates(tmp_path):
+    # Q2 decision: a funding hour still pending long past settlement is surfaced
+    # as a warning (the acceptance reader must see the totals are partial) but
+    # never gates phase3 or the exit code — young pending events stay silent.
+    from contrib.hyperliquid_perp.paper.reconcile import STALE_PENDING_FUNDING
+
+    db = _run_one_cycle_with_fill(tmp_path)
+    accounting.record_funding(
+        db,
+        run_id="r",
+        mode="paper",
+        symbol="BTC",
+        funding_timestamp=_T0,
+        position_size=D("0.001"),
+        funding_rate=None,  # no rate yet: stored as a pending event
+        mark_price=_MARK,
+        recorded_at=_T0,
+    )
+    stale = validate_run(db, run_id="r", now=_T0 + STALE_PENDING_FUNDING + timedelta(hours=1))
+    assert any("funding event(s) still pending" in w for w in stale.warnings)
+    assert stale.failures == ()  # surface, never gate
+
+    young = validate_run(db, run_id="r", now=_T0 + timedelta(hours=1))
+    assert not any("funding event(s) still pending" in w for w in young.warnings)
+
+    # A pending timestamp the backfill cannot even parse is *corrupt*, not
+    # stale (backfill_pending_funding's vocabulary) — its own warning line,
+    # regardless of "now".
+    with db.transaction() as conn:
+        conn.execute("UPDATE funding_events SET funding_timestamp = 'junk' WHERE run_id = 'r'")
+    corrupt = validate_run(db, run_id="r", now=_T0 + timedelta(hours=1))
+    assert any("unparseable" in w and "corrupt" in w for w in corrupt.warnings)
+    assert not any("still pending more than" in w for w in corrupt.warnings)
+    db.close()
+
+
+def test_config_drift_breadcrumb_surfaces_as_warning(tmp_path):
+    # Same-concept sibling of the pending-funding warning: the drift breadcrumb
+    # is store-persisted but was visible only in the dead process's log; the
+    # acceptance report must mention that the aggregate spans two parameter sets.
+    db = _run_one_cycle_with_fill(tmp_path)
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(
+            conn,
+            "r",
+            last_config_drift_status="drift",
+            last_config_drift_error="risk differs",
+            last_config_drift_at=_T0,
+        )
+    report = validate_run(db, run_id="r")
+    assert any("config drift" in w and "risk differs" in w for w in report.warnings)
+    assert report.failures == ()  # a warning, never a gate
+
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(conn, "r", last_config_drift_status="ok")
+    clean = validate_run(db, run_id="r")
+    assert not any("config drift" in w for w in clean.warnings)
+    db.close()
+
+
 def test_corrupted_account_state_reports_replay_mismatch(tmp_path):
     # Corrupt the materialized books after real fills: replay recomputes from
     # events and must disagree — a gating failure (the CLI's exit-5 lane keys

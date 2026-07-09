@@ -23,8 +23,9 @@ that self-terminates after its position closes (final export written; the
 books never re-verified, investigate the store), ``2`` unexpected error, ``4``
 (``validate`` only) the run is internally consistent but has not accumulated
 the 30-cycle gate yet ("keep running cycles"), ``5`` (``validate`` only) the
-run has integrity failures — orphans, snapshot or replay mismatches ("the
-store is broken; investigate before trusting results").
+run has integrity failures — orphans, snapshot or replay mismatches, or a
+store so corrupt the checks themselves cannot run ("the store is broken;
+investigate before trusting results").
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -147,15 +149,21 @@ def _cmd_validate(argv: list[str]) -> int:
 
     from .paper.validation import validate_run
 
-    db = _open_existing_db(args.db)
-    if db is None:
-        return 1
-    with db:
-        try:
-            report = validate_run(db, run_id=args.run_id)
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+    try:
+        db = _open_existing_db(args.db)
+        if db is None:
             return 1
+        with db:
+            report = validate_run(db, run_id=args.run_id)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except sqlite3.Error as exc:
+        # The store cannot even be read (malformed file, I/O failure mid-scan):
+        # the strongest possible "investigate the store" signal — the same
+        # exit-5 verdict as a failing report, not a generic tool crash.
+        print(f"error: store integrity failure — {exc}", file=sys.stderr)
+        return 5
     for line in report.summary_lines():
         print(line)
     if report.phase3_ready:

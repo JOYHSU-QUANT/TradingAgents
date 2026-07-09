@@ -186,10 +186,15 @@ sha256。
 
 `validate` 的 exit code：`0` = 可進 Phase 3（`cycle_count >= 30` 且 orphan／
 snapshot／replay mismatch 全為 0）；`4` = 資料一致但尚未達標（繼續累積 cycles）；
-`5` = 有 integrity failures（orphan／mismatch——先調查再相信結果）；`1` = 操作
-錯誤（db／run 不存在）。`cycle_count` 只計 `completed`／`invalid_output`（
-`api_failed` 另計為 `api_failed_count`，不算進 30 輪門檻）。跑滿 30 cycles
-（約 5 天）後用它檢查驗收條件。
+`5` = 有 integrity failures（orphan／mismatch，或 store 壞到檢查器本身跑不完——
+replay／snapshot 重算 raise、甚至檔案根本不是 SQLite，都算「先調查再相信結果」，
+不會落成籠統的 exit 2；raise 之前算得出的指標照印，算不出的印 `n/a` 不捏 0）；
+`1` = 操作錯誤（db／run 不存在）。`cycle_count` 只計 `completed`／`invalid_output`
+（`api_failed` 另計為 `api_failed_count`，不算進 30 輪門檻）。報告另有不影響
+exit code 的 `warning:` 行——settlement 過後 6 小時仍 pending 的 funding event
+（其 P&L 依 never-fabricate 恆不入帳，總額因此偏少）與最後一次 resume 記錄到的
+config drift（聚合指標橫跨兩組參數），這些先前只在（已死的）process log 可見。
+跑滿 30 cycles（約 5 天）後用它檢查驗收條件。
 
 ## 5. 輸出去哪裡
 

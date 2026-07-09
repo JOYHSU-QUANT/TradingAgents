@@ -137,6 +137,42 @@ def test_validate_exit_codes(tmp_path, capsys):
     assert "orphan fill" in capsys.readouterr().out
 
 
+def test_validate_exit_5_when_replay_raises(tmp_path, capsys):
+    # A store corrupt enough to crash the replay itself is the strongest
+    # "investigate the store" signal: exit 5 with a partial report (ledger
+    # metrics n/a), not the generic exit-2 crash lane.
+    path, db = _seed_db(tmp_path)
+    accounting.post_fill(
+        db,
+        run_id="r",
+        mode="paper",
+        fill_id="r|f|0",
+        order_id="o1",
+        symbol="BTC",
+        side="buy",
+        qty=D("0.001"),
+        price=D(50000),
+        fee_rate=D(0),
+        timestamp=_T0,
+    )
+    with db.transaction() as conn:
+        conn.execute("UPDATE fills SET fill_price = 'garbage' WHERE run_id = 'r'")
+    db.close()
+    assert cli_main(["validate", "--run-id", "r", "--db", str(path)]) == 5
+    out = capsys.readouterr().out
+    assert "accounting replay raised" in out
+    assert "realized_pnl: n/a" in out
+
+
+def test_validate_exit_5_on_unreadable_store(tmp_path, capsys):
+    # A file that is not SQLite at all takes the same exit-5 "investigate the
+    # store" verdict — not exit 2 ("tool bug") and not exit 1 (operator error).
+    bogus = tmp_path / "bogus.db"
+    bogus.write_text("this is not a database", encoding="utf-8")
+    assert cli_main(["validate", "--run-id", "r", "--db", str(bogus)]) == 5
+    assert "store integrity failure" in capsys.readouterr().err
+
+
 def test_validate_operator_errors_exit_1(tmp_path, capsys):
     path, db = _seed_db(tmp_path)
     db.close()

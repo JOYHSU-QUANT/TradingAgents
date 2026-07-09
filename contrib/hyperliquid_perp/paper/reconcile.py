@@ -45,6 +45,7 @@ from .engine import FundingSource
 from .scheduler import parse_instant
 
 __all__ = [
+    "STALE_PENDING_FUNDING",
     "ReconciliationError",
     "RestartReconciliation",
     "backfill_pending_funding",
@@ -61,7 +62,9 @@ logger = logging.getLogger(__name__)
 # settled hour will likely never resolve" (delisted coin, a gap the exchange never
 # published) apart from the ordinary "not settled yet" warning it otherwise mimics
 # — its funding P&L is silently omitted from the totals until it does resolve.
-_STALE_PENDING_FUNDING = timedelta(hours=6)
+# Public: the acceptance validator ages pending events against the same
+# threshold for its non-gating staleness warning.
+STALE_PENDING_FUNDING = timedelta(hours=6)
 
 
 def backfill_pending_funding(
@@ -100,7 +103,7 @@ def backfill_pending_funding(
                 else None
             )
             if rate is None:
-                if now - settlement >= _STALE_PENDING_FUNDING:
+                if now - settlement >= STALE_PENDING_FUNDING:
                     stale_pending += 1
                 else:
                     young_pending += 1
@@ -143,7 +146,7 @@ def backfill_pending_funding(
             "P&L stays uncounted)",
             run_id,
             stale_pending,
-            _STALE_PENDING_FUNDING,
+            STALE_PENDING_FUNDING,
         )
     # Corrupt-basis events already logged their own error above — only the
     # genuinely rate-less remainder gets the "still unavailable" warning.

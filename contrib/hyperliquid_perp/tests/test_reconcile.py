@@ -224,7 +224,7 @@ def test_stale_pending_funding_escalates_to_error(tmp_path, caplog):
     age check distinguishes it from a rate that is merely un-published yet (the
     fetch source resets its own failure counter on every successful fetch)."""
     from contrib.hyperliquid_perp.paper.reconcile import (
-        _STALE_PENDING_FUNDING,
+        STALE_PENDING_FUNDING,
         backfill_pending_funding,
     )
 
@@ -239,7 +239,7 @@ def test_stale_pending_funding_escalates_to_error(tmp_path, caplog):
         funding_rate=None,
         mark_price=_MARK,
     )
-    now = _T0 + _STALE_PENDING_FUNDING + timedelta(minutes=1)  # past the threshold
+    now = _T0 + STALE_PENDING_FUNDING + timedelta(minutes=1)  # past the threshold
     with caplog.at_level(logging.WARNING):
         posted, still_pending = backfill_pending_funding(
             db, run_id="r", now=now, funding_source=_Rates(None)

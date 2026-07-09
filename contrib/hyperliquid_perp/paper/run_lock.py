@@ -36,8 +36,9 @@ __all__ = [
 ]
 
 # The loop heartbeats once per iteration, and one iteration can legitimately
-# hold the loop for many minutes: poll() runs the full AI engine call (deep
-# reasoning + up to two in-call retries) before control returns. The window
+# hold the loop for many minutes: poll() runs one full AI engine call (deep
+# multi-agent reasoning; the §3.1 retries each land on a *later* poll, but a
+# single call can still block for minutes) before control returns. The window
 # must outlast the slowest realistic iteration — a takeover mid-AI-call would
 # recreate exactly the two-writer corruption this lease exists to prevent.
 # The cost of the margin is only how long a crashed run stays untakeable,

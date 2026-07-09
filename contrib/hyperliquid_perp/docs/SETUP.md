@@ -150,8 +150,10 @@ python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db --crea
 # 之後重啟（不帶 --create；DB 或 run 不存在會具名報錯）。重啟時自動做
 # execution §1.2 的 reconciliation（取消舊 plan、補帳 pending funding、replay 驗證、
 # gap SL 檢查、立即開新 cycle），並比對 genesis config：換 coin 硬錯、
-# risk/decision/paper_trading 漂移警告（同時落地 scheduler_state 的
-# last_config_drift_* breadcrumb，事後可從 store 還原）。同一個 --run-id 續跑同一個 run。
+# risk/decision/paper_trading(execution)/engine/market_data/indicators 漂移警告
+# （同時落地 scheduler_state 的 last_config_drift_* breadcrumb，事後可從 store 還原；
+# paper_trading.account 是 genesis-only、resume 改動無效故不警告，早於新鍵的
+# genesis 紀錄跳過該鍵比對不誤報）。同一個 --run-id 續跑同一個 run。
 # 單實例鎖：同一 run 已有活著的 process（scheduler_state 心跳 < 900s）時啟動報錯；
 # 反向也守住——凍結後被接管的舊 process，下一次心跳會發現 lease 易主而具名退出。
 python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db
@@ -177,7 +179,10 @@ error/at` 持久化），不影響交易 state 與 SL/TP。replay 驗證結果�
 engine 續 tick、SL/TP 與監控不中斷（重啟時 mismatch 且有倉位也是同一模式；空倉才
 直接拒絕啟動）。protection-only 下倉位被 SL/TP 了結後，程序會做最後一次 export
 （平倉 fill 進 CSV）並以 exit 1 自動結束——books 從未重新驗證，重啟前先調查 store。protection-only restart 不呼叫 AI，可無 `OPENROUTER_API_KEY` 啟動；
-新 run 在建立 run row 前即檢查 key，正常 resume 則在 reconcile 定案模式之後才檢查。
+新 run 在建立 run row 前即檢查 key。健康（replay OK）的 resume 若缺 key：持倉
+（或有活的 SL/TP）時**不會**退出——reconcile 已取消舊 plan，退出等於棄守倉位——
+改以同一個 protection-only 模式跑（SL/TP 與監控活著、不開新 cycle，訊息明講是缺
+key；倉位了結後同樣最後 export + exit 1）；空倉才直接具名 exit 1。
 完整 AI payload JSON 存於 `<db 目錄>/payloads/<run_id>/`，`ai_inputs` 記其路徑與
 sha256。
 市場資料 warmup 不足（closed candle 數 < 門檻）會走 §3.1 retry ladder 後記

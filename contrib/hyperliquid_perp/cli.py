@@ -20,7 +20,8 @@ the legacy CLI takes no positionals, so it can only be a subcommand typo.
 Exit codes: ``0`` success (for ``validate``: Phase-3 ready), ``1`` named
 operator/config/environment errors — including a protection-only ``paper`` run
 that self-terminates after its position closes (final export written; the
-books never re-verified, investigate the store), ``2`` unexpected error, ``4``
+books never re-verified or the API key was never supplied — stderr says
+which), ``2`` unexpected error, ``4``
 (``validate`` only) the run is internally consistent but has not accumulated
 the 30-cycle gate yet ("keep running cycles"), ``5`` (``validate`` only) the
 run has integrity failures — orphans, snapshot or replay mismatches, or a
@@ -178,14 +179,44 @@ def _cmd_validate(argv: list[str]) -> int:
 # --------------------------------------------------------------------------
 
 
+# Every behaviour-defining block the resume drift check compares — the single
+# source shared by the genesis record and the comparison loop, so a new key
+# can't be recorded but silently never drift-checked (or vice versa).
+_DRIFT_COMPARED_KEYS = ("risk", "decision", "paper_trading", "engine", "market_data", "indicators")
+
+
 def _run_config_subset(config: dict, coin: str) -> dict:
-    """The behaviour-defining blocks recorded at run genesis (never network/wallet)."""
-    return {
-        "risk": config.get("risk"),
-        "decision": config.get("decision"),
-        "paper_trading": config.get("paper_trading"),
-        "coin": coin,
-    }
+    """The behaviour-defining blocks recorded at run genesis (never network/wallet).
+
+    ``engine`` (model/analysts), ``market_data`` (candle window feeding the
+    context), and ``indicators`` (signal set + warm-up gate) are here because
+    each redefines every subsequent decision at least as much as a
+    risk-parameter tweak does; ``paper_trading`` is stored whole for the audit
+    record even though only its ``execution`` sub-block is compared on resume
+    (``account`` is genesis-only).
+    """
+    subset: dict = {key: config.get(key) for key in _DRIFT_COMPARED_KEYS}
+    subset["coin"] = coin
+    return subset
+
+
+# Genesis records written before these keys joined the subset lack them;
+# absence there means "unknown", not "was empty" — skip the comparison rather
+# than false-flag every pre-upgrade run whose config carries the block today.
+_DRIFT_KEYS_ADDED_LATER = frozenset({"engine", "market_data", "indicators"})
+
+
+def _resume_effective(key: str, block: object) -> object:
+    """Project a stored/current config block onto what actually applies on resume.
+
+    ``paper_trading.account`` (initial balance, seed positions) is consumed
+    only at run genesis — a resume-time edit there changes nothing, so it must
+    not trip the "behaviour changes from here on" warning. Everything else
+    applies as-is.
+    """
+    if key == "paper_trading" and isinstance(block, dict):
+        return block.get("execution")
+    return block
 
 
 def _config_drift_report(
@@ -195,8 +226,12 @@ def _config_drift_report(
 
     Returns ``("coin", msg)`` for a coin mismatch (hard error — a different
     instrument is a different run, not a resumption), ``("params", msg)`` for
-    risk/decision/paper_trading drift (warning — behaviour changes mid-run but
-    the operator may intend it), or ``None`` when nothing drifted or no record
+    risk/decision/paper_trading(execution)/engine/market_data/indicators drift
+    (warning — behaviour changes mid-run but the operator may intend it;
+    genesis-only ``paper_trading.account`` edits are inert on resume and don't
+    warn, and a genesis record predating a key in ``_DRIFT_KEYS_ADDED_LATER``
+    skips that comparison rather than false-flagging), or ``None`` when
+    nothing drifted or no record
     exists (a pre-drift-check store). A genesis record this process cannot
     parse also reports as ``("params", ...)``: the homogeneity check became
     impossible, which is breadcrumb-grade — never a startup abort (that would
@@ -224,7 +259,10 @@ def _config_drift_report(
             "instrument (use a new --run-id).",
         )
     drifted = sorted(
-        key for key in ("risk", "decision", "paper_trading") if stored.get(key) != current.get(key)
+        key
+        for key in _DRIFT_COMPARED_KEYS
+        if not (key in _DRIFT_KEYS_ADDED_LATER and key not in stored)
+        and _resume_effective(key, stored.get(key)) != _resume_effective(key, current.get(key))
     )
     if drifted:
         return (
@@ -239,9 +277,12 @@ def _require_api_key() -> bool:
     """True when OPENROUTER_API_KEY is set; else print the abort message.
 
     Checked only on paths that will actually drive the AI engine — a fresh run
-    (always) and a healthy restart. A restart into protection-only mode never
-    polls the AI, so it is allowed to run keyless (the operator just wants
-    SL/TP protection and the monitor alive).
+    (always, before the run row is written) and a healthy restart with nothing
+    live to protect. A restart into protection-only mode never polls the AI,
+    so it runs keyless — and a keyless healthy restart holding live work falls
+    back to that same mode rather than exiting (the caller owns that fork:
+    reconcile has already canceled the plans, so exiting would leave the
+    position with nobody watching its SL/TP).
     """
     if os.environ.get("OPENROUTER_API_KEY"):
         return True
@@ -460,12 +501,6 @@ def _cmd_paper(argv: list[str]) -> int:
                     + (", immediate cycle forced" if report.forced_immediate_cycle else ""),
                     file=sys.stderr,
                 )
-                # A healthy restart will poll the AI, so it needs the key; a
-                # protection-only restart (trading_halted) never does — let it
-                # run keyless. Checked here, after reconcile settles the mode.
-                if not trading_halted and not _require_api_key():
-                    return 1
-
             engine = PaperExecutionEngine(
                 db=db,
                 run_id=run_id,
@@ -486,6 +521,36 @@ def _cmd_paper(argv: list[str]) -> int:
                 # an unconsumed flag would mislabel that fresh position's first real
                 # SL trigger as a restart gap fill.
                 engine.flag_restart_gap()
+            halt_reason = "replay" if trading_halted else None
+            if not trading_halted and not os.environ.get("OPENROUTER_API_KEY"):
+                # Only the restart lane reaches here keyless — a fresh run
+                # demanded the key before writing the run row. A keyless
+                # healthy restart over live work must NOT exit: reconcile
+                # already canceled its plans, so exiting would leave the
+                # position with nobody watching SL/TP — the exact harm
+                # protection-only mode exists to prevent (a replay-mismatch
+                # restart, with *less* trustworthy books, already gets that
+                # protection). Flat, there is nothing to protect and the
+                # plain abort stands.
+                if engine.has_active_work():
+                    trading_halted = True
+                    halt_reason = "missing-key"
+                    logger.error(
+                        "OPENROUTER_API_KEY missing on restart of %s with a live "
+                        "position — entering protection-only mode",
+                        run_id,
+                    )
+                    print(
+                        "ERROR: OPENROUTER_API_KEY is not set but this run holds "
+                        "a live position — running in protection-only mode: SL/TP "
+                        "protection and the market monitor stay live, NEW decision "
+                        "cycles stay halted. Set the key and restart to resume "
+                        "trading.",
+                        file=sys.stderr,
+                    )
+                else:
+                    _require_api_key()  # prints the standard abort message
+                    return 1
             if trading_halted:
                 # Protection-only never polls the AI, and nothing ever un-halts
                 # a protection-only process — the loop never touches the
@@ -523,6 +588,7 @@ def _cmd_paper(argv: list[str]) -> int:
                     export_dir,
                     funding_source,
                     trading_halted=trading_halted,
+                    halt_reason=halt_reason,
                 )
             except KeyboardInterrupt:
                 print("\nshutting down — final export...", file=sys.stderr)
@@ -556,6 +622,7 @@ def _paper_loop(
     funding_source,
     *,
     trading_halted: bool,
+    halt_reason: str | None = None,
 ) -> int:
     """The production loop: tick (when the monitor is on) → poll → sleep.
 
@@ -580,8 +647,11 @@ def _paper_loop(
     operator gets the signal to investigate the store.
 
     Every iteration refreshes the single-instance lease, so the sleep is
-    capped at 60s (well inside ``LOCK_STALE_SECONDS``) — an idle iteration
-    still touches only SQLite, never market data. A superseded lease raises
+    capped at 60s (well inside ``LOCK_STALE_SECONDS``). The cap bounds only
+    the wake cadence, not the market-data request rate: ``engine.tick()`` is
+    throttled to the configured monitor interval, so a monitor interval above
+    60s is still honored (the early wakes touch only SQLite). A superseded
+    lease raises
     :class:`~.paper.run_lock.RunLockError` out of the loop (see
     :func:`~.paper.run_lock.heartbeat_run_lock`).
     """
@@ -590,10 +660,17 @@ def _paper_loop(
     from .paper.scheduler import CycleEvent
 
     pid = os.getpid()
+    next_tick_at: datetime | None = None  # None → the first tick fires immediately
     while True:
-        heartbeat_run_lock(db, run_id, pid=pid, now=clock.now())
-        if engine.has_active_work():
+        now = clock.now()
+        heartbeat_run_lock(db, run_id, pid=pid, now=now)
+        # Tick cadence is the configured monitor interval, decoupled from the
+        # 60s heartbeat wake cap below: with interval > 60 the loop wakes for
+        # the lease but skips the tick (and its market-data fetch) until the
+        # interval has actually elapsed, honoring the operator's request rate.
+        if engine.has_active_work() and (next_tick_at is None or now >= next_tick_at):
             engine.tick()
+            next_tick_at = now + timedelta(seconds=interval)
         result = scheduler.poll() if not trading_halted else None
         if result is not None:
             print(
@@ -609,6 +686,7 @@ def _paper_loop(
                 )
                 if not _post_cycle_export(db, run_id, export_dir):
                     trading_halted = True
+                    halt_reason = "replay"
                     logger.error(
                         "halting NEW decision cycles for %s: accounting replay "
                         "can no longer rebuild the books",
@@ -648,13 +726,22 @@ def _paper_loop(
                 "exporting final state and exiting",
                 run_id,
             )
-            print(
-                "protection-only mode has nothing left to protect (the "
-                "position is closed and new cycles stay halted) — exporting "
-                "the final state and exiting. The books never re-verified; "
-                "investigate the store before starting a new run.",
-                file=sys.stderr,
-            )
+            if halt_reason == "missing-key":
+                print(
+                    "protection-only mode has nothing left to protect (the "
+                    "position is closed and new cycles stayed halted for the "
+                    "missing OPENROUTER_API_KEY) — exporting the final state "
+                    "and exiting. Set the key to resume this run.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "protection-only mode has nothing left to protect (the "
+                    "position is closed and new cycles stay halted) — exporting "
+                    "the final state and exiting. The books never re-verified; "
+                    "investigate the store before starting a new run.",
+                    file=sys.stderr,
+                )
             _post_cycle_export(db, run_id, export_dir)
             return 1
         now = clock.now()
@@ -662,12 +749,10 @@ def _paper_loop(
         # Halted-with-work and pending-retry (due is None while not halted)
         # both tick at the monitor interval; the halted-and-idle case exited
         # above, so ``due is None`` can no longer mean "idle heartbeat".
-        if active or due is None:
-            delay = float(interval)
-        else:
-            delay = max(1.0, min((due - now).total_seconds(), 600.0))
+        delay = float(interval) if active or due is None else max(1.0, (due - now).total_seconds())
         # The 60s cap keeps the lease heartbeat fresh; waking early is a cheap
-        # SQLite poll (nothing above issues market requests while idle).
+        # SQLite poll — engine.tick() above is throttled to the configured
+        # interval, so an early wake never issues extra market-data requests.
         time.sleep(min(delay, 60.0))
 
 

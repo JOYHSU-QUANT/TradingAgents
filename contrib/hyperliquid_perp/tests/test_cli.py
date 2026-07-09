@@ -296,14 +296,80 @@ def test_paper_fresh_run_missing_api_key_exits_1(tmp_path, capsys, monkeypatch, 
 
 
 def test_paper_healthy_restart_missing_api_key_exits_1(tmp_path, capsys, monkeypatch, paper_seams):
-    # A healthy restart will poll the AI, so it too needs the key — but only after
-    # reconcile settles the mode (a protection-only restart is allowed keyless).
+    # A FLAT healthy restart will poll the AI and has nothing to protect, so a
+    # missing key still aborts (checked after reconcile + engine construction —
+    # a keyless restart holding live work falls back to protection-only instead;
+    # see the companion test below).
     path, db = _seed_db(tmp_path)
     db.close()
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
     assert rc == 1
     assert "OPENROUTER_API_KEY" in capsys.readouterr().err
+
+
+def test_paper_keyless_healthy_restart_with_live_work_enters_protection_only(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    """A keyless healthy restart over live work must NOT exit: reconcile already
+    canceled the plans, so exiting would leave the position with nobody watching
+    its SL/TP — the exact harm protection-only mode exists to prevent (a
+    replay-mismatch restart, with *less* trustworthy books, already gets it).
+    Same construction contract as the mismatch fork: scheduler/provider never
+    built, and the settle-exit messaging carries the missing-key reason."""
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
+    from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
+    from contrib.hyperliquid_perp.persistence.models import PositionState
+
+    path = tmp_path / "cli.db"
+    db = Database(path)
+    accounting.initialize_run(
+        db,
+        run_id="r",
+        mode="paper",
+        initial_balance_usdc=D(1000),
+        schema_version=1,
+        initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
+    )
+    db.close()
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        reconcile_mod,
+        "reconcile_on_restart",
+        lambda db_, *, run_id, now, funding_source: RestartReconciliation(
+            canceled_plan_ids=(),
+            canceled_order_ids=(),
+            funding_posted=0,
+            funding_still_pending=0,
+            forced_immediate_cycle=False,
+            replay_error=None,
+            replay_status="ok",
+        ),
+    )
+
+    def _forbid_provider(*args, **kwargs):
+        raise AssertionError("keyless protection-only must not build the decision provider")
+
+    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _forbid_provider)
+    seen: dict[str, object] = {}
+
+    def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
+        seen["scheduler"] = scheduler
+        seen["engine_active"] = engine.has_active_work()
+        seen["trading_halted"] = kwargs["trading_halted"]
+        seen["halt_reason"] = kwargs["halt_reason"]
+        return 0
+
+    monkeypatch.setattr(cli_mod, "_paper_loop", fake_loop)
+    assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 0
+    assert seen["scheduler"] is None
+    assert seen["engine_active"] is True  # the seeded live position
+    assert seen["trading_halted"] is True
+    assert seen["halt_reason"] == "missing-key"
+    err = capsys.readouterr().err
+    assert "OPENROUTER_API_KEY is not set but this run holds a live position" in err
+    assert "protection-only" in err
 
 
 def test_mark_export_verification_writes_and_clears(tmp_path):
@@ -434,6 +500,71 @@ def test_config_drift_identical_config_with_decimal_returns_none():
     }
     stored = _subset_json(config, "BTC")
     assert _config_drift_report(stored, config, "BTC") is None
+
+
+def test_config_drift_paper_trading_account_change_is_inert():
+    # account (initial balance / seeds) is genesis-only: a resume-time edit
+    # changes nothing, so it must not trip the "behaviour changes" warning.
+    genesis = {
+        "paper_trading": {
+            "account": {"initial_balance_usdc": 1000},
+            "execution": {"fill_model": {"slippage_bps": 5}},
+        }
+    }
+    stored = _subset_json(genesis, "BTC")
+    edited_account = {
+        "paper_trading": {
+            "account": {"initial_balance_usdc": 2000},
+            "execution": {"fill_model": {"slippage_bps": 5}},
+        }
+    }
+    assert _config_drift_report(stored, edited_account, "BTC") is None
+    # ...while an execution edit (which DOES apply on resume) still warns.
+    edited_execution = {
+        "paper_trading": {
+            "account": {"initial_balance_usdc": 1000},
+            "execution": {"fill_model": {"slippage_bps": 9}},
+        }
+    }
+    kind, msg = _config_drift_report(stored, edited_execution, "BTC")
+    assert kind == "params"
+    assert "paper_trading" in msg
+
+
+def test_config_drift_covers_engine_market_data_and_indicators():
+    # A model/analyst swap, a candle-window change, or an indicator-set change
+    # redefines every subsequent decision — all three warn like risk drift.
+    genesis = {
+        "engine": {"deep_think_llm": "model-a"},
+        "market_data": {"candle_interval": "4h", "candle_lookback": 200},
+        "indicators": ["atr_14"],
+    }
+    stored = _subset_json(genesis, "BTC")
+    current = {
+        "engine": {"deep_think_llm": "model-b"},
+        "market_data": {"candle_interval": "1h", "candle_lookback": 200},
+        "indicators": ["atr_14", "rsi_14"],
+    }
+    kind, msg = _config_drift_report(stored, current, "BTC")
+    assert kind == "params"
+    assert "engine" in msg and "market_data" in msg and "indicators" in msg
+
+
+def test_config_drift_pre_upgrade_record_skips_later_keys():
+    # A genesis record written before engine/market_data/indicators joined the
+    # subset lacks those keys entirely; absence means "unknown", not "was
+    # empty" — the comparison skips them instead of false-flagging every old
+    # run whose config carries the blocks today.
+    stored = json.dumps(
+        {"risk": {"leverage": 5}, "decision": None, "paper_trading": None, "coin": "BTC"}
+    )
+    current = {
+        "risk": {"leverage": 5},
+        "engine": {"deep_think_llm": "model-a"},
+        "market_data": {"candle_interval": "4h"},
+        "indicators": ["atr_14"],
+    }
+    assert _config_drift_report(stored, current, "BTC") is None
 
 
 def test_post_cycle_export_persists_status_breadcrumbs(tmp_path, monkeypatch):
@@ -725,6 +856,7 @@ def test_paper_loop_wiring_and_halt_latch(tmp_path, monkeypatch):
 
     def fake_sleep(seconds):
         sleeps.append(seconds)
+        clock.advance(seconds)  # the tick throttle keys off elapsed clock time
         if len(sleeps) >= 2:
             raise KeyboardInterrupt
 
@@ -748,6 +880,62 @@ def test_paper_loop_wiring_and_halt_latch(tmp_path, monkeypatch):
     assert calls == ["heartbeat", "tick", "poll", "backfill", "export", "heartbeat", "tick"]
     # Sleep stays inside the lease-freshness cap.
     assert sleeps and all(s <= 60.0 for s in sleeps)
+    db.close()
+
+
+def test_paper_loop_tick_throttled_to_interval_above_heartbeat_cap(tmp_path, monkeypatch):
+    """interval_seconds > 60 must be honored: the loop still wakes every <=60s
+    for the lease heartbeat, but the tick (the market-data fetch) fires only
+    once the configured interval has elapsed — not on every wake (which would
+    silently double the operator's request rate)."""
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.paper.clock import ManualClock
+
+    path, db = _seed_db(tmp_path)
+    clock = ManualClock(_T0)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        run_lock_mod,
+        "heartbeat_run_lock",
+        lambda db_, run_id, *, pid, now: calls.append("heartbeat"),
+    )
+
+    class _Engine:
+        def has_active_work(self):
+            return True
+
+        def tick(self):
+            calls.append(f"tick@{int((clock.now() - _T0).total_seconds())}")
+
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        clock.advance(seconds)
+        if len(sleeps) >= 4:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod.time, "sleep", fake_sleep)
+
+    with pytest.raises(KeyboardInterrupt):
+        cli_mod._paper_loop(
+            db,
+            "r",
+            _Engine(),
+            None,  # halted: poll never runs, isolating the tick cadence
+            clock,
+            120,
+            tmp_path / "exports",
+            funding_source=None,
+            trading_halted=True,
+        )
+
+    # Wakes at 0/60/120/180s; ticks only at 0 and 120 (the 120s interval),
+    # while every sleep stays inside the 60s lease-freshness cap.
+    assert [c for c in calls if c.startswith("tick")] == ["tick@0", "tick@120"]
+    assert calls.count("heartbeat") == 4
+    assert sleeps == [60.0, 60.0, 60.0, 60.0]
     db.close()
 
 
@@ -800,7 +988,52 @@ def test_paper_loop_halted_with_nothing_to_protect_exits_1(tmp_path, monkeypatch
     )
     assert rc == 1
     assert calls == ["export"]  # the final state (closing fill) was published
-    assert "nothing left to protect" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "nothing left to protect" in err
+    assert "books never re-verified" in err  # default halt reason: replay
+    db.close()
+
+
+def test_paper_loop_missing_key_settle_exit_names_the_key(tmp_path, monkeypatch, capsys):
+    # Same settle-exit lane, but a keyless-healthy halt must tell the operator
+    # to set the key — not to investigate a store that verified fine.
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.paper.clock import ManualClock
+
+    path, db = _seed_db(tmp_path)
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
+    monkeypatch.setattr(cli_mod, "_post_cycle_export", lambda db_, run_id, export_dir: True)
+    monkeypatch.setattr(
+        cli_mod.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
+    )
+
+    class _Engine:
+        def __init__(self):
+            self.work = True
+
+        def has_active_work(self):
+            return self.work
+
+        def tick(self):
+            self.work = False
+
+    rc = cli_mod._paper_loop(
+        db,
+        "r",
+        _Engine(),
+        None,
+        ManualClock(_T0),
+        30,
+        tmp_path / "exports",
+        funding_source=None,
+        trading_halted=True,
+        halt_reason="missing-key",
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "OPENROUTER_API_KEY" in err
+    assert "books never re-verified" not in err
     db.close()
 
 

@@ -178,7 +178,12 @@ error/at` 持久化），不影響交易 state 與 SL/TP。replay 驗證結果�
 自動清除）。replay mismatch 時進 protection-only 模式——停開新 decision cycle、
 取消在途的 execution plan（與重啟的 cancel sweep 一致，不再讓成交落在無法驗證的
 books 上），但 engine 續 tick、SL/TP 與監控不中斷（重啟時 mismatch 且有倉位也是
-同一模式；空倉才直接拒絕啟動）。protection-only 下倉位被 SL/TP 了結後，程序會做最後一次 export
+同一模式；空倉才直接拒絕啟動）。protection-only 不 poll scheduler，因此 pending
+funding 改由 loop 每小時自行重試（healthy 模式在每個 cycle 邊界重試）；settle-exit
+與 Ctrl-C/SIGTERM 的最終 export 前也會各補跑一次，讓最後一批 CSV 在 store 允許的
+範圍內最完整。前一個 process 若留下 in_progress 的 decision attempt，protection-only
+啟動時會提示一行——該 attempt 刻意不動（只有下一次健康重啟能接續同一個 attempt，
+不燒 retry 預算）。protection-only 下倉位被 SL/TP 了結後，程序會做最後一次 export
 （平倉 fill 進 CSV）並以 exit 1 自動結束——books 從未重新驗證，重啟前先調查 store。protection-only restart 不呼叫 AI，可無 `OPENROUTER_API_KEY` 啟動；
 新 run 在建立 run row 前即檢查 key。健康（replay OK）的 resume 若缺 key：持倉
 （或有活的 SL/TP）時**不會**退出——reconcile 已取消舊 plan，退出等於棄守倉位——

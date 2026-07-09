@@ -1170,6 +1170,355 @@ def test_paper_loop_missing_key_settle_exit_names_the_key(tmp_path, monkeypatch,
     db.close()
 
 
+def test_paper_loop_halted_retries_pending_funding_hourly(tmp_path, monkeypatch):
+    """Protection-only never polls the scheduler, so it never reaches the
+    cycle-terminal funding retry — the loop must retry pending funding on its
+    own wall-clock cadence instead, or a transiently unresolvable hour stays
+    pending (its P&L uncounted) for the run's whole halted lifetime. The first
+    retry waits a full period: every entry into halted mode has just run a
+    backfill."""
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.paper.clock import ManualClock
+
+    path, db = _seed_db(tmp_path)
+    clock = ManualClock(_T0)
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
+    retries: list[int] = []
+    monkeypatch.setattr(
+        reconcile_mod,
+        "backfill_pending_funding",
+        lambda db_, *, run_id, now, funding_source: retries.append(
+            int((now - _T0).total_seconds())
+        ),
+    )
+
+    class _Engine:
+        def has_active_work(self):
+            return True
+
+        def tick(self):
+            pass
+
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        clock.advance(seconds)
+        if len(sleeps) >= 250:  # ~2h05m of 30s (interval) wakes — two retry periods
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod.time, "sleep", fake_sleep)
+
+    with pytest.raises(KeyboardInterrupt):
+        cli_mod._paper_loop(
+            db,
+            "r",
+            _Engine(),
+            None,  # protection-only never builds the scheduler
+            clock,
+            30,
+            tmp_path / "exports",
+            funding_source=None,
+            trading_halted=True,
+        )
+    # Fires once per hour on the wall clock — not on every 30s wake, and not
+    # immediately on entry (a backfill just ran on every path into halted mode).
+    assert retries == [3600, 7200]
+    db.close()
+
+
+def test_paper_loop_mid_run_halt_arms_hourly_funding_retry(tmp_path, monkeypatch):
+    # The other entry into halted mode: a mid-run replay failure. The halt must
+    # arm the hourly retry timer too (one full period out — the cycle-terminal
+    # backfill just ran), or a mid-run-halted loop would never retry again.
+    from datetime import timedelta
+
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
+
+    path, db = _seed_db(tmp_path)
+    clock = ManualClock(_T0)
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
+    retries: list[int] = []
+    monkeypatch.setattr(
+        reconcile_mod,
+        "backfill_pending_funding",
+        lambda db_, *, run_id, now, funding_source: retries.append(
+            int((now - _T0).total_seconds())
+        ),
+    )
+    # The failing verification flips the loop into halted mode on iteration 1.
+    monkeypatch.setattr(cli_mod, "_post_cycle_export", lambda db_, run_id, export_dir: False)
+
+    terminal = PollResult(
+        event=CycleEvent.API_FAILED,
+        decision_attempt_id="r#001",
+        scheduled_at=_T0,
+        attempt_count=3,
+        next_decision_at=_T0 + timedelta(hours=4),
+    )
+
+    class _Engine:
+        def has_active_work(self):
+            return True
+
+        def tick(self):
+            pass
+
+        def cancel_active_plans(self):
+            return False
+
+    class _Scheduler:
+        def poll(self):
+            return terminal
+
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        clock.advance(seconds)
+        if len(sleeps) >= 125:  # ~1h02m of 30s (interval) wakes — one retry period
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod.time, "sleep", fake_sleep)
+
+    with pytest.raises(KeyboardInterrupt):
+        cli_mod._paper_loop(
+            db,
+            "r",
+            _Engine(),
+            _Scheduler(),
+            clock,
+            30,
+            tmp_path / "exports",
+            funding_source=None,
+            trading_halted=False,
+        )
+    # t=0: the cycle-terminal lane's direct backfill (then the halt); t=3600:
+    # the halted-mode timer's first fire, one full period after the halt.
+    assert retries == [0, 3600]
+    db.close()
+
+
+def test_paper_loop_settle_exit_retries_pending_funding_before_final_export(tmp_path, monkeypatch):
+    # The settle-exit CSVs are the run's last word — pending funding that can
+    # resolve now must be posted before that final export, not left uncounted
+    # forever because the process exits.
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.paper.clock import ManualClock
+
+    path, db = _seed_db(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
+    monkeypatch.setattr(
+        reconcile_mod,
+        "backfill_pending_funding",
+        lambda db_, *, run_id, now, funding_source: calls.append("backfill"),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_post_cycle_export",
+        lambda db_, run_id, export_dir: (calls.append("export"), True)[1],
+    )
+    monkeypatch.setattr(
+        cli_mod.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
+    )
+
+    class _Engine:
+        def __init__(self):
+            self.work = True
+
+        def has_active_work(self):
+            return self.work
+
+        def tick(self):
+            self.work = False  # this tick's SL/TP closes the position
+
+    rc = cli_mod._paper_loop(
+        db,
+        "r",
+        _Engine(),
+        None,
+        ManualClock(_T0),
+        30,
+        tmp_path / "exports",
+        funding_source=None,
+        trading_halted=True,
+    )
+    assert rc == 1
+    assert calls == ["backfill", "export"]
+    db.close()
+
+
+def test_paper_loop_shutdown_funding_retry_is_best_effort(tmp_path, monkeypatch):
+    # Contrast with the fail-loud cycle-terminal lane: in the settle-exit lane
+    # the retry exists to complete the final CSVs — a raising retry must not
+    # cost us the export itself (or, in the halted timer, kill the loop that
+    # keeps SL/TP alive).
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.paper.clock import ManualClock
+
+    path, db = _seed_db(tmp_path)
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
+
+    def raising_backfill(db_, *, run_id, now, funding_source):
+        raise RuntimeError("funding source broke mid-backfill")
+
+    monkeypatch.setattr(reconcile_mod, "backfill_pending_funding", raising_backfill)
+    exports: list[str] = []
+    monkeypatch.setattr(
+        cli_mod,
+        "_post_cycle_export",
+        lambda db_, run_id, export_dir: exports.append(run_id) or True,
+    )
+    monkeypatch.setattr(
+        cli_mod.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
+    )
+
+    class _Engine:
+        def __init__(self):
+            self.work = True
+
+        def has_active_work(self):
+            return self.work
+
+        def tick(self):
+            self.work = False
+
+    rc = cli_mod._paper_loop(
+        db,
+        "r",
+        _Engine(),
+        None,
+        ManualClock(_T0),
+        30,
+        tmp_path / "exports",
+        funding_source=None,
+        trading_halted=True,
+    )
+    assert rc == 1
+    assert exports == ["r"]  # the final export still happened
+    db.close()
+
+
+def test_paper_ctrl_c_shutdown_retries_pending_funding_before_final_export(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    # The Ctrl-C/SIGTERM lane is the other "last word" export: drive a real
+    # KeyboardInterrupt through _cmd_paper and pin backfill-before-export.
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
+    from contrib.hyperliquid_perp.paper.engine import PaperExecutionEngine
+    from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
+
+    path = tmp_path / "cli.db"
+    db = Database(path)
+    accounting.initialize_run(
+        db,
+        run_id="r",
+        mode="paper",
+        initial_balance_usdc=D(1000),
+        schema_version=1,
+        initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
+    )
+    db.close()
+    # Keyless restart over live work → protection-only: the REAL _paper_loop
+    # runs without a scheduler, so the interrupt is the only exit path.
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        reconcile_mod,
+        "reconcile_on_restart",
+        lambda db_, *, run_id, now, funding_source: RestartReconciliation(
+            canceled_plan_ids=(),
+            canceled_order_ids=(),
+            funding_posted=0,
+            funding_still_pending=0,
+            forced_immediate_cycle=False,
+            replay_error=None,
+            replay_status="ok",
+        ),
+    )
+    monkeypatch.setattr(PaperExecutionEngine, "tick", lambda self: None)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        reconcile_mod,
+        "backfill_pending_funding",
+        lambda db_, *, run_id, now, funding_source: calls.append("backfill"),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_post_cycle_export",
+        lambda db_, run_id, export_dir: (calls.append("export"), True)[1],
+    )
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 0
+    assert "final export" in capsys.readouterr().err
+    assert calls == ["backfill", "export"]
+
+
+def test_paper_protection_only_startup_notes_stranded_in_progress_attempt(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    """A crash mid-decision-cycle leaves the attempt in_progress (§3.1 persists
+    the try before the AI call); a restart into protection-only never polls the
+    scheduler, so nothing can resume or terminalize it for the whole halted
+    lifetime. Deliberately kept that way — only a healthy restart may resume
+    the SAME attempt — but the operator must be told, not left to find a
+    perpetually-open cycle in a post-mortem."""
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
+    from contrib.hyperliquid_perp.paper.engine import PaperExecutionEngine
+    from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
+
+    path = tmp_path / "cli.db"
+    db = Database(path)
+    accounting.initialize_run(
+        db,
+        run_id="r",
+        mode="paper",
+        initial_balance_usdc=D(1000),
+        schema_version=1,
+        initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
+    )
+    insert_decision_attempts(db, ["in_progress"], start=_T0)
+    db.close()
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)  # keyless → protection-only
+    monkeypatch.setattr(
+        reconcile_mod,
+        "reconcile_on_restart",
+        lambda db_, *, run_id, now, funding_source: RestartReconciliation(
+            canceled_plan_ids=(),
+            canceled_order_ids=(),
+            funding_posted=0,
+            funding_still_pending=0,
+            forced_immediate_cycle=False,
+            replay_error=None,
+            replay_status="ok",
+        ),
+    )
+    monkeypatch.setattr(PaperExecutionEngine, "tick", lambda self: None)
+    monkeypatch.setattr(cli_mod, "_post_cycle_export", lambda db_, run_id, export_dir: True)
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "remains in_progress" in err
+    assert "next healthy restart" in err
+    # The attempt itself was left untouched — resumable state must survive.
+    db = Database(path)
+    row = repo.find_in_progress_attempt(db.conn, "r")
+    assert row is not None and row["attempt_count"] == 1
+    db.close()
+
+
 # --------------------------------------------------------------------------
 # exception lanes through the paper stack: each raising seam actually fires
 # (not mocked to a never-raising no-op), pinning the cross-frame wiring

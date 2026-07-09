@@ -609,6 +609,26 @@ def _cmd_paper(argv: list[str]) -> int:
                 # modes to a startup whose one job is keeping SL/TP alive, the
                 # same principle that lets this mode start keyless.
                 scheduler = None
+                stranded = repo.find_in_progress_attempt(db.conn, run_id)
+                if stranded is not None:
+                    # Purely informational: only a healthy restart's first
+                    # poll may finish this attempt (§3.1 resumes the SAME
+                    # attempt, without burning its retry budget) — terminalizing
+                    # it here would destroy that resumable state and write a
+                    # next_decision_at onto books this mode exists to distrust.
+                    attempt_id = stranded["decision_attempt_id"]
+                    logger.warning(
+                        "decision attempt %s remains in_progress; protection-only "
+                        "never polls the scheduler, so it stays open until the "
+                        "next healthy restart resumes it",
+                        attempt_id,
+                    )
+                    print(
+                        f"note: decision attempt {attempt_id!r} from the previous "
+                        "process remains in_progress — protection-only mode never "
+                        "resumes it; the next healthy restart will.",
+                        file=sys.stderr,
+                    )
             else:
                 provider = _EngineDecisionProvider(
                     config,
@@ -642,6 +662,9 @@ def _cmd_paper(argv: list[str]) -> int:
                 )
             except KeyboardInterrupt:
                 print("\nshutting down — final export...", file=sys.stderr)
+                # Same last-resolution pass as the settle-exit lane: pending
+                # funding posted now is funding the final CSVs won't be missing.
+                _retry_pending_funding(db, run_id, now=clock.now(), funding_source=funding_source)
                 _post_cycle_export(db, run_id, export_dir)
                 return 0
             except RunLockError as exc:
@@ -687,7 +710,11 @@ def _paper_loop(
     for sizing) but keeps the engine ticking — SL/TP protection and the market
     monitor must survive (spec §5 / data §1.1). ``trading_halted=True`` enters
     that mode from the first iteration (a restart over mismatched books with a
-    live position).
+    live position). Because halted mode never polls the scheduler, it retries
+    pending funding on its own wall-clock cadence
+    (``_HALTED_FUNDING_RETRY_SECONDS``) instead of at cycle boundaries, and
+    both exit lanes (settle-exit below, Ctrl-C/SIGTERM in the caller) give
+    pending funding one last resolution pass before the closing export.
 
     Protection-only mode exists *for* that live position — once it is gone
     (SL/TP closed it and nothing else is live), halted trading means there is
@@ -712,6 +739,16 @@ def _paper_loop(
 
     pid = os.getpid()
     next_tick_at: datetime | None = None  # None → the first tick fires immediately
+    # Halted mode never polls the scheduler, so it never reaches the
+    # cycle-terminal funding retry below — without its own timer, pending
+    # funding would stay unposted for the run's whole halted lifetime
+    # (execution §6.5's 稍後補帳). Both entries into halted mode have just run
+    # a backfill (restart reconciliation, or the cycle-terminal retry in the
+    # iteration that halts mid-run), so the first in-loop retry waits a full
+    # period.
+    next_funding_retry_at: datetime | None = (
+        clock.now() + timedelta(seconds=_HALTED_FUNDING_RETRY_SECONDS) if trading_halted else None
+    )
     while True:
         now = clock.now()
         heartbeat_run_lock(db, run_id, pid=pid, now=now)
@@ -724,6 +761,9 @@ def _paper_loop(
         if engine.has_active_work() and (next_tick_at is None or now >= next_tick_at):
             engine.tick()
             next_tick_at = now + timedelta(seconds=interval)
+        if trading_halted and next_funding_retry_at is not None and now >= next_funding_retry_at:
+            _retry_pending_funding(db, run_id, now=now, funding_source=funding_source)
+            next_funding_retry_at = now + timedelta(seconds=_HALTED_FUNDING_RETRY_SECONDS)
         result = scheduler.poll() if not trading_halted else None
         if result is not None:
             print(
@@ -740,6 +780,11 @@ def _paper_loop(
                 if not _post_cycle_export(db, run_id, export_dir):
                     trading_halted = True
                     halt_reason = "replay"
+                    # The cycle-terminal backfill above just ran; start the
+                    # halted-mode funding-retry timer one full period out.
+                    next_funding_retry_at = clock.now() + timedelta(
+                        seconds=_HALTED_FUNDING_RETRY_SECONDS
+                    )
                     # Mirror the restart lane's cancel sweep: the halting cycle
                     # may have just started a plan (zero slices consumed), and
                     # letting it fill — or a flip open its reverse leg — would
@@ -803,6 +848,9 @@ def _paper_loop(
                     "investigate the store before starting a new run.",
                     file=sys.stderr,
                 )
+            # The final CSVs should be as complete as the store allows: give
+            # any still-pending funding one last resolution pass first.
+            _retry_pending_funding(db, run_id, now=clock.now(), funding_source=funding_source)
             _post_cycle_export(db, run_id, export_dir)
             return 1
         now = clock.now()
@@ -922,6 +970,33 @@ def _post_cycle_export(db, run_id: str, export_dir: Path) -> bool:
     if export_ok:
         _mark_export_verification(export_dir, run_id, replay_ok, replay_detail)
     return replay_ok
+
+
+# Protection-only mode never reaches the cycle-terminal funding retry (the
+# scheduler is never polled), so the loop retries on this wall-clock cadence
+# instead. Hour-grained to match funding's own settlement granularity; when
+# nothing is pending the pass is a single cheap SQLite query.
+_HALTED_FUNDING_RETRY_SECONDS = 3600
+
+
+def _retry_pending_funding(db, run_id: str, *, now: datetime, funding_source) -> None:
+    """Best-effort pending-funding retry for the protection and shutdown lanes.
+
+    The cycle-terminal lane calls :func:`backfill_pending_funding` directly and
+    stays fail-loud (a store-level error there must kill the loop — pinned by
+    test). These lanes exist to keep SL/TP alive (the halted-mode timer) or to
+    flush the most complete final CSVs the store allows (settle-exit and
+    Ctrl-C/SIGTERM exports) — a raising retry must not take either down, so any
+    failure is contained to an ERROR log and the hourly timer (or the export
+    itself) carries on. ``record_funding`` posts exactly-once, so repeated
+    passes are safe.
+    """
+    from .paper.reconcile import backfill_pending_funding
+
+    try:
+        backfill_pending_funding(db, run_id=run_id, now=now, funding_source=funding_source)
+    except Exception:
+        logger.exception("pending-funding retry failed for %s (best-effort lane)", run_id)
 
 
 # --------------------------------------------------------------------------

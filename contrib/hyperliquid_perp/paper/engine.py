@@ -1087,9 +1087,10 @@ class PaperExecutionEngine:
         unavailable, but it does **not** retry a pending hour, backfill hours before
         start, or value a multi-hour catch-up at each hour's own historical mark
         (a catch-up spanning >1 hour uses this tick's mark for all of them). PR4's
-        scheduler/reconciliation owns pending-retry and historical backfill (the
-        exactly-once key and stored-basis machinery in ``record_funding`` already
-        make that safe to add). A ``None`` source disables funding entirely.
+        daemon loop/reconciliation owns pending-retry (cycle boundaries, the
+        halted-mode hourly timer, and the shutdown exports) and historical backfill
+        (the exactly-once key and stored-basis machinery in ``record_funding``
+        already make that safe to add). A ``None`` source disables funding entirely.
         """
         if self._funding is None:
             return

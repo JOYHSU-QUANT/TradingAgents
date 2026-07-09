@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from ..persistence import repository as repo
@@ -52,6 +52,15 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+# A pending funding event still unresolved this long after its settlement hour is
+# almost certainly stuck, not merely un-published: an hourly rate normally posts
+# within the hour, and the history source's window widens to cover any age. Past
+# this age the log escalates to ERROR so an operator can tell "the rate for a
+# settled hour will likely never resolve" (delisted coin, a gap the exchange never
+# published) apart from the ordinary "not settled yet" warning it otherwise mimics
+# — its funding P&L is silently omitted from the totals until it does resolve.
+_STALE_PENDING_FUNDING = timedelta(hours=6)
 
 
 def backfill_pending_funding(
@@ -71,6 +80,7 @@ def backfill_pending_funding(
     """
     posted = 0
     still_pending = 0
+    stale_pending = 0
     for event in repo.iter_funding_events(db.conn, run_id, status="pending"):
         settlement = parse_instant(event["funding_timestamp"])
         rate = (
@@ -80,6 +90,8 @@ def backfill_pending_funding(
         )
         if rate is None:
             still_pending += 1
+            if now - settlement >= _STALE_PENDING_FUNDING:
+                stale_pending += 1
             continue
         res = accounting.record_funding(
             db,
@@ -94,12 +106,26 @@ def backfill_pending_funding(
         )
         if res.status == "posted":
             posted += 1
-    if still_pending:
+    # A stuck-forever pending event (its rate never resolves) resets the fetch
+    # source's own consecutive-failure counter on every successful fetch, so only
+    # this age check can distinguish it from a rate that is merely un-published yet.
+    if stale_pending:
+        logger.error(
+            "funding backfill for %s left %d event(s) pending past %s after their "
+            "settlement hour (rate for a settled hour likely never resolves — "
+            "delisted coin or an hour the exchange never published; that funding "
+            "P&L stays uncounted)",
+            run_id,
+            stale_pending,
+            _STALE_PENDING_FUNDING,
+        )
+    young_pending = still_pending - stale_pending
+    if young_pending:
         logger.warning(
             "funding backfill for %s left %d event(s) pending (rate still "
             "unavailable); they retry at the next cycle boundary or restart",
             run_id,
-            still_pending,
+            young_pending,
         )
     return posted, still_pending
 
@@ -178,11 +204,13 @@ def reconcile_on_restart(
     if repo.get_run(db.conn, run_id) is None:
         raise ValueError(f"run {run_id!r} does not exist; nothing to reconcile")
 
-    # Steps 1–3: one transaction — plans to canceled_restart with their residual,
-    # their still-live orders to canceled. A crash mid-way rolls back to a state
-    # this function simply re-runs.
+    # Steps 1–3 + 8: one transaction — plans to canceled_restart with their
+    # residual, their still-live orders to canceled, and the immediate-cycle force
+    # (step 8) written alongside so it can never be stranded by a later crash. A
+    # crash mid-way rolls back to a state this function simply re-runs.
     canceled_plans: list[str] = []
     canceled_orders: list[str] = []
+    force_written = False
     with db.transaction() as conn:
         for plan in repo.iter_execution_plans(conn, run_id, statuses=repo.LIVE_PLAN_STATUSES):
             remaining = Decimal(plan["remaining_qty"]) if plan["remaining_qty"] else Decimal(0)
@@ -206,6 +234,26 @@ def reconcile_on_restart(
             )
             canceled_orders.append(order["order_id"])
 
+        # Step 8 (store side), written in THIS transaction — not a later one. A
+        # canceled plan abandons the old target, so the next AI cycle must start
+        # immediately (spec §3). Deriving the force from ``canceled_plans`` and
+        # committing ``next_decision_at=now`` in a separate later transaction would
+        # strand the store, on a crash during the funding/replay work below, with
+        # canceled plans but the *old* clock: a re-run rebuilds ``canceled_plans``
+        # empty (the plans are already ``canceled_restart``, no longer LIVE) and so
+        # never forces, idling the position until the stale clock (up to 4h) while
+        # SL/TP still ticks. An in-progress attempt IS that cycle (it resumes on the
+        # first poll), so only force when none exists. Writing before replay is safe:
+        # if replay later fails the run either halts (protection-only — the scheduler
+        # never polls) or exits (flat mismatch), so ``now`` is inert in both, and the
+        # reported ``forced_immediate_cycle`` below stays False over mismatched books.
+        if canceled_plans and repo.find_in_progress_attempt(conn, run_id) is None:
+            state = repo.get_scheduler_state(conn, run_id)
+            raw_next = state["next_decision_at"] if state is not None else None
+            if raw_next is None or parse_instant(raw_next) > now:
+                repo.upsert_scheduler_state(conn, run_id, next_decision_at=now, updated_at=now)
+                force_written = True
+
     # Step 5 (store side): post pending funding from the stored settlement basis.
     posted, still_pending = backfill_pending_funding(
         db, run_id=run_id, now=now, funding_source=funding_source
@@ -228,23 +276,11 @@ def reconcile_on_restart(
         replay_error = detail
         logger.error("%s — continuing in protection-only mode", detail)
 
-    # Step 8: a canceled plan means the old target is abandoned — the next AI
-    # cycle starts immediately (spec §3). An in-progress attempt IS that cycle
-    # (it resumes on the first poll), so only force the clock when none exists.
-    # Skipped over mismatched books: a forced cycle would size against a state
-    # the store cannot rebuild.
-    forced = False
-    if (
-        replay_error is None
-        and canceled_plans
-        and repo.find_in_progress_attempt(db.conn, run_id) is None
-    ):
-        state = repo.get_scheduler_state(db.conn, run_id)
-        raw_next = state["next_decision_at"] if state is not None else None
-        if raw_next is None or parse_instant(raw_next) > now:
-            with db.transaction() as conn:
-                repo.upsert_scheduler_state(conn, run_id, next_decision_at=now, updated_at=now)
-            forced = True
+    # Step 8 report: the store-side force was committed above with the cancels.
+    # It only counts as an immediate cycle when the books verified — a mismatch
+    # runs protection-only, where the forced clock is inert (and a forced cycle
+    # over unrebuildable books is exactly what RestartReconciliation forbids).
+    forced = force_written and replay_error is None
 
     if canceled_plans:
         logger.info(

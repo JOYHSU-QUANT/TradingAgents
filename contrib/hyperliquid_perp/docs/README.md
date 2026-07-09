@@ -176,7 +176,7 @@ Phase 3 的 agent-wallet private key）一律放環境變數，絕不放進任�
 | `paper/config.py` | ✅ | typed `paper_trading:` block（phase2-execution §5.4）。 |
 | `paper/engine.py`（+ `clock` / `fill_model` / `market_feed` / `stops` / `twap`） | ✅ | TWAP / flip plan · SL/TP lifecycle · paper 成交模擬 · market-data 新鮮度／pause／gap-stop · monitor tick 邏輯（外層 30s loop 屬 PR4 scheduler；phase2-execution §1–5）。 |
 | `paper/scheduler.py` | ✅ | 4h rolling cycle · deterministic `decision_attempt_id` · 3-attempt retry（10s/30s，跨重啟延續）· `invalid_output` fail-closed · `ai_inputs`/`ai_outputs`/`decision_attempts` audit rows（phase2-spec §3／§3.1）。 |
-| `paper/reconcile.py` | ✅ | 重啟 reconciliation 九步：canceled_restart + residual · pending funding 以 stored basis 補帳 · replay 不一致拒絕啟動 · 立即開新 cycle（phase2-execution §1.2）。 |
+| `paper/reconcile.py` | ✅ | 重啟 reconciliation 九步：canceled_restart + residual · pending funding 以 stored basis 補帳 · replay 不一致時 flat 拒絕啟動／非 flat 轉 protection-only（引擎續守 SL/TP、halt 新決策）· 立即開新 cycle（phase2-execution §1.2）。 |
 | `paper/validation.py` | ✅ | 驗收器：13 項 summary 指標 · orphan／snapshot／replay 鏈路檢查 · 可進 Phase 3 判定（phase2-spec §5）。 |
 | `paper/run_lock.py` | ✅ | 單實例 lease（`scheduler_state` 的 pid + heartbeat）：同一 run 同時只允許一個 `paper` process，防重複啟動互相取消活單、雙倍 AI 花費。 |
 | `cli.py` + `__main__.py` | ✅ | `python -m contrib.hyperliquid_perp paper / export / validate`；空 argv／旗標式呼叫原樣委派 legacy `main.py`（`--context-only` 不變），未知裸字具名報錯 exit 1；SIGTERM 與 Ctrl-C 同樣走收尾 export。 |

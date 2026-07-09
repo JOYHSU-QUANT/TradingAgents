@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -181,6 +182,99 @@ def test_pending_funding_backfills_exactly_once(tmp_path):
     db.close()
 
 
+def test_force_cycle_survives_crash_before_replay(tmp_path):
+    """The step-8 force commits with the cancels, not a later transaction.
+
+    A crash during the funding/replay work after the cancels must not strand the
+    store with canceled plans but the *old* next_decision_at — that would idle the
+    position until the stale clock (up to 4h) while a re-run, finding the plans
+    already canceled_restart, rebuilds an empty canceled list and never re-forces.
+    """
+    db = _init(tmp_path)
+    clock, plan_id = _engine_with_plan(db, slices_filled=1)  # non-flat, live plan
+    accounting.record_funding(  # a pending event so backfill calls the source
+        db,
+        run_id="r",
+        mode="paper",
+        symbol="BTC",
+        funding_timestamp=_T0,
+        position_size=D("0.001"),
+        funding_rate=None,
+        mark_price=_MARK,
+    )
+
+    class _Boom:
+        def rate_at(self, coin, ts):
+            raise RuntimeError("network down mid-backfill")
+
+    now = clock.now() + timedelta(minutes=5)
+    with pytest.raises(RuntimeError, match="network down"):
+        reconcile_on_restart(db, run_id="r", now=now, funding_source=_Boom())
+
+    # The cancel + force committed before the crash — the force signal is durable.
+    assert repo.get_execution_plan(db.conn, plan_id)["status"] == "canceled_restart"
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert parse_instant(state["next_decision_at"]) == now
+    db.close()
+
+
+def test_stale_pending_funding_escalates_to_error(tmp_path, caplog):
+    """A pending event older than the stale threshold logs ERROR, not the ordinary
+    WARNING — its rate for a settled hour will likely never resolve, and only this
+    age check distinguishes it from a rate that is merely un-published yet (the
+    fetch source resets its own failure counter on every successful fetch)."""
+    from contrib.hyperliquid_perp.paper.reconcile import (
+        _STALE_PENDING_FUNDING,
+        backfill_pending_funding,
+    )
+
+    db = _init(tmp_path)
+    accounting.record_funding(
+        db,
+        run_id="r",
+        mode="paper",
+        symbol="BTC",
+        funding_timestamp=_T0,
+        position_size=D("0.001"),
+        funding_rate=None,
+        mark_price=_MARK,
+    )
+    now = _T0 + _STALE_PENDING_FUNDING + timedelta(minutes=1)  # past the threshold
+    with caplog.at_level(logging.WARNING):
+        posted, still_pending = backfill_pending_funding(
+            db, run_id="r", now=now, funding_source=_Rates(None)
+        )
+    assert (posted, still_pending) == (0, 1)
+    assert any(
+        r.levelno == logging.ERROR and "likely never resolves" in r.getMessage()
+        for r in caplog.records
+    )
+    db.close()
+
+
+def test_young_pending_funding_warns_not_errors(tmp_path, caplog):
+    """A recently-elapsed pending event stays a WARNING — it may just be unsettled."""
+    from contrib.hyperliquid_perp.paper.reconcile import backfill_pending_funding
+
+    db = _init(tmp_path)
+    accounting.record_funding(
+        db,
+        run_id="r",
+        mode="paper",
+        symbol="BTC",
+        funding_timestamp=_T0,
+        position_size=D("0.001"),
+        funding_rate=None,
+        mark_price=_MARK,
+    )
+    now = _T0 + timedelta(hours=1)  # well under the stale threshold
+    with caplog.at_level(logging.WARNING):
+        backfill_pending_funding(db, run_id="r", now=now, funding_source=_Rates(None))
+    assert not any(r.levelno == logging.ERROR for r in caplog.records)
+    assert any(r.levelno == logging.WARNING and "pending" in r.getMessage() for r in caplog.records)
+    db.close()
+
+
 def test_pending_funding_stays_pending_without_rate(tmp_path):
     db = _init(tmp_path)
     accounting.record_funding(
@@ -224,8 +318,11 @@ def test_replay_mismatch_with_open_position_reports_protection_only(tmp_path):
     """Non-flat + corrupt books: report the mismatch, never exit-and-abandon the SL/TP.
 
     Exiting would leave a live position with nobody watching its stops — worse
-    than the corruption. Step 8 (forced cycle) must be skipped: a new decision
-    would size against books the store cannot rebuild.
+    than the corruption. The reported ``forced_immediate_cycle`` stays False: a new
+    decision must never size against books the store cannot rebuild. The store-side
+    ``next_decision_at=now`` written with the cancels (so a crash can't strand the
+    force signal) is inert here — protection-only halts the scheduler, so it never
+    polls that clock; only a later healthy restart would act on it.
     """
     db = _init(tmp_path)
     clock, plan_id = _engine_with_plan(db, slices_filled=1)  # non-flat position
@@ -242,10 +339,12 @@ def test_replay_mismatch_with_open_position_reports_protection_only(tmp_path):
     assert "accounting replay" in report.replay_error
     # Steps 1-3 still ran: the stale plan is canceled either way.
     assert report.canceled_plan_ids == (plan_id,)
-    # Step 8 skipped despite the canceled plan.
+    # The report never claims a forced cycle over mismatched books...
     assert not report.forced_immediate_cycle
+    # ...but the store-side force stamp was committed with the cancels; it is inert
+    # under protection-only (the scheduler is halted and never polls it).
     state = repo.get_scheduler_state(db.conn, "r")
-    assert state is None or state["next_decision_at"] is None
+    assert parse_instant(state["next_decision_at"]) == now
     db.close()
 
 

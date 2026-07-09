@@ -202,6 +202,33 @@ def test_fresh_run_executes_immediately_and_persists_cycle(tmp_path):
     db.close()
 
 
+def test_finalize_clears_pending_before_snapshot_so_a_raising_snapshot_cant_double_commit(tmp_path):
+    # write_cycle_snapshot swallows only (sqlite3.Error, OSError); a non-DB error
+    # (mark<=0, halted engine, corrupt Decimal) must not strand self._pending and
+    # re-finalize the already-committed cycle into a duplicate plan/output.
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+
+    def _boom(_mark):
+        raise ValueError("snapshot boom")
+
+    engine.write_cycle_snapshot = _boom  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="snapshot boom"):
+        scheduler.poll()
+
+    # The cycle committed exactly once and the in-memory latch is already clear.
+    assert scheduler._pending is None
+    assert db.conn.execute("SELECT COUNT(*) FROM ai_outputs").fetchone()[0] == 1
+    assert db.conn.execute("SELECT COUNT(*) FROM decision_attempts").fetchone()[0] == 1
+    assert db.conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 1
+
+    # A later poll never re-finalizes the same decision: still one of each row.
+    assert scheduler.poll() is None
+    assert db.conn.execute("SELECT COUNT(*) FROM ai_outputs").fetchone()[0] == 1
+    assert db.conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 1
+    db.close()
+
+
 def test_delayed_cycle_runs_under_original_schedule_then_rolls_from_actual(tmp_path):
     # Spec §3's example: due 14:15-style boundary missed; recovery at 16:00-style
     # instant runs once and the next boundary keys off the actual decision time.
@@ -480,6 +507,19 @@ def test_decision_input_rejects_half_candle_window():
     DecisionInput(context=ctx)
 
 
+def test_decision_input_rejects_inverted_candle_window():
+    ctx = _ctx(_T0)
+    # An inverted [start, end] is malformed the same way a half-present pair is.
+    with pytest.raises(ValueError, match="after candle_end"):
+        DecisionInput(
+            context=ctx,
+            candle_start=_T0 + timedelta(hours=4),
+            candle_end=_T0,
+        )
+    # Equal boundaries (degenerate but not inverted) are allowed through.
+    DecisionInput(context=ctx, candle_start=_T0, candle_end=_T0)
+
+
 def test_poll_result_shape_guards():
     from contrib.hyperliquid_perp.paper.scheduler import PollResult
 
@@ -501,6 +541,16 @@ def test_poll_result_shape_guards():
             scheduled_at=_T0,
             attempt_count=1,
             retry_at=_T0,
+            next_decision_at=_T0,
+        )
+    # A naive instant on any carried datetime is rejected (breadcrumb/export
+    # consumers compare against UTC-aware instants).
+    with pytest.raises(ValueError, match="timezone-aware"):
+        PollResult(
+            event=CycleEvent.API_FAILED,
+            decision_attempt_id="a",
+            scheduled_at=datetime(2026, 7, 6, 12, 0),  # noqa: DTZ001 — naive on purpose
+            attempt_count=1,
             next_decision_at=_T0,
         )
 

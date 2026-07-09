@@ -879,7 +879,12 @@ class _EngineDecisionProvider:
             output_format_text=self._format_text,
         )
         coin = decision_input.context.coin
-        trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # Drive the base engine off the cycle's own as_of, not wall-clock now:
+        # a late/recovery cycle (process was down across schedule points) must
+        # feed the base news/sentiment analysts the same time base as the perp
+        # market context they reason alongside, and a single read can't straddle
+        # a UTC midnight between the two.
+        trade_date = decision_input.context.as_of.strftime("%Y-%m-%d")
         try:
             propagated = graph.propagate(coin, trade_date, asset_type="crypto")
         except Exception as exc:  # noqa: BLE001 — engine-run failures are external (§3.1)

@@ -102,6 +102,15 @@ class ValidationReport:
                 f"ValidationReport.failures has {len(self.failures)} entries but the "
                 f"gating counts sum to {expected}"
             )
+        # No account snapshot means the unrealized leg was valued at 0 (the split
+        # the docstring above promises). A non-zero unrealized_pnl with a None
+        # as_of would print a self-contradicting summary ("unrealized: 5" next to
+        # "as_of: n/a … valued at 0"); enforce the documented pairing.
+        if self.unrealized_as_of is None and self.unrealized_pnl != 0:
+            raise ValueError(
+                "ValidationReport.unrealized_pnl must be 0 when unrealized_as_of is None "
+                f"(no account snapshot), got {self.unrealized_pnl}"
+            )
 
     @property
     def phase3_ready(self) -> bool:

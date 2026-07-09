@@ -170,6 +170,36 @@ def test_report_unrealized_as_of_none_without_snapshot(tmp_path):
     db.close()
 
 
+def test_report_rejects_nonzero_unrealized_without_as_of():
+    from contrib.hyperliquid_perp.paper.validation import ValidationReport
+
+    # A None as_of means the unrealized leg was valued at 0; a non-zero
+    # unrealized_pnl beside it would print a self-contradicting summary.
+    common = {
+        "run_id": "r",
+        "cycle_count": 30,
+        "api_failed_count": 0,
+        "order_count": 0,
+        "fill_count": 0,
+        "rejected_order_count": 0,
+        "orphan_order_count": 0,
+        "orphan_fill_count": 0,
+        "snapshot_mismatch_count": 0,
+        "accounting_replay_mismatch_count": 0,
+        "max_exposure_pct": None,
+        "max_effective_leverage": None,
+        "realized_pnl": D(0),
+        "total_pnl": D(0),
+        "total_fees": D(0),
+        "net_funding_pnl": D(0),
+        "failures": (),
+    }
+    with pytest.raises(ValueError, match="unrealized_pnl must be 0 when unrealized_as_of is None"):
+        ValidationReport(**common, unrealized_pnl=D(5), unrealized_as_of=None)
+    # 0 unrealized with a None as_of is the legal shape.
+    ValidationReport(**common, unrealized_pnl=D(0), unrealized_as_of=None)
+
+
 def test_orphan_fill_detected(tmp_path):
     db = _run_one_cycle_with_fill(tmp_path)
     # post_fill keeps the ledger consistent but references a non-existent order.

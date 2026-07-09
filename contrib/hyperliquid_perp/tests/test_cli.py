@@ -25,7 +25,10 @@ from contrib.hyperliquid_perp.cli import (
     _run_config_subset,
     main as cli_main,
 )
+from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig
+from contrib.hyperliquid_perp.domains.perp.schema import PerpMarketContext
 from contrib.hyperliquid_perp.paper import accounting
+from contrib.hyperliquid_perp.paper.scheduler import DecisionInput
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 
@@ -35,6 +38,27 @@ D = Decimal
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
 
 
+def _perp_ctx(as_of: datetime, coin: str = "BTC") -> PerpMarketContext:
+    return PerpMarketContext(
+        coin=coin,
+        as_of=as_of,
+        candle_interval="4h",
+        candle_count=200,
+        mark_price=D(50000),
+        oracle_price=D(50000),
+        prev_day_price=D(50000),
+        mid_price=D(50000),
+        day_change_pct=None,
+        open_interest=D(0),
+        day_ntl_volume=D(0),
+        funding_rate=D("0.0001"),
+        funding_premium=None,
+        funding_zscore_30d=None,
+        funding_window_days=30,
+        funding_sample_count=0,
+    )
+
+
 def _seed_db(tmp_path):
     path = tmp_path / "cli.db"
     db = Database(path)
@@ -42,6 +66,48 @@ def _seed_db(tmp_path):
         db, run_id="r", mode="paper", initial_balance_usdc=D(1000), schema_version=1
     )
     return path, db
+
+
+def test_request_decision_drives_engine_with_cycle_as_of_not_now(monkeypatch):
+    # DA3: the base engine's trade_date must track the cycle's as_of (a single
+    # time base with the perp context), not wall-clock now — a late/recovery
+    # cycle otherwise feeds today's news alongside the (older) market context.
+    import contrib.hyperliquid_perp.integration.trading_graph as tg
+    from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
+
+    captured: dict = {}
+
+    class _FakeGraph:
+        def propagate(self, coin, trade_date, asset_type="crypto"):
+            captured.update(coin=coin, trade_date=trade_date, asset_type=asset_type)
+            return (
+                {
+                    "final_trade_decision": (
+                        '{"decision_mode": "set_target", "target_side": "long", '
+                        '"requested_target_margin_pct": 1, "confidence": 0.8, '
+                        '"rationale": "r", "key_risks": ["a risk"]}'
+                    )
+                },
+                "signal",
+            )
+
+    monkeypatch.setattr(tg, "build_graph", lambda **_kw: _FakeGraph())
+
+    # Bypass the heavy __init__ (engine-config build); request_decision only
+    # reads the five attributes set below.
+    provider = object.__new__(_EngineDecisionProvider)
+    provider._context_text = "ctx"
+    provider._format_text = "fmt"
+    provider._analysts = []
+    provider._engine_config = {"deep_think_llm": "model-x"}
+    provider._decision = DecisionConfig()
+
+    as_of = datetime(2026, 3, 15, 2, 30, tzinfo=timezone.utc)
+    provider.request_decision(DecisionInput(context=_perp_ctx(as_of)))
+
+    assert captured["trade_date"] == "2026-03-15"  # the cycle's as_of date, not today
+    assert captured["coin"] == "BTC"
+    assert captured["asset_type"] == "crypto"
 
 
 def test_validate_exit_codes(tmp_path, capsys):

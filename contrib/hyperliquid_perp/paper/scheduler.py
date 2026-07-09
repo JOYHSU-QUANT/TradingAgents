@@ -142,6 +142,17 @@ class DecisionInput:
                 "DecisionInput.candle_start and candle_end must be provided "
                 "together (or both omitted)"
             )
+        # An inverted window (start after end) is a malformed §5 row the same way
+        # a half-present pair is; the spec pair is one candle's [start, end].
+        if (
+            self.candle_start is not None
+            and self.candle_end is not None
+            and self.candle_start > self.candle_end
+        ):
+            raise ValueError(
+                "DecisionInput.candle_start must not be after candle_end "
+                f"({self.candle_start} > {self.candle_end})"
+            )
 
 
 @runtime_checkable
@@ -198,6 +209,13 @@ class PollResult:
             raise ValueError("output_id is present exactly when a decision was persisted")
         if (self.plan is None) == completed:
             raise ValueError("plan is present exactly when a decision was persisted")
+        # Every instant this result carries is a UTC-aware breadcrumb/export
+        # input (same convention as _PendingDecision.scheduled_at); a naive one
+        # would compare wrong against the aware instants downstream consume.
+        for name in ("scheduled_at", "retry_at", "next_decision_at"):
+            value = getattr(self, name)
+            if value is not None and value.tzinfo is None:
+                raise ValueError(f"PollResult.{name} must be timezone-aware (UTC)")
 
 
 @dataclass
@@ -593,6 +611,13 @@ class PaperScheduler:
                 current_attempt_id=None,
                 updated_at=now,
             )
+        # The cycle is now durably committed; drop the in-memory pending decision
+        # BEFORE the best-effort snapshot. write_cycle_snapshot only swallows
+        # (sqlite3.Error, OSError); a non-DB error (mark<=0 ValueError, a halted
+        # engine, a corrupt stored Decimal) would otherwise escape with _pending
+        # still set and re-enter _finalize next poll, re-running start_plan and
+        # committing a duplicate live plan for the same output_id.
+        self._pending = None
         # Cycle-end snapshot (§11.1/§12.1) at the gate's own mark — after the
         # audit transaction so a snapshot failure can't roll back the decision,
         # and best-effort so a snapshot write error can't tear down the live
@@ -603,7 +628,6 @@ class PaperScheduler:
                 "completed cycle %s: cycle-end snapshot skipped; will re-snapshot next tick",
                 pending.attempt_id,
             )
-        self._pending = None
         return PollResult(
             event=CycleEvent.COMPLETED if pending.parsed.is_valid else CycleEvent.INVALID_OUTPUT,
             decision_attempt_id=pending.attempt_id,

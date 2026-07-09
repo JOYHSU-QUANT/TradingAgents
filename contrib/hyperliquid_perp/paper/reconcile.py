@@ -48,6 +48,7 @@ __all__ = [
     "ReconciliationError",
     "RestartReconciliation",
     "backfill_pending_funding",
+    "classify_replay",
     "reconcile_on_restart",
 ]
 

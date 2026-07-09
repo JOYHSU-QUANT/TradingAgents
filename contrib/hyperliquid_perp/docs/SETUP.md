@@ -175,7 +175,8 @@ error/at` 持久化），不影響交易 state 與 SL/TP。replay 驗證結果�
 `REPLAY_UNVERIFIED.json`，讓只讀 CSV 的下游知道該批未經驗證（下一個乾淨 cycle
 自動清除）。replay mismatch 時進 protection-only 模式——停開新 decision cycle，但
 engine 續 tick、SL/TP 與監控不中斷（重啟時 mismatch 且有倉位也是同一模式；空倉才
-直接拒絕啟動）。protection-only restart 不呼叫 AI，可無 `OPENROUTER_API_KEY` 啟動；
+直接拒絕啟動）。protection-only 下倉位被 SL/TP 了結後，程序會做最後一次 export
+（平倉 fill 進 CSV）並以 exit 1 自動結束——books 從未重新驗證，重啟前先調查 store。protection-only restart 不呼叫 AI，可無 `OPENROUTER_API_KEY` 啟動；
 新 run 在建立 run row 前即檢查 key，正常 resume 則在 reconcile 定案模式之後才檢查。
 完整 AI payload JSON 存於 `<db 目錄>/payloads/<run_id>/`，`ai_inputs` 記其路徑與
 sha256。

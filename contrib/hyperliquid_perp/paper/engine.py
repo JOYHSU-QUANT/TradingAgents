@@ -552,6 +552,42 @@ class PaperExecutionEngine:
             return True
         return self._protection.stop_loss is not None or self._protection.take_profit is not None
 
+    @_fail_stop
+    def cancel_active_plans(self) -> bool:
+        """Cancel the in-flight leg and any pending flip (mid-run halt sweep).
+
+        The mid-run analogue of restart reconciliation's cancel sweep (§1.2
+        steps 1–3): entering protection-only mode must also stop the plan the
+        halting cycle just started — otherwise it keeps filling for up to an
+        hour on books that just failed to verify, and a flip caught between
+        legs would register a brand-new order after the halt. SL/TP and the
+        monitor stay live; a surviving position regains its TP exactly like
+        every other terminal path. Returns whether anything was canceled.
+        """
+        now = self._clock.now()
+        canceled = False
+        leg = self._leg
+        if leg is not None and not leg.terminal:
+            with self._db.transaction() as conn:
+                self._write_leg_terminal(
+                    conn,
+                    leg,
+                    now,
+                    status="canceled",
+                    plan_reason="trading_halted",
+                    order_reason="trading_halted",
+                )
+            canceled = True
+        if self._flip is not None:
+            # A flip that has not opened its reverse leg never will now —
+            # record it exactly like the expiry path (which also restores a
+            # surviving position's TP).
+            self._record_flip_incomplete("trading_halted")
+            canceled = True
+        elif canceled:
+            self._reconcile_protection_after_terminal()
+        return canceled
+
     # -- liquidation estimate ---------------------------------------------
 
     def liquidation_price(self, position: PositionState, mark: Decimal) -> Decimal | None:

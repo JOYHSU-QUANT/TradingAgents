@@ -703,15 +703,23 @@ def _paper_loop(
                 if not _post_cycle_export(db, run_id, export_dir):
                     trading_halted = True
                     halt_reason = "replay"
+                    # Mirror the restart lane's cancel sweep: the halting cycle
+                    # may have just started a plan (zero slices consumed), and
+                    # letting it fill — or a flip open its reverse leg — would
+                    # build exposure on the very books that failed to verify,
+                    # diverging from what a kill-and-restart would produce.
+                    canceled = engine.cancel_active_plans()
                     logger.error(
                         "halting NEW decision cycles for %s: accounting replay "
-                        "can no longer rebuild the books",
+                        "can no longer rebuild the books%s",
                         run_id,
+                        " (in-flight execution plan canceled)" if canceled else "",
                     )
                     print(
                         "ERROR: accounting replay can no longer rebuild this run's "
-                        "books — halting NEW decision cycles. The engine keeps "
-                        "ticking (SL/TP protection and monitor stay live). "
+                        "books — halting NEW decision cycles and canceling any "
+                        "in-flight execution plan. The engine keeps ticking "
+                        "(SL/TP protection and monitor stay live). "
                         "Investigate the store; a restart stays in this "
                         "protection-only mode until the books verify again.",
                         file=sys.stderr,
@@ -1005,13 +1013,22 @@ class _EngineDecisionProvider:
         }
         raw = json.dumps(payload, ensure_ascii=False, indent=2)
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-        self._payload_dir.mkdir(parents=True, exist_ok=True)
         # Microsecond-stamped: each retry try builds its own payload, and two
         # tries landing in the same wall-clock second must not overwrite each
         # other (the earlier try's stored hash would falsely alias the later
         # file) — same per-try-distinctness rule as input_id/output_id.
         path = self._payload_dir / f"{coin}-{as_of.strftime('%Y%m%dT%H%M%S_%fZ')}.json"
-        path.write_text(raw, encoding="utf-8")
+        try:
+            self._payload_dir.mkdir(parents=True, exist_ok=True)
+            path.write_text(raw, encoding="utf-8")
+        except OSError as exc:
+            # An audit-artifact filesystem failure (disk full, permissions)
+            # must not tear down the daemon and strand the live SL/TP monitor:
+            # nothing is in the store yet and the AI has not been called, so
+            # ride the §3.1 ladder like the sibling environmental failures —
+            # worst case a recurring api_failed cycle whose error_message
+            # names the cause, with the position held and protection alive.
+            raise RetryableDecisionError("server_error", f"payload write failed: {exc}") from exc
         candle_end = ctx.as_of
         candle_start = candle_end - timedelta(milliseconds=interval_to_ms(ctx.candle_interval))
         self._context_text = context_text

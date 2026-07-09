@@ -25,7 +25,7 @@ from contrib.hyperliquid_perp.cli import (
     _run_config_subset,
     main as cli_main,
 )
-from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig
+from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, RiskConfig
 from contrib.hyperliquid_perp.domains.perp.schema import PerpMarketContext
 from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.paper.scheduler import DecisionInput
@@ -108,6 +108,37 @@ def test_request_decision_drives_engine_with_cycle_as_of_not_now(monkeypatch):
     assert captured["trade_date"] == "2026-03-15"  # the cycle's as_of date, not today
     assert captured["coin"] == "BTC"
     assert captured["asset_type"] == "crypto"
+
+
+def test_build_input_payload_write_failure_rides_retry_ladder(tmp_path, monkeypatch):
+    # An environmental filesystem failure on the audit payload (disk full,
+    # permissions) must not tear down the daemon (exit 2, SL/TP unwatched):
+    # build_input classifies it into the §3.1 ladder like its sibling
+    # environmental failures, so the worst case is an api_failed cycle whose
+    # error_message names the cause.
+    import contrib.hyperliquid_perp.main as main_mod
+    from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
+    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
+
+    as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
+    ctx = _perp_ctx(as_of)
+    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, None))
+    monkeypatch.setattr(main_mod, "_warmup_threshold", lambda config: 1)
+
+    provider = object.__new__(_EngineDecisionProvider)
+    provider._config = {}
+    provider._risk = RiskConfig(leverage=D(5), max_target_margin_pct=60)
+    provider._decision = DecisionConfig()
+    # A FILE where the payload directory must go: mkdir(exist_ok=True) still
+    # raises FileExistsError (an OSError) — the same landing zone as ENOSPC.
+    blocked = tmp_path / "payloads"
+    blocked.write_text("not a directory", encoding="utf-8")
+    provider._payload_dir = blocked
+
+    with pytest.raises(RetryableDecisionError) as exc_info:
+        provider.build_input(coin="BTC", as_of=as_of)
+    assert exc_info.value.error_type == "server_error"
+    assert "payload write failed" in exc_info.value.message
 
 
 def test_validate_exit_codes(tmp_path, capsys):
@@ -800,7 +831,8 @@ def test_paper_loop_wiring_and_halt_latch(tmp_path, monkeypatch):
     Pins the wiring that only exists in ``_paper_loop`` itself: the heartbeat
     fires every iteration, tick precedes poll, a cycle-terminal poll triggers
     the funding backfill and the replay-verify export, and a failed
-    verification latches ``trading_halted`` (no further ``poll()`` calls).
+    verification latches ``trading_halted`` AND cancels the in-flight plans
+    (no further ``poll()`` calls, no fills on unverifiable books).
     """
     from datetime import timedelta
 
@@ -844,6 +876,10 @@ def test_paper_loop_wiring_and_halt_latch(tmp_path, monkeypatch):
         def tick(self):
             calls.append("tick")
 
+        def cancel_active_plans(self):
+            calls.append("cancel")
+            return True
+
     class _Scheduler:
         def poll(self):
             calls.append("poll")
@@ -876,8 +912,18 @@ def test_paper_loop_wiring_and_halt_latch(tmp_path, monkeypatch):
         )
 
     # Iteration 1: heartbeat -> tick -> poll -> cycle-terminal work; the failed
-    # verification latches the halt, so iteration 2 ticks but never polls.
-    assert calls == ["heartbeat", "tick", "poll", "backfill", "export", "heartbeat", "tick"]
+    # verification latches the halt and cancels the in-flight plans, so
+    # iteration 2 ticks but never polls.
+    assert calls == [
+        "heartbeat",
+        "tick",
+        "poll",
+        "backfill",
+        "export",
+        "cancel",
+        "heartbeat",
+        "tick",
+    ]
     # Sleep stays inside the lease-freshness cap.
     assert sleeps and all(s <= 60.0 for s in sleeps)
     db.close()

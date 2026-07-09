@@ -1109,3 +1109,71 @@ def test_flat_restart_reports_no_active_work_for_gap_arming(tmp_path):
     )
     assert not engine2.has_active_work()  # flat restart -> CLI must not arm the flag
     db.close()
+
+
+# --------------------------------------------------------------------------
+# cancel_active_plans (mid-run protection-only halt sweep)
+# --------------------------------------------------------------------------
+
+
+def test_cancel_active_plans_terminates_inflight_leg_and_restores_tp(tmp_path):
+    # The mid-run halt's analogue of restart reconciliation's cancel sweep: an
+    # in-flight TWAP leg stops filling, its rows terminate as canceled with the
+    # halt reason, and the surviving position regains its TP.
+    db, clock, engine, _ = _engine(tmp_path)
+    _provider(engine, [_snap(), _snap(), _snap()])
+    engine.start_plan(_decision("long", 2))  # 2-slice TWAP
+    plan_id = engine._leg.plan_id
+    order_id = engine._leg.order_id
+    clock.advance(30)
+    engine.tick()  # slice 1 of 2 fills
+    assert _size(db) == D("0.001")
+
+    assert engine.cancel_active_plans() is True
+    assert _plan_status(db, plan_id) == ("canceled", "trading_halted")
+    assert _order_status(db, order_id) == ("canceled", "trading_halted")
+    assert engine._protection.take_profit is not None
+    # The canceled plan never fills its remaining slice.
+    clock.advance(30)
+    engine.tick()
+    assert _size(db) == D("0.001")
+    db.close()
+
+
+def test_cancel_active_plans_records_pending_flip_incomplete(tmp_path):
+    # A flip caught between decision and completion must not open its reverse
+    # leg after the halt: the close leg cancels and the flip records
+    # flip_incomplete — the same outcome a kill-and-restart would produce.
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _provider(engine, [_snap()] * 3)
+    engine.start_plan(_decision("short", 5))  # flip: close leg registered
+    assert engine._flip is not None
+    close_plan_id = engine._leg.plan_id
+
+    assert engine.cancel_active_plans() is True
+    assert engine._flip is None
+    assert _plan_status(db, close_plan_id) == ("canceled", "trading_halted")
+    row = db.conn.execute(
+        "SELECT status_reason FROM execution_plans WHERE status = 'flip_incomplete'"
+    ).fetchone()
+    assert row["status_reason"] == "trading_halted"
+    # Nothing closes or opens afterward; the surviving position keeps its TP.
+    clock.advance(30)
+    engine.tick()
+    assert _size(db) == D("0.001")
+    assert engine._protection.take_profit is not None
+    db.close()
+
+
+def test_cancel_active_plans_with_nothing_inflight_is_a_noop(tmp_path):
+    db, clock, engine, _ = _engine(tmp_path)
+    assert engine.cancel_active_plans() is False  # nothing ever started
+    _provider(engine, [_snap(), _snap()])
+    engine.start_plan(_decision("long", 1))
+    plan_id = engine._leg.plan_id
+    clock.advance(30)
+    engine.tick()  # paper_market fill completes the plan
+    assert engine.cancel_active_plans() is False  # terminal leg: nothing to cancel
+    assert _plan_status(db, plan_id) == ("completed", None)
+    db.close()

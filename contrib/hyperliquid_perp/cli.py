@@ -26,7 +26,12 @@ which), ``2`` unexpected error, ``4``
 the 30-cycle gate yet ("keep running cycles"), ``5`` (``validate`` only) the
 run has integrity failures — orphans, snapshot or replay mismatches, or a
 store so corrupt the checks themselves cannot run ("the store is broken;
-investigate before trusting results").
+investigate before trusting results"), ``130`` interrupted before a graceful
+lane could take over (Ctrl-C in ``export``/``validate`` or during ``paper``
+startup/reconciliation — SIGTERM likewise once ``paper`` has installed its
+handler; once the loop runs, both signals take the shutdown-export lane
+instead of ``130``). Legacy delegated invocations keep :mod:`.main`'s own
+exit contract.
 """
 
 from __future__ import annotations

@@ -323,6 +323,19 @@ def _cmd_paper(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
+    # The one multi-day daemon in this module: its ERROR/WARNING diagnostics
+    # (corrupt funding rows, snapshot write failures, funding-history
+    # escalations) need timestamps and logger names for a post-mortem, and its
+    # INFO trail (e.g. which plans a restart canceled) must not be dropped.
+    # basicConfig no-ops when an embedding application already installed
+    # handlers; the single-shot subcommands (export/validate/legacy) stay
+    # unconfigured on purpose.
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
     # Checked before any network/key work: a wrong CWD or typo'd --db must be
     # an error, not a silently forked fresh store (and it needs no credentials
     # to diagnose).

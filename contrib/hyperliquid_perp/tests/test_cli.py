@@ -1039,6 +1039,243 @@ def test_paper_loop_missing_key_settle_exit_names_the_key(tmp_path, monkeypatch,
     db.close()
 
 
+# --------------------------------------------------------------------------
+# exception lanes through the paper stack: each raising seam actually fires
+# (not mocked to a never-raising no-op), pinning the cross-frame wiring
+# --------------------------------------------------------------------------
+
+
+def test_paper_lease_takeover_exits_1_without_export_and_preserves_successor(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    """Drive a REAL lease takeover through the full paper stack: a successor
+    re-acquires mid-run, the next real ``heartbeat_run_lock`` hits its pid
+    fence and raises ``RunLockError`` out of ``_paper_loop``, ``_run_locked``
+    maps it to exit 1 WITHOUT the shutdown export (every store write would
+    corrupt the successor's view), and the outer ``finally``'s pid-guarded
+    release must NOT clear the successor's fresh lease."""
+    import os
+
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.paper.engine import PaperExecutionEngine
+    from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
+    from contrib.hyperliquid_perp.persistence.models import PositionState
+
+    path = tmp_path / "cli.db"
+    db = Database(path)
+    accounting.initialize_run(
+        db,
+        run_id="r",
+        mode="paper",
+        initial_balance_usdc=D(1000),
+        schema_version=1,
+        initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
+    )
+    db.close()
+    # Keyless restart over live work → protection-only: the REAL _paper_loop
+    # runs without a scheduler (poll skipped), isolating the lease wiring.
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        reconcile_mod,
+        "reconcile_on_restart",
+        lambda db_, *, run_id, now, funding_source: RestartReconciliation(
+            canceled_plan_ids=(),
+            canceled_order_ids=(),
+            funding_posted=0,
+            funding_still_pending=0,
+            forced_immediate_cycle=False,
+            replay_error=None,
+            replay_status="ok",
+        ),
+    )
+    monkeypatch.setattr(PaperExecutionEngine, "tick", lambda self: None)
+    exports: list[str] = []
+    monkeypatch.setattr(
+        cli_mod,
+        "_post_cycle_export",
+        lambda db_, run_id, export_dir: exports.append(run_id) or True,
+    )
+    monkeypatch.setattr(cli_mod.time, "sleep", lambda s: None)
+
+    real_heartbeat = run_lock_mod.heartbeat_run_lock
+    our_pid = os.getpid()
+    successor_pid = our_pid + 1
+    beats: list[int] = []
+
+    def hijacking_heartbeat(db_, run_id, *, pid, now):
+        beats.append(pid)
+        if len(beats) == 2:
+            # The successor took over between two heartbeats (our lease looked
+            # stale from its side): real release+acquire, then the REAL
+            # heartbeat below must hit its pid fence and raise.
+            run_lock_mod.release_run_lock(db_, run_id, pid=pid, now=now)
+            run_lock_mod.acquire_run_lock(db_, run_id, pid=successor_pid, now=now)
+        real_heartbeat(db_, run_id, pid=pid, now=now)
+
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", hijacking_heartbeat)
+
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    assert "no longer held by pid" in capsys.readouterr().err
+    assert beats == [our_pid, our_pid]  # the raise came from the 2nd heartbeat
+    assert exports == []  # no shutdown export — the successor owns the store now
+    db = Database(path)
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["lock_pid"] == successor_pid  # finally's release no-oped (pid guard)
+    db.close()
+
+
+def test_paper_flat_restart_reconciliation_error_exits_1_and_stamps_breadcrumb(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    # Flat restart over unverifiable books: the raiser is unit-tested in
+    # test_reconcile; this pins the cli wiring — exit 1 plus the refusal's own
+    # lane vocabulary ("failed") reaching the durable replay breadcrumb.
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
+
+    path, db = _seed_db(tmp_path)
+    db.close()
+
+    def raising_reconcile(db_, *, run_id, now, funding_source):
+        raise reconcile_mod.ReconciliationError("books corrupt", replay_status="failed")
+
+    monkeypatch.setattr(reconcile_mod, "reconcile_on_restart", raising_reconcile)
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    assert "books corrupt" in capsys.readouterr().err
+    db = Database(path)
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["last_replay_status"] == "failed"
+    assert "books corrupt" in state["last_replay_error"]
+    db.close()
+
+
+def test_paper_loop_does_not_swallow_backfill_runtime_error(tmp_path, monkeypatch):
+    # RuntimeError out of backfill_pending_funding is fail-loud by design:
+    # nothing in the loop may contain it (main() maps it to exit 2, already
+    # pinned by test_cli_main_wrapper_maps_interrupt_and_unexpected_error).
+    from datetime import timedelta
+
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
+
+    path, db = _seed_db(tmp_path)
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
+
+    def raising_backfill(db_, *, run_id, now, funding_source):
+        raise RuntimeError("funding source broke mid-backfill")
+
+    monkeypatch.setattr(reconcile_mod, "backfill_pending_funding", raising_backfill)
+    exports: list[str] = []
+    monkeypatch.setattr(
+        cli_mod,
+        "_post_cycle_export",
+        lambda db_, run_id, export_dir: exports.append(run_id) or True,
+    )
+
+    terminal = PollResult(
+        event=CycleEvent.API_FAILED,
+        decision_attempt_id="r#001",
+        scheduled_at=_T0,
+        attempt_count=3,
+        next_decision_at=_T0 + timedelta(hours=4),
+    )
+
+    class _Engine:
+        def has_active_work(self):
+            return True
+
+        def tick(self):
+            pass
+
+    class _Scheduler:
+        def poll(self):
+            return terminal
+
+    with pytest.raises(RuntimeError, match="mid-backfill"):
+        cli_mod._paper_loop(
+            db,
+            "r",
+            _Engine(),
+            _Scheduler(),
+            ManualClock(_T0),
+            30,
+            tmp_path / "exports",
+            funding_source=None,
+            trading_halted=False,
+        )
+    assert exports == []  # backfill precedes the export in the terminal branch
+    db.close()
+
+
+def test_post_cycle_export_breadcrumb_write_failure_is_fail_loud(tmp_path, monkeypatch):
+    # Settled 9th-loop lane: the durable breadcrumb is trading-write-grade — a
+    # stamp failure must escape _post_cycle_export (killing the loop, exit 2
+    # via main), not be contained like the export/replay outcomes it records.
+    import sqlite3
+
+    import contrib.hyperliquid_perp.cli as cli_mod
+
+    path, db = _seed_db(tmp_path)
+
+    def raising_stamp(db_, run_id, kind, status, error):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(cli_mod, "_stamp_breadcrumb", raising_stamp)
+    with pytest.raises(sqlite3.OperationalError):
+        _post_cycle_export(db, "r", tmp_path / "exp")
+    db.close()
+
+
+def test_paper_exchange_error_before_lease_exits_1(tmp_path, capsys, monkeypatch, paper_seams):
+    # The asset-meta fetch precedes the lease: an ExchangeError must land in
+    # the named exit-1 lane with the message, not a traceback (exit 2).
+    from contrib.hyperliquid_perp.exchanges.hyperliquid import market_data as md_mod
+    from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeError
+
+    def raising_meta(self, coin):
+        raise ExchangeError("meta endpoint down")
+
+    monkeypatch.setattr(md_mod.HyperliquidMarketData, "get_asset_meta", raising_meta)
+    rc = cli_main(_paper_argv(tmp_path / "new.db", run_id="fresh", config=paper_seams, create=True))
+    assert rc == 1
+    assert "meta endpoint down" in capsys.readouterr().err
+
+
+def test_paper_acquire_conflict_with_live_holder_exits_1(tmp_path, capsys, paper_seams):
+    # A second process on the same run refuses at startup while the holder's
+    # heartbeat is fresh (raiser unit-tested in test_run_lock; this pins the
+    # _cmd_paper wiring and its exit-1 mapping).
+    import os
+
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+
+    path, db = _seed_db(tmp_path)
+    run_lock_mod.acquire_run_lock(db, "r", pid=os.getpid() + 1, now=datetime.now(timezone.utc))
+    db.close()
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    assert "already being driven" in capsys.readouterr().err
+
+
+def test_paper_configures_logging_for_the_daemon(tmp_path, monkeypatch):
+    # The multi-day daemon wires timestamped INFO logging at entry (the other
+    # subcommands stay unconfigured); basicConfig itself no-ops when an
+    # embedding app already installed handlers, so record the call instead of
+    # inspecting global logger state.
+    import contrib.hyperliquid_perp.cli as cli_mod
+
+    seen: dict = {}
+    monkeypatch.setattr(cli_mod.logging, "basicConfig", lambda **kwargs: seen.update(kwargs))
+    rc = cli_main(["paper", "--coin", "BTC", "--db", str(tmp_path / "missing.db")])
+    assert rc == 1  # missing store without --create: the early named exit
+    assert seen["level"] == cli_mod.logging.INFO
+    assert "%(asctime)s" in seen["format"]
+
+
 def test_paper_protection_only_restart_skips_provider_and_stamps_failed(
     tmp_path, monkeypatch, paper_seams
 ):

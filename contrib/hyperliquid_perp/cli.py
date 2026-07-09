@@ -649,8 +649,9 @@ def _paper_loop(
     Every iteration refreshes the single-instance lease, so the sleep is
     capped at 60s (well inside ``LOCK_STALE_SECONDS``). The cap bounds only
     the wake cadence, not the market-data request rate: ``engine.tick()`` is
-    throttled to the configured monitor interval, so a monitor interval above
-    60s is still honored (the early wakes touch only SQLite). A superseded
+    throttled to the configured monitor interval, keeping the two cadences
+    decoupled (defensive — config already rejects intervals above the 30s TWAP
+    slice cadence; early wakes touch only SQLite). A superseded
     lease raises
     :class:`~.paper.run_lock.RunLockError` out of the loop (see
     :func:`~.paper.run_lock.heartbeat_run_lock`).
@@ -665,9 +666,11 @@ def _paper_loop(
         now = clock.now()
         heartbeat_run_lock(db, run_id, pid=pid, now=now)
         # Tick cadence is the configured monitor interval, decoupled from the
-        # 60s heartbeat wake cap below: with interval > 60 the loop wakes for
-        # the lease but skips the tick (and its market-data fetch) until the
-        # interval has actually elapsed, honoring the operator's request rate.
+        # 60s heartbeat wake cap below: were the interval ever to exceed the
+        # cap, the loop would wake for the lease but skip the tick (and its
+        # market-data fetch) until the interval elapsed. Config currently
+        # rejects intervals above the 30s TWAP slice cadence, so this is a
+        # defensive invariant, not an operator-facing mode.
         if engine.has_active_work() and (next_tick_at is None or now >= next_tick_at):
             engine.tick()
             next_tick_at = now + timedelta(seconds=interval)

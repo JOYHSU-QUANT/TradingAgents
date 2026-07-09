@@ -884,10 +884,12 @@ def test_paper_loop_wiring_and_halt_latch(tmp_path, monkeypatch):
 
 
 def test_paper_loop_tick_throttled_to_interval_above_heartbeat_cap(tmp_path, monkeypatch):
-    """interval_seconds > 60 must be honored: the loop still wakes every <=60s
-    for the lease heartbeat, but the tick (the market-data fetch) fires only
-    once the configured interval has elapsed — not on every wake (which would
-    silently double the operator's request rate)."""
+    """The wake cadence and the tick cadence must stay decoupled: the loop
+    wakes every <=60s for the lease heartbeat, but the tick (the market-data
+    fetch) fires only once the configured interval has elapsed — not on every
+    wake. Config rejects intervals above the 30s TWAP slice cadence, so this
+    pins the loop's defensive invariant with a direct call (interval=120),
+    not an operator-reachable configuration."""
     import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
     from contrib.hyperliquid_perp.paper.clock import ManualClock

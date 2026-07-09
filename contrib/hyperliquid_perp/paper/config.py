@@ -18,6 +18,7 @@ from ..domains.perp.config_coercion import (
     decimal_from_yaml,
     int_from_yaml,
 )
+from .twap import SLICE_INTERVAL_SECONDS
 
 __all__ = [
     "FillModelConfig",
@@ -125,6 +126,17 @@ class MarketMonitorConfig:
     def __post_init__(self) -> None:
         if self.interval_seconds <= 0:
             raise ValueError(f"interval_seconds must be > 0, got {self.interval_seconds}")
+        if self.interval_seconds > SLICE_INTERVAL_SECONDS:
+            # The TWAP executor fills at most one slice per tick on a fixed 30s
+            # slice grid with a hard 1h plan deadline — a monitor interval above
+            # the slice interval cannot complete a full-size plan before the
+            # deadline, silently under-filling the AI-approved target. Reject
+            # loudly rather than tolerate broken execution.
+            raise ValueError(
+                f"interval_seconds must be <= {SLICE_INTERVAL_SECONDS} (the TWAP "
+                f"slice cadence; larger values under-fill TWAP plans), got "
+                f"{self.interval_seconds}"
+            )
         if self.request_timeout_seconds <= 0:
             raise ValueError(
                 f"request_timeout_seconds must be > 0, got {self.request_timeout_seconds}"

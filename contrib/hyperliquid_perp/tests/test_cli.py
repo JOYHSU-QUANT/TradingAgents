@@ -31,6 +31,7 @@ from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.paper.scheduler import DecisionInput
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
+from contrib.hyperliquid_perp.persistence.models import PositionState
 
 from .conftest import insert_decision_attempts
 
@@ -326,6 +327,91 @@ def test_paper_fresh_run_missing_api_key_exits_1(tmp_path, capsys, monkeypatch, 
     db.close()
 
 
+def test_paper_fresh_run_off_coin_seed_exits_1(tmp_path, capsys, paper_seams):
+    # The engine manages exactly the run coin: an off-coin seed would sit in
+    # the store all run, excluded from equity/SL-TP/funding — so a fresh run
+    # refuses it as a config error, before the run row is written.
+    paper_seams.write_text(
+        "paper_trading:\n"
+        "  account:\n"
+        "    initial_positions:\n"
+        "      - {coin: BTC, size: '0.01', entry_price: '50000'}\n"
+        "      - {coin: ETH, size: '0.1', entry_price: '3000'}\n",
+        encoding="utf-8",
+    )
+    path = tmp_path / "new.db"
+    rc = cli_main(_paper_argv(path, run_id="fresh", config=paper_seams, create=True))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "'ETH'" in err and "'BTC'" in err
+    assert "initial_positions" in err
+    db = Database(path)
+    assert repo.get_run(db.conn, "fresh") is None  # rejected before genesis
+    db.close()
+
+
+def test_paper_resume_with_off_coin_position_exits_1(tmp_path, capsys, paper_seams):
+    # Resume-side counterpart of the fresh-run seed guard: a store created via
+    # direct initialize_run may legally hold off-coin positions (multi-coin
+    # genesis is an API-level feature), but the single-coin daemon refuses to
+    # resume it — before reconcile writes anything — rather than run with
+    # equity/SL-TP silently excluding that position. replay alone would pass
+    # (seeds sit symmetrically on both sides), so this needs its own check.
+    path = tmp_path / "multi.db"
+    db = Database(path)
+    accounting.initialize_run(
+        db,
+        run_id="r",
+        mode="paper",
+        initial_balance_usdc=D(1000),
+        schema_version=1,
+        initial_positions=[PositionState(coin="ETH", size=D("0.1"), entry_price=D(3000))],
+    )
+    db.close()
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "'ETH'" in err and "'BTC'" in err
+    assert "protection" in err
+
+
+def test_paper_resume_ignores_flat_off_coin_position(tmp_path, capsys, monkeypatch, paper_seams):
+    # The resume guard blocks only OPEN off-coin positions: a closed one is
+    # inert everywhere (zero equity contribution, nothing to protect), so it
+    # must not strand the store. The keyless flat-restart refusal firing
+    # proves startup got past the off-coin check.
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    path = tmp_path / "closed.db"
+    db = Database(path)
+    accounting.initialize_run(
+        db,
+        run_id="r",
+        mode="paper",
+        initial_balance_usdc=D(1000),
+        schema_version=1,
+        initial_positions=[PositionState(coin="ETH", size=D("0.1"), entry_price=D(3000))],
+    )
+    accounting.post_fill(
+        db,
+        run_id="r",
+        mode="paper",
+        fill_id="r|close|0",
+        order_id="o-close",
+        symbol="ETH",
+        side="sell",
+        qty=D("0.1"),
+        price=D(3000),
+        fee_rate=D(0),
+        timestamp=_T0,
+    )
+    db.close()
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "OPENROUTER_API_KEY" in err  # the refusal came from the key check
+    assert "manages only" not in err
+
+
 def test_paper_healthy_restart_missing_api_key_exits_1(tmp_path, capsys, monkeypatch, paper_seams):
     # A FLAT healthy restart will poll the AI and has nothing to protect, so a
     # missing key still aborts (checked after reconcile + engine construction —
@@ -351,7 +437,6 @@ def test_paper_keyless_healthy_restart_with_live_work_enters_protection_only(
     import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
-    from contrib.hyperliquid_perp.persistence.models import PositionState
 
     path = tmp_path / "cli.db"
     db = Database(path)
@@ -1106,7 +1191,6 @@ def test_paper_lease_takeover_exits_1_without_export_and_preserves_successor(
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
     from contrib.hyperliquid_perp.paper.engine import PaperExecutionEngine
     from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
-    from contrib.hyperliquid_perp.persistence.models import PositionState
 
     path = tmp_path / "cli.db"
     db = Database(path)

@@ -439,6 +439,22 @@ def _cmd_paper(argv: list[str]) -> int:
 
             trading_halted = False
             if not is_restart:
+                # Seeds are genesis-only and the engine manages exactly the
+                # run coin: an off-coin seed would sit in the store all run —
+                # excluded from the equity the AI sizes against, with no
+                # SL/TP, liquidation watch, or funding — silently misstating
+                # net worth. Config error, before anything is written.
+                off_coin = sorted({p.coin for p in paper_cfg.account.initial_positions} - {coin})
+                if off_coin:
+                    print(
+                        f"error: initial_positions seed coin(s) "
+                        f"{', '.join(map(repr, off_coin))} do not match the run "
+                        f"coin {coin!r} — a paper run manages exactly one coin. "
+                        "Fix paper_trading.account.initial_positions or start a "
+                        "separate run for that coin.",
+                        file=sys.stderr,
+                    )
+                    return 1
                 # A fresh run always drives the AI — demand the key before
                 # writing the run row, so a keyless ``--create`` fails cleanly
                 # instead of leaving a half-created run that the next attempt
@@ -483,6 +499,27 @@ def _cmd_paper(argv: list[str]) -> int:
                     logger.warning("config drift on resume for %s: %s", run_id, message)
                     print(f"WARNING: {message}", file=sys.stderr)
                     _stamp_breadcrumb(db, run_id, "config_drift", "drift", message)
+                # The same single-coin invariant as the fresh-run seed guard,
+                # enforced at the other daemon entry point: a store created by
+                # direct initialize_run (or an older build) may hold off-coin
+                # positions that replay verifies symmetrically yet every
+                # equity/protection computation silently excludes. Checked
+                # before reconcile writes anything.
+                off_coin = sorted(
+                    p.coin
+                    for p in repo.get_all_current_positions(db.conn, run_id)
+                    if p.coin != coin and not p.is_flat
+                )
+                if off_coin:
+                    print(
+                        f"error: run {run_id!r} holds open position(s) in "
+                        f"{', '.join(map(repr, off_coin))} but this daemon "
+                        f"manages only {coin!r} — they would be excluded from "
+                        "equity and SL/TP protection. The paper daemon cannot "
+                        "run this store (export/validate still work).",
+                        file=sys.stderr,
+                    )
+                    return 1
                 try:
                     report = reconcile_on_restart(
                         db, run_id=run_id, now=now, funding_source=funding_source

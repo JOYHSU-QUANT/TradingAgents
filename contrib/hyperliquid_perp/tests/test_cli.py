@@ -267,6 +267,12 @@ def paper_seams(tmp_path, monkeypatch):
     )
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    # Neutralize the CLI's .env load: it would re-inject a developer's real
+    # repo-root key right after the keyless tests delenv it, so key presence
+    # here must be exactly what each test sets in os.environ.
+    from contrib.hyperliquid_perp import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "load_dotenv_files", lambda: None)
     monkeypatch.setattr(
         sdk_mod.HyperliquidClient,
         "from_config",
@@ -783,6 +789,19 @@ def test_unknown_bare_word_is_an_error_not_legacy_usage(capsys):
     err = capsys.readouterr().err
     assert "unknown subcommand 'expot'" in err
     assert "paper" in err and "export" in err and "validate" in err
+
+
+def test_cli_main_loads_dotenv_on_every_invocation(monkeypatch):
+    # The subcommand entry loads .env as its first act — before dispatch and
+    # before anything reads os.environ — so a key kept only in the repo-root
+    # .env satisfies the paper startup checks (main.py's legacy path has the
+    # companion ordering test in test_main.py).
+    import contrib.hyperliquid_perp.cli as cli_mod
+
+    calls = []
+    monkeypatch.setattr(cli_mod, "load_dotenv_files", lambda: calls.append(True))
+    assert cli_main(["expot"]) == 1  # even a subcommand typo went through the load
+    assert calls == [True]
 
 
 def test_empty_and_flag_style_argv_delegate_to_legacy(monkeypatch):

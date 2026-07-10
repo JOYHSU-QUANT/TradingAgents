@@ -28,6 +28,13 @@ TradingAgents 原樣運行並輸出決策（Phase 1 為 5-tier rating + thesis�
 | [phase1-spec](./phase1-spec.md) | Phase 1 決策記錄、config schema、secrets、setup & run、build order。 |
 | [phase2-spec](./phase2-spec.md) | Phase 2 目標、風控參數、cycle 排程、第一版取捨、驗收標準、建置順序。 |
 
+**操作**（照做的步驟）：
+
+| 文件 | 內容 |
+|---|---|
+| [SETUP](./SETUP.md) | 安裝、config 欄位、exit-code 契約、troubleshooting 的完整參考。 |
+| [RUNBOOK](./RUNBOOK.md) | Paper trading 試跑操作手冊：前置 → smoke → 啟動／重啟 → 日常監控 → 驗收。 |
+
 ---
 
 ## 架構

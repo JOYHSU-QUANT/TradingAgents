@@ -20,6 +20,7 @@
 
 - [docs/README](./docs/README.md) — 總覽、架構、專案結構、roadmap。
 - [SETUP](./docs/SETUP.md) — 安裝與執行 runbook（install、設定、執行、輸出、troubleshooting）。
+- [RUNBOOK](./docs/RUNBOOK.md) — Paper trading 試跑操作手冊（前置 → smoke → 啟動／重啟 → 監控 → 驗收）。
 - [DESIGN](./docs/DESIGN.md) — Hyperliquid API 與交易規則參考 + 決策契約（Phase 2 structured target 與 Phase 1 legacy）。
 - [INTEGRATION](./docs/INTEGRATION.md) — 子類別 override 點、決策契約流程（parse → RiskGate）與模型分工。
 - [phase1-spec](./docs/phase1-spec.md) — Phase 1 decisions, config schema, secrets, setup & run, build order.

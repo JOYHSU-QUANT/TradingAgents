@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from .audit.decision_log import log_target_decision
-from .config import CONFIG_LOAD_ERRORS, load_config, wallet_address
+from .config import CONFIG_LOAD_ERRORS, load_config, load_dotenv_files, wallet_address
 from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context
 from .domains.perp.indicators import required_candles, supported_indicators
@@ -589,6 +589,10 @@ def run_engine(config: dict, coin: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Before the OPENROUTER_API_KEY check in run_engine: the engine package
+    # that would load the .env files itself is imported lazily, after that
+    # check. Idempotent when already called by the subcommand CLI's main().
+    load_dotenv_files()
     args = _parse_args(argv)
     try:
         config = load_config(args.config)

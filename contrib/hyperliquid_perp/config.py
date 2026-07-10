@@ -46,6 +46,26 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset(
 )
 
 
+def load_dotenv_files() -> None:
+    """Load the project ``.env`` / ``.env.enterprise`` into ``os.environ``.
+
+    Mirrors the loads in ``tradingagents/__init__`` so an ``OPENROUTER_API_KEY``
+    kept in the repo-root ``.env`` satisfies this module's CLIs too. The engine
+    package performs the same loads on import, but it is imported lazily — only
+    once a cycle actually drives the AI — which is *after* the startup API-key
+    checks here, so the CLI entry points must load the files themselves first.
+    ``load_dotenv`` defaults to ``override=False`` (an exported variable always
+    wins over the file), and a missing python-dotenv degrades to
+    env-vars-only operation, same as upstream.
+    """
+    try:
+        from dotenv import find_dotenv, load_dotenv
+    except ImportError:
+        return
+    load_dotenv(find_dotenv(usecwd=True))
+    load_dotenv(find_dotenv(".env.enterprise", usecwd=True))
+
+
 def config_path() -> Path:
     """The config file that :func:`load_config` will read."""
     return _LOCAL if _LOCAL.exists() else _EXAMPLE

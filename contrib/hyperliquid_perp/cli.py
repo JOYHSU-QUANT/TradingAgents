@@ -47,7 +47,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .config import CONFIG_LOAD_ERRORS, load_config
+from .config import CONFIG_LOAD_ERRORS, load_config, load_dotenv_files
 from .persistence.db import Database
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,10 @@ def _raise_keyboard_interrupt(signum, frame) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Before anything reads os.environ: the OPENROUTER_API_KEY startup checks
+    # (fresh `paper` runs, healthy keyless-restart triage) run long before the
+    # lazily-imported engine package would load the .env files itself.
+    load_dotenv_files()
     argv = list(sys.argv[1:]) if argv is None else list(argv)
     if not argv or argv[0].startswith("-"):
         # Phase 1/2 compatibility path: identical flags, identical behaviour.

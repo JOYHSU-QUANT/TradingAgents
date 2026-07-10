@@ -68,8 +68,17 @@ cp contrib/hyperliquid_perp/configs/hyperliquid.example.yaml \
 | `OPENROUTER_API_KEY` | 跑完整引擎時。一把 key 涵蓋所有 OpenRouter 模型。 |
 | `HYPERLIQUID_AGENT_KEY` | **只有 Phase 3**——Phase 1 不需要。 |
 
+設定方式擇一（詳見 [RUNBOOK §1.3](./RUNBOOK.md)）：
+
 ```bash
+# 1) repo 根目錄 .env（gitignored）——長駐 run 推薦。本模組的 CLI 入口
+#    （legacy 與 paper/export/validate 子命令）啟動時都會載入它；
+#    已 export 的環境變數永遠優先於檔案值：
+echo "OPENROUTER_API_KEY=sk-or-..." >> .env
+
+# 2) 只設當前終端機（bash / PowerShell）：
 export OPENROUTER_API_KEY=sk-or-...
+# $env:OPENROUTER_API_KEY = "sk-or-..."
 ```
 
 `*.local.yaml` 與 `.env` 都已被 gitignore。**Private key 絕不能放進任何 yaml

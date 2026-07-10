@@ -7,11 +7,14 @@ as "no wallet configured" (``None``).
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from contrib.hyperliquid_perp.config import (
     _WALLET_PLACEHOLDER,
     load_config,
+    load_dotenv_files,
     wallet_address,
 )
 
@@ -124,3 +127,45 @@ def test_load_config_rejects_non_list_coins(tmp_path):
     bad.write_text("coins: BTC\n", encoding="utf-8")
     with pytest.raises(ValueError, match="'coins' must be a list"):
         load_config(bad)
+
+
+# --------------------------------------------------------------------------
+# load_dotenv_files — repo-root .env must satisfy the CLI startup key checks
+# --------------------------------------------------------------------------
+
+
+def test_load_dotenv_files_reads_env_from_cwd(tmp_path, monkeypatch):
+    # The engine package loads .env on import, but the CLIs check
+    # OPENROUTER_API_KEY before that lazy import — so this helper must find the
+    # same file (find_dotenv walks up from the CWD) on its own.
+    (tmp_path / ".env").write_text("OPENROUTER_API_KEY=sk-or-from-dotenv\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    load_dotenv_files()
+
+    assert os.environ["OPENROUTER_API_KEY"] == "sk-or-from-dotenv"
+
+
+def test_load_dotenv_files_never_overrides_exported_vars(tmp_path, monkeypatch):
+    # Same contract as tradingagents/__init__: an exported variable always wins
+    # over the file, so a shell override for one run cannot be clobbered.
+    (tmp_path / ".env").write_text("OPENROUTER_API_KEY=sk-or-from-dotenv\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-exported")
+
+    load_dotenv_files()
+
+    assert os.environ["OPENROUTER_API_KEY"] == "sk-or-exported"
+
+
+def test_load_dotenv_files_reads_env_enterprise(tmp_path, monkeypatch):
+    # Both upstream files are mirrored; .env.enterprise is the second load.
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    (tmp_path / ".env.enterprise").write_text("HL_ENTERPRISE_MARKER=yes\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HL_ENTERPRISE_MARKER", raising=False)
+
+    load_dotenv_files()
+
+    assert os.environ["HL_ENTERPRISE_MARKER"] == "yes"

@@ -9,6 +9,7 @@ path needs a key + network and is left to integration testing.
 from __future__ import annotations
 
 import logging
+import os
 from decimal import Decimal
 
 import pytest
@@ -826,3 +827,23 @@ def test_main_unexpected_error_returns_exit_code_2(monkeypatch, capsys, caplog):
     # unexpected failure is diagnosable from a configured handler.
     assert any(r.exc_info is not None for r in caplog.records)
     assert "kaboom" in caplog.text
+
+
+def test_main_loads_dotenv_before_key_check(tmp_path, monkeypatch):
+    # A key kept only in the repo-root .env must satisfy run_engine's startup
+    # check: the engine package that would load .env itself is imported lazily,
+    # only after that check, so main() has to perform the load first.
+    (tmp_path / ".env").write_text("OPENROUTER_API_KEY=sk-or-from-dotenv\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    def _stop(config, coin):
+        raise ExchangeError("stop before any network call")
+
+    monkeypatch.setattr(main_mod, "_build_context", _stop)
+    rc = main_mod.main(["--coin", "BTC"])
+
+    # Reaching the patched _build_context proves the key check passed on the
+    # .env value; without the load main() would exit on the missing-key path.
+    assert rc == 1
+    assert os.environ["OPENROUTER_API_KEY"] == "sk-or-from-dotenv"

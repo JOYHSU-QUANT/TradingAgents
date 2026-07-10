@@ -832,7 +832,11 @@ def test_main_unexpected_error_returns_exit_code_2(monkeypatch, capsys, caplog):
 def test_main_loads_dotenv_before_key_check(tmp_path, monkeypatch):
     # A key kept only in the repo-root .env must satisfy run_engine's startup
     # check: the engine package that would load .env itself is imported lazily,
-    # only after that check, so main() has to perform the load first.
+    # only after that check, so main() has to perform the load first. The
+    # suite-wide autouse fixture stubs the loader out; re-bind the real one.
+    from contrib.hyperliquid_perp import config as config_mod
+
+    monkeypatch.setattr(main_mod, "load_dotenv_files", config_mod.load_dotenv_files)
     (tmp_path / ".env").write_text("OPENROUTER_API_KEY=sk-or-from-dotenv\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)

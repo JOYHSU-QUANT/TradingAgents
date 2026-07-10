@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import signal
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -267,12 +268,6 @@ def paper_seams(tmp_path, monkeypatch):
     )
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    # Neutralize the CLI's .env load: it would re-inject a developer's real
-    # repo-root key right after the keyless tests delenv it, so key presence
-    # here must be exactly what each test sets in os.environ.
-    from contrib.hyperliquid_perp import cli as cli_mod
-
-    monkeypatch.setattr(cli_mod, "load_dotenv_files", lambda: None)
     monkeypatch.setattr(
         sdk_mod.HyperliquidClient,
         "from_config",
@@ -331,6 +326,35 @@ def test_paper_fresh_run_missing_api_key_exits_1(tmp_path, capsys, monkeypatch, 
     db = Database(path)
     assert repo.get_run(db.conn, "fresh") is None  # not created before the key check
     db.close()
+
+
+def test_paper_key_check_satisfied_by_dotenv(tmp_path, monkeypatch, paper_seams):
+    # Companion of test_main's ordering test for the paper path: a key kept only
+    # in the repo-root .env must satisfy _require_api_key, which fires before
+    # the run row is written. The suite-wide autouse fixture stubs the loader
+    # out, so this test re-binds the real one.
+    from contrib.hyperliquid_perp import cli as cli_mod, config as config_mod
+
+    monkeypatch.setattr(cli_mod, "load_dotenv_files", config_mod.load_dotenv_files)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("OPENROUTER_API_KEY=sk-or-from-dotenv\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    reached = []
+
+    def _stop(*args, **kwargs):
+        reached.append(True)
+        raise RuntimeError("stop right after the key check")
+
+    # cli lazy-imports `from .paper import accounting`; patch the module itself.
+    monkeypatch.setattr(accounting, "initialize_run", _stop)
+    rc = cli_main(_paper_argv(tmp_path / "new.db", run_id="fresh", config=paper_seams, create=True))
+
+    # Reaching initialize_run proves the key check passed on the .env value;
+    # without the load, the run would have exited 1 on the missing-key path.
+    assert reached == [True]
+    assert rc == 2  # the top-level wrapper maps the sentinel as unexpected
+    assert os.environ["OPENROUTER_API_KEY"] == "sk-or-from-dotenv"
 
 
 def test_paper_fresh_run_off_coin_seed_exits_1(tmp_path, capsys, paper_seams):

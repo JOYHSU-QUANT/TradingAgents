@@ -7,6 +7,7 @@ so ``--context-only`` works out of the box without any local setup.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -55,15 +56,54 @@ def load_dotenv_files() -> None:
     once a cycle actually drives the AI — which is *after* the startup API-key
     checks here, so the CLI entry points must load the files themselves first.
     ``load_dotenv`` defaults to ``override=False`` (an exported variable always
-    wins over the file), and a missing python-dotenv degrades to
-    env-vars-only operation, same as upstream.
+    wins over the file). Degradations never raise — a missing python-dotenv
+    means env-vars-only operation (same as upstream), and an unreadable file
+    (e.g. saved as UTF-16 by a bare PowerShell ``>>`` redirection) warns on
+    stderr and continues, so both CLI entry points keep their named-exit
+    contract instead of dying on a raw traceback before any handler exists.
     """
     try:
         from dotenv import find_dotenv, load_dotenv
     except ImportError:
         return
-    load_dotenv(find_dotenv(usecwd=True))
-    load_dotenv(find_dotenv(".env.enterprise", usecwd=True))
+    # Per-file try: a corrupt .env must degrade only itself, not suppress a
+    # healthy .env.enterprise (the missing-file fallback re-load of .env keeps
+    # its upstream behaviour, so the label goes generic when the path is "").
+    for name in (".env", ".env.enterprise"):
+        path = find_dotenv(name, usecwd=True)
+        try:
+            load_dotenv(path)
+        except (OSError, UnicodeDecodeError) as exc:
+            print(
+                f"warning: could not read {path or 'a .env file'}: {exc} — "
+                "continuing with the exported environment variables only. "
+                "Is the file saved as UTF-8?",
+                file=sys.stderr,
+            )
+
+
+def dotenv_diagnosis(var: str) -> str:
+    """One line explaining why the ``.env`` files did not satisfy ``var``.
+
+    Appended to the startup key-check failure messages, so the operator can
+    tell apart "no .env found from this working directory", "found one but it
+    does not set the key", and "python-dotenv unavailable" without any
+    steady-state log noise on the healthy path.
+    """
+    try:
+        from dotenv import dotenv_values, find_dotenv
+    except ImportError:
+        return "python-dotenv is not importable, so .env files were ignored"
+    path = find_dotenv(usecwd=True)
+    if not path:
+        return f"no .env found walking up from {Path.cwd()}"
+    try:
+        values = dotenv_values(path)
+    except (OSError, UnicodeDecodeError) as exc:
+        return f"found {path} but could not read it ({exc})"
+    if values.get(var):
+        return f"{path} sets {var}, but an exported empty {var} takes precedence over .env files"
+    return f"found {path} but it does not set {var}"
 
 
 def config_path() -> Path:

@@ -42,7 +42,7 @@ cp contrib/hyperliquid_perp/configs/hyperliquid.example.yaml \
 
 | 方式 | 指令／位置 | 適用 |
 |---|---|---|
-| repo 根目錄 `.env`（已 gitignore） | `OPENROUTER_API_KEY=sk-or-...` 一行 | **推薦**——長駐 run、重開機後仍有效，不依賴終端機。 |
+| repo 根目錄 `.env`（已 gitignore） | `OPENROUTER_API_KEY=sk-or-...` 一行，檔案存成 **UTF-8**（PowerShell 的 `>>` 預設寫 UTF-16，CLI 會警告後忽略該檔——用編輯器存檔，或 `Add-Content -Path .env -Value "OPENROUTER_API_KEY=sk-or-..." -Encoding utf8`） | **推薦**——長駐 run、重開機後仍有效，不依賴終端機。 |
 | Windows 使用者層級環境變數 | `[Environment]::SetEnvironmentVariable("OPENROUTER_API_KEY", "sk-or-...", "User")` | 同樣持久；之後開的新終端機才看得到。 |
 | 當前終端機 session | PowerShell：`$env:OPENROUTER_API_KEY = "sk-or-..."`；bash：`export OPENROUTER_API_KEY=sk-or-...` | 快速試跑；關窗即失效。 |
 
@@ -68,7 +68,8 @@ python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db --crea
 之後它會：
 
 - 每 **4 小時**跑一個 decision cycle（context → AI → RiskGate → 紙上 TWAP 下單），
-- 每 **30 秒** tick 一次監控（TWAP 吃單、SL/TP、市況新鮮度），
+- 有活兒（持倉、進行中的 TWAP／flip、掛著的 SL/TP）時每 **30 秒** tick 一次監控
+  （TWAP 吃單、SL/TP、市況新鮮度）；空倉閒置時不發任何市場請求，睡到下個 cycle，
 - 每個 cycle 完成後自動 export 八張 CSV 到 `<db 目錄>/exports/paper-BTC/`
   （`--export-dir` 可改），
 - 完整 AI payload JSON 存在 `<db 目錄>/payloads/paper-BTC/`。
@@ -76,8 +77,10 @@ python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db --crea
 單實例鎖：同一個 run 同時只允許一個 process，重複啟動會具名報錯。
 
 > **長駐建議**：這是前景程序，掛幾天請放在不會被關掉的終端機
-> （tmux／screen／`Start-Process`／systemd 都可以）。Ctrl-C 與 SIGTERM 都是
-> 安全停止，會先做最後一次 export 再退出。
+> （tmux／screen／`Start-Process`／systemd 都可以），且 launcher 的 working
+> directory 必須是 repo 根目錄——`.env` 的搜尋從 CWD 往上走（systemd 設
+> `WorkingDirectory=`、`Start-Process` 設 `-WorkingDirectory`）。Ctrl-C 與
+> SIGTERM 都是安全停止，會先做最後一次 export 再退出。
 
 ## 4. 停止與重啟
 
@@ -91,7 +94,9 @@ python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db
 ```
 
 重啟自動做 reconciliation：取消前一個 process 留下的 execution plan、補帳
-pending funding、accounting replay 驗證、gap SL 檢查、立即開新 cycle。換 coin
+pending funding、accounting replay 驗證、gap SL 檢查；若這次重啟真的取消了一個
+未完成的 plan 會立即開新 cycle，否則沿用原本的排程時間（常見情況——乾淨停止、
+沒有活 plan——最長可能等 4h 才有下一個 cycle）。換 coin
 是硬錯誤；`risk:`／`decision:`／`engine:` 等與 genesis 不同會印 drift 警告並
 記進 store。
 
@@ -99,7 +104,7 @@ pending funding、accounting replay 驗證、gap SL 檢查、立即開新 cycle�
 
 | 看什麼 | 在哪裡 | 正常 | 異常時 |
 |---|---|---|---|
-| process 還活著、log 有新輸出 | stderr log（INFO、含時間戳） | 每 30s tick、每 4h 一個 cycle | 見下方 protection-only |
+| process 還活著、log 有新輸出 | stderr log（INFO、含時間戳） | 每 4h 一個 cycle 的 log；tick 只在有部位／活動掛單時發生且健康時不寫 log——空倉的安靜是正常的 | 見下方 protection-only |
 | 最新 CSV | `<db 目錄>/exports/paper-BTC/` + `manifest.json` | 每 cycle 更新 | `export_failed` 只記錄不影響交易 state；連續失敗查磁碟/權限 |
 | `REPLAY_UNVERIFIED.json` | 同上 export 目錄 | **不存在** | 存在 = 該批 CSV 未經 replay 驗證，先調查 store 再相信數字 |
 | 中途健檢 | `python -m contrib.hyperliquid_perp validate --run-id paper-BTC` | exit 4（一致、cycles 未滿） | exit 5 = integrity failure，停下來調查 |
@@ -109,8 +114,10 @@ pending funding、accounting replay 驗證、gap SL 檢查、立即開新 cycle�
 會做最後 export 並以 exit 1 自動結束。此時**先調查 store**（`validate` + log），
 不要盲目重啟。
 
-`api_failed` cycle（網路／API 問題、無 AI 花費）是預期會偶發的，計入
-`api_failed_count`、不進 30 輪門檻；連續大量出現才需要查網路。
+`api_failed` cycle（網路／API 問題）是預期會偶發的，計入
+`api_failed_count`、不進 30 輪門檻；連續大量出現才需要查網路。注意只有
+LLM 呼叫**之前**的失敗（連線、warmup、payload 寫入）零 AI 花費——LLM 逾時／
+限流類的 api_failed 每次嘗試（最多 3 次）都已產生費用。
 
 ## 6. 驗收（約 5 天後）
 
@@ -139,7 +146,7 @@ python -m contrib.hyperliquid_perp validate --run-id paper-BTC
 | `OPENROUTER_API_KEY is not set` | 依 §1.3 三種方式擇一設定；`.env` 記得放在 repo 根目錄。 |
 | 啟動報 run 已有活著的 process | 單實例鎖。找到舊 process 停掉；若是殘留心跳，等 15 分鐘 lease 過期。 |
 | `config not found` / `invalid config` | 對照 example 修 `hyperliquid.local.yaml`；strict 解析會擋未知 key。 |
-| 倉位永遠 `flat` | `wallet_address` 還是佔位符。 |
+| `--context-only` 不印倉位行／完整輪報 no usable account equity（exit 1） | `wallet_address` 還是佔位符；填真實唯讀地址。 |
 | 太年輕的標的每 4h 一筆 `api_failed` | 市場資料 warmup 不足，暖機完成前屬預期行為。 |
 
 更多症狀見 [SETUP §7](./SETUP.md#7-troubleshooting)。

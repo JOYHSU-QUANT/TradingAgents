@@ -47,7 +47,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .config import CONFIG_LOAD_ERRORS, load_config, load_dotenv_files
+from .config import CONFIG_LOAD_ERRORS, dotenv_diagnosis, load_config, load_dotenv_files
 from .persistence.db import Database
 
 logger = logging.getLogger(__name__)
@@ -297,7 +297,8 @@ def _require_api_key() -> bool:
         return True
     print(
         "error: OPENROUTER_API_KEY is not set — the paper run drives the AI engine "
-        "every 4h. Use --context-only (legacy CLI) for a keyless dev loop.",
+        "every 4h. Use --context-only (legacy CLI) for a keyless dev loop. "
+        f"({dotenv_diagnosis('OPENROUTER_API_KEY')}.)",
         file=sys.stderr,
     )
     return False
@@ -604,7 +605,7 @@ def _cmd_paper(argv: list[str]) -> int:
                         "a live position — running in protection-only mode: SL/TP "
                         "protection and the market monitor stay live, NEW decision "
                         "cycles stay halted. Set the key and restart to resume "
-                        "trading.",
+                        f"trading. ({dotenv_diagnosis('OPENROUTER_API_KEY')}.)",
                         file=sys.stderr,
                     )
                 else:

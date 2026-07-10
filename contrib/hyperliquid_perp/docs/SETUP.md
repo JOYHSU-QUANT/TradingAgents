@@ -73,8 +73,10 @@ cp contrib/hyperliquid_perp/configs/hyperliquid.example.yaml \
 ```bash
 # 1) repo 根目錄 .env（gitignored）——長駐 run 推薦。本模組的 CLI 入口
 #    （legacy 與 paper/export/validate 子命令）啟動時都會載入它；
-#    已 export 的環境變數永遠優先於檔案值：
+#    已 export 的環境變數永遠優先於檔案值。檔案必須是 UTF-8：
 echo "OPENROUTER_API_KEY=sk-or-..." >> .env
+#    （PowerShell 的 >> 預設寫 UTF-16，CLI 會警告後忽略該檔——改用：
+#     Add-Content -Path .env -Value "OPENROUTER_API_KEY=sk-or-..." -Encoding utf8）
 
 # 2) 只設當前終端機（bash / PowerShell）：
 export OPENROUTER_API_KEY=sk-or-...
@@ -158,7 +160,8 @@ python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db --crea
 
 # 之後重啟（不帶 --create；DB 或 run 不存在會具名報錯）。重啟時自動做
 # execution §1.2 的 reconciliation（取消舊 plan、補帳 pending funding、replay 驗證、
-# gap SL 檢查、立即開新 cycle），並比對 genesis config：換 coin 硬錯、
+# gap SL 檢查；真的取消到未完成 plan 才立即開新 cycle，否則沿用原排程），
+# 並比對 genesis config：換 coin 硬錯、
 # risk/decision/paper_trading(execution)/engine/market_data/indicators 漂移警告
 # （同時落地 scheduler_state 的 last_config_drift_* breadcrumb，事後可從 store 還原；
 # paper_trading.account 是 genesis-only、resume 改動無效故不警告，早於新鍵的
@@ -305,7 +308,7 @@ python -m ruff check contrib/hyperliquid_perp/
 |---|---|
 | `ModuleNotFoundError: langchain`（或類似） | 核心依賴沒裝 → `pip install -r requirements.txt`。 |
 | `OPENROUTER_API_KEY is not set …` | 完整一輪需要 key；`export` 它，或改用 `--context-only`。 |
-| 倉位永遠顯示 `flat`／讀不到帳戶 | `wallet_address` 還是 `0xYOUR...` 佔位符；填一個真實的唯讀地址。 |
+| `--context-only` 不印倉位行／完整輪報 `no usable account equity`（exit 1） | `wallet_address` 還是 `0xYOUR...` 佔位符；填一個真實的唯讀地址。 |
 | `config not found …` | 把 `hyperliquid.example.yaml` 複製成 `hyperliquid.local.yaml`。 |
 | `invalid config — unknown … key` / `unknown top-level config key` | config 有打錯的 key（如 `max_target_margin_pt`）或頂層區塊名（如 `riks:`）；strict 解析會擋下不讓它靜默退回預設值。對照 `hyperliquid.example.yaml` 的 key 名修正。 |
 | 想先便宜地跑一次驗收 | 暫時把 `engine.deep_think_llm` / `quick_think_llm` 指到便宜／免費的 OpenRouter 模型，確認 pipeline 會 parse target → 跑 RiskGate → 寫 log（schema v3），再切回來。 |

@@ -25,7 +25,13 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from .audit.decision_log import log_target_decision
-from .config import CONFIG_LOAD_ERRORS, load_config, load_dotenv_files, wallet_address
+from .config import (
+    CONFIG_LOAD_ERRORS,
+    dotenv_diagnosis,
+    load_config,
+    load_dotenv_files,
+    wallet_address,
+)
 from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context
 from .domains.perp.indicators import required_candles, supported_indicators
@@ -318,7 +324,8 @@ def run_engine(config: dict, coin: str) -> int:
     if not os.environ.get("OPENROUTER_API_KEY"):
         raise SystemExit(
             "OPENROUTER_API_KEY is not set — needed for the engine run. "
-            "Use --context-only for a keyless dev loop."
+            "Use --context-only for a keyless dev loop. "
+            f"({dotenv_diagnosis('OPENROUTER_API_KEY')}.)"
         )
 
     ctx, client = _build_context(config, coin)

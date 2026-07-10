@@ -82,12 +82,16 @@ def load_dotenv_files() -> None:
     # load_dotenv("") is a silent no-op (the same call upstream makes), so only
     # a found-but-unreadable file can reach the warning below.
     for name in _DOTENV_FILE_NAMES:
-        path = find_dotenv(name, usecwd=True)
+        # find_dotenv is inside the guard too: usecwd=True calls os.getcwd(),
+        # which raises OSError if the working directory was deleted — the
+        # degradation contract must cover the scan, not just the read.
+        path = ""
         try:
+            path = find_dotenv(name, usecwd=True)
             load_dotenv(path)
         except DOTENV_READ_ERRORS as exc:
             print(
-                f"warning: could not read {path}: {exc} — "
+                f"warning: could not read {path or name}: {exc} — "
                 "continuing with the exported environment variables only. "
                 "Is the file saved as UTF-8?",
                 file=sys.stderr,
@@ -112,7 +116,12 @@ def dotenv_diagnosis(var: str) -> str:
     found: list[str] = []
     unreadable: str | None = None
     for name in _DOTENV_FILE_NAMES:
-        path = find_dotenv(name, usecwd=True)
+        try:
+            path = find_dotenv(name, usecwd=True)
+        except DOTENV_READ_ERRORS as exc:
+            # os.getcwd() on a deleted working directory — same degradation
+            # contract as the loader's scan.
+            return f"could not scan for {name} ({exc})"
         if not path:
             continue
         found.append(path)

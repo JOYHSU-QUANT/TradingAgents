@@ -237,6 +237,24 @@ def test_dotenv_diagnosis_covers_env_enterprise(tmp_path, monkeypatch):
     assert "could not read" in diagnosis
 
 
+def test_dotenv_scan_failure_degrades_not_raises(monkeypatch, capsys):
+    # find_dotenv(usecwd=True) calls os.getcwd(), which raises OSError when the
+    # working directory was deleted under a long-lived daemon — both functions
+    # must extend their degradation contract to the scan, not just the read.
+    import dotenv
+
+    def _raise(*args, **kwargs):
+        raise OSError("[Errno 2] no such file or directory")
+
+    monkeypatch.setattr(dotenv, "find_dotenv", _raise)
+
+    load_dotenv_files()  # must not raise
+    assert "could not read" in capsys.readouterr().err
+
+    diagnosis = dotenv_diagnosis("OPENROUTER_API_KEY")
+    assert "could not scan" in diagnosis
+
+
 def test_load_dotenv_files_corrupt_env_does_not_suppress_enterprise(tmp_path, monkeypatch, capsys):
     # The per-file try exists precisely so a corrupt .env degrades only itself:
     # the healthy .env.enterprise after it must still load. Guards against the

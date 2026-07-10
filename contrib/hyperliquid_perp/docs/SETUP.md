@@ -68,6 +68,10 @@ cp contrib/hyperliquid_perp/configs/hyperliquid.example.yaml \
 | `OPENROUTER_API_KEY` | 跑完整引擎時。一把 key 涵蓋所有 OpenRouter 模型。 |
 | `HYPERLIQUID_AGENT_KEY` | **只有 Phase 3**——Phase 1 不需要。 |
 
+> `HYPERLIQUID_AGENT_KEY` 是 trade-capable private key，儲存方式（是否允許
+> 明文 `.env`）Phase 3 屆時另訂；下方的 `.env` 建議目前僅針對
+> `OPENROUTER_API_KEY`。
+
 設定方式擇一（詳見 [RUNBOOK §1.3](./RUNBOOK.md)）：
 
 ```bash
@@ -179,8 +183,9 @@ python -m contrib.hyperliquid_perp validate --run-id paper-BTC
 ```
 
 `paper` 每個 cycle 完成（含 `invalid_output`／`api_failed`）會先跑 accounting
-replay 再自動 export CSV；Ctrl-C（SIGINT）與 SIGTERM（systemd／docker／`kill`）
-的正常 shutdown 都會做最後一次 export。自動 export 寫到
+replay 再自動 export CSV；迴圈運行中，Ctrl-C（SIGINT）與 SIGTERM（systemd／
+docker／`kill`）的正常 shutdown 都會做最後一次 export（訊號落在啟動／
+reconciliation 階段則 exit 130、不做最後 export）。自動 export 寫到
 `<db 目錄>/exports/<run_id>/`（`--export-dir` 可改）。CSV 只是 SQLite 的 view——
 export 失敗只記 `export_failed`（stderr + `scheduler_state.last_export_status/
 error/at` 持久化），不影響交易 state 與 SL/TP。replay 驗證結果同樣持久化在

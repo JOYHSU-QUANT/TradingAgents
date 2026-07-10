@@ -88,13 +88,15 @@ python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db --crea
 > 調查。手動掛 tmux／screen 也可以，但要接受上述無人看管的空窗。無論哪種方式，
 > launcher 的 working directory 必須是 repo 根目錄——`.env` 的搜尋從 CWD 往上走
 > （systemd 設 `WorkingDirectory=`、Task Scheduler 設「開始位置」、`Start-Process`
-> 設 `-WorkingDirectory`）。Ctrl-C 與 SIGTERM 都是安全停止，會先做最後一次
-> export 再退出。
+> 設 `-WorkingDirectory`）。迴圈跑起來之後，Ctrl-C 與 SIGTERM 都是安全停止，
+> 會先做最後一次 export 再退出；訊號若落在啟動／reconciliation 階段（迴圈開始
+> 前），則以 exit 130 直接中止、不做 export。
 
 ## 4. 停止與重啟
 
-**停止**：Ctrl-C（或 `kill <pid>`）。正常 shutdown 會補一次 pending funding
-重試並寫最後一批 CSV。
+**停止**：Ctrl-C（或 `kill <pid>`）。迴圈運行中的正常 shutdown 會補一次 pending
+funding 重試並寫最後一批 CSV（訊號落在啟動／reconciliation 階段則 exit 130、
+不寫最後 export——見 §3 同一注意事項）。
 
 **重啟**（同一個 run 續跑，**不帶** `--create`）：
 

@@ -68,8 +68,23 @@ cp contrib/hyperliquid_perp/configs/hyperliquid.example.yaml \
 | `OPENROUTER_API_KEY` | 跑完整引擎時。一把 key 涵蓋所有 OpenRouter 模型。 |
 | `HYPERLIQUID_AGENT_KEY` | **只有 Phase 3**——Phase 1 不需要。 |
 
+> `HYPERLIQUID_AGENT_KEY` 是 trade-capable private key，儲存方式（是否允許
+> 明文 `.env`）Phase 3 屆時另訂；下方的 `.env` 建議目前僅針對
+> `OPENROUTER_API_KEY`。
+
+設定方式擇一（詳見 [RUNBOOK §1.3](./RUNBOOK.md)）：
+
 ```bash
+# 1) repo 根目錄 .env（gitignored）——長駐 run 推薦。本模組的 CLI 入口
+#    （legacy 與 paper/export/validate 子命令）啟動時都會載入它；
+#    已 export 的環境變數永遠優先於檔案值。檔案必須是 UTF-8：
+echo "OPENROUTER_API_KEY=sk-or-..." >> .env
+#    （PowerShell 的 >> 預設寫 UTF-16，CLI 會警告後忽略該檔——改用：
+#     Add-Content -Path .env -Value "OPENROUTER_API_KEY=sk-or-..." -Encoding utf8）
+
+# 2) 只設當前終端機（bash / PowerShell）：
 export OPENROUTER_API_KEY=sk-or-...
+# $env:OPENROUTER_API_KEY = "sk-or-..."
 ```
 
 `*.local.yaml` 與 `.env` 都已被 gitignore。**Private key 絕不能放進任何 yaml
@@ -149,7 +164,8 @@ python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db --crea
 
 # 之後重啟（不帶 --create；DB 或 run 不存在會具名報錯）。重啟時自動做
 # execution §1.2 的 reconciliation（取消舊 plan、補帳 pending funding、replay 驗證、
-# gap SL 檢查、立即開新 cycle），並比對 genesis config：換 coin 硬錯、
+# gap SL 檢查；真的取消到未完成 plan 才立即開新 cycle，否則沿用原排程），
+# 並比對 genesis config：換 coin 硬錯、
 # risk/decision/paper_trading(execution)/engine/market_data/indicators 漂移警告
 # （同時落地 scheduler_state 的 last_config_drift_* breadcrumb，事後可從 store 還原；
 # paper_trading.account 是 genesis-only、resume 改動無效故不警告，早於新鍵的
@@ -167,8 +183,9 @@ python -m contrib.hyperliquid_perp validate --run-id paper-BTC
 ```
 
 `paper` 每個 cycle 完成（含 `invalid_output`／`api_failed`）會先跑 accounting
-replay 再自動 export CSV；Ctrl-C（SIGINT）與 SIGTERM（systemd／docker／`kill`）
-的正常 shutdown 都會做最後一次 export。自動 export 寫到
+replay 再自動 export CSV；迴圈運行中，Ctrl-C（SIGINT）與 SIGTERM（systemd／
+docker／`kill`）的正常 shutdown 都會做最後一次 export（訊號落在啟動／
+reconciliation 階段則 exit 130、不做最後 export）。自動 export 寫到
 `<db 目錄>/exports/<run_id>/`（`--export-dir` 可改）。CSV 只是 SQLite 的 view——
 export 失敗只記 `export_failed`（stderr + `scheduler_state.last_export_status/
 error/at` 持久化），不影響交易 state 與 SL/TP。replay 驗證結果同樣持久化在
@@ -184,11 +201,17 @@ funding 改由 loop 每小時自行重試（healthy 模式在每個 cycle 邊界
 範圍內最完整。前一個 process 若留下 in_progress 的 decision attempt，protection-only
 啟動時會提示一行——該 attempt 刻意不動（只有下一次健康重啟能接續同一個 attempt，
 不燒 retry 預算）。protection-only 下倉位被 SL/TP 了結後，程序會做最後一次 export
-（平倉 fill 進 CSV）並以 exit 1 自動結束——books 從未重新驗證，重啟前先調查 store。protection-only restart 不呼叫 AI，可無 `OPENROUTER_API_KEY` 啟動；
-新 run 在建立 run row 前即檢查 key。健康（replay OK）的 resume 若缺 key：持倉
+（平倉 fill 進 CSV）並以 exit 1 自動結束——結束訊息會明講成因：replay 版本表示
+books 從未重新驗證、重啟前先調查 store；缺 key／import 失敗版本只需照訊息修好
+環境即可。protection-only restart 不呼叫 AI，可無 `OPENROUTER_API_KEY` 啟動；
+新 run 在建立 run row 前即檢查 key，也在同一位置預先建構 decision provider——
+引擎 import 失敗（如 corrupt `.env`）同樣擋在 run row 之前，操作者修好環境後
+重跑同一個 `--create` 不會撞上 already-exists。健康（replay OK）的 resume 若缺 key：持倉
 （或有活的 SL/TP）時**不會**退出——reconcile 已取消舊 plan，退出等於棄守倉位——
 改以同一個 protection-only 模式跑（SL/TP 與監控活著、不開新 cycle，訊息明講是缺
-key；倉位了結後同樣最後 export + exit 1）；空倉才直接具名 exit 1。
+key；倉位了結後同樣最後 export + exit 1）；空倉才直接具名 exit 1。健康 resume 的
+引擎 import 失敗（如 corrupt `.env`）走同一條規則：持倉進 protection-only（訊息
+明講 import 失敗與修法），空倉才具名 exit 1。
 完整 AI payload JSON 存於 `<db 目錄>/payloads/<run_id>/`，`ai_inputs` 記其路徑與
 sha256。
 `paper` 啟動時會配置 logging（INFO、stderr、含時間戳與 logger 名——多日 run 的
@@ -294,9 +317,9 @@ python -m ruff check contrib/hyperliquid_perp/
 
 | 症狀 | 解法 |
 |---|---|
-| `ModuleNotFoundError: langchain`（或類似） | 核心依賴沒裝 → `pip install -r requirements.txt`。 |
+| `… is not importable (No module named 'langchain')`（或類似；CLI 會把 `ModuleNotFoundError` 包進這則具名 exit-1 訊息） | 核心依賴沒裝 → `pip install -r requirements.txt`。 |
 | `OPENROUTER_API_KEY is not set …` | 完整一輪需要 key；`export` 它，或改用 `--context-only`。 |
-| 倉位永遠顯示 `flat`／讀不到帳戶 | `wallet_address` 還是 `0xYOUR...` 佔位符；填一個真實的唯讀地址。 |
+| `--context-only` 不印倉位行／完整輪報 `no usable account equity`（exit 1） | `wallet_address` 還是 `0xYOUR...` 佔位符；填一個真實的唯讀地址。 |
 | `config not found …` | 把 `hyperliquid.example.yaml` 複製成 `hyperliquid.local.yaml`。 |
 | `invalid config — unknown … key` / `unknown top-level config key` | config 有打錯的 key（如 `max_target_margin_pt`）或頂層區塊名（如 `riks:`）；strict 解析會擋下不讓它靜默退回預設值。對照 `hyperliquid.example.yaml` 的 key 名修正。 |
 | 想先便宜地跑一次驗收 | 暫時把 `engine.deep_think_llm` / `quick_think_llm` 指到便宜／免費的 OpenRouter 模型，確認 pipeline 會 parse target → 跑 RiskGate → 寫 log（schema v3），再切回來。 |

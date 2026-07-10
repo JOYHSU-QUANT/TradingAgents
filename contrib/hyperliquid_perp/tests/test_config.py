@@ -7,11 +7,15 @@ as "no wallet configured" (``None``).
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from contrib.hyperliquid_perp.config import (
     _WALLET_PLACEHOLDER,
+    dotenv_diagnosis,
     load_config,
+    load_dotenv_files,
     wallet_address,
 )
 
@@ -124,3 +128,207 @@ def test_load_config_rejects_non_list_coins(tmp_path):
     bad.write_text("coins: BTC\n", encoding="utf-8")
     with pytest.raises(ValueError, match="'coins' must be a list"):
         load_config(bad)
+
+
+# --------------------------------------------------------------------------
+# load_dotenv_files — repo-root .env must satisfy the CLI startup key checks
+# --------------------------------------------------------------------------
+
+
+def test_load_dotenv_files_reads_env_from_cwd(tmp_path, monkeypatch):
+    # The engine package loads .env on import, but the CLIs check
+    # OPENROUTER_API_KEY before that lazy import — so this helper must find the
+    # same file (find_dotenv walks up from the CWD) on its own.
+    (tmp_path / ".env").write_text("OPENROUTER_API_KEY=sk-or-from-dotenv\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    load_dotenv_files()
+
+    assert os.environ["OPENROUTER_API_KEY"] == "sk-or-from-dotenv"
+
+
+def test_load_dotenv_files_never_overrides_exported_vars(tmp_path, monkeypatch):
+    # Same contract as tradingagents/__init__: an exported variable always wins
+    # over the file, so a shell override for one run cannot be clobbered.
+    (tmp_path / ".env").write_text("OPENROUTER_API_KEY=sk-or-from-dotenv\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-exported")
+
+    load_dotenv_files()
+
+    assert os.environ["OPENROUTER_API_KEY"] == "sk-or-exported"
+
+
+def test_load_dotenv_files_reads_env_enterprise(tmp_path, monkeypatch):
+    # Both upstream files are mirrored; .env.enterprise is the second load.
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    (tmp_path / ".env.enterprise").write_text("HL_ENTERPRISE_MARKER=yes\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HL_ENTERPRISE_MARKER", raising=False)
+
+    load_dotenv_files()
+
+    assert os.environ["HL_ENTERPRISE_MARKER"] == "yes"
+
+
+def test_load_dotenv_files_warns_and_continues_on_undecodable_file(tmp_path, monkeypatch, capsys):
+    # PowerShell's bare `>>` redirection writes UTF-16: the loader must degrade
+    # to env-vars-only with a stderr warning — it runs as the first statement of
+    # both CLI entry points, before any exit-code mapping exists, so a raw
+    # UnicodeDecodeError here would break the named-exit contract.
+    (tmp_path / ".env").write_bytes("OPENROUTER_API_KEY=sk\n".encode("utf-16"))
+    monkeypatch.chdir(tmp_path)
+
+    load_dotenv_files()  # must not raise
+
+    err = capsys.readouterr().err
+    assert "could not read" in err
+    assert "UTF-8" in err
+
+
+def test_dotenv_diagnosis_distinguishes_missing_file_and_missing_key(tmp_path, monkeypatch):
+    # The key-check failure messages lean on these wordings to tell the
+    # operator whether the problem is the file's location or its contents.
+    monkeypatch.chdir(tmp_path)
+    assert "no .env or .env.enterprise found" in dotenv_diagnosis("OPENROUTER_API_KEY")
+
+    (tmp_path / ".env").write_text("OTHER=1\n", encoding="utf-8")
+    diagnosis = dotenv_diagnosis("OPENROUTER_API_KEY")
+    assert "does not set OPENROUTER_API_KEY" in diagnosis
+
+
+def test_dotenv_diagnosis_names_unreadable_file_and_empty_export(tmp_path, monkeypatch):
+    # The remaining two operator situations: an undecodable file (the loader
+    # already warned, the diagnosis repeats the cause next to the abort), and
+    # the subtle override=False trap — an exported *empty* var blocks the
+    # file's value, so "but my .env sets it!" needs its own wording.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_bytes("OPENROUTER_API_KEY=sk\n".encode("utf-16"))
+    assert "could not read" in dotenv_diagnosis("OPENROUTER_API_KEY")
+
+    (tmp_path / ".env").write_text("OPENROUTER_API_KEY=sk-or-x\n", encoding="utf-8")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "")
+    assert "exported empty" in dotenv_diagnosis("OPENROUTER_API_KEY")
+
+
+def test_dotenv_diagnosis_covers_env_enterprise(tmp_path, monkeypatch):
+    # The loader reads .env AND .env.enterprise: the diagnosis must model the
+    # same two-file set, or an enterprise-file-only setup gets told "no .env
+    # found" moments after the loader read one.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env.enterprise").write_text("OTHER=1\n", encoding="utf-8")
+    diagnosis = dotenv_diagnosis("OPENROUTER_API_KEY")
+    assert ".env.enterprise" in diagnosis
+    assert "does not set OPENROUTER_API_KEY" in diagnosis
+
+    (tmp_path / ".env").write_text("OTHER=1\n", encoding="utf-8")
+    diagnosis = dotenv_diagnosis("OPENROUTER_API_KEY")
+    assert "neither sets OPENROUTER_API_KEY" in diagnosis
+
+    (tmp_path / ".env.enterprise").write_text("OPENROUTER_API_KEY=sk-e\n", encoding="utf-8")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "")
+    assert "exported empty" in dotenv_diagnosis("OPENROUTER_API_KEY")
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    (tmp_path / ".env.enterprise").write_bytes("OPENROUTER_API_KEY=sk\n".encode("utf-16"))
+    diagnosis = dotenv_diagnosis("OPENROUTER_API_KEY")
+    assert ".env.enterprise" in diagnosis
+    assert "could not read" in diagnosis
+
+
+def test_dotenv_scan_failure_degrades_not_raises(monkeypatch, capsys):
+    # find_dotenv(usecwd=True) calls os.getcwd(), which raises OSError when the
+    # working directory was deleted under a long-lived daemon — both functions
+    # must extend their degradation contract to the scan, not just the read.
+    import dotenv
+
+    def _raise(*args, **kwargs):
+        raise OSError("[Errno 2] no such file or directory")
+
+    monkeypatch.setattr(dotenv, "find_dotenv", _raise)
+
+    load_dotenv_files()  # must not raise
+    assert "could not read" in capsys.readouterr().err
+
+    diagnosis = dotenv_diagnosis("OPENROUTER_API_KEY")
+    assert "could not scan" in diagnosis
+
+
+def test_load_dotenv_files_corrupt_env_does_not_suppress_enterprise(tmp_path, monkeypatch, capsys):
+    # The per-file try exists precisely so a corrupt .env degrades only itself:
+    # the healthy .env.enterprise after it must still load. Guards against the
+    # plausible refactor of hoisting the try/except out of the loop (or breaking
+    # out of it on failure), which every other test would miss.
+    (tmp_path / ".env").write_bytes("OPENROUTER_API_KEY=sk\n".encode("utf-16"))
+    (tmp_path / ".env.enterprise").write_text("HL_ENTERPRISE_MARKER=yes\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HL_ENTERPRISE_MARKER", raising=False)
+
+    load_dotenv_files()  # must not raise
+
+    assert os.environ["HL_ENTERPRISE_MARKER"] == "yes"
+    assert "could not read" in capsys.readouterr().err
+
+
+def test_load_dotenv_files_scan_failure_on_one_file_does_not_suppress_other(
+    tmp_path, monkeypatch, capsys
+):
+    # The read half of the degradation contract has the mixed-scenario test
+    # above; this is the scan half's counterpart — a find_dotenv failure on
+    # .env must degrade only that file, not break/return past .env.enterprise.
+    import dotenv
+
+    real_find = dotenv.find_dotenv
+
+    def _selective(name, *args, **kwargs):
+        if name == ".env":
+            raise OSError("scan failed for .env")
+        return real_find(name, *args, **kwargs)
+
+    monkeypatch.setattr(dotenv, "find_dotenv", _selective)
+    (tmp_path / ".env.enterprise").write_text("HL_ENTERPRISE_MARKER=yes\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HL_ENTERPRISE_MARKER", raising=False)
+
+    load_dotenv_files()  # must not raise
+
+    assert os.environ["HL_ENTERPRISE_MARKER"] == "yes"
+    assert "could not read" in capsys.readouterr().err
+
+
+def test_dotenv_functions_degrade_without_python_dotenv(tmp_path, monkeypatch, capsys):
+    # The optional-dependency branch: without python-dotenv the loader is a
+    # silent no-op (env-vars-only operation, same as upstream) and the
+    # diagnosis says so — neither may raise. Poisoning sys.modules makes the
+    # in-function ``from dotenv import ...`` raise ImportError.
+    import sys
+
+    monkeypatch.setitem(sys.modules, "dotenv", None)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("OPENROUTER_API_KEY=sk-or-x\n", encoding="utf-8")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    load_dotenv_files()  # must not raise
+    assert "OPENROUTER_API_KEY" not in os.environ  # nothing was loaded
+    assert capsys.readouterr().err == ""  # and silently so
+
+    assert "python-dotenv is not importable" in dotenv_diagnosis("OPENROUTER_API_KEY")
+
+
+def test_dotenv_diagnosis_blames_earlier_empty_file_not_export(tmp_path, monkeypatch):
+    # A blank assignment in .env (``OPENROUTER_API_KEY=``) loads first and
+    # blocks .env.enterprise's real key exactly like an exported empty value
+    # would — but no export exists, so the "exported empty" wording would send
+    # the operator to the wrong place. The diagnosis must blame the fixable
+    # line in the earlier file.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("OPENROUTER_API_KEY=\n", encoding="utf-8")
+    (tmp_path / ".env.enterprise").write_text("OPENROUTER_API_KEY=sk-e\n", encoding="utf-8")
+
+    diagnosis = dotenv_diagnosis("OPENROUTER_API_KEY")
+
+    assert ".env.enterprise sets OPENROUTER_API_KEY" in diagnosis  # the real key…
+    assert "sets it to an empty value" in diagnosis  # …lost to the blank line
+    assert "exported" not in diagnosis  # and the export is not blamed

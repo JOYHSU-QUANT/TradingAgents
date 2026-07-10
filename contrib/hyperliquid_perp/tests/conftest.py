@@ -14,6 +14,24 @@ from contrib.hyperliquid_perp.persistence.ids import decision_attempt_id as deri
 _FIXTURES = Path(__file__).parent / "fixtures"
 
 
+@pytest.fixture(autouse=True)
+def _no_real_dotenv(monkeypatch):
+    """Keep the whole suite immune to a developer's real repo-root ``.env``.
+
+    Both CLI entry points call ``load_dotenv_files()`` as their first act; under
+    pytest that would inject every variable of a real ``.env`` into the process,
+    and ``load_dotenv``'s ``os.environ`` writes happen outside monkeypatch's
+    snapshot, so they outlive the test that triggered them. Neutralize the
+    entry-point bindings suite-wide; the loader itself stays testable through
+    ``config.load_dotenv_files`` (untouched), and the entry-point ordering tests
+    opt back in by re-binding the real function.
+    """
+    from contrib.hyperliquid_perp import cli, main
+
+    monkeypatch.setattr(cli, "load_dotenv_files", lambda: None)
+    monkeypatch.setattr(main, "load_dotenv_files", lambda: None)
+
+
 def _load(name: str):
     with (_FIXTURES / name).open(encoding="utf-8") as fh:
         return json.load(fh)

@@ -11,7 +11,8 @@
 > 清算模型**（fills · fees · funding exactly-once · margin/liquidation · accounting
 > replay）以及 **paper 執行引擎**（TWAP/flip · SL/TP · paper 成交模擬 · market-data
 > 新鮮度／pause／gap-stop · market monitor，注入式 clock ＋ snapshot provider）皆已
-> 實作，剩餘的 scheduler／CLI／CSV export／驗收器層仍待實作（設計見
+> 實作，**scheduler／CLI（`paper`·`export`·`validate` 子命令）／CSV export／驗收器**
+> 也已完成——Phase 2 全層可跑（操作見 [RUNBOOK](./docs/RUNBOOK.md)，設計見
 > [phase2-spec](./docs/phase2-spec.md)）。
 
 ## 文件
@@ -20,6 +21,7 @@
 
 - [docs/README](./docs/README.md) — 總覽、架構、專案結構、roadmap。
 - [SETUP](./docs/SETUP.md) — 安裝與執行 runbook（install、設定、執行、輸出、troubleshooting）。
+- [RUNBOOK](./docs/RUNBOOK.md) — Paper trading 試跑操作手冊（前置 → smoke → 啟動／重啟 → 監控 → 驗收）。
 - [DESIGN](./docs/DESIGN.md) — Hyperliquid API 與交易規則參考 + 決策契約（Phase 2 structured target 與 Phase 1 legacy）。
 - [INTEGRATION](./docs/INTEGRATION.md) — 子類別 override 點、決策契約流程（parse → RiskGate）與模型分工。
 - [phase1-spec](./docs/phase1-spec.md) — Phase 1 decisions, config schema, secrets, setup & run, build order.

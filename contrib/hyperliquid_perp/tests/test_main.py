@@ -123,25 +123,57 @@ def test_build_engine_config_preserves_explicit_empty_analysts():
     assert selected == []
 
 
-def test_build_engine_config_names_corrupt_dotenv_read(monkeypatch):
-    # tradingagents/__init__ loads the repo .env files with no read guard, so
-    # the process's first tradingagents import can raise UnicodeDecodeError
-    # (not ImportError) on a corrupt file — the guard must turn it into the
-    # named EngineImportError instead of an exit-2 traceback.
+def _block_tradingagents_import(monkeypatch, exc: BaseException) -> None:
+    """Make the process's next ``tradingagents`` import raise ``exc``.
+
+    Purges cached modules first so ``_build_engine_config``'s deferred import
+    really re-executes, then poisons ``builtins.__import__`` for exactly the
+    ``tradingagents`` package.
+    """
     import builtins
     import sys
 
     real_import = builtins.__import__
 
-    def _corrupt_env_import(name, *args, **kwargs):
+    def _poisoned(name, *args, **kwargs):
         if name.split(".")[0] == "tradingagents":
-            raise UnicodeDecodeError("utf-8", b"\xff\xfe", 0, 1, "invalid start byte")
+            raise exc
         return real_import(name, *args, **kwargs)
 
     for mod in [m for m in list(sys.modules) if m.split(".")[0] == "tradingagents"]:
         monkeypatch.delitem(sys.modules, mod)
-    monkeypatch.setattr(builtins, "__import__", _corrupt_env_import)
+    monkeypatch.setattr(builtins, "__import__", _poisoned)
+
+
+def test_build_engine_config_names_corrupt_dotenv_read(monkeypatch):
+    # tradingagents/__init__ loads the repo .env files with no read guard, so
+    # the process's first tradingagents import can raise UnicodeDecodeError
+    # (not ImportError) on a corrupt file — the guard must turn it into the
+    # named EngineImportError instead of an exit-2 traceback.
+    _block_tradingagents_import(
+        monkeypatch, UnicodeDecodeError("utf-8", b"\xff\xfe", 0, 1, "invalid start byte")
+    )
     with pytest.raises(main_mod.EngineImportError, match="UTF-8"):
+        main_mod._build_engine_config({})
+
+
+def test_build_engine_config_oserror_read_maps_to_named_error(monkeypatch):
+    # DOTENV_READ_ERRORS is (OSError, UnicodeDecodeError); the OSError half
+    # (e.g. an unreadable .env under the package init's unguarded load) must
+    # take the same named-EngineImportError lane, not fall through to exit 2.
+    # Guards a refactor narrowing this except to UnicodeDecodeError only.
+    _block_tradingagents_import(monkeypatch, OSError("[Errno 13] Permission denied: '.env'"))
+    with pytest.raises(main_mod.EngineImportError, match="Permission denied"):
+        main_mod._build_engine_config({})
+
+
+def test_build_engine_config_import_error_names_the_missing_module(monkeypatch):
+    # Callers print only str(exc) on this named-exit path — the chained cause
+    # never reaches a traceback-printing handler — so a broken transitive
+    # dependency must ride in the message itself, or the operator gets a
+    # misdirecting "is tradingagents installed?" with no module name.
+    _block_tradingagents_import(monkeypatch, ModuleNotFoundError("No module named 'langchain'"))
+    with pytest.raises(main_mod.EngineImportError, match="langchain"):
         main_mod._build_engine_config({})
 
 
@@ -904,3 +936,15 @@ def test_main_loads_dotenv_before_key_check(tmp_path, monkeypatch):
     # .env value; without the load main() would exit on the missing-key path.
     assert rc == 1
     assert os.environ["OPENROUTER_API_KEY"] == "sk-or-from-dotenv"
+
+
+def test_main_loads_dotenv_unconditionally_first(monkeypatch):
+    # The companion of test_cli's every-invocation pin: main() performs the
+    # load as its very first act, before argv parsing — a regression moving it
+    # into run_engine (still "before the key check") would silently stop
+    # loading .env for --context-only and argv-error runs.
+    calls: list[bool] = []
+    monkeypatch.setattr(main_mod, "load_dotenv_files", lambda: calls.append(True))
+    with pytest.raises(SystemExit):
+        main_mod.main(["--no-such-flag"])
+    assert calls == [True]

@@ -635,6 +635,36 @@ def _cmd_paper(argv: list[str]) -> int:
                 else:
                     _require_api_key()  # prints the standard abort message
                     return 1
+            if not trading_halted and provider is None:
+                # Only the healthy restart lane reaches here without a provider
+                # — the fresh lane built it pre-flight. Same protection-only
+                # rule as the keyless restart above: an EngineImportError is
+                # operator-fixable (see _build_engine_config for the causes),
+                # so over live work exiting would leave the position with
+                # nobody watching SL/TP; flat, the named exit 1 stands.
+                try:
+                    provider = _build_provider()
+                except EngineImportError as exc:
+                    if engine.has_active_work():
+                        trading_halted = True
+                        halt_reason = "import-error"
+                        logger.error(
+                            "tradingagents import failed on restart of %s with "
+                            "a live position — entering protection-only mode: %s",
+                            run_id,
+                            exc,
+                        )
+                        print(
+                            f"ERROR: {exc}\nThis run holds a live position — "
+                            "running in protection-only mode: SL/TP protection "
+                            "and the market monitor stay live, NEW decision "
+                            "cycles stay halted. Fix the environment and "
+                            "restart to resume trading.",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(f"error: {exc}", file=sys.stderr)
+                        return 1
             if trading_halted:
                 # Protection-only never polls the AI, and nothing ever un-halts
                 # a protection-only process — the loop never touches the
@@ -664,15 +694,6 @@ def _cmd_paper(argv: list[str]) -> int:
                         file=sys.stderr,
                     )
             else:
-                if provider is None:
-                    try:
-                        provider = _build_provider()
-                    except EngineImportError as exc:
-                        # Operator-fixable environment error — named exit 1,
-                        # not the exit-2 "unexpected error" bucket; see
-                        # _build_engine_config for the causes.
-                        print(f"error: {exc}", file=sys.stderr)
-                        return 1
                 scheduler = PaperScheduler(
                     db=db,
                     run_id=run_id,
@@ -875,6 +896,15 @@ def _paper_loop(
                     "position is closed and new cycles stayed halted for the "
                     "missing OPENROUTER_API_KEY) — exporting the final state "
                     "and exiting. Set the key to resume this run.",
+                    file=sys.stderr,
+                )
+            elif halt_reason == "import-error":
+                print(
+                    "protection-only mode has nothing left to protect (the "
+                    "position is closed and new cycles stayed halted because "
+                    "the tradingagents engine failed to import) — exporting "
+                    "the final state and exiting. Fix the environment (see "
+                    "the startup error) to resume this run.",
                     file=sys.stderr,
                 )
             else:

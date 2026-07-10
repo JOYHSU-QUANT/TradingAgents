@@ -119,7 +119,7 @@ pending funding、accounting replay 驗證、gap SL 檢查；若這次重啟真�
 | 中途健檢 | `python -m contrib.hyperliquid_perp validate --run-id paper-BTC` | exit 4（一致、cycles 未滿） | exit 5 = integrity failure，停下來調查 |
 
 **Protection-only 模式**（log 會明講）：不開新 decision cycle，但 SL/TP 與監控
-持續；倉位被 SL/TP 了結後程序會做最後 export 並以 exit 1 自動結束。兩種成因、
+持續；倉位被 SL/TP 了結後程序會做最後 export 並以 exit 1 自動結束。三種成因、
 對應動作不同：
 
 - **replay mismatch**：帳本重放對不上——**先調查 store**（`validate` + log），
@@ -127,6 +127,11 @@ pending funding、accounting replay 驗證、gap SL 檢查；若這次重啟真�
 - **健康 resume 缺 API key**：帳本是健康的，只是少了憑證——照 §1.3 設好
   `OPENROUTER_API_KEY` 後重啟即可恢復交易（CLI 的 stderr 訊息也是這麼指示），
   不需要先跑 `validate`。
+- **健康 resume 但引擎 import 失敗**（常見成因：`.env` 被存成 UTF-16 等壞編
+  碼）：帳本健康、倉位仍活著，只是引擎載不起來——照 stderr 印出的錯誤修好
+  環境（例如把 `.env` 重存為 UTF-8）後重啟即可恢復交易，不需要先跑
+  `validate`。同樣的失敗發生在**空倉** restart 或 fresh `--create` 時則直接
+  具名 exit 1（沒有倉位需要看護）。
 
 `api_failed` cycle（網路／API 問題）是預期會偶發的，計入
 `api_failed_count`、不進 30 輪門檻；連續大量出現才需要查網路。注意只有

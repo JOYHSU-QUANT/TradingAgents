@@ -269,3 +269,66 @@ def test_load_dotenv_files_corrupt_env_does_not_suppress_enterprise(tmp_path, mo
 
     assert os.environ["HL_ENTERPRISE_MARKER"] == "yes"
     assert "could not read" in capsys.readouterr().err
+
+
+def test_load_dotenv_files_scan_failure_on_one_file_does_not_suppress_other(
+    tmp_path, monkeypatch, capsys
+):
+    # The read half of the degradation contract has the mixed-scenario test
+    # above; this is the scan half's counterpart — a find_dotenv failure on
+    # .env must degrade only that file, not break/return past .env.enterprise.
+    import dotenv
+
+    real_find = dotenv.find_dotenv
+
+    def _selective(name, *args, **kwargs):
+        if name == ".env":
+            raise OSError("scan failed for .env")
+        return real_find(name, *args, **kwargs)
+
+    monkeypatch.setattr(dotenv, "find_dotenv", _selective)
+    (tmp_path / ".env.enterprise").write_text("HL_ENTERPRISE_MARKER=yes\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HL_ENTERPRISE_MARKER", raising=False)
+
+    load_dotenv_files()  # must not raise
+
+    assert os.environ["HL_ENTERPRISE_MARKER"] == "yes"
+    assert "could not read" in capsys.readouterr().err
+
+
+def test_dotenv_functions_degrade_without_python_dotenv(tmp_path, monkeypatch, capsys):
+    # The optional-dependency branch: without python-dotenv the loader is a
+    # silent no-op (env-vars-only operation, same as upstream) and the
+    # diagnosis says so — neither may raise. Poisoning sys.modules makes the
+    # in-function ``from dotenv import ...`` raise ImportError.
+    import sys
+
+    monkeypatch.setitem(sys.modules, "dotenv", None)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("OPENROUTER_API_KEY=sk-or-x\n", encoding="utf-8")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    load_dotenv_files()  # must not raise
+    assert "OPENROUTER_API_KEY" not in os.environ  # nothing was loaded
+    assert capsys.readouterr().err == ""  # and silently so
+
+    assert "python-dotenv is not importable" in dotenv_diagnosis("OPENROUTER_API_KEY")
+
+
+def test_dotenv_diagnosis_blames_earlier_empty_file_not_export(tmp_path, monkeypatch):
+    # A blank assignment in .env (``OPENROUTER_API_KEY=``) loads first and
+    # blocks .env.enterprise's real key exactly like an exported empty value
+    # would — but no export exists, so the "exported empty" wording would send
+    # the operator to the wrong place. The diagnosis must blame the fixable
+    # line in the earlier file.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("OPENROUTER_API_KEY=\n", encoding="utf-8")
+    (tmp_path / ".env.enterprise").write_text("OPENROUTER_API_KEY=sk-e\n", encoding="utf-8")
+
+    diagnosis = dotenv_diagnosis("OPENROUTER_API_KEY")
+
+    assert ".env.enterprise sets OPENROUTER_API_KEY" in diagnosis  # the real key…
+    assert "sets it to an empty value" in diagnosis  # …lost to the blank line
+    assert "exported" not in diagnosis  # and the export is not blamed

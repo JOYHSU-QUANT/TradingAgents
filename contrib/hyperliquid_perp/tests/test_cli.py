@@ -582,7 +582,9 @@ def test_paper_restart_provider_import_failure_exits_1_named(
     # Restart-lane counterpart of the fresh-run pre-flight above: a healthy
     # keyed restart builds the provider only after reconciliation settles that
     # it trades, and an EngineImportError there must still map to the named
-    # exit 1, not the exit-2 last-resort handler.
+    # exit 1, not the exit-2 last-resort handler. This is the FLAT case —
+    # nothing to protect, so the abort stands; a restart holding live work
+    # degrades to protection-only instead (companion test below).
     import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.main import EngineImportError
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
@@ -614,6 +616,75 @@ def test_paper_restart_provider_import_failure_exits_1_named(
     rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
     assert rc == 1
     assert "error: importing tradingagents failed" in capsys.readouterr().err
+
+
+def test_paper_restart_import_failure_with_live_work_enters_protection_only(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    """Corrupt-.env twin of the keyless protection-only fork: a healthy keyed
+    restart over live work whose provider build raises EngineImportError must
+    degrade to protection-only instead of exiting — the fault is as
+    operator-fixable as a missing key, and under supervised restart (RUNBOOK
+    §3) exit 1 would loop forever with the position unwatched. Flat, the named
+    exit 1 stands (companion test above). Same construction contract as the
+    other halted forks: no scheduler, and the loop messaging carries the
+    import-error reason."""
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.main import EngineImportError
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
+    from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
+
+    path = tmp_path / "cli.db"
+    db = Database(path)
+    accounting.initialize_run(
+        db,
+        run_id="r",
+        mode="paper",
+        initial_balance_usdc=D(1000),
+        schema_version=1,
+        initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
+    )
+    db.close()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        reconcile_mod,
+        "reconcile_on_restart",
+        lambda db_, *, run_id, now, funding_source: RestartReconciliation(
+            canceled_plan_ids=(),
+            canceled_order_ids=(),
+            funding_posted=0,
+            funding_still_pending=0,
+            forced_immediate_cycle=False,
+            replay_error=None,
+            replay_status="ok",
+        ),
+    )
+
+    def _boom(*args, **kwargs):
+        raise EngineImportError(
+            "importing tradingagents failed, most likely while its package init "
+            "read a repo .env file"
+        )
+
+    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _boom)
+    seen: dict[str, object] = {}
+
+    def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
+        seen["scheduler"] = scheduler
+        seen["engine_active"] = engine.has_active_work()
+        seen["trading_halted"] = kwargs["trading_halted"]
+        seen["halt_reason"] = kwargs["halt_reason"]
+        return 0
+
+    monkeypatch.setattr(cli_mod, "_paper_loop", fake_loop)
+    assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 0
+    assert seen["scheduler"] is None
+    assert seen["engine_active"] is True  # the seeded live position
+    assert seen["trading_halted"] is True
+    assert seen["halt_reason"] == "import-error"
+    err = capsys.readouterr().err
+    assert "importing tradingagents failed" in err  # the fixable cause is shown
+    assert "protection-only" in err
 
 
 def test_mark_export_verification_writes_and_clears(tmp_path):
@@ -1308,6 +1379,51 @@ def test_paper_loop_missing_key_settle_exit_names_the_key(tmp_path, monkeypatch,
     err = capsys.readouterr().err
     assert "OPENROUTER_API_KEY" in err
     assert "books never re-verified" not in err
+    db.close()
+
+
+def test_paper_loop_import_error_settle_exit_names_the_cause(tmp_path, monkeypatch, capsys):
+    # Third settle-exit wording: an import-error halt has healthy books, so the
+    # exit message must point at the environment fix — not at investigating a
+    # store that verified fine, and not at the API key.
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.paper.clock import ManualClock
+
+    path, db = _seed_db(tmp_path)
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
+    monkeypatch.setattr(cli_mod, "_post_cycle_export", lambda db_, run_id, export_dir: True)
+    monkeypatch.setattr(
+        cli_mod.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
+    )
+
+    class _Engine:
+        def __init__(self):
+            self.work = True
+
+        def has_active_work(self):
+            return self.work
+
+        def tick(self):
+            self.work = False
+
+    rc = cli_mod._paper_loop(
+        db,
+        "r",
+        _Engine(),
+        None,
+        ManualClock(_T0),
+        30,
+        tmp_path / "exports",
+        funding_source=None,
+        trading_halted=True,
+        halt_reason="import-error",
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "failed to import" in err
+    assert "books never re-verified" not in err
+    assert "OPENROUTER_API_KEY" not in err
     db.close()
 
 

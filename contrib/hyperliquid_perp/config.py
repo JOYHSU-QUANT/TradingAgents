@@ -111,10 +111,11 @@ def dotenv_diagnosis(var: str) -> str:
     """
     try:
         from dotenv import dotenv_values, find_dotenv
-    except ImportError:
-        return "python-dotenv is not importable, so .env files were ignored"
+    except ImportError as exc:
+        return f"python-dotenv is not importable ({exc}), so .env files were ignored"
     found: list[str] = []
     unreadable: str | None = None
+    empty_in: str | None = None
     for name in _DOTENV_FILE_NAMES:
         try:
             path = find_dotenv(name, usecwd=True)
@@ -133,10 +134,22 @@ def dotenv_diagnosis(var: str) -> str:
             continue
         if values.get(var):
             # The loader already ran in this process, so a readable file that
-            # sets the var can only have lost to an exported empty value.
+            # sets the var can only have lost to something that set it empty
+            # first. An earlier file's blank assignment (``{var}=``) is loaded
+            # into os.environ and blocks this one exactly like an exported
+            # empty value would — blaming "an export" then sends the operator
+            # to the wrong place, away from the fixable line in the repo.
+            if empty_in is not None:
+                return (
+                    f"{path} sets {var}, but {empty_in} sets it to an empty "
+                    f"value that loads first and blocks it — remove or fill "
+                    f"in that line"
+                )
             return (
                 f"{path} sets {var}, but an exported empty {var} takes precedence over .env files"
             )
+        if var in values and empty_in is None:
+            empty_in = path
     if unreadable is not None:
         return unreadable
     if len(found) == 1:

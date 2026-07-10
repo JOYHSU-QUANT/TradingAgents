@@ -301,10 +301,14 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     except ImportError as exc:
         # Deferred so --context-only stays import-light, but if the engine package is
         # missing/moved this surfaces a clear cause instead of a generic top-level
-        # "unexpected error".
+        # "unexpected error". ``exc`` rides in the message because callers print
+        # only str(): a broken transitive dependency (``No module named
+        # 'langchain'``) would otherwise be invisible — the chained cause never
+        # reaches a traceback-printing handler on this named-exit path.
         raise EngineImportError(
-            "tradingagents.default_config.DEFAULT_CONFIG is not importable — "
-            "is the tradingagents package installed?"
+            f"tradingagents.default_config.DEFAULT_CONFIG is not importable "
+            f"({exc}) — is the tradingagents package (and its dependencies) "
+            "installed?"
         ) from exc
     except DOTENV_READ_ERRORS as exc:
         # This is the process's first tradingagents import, and the package
@@ -313,8 +317,8 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
         # earlier) — so a corrupt file (e.g. saved as UTF-16 by a bare
         # PowerShell ``>>``) detonates here, not as an ImportError.
         raise EngineImportError(
-            f"importing tradingagents failed while its package init read a "
-            f"repo .env file: {exc} — is the file saved as UTF-8?"
+            f"importing tradingagents failed, most likely while its package "
+            f"init read a repo .env file: {exc} — is the file saved as UTF-8?"
         ) from exc
 
     eng_cfg = config.get("engine", {})

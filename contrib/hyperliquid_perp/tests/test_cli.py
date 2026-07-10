@@ -318,11 +318,19 @@ def test_paper_fresh_run_missing_api_key_exits_1(tmp_path, capsys, monkeypatch, 
     # A fresh run always drives the AI, so a missing key still refuses — but the
     # check now fires in the fresh-run branch, BEFORE the run row is written, so a
     # retry with the key still sees a clean --create (no half-created run).
+    import contrib.hyperliquid_perp.cli as cli_mod
+
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    # Sentinel pins the dotenv_diagnosis wiring: the abort message must embed
+    # the diagnosis for the actual variable — dropping the interpolation (or
+    # diagnosing the wrong var) is invisible to the substring check alone.
+    monkeypatch.setattr(cli_mod, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
     path = tmp_path / "new.db"
     rc = cli_main(_paper_argv(path, run_id="fresh", config=paper_seams, create=True))
     assert rc == 1
-    assert "OPENROUTER_API_KEY" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "OPENROUTER_API_KEY" in err
+    assert "DIAG[OPENROUTER_API_KEY]" in err
     db = Database(path)
     assert repo.get_run(db.conn, "fresh") is None  # not created before the key check
     db.close()
@@ -498,6 +506,9 @@ def test_paper_keyless_healthy_restart_with_live_work_enters_protection_only(
         raise AssertionError("keyless protection-only must not build the decision provider")
 
     monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _forbid_provider)
+    # Sentinel pins the dotenv_diagnosis wiring in the protection-only message
+    # (same contract as the fresh-run abort's sentinel above).
+    monkeypatch.setattr(cli_mod, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
     seen: dict[str, object] = {}
 
     def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
@@ -516,6 +527,27 @@ def test_paper_keyless_healthy_restart_with_live_work_enters_protection_only(
     err = capsys.readouterr().err
     assert "OPENROUTER_API_KEY is not set but this run holds a live position" in err
     assert "protection-only" in err
+    assert "DIAG[OPENROUTER_API_KEY]" in err
+
+
+def test_paper_provider_import_failure_exits_1_named(tmp_path, capsys, monkeypatch, paper_seams):
+    # _EngineDecisionProvider construction runs _build_engine_config, whose
+    # named RuntimeError must map to the documented exit 1 (see
+    # _build_engine_config for the causes), not the exit-2 last-resort handler.
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.main import EngineImportError
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    def _boom(*args, **kwargs):
+        raise EngineImportError(
+            "importing tradingagents failed while its package init read a repo .env file"
+        )
+
+    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _boom)
+    rc = cli_main(_paper_argv(tmp_path / "new.db", run_id="fresh", config=paper_seams, create=True))
+    assert rc == 1
+    assert "error: importing tradingagents failed" in capsys.readouterr().err
 
 
 def test_mark_export_verification_writes_and_clears(tmp_path):

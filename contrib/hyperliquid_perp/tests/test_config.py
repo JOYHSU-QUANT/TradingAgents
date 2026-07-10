@@ -191,7 +191,7 @@ def test_dotenv_diagnosis_distinguishes_missing_file_and_missing_key(tmp_path, m
     # The key-check failure messages lean on these wordings to tell the
     # operator whether the problem is the file's location or its contents.
     monkeypatch.chdir(tmp_path)
-    assert "no .env found" in dotenv_diagnosis("OPENROUTER_API_KEY")
+    assert "no .env or .env.enterprise found" in dotenv_diagnosis("OPENROUTER_API_KEY")
 
     (tmp_path / ".env").write_text("OTHER=1\n", encoding="utf-8")
     diagnosis = dotenv_diagnosis("OPENROUTER_API_KEY")
@@ -210,3 +210,44 @@ def test_dotenv_diagnosis_names_unreadable_file_and_empty_export(tmp_path, monke
     (tmp_path / ".env").write_text("OPENROUTER_API_KEY=sk-or-x\n", encoding="utf-8")
     monkeypatch.setenv("OPENROUTER_API_KEY", "")
     assert "exported empty" in dotenv_diagnosis("OPENROUTER_API_KEY")
+
+
+def test_dotenv_diagnosis_covers_env_enterprise(tmp_path, monkeypatch):
+    # The loader reads .env AND .env.enterprise: the diagnosis must model the
+    # same two-file set, or an enterprise-file-only setup gets told "no .env
+    # found" moments after the loader read one.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env.enterprise").write_text("OTHER=1\n", encoding="utf-8")
+    diagnosis = dotenv_diagnosis("OPENROUTER_API_KEY")
+    assert ".env.enterprise" in diagnosis
+    assert "does not set OPENROUTER_API_KEY" in diagnosis
+
+    (tmp_path / ".env").write_text("OTHER=1\n", encoding="utf-8")
+    diagnosis = dotenv_diagnosis("OPENROUTER_API_KEY")
+    assert "neither sets OPENROUTER_API_KEY" in diagnosis
+
+    (tmp_path / ".env.enterprise").write_text("OPENROUTER_API_KEY=sk-e\n", encoding="utf-8")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "")
+    assert "exported empty" in dotenv_diagnosis("OPENROUTER_API_KEY")
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    (tmp_path / ".env.enterprise").write_bytes("OPENROUTER_API_KEY=sk\n".encode("utf-16"))
+    diagnosis = dotenv_diagnosis("OPENROUTER_API_KEY")
+    assert ".env.enterprise" in diagnosis
+    assert "could not read" in diagnosis
+
+
+def test_load_dotenv_files_corrupt_env_does_not_suppress_enterprise(tmp_path, monkeypatch, capsys):
+    # The per-file try exists precisely so a corrupt .env degrades only itself:
+    # the healthy .env.enterprise after it must still load. Guards against the
+    # plausible refactor of hoisting the try/except out of the loop (or breaking
+    # out of it on failure), which every other test would miss.
+    (tmp_path / ".env").write_bytes("OPENROUTER_API_KEY=sk\n".encode("utf-16"))
+    (tmp_path / ".env.enterprise").write_text("HL_ENTERPRISE_MARKER=yes\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HL_ENTERPRISE_MARKER", raising=False)
+
+    load_dotenv_files()  # must not raise
+
+    assert os.environ["HL_ENTERPRISE_MARKER"] == "yes"
+    assert "could not read" in capsys.readouterr().err

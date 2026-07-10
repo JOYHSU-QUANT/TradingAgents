@@ -123,6 +123,28 @@ def test_build_engine_config_preserves_explicit_empty_analysts():
     assert selected == []
 
 
+def test_build_engine_config_names_corrupt_dotenv_read(monkeypatch):
+    # tradingagents/__init__ loads the repo .env files with no read guard, so
+    # the process's first tradingagents import can raise UnicodeDecodeError
+    # (not ImportError) on a corrupt file — the guard must turn it into the
+    # named EngineImportError instead of an exit-2 traceback.
+    import builtins
+    import sys
+
+    real_import = builtins.__import__
+
+    def _corrupt_env_import(name, *args, **kwargs):
+        if name.split(".")[0] == "tradingagents":
+            raise UnicodeDecodeError("utf-8", b"\xff\xfe", 0, 1, "invalid start byte")
+        return real_import(name, *args, **kwargs)
+
+    for mod in [m for m in list(sys.modules) if m.split(".")[0] == "tradingagents"]:
+        monkeypatch.delitem(sys.modules, mod)
+    monkeypatch.setattr(builtins, "__import__", _corrupt_env_import)
+    with pytest.raises(main_mod.EngineImportError, match="UTF-8"):
+        main_mod._build_engine_config({})
+
+
 # --------------------------------------------------------------------------
 # _load_position — wallet / error / success branches
 # --------------------------------------------------------------------------
@@ -355,6 +377,37 @@ def test_run_engine_reports_bad_paper_trading_block_as_config_error(monkeypatch,
     err = capsys.readouterr().err
     assert "invalid risk:/decision:/paper_trading: config" in err
     assert "taker_fee_rate" in err
+
+
+def test_run_engine_missing_key_message_embeds_dotenv_diagnosis(monkeypatch):
+    # The abort text must carry config.dotenv_diagnosis's verdict for the actual
+    # variable — dropping the interpolation (or diagnosing the wrong var) is
+    # invisible to every substring the message carried before the .env work.
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(main_mod, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
+    with pytest.raises(SystemExit, match=r"DIAG\[OPENROUTER_API_KEY\]"):
+        main_mod.run_engine({}, "BTC")
+
+
+def test_run_engine_reports_engine_import_failure_as_named_error(monkeypatch, capsys):
+    # _build_engine_config's EngineImportError (see there for the causes) is
+    # operator-fixable — exit 1 with the message, not main's exit-2
+    # "unexpected error" bucket.
+    calls = []
+    _stub_engine(monkeypatch)
+    monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
+
+    def _boom(config):
+        raise main_mod.EngineImportError(
+            "importing tradingagents failed while its package init read a repo .env file"
+        )
+
+    monkeypatch.setattr(main_mod, "_build_engine_config", _boom)
+    rc = main_mod.run_engine({}, "BTC")
+    assert rc == 1
+    assert calls == []  # engine never built
+    err = capsys.readouterr().err
+    assert "error: importing tradingagents failed" in err
 
 
 def test_run_engine_aborts_when_position_lookup_fails(monkeypatch, capsys):

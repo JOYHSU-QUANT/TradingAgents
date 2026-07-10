@@ -640,12 +640,21 @@ def _cmd_paper(argv: list[str]) -> int:
                         file=sys.stderr,
                     )
             else:
-                provider = _EngineDecisionProvider(
-                    config,
-                    risk_cfg=risk_cfg,
-                    decision_cfg=decision_cfg,
-                    payload_dir=db_path.resolve().parent / "payloads" / run_id,
-                )
+                from .main import EngineImportError
+
+                try:
+                    provider = _EngineDecisionProvider(
+                        config,
+                        risk_cfg=risk_cfg,
+                        decision_cfg=decision_cfg,
+                        payload_dir=db_path.resolve().parent / "payloads" / run_id,
+                    )
+                except EngineImportError as exc:
+                    # Operator-fixable environment error — named exit 1, not
+                    # the exit-2 "unexpected error" bucket; see
+                    # _build_engine_config for the causes.
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 1
                 scheduler = PaperScheduler(
                     db=db,
                     run_id=run_id,

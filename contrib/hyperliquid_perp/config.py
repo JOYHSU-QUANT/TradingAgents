@@ -26,6 +26,17 @@ _WALLET_PLACEHOLDER = "0xYOUR..."
 # lives here so a parser swap updates it next to the code that raises.
 CONFIG_LOAD_ERRORS = (ValueError, OSError, yaml.YAMLError)
 
+# The dotenv files the loader reads, in load order. dotenv_diagnosis walks the
+# same tuple so its verdicts can never contradict what the loader just did —
+# extend HERE (only) to add a file to both.
+_DOTENV_FILE_NAMES = (".env", ".env.enterprise")
+
+# Everything reading a found dotenv file can raise (e.g. saved as UTF-16 by a
+# bare PowerShell ``>>``). Shared with main._build_engine_config's import guard
+# so the loader's warn-and-continue set and the guard's named-error set never
+# fork.
+DOTENV_READ_ERRORS = (OSError, UnicodeDecodeError)
+
 # The complete set of recognised top-level config keys. Unknown keys are
 # rejected (not ignored): a typo in a *block name* — e.g. ``riks:`` — would
 # otherwise silently drop the whole block and fall back to defaults, and for the
@@ -67,15 +78,16 @@ def load_dotenv_files() -> None:
     except ImportError:
         return
     # Per-file try: a corrupt .env must degrade only itself, not suppress a
-    # healthy .env.enterprise (the missing-file fallback re-load of .env keeps
-    # its upstream behaviour, so the label goes generic when the path is "").
-    for name in (".env", ".env.enterprise"):
+    # healthy .env.enterprise. A missing file makes find_dotenv return "" and
+    # load_dotenv("") is a silent no-op (the same call upstream makes), so only
+    # a found-but-unreadable file can reach the warning below.
+    for name in _DOTENV_FILE_NAMES:
         path = find_dotenv(name, usecwd=True)
         try:
             load_dotenv(path)
-        except (OSError, UnicodeDecodeError) as exc:
+        except DOTENV_READ_ERRORS as exc:
             print(
-                f"warning: could not read {path or 'a .env file'}: {exc} — "
+                f"warning: could not read {path}: {exc} — "
                 "continuing with the exported environment variables only. "
                 "Is the file saved as UTF-8?",
                 file=sys.stderr,
@@ -86,24 +98,43 @@ def dotenv_diagnosis(var: str) -> str:
     """One line explaining why the ``.env`` files did not satisfy ``var``.
 
     Appended to the startup key-check failure messages, so the operator can
-    tell apart "no .env found from this working directory", "found one but it
-    does not set the key", and "python-dotenv unavailable" without any
-    steady-state log noise on the healthy path.
+    tell apart "no dotenv file found from this working directory", "found one
+    but it does not set the key", and "python-dotenv unavailable" without any
+    steady-state log noise on the healthy path. Inspects the same two files, in
+    the same order, as :func:`load_dotenv_files` — the diagnosis must never
+    contradict what the loader just did (e.g. claim "no .env found" when a
+    ``.env.enterprise`` was loaded moments earlier).
     """
     try:
         from dotenv import dotenv_values, find_dotenv
     except ImportError:
         return "python-dotenv is not importable, so .env files were ignored"
-    path = find_dotenv(usecwd=True)
-    if not path:
-        return f"no .env found walking up from {Path.cwd()}"
-    try:
-        values = dotenv_values(path)
-    except (OSError, UnicodeDecodeError) as exc:
-        return f"found {path} but could not read it ({exc})"
-    if values.get(var):
-        return f"{path} sets {var}, but an exported empty {var} takes precedence over .env files"
-    return f"found {path} but it does not set {var}"
+    found: list[str] = []
+    unreadable: str | None = None
+    for name in _DOTENV_FILE_NAMES:
+        path = find_dotenv(name, usecwd=True)
+        if not path:
+            continue
+        found.append(path)
+        try:
+            values = dotenv_values(path)
+        except DOTENV_READ_ERRORS as exc:
+            if unreadable is None:
+                unreadable = f"found {path} but could not read it ({exc})"
+            continue
+        if values.get(var):
+            # The loader already ran in this process, so a readable file that
+            # sets the var can only have lost to an exported empty value.
+            return (
+                f"{path} sets {var}, but an exported empty {var} takes precedence over .env files"
+            )
+    if unreadable is not None:
+        return unreadable
+    if len(found) == 1:
+        return f"found {found[0]} but it does not set {var}"
+    if found:
+        return f"found {' and '.join(found)} but neither sets {var}"
+    return f"no {' or '.join(_DOTENV_FILE_NAMES)} found walking up from {Path.cwd()}"
 
 
 def config_path() -> Path:

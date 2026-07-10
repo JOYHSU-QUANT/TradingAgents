@@ -25,7 +25,14 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from .audit.decision_log import log_target_decision
-from .config import CONFIG_LOAD_ERRORS, load_config, wallet_address
+from .config import (
+    CONFIG_LOAD_ERRORS,
+    DOTENV_READ_ERRORS,
+    dotenv_diagnosis,
+    load_config,
+    load_dotenv_files,
+    wallet_address,
+)
 from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context
 from .domains.perp.indicators import required_candles, supported_indicators
@@ -274,6 +281,15 @@ def run_context_only(config: dict, coin: str) -> int:
     return 0
 
 
+class EngineImportError(RuntimeError):
+    """Named, operator-fixable failure importing the tradingagents engine.
+
+    Raised only by :func:`_build_engine_config`; callers map exactly this type
+    to a named exit 1, so any other ``RuntimeError`` still surfaces as an
+    unexpected-error exit 2 instead of hiding behind a reassuring message.
+    """
+
+
 def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     """Overlay the perp ``engine`` block onto the engine's DEFAULT_CONFIG.
 
@@ -285,10 +301,24 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     except ImportError as exc:
         # Deferred so --context-only stays import-light, but if the engine package is
         # missing/moved this surfaces a clear cause instead of a generic top-level
-        # "unexpected error".
-        raise RuntimeError(
-            "tradingagents.default_config.DEFAULT_CONFIG is not importable — "
-            "is the tradingagents package installed?"
+        # "unexpected error". ``exc`` rides in the message because callers print
+        # only str(): a broken transitive dependency (``No module named
+        # 'langchain'``) would otherwise be invisible — the chained cause never
+        # reaches a traceback-printing handler on this named-exit path.
+        raise EngineImportError(
+            f"tradingagents.default_config.DEFAULT_CONFIG is not importable "
+            f"({exc}) — is the tradingagents package (and its dependencies) "
+            "installed?"
+        ) from exc
+    except DOTENV_READ_ERRORS as exc:
+        # This is the process's first tradingagents import, and the package
+        # __init__ loads the repo .env files with no read guard (unlike
+        # config.load_dotenv_files, which warned and continued moments
+        # earlier) — so a corrupt file (e.g. saved as UTF-16 by a bare
+        # PowerShell ``>>``) detonates here, not as an ImportError.
+        raise EngineImportError(
+            f"importing tradingagents failed, most likely while its package "
+            f"init read a repo .env file: {exc} — is the file saved as UTF-8?"
         ) from exc
 
     eng_cfg = config.get("engine", {})
@@ -318,7 +348,8 @@ def run_engine(config: dict, coin: str) -> int:
     if not os.environ.get("OPENROUTER_API_KEY"):
         raise SystemExit(
             "OPENROUTER_API_KEY is not set — needed for the engine run. "
-            "Use --context-only for a keyless dev loop."
+            "Use --context-only for a keyless dev loop. "
+            f"({dotenv_diagnosis('OPENROUTER_API_KEY')}.)"
         )
 
     ctx, client = _build_context(config, coin)
@@ -415,7 +446,13 @@ def run_engine(config: dict, coin: str) -> int:
         decision_cfg,
         max_pct=risk_gate.effective_max_target_margin_pct(risk_cfg, decision_cfg),
     )
-    engine_config, selected_analysts = _build_engine_config(config)
+    try:
+        engine_config, selected_analysts = _build_engine_config(config)
+    except EngineImportError as exc:
+        # Operator-fixable environment error — named exit 1, not main's exit-2
+        # "unexpected error" bucket; see _build_engine_config for the causes.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     graph = build_graph(
         perp_context_text=ctx_text,
         config=engine_config,
@@ -589,6 +626,10 @@ def run_engine(config: dict, coin: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Before the OPENROUTER_API_KEY check in run_engine: the engine package
+    # that would load the .env files itself is imported lazily, after that
+    # check. Idempotent when already called by the subcommand CLI's main().
+    load_dotenv_files()
     args = _parse_args(argv)
     try:
         config = load_config(args.config)

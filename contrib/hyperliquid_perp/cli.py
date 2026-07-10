@@ -20,8 +20,8 @@ the legacy CLI takes no positionals, so it can only be a subcommand typo.
 Exit codes: ``0`` success (for ``validate``: Phase-3 ready), ``1`` named
 operator/config/environment errors — including a protection-only ``paper`` run
 that self-terminates after its position closes (final export written; the
-books never re-verified or the API key was never supplied — stderr says
-which), ``2`` unexpected error, ``4``
+books never re-verified, the API key was never supplied, or the engine
+failed to import — stderr says which), ``2`` unexpected error, ``4``
 (``validate`` only) the run is internally consistent but has not accumulated
 the 30-cycle gate yet ("keep running cycles"), ``5`` (``validate`` only) the
 run has integrity failures — orphans, snapshot or replay mismatches, or a
@@ -47,7 +47,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .config import CONFIG_LOAD_ERRORS, load_config
+from .config import CONFIG_LOAD_ERRORS, dotenv_diagnosis, load_config, load_dotenv_files
 from .persistence.db import Database
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,10 @@ def _raise_keyboard_interrupt(signum, frame) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Before anything reads os.environ: the OPENROUTER_API_KEY startup checks
+    # (fresh `paper` runs, healthy keyless-restart triage) run long before the
+    # lazily-imported engine package would load the .env files itself.
+    load_dotenv_files()
     argv = list(sys.argv[1:]) if argv is None else list(argv)
     if not argv or argv[0].startswith("-"):
         # Phase 1/2 compatibility path: identical flags, identical behaviour.
@@ -293,7 +297,8 @@ def _require_api_key() -> bool:
         return True
     print(
         "error: OPENROUTER_API_KEY is not set — the paper run drives the AI engine "
-        "every 4h. Use --context-only (legacy CLI) for a keyless dev loop.",
+        "every 4h. Use --context-only (legacy CLI) for a keyless dev loop. "
+        f"({dotenv_diagnosis('OPENROUTER_API_KEY')}.)",
         file=sys.stderr,
     )
     return False
@@ -433,6 +438,7 @@ def _cmd_paper(argv: list[str]) -> int:
 
         def _run_locked() -> int:
             """The lease-holding tail of ``paper``: create/reconcile, then the loop."""
+            from .main import EngineImportError
             from .paper import accounting
             from .paper.engine import PaperExecutionEngine
             from .paper.market_feed import PortSnapshotProvider
@@ -443,6 +449,18 @@ def _cmd_paper(argv: list[str]) -> int:
             from .persistence.schema import SCHEMA_VERSION
 
             trading_halted = False
+            # Built pre-flight on a fresh run (before the run row exists);
+            # a restart builds it after reconciliation settles that it trades.
+            provider = None
+
+            def _build_provider():
+                return _EngineDecisionProvider(
+                    config,
+                    risk_cfg=risk_cfg,
+                    decision_cfg=decision_cfg,
+                    payload_dir=db_path.resolve().parent / "payloads" / run_id,
+                )
+
             if not is_restart:
                 # Seeds are genesis-only and the engine manages exactly the
                 # run coin: an off-coin seed would sit in the store all run —
@@ -465,6 +483,17 @@ def _cmd_paper(argv: list[str]) -> int:
                 # instead of leaving a half-created run that the next attempt
                 # then rejects as "already exists".
                 if not _require_api_key():
+                    return 1
+                # The decision provider is the other operator-fixable
+                # pre-flight: its construction triggers the process's first
+                # tradingagents import, which detonates on a corrupt repo
+                # .env (see _build_engine_config). Same ordering rule as the
+                # key check — fail before the run row exists, or the retry
+                # after fixing the file is rejected as "already exists".
+                try:
+                    provider = _build_provider()
+                except EngineImportError as exc:
+                    print(f"error: {exc}", file=sys.stderr)
                     return 1
                 seeds = [
                     PositionState(coin=p.coin, size=p.size, entry_price=p.entry_price)
@@ -600,12 +629,42 @@ def _cmd_paper(argv: list[str]) -> int:
                         "a live position — running in protection-only mode: SL/TP "
                         "protection and the market monitor stay live, NEW decision "
                         "cycles stay halted. Set the key and restart to resume "
-                        "trading.",
+                        f"trading. ({dotenv_diagnosis('OPENROUTER_API_KEY')}.)",
                         file=sys.stderr,
                     )
                 else:
                     _require_api_key()  # prints the standard abort message
                     return 1
+            if not trading_halted and provider is None:
+                # Only the healthy restart lane reaches here without a provider
+                # — the fresh lane built it pre-flight. Same protection-only
+                # rule as the keyless restart above: an EngineImportError is
+                # operator-fixable (see _build_engine_config for the causes),
+                # so over live work exiting would leave the position with
+                # nobody watching SL/TP; flat, the named exit 1 stands.
+                try:
+                    provider = _build_provider()
+                except EngineImportError as exc:
+                    if engine.has_active_work():
+                        trading_halted = True
+                        halt_reason = "import-error"
+                        logger.error(
+                            "tradingagents import failed on restart of %s with "
+                            "a live position — entering protection-only mode: %s",
+                            run_id,
+                            exc,
+                        )
+                        print(
+                            f"ERROR: {exc}\nThis run holds a live position — "
+                            "running in protection-only mode: SL/TP protection "
+                            "and the market monitor stay live, NEW decision "
+                            "cycles stay halted. Fix the environment and "
+                            "restart to resume trading.",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(f"error: {exc}", file=sys.stderr)
+                        return 1
             if trading_halted:
                 # Protection-only never polls the AI, and nothing ever un-halts
                 # a protection-only process — the loop never touches the
@@ -635,12 +694,6 @@ def _cmd_paper(argv: list[str]) -> int:
                         file=sys.stderr,
                     )
             else:
-                provider = _EngineDecisionProvider(
-                    config,
-                    risk_cfg=risk_cfg,
-                    decision_cfg=decision_cfg,
-                    payload_dir=db_path.resolve().parent / "payloads" / run_id,
-                )
                 scheduler = PaperScheduler(
                     db=db,
                     run_id=run_id,
@@ -843,6 +896,15 @@ def _paper_loop(
                     "position is closed and new cycles stayed halted for the "
                     "missing OPENROUTER_API_KEY) — exporting the final state "
                     "and exiting. Set the key to resume this run.",
+                    file=sys.stderr,
+                )
+            elif halt_reason == "import-error":
+                print(
+                    "protection-only mode has nothing left to protect (the "
+                    "position is closed and new cycles stayed halted because "
+                    "the tradingagents engine failed to import) — exporting "
+                    "the final state and exiting. Fix the environment (see "
+                    "the startup error) to resume this run.",
                     file=sys.stderr,
                 )
             else:

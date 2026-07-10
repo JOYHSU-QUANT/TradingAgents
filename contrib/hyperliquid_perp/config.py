@@ -7,6 +7,7 @@ so ``--context-only`` works out of the box without any local setup.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,17 @@ _WALLET_PLACEHOLDER = "0xYOUR..."
 # Callers turn any of these into a named exit, never a raw traceback; the list
 # lives here so a parser swap updates it next to the code that raises.
 CONFIG_LOAD_ERRORS = (ValueError, OSError, yaml.YAMLError)
+
+# The dotenv files the loader reads, in load order. dotenv_diagnosis walks the
+# same tuple so its verdicts can never contradict what the loader just did —
+# extend HERE (only) to add a file to both.
+_DOTENV_FILE_NAMES = (".env", ".env.enterprise")
+
+# Everything reading a found dotenv file can raise (e.g. saved as UTF-16 by a
+# bare PowerShell ``>>``). Shared with main._build_engine_config's import guard
+# so the loader's warn-and-continue set and the guard's named-error set never
+# fork.
+DOTENV_READ_ERRORS = (OSError, UnicodeDecodeError)
 
 # The complete set of recognised top-level config keys. Unknown keys are
 # rejected (not ignored): a typo in a *block name* — e.g. ``riks:`` — would
@@ -44,6 +56,107 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset(
         "paper_trading",
     }
 )
+
+
+def load_dotenv_files() -> None:
+    """Load the project ``.env`` / ``.env.enterprise`` into ``os.environ``.
+
+    Mirrors the loads in ``tradingagents/__init__`` so an ``OPENROUTER_API_KEY``
+    kept in the repo-root ``.env`` satisfies this module's CLIs too. The engine
+    package performs the same loads on import, but it is imported lazily — only
+    once a cycle actually drives the AI — which is *after* the startup API-key
+    checks here, so the CLI entry points must load the files themselves first.
+    ``load_dotenv`` defaults to ``override=False`` (an exported variable always
+    wins over the file). Degradations never raise — a missing python-dotenv
+    means env-vars-only operation (same as upstream), and an unreadable file
+    (e.g. saved as UTF-16 by a bare PowerShell ``>>`` redirection) warns on
+    stderr and continues, so both CLI entry points keep their named-exit
+    contract instead of dying on a raw traceback before any handler exists.
+    """
+    try:
+        from dotenv import find_dotenv, load_dotenv
+    except ImportError:
+        return
+    # Per-file try: a corrupt .env must degrade only itself, not suppress a
+    # healthy .env.enterprise. A missing file makes find_dotenv return "" and
+    # load_dotenv("") is a silent no-op (the same call upstream makes), so only
+    # a found-but-unreadable file can reach the warning below.
+    for name in _DOTENV_FILE_NAMES:
+        # find_dotenv is inside the guard too: usecwd=True calls os.getcwd(),
+        # which raises OSError if the working directory was deleted — the
+        # degradation contract must cover the scan, not just the read.
+        path = ""
+        try:
+            path = find_dotenv(name, usecwd=True)
+            load_dotenv(path)
+        except DOTENV_READ_ERRORS as exc:
+            print(
+                f"warning: could not read {path or name}: {exc} — "
+                "continuing with the exported environment variables only. "
+                "Is the file saved as UTF-8?",
+                file=sys.stderr,
+            )
+
+
+def dotenv_diagnosis(var: str) -> str:
+    """One line explaining why the ``.env`` files did not satisfy ``var``.
+
+    Appended to the startup key-check failure messages, so the operator can
+    tell apart "no dotenv file found from this working directory", "found one
+    but it does not set the key", and "python-dotenv unavailable" without any
+    steady-state log noise on the healthy path. Inspects the same two files, in
+    the same order, as :func:`load_dotenv_files` — the diagnosis must never
+    contradict what the loader just did (e.g. claim "no .env found" when a
+    ``.env.enterprise`` was loaded moments earlier).
+    """
+    try:
+        from dotenv import dotenv_values, find_dotenv
+    except ImportError as exc:
+        return f"python-dotenv is not importable ({exc}), so .env files were ignored"
+    found: list[str] = []
+    unreadable: str | None = None
+    empty_in: str | None = None
+    for name in _DOTENV_FILE_NAMES:
+        try:
+            path = find_dotenv(name, usecwd=True)
+        except DOTENV_READ_ERRORS as exc:
+            # os.getcwd() on a deleted working directory — same degradation
+            # contract as the loader's scan.
+            return f"could not scan for {name} ({exc})"
+        if not path:
+            continue
+        found.append(path)
+        try:
+            values = dotenv_values(path)
+        except DOTENV_READ_ERRORS as exc:
+            if unreadable is None:
+                unreadable = f"found {path} but could not read it ({exc})"
+            continue
+        if values.get(var):
+            # The loader already ran in this process, so a readable file that
+            # sets the var can only have lost to something that set it empty
+            # first. An earlier file's blank assignment (``{var}=``) is loaded
+            # into os.environ and blocks this one exactly like an exported
+            # empty value would — blaming "an export" then sends the operator
+            # to the wrong place, away from the fixable line in the repo.
+            if empty_in is not None:
+                return (
+                    f"{path} sets {var}, but {empty_in} sets it to an empty "
+                    f"value that loads first and blocks it — remove or fill "
+                    f"in that line"
+                )
+            return (
+                f"{path} sets {var}, but an exported empty {var} takes precedence over .env files"
+            )
+        if var in values and empty_in is None:
+            empty_in = path
+    if unreadable is not None:
+        return unreadable
+    if len(found) == 1:
+        return f"found {found[0]} but it does not set {var}"
+    if found:
+        return f"found {' and '.join(found)} but neither sets {var}"
+    return f"no {' or '.join(_DOTENV_FILE_NAMES)} found walking up from {Path.cwd()}"
 
 
 def config_path() -> Path:

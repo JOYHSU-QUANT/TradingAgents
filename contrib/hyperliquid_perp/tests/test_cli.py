@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import signal
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -317,14 +318,54 @@ def test_paper_fresh_run_missing_api_key_exits_1(tmp_path, capsys, monkeypatch, 
     # A fresh run always drives the AI, so a missing key still refuses — but the
     # check now fires in the fresh-run branch, BEFORE the run row is written, so a
     # retry with the key still sees a clean --create (no half-created run).
+    import contrib.hyperliquid_perp.cli as cli_mod
+
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    # Sentinel pins the dotenv_diagnosis wiring: the abort message must embed
+    # the diagnosis for the actual variable — dropping the interpolation (or
+    # diagnosing the wrong var) is invisible to the substring check alone.
+    monkeypatch.setattr(cli_mod, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
     path = tmp_path / "new.db"
     rc = cli_main(_paper_argv(path, run_id="fresh", config=paper_seams, create=True))
     assert rc == 1
-    assert "OPENROUTER_API_KEY" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "OPENROUTER_API_KEY" in err
+    assert "DIAG[OPENROUTER_API_KEY]" in err
     db = Database(path)
     assert repo.get_run(db.conn, "fresh") is None  # not created before the key check
     db.close()
+
+
+def test_paper_key_check_satisfied_by_dotenv(tmp_path, monkeypatch, paper_seams):
+    # Companion of test_main's ordering test for the paper path: a key kept only
+    # in the repo-root .env must satisfy _require_api_key, which fires before
+    # the run row is written. The suite-wide autouse fixture stubs the loader
+    # out, so this test re-binds the real one.
+    from contrib.hyperliquid_perp import cli as cli_mod, config as config_mod
+
+    monkeypatch.setattr(cli_mod, "load_dotenv_files", config_mod.load_dotenv_files)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("OPENROUTER_API_KEY=sk-or-from-dotenv\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    reached = []
+
+    def _stop(*args, **kwargs):
+        reached.append(True)
+        raise RuntimeError("stop right after the key check")
+
+    # cli lazy-imports `from .paper import accounting`; patch the module itself.
+    monkeypatch.setattr(accounting, "initialize_run", _stop)
+    # The provider pre-flight sits between the key check and initialize_run;
+    # stub it so this test stays off the real tradingagents import.
+    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", lambda *a, **kw: object())
+    rc = cli_main(_paper_argv(tmp_path / "new.db", run_id="fresh", config=paper_seams, create=True))
+
+    # Reaching initialize_run proves the key check passed on the .env value;
+    # without the load, the run would have exited 1 on the missing-key path.
+    assert reached == [True]
+    assert rc == 2  # the top-level wrapper maps the sentinel as unexpected
+    assert os.environ["OPENROUTER_API_KEY"] == "sk-or-from-dotenv"
 
 
 def test_paper_fresh_run_off_coin_seed_exits_1(tmp_path, capsys, paper_seams):
@@ -468,6 +509,9 @@ def test_paper_keyless_healthy_restart_with_live_work_enters_protection_only(
         raise AssertionError("keyless protection-only must not build the decision provider")
 
     monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _forbid_provider)
+    # Sentinel pins the dotenv_diagnosis wiring in the protection-only message
+    # (same contract as the fresh-run abort's sentinel above).
+    monkeypatch.setattr(cli_mod, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
     seen: dict[str, object] = {}
 
     def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
@@ -485,6 +529,163 @@ def test_paper_keyless_healthy_restart_with_live_work_enters_protection_only(
     assert seen["halt_reason"] == "missing-key"
     err = capsys.readouterr().err
     assert "OPENROUTER_API_KEY is not set but this run holds a live position" in err
+    assert "protection-only" in err
+    assert "DIAG[OPENROUTER_API_KEY]" in err
+
+
+def test_paper_provider_import_failure_exits_1_named(tmp_path, capsys, monkeypatch, paper_seams):
+    # _EngineDecisionProvider construction runs _build_engine_config, whose
+    # named RuntimeError must map to the documented exit 1 (see
+    # _build_engine_config for the causes), not the exit-2 last-resort handler.
+    # On a fresh run it fires pre-flight, BEFORE the run row is written — same
+    # ordering rule as the key check — so fixing the cause (e.g. re-saving the
+    # .env as UTF-8) lets the SAME --create succeed instead of bouncing off
+    # "already exists".
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.main import EngineImportError
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    def _boom(*args, **kwargs):
+        raise EngineImportError(
+            "importing tradingagents failed, most likely while its package init "
+            "read a repo .env file"
+        )
+
+    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _boom)
+    path = tmp_path / "new.db"
+    rc = cli_main(_paper_argv(path, run_id="fresh", config=paper_seams, create=True))
+    assert rc == 1
+    assert "error: importing tradingagents failed" in capsys.readouterr().err
+    db = Database(path)
+    assert repo.get_run(db.conn, "fresh") is None  # failed before genesis
+    db.close()
+
+    # The operator fixes the environment and retries the SAME command: the
+    # provider now builds and --create must not hit "already exists".
+    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", lambda *a, **kw: object())
+    seen: dict[str, object] = {}
+
+    def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
+        seen["run_id"] = run_id
+        return 0
+
+    monkeypatch.setattr(cli_mod, "_paper_loop", fake_loop)
+    rc = cli_main(_paper_argv(path, run_id="fresh", config=paper_seams, create=True))
+    assert rc == 0
+    assert seen["run_id"] == "fresh"
+    assert "created paper run" in capsys.readouterr().err
+
+
+def test_paper_restart_provider_import_failure_exits_1_named(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    # Restart-lane counterpart of the fresh-run pre-flight above: a healthy
+    # keyed restart builds the provider only after reconciliation settles that
+    # it trades, and an EngineImportError there must still map to the named
+    # exit 1, not the exit-2 last-resort handler. This is the FLAT case —
+    # nothing to protect, so the abort stands; a restart holding live work
+    # degrades to protection-only instead (companion test below).
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.main import EngineImportError
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
+    from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
+
+    path, db = _seed_db(tmp_path)
+    db.close()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        reconcile_mod,
+        "reconcile_on_restart",
+        lambda db_, *, run_id, now, funding_source: RestartReconciliation(
+            canceled_plan_ids=(),
+            canceled_order_ids=(),
+            funding_posted=0,
+            funding_still_pending=0,
+            forced_immediate_cycle=False,
+            replay_error=None,
+            replay_status="ok",
+        ),
+    )
+
+    def _boom(*args, **kwargs):
+        raise EngineImportError(
+            "importing tradingagents failed, most likely while its package init "
+            "read a repo .env file"
+        )
+
+    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _boom)
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    assert "error: importing tradingagents failed" in capsys.readouterr().err
+
+
+def test_paper_restart_import_failure_with_live_work_enters_protection_only(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    """Corrupt-.env twin of the keyless protection-only fork: a healthy keyed
+    restart over live work whose provider build raises EngineImportError must
+    degrade to protection-only instead of exiting — the fault is as
+    operator-fixable as a missing key, and under supervised restart (RUNBOOK
+    §3) exit 1 would loop forever with the position unwatched. Flat, the named
+    exit 1 stands (companion test above). Same construction contract as the
+    other halted forks: no scheduler, and the loop messaging carries the
+    import-error reason."""
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.main import EngineImportError
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
+    from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
+
+    path = tmp_path / "cli.db"
+    db = Database(path)
+    accounting.initialize_run(
+        db,
+        run_id="r",
+        mode="paper",
+        initial_balance_usdc=D(1000),
+        schema_version=1,
+        initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
+    )
+    db.close()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        reconcile_mod,
+        "reconcile_on_restart",
+        lambda db_, *, run_id, now, funding_source: RestartReconciliation(
+            canceled_plan_ids=(),
+            canceled_order_ids=(),
+            funding_posted=0,
+            funding_still_pending=0,
+            forced_immediate_cycle=False,
+            replay_error=None,
+            replay_status="ok",
+        ),
+    )
+
+    def _boom(*args, **kwargs):
+        raise EngineImportError(
+            "importing tradingagents failed, most likely while its package init "
+            "read a repo .env file"
+        )
+
+    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _boom)
+    seen: dict[str, object] = {}
+
+    def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
+        seen["scheduler"] = scheduler
+        seen["engine_active"] = engine.has_active_work()
+        seen["trading_halted"] = kwargs["trading_halted"]
+        seen["halt_reason"] = kwargs["halt_reason"]
+        return 0
+
+    monkeypatch.setattr(cli_mod, "_paper_loop", fake_loop)
+    assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 0
+    assert seen["scheduler"] is None
+    assert seen["engine_active"] is True  # the seeded live position
+    assert seen["trading_halted"] is True
+    assert seen["halt_reason"] == "import-error"
+    err = capsys.readouterr().err
+    assert "importing tradingagents failed" in err  # the fixable cause is shown
     assert "protection-only" in err
 
 
@@ -783,6 +984,19 @@ def test_unknown_bare_word_is_an_error_not_legacy_usage(capsys):
     err = capsys.readouterr().err
     assert "unknown subcommand 'expot'" in err
     assert "paper" in err and "export" in err and "validate" in err
+
+
+def test_cli_main_loads_dotenv_on_every_invocation(monkeypatch):
+    # The subcommand entry loads .env as its first act — before dispatch and
+    # before anything reads os.environ — so a key kept only in the repo-root
+    # .env satisfies the paper startup checks (main.py's legacy path has the
+    # companion ordering test in test_main.py).
+    import contrib.hyperliquid_perp.cli as cli_mod
+
+    calls = []
+    monkeypatch.setattr(cli_mod, "load_dotenv_files", lambda: calls.append(True))
+    assert cli_main(["expot"]) == 1  # even a subcommand typo went through the load
+    assert calls == [True]
 
 
 def test_empty_and_flag_style_argv_delegate_to_legacy(monkeypatch):
@@ -1167,6 +1381,51 @@ def test_paper_loop_missing_key_settle_exit_names_the_key(tmp_path, monkeypatch,
     err = capsys.readouterr().err
     assert "OPENROUTER_API_KEY" in err
     assert "books never re-verified" not in err
+    db.close()
+
+
+def test_paper_loop_import_error_settle_exit_names_the_cause(tmp_path, monkeypatch, capsys):
+    # Third settle-exit wording: an import-error halt has healthy books, so the
+    # exit message must point at the environment fix — not at investigating a
+    # store that verified fine, and not at the API key.
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.paper.clock import ManualClock
+
+    path, db = _seed_db(tmp_path)
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
+    monkeypatch.setattr(cli_mod, "_post_cycle_export", lambda db_, run_id, export_dir: True)
+    monkeypatch.setattr(
+        cli_mod.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
+    )
+
+    class _Engine:
+        def __init__(self):
+            self.work = True
+
+        def has_active_work(self):
+            return self.work
+
+        def tick(self):
+            self.work = False
+
+    rc = cli_mod._paper_loop(
+        db,
+        "r",
+        _Engine(),
+        None,
+        ManualClock(_T0),
+        30,
+        tmp_path / "exports",
+        funding_source=None,
+        trading_halted=True,
+        halt_reason="import-error",
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "failed to import" in err
+    assert "books never re-verified" not in err
+    assert "OPENROUTER_API_KEY" not in err
     db.close()
 
 

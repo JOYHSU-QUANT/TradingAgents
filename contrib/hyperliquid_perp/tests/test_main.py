@@ -431,7 +431,8 @@ def test_run_engine_reports_engine_import_failure_as_named_error(monkeypatch, ca
 
     def _boom(config):
         raise main_mod.EngineImportError(
-            "importing tradingagents failed while its package init read a repo .env file"
+            "importing tradingagents failed, most likely while its package init "
+            "read a repo .env file"
         )
 
     monkeypatch.setattr(main_mod, "_build_engine_config", _boom)

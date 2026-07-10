@@ -20,8 +20,8 @@ the legacy CLI takes no positionals, so it can only be a subcommand typo.
 Exit codes: ``0`` success (for ``validate``: Phase-3 ready), ``1`` named
 operator/config/environment errors — including a protection-only ``paper`` run
 that self-terminates after its position closes (final export written; the
-books never re-verified or the API key was never supplied — stderr says
-which), ``2`` unexpected error, ``4``
+books never re-verified, the API key was never supplied, or the engine
+failed to import — stderr says which), ``2`` unexpected error, ``4``
 (``validate`` only) the run is internally consistent but has not accumulated
 the 30-cycle gate yet ("keep running cycles"), ``5`` (``validate`` only) the
 run has integrity failures — orphans, snapshot or replay mismatches, or a

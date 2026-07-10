@@ -196,7 +196,9 @@ funding 改由 loop 每小時自行重試（healthy 模式在每個 cycle 邊界
 範圍內最完整。前一個 process 若留下 in_progress 的 decision attempt，protection-only
 啟動時會提示一行——該 attempt 刻意不動（只有下一次健康重啟能接續同一個 attempt，
 不燒 retry 預算）。protection-only 下倉位被 SL/TP 了結後，程序會做最後一次 export
-（平倉 fill 進 CSV）並以 exit 1 自動結束——books 從未重新驗證，重啟前先調查 store。protection-only restart 不呼叫 AI，可無 `OPENROUTER_API_KEY` 啟動；
+（平倉 fill 進 CSV）並以 exit 1 自動結束——結束訊息會明講成因：replay 版本表示
+books 從未重新驗證、重啟前先調查 store；缺 key／import 失敗版本只需照訊息修好
+環境即可。protection-only restart 不呼叫 AI，可無 `OPENROUTER_API_KEY` 啟動；
 新 run 在建立 run row 前即檢查 key，也在同一位置預先建構 decision provider——
 引擎 import 失敗（如 corrupt `.env`）同樣擋在 run row 之前，操作者修好環境後
 重跑同一個 `--create` 不會撞上 already-exists。健康（replay OK）的 resume 若缺 key：持倉
@@ -310,7 +312,7 @@ python -m ruff check contrib/hyperliquid_perp/
 
 | 症狀 | 解法 |
 |---|---|
-| `ModuleNotFoundError: langchain`（或類似） | 核心依賴沒裝 → `pip install -r requirements.txt`。 |
+| `… is not importable (No module named 'langchain')`（或類似；CLI 會把 `ModuleNotFoundError` 包進這則具名 exit-1 訊息） | 核心依賴沒裝 → `pip install -r requirements.txt`。 |
 | `OPENROUTER_API_KEY is not set …` | 完整一輪需要 key；`export` 它，或改用 `--context-only`。 |
 | `--context-only` 不印倉位行／完整輪報 `no usable account equity`（exit 1） | `wallet_address` 還是 `0xYOUR...` 佔位符；填一個真實的唯讀地址。 |
 | `config not found …` | 把 `hyperliquid.example.yaml` 複製成 `hyperliquid.local.yaml`。 |

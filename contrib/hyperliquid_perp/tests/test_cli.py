@@ -548,7 +548,8 @@ def test_paper_provider_import_failure_exits_1_named(tmp_path, capsys, monkeypat
 
     def _boom(*args, **kwargs):
         raise EngineImportError(
-            "importing tradingagents failed while its package init read a repo .env file"
+            "importing tradingagents failed, most likely while its package init "
+            "read a repo .env file"
         )
 
     monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _boom)
@@ -609,7 +610,8 @@ def test_paper_restart_provider_import_failure_exits_1_named(
 
     def _boom(*args, **kwargs):
         raise EngineImportError(
-            "importing tradingagents failed while its package init read a repo .env file"
+            "importing tradingagents failed, most likely while its package init "
+            "read a repo .env file"
         )
 
     monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _boom)

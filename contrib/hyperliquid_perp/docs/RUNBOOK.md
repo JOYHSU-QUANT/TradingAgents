@@ -46,7 +46,10 @@ cp contrib/hyperliquid_perp/configs/hyperliquid.example.yaml \
 | Windows 使用者層級環境變數 | `[Environment]::SetEnvironmentVariable("OPENROUTER_API_KEY", "sk-or-...", "User")` | 同樣持久；之後開的新終端機才看得到。 |
 | 當前終端機 session | PowerShell：`$env:OPENROUTER_API_KEY = "sk-or-..."`；bash：`export OPENROUTER_API_KEY=sk-or-...` | 快速試跑；關窗即失效。 |
 
-已 export 的環境變數永遠優先於 `.env` 檔的值。
+已 export 的環境變數永遠優先於 `.env` 檔的值。repo 根目錄的 `.env.enterprise`
+也會一併載入（上游引擎對等行為；優先序 exported env > `.env` > `.env.enterprise`）
+——一般設定用不到，但失敗診斷訊息可能提到它。兩個檔都只在程序**啟動時讀一次**：
+run 跑到一半編輯（補 key、換 key）對運行中的程序無效，重啟後才會讀到新值。
 
 ## 2. 免費 smoke test（不花 LLM 成本）
 
@@ -76,11 +79,17 @@ python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db --crea
 
 單實例鎖：同一個 run 同時只允許一個 process，重複啟動會具名報錯。
 
-> **長駐建議**：這是前景程序，掛幾天請放在不會被關掉的終端機
-> （tmux／screen／`Start-Process`／systemd 都可以），且 launcher 的 working
-> directory 必須是 repo 根目錄——`.env` 的搜尋從 CWD 往上走（systemd 設
-> `WorkingDirectory=`、`Start-Process` 設 `-WorkingDirectory`）。Ctrl-C 與
-> SIGTERM 都是安全停止，會先做最後一次 export 再退出。
+> **長駐建議**：這是前景程序。多日驗收 run 建議掛在**會自動重啟的監管**下
+> （systemd `Restart=on-failure` + `RestartSec=60` + `StartLimitBurst`；Windows
+> 用 Task Scheduler「工作失敗時重新啟動」或 NSSM）——重啟 reconciliation 本來
+> 就設計成安全冪等，而無監管時半夜 crash 到被發現之間，持倉完全沒有 SL/TP 看管。
+> 注意：protection-only 自我了結與 keyless 停止走的也是 exit 1，監管會把它拉
+> 回來、再進 protection-only——反覆重啟不是修復，看到這個模式仍要照 §5 人工
+> 調查。手動掛 tmux／screen 也可以，但要接受上述無人看管的空窗。無論哪種方式，
+> launcher 的 working directory 必須是 repo 根目錄——`.env` 的搜尋從 CWD 往上走
+> （systemd 設 `WorkingDirectory=`、Task Scheduler 設「開始位置」、`Start-Process`
+> 設 `-WorkingDirectory`）。Ctrl-C 與 SIGTERM 都是安全停止，會先做最後一次
+> export 再退出。
 
 ## 4. 停止與重啟
 

@@ -356,6 +356,9 @@ def test_paper_key_check_satisfied_by_dotenv(tmp_path, monkeypatch, paper_seams)
 
     # cli lazy-imports `from .paper import accounting`; patch the module itself.
     monkeypatch.setattr(accounting, "initialize_run", _stop)
+    # The provider pre-flight sits between the key check and initialize_run;
+    # stub it so this test stays off the real tradingagents import.
+    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", lambda *a, **kw: object())
     rc = cli_main(_paper_argv(tmp_path / "new.db", run_id="fresh", config=paper_seams, create=True))
 
     # Reaching initialize_run proves the key check passed on the .env value;
@@ -534,6 +537,10 @@ def test_paper_provider_import_failure_exits_1_named(tmp_path, capsys, monkeypat
     # _EngineDecisionProvider construction runs _build_engine_config, whose
     # named RuntimeError must map to the documented exit 1 (see
     # _build_engine_config for the causes), not the exit-2 last-resort handler.
+    # On a fresh run it fires pre-flight, BEFORE the run row is written — same
+    # ordering rule as the key check — so fixing the cause (e.g. re-saving the
+    # .env as UTF-8) lets the SAME --create succeed instead of bouncing off
+    # "already exists".
     import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.main import EngineImportError
 
@@ -545,7 +552,66 @@ def test_paper_provider_import_failure_exits_1_named(tmp_path, capsys, monkeypat
         )
 
     monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _boom)
-    rc = cli_main(_paper_argv(tmp_path / "new.db", run_id="fresh", config=paper_seams, create=True))
+    path = tmp_path / "new.db"
+    rc = cli_main(_paper_argv(path, run_id="fresh", config=paper_seams, create=True))
+    assert rc == 1
+    assert "error: importing tradingagents failed" in capsys.readouterr().err
+    db = Database(path)
+    assert repo.get_run(db.conn, "fresh") is None  # failed before genesis
+    db.close()
+
+    # The operator fixes the environment and retries the SAME command: the
+    # provider now builds and --create must not hit "already exists".
+    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", lambda *a, **kw: object())
+    seen: dict[str, object] = {}
+
+    def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
+        seen["run_id"] = run_id
+        return 0
+
+    monkeypatch.setattr(cli_mod, "_paper_loop", fake_loop)
+    rc = cli_main(_paper_argv(path, run_id="fresh", config=paper_seams, create=True))
+    assert rc == 0
+    assert seen["run_id"] == "fresh"
+    assert "created paper run" in capsys.readouterr().err
+
+
+def test_paper_restart_provider_import_failure_exits_1_named(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    # Restart-lane counterpart of the fresh-run pre-flight above: a healthy
+    # keyed restart builds the provider only after reconciliation settles that
+    # it trades, and an EngineImportError there must still map to the named
+    # exit 1, not the exit-2 last-resort handler.
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.main import EngineImportError
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
+    from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
+
+    path, db = _seed_db(tmp_path)
+    db.close()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        reconcile_mod,
+        "reconcile_on_restart",
+        lambda db_, *, run_id, now, funding_source: RestartReconciliation(
+            canceled_plan_ids=(),
+            canceled_order_ids=(),
+            funding_posted=0,
+            funding_still_pending=0,
+            forced_immediate_cycle=False,
+            replay_error=None,
+            replay_status="ok",
+        ),
+    )
+
+    def _boom(*args, **kwargs):
+        raise EngineImportError(
+            "importing tradingagents failed while its package init read a repo .env file"
+        )
+
+    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _boom)
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
     assert rc == 1
     assert "error: importing tradingagents failed" in capsys.readouterr().err
 

@@ -438,6 +438,7 @@ def _cmd_paper(argv: list[str]) -> int:
 
         def _run_locked() -> int:
             """The lease-holding tail of ``paper``: create/reconcile, then the loop."""
+            from .main import EngineImportError
             from .paper import accounting
             from .paper.engine import PaperExecutionEngine
             from .paper.market_feed import PortSnapshotProvider
@@ -448,6 +449,18 @@ def _cmd_paper(argv: list[str]) -> int:
             from .persistence.schema import SCHEMA_VERSION
 
             trading_halted = False
+            # Built pre-flight on a fresh run (before the run row exists);
+            # a restart builds it after reconciliation settles that it trades.
+            provider = None
+
+            def _build_provider():
+                return _EngineDecisionProvider(
+                    config,
+                    risk_cfg=risk_cfg,
+                    decision_cfg=decision_cfg,
+                    payload_dir=db_path.resolve().parent / "payloads" / run_id,
+                )
+
             if not is_restart:
                 # Seeds are genesis-only and the engine manages exactly the
                 # run coin: an off-coin seed would sit in the store all run —
@@ -470,6 +483,17 @@ def _cmd_paper(argv: list[str]) -> int:
                 # instead of leaving a half-created run that the next attempt
                 # then rejects as "already exists".
                 if not _require_api_key():
+                    return 1
+                # The decision provider is the other operator-fixable
+                # pre-flight: its construction triggers the process's first
+                # tradingagents import, which detonates on a corrupt repo
+                # .env (see _build_engine_config). Same ordering rule as the
+                # key check — fail before the run row exists, or the retry
+                # after fixing the file is rejected as "already exists".
+                try:
+                    provider = _build_provider()
+                except EngineImportError as exc:
+                    print(f"error: {exc}", file=sys.stderr)
                     return 1
                 seeds = [
                     PositionState(coin=p.coin, size=p.size, entry_price=p.entry_price)
@@ -640,21 +664,15 @@ def _cmd_paper(argv: list[str]) -> int:
                         file=sys.stderr,
                     )
             else:
-                from .main import EngineImportError
-
-                try:
-                    provider = _EngineDecisionProvider(
-                        config,
-                        risk_cfg=risk_cfg,
-                        decision_cfg=decision_cfg,
-                        payload_dir=db_path.resolve().parent / "payloads" / run_id,
-                    )
-                except EngineImportError as exc:
-                    # Operator-fixable environment error — named exit 1, not
-                    # the exit-2 "unexpected error" bucket; see
-                    # _build_engine_config for the causes.
-                    print(f"error: {exc}", file=sys.stderr)
-                    return 1
+                if provider is None:
+                    try:
+                        provider = _build_provider()
+                    except EngineImportError as exc:
+                        # Operator-fixable environment error — named exit 1,
+                        # not the exit-2 "unexpected error" bucket; see
+                        # _build_engine_config for the causes.
+                        print(f"error: {exc}", file=sys.stderr)
+                        return 1
                 scheduler = PaperScheduler(
                     db=db,
                     run_id=run_id,

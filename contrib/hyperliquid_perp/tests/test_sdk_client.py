@@ -118,6 +118,19 @@ def test_info_typeerror_is_translated_to_exchange_error(monkeypatch):
         HyperliquidClient("mainnet")
 
 
+def test_construction_network_failure_is_wrapped_as_request_error(monkeypatch):
+    # Info() auto-fetches perp meta at construction — a network failure there
+    # must reach callers as ExchangeRequestError (their named exit-1 lane), not
+    # as a raw requests exception that lands in the generic exit-2 bucket.
+    class _NetBoom:
+        def __init__(self, *, base_url, skip_ws, spot_meta, timeout):
+            raise ConnectionError("dns down")
+
+    monkeypatch.setattr("contrib.hyperliquid_perp.exchanges.hyperliquid.sdk_client.Info", _NetBoom)
+    with pytest.raises(ExchangeRequestError, match="dns down"):
+        HyperliquidClient("mainnet")
+
+
 def test_info_internal_typeerror_is_not_mislabeled_as_version_mismatch(monkeypatch):
     # A TypeError raised *inside* a compatible Info.__init__ (a data fault, not a
     # signature rejection) must surface unchanged — relabeling it "incompatible SDK

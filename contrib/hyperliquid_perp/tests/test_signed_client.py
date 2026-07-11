@@ -128,6 +128,21 @@ def test_old_sdk_signature_is_translated_to_exchange_error(monkeypatch):
         HyperliquidSignedClient("testnet", _KEY, wallet_address=_WALLET)
 
 
+def test_construction_network_failure_is_wrapped_as_request_error(monkeypatch):
+    # Exchange() builds its own Info (perp-meta auto-fetch) — a network failure
+    # at construction must reach callers as ExchangeRequestError, same rule as
+    # the read-only client.
+    class _NetBoom:
+        def __init__(
+            self, wallet, base_url=None, account_address=None, spot_meta=None, timeout=None
+        ):
+            raise ConnectionError("dns down")
+
+    monkeypatch.setattr(_SEAM, _NetBoom)
+    with pytest.raises(ExchangeRequestError, match="dns down"):
+        HyperliquidSignedClient("testnet", _KEY, wallet_address=_WALLET)
+
+
 def test_internal_typeerror_is_not_mislabeled_as_version_mismatch(monkeypatch):
     # A TypeError raised *inside* a compatible __init__ is a data fault and
     # must surface unchanged (same triage rule as sdk_client's Info guard).

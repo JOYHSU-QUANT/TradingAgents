@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from hyperliquid.exchange import Exchange
 
-from .errors import ExchangeError
+from .errors import ExchangeError, ExchangeRequestError
 from .sdk_client import _BASE_URLS, _init_rejects_kwargs, account_from_agent_key, call_sdk
 
 # The keyword arguments we pass to ``Exchange(...)`` in __init__, for the same
@@ -66,6 +66,13 @@ class HyperliquidSignedClient:
             raise ExchangeError(
                 f"Hyperliquid SDK Exchange() rejected its arguments — incompatible "
                 f"hyperliquid-python-sdk version? ({type(exc).__name__}: {exc})"
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 — construction meta-fetch is network I/O
+            # Exchange() builds its own Info, whose construction auto-fetches
+            # perp meta — same translation rule as sdk_client's Info guard so a
+            # network failure stays in callers' named ExchangeError lanes.
+            raise ExchangeRequestError(
+                f"Hyperliquid request failed: {type(exc).__name__}: {exc}"
             ) from exc
 
     @property

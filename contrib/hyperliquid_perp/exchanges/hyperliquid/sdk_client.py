@@ -134,6 +134,15 @@ class HyperliquidClient:
                 f"Hyperliquid SDK Info() rejected its arguments — incompatible "
                 f"hyperliquid-python-sdk version? ({type(exc).__name__}: {exc})"
             ) from exc
+        except Exception as exc:  # noqa: BLE001 — construction meta-fetch is network I/O
+            # Info() auto-fetches perp meta over the network at construction, so
+            # a connection/HTTP failure surfaces HERE, not in any call_sdk-wrapped
+            # call — translate it like call_sdk would, or callers' named
+            # `except ExchangeError` lanes (exit 1) miss it and it lands in the
+            # generic exit-2 "unexpected error" bucket.
+            raise ExchangeRequestError(
+                f"Hyperliquid request failed: {type(exc).__name__}: {exc}"
+            ) from exc
 
     @classmethod
     def from_config(

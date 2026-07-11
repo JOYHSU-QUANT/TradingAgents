@@ -125,6 +125,7 @@ TradingAgents/
         │   └── trading_graph.py         #   HyperliquidTradingGraph subclass
         ├── persistence/                 # Phase 2 SQLite source of truth
         ├── paper/                       # Phase 2 paper accounting + execution engine
+        ├── live/                        # Phase 3 live execution（平行於 paper/，PR 1 起）
         ├── risk/
         ├── execution/
         ├── audit/
@@ -194,9 +195,9 @@ Phase 3 的 agent-wallet private key）一律放環境變數，絕不放進任�
 規格：[phase3-spec](./phase3-spec.md)（v3）。架構原則：live 引擎為平行 `live/` 套件、
 paper engine 零改動，共用 scheduler／RiskGate／persistence／純函式（phase3-spec §2.1）。
 
-| 模組（規劃） | PR | 說明 |
+| 模組 | PR | 說明 |
 |---|---|---|
-| live config gates ＋ agent key 驗證 ＋ signed client wrapper（`exchanges/hyperliquid/`） | PR 1 | mode／`allow_real_orders` 閘門、分網路 agent key 與啟動授權驗證（phase3-spec §3–§6）。 |
+| `live/config.py`＋`live/secrets.py`＋`live/authorization.py`＋`exchanges/hyperliquid/signed_client.py`＋CLI `live` 子命令 skeleton ✅ | PR 1 | typed `live:` 區塊（mode 必填、mainnet_live 拒絕、§5 ceiling 檢查、risk↔live 一致性）、分網路 agent key（缺 key＋`allow_real_orders: true` 拒絕啟動）、§6.1 啟動授權驗證、signed `Exchange` wrapper（僅初始化＋健康檢查，無下單方法）（phase3-spec §3–§6）。 |
 | schema v6 ＋ cloid ＋ 下單／取消／orderStatus ＋ kill switch | PR 2 | cloid_registry、live order persistence、scheduleCancel（§7–§8、§16、§18）。 |
 | WS／REST fill ingestion ＋ 去重 ＋ 帳務 | PR 3 | queue＋tick 消化、exchange fee／funding 單一基準（§11、§14–§15）。 |
 | reconciliation ＋ safe mode | PR 4 | startup／heartbeat 對帳、safe mode 狀態機與 CLI 解除（§12–§13、§19）。 |

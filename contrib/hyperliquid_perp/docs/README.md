@@ -27,6 +27,7 @@ TradingAgents 原樣運行並輸出決策（Phase 1 為 5-tier rating + thesis�
 |---|---|
 | [phase1-spec](./phase1-spec.md) | Phase 1 決策記錄、config schema、secrets、setup & run、build order。 |
 | [phase2-spec](./phase2-spec.md) | Phase 2 目標、風控參數、cycle 排程、第一版取捨、驗收標準、建置順序。 |
+| [phase3-spec](./phase3-spec.md) | Phase 3 live execution（v3）：config gates、agent key、自管切片 TWAP、reconciliation、safe mode、kill switch、驗收標準、6-PR 建置順序。 |
 
 **操作**（照做的步驟）：
 
@@ -190,10 +191,14 @@ Phase 3 的 agent-wallet private key）一律放環境變數，絕不放進任�
 
 ### Phase 3 — live execution
 
-| 檔案 | 狀態 | 說明 |
+規格：[phase3-spec](./phase3-spec.md)（v3）。架構原則：live 引擎為平行 `live/` 套件、
+paper engine 零改動，共用 scheduler／RiskGate／persistence／純函式（phase3-spec §2.1）。
+
+| 模組（規劃） | PR | 說明 |
 |---|---|---|
-| `exchanges/hyperliquid/execution.py` | ✅ | SDK Exchange → submit / cancel。 |
-| `exchanges/hyperliquid/websocket.py` | ✅ | SDK WebSocket wrapper / callbacks。 |
-| `execution/live_executor.py` | ✅ | 包裝 `HyperliquidExecution`。 |
-| `execution/reconciliation.py` | ✅ | HL 實際狀態 vs 本地 `PerpState` 對帳。 |
-| `notifications/telegram.py` | ✅ | 成交、清算警報、每日 PnL 通知。 |
+| live config gates ＋ agent key 驗證 ＋ signed client wrapper（`exchanges/hyperliquid/`） | PR 1 | mode／`allow_real_orders` 閘門、分網路 agent key 與啟動授權驗證（phase3-spec §3–§6）。 |
+| schema v6 ＋ cloid ＋ 下單／取消／orderStatus ＋ kill switch | PR 2 | cloid_registry、live order persistence、scheduleCancel（§7–§8、§16、§18）。 |
+| WS／REST fill ingestion ＋ 去重 ＋ 帳務 | PR 3 | queue＋tick 消化、exchange fee／funding 單一基準（§11、§14–§15）。 |
+| reconciliation ＋ safe mode | PR 4 | startup／heartbeat 對帳、safe mode 狀態機與 CLI 解除（§12–§13、§19）。 |
+| `live/` 切片執行引擎 ＋ SL／TP protection | PR 5 | 自管切片 TWAP、reduce-only trigger orders、loss guards（§9–§10、§17）。 |
+| smoke tests ＋ 驗收 | PR 6 | testnet smoke tests、live 驗收指標、live RUNBOOK（§20–§21）。 |

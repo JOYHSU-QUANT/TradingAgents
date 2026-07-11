@@ -28,9 +28,10 @@
 - [phase2-spec](./docs/phase2-spec.md) — Phase 2 目標、風控參數、排程、驗收標準與建置順序。
 - [phase2-execution](./docs/phase2-execution.md) — Phase 2 執行與模擬設計（TWAP / flip、SL/TP、paper 成交模型、公式）。
 - [phase2-data](./docs/phase2-data.md) — Phase 2 SQLite / CSV 資料 schema。
+- [phase3-spec](./docs/phase3-spec.md) — Phase 3 live execution 規格（v3）：自管切片 TWAP、reconciliation、safe mode、kill switch、驗收標準。
 
 ## 安全
 
 `configs/*.local.yaml` 只保存公開 wallet address 與 network，且已被 gitignore——
-永遠不要 commit 它。**Secrets（API keys、Phase 3 的 agent-wallet private key）
-一律放環境變數，絕不放進任何 yaml。**
+永遠不要 commit 它。**Secrets（API keys、Phase 3 的 agent-wallet private keys
+`HYPERLIQUID_AGENT_KEY_TESTNET` / `_MAINNET`）一律放環境變數，絕不放進任何 yaml。**

@@ -32,7 +32,7 @@ extension points 負責把 perp 資料送*進去*、把引擎的決策讀*出來
 |---|---|---|
 | `TradingAgentsGraph(selected_analysts, config, …)` | 建構子 | 子類別化。 |
 | `.resolve_instrument_context(ticker, asset_type) -> str` | 建立注入每個 agent 的 per-instrument context 字串。 | **Override 點**——附加 perp snapshot。 |
-| `._create_tool_nodes() -> dict[str, ToolNode]` | 註冊每個 analyst 可呼叫的 tools。 | **可選 override**——Phase 3 加即時 HL tool。 |
+| `._create_tool_nodes() -> dict[str, ToolNode]` | 註冊每個 analyst 可呼叫的 tools。 | **可選 override**——加即時 HL tool（不在 Phase 3 第一版範圍，見 phase3-spec §25）。 |
 | `.propagate(company_name, trade_date, asset_type) -> (final_state, signal)` | 跑整個 graph。 | 以 `asset_type="crypto"` 呼叫。 |
 | `final_state["final_trade_decision"]` | 渲染後的 `PortfolioDecision` markdown（`**Rating**: …`）；注入 output-format 契約後結尾帶 structured target JSON。 | `parse_target_decision` 的輸入。 |
 | `final_state["trader_investment_plan"]` | 渲染後的 `TraderProposal`（`action`、`entry_price`、`stop_loss`、`position_sizing`）。 | Phase 2 不再讀取（Phase 1 adapter 的價格水位輸入，已退役）。 |
@@ -182,7 +182,7 @@ result = risk_gate.evaluate(
 > `decision_adapter.py` 已隨 Phase 2 契約遷移退役）。`tradingagents/` 之下
 > 沒有任何檔案被動到，模組因此能持續跟上 upstream。
 
-## 之後原生使用 funding（Phase 3）
+## 之後原生使用 funding（future work——不在 Phase 3 第一版範圍，見 phase3-spec §25）
 
 在同一個子類別 override `_create_tool_nodes()`，把即時 Hyperliquid tool 加進
 相關 analyst 的 tool node——仍然是純附加、零核心修改。在那之前，注入的 context

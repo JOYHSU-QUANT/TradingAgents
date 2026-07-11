@@ -66,11 +66,11 @@ cp contrib/hyperliquid_perp/configs/hyperliquid.example.yaml \
 | 變數 | 何時需要 |
 |---|---|
 | `OPENROUTER_API_KEY` | 跑完整引擎時。一把 key 涵蓋所有 OpenRouter 模型。 |
-| `HYPERLIQUID_AGENT_KEY` | **只有 Phase 3**——Phase 1 不需要。 |
+| `HYPERLIQUID_AGENT_KEY_TESTNET` / `HYPERLIQUID_AGENT_KEY_MAINNET` | **只有 Phase 3**——Phase 1/2 不需要。分網路兩把 agent key，程式依 `network` 自動選用（[phase3-spec §6](./phase3-spec.md)）。 |
 
-> `HYPERLIQUID_AGENT_KEY` 是 trade-capable private key，儲存方式（是否允許
-> 明文 `.env`）Phase 3 屆時另訂；下方的 `.env` 建議目前僅針對
-> `OPENROUTER_API_KEY`。
+> Agent key 是 trade-capable private key（只能交易、不能提款），放 gitignored
+> `.env`；啟動時會驗證它已被 `wallet_address` 授權且未過期，失敗拒絕啟動
+> （phase3-spec §6.1）。
 
 設定方式擇一（詳見 [RUNBOOK §1.3](./RUNBOOK.md)）：
 

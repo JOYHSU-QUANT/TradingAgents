@@ -27,7 +27,7 @@ structured target 與 Phase 1 legacy `PerpTradeDecision`）。決策如何從引
 | `clearinghouseState` | 帳戶狀態：margin、倉位、掛單。Body：`user`——**必須是 wallet address，不是 agent address**。 | `marginSummary`, `accountValue`, `withdrawable`, `assetPositions[].szi`, `entryPx`, `leverage`, `unrealizedPnl`, `liquidationPx`, `openOrders[]` | Wallet address |
 | `userFillsByTime` | 今日成交，用來計算 realized PnL。Body：`user`、`startTime=今日 00:00 UTC`。 | `closedPnl`, `fee`, `side`, `sz`, `px`, `time` | Wallet address |
 | `userFunding` | 今日 funding 收付。Body：`user`、`startTime=今日 00:00 UTC`；`delta` 要自己加總。 | `delta`, `time` | Wallet address |
-| `orderStatus` | 查詢單一 order 的目前狀態（例如 limit 是否成交）。Body：`user`、`oid`。由 `execution.py` 用來輪詢 order 狀態。 | `status: open / filled / canceled / rejected` | Wallet address |
+| `orderStatus` | 查詢單一 order 的目前狀態（例如 limit 是否成交）。Body：`user`、`oid`。由 Phase 3 live 層用來輪詢 order 狀態（見 phase3-spec §7）。 | `status: open / filled / canceled / rejected` | Wallet address |
 
 ## Exchange endpoint
 
@@ -191,6 +191,10 @@ structured target 與 Phase 1 legacy `PerpTradeDecision`）。決策如何從引
 | **reduceOnly** | 可以 | 是否只減倉 |
 | **randomize** | 通常可以 | 是否隨機化執行節奏/大小，避免太機械 |
 | **送單頻率** | 原生 TWAP 不可直接調 | 固定約每 30 秒一筆 |
+
+> **Phase 3 註記**：live 執行採**自管切片 TWAP**（自送 IOC 限價切片單，帶 0.5%
+> 價格保護與 cloid），不用原生 twapOrder——SDK 未支援、API 無價格保護參數
+> （子單滑價固定 3%）且無 cloid。詳見 [phase3-spec §9.5](./phase3-spec.md)。
 
 ---
 

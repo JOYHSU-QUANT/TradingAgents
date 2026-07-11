@@ -14,6 +14,8 @@ import pytest
 
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeRequestError
 from contrib.hyperliquid_perp.live.authorization import (
+    EXPIRY_WARNING_HORIZON,
+    AgentAuthorization,
     AgentAuthorizationError,
     derive_agent_address,
     verify_agent_authorization,
@@ -63,6 +65,31 @@ def test_address_match_is_case_insensitive():
     info = _FakeInfo([_entry(agent.lower())])
     auth = verify_agent_authorization(info, wallet_address=_WALLET, agent_key=_KEY, now=_NOW)
     assert auth.agent_address == agent
+
+
+def test_duplicate_agent_entries_are_rejected():
+    # Two entries for the same address (e.g. a re-approval leaving a stale
+    # one) make the verdict ambiguous — reject rather than guess which
+    # validUntil is live (the AccountSnapshot duplicate-coin precedent).
+    agent = derive_agent_address(_KEY)
+    info = _FakeInfo(
+        [
+            _entry(agent.lower(), valid_until=_NOW - timedelta(days=1)),
+            _entry(agent, valid_until=_NOW + timedelta(days=90)),
+        ]
+    )
+    with pytest.raises(AgentAuthorizationError, match="ambiguous"):
+        verify_agent_authorization(info, wallet_address=_WALLET, agent_key=_KEY, now=_NOW)
+
+
+def test_expires_within_boundaries():
+    auth = AgentAuthorization(
+        agent_address="0x" + "cc" * 20, valid_until=_NOW + EXPIRY_WARNING_HORIZON
+    )
+    # Exactly the horizon away is NOT "within" (strict <)…
+    assert not auth.expires_within(EXPIRY_WARNING_HORIZON, now=_NOW)
+    # …one second inside it is.
+    assert auth.expires_within(EXPIRY_WARNING_HORIZON, now=_NOW + timedelta(seconds=1))
 
 
 def test_agent_not_in_list_is_named_failure():

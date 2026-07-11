@@ -95,6 +95,28 @@ def test_from_config_explicit_timeout_overrides_config(monkeypatch):
     assert captured["timeout"] == 12.0
 
 
+def test_from_config_network_override_wins_over_config(monkeypatch):
+    # _cmd_live pins the client to live.network via the explicit kwarg; a stale
+    # top-level `network: mainnet` in the same YAML must NOT win for a
+    # testnet_live run — the exact §3.1 "wrong network by accident" class.
+    _capture_info_kwargs(monkeypatch)
+    client = HyperliquidClient.from_config({"network": "mainnet"}, network="testnet")
+    assert client.network == "testnet"
+
+
+def test_from_config_without_override_reads_config_network(monkeypatch):
+    _capture_info_kwargs(monkeypatch)
+    client = HyperliquidClient.from_config({"network": "testnet"})
+    assert client.network == "testnet"
+
+
+def test_from_config_defaults_to_mainnet(monkeypatch):
+    # No override, no config key: the Phase 1/2 default stands.
+    _capture_info_kwargs(monkeypatch)
+    client = HyperliquidClient.from_config({})
+    assert client.network == "mainnet"
+
+
 def test_from_config_null_network_timeout_falls_back_to_default(monkeypatch):
     # A present-but-null value (YAML `network_timeout_s:` left blank) must fall back
     # to the default, not crash on float(None).

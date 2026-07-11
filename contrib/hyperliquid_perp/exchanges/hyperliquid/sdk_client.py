@@ -1,20 +1,25 @@
 """Thin wrapper around the official Hyperliquid SDK ``Info`` client.
 
 Centralises mainnet/testnet selection so nothing else constructs ``Info``
-directly. Phase 1 only ever reads public/info endpoints (``skip_ws=True``); the
-signed ``Exchange`` client and WebSockets arrive in Phase 3.
+directly, and is the one home for leak-safe agent-key handling
+(:func:`account_from_agent_key`). This client reads public/info endpoints only
+(``skip_ws=True``); its signed counterpart is :mod:`.signed_client`, and
+WebSockets arrive in a later Phase 3 PR.
 """
 
 from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
 from .errors import ExchangeError, ExchangeRequestError
+
+if TYPE_CHECKING:
+    from eth_account.signers.local import LocalAccount
 
 _BASE_URLS = {
     "mainnet": constants.MAINNET_API_URL,
@@ -51,7 +56,7 @@ def _init_rejects_kwargs(init: Callable[..., Any], kwarg_names: tuple[str, ...])
     return any(name not in accepted for name in kwarg_names)
 
 
-def account_from_agent_key(agent_key: str, *, error_cls: type[Exception]):
+def account_from_agent_key(agent_key: str, *, error_cls: type[Exception]) -> LocalAccount:
     """Build the SDK ``LocalAccount`` from an agent private key, leak-safe.
 
     The single home for the key-handling discipline (§6 rule 2): the raised

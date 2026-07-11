@@ -131,7 +131,7 @@ TradingAgents/
         ├── audit/
         ├── notifications/
         ├── configs/
-        │   ├── hyperliquid.example.yaml   # network/wallet + risk:/decision:/paper_trading: 區塊
+        │   ├── hyperliquid.example.yaml   # network/wallet + risk:/decision:/paper_trading:/live: 區塊
         │   └── hyperliquid.local.yaml     🔒 gitignored
         ├── docs/
         ├── ports.py
@@ -140,9 +140,10 @@ TradingAgents/
         └── README.md
 ```
 
-`🔒 gitignored` 檔案只保存公開 wallet address 與 network。**Secrets（API keys、
-Phase 3 的 agent-wallet private key）一律放環境變數，絕不放進任何 yaml。**
-見 [phase1-spec](./phase1-spec.md#secrets--keys)。
+`🔒 gitignored` 檔案保存公開 wallet address、network，以及 Phase 3 的 `live:`
+gate 區塊（mode / allow_real_orders / safety 等，見 phase3-spec §24）——都是
+非機密設定。**Secrets（API keys、Phase 3 的 agent-wallet private key）一律放
+環境變數，絕不放進任何 yaml。**見 [phase1-spec](./phase1-spec.md#secrets--keys)。
 
 ## 實作 phases
 

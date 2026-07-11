@@ -39,8 +39,9 @@ def load_agent_key(network: str) -> str | None:
 
     A present-but-blank var (``HYPERLIQUID_AGENT_KEY_TESTNET=`` in ``.env``)
     reads as missing, exactly like the OPENROUTER_API_KEY checks treat it —
-    so §6 rule 6 (missing key forces ``allow_real_orders`` to false) fires on
-    the empty-assignment case too instead of passing "" to key derivation.
+    so the §6 rule 6 gate (a missing key with ``allow_real_orders: true`` is a
+    named startup failure) fires on the empty-assignment case too instead of
+    passing "" to key derivation.
     """
     value = os.environ.get(agent_key_env_var(network), "").strip()
     return value or None

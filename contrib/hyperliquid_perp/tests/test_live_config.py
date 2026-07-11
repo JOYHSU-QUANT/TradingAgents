@@ -47,10 +47,10 @@ def _live_block(**overrides) -> dict:
 
 
 def test_defaults_are_the_safest_state():
-    # mode is required; every other default is the safest expressible state.
-    cfg = LiveConfig.from_dict({"mode": "paper"})
+    # mode and network are required; every other default is the safest
+    # expressible state.
+    cfg = LiveConfig.from_dict({"mode": "paper", "network": "testnet"})
     assert cfg.mode is ExecutionMode.PAPER
-    assert cfg.network == "testnet"
     assert cfg.allow_real_orders is False
     assert cfg.allow_manage_external_orders is False
     assert cfg.require_agent_wallet is True
@@ -62,6 +62,14 @@ def test_missing_mode_is_a_named_error(block):
     # A default the live subcommand always rejects would just be a worse error
     # message — an absent (or blank) mode must say "required" instead.
     with pytest.raises(ValueError, match="live.mode is required"):
+        LiveConfig.from_dict(block)
+
+
+@pytest.mark.parametrize("block", [{"mode": "testnet_live"}, {"mode": "paper", "network": None}])
+def test_missing_network_is_a_named_error(block):
+    # A guessed network would blame the operator for a value they never wrote
+    # when it contradicts the mode's §3.1 pin — required, like mode.
+    with pytest.raises(ValueError, match="live.network is required"):
         LiveConfig.from_dict(block)
 
 
@@ -128,10 +136,8 @@ def test_mainnet_tiny_requires_and_accepts_mainnet():
 
 
 def test_symbols_are_uppercased():
-    cfg = LiveConfig.from_dict(
-        _live_block(safety={"single_symbol_only": False, "allowed_symbols": ["btc", "eth"]})
-    )
-    assert cfg.safety.allowed_symbols == ("BTC", "ETH")
+    cfg = LiveConfig.from_dict(_live_block(safety={"allowed_symbols": ["btc"]}))
+    assert cfg.safety.allowed_symbols == ("BTC",)
 
 
 def test_network_is_normalised():
@@ -154,6 +160,55 @@ def test_mainnet_live_is_rejected():
 def test_unknown_mode_is_rejected():
     with pytest.raises(ValueError, match="live.mode must be one of"):
         LiveConfig.from_dict(_live_block(mode="live"))
+
+
+def test_unknown_mode_message_does_not_advertise_mainnet_live():
+    # The typo message must not send the operator to a value the very next
+    # check hard-rejects — mainnet_live appears only with its "not enabled".
+    with pytest.raises(ValueError, match="not enabled") as excinfo:
+        LiveConfig.from_dict(_live_block(mode="testnet"))
+    assert "paper, testnet_live, mainnet_tiny" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("safety", "match"),
+    [
+        ({"max_notional_usdc": 101}, "mainnet_tiny cap"),
+        ({"max_target_margin_pct": 61}, "mainnet_tiny cap"),
+    ],
+)
+def test_mainnet_tiny_looser_than_spec_caps_is_rejected(safety, match):
+    # §21.1/§24.2: the hard config gate — mainnet_tiny with non-tiny caps is a
+    # named startup failure, not an operator promise.
+    with pytest.raises(ValueError, match=match):
+        LiveConfig.from_dict(_live_block(mode="mainnet_tiny", network="mainnet", safety=safety))
+
+
+def test_mainnet_tiny_spec_caps_and_tighter_are_accepted():
+    cfg = LiveConfig.from_dict(
+        _live_block(
+            mode="mainnet_tiny",
+            network="mainnet",
+            safety={"max_notional_usdc": 100, "max_target_margin_pct": 60},
+        )
+    )
+    assert cfg.mode is ExecutionMode.MAINNET_TINY
+    tighter = LiveConfig.from_dict(
+        _live_block(
+            mode="mainnet_tiny",
+            network="mainnet",
+            safety={"max_notional_usdc": 50, "max_target_margin_pct": 30},
+        )
+    )
+    assert tighter.safety.max_notional_usdc == D(50)
+
+
+def test_testnet_live_is_not_bound_by_mainnet_tiny_caps():
+    # The §21.1 caps define mainnet_tiny; testnet drills may size differently.
+    cfg = LiveConfig.from_dict(
+        _live_block(safety={"max_notional_usdc": 450, "max_target_margin_pct": 100})
+    )
+    assert cfg.safety.max_notional_usdc == D(450)
 
 
 @pytest.mark.parametrize(
@@ -227,6 +282,19 @@ def test_bool_from_yaml_accepts_only_bools():
 # ---------------------------------------------------------------------------
 
 
+def test_max_notional_below_exchange_minimum_is_rejected():
+    # §5 rule 4's config-only slice: effective_notional_cap <= max_notional_usdc
+    # for ANY equity, so a max below the exchange minimum can never trade —
+    # named at construction, not after three network calls.
+    with pytest.raises(ValueError, match="exchange minimum order value"):
+        LiveSafetyConfig.from_dict({"max_notional_usdc": 9})
+
+
+def test_max_notional_equal_to_exchange_minimum_is_allowed():
+    safety = LiveSafetyConfig.from_dict({"max_notional_usdc": 10})
+    assert safety.max_notional_usdc == EXCHANGE_MIN_ORDER_NOTIONAL_USDC
+
+
 def test_notional_above_ceiling_is_rejected_not_clamped():
     # §5 rule 5: startup fail, never clamp.
     with pytest.raises(ValueError, match="absolute_notional_ceiling"):
@@ -256,9 +324,17 @@ def test_single_symbol_only_with_two_symbols_is_rejected():
         LiveSafetyConfig.from_dict({"allowed_symbols": ["BTC", "ETH"]})
 
 
+def test_single_symbol_only_false_is_rejected():
+    # §25 #4: multi-symbol portfolio execution is out of scope for v1 — the
+    # switch gets the same hard treatment as leverage>1/isolated, so a
+    # 2-symbol config cannot sail through PR 1 into a single-symbol PR 5.
+    with pytest.raises(ValueError, match="single_symbol_only must be true"):
+        LiveSafetyConfig.from_dict({"single_symbol_only": False, "allowed_symbols": ["BTC", "ETH"]})
+
+
 def test_duplicate_symbols_are_rejected():
     with pytest.raises(ValueError, match="duplicate"):
-        LiveSafetyConfig.from_dict({"single_symbol_only": False, "allowed_symbols": ["BTC", "btc"]})
+        LiveSafetyConfig.from_dict({"allowed_symbols": ["BTC", "btc"]})
 
 
 @pytest.mark.parametrize(

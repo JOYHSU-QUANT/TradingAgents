@@ -200,7 +200,9 @@ def _cmd_live(argv: list[str]) -> int:
     The PR 1 skeleton of the Phase 3 startup sequence: everything here must
     pass before a future live loop may run, and every failure is a named
     exit 1 — this command can never place an order (the signed client exposes
-    no order methods yet, and the run exits before any loop).
+    no order methods yet, and the run exits before any loop). Config/env
+    problems fail fast (nothing else is checkable without them); the
+    network-dependent gates all run and report every failure in one pass.
     """
     parser = argparse.ArgumentParser(
         prog="python -m contrib.hyperliquid_perp live",
@@ -226,7 +228,11 @@ def _cmd_live(argv: list[str]) -> int:
     from .exchanges.hyperliquid.errors import ExchangeError
     from .exchanges.hyperliquid.sdk_client import HyperliquidClient
     from .exchanges.hyperliquid.signed_client import HyperliquidSignedClient
-    from .live.authorization import AgentAuthorizationError, verify_agent_authorization
+    from .live.authorization import (
+        EXPIRY_WARNING_HORIZON,
+        AgentAuthorizationError,
+        verify_agent_authorization,
+    )
     from .live.config import (
         EXCHANGE_MIN_ORDER_NOTIONAL_USDC,
         ExecutionMode,
@@ -273,6 +279,22 @@ def _cmd_live(argv: list[str]) -> int:
         )
         return 1
 
+    # A top-level ``network:`` that disagrees with ``live.network`` is legal —
+    # the same file can drive paper reads on mainnet while live drills on
+    # testnet — but it is also how a stale key silently points somewhere
+    # unexpected, so say which one the live run uses.
+    # load_config validates the top-level key case-insensitively but stores it
+    # raw — normalise before comparing or `network: TestNet` would warn
+    # spuriously against an equal live.network.
+    top_network = config.get("network")
+    if isinstance(top_network, str) and top_network.strip().lower() != live_cfg.network:
+        print(
+            f"warning: live run uses live.network {live_cfg.network!r} and "
+            f"ignores the top-level network: {top_network!r} (only paper/export/"
+            "validate read the top-level key).",
+            file=sys.stderr,
+        )
+
     addr = wallet_address(config)
     if not addr:
         print(
@@ -318,6 +340,13 @@ def _cmd_live(argv: list[str]) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    # The three network-dependent gates below (authorization, account read +
+    # caps, signed health check) are independent given a constructed client —
+    # run them ALL and report every failure in one pass, so an operator with
+    # two broken things fixes both before the next run instead of discovering
+    # them one re-run at a time.
+    failures: list[str] = []
+
     auth = None
     if agent_key is not None:
         # §6.1: run the authorization check whenever a key is present — even
@@ -325,46 +354,21 @@ def _cmd_live(argv: list[str]) -> int:
         try:
             auth = verify_agent_authorization(client.info, wallet_address=addr, agent_key=agent_key)
         except (AgentAuthorizationError, ExchangeError) as exc:
-            print(f"error: agent authorization failed — {exc}", file=sys.stderr)
-            return 1
-        print(
-            f"agent {auth.agent_address} authorized for {addr} until "
-            f"{auth.valid_until.isoformat()}",
-            file=sys.stderr,
-        )
-
-    try:
-        snapshot = HyperliquidAccount(client).get_account_snapshot(addr)
-    except ExchangeError as exc:
-        print(f"error: account read failed — {exc}", file=sys.stderr)
-        return 1
-    except ValueError as exc:
-        print(
-            f"error: account snapshot unusable (margin-called / empty / invalid?) — {exc}",
-            file=sys.stderr,
-        )
-        return 1
-
-    caps = compute_notional_caps(snapshot.account_value, live_cfg.safety)
-    # §5 rule 3: compute AND record both caps at startup.
-    logger.info(
-        "startup caps for %s: account_equity=%s pct_cap_notional=%s effective_notional_cap=%s",
-        live_cfg.mode.value,
-        snapshot.account_value,
-        caps.pct_cap_notional,
-        caps.effective_notional_cap,
-    )
-    if caps.below_exchange_minimum:
-        print(
-            f"error: effective_notional_cap ({caps.effective_notional_cap} USDC) "
-            f"is below the exchange minimum order value "
-            f"({EXCHANGE_MIN_ORDER_NOTIONAL_USDC} USDC) — the run could never "
-            "place an order (§5 rule 4). Fund the account or raise the caps.",
-            file=sys.stderr,
-        )
-        return 1
-
-    if agent_key is not None:
+            failures.append(f"agent authorization failed — {exc}")
+        else:
+            print(
+                f"agent {auth.agent_address} authorized for {addr} until "
+                f"{auth.valid_until.isoformat()}",
+                file=sys.stderr,
+            )
+            if auth.expires_within(EXPIRY_WARNING_HORIZON):
+                print(
+                    f"warning: agent authorization expires at "
+                    f"{auth.valid_until.isoformat()} — less than "
+                    f"{EXPIRY_WARNING_HORIZON.days} days away; re-approve the "
+                    "agent before a long run (§6.1).",
+                    file=sys.stderr,
+                )
         # Prove the signed transport end-to-end (construction + a read on the
         # live network) so a bad SDK/network surfaces now, not on the first
         # real order in a later PR. Still zero order methods exposed.
@@ -374,13 +378,49 @@ def _cmd_live(argv: list[str]) -> int:
             )
             signed.health_check()
         except ExchangeError as exc:
-            print(f"error: signed client health check failed — {exc}", file=sys.stderr)
-            return 1
-        print(f"signed client healthy: {signed!r}", file=sys.stderr)
+            failures.append(f"signed client health check failed — {exc}")
+        else:
+            print(f"signed client healthy: {signed!r}", file=sys.stderr)
+
+    snapshot = None
+    caps = None
+    try:
+        snapshot = HyperliquidAccount(client).get_account_snapshot(addr)
+    except ExchangeError as exc:
+        failures.append(f"account read failed — {exc}")
+    except ValueError as exc:
+        failures.append(f"account snapshot unusable (margin-called / empty / invalid?) — {exc}")
+    else:
+        caps = compute_notional_caps(snapshot.account_value, live_cfg.safety)
+        # §5 rule 3: compute AND record both caps at startup.
+        logger.info(
+            "startup caps for %s: account_equity=%s pct_cap_notional=%s effective_notional_cap=%s",
+            live_cfg.mode.value,
+            snapshot.account_value,
+            caps.pct_cap_notional,
+            caps.effective_notional_cap,
+        )
+        if caps.below_exchange_minimum:
+            failures.append(
+                f"effective_notional_cap ({caps.effective_notional_cap} USDC) "
+                f"is below the exchange minimum order value "
+                f"({EXCHANGE_MIN_ORDER_NOTIONAL_USDC} USDC) — the run could never "
+                "place an order (§5 rule 4). Fund the account or raise the caps."
+            )
+
+    if failures:
+        for failure in failures:
+            print(f"error: {failure}", file=sys.stderr)
+        return 1
 
     print(f"mode: {live_cfg.mode.value}")
     print(f"network: {live_cfg.network}")
     print(f"allow_real_orders: {'true' if live_cfg.allow_real_orders else 'false'}")
+    if auth is not None:
+        # Part of the machine-readable contract: a deploy preflight wrapping
+        # this gate check can capture the expiry without scraping stderr.
+        print(f"agent_address: {auth.agent_address}")
+        print(f"authorization_valid_until: {auth.valid_until.isoformat()}")
     print(f"account_equity: {snapshot.account_value} USDC")
     print(f"pct_cap_notional: {caps.pct_cap_notional} USDC")
     print(f"effective_notional_cap: {caps.effective_notional_cap} USDC")

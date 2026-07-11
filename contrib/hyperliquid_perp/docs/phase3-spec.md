@@ -147,8 +147,8 @@ Phase 3 必須明確區分「讀取交易所資料」與「允許真實下單」
 
 ```yaml
 live:
-  mode: testnet_live
-  network: testnet
+  mode: testnet_live      # 必填（PR 1 修訂）：無預設值
+  network: testnet        # 必填（PR 1 修訂）：無預設值；依 mode 釘死（§3.1）
   allow_real_orders: false
   allow_manage_external_orders: false
 
@@ -260,6 +260,9 @@ threshold_equity = max_notional_usdc / (max_target_margin_pct / 100 × leverage)
    違反時：啟動 fail，不得自動 clamp 或忽略。
    ```
 
+   另外 `max_notional_usdc < 10 USDC`（交易所最小下單額）在 config load
+   直接具名拒絕（PR 1 修訂）：effective_notional_cap 恆 ≤ max_notional_usdc，
+   低於最小下單額代表任何 equity 都無法下單，不必等到讀完帳戶才發現。
    （此規則檢查的對象是設定值 max_notional_usdc 本身，而不是計算出的
    effective_notional_cap——後者由規則 3 的公式決定，數學上不可能超過
    max_notional_usdc，不需要二次上限檢查。）
@@ -301,7 +304,12 @@ HYPERLIQUID_AGENT_KEY_MAINNET   # mainnet agent wallet private key
 1. 由 agent private key 推導出 agent address。
 2. 以唯讀 Info API（`extra_agents`）查詢 `wallet_address` 的已授權 agent 清單。
 3. agent address 必須在清單中且未過期（agent 授權有效期最長約 180 天）。
+   同一 address 在清單中出現多次（例如 re-approve 留下 stale 條目）視為
+   歧義，具名拒絕——不猜哪個 validUntil 是有效的（PR 1 修訂）。
 4. 任一步失敗 → 具名錯誤、**拒絕啟動**（不進 safe mode，因為還沒開始跑）。
+5. 剩餘效期低於 7 天時印出警告但放行（PR 1 修訂）：長駐迴圈跑到一半授權
+   過期，會變成 real orders 開著時的簽名中途失敗——啟動時就該提醒續期；
+   合法的短效授權仍不得被拒。
 
 此驗證可一次抓到三種錯誤：拿錯網路的 key、key 授權給別的帳戶、授權過期。
 
@@ -1260,6 +1268,19 @@ flag 無法跨重啟存續，而 `--allow-real-orders` 若寫死在 unit file �
 失去「每次都要明確重打」的安全價值；改由嚴格驗證的 config 檔承擔這個
 gate，與本模組其餘 config 的風格一致。
 
+`live` 子命令的啟動 gate 檢查行為（PR 1 修訂）：
+
+- config / env 問題 fail-fast（沒有它們其餘檢查無從談起）；client 建好之後
+  的三個網路 gate（§6.1 授權、帳戶讀取＋§5 caps、signed client health
+  check）**全部跑完、一次回報所有失敗**再 exit 1，operator 不必一次修一個。
+- stdout 為機器可讀契約：`mode:` / `network:` / `allow_real_orders:` /
+  `agent_address:` / `authorization_valid_until:`（keyless 時省略後兩項）/
+  `account_equity:` / `pct_cap_notional:` / `effective_notional_cap:`；
+  人讀訊息與警告一律走 stderr。
+- 頂層 `network:` 與 `live.network` 不一致是合法的（同一份 config 讓 paper
+  讀 mainnet 行情、live 在 testnet 演練），但會印 stderr 警告說明 live 用
+  的是哪一個。
+
 ### 24.1 Testnet Live
 
 ```bash
@@ -1281,7 +1302,10 @@ export HYPERLIQUID_AGENT_KEY_MAINNET=...
 python -m contrib.hyperliquid_perp live --config configs/hyperliquid.local.yaml
 ```
 
-mainnet_tiny 必須通過 hard config gate，否則拒絕啟動。
+mainnet_tiny 必須通過 hard config gate，否則拒絕啟動。（PR 1 修訂）此 gate
+在 config load 由程式強制：`mode: mainnet_tiny` 時 `max_notional_usdc <= 100`
+且 `max_target_margin_pct <= 60`（§21.1 的定義值；更緊可以，更鬆拒絕），
+配合全域的 `leverage = 1` 與 `single_symbol_only = true` 硬檢查。
 
 ## 25. Out of Scope
 
@@ -1290,7 +1314,8 @@ Phase 3 第一版不處理：
 1. Shadow live
 2. Preflight-only
 3. **Native TWAP（twapOrder / twapCancel）——v3 修訂，理由見 §9.5**
-4. 多 symbol portfolio execution
+4. 多 symbol portfolio execution（PR 1 修訂：`single_symbol_only: false` 在
+   config load 具名拒絕，與 leverage>1 / isolated 同等硬處理）
 5. 多帳戶管理
 6. 槓桿 > 1
 7. Isolated margin

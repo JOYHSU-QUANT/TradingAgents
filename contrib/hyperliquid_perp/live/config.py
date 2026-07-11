@@ -26,6 +26,8 @@ from ..domains.perp.risk_gate import MarginMode, RiskConfig
 
 __all__ = [
     "EXCHANGE_MIN_ORDER_NOTIONAL_USDC",
+    "MAINNET_TINY_MAX_NOTIONAL_USDC",
+    "MAINNET_TINY_MAX_TARGET_MARGIN_PCT",
     "ExecutionMode",
     "ExecutionStyle",
     "KillSwitchConfig",
@@ -46,6 +48,19 @@ __all__ = [
 # this means no order can ever be placed — startup must fail (or enter safe
 # mode) rather than run a bot that is structurally unable to trade.
 EXCHANGE_MIN_ORDER_NOTIONAL_USDC = Decimal("10")
+
+# §21.1/§24.2: the caps that DEFINE mainnet_tiny. The hard config gate pins
+# them at load — a tighter value is fine, a looser one is a different mode.
+# They equal the LiveSafetyConfig field defaults today, but the anchors differ
+# (§4 example values vs §21.1 definitions) — do not fold them together.
+MAINNET_TINY_MAX_NOTIONAL_USDC = Decimal(100)
+MAINNET_TINY_MAX_TARGET_MARGIN_PCT = 60
+
+# The enabled-mode vocabulary, shared by every operator-facing message that
+# lists it — enabling mainnet_live later must not leave a stale copy behind.
+_ENABLED_MODES_EXPECTED = (
+    "one of paper, testnet_live, mainnet_tiny (mainnet_live is not enabled in Phase 3 v1)"
+)
 
 # cloid_logical joins its segments with "_" (§8.2), so a prefix containing one
 # would corrupt every parse of the id; keep it strictly alphanumeric.
@@ -135,12 +150,19 @@ class LiveSafetyConfig:
     max_consecutive_loss_count: int = 3
 
     def __post_init__(self) -> None:
-        if not self.allowed_symbols:
-            raise ValueError("live.safety.allowed_symbols must not be empty")
-        if self.single_symbol_only and len(self.allowed_symbols) != 1:
+        # §25 #4: multi-symbol portfolio execution is out of scope for Phase 3
+        # v1 — same hard treatment as leverage>1/isolated/external orders, so a
+        # multi-symbol config cannot sail through PR 1 and hit the (single-
+        # symbol) PR 5 engine. Widening later is an explicit vocabulary change.
+        if not self.single_symbol_only:
             raise ValueError(
-                f"live.safety.single_symbol_only is true but allowed_symbols has "
-                f"{len(self.allowed_symbols)} entries: {list(self.allowed_symbols)}"
+                "live.safety.single_symbol_only must be true — multi-symbol "
+                "portfolio execution is out of scope for Phase 3 v1 (§25 #4)"
+            )
+        if len(self.allowed_symbols) != 1:
+            raise ValueError(
+                f"live.safety.allowed_symbols must have exactly one entry "
+                f"(single_symbol_only, §25 #4), got {list(self.allowed_symbols)}"
             )
         # Leverage > 1 is explicitly out of scope for Phase 3 v1 (§25 #6): the
         # live sizing/liquidation paths only exist for 1x, so any other value
@@ -161,9 +183,16 @@ class LiveSafetyConfig:
                 f"live.safety.max_target_margin_pct must be in (0, 100], "
                 f"got {self.max_target_margin_pct}"
             )
-        if self.max_notional_usdc <= 0:
+        # §5 rule 4's config-only slice: effective_notional_cap can never
+        # exceed max_notional_usdc, so a value below the exchange minimum makes
+        # the run structurally unable to trade at ANY equity — a named
+        # construction failure, not a discovery three network calls later.
+        if self.max_notional_usdc < EXCHANGE_MIN_ORDER_NOTIONAL_USDC:
             raise ValueError(
-                f"live.safety.max_notional_usdc must be > 0, got {self.max_notional_usdc}"
+                f"live.safety.max_notional_usdc ({self.max_notional_usdc}) is below "
+                f"the exchange minimum order value "
+                f"({EXCHANGE_MIN_ORDER_NOTIONAL_USDC} USDC) — no order could ever "
+                "be placed (§5 rule 4)"
             )
         if self.absolute_notional_ceiling <= 0:
             raise ValueError(
@@ -394,16 +423,18 @@ class KillSwitchConfig:
 class LiveConfig:
     """Typed ``live:`` block — modes, gates, and the §4 sub-blocks.
 
-    ``mode`` is required — there is no safe value to guess (a default the
-    ``live`` subcommand always rejects would just be a worse error message).
-    Every other default is the safest expressible state: testnet, real orders
-    off. Every cross-field contradiction the spec defines is a construction
-    error, so a :class:`LiveConfig` that exists is one whose gates are
-    internally coherent.
+    ``mode`` and ``network`` are required — neither has a safe value to guess
+    (a guessed mode would just be rejected downstream with a worse message,
+    and a guessed network would blame the operator for a value they never
+    wrote when it contradicts the mode's §3.1 pin). Every other default is
+    the safest expressible state: real orders off. Every cross-field
+    contradiction the spec defines is a construction error, so a
+    :class:`LiveConfig` that exists is one whose gates are internally
+    coherent.
     """
 
     mode: ExecutionMode
-    network: str = "testnet"
+    network: str
     allow_real_orders: bool = False
     allow_manage_external_orders: bool = False
     order_owner_prefix: str = "hta"
@@ -420,7 +451,9 @@ class LiveConfig:
             "mode",
             ExecutionMode,
             key="live.mode",
-            expected=f"one of {', '.join(m.value for m in ExecutionMode)}",
+            # Deliberately NOT the full member list: advertising mainnet_live
+            # here would send a typo straight into the §22 rejection below.
+            expected=_ENABLED_MODES_EXPECTED,
         )
         # §22 / build order: mainnet_live is defined but not enabled in Phase 3
         # v1 — rejected here so it cannot be reached by any code path at all.
@@ -448,6 +481,24 @@ class LiveConfig:
                 f"live.mode '{self.mode.value}' requires live.network "
                 f"'{required_network}', got {network!r}"
             )
+        # §21.1/§24.2: mainnet_tiny is DEFINED by its tiny caps — the hard
+        # config gate enforces them at load (tighter is fine; looser means the
+        # operator wanted a different mode and must say so).
+        if self.mode is ExecutionMode.MAINNET_TINY:
+            if self.safety.max_notional_usdc > MAINNET_TINY_MAX_NOTIONAL_USDC:
+                raise ValueError(
+                    f"live.safety.max_notional_usdc ({self.safety.max_notional_usdc}) "
+                    f"exceeds the mainnet_tiny cap "
+                    f"({MAINNET_TINY_MAX_NOTIONAL_USDC} USDC, §21.1) — the hard "
+                    "config gate refuses to start (§24.2)"
+                )
+            if self.safety.max_target_margin_pct > MAINNET_TINY_MAX_TARGET_MARGIN_PCT:
+                raise ValueError(
+                    f"live.safety.max_target_margin_pct "
+                    f"({self.safety.max_target_margin_pct}) exceeds the mainnet_tiny "
+                    f"cap ({MAINNET_TINY_MAX_TARGET_MARGIN_PCT}, §21.1) — the hard "
+                    "config gate refuses to start (§24.2)"
+                )
         if self.mode is ExecutionMode.PAPER and self.allow_real_orders:
             raise ValueError(
                 "live.allow_real_orders is true but live.mode is 'paper' — paper "
@@ -494,13 +545,15 @@ class LiveConfig:
                 "kill_switch": KillSwitchConfig.from_dict,
             },
         )
-        # Named error, not a bare TypeError from the missing dataclass field:
-        # an absent (or blank) mode is the most likely newcomer mistake and
-        # the message must say "required", not guess a mode for them.
+        # Named errors, not a bare TypeError from the missing dataclass field:
+        # an absent (or blank) mode/network is the most likely newcomer mistake
+        # and the message must say "required", not guess a value for them.
         if "mode" not in overrides:
+            raise ValueError(f"live.mode is required — {_ENABLED_MODES_EXPECTED}")
+        if "network" not in overrides:
             raise ValueError(
-                "live.mode is required — one of paper, testnet_live, mainnet_tiny "
-                "(mainnet_live is not enabled in Phase 3 v1)"
+                f"live.network is required — one of {list(LEGAL_NETWORKS)} "
+                "(each live mode is pinned to its network, §3.1)"
             )
         return cls(**overrides)
 

@@ -15,16 +15,28 @@ any error message, log line, or return value.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 
 from ..exchanges.hyperliquid.sdk_client import account_from_agent_key, call_sdk
 
+if TYPE_CHECKING:
+    from hyperliquid.info import Info
+
 __all__ = [
+    "EXPIRY_WARNING_HORIZON",
     "AgentAuthorization",
     "AgentAuthorizationError",
     "derive_agent_address",
     "verify_agent_authorization",
 ]
+
+# §6.1: an authorization that outlives startup but not the long-running loop
+# turns into mid-run signing failures with real orders enabled — the exact
+# class of operator-actionable problem the startup check exists to front-load.
+# Below this remaining validity the caller warns (still passes; a legitimately
+# short approval must not be refused).
+EXPIRY_WARNING_HORIZON = timedelta(days=7)
 
 
 class AgentAuthorizationError(Exception):
@@ -41,6 +53,11 @@ class AgentAuthorization:
     agent_address: str
     valid_until: datetime
 
+    def expires_within(self, horizon: timedelta, *, now: datetime | None = None) -> bool:
+        """True when the authorization expires within ``horizon`` of ``now``
+        (callers warn — verification already guaranteed it is not expired)."""
+        return self.valid_until - (now or datetime.now(timezone.utc)) < horizon
+
 
 def derive_agent_address(agent_key: str) -> str:
     """Derive the agent's public address from its private key (§6.1 step 1).
@@ -53,7 +70,7 @@ def derive_agent_address(agent_key: str) -> str:
 
 
 def verify_agent_authorization(
-    info,
+    info: Info,
     *,
     wallet_address: str,
     agent_key: str,
@@ -75,22 +92,29 @@ def verify_agent_authorization(
             f"for wallet {wallet_address} — cannot verify agent authorization"
         )
     wanted = agent_address.lower()
-    entry = next(
-        (
-            item
-            for item in raw
-            if isinstance(item, dict)
-            and isinstance(item.get("address"), str)
-            and item["address"].lower() == wanted
-        ),
-        None,
-    )
-    if entry is None:
+    matches = [
+        item
+        for item in raw
+        if isinstance(item, dict)
+        and isinstance(item.get("address"), str)
+        and item["address"].lower() == wanted
+    ]
+    if not matches:
         raise AgentAuthorizationError(
             f"agent {agent_address} is not in wallet {wallet_address}'s approved "
             "agent list — wrong network's key, a key for a different account, or "
             "the agent was never approved (§6.1)"
         )
+    # Reject ambiguity rather than guess (the AccountSnapshot duplicate-coin
+    # precedent): with two entries, picking either validUntil could silently
+    # read a stale re-approval as the live one — or vice versa.
+    if len(matches) > 1:
+        raise AgentAuthorizationError(
+            f"agent {agent_address} appears {len(matches)} times in wallet "
+            f"{wallet_address}'s approved agent list — ambiguous authorization; "
+            "remove the stale approval and re-run (§6.1)"
+        )
+    entry = matches[0]
     valid_until_ms = entry.get("validUntil")
     if not isinstance(valid_until_ms, (int, float)) or isinstance(valid_until_ms, bool):
         raise AgentAuthorizationError(

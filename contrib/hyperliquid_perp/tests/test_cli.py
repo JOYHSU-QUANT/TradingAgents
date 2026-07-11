@@ -10,7 +10,7 @@ import csv
 import json
 import os
 import signal
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -2152,6 +2152,10 @@ def live_seams(monkeypatch):
         equity=D(1000),
         account_error=None,
         auth_error=None,
+        # Relative to the wall clock because _cmd_live's near-expiry warning
+        # compares against real now; 90 days out never trips the 7-day horizon.
+        auth_valid_until=datetime.now(timezone.utc) + timedelta(days=90),
+        signed_error=None,
         auth_calls=[],
         health_calls=[],
         client_networks=[],
@@ -2186,7 +2190,7 @@ def live_seams(monkeypatch):
             raise state.auth_error
         return AgentAuthorization(
             agent_address="0x" + "cc" * 20,
-            valid_until=datetime(2026, 12, 1, tzinfo=timezone.utc),
+            valid_until=state.auth_valid_until,
         )
 
     class _FakeSigned:
@@ -2196,6 +2200,8 @@ def live_seams(monkeypatch):
 
         def health_check(self):
             state.health_calls.append(self.network)
+            if state.signed_error is not None:
+                raise state.signed_error
 
         def __repr__(self):
             return f"FakeSigned(network={self.network!r})"
@@ -2215,10 +2221,18 @@ def test_live_missing_live_block_exits_1(tmp_path, capsys, live_seams):
 
 
 def test_live_paper_mode_exits_1(tmp_path, capsys, live_seams):
-    cfg = _live_yaml(tmp_path, live_lines="  mode: paper\n")
+    cfg = _live_yaml(tmp_path, live_lines="  mode: paper\n  network: testnet\n")
     rc = cli_main(["live", "--config", str(cfg)])
     assert rc == 1
     assert "paper subcommand" in capsys.readouterr().err
+
+
+def test_live_missing_network_exits_1(tmp_path, capsys, live_seams):
+    # live.network is required (no guessed default to blame the operator for).
+    cfg = _live_yaml(tmp_path, live_lines="  mode: testnet_live\n")
+    rc = cli_main(["live", "--config", str(cfg)])
+    assert rc == 1
+    assert "live.network is required" in capsys.readouterr().err
 
 
 def test_live_mainnet_live_mode_exits_1(tmp_path, capsys, live_seams):
@@ -2282,6 +2296,9 @@ def test_live_keyless_gate_check_with_orders_off_passes(tmp_path, capsys, live_s
     assert rc == 0
     out = capsys.readouterr().out
     assert "allow_real_orders: false" in out
+    # No authorization ran, so the machine-readable block omits its fields.
+    assert "agent_address:" not in out
+    assert "authorization_valid_until:" not in out
     assert live_seams.auth_calls == []  # nothing to verify without a key
     assert live_seams.health_calls == []  # no signed client without a key
 
@@ -2333,6 +2350,10 @@ def test_live_happy_path_prints_caps_and_exits_0(tmp_path, capsys, live_seams):
     assert "effective_notional_cap: 100 USDC" in out
     assert "mode: testnet_live" in out
     assert "allow_real_orders: false" in out
+    # The machine-readable contract includes the authorization result, so a
+    # deploy preflight can capture the expiry without scraping stderr.
+    assert f"agent_address: {'0x' + 'cc' * 20}" in out
+    assert f"authorization_valid_until: {live_seams.auth_valid_until.isoformat()}" in out
     # Authorization ran against the configured wallet, on the live network.
     assert live_seams.auth_calls == [_LIVE_WALLET]
     assert live_seams.client_networks == ["testnet"]
@@ -2353,7 +2374,73 @@ def test_live_auth_failure_exits_1(tmp_path, capsys, live_seams):
     assert rc == 1
     err = capsys.readouterr().err
     assert "agent authorization failed" in err
-    assert live_seams.snapshot_requests == []  # aborted before the account read
+    # Collect-all: the independent gates still ran so the operator sees every
+    # failure in one pass, then the run exits 1.
+    assert live_seams.snapshot_requests == [_LIVE_WALLET]
+    assert live_seams.health_calls == ["testnet"]
+
+
+def test_live_auth_network_failure_exits_1(tmp_path, capsys, live_seams):
+    # A network/SDK failure during the §6.1 check must ride the SAME named
+    # exit-1 lane as a rejection, not fall into the generic exit-2 bucket.
+    from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeRequestError
+
+    live_seams.auth_error = ExchangeRequestError("Hyperliquid request failed: boom")
+    rc = cli_main(["live", "--config", str(_live_yaml(tmp_path))])
+    assert rc == 1
+    assert "agent authorization failed" in capsys.readouterr().err
+
+
+def test_live_signed_health_check_failure_exits_1(tmp_path, capsys, live_seams):
+    # The one place PR 1 proves the signed transport: a health-check failure
+    # must be a named exit 1, never "gates OK".
+    from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeRequestError
+
+    live_seams.signed_error = ExchangeRequestError("signed transport down")
+    rc = cli_main(["live", "--config", str(_live_yaml(tmp_path))])
+    assert rc == 1
+    out, err = capsys.readouterr()
+    assert "signed client health check failed" in err
+    assert "gates OK" not in err
+    assert "mode:" not in out  # no machine-readable success block on failure
+
+
+def test_live_key_present_without_require_still_verifies(tmp_path, capsys, live_seams):
+    # §6.1 runs whenever a key exists — require_agent_wallet: false must not
+    # skip verification of a present (possibly wrong-network) key.
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines=("  mode: testnet_live\n  network: testnet\n  require_agent_wallet: false\n"),
+    )
+    rc = cli_main(["live", "--config", str(cfg)])
+    assert rc == 0
+    assert live_seams.auth_calls == [_LIVE_WALLET]
+    assert live_seams.health_calls == ["testnet"]
+
+
+def test_live_collects_all_gate_failures_in_one_pass(tmp_path, capsys, live_seams):
+    # An operator with a bad approval AND an underfunded account AND a broken
+    # signed transport sees all three named failures on one run.
+    from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeRequestError
+    from contrib.hyperliquid_perp.live.authorization import AgentAuthorizationError
+
+    live_seams.auth_error = AgentAuthorizationError("not approved")
+    live_seams.equity = D(10)  # effective cap 6 < 10 USDC exchange minimum
+    live_seams.signed_error = ExchangeRequestError("signed transport down")
+    rc = cli_main(["live", "--config", str(_live_yaml(tmp_path))])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "agent authorization failed" in err
+    assert "minimum order value" in err
+    assert "signed client health check failed" in err
+
+
+def test_live_near_expiry_authorization_warns_but_passes(tmp_path, capsys, live_seams):
+    live_seams.auth_valid_until = datetime.now(timezone.utc) + timedelta(days=2)
+    rc = cli_main(["live", "--config", str(_live_yaml(tmp_path))])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "warning: agent authorization expires" in err
 
 
 def test_live_cap_below_exchange_minimum_exits_1(tmp_path, capsys, live_seams):
@@ -2364,7 +2451,8 @@ def test_live_cap_below_exchange_minimum_exits_1(tmp_path, capsys, live_seams):
     assert rc == 1
     err = capsys.readouterr().err
     assert "minimum order value" in err
-    assert live_seams.health_calls == []  # failed before the signed client
+    # Collect-all: the signed transport was still proven in the same pass.
+    assert live_seams.health_calls == ["testnet"]
 
 
 def test_live_account_read_failure_exits_1(tmp_path, capsys, live_seams):
@@ -2374,3 +2462,33 @@ def test_live_account_read_failure_exits_1(tmp_path, capsys, live_seams):
     rc = cli_main(["live", "--config", str(_live_yaml(tmp_path))])
     assert rc == 1
     assert "account read failed" in capsys.readouterr().err
+
+
+def test_live_top_level_network_mismatch_warns(tmp_path, capsys, live_seams):
+    # A top-level network: that disagrees with live.network is legal (paper
+    # reads mainnet data while live drills on testnet) but must be said aloud.
+    path = tmp_path / "live-cfg.yaml"
+    path.write_text(
+        f'wallet_address: "{_LIVE_WALLET}"\nnetwork: mainnet\n'
+        "live:\n  mode: testnet_live\n  network: testnet\n",
+        encoding="utf-8",
+    )
+    rc = cli_main(["live", "--config", str(path)])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "ignores the top-level network" in err
+    assert live_seams.client_networks == ["testnet"]  # live.network won
+
+
+def test_live_matching_top_level_network_does_not_warn(tmp_path, capsys, live_seams):
+    # Mixed case: load_config stores the top-level key raw, so the comparison
+    # must normalise or an equal pair would warn spuriously.
+    path = tmp_path / "live-cfg.yaml"
+    path.write_text(
+        f'wallet_address: "{_LIVE_WALLET}"\nnetwork: TestNet\n'
+        "live:\n  mode: testnet_live\n  network: testnet\n",
+        encoding="utf-8",
+    )
+    rc = cli_main(["live", "--config", str(path)])
+    assert rc == 0
+    assert "ignores the top-level network" not in capsys.readouterr().err

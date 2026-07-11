@@ -45,8 +45,8 @@ def test_missing_var_is_none(monkeypatch):
 
 @pytest.mark.parametrize("value", ["", "   "])
 def test_blank_var_is_none(monkeypatch, value):
-    # A blank assignment in .env must fire §6 rule 6 (forced allow_real_orders
-    # off), not reach key derivation as "".
+    # A blank assignment in .env must read as a missing key so the §6 rule 6
+    # hard-fail gate fires, not reach key derivation as "".
     monkeypatch.setenv("HYPERLIQUID_AGENT_KEY_TESTNET", value)
     assert load_agent_key("testnet") is None
 

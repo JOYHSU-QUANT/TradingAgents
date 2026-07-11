@@ -1,7 +1,8 @@
 # Hyperliquid perp — example config. Copy to hyperliquid.local.yaml and fill in.
-# The .local.yaml is gitignored; it holds the PUBLIC wallet address + network
-# only. Secrets (OPENROUTER_API_KEY, the Phase-3 agent-wallet key) live in env
-# vars, never here (phase1-spec decision #9).
+# The .local.yaml is gitignored; it holds the PUBLIC wallet address, network,
+# and the Phase 3 live: gate block — non-secret settings only. Secrets
+# (OPENROUTER_API_KEY, the Phase-3 agent-wallet key) live in env vars, never
+# here (phase1-spec decision #9).
 
 network: mainnet              # Phase 1/2 = mainnet (read-only); testnet reserved for Phase 3 order testing
 network_timeout_s: 30         # HTTP timeout (seconds) per Hyperliquid request; a stalled read fails instead of hanging forever
@@ -58,18 +59,18 @@ paper_trading:
 # additionally require allow_real_orders: true AND every §4.1 gate to pass.
 # live:
 #   mode: testnet_live           # REQUIRED: paper / testnet_live / mainnet_tiny (mainnet_live is rejected in v1)
-#   network: testnet             # pinned per mode: testnet_live->testnet, mainnet_tiny->mainnet
+#   network: testnet             # REQUIRED; pinned per mode: testnet_live->testnet, mainnet_tiny->mainnet
 #   allow_real_orders: false     # master gate; true without the agent key env var refuses startup (§6 rule 6)
 #   allow_manage_external_orders: false   # must stay false in v1 (§25: bot-owned orders only)
 #   order_owner_prefix: "hta"    # readable cloid_logical prefix only, NOT used for bot-owned detection
 #   require_agent_wallet: true   # true -> startup fails without the agent key env var
 #   safety:
-#     single_symbol_only: true
+#     single_symbol_only: true   # must stay true in v1 (§25 #4: single symbol only)
 #     allowed_symbols: [BTC]
 #     leverage: 1                # Phase 3 v1 is 1x only (§25)
 #     margin_mode: cross
-#     max_target_margin_pct: 60
-#     max_notional_usdc: 100
+#     max_target_margin_pct: 60  # mainnet_tiny hard-caps this at 60 (§21.1)
+#     max_notional_usdc: 100     # >= 10 (exchange min order); mainnet_tiny hard-caps at 100 (§21.1)
 #     absolute_notional_ceiling: 500   # config-load ceiling for max_notional_usdc (§5 rule 5; fail, not clamp)
 #     max_open_orders: 5               # behaviour §10.5
 #     max_daily_loss_pct: 2            # behaviour §10.3

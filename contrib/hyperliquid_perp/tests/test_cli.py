@@ -2105,3 +2105,272 @@ def test_paper_bad_paper_trading_value_exits_1(tmp_path, capsys, paper_seams):
     err = capsys.readouterr().err
     assert "paper_trading" in err
     assert "Fix the YAML" in err
+
+
+# --------------------------------------------------------------------------
+# live — the Phase 3 PR 1 startup skeleton
+# --------------------------------------------------------------------------
+
+_LIVE_WALLET = "0x" + "aa" * 20
+_LIVE_KEY = "0x" + "11" * 32
+_LIVE_ENV = "HYPERLIQUID_AGENT_KEY_TESTNET"
+
+
+def _live_yaml(
+    tmp_path,
+    *,
+    wallet: str | None = _LIVE_WALLET,
+    live_lines: str | None = "  mode: testnet_live\n  network: testnet\n",
+):
+    path = tmp_path / "live-cfg.yaml"
+    text = ""
+    if wallet is not None:
+        text += f'wallet_address: "{wallet}"\n'
+    if live_lines is not None:
+        text += "live:\n" + live_lines
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def live_seams(monkeypatch):
+    """Fake every network seam ``_cmd_live`` touches; return mutable knobs.
+
+    The read-only client, account read, authorization check, and signed client
+    are all patched at their module seams (the function-local imports bind at
+    call time), so tests drive the gate logic offline.
+    """
+    from contrib.hyperliquid_perp.exchanges.hyperliquid import (
+        account as account_mod,
+        sdk_client as sdk_mod,
+        signed_client as signed_mod,
+    )
+    from contrib.hyperliquid_perp.live import authorization as auth_mod
+    from contrib.hyperliquid_perp.live.authorization import AgentAuthorization
+
+    state = SimpleNamespace(
+        equity=D(1000),
+        account_error=None,
+        auth_error=None,
+        auth_calls=[],
+        health_calls=[],
+        client_networks=[],
+        snapshot_requests=[],
+    )
+
+    class _FakeClient:
+        def __init__(self, network="mainnet", *, timeout=None):
+            state.client_networks.append(network)
+            self.network = network
+            self.timeout = timeout
+            self.info = SimpleNamespace()
+
+        @classmethod
+        def from_config(cls, config, *, timeout=None, network=None):
+            # Mirrors the real from_config's network-override contract.
+            return cls(network=network or config.get("network", "mainnet"), timeout=timeout)
+
+    class _FakeAccount:
+        def __init__(self, client):
+            pass
+
+        def get_account_snapshot(self, addr):
+            state.snapshot_requests.append(addr)
+            if state.account_error is not None:
+                raise state.account_error
+            return SimpleNamespace(account_value=state.equity)
+
+    def _fake_verify(info, *, wallet_address, agent_key, now=None):
+        state.auth_calls.append(wallet_address)
+        if state.auth_error is not None:
+            raise state.auth_error
+        return AgentAuthorization(
+            agent_address="0x" + "cc" * 20,
+            valid_until=datetime(2026, 12, 1, tzinfo=timezone.utc),
+        )
+
+    class _FakeSigned:
+        def __init__(self, network, agent_key, *, wallet_address, timeout=None):
+            self.network = network
+            self.wallet_address = wallet_address
+
+        def health_check(self):
+            state.health_calls.append(self.network)
+
+        def __repr__(self):
+            return f"FakeSigned(network={self.network!r})"
+
+    monkeypatch.setattr(sdk_mod, "HyperliquidClient", _FakeClient)
+    monkeypatch.setattr(account_mod, "HyperliquidAccount", _FakeAccount)
+    monkeypatch.setattr(auth_mod, "verify_agent_authorization", _fake_verify)
+    monkeypatch.setattr(signed_mod, "HyperliquidSignedClient", _FakeSigned)
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    return state
+
+
+def test_live_missing_live_block_exits_1(tmp_path, capsys, live_seams):
+    rc = cli_main(["live", "--config", str(_live_yaml(tmp_path, live_lines=None))])
+    assert rc == 1
+    assert "no live: block" in capsys.readouterr().err
+
+
+def test_live_paper_mode_exits_1(tmp_path, capsys, live_seams):
+    cfg = _live_yaml(tmp_path, live_lines="  mode: paper\n")
+    rc = cli_main(["live", "--config", str(cfg)])
+    assert rc == 1
+    assert "paper subcommand" in capsys.readouterr().err
+
+
+def test_live_mainnet_live_mode_exits_1(tmp_path, capsys, live_seams):
+    # The §22 hard rejection must surface as the named config exit, not a crash.
+    cfg = _live_yaml(tmp_path, live_lines="  mode: mainnet_live\n  network: mainnet\n")
+    rc = cli_main(["live", "--config", str(cfg)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "invalid live: config" in err
+    assert "mainnet_live" in err
+
+
+def test_live_missing_wallet_exits_1(tmp_path, capsys, live_seams):
+    rc = cli_main(["live", "--config", str(_live_yaml(tmp_path, wallet=None))])
+    assert rc == 1
+    assert "wallet_address" in capsys.readouterr().err
+
+
+def test_live_missing_key_with_require_exits_1(tmp_path, capsys, live_seams, monkeypatch):
+    # require_agent_wallet defaults true: no key -> named startup refusal that
+    # names the exact env var for this network.
+    monkeypatch.delenv(_LIVE_ENV, raising=False)
+    rc = cli_main(["live", "--config", str(_live_yaml(tmp_path))])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert _LIVE_ENV in err
+    assert "require_agent_wallet" in err
+    assert live_seams.auth_calls == []
+
+
+def test_live_missing_key_with_real_orders_exits_1(tmp_path, capsys, live_seams, monkeypatch):
+    # §6 rule 6 (PR 1 revision): real orders asked for with no key is an
+    # operator contradiction — named hard fail, never a silent downgrade into
+    # an order-less run.
+    monkeypatch.delenv(_LIVE_ENV, raising=False)
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines=(
+            "  mode: testnet_live\n  network: testnet\n"
+            "  allow_real_orders: true\n  require_agent_wallet: false\n"
+        ),
+    )
+    rc = cli_main(["live", "--config", str(cfg)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert _LIVE_ENV in err
+    assert "allow_real_orders" in err
+    assert live_seams.auth_calls == []
+    assert live_seams.health_calls == []
+
+
+def test_live_keyless_gate_check_with_orders_off_passes(tmp_path, capsys, live_seams, monkeypatch):
+    # The legitimate keyless lane: orders off + not required -> gate check
+    # runs without authorization or a signed client.
+    monkeypatch.delenv(_LIVE_ENV, raising=False)
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines=("  mode: testnet_live\n  network: testnet\n  require_agent_wallet: false\n"),
+    )
+    rc = cli_main(["live", "--config", str(cfg)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "allow_real_orders: false" in out
+    assert live_seams.auth_calls == []  # nothing to verify without a key
+    assert live_seams.health_calls == []  # no signed client without a key
+
+
+def test_live_real_orders_positive_path(tmp_path, capsys, live_seams):
+    # The §4.1 master gate's positive path: key present + allow_real_orders
+    # true must reach exit 0 with the flag reported true and UNforced, with
+    # authorization and the signed health check both proven.
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines=("  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n"),
+    )
+    rc = cli_main(["live", "--config", str(cfg)])
+    assert rc == 0
+    out, err = capsys.readouterr()
+    assert "allow_real_orders: true" in out
+    assert "forced" not in out
+    assert live_seams.auth_calls == [_LIVE_WALLET]
+    assert live_seams.health_calls == ["testnet"]
+    # Secret hygiene over the full assembled output: the raw key must never
+    # reach stdout or stderr on any live lane.
+    assert _LIVE_KEY not in out
+    assert _LIVE_KEY not in err
+
+
+def test_live_risk_consistency_mismatch_exits_1(tmp_path, capsys, live_seams):
+    # risk: and live.safety: must agree on the sizing regime — a live cap
+    # looser than the AI gate's cap is a named config error at startup.
+    path = tmp_path / "live-cfg.yaml"
+    path.write_text(
+        f'wallet_address: "{_LIVE_WALLET}"\n'
+        "risk:\n  max_target_margin_pct: 50\n"
+        "live:\n  mode: testnet_live\n  network: testnet\n",
+        encoding="utf-8",
+    )
+    rc = cli_main(["live", "--config", str(path)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "risk.max_target_margin_pct" in err
+    assert live_seams.auth_calls == []  # rejected before any network work
+
+
+def test_live_happy_path_prints_caps_and_exits_0(tmp_path, capsys, live_seams):
+    rc = cli_main(["live", "--config", str(_live_yaml(tmp_path))])
+    assert rc == 0
+    out, err = capsys.readouterr()
+    # §5 rule 3 with the default safety caps: equity 1000 -> pct 600, min(600, 100) = 100.
+    assert "pct_cap_notional: 600 USDC" in out
+    assert "effective_notional_cap: 100 USDC" in out
+    assert "mode: testnet_live" in out
+    assert "allow_real_orders: false" in out
+    # Authorization ran against the configured wallet, on the live network.
+    assert live_seams.auth_calls == [_LIVE_WALLET]
+    assert live_seams.client_networks == ["testnet"]
+    assert live_seams.snapshot_requests == [_LIVE_WALLET]
+    # The signed transport was proven end-to-end (init + health check).
+    assert live_seams.health_calls == ["testnet"]
+    assert "gates OK" in err
+    # Secret hygiene: the raw agent key must never reach the assembled output.
+    assert _LIVE_KEY not in out
+    assert _LIVE_KEY not in err
+
+
+def test_live_auth_failure_exits_1(tmp_path, capsys, live_seams):
+    from contrib.hyperliquid_perp.live.authorization import AgentAuthorizationError
+
+    live_seams.auth_error = AgentAuthorizationError("agent 0xcc... is not in wallet list")
+    rc = cli_main(["live", "--config", str(_live_yaml(tmp_path))])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "agent authorization failed" in err
+    assert live_seams.snapshot_requests == []  # aborted before the account read
+
+
+def test_live_cap_below_exchange_minimum_exits_1(tmp_path, capsys, live_seams):
+    # §5 rule 4: equity 10 -> effective cap 6 USDC < the 10 USDC exchange
+    # minimum — the run could never trade, so startup fails.
+    live_seams.equity = D(10)
+    rc = cli_main(["live", "--config", str(_live_yaml(tmp_path))])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "minimum order value" in err
+    assert live_seams.health_calls == []  # failed before the signed client
+
+
+def test_live_account_read_failure_exits_1(tmp_path, capsys, live_seams):
+    from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeRequestError
+
+    live_seams.account_error = ExchangeRequestError("boom")
+    rc = cli_main(["live", "--config", str(_live_yaml(tmp_path))])
+    assert rc == 1
+    assert "account read failed" in capsys.readouterr().err

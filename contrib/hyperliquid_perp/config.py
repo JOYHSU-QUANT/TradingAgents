@@ -20,6 +20,12 @@ _EXAMPLE = _CONFIG_DIR / "hyperliquid.example.yaml"
 # Sentinel placeholder in the example file — treated as "no wallet configured".
 _WALLET_PLACEHOLDER = "0xYOUR..."
 
+# The legal network vocabulary, shared with live/config.py's ``live.network``
+# validation. Deliberately duplicated from sdk_client._BASE_URLS (not imported)
+# to keep this module free of the heavy SDK import that --context-only relies
+# on being cheap.
+LEGAL_NETWORKS = ("mainnet", "testnet")
+
 # Everything load_config can raise for an operator config mistake — a missing or
 # unreadable path (OSError), a YAML syntax error, or a failed validation below.
 # Callers turn any of these into a named exit, never a raw traceback; the list
@@ -54,6 +60,7 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset(
         "risk",
         "decision",
         "paper_trading",
+        "live",
     }
 )
 
@@ -194,8 +201,10 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     # block (``market_data: 5``, ``coins: BTC``) survives key validation and then
     # blows up deep in the run — ``5.get(...)`` (AttributeError) or ``"BTC"[0]``
     # silently taking the first character — instead of a clean exit-1 here. The
-    # ``risk:``/``decision:`` blocks are shape-checked by their own from_dict.
-    for key in ("market_data", "engine", "paper_trading"):
+    # ``risk:``/``decision:``/``live:`` blocks are shape-checked by their own
+    # from_dict (``live:`` additionally here, so a scalar ``live: true`` fails
+    # at load even on paths that never parse the block).
+    for key in ("market_data", "engine", "paper_trading", "live"):
         val = config.get(key)
         if val is not None and not isinstance(val, dict):
             raise ValueError(f"{key!r} must be a mapping, got {val!r}")
@@ -207,11 +216,11 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     # surfaces as an exit-2 traceback instead of a named config error. Validate
     # up front so an operator typo stays in the CONFIG_LOAD_ERRORS lane —
     # sdk_client's own ValueError remains the standalone defense. The legal
-    # network set is duplicated here (not imported) to keep this module free of
-    # the heavy SDK import that --context-only relies on being cheap.
+    # network set lives on LEGAL_NETWORKS above (see its comment for why it is
+    # not imported from sdk_client).
     network = config.get("network")
     if network is not None and (
-        not isinstance(network, str) or network.strip().lower() not in ("mainnet", "testnet")
+        not isinstance(network, str) or network.strip().lower() not in LEGAL_NETWORKS
     ):
         raise ValueError(f"'network' must be 'mainnet' or 'testnet', got {network!r}")
     timeout = config.get("network_timeout_s")

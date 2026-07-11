@@ -1,6 +1,6 @@
-"""Subcommand CLI for the Hyperliquid perp module (PR 4).
+"""Subcommand CLI for the Hyperliquid perp module.
 
-Three subcommands plus full Phase 1/2 backward compatibility:
+Four subcommands plus full Phase 1/2 backward compatibility:
 
 - ``python -m contrib.hyperliquid_perp paper --coin BTC`` — the long-running
   paper run: restart reconciliation (execution §1.2), then the 30-second
@@ -10,6 +10,10 @@ Three subcommands plus full Phase 1/2 backward compatibility:
   — manual full-dataset CSV export (phase2-data §1.1).
 - ``python -m contrib.hyperliquid_perp validate --run-id <id>`` — the spec §5
   acceptance report and Phase-3 verdict.
+- ``python -m contrib.hyperliquid_perp live --config <yaml>`` — the Phase 3
+  startup skeleton (phase3-spec PR 1): load the ``live:`` config gates, verify
+  the agent-wallet authorization, print the effective notional caps, and exit
+  without entering any trading loop (that arrives in PR 5). Places no orders.
 
 Empty argv and flag-style invocations (first argument starting with ``-``) —
 including the Phase 1 ``--context-only`` smoke run and the single-shot engine
@@ -27,11 +31,11 @@ the 30-cycle gate yet ("keep running cycles"), ``5`` (``validate`` only) the
 run has integrity failures — orphans, snapshot or replay mismatches, or a
 store so corrupt the checks themselves cannot run ("the store is broken;
 investigate before trusting results"), ``130`` interrupted before a graceful
-lane could take over (Ctrl-C in ``export``/``validate`` or during ``paper``
-startup/reconciliation — SIGTERM likewise once ``paper`` has installed its
-handler; once the loop runs, both signals take the shutdown-export lane
-instead of ``130``). Legacy delegated invocations keep :mod:`.main`'s own
-exit contract.
+lane could take over (Ctrl-C in ``export``/``validate``/``live`` or during
+``paper`` startup/reconciliation — SIGTERM likewise once ``paper`` has
+installed its handler; once the loop runs, both signals take the
+shutdown-export lane instead of ``130``). Legacy delegated invocations keep
+:mod:`.main`'s own exit contract.
 """
 
 from __future__ import annotations
@@ -52,7 +56,7 @@ from .persistence.db import Database
 
 logger = logging.getLogger(__name__)
 
-_SUBCOMMANDS = ("paper", "export", "validate")
+_SUBCOMMANDS = ("paper", "export", "validate", "live")
 
 # Version stamp for the ai_inputs.prompt_version column: bump when the injected
 # context/format contract changes shape (the payload hash tracks content).
@@ -95,6 +99,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_export(rest)
         if command == "validate":
             return _cmd_validate(rest)
+        if command == "live":
+            return _cmd_live(rest)
         return _cmd_paper(rest)
     except KeyboardInterrupt:
         print("interrupted.", file=sys.stderr)
@@ -181,6 +187,208 @@ def _cmd_validate(argv: list[str]) -> int:
     # Integrity failures and a merely-short run are different operator actions
     # (investigate vs keep running) — give them distinct codes.
     return 5 if report.failures else 4
+
+
+# --------------------------------------------------------------------------
+# live — the Phase 3 startup skeleton (PR 1: gates + authorization, no loop)
+# --------------------------------------------------------------------------
+
+
+def _cmd_live(argv: list[str]) -> int:
+    """Load the ``live:`` gates, verify agent authorization, print caps, exit.
+
+    The PR 1 skeleton of the Phase 3 startup sequence: everything here must
+    pass before a future live loop may run, and every failure is a named
+    exit 1 — this command can never place an order (the signed client exposes
+    no order methods yet, and the run exits before any loop).
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m contrib.hyperliquid_perp live",
+        description=(
+            "Phase 3 startup skeleton: validate live config gates + agent "
+            "authorization, print effective caps, and exit (no trading loop)."
+        ),
+    )
+    parser.add_argument("--config", default=None, help="Config YAML path.")
+    args = parser.parse_args(argv)
+
+    # Same rationale as ``paper``: startup diagnostics need timestamps; the
+    # basicConfig no-ops when an embedding application already configured one.
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    from .config import wallet_address
+    from .domains.perp.risk_gate import RiskConfig
+    from .exchanges.hyperliquid.account import HyperliquidAccount
+    from .exchanges.hyperliquid.errors import ExchangeError
+    from .exchanges.hyperliquid.sdk_client import HyperliquidClient
+    from .exchanges.hyperliquid.signed_client import HyperliquidSignedClient
+    from .live.authorization import AgentAuthorizationError, verify_agent_authorization
+    from .live.config import (
+        EXCHANGE_MIN_ORDER_NOTIONAL_USDC,
+        ExecutionMode,
+        LiveConfig,
+        compute_notional_caps,
+        validate_live_risk_consistency,
+    )
+    from .live.secrets import agent_key_env_var, load_agent_key
+
+    try:
+        config = load_config(args.config)
+    except CONFIG_LOAD_ERRORS as exc:
+        print(f"error: invalid config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
+        return 1
+    raw_live = config.get("live")
+    if raw_live is None:
+        print(
+            "error: config has no live: block — the live subcommand needs one "
+            "(phase3-spec §4). Add it to the YAML and re-run.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        live_cfg = LiveConfig.from_dict(raw_live)
+    except ValueError as exc:
+        print(f"error: invalid live: config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
+        return 1
+    if live_cfg.mode is ExecutionMode.PAPER:
+        print(
+            "error: live.mode is 'paper' — use the paper subcommand for paper "
+            "runs; the live subcommand needs testnet_live or mainnet_tiny.",
+            file=sys.stderr,
+        )
+        return 1
+    # The AI gate (risk:) and the live hard caps (live.safety:) must agree on
+    # the sizing regime before PR 5 wires them into one loop — a divergent
+    # pair is a config mistake today, not a runtime surprise later.
+    try:
+        risk_cfg = RiskConfig.from_dict(config.get("risk"))
+        validate_live_risk_consistency(live_cfg, risk_cfg)
+    except ValueError as exc:
+        print(
+            f"error: invalid risk:/live: config — {exc}. Fix the YAML and re-run.", file=sys.stderr
+        )
+        return 1
+
+    addr = wallet_address(config)
+    if not addr:
+        print(
+            "error: wallet_address is not configured — the live subcommand needs "
+            "the main wallet address for agent authorization and account reads.",
+            file=sys.stderr,
+        )
+        return 1
+
+    env_var = agent_key_env_var(live_cfg.network)
+    agent_key = load_agent_key(live_cfg.network)
+    if agent_key is None:
+        if live_cfg.require_agent_wallet:
+            print(
+                f"error: {env_var} is not set but live.require_agent_wallet is "
+                f"true — export the {live_cfg.network} agent key or set "
+                f"require_agent_wallet: false for a keyless gate check. "
+                f"({dotenv_diagnosis(env_var)}.)",
+                file=sys.stderr,
+            )
+            return 1
+        if live_cfg.allow_real_orders:
+            # §6 rule 6: a missing agent key can never mean "orders still on".
+            # An operator who asked for real orders and has no key almost
+            # certainly wants to know loudly — same hard-fail treatment as the
+            # paper+allow_real_orders contradiction, not a silent downgrade
+            # into an order-less run.
+            print(
+                f"error: live.allow_real_orders is true but {env_var} is not "
+                f"set (§6 rule 6) — export the {live_cfg.network} agent key, or "
+                "set allow_real_orders: false for a keyless gate check. "
+                f"({dotenv_diagnosis(env_var)}.)",
+                file=sys.stderr,
+            )
+            return 1
+
+    try:
+        # Live runs are pinned to ``live.network``, not the top-level Phase 1/2
+        # ``network:`` key — the override keeps ``network_timeout_s`` resolution
+        # in its one seam instead of re-implementing it here.
+        client = HyperliquidClient.from_config(config, network=live_cfg.network)
+    except ExchangeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    auth = None
+    if agent_key is not None:
+        # §6.1: run the authorization check whenever a key is present — even
+        # with real orders off, a bad key/approval is operator-actionable now.
+        try:
+            auth = verify_agent_authorization(client.info, wallet_address=addr, agent_key=agent_key)
+        except (AgentAuthorizationError, ExchangeError) as exc:
+            print(f"error: agent authorization failed — {exc}", file=sys.stderr)
+            return 1
+        print(
+            f"agent {auth.agent_address} authorized for {addr} until "
+            f"{auth.valid_until.isoformat()}",
+            file=sys.stderr,
+        )
+
+    try:
+        snapshot = HyperliquidAccount(client).get_account_snapshot(addr)
+    except ExchangeError as exc:
+        print(f"error: account read failed — {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(
+            f"error: account snapshot unusable (margin-called / empty / invalid?) — {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    caps = compute_notional_caps(snapshot.account_value, live_cfg.safety)
+    # §5 rule 3: compute AND record both caps at startup.
+    logger.info(
+        "startup caps for %s: account_equity=%s pct_cap_notional=%s effective_notional_cap=%s",
+        live_cfg.mode.value,
+        snapshot.account_value,
+        caps.pct_cap_notional,
+        caps.effective_notional_cap,
+    )
+    if caps.below_exchange_minimum:
+        print(
+            f"error: effective_notional_cap ({caps.effective_notional_cap} USDC) "
+            f"is below the exchange minimum order value "
+            f"({EXCHANGE_MIN_ORDER_NOTIONAL_USDC} USDC) — the run could never "
+            "place an order (§5 rule 4). Fund the account or raise the caps.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if agent_key is not None:
+        # Prove the signed transport end-to-end (construction + a read on the
+        # live network) so a bad SDK/network surfaces now, not on the first
+        # real order in a later PR. Still zero order methods exposed.
+        try:
+            signed = HyperliquidSignedClient(
+                live_cfg.network, agent_key, wallet_address=addr, timeout=client.timeout
+            )
+            signed.health_check()
+        except ExchangeError as exc:
+            print(f"error: signed client health check failed — {exc}", file=sys.stderr)
+            return 1
+        print(f"signed client healthy: {signed!r}", file=sys.stderr)
+
+    print(f"mode: {live_cfg.mode.value}")
+    print(f"network: {live_cfg.network}")
+    print(f"allow_real_orders: {'true' if live_cfg.allow_real_orders else 'false'}")
+    print(f"account_equity: {snapshot.account_value} USDC")
+    print(f"pct_cap_notional: {caps.pct_cap_notional} USDC")
+    print(f"effective_notional_cap: {caps.effective_notional_cap} USDC")
+    print(
+        "live startup gates OK — exiting (PR 1 skeleton; the trading loop arrives in a later PR).",
+        file=sys.stderr,
+    )
+    return 0
 
 
 # --------------------------------------------------------------------------

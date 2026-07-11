@@ -287,7 +287,12 @@ HYPERLIQUID_AGENT_KEY_MAINNET   # mainnet agent wallet private key
 3. `.env` 與 `*.local.yaml` 必須 gitignored。
 4. Main wallet private key 永遠不得提供給本系統。
 5. Agent wallet 只能交易，不能提款。
-6. 若對應網路的 agent key 缺失，allow_real_orders 必須被強制視為 false。
+6. 若對應網路的 agent key 缺失，系統不得以 allow_real_orders = true 運行：
+   config 設了 `allow_real_orders: true` 而 key 缺失時，啟動必須以具名錯誤
+   拒絕（與 paper + allow_real_orders 的矛盾同等對待，不做靜默降級）；
+   keyless 的 gate 檢查一律以 `allow_real_orders: false` 明示。
+   （PR 1 修訂：由字面「強制視為 false」改為硬失敗——設了 true 卻沒 key
+   幾乎必是操作錯誤，應該大聲失敗而不是跑一個永遠下不了單的迴圈。）
 
 ### 6.1 啟動授權驗證（v3 新增）
 
@@ -1249,17 +1254,21 @@ config gate → run mainnet_tiny 30 cycles。
 
 ## 24. Setup and Run
 
+**（PR 1 修訂）**mode / network / allow_real_orders / symbol 一律由 YAML 的
+`live:` 區塊提供（見 §4），CLI 不提供對應 flags——長駐（systemd）部署下
+flag 無法跨重啟存續，而 `--allow-real-orders` 若寫死在 unit file 裡也就
+失去「每次都要明確重打」的安全價值；改由嚴格驗證的 config 檔承擔這個
+gate，與本模組其餘 config 的風格一致。
+
 ### 24.1 Testnet Live
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-...
 export HYPERLIQUID_AGENT_KEY_TESTNET=...
 
-python -m contrib.hyperliquid_perp.main \
-  --mode testnet_live \
-  --network testnet \
-  --allow-real-orders \
-  --coin BTC
+# configs/hyperliquid.local.yaml 的 live: 區塊：
+#   mode: testnet_live / network: testnet / allow_real_orders: true / safety.allowed_symbols: [BTC]
+python -m contrib.hyperliquid_perp live --config configs/hyperliquid.local.yaml
 ```
 
 ### 24.2 Mainnet Tiny
@@ -1268,11 +1277,8 @@ python -m contrib.hyperliquid_perp.main \
 export OPENROUTER_API_KEY=sk-or-...
 export HYPERLIQUID_AGENT_KEY_MAINNET=...
 
-python -m contrib.hyperliquid_perp.main \
-  --mode mainnet_tiny \
-  --network mainnet \
-  --allow-real-orders \
-  --coin BTC
+# live: 區塊改為 mode: mainnet_tiny / network: mainnet
+python -m contrib.hyperliquid_perp live --config configs/hyperliquid.local.yaml
 ```
 
 mainnet_tiny 必須通過 hard config gate，否則拒絕啟動。

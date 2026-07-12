@@ -247,13 +247,19 @@ class KillSwitchManager:
             oid = str(order.get("oid", "?"))
             coin = order.get("coin")
             cloid = order.get("cloid")
-            row = repo.get_cloid_by_hex(self._db.conn, cloid) if isinstance(cloid, str) else None
-            if row is None or coin is None:
-                # §19.3: unknown cloid (or none) = non-bot-owned; §25 — never
-                # manage it. PR 4's reconciliation escalates to manual safe mode.
-                skipped_non_bot.append(oid)
-                continue
             try:
+                # The ownership lookup sits INSIDE the per-order guard: a
+                # repo-layer error here (e.g. lock contention) is the same
+                # must-not-stop-the-sweep class as a failed cancel.
+                row = (
+                    repo.get_cloid_by_hex(self._db.conn, cloid) if isinstance(cloid, str) else None
+                )
+                if row is None or coin is None:
+                    # §19.3: unknown cloid (or none) = non-bot-owned; §25 —
+                    # never manage it. PR 4's reconciliation escalates to
+                    # manual safe mode.
+                    skipped_non_bot.append(oid)
+                    continue
                 self._cancel_with_evidence(
                     coin=coin, cloid_hex=cloid, cloid_logical=row["cloid_logical"]
                 )

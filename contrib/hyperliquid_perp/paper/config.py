@@ -17,6 +17,7 @@ from ..domains.perp.config_coercion import (
     config_overrides,
     decimal_from_yaml,
     int_from_yaml,
+    str_from_yaml,
 )
 from .twap import SLICE_INTERVAL_SECONDS
 
@@ -66,7 +67,10 @@ class InitialPosition:
                 f"initial position missing key(s): {', '.join(map(repr, sorted(missing)))}"
             )
         return cls(
-            coin=str(raw["coin"]),
+            # str_from_yaml, not str(): the only downstream check is non-empty
+            # (an open pattern), so YAML `coin: true` would otherwise seed a
+            # position on the literal symbol "True".
+            coin=str_from_yaml(raw["coin"]),
             size=decimal_from_yaml(raw["size"]),
             entry_price=decimal_from_yaml(raw["entry_price"]),
         )

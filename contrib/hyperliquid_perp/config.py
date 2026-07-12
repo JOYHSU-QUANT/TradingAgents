@@ -20,6 +20,12 @@ _EXAMPLE = _CONFIG_DIR / "hyperliquid.example.yaml"
 # Sentinel placeholder in the example file — treated as "no wallet configured".
 _WALLET_PLACEHOLDER = "0xYOUR..."
 
+# The legal network vocabulary, shared with live/config.py's ``live.network``
+# validation. Deliberately duplicated from sdk_client._BASE_URLS (not imported)
+# to keep this module free of the heavy SDK import that --context-only relies
+# on being cheap.
+LEGAL_NETWORKS = ("mainnet", "testnet")
+
 # Everything load_config can raise for an operator config mistake — a missing or
 # unreadable path (OSError), a YAML syntax error, or a failed validation below.
 # Callers turn any of these into a named exit, never a raw traceback; the list
@@ -54,6 +60,7 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset(
         "risk",
         "decision",
         "paper_trading",
+        "live",
     }
 )
 
@@ -194,8 +201,10 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     # block (``market_data: 5``, ``coins: BTC``) survives key validation and then
     # blows up deep in the run — ``5.get(...)`` (AttributeError) or ``"BTC"[0]``
     # silently taking the first character — instead of a clean exit-1 here. The
-    # ``risk:``/``decision:`` blocks are shape-checked by their own from_dict.
-    for key in ("market_data", "engine", "paper_trading"):
+    # ``risk:``/``decision:``/``live:`` blocks are shape-checked by their own
+    # from_dict (``live:`` additionally here, so a scalar ``live: true`` fails
+    # at load even on paths that never parse the block).
+    for key in ("market_data", "engine", "paper_trading", "live"):
         val = config.get(key)
         if val is not None and not isinstance(val, dict):
             raise ValueError(f"{key!r} must be a mapping, got {val!r}")
@@ -207,11 +216,11 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     # surfaces as an exit-2 traceback instead of a named config error. Validate
     # up front so an operator typo stays in the CONFIG_LOAD_ERRORS lane —
     # sdk_client's own ValueError remains the standalone defense. The legal
-    # network set is duplicated here (not imported) to keep this module free of
-    # the heavy SDK import that --context-only relies on being cheap.
+    # network set lives on LEGAL_NETWORKS above (see its comment for why it is
+    # not imported from sdk_client).
     network = config.get("network")
     if network is not None and (
-        not isinstance(network, str) or network.strip().lower() not in ("mainnet", "testnet")
+        not isinstance(network, str) or network.strip().lower() not in LEGAL_NETWORKS
     ):
         raise ValueError(f"'network' must be 'mainnet' or 'testnet', got {network!r}")
     timeout = config.get("network_timeout_s")
@@ -225,6 +234,38 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     addr = config.get("wallet_address")
     if addr is not None and not isinstance(addr, str):
         raise ValueError(f"'wallet_address' must be a string, got {addr!r}")
+    # A present live: block is deep-validated on EVERY load, not just by the
+    # live subcommand: a staged-but-broken block (deploy workflow: edit config,
+    # restart under systemd) would otherwise ride along with paper for days and
+    # only fail at the moment of flipping to live — the highest-stakes moment.
+    live_raw = config.get("live")
+    if live_raw is not None:
+        # Lazy import: live.config pulls in the risk-gate domain module, which
+        # --context-only smoke runs should not pay for unless a live: block
+        # exists. (No cycle: live.config imports LEGAL_NETWORKS from this
+        # module at import time, which is fine inside a function body here.)
+        from .domains.perp.risk_gate import RiskConfig
+        from .live.config import LiveConfig, validate_live_risk_consistency
+
+        try:
+            live_cfg = LiveConfig.from_dict(live_raw)
+        except ValueError as exc:
+            raise ValueError(f"invalid live: config — {exc}") from None
+        # A staged live: block also pins its companions: risk: and its three
+        # cross-checked fields must be operator-written, and the two blocks
+        # must agree NOW, not at the flip-to-live moment (§24 — see
+        # validate_live_risk_consistency for the vacuous-pass rationale).
+        raw_risk = config.get("risk")
+        if raw_risk is None:
+            raise ValueError(
+                "config has a live: block but no risk: block — live startup "
+                "cross-checks risk: against live.safety, so a config staged "
+                "for live must write risk: explicitly"
+            )
+        try:
+            validate_live_risk_consistency(live_cfg, RiskConfig.from_dict(raw_risk), raw_risk)
+        except ValueError as exc:
+            raise ValueError(f"invalid risk:/live: config — {exc}") from None
     return config
 
 

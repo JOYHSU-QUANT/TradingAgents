@@ -2,10 +2,12 @@
 
 Generic "YAML scalar → typed value" helpers with no decision-contract logic:
 :func:`config_overrides` builds coerced kwargs for a config dataclass from a
-raw YAML block, and :func:`decimal_from_yaml` / :func:`int_from_yaml` are the
-scalar converters it dispatches to. Used by ``risk_gate.RiskConfig``,
-``target_decision.DecisionConfig``, and ``paper.config.PaperTradingConfig``,
-so they live here rather than in any one domain module.
+raw YAML block, and :func:`decimal_from_yaml` / :func:`int_from_yaml` /
+:func:`bool_from_yaml` / :func:`str_from_yaml` are the scalar converters it
+dispatches to. Used by
+``risk_gate.RiskConfig``, ``target_decision.DecisionConfig``,
+``paper.config.PaperTradingConfig``, and ``live.config.LiveConfig``, so they
+live here rather than in any one domain module.
 
 Everything here is pure (no I/O, no clock); amounts are :class:`~decimal.Decimal`.
 """
@@ -17,10 +19,25 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 __all__ = [
+    "bool_from_yaml",
     "config_overrides",
     "decimal_from_yaml",
     "int_from_yaml",
+    "str_from_yaml",
 ]
+
+
+def bool_from_yaml(value: object) -> bool:
+    """Coerce a YAML scalar to bool, accepting only genuine YAML booleans.
+
+    ``bool(value)`` would read any non-empty string — including ``"false"``
+    quoted by accident — as True. For gate fields like ``allow_real_orders``
+    that inversion is the difference between a dry run and real money, so
+    anything that is not already a bool fails loud.
+    """
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"expected true/false, got {value!r}")
 
 
 def decimal_from_yaml(value: object) -> Decimal:
@@ -60,14 +77,28 @@ def int_from_yaml(value: object) -> int:
         raise ValueError(f"expected an integer, got {value!r}") from None
 
 
+def str_from_yaml(value: object) -> str:
+    """Coerce a YAML scalar to str, accepting only genuine YAML strings.
+
+    ``str(value)`` would render any scalar — YAML ``true`` becomes ``"True"``,
+    a bare ``0x123`` parsed as an int becomes its decimal rendering — and a
+    field validated by an *open* pattern (a regex or non-empty check, e.g.
+    ``live.order_owner_prefix``) would accept the rendering as if the operator
+    wrote it. A wrong YAML type must fail loud, not pass as its repr.
+    """
+    if isinstance(value, str):
+        return value
+    raise ValueError(f"expected a string, got {value!r}")
+
+
 def config_overrides(
     cfg: dict | None, converters: Mapping[str, Callable[[Any], Any]]
 ) -> dict[str, Any]:
     """Coerced kwargs for a config dataclass from a raw YAML block.
 
-    The single YAML-coercion seam shared by ``risk_gate.RiskConfig``,
-    ``target_decision.DecisionConfig``, and ``paper.config.PaperTradingConfig``
-    (see the module docstring). Only keys that are present *and* non-null are
+    The single YAML-coercion seam shared by every config dataclass (see the
+    module docstring for the consumer list — it is not duplicated here so the
+    two can never drift). Only keys that are present *and* non-null are
     returned, so an absent or blank YAML key falls back to the dataclass field
     default — each default is declared exactly once, on the field. A value the
     converter rejects re-raises with the config key named, so the operator

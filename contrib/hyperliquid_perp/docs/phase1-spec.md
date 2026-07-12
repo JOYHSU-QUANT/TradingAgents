@@ -65,7 +65,7 @@ adapter:
 | Secret | Where | Phase |
 |---|---|---|
 | `OPENROUTER_API_KEY` | env var (one key, all OpenRouter models) | 1 — only needed to run the full engine; **not** needed for `--context-only` |
-| `HYPERLIQUID_AGENT_KEY` | env var | 3 only — an **agent/API wallet** key (can trade, cannot withdraw), never the master key |
+| `HYPERLIQUID_AGENT_KEY_TESTNET` / `HYPERLIQUID_AGENT_KEY_MAINNET` | env var (one per network) | 3 only — an **agent/API wallet** key (can trade, cannot withdraw), never the master key |
 
 - The private key never goes in any yaml or committed file. `.gitignore` must
   cover `.env` and `*.local.yaml`.

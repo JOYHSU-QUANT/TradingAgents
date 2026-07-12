@@ -82,6 +82,14 @@ def test_from_config_defaults_timeout_to_30s(monkeypatch):
     assert captured["timeout"] == 30.0
 
 
+def test_direct_construction_defaults_timeout_to_30s(monkeypatch):
+    # The same hazard guards the raw __init__: skipping from_config must not
+    # silently buy an unbounded hang.
+    captured = _capture_info_kwargs(monkeypatch)
+    HyperliquidClient("mainnet")
+    assert captured["timeout"] == 30.0
+
+
 def test_from_config_reads_network_timeout_s(monkeypatch):
     captured = _capture_info_kwargs(monkeypatch)
     HyperliquidClient.from_config({"network": "mainnet", "network_timeout_s": 5})
@@ -93,6 +101,28 @@ def test_from_config_explicit_timeout_overrides_config(monkeypatch):
     captured = _capture_info_kwargs(monkeypatch)
     HyperliquidClient.from_config({"network_timeout_s": 5}, timeout=12.0)
     assert captured["timeout"] == 12.0
+
+
+def test_from_config_network_override_wins_over_config(monkeypatch):
+    # _cmd_live pins the client to live.network via the explicit kwarg; a stale
+    # top-level `network: mainnet` in the same YAML must NOT win for a
+    # testnet_live run — the exact §3.1 "wrong network by accident" class.
+    _capture_info_kwargs(monkeypatch)
+    client = HyperliquidClient.from_config({"network": "mainnet"}, network="testnet")
+    assert client.network == "testnet"
+
+
+def test_from_config_without_override_reads_config_network(monkeypatch):
+    _capture_info_kwargs(monkeypatch)
+    client = HyperliquidClient.from_config({"network": "testnet"})
+    assert client.network == "testnet"
+
+
+def test_from_config_defaults_to_mainnet(monkeypatch):
+    # No override, no config key: the Phase 1/2 default stands.
+    _capture_info_kwargs(monkeypatch)
+    client = HyperliquidClient.from_config({})
+    assert client.network == "mainnet"
 
 
 def test_from_config_null_network_timeout_falls_back_to_default(monkeypatch):
@@ -115,6 +145,19 @@ def test_info_typeerror_is_translated_to_exchange_error(monkeypatch):
 
     monkeypatch.setattr("contrib.hyperliquid_perp.exchanges.hyperliquid.sdk_client.Info", _OldInfo)
     with pytest.raises(ExchangeError, match="incompatible"):
+        HyperliquidClient("mainnet")
+
+
+def test_construction_network_failure_is_wrapped_as_request_error(monkeypatch):
+    # Info() auto-fetches perp meta at construction — a network failure there
+    # must reach callers as ExchangeRequestError (their named exit-1 lane), not
+    # as a raw requests exception that lands in the generic exit-2 bucket.
+    class _NetBoom:
+        def __init__(self, *, base_url, skip_ws, spot_meta, timeout):
+            raise ConnectionError("dns down")
+
+    monkeypatch.setattr("contrib.hyperliquid_perp.exchanges.hyperliquid.sdk_client.Info", _NetBoom)
+    with pytest.raises(ExchangeRequestError, match="dns down"):
         HyperliquidClient("mainnet")
 
 

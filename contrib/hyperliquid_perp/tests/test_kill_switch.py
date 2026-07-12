@@ -1,0 +1,319 @@
+"""Tests for the §18 dead man's switch manager (fake client, manual clock)."""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeRequestError
+from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import CancelAck
+from contrib.hyperliquid_perp.live.config import ExecutionMode, KillSwitchConfig
+from contrib.hyperliquid_perp.live.kill_switch import KillSwitchManager
+from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
+from contrib.hyperliquid_perp.paper.clock import ManualClock
+from contrib.hyperliquid_perp.persistence import repository as repo
+from contrib.hyperliquid_perp.persistence.db import Database
+
+_NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
+_HEX = "0x" + "ab" * 16
+_HEX2 = "0x" + "cd" * 16
+
+
+class _FakeClient:
+    """Mirrors the real client: the bound §4.1 gate judges every mutation."""
+
+    def __init__(self, gate):
+        self._gate = gate
+        self.schedule_calls: list[datetime] = []
+        self.schedule_error: Exception | None = None
+        self.open_orders_result: list | Exception = []
+        self.cancel_calls: list[tuple[str, str]] = []
+        self.cancel_results: dict[str, CancelAck | Exception] = {}
+
+    def schedule_cancel(self, *, cancel_at):
+        self._gate.require_exchange_action()
+        if self.schedule_error is not None:
+            raise self.schedule_error
+        self.schedule_calls.append(cancel_at)
+
+    def open_orders(self):
+        if isinstance(self.open_orders_result, Exception):
+            raise self.open_orders_result
+        return self.open_orders_result
+
+    def cancel_by_cloid(self, *, coin, cloid_hex):
+        self._gate.require_exchange_action()
+        self.cancel_calls.append((coin, cloid_hex))
+        result = self.cancel_results.get(cloid_hex, CancelAck(success=True))
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+def _gate() -> RealOrderGate:
+    return RealOrderGate(
+        allow_real_orders=True,
+        mode=ExecutionMode.TESTNET_LIVE,
+        allowed_symbols=("BTC",),
+        agent_authorized=True,
+    )
+
+
+@pytest.fixture
+def env():
+    db = Database(":memory:")
+    gate = _gate()
+    client = _FakeClient(gate)
+    clock = ManualClock(_NOW)
+    manager = KillSwitchManager(
+        client=client,
+        gate=gate,
+        db=db,
+        run_id="r",
+        config=KillSwitchConfig(),
+        clock=clock,
+    )
+    yield db, client, gate, clock, manager
+    db.close()
+
+
+def _event_types(db):
+    return [e["event_type"] for e in repo.iter_kill_switch_events(db.conn, "r")]
+
+
+def _register_cloid(db, *, logical, hex_id):
+    with db.transaction() as conn:
+        repo.insert_cloid_mapping(
+            conn,
+            cloid_logical=logical,
+            cloid_hex=hex_id,
+            run_id="r",
+            symbol="BTC",
+            order_role="entry",
+        )
+
+
+def test_disabled_config_cannot_build_a_manager():
+    gate = _gate()
+    with pytest.raises(ValueError, match="enabled"):
+        KillSwitchManager(
+            client=_FakeClient(gate),
+            gate=gate,
+            db=Database(":memory:"),
+            run_id="r",
+            config=KillSwitchConfig(enabled=False),
+        )
+
+
+def test_arm_schedules_the_120s_deadline_and_records(env):
+    db, client, gate, clock, manager = env
+    manager.arm()
+    assert manager.armed
+    assert gate.kill_switch_active
+    # §18.1 default: deadline = now + 120s.
+    assert client.schedule_calls == [_NOW + timedelta(seconds=120)]
+    assert _event_types(db) == ["kill_switch_armed"]
+
+
+def test_arm_failure_propagates_hard(env):
+    db, client, gate, clock, manager = env
+    client.schedule_error = ExchangeRequestError("down")
+    with pytest.raises(ExchangeRequestError):
+        manager.arm()
+    assert not manager.armed
+    assert not gate.kill_switch_active
+
+
+def test_refresh_cadence_is_30s(env):
+    db, client, gate, clock, manager = env
+    manager.arm()
+    assert not manager.refresh_due()
+    clock.advance(29)
+    assert not manager.refresh_due()
+    manager.tick()
+    assert len(client.schedule_calls) == 1  # not due yet — no extra call
+    clock.advance(1)
+    assert manager.refresh_due()
+    manager.tick()
+    assert len(client.schedule_calls) == 2
+    # The refreshed deadline is measured from the refresh instant.
+    assert client.schedule_calls[1] == _NOW + timedelta(seconds=30 + 120)
+    assert _event_types(db) == ["kill_switch_armed", "kill_switch_refreshed"]
+
+
+def test_refresh_before_arm_is_a_wiring_error(env):
+    _, _, _, _, manager = env
+    with pytest.raises(RuntimeError, match="before arm"):
+        manager.refresh()
+
+
+def test_refresh_failure_records_flags_and_does_not_raise(env):
+    db, client, gate, clock, manager = env
+    manager.arm()
+    clock.advance(30)
+    client.schedule_error = ExchangeRequestError("timeout")
+    assert manager.refresh() is False
+    assert manager.stop_new_orders
+    assert not gate.kill_switch_active  # §4.1: no new order can pass
+    events = repo.iter_kill_switch_events(db.conn, "r")
+    assert _event_types(db) == ["kill_switch_armed", "kill_switch_refresh_failed"]
+    assert "timeout" in events[1]["error_message"]
+
+
+def test_gate_rejection_during_refresh_is_a_recorded_failure_not_a_crash(env):
+    # The client's bound gate raising LiveOrderGateRejected (not an
+    # ExchangeError) must land in the same recorded-failure lane.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    clock.advance(30)
+    gate.agent_authorized = False  # the client's own gate now refuses
+    assert manager.refresh() is False
+    assert manager.stop_new_orders
+    assert _event_types(db) == ["kill_switch_armed", "kill_switch_refresh_failed"]
+
+
+def test_recovered_refresh_rearms_exchange_but_gate_stays_closed(env):
+    db, client, gate, clock, manager = env
+    manager.arm()
+    clock.advance(30)
+    client.schedule_error = ExchangeRequestError("timeout")
+    manager.refresh()
+    clock.advance(30)
+    client.schedule_error = None
+    assert manager.refresh() is True
+    # The exchange-side switch is re-armed (a second schedule call landed)...
+    assert len(client.schedule_calls) == 2
+    # ...but §13.4 requires a reconciliation pass (PR 4) before trading
+    # resumes: one lucky refresh must NOT re-open the §4.1 gate.
+    assert manager.stop_new_orders
+    assert not gate.kill_switch_active
+    assert _event_types(db) == [
+        "kill_switch_armed",
+        "kill_switch_refresh_failed",
+        "kill_switch_refreshed",
+    ]
+
+
+def test_shutdown_cancels_bot_owned_only_with_evidence_rows(env):
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _register_cloid(db, logical="log-1", hex_id=_HEX)
+    client.open_orders_result = [
+        {"oid": 1, "coin": "BTC", "cloid": _HEX},  # bot-owned → cancel
+        {"oid": 2, "coin": "BTC", "cloid": "0x" + "ff" * 16},  # unknown → skip
+        {"oid": 3, "coin": "BTC"},  # no cloid → skip
+    ]
+    manager.shutdown()
+    assert client.cancel_calls == [("BTC", _HEX)]
+    events = repo.iter_kill_switch_events(db.conn, "r")
+    assert _event_types(db) == [
+        "kill_switch_armed",
+        "shutdown_cancel_orders_started",
+        "shutdown_cancel_orders_completed",
+    ]
+    detail = json.loads(events[-1]["detail"])
+    assert detail == {"canceled": ["1"], "skipped_non_bot": ["2", "3"], "failures": []}
+    # §16.5: the cancel round-trip left its own evidence row.
+    attempts = repo.iter_live_order_attempts(db.conn, "r", cloid_hex=_HEX)
+    assert [(a["action"], a["status"]) for a in attempts] == [("cancel_by_cloid", "acknowledged")]
+
+
+def test_shutdown_settles_the_local_order_row(env):
+    from decimal import Decimal
+
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _register_cloid(db, logical="log-1", hex_id=_HEX)
+    with db.transaction() as conn:
+        repo.insert_order(
+            conn,
+            order_id="o1",
+            mode="live",
+            run_id="r",
+            symbol="BTC",
+            order_role="entry",
+            side="buy",
+            order_type="ioc_limit",
+            qty=Decimal("0.01"),
+            status="open",
+            cloid_logical="log-1",
+            cloid_hex=_HEX,
+        )
+    client.open_orders_result = [{"oid": 1, "coin": "BTC", "cloid": _HEX}]
+    manager.shutdown()
+    order = repo.get_order(db.conn, "o1")
+    assert order["status"] == "canceled"
+    assert order["cancel_reason"] == "shutdown_cancel"
+    assert order["canceled_at"] is not None
+
+
+def test_shutdown_survives_per_order_cancel_failures(env):
+    db, client, gate, clock, manager = env
+    manager.arm()
+    for i, hx in enumerate((_HEX, _HEX2)):
+        _register_cloid(db, logical=f"log-{i}", hex_id=hx)
+    client.open_orders_result = [
+        {"oid": 1, "coin": "BTC", "cloid": _HEX},
+        {"oid": 2, "coin": "BTC", "cloid": _HEX2},
+    ]
+    client.cancel_results[_HEX] = ExchangeRequestError("boom")
+    manager.shutdown()
+    # The failure did not stop the sweep; order 2 still got its cancel.
+    assert [c[1] for c in client.cancel_calls] == [_HEX, _HEX2]
+    detail = json.loads(repo.iter_kill_switch_events(db.conn, "r")[-1]["detail"])
+    assert detail["canceled"] == ["2"]
+    assert len(detail["failures"]) == 1 and "boom" in detail["failures"][0]
+    # Both round-trips are on the evidence trail, each with its outcome.
+    failed = repo.iter_live_order_attempts(db.conn, "r", cloid_hex=_HEX)
+    assert [a["status"] for a in failed] == ["failed"]
+    ok = repo.iter_live_order_attempts(db.conn, "r", cloid_hex=_HEX2)
+    assert [a["status"] for a in ok] == ["acknowledged"]
+
+
+def test_shutdown_records_a_rejected_cancel_as_a_failure(env):
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _register_cloid(db, logical="log-1", hex_id=_HEX)
+    client.open_orders_result = [{"oid": 1, "coin": "BTC", "cloid": _HEX}]
+    client.cancel_results[_HEX] = CancelAck(success=False, error="Order already canceled")
+    manager.shutdown()
+    detail = json.loads(repo.iter_kill_switch_events(db.conn, "r")[-1]["detail"])
+    assert detail["canceled"] == []
+    assert "already canceled" in detail["failures"][0]
+    attempts = repo.iter_live_order_attempts(db.conn, "r", cloid_hex=_HEX)
+    assert [a["status"] for a in attempts] == ["rejected"]
+
+
+def test_shutdown_gate_rejection_does_not_blow_through_the_sweep(env):
+    db, client, gate, clock, manager = env
+    manager.arm()
+    for i, hx in enumerate((_HEX, _HEX2)):
+        _register_cloid(db, logical=f"log-{i}", hex_id=hx)
+    client.open_orders_result = [
+        {"oid": 1, "coin": "BTC", "cloid": _HEX},
+        {"oid": 2, "coin": "BTC", "cloid": _HEX2},
+    ]
+    gate.agent_authorized = False  # the client's bound gate now refuses
+    manager.shutdown()
+    events = repo.iter_kill_switch_events(db.conn, "r")
+    assert events[-1]["event_type"] == "shutdown_cancel_orders_completed"
+    detail = json.loads(events[-1]["detail"])
+    assert detail["canceled"] == []
+    assert len(detail["failures"]) == 2  # both got their attempt, both recorded
+
+
+def test_shutdown_with_unreachable_exchange_still_completes_the_audit_trail(env):
+    db, client, gate, clock, manager = env
+    manager.arm()
+    client.open_orders_result = ExchangeRequestError("dns down")
+    manager.shutdown()
+    events = repo.iter_kill_switch_events(db.conn, "r")
+    assert events[-1]["event_type"] == "shutdown_cancel_orders_completed"
+    assert "dns down" in events[-1]["error_message"]
+    assert json.loads(events[-1]["detail"]) == {
+        "canceled": [],
+        "skipped_non_bot": [],
+        "failures": [],
+    }

@@ -29,7 +29,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-__all__ = ["decision_attempt_id", "fill_id", "funding_event_id", "slice_id"]
+__all__ = [
+    "decision_attempt_id",
+    "fill_id",
+    "funding_event_id",
+    "live_order_attempt_id",
+    "slice_id",
+]
 
 _SEP = "|"
 
@@ -96,6 +102,26 @@ def funding_event_id(run_id: str, symbol: str, funding_timestamp: datetime) -> s
             _part(run_id, name="run_id"),
             _part(symbol, name="symbol"),
             _part(ts, name="funding_timestamp"),
+        )
+    )
+
+
+def live_order_attempt_id(run_id: str, action: str, target: str, attempt_index: int) -> str:
+    """Unique key for one live exchange round-trip (phase3-spec §8.3).
+
+    ``target`` is the cloid_hex for place / cancel_by_cloid attempts and the
+    exchange order id for a by-oid cancel — whichever identifier the exchange
+    action itself is addressed by. Deterministic for the same reason as
+    ``fill_id``: a crash-retry that re-derives the same (action, target,
+    attempt_index) collides on the PRIMARY KEY instead of silently minting a
+    second row for the same round-trip.
+    """
+    return _SEP.join(
+        (
+            _part(run_id, name="run_id"),
+            _part(action, name="action"),
+            _part(target, name="target"),
+            _part(attempt_index, name="attempt_index"),
         )
     )
 

@@ -2169,6 +2169,7 @@ def live_seams(monkeypatch):
         health_calls=[],
         client_networks=[],
         snapshot_requests=[],
+        signed_gates=[],
     )
 
     class _FakeClient:
@@ -2205,9 +2206,12 @@ def live_seams(monkeypatch):
         )
 
     class _FakeSigned:
-        def __init__(self, network, agent_key, *, wallet_address, timeout=None):
+        def __init__(self, network, agent_key, *, wallet_address, gate, timeout=None):
             self.network = network
             self.wallet_address = wallet_address
+            # PR 2: the §4.1 gate is bound at construction; the config-only
+            # command must hand over a fail-closed gate.
+            state.signed_gates.append(gate)
 
         def health_check(self):
             state.health_calls.append(self.network)

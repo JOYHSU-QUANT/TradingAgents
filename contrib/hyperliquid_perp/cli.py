@@ -378,10 +378,18 @@ def _cmd_live(argv: list[str]) -> int:
                 )
         # Prove the signed transport end-to-end (construction + a read on the
         # live network) so a bad SDK/network surfaces now, not on the first
-        # real order in a later PR. Still zero order methods exposed.
+        # real order in a later PR. The bound gate is fresh-from-config, i.e.
+        # fail-closed: no runtime condition is proven in this config-only
+        # command, so the client could not place an order even if asked.
         try:
+            from .live.order_gate import RealOrderGate
+
             signed = HyperliquidSignedClient(
-                live_cfg.network, agent_key, wallet_address=addr, timeout=client.timeout
+                live_cfg.network,
+                agent_key,
+                wallet_address=addr,
+                gate=RealOrderGate.from_config(live_cfg),
+                timeout=client.timeout,
             )
             signed.health_check()
         except ExchangeError as exc:

@@ -1,39 +1,93 @@
-"""Tests for the signed ``Exchange`` wrapper (PR 1: init + health check only).
+"""Tests for the signed ``Exchange`` wrapper (init, health check, §7 actions).
 
 The SDK ``Exchange`` is stubbed at the module seam (its real __init__ fetches
 perp meta over the network), so what is under test is the wrapper's contract:
 network validation before construction, the spot_meta/timeout defenses, the
-key-hygiene rules, and the version-mismatch triage mirrored from sdk_client.
+key-hygiene rules, the version-mismatch triage mirrored from sdk_client, and
+(PR 2) the §4.1 gating + response parsing of the order/cancel/scheduleCancel
+actions.
 """
 
 from __future__ import annotations
+
+from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
     ExchangeError,
     ExchangeRequestError,
+    MalformedResponseError,
 )
 from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import (
     HyperliquidSignedClient,
+    is_duplicate_cloid_error,
 )
 from contrib.hyperliquid_perp.live.authorization import derive_agent_address
+from contrib.hyperliquid_perp.live.config import ExecutionMode
+from contrib.hyperliquid_perp.live.order_gate import LiveOrderGateRejected, RealOrderGate
 
 _KEY = "0x" + "11" * 32
 _WALLET = "0x" + "aa" * 20
 _SEAM = "contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client.Exchange"
+_CLOID = "0x" + "ab" * 16
+
+
+def _open_gate() -> RealOrderGate:
+    return RealOrderGate(
+        allow_real_orders=True,
+        mode=ExecutionMode.TESTNET_LIVE,
+        allowed_symbols=("BTC",),
+        agent_authorized=True,
+        startup_reconciliation_passed=True,
+        kill_switch_active=True,
+        state_reconciled=True,
+        risk_gate_approved=True,
+    )
+
+
+def _closed_gate() -> RealOrderGate:
+    return RealOrderGate(
+        allow_real_orders=False,
+        mode=ExecutionMode.TESTNET_LIVE,
+        allowed_symbols=("BTC",),
+    )
+
+
+def _client(network="testnet", *, key=_KEY, gate=None, **kwargs) -> HyperliquidSignedClient:
+    """A client with the (now construction-bound) §4.1 gate defaulted open."""
+    return HyperliquidSignedClient(
+        network, key, wallet_address=_WALLET, gate=gate or _open_gate(), **kwargs
+    )
 
 
 class _FakeInfo:
     def __init__(self):
         self.user_state_calls: list[str] = []
         self.user_state_error: Exception | None = None
+        self.query_calls: list = []
+        self.query_result = {"status": "unknownOid"}
+        self.open_orders_result: list = []
 
     def user_state(self, address: str):
         self.user_state_calls.append(address)
         if self.user_state_error is not None:
             raise self.user_state_error
         return {"marginSummary": {}}
+
+    def query_order_by_cloid(self, user, cloid):
+        self.query_calls.append(("cloid", user, cloid))
+        return self.query_result
+
+    def query_order_by_oid(self, user, oid):
+        self.query_calls.append(("oid", user, oid))
+        return self.query_result
+
+    def frontend_open_orders(self, address):
+        self.frontend_open_orders_calls = getattr(self, "frontend_open_orders_calls", [])
+        self.frontend_open_orders_calls.append(address)
+        return self.open_orders_result
 
 
 class _FakeExchange:
@@ -46,6 +100,34 @@ class _FakeExchange:
         self.spot_meta = spot_meta
         self.timeout = timeout
         self.info = _FakeInfo()
+        self.order_calls: list[tuple] = []
+        self.order_result = {
+            "status": "ok",
+            "response": {"type": "order", "data": {"statuses": [{"resting": {"oid": 111}}]}},
+        }
+        self.cancel_calls: list[tuple] = []
+        self.cancel_result = {
+            "status": "ok",
+            "response": {"type": "cancel", "data": {"statuses": ["success"]}},
+        }
+        self.schedule_calls: list[int] = []
+        self.schedule_result = {"status": "ok", "response": {"type": "default"}}
+
+    def order(self, name, is_buy, sz, limit_px, order_type, reduce_only=False, cloid=None):
+        self.order_calls.append((name, is_buy, sz, limit_px, order_type, reduce_only, cloid))
+        return self.order_result
+
+    def cancel(self, name, oid):
+        self.cancel_calls.append(("oid", name, oid))
+        return self.cancel_result
+
+    def cancel_by_cloid(self, name, cloid):
+        self.cancel_calls.append(("cloid", name, cloid))
+        return self.cancel_result
+
+    def schedule_cancel(self, time):
+        self.schedule_calls.append(time)
+        return self.schedule_result
 
 
 @pytest.fixture
@@ -55,12 +137,12 @@ def fake_exchange(monkeypatch):
 
 def test_unknown_network_raises_before_construction():
     with pytest.raises(ValueError, match="network must be one of"):
-        HyperliquidSignedClient("prod", _KEY, wallet_address=_WALLET)
+        _client("prod")
 
 
 def test_construction_pins_base_url_to_live_network(fake_exchange):
-    testnet = HyperliquidSignedClient("testnet", _KEY, wallet_address=_WALLET, timeout=7.0)
-    mainnet = HyperliquidSignedClient("mainnet", _KEY, wallet_address=_WALLET)
+    testnet = _client(timeout=7.0)
+    mainnet = _client("mainnet")
     assert "testnet" in testnet._exchange.base_url
     assert testnet._exchange.base_url != mainnet._exchange.base_url
     assert testnet._exchange.timeout == 7.0
@@ -74,44 +156,249 @@ def test_construction_pins_base_url_to_live_network(fake_exchange):
 
 
 def test_wallet_is_derived_from_the_agent_key(fake_exchange):
-    client = HyperliquidSignedClient("testnet", _KEY, wallet_address=_WALLET)
+    client = _client()
     assert client.agent_address == derive_agent_address(_KEY)
 
 
 def test_malformed_key_is_named_and_never_echoed(fake_exchange):
     bad_key = "0xdeadbeef"
     with pytest.raises(ExchangeError) as excinfo:
-        HyperliquidSignedClient("testnet", bad_key, wallet_address=_WALLET)
+        _client(key=bad_key)
     message = str(excinfo.value)
     assert "malformed" in message
     assert bad_key not in message
     assert excinfo.value.__cause__ is None
 
 
-def test_no_order_methods_exist_in_pr1(fake_exchange):
-    # The PR 1 contract: this wrapper cannot place or cancel anything. If an
-    # order method lands, it must arrive with the §4.1 gate — this test forces
-    # that conversation.
-    client = HyperliquidSignedClient("testnet", _KEY, wallet_address=_WALLET)
-    for forbidden in ("order", "cancel", "cancel_by_cloid", "modify_order", "market_open"):
-        assert not hasattr(client, forbidden)
+# ---- §7 exchange actions (PR 2: they arrived WITH the §4.1 gate) ----------
+
+
+def test_place_ioc_limit_sends_ioc_with_cloid_and_parses_resting(fake_exchange):
+    client = _client()
+    ack = client.place_ioc_limit(
+        coin="BTC",
+        is_buy=True,
+        size=Decimal("0.01"),
+        limit_price=Decimal("100.5"),
+        cloid_hex=_CLOID,
+    )
+    assert ack.status == "resting" and ack.accepted
+    assert ack.exchange_order_id == "111"
+    (name, is_buy, sz, px, order_type, reduce_only, cloid) = client._exchange.order_calls[0]
+    assert (name, is_buy, reduce_only) == ("BTC", True, False)
+    assert order_type == {"limit": {"tif": "Ioc"}}  # §9: every slice is IOC
+    assert sz == 0.01 and px == 100.5  # Decimal→float at the wire boundary
+    assert cloid.to_raw() == _CLOID  # the wire id is the cloid_hex (§8.3 rule 7)
+
+
+def test_place_ioc_limit_parses_filled_and_error_statuses(fake_exchange):
+    client = _client()
+    client._exchange.order_result = {
+        "status": "ok",
+        "response": {
+            "type": "order",
+            "data": {"statuses": [{"filled": {"oid": 7, "totalSz": "0.01", "avgPx": "99.5"}}]},
+        },
+    }
+    ack = client.place_ioc_limit(
+        coin="BTC",
+        is_buy=True,
+        size=Decimal("0.01"),
+        limit_price=Decimal("100"),
+        cloid_hex=_CLOID,
+    )
+    assert ack.status == "filled"
+    assert ack.filled_size == Decimal("0.01") and ack.average_price == Decimal("99.5")
+    client._exchange.order_result = {
+        "status": "ok",
+        "response": {"type": "order", "data": {"statuses": [{"error": "Duplicate cloid"}]}},
+    }
+    ack = client.place_ioc_limit(
+        coin="BTC",
+        is_buy=True,
+        size=Decimal("0.01"),
+        limit_price=Decimal("100"),
+        cloid_hex=_CLOID,
+    )
+    assert ack.status == "error" and not ack.accepted and ack.is_duplicate
+
+
+def test_top_level_err_envelope_becomes_an_error_ack(fake_exchange):
+    client = _client()
+    client._exchange.order_result = {"status": "err", "response": "User or API Wallet invalid"}
+    ack = client.place_ioc_limit(
+        coin="BTC",
+        is_buy=True,
+        size=Decimal("0.01"),
+        limit_price=Decimal("100"),
+        cloid_hex=_CLOID,
+    )
+    assert ack.status == "error" and "invalid" in ack.error
+
+
+def test_multi_status_order_response_is_malformed(fake_exchange):
+    client = _client()
+    client._exchange.order_result = {
+        "status": "ok",
+        "response": {
+            "type": "order",
+            "data": {"statuses": [{"resting": {"oid": 1}}, {"resting": {"oid": 2}}]},
+        },
+    }
+    with pytest.raises(MalformedResponseError, match="expected exactly 1"):
+        client.place_ioc_limit(
+            coin="BTC",
+            is_buy=True,
+            size=Decimal("0.01"),
+            limit_price=Decimal("100"),
+            cloid_hex=_CLOID,
+        )
+
+
+def test_every_mutation_is_gated(fake_exchange):
+    # The §4.1 contract the PR 1 placeholder test existed to force: no order
+    # or cancel unless the construction-bound gate allows it.
+    client = _client(gate=_closed_gate())
+    with pytest.raises(LiveOrderGateRejected):
+        client.place_ioc_limit(
+            coin="BTC",
+            is_buy=True,
+            size=Decimal("0.01"),
+            limit_price=Decimal("100"),
+            cloid_hex=_CLOID,
+        )
+    with pytest.raises(LiveOrderGateRejected):
+        client.cancel_by_oid(coin="BTC", exchange_order_id="1")
+    with pytest.raises(LiveOrderGateRejected):
+        client.cancel_by_cloid(coin="BTC", cloid_hex=_CLOID)
+    with pytest.raises(LiveOrderGateRejected):
+        client.schedule_cancel(cancel_at=datetime.now(timezone.utc))
+    assert client._exchange.order_calls == []
+    assert client._exchange.cancel_calls == []
+    assert client._exchange.schedule_calls == []
+
+
+def test_gate_flags_flipped_after_construction_are_honoured(fake_exchange):
+    # The bound gate is judged live at each call, not snapshotted: the kill
+    # switch manager flips flags on the SAME instance the client holds.
+    gate = _open_gate()
+    client = _client(gate=gate)
+    gate.kill_switch_active = False
+    with pytest.raises(LiveOrderGateRejected, match="kill switch"):
+        client.place_ioc_limit(
+            coin="BTC",
+            is_buy=True,
+            size=Decimal("0.01"),
+            limit_price=Decimal("100"),
+            cloid_hex=_CLOID,
+        )
+    assert client._exchange.order_calls == []
+
+
+def test_order_gate_blocks_full_list_but_cancel_needs_only_the_base(fake_exchange):
+    # §13.1: cancels stay allowed in safe-mode-like states.
+    gate = _open_gate()
+    gate.manual_safe_mode = True
+    client = _client(gate=gate)
+    with pytest.raises(LiveOrderGateRejected):
+        client.place_ioc_limit(
+            coin="BTC",
+            is_buy=True,
+            size=Decimal("0.01"),
+            limit_price=Decimal("100"),
+            cloid_hex=_CLOID,
+        )
+    ack = client.cancel_by_cloid(coin="BTC", cloid_hex=_CLOID)
+    assert ack.success
+
+
+def test_cancel_parses_success_and_error(fake_exchange):
+    client = _client()
+    ack = client.cancel_by_oid(coin="BTC", exchange_order_id="42")
+    assert ack.success
+    assert client._exchange.cancel_calls[0] == ("oid", "BTC", 42)
+    client._exchange.cancel_result = {
+        "status": "ok",
+        "response": {
+            "type": "cancel",
+            "data": {"statuses": [{"error": "Order already canceled"}]},
+        },
+    }
+    ack = client.cancel_by_cloid(coin="BTC", cloid_hex=_CLOID)
+    assert not ack.success and "already canceled" in ack.error
+
+
+def test_unrecognised_cancel_status_is_malformed(fake_exchange):
+    client = _client()
+    client._exchange.cancel_result = {
+        "status": "ok",
+        "response": {"type": "cancel", "data": {"statuses": [123]}},
+    }
+    with pytest.raises(MalformedResponseError, match="cancel status not recognised"):
+        client.cancel_by_oid(coin="BTC", exchange_order_id="42")
+
+
+def test_schedule_cancel_sends_epoch_ms_and_rejects_naive(fake_exchange):
+    client = _client()
+    when = datetime(2026, 7, 12, 8, 2, tzinfo=timezone.utc)
+    client.schedule_cancel(cancel_at=when)
+    assert client._exchange.schedule_calls == [int(when.timestamp() * 1000)]
+    with pytest.raises(ValueError, match="timezone-aware"):
+        client.schedule_cancel(cancel_at=datetime(2026, 7, 12, 8, 2))
+
+
+def test_schedule_cancel_err_envelope_raises_request_error(fake_exchange):
+    client = _client()
+    client._exchange.schedule_result = {"status": "err", "response": "too many triggers"}
+    with pytest.raises(ExchangeRequestError, match="too many triggers"):
+        client.schedule_cancel(cancel_at=datetime.now(timezone.utc))
+
+
+def test_queries_are_read_only_and_ungated(fake_exchange):
+    client = _client()
+    client._exchange.info.query_result = {"status": "unknownOid"}
+    assert client.query_order_by_cloid(_CLOID) == {"status": "unknownOid"}
+    assert client.query_order_by_oid("42") == {"status": "unknownOid"}
+    kinds = [c[0] for c in client._exchange.info.query_calls]
+    assert kinds == ["cloid", "oid"]
+    # Queried against the MAIN wallet, and the cloid goes out in wire form.
+    assert client._exchange.info.query_calls[0][1] == _WALLET
+    assert client._exchange.info.query_calls[0][2].to_raw() == _CLOID
+    assert client._exchange.info.query_calls[1][2] == 42
+
+
+def test_open_orders_uses_the_frontend_endpoint(fake_exchange):
+    # §19.3: the basic openOrders response is not documented to echo cloid;
+    # only frontendOpenOrders carries the metadata the bot-owned lookup needs.
+    client = _client()
+    client._exchange.info.open_orders_result = [{"oid": 1, "coin": "BTC", "cloid": _CLOID}]
+    assert client.open_orders() == [{"oid": 1, "coin": "BTC", "cloid": _CLOID}]
+    assert client._exchange.info.frontend_open_orders_calls == [_WALLET]
+
+
+def test_duplicate_marker_heuristic():
+    assert is_duplicate_cloid_error("Duplicate cloid")
+    assert is_duplicate_cloid_error("order already exists")
+    assert not is_duplicate_cloid_error("Insufficient margin")
+    assert not is_duplicate_cloid_error(None)
+    assert not is_duplicate_cloid_error("")
 
 
 def test_health_check_reads_user_state_via_exchange_transport(fake_exchange):
-    client = HyperliquidSignedClient("testnet", _KEY, wallet_address=_WALLET)
+    client = _client()
     client.health_check()
     assert client._exchange.info.user_state_calls == [_WALLET]
 
 
 def test_health_check_wraps_sdk_errors(fake_exchange):
-    client = HyperliquidSignedClient("testnet", _KEY, wallet_address=_WALLET)
+    client = _client()
     client._exchange.info.user_state_error = ConnectionError("down")
     with pytest.raises(ExchangeRequestError):
         client.health_check()
 
 
 def test_repr_shows_addresses_never_the_key(fake_exchange):
-    client = HyperliquidSignedClient("testnet", _KEY, wallet_address=_WALLET)
+    client = _client()
     text = repr(client)
     assert _WALLET in text
     assert client.agent_address in text
@@ -128,7 +415,7 @@ def test_old_sdk_signature_is_translated_to_exchange_error(monkeypatch):
 
     monkeypatch.setattr(_SEAM, _OldExchange)
     with pytest.raises(ExchangeError, match="incompatible"):
-        HyperliquidSignedClient("testnet", _KEY, wallet_address=_WALLET)
+        _client()
 
 
 def test_construction_network_failure_is_wrapped_as_request_error(monkeypatch):
@@ -143,7 +430,7 @@ def test_construction_network_failure_is_wrapped_as_request_error(monkeypatch):
 
     monkeypatch.setattr(_SEAM, _NetBoom)
     with pytest.raises(ExchangeRequestError, match="dns down"):
-        HyperliquidSignedClient("testnet", _KEY, wallet_address=_WALLET)
+        _client()
 
 
 def test_internal_typeerror_is_not_mislabeled_as_version_mismatch(monkeypatch):
@@ -157,4 +444,4 @@ def test_internal_typeerror_is_not_mislabeled_as_version_mismatch(monkeypatch):
 
     monkeypatch.setattr(_SEAM, _InternalBoom)
     with pytest.raises(TypeError, match="not subscriptable"):
-        HyperliquidSignedClient("testnet", _KEY, wallet_address=_WALLET)
+        _client()

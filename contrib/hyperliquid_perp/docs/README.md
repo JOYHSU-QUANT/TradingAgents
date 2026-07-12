@@ -198,8 +198,8 @@ paper engine 零改動，共用 scheduler／RiskGate／persistence／純函式�
 
 | 模組 | PR | 說明 |
 |---|---|---|
-| `live/config.py`＋`live/secrets.py`＋`live/authorization.py`＋`exchanges/hyperliquid/signed_client.py`＋CLI `live` 子命令 skeleton ✅ | PR 1 | typed `live:` 區塊（mode 必填、mainnet_live 拒絕、§5 ceiling 檢查、risk↔live 一致性、config load 即深度驗證、真單雙旗宣告 §6 規則 7、明寫 `risk:` 區塊到欄位層級——三個交叉檢查欄位缺寫即拒，config load 即驗）、分網路 agent key（缺 key＋`allow_real_orders: true` 拒絕啟動）、§6.1 啟動授權驗證、signed `Exchange` wrapper（僅初始化＋健康檢查，無下單方法）（phase3-spec §3–§6、§24）。 |
-| schema v6 ＋ cloid ＋ 下單／取消／orderStatus ＋ kill switch | PR 2 | cloid_registry、live order persistence、scheduleCancel（§7–§8、§16、§18）。 |
+| `live/config.py`＋`live/secrets.py`＋`live/authorization.py`＋`exchanges/hyperliquid/signed_client.py`＋CLI `live` 子命令 skeleton ✅ | PR 1 | typed `live:` 區塊（mode 必填、mainnet_live 拒絕、§5 ceiling 檢查、risk↔live 一致性、config load 即深度驗證、真單雙旗宣告 §6 規則 7、明寫 `risk:` 區塊到欄位層級——三個交叉檢查欄位缺寫即拒，config load 即驗）、分網路 agent key（缺 key＋`allow_real_orders: true` 拒絕啟動）、§6.1 啟動授權驗證、signed `Exchange` wrapper（PR 1 僅初始化＋健康檢查；下單方法於 PR 2 隨 §4.1 gate 一同進場）（phase3-spec §3–§6、§24）。 |
+| schema v6（`persistence/schema.py`）＋ `persistence/cloid.py` ＋ `live/order_gate.py` ＋ `live/orders.py` ＋ `live/kill_switch.py` ＋ signed client 下單／取消／orderStatus／scheduleCancel ✅ | PR 2 | migration v6（§16 欄位＋七張 live 內部表＋`fills.exchange_fill_key` UNIQUE）、cloid 兩層推導與 cloid_registry（§8.2／§19.3）、§4.1 real order gate（建構時綁定 signed client）、§8.3 冪等送單（送單前 intent 落表、duplicate／unknown-outcome 一律先查 orderStatus、絕不盲目重送）、§18 dead man's switch（armed／refreshed／refresh_failed／shutdown cancel bot-owned，事件全落 `kill_switch_events`）（§7–§8、§16、§18）。 |
 | WS／REST fill ingestion ＋ 去重 ＋ 帳務 | PR 3 | queue＋tick 消化、exchange fee／funding 單一基準（§11、§14–§15）。 |
 | reconciliation ＋ safe mode | PR 4 | startup／heartbeat 對帳、safe mode 狀態機與 CLI 解除（§12–§13、§19）。 |
 | `live/` 切片執行引擎 ＋ SL／TP protection | PR 5 | 自管切片 TWAP、reduce-only trigger orders、loss guards（§9–§10、§17）。 |

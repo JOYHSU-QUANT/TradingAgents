@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -306,6 +307,39 @@ def test_shutdown_survives_non_exchange_failures_too(env):
     detail = json.loads(events[-1]["detail"])
     assert detail["canceled"] == ["2"]
     assert "RuntimeError" in detail["failures"][0]
+
+
+def test_shutdown_survives_ownership_lookup_failure(env, monkeypatch):
+    # The §19.3 ownership lookup (get_cloid_by_hex) sits INSIDE the per-order
+    # guard: a repo-layer error identifying ONE order's owner must not abort
+    # the sweep — the next order still gets its cancel attempt and the
+    # completed event is still written.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    for i, hx in enumerate((_HEX, _HEX2)):
+        _register_cloid(db, logical=f"log-{i}", hex_id=hx)
+    client.open_orders_result = [
+        {"oid": 1, "coin": "BTC", "cloid": _HEX},
+        {"oid": 2, "coin": "BTC", "cloid": _HEX2},
+    ]
+    real_lookup = repo.get_cloid_by_hex
+
+    def flaky_lookup(conn, cloid_hex):
+        if cloid_hex == _HEX:
+            raise sqlite3.OperationalError("database is locked")
+        return real_lookup(conn, cloid_hex)
+
+    monkeypatch.setattr(repo, "get_cloid_by_hex", flaky_lookup)
+    manager.shutdown()
+    # Order 1 died at the lookup (no cancel round-trip); order 2 completed.
+    assert [c[1] for c in client.cancel_calls] == [_HEX2]
+    events = repo.iter_kill_switch_events(db.conn, "r")
+    assert events[-1]["event_type"] == "shutdown_cancel_orders_completed"
+    detail = json.loads(events[-1]["detail"])
+    assert detail["canceled"] == ["2"]
+    assert detail["skipped_non_bot"] == []
+    assert len(detail["failures"]) == 1
+    assert "OperationalError" in detail["failures"][0]
 
 
 def test_shutdown_gate_rejection_does_not_blow_through_the_sweep(env):

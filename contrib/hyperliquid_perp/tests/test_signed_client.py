@@ -21,7 +21,9 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
     MalformedResponseError,
 )
 from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import (
+    CancelAck,
     HyperliquidSignedClient,
+    OrderAck,
     is_duplicate_cloid_error,
 )
 from contrib.hyperliquid_perp.live.authorization import derive_agent_address
@@ -445,3 +447,30 @@ def test_internal_typeerror_is_not_mislabeled_as_version_mismatch(monkeypatch):
     monkeypatch.setattr(_SEAM, _InternalBoom)
     with pytest.raises(TypeError, match="not subscriptable"):
         _client()
+
+
+def test_order_ack_enforces_its_status_contract():
+    # The docstring's status↔field contract is enforced at construction, so
+    # a parser bug or a sloppy test double cannot mint an impossible verdict.
+    with pytest.raises(ValueError, match="resting/filled/error"):
+        OrderAck(status="restnig", exchange_order_id="1")
+    with pytest.raises(ValueError, match="'error'"):
+        OrderAck(status="error")  # a rejection must carry the exchange text
+    with pytest.raises(ValueError, match="'resting'"):
+        OrderAck(status="resting")  # accepted must carry the oid
+    with pytest.raises(ValueError, match="'filled'"):
+        OrderAck(status="filled", exchange_order_id="1")  # fills need size+price
+    with pytest.raises(ValueError, match="'resting'"):
+        OrderAck(  # resting cannot smuggle fill evidence
+            status="resting",
+            exchange_order_id="1",
+            filled_size=Decimal("1"),
+            average_price=Decimal("2"),
+        )
+
+
+def test_cancel_ack_requires_error_exactly_on_failure():
+    with pytest.raises(ValueError, match="exactly when"):
+        CancelAck(success=False)  # a refusal must say why
+    with pytest.raises(ValueError, match="exactly when"):
+        CancelAck(success=True, error="but it worked?")  # success cannot smuggle one

@@ -82,6 +82,35 @@ class OrderAck:
     error: str | None = None
     raw: Any = None
 
+    def __post_init__(self) -> None:
+        # The docstring's status↔field contract, enforced: a verdict whose
+        # evidence fields disagree with it cannot exist (parser or test double).
+        if self.status not in ("resting", "filled", "error"):
+            raise ValueError(f"OrderAck.status must be resting/filled/error, got {self.status!r}")
+        if self.status == "error":
+            ok = (
+                self.error is not None
+                and self.exchange_order_id is None
+                and self.filled_size is None
+                and self.average_price is None
+            )
+        elif self.status == "filled":
+            ok = (
+                self.error is None
+                and self.exchange_order_id is not None
+                and self.filled_size is not None
+                and self.average_price is not None
+            )
+        else:  # resting — on the book, nothing filled yet.
+            ok = (
+                self.error is None
+                and self.exchange_order_id is not None
+                and self.filled_size is None
+                and self.average_price is None
+            )
+        if not ok:
+            raise ValueError(f"OrderAck fields do not satisfy the {self.status!r} contract")
+
     @property
     def accepted(self) -> bool:
         return self.status in ("resting", "filled")
@@ -98,6 +127,15 @@ class CancelAck:
     success: bool
     error: str | None = None
     raw: Any = None
+
+    def __post_init__(self) -> None:
+        # "success or the error" is exclusive: a refusal must carry its reason
+        # and a success must not smuggle one.
+        if self.success == (self.error is not None):
+            raise ValueError(
+                f"CancelAck requires error exactly when success is False, "
+                f"got success={self.success} error={self.error!r}"
+            )
 
 
 def _response_payload(response: Any, *, action: str) -> Any:

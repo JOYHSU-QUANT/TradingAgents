@@ -25,7 +25,7 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
 from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import OrderAck
 from contrib.hyperliquid_perp.live.config import ExecutionMode
 from contrib.hyperliquid_perp.live.order_gate import LiveOrderGateRejected, RealOrderGate
-from contrib.hyperliquid_perp.live.orders import LiveOrderSubmitter
+from contrib.hyperliquid_perp.live.orders import LiveOrderSubmitter, SubmitOutcome
 from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.cloid import cloid_hex as derive_cloid_hex
@@ -345,3 +345,32 @@ def test_evidence_is_durable_before_the_wire_and_failure_is_patched(env):
     # 'submitted'. Both are unknown-outcome markers for the retry pre-check.
     attempts = repo.iter_live_order_attempts(db.conn, "r", cloid_hex=_HEX)
     assert [a["status"] for a in attempts] == ["failed"]
+
+
+def test_submit_outcome_enforces_its_evidence_contract():
+    # A verdict whose evidence fields disagree with it cannot be constructed.
+    with pytest.raises(ValueError, match="acknowledged"):
+        SubmitOutcome(outcome="acknowledged", order_id="o1", cloid_logical=_LOGICAL, cloid_hex=_HEX)
+    # A rejection must carry its reason.
+    with pytest.raises(ValueError, match="rejected"):
+        SubmitOutcome(
+            outcome="rejected",
+            order_id="o1",
+            cloid_logical=_LOGICAL,
+            cloid_hex=_HEX,
+            attempt_id="a1",
+            ack=_REJECT_ACK,
+        )
+    # The cloid pair must be a real derivation.
+    with pytest.raises(ValueError, match="derivation"):
+        SubmitOutcome(
+            outcome="rejected",
+            order_id="o1",
+            cloid_logical=_LOGICAL,
+            cloid_hex="0x" + "00" * 16,
+            error="x",
+            ack=_REJECT_ACK,
+        )
+    # A typo'd verdict is not silently a fourth state.
+    with pytest.raises(ValueError):
+        SubmitOutcome(outcome="acknowleged", order_id="o1", cloid_logical=_LOGICAL, cloid_hex=_HEX)

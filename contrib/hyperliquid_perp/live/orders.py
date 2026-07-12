@@ -36,6 +36,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -49,9 +50,17 @@ from ..persistence.ids import live_order_attempt_id
 from ..persistence.models import Side
 from .order_gate import RealOrderGate
 
-__all__ = ["LiveOrderSubmitter", "SubmitOutcome"]
+__all__ = ["LiveOrderSubmitter", "SubmitOutcome", "SubmitOutcomeKind"]
 
 logger = logging.getLogger(__name__)
+
+
+class SubmitOutcomeKind(str, Enum):
+    """The three terminal verdicts of one §8.3 submit call."""
+
+    ACKNOWLEDGED = "acknowledged"
+    RECOVERED_EXISTING = "recovered_existing"
+    REJECTED = "rejected"
 
 
 @dataclass(frozen=True)
@@ -79,10 +88,11 @@ class SubmitOutcome:
     produced it: the ack path copies ``ack.error``, the recovery path
     describes the recovered orderStatus. Consumers must not reach into
     ``ack``/``order_status`` for it — those carry the raw evidence and are
-    each None on the other path.
+    each None on the other path. ``__post_init__`` enforces this contract, so
+    an outcome whose evidence fields disagree with its verdict cannot exist.
     """
 
-    outcome: str
+    outcome: SubmitOutcomeKind
     order_id: str
     cloid_logical: str
     cloid_hex: str
@@ -91,6 +101,36 @@ class SubmitOutcome:
     error: str | None = None
     ack: OrderAck | None = None
     order_status: Any = None
+
+    def __post_init__(self) -> None:
+        # Coerce a raw string the way Side.parse does — loud on a typo.
+        object.__setattr__(self, "outcome", SubmitOutcomeKind(self.outcome))
+        if self.cloid_hex != derive_cloid_hex(self.cloid_logical):
+            raise ValueError(
+                f"cloid_hex {self.cloid_hex!r} is not the derivation of "
+                f"cloid_logical {self.cloid_logical!r}"
+            )
+        if self.outcome is SubmitOutcomeKind.ACKNOWLEDGED:
+            ok = (
+                self.ack is not None
+                and self.order_status is None
+                and self.error is None
+                and self.attempt_id is not None
+                and self.exchange_order_id is not None
+            )
+        elif self.outcome is SubmitOutcomeKind.RECOVERED_EXISTING:
+            ok = (
+                self.order_status is not None
+                and self.ack is None
+                and self.error is None
+                and self.exchange_order_id is not None
+            )
+        else:  # REJECTED — evidence from exactly one path, reason mandatory.
+            ok = self.error is not None and (self.ack is None) != (self.order_status is None)
+        if not ok:
+            raise ValueError(
+                f"SubmitOutcome fields do not satisfy the {self.outcome.value!r} contract"
+            )
 
 
 class LiveOrderSubmitter:
@@ -399,7 +439,7 @@ class LiveOrderSubmitter:
                     updated_at=ack_at,
                 )
             return SubmitOutcome(
-                outcome="rejected",
+                outcome=SubmitOutcomeKind.REJECTED,
                 order_id=order_id,
                 cloid_logical=cloid_logical,
                 cloid_hex=hex_id,
@@ -434,7 +474,7 @@ class LiveOrderSubmitter:
                 updated_at=ack_at,
             )
         return SubmitOutcome(
-            outcome="acknowledged",
+            outcome=SubmitOutcomeKind.ACKNOWLEDGED,
             order_id=order_id,
             cloid_logical=cloid_logical,
             cloid_hex=hex_id,
@@ -515,7 +555,9 @@ class LiveOrderSubmitter:
                 )
         rejected = local_status == "rejected"
         return SubmitOutcome(
-            outcome="rejected" if rejected else "recovered_existing",
+            outcome=(
+                SubmitOutcomeKind.REJECTED if rejected else SubmitOutcomeKind.RECOVERED_EXISTING
+            ),
             order_id=order_id,
             cloid_logical=cloid_logical,
             cloid_hex=cloid_hex,

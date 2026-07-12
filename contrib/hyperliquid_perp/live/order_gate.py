@@ -39,6 +39,11 @@ _LIVE_MODES = frozenset(
     {ExecutionMode.TESTNET_LIVE, ExecutionMode.MAINNET_TINY, ExecutionMode.MAINNET_LIVE}
 )
 
+# The config-derived conditions pinned at construction; reassigning one is a
+# caller bug (the runtime flags are the mutable surface), so the gate enforces
+# its docstring's immutability promise instead of trusting callers to read it.
+_PINNED_FIELDS = frozenset({"allow_real_orders", "mode", "allowed_symbols"})
+
 
 class LiveOrderGateRejected(Exception):
     """A live exchange action was refused; ``reason`` names the failed condition."""
@@ -53,11 +58,12 @@ class RealOrderGate:
     """Mutable gate state; construction pins the config-derived conditions.
 
     The config trio (``allow_real_orders`` / ``mode`` / ``allowed_symbols``)
-    is immutable for the process lifetime; the rest are runtime flags flipped
-    by the components that own them (kill switch manager, PR 4 reconciliation
-    and safe-mode machine, PR 5 engine). Flag writers need hold no invariant
-    beyond "set it when proven, clear it when lost" — the gate re-evaluates
-    the whole condition list on every check, so there is no ordering hazard.
+    is immutable for the process lifetime — enforced: reassigning one raises
+    ``AttributeError``. The rest are runtime flags flipped by the components
+    that own them (kill switch manager, PR 4 reconciliation and safe-mode
+    machine, PR 5 engine). Flag writers need hold no invariant beyond "set it
+    when proven, clear it when lost" — the gate re-evaluates the whole
+    condition list on every check, so there is no ordering hazard.
     """
 
     allow_real_orders: bool
@@ -80,6 +86,16 @@ class RealOrderGate:
     # approved target" condition. The engine clears it after the cycle so a
     # stale approval from cycle N can never authorize an order in cycle N+1.
     risk_gate_approved: bool = False
+
+    def __setattr__(self, name: str, value: object) -> None:
+        # First assignment (dataclass __init__) passes; any rebind of a
+        # config-derived condition on a live gate fails loud.
+        if name in _PINNED_FIELDS and name in self.__dict__:
+            raise AttributeError(
+                f"RealOrderGate.{name} is pinned at construction; "
+                "build a new gate instead of reconfiguring a live one"
+            )
+        super().__setattr__(name, value)
 
     @classmethod
     def from_config(cls, config: LiveConfig) -> RealOrderGate:

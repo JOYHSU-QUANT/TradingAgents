@@ -28,6 +28,7 @@ from contrib.hyperliquid_perp.cli import (
 )
 from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, RiskConfig
 from contrib.hyperliquid_perp.domains.perp.schema import PerpMarketContext
+from contrib.hyperliquid_perp.live.config import ExecutionMode
 from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.paper.scheduler import DecisionInput
 from contrib.hyperliquid_perp.persistence import repository as repo
@@ -2354,6 +2355,14 @@ def test_live_real_orders_positive_path(tmp_path, capsys, live_seams):
     assert "forced" not in out
     assert live_seams.auth_calls == [_LIVE_WALLET]
     assert live_seams.health_calls == ["testnet"]
+    # The signed client's bound §4.1 gate must be fresh-from-config: the
+    # permissive config bits arrive, but every runtime condition is
+    # fail-closed — even asked politely, this client cannot place an order.
+    [bound_gate] = live_seams.signed_gates
+    assert bound_gate.allow_real_orders is True
+    assert bound_gate.mode is ExecutionMode.TESTNET_LIVE
+    assert bound_gate.allowed_symbols == ("BTC",)
+    assert bound_gate.check_order("BTC") is not None
     # Secret hygiene over the full assembled output: the raw key must never
     # reach stdout or stderr on any live lane.
     assert _LIVE_KEY not in out

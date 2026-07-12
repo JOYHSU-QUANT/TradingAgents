@@ -249,6 +249,38 @@ def test_retry_after_unknown_outcome_queries_before_resending(env):
     assert client.status_calls == [_HEX]
 
 
+def test_precheck_query_failure_propagates_and_never_resends(env):
+    # §8.3 rule 5 permits a resend ONLY when the cloid is CONFIRMED absent.
+    # If the pre-check's orderStatus query itself fails (timeout, transport),
+    # that confirmation never happened: the error must propagate loud and no
+    # second place call may reach the wire — a regression that swallowed the
+    # query failure and read it as "absent" would double-send real money.
+    db, client, _, submitter = env
+    client.place_results = [ExchangeRequestError("timeout")]
+    with pytest.raises(ExchangeRequestError):
+        _submit(submitter)
+    client.status_results = [ExchangeRequestError("orderStatus down")]
+    with pytest.raises(ExchangeRequestError, match="orderStatus down"):
+        _submit(submitter)
+    assert len(client.place_calls) == 1  # the failed first send only
+    assert client.status_calls == [_HEX]
+
+
+def test_duplicate_ack_query_failure_propagates_without_resend(env):
+    # Same guarantee on the post-duplicate-ack path: duplicate says the cloid
+    # exists somewhere, so a failed resolution query must fail loud, never
+    # fall through to a resend or a fabricated outcome.
+    db, client, _, submitter = env
+    client.place_results = [_DUPLICATE_ACK]
+    client.status_results = [ExchangeRequestError("orderStatus down")]
+    with pytest.raises(ExchangeRequestError, match="orderStatus down"):
+        _submit(submitter)
+    assert len(client.place_calls) == 1
+    # The duplicate verdict itself was settled on the trail before the query.
+    attempts = repo.iter_live_order_attempts(db.conn, "r", cloid_hex=_HEX)
+    assert [a["status"] for a in attempts] == ["duplicate"]
+
+
 def test_retry_after_acknowledged_send_never_blind_resends(env):
     # The exchange's duplicate rejection only guards OPEN orders: a filled
     # cloid would be accepted again as a brand-new order. So even a prior

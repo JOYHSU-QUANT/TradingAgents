@@ -275,6 +275,8 @@ def test_every_mutation_is_gated(fake_exchange):
         client.cancel_by_cloid(coin="BTC", cloid_hex=_CLOID)
     with pytest.raises(LiveOrderGateRejected):
         client.schedule_cancel(cancel_at=datetime.now(timezone.utc))
+    with pytest.raises(LiveOrderGateRejected):
+        client.clear_scheduled_cancel()
     assert client._exchange.order_calls == []
     assert client._exchange.cancel_calls == []
     assert client._exchange.schedule_calls == []
@@ -354,6 +356,20 @@ def test_schedule_cancel_err_envelope_raises_request_error(fake_exchange):
     client._exchange.schedule_result = {"status": "err", "response": "too many triggers"}
     with pytest.raises(ExchangeRequestError, match="too many triggers"):
         client.schedule_cancel(cancel_at=datetime.now(timezone.utc))
+
+
+def test_clear_scheduled_cancel_sends_none(fake_exchange):
+    # §18.2 rule 6: disarm goes out as scheduleCancel with no time (SDK unset).
+    client = _client()
+    client.clear_scheduled_cancel()
+    assert client._exchange.schedule_calls == [None]
+
+
+def test_clear_scheduled_cancel_err_envelope_raises_request_error(fake_exchange):
+    client = _client()
+    client._exchange.schedule_result = {"status": "err", "response": "cannot unset"}
+    with pytest.raises(ExchangeRequestError, match="cannot unset"):
+        client.clear_scheduled_cancel()
 
 
 def test_queries_are_read_only_and_ungated(fake_exchange):

@@ -29,6 +29,8 @@ class _FakeClient:
         self._gate = gate
         self.schedule_calls: list[datetime] = []
         self.schedule_error: Exception | None = None
+        self.clear_calls: int = 0
+        self.clear_error: Exception | None = None
         self.open_orders_result: list | Exception = []
         self.cancel_calls: list[tuple[str, str]] = []
         self.cancel_results: dict[str, CancelAck | Exception] = {}
@@ -38,6 +40,12 @@ class _FakeClient:
         if self.schedule_error is not None:
             raise self.schedule_error
         self.schedule_calls.append(cancel_at)
+
+    def clear_scheduled_cancel(self):
+        self._gate.require_exchange_action()
+        if self.clear_error is not None:
+            raise self.clear_error
+        self.clear_calls += 1
 
     def open_orders(self):
         if isinstance(self.open_orders_result, Exception):
@@ -213,9 +221,14 @@ def test_shutdown_cancels_bot_owned_only_with_evidence_rows(env):
         "kill_switch_armed",
         "shutdown_cancel_orders_started",
         "shutdown_cancel_orders_completed",
+        "kill_switch_disarmed",  # §18.2 rule 6: clean sweep unsets the trigger
     ]
-    detail = json.loads(events[-1]["detail"])
+    detail = json.loads(events[-2]["detail"])
     assert detail == {"canceled": ["1"], "skipped_non_bot": ["2", "3"], "failures": []}
+    # Skipped non-bot orders must NOT block the disarm — protecting them from
+    # the wallet-wide trigger is the very point of rule 6.
+    assert client.clear_calls == 1
+    assert not manager.armed
     # §16.5: the cancel round-trip left its own evidence row.
     attempts = repo.iter_live_order_attempts(db.conn, "r", cloid_hex=_HEX)
     assert [(a["action"], a["status"]) for a in attempts] == [("cancel_by_cloid", "acknowledged")]
@@ -271,6 +284,9 @@ def test_shutdown_survives_per_order_cancel_failures(env):
     assert [a["status"] for a in failed] == ["failed"]
     ok = repo.iter_live_order_attempts(db.conn, "r", cloid_hex=_HEX2)
     assert [a["status"] for a in ok] == ["acknowledged"]
+    # A failed cancel keeps the wallet-wide backstop armed (§18.2 rule 6).
+    assert client.clear_calls == 0
+    assert manager.armed
 
 
 def test_shutdown_records_a_rejected_cancel_as_a_failure(env):
@@ -360,6 +376,74 @@ def test_shutdown_gate_rejection_does_not_blow_through_the_sweep(env):
     assert len(detail["failures"]) == 2  # both got their attempt, both recorded
 
 
+def test_empty_sweep_is_clean_and_disarms(env):
+    db, client, gate, clock, manager = env
+    manager.arm()
+    client.open_orders_result = []
+    manager.shutdown()
+    assert client.clear_calls == 1
+    assert not manager.armed
+    assert _event_types(db)[-1] == "kill_switch_disarmed"
+
+
+def test_disarm_failure_is_recorded_and_stays_armed(env):
+    # Disarm is best-effort: its failure must never raise out of the shutdown
+    # path, and staying armed is the fail-safe direction.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    client.open_orders_result = []
+    client.clear_error = ExchangeRequestError("disarm down")
+    manager.shutdown()
+    assert manager.armed
+    events = repo.iter_kill_switch_events(db.conn, "r")
+    assert events[-1]["event_type"] == "kill_switch_disarm_failed"
+    assert "disarm down" in events[-1]["error_message"]
+
+
+def test_post_ack_persistence_failure_counts_as_failure_and_keeps_armed(env, monkeypatch):
+    # The dangerous window: the exchange CONFIRMED the cancel, then the local
+    # orders-row patch raises. The outcome transaction rolls back whole — the
+    # attempt stays 'submitted', the order row stays 'open' (PR 4
+    # reconciliation aligns it), the sweep records a failure, and the switch
+    # must stay armed (not-clean sweep).
+    from decimal import Decimal
+
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _register_cloid(db, logical="log-1", hex_id=_HEX)
+    with db.transaction() as conn:
+        repo.insert_order(
+            conn,
+            order_id="o1",
+            mode="live",
+            run_id="r",
+            symbol="BTC",
+            order_role="entry",
+            side="buy",
+            order_type="ioc_limit",
+            qty=Decimal("0.01"),
+            status="open",
+            cloid_logical="log-1",
+            cloid_hex=_HEX,
+        )
+    client.open_orders_result = [{"oid": 1, "coin": "BTC", "cloid": _HEX}]
+
+    def exploding_update_order(conn, order_id, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(repo, "update_order", exploding_update_order)
+    manager.shutdown()
+    detail = json.loads(repo.iter_kill_switch_events(db.conn, "r")[-1]["detail"])
+    assert detail["canceled"] == []
+    assert "OperationalError" in detail["failures"][0]
+    # The rollback preserved the pre-ack evidence state.
+    attempts = repo.iter_live_order_attempts(db.conn, "r", cloid_hex=_HEX)
+    assert [a["status"] for a in attempts] == ["submitted"]
+    assert repo.get_order(db.conn, "o1")["status"] == "open"
+    assert client.clear_calls == 0
+    assert manager.armed
+
+
 def test_shutdown_with_unreachable_exchange_still_completes_the_audit_trail(env):
     db, client, gate, clock, manager = env
     manager.arm()
@@ -373,3 +457,7 @@ def test_shutdown_with_unreachable_exchange_still_completes_the_audit_trail(env)
         "skipped_non_bot": [],
         "failures": [],
     }
+    # An enumeration failure is NOT a clean sweep: the trigger stays armed —
+    # it is the only thing still covering whatever we could not see.
+    assert client.clear_calls == 0
+    assert manager.armed

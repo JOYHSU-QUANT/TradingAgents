@@ -20,7 +20,10 @@
    non-bot-owned orders) and reported in the completed event's detail. Every
    cancel round-trip is recorded in ``live_order_attempts`` (intent before
    the wire, outcome after — the same §8.3/§16.5 evidence protocol orders
-   use), and a successful cancel patches the local orders row.
+   use), and a successful cancel patches the local orders row. A fully clean
+   sweep then disarms the exchange-side scheduleCancel (§18.2 rule 6): the
+   trigger is wallet-wide, so leaving it armed would cancel the very non-bot
+   orders the sweep skipped. Any failure keeps it armed as the backstop.
 
 Every state change lands in ``kill_switch_events`` (§18.5). The manager only
 exists on runs where real orders are enabled — an unarmed (paper / gate-check)
@@ -226,11 +229,14 @@ class KillSwitchManager:
             raise ExchangeError(f"cancel rejected: {ack.error}")
 
     def shutdown(self) -> None:
-        """§18.2 rules 5–6: cancel bot-owned open orders; never force-close.
+        """§18.2 rules 5–7: cancel bot-owned open orders; never force-close.
 
         Per-order failures are recorded and do not stop the sweep — every
-        remaining order still gets its cancel attempt, and whatever survives
-        is covered by the still-armed exchange-side scheduleCancel deadline.
+        remaining order still gets its cancel attempt. The exchange-side
+        scheduleCancel trigger is wallet-wide (it would also take out the
+        non-bot orders the sweep deliberately skips per §19.3), so a fully
+        clean sweep (enumeration succeeded, zero failures) disarms it; any
+        failure leaves it armed as the backstop for whatever survived.
         """
         self._record("shutdown_cancel_orders_started")
         canceled: list[str] = []
@@ -282,3 +288,16 @@ class KillSwitchManager:
             ),
             error=sweep_error,
         )
+        if sweep_error is None and not failures:
+            # Clean sweep: no bot order is left for the wallet-wide trigger to
+            # protect, and letting it fire would cancel the skipped non-bot
+            # orders. Disarm; a disarm failure stays armed (fail-safe) and is
+            # recorded, never raised out of the shutdown path.
+            try:
+                self._client.clear_scheduled_cancel()
+            except Exception as exc:
+                self._record("kill_switch_disarm_failed", error=str(exc))
+                logger.warning("kill switch disarm failed: %s", exc)
+            else:
+                self._armed = False
+                self._record("kill_switch_disarmed", detail="clean shutdown sweep")

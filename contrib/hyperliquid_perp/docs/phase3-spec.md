@@ -406,6 +406,10 @@ order、都有自己的 cloid——不存在 v2 native TWAP 母單「cloid_hex, 
 6. 不得用不同 cloid 重複提交同一個 logical order。
 7. 所有對交易所的查詢（orderStatus、cancelByCloid 等）一律使用 cloid_hex；
    cloid_logical 只在本地系統內部使用，不送給交易所。
+8. Retry 同一個 logical order 時，參數（side / size / price / reduce_only）必須與
+   前次送出完全一致（byte-identical）：恢復路徑（rule 4 的補寫）以呼叫方參數回填
+   本地 order record、不與交易所回報逐欄比對，引擎不得在 retry 時用新價重算 qty——
+   同一 cloid_logical ⇔ 同一組參數；要改參數就開新 logical order（v4 新增，2026-07-12）。
 
 ## 9. Sliced TWAP Execution（v3 全章改寫）
 
@@ -1008,15 +1012,24 @@ kill_switch:
   emergency_close_on_shutdown: false
 ```
 
+（`emergency_close_on_shutdown` 的行為（reduce-only emergency close，§8.1/§17）
+隨 PR 5 的 protection manager 進場；在那之前 config 建構期拒絕 `true`——
+未實作的行為不得被 config 靜默接受，v4 註記。）
+
 ### 18.2 Required Behavior
 
 1. Process 啟動後，完成 exchange client 初始化時，必須立刻 schedule cancel。
 2. Live loop 運行期間，必須每 30 秒刷新 schedule cancel deadline。
 3. 若刷新失敗，必須進入 safe mode。
-4. Process crash 時，交易所應在 deadline 後自動取消 bot-owned open orders。
+4. Process crash 時，交易所在 deadline 後自動取消**該錢包全部** open orders
+   （scheduleCancel 是全錢包觸發，無法只限 bot-owned；crash backstop 接受此代價，
+   v4 修訂措辭）。
 5. 正常 shutdown 時，應取消 bot-owned open orders。
-6. 正常 shutdown 預設不強制平倉。
-7. 持倉繼續依靠既有 SL protection。
+6. 正常 shutdown 的 cancel sweep 完全乾淨（open orders 枚舉成功且零 cancel 失敗）時，
+   必須解除 scheduleCancel（unset），避免全錢包觸發掃掉 sweep 依 §19.3 刻意跳過的
+   非 bot 訂單；sweep 有任何失敗則維持武裝，作為殘單的 backstop（v4 新增，2026-07-12）。
+7. 正常 shutdown 預設不強制平倉。
+8. 持倉繼續依靠既有 SL protection。
 
 ### 18.3 Emergency Kill Switch Triggers
 
@@ -1052,10 +1065,15 @@ kill_switch_armed
 kill_switch_refreshed
 kill_switch_refresh_failed
 kill_switch_cancel_triggered
+kill_switch_disarmed
+kill_switch_disarm_failed
 emergency_kill_switch_triggered
 shutdown_cancel_orders_started
 shutdown_cancel_orders_completed
 ```
+
+（`kill_switch_disarmed` / `kill_switch_disarm_failed` 隨 §18.2 規則 6 的
+clean-shutdown 解除行為新增，v4。）
 
 ## 19. Startup / Restart Recovery
 

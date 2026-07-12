@@ -389,6 +389,22 @@ class HyperliquidSignedClient:
         if isinstance(payload, dict) and "error" in payload and "data" not in payload:
             raise ExchangeRequestError(f"Hyperliquid scheduleCancel rejected: {payload['error']}")
 
+    def clear_scheduled_cancel(self) -> None:
+        """Disarm the dead man's switch (§7 ``scheduleCancel`` unset, §18.2 rule 6).
+
+        The exchange-side trigger is wallet-wide — at the deadline it cancels
+        EVERY open order on the wallet, including non-bot-owned orders the
+        shutdown sweep deliberately left alone (§19.3). After a fully clean
+        sweep there is no bot order left for the backstop to protect, so the
+        kill switch manager unsets the trigger. Failure raises — the caller
+        records it and leaves the switch armed (the fail-safe direction).
+        """
+        self._gate.require_exchange_action()
+        response = call_sdk(self._exchange.schedule_cancel, None)
+        payload = _response_payload(response, action="scheduleCancel")
+        if isinstance(payload, dict) and "error" in payload and "data" not in payload:
+            raise ExchangeRequestError(f"Hyperliquid scheduleCancel rejected: {payload['error']}")
+
     def __repr__(self) -> str:  # never the key — addresses only (§6 rule 2)
         return (
             f"{type(self).__name__}(network={self.network!r}, "

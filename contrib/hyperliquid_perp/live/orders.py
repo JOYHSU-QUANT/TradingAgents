@@ -292,6 +292,10 @@ class LiveOrderSubmitter:
         # a filled/expired cloid would be accepted again as a brand-new order.
         prior = repo.iter_live_order_attempts(self._db.conn, self._run_id, cloid_hex=hex_id)
         if any(row["action"] == "place" for row in prior):
+            # A prior attempt stuck at 'submitted' stays that way — its own
+            # ack was never observed and that is its defined terminal state
+            # (see update_live_order_attempt); the recovered fate lands on
+            # the orders row, which is what PR 4 reconciles against.
             recovered = self._try_recover_existing(
                 order_id=order_id,
                 coin=coin,
@@ -509,6 +513,15 @@ class LiveOrderSubmitter:
         order is reported as outcome ``rejected`` (the send is confirmed
         unsuccessful, but the cloid is known to the exchange, so rule 5's
         resend condition — cloid_hex 不存在 — still does not hold).
+
+        The back-fill records the CALLER's size/price/side; the exchange's
+        view survives only in the raw payload file. That is sound because of
+        the §8.3 retry contract: a retry of the same ``cloid_logical`` must
+        carry byte-identical parameters (the PR 5 engine derives the cloid
+        and the parameters deterministically from the same plan slice), so
+        the caller's parameters ARE the exchange order's parameters. An
+        engine that recomputed size on retry would break this — the contract
+        lives here and in spec §8.3, not in a runtime comparison.
         """
         status_payload = self._client.query_order_by_cloid(cloid_hex)
         parsed = _parse_order_status(status_payload)

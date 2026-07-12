@@ -114,6 +114,8 @@ KILL_SWITCH_EVENT_TYPES = frozenset(
         "kill_switch_refreshed",
         "kill_switch_refresh_failed",
         "kill_switch_cancel_triggered",
+        "kill_switch_disarmed",
+        "kill_switch_disarm_failed",
         "emergency_kill_switch_triggered",
         "shutdown_cancel_orders_started",
         "shutdown_cancel_orders_completed",
@@ -1557,6 +1559,14 @@ def update_live_order_attempt(
     the trail is append-only evidence (schema §16.5), and the §8.3 pre-send
     check trusts these statuses to decide whether an earlier send's outcome is
     known — rewriting a settled attempt would falsify that record.
+
+    A row that stays ``submitted`` forever is a defined terminal state, not a
+    leak: it means the process died inside that send's network window and the
+    attempt's own ack was never observed. §8.3 recovery resolves the ORDER's
+    fate via orderStatus and records it on the orders row (the authoritative
+    surface PR 4 reconciles against); it deliberately does not back-patch the
+    dangling attempt, because that send's direct result is genuinely unknown
+    (several attempts may exist and any one of them could be the winner).
     """
     if not isinstance(status, _Unset):
         check_enum(status, _LIVE_ATTEMPT_STATUSES, name="status")

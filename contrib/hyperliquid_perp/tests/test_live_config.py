@@ -425,6 +425,9 @@ def test_out_of_range_safety_values_are_rejected(overrides):
         ),
         ("kill_switch", {"on_refresh_failed": "ignore"}, "safe_mode"),
         ("kill_switch", {"on_shutdown": "leave_orders"}, "cancel_bot_owned_open_orders"),
+        # §18.1: the flag exists but its behavior lands with PR 5 — true would
+        # configure protection that silently does not exist yet.
+        ("kill_switch", {"emergency_close_on_shutdown": True}, "not implemented yet"),
     ],
 )
 def test_bad_sub_block_values_are_rejected(block, overrides, match):

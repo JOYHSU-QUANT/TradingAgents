@@ -412,6 +412,17 @@ class KillSwitchConfig:
             key="live.kill_switch.on_shutdown",
             expected="'cancel_bot_owned_open_orders' (the only §18 policy)",
         )
+        # §18.1 declares the flag but the behavior (reduce-only emergency
+        # close, §8.1/§17) lands with PR 5's protection manager. Until then a
+        # true value would configure protection that silently does not exist —
+        # same rule as the single-member policy enums above: unimplemented
+        # behavior must not be accepted by config.
+        if self.emergency_close_on_shutdown:
+            raise ValueError(
+                "live.kill_switch.emergency_close_on_shutdown: true is not "
+                "implemented yet (emergency close arrives with the protection "
+                "manager, PR 5); set it to false"
+            )
 
     @classmethod
     def from_dict(cls, cfg: dict | None) -> KillSwitchConfig:

@@ -57,11 +57,11 @@ paper_trading:
 # subcommand. The agent private key is NEVER put here: it is read from
 # HYPERLIQUID_AGENT_KEY_TESTNET / _MAINNET per live.network (§6). Real orders
 # additionally require allow_real_orders: true AND every §4.1 gate to pass.
-# Notes (§24): a present live: block is deep-validated on EVERY config load
-# (a broken staged block also stops paper); the live subcommand additionally
-# requires an explicit risk: block (the cross-check refuses implicit defaults);
-# live inherits the top-level network_timeout_s and wallet_address (only
-# network: is live-local).
+# Notes (§24): a present live: block is deep-validated on EVERY config load —
+# including "risk: must be written explicitly" and the risk↔live consistency
+# cross-check — so a broken staged combination also stops paper; live inherits
+# the top-level network_timeout_s and wallet_address (only network: is
+# live-local).
 # live:
 #   mode: testnet_live           # REQUIRED: paper / testnet_live / mainnet_tiny (mainnet_live is rejected in v1)
 #   network: testnet             # REQUIRED; pinned per mode: testnet_live->testnet, mainnet_tiny->mainnet

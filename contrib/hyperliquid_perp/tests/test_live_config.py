@@ -514,7 +514,10 @@ def test_leverage_mismatch_is_rejected():
 
 def test_load_config_accepts_live_block(tmp_path):
     path = tmp_path / "cfg.yaml"
-    path.write_text("live:\n  mode: testnet_live\n  network: testnet\n", encoding="utf-8")
+    path.write_text(
+        "risk:\n  max_target_margin_pct: 60\nlive:\n  mode: testnet_live\n  network: testnet\n",
+        encoding="utf-8",
+    )
     config = load_config(path)
     assert LiveConfig.from_dict(config["live"]).mode is ExecutionMode.TESTNET_LIVE
 
@@ -549,7 +552,29 @@ def test_load_config_deep_validates_live_gate_contradictions(tmp_path):
 
 
 def test_load_config_without_live_block_skips_live_validation(tmp_path):
-    # No live: block -> nothing to validate; paper-only configs are untouched.
+    # No live: block -> nothing to validate; paper-only configs are untouched
+    # (including the absence of any risk: requirement).
     path = tmp_path / "cfg.yaml"
     path.write_text("network: mainnet\n", encoding="utf-8")
     assert "live" not in load_config(path)
+
+
+def test_load_config_live_block_requires_risk_block(tmp_path):
+    # A staged live: block pins its companion: risk: must be written NOW, not
+    # discovered missing at the flip-to-live moment.
+    path = tmp_path / "cfg.yaml"
+    path.write_text("live:\n  mode: testnet_live\n  network: testnet\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="no risk: block"):
+        load_config(path)
+
+
+def test_load_config_live_block_cross_checks_risk(tmp_path):
+    # The risk↔live consistency check runs at load too: a staged divergent
+    # pair fails every subcommand today, not live startup next week.
+    path = tmp_path / "cfg.yaml"
+    path.write_text(
+        "risk:\n  max_target_margin_pct: 50\nlive:\n  mode: testnet_live\n  network: testnet\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="exceeds risk.max_target_margin_pct"):
+        load_config(path)

@@ -244,12 +244,27 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         # --context-only smoke runs should not pay for unless a live: block
         # exists. (No cycle: live.config imports LEGAL_NETWORKS from this
         # module at import time, which is fine inside a function body here.)
-        from .live.config import LiveConfig
+        from .domains.perp.risk_gate import RiskConfig
+        from .live.config import LiveConfig, validate_live_risk_consistency
 
         try:
-            LiveConfig.from_dict(live_raw)
+            live_cfg = LiveConfig.from_dict(live_raw)
         except ValueError as exc:
             raise ValueError(f"invalid live: config — {exc}") from None
+        # A staged live: block also pins its companions: risk: must be written
+        # explicitly (the cross-check compares operator intent, and a live run
+        # on implicit risk defaults is exactly the vacuous pass §24 forbids)
+        # and the two blocks must agree NOW, not at the flip-to-live moment.
+        if config.get("risk") is None:
+            raise ValueError(
+                "config has a live: block but no risk: block — live startup "
+                "cross-checks risk: against live.safety, so a config staged "
+                "for live must write risk: explicitly"
+            )
+        try:
+            validate_live_risk_consistency(live_cfg, RiskConfig.from_dict(config.get("risk")))
+        except ValueError as exc:
+            raise ValueError(f"invalid risk:/live: config — {exc}") from None
     return config
 
 

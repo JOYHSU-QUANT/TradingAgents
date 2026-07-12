@@ -40,17 +40,20 @@ from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.ids import live_order_attempt_id
 from .config import KillSwitchConfig
-from .order_gate import LiveOrderGateRejected, RealOrderGate
+from .order_gate import RealOrderGate
 
 __all__ = ["KillSwitchManager"]
 
 logger = logging.getLogger(__name__)
 
-# Everything a kill-switch exchange round-trip can fail with and the loop must
-# survive: transport/exchange errors, and the client's own bound gate refusing
-# the action (LiveOrderGateRejected is NOT an ExchangeError — missing it would
-# let a mis-wired gate blow through the shutdown sweep mid-loop).
-_ACTION_FAILURES = (ExchangeError, LiveOrderGateRejected)
+# NOTE on breadth: the refresh/shutdown paths deliberately catch ``Exception``,
+# not just ExchangeError — a round-trip can also fail in the persistence layer
+# (sqlite lock/IntegrityError, an invariant ValueError) or at the client's own
+# bound gate (LiveOrderGateRejected, NOT an ExchangeError), and any of those
+# escaping would abort the sweep mid-loop / kill the live loop — exactly what
+# §18.2 rule 3 and §18.4 rules 2–4 forbid. The error type travels in the
+# recorded event, so a code bug is loud in the audit trail, never re-raised
+# into the safety path.
 
 
 class KillSwitchManager:
@@ -143,7 +146,7 @@ class KillSwitchManager:
             raise RuntimeError("KillSwitchManager.refresh() before arm()")
         try:
             self._schedule()
-        except _ACTION_FAILURES as exc:
+        except Exception as exc:
             self._gate.kill_switch_active = False
             self.stop_new_orders = True
             self._record("kill_switch_refresh_failed", error=str(exc))
@@ -236,7 +239,7 @@ class KillSwitchManager:
         sweep_error: str | None = None
         try:
             open_orders = self._client.open_orders()
-        except _ACTION_FAILURES as exc:
+        except Exception as exc:
             # Can't enumerate: the scheduled cancel deadline is the backstop.
             open_orders = []
             sweep_error = f"open_orders failed: {exc}"
@@ -254,8 +257,12 @@ class KillSwitchManager:
                 self._cancel_with_evidence(
                     coin=coin, cloid_hex=cloid, cloid_logical=row["cloid_logical"]
                 )
-            except _ACTION_FAILURES as exc:
-                failures.append(f"{oid}: {exc}")
+            except Exception as exc:
+                # ANY per-order failure — exchange, gate, or persistence-layer
+                # (ValueError/sqlite3.*) — must not stop the sweep: the
+                # remaining orders still get their cancel attempt, and the
+                # completed event must always be written.
+                failures.append(f"{oid}: {type(exc).__name__}: {exc}")
                 continue
             canceled.append(oid)
         self._record(

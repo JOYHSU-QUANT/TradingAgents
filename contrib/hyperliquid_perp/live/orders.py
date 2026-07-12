@@ -74,6 +74,12 @@ class SubmitOutcome:
     ``attempt_id`` is None when the outcome was resolved by the pre-send
     orderStatus check — no new round-trip happened, so there is no attempt row
     to point at.
+
+    ``error`` is the one place a rejection reason lives, WHICHEVER path
+    produced it: the ack path copies ``ack.error``, the recovery path
+    describes the recovered orderStatus. Consumers must not reach into
+    ``ack``/``order_status`` for it — those carry the raw evidence and are
+    each None on the other path.
     """
 
     outcome: str
@@ -82,6 +88,7 @@ class SubmitOutcome:
     cloid_hex: str
     attempt_id: str | None = None
     exchange_order_id: str | None = None
+    error: str | None = None
     ack: OrderAck | None = None
     order_status: Any = None
 
@@ -397,6 +404,7 @@ class LiveOrderSubmitter:
                 cloid_logical=cloid_logical,
                 cloid_hex=hex_id,
                 attempt_id=attempt_id,
+                error=ack.error,
                 ack=ack,
             )
 
@@ -505,13 +513,15 @@ class LiveOrderSubmitter:
                     raw_exchange_payload_path=raw_path,
                     updated_at=now,
                 )
+        rejected = local_status == "rejected"
         return SubmitOutcome(
-            outcome="rejected" if local_status == "rejected" else "recovered_existing",
+            outcome="rejected" if rejected else "recovered_existing",
             order_id=order_id,
             cloid_logical=cloid_logical,
             cloid_hex=cloid_hex,
             attempt_id=attempt_id,
             exchange_order_id=exchange_order_id,
+            error=f"orderStatus reported {exchange_status!r}" if rejected else None,
             order_status=status_payload,
         )
 

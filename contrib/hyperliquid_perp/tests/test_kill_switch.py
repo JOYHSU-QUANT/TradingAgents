@@ -286,6 +286,28 @@ def test_shutdown_records_a_rejected_cancel_as_a_failure(env):
     assert [a["status"] for a in attempts] == ["rejected"]
 
 
+def test_shutdown_survives_non_exchange_failures_too(env):
+    # A persistence-layer or unexpected error (NOT an ExchangeError) inside one
+    # order's cancel round-trip must not abort the sweep or lose the completed
+    # event — the remaining orders still get their attempt.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    for i, hx in enumerate((_HEX, _HEX2)):
+        _register_cloid(db, logical=f"log-{i}", hex_id=hx)
+    client.open_orders_result = [
+        {"oid": 1, "coin": "BTC", "cloid": _HEX},
+        {"oid": 2, "coin": "BTC", "cloid": _HEX2},
+    ]
+    client.cancel_results[_HEX] = RuntimeError("db lock boom")
+    manager.shutdown()
+    assert [c[1] for c in client.cancel_calls] == [_HEX, _HEX2]
+    events = repo.iter_kill_switch_events(db.conn, "r")
+    assert events[-1]["event_type"] == "shutdown_cancel_orders_completed"
+    detail = json.loads(events[-1]["detail"])
+    assert detail["canceled"] == ["2"]
+    assert "RuntimeError" in detail["failures"][0]
+
+
 def test_shutdown_gate_rejection_does_not_blow_through_the_sweep(env):
     db, client, gate, clock, manager = env
     manager.arm()

@@ -175,6 +175,7 @@ def test_exchange_rejection_is_recorded_not_raised(env):
     client.place_results = [_REJECT_ACK]
     outcome = _submit(submitter)
     assert outcome.outcome == "rejected"
+    assert outcome.error == "Insufficient margin"  # the ONE home for the reason
     order = repo.get_order(db.conn, "o1")
     assert order["status"] == "rejected"
     assert order["status_reason"] == "Insufficient margin"
@@ -272,6 +273,8 @@ def test_recovered_rejected_status_reports_rejected_not_recovered(env):
     # The earlier send is CONFIRMED unsuccessful — the caller must not read
     # this as a live/filled order.
     assert outcome.outcome == "rejected"
+    # Both rejected paths populate the same error field (never ack-only).
+    assert outcome.error is not None and "rejected" in outcome.error
     assert repo.get_order(db.conn, "o1")["status"] == "rejected"
     assert len(client.place_calls) == 1  # the cloid is known: still no resend
 

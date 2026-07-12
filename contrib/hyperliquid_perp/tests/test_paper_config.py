@@ -81,6 +81,10 @@ def test_initial_position_validation():
         InitialPosition.from_dict({"coin": "BTC", "size": "0.01"})
     with pytest.raises(ValueError, match="unknown initial position key"):
         InitialPosition.from_dict({"coin": "BTC", "size": "0.01", "entry_price": 1, "x": 1})
+    # str() would render YAML `coin: true` as the seed symbol "True" — the
+    # non-empty check is an open pattern, so the type itself must fail loud.
+    with pytest.raises(ValueError, match="expected a string"):
+        InitialPosition.from_dict({"coin": True, "size": "0.01", "entry_price": 60000})
 
 
 def test_duplicate_initial_position_coin_rejected():

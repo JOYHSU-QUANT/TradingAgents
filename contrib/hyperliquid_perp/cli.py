@@ -269,9 +269,21 @@ def _cmd_live(argv: list[str]) -> int:
         return 1
     # The AI gate (risk:) and the live hard caps (live.safety:) must agree on
     # the sizing regime before PR 5 wires them into one loop — a divergent
-    # pair is a config mistake today, not a runtime surprise later.
+    # pair is a config mistake today, not a runtime surprise later. The block
+    # must be written explicitly: the cross-check's premise is "two blocks the
+    # operator wrote must agree", and defaults the operator never wrote would
+    # pass it vacuously while PR 5's AI gate trades under values nobody chose.
+    raw_risk = config.get("risk")
+    if raw_risk is None:
+        print(
+            "error: config has no risk: block — the live subcommand refuses to "
+            "run the AI gate on implicit defaults; write the block explicitly "
+            "so the risk:/live.safety cross-check compares operator intent.",
+            file=sys.stderr,
+        )
+        return 1
     try:
-        risk_cfg = RiskConfig.from_dict(config.get("risk"))
+        risk_cfg = RiskConfig.from_dict(raw_risk)
         validate_live_risk_consistency(live_cfg, risk_cfg)
     except ValueError as exc:
         print(
@@ -290,8 +302,9 @@ def _cmd_live(argv: list[str]) -> int:
     if isinstance(top_network, str) and top_network.strip().lower() != live_cfg.network:
         print(
             f"warning: live run uses live.network {live_cfg.network!r} and "
-            f"ignores the top-level network: {top_network!r} (only paper/export/"
-            "validate read the top-level key).",
+            f"ignores the top-level network: {top_network!r} (only the paper "
+            "subcommand reads that key; live does still inherit the top-level "
+            "network_timeout_s and wallet_address).",
             file=sys.stderr,
         )
 
@@ -306,30 +319,25 @@ def _cmd_live(argv: list[str]) -> int:
 
     env_var = agent_key_env_var(live_cfg.network)
     agent_key = load_agent_key(live_cfg.network)
-    if agent_key is None:
-        if live_cfg.require_agent_wallet:
-            print(
-                f"error: {env_var} is not set but live.require_agent_wallet is "
-                f"true — export the {live_cfg.network} agent key or set "
-                f"require_agent_wallet: false for a keyless gate check. "
-                f"({dotenv_diagnosis(env_var)}.)",
-                file=sys.stderr,
-            )
-            return 1
-        if live_cfg.allow_real_orders:
-            # §6 rule 6: a missing agent key can never mean "orders still on".
-            # An operator who asked for real orders and has no key almost
-            # certainly wants to know loudly — same hard-fail treatment as the
-            # paper+allow_real_orders contradiction, not a silent downgrade
-            # into an order-less run.
-            print(
-                f"error: live.allow_real_orders is true but {env_var} is not "
-                f"set (§6 rule 6) — export the {live_cfg.network} agent key, or "
-                "set allow_real_orders: false for a keyless gate check. "
-                f"({dotenv_diagnosis(env_var)}.)",
-                file=sys.stderr,
-            )
-            return 1
+    if agent_key is None and live_cfg.require_agent_wallet:
+        # §6 rule 6 rides this check too: allow_real_orders: true implies
+        # require_agent_wallet: true (a LiveConfig construction invariant), so
+        # "real orders asked for, no key" always lands here — a named hard
+        # fail, never a silent downgrade into an order-less run.
+        detail = (
+            "live.allow_real_orders is true (§6 rule 6: a missing key can "
+            "never mean orders still on)"
+            if live_cfg.allow_real_orders
+            else "live.require_agent_wallet is true"
+        )
+        print(
+            f"error: {env_var} is not set but {detail} — export the "
+            f"{live_cfg.network} agent key, or set require_agent_wallet: false "
+            f"(with allow_real_orders: false) for a keyless gate check. "
+            f"({dotenv_diagnosis(env_var)}.)",
+            file=sys.stderr,
+        )
+        return 1
 
     try:
         # Live runs are pinned to ``live.network``, not the top-level Phase 1/2

@@ -27,7 +27,7 @@ from decimal import ROUND_FLOOR, Decimal
 from enum import Enum
 from typing import Any
 
-from .config_coercion import config_overrides, decimal_from_yaml, int_from_yaml
+from .config_coercion import config_overrides, decimal_from_yaml, int_from_yaml, str_from_yaml
 from .schema import PerpPosition
 from .target_decision import (
     DecisionConfig,
@@ -122,7 +122,7 @@ class RiskConfig:
                 cfg,
                 {
                     "leverage": decimal_from_yaml,
-                    "margin_mode": str,
+                    "margin_mode": str_from_yaml,
                     "max_target_margin_pct": int_from_yaml,
                 },
             )

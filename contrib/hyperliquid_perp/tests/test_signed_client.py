@@ -64,6 +64,9 @@ def test_construction_pins_base_url_to_live_network(fake_exchange):
     assert "testnet" in testnet._exchange.base_url
     assert testnet._exchange.base_url != mainnet._exchange.base_url
     assert testnet._exchange.timeout == 7.0
+    # No timeout kwarg -> the bounded default, never an unbounded-hang None
+    # on the signing path (PR 2's order methods land on this class).
+    assert mainnet._exchange.timeout == 30.0
     # The agent key signs; the MAIN wallet is the account being traded (§6).
     assert testnet._exchange.account_address == _WALLET
     # Same 0.22.0 mainnet-spot-meta crash defense as the read-only client.

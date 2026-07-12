@@ -3,7 +3,8 @@
 Generic "YAML scalar → typed value" helpers with no decision-contract logic:
 :func:`config_overrides` builds coerced kwargs for a config dataclass from a
 raw YAML block, and :func:`decimal_from_yaml` / :func:`int_from_yaml` /
-:func:`bool_from_yaml` are the scalar converters it dispatches to. Used by
+:func:`bool_from_yaml` / :func:`str_from_yaml` are the scalar converters it
+dispatches to. Used by
 ``risk_gate.RiskConfig``, ``target_decision.DecisionConfig``,
 ``paper.config.PaperTradingConfig``, and ``live.config.LiveConfig``, so they
 live here rather than in any one domain module.
@@ -22,6 +23,7 @@ __all__ = [
     "config_overrides",
     "decimal_from_yaml",
     "int_from_yaml",
+    "str_from_yaml",
 ]
 
 
@@ -73,6 +75,20 @@ def int_from_yaml(value: object) -> int:
         # slip) raises TypeError. Normalise both to ValueError so config_overrides
         # surfaces a named config error instead of leaking an unnamed TypeError.
         raise ValueError(f"expected an integer, got {value!r}") from None
+
+
+def str_from_yaml(value: object) -> str:
+    """Coerce a YAML scalar to str, accepting only genuine YAML strings.
+
+    ``str(value)`` would render any scalar — YAML ``true`` becomes ``"True"``,
+    a bare ``0x123`` parsed as an int becomes its decimal rendering — and a
+    field validated by an *open* pattern (a regex or non-empty check, e.g.
+    ``live.order_owner_prefix``) would accept the rendering as if the operator
+    wrote it. A wrong YAML type must fail loud, not pass as its repr.
+    """
+    if isinstance(value, str):
+        return value
+    raise ValueError(f"expected a string, got {value!r}")
 
 
 def config_overrides(

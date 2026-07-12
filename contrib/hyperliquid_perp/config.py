@@ -234,6 +234,22 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     addr = config.get("wallet_address")
     if addr is not None and not isinstance(addr, str):
         raise ValueError(f"'wallet_address' must be a string, got {addr!r}")
+    # A present live: block is deep-validated on EVERY load, not just by the
+    # live subcommand: a staged-but-broken block (deploy workflow: edit config,
+    # restart under systemd) would otherwise ride along with paper for days and
+    # only fail at the moment of flipping to live — the highest-stakes moment.
+    live_raw = config.get("live")
+    if live_raw is not None:
+        # Lazy import: live.config pulls in the risk-gate domain module, which
+        # --context-only smoke runs should not pay for unless a live: block
+        # exists. (No cycle: live.config imports LEGAL_NETWORKS from this
+        # module at import time, which is fine inside a function body here.)
+        from .live.config import LiveConfig
+
+        try:
+            LiveConfig.from_dict(live_raw)
+        except ValueError as exc:
+            raise ValueError(f"invalid live: config — {exc}") from None
     return config
 
 

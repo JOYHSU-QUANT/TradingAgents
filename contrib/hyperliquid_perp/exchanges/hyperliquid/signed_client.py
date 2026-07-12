@@ -16,7 +16,13 @@ from __future__ import annotations
 from hyperliquid.exchange import Exchange
 
 from .errors import ExchangeError, ExchangeRequestError
-from .sdk_client import _BASE_URLS, _init_rejects_kwargs, account_from_agent_key, call_sdk
+from .sdk_client import (
+    _BASE_URLS,
+    DEFAULT_NETWORK_TIMEOUT_S,
+    _init_rejects_kwargs,
+    account_from_agent_key,
+    call_sdk,
+)
 
 # The keyword arguments we pass to ``Exchange(...)`` in __init__, for the same
 # signature-based version-mismatch triage sdk_client applies to ``Info``
@@ -32,13 +38,16 @@ class HyperliquidSignedClient:
     + :meth:`health_check`. Deliberately NO order/cancel methods yet.
     """
 
+    # Same bounded timeout default and rationale as HyperliquidClient.__init__
+    # — PR 2's order methods land on this class, so the signing path must
+    # never inherit an unbounded hang by default.
     def __init__(
         self,
         network: str,
         agent_key: str,
         *,
         wallet_address: str,
-        timeout: float | None = None,
+        timeout: float | None = DEFAULT_NETWORK_TIMEOUT_S,
     ) -> None:
         key = network.strip().lower()
         if key not in _BASE_URLS:

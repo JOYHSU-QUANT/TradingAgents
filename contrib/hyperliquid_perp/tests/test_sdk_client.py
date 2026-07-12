@@ -82,6 +82,14 @@ def test_from_config_defaults_timeout_to_30s(monkeypatch):
     assert captured["timeout"] == 30.0
 
 
+def test_direct_construction_defaults_timeout_to_30s(monkeypatch):
+    # The same hazard guards the raw __init__: skipping from_config must not
+    # silently buy an unbounded hang.
+    captured = _capture_info_kwargs(monkeypatch)
+    HyperliquidClient("mainnet")
+    assert captured["timeout"] == 30.0
+
+
 def test_from_config_reads_network_timeout_s(monkeypatch):
     captured = _capture_info_kwargs(monkeypatch)
     HyperliquidClient.from_config({"network": "mainnet", "network_timeout_s": 5})

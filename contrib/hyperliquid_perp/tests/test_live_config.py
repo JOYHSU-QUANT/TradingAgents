@@ -250,11 +250,39 @@ def test_real_orders_with_kill_switch_enabled_is_accepted():
     assert cfg.allow_real_orders is True
 
 
+def test_real_orders_without_required_wallet_is_rejected():
+    # §6 rule 7: armed runs are a two-flag declaration — real orders must not
+    # depend on whether the agent-key env var happens to be set.
+    with pytest.raises(ValueError, match="require_agent_wallet"):
+        LiveConfig.from_dict(_live_block(allow_real_orders=True, require_agent_wallet=False))
+
+
+def test_real_orders_with_required_wallet_is_accepted():
+    cfg = LiveConfig.from_dict(_live_block(allow_real_orders=True, require_agent_wallet=True))
+    assert cfg.allow_real_orders is True
+    assert cfg.require_agent_wallet is True
+
+
 @pytest.mark.parametrize("prefix", ["", "with_underscore", "spa ce", "x" * 17])
 def test_bad_order_owner_prefix_is_rejected(prefix):
     # The prefix becomes a "_"-separated cloid_logical segment (§8.2).
     with pytest.raises(ValueError, match="order_owner_prefix"):
         LiveConfig.from_dict(_live_block(order_owner_prefix=prefix))
+
+
+@pytest.mark.parametrize("prefix", [True, 123, ["hta"]])
+def test_non_string_order_owner_prefix_is_rejected(prefix):
+    # str() would render YAML `true` as "True", which the open alphanumeric
+    # pattern accepts — the type itself must fail loud (str_from_yaml).
+    with pytest.raises(ValueError, match="expected a string"):
+        LiveConfig.from_dict(_live_block(order_owner_prefix=prefix))
+
+
+def test_non_string_mode_is_a_type_error_not_a_repr():
+    # Same str_from_yaml discipline on the closed-set fields: YAML `true`
+    # must be named as a type error, not chase the enum with the repr "True".
+    with pytest.raises(ValueError, match="expected a string"):
+        LiveConfig.from_dict({"mode": True, "network": "testnet"})
 
 
 def test_unknown_live_key_is_rejected():
@@ -372,7 +400,9 @@ def test_out_of_range_safety_values_are_rejected(overrides):
         (
             "execution",
             {"plan_duration_minutes": 1, "slice_interval_seconds": 61},
-            "no slice would ever fire",
+            # §9.1: the first slice fires at t=0, so this is rejected as a
+            # near-certain units mix-up, not as "no slice would fire".
+            "never be a second slice",
         ),
         ("websocket", {"disconnect_safe_mode_after_seconds": 0}, "disconnect"),
         ("protection", {"sl_repair_max_attempts": 0}, "sl_repair_max_attempts"),
@@ -418,6 +448,16 @@ def test_caps_below_exchange_minimum_flag():
     assert caps.effective_notional_cap == D(6)
     assert caps.effective_notional_cap < EXCHANGE_MIN_ORDER_NOTIONAL_USDC
     assert caps.below_exchange_minimum
+
+
+def test_caps_exactly_at_exchange_minimum_are_allowed():
+    # The §5 rule-4 boundary is a strict <: a cap of exactly 10 USDC can still
+    # place the minimum order, so it must NOT trip the flag.
+    caps = compute_notional_caps(
+        D(1000), LiveSafetyConfig(max_notional_usdc=EXCHANGE_MIN_ORDER_NOTIONAL_USDC)
+    )
+    assert caps.effective_notional_cap == EXCHANGE_MIN_ORDER_NOTIONAL_USDC
+    assert not caps.below_exchange_minimum
 
 
 def test_notional_caps_reject_incoherent_pairs():
@@ -484,3 +524,32 @@ def test_load_config_rejects_scalar_live_block(tmp_path):
     path.write_text("live: true\n", encoding="utf-8")
     with pytest.raises(ValueError, match="'live' must be a mapping"):
         load_config(path)
+
+
+def test_load_config_deep_validates_live_block(tmp_path):
+    # A present live: block is deep-validated on EVERY load (§24): a staged
+    # broken block must fail any subcommand at startup, not ride along with
+    # paper until the moment of flipping to live.
+    path = tmp_path / "cfg.yaml"
+    path.write_text("live:\n  mode: testnet_live\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid live: config"):
+        load_config(path)
+
+
+def test_load_config_deep_validates_live_gate_contradictions(tmp_path):
+    # Not just missing fields — the full construction invariants run at load.
+    path = tmp_path / "cfg.yaml"
+    path.write_text(
+        "live:\n  mode: testnet_live\n  network: testnet\n"
+        "  allow_real_orders: true\n  require_agent_wallet: false\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="require_agent_wallet"):
+        load_config(path)
+
+
+def test_load_config_without_live_block_skips_live_validation(tmp_path):
+    # No live: block -> nothing to validate; paper-only configs are untouched.
+    path = tmp_path / "cfg.yaml"
+    path.write_text("network: mainnet\n", encoding="utf-8")
+    assert "live" not in load_config(path)

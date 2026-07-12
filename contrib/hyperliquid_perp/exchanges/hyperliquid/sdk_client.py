@@ -105,7 +105,14 @@ def call_sdk(fn: Callable[..., Any], *args: Any) -> Any:
 class HyperliquidClient:
     """Owns the SDK ``Info`` instance used for all read-only calls."""
 
-    def __init__(self, network: str = "mainnet", *, timeout: float | None = None) -> None:
+    # The default is the bounded fallback, not None: a None timeout makes every
+    # SDK request block forever on a stalled connection (the exact hazard
+    # from_config's resolution exists to avoid), and a direct construction must
+    # not inherit it just for skipping from_config. Passing timeout=None
+    # explicitly remains the deliberate "no timeout" escape hatch.
+    def __init__(
+        self, network: str = "mainnet", *, timeout: float | None = DEFAULT_NETWORK_TIMEOUT_S
+    ) -> None:
         key = network.strip().lower()
         if key not in _BASE_URLS:
             raise ValueError(f"network must be one of {sorted(_BASE_URLS)}, got {network!r}")

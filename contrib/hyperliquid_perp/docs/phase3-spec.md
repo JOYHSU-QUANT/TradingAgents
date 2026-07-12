@@ -296,6 +296,10 @@ HYPERLIQUID_AGENT_KEY_MAINNET   # mainnet agent wallet private key
    keyless 的 gate 檢查一律以 `allow_real_orders: false` 明示。
    （PR 1 修訂：由字面「強制視為 false」改為硬失敗——設了 true 卻沒 key
    幾乎必是操作錯誤，應該大聲失敗而不是跑一個永遠下不了單的迴圈。）
+7. **（PR 1 修訂）真單是雙旗宣告**：`allow_real_orders: true` 必須搭配
+   `require_agent_wallet: true`，否則 config 建構即具名失敗——真單開關
+   不得取決於環境變數是否恰好存在，而是兩個旗標的明確宣告（規則 6 的
+   缺 key 拒絕因此一律經由 require_agent_wallet 檢查觸發）。
 
 ### 6.1 啟動授權驗證（v3 新增）
 
@@ -425,7 +429,13 @@ execution:
    `min_order_qty` 由交易所最小下單名目價值與當下 mid 推得。
 3. 切片配量用整數 step allocation，總和恰等於 `total_qty`，
    捨去的零頭記為 `rounding_residual_qty`。
-4. 1 張切片 → 單張立即單；2 張以上 → 每 `slice_interval_seconds` 送一張。
+4. 1 張切片 → 單張立即單；2 張以上 → **首片於 t=0 立即送出**，其後每
+   `slice_interval_seconds` 送一張（PR 1 定案：任何合法組合都至少送出一
+   片；config 層仍拒絕 interval > duration——那幾乎必是秒/分單位打錯）。
+   `plan_duration / slice_interval` 是**最大攤開範圍（envelope），不是承
+   諾片數**：規則 2 的 `floor(total_qty / min_order_qty)` 上界讓每片自動
+   ≥ 交易所最小下單額——最小 clip 額優先於 interval，片數不足時提前完成
+   （PR 1 定案；mainnet_tiny 的 100 USDC cap 配預設 120 片即為此情形）。
 5. Flip(反向)沿用 Phase 2 的 sequential 兩腿模型：close leg 完成且倉位歸零後，
    重跑 RiskGate 才開 open leg；兩腿共用同一個 1 小時 envelope 與切片預算。
 
@@ -1280,6 +1290,17 @@ gate，與本模組其餘 config 的風格一致。
 - 頂層 `network:` 與 `live.network` 不一致是合法的（同一份 config 讓 paper
   讀 mainnet 行情、live 在 testnet 演練），但會印 stderr 警告說明 live 用
   的是哪一個。
+- **live 沿用頂層 `network_timeout_s` 與 `wallet_address`**（PR 1 定案）：
+  `live:` 區塊只自帶 `network`；逾時與主錢包地址與 paper 共用同一頂層
+  key（wallet 本來就必須同一顆——授權對象是主錢包；timeout 共用一個
+  resolution seam）。注意：調整頂層 timeout 會同時影響 live 簽名路徑。
+- **`live:` 區塊在 config load 即深度驗證**（PR 1 定案）：只要 config 裡
+  有 `live:` 區塊，任何載入 config 的子命令（含 paper）都會在啟動時跑完
+  整個 `LiveConfig` 驗證——staged 的壞 live: 區塊不得陪 paper 跑到切換
+  live 那一刻才爆。
+- **live 子命令要求明寫 `risk:` 區塊**（PR 1 定案）：risk↔live 交叉檢查
+  的前提是「兩塊都是操作者寫的」；沒有 `risk:` 區塊 → 具名 exit 1，不
+  拿預設值充數（paper 不受影響）。
 
 ### 24.1 Testnet Live
 

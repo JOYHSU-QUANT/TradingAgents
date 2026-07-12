@@ -57,13 +57,18 @@ paper_trading:
 # subcommand. The agent private key is NEVER put here: it is read from
 # HYPERLIQUID_AGENT_KEY_TESTNET / _MAINNET per live.network (§6). Real orders
 # additionally require allow_real_orders: true AND every §4.1 gate to pass.
+# Notes (§24): a present live: block is deep-validated on EVERY config load
+# (a broken staged block also stops paper); the live subcommand additionally
+# requires an explicit risk: block (the cross-check refuses implicit defaults);
+# live inherits the top-level network_timeout_s and wallet_address (only
+# network: is live-local).
 # live:
 #   mode: testnet_live           # REQUIRED: paper / testnet_live / mainnet_tiny (mainnet_live is rejected in v1)
 #   network: testnet             # REQUIRED; pinned per mode: testnet_live->testnet, mainnet_tiny->mainnet
-#   allow_real_orders: false     # master gate; true without the agent key env var refuses startup (§6 rule 6)
+#   allow_real_orders: false     # master gate; true requires require_agent_wallet: true (§6 rule 7) and the agent key env var (§6 rule 6)
 #   allow_manage_external_orders: false   # must stay false in v1 (§25: bot-owned orders only)
 #   order_owner_prefix: "hta"    # readable cloid_logical prefix only, NOT used for bot-owned detection
-#   require_agent_wallet: true   # true -> startup fails without the agent key env var
+#   require_agent_wallet: true   # true -> startup fails without the agent key env var; must be true when allow_real_orders is true
 #   safety:
 #     single_symbol_only: true   # must stay true in v1 (§25 #4: single symbol only)
 #     allowed_symbols: [BTC]
@@ -78,8 +83,8 @@ paper_trading:
 #   execution:
 #     default_style: sliced_twap       # entry/rebalance only (§9.4); the only v1 style
 #     max_slippage_pct: 0.005          # a FRACTION: 0.005 = ±0.5% IOC limit band (§9.2)
-#     plan_duration_minutes: 60
-#     slice_interval_seconds: 30
+#     plan_duration_minutes: 60        # an ENVELOPE, not a slice-count commitment: the min clip
+#     slice_interval_seconds: 30       # size (exchange 10 USDC min) wins over interval (§9.1)
 #   websocket:
 #     disconnect_safe_mode_after_seconds: 300
 #   protection:

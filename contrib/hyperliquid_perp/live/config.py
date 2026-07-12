@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from enum import Enum
 
 from ..config import LEGAL_NETWORKS
@@ -21,7 +21,9 @@ from ..domains.perp.config_coercion import (
     config_overrides,
     decimal_from_yaml,
     int_from_yaml,
+    str_from_yaml,
 )
+from ..domains.perp.margin import DECIMAL_CONTEXT
 from ..domains.perp.risk_gate import MarginMode, RiskConfig
 
 __all__ = [
@@ -229,7 +231,7 @@ class LiveSafetyConfig:
                     "single_symbol_only": bool_from_yaml,
                     "allowed_symbols": _parse_allowed_symbols,
                     "leverage": decimal_from_yaml,
-                    "margin_mode": str,
+                    "margin_mode": str_from_yaml,
                     "max_target_margin_pct": int_from_yaml,
                     "max_notional_usdc": decimal_from_yaml,
                     "absolute_notional_ceiling": decimal_from_yaml,
@@ -275,11 +277,15 @@ class LiveExecutionConfig:
                 f"live.execution.slice_interval_seconds must be > 0, "
                 f"got {self.slice_interval_seconds}"
             )
+        # §9.1: the first slice fires at t=0, so even this combination would
+        # still send one slice — but an interval longer than the whole plan
+        # is a units mix-up (seconds vs minutes) far more often than intent.
         if self.slice_interval_seconds > self.plan_duration_minutes * 60:
             raise ValueError(
                 f"live.execution.slice_interval_seconds "
                 f"({self.slice_interval_seconds}) exceeds the whole plan duration "
-                f"({self.plan_duration_minutes} minutes) — no slice would ever fire"
+                f"({self.plan_duration_minutes} minutes) — there would never be a "
+                "second slice; almost certainly a units mix-up"
             )
 
     @classmethod
@@ -288,7 +294,7 @@ class LiveExecutionConfig:
             **config_overrides(
                 cfg,
                 {
-                    "default_style": str,
+                    "default_style": str_from_yaml,
                     "max_slippage_pct": decimal_from_yaml,
                     "plan_duration_minutes": int_from_yaml,
                     "slice_interval_seconds": int_from_yaml,
@@ -350,7 +356,7 @@ class LiveProtectionConfig:
                 {
                     "sl_repair_max_attempts": int_from_yaml,
                     "sl_repair_retry_delay_seconds": int_from_yaml,
-                    "tp_failure_mode": str,
+                    "tp_failure_mode": str_from_yaml,
                 },
             )
         )
@@ -411,8 +417,8 @@ class KillSwitchConfig:
                     "enabled": bool_from_yaml,
                     "schedule_cancel_seconds": int_from_yaml,
                     "refresh_interval_seconds": int_from_yaml,
-                    "on_refresh_failed": str,
-                    "on_shutdown": str,
+                    "on_refresh_failed": str_from_yaml,
+                    "on_shutdown": str_from_yaml,
                     "emergency_close_on_shutdown": bool_from_yaml,
                 },
             )
@@ -526,17 +532,29 @@ class LiveConfig:
                 "live.allow_real_orders is true but live.kill_switch.enabled is "
                 "false — real orders require the kill switch (§4.1)"
             )
+        # §6: real orders always need the agent wallet, so asking for them
+        # while declaring the wallet optional is a contradiction — armed runs
+        # must be a two-flag declaration, never dependent on whether the env
+        # var happens to be set. (This also means §6 rule 6's missing-key
+        # refusal always surfaces through the require_agent_wallet check.)
+        if self.allow_real_orders and not self.require_agent_wallet:
+            raise ValueError(
+                "live.allow_real_orders is true but live.require_agent_wallet is "
+                "false — real orders always need the agent wallet (§6); declare "
+                "both flags true, or set allow_real_orders: false for a keyless "
+                "gate check"
+            )
 
     @classmethod
     def from_dict(cls, cfg: dict | None) -> LiveConfig:
         overrides = config_overrides(
             cfg,
             {
-                "mode": str,
-                "network": str,
+                "mode": str_from_yaml,
+                "network": str_from_yaml,
                 "allow_real_orders": bool_from_yaml,
                 "allow_manage_external_orders": bool_from_yaml,
-                "order_owner_prefix": str,
+                "order_owner_prefix": str_from_yaml,
                 "require_agent_wallet": bool_from_yaml,
                 "safety": LiveSafetyConfig.from_dict,
                 "execution": LiveExecutionConfig.from_dict,
@@ -598,11 +616,14 @@ def compute_notional_caps(account_equity: Decimal, safety: LiveSafetyConfig) -> 
     ``pct_cap_notional = account_equity × max_target_margin_pct / 100 × leverage``
     ``effective_notional_cap = min(pct_cap_notional, max_notional_usdc)``
     """
-    pct_cap = account_equity * safety.max_target_margin_pct / 100 * safety.leverage
-    return NotionalCaps(
-        pct_cap_notional=pct_cap,
-        effective_notional_cap=min(pct_cap, safety.max_notional_usdc),
-    )
+    # Same pin as every other money computation (margin.py DECIMAL_CONTEXT):
+    # the recorded startup caps must not depend on the ambient global context.
+    with localcontext(DECIMAL_CONTEXT):
+        pct_cap = account_equity * safety.max_target_margin_pct / 100 * safety.leverage
+        return NotionalCaps(
+            pct_cap_notional=pct_cap,
+            effective_notional_cap=min(pct_cap, safety.max_notional_usdc),
+        )
 
 
 def validate_live_risk_consistency(live: LiveConfig, risk: RiskConfig) -> None:

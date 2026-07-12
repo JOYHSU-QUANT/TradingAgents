@@ -1298,10 +1298,14 @@ gate，與本模組其餘 config 的風格一致。
   有 `live:` 區塊，任何載入 config 的子命令（含 paper）都會在啟動時跑完
   整個 `LiveConfig` 驗證、要求 `risk:` 區塊明寫、並跑 risk↔live 交叉一致
   檢查——staged 的壞 live: 組合不得陪 paper 跑到切換 live 那一刻才爆。
-- **明寫 `risk:` 區塊**（PR 1 定案）：risk↔live 交叉檢查的前提是「兩塊
-  都是操作者寫的」；config 有 `live:` 區塊而沒有 `risk:` 區塊 → 具名
-  exit 1，不拿預設值充數（純 paper config——沒有 live: 區塊——不受影響）。
-  live 子命令另有同款 standalone 檢查作為縱深防禦。
+- **明寫 `risk:` 區塊——到欄位層級**（PR 1 定案）：risk↔live 交叉檢查的
+  前提是「兩塊都是操作者寫的」；config 有 `live:` 區塊而沒有 `risk:` 區塊
+  → 具名 exit 1。且區塊存在還不夠：三個被交叉檢查的欄位（`leverage`、
+  `margin_mode`、`max_target_margin_pct`）缺寫（或寫 null）會被 from_dict
+  用「恰好等於 live.safety 預設」的預設值補上，讓交叉檢查空洞通過——所以
+  這三個欄位也必須明寫，缺任一個 → 具名 exit 1，不拿預設值充數（純 paper
+  config——沒有 live: 區塊——不受影響）。live 子命令另有同款 standalone
+  檢查作為縱深防禦。
 
 ### 24.1 Testnet Live
 

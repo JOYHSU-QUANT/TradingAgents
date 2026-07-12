@@ -270,9 +270,8 @@ def _cmd_live(argv: list[str]) -> int:
     # The AI gate (risk:) and the live hard caps (live.safety:) must agree on
     # the sizing regime before PR 5 wires them into one loop — a divergent
     # pair is a config mistake today, not a runtime surprise later. The block
-    # must be written explicitly: the cross-check's premise is "two blocks the
-    # operator wrote must agree", and defaults the operator never wrote would
-    # pass it vacuously while PR 5's AI gate trades under values nobody chose.
+    # and its cross-checked fields must be operator-written (§24 — see
+    # validate_live_risk_consistency for the vacuous-pass rationale).
     raw_risk = config.get("risk")
     if raw_risk is None:
         print(
@@ -284,7 +283,7 @@ def _cmd_live(argv: list[str]) -> int:
         return 1
     try:
         risk_cfg = RiskConfig.from_dict(raw_risk)
-        validate_live_risk_consistency(live_cfg, risk_cfg)
+        validate_live_risk_consistency(live_cfg, risk_cfg, raw_risk)
     except ValueError as exc:
         print(
             f"error: invalid risk:/live: config — {exc}. Fix the YAML and re-run.", file=sys.stderr

@@ -2440,11 +2440,28 @@ def test_live_mainnet_tiny_collects_all_gate_failures(tmp_path, capsys, live_sea
 def test_live_risk_consistency_mismatch_exits_1(tmp_path, capsys, live_seams):
     # risk: and live.safety: must agree on the sizing regime — a live cap
     # looser than the AI gate's cap is a named config error at startup.
-    path = _live_yaml(tmp_path, risk_lines="  max_target_margin_pct: 50\n")
+    path = _live_yaml(
+        tmp_path,
+        risk_lines="  leverage: 1\n  margin_mode: cross\n  max_target_margin_pct: 50\n",
+    )
     rc = cli_main(["live", "--config", str(path)])
     assert rc == 1
     err = capsys.readouterr().err
     assert "risk.max_target_margin_pct" in err
+    assert live_seams.auth_calls == []  # rejected before any network work
+
+
+def test_live_partial_risk_block_exits_1(tmp_path, capsys, live_seams):
+    # §24 field granularity: a partial risk: block would let from_dict fill
+    # the cross-checked fields from defaults identical to live.safety's,
+    # passing the cross-check vacuously — the operator must write them.
+    path = _live_yaml(tmp_path, risk_lines="  leverage: 1\n")
+    rc = cli_main(["live", "--config", str(path)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "must explicitly write" in err
+    assert "margin_mode" in err
+    assert "max_target_margin_pct" in err
     assert live_seams.auth_calls == []  # rejected before any network work
 
 
@@ -2569,6 +2586,17 @@ def test_live_account_read_failure_exits_1(tmp_path, capsys, live_seams):
     rc = cli_main(["live", "--config", str(_live_yaml(tmp_path))])
     assert rc == 1
     assert "account read failed" in capsys.readouterr().err
+
+
+def test_live_unusable_account_snapshot_exits_1(tmp_path, capsys, live_seams):
+    # AccountSnapshot.__post_init__ raises a bare ValueError when
+    # account_value <= 0 (margin-called / empty account) — that must stay a
+    # named exit-1 startup failure with an actionable message, never fall
+    # through to the generic exit-2 crash handler.
+    live_seams.account_error = ValueError("AccountSnapshot.account_value must be > 0, got 0")
+    rc = cli_main(["live", "--config", str(_live_yaml(tmp_path))])
+    assert rc == 1
+    assert "account snapshot unusable" in capsys.readouterr().err
 
 
 def test_live_top_level_network_mismatch_warns(tmp_path, capsys, live_seams):

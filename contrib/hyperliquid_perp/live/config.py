@@ -11,6 +11,7 @@ runtime surprise. Also home to the §5 notional-cap math
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, localcontext
 from enum import Enum
@@ -130,7 +131,11 @@ def _parse_allowed_symbols(raw: object) -> tuple[str, ...]:
     for item in raw:
         if not isinstance(item, str) or not item.strip():
             raise ValueError(f"each symbol must be a non-empty string, got {item!r}")
-        symbols.append(item.strip().upper())
+        # Case is preserved: Hyperliquid coin names are case-sensitive (kPEPE,
+        # kSHIB, …), so normalising would silently rewrite a configured coin
+        # into a nonexistent identifier. Write symbols as the exchange lists
+        # them.
+        symbols.append(item.strip())
     if len(set(symbols)) != len(symbols):
         raise ValueError(f"duplicate symbol(s) in {symbols}")
     return tuple(symbols)
@@ -626,7 +631,15 @@ def compute_notional_caps(account_equity: Decimal, safety: LiveSafetyConfig) -> 
         )
 
 
-def validate_live_risk_consistency(live: LiveConfig, risk: RiskConfig) -> None:
+# The raw-config keys the cross-check below compares against live.safety.
+# The explicitness pass and the comparisons share one entry point, so a new
+# cross-checked field means updating both this tuple and the branches below.
+_RISK_CROSS_CHECK_KEYS = ("leverage", "margin_mode", "max_target_margin_pct")
+
+
+def validate_live_risk_consistency(
+    live: LiveConfig, risk: RiskConfig, raw_risk: Mapping[str, object]
+) -> None:
     """Cross-check the ``live.safety`` fields that overlap the ``risk:`` block.
 
     PR 5 runs the AI gate off ``risk:`` and the hard live caps off
@@ -634,6 +647,11 @@ def validate_live_risk_consistency(live: LiveConfig, risk: RiskConfig) -> None:
     check a config could size AI targets under one leverage/margin regime and
     cap live orders under another — with real money, silently. Rules:
 
+    - the cross-checked fields must be operator-written in ``raw_risk`` (the
+      raw YAML mapping ``risk`` was parsed from): block presence alone would
+      let ``RiskConfig.from_dict`` fill absent (or null) fields from defaults
+      identical to the ``live.safety`` defaults, so the cross-check would pass
+      vacuously on values nobody wrote (§24);
     - ``leverage`` and ``margin_mode`` must be identical (one sizing regime);
     - ``live.safety.max_target_margin_pct`` may be *tighter* than the gate's
       cap (layered defense — the gate's §10.1 checks reject loudly) but never
@@ -642,6 +660,13 @@ def validate_live_risk_consistency(live: LiveConfig, risk: RiskConfig) -> None:
 
     Raises ``ValueError`` (a config error — callers exit 1, never clamp).
     """
+    missing = [k for k in _RISK_CROSS_CHECK_KEYS if raw_risk.get(k) is None]
+    if missing:
+        raise ValueError(
+            f"risk: block must explicitly write {', '.join(missing)} when a "
+            "live: block is staged — the risk↔live.safety cross-check compares "
+            "operator intent, and implicit defaults would pass it vacuously (§24)"
+        )
     if live.safety.leverage != risk.leverage:
         raise ValueError(
             f"live.safety.leverage ({live.safety.leverage}) != risk.leverage "

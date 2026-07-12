@@ -58,10 +58,11 @@ paper_trading:
 # HYPERLIQUID_AGENT_KEY_TESTNET / _MAINNET per live.network (§6). Real orders
 # additionally require allow_real_orders: true AND every §4.1 gate to pass.
 # Notes (§24): a present live: block is deep-validated on EVERY config load —
-# including "risk: must be written explicitly" and the risk↔live consistency
-# cross-check — so a broken staged combination also stops paper; live inherits
-# the top-level network_timeout_s and wallet_address (only network: is
-# live-local).
+# including "risk: must be written explicitly" (the block AND its three
+# cross-checked fields: leverage, margin_mode, max_target_margin_pct) and the
+# risk↔live consistency cross-check — so a broken staged combination also
+# stops paper; live inherits the top-level network_timeout_s and
+# wallet_address (only network: is live-local).
 # live:
 #   mode: testnet_live           # REQUIRED: paper / testnet_live / mainnet_tiny (mainnet_live is rejected in v1)
 #   network: testnet             # REQUIRED; pinned per mode: testnet_live->testnet, mainnet_tiny->mainnet
@@ -71,7 +72,7 @@ paper_trading:
 #   require_agent_wallet: true   # true -> startup fails without the agent key env var; must be true when allow_real_orders is true
 #   safety:
 #     single_symbol_only: true   # must stay true in v1 (§25 #4: single symbol only)
-#     allowed_symbols: [BTC]
+#     allowed_symbols: [BTC]      # case-sensitive — write it as the exchange lists it (e.g. kPEPE)
 #     leverage: 1                # Phase 3 v1 is 1x only (§25)
 #     margin_mode: cross
 #     max_target_margin_pct: 60  # mainnet_tiny hard-caps this at 60 (§21.1)

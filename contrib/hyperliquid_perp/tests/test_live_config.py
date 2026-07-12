@@ -135,9 +135,12 @@ def test_mainnet_tiny_requires_and_accepts_mainnet():
     assert cfg.mode is ExecutionMode.MAINNET_TINY
 
 
-def test_symbols_are_uppercased():
-    cfg = LiveConfig.from_dict(_live_block(safety={"allowed_symbols": ["btc"]}))
-    assert cfg.safety.allowed_symbols == ("BTC",)
+def test_symbol_case_is_preserved():
+    # Hyperliquid coin names are case-sensitive (kPEPE, kSHIB, …): normalising
+    # case would silently rewrite a configured coin into a nonexistent one.
+    # Whitespace is still stripped.
+    cfg = LiveConfig.from_dict(_live_block(safety={"allowed_symbols": ["  kPEPE  "]}))
+    assert cfg.safety.allowed_symbols == ("kPEPE",)
 
 
 def test_network_is_normalised():
@@ -362,6 +365,13 @@ def test_single_symbol_only_false_is_rejected():
 
 def test_duplicate_symbols_are_rejected():
     with pytest.raises(ValueError, match="duplicate"):
+        LiveSafetyConfig.from_dict({"allowed_symbols": ["BTC", "BTC"]})
+
+
+def test_case_differing_symbols_are_distinct():
+    # "BTC" and "btc" are different identifiers on a case-sensitive exchange,
+    # so they trip the single-symbol count check — not the duplicate check.
+    with pytest.raises(ValueError, match="exactly one entry"):
         LiveSafetyConfig.from_dict({"allowed_symbols": ["BTC", "btc"]})
 
 
@@ -479,32 +489,50 @@ def _live_cfg(**safety) -> LiveConfig:
     return LiveConfig.from_dict(_live_block(safety=safety) if safety else _live_block())
 
 
+def _raw_risk(risk: RiskConfig) -> dict:
+    # The raw YAML mapping `risk` would have been parsed from — the §24
+    # explicitness pass checks the operator wrote the cross-checked fields.
+    return {
+        "leverage": risk.leverage,
+        "margin_mode": risk.margin_mode.value,
+        "max_target_margin_pct": risk.max_target_margin_pct,
+    }
+
+
 def test_matching_blocks_pass_consistency():
-    validate_live_risk_consistency(_live_cfg(), RiskConfig())
+    risk = RiskConfig()
+    validate_live_risk_consistency(_live_cfg(), risk, _raw_risk(risk))
 
 
 def test_tighter_live_cap_is_allowed():
     # Layered defense: the live hard cap may be tighter than the AI gate's cap
     # (the §10.1 checks reject loudly at execution time).
-    validate_live_risk_consistency(
-        _live_cfg(max_target_margin_pct=40),
-        RiskConfig(max_target_margin_pct=60),
-    )
+    risk = RiskConfig(max_target_margin_pct=60)
+    validate_live_risk_consistency(_live_cfg(max_target_margin_pct=40), risk, _raw_risk(risk))
 
 
 def test_looser_live_cap_is_rejected():
     # Headroom the gate can never approve means the operator almost certainly
     # edited the wrong block.
+    risk = RiskConfig(max_target_margin_pct=60)
     with pytest.raises(ValueError, match="exceeds risk.max_target_margin_pct"):
-        validate_live_risk_consistency(
-            _live_cfg(max_target_margin_pct=80),
-            RiskConfig(max_target_margin_pct=60),
-        )
+        validate_live_risk_consistency(_live_cfg(max_target_margin_pct=80), risk, _raw_risk(risk))
 
 
 def test_leverage_mismatch_is_rejected():
+    risk = RiskConfig(leverage=D(2))
     with pytest.raises(ValueError, match="risk.leverage"):
-        validate_live_risk_consistency(_live_cfg(), RiskConfig(leverage=D(2)))
+        validate_live_risk_consistency(_live_cfg(), risk, _raw_risk(risk))
+
+
+def test_partial_raw_risk_is_rejected():
+    # §24 field granularity at the function level: absent (or null) raw keys
+    # mean from_dict filled defaults identical to live.safety's — the
+    # cross-check must refuse to compare rather than pass vacuously.
+    with pytest.raises(
+        ValueError, match="must explicitly write margin_mode, max_target_margin_pct"
+    ):
+        validate_live_risk_consistency(_live_cfg(), RiskConfig(), {"leverage": 1})
 
 
 # ---------------------------------------------------------------------------
@@ -515,7 +543,8 @@ def test_leverage_mismatch_is_rejected():
 def test_load_config_accepts_live_block(tmp_path):
     path = tmp_path / "cfg.yaml"
     path.write_text(
-        "risk:\n  max_target_margin_pct: 60\nlive:\n  mode: testnet_live\n  network: testnet\n",
+        "risk:\n  leverage: 1\n  margin_mode: cross\n  max_target_margin_pct: 60\n"
+        "live:\n  mode: testnet_live\n  network: testnet\n",
         encoding="utf-8",
     )
     config = load_config(path)
@@ -568,12 +597,30 @@ def test_load_config_live_block_requires_risk_block(tmp_path):
         load_config(path)
 
 
+def test_load_config_live_block_requires_explicit_risk_fields(tmp_path):
+    # §24 field granularity: block presence alone is not enough — absent (or
+    # null) cross-checked fields would be filled from RiskConfig defaults
+    # identical to the live.safety defaults, so the cross-check would pass
+    # vacuously on values nobody wrote.
+    path = tmp_path / "cfg.yaml"
+    path.write_text(
+        "risk:\n  leverage: 1\n  margin_mode: null\n"
+        "live:\n  mode: testnet_live\n  network: testnet\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ValueError, match="must explicitly write margin_mode, max_target_margin_pct"
+    ):
+        load_config(path)
+
+
 def test_load_config_live_block_cross_checks_risk(tmp_path):
     # The risk↔live consistency check runs at load too: a staged divergent
     # pair fails every subcommand today, not live startup next week.
     path = tmp_path / "cfg.yaml"
     path.write_text(
-        "risk:\n  max_target_margin_pct: 50\nlive:\n  mode: testnet_live\n  network: testnet\n",
+        "risk:\n  leverage: 1\n  margin_mode: cross\n  max_target_margin_pct: 50\n"
+        "live:\n  mode: testnet_live\n  network: testnet\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="exceeds risk.max_target_margin_pct"):

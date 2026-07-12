@@ -152,8 +152,12 @@ class KillSwitchManager:
         except Exception as exc:
             self._gate.kill_switch_active = False
             self.stop_new_orders = True
-            self._record("kill_switch_refresh_failed", error=str(exc))
+            # Log BEFORE the durable record: if the event write itself dies
+            # (broken DB at the worst moment), the root cause is already on
+            # the log. The write stays unguarded — losing the audit trail
+            # must fail loud, same as every other event write here.
             logger.warning("kill switch refresh failed: %s", exc)
+            self._record("kill_switch_refresh_failed", error=str(exc))
             return False
         # The exchange-side switch is re-armed, but the §4.1 condition only
         # re-opens if no failure is outstanding: after a refresh failure,
@@ -296,8 +300,10 @@ class KillSwitchManager:
             try:
                 self._client.clear_scheduled_cancel()
             except Exception as exc:
-                self._record("kill_switch_disarm_failed", error=str(exc))
+                # Same ordering rule as refresh(): log first so a failing
+                # event write cannot erase the disarm failure's root cause.
                 logger.warning("kill switch disarm failed: %s", exc)
+                self._record("kill_switch_disarm_failed", error=str(exc))
             else:
                 self._armed = False
                 self._record("kill_switch_disarmed", detail="clean shutdown sweep")

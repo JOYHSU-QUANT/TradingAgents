@@ -198,7 +198,7 @@ paper engine 零改動，共用 scheduler／RiskGate／persistence／純函式�
 
 | 模組 | PR | 說明 |
 |---|---|---|
-| `live/config.py`＋`live/secrets.py`＋`live/authorization.py`＋`exchanges/hyperliquid/signed_client.py`＋CLI `live` 子命令 skeleton ✅ | PR 1 | typed `live:` 區塊（mode 必填、mainnet_live 拒絕、§5 ceiling 檢查、risk↔live 一致性、config load 即深度驗證、真單雙旗宣告 §6 規則 7、live 子命令要求明寫 `risk:` 區塊）、分網路 agent key（缺 key＋`allow_real_orders: true` 拒絕啟動）、§6.1 啟動授權驗證、signed `Exchange` wrapper（僅初始化＋健康檢查，無下單方法）（phase3-spec §3–§6、§24）。 |
+| `live/config.py`＋`live/secrets.py`＋`live/authorization.py`＋`exchanges/hyperliquid/signed_client.py`＋CLI `live` 子命令 skeleton ✅ | PR 1 | typed `live:` 區塊（mode 必填、mainnet_live 拒絕、§5 ceiling 檢查、risk↔live 一致性、config load 即深度驗證、真單雙旗宣告 §6 規則 7、明寫 `risk:` 區塊到欄位層級——三個交叉檢查欄位缺寫即拒，config load 即驗）、分網路 agent key（缺 key＋`allow_real_orders: true` 拒絕啟動）、§6.1 啟動授權驗證、signed `Exchange` wrapper（僅初始化＋健康檢查，無下單方法）（phase3-spec §3–§6、§24）。 |
 | schema v6 ＋ cloid ＋ 下單／取消／orderStatus ＋ kill switch | PR 2 | cloid_registry、live order persistence、scheduleCancel（§7–§8、§16、§18）。 |
 | WS／REST fill ingestion ＋ 去重 ＋ 帳務 | PR 3 | queue＋tick 消化、exchange fee／funding 單一基準（§11、§14–§15）。 |
 | reconciliation ＋ safe mode | PR 4 | startup／heartbeat 對帳、safe mode 狀態機與 CLI 解除（§12–§13、§19）。 |

@@ -225,17 +225,32 @@ def test_place_ioc_limit_parses_filled_and_error_statuses(fake_exchange):
     assert ack.status == "error" and not ack.accepted and ack.is_duplicate
 
 
-def test_top_level_err_envelope_becomes_an_error_ack(fake_exchange):
+def test_top_level_err_envelope_raises_request_error(fake_exchange):
+    # §8.3 rule 11: a top-level err is an ACTION-level failure (signature /
+    # payload / nonce) — the order may never have reached the matching engine,
+    # so it must raise like a transport failure, never become a per-order
+    # 'error' ack whose REJECTED verdict would consume the cloid.
     client = _client()
     client._exchange.order_result = {"status": "err", "response": "User or API Wallet invalid"}
-    ack = client.place_ioc_limit(
-        coin="BTC",
-        is_buy=True,
-        size=Decimal("0.01"),
-        limit_price=Decimal("100"),
-        cloid_hex=_CLOID,
-    )
-    assert ack.status == "error" and "invalid" in ack.error
+    with pytest.raises(ExchangeRequestError, match="invalid"):
+        client.place_ioc_limit(
+            coin="BTC",
+            is_buy=True,
+            size=Decimal("0.01"),
+            limit_price=Decimal("100"),
+            cloid_hex=_CLOID,
+        )
+
+
+def test_cancel_top_level_err_envelope_raises_request_error(fake_exchange):
+    # Same action-level semantics on both cancel paths: an envelope err is not
+    # a per-cancel rejection verdict.
+    client = _client()
+    client._exchange.cancel_result = {"status": "err", "response": "Invalid nonce"}
+    with pytest.raises(ExchangeRequestError, match="nonce"):
+        client.cancel_by_cloid(coin="BTC", cloid_hex=_CLOID)
+    with pytest.raises(ExchangeRequestError, match="nonce"):
+        client.cancel_by_oid(coin="BTC", exchange_order_id="7")
 
 
 def test_multi_status_order_response_is_malformed(fake_exchange):

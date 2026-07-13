@@ -120,6 +120,11 @@ class KillSwitchManager:
         whose dead man's switch never engaged would run real orders with no
         crash protection at all.
         """
+        if self._shutdown_started:
+            # Same terminal boundary tick()/refresh() enforce: re-arming a
+            # retired manager would silently reopen the §4.1 gate condition
+            # shutdown() just closed.
+            raise RuntimeError("KillSwitchManager.arm() after shutdown()")
         self._schedule()
         self._armed = True
         self._gate.kill_switch_active = True
@@ -257,14 +262,30 @@ class KillSwitchManager:
         canceled: list[str] = []
         skipped_non_bot: list[str] = []
         failures: list[str] = []
+        open_orders: list = []
         sweep_error: str | None = None
         try:
-            open_orders = self._client.open_orders()
+            raw_orders = self._client.open_orders()
+            if isinstance(raw_orders, list):
+                open_orders = raw_orders
+            else:
+                sweep_error = f"open_orders returned {type(raw_orders).__name__}, expected a list"
         except Exception as exc:
-            # Can't enumerate: the scheduled cancel deadline is the backstop.
-            open_orders = []
             sweep_error = f"open_orders failed: {exc}"
+        if sweep_error is not None:
+            # Can't enumerate: the scheduled cancel deadline is the backstop.
+            # Same ordering rule as refresh(): log before the durable event
+            # write so a failing write cannot erase the root cause.
+            logger.warning("kill switch shutdown cannot enumerate open orders: %s", sweep_error)
         for order in open_orders:
+            if not isinstance(order, dict):
+                # Unknown shape means unknown ownership: this might be a bot
+                # order the sweep cannot cancel, so it is a FAILURE (keeps the
+                # wallet-wide backstop armed), not a skip — and it must not
+                # abort the sweep for the well-formed entries that follow.
+                logger.warning("kill switch shutdown: malformed open_orders entry: %r", order)
+                failures.append(f"?: malformed open_orders entry ({type(order).__name__})")
+                continue
             oid = str(order.get("oid", "?"))
             coin = order.get("coin")
             cloid = order.get("cloid")
@@ -272,13 +293,15 @@ class KillSwitchManager:
                 # The ownership lookup sits INSIDE the per-order guard: a
                 # repo-layer error here (e.g. lock contention) is the same
                 # must-not-stop-the-sweep class as a failed cancel.
-                row = (
-                    repo.get_cloid_by_hex(self._db.conn, cloid) if isinstance(cloid, str) else None
-                )
+                if not isinstance(cloid, str):
+                    # §19.3: no cloid = non-bot-owned; §25 — never manage it.
+                    skipped_non_bot.append(oid)
+                    continue
+                row = repo.get_cloid_by_hex(self._db.conn, cloid)
                 if row is None:
-                    # §19.3: unknown cloid (or none) = non-bot-owned; §25 —
-                    # never manage it. PR 4's reconciliation escalates to
-                    # manual safe mode.
+                    # §19.3: unknown cloid = non-bot-owned; §25 — never
+                    # manage it. PR 4's reconciliation escalates to manual
+                    # safe mode.
                     skipped_non_bot.append(oid)
                     continue
                 if coin is None:
@@ -295,7 +318,9 @@ class KillSwitchManager:
                 # ANY per-order failure — exchange, gate, or persistence-layer
                 # (ValueError/sqlite3.*) — must not stop the sweep: the
                 # remaining orders still get their cancel attempt, and the
-                # completed event must always be written.
+                # completed event must always be written. Log at capture, same
+                # ordering rule as refresh().
+                logger.warning("kill switch shutdown cancel failed for %s: %s", oid, exc)
                 failures.append(f"{oid}: {type(exc).__name__}: {exc}")
                 continue
             canceled.append(oid)

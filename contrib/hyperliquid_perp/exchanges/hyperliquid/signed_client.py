@@ -141,10 +141,14 @@ class CancelAck:
 def _response_payload(response: Any, *, action: str) -> Any:
     """Unwrap the SDK's ``{"status": "ok"/"err", "response": ...}`` envelope.
 
-    A top-level ``"err"`` is an exchange-level rejection (bad signature, bad
-    payload) — surfaced as a normal error string by callers, not an exception,
-    so the §8.3 protocol can inspect it. Anything not shaped like the envelope
-    is a malformed response and fails loud.
+    A top-level ``"err"`` is an ACTION-level failure (bad signature, bad
+    payload, invalid nonce) — the order/cancel may never have reached the
+    matching engine, so it raises ``ExchangeRequestError`` like any other
+    transport failure instead of masquerading as a per-order verdict; the
+    caller's attempt row records 'failed' (outcome unknown) and the §8.3
+    pre-check resolves it through orderStatus on the same-cloid retry.
+    Per-order rejections arrive INSIDE ``statuses`` and stay acks. Anything
+    not shaped like the envelope is a malformed response and fails loud.
     """
     if not isinstance(response, dict) or "status" not in response:
         raise MalformedResponseError(
@@ -152,19 +156,8 @@ def _response_payload(response: Any, *, action: str) -> Any:
         )
     if response["status"] != "ok":
         # The err payload is the message itself (a string) per the SDK.
-        return {"error": str(response.get("response"))}
+        raise ExchangeRequestError(f"Hyperliquid {action} rejected: {response.get('response')}")
     return response.get("response")
-
-
-def _raise_on_top_level_error(response: Any, *, action: str) -> None:
-    """Raise when an action's response is a top-level error envelope.
-
-    For statusless actions (scheduleCancel) this IS the whole verdict: no
-    per-order statuses exist, so a top-level error is the only failure shape.
-    """
-    payload = _response_payload(response, action=action)
-    if isinstance(payload, dict) and "error" in payload and "data" not in payload:
-        raise ExchangeRequestError(f"Hyperliquid {action} rejected: {payload['error']}")
 
 
 def _single_status(response: Any, *, action: str) -> Any:
@@ -176,8 +169,6 @@ def _single_status(response: Any, *, action: str) -> Any:
     exchange did.
     """
     payload = _response_payload(response, action=action)
-    if isinstance(payload, dict) and "error" in payload and "data" not in payload:
-        return payload  # top-level err envelope, already normalised
     data = payload.get("data") if isinstance(payload, dict) else None
     statuses = data.get("statuses") if isinstance(data, dict) else None
     if not isinstance(statuses, list) or len(statuses) != 1:
@@ -316,8 +307,11 @@ class HyperliquidSignedClient:
         is mandatory: every order this system sends must be attributable
         through the registry (§8.2), and an anonymous order would be judged
         non-bot-owned by our own reconciliation (§19.3). Returns the parsed
-        :class:`OrderAck`; an exchange-side rejection is an ``error`` ack, not
-        an exception (the §8.3 retry protocol needs to inspect it).
+        :class:`OrderAck`; a PER-ORDER rejection is an ``error`` ack, not an
+        exception (the §8.3 retry protocol needs to inspect it), while a
+        top-level ``err`` envelope (action-level: signature/payload/nonce)
+        raises ``ExchangeRequestError`` — the order may never have reached
+        the matching engine, so it must not consume the cloid as 'rejected'.
         """
         self._gate.require_order(coin)
         response = call_sdk(
@@ -396,7 +390,9 @@ class HyperliquidSignedClient:
         if cancel_at.tzinfo is None:
             raise ValueError("cancel_at must be timezone-aware (UTC)")
         response = call_sdk(self._exchange.schedule_cancel, int(cancel_at.timestamp() * 1000))
-        _raise_on_top_level_error(response, action="scheduleCancel")
+        # scheduleCancel is statusless: the envelope IS the whole verdict, and
+        # _response_payload raises on a top-level err.
+        _response_payload(response, action="scheduleCancel")
 
     def clear_scheduled_cancel(self) -> None:
         """Disarm the dead man's switch (§7 ``scheduleCancel`` unset, §18.2 rule 6).
@@ -410,7 +406,7 @@ class HyperliquidSignedClient:
         """
         self._gate.require_exchange_action()
         response = call_sdk(self._exchange.schedule_cancel, None)
-        _raise_on_top_level_error(response, action="scheduleCancel")
+        _response_payload(response, action="scheduleCancel")
 
     def __repr__(self) -> str:  # never the key — addresses only (§6 rule 2)
         return (

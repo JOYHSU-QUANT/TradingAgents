@@ -404,13 +404,18 @@ class LiveOrderSubmitter:
 
         if ack.is_duplicate:
             # §8.3 rules 2–4: never blind-resend; resolve through orderStatus.
+            # Stamped like the rejected patch below: the exchange DID answer
+            # this round-trip, so acknowledged_at NULL stays an exact synonym
+            # for "no answer observed" (submitted/failed rows only).
             with self._db.transaction() as conn:
                 repo.update_live_order_attempt(
                     conn,
                     attempt_id,
                     status="duplicate",
                     error_message=ack.error,
+                    exchange_status=ack.status,
                     raw_exchange_payload_path=raw_path,
+                    acknowledged_at=ack_at,
                 )
             recovered = recover_existing(attempt_id)
             if recovered is not None:

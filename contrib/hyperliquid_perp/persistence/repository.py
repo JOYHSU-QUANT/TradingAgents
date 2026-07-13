@@ -106,8 +106,11 @@ _CONFIG_DRIFT_STATUSES = frozenset({"ok", "drift"})
 # duplicate-retry protocol must query the exchange before resending.
 _LIVE_ATTEMPT_ACTIONS = frozenset({"place", "cancel", "cancel_by_cloid"})
 _LIVE_ATTEMPT_STATUSES = frozenset({"submitted", "acknowledged", "rejected", "duplicate", "failed"})
-# §18.5: the complete kill-switch event vocabulary. Public: the PR 2 kill
-# switch manager writes these and PR 6's acceptance metrics read them.
+# §18.5: the complete kill-switch event vocabulary. Public: PR 6's acceptance
+# metrics read them. The PR 2 kill switch manager writes seven of the nine;
+# kill_switch_cancel_triggered / emergency_kill_switch_triggered belong to the
+# §18.3 emergency-trigger state machine, which is NOT in PR 2 — no rows with
+# those types exist yet.
 KILL_SWITCH_EVENT_TYPES = frozenset(
     {
         "kill_switch_armed",

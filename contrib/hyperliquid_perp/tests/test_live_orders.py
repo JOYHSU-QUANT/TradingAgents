@@ -249,6 +249,10 @@ def test_duplicate_resolves_through_order_status_and_backfills(env):
     assert len(client.place_calls) == 1  # the original send only
     attempts = repo.iter_live_order_attempts(db.conn, "r", cloid_hex=_HEX)
     assert [a["status"] for a in attempts] == ["duplicate"]
+    # The exchange answered this round-trip: stamped like the rejected patch,
+    # so acknowledged_at NULL stays exactly "no answer observed".
+    assert attempts[0]["exchange_status"] == "error"
+    assert attempts[0]["acknowledged_at"] is not None
 
 
 def test_duplicate_with_unknown_status_refuses_to_resend(env):

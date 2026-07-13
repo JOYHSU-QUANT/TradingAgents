@@ -511,6 +511,56 @@ def test_refresh_after_shutdown_raises_even_when_disarm_failed(env):
         manager.refresh()
 
 
+def test_arm_after_shutdown_is_a_lifecycle_error(env):
+    # arm() shares the terminal boundary tick()/refresh() enforce: re-arming a
+    # retired manager would re-issue scheduleCancel and silently reopen the
+    # §4.1 gate condition shutdown() just closed.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    client.open_orders_result = []
+    manager.shutdown()
+    with pytest.raises(RuntimeError, match="after shutdown"):
+        manager.arm()
+    assert not gate.kill_switch_active
+    assert client.schedule_calls == [_NOW + timedelta(seconds=120)]  # arm #1 only
+
+
+def test_malformed_open_orders_entry_is_a_failure_not_a_sweep_abort(env):
+    # One non-dict entry in the enumeration = unknown ownership: it lands in
+    # failures (keeping the wallet-wide backstop armed), the well-formed order
+    # after it still gets its cancel, and the completed event is written.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _register_cloid(db, logical="log-1", hex_id=_HEX)
+    client.open_orders_result = ["not a dict", {"oid": 2, "coin": "BTC", "cloid": _HEX}]
+    manager.shutdown()
+    assert client.cancel_calls == [("BTC", _HEX)]
+    events = repo.iter_kill_switch_events(db.conn, "r")
+    assert events[-1]["event_type"] == "shutdown_cancel_orders_completed"
+    detail = json.loads(events[-1]["detail"])
+    assert detail["canceled"] == ["2"]
+    assert len(detail["failures"]) == 1
+    assert "malformed open_orders entry" in detail["failures"][0]
+    assert client.clear_calls == 0
+    assert manager.armed
+
+
+def test_non_list_open_orders_counts_as_enumeration_failure(env):
+    # A top-level shape surprise (dict instead of list) must not crash the
+    # shutdown path: it is the same "cannot enumerate" class as a transport
+    # failure — completed event with the error, backstop stays armed.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    client.open_orders_result = {"error": "unexpected"}  # type: ignore[assignment]
+    manager.shutdown()
+    events = repo.iter_kill_switch_events(db.conn, "r")
+    assert events[-1]["event_type"] == "shutdown_cancel_orders_completed"
+    assert "expected a list" in events[-1]["error_message"]
+    assert client.cancel_calls == []
+    assert client.clear_calls == 0
+    assert manager.armed
+
+
 def test_unarmed_shutdown_sweeps_but_never_disarms(env):
     # A shutdown before arm() still runs the sweep and writes its audit pair,
     # but there is no scheduleCancel to clear and no disarmed event to fake.

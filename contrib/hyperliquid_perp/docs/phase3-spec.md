@@ -418,6 +418,12 @@ order、都有自己的 cloid——不存在 v2 native TWAP 母單「cloid_hex, 
     live_order_attempts 已有該 cloid 的 acknowledged place attempt（交易所確定
     收過），unknownOid 是矛盾（retention 過期／Info 不一致），必須具名報錯拒絕
     重送，不得讀成「前次未成功」（v5 新增，2026-07-13）。
+11. 頂層 `{"status":"err"}` envelope（壞簽名、壞 payload、invalid nonce 等 action
+    層失敗）不是 per-order error ack：訂單可能根本沒進撮合引擎，transport 層具名
+    raise（`ExchangeRequestError`），attempt 記 'failed'（outcome unknown），依
+    rule 1 同 cloid retry、由 pre-check 的 orderStatus 解決——transient 失敗不得
+    消耗 cloid、不得在審計留下永久 rejected；rule 9 的「error ack」只指 `statuses`
+    內的 per-order error（v6 新增，2026-07-13）。
 
 ## 9. Sliced TWAP Execution（v3 全章改寫）
 
@@ -1048,14 +1054,17 @@ kill_switch:
 5. 正常 shutdown 時，應取消 bot-owned open orders。shutdown 的第一步即關閉
    §4.1 gate（kill_switch_active 落下）——sweep 不得與新單競速；shutdown 開始後
    tick / refresh 一律拒絕（不論 disarm 成敗），邊界由 manager 自我封鎖、不依賴
-   呼叫方自律（v5 新增，2026-07-13）。
+   呼叫方自律（v5 新增，2026-07-13）；arm 同受此封鎖——重新 arm 會重開剛關閉的
+   gate（v6 新增，2026-07-13）。
 6. 正常 shutdown 的 cancel sweep 完全乾淨（open orders 枚舉成功且零 cancel 失敗）時，
    必須解除 scheduleCancel（unset），避免全錢包觸發掃掉 sweep 依 §19.3 刻意跳過的
    非 bot 訂單；sweep 有任何失敗則維持武裝，作為殘單的 backstop（v4 新增，2026-07-12）。
    「乾淨」的認定：registry 命中（確定 bot-owned）但 open orders payload 缺 coin
    無法下 cancel 的訂單計入 failures（「我們的但動不了」≠「不是我們的」），擋 disarm；
    從未 arm 過的 shutdown 沒有東西可解除——不呼叫 unset、不寫 disarmed 事件
-   （v5 新增，2026-07-13）。
+   （v5 新增，2026-07-13）。形狀不明的 open orders 條目（非 dict）＝所有權不明，
+   計入 failures 擋 disarm 且不得中斷 sweep；open_orders 回傳非 list 視同枚舉失敗
+   （v6 新增，2026-07-13）。
 7. 正常 shutdown 預設不強制平倉。
 8. 持倉繼續依靠既有 SL protection。
 

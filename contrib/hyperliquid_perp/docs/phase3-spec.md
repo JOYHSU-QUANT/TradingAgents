@@ -410,6 +410,14 @@ order、都有自己的 cloid——不存在 v2 native TWAP 母單「cloid_hex, 
    前次送出完全一致（byte-identical）：恢復路徑（rule 4 的補寫）以呼叫方參數回填
    本地 order record、不與交易所回報逐欄比對，引擎不得在 retry 時用新價重算 qty——
    同一 cloid_logical ⇔ 同一組參數；要改參數就開新 logical order（v4 新增，2026-07-12）。
+9. 任何 error ack 在判定 rejected 之前，必須先以 cloid_hex 查詢 orderStatus：
+   duplicate 錯誤文案比對只是 fast-path（rule 2 的觸發器），orderStatus 才是
+   rejected-vs-exists 的權威——rejected 判定授權呼叫方開新 logical order，若實際上
+   訂單存在（文案改字造成 duplicate 漏判）就是雙倉（v5 新增，2026-07-13）。
+10. rule 5 的「cloid_hex 不存在」以 orderStatus 回 unknownOid 為準——但若本地
+    live_order_attempts 已有該 cloid 的 acknowledged place attempt（交易所確定
+    收過），unknownOid 是矛盾（retention 過期／Info 不一致），必須具名報錯拒絕
+    重送，不得讀成「前次未成功」（v5 新增，2026-07-13）。
 
 ## 9. Sliced TWAP Execution（v3 全章改寫）
 
@@ -867,6 +875,15 @@ raw_exchange_payload_path
 
 （`exchange_order_id`、`order_role`、`reduce_only` Phase 2 schema 已有，不重複新增。）
 
+詞彙契約（v5 新增，2026-07-13）：`exchange_status` 一律寫正規化家族詞（與
+`orders.status` 同詞彙：open / filled / canceled / rejected），`exchange_raw_status`
+一律寫交易所 verbatim 原字；ack 路徑與 §8.3 rule 4 恢復路徑都必須兩欄齊寫。
+`cloid_hex` 有 UNIQUE index（一 cloid 一 orders row；NULL——所有 paper 舊列——互異）。
+恢復路徑插入的 orders row `submitted_at` / `acknowledged_at` 保持 NULL：真實送出
+時間未知，消費者必須把 NULL 讀成「未知」而非「未送出」。IOC ack 部分成交
+（totalSz < 請求 size）時 `status` 寫 `partially_filled`，不得寫 `filled`；
+成交數量真相仍由 PR 3 fill ingestion 擁有。
+
 ### 16.2 fills Additions
 
 ```
@@ -1016,6 +1033,10 @@ kill_switch:
 隨 PR 5 的 protection manager 進場；在那之前 config 建構期拒絕 `true`——
 未實作的行為不得被 config 靜默接受，v4 註記。）
 
+（`schedule_cancel_seconds` 建構期要求 > 5：Hyperliquid 拒絕觸發時間距今不足
+5 秒的 scheduleCancel，≤ 5 的值永遠 arm 不起來，而 §18.2 rule 1 把 arm 失敗
+定為硬錯誤——無法實作的 config 值在載入期拒絕，v5 新增，2026-07-13。）
+
 ### 18.2 Required Behavior
 
 1. Process 啟動後，完成 exchange client 初始化時，必須立刻 schedule cancel。
@@ -1024,10 +1045,17 @@ kill_switch:
 4. Process crash 時，交易所在 deadline 後自動取消**該錢包全部** open orders
    （scheduleCancel 是全錢包觸發，無法只限 bot-owned；crash backstop 接受此代價，
    v4 修訂措辭）。
-5. 正常 shutdown 時，應取消 bot-owned open orders。
+5. 正常 shutdown 時，應取消 bot-owned open orders。shutdown 的第一步即關閉
+   §4.1 gate（kill_switch_active 落下）——sweep 不得與新單競速；shutdown 開始後
+   tick / refresh 一律拒絕（不論 disarm 成敗），邊界由 manager 自我封鎖、不依賴
+   呼叫方自律（v5 新增，2026-07-13）。
 6. 正常 shutdown 的 cancel sweep 完全乾淨（open orders 枚舉成功且零 cancel 失敗）時，
    必須解除 scheduleCancel（unset），避免全錢包觸發掃掉 sweep 依 §19.3 刻意跳過的
    非 bot 訂單；sweep 有任何失敗則維持武裝，作為殘單的 backstop（v4 新增，2026-07-12）。
+   「乾淨」的認定：registry 命中（確定 bot-owned）但 open orders payload 缺 coin
+   無法下 cancel 的訂單計入 failures（「我們的但動不了」≠「不是我們的」），擋 disarm；
+   從未 arm 過的 shutdown 沒有東西可解除——不呼叫 unset、不寫 disarmed 事件
+   （v5 新增，2026-07-13）。
 7. 正常 shutdown 預設不強制平倉。
 8. 持倉繼續依靠既有 SL protection。
 

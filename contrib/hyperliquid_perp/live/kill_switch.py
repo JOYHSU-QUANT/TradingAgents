@@ -84,6 +84,7 @@ class KillSwitchManager:
         self._config = config
         self._clock = clock or WallClock()
         self._armed = False
+        self._shutdown_started = False
         self._last_scheduled_at: datetime | None = None
         # Sticky until PR 4's safe-mode release path clears it (§13.4).
         self.stop_new_orders = False
@@ -145,6 +146,8 @@ class KillSwitchManager:
         running (monitoring, protection, future refresh attempts continue —
         §18.4 rules 2–4).
         """
+        if self._shutdown_started:
+            raise RuntimeError("KillSwitchManager.refresh() after shutdown()")
         if not self._armed:
             raise RuntimeError("KillSwitchManager.refresh() before arm()")
         try:
@@ -170,6 +173,8 @@ class KillSwitchManager:
 
     def tick(self) -> None:
         """Refresh if due — the live loop calls this every cycle (30s)."""
+        if self._shutdown_started:
+            raise RuntimeError("KillSwitchManager.tick() after shutdown()")
         if self.refresh_due():
             self.refresh()
 
@@ -182,7 +187,7 @@ class KillSwitchManager:
         underlying failure — the sweep loop records it and carries on.
         """
         attempt_index = repo.next_live_attempt_index(
-            self._db.conn, self._run_id, action="cancel_by_cloid", cloid_hex=cloid_hex
+            self._db.conn, action="cancel_by_cloid", cloid_hex=cloid_hex
         )
         attempt_id = live_order_attempt_id(
             self._run_id, "cancel_by_cloid", cloid_hex, attempt_index
@@ -242,6 +247,12 @@ class KillSwitchManager:
         clean sweep (enumeration succeeded, zero failures) disarms it; any
         failure leaves it armed as the backstop for whatever survived.
         """
+        # The boundary is self-enforcing, not a caller convention: from the
+        # first statement no new order may pass the §4.1 gate (the sweep must
+        # not race fresh submissions), and tick()/refresh() refuse to touch a
+        # switch whose manager is retiring.
+        self._shutdown_started = True
+        self._gate.kill_switch_active = False
         self._record("shutdown_cancel_orders_started")
         canceled: list[str] = []
         skipped_non_bot: list[str] = []
@@ -264,11 +275,18 @@ class KillSwitchManager:
                 row = (
                     repo.get_cloid_by_hex(self._db.conn, cloid) if isinstance(cloid, str) else None
                 )
-                if row is None or coin is None:
+                if row is None:
                     # §19.3: unknown cloid (or none) = non-bot-owned; §25 —
                     # never manage it. PR 4's reconciliation escalates to
                     # manual safe mode.
                     skipped_non_bot.append(oid)
+                    continue
+                if coin is None:
+                    # Bot-owned but the payload carries no coin to cancel
+                    # with: "ours but uncancelable" is a FAILURE, not "not
+                    # ours" — the sweep is not clean and the wallet-wide
+                    # backstop must stay armed for this order.
+                    failures.append(f"{oid}: bot-owned order missing 'coin' in open_orders")
                     continue
                 self._cancel_with_evidence(
                     coin=coin, cloid_hex=cloid, cloid_logical=row["cloid_logical"]
@@ -292,11 +310,13 @@ class KillSwitchManager:
             ),
             error=sweep_error,
         )
-        if sweep_error is None and not failures:
+        if sweep_error is None and not failures and self._armed:
             # Clean sweep: no bot order is left for the wallet-wide trigger to
             # protect, and letting it fire would cancel the skipped non-bot
             # orders. Disarm; a disarm failure stays armed (fail-safe) and is
-            # recorded, never raised out of the shutdown path.
+            # recorded, never raised out of the shutdown path. An unarmed
+            # manager has nothing to disarm — a shutdown before arm() must
+            # not record a phantom disarmed event.
             try:
                 self._client.clear_scheduled_cancel()
             except Exception as exc:

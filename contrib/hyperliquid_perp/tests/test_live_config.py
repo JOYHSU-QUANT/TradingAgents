@@ -435,6 +435,25 @@ def test_bad_sub_block_values_are_rejected(block, overrides, match):
         LiveConfig.from_dict(_live_block(**{block: overrides}))
 
 
+def test_schedule_cancel_at_exchange_floor_is_rejected():
+    # Hyperliquid rejects a scheduleCancel whose trigger is less than 5
+    # seconds in the future, and §18.2 rule 1 makes an arming failure a hard
+    # startup error — a window that could never arm dies at config load.
+    with pytest.raises(ValueError, match="Hyperliquid rejects"):
+        LiveConfig.from_dict(
+            _live_block(kill_switch={"schedule_cancel_seconds": 5, "refresh_interval_seconds": 1})
+        )
+
+
+def test_schedule_cancel_just_above_floor_is_accepted():
+    # The floor is a strict >: 6 seconds can arm (with the refresh landing
+    # before the deadline, per the refresh < schedule check).
+    cfg = LiveConfig.from_dict(
+        _live_block(kill_switch={"schedule_cancel_seconds": 6, "refresh_interval_seconds": 5})
+    )
+    assert cfg.kill_switch.schedule_cancel_seconds == 6
+
+
 # ---------------------------------------------------------------------------
 # §5 cap math
 # ---------------------------------------------------------------------------

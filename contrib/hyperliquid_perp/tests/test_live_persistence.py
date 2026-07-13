@@ -275,13 +275,51 @@ def test_attempt_retry_is_a_new_row_never_an_overwrite(db):
 
 
 def test_next_attempt_index_resumes_above_persisted_max(db):
-    assert repo.next_live_attempt_index(db.conn, "r", action="place", cloid_hex=_HEX) == 0
+    assert repo.next_live_attempt_index(db.conn, action="place", cloid_hex=_HEX) == 0
     with db.transaction() as conn:
         _insert_attempt(conn, index=0)
         _insert_attempt(conn, index=1)
-    assert repo.next_live_attempt_index(db.conn, "r", action="place", cloid_hex=_HEX) == 2
+    assert repo.next_live_attempt_index(db.conn, action="place", cloid_hex=_HEX) == 2
     # Another action namespace counts separately.
-    assert repo.next_live_attempt_index(db.conn, "r", action="cancel_by_cloid", cloid_hex=_HEX) == 0
+    assert repo.next_live_attempt_index(db.conn, action="cancel_by_cloid", cloid_hex=_HEX) == 0
+
+
+def test_next_attempt_index_spans_runs(db):
+    # The UNIQUE (cloid_hex, action, attempt_index) namespace has no run
+    # column, so the allocator must not filter by run either: a later run's
+    # shutdown sweep cancels an earlier run's surviving order, and a
+    # run-scoped MAX() would re-derive an index the constraint already holds.
+    with db.transaction() as conn:
+        repo.insert_live_order_attempt(
+            conn,
+            attempt_id=live_order_attempt_id("r1", "cancel_by_cloid", _HEX, 0),
+            run_id="r1",
+            action="cancel_by_cloid",
+            symbol="BTC",
+            attempt_index=0,
+            cloid_logical="log-1",
+            cloid_hex=_HEX,
+            requested_at=_NOW,
+        )
+    next_index = repo.next_live_attempt_index(db.conn, action="cancel_by_cloid", cloid_hex=_HEX)
+    assert next_index == 1
+    # r2's insert under the allocated index lands — no IntegrityError.
+    with db.transaction() as conn:
+        repo.insert_live_order_attempt(
+            conn,
+            attempt_id=live_order_attempt_id("r2", "cancel_by_cloid", _HEX, next_index),
+            run_id="r2",
+            action="cancel_by_cloid",
+            symbol="BTC",
+            attempt_index=next_index,
+            cloid_logical="log-1",
+            cloid_hex=_HEX,
+            requested_at=_NOW,
+        )
+    rows = db.conn.execute(
+        "SELECT run_id, attempt_index FROM live_order_attempts ORDER BY rowid"
+    ).fetchall()
+    assert [(r["run_id"], r["attempt_index"]) for r in rows] == [("r1", 0), ("r2", 1)]
 
 
 def test_attempt_field_presence_rules(db):
@@ -393,6 +431,19 @@ def test_live_order_roundtrip_with_ack_backfill(db):
 def test_order_cloid_pair_travels_together(db):
     with pytest.raises(ValueError, match="together"), db.transaction() as conn:
         _insert_live_order(conn, cloid_logical=None)
+
+
+def test_orders_cloid_hex_is_unique_but_null_stays_distinct(db):
+    # One orders row per cloid (schema v6 idx_orders_cloid_hex): the registry
+    # pins the pair, this pins the row count. Paper rows carry no cloid, so
+    # NULLs must not collide — same posture as the fills dedupe key.
+    with db.transaction() as conn:
+        _insert_live_order(conn)
+    with pytest.raises(sqlite3.IntegrityError), db.transaction() as conn:
+        _insert_live_order(conn, order_id="o2")  # same cloid_hex
+    with db.transaction() as conn:
+        for oid in ("p1", "p2"):
+            _insert_live_order(conn, order_id=oid, cloid_logical=None, cloid_hex=None)
 
 
 def test_live_order_roles_accepted(db):

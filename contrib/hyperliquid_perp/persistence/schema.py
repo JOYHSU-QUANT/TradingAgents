@@ -551,7 +551,9 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     # live orders write cloid_logical / cloid_hex instead (§16.1); the column
     # stays for old paper rows but gains no new writers.
     6: (
-        # §16.1 orders additions.
+        # §16.1 orders additions. exchange_status carries the normalized
+        # status family (the orders.status vocabulary) and exchange_raw_status
+        # the verbatim exchange word — every live write path fills both.
         "ALTER TABLE orders ADD COLUMN cloid_logical TEXT",
         "ALTER TABLE orders ADD COLUMN cloid_hex TEXT",
         "ALTER TABLE orders ADD COLUMN exchange_status TEXT",
@@ -562,6 +564,10 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE orders ADD COLUMN cancel_reason TEXT",
         "ALTER TABLE orders ADD COLUMN is_bot_owned INTEGER",
         "ALTER TABLE orders ADD COLUMN raw_exchange_payload_path TEXT",
+        # One orders row per cloid: cloid_registry's PK pins the pair itself;
+        # this pins the row count. NULLs (every paper row) stay distinct, same
+        # as idx_fills_exchange_fill_key below.
+        "CREATE UNIQUE INDEX idx_orders_cloid_hex ON orders (cloid_hex)",
         # §16.2 fills additions. exchange_fill_key is the §14.2 dedupe key;
         # SQLite cannot ADD COLUMN with a UNIQUE constraint, so the guard is a
         # UNIQUE index (NULLs stay distinct — paper fills never carry the key).

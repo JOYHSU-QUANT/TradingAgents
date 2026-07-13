@@ -11,6 +11,7 @@ never-blind-resend rules.
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -25,7 +26,11 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
 from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import OrderAck
 from contrib.hyperliquid_perp.live.config import ExecutionMode
 from contrib.hyperliquid_perp.live.order_gate import LiveOrderGateRejected, RealOrderGate
-from contrib.hyperliquid_perp.live.orders import LiveOrderSubmitter, SubmitOutcome
+from contrib.hyperliquid_perp.live.orders import (
+    LiveOrderSubmitter,
+    SubmitOutcome,
+    _local_status_for_exchange_status,
+)
 from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.cloid import cloid_hex as derive_cloid_hex
@@ -147,13 +152,18 @@ def test_accepted_order_writes_evidence_then_backfills_ack(env):
     order = repo.get_order(db.conn, "o1")
     assert order["status"] == "open"
     assert order["exchange_order_id"] == "111"
-    assert order["exchange_status"] == "resting"
+    # §16.1 vocabulary: exchange_status is the normalized family (the
+    # orders.status words), exchange_raw_status the verbatim wire word.
+    assert order["exchange_status"] == "open"
+    assert order["exchange_raw_status"] == "resting"
     assert order["submitted_at"] is not None
     assert order["acknowledged_at"] is not None
     assert order["is_bot_owned"] == 1
     assert order["output_id"] == "out1"
     attempts = repo.iter_live_order_attempts(db.conn, "r", cloid_hex=_HEX)
     assert [a["status"] for a in attempts] == ["acknowledged"]
+    # The attempt row keeps the verbatim ack word — raw evidence trail.
+    assert attempts[0]["exchange_status"] == "resting"
     # The raw exchange payload landed on disk and its path on the rows.
     raw_path = order["raw_exchange_payload_path"]
     assert raw_path is not None
@@ -173,14 +183,40 @@ def test_ioc_filled_ack_maps_to_filled_status(env):
 def test_exchange_rejection_is_recorded_not_raised(env):
     db, client, _, submitter = env
     client.place_results = [_REJECT_ACK]
+    # Before any REJECTED verdict, orderStatus (not the rejection wording)
+    # gets the last word on rejected-vs-exists — here it confirms absence.
+    client.status_results = [_UNKNOWN_STATUS]
     outcome = _submit(submitter)
     assert outcome.outcome == "rejected"
     assert outcome.error == "Insufficient margin"  # the ONE home for the reason
+    assert client.status_calls == [_HEX]
     order = repo.get_order(db.conn, "o1")
     assert order["status"] == "rejected"
     assert order["status_reason"] == "Insufficient margin"
+    # Orders row: normalized family + verbatim wire word (§16.1).
+    assert order["exchange_status"] == "rejected"
+    assert order["exchange_raw_status"] == "error"
     attempts = repo.iter_live_order_attempts(db.conn, "r", cloid_hex=_HEX)
     assert [a["status"] for a in attempts] == ["rejected"]
+    # The attempt keeps the verbatim ack word.
+    assert attempts[0]["exchange_status"] == "error"
+
+
+def test_rejection_ack_with_known_cloid_recovers_instead_of_rejecting(env):
+    # The duplicate markers are a fast-path, not the authority: a duplicate
+    # rejection whose wording they fail to match must not become REJECTED —
+    # that verdict licenses the caller to mint a NEW logical order, a double
+    # order if the original is live. orderStatus knowing the cloid wins.
+    db, client, _, submitter = env
+    client.place_results = [_REJECT_ACK]
+    client.status_results = [_KNOWN_STATUS]
+    outcome = _submit(submitter)
+    assert outcome.outcome == "recovered_existing"
+    assert outcome.exchange_order_id == "333"
+    assert len(client.place_calls) == 1  # nothing was resent
+    order = repo.get_order(db.conn, "o1")
+    assert order["status"] == "filled"
+    assert order["exchange_order_id"] == "333"
 
 
 def test_gate_rejection_blocks_before_any_evidence_is_written(env):
@@ -324,6 +360,89 @@ def test_recovered_terminal_family_status_never_reads_as_open(env):
     assert repo.get_order(db.conn, "o1")["status"] == "canceled"
 
 
+def test_acknowledged_cloid_missing_from_order_status_fails_loud(env):
+    # The durable trail says the exchange ACKNOWLEDGED this cloid; orderStatus
+    # answering unknownOid contradicts that evidence (retention expiry, Info
+    # inconsistency), and a resend would be accepted as a brand-new order —
+    # same fail-loud posture as the duplicate/unknownOid contradiction.
+    db, client, _, submitter = env
+    client.place_results = [_RESTING_ACK]
+    assert _submit(submitter).outcome == "acknowledged"
+    client.status_results = [_UNKNOWN_STATUS]
+    with pytest.raises(ExchangeError, match="was acknowledged"):
+        _submit(submitter)
+    assert len(client.place_calls) == 1  # never resent
+
+
+def test_partial_ioc_fill_maps_to_partially_filled(env):
+    # A 'filled' ack whose totalSz is below the requested size must not read
+    # as fully filled — the local status says partially_filled while the
+    # exchange columns keep the wire verdict verbatim.
+    db, client, _, submitter = env
+    client.place_results = [
+        OrderAck(
+            status="filled",
+            exchange_order_id="444",
+            filled_size=Decimal("0.004"),  # < the requested 0.01
+            average_price=Decimal("100"),
+            raw={"kind": "partial"},
+        )
+    ]
+    outcome = _submit(submitter)
+    assert outcome.outcome == "acknowledged"
+    order = repo.get_order(db.conn, "o1")
+    assert order["status"] == "partially_filled"
+    assert order["exchange_status"] == "filled"
+    assert order["exchange_raw_status"] == "filled"
+
+
+def test_order_id_reuse_under_a_different_cloid_fails_loud(env):
+    # §8.3 leans on order_id↔cloid coherence: reusing an order_id under a new
+    # cloid pair would send the wire order under the NEW cloid while the local
+    # row still carries the old one. The intent transaction refuses.
+    db, client, _, submitter = env
+    client.place_results = [_RESTING_ACK]
+    assert _submit(submitter).outcome == "acknowledged"
+    with pytest.raises(ValueError, match="cloid_hex"):
+        _submit(submitter, cloid_logical="hta_r_BTC_out1_plan1_open_001_entry")
+    assert len(client.place_calls) == 1  # raised before any wire traffic
+
+
+def test_post_ack_persistence_failure_rolls_back_and_recovers_on_retry(env, monkeypatch):
+    # The exchange accepted but the outcome transaction failed: the whole
+    # transaction rolls back, so the attempt stays 'submitted' — its defined
+    # terminal state for an unobserved outcome — and the retry resolves
+    # through orderStatus without resending.
+    db, client, _, submitter = env
+    client.place_results = [_RESTING_ACK]
+
+    def _boom(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(repo, "update_order", _boom)
+    with pytest.raises(sqlite3.OperationalError):
+        _submit(submitter)
+    monkeypatch.undo()
+    attempts = repo.iter_live_order_attempts(db.conn, "r", cloid_hex=_HEX)
+    assert [a["status"] for a in attempts] == ["submitted"]  # rolled back
+    client.status_results = [_KNOWN_STATUS]
+    outcome = _submit(submitter)
+    assert outcome.outcome == "recovered_existing"
+    assert len(client.place_calls) == 1  # no resend
+    assert client.status_calls == [_HEX]
+
+
+def test_raw_payload_write_failure_does_not_fail_the_submit(env, tmp_path):
+    # The order is already live when the evidence file is written: an OSError
+    # there must degrade to a warning + NULL path, never an exception.
+    db, client, _, submitter = env
+    (tmp_path / "raw").write_text("not a directory", encoding="utf-8")
+    client.place_results = [_RESTING_ACK]
+    outcome = _submit(submitter)
+    assert outcome.outcome == "acknowledged"
+    assert repo.get_order(db.conn, "o1")["raw_exchange_payload_path"] is None
+
+
 def test_retry_after_unknown_outcome_resends_when_exchange_confirms_absent(env):
     db, client, _, submitter = env
     client.place_results = [ExchangeRequestError("timeout")]
@@ -339,6 +458,36 @@ def test_retry_after_unknown_outcome_resends_when_exchange_confirms_absent(env):
     attempts = repo.iter_live_order_attempts(db.conn, "r", cloid_hex=_HEX)
     assert [a["attempt_index"] for a in attempts] == [0, 1]
     assert [a["status"] for a in attempts] == ["failed", "acknowledged"]
+
+
+def test_exchange_status_family_classifier():
+    # "reject" outranks "cancel": iocCancelRejected — the vocabulary's one
+    # both-words status — is a placement rejection (nothing ever rested), and
+    # reading it as canceled would report a never-placed order as recovered.
+    assert _local_status_for_exchange_status("iocCancelRejected") == "rejected"
+    assert _local_status_for_exchange_status("tickRejected") == "rejected"
+    assert _local_status_for_exchange_status("minTradeNtlRejected") == "rejected"
+    assert _local_status_for_exchange_status("scheduledCancel") == "canceled"
+    assert _local_status_for_exchange_status("liquidatedCanceled") == "canceled"
+    assert _local_status_for_exchange_status("resting") == "open"
+    assert _local_status_for_exchange_status("filled") == "filled"
+
+
+def test_recovered_ioc_cancel_rejected_reports_rejected(env):
+    # Flow-level pin for the classifier fix: an IOC that could not match is a
+    # rejection, never RECOVERED_EXISTING with a canceled row.
+    db, client, _, submitter = env
+    client.place_results = [ExchangeRequestError("timeout")]
+    with pytest.raises(ExchangeRequestError):
+        _submit(submitter)
+    client.status_results = [
+        {"status": "order", "order": {"order": {"oid": 336}, "status": "iocCancelRejected"}}
+    ]
+    outcome = _submit(submitter)
+    assert outcome.outcome == "rejected"
+    assert outcome.error is not None and "iocCancelRejected" in outcome.error
+    assert repo.get_order(db.conn, "o1")["status"] == "rejected"
+    assert len(client.place_calls) == 1  # the cloid is known: no resend
 
 
 def test_malformed_order_status_payload_fails_loud_never_reads_as_absent(env):

@@ -156,6 +156,17 @@ def _response_payload(response: Any, *, action: str) -> Any:
     return response.get("response")
 
 
+def _raise_on_top_level_error(response: Any, *, action: str) -> None:
+    """Raise when an action's response is a top-level error envelope.
+
+    For statusless actions (scheduleCancel) this IS the whole verdict: no
+    per-order statuses exist, so a top-level error is the only failure shape.
+    """
+    payload = _response_payload(response, action=action)
+    if isinstance(payload, dict) and "error" in payload and "data" not in payload:
+        raise ExchangeRequestError(f"Hyperliquid {action} rejected: {payload['error']}")
+
+
 def _single_status(response: Any, *, action: str) -> Any:
     """The one per-order status out of a single-order action's response.
 
@@ -385,9 +396,7 @@ class HyperliquidSignedClient:
         if cancel_at.tzinfo is None:
             raise ValueError("cancel_at must be timezone-aware (UTC)")
         response = call_sdk(self._exchange.schedule_cancel, int(cancel_at.timestamp() * 1000))
-        payload = _response_payload(response, action="scheduleCancel")
-        if isinstance(payload, dict) and "error" in payload and "data" not in payload:
-            raise ExchangeRequestError(f"Hyperliquid scheduleCancel rejected: {payload['error']}")
+        _raise_on_top_level_error(response, action="scheduleCancel")
 
     def clear_scheduled_cancel(self) -> None:
         """Disarm the dead man's switch (§7 ``scheduleCancel`` unset, §18.2 rule 6).
@@ -401,9 +410,7 @@ class HyperliquidSignedClient:
         """
         self._gate.require_exchange_action()
         response = call_sdk(self._exchange.schedule_cancel, None)
-        payload = _response_payload(response, action="scheduleCancel")
-        if isinstance(payload, dict) and "error" in payload and "data" not in payload:
-            raise ExchangeRequestError(f"Hyperliquid scheduleCancel rejected: {payload['error']}")
+        _raise_on_top_level_error(response, action="scheduleCancel")
 
     def __repr__(self) -> str:  # never the key — addresses only (§6 rule 2)
         return (

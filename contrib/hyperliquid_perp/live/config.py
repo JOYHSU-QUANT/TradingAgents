@@ -52,6 +52,12 @@ __all__ = [
 # mode) rather than run a bot that is structurally unable to trade.
 EXCHANGE_MIN_ORDER_NOTIONAL_USDC = Decimal("10")
 
+# Hyperliquid rejects a scheduleCancel whose trigger is less than 5 seconds in
+# the future, so a window at or under this could never arm — and §18.2 rule 1
+# makes an arming failure a hard startup error. Same posture as the notional
+# minimum above: a config value that cannot work is rejected at load.
+MIN_SCHEDULE_CANCEL_SECONDS = 5
+
 # §21.1/§24.2: the caps that DEFINE mainnet_tiny. The hard config gate pins
 # them at load — a tighter value is fine, a looser one is a different mode.
 # They equal the LiveSafetyConfig field defaults today, but the anchors differ
@@ -379,10 +385,12 @@ class KillSwitchConfig:
     emergency_close_on_shutdown: bool = False
 
     def __post_init__(self) -> None:
-        if self.schedule_cancel_seconds <= 0:
+        if self.schedule_cancel_seconds <= MIN_SCHEDULE_CANCEL_SECONDS:
             raise ValueError(
-                f"live.kill_switch.schedule_cancel_seconds must be > 0, "
-                f"got {self.schedule_cancel_seconds}"
+                f"live.kill_switch.schedule_cancel_seconds must be > "
+                f"{MIN_SCHEDULE_CANCEL_SECONDS} (Hyperliquid rejects a "
+                f"scheduleCancel trigger less than {MIN_SCHEDULE_CANCEL_SECONDS} "
+                f"seconds in the future), got {self.schedule_cancel_seconds}"
             )
         if self.refresh_interval_seconds <= 0:
             raise ValueError(

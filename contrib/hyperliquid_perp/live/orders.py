@@ -219,7 +219,19 @@ class LiveOrderSubmitter:
             order_role=order_role,
             created_at=now,
         )
-        if repo.get_order(conn, order_id) is not None:
+        existing = repo.get_order(conn, order_id)
+        if existing is not None:
+            if existing["cloid_hex"] != cloid_hex:
+                # §8.3 leans on order_id↔cloid coherence everywhere; a caller
+                # that reuses an order_id under a different cloid pair would
+                # send the wire order under the NEW cloid while the local row
+                # still carries the old one. The registry catches the reverse
+                # slip (same logical, different hex); this catches this one.
+                raise ValueError(
+                    f"order {order_id!r} already exists with cloid_hex "
+                    f"{existing['cloid_hex']!r}, not {cloid_hex!r} — an order_id "
+                    "keeps one cloid pair for life (§8.3)"
+                )
             return False
         repo.insert_order(
             conn,
@@ -285,18 +297,11 @@ class LiveOrderSubmitter:
         hex_id = derive_cloid_hex(cloid_logical)
         is_buy = Side.parse(side) is Side.BUY
 
-        # §8.3 rules 3–5 pre-check: if this cloid was EVER sent before (any
-        # prior place attempt, whatever its recorded outcome), ask the
-        # exchange first. Even an 'acknowledged' prior send must short-circuit
-        # here: the exchange's duplicate rejection only guards OPEN orders, so
-        # a filled/expired cloid would be accepted again as a brand-new order.
-        prior = repo.iter_live_order_attempts(self._db.conn, self._run_id, cloid_hex=hex_id)
-        if any(row["action"] == "place" for row in prior):
-            # A prior attempt stuck at 'submitted' stays that way — its own
-            # ack was never observed and that is its defined terminal state
-            # (see update_live_order_attempt); the recovered fate lands on
-            # the orders row, which is what PR 4 reconciles against.
-            recovered = self._try_recover_existing(
+        # One binding for the three §8.3 recovery call sites (pre-check,
+        # duplicate ack, rejected ack) — the parameters never vary, only
+        # which attempt row the outcome should point at.
+        def recover_existing(attempt_id: str | None) -> SubmitOutcome | None:
+            return self._try_recover_existing(
                 order_id=order_id,
                 coin=coin,
                 side=side,
@@ -310,13 +315,26 @@ class LiveOrderSubmitter:
                 flip_plan_id=flip_plan_id,
                 flip_leg=flip_leg,
                 parent_order_id=parent_order_id,
-                attempt_id=None,
+                attempt_id=attempt_id,
             )
+
+        # §8.3 rules 3–5 pre-check: if this cloid was EVER sent before (any
+        # prior place attempt, whatever its recorded outcome), ask the
+        # exchange first. Even an 'acknowledged' prior send must short-circuit
+        # here: the exchange's duplicate rejection only guards OPEN orders, so
+        # a filled/expired cloid would be accepted again as a brand-new order.
+        prior = repo.iter_live_order_attempts(self._db.conn, self._run_id, cloid_hex=hex_id)
+        if any(row["action"] == "place" for row in prior):
+            # A prior attempt stuck at 'submitted' stays that way — its own
+            # ack was never observed and that is its defined terminal state
+            # (see update_live_order_attempt); the recovered fate lands on
+            # the orders row, which is what PR 4 reconciles against.
+            recovered = recover_existing(attempt_id=None)
             if recovered is not None:
                 return recovered
 
         attempt_index = repo.next_live_attempt_index(
-            self._db.conn, self._run_id, action="place", cloid_hex=hex_id
+            self._db.conn, action="place", cloid_hex=hex_id
         )
         attempt_id = live_order_attempt_id(self._run_id, "place", hex_id, attempt_index)
         now = self._clock.now()
@@ -394,22 +412,7 @@ class LiveOrderSubmitter:
                     error_message=ack.error,
                     raw_exchange_payload_path=raw_path,
                 )
-            recovered = self._try_recover_existing(
-                order_id=order_id,
-                coin=coin,
-                side=side,
-                size=size,
-                limit_price=limit_price,
-                cloid_logical=cloid_logical,
-                cloid_hex=hex_id,
-                order_role=order_role,
-                reduce_only=reduce_only,
-                output_id=output_id,
-                flip_plan_id=flip_plan_id,
-                flip_leg=flip_leg,
-                parent_order_id=parent_order_id,
-                attempt_id=attempt_id,
-            )
+            recovered = recover_existing(attempt_id)
             if recovered is not None:
                 return recovered
             # The exchange said "duplicate" but its own orderStatus cannot see
@@ -428,16 +431,28 @@ class LiveOrderSubmitter:
                     attempt_id,
                     status="rejected",
                     error_message=ack.error,
-                    exchange_status="rejected",
+                    exchange_status=ack.status,
                     raw_exchange_payload_path=raw_path,
                     acknowledged_at=ack_at,
                 )
+            # The duplicate markers are a fast-path, not the authority: the
+            # exchange's rejection text is not a versioned contract, and a
+            # duplicate rejection the markers fail to match must not become
+            # REJECTED — that verdict licenses the caller to mint a NEW
+            # logical order, a double order if the original is live. Before
+            # any REJECTED verdict, orderStatus (not the wording) gets the
+            # last word on rejected-vs-exists.
+            recovered = recover_existing(attempt_id)
+            if recovered is not None:
+                return recovered
+            with self._db.transaction() as conn:
                 repo.update_order(
                     conn,
                     order_id,
                     status="rejected",
                     status_reason=ack.error,
                     exchange_status="rejected",
+                    exchange_raw_status=ack.status,
                     raw_exchange_payload_path=raw_path,
                     acknowledged_at=ack_at,
                     updated_at=ack_at,
@@ -454,9 +469,13 @@ class LiveOrderSubmitter:
 
         # Accepted: ack-time back-fill (§16.1 exchange_order_id /
         # exchange_status / acknowledged_at). Local status maps the wire
-        # verdict; filled_qty/remaining stay with PR 3's fill ingestion — the
-        # exchange fill events are the accounting basis (§15), not this ack.
-        local_status = "open" if ack.status == "resting" else "filled"
+        # verdict — a partial IOC fill (totalSz < requested) must not read as
+        # fully filled; filled_qty/remaining stay with PR 3's fill ingestion —
+        # the exchange fill events are the accounting basis (§15), not this ack.
+        exchange_status = "open" if ack.status == "resting" else "filled"
+        local_status = exchange_status
+        if ack.status == "filled" and ack.filled_size is not None and ack.filled_size < size:
+            local_status = "partially_filled"
         with self._db.transaction() as conn:
             repo.update_live_order_attempt(
                 conn,
@@ -472,7 +491,8 @@ class LiveOrderSubmitter:
                 order_id,
                 status=local_status,
                 exchange_order_id=ack.exchange_order_id,
-                exchange_status=ack.status,
+                exchange_status=exchange_status,
+                exchange_raw_status=ack.status,
                 raw_exchange_payload_path=raw_path,
                 acknowledged_at=ack_at,
                 updated_at=ack_at,
@@ -522,10 +542,27 @@ class LiveOrderSubmitter:
         the caller's parameters ARE the exchange order's parameters. An
         engine that recomputed size on retry would break this — the contract
         lives here and in spec §8.3, not in a runtime comparison.
+
+        A recovery INSERT leaves ``submitted_at`` / ``acknowledged_at`` NULL on
+        purpose: the true send time is unknown (only ``timestamp`` /
+        ``updated_at`` carry the recovery instant). Consumers (PR 4) must read
+        NULL as "unknown", never as "not sent".
         """
         status_payload = self._client.query_order_by_cloid(cloid_hex)
         parsed = _parse_order_status(status_payload)
         if parsed is None:
+            # unknownOid clears rule 5's resend condition — UNLESS the durable
+            # record says the exchange once ACKNOWLEDGED this cloid. Then
+            # "absent" contradicts local evidence (retention expiry, an Info
+            # inconsistency) and a resend would be accepted as a brand-new
+            # order. Same fail-loud posture as the duplicate/unknownOid
+            # contradiction in submit_ioc_limit.
+            prior = repo.iter_live_order_attempts(self._db.conn, self._run_id, cloid_hex=cloid_hex)
+            if any(row["action"] == "place" and row["status"] == "acknowledged" for row in prior):
+                raise ExchangeError(
+                    f"orderStatus does not know cloid {cloid_hex} but a prior "
+                    f"place attempt was acknowledged — refusing to resend (§8.3 rule 5)"
+                )
             return None
         exchange_order_id, exchange_status = parsed
         raw_path = self._write_raw_payload("orderStatus", cloid_hex, status_payload)
@@ -551,7 +588,10 @@ class LiveOrderSubmitter:
                 status=local_status,
                 now=now,
                 exchange_order_id=exchange_order_id,
-                exchange_status=exchange_status,
+                # §16.1 vocabulary, one contract on every write path:
+                # exchange_status = the normalized family (orders.status
+                # words), exchange_raw_status = the verbatim wire word.
+                exchange_status=local_status,
                 exchange_raw_status=exchange_status,
                 raw_exchange_payload_path=raw_path,
             )
@@ -561,7 +601,7 @@ class LiveOrderSubmitter:
                     order_id,
                     status=local_status,
                     exchange_order_id=exchange_order_id,
-                    exchange_status=exchange_status,
+                    exchange_status=local_status,
                     exchange_raw_status=exchange_status,
                     raw_exchange_payload_path=raw_path,
                     updated_at=now,
@@ -582,19 +622,48 @@ class LiveOrderSubmitter:
 
 
 # The exchange's order-status vocabulary mapped to the local orders.status
-# column. Exact names first; the rest classify by family — Hyperliquid has
-# many terminal variants (scheduledCancel, liquidatedCanceled, tickRejected,
-# minTradeNtlRejected, ...) and a new one must never be mistaken for a live
-# order. Truly unknown statuses map to 'open' WITH a warning: overstating
-# liveness is the conservative direction (an 'open' order keeps being watched
-# and reconciled — PR 4 owns the exhaustive treatment), whereas guessing
-# terminal would silently stop managing a possibly-live order.
+# column. The documented set is enumerated EXACTLY — a heuristic must never
+# stand in for a known, closed vocabulary (iocCancelRejected contains both
+# "cancel" and "reject"; only the exact entry can classify it reliably). The
+# substring fallback below covers only words the docs gain after this list;
+# truly unknown statuses map to 'open' WITH a warning: overstating liveness
+# is the conservative direction (an 'open' order keeps being watched and
+# reconciled — PR 4 owns the exhaustive treatment), whereas guessing terminal
+# would silently stop managing a possibly-live order.
 _EXCHANGE_TO_LOCAL_STATUS = {
+    # Live on the book (a fired trigger order is a live order).
     "open": "open",
     "resting": "open",
+    "triggered": "open",
     "filled": "filled",
+    # Canceled family — was on the book, then removed.
     "canceled": "canceled",
+    "marginCanceled": "canceled",
+    "vaultWithdrawalCanceled": "canceled",
+    "openInterestCapCanceled": "canceled",
+    "selfTradeCanceled": "canceled",
+    "reduceOnlyCanceled": "canceled",
+    "siblingFilledCanceled": "canceled",
+    "delistedCanceled": "canceled",
+    "liquidatedCanceled": "canceled",
+    "scheduledCancel": "canceled",
+    # Rejected family — never accepted onto the book.
     "rejected": "rejected",
+    "tickRejected": "rejected",
+    "minTradeNtlRejected": "rejected",
+    "perpMarginRejected": "rejected",
+    "reduceOnlyRejected": "rejected",
+    "badAloPxRejected": "rejected",
+    "iocCancelRejected": "rejected",
+    "badTriggerPxRejected": "rejected",
+    "marketOrderNoLiquidityRejected": "rejected",
+    "positionIncreaseAtOpenInterestCapRejected": "rejected",
+    "positionFlipAtOpenInterestCapRejected": "rejected",
+    "tooAggressiveAtOpenInterestCapRejected": "rejected",
+    "openInterestIncreaseRejected": "rejected",
+    "insufficientSpotBalanceRejected": "rejected",
+    "oracleRejected": "rejected",
+    "perpMaxPositionRejected": "rejected",
 }
 
 
@@ -603,10 +672,15 @@ def _local_status_for_exchange_status(exchange_status: str) -> str:
     if mapped is not None:
         return mapped
     lowered = exchange_status.lower()
-    if "cancel" in lowered:
-        return "canceled"
+    # "reject" outranks "cancel": iocCancelRejected — the documented
+    # vocabulary's one both-words status, "rejected due to IOC not able to
+    # match" — is a placement rejection (nothing ever rested), and reading it
+    # as canceled would report a never-placed order as RECOVERED_EXISTING
+    # instead of REJECTED.
     if "reject" in lowered:
         return "rejected"
+    if "cancel" in lowered:
+        return "canceled"
     if "filled" in lowered:
         return "filled"
     logger.warning(

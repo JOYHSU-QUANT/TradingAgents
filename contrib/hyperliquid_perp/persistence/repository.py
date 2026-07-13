@@ -1618,20 +1618,20 @@ def iter_live_order_attempts(
     ).fetchall()
 
 
-def next_live_attempt_index(
-    conn: sqlite3.Connection, run_id: str, *, action: str, cloid_hex: str
-) -> int:
+def next_live_attempt_index(conn: sqlite3.Connection, *, action: str, cloid_hex: str) -> int:
     """The next free attempt_index for one (cloid, action) — 0 for a first send.
 
-    Derived from the store, not an in-memory counter, so a restarted process
-    resumes above the persisted maximum instead of colliding with the UNIQUE
-    (cloid_hex, action, attempt_index) evidence trail.
+    Derived from the store, not an in-memory counter, and with NO run filter:
+    the UNIQUE (cloid_hex, action, attempt_index) evidence trail spans runs —
+    a later run's shutdown sweep cancels an earlier run's surviving order —
+    so the index namespace must span them too, or the second run re-derives
+    an index the constraint already holds and every cancel of that order
+    fails on the INSERT before a round-trip is even attempted.
     """
     check_enum(action, _LIVE_ATTEMPT_ACTIONS, name="action")
     row = conn.execute(
-        "SELECT MAX(attempt_index) FROM live_order_attempts "
-        "WHERE run_id = ? AND action = ? AND cloid_hex = ?",
-        (run_id, action, cloid_hex),
+        "SELECT MAX(attempt_index) FROM live_order_attempts WHERE action = ? AND cloid_hex = ?",
+        (action, cloid_hex),
     ).fetchone()
     return 0 if row[0] is None else row[0] + 1
 

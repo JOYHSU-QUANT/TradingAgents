@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -16,6 +17,7 @@ from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
 from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
+from contrib.hyperliquid_perp.persistence.ids import live_order_attempt_id
 
 _NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
 _HEX = "0x" + "ab" * 16
@@ -235,8 +237,6 @@ def test_shutdown_cancels_bot_owned_only_with_evidence_rows(env):
 
 
 def test_shutdown_settles_the_local_order_row(env):
-    from decimal import Decimal
-
     db, client, gate, clock, manager = env
     manager.arm()
     _register_cloid(db, logical="log-1", hex_id=_HEX)
@@ -406,8 +406,6 @@ def test_post_ack_persistence_failure_counts_as_failure_and_keeps_armed(env, mon
     # attempt stays 'submitted', the order row stays 'open' (PR 4
     # reconciliation aligns it), the sweep records a failure, and the switch
     # must stay armed (not-clean sweep).
-    from decimal import Decimal
-
     db, client, gate, clock, manager = env
     manager.arm()
     _register_cloid(db, logical="log-1", hex_id=_HEX)
@@ -461,3 +459,132 @@ def test_shutdown_with_unreachable_exchange_still_completes_the_audit_trail(env)
     # it is the only thing still covering whatever we could not see.
     assert client.clear_calls == 0
     assert manager.armed
+
+
+def test_shutdown_closes_the_gate_at_sweep_start_independent_of_disarm(env):
+    # The §4.1 gate drops at the FIRST statement of shutdown(), before any
+    # cancel — not as a consequence of the disarm outcome. Even a clean sweep
+    # with a successful disarm must find the gate already closed.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    assert gate.kill_switch_active
+    _register_cloid(db, logical="log-1", hex_id=_HEX)
+    client.open_orders_result = [{"oid": 1, "coin": "BTC", "cloid": _HEX}]
+    gate_seen_at_disarm: list[bool] = []
+    original_clear = client.clear_scheduled_cancel
+
+    def spying_clear():
+        gate_seen_at_disarm.append(gate.kill_switch_active)
+        return original_clear()
+
+    client.clear_scheduled_cancel = spying_clear
+    manager.shutdown()
+    # Clean sweep, disarm succeeded...
+    assert client.cancel_calls == [("BTC", _HEX)]
+    assert client.clear_calls == 1
+    assert not manager.armed
+    # ...yet the gate was already down when the disarm ran, and stays down.
+    assert gate_seen_at_disarm == [False]
+    assert not gate.kill_switch_active
+
+
+def test_tick_after_clean_shutdown_is_a_lifecycle_error(env):
+    db, client, gate, clock, manager = env
+    manager.arm()
+    client.open_orders_result = []
+    manager.shutdown()  # clean sweep, successful disarm
+    assert not manager.armed
+    with pytest.raises(RuntimeError, match="after shutdown"):
+        manager.tick()
+
+
+def test_refresh_after_shutdown_raises_even_when_disarm_failed(env):
+    # Previously a failed disarm left the manager willing to keep refreshing;
+    # the retirement boundary now holds regardless of the disarm outcome.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    client.open_orders_result = []
+    client.clear_error = ExchangeRequestError("disarm down")
+    manager.shutdown()
+    assert manager.armed  # disarm failed — exchange-side switch still set
+    with pytest.raises(RuntimeError, match="after shutdown"):
+        manager.refresh()
+
+
+def test_unarmed_shutdown_sweeps_but_never_disarms(env):
+    # A shutdown before arm() still runs the sweep and writes its audit pair,
+    # but there is no scheduleCancel to clear and no disarmed event to fake.
+    db, client, gate, clock, manager = env
+    client.open_orders_result = []
+    manager.shutdown()
+    assert _event_types(db) == [
+        "shutdown_cancel_orders_started",
+        "shutdown_cancel_orders_completed",
+    ]
+    assert client.clear_calls == 0
+    assert not manager.armed
+
+
+def test_registry_hit_without_coin_is_a_failure_not_a_skip(env):
+    # Bot-owned (registry hit) but the open_orders payload has no 'coin' to
+    # address the cancel with: "ours but uncancelable" must land in failures
+    # (blocking the disarm), never in skipped_non_bot.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _register_cloid(db, logical="log-1", hex_id=_HEX)
+    client.open_orders_result = [{"oid": 1, "cloid": _HEX}]  # no "coin" key
+    manager.shutdown()
+    assert client.cancel_calls == []  # no round-trip was possible
+    detail = json.loads(repo.iter_kill_switch_events(db.conn, "r")[-1]["detail"])
+    assert detail["canceled"] == []
+    assert detail["skipped_non_bot"] == []
+    assert len(detail["failures"]) == 1
+    assert "missing 'coin'" in detail["failures"][0]
+    # Not a clean sweep: the wallet-wide backstop stays armed for this order.
+    assert client.clear_calls == 0
+    assert manager.armed
+
+
+def test_cross_run_cancel_evidence_spans_runs_without_index_collision(env):
+    # Regression (D1): run 'r-old' already holds (cancel_by_cloid, H, 0) on
+    # the evidence trail. A later run's sweep canceling the same surviving
+    # order must derive attempt_index 1 — not re-derive 0 and die on the
+    # UNIQUE (cloid_hex, action, attempt_index) before the round-trip.
+    db, client, gate, clock, _ = env
+    with db.transaction() as conn:
+        repo.insert_cloid_mapping(
+            conn,
+            cloid_logical="log-old",
+            cloid_hex=_HEX,
+            run_id="r-old",
+            symbol="BTC",
+            order_role="entry",
+        )
+        repo.insert_live_order_attempt(
+            conn,
+            attempt_id=live_order_attempt_id("r-old", "cancel_by_cloid", _HEX, 0),
+            run_id="r-old",
+            action="cancel_by_cloid",
+            symbol="BTC",
+            attempt_index=0,
+            cloid_logical="log-old",
+            cloid_hex=_HEX,
+            requested_at=_NOW - timedelta(days=1),
+        )
+    manager = KillSwitchManager(
+        client=client,
+        gate=gate,
+        db=db,
+        run_id="r-new",
+        config=KillSwitchConfig(),
+        clock=clock,
+    )
+    manager.arm()
+    client.open_orders_result = [{"oid": 7, "coin": "BTC", "cloid": _HEX}]
+    manager.shutdown()
+    assert client.cancel_calls == [("BTC", _HEX)]
+    attempts = repo.iter_live_order_attempts(db.conn, "r-new", cloid_hex=_HEX)
+    assert [(a["attempt_index"], a["status"]) for a in attempts] == [(1, "acknowledged")]
+    # No IntegrityError anywhere → the sweep was clean and the disarm landed.
+    assert client.clear_calls == 1
+    assert not manager.armed

@@ -634,6 +634,16 @@ class KillSwitchManager:
             # The send never landed: no exchange order exists under this cloid.
             # Nothing to settle the row FROM (the exchange has no verdict to
             # record), so it stays as it is for PR 4's reconciliation.
+            #
+            # NAMED BOUNDARY: this is the one corner where the disarm still rests
+            # on a single Info read. A place that timed out (attempt 'failed', no
+            # exchange_order_id) whose order actually rested WOULD, if Info has
+            # not caught up, answer unknownOid here — and be let through. It is
+            # the same definition of "durable proof" §8.3 rule 10 already runs on
+            # (has_exchange_known_cloid), so tightening it here without tightening
+            # rule 10 would make the two disagree about the same evidence. Closing
+            # it needs a stronger proof of receipt than we currently record, which
+            # is PR 3/4 territory (exchange fill events, reconciliation).
             return True
         exchange_order_id, exchange_status = parsed
         local_status = local_status_for_exchange_status(exchange_status)

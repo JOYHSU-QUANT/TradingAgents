@@ -445,6 +445,16 @@ class LiveOrderSubmitter:
                     status="submitted",
                     status_reason=None,
                     submitted_at=now,
+                    # The exchange-side columns describe the PREVIOUS attempt's
+                    # verdict, and this send has no verdict yet. Cleared with the
+                    # status they belong to: a crash inside the network window
+                    # would otherwise leave a row reading status='submitted' with
+                    # exchange_status='rejected' and an acknowledged_at from an
+                    # answer to a different send — self-contradictory evidence in
+                    # the one place PR 4's reconciliation looks.
+                    exchange_status=None,
+                    exchange_raw_status=None,
+                    acknowledged_at=None,
                     updated_at=now,
                 )
             repo.insert_live_order_attempt(

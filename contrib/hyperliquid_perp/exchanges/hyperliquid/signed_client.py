@@ -7,9 +7,11 @@ cloid, cancel (by oid and by cloid), orderStatus queries, scheduleCancel — all
 returning structured results (:class:`OrderAck` / :class:`CancelAck`) instead
 of raw SDK dicts. The §4.1
 :class:`~contrib.hyperliquid_perp.live.order_gate.RealOrderGate` is bound at
-construction and judges every signed MUTATION: order placement passes the full
-condition list, cancel/scheduleCancel the base subset (§13.1 allows those in
-safe mode). Queries are read-only and ungated.
+construction and judges every signed MUTATION: order placement passes the
+wire-scoped condition list (``check_order``), cancel/scheduleCancel the base
+subset (§13.1 allows those in safe mode). The full §4.1 list is a DECISION
+question, asked once per cycle through ``check_new_target`` by the engine, not
+per order. Queries are read-only and ungated.
 
 This layer is transport only: no persistence, no retry policy. The §8.3
 idempotent-retry protocol (registry write before send, query-before-resend on
@@ -339,8 +341,12 @@ class HyperliquidSignedClient:
     ) -> OrderAck:
         """Submit one IOC limit order carrying its cloid (§7 ``order``, §9).
 
-        The FULL §4.1 gate (bound at construction) runs first — a rejection
-        raises ``LiveOrderGateRejected`` before any network traffic. The cloid
+        The §4.1 gate bound at construction runs first — a rejection raises
+        ``LiveOrderGateRejected`` before any network traffic. It is the
+        WIRE-SCOPED subset (``check_order``), the conditions that must hold for
+        any order to be sent at all; the three decision-scoped ones live on
+        ``check_new_target``, which the engine asks once per cycle (§9.3 allows
+        SL repair and emergency close while a slice plan runs). The cloid
         is mandatory: every order this system sends must be attributable
         through the registry (§8.2), and an anonymous order would be judged
         non-bot-owned by our own reconciliation (§19.3). Returns the parsed

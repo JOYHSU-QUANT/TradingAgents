@@ -433,17 +433,23 @@ order、都有自己的 cloid——不存在 v2 native TWAP 母單「cloid_hex, 
     rule 1 同 cloid retry、由 pre-check 的 orderStatus 解決——transient 失敗不得
     消耗 cloid、不得在審計留下永久 rejected；rule 9 的「error ack」只指 `statuses`
     內的 per-order error（v6 新增，2026-07-13）。
-12. **猜測不得授權重送**（v7 新增，2026-07-13）：exchange status → local status 的
-    對照以「完整文件化詞彙 exact 表」為權威；表外新詞走 substring fallback，而該
-    fallback **永遠不得產出 `rejected`**。理由：`rejected` 不只是一個標籤，它會變成
-    `SubmitOutcomeKind.REJECTED`，依 rule 9 這個判決**授權呼叫方開一張新的 logical
-    order**。若一個未來新增、字面含 "reject" 但訂單其實還掛在場上的狀態被猜成
-    rejected，就會替一個活著的部位再鑄一個 cloid——這與 rule 10 的 resend guard
-    是同一個 bug class（用不完整的 status 判斷驅動安全判決），而且是唯一「猜錯要
-    賠真錢」的方向。因此表外的 reject-ish 新詞與完全未知的新詞一視同仁：記為
-    `open` + warning，交給 PR 4 reconciliation 對帳。高估「還活著」是可回復的
-    （對帳會關掉它），高估「被拒絕」會鑄新單。fallback 剩下的 cancel / filled 兩臂
-    在這個方向上是安全的（都不授權重送），維持 best-effort。
+12. **exchange status 一律只查 exact 表，表外的字一律不猜**（v7 新增，2026-07-13）：
+    exchange status → local status 的對照，**唯一權威是「完整文件化詞彙 exact 表」**
+    （`_EXCHANGE_TO_LOCAL_STATUS`，已涵蓋 Hyperliquid 文件列出的全部 29 個字）。
+    表外的字＝交易所在這張表寫完之後新增的字；對這種字**任何方向的猜測都不安全**，
+    所以一個都不猜——一律記為 `open` + warning，交給 PR 4 reconciliation 對帳：
+    - 猜成 `rejected` 是最貴的：它會變成 `SubmitOutcomeKind.REJECTED`，依 rule 9
+      **授權呼叫方開一張新的 logical order**。一個字面含 "reject" 但訂單其實還掛在
+      場上的新狀態，就會替一個活著的部位再鑄一個 cloid（雙倉）。
+    - 猜成**終態**（`canceled` / `filled`）則會靜默放棄一張可能還活著的單：像
+      `cancelRequested`（取消在途、單還在場上）會被記成 canceled，之後真的成交時，
+      fill 會落在一張本地已 canceled 的單上。
+    兩者與 rule 10 的 resend guard 是同一個 bug class（用不完整的 status 判斷驅動
+    安全判決）。exact 表既然已涵蓋全部文件化詞彙，heuristic 對「真正重要的字」毫無
+    貢獻，只會在「最不該猜」的地方開火——因此 substring fallback 已整個移除（v6 曾
+    保留 reject/cancel/filled 三臂，v7 全數刪除）。記為 `open` 是唯一保守的讀法：
+    高估「還活著」可回復（單會繼續被看管、對帳會關掉它），高估「被拒絕」會鑄新單，
+    高估「已結束」會丟掉活單。
 
 ## 9. Sliced TWAP Execution（v3 全章改寫）
 
@@ -1064,12 +1070,13 @@ kill_switch:
 定為硬錯誤——無法實作的 config 值在載入期拒絕，v5 新增，2026-07-13。）
 
 （`schedule_cancel_seconds >= 2 × refresh_interval_seconds` 建構期強制（v7 新增，
-2026-07-13）：舊規則只要求 `refresh < schedule_cancel`，但 live loop 只在 tick 上
-刷新，實際節奏被 loop 週期量化，**一次 skip 或慢一拍就把下次刷新推到約 2×
-interval**。`refresh=119 / schedule_cancel=120` 這種舊規則接受的 config，第一個
+2026-07-13）：舊規則只要求 `refresh < schedule_cancel`，但 manager 只在被 tick 時
+刷新，實際節奏被**呼叫方的 tick 間隔**量化，**一次 skip 或慢一拍就把下次刷新推到
+約 2× interval**。`refresh=119 / schedule_cancel=120` 這種舊規則接受的 config，第一個
 ≥119s 的 tick 會落在約 120s——dead man's switch 在**正常運行中**觸發，掃掉該錢包
 全部掛單。要求 deadline 至少涵蓋兩個完整 interval，讓「漏掉一輪」是可存活的而非
-致命的。預設值 120/30 是 4×。）
+致命的。預設值 120/30 是 4×。**這是必要條件、不是充分條件**——它看不到呼叫方的
+tick 間隔，真正綁定的檢查是 §18.2 rule 2 的 `max_tick_gap_seconds` 建構期不變量。）
 
 ### 18.2 Required Behavior
 
@@ -1079,9 +1086,9 @@ interval**。`refresh=119 / schedule_cancel=120` 這種舊規則接受的 config
    與 refresh 同一條式子）——否則第二次 arm 會把刷新失敗關上的 §4.1 gate 靠運氣
    重開，而不是走 §13.4 reconciliation（v7 新增，2026-07-13）。
 2. Live loop 運行期間，必須依 `refresh_interval_seconds` 刷新 schedule cancel deadline。
-   `refresh_due()` 的 interval 語意是「至少這麼頻繁」而非「不得早於」：live loop 的
-   週期**等於** refresh_interval（都是 30s），tick 必然比它比較的那個排程時刻晚幾
-   毫秒，若用嚴格 `elapsed >= interval` 判斷，這點抖動就會 skip 掉刷新、讓真實節奏
+   `refresh_due()` 的 interval 語意是「至少這麼頻繁」而非「不得早於」：當呼叫方以與
+   refresh_interval 相同的週期 tick（預期的 30s／30s 接線），tick 必然比它比較的那個
+   排程時刻晚幾毫秒，若用嚴格 `elapsed >= interval` 判斷，這點抖動就會 skip 掉刷新、讓真實節奏
    悄悄砍半成「每兩輪一次」（只有事件時間戳的空隙看得出來）。因此保留一個遠大於
    抖動、又遠小於 interval 的 slack（0.5s）——只會讓刷新稍微提早，永遠不會推遲過
    deadline（v7 新增，2026-07-13）。
@@ -1097,12 +1104,28 @@ interval**。`refresh=119 / schedule_cancel=120` 這種舊規則接受的 config
    dead man's switch 在正常運行中觸發並掃掉全錢包掛單。
 
    **`max_tick_gap_seconds` 的語意要照字面讀：兩次 tick() 之間的最壞牆鐘時間，不是
-   sleep 間隔**（v7 新增，2026-07-13）。既有 `_run_loop` 的一輪是
+   sleep 間隔**（v7 新增，2026-07-13）。既有 `_paper_loop`（cli.py）的一輪是
    `engine.tick()` → `scheduler.poll()` → `sleep(min(delay, 60))` **同步**執行，而
    `poll()` 會跑完整的多 agent AI 決策——**數分鐘**，不是數秒。若 PR 5 傳入 sleep 上限
    （60s）卻讓一輪 block 三分鐘，這道檢查會放行，然後在決策途中被交易所掃單。因此
    **§18.2 對 PR 5 的硬性要求：kill switch 必須在決策 cycle *內部*（或由獨立的
    refresher）刷新，不能只在 loop 頂端刷新**；傳進來的必須是真實的最壞 tick 間隔。
+   **刷新（與 shutdown）必須先偵測「switch 是否已經觸發過了」**（v7 新增，
+   2026-07-13）：`max_tick_gap_seconds` 是呼叫方在建構期做出的**承諾**，而這是唯一
+   會去查核它有沒有兌現的地方。若距離上次成功排程已超過 `schedule_cancel_seconds`，
+   交易所**已經**把該錢包的掛單全部取消了；此時若 refresh 只是若無其事地重新排程並
+   重開 §4.1 gate，引擎就會對著一本它以為還在、其實已被清空的簿子繼續下單，而唯一的
+   線索只有事件時間戳上的一個空隙。因此偵測到逾期時：latch `stop_new_orders`（與刷新
+   失敗同一條 sticky 規則，只能由 §13.4 reconciliation 解除）、關閉 §4.1 gate、記
+   `kill_switch_cancel_triggered` 事件（§18.5 詞彙既有成員；PR2 現在寫 9 之 8）、
+   log ERROR。仍會重新排程（往後的保護要接上），但 latch 讓新單進不來；本地 order
+   rows 在 reconciliation 之前是 stale 的（still 'open'）。
+   **報一次、且以「排程紀元」為鍵**：latch 也會被刷新失敗拉起，而「連續刷新失敗」正是
+   讓 deadline 逾期最可能的原因（API 斷線跨過 deadline），所以若以 latch 為去重鍵，
+   最可能的真實觸發反而會靜默無聲。以 `_last_scheduled_at` 為鍵則每個逾期的 deadline
+   恰好報一次。shutdown 也要做同一個偵測——它是呼叫方停止 tick 之後唯一還會跑的方法，
+   而逾期後 `open_orders()` 會回空集合，sweep 會「乾淨」收場並 disarm，產生一份「什麼
+   都不用取消的完美關機」假象。
 3. 若刷新失敗，必須進入 safe mode。解除 safe mode 只有一個入口：
    `release_safe_mode()`（§13.4 呼叫），它必須**同時**清掉 sticky latch 與重開
    §4.1 gate——只清 latch 會讓 gate 一直關到下次成功刷新，只開 gate 會被下次

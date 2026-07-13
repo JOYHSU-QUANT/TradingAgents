@@ -207,12 +207,12 @@ def test_refresh_cadence_is_30s(env):
 
 
 def test_a_tick_a_hair_early_still_refreshes(env):
-    # The live loop's period EQUALS refresh_interval_seconds (both 30s), so
-    # tick() lands a few ms later in each cycle than the schedule it is measured
-    # against. Under a bare `elapsed >= interval` test that shortfall skipped the
-    # refresh and halved the real cadence to every OTHER cycle — silently, since
-    # only a gap in the event timestamps would ever show it. The slack absorbs
-    # the jitter: a tick a hair early is still due.
+    # A caller ticking at the same period as refresh_interval_seconds (the
+    # intended 30s/30s wiring) lands a few ms later in each cycle than the
+    # schedule it is measured against. Under a bare `elapsed >= interval` test
+    # that shortfall skipped the refresh and halved the real cadence to every
+    # OTHER cycle — silently, since only a gap in the event timestamps would ever
+    # show it. The slack absorbs the jitter: a tick a hair early is still due.
     db, client, _, clock, manager = env
     manager.arm()
     clock.advance(29.9)
@@ -331,6 +331,113 @@ def test_release_safe_mode_without_a_latch_is_a_noop(env):
     assert manager.release_safe_mode() is True
     assert gate.kill_switch_active
     assert _event_types(db) == ["kill_switch_armed"]  # nothing to release
+
+
+def test_a_refresh_after_the_deadline_lapsed_knows_the_switch_already_fired(env):
+    # max_tick_gap_seconds is a promise the caller makes at construction; this is
+    # the only thing that checks it was kept. If more than schedule_cancel_seconds
+    # has passed (a decision cycle that blocked for minutes), the exchange HAS
+    # cancelled every order on the wallet. Silently re-arming and reopening the
+    # gate would leave the engine trading against a book it thinks is still there.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    clock.advance(200)  # > the 120s deadline: the switch fired while we were away
+
+    assert manager.refresh() is True  # the exchange-side switch is re-armed...
+    assert manager.stop_new_orders  # ...but we are latched: our orders are gone
+    assert not gate.kill_switch_active  # §4.1 shut until reconciliation
+    assert _event_types(db) == [
+        "kill_switch_armed",
+        "kill_switch_cancel_triggered",
+        "kill_switch_refreshed",
+    ]
+
+
+def test_one_lapsed_deadline_is_reported_once(env):
+    # Keyed on the SCHEDULE EPOCH, so repeated refreshes against the same lapsed
+    # deadline report once...
+    db, client, _, clock, manager = env
+    manager.arm()
+    client.schedule_error = ExchangeRequestError("api down")
+    clock.advance(200)  # deadline lapsed; refreshes keep failing, epoch frozen
+    manager.refresh()
+    clock.advance(30)
+    manager.refresh()
+    assert _event_types(db).count("kill_switch_cancel_triggered") == 1
+
+
+def test_a_second_lapsed_deadline_is_reported_again(env):
+    # ...but a NEW deadline that lapses is a second, genuine firing.
+    db, client, _, clock, manager = env
+    manager.arm()
+    clock.advance(200)
+    manager.refresh()  # reports firing #1, and re-schedules (new epoch)
+    clock.advance(200)
+    manager.refresh()  # that new deadline lapsed too — firing #2
+    assert _event_types(db).count("kill_switch_cancel_triggered") == 2
+
+
+def test_a_firing_during_an_api_outage_is_still_reported(env, caplog):
+    # THE most likely real firing: the API goes down, refreshes fail (which
+    # raises the latch), and the deadline lapses mid-outage. Keying the dedupe on
+    # the latch would have gone completely silent here — no event, no ERROR —
+    # exactly when the wallet was actually swept.
+    db, client, gate, clock, manager = env
+    caplog.set_level(logging.ERROR, logger="contrib.hyperliquid_perp.live.kill_switch")
+    manager.arm()
+    client.schedule_error = ExchangeRequestError("api down")
+    for _ in range(3):  # refreshes fail across the 120s deadline
+        clock.advance(30)
+        manager.refresh()
+    assert manager.stop_new_orders  # latched by the FAILURES
+
+    clock.advance(60)  # now past the deadline: the exchange swept the wallet
+    client.schedule_error = None
+    manager.refresh()  # the API is back — this must NOT be a quiet recovery
+
+    assert "kill_switch_cancel_triggered" in _event_types(db)
+    assert any("kill switch FIRED" in r.message for r in caplog.records)
+    assert manager.stop_new_orders  # still latched
+    assert not gate.kill_switch_active
+
+
+def test_shutdown_notices_the_switch_already_fired(env):
+    # After a lapsed deadline the exchange has swept the wallet, so open_orders()
+    # comes back empty and the sweep would otherwise record a "perfectly clean
+    # shutdown, nothing to cancel" — the most misleading trail of all.
+    db, client, _, clock, manager = env
+    manager.arm()
+    clock.advance(200)
+    client.open_orders_result = []  # the exchange already cancelled everything
+    manager.shutdown()
+    assert "kill_switch_cancel_triggered" in _event_types(db)
+
+
+def test_a_release_on_a_switch_that_already_fired_does_not_resume_trading(env):
+    # The release runs a proving refresh, and that refresh detects the lapsed
+    # deadline and RE-latches. So refresh() itself succeeds (the exchange-side
+    # switch re-arms), but the release must still report failure: our orders were
+    # just swept off the book, and resuming trading before reconciliation — on
+    # local rows that still say 'open' — is exactly wrong. The latch, not the
+    # round-trip, is the verdict.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    clock.advance(30)
+    client.schedule_error = ExchangeRequestError("timeout")
+    manager.refresh()  # latched; the deadline is now ticking down unrefreshed
+    client.schedule_error = None
+
+    clock.advance(200)  # the deadline lapses: the exchange fired the switch
+    assert manager.release_safe_mode() is False
+    assert manager.stop_new_orders  # re-latched by the expiry detection
+    assert not gate.kill_switch_active
+    assert "kill_switch_cancel_triggered" in _event_types(db)
+
+    # That failed release still re-armed the switch, so the deadline is fresh
+    # again — a release retried after reconciliation now succeeds.
+    clock.advance(10)
+    assert manager.release_safe_mode() is True
+    assert gate.kill_switch_active
 
 
 def _safe_mode_errors(caplog) -> int:

@@ -143,6 +143,10 @@ class KillSwitchManager:
         # the one call that cancels our live orders.
         self._shutdown_completed = False
         self._last_scheduled_at: datetime | None = None
+        # The schedule epoch whose lapse has already been reported, so one fired
+        # switch produces one event. Keyed on the schedule, not on the latch —
+        # see _detect_expired_deadline.
+        self._expiry_reported_for: datetime | None = None
         # Sticky until PR 4's safe-mode release path clears it (§13.4).
         self.stop_new_orders = False
         # Whether the operator has already been told we are in safe mode. Not
@@ -243,9 +247,14 @@ class KillSwitchManager:
         if not self.stop_new_orders:
             return True
         self.stop_new_orders = False
-        if not self.refresh():
-            # refresh() already re-latched, closed the gate and recorded why.
-            logger.warning("kill switch safe mode release failed: the switch still cannot refresh")
+        self.refresh()
+        # The latch, not the round-trip, is the verdict. refresh() can succeed
+        # and STILL re-latch us — if the deadline had already elapsed, the switch
+        # has fired and its orders are gone, so that refresh re-arms the exchange
+        # but must not resume trading. (Its re-schedule leaves a fresh deadline
+        # behind, so a release attempted again after reconciliation can succeed.)
+        if self.stop_new_orders:
+            logger.warning("kill switch safe mode release failed: the switch is still not healthy")
             return False
         logger.info("kill switch safe mode released: new orders may pass the gate again")
         return True
@@ -267,6 +276,55 @@ class KillSwitchManager:
         elapsed = (self._clock.now() - self._last_scheduled_at).total_seconds()
         return elapsed >= self._config.refresh_interval_seconds - _REFRESH_DUE_SLACK_S
 
+    def _detect_expired_deadline(self) -> None:
+        """Notice that the dead man's switch already FIRED before we got here.
+
+        ``max_tick_gap_seconds`` is a promise the caller makes at construction;
+        this is the only thing that checks whether it kept it. If more than
+        schedule_cancel_seconds has passed since the last successful schedule,
+        the exchange has already cancelled every order on the wallet — and a
+        refresh that simply re-armed and reopened the §4.1 gate would leave the
+        engine placing orders against a book it believes is still there, with
+        nothing but a gap in the event timestamps to show for it.
+
+        Treated exactly like a refresh failure (the same sticky latch, released
+        only by PR 4's §13.4 reconciliation), because the consequence is the
+        same and worse: our orders are provably gone, and the local rows still
+        say 'open' until reconciliation settles them.
+
+        Reported once per LAPSED DEADLINE, keyed on the schedule it lapsed from —
+        NOT on the latch. The latch is also raised by a refresh failure, and a
+        run of refresh failures is precisely what lets a deadline lapse (an API
+        outage spanning it), so keying on the latch would go silent on the single
+        most likely real firing. Keying on the schedule epoch reports exactly
+        once in every path: while refreshes keep failing the epoch is frozen (one
+        report), and while they succeed the deadline is pushed and never lapses.
+        """
+        if self._last_scheduled_at is None:
+            return
+        elapsed = (self._clock.now() - self._last_scheduled_at).total_seconds()
+        if elapsed < self._config.schedule_cancel_seconds:
+            return
+        already_reported = self._expiry_reported_for == self._last_scheduled_at
+        self._expiry_reported_for = self._last_scheduled_at
+        self._gate.kill_switch_active = False
+        self.stop_new_orders = True
+        self._safe_mode_announced = True
+        if not already_reported:
+            logger.error(
+                "kill switch FIRED: %.1fs since the last refresh exceeds the %ss "
+                "scheduled-cancel deadline — the exchange has cancelled every order "
+                "on this wallet. New orders are BLOCKED until reconciliation "
+                "(§18.2 rule 3); local order rows are stale until then.",
+                elapsed,
+                self._config.schedule_cancel_seconds,
+            )
+            self._record(
+                "kill_switch_cancel_triggered",
+                detail=f"no refresh for {elapsed:.1f}s "
+                f"(deadline {self._config.schedule_cancel_seconds}s)",
+            )
+
     def refresh(self) -> bool:
         """Push the exchange-side deadline back; False (plus flags) on failure.
 
@@ -276,11 +334,17 @@ class KillSwitchManager:
         The failure is recorded and NOT raised: the caller's loop must keep
         running (monitoring, protection, future refresh attempts continue —
         §18.4 rules 2–4).
+
+        A refresh that arrives AFTER the deadline already elapsed still
+        re-arms the exchange-side switch (protection going forward), but the
+        latch it raises keeps the §4.1 gate shut — see _detect_expired_deadline.
         """
         if self._shutdown_started:
             raise RuntimeError("KillSwitchManager.refresh() after shutdown()")
         if not self._armed:
             raise RuntimeError("KillSwitchManager.refresh() before arm()")
+        # Before anything else: did the switch already fire while we were away?
+        self._detect_expired_deadline()
         try:
             self._schedule()
         except Exception as exc:
@@ -432,6 +496,16 @@ class KillSwitchManager:
         """
         if self._shutdown_completed:
             return
+        # Shutdown is the one method that still runs after the caller has stopped
+        # ticking, so it must ask the same question refresh() does: did the switch
+        # already fire? Without this, a lapsed deadline produces the most
+        # misleading audit trail of all — the exchange has swept the wallet, so
+        # open_orders() comes back empty, the sweep finds nothing to cancel, and
+        # the run records a completed event with `canceled: []` and disarms,
+        # reading as a perfectly clean shutdown while the local rows still say
+        # 'open' and nothing anywhere says the orders were cancelled for us.
+        if self._armed:
+            self._detect_expired_deadline()
         # The boundary is self-enforcing, not a caller convention: from the
         # first statement no new order may pass the §4.1 gate (the sweep must
         # not race fresh submissions), and tick()/refresh() refuse to touch a

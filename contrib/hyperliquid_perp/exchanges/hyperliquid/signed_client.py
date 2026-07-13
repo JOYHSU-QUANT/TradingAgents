@@ -24,7 +24,7 @@ only public addresses (§6 rule 2: the key must not reach logs).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +32,7 @@ from hyperliquid.exchange import Exchange
 from hyperliquid.utils.types import Cloid
 
 from .errors import ExchangeError, ExchangeRequestError, MalformedResponseError
+from .mapper import require_decimal
 from .sdk_client import (
     _BASE_URLS,
     DEFAULT_NETWORK_TIMEOUT_S,
@@ -57,7 +58,13 @@ _DUPLICATE_CLOID_MARKERS = ("duplicate", "already exists", "already used")
 
 
 def is_duplicate_cloid_error(message: str | None) -> bool:
-    """True when an order-status error text signals a duplicate/known cloid."""
+    """True when an order ACK's error text signals a duplicate/known cloid.
+
+    Applied to :attr:`OrderAck.error` — the exchange's per-order rejection text —
+    never to an orderStatus payload. That distinction is the point of §8.3 rule
+    9: this text is a fast-path hint, and orderStatus is the authority on
+    rejected-vs-exists.
+    """
     if not message:
         return False
     lowered = message.lower()
@@ -172,11 +179,41 @@ def _single_status(response: Any, *, action: str) -> Any:
     data = payload.get("data") if isinstance(payload, dict) else None
     statuses = data.get("statuses") if isinstance(data, dict) else None
     if not isinstance(statuses, list) or len(statuses) != 1:
+        # `statuses` has already FAILED the list test here, so it may be any
+        # shape at all — len() on a truthy non-sized value (say `"statuses": 3`)
+        # would raise TypeError while building the very message meant to report
+        # the malformation, and the named-error contract this layer promises
+        # would be broken by its own error path.
+        count = len(statuses) if isinstance(statuses, list) else "non-list"
         raise MalformedResponseError(
-            f"Hyperliquid {action} response carries {0 if not statuses else len(statuses)}"
+            f"Hyperliquid {action} response carries {count}"
             f" statuses (expected exactly 1): {response!r}"
         )
     return statuses[0]
+
+
+def _field(container: Any, key: str, *, kind: str) -> Any:
+    """One required field out of an exchange status body, or fail loud.
+
+    The SDK hands back plain dicts, so a field the exchange stops sending (or
+    renames) would otherwise surface as a bare KeyError from inside a parser
+    that documents itself as raising MalformedResponseError — and the caller's
+    `except ExchangeError` lane would not catch it.
+    """
+    if not isinstance(container, dict) or key not in container:
+        raise MalformedResponseError(f"Hyperliquid {kind} status is missing {key!r}: {container!r}")
+    return container[key]
+
+
+def _decimal_field(container: Any, key: str, *, kind: str) -> Decimal:
+    """A required numeric field as Decimal, via the mapper's shared guard.
+
+    ``require_decimal`` is used rather than a local ``Decimal(str(...))``
+    because it also rejects NON-FINITE values: ``Decimal("NaN")`` parses without
+    complaint, and a NaN ``avgPx`` here would reach OrderAck, the orders row, and
+    every PnL derived from it — poisoning the accounting rather than failing.
+    """
+    return require_decimal(_field(container, key, kind=kind), field=f"{kind} {key}")
 
 
 def _parse_order_ack(response: Any) -> OrderAck:
@@ -185,16 +222,16 @@ def _parse_order_ack(response: Any) -> OrderAck:
         resting = status["resting"]
         return OrderAck(
             status="resting",
-            exchange_order_id=str(resting["oid"]),
+            exchange_order_id=str(_field(resting, "oid", kind="resting order")),
             raw=response,
         )
     if isinstance(status, dict) and "filled" in status:
         filled = status["filled"]
         return OrderAck(
             status="filled",
-            exchange_order_id=str(filled["oid"]),
-            filled_size=Decimal(str(filled["totalSz"])),
-            average_price=Decimal(str(filled["avgPx"])),
+            exchange_order_id=str(_field(filled, "oid", kind="filled order")),
+            filled_size=_decimal_field(filled, "totalSz", kind="filled order"),
+            average_price=_decimal_field(filled, "avgPx", kind="filled order"),
             raw=response,
         )
     if isinstance(status, dict) and "error" in status:
@@ -364,6 +401,29 @@ class HyperliquidSignedClient:
             self.wallet_address,
             int(exchange_order_id),
         )
+
+    def exchange_time(self) -> datetime | None:
+        """The exchange's own clock, or None if this response does not carry it.
+
+        ``clearinghouseState`` stamps its answer with a ``time`` field (epoch
+        ms). It is the only exchange-side clock this transport can reach without
+        a new endpoint, and the kill switch needs it: ``scheduleCancel`` takes an
+        ABSOLUTE deadline computed from OUR clock, so host clock drift silently
+        changes the real protection window (see KillSwitchManager.arm).
+
+        Returns None — rather than raising — when the field is absent or
+        unparseable: the field is not load-bearing for any other caller, and a
+        missing timestamp must degrade the skew CHECK, never block a startup
+        that is otherwise healthy. Read-only, so ungated.
+        """
+        state = call_sdk(self._exchange.info.user_state, self.wallet_address)
+        stamp = state.get("time") if isinstance(state, dict) else None
+        if stamp is None:
+            return None
+        try:
+            return datetime.fromtimestamp(int(stamp) / 1000, tz=timezone.utc)
+        except (TypeError, ValueError, OSError, OverflowError):
+            return None
 
     def open_orders(self) -> Any:
         """The main wallet's open orders (read-only; §18 shutdown / §19.3 startup).

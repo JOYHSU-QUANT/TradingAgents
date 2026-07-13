@@ -115,6 +115,14 @@ def live_order_attempt_id(run_id: str, action: str, target: str, attempt_index: 
     ``fill_id``: a crash-retry that re-derives the same (action, target,
     attempt_index) collides on the PRIMARY KEY instead of silently minting a
     second row for the same round-trip.
+
+    CAVEAT for the by-oid ``cancel`` action (no writer yet — PR 4/5 will be the
+    first): the attempt_index such a row needs cannot come from
+    ``next_live_attempt_index``, which keys on cloid_hex alone, and the table's
+    ``UNIQUE (cloid_hex, action, attempt_index)`` does not constrain it either
+    (its cloid_hex is NULL, and NULLs stay distinct). This PRIMARY KEY is its
+    ONLY guard, so whoever writes the first by-oid cancel owns deriving its
+    index — do not assume the cloid-based helper already covers it.
     """
     return _SEP.join(
         (

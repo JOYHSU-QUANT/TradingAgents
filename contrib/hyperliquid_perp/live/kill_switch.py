@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from ..exchanges.hyperliquid.errors import ExchangeError
 from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
@@ -51,6 +52,8 @@ from ..persistence.db import Database
 from ..persistence.ids import live_order_attempt_id
 from .config import KillSwitchConfig
 from .order_gate import RealOrderGate
+from .orders import local_status_for_exchange_status, parse_order_status
+from .payloads import payload_column, write_raw_payload
 
 __all__ = ["KillSwitchManager"]
 
@@ -68,13 +71,25 @@ logger = logging.getLogger(__name__)
 # guard cannot be one, because it cannot see the caller's tick gap at all.
 _REFRESH_DUE_SLACK_S = 0.5
 
+# How far this host's clock may differ from the exchange's before arming is
+# refused. scheduleCancel takes an ABSOLUTE deadline that we compute from the
+# LOCAL clock, and _detect_expired_deadline measures the lapse against that same
+# local clock — so the two are self-consistent and drift is INVISIBLE here while
+# silently resizing the real, exchange-side protection window. Generous next to
+# a round-trip's latency (sub-second), tight next to the smallest sane
+# schedule_cancel window (MIN_SCHEDULE_CANCEL_SECONDS = 5s upward, 120s in the
+# example config): a skew this large already means time sync is broken, not slow.
+_MAX_CLOCK_SKEW_S = 5.0
+
 # NOTE on breadth: the refresh/shutdown paths deliberately catch ``Exception``,
 # not just ExchangeError — a round-trip can also fail in the persistence layer
 # (sqlite lock/IntegrityError, an invariant ValueError) or at the client's own
 # bound gate (LiveOrderGateRejected, NOT an ExchangeError), and any of those
-# escaping would abort the sweep mid-loop / kill the live loop — exactly what
-# §18.2 rule 3 and §18.4 rules 2–4 forbid. The error type travels in the
-# recorded event, so a code bug is loud in the audit trail, never re-raised
+# escaping would abort the sweep mid-loop (§18.2 rule 5: every remaining order
+# still gets its cancel attempt; §18.4 rule 1: the loop keeps running) or kill
+# the live loop (§18.2 rule 3 / §18.4 rules 2–4: a refresh failure stops new
+# orders but must not stop monitoring and protection). The error type travels in
+# the recorded event, so a code bug is loud in the audit trail, never re-raised
 # into the safety path.
 
 
@@ -90,6 +105,7 @@ class KillSwitchManager:
         run_id: str,
         config: KillSwitchConfig,
         max_tick_gap_seconds: float,
+        payload_dir: Path,
         clock: Clock | None = None,
     ) -> None:
         if not config.enabled:
@@ -138,6 +154,7 @@ class KillSwitchManager:
         self._db = db
         self._run_id = run_id
         self._config = config
+        self._payload_dir = payload_dir
         self._clock = clock or WallClock()
         self._armed = False
         self._shutdown_started = False
@@ -159,8 +176,14 @@ class KillSwitchManager:
         # switch produces one event. Keyed on the schedule, not on the latch —
         # see _detect_expired_deadline.
         self._expiry_reported_for: datetime | None = None
-        # Sticky until PR 4's safe-mode release path clears it (§13.4).
-        self.stop_new_orders = False
+        # Sticky until PR 4's safe-mode release path clears it (§13.4). PRIVATE,
+        # read through a property: it is the latch that blocks new orders, and a
+        # bare writable attribute invites `ks.stop_new_orders = False` as a
+        # shortcut past release_safe_mode() — which would reopen the §4.1 gate on
+        # the next refresh with no proving round-trip and no §13.4
+        # reconciliation. Released by luck is the one thing the sticky rule
+        # exists to prevent, so there is one door, and it is release_safe_mode().
+        self._stop_new_orders = False
         # Whether the operator has already been told we are in safe mode. Not
         # derivable from stop_new_orders: release_safe_mode() drops the latch
         # BEFORE its proving refresh, so a failed release would re-announce
@@ -170,6 +193,16 @@ class KillSwitchManager:
     @property
     def armed(self) -> bool:
         return self._armed
+
+    @property
+    def stop_new_orders(self) -> bool:
+        """The sticky §18.2-rule-3 latch: no new order may pass while it is up.
+
+        Read-only by design. PR 4's safe-mode state machine CONSUMES this flag;
+        the only thing that lowers it is :meth:`release_safe_mode`, which earns
+        the release with a proving refresh instead of asserting it.
+        """
+        return self._stop_new_orders
 
     def _record(
         self, event_type: str, *, detail: str | None = None, error: str | None = None
@@ -191,6 +224,55 @@ class KillSwitchManager:
         self._client.schedule_cancel(cancel_at=deadline)
         self._last_scheduled_at = now
 
+    def _check_clock_skew(self) -> None:
+        """Refuse to arm against a host clock the exchange does not agree with.
+
+        Every deadline this manager sends is ABSOLUTE and computed from the local
+        clock, and every lapse it detects is measured against that same clock —
+        so the pair is self-consistent and host drift is invisible to us while
+        changing the window that actually protects the wallet. A host four
+        minutes fast turns a 120s dead man's switch into a 360s one: the process
+        can die and leave real orders exposed for three times the configured
+        window, with nothing in the logs or events to say so. The declared
+        max_tick_gap invariant cannot catch it — it reasons entirely in local
+        time.
+
+        Only the "host ahead" direction is silent, which is why it needs a guard:
+        a host BEHIND sends a deadline the exchange sees as too near (or past),
+        and the exchange rejects it — arm() then fails loud on its own.
+
+        Skipped with a warning when the exchange hands back no timestamp: an
+        unavailable clock must degrade the CHECK, never block an otherwise
+        healthy startup.
+        """
+        try:
+            exchange_now = self._client.exchange_time()
+        except Exception as exc:
+            logger.warning(
+                "kill switch could not read the exchange clock (%s); host clock skew "
+                "is unverified and the scheduleCancel window is only as accurate as "
+                "this host's clock",
+                exc,
+            )
+            return
+        if exchange_now is None:
+            logger.warning(
+                "kill switch could not verify host clock skew: the exchange returned "
+                "no timestamp — the scheduleCancel window is only as accurate as this "
+                "host's clock"
+            )
+            return
+        skew = (self._clock.now() - exchange_now).total_seconds()
+        if abs(skew) >= _MAX_CLOCK_SKEW_S:
+            raise ValueError(
+                f"host clock differs from the exchange by {skew:+.1f}s (limit "
+                f"{_MAX_CLOCK_SKEW_S}s): scheduleCancel deadlines are absolute and "
+                f"computed from this clock, so the dead man's switch would not really "
+                f"be the configured {self._config.schedule_cancel_seconds}s wide. "
+                "Fix time sync (NTP) before trading."
+            )
+        logger.info("kill switch clock check: host is %+.2fs from the exchange", skew)
+
     def arm(self) -> None:
         """§18.2 rule 1: schedule cancel immediately after client init.
 
@@ -209,6 +291,9 @@ class KillSwitchManager:
             raise RuntimeError("KillSwitchManager.arm() after shutdown()")
         if self._armed:
             raise RuntimeError("KillSwitchManager.arm() twice — already armed")
+        # Before the first absolute deadline goes out, prove the clock we compute
+        # it from agrees with the exchange's.
+        self._check_clock_skew()
         self._schedule()
         self._armed = True
         # NOT an unconditional True: the sticky stop_new_orders latch outranks
@@ -256,9 +341,9 @@ class KillSwitchManager:
             raise RuntimeError("KillSwitchManager.release_safe_mode() after shutdown()")
         if not self._armed:
             raise RuntimeError("KillSwitchManager.release_safe_mode() before arm()")
-        if not self.stop_new_orders:
+        if not self._stop_new_orders:
             return True
-        self.stop_new_orders = False
+        self._stop_new_orders = False
         self.refresh()
         # The latch, not the round-trip, is the verdict. refresh() can succeed
         # and STILL re-latch us — if the deadline had already elapsed, the switch
@@ -327,7 +412,7 @@ class KillSwitchManager:
         # gate is shut and the latch is up.
         already_reported = self._expiry_reported_for == self._last_scheduled_at
         self._gate.kill_switch_active = False
-        self.stop_new_orders = True
+        self._stop_new_orders = True
         self._safe_mode_announced = True
         if already_reported:
             return
@@ -376,7 +461,7 @@ class KillSwitchManager:
             self._schedule()
         except Exception as exc:
             self._gate.kill_switch_active = False
-            self.stop_new_orders = True
+            self._stop_new_orders = True
             # Log BEFORE the durable record: if the event write itself dies
             # (broken DB at the worst moment), the root cause is already on
             # the log. The write stays unguarded — losing the audit trail
@@ -459,12 +544,35 @@ class KillSwitchManager:
         try:
             ack = self._client.cancel_by_cloid(coin=coin, cloid_hex=cloid_hex)
         except Exception as exc:
-            with self._db.transaction() as conn:
-                repo.update_live_order_attempt(
-                    conn, attempt_id, status="failed", error_message=str(exc)
+            # Record 'failed' WITHOUT letting the record replace `exc`. The
+            # original is the diagnosis, and it is doubly load-bearing here: the
+            # sweep loop puts it verbatim into the §18.5 completed event, so a
+            # busy DB would make the permanent audit record of a failed cancel
+            # read "database is locked" instead of the exchange's actual reason.
+            # Log first (this file's standing ordering rule), then record.
+            logger.warning("kill switch cancel of cloid %s failed: %s", cloid_hex, exc)
+            try:
+                with self._db.transaction() as conn:
+                    repo.update_live_order_attempt(
+                        conn, attempt_id, status="failed", error_message=str(exc)
+                    )
+            except Exception:
+                logger.exception(
+                    "could not record cancel attempt %s as 'failed'; it stays "
+                    "'submitted' (outcome unknown)",
+                    attempt_id,
                 )
             raise
         done_at = self._clock.now()
+        # The cancel's raw response is evidence too — same protocol the order
+        # path follows, and the attempt row has carried the column all along.
+        raw_path = write_raw_payload(
+            payload_dir=self._payload_dir,
+            kind="cancel",
+            key=cloid_hex,
+            payload=ack.raw,
+            now=done_at,
+        )
         with self._db.transaction() as conn:
             repo.update_live_order_attempt(
                 conn,
@@ -472,6 +580,7 @@ class KillSwitchManager:
                 status="acknowledged" if ack.success else "rejected",
                 error_message=ack.error,
                 acknowledged_at=done_at,
+                raw_exchange_payload_path=payload_column(raw_path),
             )
             if ack.success and local_order is not None:
                 repo.update_order(
@@ -486,6 +595,139 @@ class KillSwitchManager:
         if not ack.success:
             raise ExchangeError(f"cancel rejected: {ack.error}")
 
+    def _confirm_settled(self, order_id: str, cloid_hex: str) -> bool:
+        """Ask the EXCHANGE whether a locally-live order is really finished.
+
+        Used only by the disarm cross-check, for an order the sweep never saw in
+        ``open_orders()``. Returns True when the exchange proves the order is
+        settled, False when it is still live — or when the exchange's answer
+        contradicts our evidence and we therefore cannot claim it is settled.
+        Transport failures raise: the caller counts them as a failure, which
+        keeps the trigger armed.
+
+        ``unknownOid`` splits in two, and the split matters. If durable evidence
+        says the exchange once TOOK this cloid (§8.3 rule 10), then "I don't know
+        it" contradicts that, and an order we cannot account for must not earn
+        the disarm. If it does NOT — a 'submitted' row whose send never actually
+        reached the exchange — then there is no order and nothing to protect, so
+        it must not block the disarm forever either.
+
+        A settled answer is WRITTEN BACK. The exchange has just told us this
+        order's fate; leaving the row non-terminal would make the very next
+        shutdown — of this run and of every future run, since
+        ``iter_open_live_orders`` deliberately spans runs — pay the same
+        round-trip again for an order resolved long ago, so the cross-check's
+        cost would grow without bound across restarts. This is the same
+        "make SQLite agree with what the exchange just said" rule the §8.3
+        recovery back-fill follows.
+        """
+        payload = self._client.query_order_by_cloid(cloid_hex)
+        parsed = parse_order_status(payload)
+        if parsed is None:
+            if repo.has_exchange_known_cloid(self._db.conn, cloid_hex=cloid_hex):
+                logger.warning(
+                    "kill switch shutdown: orderStatus does not know cloid %s, but local "
+                    "evidence says the exchange took it — cannot call it settled",
+                    cloid_hex,
+                )
+                return False
+            # The send never landed: no exchange order exists under this cloid.
+            # Nothing to settle the row FROM (the exchange has no verdict to
+            # record), so it stays as it is for PR 4's reconciliation.
+            return True
+        exchange_order_id, exchange_status = parsed
+        local_status = local_status_for_exchange_status(exchange_status)
+        # LIVE_ORDER_STATUSES is the codebase's authority on "non-terminal", and
+        # it is partition-guarded against its terminal half — a bare
+        # `!= "open"` test would silently call a future 'partially_filled'
+        # mapping settled and drop the backstop over a live order.
+        if local_status in repo.LIVE_ORDER_STATUSES:
+            return False
+        with self._db.transaction() as conn:
+            repo.update_order(
+                conn,
+                order_id,
+                status=local_status,
+                exchange_order_id=exchange_order_id,
+                exchange_status=local_status,
+                exchange_raw_status=exchange_status,
+                updated_at=self._clock.now(),
+            )
+        return True
+
+    def _cross_check_local_orders(
+        self, handled_cloids: set[str], *, enumeration_failed: bool
+    ) -> list[str]:
+        """Local orders the sweep did not account for — each one blocks the disarm.
+
+        The disarm is the ONE irreversible removal of the crash backstop, and
+        until this check it rested entirely on a single ``open_orders()`` read.
+        An empty answer cannot be told apart from an Info view that has not caught
+        up with an order placed a second ago — and in that case failures is empty,
+        the sweep reads as clean, and the wallet-wide trigger is dropped over a
+        live order. Precisely the absence-of-evidence this system refuses to trust
+        anywhere else: §8.3 rule 10 (``has_exchange_known_cloid``) exists because
+        the exchange saying "I don't know it" does not outrank durable local proof.
+
+        So every orders row SQLite still calls non-terminal gets accounted for. The
+        sweep's own cancels have already patched their rows terminal, so they drop
+        out on their own; anything left is asked about directly. Still live, or
+        unconfirmable, counts as a failure — the trigger stays armed.
+
+        ``enumeration_failed`` suppresses the exchange round-trips, and that is a
+        LATENCY guard, not a policy one. When ``open_orders()`` has just failed
+        the endpoint is almost certainly unreachable, so every ``orderStatus``
+        here is doomed for the same reason — and each one can burn the full
+        network timeout, sequentially, inside a signal handler. A handful of open
+        orders against a dead endpoint would push shutdown past systemd's
+        TimeoutStopSec and get the process SIGKILLed mid-sweep, destroying the
+        very teardown these diagnostics document. The outcome is unchanged either
+        way (a sweep_error already keeps the trigger armed), so the orders are
+        still NAMED in the §18.5 detail — just not re-confirmed over a network
+        that is not answering.
+        """
+        unaccounted: list[str] = []
+        try:
+            rows = repo.iter_open_live_orders(self._db.conn)
+        except Exception as exc:
+            # We cannot prove the sweep was clean, so we must not claim it was.
+            logger.warning("kill switch shutdown cannot read local live orders: %s", exc)
+            return [f"?: local live-order cross-check failed: {exc}"]
+        for row in rows:
+            cloid = row["cloid_hex"]
+            if cloid in handled_cloids:
+                continue  # the sweep already cancelled it, or already failed it
+            order_id = row["order_id"]
+            if enumeration_failed:
+                # Named, not queried — see the docstring. It blocks the disarm
+                # regardless, exactly as the sweep_error already does.
+                unaccounted.append(
+                    f"{order_id}: local live order, open_orders enumeration failed — unconfirmed"
+                )
+                continue
+            try:
+                settled = self._confirm_settled(order_id, cloid)
+            except Exception as exc:
+                logger.warning(
+                    "kill switch shutdown cannot confirm local order %s (cloid %s): %s",
+                    order_id,
+                    cloid,
+                    exc,
+                )
+                unaccounted.append(f"{order_id}: could not confirm settled: {exc}")
+                continue
+            if not settled:
+                logger.warning(
+                    "kill switch shutdown: local order %s (cloid %s) is still live at the "
+                    "exchange but was absent from open_orders",
+                    order_id,
+                    cloid,
+                )
+                unaccounted.append(
+                    f"{order_id}: still live at the exchange, absent from open_orders"
+                )
+        return unaccounted
+
     def shutdown(self) -> None:
         """§18.2 rules 5–7: cancel bot-owned open orders; never force-close.
 
@@ -495,6 +737,15 @@ class KillSwitchManager:
         non-bot orders the sweep deliberately skips per §19.3), so a fully
         clean sweep (enumeration succeeded, zero failures) disarms it; any
         failure leaves it armed as the backstop for whatever survived.
+
+        "Clean" is decided from BOTH sides. The exchange's ``open_orders()`` is
+        an eventually-consistent read: an empty answer is indistinguishable from
+        an Info view that has not yet caught up with an order placed a second
+        ago, and believing it would drop the wallet-wide backstop over a live
+        order. So the local record gets a vote too — every orders row SQLite
+        still calls non-terminal that the sweep did not handle is put to the
+        exchange directly (``_cross_check_local_orders``), and one that is still
+        live, or that cannot be confirmed settled, is a failure like any other.
 
         Idempotent once it has COMPLETED. A second call after a successful
         sweep is a no-op rather than an error: shutdown is a teardown path (a
@@ -548,6 +799,10 @@ class KillSwitchManager:
         failures: list[str] = []
         open_orders: list = []
         sweep_error: str | None = None
+        # Every bot cloid this sweep took responsibility for — cancelled OR
+        # failed. The cross-check below skips these and asks the exchange about
+        # whatever local live orders remain.
+        handled_cloids: set[str] = set()
         try:
             raw_orders = self._client.open_orders()
             if isinstance(raw_orders, list):
@@ -593,8 +848,13 @@ class KillSwitchManager:
                     # with: "ours but uncancelable" is a FAILURE, not "not
                     # ours" — the sweep is not clean and the wallet-wide
                     # backstop must stay armed for this order.
+                    handled_cloids.add(cloid)
                     failures.append(f"{oid}: bot-owned order missing 'coin' in open_orders")
                     continue
+                # Ours: from here the sweep owns this cloid's outcome, cancelled
+                # or failed. Recorded BEFORE the attempt, so a raise cannot leave
+                # the cross-check double-counting it as unaccounted-for.
+                handled_cloids.add(cloid)
                 self._cancel_with_evidence(
                     coin=coin, cloid_hex=cloid, cloid_logical=row["cloid_logical"]
                 )
@@ -608,13 +868,24 @@ class KillSwitchManager:
                 failures.append(f"{oid}: {type(exc).__name__}: {exc}")
                 continue
             canceled.append(oid)
+        # The exchange's open-orders view has had its say; now the local record
+        # gets its say, and an order it still calls live that the sweep never
+        # touched blocks the disarm. Runs even when the enumeration FAILED — a
+        # sweep_error already keeps the trigger armed, but the operator still
+        # wants these orders named in the §18.5 detail.
+        unaccounted = self._cross_check_local_orders(
+            handled_cloids, enumeration_failed=sweep_error is not None
+        )
+        failures.extend(unaccounted)
         # The one line that answers "is real money still exposed?" without
         # opening SQLite: what the sweep cancelled, what it could not, and what
         # it deliberately left alone.
         logger.info(
-            "kill switch shutdown sweep: %d canceled, %d failed, %d skipped (non-bot)",
+            "kill switch shutdown sweep: %d canceled, %d failed (%d of them local orders "
+            "the exchange never listed), %d skipped (non-bot)",
             len(canceled),
             len(failures),
+            len(unaccounted),
             len(skipped_non_bot),
         )
         self._record(

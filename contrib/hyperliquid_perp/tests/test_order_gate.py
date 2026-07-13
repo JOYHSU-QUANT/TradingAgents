@@ -47,22 +47,38 @@ def test_gate_is_fail_closed_from_config():
         gate.require_order("BTC")
 
 
-@pytest.mark.parametrize(
-    ("mutation", "expected"),
-    [
-        ({"allow_real_orders": False}, "allow_real_orders"),
-        ({"mode": ExecutionMode.PAPER}, "not a live mode"),
-        ({"agent_authorized": False}, "agent authorization"),
-        ({"startup_reconciliation_passed": False}, "startup reconciliation"),
-        ({"kill_switch_active": False}, "kill switch"),
-        ({"risk_gate_approved": False}, "risk gate"),
-        ({"state_reconciled": False}, "not reconciled"),
-        ({"unresolved_protection_failure": True}, "protection failure"),
-        ({"active_slice_plan": True}, "slice plan"),
-        ({"manual_safe_mode": True}, "manual safe mode"),
-    ],
-)
-def test_each_failed_condition_rejects_with_its_own_reason(mutation, expected):
+# Conditions that must hold for ANY order to reach the wire — enforced by both
+# check_order and check_new_target.
+_WIRE_SCOPED = [
+    ({"allow_real_orders": False}, "allow_real_orders"),
+    ({"mode": ExecutionMode.PAPER}, "not a live mode"),
+    ({"agent_authorized": False}, "agent authorization"),
+    ({"startup_reconciliation_passed": False}, "startup reconciliation"),
+    ({"kill_switch_active": False}, "kill switch"),
+    ({"state_reconciled": False}, "not reconciled"),
+    ({"manual_safe_mode": True}, "manual safe mode"),
+]
+# Conditions that gate the DECISION, not the order — check_new_target only.
+_DECISION_SCOPED = [
+    ({"risk_gate_approved": False}, "risk gate"),
+    ({"unresolved_protection_failure": True}, "protection failure"),
+    ({"active_slice_plan": True}, "slice plan"),
+]
+
+
+@pytest.mark.parametrize(("mutation", "expected"), _WIRE_SCOPED + _DECISION_SCOPED)
+def test_each_failed_condition_rejects_a_new_target_with_its_own_reason(mutation, expected):
+    gate = _open_gate(**mutation)
+    reason = gate.check_new_target("BTC")
+    assert reason is not None and expected in reason
+    with pytest.raises(LiveOrderGateRejected) as excinfo:
+        gate.require_new_target("BTC")
+    assert NO_ORDER_REASON in str(excinfo.value)
+    assert excinfo.value.reason == reason
+
+
+@pytest.mark.parametrize(("mutation", "expected"), _WIRE_SCOPED)
+def test_each_wire_scoped_condition_also_rejects_the_order_itself(mutation, expected):
     gate = _open_gate(**mutation)
     reason = gate.check_order("BTC")
     assert reason is not None and expected in reason
@@ -70,6 +86,20 @@ def test_each_failed_condition_rejects_with_its_own_reason(mutation, expected):
         gate.require_order("BTC")
     assert NO_ORDER_REASON in str(excinfo.value)
     assert excinfo.value.reason == reason
+
+
+@pytest.mark.parametrize(("mutation", "expected"), _DECISION_SCOPED)
+def test_decision_scoped_conditions_do_not_block_an_order_on_the_wire(mutation, expected):
+    # The whole point of the split. An active slice plan blocks a NEW target
+    # (§9.3: 不建立新的 entry / rebalance plan) but must not block that plan's own
+    # slices, nor the SL repair and emergency close §9.3 explicitly ALLOWS — the
+    # emergency close being the one order you most need while a plan is running.
+    # Were these checked per-order, the engine would gate-reject its own sends.
+    gate = _open_gate(**mutation)
+    assert gate.check_order("BTC") is None
+    gate.require_order("BTC")  # does not raise
+    reason = gate.check_new_target("BTC")
+    assert reason is not None and expected in reason
 
 
 def test_symbol_outside_allowlist_is_rejected():
@@ -120,3 +150,16 @@ def test_config_trio_is_pinned_at_construction():
     # ...and the runtime flags still flip freely.
     gate.kill_switch_active = False
     assert gate.check_order("BTC") is not None
+
+
+def test_allowed_symbols_must_be_a_tuple_not_a_bare_string():
+    # `symbol not in self.allowed_symbols` degrades to a SUBSTRING match on a
+    # str: a gate built with allowed_symbols="BTC" would admit "BT". from_config
+    # always passes a tuple, but the class is public and hand-built by tests and
+    # (soon) PR 4/5.
+    with pytest.raises(TypeError, match="tuple"):
+        RealOrderGate(
+            allow_real_orders=True,
+            mode=ExecutionMode.TESTNET_LIVE,
+            allowed_symbols="BTC",  # type: ignore[arg-type]
+        )

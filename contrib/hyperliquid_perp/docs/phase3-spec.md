@@ -192,21 +192,41 @@ live:
 
 ### 4.1 Real Order Gate
 
-系統只有在以下條件全部成立時，才允許送出 exchange order：
+系統只有在以下條件全部成立時，才允許**建立新的交易目標**（new target）：
 
 ```
-allow_real_orders = true
-mode in {testnet_live, mainnet_tiny, mainnet_live}
-agent key exists（且通過 §6 的啟動授權驗證）
-startup reconciliation passed
-kill switch active
-symbol is allowed
-risk gate approved target
-current account / position state is reconciled
-no unresolved protection failure
-no active slice plan
-no manual_safe_mode
+allow_real_orders = true                             # wire-scoped
+mode in {testnet_live, mainnet_tiny, mainnet_live}   # wire-scoped
+agent key exists（且通過 §6 的啟動授權驗證）          # wire-scoped
+startup reconciliation passed                        # wire-scoped
+kill switch active                                   # wire-scoped
+symbol is allowed                                    # wire-scoped
+risk gate approved target                            # DECISION-scoped
+current account / position state is reconciled       # wire-scoped
+no unresolved protection failure                     # DECISION-scoped
+no active slice plan                                 # DECISION-scoped
+no manual_safe_mode                                  # wire-scoped
 ```
+
+**兩種粒度（v7 修訂，2026-07-13）**：標記 DECISION-scoped 的三條，語意是「這個決策
+cycle 可不可以開新目標」，**不是**「這一張單可不可以上線」。把它們套用在每一張單上
+會自相矛盾——§9.3 明文規定 active slice plan 期間「不建立新的 entry / rebalance
+plan」但「允許 SL repair、允許 emergency close」，而一個 plan 會跨數十個 decision
+cycle 執行約一小時。若每張單都查這三條，引擎一旦設下 `active_slice_plan`，就會擋掉
+**自己這個 plan 的每一張切片**，以及 §9.3 保證允許的 SL repair 與 emergency close
+——正是 plan 執行期間最需要送出的那一張。引擎屆時只能「不設旗標」（條件淪為裝飾）或
+繞過 submitter（繞過 gate），兩條都是錯的。同理 `risk_gate_approved`（per-cycle 的
+核准無法涵蓋一小時的切片）與 `unresolved_protection_failure`（要修復它的 SL repair
+本身必須送得出去）。
+
+因此 gate 提供兩個入口，而條件表只有一份（`RealOrderGate._first_failed`，依上表順序
+求值，回報第一條失敗的條件，兩個入口不會漂移）：
+
+- `check_new_target(symbol)` / `require_new_target` — **完整** §4.1 列表。PR 5 引擎在
+  每個 decision cycle 建立 plan **之前**問一次。
+- `check_order(symbol)` / `require_order` — 上表 wire-scoped 子集。**每一張**真正送上
+  交易所的單都必須通過（`LiveOrderSubmitter.submit_ioc_limit` 送出前查一次，signed
+  client 綁定的 gate 在 wire 再查一次當 backstop）。
 
 若任一條件不成立，系統必須拒絕建立 live order，並記錄：
 
@@ -445,7 +465,7 @@ order、都有自己的 cloid——不存在 v2 native TWAP 母單「cloid_hex, 
     內的 per-order error（v6 新增，2026-07-13）。
 12. **exchange status 一律只查 exact 表，表外的字一律不猜**（v7 新增，2026-07-13）：
     exchange status → local status 的對照，**唯一權威是「完整文件化詞彙 exact 表」**
-    （`_EXCHANGE_TO_LOCAL_STATUS`，已涵蓋 Hyperliquid 文件列出的全部 29 個字）。
+    （`_EXCHANGE_TO_LOCAL_STATUS`，已涵蓋 Hyperliquid 文件列出的全部 30 個字）。
     表外的字＝交易所在這張表寫完之後新增的字；對這種字**任何方向的猜測都不安全**，
     所以一個都不猜——一律記為 `open` + warning，交給 PR 4 reconciliation 對帳：
     - 猜成 `rejected` 是最貴的：它會變成 `SubmitOutcomeKind.REJECTED`，依 rule 9
@@ -1088,6 +1108,17 @@ kill_switch:
 致命的。預設值 120/30 是 4×。**這是必要條件、不是充分條件**——它看不到呼叫方的
 tick 間隔，真正綁定的檢查是 §18.2 rule 2 的 `max_tick_gap_seconds` 建構期不變量。）
 
+（**主機時鐘偏移在 arm() 檢查（v8 新增，2026-07-13）**：scheduleCancel 收的是**絕對**
+deadline，而我們用**本地時鐘**算出它；`_detect_expired_deadline` 又以同一個本地時鐘量測
+逾期——兩者自洽，於是主機時鐘漂移對 manager 完全隱形，卻默默改變交易所端真正的保護
+窗。主機快 4 分鐘時，120s 的 dead man's switch 實際上變成 360s：process 死掉後掛單會
+曝險 3 倍長的時間，而日誌與事件裡沒有任何跡象。`max_tick_gap` 不變量抓不到它——那條完全
+在本地時間裡推理。因此 arm() 送出第一個 deadline 前，先用交易所回覆的時間戳
+（`clearinghouseState.time`）比對本地時鐘，偏差 ≥ 5s 即拒絕啟動並要求修 NTP。只有「主機
+偏快」這個方向是無聲的，故只有它需要防護：主機偏慢送出的 deadline 太近，交易所直接拒絕，
+arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——時間戳拿不到應該降級這項**檢查**，
+不該擋掉一個其他方面都健康的啟動。）
+
 ### 18.2 Required Behavior
 
 1. Process 啟動後，完成 exchange client 初始化時，必須立刻 schedule cancel。
@@ -1177,7 +1208,17 @@ tick 間隔，真正綁定的檢查是 §18.2 rule 2 的 `max_tick_gap_seconds` 
    （「clean shutdown sweep」vs「先前 attempt 已清除」），否則審計會出現兩列互相矛盾的紀錄。
    「乾淨」的認定：registry 命中（確定 bot-owned）但 open orders payload 缺 coin
    無法下 cancel 的訂單計入 failures（「我們的但動不了」≠「不是我們的」），擋 disarm；
-   從未 arm 過的 shutdown 沒有東西可解除——不呼叫 unset、不寫 disarmed 事件
+   從未 arm 過的 shutdown 沒有東西可解除——不呼叫 unset、不寫 disarmed 事件。
+   **「乾淨」必須雙邊認定，不得只信一次 `open_orders()` 讀取（v8 新增，2026-07-13）**：
+   Info 是最終一致的視圖，空 list 無法與「剛送出的單還沒出現在視圖裡」區分——照舊寫法
+   此時 failures 為空、sweep 判為乾淨，於是在一張活單之上永久解除全錢包 backstop。這正是
+   §8.3 rule 10（`has_exchange_known_cloid`）拒絕相信的那種「交易所的沉默」，只是這次賭的是
+   安全網本身。因此 disarm 前必須拿本地紀錄交叉檢查：凡 SQLite 仍判為非終態
+   （`LIVE_ORDER_STATUSES`）且帶 cloid 的 live orders row，若 sweep 沒有處理過它，就逐一
+   `orderStatus` 問交易所——確認終態才放行；仍活著、或問不到（含 unknownOid 但本地有收據
+   證據＝§8.3 rule 10 的矛盾）一律計入 failures，維持武裝。反向也要成立：本地 'submitted'
+   但交易所確認 unknownOid 且無收據證據者＝那次 send 根本沒送達，沒有東西需要保護，不得
+   永久擋住 disarm
    （v5 新增，2026-07-13）。形狀不明的 open orders 條目（非 dict）＝所有權不明，
    計入 failures 擋 disarm 且不得中斷 sweep；open_orders 回傳非 list 視同枚舉失敗
    （v6 新增，2026-07-13）。

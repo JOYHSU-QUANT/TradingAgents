@@ -7,6 +7,7 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -34,8 +35,16 @@ _MAX_TICK_GAP_S = 30.0
 class _FakeClient:
     """Mirrors the real client: the bound §4.1 gate judges every mutation."""
 
-    def __init__(self, gate):
+    def __init__(self, gate, clock=None):
         self._gate = gate
+        self._clock = clock
+        # The exchange's clock. Defaults to agreeing with ours (zero skew), so
+        # arm()'s skew guard passes; tests that care set it explicitly.
+        self.exchange_time_result: datetime | None | Exception = None
+        # orderStatus answers for the disarm cross-check. Default: the exchange
+        # has never heard of the cloid.
+        self.order_status_results: dict[str, object] = {}
+        self.order_status_calls: list[str] = []
         self.schedule_calls: list[datetime] = []
         self.schedule_error: Exception | None = None
         self.clear_calls: int = 0
@@ -63,6 +72,20 @@ class _FakeClient:
             raise self.open_orders_result
         return self.open_orders_result
 
+    def exchange_time(self):
+        if isinstance(self.exchange_time_result, Exception):
+            raise self.exchange_time_result
+        if self.exchange_time_result is not None:
+            return self.exchange_time_result
+        return None if self._clock is None else self._clock.now()
+
+    def query_order_by_cloid(self, cloid_hex):
+        self.order_status_calls.append(cloid_hex)
+        result = self.order_status_results.get(cloid_hex, {"status": "unknownOid"})
+        if isinstance(result, Exception):
+            raise result
+        return result
+
     def cancel_by_cloid(self, *, coin, cloid_hex):
         self._gate.require_exchange_action()
         self.cancel_calls.append((coin, cloid_hex))
@@ -82,11 +105,11 @@ def _gate() -> RealOrderGate:
 
 
 @pytest.fixture
-def env():
+def env(tmp_path):
     db = Database(":memory:")
     gate = _gate()
-    client = _FakeClient(gate)
     clock = ManualClock(_NOW)
+    client = _FakeClient(gate, clock)
     manager = KillSwitchManager(
         client=client,
         gate=gate,
@@ -94,6 +117,7 @@ def env():
         run_id="r",
         config=KillSwitchConfig(),
         max_tick_gap_seconds=_MAX_TICK_GAP_S,
+        payload_dir=tmp_path / "payloads",
         clock=clock,
     )
     yield db, client, gate, clock, manager
@@ -116,7 +140,7 @@ def _register_cloid(db, *, logical, hex_id):
         )
 
 
-def test_disabled_config_cannot_build_a_manager():
+def test_disabled_config_cannot_build_a_manager(tmp_path):
     gate = _gate()
     with pytest.raises(ValueError, match="enabled"):
         KillSwitchManager(
@@ -126,6 +150,7 @@ def test_disabled_config_cannot_build_a_manager():
             run_id="r",
             config=KillSwitchConfig(enabled=False),
             max_tick_gap_seconds=_MAX_TICK_GAP_S,
+            payload_dir=tmp_path,
         )
 
 
@@ -138,6 +163,7 @@ def _manager_with(config: KillSwitchConfig, *, max_tick_gap_seconds: float):
         run_id="r",
         config=config,
         max_tick_gap_seconds=max_tick_gap_seconds,
+        payload_dir=Path("payloads"),
     )
 
 
@@ -1046,7 +1072,7 @@ def test_registry_hit_without_coin_is_a_failure_not_a_skip(env):
     assert manager.armed
 
 
-def test_cross_run_cancel_evidence_spans_runs_without_index_collision(env):
+def test_cross_run_cancel_evidence_spans_runs_without_index_collision(env, tmp_path):
     # Regression (D1): run 'r-old' already holds (cancel_by_cloid, H, 0) on
     # the evidence trail. A later run's sweep canceling the same surviving
     # order must derive attempt_index 1 — not re-derive 0 and die on the
@@ -1079,6 +1105,7 @@ def test_cross_run_cancel_evidence_spans_runs_without_index_collision(env):
         run_id="r-new",
         config=KillSwitchConfig(),
         max_tick_gap_seconds=_MAX_TICK_GAP_S,
+        payload_dir=tmp_path / "payloads",
         clock=clock,
     )
     manager.arm()
@@ -1090,3 +1117,246 @@ def test_cross_run_cancel_evidence_spans_runs_without_index_collision(env):
     # No IntegrityError anywhere → the sweep was clean and the disarm landed.
     assert client.clear_calls == 1
     assert not manager.armed
+
+
+# ---- review round 7: the disarm may not rest on one exchange read ----------
+
+
+def _live_order(db, *, order_id, cloid_hex, status="open", exchange_order_id="900"):
+    """An orders row SQLite still believes is live, carrying a bot cloid."""
+    _register_cloid(db, logical=f"log-{order_id}", hex_id=cloid_hex)
+    with db.transaction() as conn:
+        repo.insert_order(
+            conn,
+            order_id=order_id,
+            mode="live",
+            run_id="r",
+            symbol="BTC",
+            order_role="entry",
+            side="buy",
+            order_type="ioc_limit",
+            qty=Decimal("0.01"),
+            status=status,
+            price=Decimal("100"),
+            cloid_logical=f"log-{order_id}",
+            cloid_hex=cloid_hex,
+            exchange_order_id=exchange_order_id,
+            is_bot_owned=True,
+            timestamp=_NOW,
+        )
+
+
+def _completed_failures(db):
+    completed = [
+        e
+        for e in repo.iter_kill_switch_events(db.conn, "r")
+        if e["event_type"] == "shutdown_cancel_orders_completed"
+    ][0]
+    return json.loads(completed["detail"])["failures"]
+
+
+def test_an_order_the_exchange_did_not_list_but_is_still_live_blocks_the_disarm(env):
+    # Info lag over a just-placed order: open_orders() answers [], so the sweep
+    # sees zero failures and would disarm the WALLET-WIDE backstop over a live
+    # order. The local record is the counter-evidence — the same principle §8.3
+    # rule 10 applies to resends, applied here to the safety net itself.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _live_order(db, order_id="o1", cloid_hex=_HEX)
+    client.open_orders_result = []  # the exchange view has not caught up
+    client.order_status_results = {
+        _HEX: {"status": "order", "order": {"order": {"oid": 900}, "status": "resting"}}
+    }
+
+    manager.shutdown()
+
+    assert client.order_status_calls == [_HEX]
+    assert client.clear_calls == 0, "the backstop must stay armed over a live order"
+    assert manager.armed
+    assert any("still live at the exchange" in f for f in _completed_failures(db))
+
+
+def test_an_order_the_exchange_confirms_settled_does_not_block_the_disarm(env):
+    # The other half: a locally-'open' row the exchange says is FILLED is not
+    # exposure, so it must not block rule 6 forever. (PR 3's fill ingestion is
+    # what will settle the row; until it lands, this check must not deadlock.)
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _live_order(db, order_id="o1", cloid_hex=_HEX)
+    client.open_orders_result = []
+    client.order_status_results = {
+        _HEX: {"status": "order", "order": {"order": {"oid": 900}, "status": "filled"}}
+    }
+
+    manager.shutdown()
+
+    assert client.clear_calls == 1
+    assert not manager.armed
+
+
+def test_an_order_we_cannot_confirm_blocks_the_disarm(env):
+    # orderStatus itself fails: we cannot PROVE the sweep was clean, so we must
+    # not claim it was. Fail-safe direction = stay armed.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _live_order(db, order_id="o1", cloid_hex=_HEX)
+    client.open_orders_result = []
+    client.order_status_results = {_HEX: ExchangeRequestError("info node down")}
+
+    manager.shutdown()
+
+    assert client.clear_calls == 0
+    assert manager.armed
+
+
+def test_a_submitted_order_the_exchange_never_took_does_not_block_the_disarm(env):
+    # A send that never landed: the orders row is stuck at 'submitted', nothing
+    # proves the exchange received it, and orderStatus says unknownOid. No order
+    # exists, so there is nothing for the backstop to protect — and a row in this
+    # state must not block the disarm forever.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _live_order(db, order_id="o1", cloid_hex=_HEX, status="submitted", exchange_order_id=None)
+    client.open_orders_result = []
+    client.order_status_results = {_HEX: {"status": "unknownOid"}}
+
+    manager.shutdown()
+
+    assert client.clear_calls == 1
+
+
+def test_unknown_oid_against_durable_proof_of_receipt_blocks_the_disarm(env):
+    # unknownOid, but orders.exchange_order_id proves the exchange TOOK this
+    # cloid (§8.3 rule 10). "I do not know it" cannot outrank that, so the order
+    # is unaccounted-for and the backstop stays armed.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _live_order(db, order_id="o1", cloid_hex=_HEX, exchange_order_id="900")
+    client.open_orders_result = []
+    client.order_status_results = {_HEX: {"status": "unknownOid"}}
+
+    manager.shutdown()
+
+    assert client.clear_calls == 0
+    assert manager.armed
+
+
+def test_orders_the_sweep_cancelled_do_not_also_count_as_unaccounted(env):
+    # The happy path still disarms: the sweep's own cancel patches the row
+    # terminal, so the cross-check finds nothing left and asks the exchange nothing.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _live_order(db, order_id="o1", cloid_hex=_HEX)
+    client.open_orders_result = [{"oid": 900, "coin": "BTC", "cloid": _HEX}]
+
+    manager.shutdown()
+
+    assert client.cancel_calls == [("BTC", _HEX)]
+    assert client.order_status_calls == []  # nothing left to ask about
+    assert client.clear_calls == 1
+    assert repo.get_order(db.conn, "o1")["status"] == "canceled"
+
+
+def test_a_cancel_records_its_raw_exchange_payload(env):
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _register_cloid(db, logical="log-1", hex_id=_HEX)
+    client.open_orders_result = [{"oid": 900, "coin": "BTC", "cloid": _HEX}]
+    client.cancel_results = {_HEX: CancelAck(success=True, raw={"kind": "cancel-ok"})}
+
+    manager.shutdown()
+
+    attempts = repo.iter_live_order_attempts(db.conn, "r", cloid_hex=_HEX)
+    path = attempts[0]["raw_exchange_payload_path"]
+    assert path is not None, "the cancel path claims the same evidence protocol orders use"
+    assert json.loads(Path(path).read_text(encoding="utf-8"))["kind"] == "cancel-ok"
+
+
+# ---- review round 7: clock skew, and the latch is not a public knob ---------
+
+
+def test_arming_refuses_a_host_clock_the_exchange_disagrees_with(env):
+    # scheduleCancel deadlines are ABSOLUTE and computed from the local clock,
+    # and the expiry detector measures against that same clock — so drift is
+    # invisible to the manager while silently resizing the real protection
+    # window. A host 4 minutes fast turns a 120s dead man's switch into a 360s one.
+    db, client, gate, clock, manager = env
+    client.exchange_time_result = _NOW - timedelta(minutes=4)  # we are 4 min ahead
+    with pytest.raises(ValueError, match="clock"):
+        manager.arm()
+    assert client.schedule_calls == [], "no deadline may go out on a broken clock"
+    assert not manager.armed
+
+
+def test_an_unavailable_exchange_clock_warns_but_does_not_block_arming(env, caplog):
+    # A missing timestamp must degrade the CHECK, never block a healthy startup.
+    db, client, gate, clock, manager = env
+    client.exchange_time_result = ExchangeRequestError("info down")
+    with caplog.at_level(logging.WARNING):
+        manager.arm()
+    assert manager.armed
+    assert any("clock" in r.message.lower() for r in caplog.records)
+
+
+def test_the_safe_mode_latch_cannot_be_lowered_by_assignment(env):
+    # A bare writable attribute invited `ks.stop_new_orders = False` as a
+    # shortcut past release_safe_mode() — which would reopen the §4.1 gate on the
+    # next refresh with no proving round-trip and no §13.4 reconciliation.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    client.schedule_error = ExchangeRequestError("boom")
+    manager.refresh()
+    assert manager.stop_new_orders is True
+
+    with pytest.raises(AttributeError):
+        manager.stop_new_orders = False  # type: ignore[misc]
+
+    assert manager.stop_new_orders is True
+    assert gate.kill_switch_active is False
+
+
+def test_a_failed_enumeration_names_local_orders_without_querying_the_exchange(env):
+    # LATENCY guard, not a policy one. open_orders() has just failed, so the
+    # endpoint is almost certainly unreachable and every orderStatus here would be
+    # doomed for the same reason — each able to burn the full network timeout,
+    # sequentially, inside a signal handler. A handful of open orders against a
+    # dead endpoint would push shutdown past systemd's TimeoutStopSec and get the
+    # process SIGKILLed mid-sweep, destroying the teardown these diagnostics exist
+    # to document. The outcome is identical either way (a sweep_error alone keeps
+    # the trigger armed), so the orders are still NAMED — just not re-queried over
+    # a network that is not answering.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _live_order(db, order_id="o1", cloid_hex=_HEX)
+    client.open_orders_result = ExchangeRequestError("info node down")
+
+    manager.shutdown()
+
+    assert client.order_status_calls == [], "no doomed round-trips in the teardown path"
+    assert client.clear_calls == 0
+    assert manager.armed
+    assert any("enumeration failed" in f for f in _completed_failures(db))
+
+
+def test_a_settled_order_is_written_back_so_a_later_shutdown_need_not_ask_again(env):
+    # iter_open_live_orders deliberately spans runs, so a row left non-terminal
+    # would be re-queried on every future shutdown, forever — the cross-check's
+    # cost would grow without bound across restarts. The exchange has just told us
+    # this order's fate; record it, the same rule the §8.3 recovery back-fill obeys.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _live_order(db, order_id="o1", cloid_hex=_HEX)
+    client.open_orders_result = []
+    client.order_status_results = {
+        _HEX: {"status": "order", "order": {"order": {"oid": 900}, "status": "filled"}}
+    }
+
+    manager.shutdown()
+
+    row = repo.get_order(db.conn, "o1")
+    assert row["status"] == "filled"
+    # §16.1 vocabulary on both columns.
+    assert row["exchange_status"] == "filled"
+    assert row["exchange_raw_status"] == "filled"
+    # ...and it is no longer something a later shutdown must chase.
+    assert repo.iter_open_live_orders(db.conn) == []

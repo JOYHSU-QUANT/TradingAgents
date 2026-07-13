@@ -82,12 +82,15 @@ class _FakeInfo:
         self.query_calls: list = []
         self.query_result = {"status": "unknownOid"}
         self.open_orders_result: list = []
+        # clearinghouseState. Its `time` field is the exchange's own clock, which
+        # exchange_time() reads for the kill switch's host-clock-skew check.
+        self.user_state_result: object = {"marginSummary": {}}
 
     def user_state(self, address: str):
         self.user_state_calls.append(address)
         if self.user_state_error is not None:
             raise self.user_state_error
-        return {"marginSummary": {}}
+        return self.user_state_result
 
     def query_order_by_cloid(self, user, cloid):
         self.query_calls.append(("cloid", user, cloid))
@@ -509,3 +512,70 @@ def test_cancel_ack_requires_error_exactly_on_failure():
         CancelAck(success=False)  # a refusal must say why
     with pytest.raises(ValueError, match="exactly when"):
         CancelAck(success=True, error="but it worked?")  # success cannot smuggle one
+
+
+# ---- review round 7: malformed payloads stay in the named-error lane -------
+
+
+@pytest.mark.parametrize(
+    "statuses",
+    [
+        3,  # truthy but not sized: len() would raise TypeError building the message
+        "success",  # a str IS sized, but it is not a list of statuses
+        {"resting": {"oid": 1}},  # a bare dict, not a one-element list
+    ],
+)
+def test_a_statuses_field_that_is_not_a_list_fails_as_a_named_error(fake_exchange, statuses):
+    # The guard exists to REPORT a malformation, so it must not blow up while
+    # building its own message — a TypeError out of len() would escape the
+    # ExchangeError lane this layer promises its callers.
+    client = _client()
+    client._exchange.order_result = {
+        "status": "ok",
+        "response": {"type": "order", "data": {"statuses": statuses}},
+    }
+    with pytest.raises(MalformedResponseError):
+        _place(client)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        {"filled": {"oid": 1}},  # no totalSz / avgPx
+        {"filled": {"oid": 1, "totalSz": "abc", "avgPx": "100"}},  # non-numeric size
+        {"resting": {}},  # no oid
+    ],
+)
+def test_an_order_status_missing_its_fields_fails_as_a_named_error(fake_exchange, status):
+    # A KeyError or decimal.InvalidOperation here would not be caught by a caller
+    # handling ExchangeError, and the submit path would record "outcome unknown"
+    # for what is really a local parse bug — burning an orderStatus round-trip.
+    client = _client()
+    client._exchange.order_result = {
+        "status": "ok",
+        "response": {"type": "order", "data": {"statuses": [status]}},
+    }
+    with pytest.raises(MalformedResponseError):
+        _place(client)
+
+
+# ---- review round 7: the exchange's own clock ------------------------------
+
+
+def test_exchange_time_reads_the_clearinghouse_timestamp(fake_exchange):
+    client = _client()
+    client._exchange.info.user_state_result = {"marginSummary": {}, "time": 1_752_400_000_000}
+    assert client.exchange_time() == datetime.fromtimestamp(1_752_400_000, tz=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    "state",
+    [{"marginSummary": {}}, {"time": None}, {"time": "not-a-number"}, "nonsense"],
+)
+def test_exchange_time_degrades_to_none_rather_than_raising(fake_exchange, state):
+    # The kill switch uses this to check host clock skew at arm(). A missing or
+    # unparseable timestamp must degrade that CHECK (skip + warn), never block an
+    # otherwise healthy startup — so it answers None instead of raising.
+    client = _client()
+    client._exchange.info.user_state_result = state
+    assert client.exchange_time() is None

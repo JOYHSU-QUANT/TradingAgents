@@ -31,11 +31,11 @@ from ..domains.perp.enum_guard import check_enum
 
 __all__ = ["LIVE_ORDER_ROLES", "assert_cloid_provenance", "cloid_hex", "cloid_logical"]
 
-# §8.1: every live order carries one of these roles. Phase 2 already uses the
-# first four; close / emergency_close / cleanup_cancel are the live-only
-# vocabulary. repository._ORDER_ROLES IS this frozenset (aliased, not copied),
-# so the id layer and the write boundary cannot drift — do not re-introduce an
-# independent set there.
+# §8.1: every live order carries one of these roles. Phase 2 already uses
+# entry / rebalance / stop_loss / take_profit; close / emergency_close /
+# cleanup_cancel are the live-only additions. repository._ORDER_ROLES IS this
+# frozenset (aliased, not copied), so the id layer and the write boundary cannot
+# drift — do not re-introduce an independent set there.
 LIVE_ORDER_ROLES = frozenset(
     {
         "entry",

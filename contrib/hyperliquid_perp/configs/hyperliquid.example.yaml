@@ -101,3 +101,11 @@ paper_trading:
 #     on_refresh_failed: safe_mode
 #     on_shutdown: cancel_bot_owned_open_orders
 #     emergency_close_on_shutdown: false
+#                                      # `true` is REJECTED at config load until PR 5's
+#                                      # protection manager implements it: an unimplemented
+#                                      # behaviour must not be silently accepted (§18.1).
+#                                      # Also checked when the switch arms: the host clock vs
+#                                      # the exchange's. scheduleCancel deadlines are ABSOLUTE
+#                                      # and computed from the local clock, so >= 5s of drift
+#                                      # is refused — it would silently resize the real
+#                                      # protection window (fix NTP first). See §18.1.

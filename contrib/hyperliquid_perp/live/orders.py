@@ -14,9 +14,13 @@ the persistence protocol the spec demands:
    order MAY exist on the exchange.
 3. The order goes out with its cloid (the client's bound gate re-checks as a
    backstop).
-4. AFTER the response, one transaction records the outcome on both rows, and
-   the raw exchange payload is written to a file whose path lands in
-   ``raw_exchange_payload_path``.
+4. AFTER the response, the raw exchange payload is written to a file (its path
+   lands in ``raw_exchange_payload_path``, or the column is left alone if the
+   file could not be written), and the outcome is recorded on both rows. An
+   ACCEPTED ack settles both in ONE transaction; the duplicate and rejected
+   acks first settle the attempt row, then consult orderStatus (§8.3 rules
+   2–4, 9) — so the orders row is settled in a second transaction, or, on a
+   recovery, by the back-fill instead.
 
 §8.3 idempotent retry: a resubmit of the same ``cloid_logical`` re-derives the
 same ``cloid_hex``. If ANY prior send attempt exists for that cloid — whatever
@@ -30,7 +34,6 @@ answers "duplicate", the submitter queries orderStatus by cloid_hex FIRST
 
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 from dataclasses import dataclass
@@ -40,7 +43,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from ..exchanges.hyperliquid.errors import ExchangeError, MalformedResponseError
+from ..exchanges.hyperliquid.errors import (
+    ExchangeError,
+    MalformedResponseError,
+    OrderIdempotencyContradiction,
+)
 from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient, OrderAck
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
@@ -49,8 +56,15 @@ from ..persistence.db import Database
 from ..persistence.ids import live_order_attempt_id
 from ..persistence.models import Side
 from .order_gate import RealOrderGate
+from .payloads import payload_column, write_raw_payload
 
-__all__ = ["LiveOrderSubmitter", "SubmitOutcome", "SubmitOutcomeKind"]
+__all__ = [
+    "LiveOrderSubmitter",
+    "SubmitOutcome",
+    "SubmitOutcomeKind",
+    "local_status_for_exchange_status",
+    "parse_order_status",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +104,19 @@ class SubmitOutcome:
     ``ack``/``order_status`` for it — those carry the raw evidence and are
     each None on the other path. ``__post_init__`` enforces this contract, so
     an outcome whose evidence fields disagree with its verdict cannot exist.
+
+    ``exchange_raw_status`` is the exchange's VERBATIM status word for whatever
+    evidence produced this verdict — ``"resting"`` / ``"filled"`` / ``"error"``
+    from an ack, or the exact orderStatus word (``"minTradeNtlRejected"``,
+    ``"perpMarginRejected"``, …) from a recovery. It is the same value the
+    ``orders.exchange_raw_status`` column carries (§16.1), lifted onto the
+    outcome because it is the ONLY non-guessing basis a caller has for telling
+    the rejections apart: ``REJECTED`` licenses minting a new logical order
+    (§8.3 rule 9), but a permanent rejection (bad tick, below min notional)
+    will fail identically forever while a transient one (margin, oracle,
+    liquidity) may not. Classify off an EXACT word table, never off ``error``'s
+    free text — the wire message is not a versioned contract, and substring
+    tests on it are the exact bug class this module refuses everywhere else.
     """
 
     outcome: SubmitOutcomeKind
@@ -98,6 +125,7 @@ class SubmitOutcome:
     cloid_hex: str
     attempt_id: str | None = None
     exchange_order_id: str | None = None
+    exchange_raw_status: str | None = None
     error: str | None = None
     ack: OrderAck | None = None
     order_status: Any = None
@@ -109,6 +137,13 @@ class SubmitOutcome:
             raise ValueError(
                 f"cloid_hex {self.cloid_hex!r} is not the derivation of "
                 f"cloid_logical {self.cloid_logical!r}"
+            )
+        # Every verdict is reached by observing an exchange answer, so every
+        # verdict carries that answer's word. No path may omit it.
+        if self.exchange_raw_status is None:
+            raise ValueError(
+                f"SubmitOutcome({self.outcome.value!r}) must carry the exchange's "
+                "verbatim status word (exchange_raw_status)"
             )
         if self.outcome is SubmitOutcomeKind.ACKNOWLEDGED:
             ok = (
@@ -161,21 +196,43 @@ class LiveOrderSubmitter:
     # ---- raw payload evidence -------------------------------------------
 
     def _write_raw_payload(self, kind: str, key: str, payload: Any) -> str | None:
-        """Persist one raw exchange response; the path goes on the DB rows.
+        """This run's payload_dir + clock, bound to the shared writer."""
+        return write_raw_payload(
+            payload_dir=self._payload_dir,
+            kind=kind,
+            key=key,
+            payload=payload,
+            now=self._clock.now(),
+        )
 
-        Failure to write evidence must not turn a successful exchange action
-        into an exception (the order is already live) — warn and record NULL,
-        same posture as the CSV-export breadcrumbs.
+    def _record_attempt_failure(self, attempt_id: str, exc: BaseException) -> None:
+        """Patch the attempt to 'failed' without letting the patch replace ``exc``.
+
+        ``exc`` — why a real order failed on the wire — is the diagnosis. A DB
+        error raised while recording it (sqlite BUSY at the worst moment) would
+        propagate IN ITS PLACE, so the caller and the audit trail would read
+        "database is locked" where the true story was a timeout on a
+        possibly-live order. Log the original FIRST (the ordering rule the kill
+        switch already follows everywhere), then record; if the record itself
+        dies, say so and still let the original be the exception that escapes.
+
+        Losing the patch is safe: the row stays 'submitted', which means exactly
+        "outcome unknown" (see ``update_live_order_attempt``) — the same
+        conclusion 'failed' leads to. The §8.3 pre-check is status-blind, so the
+        retry resolves the order's fate through orderStatus either way.
         """
-        stamp = self._clock.now().strftime("%Y%m%dT%H%M%S_%fZ")
-        path = self._payload_dir / f"{kind}-{key}-{stamp}.json"
+        logger.warning("live order attempt %s failed on the wire: %s", attempt_id, exc)
         try:
-            self._payload_dir.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, default=str, sort_keys=True), encoding="utf-8")
-        except OSError as exc:
-            logger.warning("failed to write raw exchange payload %s: %s", path, exc)
-            return None
-        return str(path)
+            with self._db.transaction() as conn:
+                repo.update_live_order_attempt(
+                    conn, attempt_id, status="failed", error_message=str(exc)
+                )
+        except Exception:
+            logger.exception(
+                "could not record live order attempt %s as 'failed'; it stays "
+                "'submitted' (outcome unknown) and the §8.3 pre-check resolves it",
+                attempt_id,
+            )
 
     # ---- shared row writing ----------------------------------------------
 
@@ -333,7 +390,7 @@ class LiveOrderSubmitter:
         # exchange first. Even an 'acknowledged' prior send must short-circuit
         # here: the exchange's duplicate rejection only guards OPEN orders, so
         # a filled/expired cloid would be accepted again as a brand-new order.
-        if repo.has_place_attempt(self._db.conn, self._run_id, cloid_hex=hex_id):
+        if repo.has_place_attempt(self._db.conn, cloid_hex=hex_id):
             # A prior attempt stuck at 'submitted' stays that way — its own
             # ack was never observed and that is its defined terminal state
             # (see update_live_order_attempt); the recovered fate lands on
@@ -351,7 +408,7 @@ class LiveOrderSubmitter:
         # Intent transaction: registry + orders row + attempt, all-or-nothing,
         # BEFORE any network traffic.
         with self._db.transaction() as conn:
-            self._ensure_local_order(
+            inserted = self._ensure_local_order(
                 conn,
                 order_id=order_id,
                 coin=coin,
@@ -370,6 +427,26 @@ class LiveOrderSubmitter:
                 now=now,
                 submitted_at=now,
             )
+            if not inserted:
+                # A rule-5 resend: the row survives from the earlier attempt and
+                # still carries ITS verdict — 'rejected', with that rejection's
+                # reason. Re-stamp it to the intent state, or the send below runs
+                # with a TERMINAL local row over a possibly-live order: a crash
+                # inside the network window would leave 'rejected' (not in
+                # LIVE_ORDER_STATUSES) on an order resting at the exchange, PR 4's
+                # reconciliation would skip it as settled, and an engine rebuilding
+                # intent from the DB would read "that one was rejected" — which
+                # §8.3 rule 9 licenses it to answer by minting a NEW logical order.
+                # The pre-check cannot save us there: it only re-derives the SAME
+                # cloid, and a fresh cloid never reaches it.
+                repo.update_order(
+                    conn,
+                    order_id,
+                    status="submitted",
+                    status_reason=None,
+                    submitted_at=now,
+                    updated_at=now,
+                )
             repo.insert_live_order_attempt(
                 conn,
                 attempt_id=attempt_id,
@@ -412,10 +489,9 @@ class LiveOrderSubmitter:
                 reduce_only=reduce_only,
             )
         except Exception as exc:
-            with self._db.transaction() as conn:
-                repo.update_live_order_attempt(
-                    conn, attempt_id, status="failed", error_message=str(exc)
-                )
+            # Records 'failed' WITHOUT letting a busy DB replace `exc` — the
+            # exchange failure is the diagnosis, not the sqlite error.
+            self._record_attempt_failure(attempt_id, exc)
             raise
 
         raw_path = self._write_raw_payload("order", hex_id, ack.raw)
@@ -433,8 +509,8 @@ class LiveOrderSubmitter:
                     status="duplicate",
                     error_message=ack.error,
                     exchange_status=ack.status,
-                    raw_exchange_payload_path=raw_path,
                     acknowledged_at=ack_at,
+                    raw_exchange_payload_path=payload_column(raw_path),
                 )
             recovered = recover_existing(attempt_id)
             if recovered is not None:
@@ -442,8 +518,9 @@ class LiveOrderSubmitter:
             # The exchange said "duplicate" but its own orderStatus cannot see
             # the cloid — contradictory state; resending (rule 5 requires the
             # previous send be CONFIRMED unsuccessful) would risk a double
-            # order. Fail loud for the operator.
-            raise ExchangeError(
+            # order. Fail loud for the operator, in a lane a transport-retry
+            # `except ExchangeRequestError` cannot swallow.
+            raise OrderIdempotencyContradiction(
                 f"exchange reported duplicate for cloid {hex_id} but orderStatus "
                 f"does not know it — refusing to resend (§8.3 rule 5)"
             )
@@ -456,8 +533,8 @@ class LiveOrderSubmitter:
                     status="rejected",
                     error_message=ack.error,
                     exchange_status=ack.status,
-                    raw_exchange_payload_path=raw_path,
                     acknowledged_at=ack_at,
+                    raw_exchange_payload_path=payload_column(raw_path),
                 )
             # The duplicate markers are a fast-path, not the authority: the
             # exchange's rejection text is not a versioned contract, and a
@@ -477,9 +554,9 @@ class LiveOrderSubmitter:
                     status_reason=ack.error,
                     exchange_status="rejected",
                     exchange_raw_status=ack.status,
-                    raw_exchange_payload_path=raw_path,
                     acknowledged_at=ack_at,
                     updated_at=ack_at,
+                    raw_exchange_payload_path=payload_column(raw_path),
                 )
             return SubmitOutcome(
                 outcome=SubmitOutcomeKind.REJECTED,
@@ -487,6 +564,7 @@ class LiveOrderSubmitter:
                 cloid_logical=cloid_logical,
                 cloid_hex=hex_id,
                 attempt_id=attempt_id,
+                exchange_raw_status=ack.status,
                 error=ack.error,
                 ack=ack,
             )
@@ -500,9 +578,10 @@ class LiveOrderSubmitter:
         # in for it: OrderAck.accepted is `status in ("resting", "filled")`, and
         # if a future accepted status ever appears there without landing here,
         # an `else: "filled"` would silently record an UNSETTLED order as
-        # settled. Same class of bug as the rule-10 guard above — a partial
-        # status test driving a safety verdict. Fail loud instead; the ack
-        # contract (signed_client.OrderAck) makes this branch unreachable today.
+        # settled. Same class of bug as the rule-10 guard in
+        # _try_recover_existing below — a partial status test driving a safety
+        # verdict. Fail loud instead; the ack contract (signed_client.OrderAck)
+        # makes this branch unreachable today.
         if ack.status == "resting":
             exchange_status = "open"
         elif ack.status == "filled":
@@ -522,8 +601,8 @@ class LiveOrderSubmitter:
                 status="acknowledged",
                 exchange_order_id=ack.exchange_order_id,
                 exchange_status=ack.status,
-                raw_exchange_payload_path=raw_path,
                 acknowledged_at=ack_at,
+                raw_exchange_payload_path=payload_column(raw_path),
             )
             repo.update_order(
                 conn,
@@ -538,9 +617,9 @@ class LiveOrderSubmitter:
                 exchange_order_id=ack.exchange_order_id,
                 exchange_status=exchange_status,
                 exchange_raw_status=ack.status,
-                raw_exchange_payload_path=raw_path,
                 acknowledged_at=ack_at,
                 updated_at=ack_at,
+                raw_exchange_payload_path=payload_column(raw_path),
             )
         return SubmitOutcome(
             outcome=SubmitOutcomeKind.ACKNOWLEDGED,
@@ -549,6 +628,7 @@ class LiveOrderSubmitter:
             cloid_hex=hex_id,
             attempt_id=attempt_id,
             exchange_order_id=ack.exchange_order_id,
+            exchange_raw_status=ack.status,
             ack=ack,
         )
 
@@ -594,7 +674,7 @@ class LiveOrderSubmitter:
         NULL as "unknown", never as "not sent".
         """
         status_payload = self._client.query_order_by_cloid(cloid_hex)
-        parsed = _parse_order_status(status_payload)
+        parsed = parse_order_status(status_payload)
         if parsed is None:
             # unknownOid clears rule 5's resend condition — UNLESS the durable
             # record proves the exchange once TOOK this cloid. Then "absent"
@@ -611,8 +691,8 @@ class LiveOrderSubmitter:
             # let "timeout -> recover the resting order -> a later unknownOid"
             # fall through to a resend of a live order. has_exchange_known_cloid
             # owns that definition; do not hand-roll either half back in here.
-            if repo.has_exchange_known_cloid(self._db.conn, self._run_id, cloid_hex=cloid_hex):
-                raise ExchangeError(
+            if repo.has_exchange_known_cloid(self._db.conn, cloid_hex=cloid_hex):
+                raise OrderIdempotencyContradiction(
                     f"orderStatus does not know cloid {cloid_hex}, but durable local "
                     "evidence says it reached the exchange (a prior place attempt was "
                     "acknowledged/duplicate, or the order already carries an "
@@ -622,7 +702,7 @@ class LiveOrderSubmitter:
         exchange_order_id, exchange_status = parsed
         raw_path = self._write_raw_payload("orderStatus", cloid_hex, status_payload)
         now = self._clock.now()
-        local_status = _local_status_for_exchange_status(exchange_status)
+        local_status = local_status_for_exchange_status(exchange_status)
         rejected = local_status == "rejected"
         # One contract on every write path (§16.1): a rejection recorded HERE
         # must carry the same reason a rejection recorded on the ack path does.
@@ -669,8 +749,8 @@ class LiveOrderSubmitter:
                     exchange_order_id=exchange_order_id,
                     exchange_status=local_status,
                     exchange_raw_status=exchange_status,
-                    raw_exchange_payload_path=raw_path,
                     updated_at=now,
+                    raw_exchange_payload_path=payload_column(raw_path),
                 )
         return SubmitOutcome(
             outcome=(
@@ -681,6 +761,9 @@ class LiveOrderSubmitter:
             cloid_hex=cloid_hex,
             attempt_id=attempt_id,
             exchange_order_id=exchange_order_id,
+            # The exact word, not a guess from it: the caller classifies a
+            # rejection off an exact table, never off `error`'s free text.
+            exchange_raw_status=exchange_status,
             # The same string the orders row carries — one reason, not two.
             error=status_reason,
             order_status=status_payload,
@@ -694,7 +777,7 @@ class LiveOrderSubmitter:
 # exact entry can classify it reliably). Anything not in this table is a word
 # the exchange gained after it was written — and every guess about such a word
 # is unsafe in one direction or another, so we make none. See
-# _local_status_for_exchange_status.
+# local_status_for_exchange_status.
 _EXCHANGE_TO_LOCAL_STATUS = {
     # Live on the book (a fired trigger order is a live order).
     "open": "open",
@@ -732,7 +815,7 @@ _EXCHANGE_TO_LOCAL_STATUS = {
 }
 
 
-def _local_status_for_exchange_status(exchange_status: str) -> str:
+def local_status_for_exchange_status(exchange_status: str) -> str:
     """Map an exchange status word to the local orders.status vocabulary.
 
     The exact table is the ONLY authority. A word it does not carry is recorded
@@ -772,7 +855,7 @@ def _local_status_for_exchange_status(exchange_status: str) -> str:
     return "open"
 
 
-def _parse_order_status(payload: Any) -> tuple[str, str] | None:
+def parse_order_status(payload: Any) -> tuple[str, str] | None:
     """(exchange_order_id, status) from an orderStatus payload; None = unknown.
 
     The Info endpoint answers ``{"status": "unknownOid"}`` for a cloid it has

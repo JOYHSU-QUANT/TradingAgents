@@ -29,7 +29,7 @@ from contrib.hyperliquid_perp.live.order_gate import LiveOrderGateRejected, Real
 from contrib.hyperliquid_perp.live.orders import (
     LiveOrderSubmitter,
     SubmitOutcome,
-    _local_status_for_exchange_status,
+    local_status_for_exchange_status,
 )
 from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.persistence import repository as repo
@@ -221,7 +221,10 @@ def test_rejection_ack_with_known_cloid_recovers_instead_of_rejecting(env):
 
 def test_gate_rejection_blocks_before_any_evidence_is_written(env):
     db, client, gate, submitter = env
-    gate.risk_gate_approved = False
+    # A WIRE-scoped condition: the submitter asks check_order, which no longer
+    # carries the decision-scoped trio (risk_gate_approved / active_slice_plan /
+    # unresolved_protection_failure — those gate check_new_target, per §9.3).
+    gate.kill_switch_active = False
     client.place_results = [_RESTING_ACK]
     with pytest.raises(LiveOrderGateRejected):
         _submit(submitter)
@@ -560,13 +563,13 @@ def test_exchange_status_family_classifier():
     # not match"): a placement rejection, nothing ever rested, and reading it as
     # canceled would report a never-placed order as recovered. No substring
     # heuristic decides any of these.
-    assert _local_status_for_exchange_status("iocCancelRejected") == "rejected"
-    assert _local_status_for_exchange_status("tickRejected") == "rejected"
-    assert _local_status_for_exchange_status("minTradeNtlRejected") == "rejected"
-    assert _local_status_for_exchange_status("scheduledCancel") == "canceled"
-    assert _local_status_for_exchange_status("liquidatedCanceled") == "canceled"
-    assert _local_status_for_exchange_status("resting") == "open"
-    assert _local_status_for_exchange_status("filled") == "filled"
+    assert local_status_for_exchange_status("iocCancelRejected") == "rejected"
+    assert local_status_for_exchange_status("tickRejected") == "rejected"
+    assert local_status_for_exchange_status("minTradeNtlRejected") == "rejected"
+    assert local_status_for_exchange_status("scheduledCancel") == "canceled"
+    assert local_status_for_exchange_status("liquidatedCanceled") == "canceled"
+    assert local_status_for_exchange_status("resting") == "open"
+    assert local_status_for_exchange_status("filled") == "filled"
 
 
 def test_an_unknown_exchange_status_is_never_guessed_at():
@@ -584,14 +587,14 @@ def test_an_unknown_exchange_status_is_never_guessed_at():
     # "open" is the one conservative reading: the order keeps being watched and
     # PR 4's reconciliation settles it against the exchange. It must also not
     # raise — that would break §8.3 recovery for every order carrying the word.
-    assert _local_status_for_exchange_status("someBrandNewStatusWord") == "open"
+    assert local_status_for_exchange_status("someBrandNewStatusWord") == "open"
     # ...reject-ish: must NOT become "rejected".
-    assert _local_status_for_exchange_status("someNewThingRejected") == "open"
-    assert _local_status_for_exchange_status("someNewCancelRejected") == "open"
+    assert local_status_for_exchange_status("someNewThingRejected") == "open"
+    assert local_status_for_exchange_status("someNewCancelRejected") == "open"
     # ...terminal-ish: must NOT become "canceled" / "filled".
-    assert _local_status_for_exchange_status("cancelRequested") == "open"
-    assert _local_status_for_exchange_status("pendingCancel") == "open"
-    assert _local_status_for_exchange_status("partiallyFilledSomehow") == "open"
+    assert local_status_for_exchange_status("cancelRequested") == "open"
+    assert local_status_for_exchange_status("pendingCancel") == "open"
+    assert local_status_for_exchange_status("partiallyFilledSomehow") == "open"
 
 
 def test_recovery_of_an_unrecognised_status_lands_open_and_does_not_resend(env):
@@ -694,3 +697,131 @@ def test_submit_outcome_enforces_its_evidence_contract():
     # A typo'd verdict is not silently a fourth state.
     with pytest.raises(ValueError):
         SubmitOutcome(outcome="acknowleged", order_id="o1", cloid_logical=_LOGICAL, cloid_hex=_HEX)
+
+
+# ---- review round 7: the rule-5 resend must not leave a terminal orders row ----
+
+
+def test_resend_after_rejection_restamps_the_order_row_to_submitted(env):
+    # THE DOUBLE-POSITION BUG. Attempt 0 is rejected by the exchange and
+    # orderStatus confirms the cloid is absent, so the orders row is settled
+    # 'rejected'. Rule 5 then permits a resend of the SAME cloid. If the intent
+    # transaction leaves the row at 'rejected' — a TERMINAL status, not in
+    # LIVE_ORDER_STATUSES — a crash inside the send window leaves a live order
+    # that PR 4's reconciliation skips as settled, and an engine rebuilding
+    # intent from the DB reads "rejected" and is licensed (§8.3 rule 9) to mint a
+    # NEW logical order for a position it may already hold.
+    db, client, _, submitter = env
+    client.place_results = [_REJECT_ACK]
+    client.status_results = [_UNKNOWN_STATUS]
+    assert _submit(submitter).outcome == "rejected"
+    row = repo.get_order(db.conn, "o1")
+    assert row["status"] == "rejected" and row["status_reason"] == "Insufficient margin"
+
+    # The resend: margin freed up, same cloid_logical (rule 6). Freeze the wire
+    # call to inspect the row exactly as a crash mid-send would leave it.
+    client.status_results = [_UNKNOWN_STATUS]
+
+    seen: dict[str, sqlite3.Row] = {}
+
+    def _capture(**kwargs):
+        seen["row"] = repo.get_order(db.conn, "o1")
+        return _RESTING_ACK
+
+    client.place_ioc_limit = _capture  # type: ignore[method-assign]
+    outcome = _submit(submitter)
+
+    mid_send = seen["row"]
+    assert mid_send["status"] == "submitted", (
+        "the durable row during the resend's network window must be non-terminal"
+    )
+    assert mid_send["status"] in repo.LIVE_ORDER_STATUSES
+    # The stale rejection reason is gone — it described the PREVIOUS send.
+    assert mid_send["status_reason"] is None
+    assert outcome.outcome == "acknowledged"
+
+
+def test_a_failed_payload_write_never_erases_an_earlier_recorded_path(env, monkeypatch):
+    # update_order's _UNSET convention: an omitted keyword leaves the column
+    # alone, an explicit None CLEARS it. _write_raw_payload returns None when the
+    # disk write fails — passing that through would delete the pointer to the
+    # ORIGINAL ack's payload, for an order the recovery just confirmed is live.
+    db, client, _, submitter = env
+    client.place_results = [_RESTING_ACK]
+    _submit(submitter)
+    original = repo.get_order(db.conn, "o1")["raw_exchange_payload_path"]
+    assert original is not None
+
+    # Now a same-cloid retry recovers through orderStatus, but the disk is full.
+    from contrib.hyperliquid_perp.live import payloads
+
+    monkeypatch.setattr(payloads.Path, "write_text", _boom)
+    client.status_results = [_KNOWN_STATUS]
+    outcome = _submit(submitter)
+
+    assert outcome.outcome == "recovered_existing"
+    assert repo.get_order(db.conn, "o1")["raw_exchange_payload_path"] == original, (
+        "a failed payload write must omit the column, not clear it"
+    )
+
+
+def _boom(*_args, **_kwargs):
+    raise OSError("disk full")
+
+
+def test_a_busy_db_does_not_replace_the_exchange_error_that_caused_it(env, monkeypatch):
+    # The exchange failure is the diagnosis. If the transaction that records it
+    # raises (sqlite BUSY at the worst moment), THAT error must not propagate in
+    # its place — the caller would read "database is locked" where the true story
+    # was a timeout on a possibly-live order.
+    db, client, _, submitter = env
+    client.place_results = [ExchangeRequestError("read timed out")]
+
+    real_transaction = db.transaction
+    calls = {"n": 0}
+
+    def _transaction_then_fail():
+        calls["n"] += 1
+        if calls["n"] == 1:  # the intent transaction must still work
+            return real_transaction()
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(db, "transaction", _transaction_then_fail)
+
+    with pytest.raises(ExchangeRequestError, match="read timed out"):
+        _submit(submitter)
+
+
+def test_the_two_contradiction_cases_escape_a_transport_retry_lane(env):
+    # Both mean "an order MAY be live under this cloid; a human must look".
+    # ExchangeError is the BASE of ExchangeRequestError, so raising it bare let
+    # the obvious `except ExchangeRequestError: retry` idiom swallow a
+    # double-position risk. They are now a distinct, named lane.
+    from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
+        OrderIdempotencyContradiction,
+    )
+
+    db, client, _, submitter = env
+    client.place_results = [_DUPLICATE_ACK]
+    client.status_results = [_UNKNOWN_STATUS]
+    with pytest.raises(OrderIdempotencyContradiction):
+        _submit(submitter)
+    # Still an ExchangeError (callers may catch the base deliberately) but NOT a
+    # request error, so a transport-retry handler cannot catch it.
+    assert issubclass(OrderIdempotencyContradiction, ExchangeError)
+    assert not issubclass(OrderIdempotencyContradiction, ExchangeRequestError)
+
+
+def test_every_outcome_carries_the_exchange_verbatim_status_word(env):
+    # The only non-guessing basis PR 4/5 have for telling a permanent rejection
+    # (tick / min-notional — retry fails forever) from a transient one.
+    db, client, _, submitter = env
+    client.place_results = [_RESTING_ACK]
+    assert _submit(submitter).exchange_raw_status == "resting"
+
+    client.status_results = [
+        {"status": "order", "order": {"order": {"oid": 9}, "status": "minTradeNtlRejected"}}
+    ]
+    outcome = _submit(submitter, order_id="o1")
+    assert outcome.outcome == "rejected"
+    assert outcome.exchange_raw_status == "minTradeNtlRejected"

@@ -498,3 +498,108 @@ def test_live_order_roles_accepted(db):
                 cloid_hex=f"0x{i:032x}",
             )
     assert repo.get_order(db.conn, "role-0")["order_role"] == "close"
+
+
+# ---------------------------------------------------------------------------
+# review round 7: write-boundary vocabulary + evidence completeness
+# ---------------------------------------------------------------------------
+
+
+def _seed_order(db, *, order_id="o1", status="open", cloid_hex=_HEX):
+    with db.transaction() as conn:
+        repo.insert_order(
+            conn,
+            order_id=order_id,
+            mode="live",
+            run_id="r",
+            symbol="BTC",
+            order_role="entry",
+            side="buy",
+            order_type="ioc_limit",
+            qty=Decimal("0.01"),
+            status=status,
+            price=Decimal("100"),
+            cloid_logical=f"log-{order_id}",
+            cloid_hex=cloid_hex,
+            is_bot_owned=True,
+            timestamp=_NOW,
+        )
+
+
+def test_exchange_status_must_be_a_normalized_family_word(db):
+    # §16.1: exchange_status carries the NORMALIZED family (the orders.status
+    # words); exchange_raw_status carries the verbatim wire word. The ack path
+    # holds BOTH at one call site, and the same-named parameter on
+    # update_live_order_attempt takes the OPPOSITE vocabulary — so writing
+    # "resting"/"error" into the normalized column is one keystroke away, and it
+    # produces a plausible row that PR 4's reconciliation would never match.
+    _seed_order(db)
+    for raw_word in ("resting", "error"):
+        with pytest.raises(ValueError, match="exchange_status"), db.transaction() as conn:
+            repo.update_order(conn, "o1", exchange_status=raw_word)
+    # The four families are accepted; the raw column stays free-form.
+    with db.transaction() as conn:
+        repo.update_order(conn, "o1", exchange_status="open", exchange_raw_status="resting")
+    row = repo.get_order(db.conn, "o1")
+    assert (row["exchange_status"], row["exchange_raw_status"]) == ("open", "resting")
+
+
+def test_a_place_attempt_must_carry_the_parameters_it_sent(db):
+    # The attempt row is written BEFORE the network call, so it is the only
+    # record of the intent if the process dies inside the send window. §8.3
+    # recovery and PR 4's reconciliation compare that intent against the
+    # exchange — an attempt with NULL side/qty/price cannot support either.
+    with pytest.raises(ValueError, match="order parameters"), db.transaction() as conn:
+        repo.insert_live_order_attempt(
+            conn,
+            attempt_id="a1",
+            run_id="r",
+            action="place",
+            symbol="BTC",
+            attempt_index=0,
+            cloid_logical="log-1",
+            cloid_hex=_HEX,
+            requested_at=_NOW,
+        )
+
+
+def test_the_place_predicates_are_not_scoped_to_one_run(db):
+    # PR 4 reconciles orders it found on the EXCHANGE, which may belong to an
+    # EARLIER run. A run-scoped predicate would answer False there — "not this
+    # run" reading as "never sent" — licensing exactly the resend §8.3 rule 10
+    # exists to forbid. One evidence trail, one scope.
+    with db.transaction() as conn:
+        repo.insert_cloid_mapping(
+            conn,
+            cloid_logical="log-old",
+            cloid_hex=_HEX,
+            run_id="r-old",
+            symbol="BTC",
+            order_role="entry",
+        )
+        repo.insert_live_order_attempt(
+            conn,
+            attempt_id="a-old",
+            run_id="r-old",
+            action="place",
+            symbol="BTC",
+            attempt_index=0,
+            status="acknowledged",
+            cloid_logical="log-old",
+            cloid_hex=_HEX,
+            side="buy",
+            qty=Decimal("0.01"),
+            price=Decimal("100"),
+            order_role="entry",
+            requested_at=_NOW,
+        )
+    # Asked from a DIFFERENT run, the evidence still stands.
+    assert repo.has_place_attempt(db.conn, cloid_hex=_HEX) is True
+    assert repo.has_exchange_known_cloid(db.conn, cloid_hex=_HEX) is True
+
+
+def test_iter_open_live_orders_sees_only_non_terminal_live_rows(db):
+    # The disarm cross-check's input: what SQLite still believes may be resting.
+    _seed_order(db, order_id="live1", status="open", cloid_hex=_HEX)
+    _seed_order(db, order_id="done1", status="filled", cloid_hex=_HEX2)
+    assert [r["order_id"] for r in repo.iter_open_live_orders(db.conn)] == ["live1"]

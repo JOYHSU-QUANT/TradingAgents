@@ -1167,6 +1167,14 @@ tick 間隔，真正綁定的檢查是 §18.2 rule 2 的 `max_tick_gap_seconds` 
 6. 正常 shutdown 的 cancel sweep 完全乾淨（open orders 枚舉成功且零 cancel 失敗）時，
    必須解除 scheduleCancel（unset），避免全錢包觸發掃掉 sweep 依 §19.3 刻意跳過的
    非 bot 訂單；sweep 有任何失敗則維持武裝，作為殘單的 backstop（v4 新增，2026-07-12）。
+   **wire fact 一旦落地即 outrank 後續 sweep**（v7 新增，2026-07-13）：disarm 的判準是
+   「這次 sweep 乾淨」**或**「先前某次 attempt 已實際送出 unset」（`clear_scheduled_cancel()`
+   回來的當下就 latch，先於任何可能 raise 的動作）。理由：unset 成功、但它的 audit write
+   撞上鎖住的 DB 而 unwind 時，重試若又以「新的一次 sweep」重新裁決，只要這次 open_orders
+   枚舉失敗就會跳過 disarm 區塊、警告「left ARMED，觸發器將在 deadline 引爆」——而交易所
+   其實早就忘了那個觸發器，這句話是假的。因此重試不得重送 unset、不得因新 sweep 不乾淨而
+   謊報 still-armed；`kill_switch_disarmed` 的 detail 也要據實寫明是哪一次 attempt 掙來的
+   （「clean shutdown sweep」vs「先前 attempt 已清除」），否則審計會出現兩列互相矛盾的紀錄。
    「乾淨」的認定：registry 命中（確定 bot-owned）但 open orders payload 缺 coin
    無法下 cancel 的訂單計入 failures（「我們的但動不了」≠「不是我們的」），擋 disarm；
    從未 arm 過的 shutdown 沒有東西可解除——不呼叫 unset、不寫 disarmed 事件

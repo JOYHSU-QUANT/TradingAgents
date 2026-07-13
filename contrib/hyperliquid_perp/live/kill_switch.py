@@ -633,7 +633,8 @@ class KillSwitchManager:
         # sweep: without it, a retry whose open_orders() happens to fail would skip
         # the disarm block entirely and log "left ARMED, the trigger will fire" for
         # a trigger the exchange has already forgotten.
-        disarm_due = self._scheduled_cancel_cleared or (sweep_error is None and not failures)
+        already_cleared = self._scheduled_cancel_cleared
+        disarm_due = already_cleared or (sweep_error is None and not failures)
         if self._armed and disarm_due:
             # Clean sweep: no bot order is left for the wallet-wide trigger to
             # protect, and letting it fire would cancel the skipped non-bot
@@ -654,8 +655,18 @@ class KillSwitchManager:
                 logger.warning("kill switch disarm failed: %s", exc)
                 self._record("kill_switch_disarm_failed", error=str(exc))
             else:
-                logger.info("kill switch disarmed after a clean shutdown sweep")
-                self._record("kill_switch_disarmed", detail="clean shutdown sweep")
+                # Say WHICH attempt earned the disarm. On a retry that rides the
+                # wire latch, this very shutdown may have recorded a failed
+                # enumeration a few lines above — claiming "clean shutdown sweep"
+                # there would put two flatly contradictory rows next to each other
+                # in the §18.5 trail that PR 4 reconciles against.
+                detail = (
+                    "scheduled cancel already cleared on a prior attempt"
+                    if already_cleared
+                    else "clean shutdown sweep"
+                )
+                logger.info("kill switch disarmed: %s", detail)
+                self._record("kill_switch_disarmed", detail=detail)
                 # Cleared LAST, for the same reason _shutdown_completed is: this
                 # flag is what makes the disarm re-attemptable. If the event write
                 # above dies on a busy DB, the retry must still find _armed True

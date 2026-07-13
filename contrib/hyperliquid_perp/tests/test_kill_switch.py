@@ -401,6 +401,33 @@ def test_a_firing_during_an_api_outage_is_still_reported(env, caplog):
     assert not gate.kill_switch_active
 
 
+def test_a_failed_audit_write_does_not_swallow_the_firing(env, monkeypatch):
+    # The event write is fail-loud by design (a busy DB raises). If the "already
+    # reported" mark were set BEFORE it, that single failure would permanently
+    # lose the one record that the switch fired: the retry would compute
+    # already_reported and skip both the log and the write. Mark after the write.
+    db, client, _, clock, manager = env
+    manager.arm()
+    clock.advance(200)
+
+    real_record = manager._record
+
+    def _flaky_record(event_type, **kw):
+        if event_type == "kill_switch_cancel_triggered":
+            monkeypatch.setattr(manager, "_record", real_record)  # only fail once
+            raise sqlite3.OperationalError("database is locked")
+        return real_record(event_type, **kw)
+
+    monkeypatch.setattr(manager, "_record", _flaky_record)
+    with pytest.raises(sqlite3.OperationalError):
+        manager.refresh()
+    assert "kill_switch_cancel_triggered" not in _event_types(db)
+    assert manager.stop_new_orders  # but the fail-safe latch is already up
+
+    manager.refresh()  # the retry must still record the firing
+    assert _event_types(db).count("kill_switch_cancel_triggered") == 1
+
+
 def test_shutdown_notices_the_switch_already_fired(env):
     # After a lapsed deadline the exchange has swept the wallet, so open_orders()
     # comes back empty and the sweep would otherwise record a "perfectly clean

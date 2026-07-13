@@ -14,6 +14,13 @@
    the gate: while it is up, a successful refresh re-arms the exchange-side
    switch but leaves ``gate.kill_switch_active`` down — §13.4 requires a full
    reconciliation pass (PR 4) before trading resumes, not one lucky refresh.
+   :meth:`release_safe_mode` is that one door.
+
+   Every refresh (and :meth:`shutdown`) first asks whether the deadline has
+   already lapsed — i.e. whether the exchange ALREADY fired the switch and
+   swept the wallet while nobody was ticking us. That records
+   ``kill_switch_cancel_triggered`` and latches, rather than quietly re-arming
+   over a book that is no longer there.
 3. :meth:`shutdown` — cancel bot-owned open orders (§18.2 rule 5). Bot-owned
    is decided per §19.3: the exchange order's cloid reverse-looked-up in
    ``cloid_registry``; anything else is left alone (rule: never manage
@@ -251,8 +258,14 @@ class KillSwitchManager:
         # The latch, not the round-trip, is the verdict. refresh() can succeed
         # and STILL re-latch us — if the deadline had already elapsed, the switch
         # has fired and its orders are gone, so that refresh re-arms the exchange
-        # but must not resume trading. (Its re-schedule leaves a fresh deadline
-        # behind, so a release attempted again after reconciliation can succeed.)
+        # but must not resume trading.
+        #
+        # PR 4 CONTRACT: that refresh also re-schedules, so calling this again
+        # would see a fresh deadline and succeed. The "release only after
+        # reconciliation" precondition is the CALLER's to honour — this method is
+        # PR 4's post-reconciliation door, not a retry loop. Never wire it as
+        # `while not release_safe_mode(): sleep()`: that would auto-release a
+        # switch that just fired, on order rows still stale-'open'.
         if self.stop_new_orders:
             logger.warning("kill switch safe mode release failed: the switch is still not healthy")
             return False
@@ -305,25 +318,34 @@ class KillSwitchManager:
         elapsed = (self._clock.now() - self._last_scheduled_at).total_seconds()
         if elapsed < self._config.schedule_cancel_seconds:
             return
+        # Fail-safe state first: whatever happens to the audit write below, the
+        # gate is shut and the latch is up.
         already_reported = self._expiry_reported_for == self._last_scheduled_at
-        self._expiry_reported_for = self._last_scheduled_at
         self._gate.kill_switch_active = False
         self.stop_new_orders = True
         self._safe_mode_announced = True
-        if not already_reported:
-            logger.error(
-                "kill switch FIRED: %.1fs since the last refresh exceeds the %ss "
-                "scheduled-cancel deadline — the exchange has cancelled every order "
-                "on this wallet. New orders are BLOCKED until reconciliation "
-                "(§18.2 rule 3); local order rows are stale until then.",
-                elapsed,
-                self._config.schedule_cancel_seconds,
-            )
-            self._record(
-                "kill_switch_cancel_triggered",
-                detail=f"no refresh for {elapsed:.1f}s "
-                f"(deadline {self._config.schedule_cancel_seconds}s)",
-            )
+        if already_reported:
+            return
+        logger.error(
+            "kill switch FIRED: %.1fs since the last refresh exceeds the %ss "
+            "scheduled-cancel deadline — the exchange has cancelled every order "
+            "on this wallet. New orders are BLOCKED until reconciliation "
+            "(§18.2 rule 3); local order rows are stale until then.",
+            elapsed,
+            self._config.schedule_cancel_seconds,
+        )
+        self._record(
+            "kill_switch_cancel_triggered",
+            detail=f"no refresh for {elapsed:.1f}s "
+            f"(deadline {self._config.schedule_cancel_seconds}s)",
+        )
+        # Marked reported only AFTER the event is durable. _record is fail-loud
+        # by design (a busy DB raises), and marking first would let that single
+        # failure permanently swallow the one record that the switch fired: the
+        # retry — the next refresh, or the shutdown re-entry — would compute
+        # already_reported and skip both the log and the write. Worst case now is
+        # a repeated ERROR line on retry; never a lost firing.
+        self._expiry_reported_for = self._last_scheduled_at
 
     def refresh(self) -> bool:
         """Push the exchange-side deadline back; False (plus flags) on failure.
@@ -506,10 +528,12 @@ class KillSwitchManager:
         # 'open' and nothing anywhere says the orders were cancelled for us.
         if self._armed:
             self._detect_expired_deadline()
-        # The boundary is self-enforcing, not a caller convention: from the
-        # first statement no new order may pass the §4.1 gate (the sweep must
-        # not race fresh submissions), and tick()/refresh() refuse to touch a
-        # switch whose manager is retiring.
+        # The boundary is self-enforcing, not a caller convention: from here on
+        # no new order may pass the §4.1 gate (the sweep must not race fresh
+        # submissions), and tick()/refresh() refuse to touch a switch whose
+        # manager is retiring. (The expiry check above runs first, and can only
+        # shut the gate *further* — it raises the sticky latch before its own
+        # audit write, so even if that write dies the gate stays closed.)
         self._shutdown_started = True
         self._gate.kill_switch_active = False
         logger.info("kill switch shutdown: sweeping bot-owned open orders")

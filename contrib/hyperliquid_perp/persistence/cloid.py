@@ -25,10 +25,11 @@ string-splitting the id.
 from __future__ import annotations
 
 import hashlib
+import re
 
 from ..domains.perp.enum_guard import check_enum
 
-__all__ = ["LIVE_ORDER_ROLES", "cloid_hex", "cloid_logical"]
+__all__ = ["LIVE_ORDER_ROLES", "assert_cloid_provenance", "cloid_hex", "cloid_logical"]
 
 # §8.1: every live order carries one of these roles. Phase 2 already uses the
 # first four; close / emergency_close / cleanup_cancel are the live-only
@@ -49,6 +50,12 @@ LIVE_ORDER_ROLES = frozenset(
 
 # cloid_hex is "0x" + 32 hex chars = 16 bytes = 128 bits (§8.2).
 _HEX_BYTES = 16
+
+# Zero-pad width of the slice_index segment (§8.2's example: 000). Both the id
+# BUILDER and the provenance CHECKER derive from this one number — the checker
+# anchors the role to the padded index that precedes it, so a pad width changed
+# in only one of the two would make every submit fail its own guard.
+_SLICE_PAD = 3
 
 
 def _segment(value: object, *, name: str) -> str:
@@ -94,10 +101,40 @@ def cloid_logical(
         _segment(output_id, name="output_id"),
         _segment(plan_id, name="plan_id"),
         _segment(leg, name="leg"),
-        f"{slice_index:03d}",
+        f"{slice_index:0{_SLICE_PAD}d}",
         order_role,
     )
     return "_".join(segments)
+
+
+def assert_cloid_provenance(logical: str, *, run_id: str, symbol: str, order_role: str) -> None:
+    """Fail loud when a cloid_logical disagrees with the fields sent beside it.
+
+    Callers hand the submit path the opaque ``cloid_logical`` string AND the
+    provenance fields (run, symbol, role) separately, and both get written to
+    the audit trail PR 4's reconciliation reads. Nothing else checks that the
+    two agree, so a caller that built the id for one role and passed another
+    would persist self-contradictory evidence — silently, and only on the money
+    path.
+
+    A NECESSARY, not a sufficient, check: it re-derives nothing (§8.2 ids are
+    deliberately never parsed back into fields) and asserts only the segments it
+    can locate unambiguously. The role is anchored to the zero-padded slice
+    index that always precedes it — a bare suffix test would accept ``close``
+    for an id built with ``emergency_close``.
+    """
+    check_enum(order_role, LIVE_ORDER_ROLES, name="order_role")
+    if not re.search(rf"_\d{{{_SLICE_PAD},}}_{re.escape(order_role)}$", logical):
+        raise ValueError(
+            f"cloid_logical {logical!r} was not built for order_role {order_role!r} — "
+            "the id and its provenance fields disagree (§8.2)"
+        )
+    for name, value in (("run_id", run_id), ("symbol", symbol)):
+        if f"_{value}_" not in logical:
+            raise ValueError(
+                f"cloid_logical {logical!r} does not carry {name} {value!r} — "
+                "the id and its provenance fields disagree (§8.2)"
+            )
 
 
 def cloid_hex(logical: str) -> str:

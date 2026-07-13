@@ -8,6 +8,7 @@ import pytest
 
 from contrib.hyperliquid_perp.persistence.cloid import (
     LIVE_ORDER_ROLES,
+    assert_cloid_provenance,
     cloid_hex,
     cloid_logical,
 )
@@ -32,6 +33,40 @@ def test_slice_index_is_zero_padded_and_sorts_in_slice_order():
     ids = [cloid_logical(**{**_KW, "slice_index": i}) for i in (0, 2, 10, 119)]
     assert ids == sorted(ids)
     assert "_010_" in ids[2]
+
+
+def test_provenance_accepts_the_fields_the_id_was_built_from():
+    logical = cloid_logical(**_KW)
+    assert_cloid_provenance(logical, run_id=_KW["run_id"], symbol="BTC", order_role="entry")
+
+
+@pytest.mark.parametrize("role", sorted(LIVE_ORDER_ROLES))
+def test_provenance_accepts_every_role_round_trip(role):
+    logical = cloid_logical(**{**_KW, "order_role": role})
+    assert_cloid_provenance(logical, run_id=_KW["run_id"], symbol="BTC", order_role=role)
+
+
+def test_provenance_rejects_a_role_the_id_was_not_built_for():
+    logical = cloid_logical(**{**_KW, "order_role": "entry"})
+    with pytest.raises(ValueError, match="was not built for order_role"):
+        assert_cloid_provenance(logical, run_id=_KW["run_id"], symbol="BTC", order_role="close")
+
+
+def test_provenance_is_not_fooled_by_a_role_that_suffixes_another():
+    # 'close' is a suffix of 'emergency_close': a bare endswith test would pass
+    # this mismatched pair straight into the audit trail. The role is anchored
+    # to the zero-padded slice index that always precedes it.
+    logical = cloid_logical(**{**_KW, "order_role": "emergency_close"})
+    with pytest.raises(ValueError, match="was not built for order_role"):
+        assert_cloid_provenance(logical, run_id=_KW["run_id"], symbol="BTC", order_role="close")
+
+
+def test_provenance_rejects_a_foreign_run_or_symbol():
+    logical = cloid_logical(**_KW)
+    with pytest.raises(ValueError, match="does not carry run_id"):
+        assert_cloid_provenance(logical, run_id="other_run", symbol="BTC", order_role="entry")
+    with pytest.raises(ValueError, match="does not carry symbol"):
+        assert_cloid_provenance(logical, run_id=_KW["run_id"], symbol="ETH", order_role="entry")
 
 
 def test_hex_is_deterministic_sha256_prefix():

@@ -64,6 +64,17 @@ def _client(network="testnet", *, key=_KEY, gate=None, **kwargs) -> HyperliquidS
     )
 
 
+def _place(client):
+    """The canonical order under test — only the client's response varies."""
+    return client.place_ioc_limit(
+        coin="BTC",
+        is_buy=True,
+        size=Decimal("0.01"),
+        limit_price=Decimal("100"),
+        cloid_hex=_CLOID,
+    )
+
+
 class _FakeInfo:
     def __init__(self):
         self.user_state_calls: list[str] = []
@@ -202,26 +213,14 @@ def test_place_ioc_limit_parses_filled_and_error_statuses(fake_exchange):
             "data": {"statuses": [{"filled": {"oid": 7, "totalSz": "0.01", "avgPx": "99.5"}}]},
         },
     }
-    ack = client.place_ioc_limit(
-        coin="BTC",
-        is_buy=True,
-        size=Decimal("0.01"),
-        limit_price=Decimal("100"),
-        cloid_hex=_CLOID,
-    )
+    ack = _place(client)
     assert ack.status == "filled"
     assert ack.filled_size == Decimal("0.01") and ack.average_price == Decimal("99.5")
     client._exchange.order_result = {
         "status": "ok",
         "response": {"type": "order", "data": {"statuses": [{"error": "Duplicate cloid"}]}},
     }
-    ack = client.place_ioc_limit(
-        coin="BTC",
-        is_buy=True,
-        size=Decimal("0.01"),
-        limit_price=Decimal("100"),
-        cloid_hex=_CLOID,
-    )
+    ack = _place(client)
     assert ack.status == "error" and not ack.accepted and ack.is_duplicate
 
 
@@ -233,13 +232,7 @@ def test_top_level_err_envelope_raises_request_error(fake_exchange):
     client = _client()
     client._exchange.order_result = {"status": "err", "response": "User or API Wallet invalid"}
     with pytest.raises(ExchangeRequestError, match="invalid"):
-        client.place_ioc_limit(
-            coin="BTC",
-            is_buy=True,
-            size=Decimal("0.01"),
-            limit_price=Decimal("100"),
-            cloid_hex=_CLOID,
-        )
+        _place(client)
 
 
 def test_cancel_top_level_err_envelope_raises_request_error(fake_exchange):
@@ -263,13 +256,42 @@ def test_multi_status_order_response_is_malformed(fake_exchange):
         },
     }
     with pytest.raises(MalformedResponseError, match="expected exactly 1"):
-        client.place_ioc_limit(
-            coin="BTC",
-            is_buy=True,
-            size=Decimal("0.01"),
-            limit_price=Decimal("100"),
-            cloid_hex=_CLOID,
-        )
+        _place(client)
+
+
+def test_zero_status_order_response_is_malformed(fake_exchange):
+    # The empty-list twin of the multi-status case: one order out, one status
+    # back. Zero statuses means the ack cannot be attributed to our order, and
+    # guessing (e.g. reading it as "not accepted") would let a resting order be
+    # reported as rejected — which licenses the caller to mint a NEW cloid.
+    client = _client()
+    client._exchange.order_result = {
+        "status": "ok",
+        "response": {"type": "order", "data": {"statuses": []}},
+    }
+    with pytest.raises(MalformedResponseError, match="expected exactly 1"):
+        _place(client)
+
+
+def test_unrecognised_order_status_is_malformed(fake_exchange):
+    # The order-side twin of test_unrecognised_cancel_status_is_malformed: a
+    # status shape outside resting/filled/error is never guessed at.
+    client = _client()
+    client._exchange.order_result = {
+        "status": "ok",
+        "response": {"type": "order", "data": {"statuses": [{"teleported": {"oid": 1}}]}},
+    }
+    with pytest.raises(MalformedResponseError, match="order status not recognised"):
+        _place(client)
+
+
+def test_a_response_that_is_not_a_status_envelope_is_malformed(fake_exchange):
+    # Not a status envelope at all — a proxy error page, a truncated body. Fail
+    # loud rather than read the missing fields as absent evidence.
+    client = _client()
+    client._exchange.order_result = ["unexpected", "shape"]
+    with pytest.raises(MalformedResponseError):
+        _place(client)
 
 
 def test_every_mutation_is_gated(fake_exchange):
@@ -277,13 +299,7 @@ def test_every_mutation_is_gated(fake_exchange):
     # or cancel unless the construction-bound gate allows it.
     client = _client(gate=_closed_gate())
     with pytest.raises(LiveOrderGateRejected):
-        client.place_ioc_limit(
-            coin="BTC",
-            is_buy=True,
-            size=Decimal("0.01"),
-            limit_price=Decimal("100"),
-            cloid_hex=_CLOID,
-        )
+        _place(client)
     with pytest.raises(LiveOrderGateRejected):
         client.cancel_by_oid(coin="BTC", exchange_order_id="1")
     with pytest.raises(LiveOrderGateRejected):
@@ -304,13 +320,7 @@ def test_gate_flags_flipped_after_construction_are_honoured(fake_exchange):
     client = _client(gate=gate)
     gate.kill_switch_active = False
     with pytest.raises(LiveOrderGateRejected, match="kill switch"):
-        client.place_ioc_limit(
-            coin="BTC",
-            is_buy=True,
-            size=Decimal("0.01"),
-            limit_price=Decimal("100"),
-            cloid_hex=_CLOID,
-        )
+        _place(client)
     assert client._exchange.order_calls == []
 
 
@@ -320,13 +330,7 @@ def test_order_gate_blocks_full_list_but_cancel_needs_only_the_base(fake_exchang
     gate.manual_safe_mode = True
     client = _client(gate=gate)
     with pytest.raises(LiveOrderGateRejected):
-        client.place_ioc_limit(
-            coin="BTC",
-            is_buy=True,
-            size=Decimal("0.01"),
-            limit_price=Decimal("100"),
-            cloid_hex=_CLOID,
-        )
+        _place(client)
     ack = client.cancel_by_cloid(coin="BTC", cloid_hex=_CLOID)
     assert ack.success
 

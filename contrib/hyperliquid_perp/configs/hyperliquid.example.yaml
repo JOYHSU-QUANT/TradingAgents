@@ -94,8 +94,10 @@ paper_trading:
 #     tp_failure_mode: degraded_protection
 #   kill_switch:
 #     enabled: true                    # required true whenever allow_real_orders is true (§4.1)
-#     schedule_cancel_seconds: 120
-#     refresh_interval_seconds: 30     # must be < schedule_cancel_seconds
+#     schedule_cancel_seconds: 120     # must be > 5 (Hyperliquid's own floor)
+#     refresh_interval_seconds: 30     # schedule_cancel must be >= 2x this: the loop
+#                                      # refreshes only on a tick, so one missed cycle
+#                                      # must not let the switch fire (§18.1)
 #     on_refresh_failed: safe_mode
 #     on_shutdown: cancel_bot_owned_open_orders
 #     emergency_close_on_shutdown: false

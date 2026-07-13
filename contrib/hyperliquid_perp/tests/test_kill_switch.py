@@ -34,6 +34,7 @@ class _FakeClient:
         self.clear_calls: int = 0
         self.clear_error: Exception | None = None
         self.open_orders_result: list | Exception = []
+        self.open_orders_calls: int = 0
         self.cancel_calls: list[tuple[str, str]] = []
         self.cancel_results: dict[str, CancelAck | Exception] = {}
 
@@ -50,6 +51,7 @@ class _FakeClient:
         self.clear_calls += 1
 
     def open_orders(self):
+        self.open_orders_calls += 1
         if isinstance(self.open_orders_result, Exception):
             raise self.open_orders_result
         return self.open_orders_result
@@ -154,6 +156,43 @@ def test_refresh_cadence_is_30s(env):
     assert _event_types(db) == ["kill_switch_armed", "kill_switch_refreshed"]
 
 
+def test_a_tick_a_hair_early_still_refreshes(env):
+    # The live loop's period EQUALS refresh_interval_seconds (both 30s), so
+    # tick() lands a few ms later in each cycle than the schedule it is measured
+    # against. Under a bare `elapsed >= interval` test that shortfall skipped the
+    # refresh and halved the real cadence to every OTHER cycle — silently, since
+    # only a gap in the event timestamps would ever show it. The slack absorbs
+    # the jitter: a tick a hair early is still due.
+    db, client, _, clock, manager = env
+    manager.arm()
+    clock.advance(29.9)
+    assert manager.refresh_due()
+    manager.tick()
+    assert len(client.schedule_calls) == 2
+    assert _event_types(db) == ["kill_switch_armed", "kill_switch_refreshed"]
+
+
+def test_a_genuinely_early_tick_does_not_refresh(env):
+    # The slack is a jitter budget, not a licence to refresh on every tick.
+    _, client, _, clock, manager = env
+    manager.arm()
+    clock.advance(25)
+    assert not manager.refresh_due()
+    manager.tick()
+    assert len(client.schedule_calls) == 1
+
+
+def test_arming_twice_is_a_wiring_error(env):
+    # arm() is startup-only. A second arm() used to set kill_switch_active=True
+    # unconditionally, which would silently reopen the §4.1 gate that a refresh
+    # failure had latched shut — releasing safe mode by luck instead of through
+    # PR 4's §13.4 reconciliation.
+    _, _, _, _, manager = env
+    manager.arm()
+    with pytest.raises(RuntimeError, match="already armed"):
+        manager.arm()
+
+
 def test_refresh_before_arm_is_a_wiring_error(env):
     _, _, _, _, manager = env
     with pytest.raises(RuntimeError, match="before arm"):
@@ -205,6 +244,114 @@ def test_recovered_refresh_rearms_exchange_but_gate_stays_closed(env):
         "kill_switch_refresh_failed",
         "kill_switch_refreshed",
     ]
+
+
+def test_release_safe_mode_reopens_the_gate_and_survives_the_next_refresh(env):
+    # §13.4's release must move BOTH pieces of state. Clearing the latch alone
+    # would leave the gate shut until the next successful refresh; opening the
+    # gate alone would be reverted by that refresh (it recomputes the gate from
+    # the latch). One door, not two knobs — and the release must still be in
+    # force one refresh later.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    clock.advance(30)
+    client.schedule_error = ExchangeRequestError("timeout")
+    manager.refresh()
+    assert manager.stop_new_orders and not gate.kill_switch_active
+
+    client.schedule_error = None
+    manager.release_safe_mode()
+    assert not manager.stop_new_orders
+    assert gate.kill_switch_active  # new orders may pass again
+
+    clock.advance(30)
+    assert manager.refresh() is True
+    assert gate.kill_switch_active  # the refresh did NOT revert the release
+    assert _event_types(db) == [
+        "kill_switch_armed",
+        "kill_switch_refresh_failed",
+        "kill_switch_refreshed",  # the release itself
+        "kill_switch_refreshed",
+    ]
+
+
+def test_release_safe_mode_without_a_latch_is_a_noop(env):
+    db, _, gate, _, manager = env
+    manager.arm()
+    assert manager.release_safe_mode() is True
+    assert gate.kill_switch_active
+    assert _event_types(db) == ["kill_switch_armed"]  # nothing to release
+
+
+def test_release_safe_mode_fails_closed_when_the_switch_still_cannot_refresh(env):
+    # The release is EARNED: it can only be called from a state where the last
+    # refresh failed, so the exchange-side deadline is stale and may be seconds
+    # from firing. Reopening the gate there would admit new orders against a
+    # switch about to cancel them. If the refresh still fails, nothing is
+    # released.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    clock.advance(30)
+    client.schedule_error = ExchangeRequestError("timeout")
+    manager.refresh()
+
+    assert manager.release_safe_mode() is False
+    assert manager.stop_new_orders  # re-latched
+    assert not gate.kill_switch_active  # gate stays shut
+    assert _event_types(db) == [
+        "kill_switch_armed",
+        "kill_switch_refresh_failed",
+        "kill_switch_refresh_failed",
+    ]
+
+
+def test_shutdown_is_idempotent_once_completed(env):
+    # A signal handler plus a `finally` will plausibly both reach shutdown().
+    # The second call must not re-sweep: re-cancelling already-cancelled orders
+    # would record their "unknown order" rejects as fresh failures and write a
+    # second started/completed pair into the §18.5 audit trail.
+    db, client, _, _, manager = env
+    manager.arm()
+    manager.shutdown()
+    events_after_one = _event_types(db)
+    calls_after_one = client.open_orders_calls
+
+    manager.shutdown()
+    assert _event_types(db) == events_after_one
+    assert client.open_orders_calls == calls_after_one
+
+
+def test_a_shutdown_that_died_partway_is_retried_not_skipped(env, monkeypatch):
+    # The other half of idempotency, and the one that costs money to get wrong.
+    # The started-event write is deliberately unguarded (audit loss must fail
+    # loud), so a locked DB can blow up shutdown() AFTER it has latched itself.
+    # Suppressing the retry on "started" would let the signal-handler/finally
+    # pair swallow the ONLY call that cancels our live orders — leaving them
+    # resting for the wallet-wide trigger, which also takes out the non-bot
+    # orders §19.3 says never to touch. Only a COMPLETED sweep is a no-op.
+    db, client, _, _, manager = env
+    manager.arm()
+    client.open_orders_result = [{"oid": 1, "coin": "BTC", "cloid": _HEX}]
+    _register_cloid(db, logical="log-1", hex_id=_HEX)
+
+    boom = {"n": 0}
+    real_record = manager._record
+
+    def _flaky_record(event_type, **kw):
+        if event_type == "shutdown_cancel_orders_started" and boom["n"] == 0:
+            boom["n"] += 1
+            raise sqlite3.OperationalError("database is locked")
+        return real_record(event_type, **kw)
+
+    monkeypatch.setattr(manager, "_record", _flaky_record)
+    with pytest.raises(sqlite3.OperationalError):
+        manager.shutdown()
+    assert client.open_orders_calls == 0  # never got to the sweep
+
+    manager.shutdown()  # the retry must actually sweep
+    assert client.open_orders_calls == 1
+    assert client.cancel_calls == [("BTC", _HEX)]
+    assert "shutdown_cancel_orders_completed" in _event_types(db)
 
 
 def test_shutdown_cancels_bot_owned_only_with_evidence_rows(env):

@@ -415,9 +415,18 @@ order、都有自己的 cloid——不存在 v2 native TWAP 母單「cloid_hex, 
    rejected-vs-exists 的權威——rejected 判定授權呼叫方開新 logical order，若實際上
    訂單存在（文案改字造成 duplicate 漏判）就是雙倉（v5 新增，2026-07-13）。
 10. rule 5 的「cloid_hex 不存在」以 orderStatus 回 unknownOid 為準——但若本地
-    live_order_attempts 已有該 cloid 的 acknowledged place attempt（交易所確定
-    收過），unknownOid 是矛盾（retention 過期／Info 不一致），必須具名報錯拒絕
-    重送，不得讀成「前次未成功」（v5 新增，2026-07-13）。
+    live_order_attempts 已有該 cloid 的 **acknowledged 或 duplicate** place attempt
+    （交易所確定收過），unknownOid 是矛盾（retention 過期／Info 不一致），必須具名
+    報錯拒絕重送，不得讀成「前次未成功」（v5 新增 2026-07-13；v7 補上 duplicate，
+    2026-07-13）。
+    「交易所確定收過」的狀態集合＝`repository.EXCHANGE_KNOWN_ATTEMPT_STATUSES`
+    = {acknowledged, duplicate}，一律經 `has_exchange_known_place_attempt()` 讀取
+    （`action='place'` 過濾寫在 helper 內部：acknowledged 的 **cancel** attempt 只
+    證明交易所收過 cancel、不證明收過 place）。duplicate 的證據力不低於
+    acknowledged——那是交易所自己說「這個 cloid 已存在」。只讀 acknowledged 會讓
+    「timeout(failed) → 重試撞 duplicate → 再重試」這條路徑把 unknownOid 讀成
+    「確認不存在」而重送；原單若已成交即為雙倉。該狀態集合有 import 期 partition
+    guard：日後新增 attempt status 必須被明確歸類，不得預設落進安全的那一半。
 11. 頂層 `{"status":"err"}` envelope（壞簽名、壞 payload、invalid nonce 等 action
     層失敗）不是 per-order error ack：訂單可能根本沒進撮合引擎，transport 層具名
     raise（`ExchangeRequestError`），attempt 記 'failed'（outcome unknown），依
@@ -1043,11 +1052,39 @@ kill_switch:
 5 秒的 scheduleCancel，≤ 5 的值永遠 arm 不起來，而 §18.2 rule 1 把 arm 失敗
 定為硬錯誤——無法實作的 config 值在載入期拒絕，v5 新增，2026-07-13。）
 
+（`schedule_cancel_seconds >= 2 × refresh_interval_seconds` 建構期強制（v7 新增，
+2026-07-13）：舊規則只要求 `refresh < schedule_cancel`，但 live loop 只在 tick 上
+刷新，實際節奏被 loop 週期量化，**一次 skip 或慢一拍就把下次刷新推到約 2×
+interval**。`refresh=119 / schedule_cancel=120` 這種舊規則接受的 config，第一個
+≥119s 的 tick 會落在約 120s——dead man's switch 在**正常運行中**觸發，掃掉該錢包
+全部掛單。要求 deadline 至少涵蓋兩個完整 interval，讓「漏掉一輪」是可存活的而非
+致命的。預設值 120/30 是 4×。）
+
 ### 18.2 Required Behavior
 
 1. Process 啟動後，完成 exchange client 初始化時，必須立刻 schedule cancel。
+   `arm()` 只在啟動期呼叫一次：重複 arm 是接線錯誤（具名 RuntimeError），且 arm
+   必須尊重 sticky `stop_new_orders`（`kill_switch_active = not stop_new_orders`，
+   與 refresh 同一條式子）——否則第二次 arm 會把刷新失敗關上的 §4.1 gate 靠運氣
+   重開，而不是走 §13.4 reconciliation（v7 新增，2026-07-13）。
 2. Live loop 運行期間，必須每 30 秒刷新 schedule cancel deadline。
-3. 若刷新失敗，必須進入 safe mode。
+   `refresh_due()` 的 interval 語意是「至少這麼頻繁」而非「不得早於」：live loop 的
+   週期**等於** refresh_interval（都是 30s），tick 必然比它比較的那個排程時刻晚幾
+   毫秒，若用嚴格 `elapsed >= interval` 判斷，這點抖動就會 skip 掉刷新、讓真實節奏
+   悄悄砍半成「每兩輪一次」（只有事件時間戳的空隙看得出來）。因此保留一個遠大於
+   抖動、又遠小於 interval 的 slack（0.5s）——只會讓刷新稍微提早，永遠不會推遲過
+   deadline（v7 新增，2026-07-13）。
+3. 若刷新失敗，必須進入 safe mode。解除 safe mode 只有一個入口：
+   `release_safe_mode()`（§13.4 呼叫），它必須**同時**清掉 sticky latch 與重開
+   §4.1 gate——只清 latch 會讓 gate 一直關到下次成功刷新，只開 gate 會被下次
+   refresh 依 latch 重算而還原。兩個狀態要一起動，所以只開一道門、不留兩個旋鈕。
+   而且解除必須是**掙來的、不是宣告的**：能呼叫它的唯一狀態就是「上次刷新失敗」，
+   此時交易所端 deadline 已經過期或即將觸發，直接重開 gate 等於放新單去對撞一個
+   正要取消它們的 switch。因此實作是「落下 latch → 立刻 refresh」：刷新成功才重開
+   §4.1（refresh 本來就依 latch 重算 gate），刷新失敗則自動重新上鎖、回到原狀並回傳
+   False。附帶效果是 §18.5 只在真的送出 scheduleCancel 時才寫 `kill_switch_refreshed`
+   ——PR 6 的 acceptance metrics 靠這個事件推算 deadline，不能有「沒刷新卻記了刷新」
+   的假事件（v7 新增，2026-07-13）。
 4. Process crash 時，交易所在 deadline 後自動取消**該錢包全部** open orders
    （scheduleCancel 是全錢包觸發，無法只限 bot-owned；crash backstop 接受此代價，
    v4 修訂措辭）。
@@ -1055,7 +1092,16 @@ kill_switch:
    §4.1 gate（kill_switch_active 落下）——sweep 不得與新單競速；shutdown 開始後
    tick / refresh 一律拒絕（不論 disarm 成敗），邊界由 manager 自我封鎖、不依賴
    呼叫方自律（v5 新增，2026-07-13）；arm 同受此封鎖——重新 arm 會重開剛關閉的
-   gate（v6 新增，2026-07-13）。
+   gate（v6 新增，2026-07-13）。shutdown **完成後**冪等：sweep 跑完並寫下 completed
+   事件之後，再呼叫直接 return——signal handler 加 `finally` 兩路都會走到 shutdown
+   是很現實的接線，重跑會對已取消的訂單再送一次 cancel、把交易所回的「unknown
+   order」記成新的 failures，並在 §18.5 審計留下第二組 started/completed 事件；反過來
+   raise 則會讓良性的重複呼叫在 teardown 期炸掉、蓋掉真正的關閉原因。
+   但**中途失敗的 shutdown 必須可重試**：抑制條件是「已完成」而非「已開始」——
+   started 事件的寫入刻意不設防（審計遺失必須 fail loud），DB 被鎖住就會在 manager
+   已自我封鎖之後把 shutdown 炸掉；若以「已開始」抑制，那個 signal handler + finally
+   的組合就會吞掉唯一一次真正取消我方掛單的呼叫，讓單子留在場上等全錢包 trigger 掃
+   ——連帶掃掉 §19.3 明令不得碰的非 bot 訂單（v7 新增，2026-07-13）。
 6. 正常 shutdown 的 cancel sweep 完全乾淨（open orders 枚舉成功且零 cancel 失敗）時，
    必須解除 scheduleCancel（unset），避免全錢包觸發掃掉 sweep 依 §19.3 刻意跳過的
    非 bot 訂單；sweep 有任何失敗則維持武裝，作為殘單的 backstop（v4 新增，2026-07-12）。

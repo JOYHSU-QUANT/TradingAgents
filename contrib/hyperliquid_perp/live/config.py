@@ -397,14 +397,23 @@ class KillSwitchConfig:
                 f"live.kill_switch.refresh_interval_seconds must be > 0, "
                 f"got {self.refresh_interval_seconds}"
             )
-        # The refresh must land before the scheduled cancel fires, or every
-        # refresh cycle races the exchange-side deadline it exists to push back.
-        if self.refresh_interval_seconds >= self.schedule_cancel_seconds:
+        # The refresh must land before the scheduled cancel fires, with a whole
+        # missed cycle to spare. A bare `refresh < schedule_cancel` is not
+        # enough: the live loop only refreshes on a tick, so the real cadence is
+        # quantized to the loop period and one skipped or slow cycle pushes the
+        # next refresh out to ~2x the interval. Under `refresh=119,
+        # schedule_cancel=120` — which that weaker rule accepts — the first tick
+        # at or after 119s lands at ~120s and the dead man's switch fires DURING
+        # NORMAL OPERATION, cancelling every order on the wallet. Requiring the
+        # deadline to cover two full intervals makes a missed cycle survivable
+        # instead of fatal. The defaults (120 / 30) sit at 4x.
+        if self.schedule_cancel_seconds < 2 * self.refresh_interval_seconds:
             raise ValueError(
-                f"live.kill_switch.refresh_interval_seconds "
-                f"({self.refresh_interval_seconds}) must be < "
-                f"schedule_cancel_seconds ({self.schedule_cancel_seconds}), or the "
-                "dead man's switch fires between refreshes"
+                f"live.kill_switch.schedule_cancel_seconds "
+                f"({self.schedule_cancel_seconds}) must be >= 2 x "
+                f"refresh_interval_seconds ({self.refresh_interval_seconds}), or a "
+                "single missed refresh cycle lets the dead man's switch fire and "
+                "cancel every order on the wallet"
             )
         _coerce_enum(
             self,

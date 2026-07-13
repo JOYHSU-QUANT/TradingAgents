@@ -28,6 +28,7 @@ from .ids import _canonical_instant
 from .models import DECIMAL_CONTEXT, AccountLedger, PositionState, Side
 
 __all__ = [
+    "EXCHANGE_KNOWN_ATTEMPT_STATUSES",
     "KILL_SWITCH_EVENT_TYPES",
     "find_in_progress_attempt",
     "get_all_current_positions",
@@ -45,6 +46,8 @@ __all__ = [
     "get_run",
     "get_run_seed_positions",
     "get_scheduler_state",
+    "has_exchange_known_place_attempt",
+    "has_place_attempt",
     "insert_account_snapshot",
     "insert_ai_input",
     "insert_ai_output",
@@ -787,12 +790,31 @@ LIVE_PLAN_STATUSES: tuple[str, ...] = ("active", "paused_market_data")
 # "submitted" belongs here: a pre-ack live order is non-terminal — it may be
 # resting on the exchange — so the restart cancel sweep and PR 4's
 # reconciliation must see it, never skip it as already-settled.
+#
+# CAVEAT for PR 4/5: the PAPER restart sweep (paper/reconcile.reconcile_on_restart)
+# marks everything in this tuple canceled locally with NO exchange call — sound
+# for paper, where nothing ever rested. Pointing that sweep at a LIVE run would
+# silently mark a genuinely resting order canceled on no evidence, the exact
+# opposite of §8.3's query-before-assume protocol. Live reconciliation must ask
+# the exchange; do not reuse the paper sweep as-is.
 LIVE_ORDER_STATUSES: tuple[str, ...] = (
     "pending_market_data",
     "submitted",
     "open",
     "partially_filled",
 )
+# §8.3 rule 10: the live-attempt statuses that are DURABLE PROOF the exchange
+# received the order — the only local evidence that can contradict an
+# "unknownOid" answer and forbid a resend. "duplicate" is proof at least as
+# strong as "acknowledged": it is written ONLY when the exchange itself said
+# the cloid already exists. The other three are not proof — "submitted" and
+# "failed" mean the outcome is unknown, and "rejected" means the exchange
+# answered but created no order; all three leave the cloid resendable once
+# orderStatus confirms it is absent. Read this through
+# has_exchange_known_place_attempt(), never by hand: an acknowledged CANCEL
+# proves the exchange saw the cancel, not the place.
+EXCHANGE_KNOWN_ATTEMPT_STATUSES: tuple[str, ...] = ("acknowledged", "duplicate")
+_NOT_EXCHANGE_KNOWN_ATTEMPT_STATUSES: tuple[str, ...] = ("submitted", "rejected", "failed")
 
 
 def insert_decision_attempt(conn: sqlite3.Connection, **fields: Any) -> None:
@@ -919,6 +941,12 @@ _ORDER_STATUSES = frozenset(
         "rejected",
     }
 )
+# The terminal half of the same vocabulary. Private (no consumer needs it): it
+# exists so the partition guard below can prove LIVE_ORDER_STATUSES is not
+# merely a valid subset but a COMPLETE one — a new non-terminal status that
+# nobody added to LIVE_ORDER_STATUSES would otherwise be skipped as settled by
+# the restart cancel sweep and PR 4's reconciliation.
+_TERMINAL_ORDER_STATUSES: tuple[str, ...] = ("filled", "canceled", "rejected")
 # Execution-plan lifecycle: ``active`` / ``paused_market_data`` are live; the rest
 # are terminal (execution §1.1 / §1.3 / §4.1).
 _PLAN_STATUSES = frozenset(
@@ -936,17 +964,41 @@ _PLAN_STATUSES = frozenset(
     }
 )
 
-# The live/terminal splits above must stay subsets of their canonical sets —
-# checked at import so a renamed status can't leave a stale split member behind.
+# A split with no declared complement can only be checked for membership: it must
+# stay a subset of its vocabulary, so a renamed status cannot leave a stale member
+# behind. Checked at import.
 for _split, _whole, _name in (
     (TERMINAL_ATTEMPT_STATUSES, _ATTEMPT_STATUSES, "TERMINAL_ATTEMPT_STATUSES"),
     (LIVE_PLAN_STATUSES, _PLAN_STATUSES, "LIVE_PLAN_STATUSES"),
-    (LIVE_ORDER_STATUSES, _ORDER_STATUSES, "LIVE_ORDER_STATUSES"),
 ):
     _extra = set(_split) - _whole
     if _extra:
         raise ValueError(f"{_name} contains statuses outside its vocabulary: {sorted(_extra)}")
 del _split, _whole, _name, _extra
+
+# Subset alone cannot catch the failure mode the comment above describes: a status
+# ADDED to a vocabulary is silently absent from every split (check_enum validates
+# membership, never completeness). Where a vocabulary declares both halves, assert
+# the PARTITION instead — strictly stronger than the subset check (an alien member
+# shows up as "unknown"), and a newly added status fails at import until it is
+# deliberately classified, rather than defaulting into the safe-looking half.
+# §8.3's resend guard is the one that must never silently widen.
+for _split, _rest, _whole, _name in (
+    (
+        EXCHANGE_KNOWN_ATTEMPT_STATUSES,
+        _NOT_EXCHANGE_KNOWN_ATTEMPT_STATUSES,
+        _LIVE_ATTEMPT_STATUSES,
+        "the live-attempt statuses",
+    ),
+    (LIVE_ORDER_STATUSES, _TERMINAL_ORDER_STATUSES, _ORDER_STATUSES, "the order statuses"),
+):
+    _union = set(_split) | set(_rest)
+    if _union != _whole:
+        raise ValueError(
+            f"{_name} are no longer partitioned by their splits — "
+            f"unclassified: {sorted(_whole - _union)}, unknown: {sorted(_union - _whole)}"
+        )
+del _split, _rest, _whole, _name, _union
 
 
 def insert_order(
@@ -1619,6 +1671,51 @@ def iter_live_order_attempts(
         "SELECT * FROM live_order_attempts WHERE run_id = ? AND cloid_hex = ? ORDER BY rowid",
         (run_id, cloid_hex),
     ).fetchall()
+
+
+def has_place_attempt(conn: sqlite3.Connection, run_id: str, *, cloid_hex: str) -> bool:
+    """§8.3 rules 3–5 pre-check: was this cloid EVER sent, whatever the outcome?
+
+    Any prior place attempt — including one still stuck at 'submitted', and
+    including an 'acknowledged' one — forces the caller through orderStatus
+    before it may send: the exchange's duplicate rejection guards only OPEN
+    orders, so a filled or expired cloid would be accepted again as a brand-new
+    order. Deliberately status-blind, which is what makes it total.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM live_order_attempts "
+        "WHERE run_id = ? AND cloid_hex = ? AND action = 'place' LIMIT 1",
+        (run_id, cloid_hex),
+    ).fetchone()
+    return row is not None
+
+
+def has_exchange_known_place_attempt(
+    conn: sqlite3.Connection, run_id: str, *, cloid_hex: str
+) -> bool:
+    """§8.3 rule 10: does durable local evidence prove the exchange took this cloid?
+
+    True when a PLACE attempt for the cloid reached a status in
+    EXCHANGE_KNOWN_ATTEMPT_STATUSES. Such evidence outranks a later
+    "unknownOid" from orderStatus (Info lag, retention expiry): the send was
+    received, so a resend would be accepted as a brand-new order — a double
+    position if the original filled.
+
+    The ``action = 'place'`` filter lives INSIDE this helper on purpose. The
+    kill switch writes 'acknowledged' on ``cancel_by_cloid`` rows too, and an
+    acknowledged CANCEL proves the exchange saw the cancel, not the place —
+    a caller that hand-rolled the status test could drop the action filter and
+    silently read one as the other.
+    """
+    placeholders = ", ".join("?" for _ in EXCHANGE_KNOWN_ATTEMPT_STATUSES)
+    row = conn.execute(
+        "SELECT 1 FROM live_order_attempts "
+        "WHERE run_id = ? AND cloid_hex = ? AND action = 'place' "
+        f"AND status IN ({placeholders}) "
+        "LIMIT 1",
+        (run_id, cloid_hex, *EXCHANGE_KNOWN_ATTEMPT_STATUSES),
+    ).fetchone()
+    return row is not None
 
 
 def next_live_attempt_index(conn: sqlite3.Connection, *, action: str, cloid_hex: str) -> int:

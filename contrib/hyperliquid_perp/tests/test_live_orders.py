@@ -373,9 +373,44 @@ def test_acknowledged_cloid_missing_from_order_status_fails_loud(env):
     client.place_results = [_RESTING_ACK]
     assert _submit(submitter).outcome == "acknowledged"
     client.status_results = [_UNKNOWN_STATUS]
-    with pytest.raises(ExchangeError, match="was acknowledged"):
+    with pytest.raises(ExchangeError, match="reached the exchange"):
         _submit(submitter)
     assert len(client.place_calls) == 1  # never resent
+
+
+def test_duplicate_cloid_missing_from_order_status_never_resends(env):
+    # §8.3 rule 10, the other half of the evidence. A 'duplicate' attempt row is
+    # proof at least as strong as an ack — the EXCHANGE ITSELF said the cloid
+    # exists. Reading only 'acknowledged' here let this sequence resend:
+    #
+    #   1. send times out -> attempt 'failed' (the order actually rests)
+    #   2. retry: unknownOid -> resend -> exchange answers "duplicate" ->
+    #      attempt 'duplicate', recovery still unknownOid -> correctly refuses
+    #   3. retry again (rule 1 mandates the SAME cloid): the guard saw only
+    #      ['failed','duplicate'], found no 'acknowledged', read unknownOid as
+    #      "confirmed absent" -> RESENT. If the original had filled, that is a
+    #      double position.
+    db, client, _, submitter = env
+    client.place_results = [ExchangeRequestError("timeout")]
+    with pytest.raises(ExchangeRequestError):
+        _submit(submitter)
+
+    # Two unknownOid answers: the pre-check asks (a prior attempt exists), and
+    # the duplicate ack asks again before it may refuse.
+    client.place_results = [_DUPLICATE_ACK]
+    client.status_results = [_UNKNOWN_STATUS, _UNKNOWN_STATUS]
+    with pytest.raises(ExchangeError, match="refusing to resend"):
+        _submit(submitter)
+    assert [r["status"] for r in repo.iter_live_order_attempts(db.conn, "r")] == [
+        "failed",
+        "duplicate",
+    ]
+
+    # The third call is the one that used to resend.
+    client.status_results = [_UNKNOWN_STATUS]
+    with pytest.raises(ExchangeError, match="reached the exchange"):
+        _submit(submitter)
+    assert len(client.place_calls) == 2  # NOT 3 — the duplicate row forbade it
 
 
 def test_partial_ioc_fill_maps_to_partially_filled(env):
@@ -475,6 +510,34 @@ def test_exchange_status_family_classifier():
     assert _local_status_for_exchange_status("liquidatedCanceled") == "canceled"
     assert _local_status_for_exchange_status("resting") == "open"
     assert _local_status_for_exchange_status("filled") == "filled"
+
+
+def test_unrecognised_exchange_status_falls_open_to_local_open():
+    # The deliberate fail-open net: Hyperliquid can add a status word this map
+    # has never seen, and overstating liveness is the conservative direction —
+    # PR 4's reconciliation resolves it against the exchange. It must NOT raise
+    # (that would break §8.3 recovery for every order carrying the new word)
+    # and must NOT default to a terminal status (that would silently strand a
+    # live order as settled).
+    assert _local_status_for_exchange_status("someBrandNewStatusWord") == "open"
+
+
+def test_recovery_of_an_unrecognised_status_lands_open_and_does_not_resend(env):
+    # The flow-level half: an unknown status word must still recover, not blow
+    # up the retry path and not resend a cloid the exchange demonstrably knows.
+    db, client, _, submitter = env
+    client.place_results = [ExchangeRequestError("timeout")]
+    with pytest.raises(ExchangeRequestError):
+        _submit(submitter)
+    client.status_results = [
+        {"status": "order", "order": {"order": {"oid": 77}, "status": "someBrandNewStatusWord"}}
+    ]
+    outcome = _submit(submitter)
+    assert outcome.outcome == "recovered_existing"
+    row = repo.get_order(db.conn, "o1")
+    assert row["status"] == "open"
+    assert row["exchange_raw_status"] == "someBrandNewStatusWord"  # verbatim, §16.1
+    assert len(client.place_calls) == 1  # never resent
 
 
 def test_recovered_ioc_cancel_rejected_reports_rejected(env):

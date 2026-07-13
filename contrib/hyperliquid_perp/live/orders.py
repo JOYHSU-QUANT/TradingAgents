@@ -44,7 +44,7 @@ from ..exchanges.hyperliquid.errors import ExchangeError, MalformedResponseError
 from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient, OrderAck
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
-from ..persistence.cloid import cloid_hex as derive_cloid_hex
+from ..persistence.cloid import assert_cloid_provenance, cloid_hex as derive_cloid_hex
 from ..persistence.db import Database
 from ..persistence.ids import live_order_attempt_id
 from ..persistence.models import Side
@@ -199,6 +199,7 @@ class LiveOrderSubmitter:
         status: str,
         now: datetime,
         submitted_at: datetime | None = None,
+        status_reason: str | None = None,
         exchange_order_id: str | None = None,
         exchange_status: str | None = None,
         exchange_raw_status: str | None = None,
@@ -244,6 +245,7 @@ class LiveOrderSubmitter:
             order_type="ioc_limit",
             qty=size,
             status=status,
+            status_reason=status_reason,
             price=limit_price,
             remaining_qty=size,
             reduce_only=reduce_only,
@@ -294,6 +296,14 @@ class LiveOrderSubmitter:
         # gate re-checks at the wire as a backstop.
         self._gate.require_order(coin)
 
+        # The cloid and the provenance fields beside it describe the same order
+        # twice; both reach the audit trail, and only this check makes them
+        # agree. Before the intent transaction, so a contradictory pair can
+        # never consume a cloid or leave a row behind.
+        assert_cloid_provenance(
+            cloid_logical, run_id=self._run_id, symbol=coin, order_role=order_role
+        )
+
         hex_id = derive_cloid_hex(cloid_logical)
         is_buy = Side.parse(side) is Side.BUY
 
@@ -323,8 +333,7 @@ class LiveOrderSubmitter:
         # exchange first. Even an 'acknowledged' prior send must short-circuit
         # here: the exchange's duplicate rejection only guards OPEN orders, so
         # a filled/expired cloid would be accepted again as a brand-new order.
-        prior = repo.iter_live_order_attempts(self._db.conn, self._run_id, cloid_hex=hex_id)
-        if any(row["action"] == "place" for row in prior):
+        if repo.has_place_attempt(self._db.conn, self._run_id, cloid_hex=hex_id):
             # A prior attempt stuck at 'submitted' stays that way — its own
             # ack was never observed and that is its defined terminal state
             # (see update_live_order_attempt); the recovered fate lands on
@@ -383,6 +392,16 @@ class LiveOrderSubmitter:
         # patched 'failed' — a durable "outcome unknown" marker (a timeout may
         # still have delivered the order) that the next retry's pre-check
         # resolves through orderStatus before resending.
+        #
+        # PR 5 REQUIREMENT: size/price must already be rounded to the coin's
+        # lot/tick (szDecimals + px significant figures) before they get here.
+        # This layer cannot tell a purely LOCAL validation failure (the SDK's
+        # float_to_wire refusing a value that never left the process) from a
+        # genuine transport failure — call_sdk wraps both into
+        # ExchangeRequestError — so a malformed order is recorded as "outcome
+        # unknown" and burns an orderStatus round-trip resolving an order that
+        # was never sent. Validating here would need the exchange's perp meta,
+        # which is the plan builder's (§9.1) job, not the transport's.
         try:
             ack = self._client.place_ioc_limit(
                 coin=coin,
@@ -477,7 +496,22 @@ class LiveOrderSubmitter:
         # verdict — a partial IOC fill (totalSz < requested) must not read as
         # fully filled; filled_qty/remaining stay with PR 3's fill ingestion —
         # the exchange fill events are the accounting basis (§15), not this ack.
-        exchange_status = "open" if ack.status == "resting" else "filled"
+        # Enumerate the accepted vocabulary rather than letting an `else` stand
+        # in for it: OrderAck.accepted is `status in ("resting", "filled")`, and
+        # if a future accepted status ever appears there without landing here,
+        # an `else: "filled"` would silently record an UNSETTLED order as
+        # settled. Same class of bug as the rule-10 guard above — a partial
+        # status test driving a safety verdict. Fail loud instead; the ack
+        # contract (signed_client.OrderAck) makes this branch unreachable today.
+        if ack.status == "resting":
+            exchange_status = "open"
+        elif ack.status == "filled":
+            exchange_status = "filled"
+        else:  # pragma: no cover — OrderAck.accepted admits no other status
+            raise ExchangeError(
+                f"order for cloid {hex_id} was accepted with unhandled status "
+                f"{ack.status!r} — refusing to guess whether it is settled"
+            )
         local_status = exchange_status
         if ack.status == "filled" and ack.filled_size is not None and ack.filled_size < size:
             local_status = "partially_filled"
@@ -557,22 +591,40 @@ class LiveOrderSubmitter:
         parsed = _parse_order_status(status_payload)
         if parsed is None:
             # unknownOid clears rule 5's resend condition — UNLESS the durable
-            # record says the exchange once ACKNOWLEDGED this cloid. Then
-            # "absent" contradicts local evidence (retention expiry, an Info
+            # record proves the exchange once TOOK this cloid. Then "absent"
+            # contradicts local evidence (retention expiry, an Info
             # inconsistency) and a resend would be accepted as a brand-new
             # order. Same fail-loud posture as the duplicate/unknownOid
             # contradiction in submit_ioc_limit.
-            prior = repo.iter_live_order_attempts(self._db.conn, self._run_id, cloid_hex=cloid_hex)
-            if any(row["action"] == "place" and row["status"] == "acknowledged" for row in prior):
+            #
+            # "Took it" is EXCHANGE_KNOWN_ATTEMPT_STATUSES — acknowledged OR
+            # duplicate. A duplicate row is proof at least as strong as an ack
+            # (the exchange itself said the cloid exists); reading only
+            # 'acknowledged' here let a duplicate-then-unknownOid retry fall
+            # through to a resend — the double order rules 5/9/10 exist to
+            # prevent. The named set and its partition guard are what keep this
+            # test complete: do not hand-roll the status literals back in.
+            if repo.has_exchange_known_place_attempt(
+                self._db.conn, self._run_id, cloid_hex=cloid_hex
+            ):
                 raise ExchangeError(
-                    f"orderStatus does not know cloid {cloid_hex} but a prior "
-                    f"place attempt was acknowledged — refusing to resend (§8.3 rule 5)"
+                    f"orderStatus does not know cloid {cloid_hex} but a prior place "
+                    f"attempt reached the exchange — refusing to resend (§8.3 rule 5)"
                 )
             return None
         exchange_order_id, exchange_status = parsed
         raw_path = self._write_raw_payload("orderStatus", cloid_hex, status_payload)
         now = self._clock.now()
         local_status = _local_status_for_exchange_status(exchange_status)
+        rejected = local_status == "rejected"
+        # One contract on every write path (§16.1): a rejection recorded HERE
+        # must carry the same reason a rejection recorded on the ack path does.
+        # orderStatus is the COMMON route for a real live rejection (Hyperliquid
+        # exposes tickRejected / perpMarginRejected / … there), so leaving this
+        # NULL would mean orders.status_reason is normally empty for exactly the
+        # rejections an operator most needs to explain. The same string becomes
+        # the outcome's `error` below — one reason, one predicate, not two.
+        status_reason = f"orderStatus reported {exchange_status!r}" if rejected else None
         with self._db.transaction() as conn:
             # Rule 4: the order exists on the exchange — make SQLite agree.
             inserted = self._ensure_local_order(
@@ -592,6 +644,7 @@ class LiveOrderSubmitter:
                 parent_order_id=parent_order_id,
                 status=local_status,
                 now=now,
+                status_reason=status_reason,
                 exchange_order_id=exchange_order_id,
                 # §16.1 vocabulary, one contract on every write path:
                 # exchange_status = the normalized family (orders.status
@@ -605,13 +658,13 @@ class LiveOrderSubmitter:
                     conn,
                     order_id,
                     status=local_status,
+                    status_reason=status_reason,
                     exchange_order_id=exchange_order_id,
                     exchange_status=local_status,
                     exchange_raw_status=exchange_status,
                     raw_exchange_payload_path=raw_path,
                     updated_at=now,
                 )
-        rejected = local_status == "rejected"
         return SubmitOutcome(
             outcome=(
                 SubmitOutcomeKind.REJECTED if rejected else SubmitOutcomeKind.RECOVERED_EXISTING
@@ -621,7 +674,8 @@ class LiveOrderSubmitter:
             cloid_hex=cloid_hex,
             attempt_id=attempt_id,
             exchange_order_id=exchange_order_id,
-            error=f"orderStatus reported {exchange_status!r}" if rejected else None,
+            # The same string the orders row carries — one reason, not two.
+            error=status_reason,
             order_status=status_payload,
         )
 

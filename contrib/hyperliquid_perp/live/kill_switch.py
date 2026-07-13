@@ -49,6 +49,17 @@ __all__ = ["KillSwitchManager"]
 
 logger = logging.getLogger(__name__)
 
+# Jitter budget for refresh_due(). The live loop's period equals
+# refresh_interval_seconds by default, so a bare `elapsed >= interval` test
+# skips every other refresh over mere milliseconds of scheduling drift (tick()
+# runs a hair later in the cycle than the schedule it is compared against).
+# Half a second dwarfs that drift while staying well inside the interval, so it
+# only ever pulls a refresh slightly EARLIER — never pushes one past the
+# deadline it exists to renew, and never turns a genuinely early call into a
+# refresh. The config guard (schedule_cancel >= 2x interval) is the backstop if
+# a future loop's jitter ever exceeds this.
+_REFRESH_DUE_SLACK_S = 0.5
+
 # NOTE on breadth: the refresh/shutdown paths deliberately catch ``Exception``,
 # not just ExchangeError — a round-trip can also fail in the persistence layer
 # (sqlite lock/IntegrityError, an invariant ValueError) or at the client's own
@@ -85,6 +96,14 @@ class KillSwitchManager:
         self._clock = clock or WallClock()
         self._armed = False
         self._shutdown_started = False
+        # Distinct from _shutdown_started on purpose. _shutdown_started closes
+        # the §4.1 gate on the FIRST statement of shutdown() and can never be
+        # unwound; _shutdown_completed says the sweep actually ran to its
+        # completed event. Only the latter suppresses a re-entry — a shutdown
+        # that died partway (the unguarded audit write hitting a busy DB) must
+        # still be retryable, or a signal-handler + finally pair would swallow
+        # the one call that cancels our live orders.
+        self._shutdown_completed = False
         self._last_scheduled_at: datetime | None = None
         # Sticky until PR 4's safe-mode release path clears it (§13.4).
         self.stop_new_orders = False
@@ -119,27 +138,85 @@ class KillSwitchManager:
         An arming failure is a hard error (propagates): starting a live loop
         whose dead man's switch never engaged would run real orders with no
         crash protection at all.
+
+        Startup-only, and self-enforcing: arming twice is a wiring bug, not a
+        recovery path. PR 4's safe-mode release goes through
+        release_safe_mode(), never through a second arm().
         """
         if self._shutdown_started:
             # Same terminal boundary tick()/refresh() enforce: re-arming a
             # retired manager would silently reopen the §4.1 gate condition
             # shutdown() just closed.
             raise RuntimeError("KillSwitchManager.arm() after shutdown()")
+        if self._armed:
+            raise RuntimeError("KillSwitchManager.arm() twice — already armed")
         self._schedule()
         self._armed = True
-        self._gate.kill_switch_active = True
+        # NOT an unconditional True: the sticky stop_new_orders latch outranks
+        # arming, exactly as it does in refresh(). Were arm() ever made
+        # re-runnable, an unconditional True here would silently reopen the
+        # §4.1 gate that a refresh failure closed — releasing safe mode by luck
+        # instead of through PR 4's §13.4 reconciliation.
+        self._gate.kill_switch_active = not self.stop_new_orders
+        logger.info(
+            "kill switch armed: deadline=%ss refresh=%ss",
+            self._config.schedule_cancel_seconds,
+            self._config.refresh_interval_seconds,
+        )
         self._record(
             "kill_switch_armed",
             detail=f"deadline={self._config.schedule_cancel_seconds}s "
             f"refresh={self._config.refresh_interval_seconds}s",
         )
 
+    def release_safe_mode(self) -> bool:
+        """PR 4 §13.4: the ONE way to clear the sticky refresh-failure latch.
+
+        Two pieces of state must move together — the latch and the §4.1 gate
+        condition — and clearing only one silently half-works: clearing the
+        latch alone leaves the gate shut until the next successful refresh,
+        while opening the gate alone is reverted by that same refresh (which
+        recomputes it from the latch). Callers get one door, not two knobs.
+
+        The release is EARNED, not asserted: the only state it can be called
+        from is one where the last refresh failed, so the exchange-side
+        deadline is stale and may be seconds from firing. Reopening the gate
+        there would admit new orders against a switch about to cancel them.
+        So the latch drops and the deadline is immediately pushed — a
+        successful refresh reopens §4.1 (it recomputes the gate from the
+        latch), a failing one re-latches and leaves us exactly where we were.
+        Returns True when the release took effect.
+        """
+        if self._shutdown_started:
+            raise RuntimeError("KillSwitchManager.release_safe_mode() after shutdown()")
+        if not self._armed:
+            raise RuntimeError("KillSwitchManager.release_safe_mode() before arm()")
+        if not self.stop_new_orders:
+            return True
+        self.stop_new_orders = False
+        if not self.refresh():
+            # refresh() already re-latched, closed the gate and recorded why.
+            logger.warning("kill switch safe mode release failed: the switch still cannot refresh")
+            return False
+        logger.info("kill switch safe mode released: new orders may pass the gate again")
+        return True
+
     def refresh_due(self) -> bool:
-        """True when the §18.2 rule-2 cadence calls for a refresh."""
+        """True when the §18.2 rule-2 cadence calls for a refresh.
+
+        The interval means "at least this often", not "no sooner than". The
+        live loop's period EQUALS refresh_interval_seconds by default (both
+        30s), so an exact ``>=`` test lets ordinary scheduling jitter — the
+        milliseconds between the loop's tick boundary and this call — push
+        elapsed just under the interval and SKIP the refresh, halving the real
+        cadence to every other cycle. The slack absorbs that jitter. The config
+        guard (schedule_cancel >= 2 x refresh_interval) is what makes even a
+        fully skipped cycle survivable; this keeps it from happening at all.
+        """
         if self._last_scheduled_at is None:
             return True
         elapsed = (self._clock.now() - self._last_scheduled_at).total_seconds()
-        return elapsed >= self._config.refresh_interval_seconds
+        return elapsed >= self._config.refresh_interval_seconds - _REFRESH_DUE_SLACK_S
 
     def refresh(self) -> bool:
         """Push the exchange-side deadline back; False (plus flags) on failure.
@@ -158,6 +235,7 @@ class KillSwitchManager:
         try:
             self._schedule()
         except Exception as exc:
+            first_failure = not self.stop_new_orders
             self._gate.kill_switch_active = False
             self.stop_new_orders = True
             # Log BEFORE the durable record: if the event write itself dies
@@ -165,6 +243,15 @@ class KillSwitchManager:
             # the log. The write stays unguarded — losing the audit trail
             # must fail loud, same as every other event write here.
             logger.warning("kill switch refresh failed: %s", exc)
+            if first_failure:
+                # The state transition, called out once: from here new orders
+                # are blocked until PR 4's §13.4 reconciliation releases it.
+                # An operator tailing the service log must not have to infer
+                # that from a repeating warning.
+                logger.error(
+                    "kill switch entering safe mode: new orders are BLOCKED until "
+                    "reconciliation releases them (§18.2 rule 3)"
+                )
             self._record("kill_switch_refresh_failed", error=str(exc))
             return False
         # The exchange-side switch is re-armed, but the §4.1 condition only
@@ -251,13 +338,32 @@ class KillSwitchManager:
         non-bot orders the sweep deliberately skips per §19.3), so a fully
         clean sweep (enumeration succeeded, zero failures) disarms it; any
         failure leaves it armed as the backstop for whatever survived.
+
+        Idempotent once it has COMPLETED. A second call after a successful
+        sweep is a no-op rather than an error: shutdown is a teardown path (a
+        signal handler plus a ``finally`` will plausibly both reach it), and
+        re-running the sweep would re-cancel already-canceled orders, record
+        their "unknown order" rejects as fresh failures, and write a second
+        started/completed event pair into the §18.5 audit trail. Raising
+        instead would turn a benign double-call into a crash that masks
+        whatever the real shutdown reason was.
+
+        A shutdown that RAISED partway (the unguarded audit write meeting a
+        locked DB) is retried, not skipped: suppressing on "started" would let
+        that same signal-handler/finally pair swallow the only call that
+        cancels our live orders, leaving them resting for the wallet-wide
+        trigger to sweep — which also takes out the non-bot orders §19.3 says
+        never to touch.
         """
+        if self._shutdown_completed:
+            return
         # The boundary is self-enforcing, not a caller convention: from the
         # first statement no new order may pass the §4.1 gate (the sweep must
         # not race fresh submissions), and tick()/refresh() refuse to touch a
         # switch whose manager is retiring.
         self._shutdown_started = True
         self._gate.kill_switch_active = False
+        logger.info("kill switch shutdown: sweeping bot-owned open orders")
         self._record("shutdown_cancel_orders_started")
         canceled: list[str] = []
         skipped_non_bot: list[str] = []
@@ -324,6 +430,15 @@ class KillSwitchManager:
                 failures.append(f"{oid}: {type(exc).__name__}: {exc}")
                 continue
             canceled.append(oid)
+        # The one line that answers "is real money still exposed?" without
+        # opening SQLite: what the sweep cancelled, what it could not, and what
+        # it deliberately left alone.
+        logger.info(
+            "kill switch shutdown sweep: %d canceled, %d failed, %d skipped (non-bot)",
+            len(canceled),
+            len(failures),
+            len(skipped_non_bot),
+        )
         self._record(
             "shutdown_cancel_orders_completed",
             detail=json.dumps(
@@ -335,6 +450,9 @@ class KillSwitchManager:
             ),
             error=sweep_error,
         )
+        # The sweep ran and its outcome is durable. From here a re-entry is a
+        # genuine no-op; before here it was a retry of unfinished work.
+        self._shutdown_completed = True
         if sweep_error is None and not failures and self._armed:
             # Clean sweep: no bot order is left for the wallet-wide trigger to
             # protect, and letting it fire would cancel the skipped non-bot
@@ -351,4 +469,13 @@ class KillSwitchManager:
                 self._record("kill_switch_disarm_failed", error=str(exc))
             else:
                 self._armed = False
+                logger.info("kill switch disarmed after a clean shutdown sweep")
                 self._record("kill_switch_disarmed", detail="clean shutdown sweep")
+        elif self._armed:
+            # The other half of the operator's question: the wallet-wide trigger
+            # is STILL LIVE and will fire at the deadline. That is the intended
+            # backstop, but it is not a quiet outcome — say so.
+            logger.warning(
+                "kill switch left ARMED after shutdown (sweep not clean): the "
+                "wallet-wide scheduled cancel will fire at its deadline"
+            )

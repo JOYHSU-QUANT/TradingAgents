@@ -48,17 +48,58 @@ def test_v5_store_upgrades_to_v6_in_place(monkeypatch):
 
     monkeypatch.setattr(db_module, "MIGRATIONS", v5_only)
     assert apply_migrations(conn) == 5
+    # Every table v6 adds a column to gets a pre-migration row, not just
+    # `orders`: seeding one table would let a mis-targeted ALTER on any of the
+    # other four pass unnoticed. The paper run this migrates is live on a
+    # server, so "the existing rows survive" is the whole point.
+    stamp = "2026-07-12T00:00:00+00:00"
     conn.execute(
         "INSERT INTO orders (order_id, timestamp, mode, run_id, symbol, order_role,"
         " side, type, qty, status, updated_at)"
-        " VALUES ('o1', '2026-07-12T00:00:00+00:00', 'paper', 'r', 'BTC', 'entry',"
-        " 'buy', 'paper_market', '1', 'filled', '2026-07-12T00:00:00+00:00')"
+        f" VALUES ('o1', '{stamp}', 'paper', 'r', 'BTC', 'entry',"
+        f" 'buy', 'paper_market', '1', 'filled', '{stamp}')"
     )
+    conn.execute(
+        "INSERT INTO fills (fill_id, timestamp, mode, run_id, order_id, symbol, side,"
+        " fill_qty, fill_price, fill_notional, fee, fee_rate, realized_pnl_delta,"
+        " liquidity_type)"
+        f" VALUES ('f1', '{stamp}', 'paper', 'r', 'o1', 'BTC', 'buy',"
+        " '1', '100', '100', '0.1', '0.001', '0', 'taker')"
+    )
+    # The two snapshot ids are INTEGER PRIMARY KEY AUTOINCREMENT — let SQLite
+    # assign them.
+    conn.execute(
+        "INSERT INTO account_snapshots (timestamp, mode, run_id, wallet_balance,"
+        " account_equity, available_balance, realized_pnl, unrealized_pnl, total_pnl,"
+        " total_fees, net_funding_pnl, total_position_notional, used_initial_margin,"
+        " total_maintenance_margin)"
+        f" VALUES ('{stamp}', 'paper', 'r', '1000', '1000', '900', '0', '0', '0',"
+        " '0', '0', '100', '100', '5')"
+    )
+    conn.execute(
+        "INSERT INTO position_snapshots (timestamp, mode, run_id, symbol,"
+        " position_size, side, mark_price, position_notional, unrealized_pnl, realized_pnl,"
+        " maintenance_margin)"
+        f" VALUES ('{stamp}', 'paper', 'r', 'BTC', '1', 'buy', '100', '100', '0', '0', '5')"
+    )
+    conn.execute(f"INSERT INTO scheduler_state (run_id, updated_at) VALUES ('r', '{stamp}')")
+
     monkeypatch.setattr(db_module, "MIGRATIONS", MIGRATIONS)
     assert apply_migrations(conn) == 6
+
     row = conn.execute("SELECT * FROM orders").fetchone()
     assert row["order_id"] == "o1"
     assert row["cloid_hex"] is None  # new columns are nullable for old rows
+    # The other four survive their ALTERs too, rows and all.
+    for table, key, value in (
+        ("fills", "fill_id", "f1"),
+        ("account_snapshots", "run_id", "r"),
+        ("position_snapshots", "symbol", "BTC"),
+        ("scheduler_state", "run_id", "r"),
+    ):
+        surviving = conn.execute(f"SELECT * FROM {table}").fetchall()
+        assert [r[key] for r in surviving] == [value], table
+    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 
 def test_v6_creates_the_seven_live_tables(db):

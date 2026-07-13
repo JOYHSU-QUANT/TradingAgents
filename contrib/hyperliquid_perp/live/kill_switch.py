@@ -56,8 +56,9 @@ logger = logging.getLogger(__name__)
 # Half a second dwarfs that drift while staying well inside the interval, so it
 # only ever pulls a refresh slightly EARLIER — never pushes one past the
 # deadline it exists to renew, and never turns a genuinely early call into a
-# refresh. The config guard (schedule_cancel >= 2x interval) is the backstop if
-# a future loop's jitter ever exceeds this.
+# refresh. The real backstop, if a loop's jitter ever exceeds this, is the
+# constructor invariant (refresh_interval + loop_period < schedule_cancel) —
+# the config guard alone cannot be one, because it cannot see the loop's period.
 _REFRESH_DUE_SLACK_S = 0.5
 
 # NOTE on breadth: the refresh/shutdown paths deliberately catch ``Exception``,
@@ -81,6 +82,7 @@ class KillSwitchManager:
         db: Database,
         run_id: str,
         config: KillSwitchConfig,
+        loop_period_seconds: float,
         clock: Clock | None = None,
     ) -> None:
         if not config.enabled:
@@ -88,6 +90,32 @@ class KillSwitchManager:
             # constructing a manager from a disabled config means the caller's
             # wiring is wrong, not that we should silently no-op a safety net.
             raise ValueError("KillSwitchManager requires live.kill_switch.enabled")
+        # The manager only ever refreshes when its owner ticks it, so the LOOP's
+        # period — not the configured interval — is what really bounds how late
+        # a refresh can land. That number lives in the caller (PR 5's live loop;
+        # the paper loop it rides sleeps up to 60s), so it is passed in and the
+        # invariant is ENFORCED here rather than assumed in a comment: the
+        # deadline must survive a refresh that is one whole loop period late.
+        #
+        # Worst case between two refreshes is refresh_interval + loop_period
+        # (the tick after the interval elapses can be a full period away). The
+        # config guard's `schedule_cancel >= 2 x refresh_interval` is only the
+        # special case of this where the loop ticks at the interval — it cannot
+        # see the loop's period, so it cannot catch e.g. schedule_cancel=60 /
+        # refresh=30 driven by a 60s-waking loop, which fires the switch DURING
+        # NORMAL OPERATION and cancels every order on the wallet.
+        if loop_period_seconds <= 0:
+            raise ValueError(f"loop_period_seconds must be > 0, got {loop_period_seconds}")
+        worst_case_gap = config.refresh_interval_seconds + loop_period_seconds
+        if worst_case_gap >= config.schedule_cancel_seconds:
+            raise ValueError(
+                f"the kill switch cannot be refreshed in time: a refresh may land "
+                f"{worst_case_gap}s apart (refresh_interval "
+                f"{config.refresh_interval_seconds}s + loop period "
+                f"{loop_period_seconds}s), but the scheduled cancel fires after "
+                f"{config.schedule_cancel_seconds}s — the dead man's switch would "
+                "cancel every order on the wallet during normal operation"
+            )
         self._client = client
         self._gate = gate
         self._db = db
@@ -107,6 +135,11 @@ class KillSwitchManager:
         self._last_scheduled_at: datetime | None = None
         # Sticky until PR 4's safe-mode release path clears it (§13.4).
         self.stop_new_orders = False
+        # Whether the operator has already been told we are in safe mode. Not
+        # derivable from stop_new_orders: release_safe_mode() drops the latch
+        # BEFORE its proving refresh, so a failed release would re-announce
+        # "entering safe mode" on every retry of an unchanged state.
+        self._safe_mode_announced = False
 
     @property
     def armed(self) -> bool:
@@ -186,6 +219,12 @@ class KillSwitchManager:
         successful refresh reopens §4.1 (it recomputes the gate from the
         latch), a failing one re-latches and leaves us exactly where we were.
         Returns True when the release took effect.
+
+        The §18.5 trace of a release is the ordinary ``kill_switch_refreshed``
+        row its proving refresh writes — truthful, because a real scheduleCancel
+        round-trip did happen. The DISTINGUISHABLE record ("safe mode released,
+        by whom, why") belongs to PR 4's ``safe_mode_events`` table, which owns
+        safe-mode history; it is deliberately not a tenth §18.5 event type.
         """
         if self._shutdown_started:
             raise RuntimeError("KillSwitchManager.release_safe_mode() after shutdown()")
@@ -209,9 +248,9 @@ class KillSwitchManager:
         30s), so an exact ``>=`` test lets ordinary scheduling jitter — the
         milliseconds between the loop's tick boundary and this call — push
         elapsed just under the interval and SKIP the refresh, halving the real
-        cadence to every other cycle. The slack absorbs that jitter. The config
-        guard (schedule_cancel >= 2 x refresh_interval) is what makes even a
-        fully skipped cycle survivable; this keeps it from happening at all.
+        cadence to every other cycle. The slack keeps that from happening at
+        all; what makes a skipped cycle SURVIVABLE if it happens anyway is the
+        constructor invariant (refresh_interval + loop_period < schedule_cancel).
         """
         if self._last_scheduled_at is None:
             return True
@@ -235,7 +274,6 @@ class KillSwitchManager:
         try:
             self._schedule()
         except Exception as exc:
-            first_failure = not self.stop_new_orders
             self._gate.kill_switch_active = False
             self.stop_new_orders = True
             # Log BEFORE the durable record: if the event write itself dies
@@ -243,11 +281,13 @@ class KillSwitchManager:
             # the log. The write stays unguarded — losing the audit trail
             # must fail loud, same as every other event write here.
             logger.warning("kill switch refresh failed: %s", exc)
-            if first_failure:
+            if not self._safe_mode_announced:
+                self._safe_mode_announced = True
                 # The state transition, called out once: from here new orders
-                # are blocked until PR 4's §13.4 reconciliation releases it.
+                # are blocked until PR 4's §13.4 reconciliation releases them.
                 # An operator tailing the service log must not have to infer
-                # that from a repeating warning.
+                # that from a repeating warning — nor read it afresh on every
+                # failed release attempt of an unchanged state.
                 logger.error(
                     "kill switch entering safe mode: new orders are BLOCKED until "
                     "reconciliation releases them (§18.2 rule 3)"
@@ -260,6 +300,16 @@ class KillSwitchManager:
         # lucky refresh — the sticky flag is enforced here, at the gate,
         # not merely stored for PR 4 to poll.
         self._gate.kill_switch_active = not self.stop_new_orders
+        if not self.stop_new_orders:
+            # Out of safe mode <=> no announcement outstanding. Reset HERE, next
+            # to the gate it mirrors, not in release_safe_mode() after this call
+            # returns: the unguarded _record below can raise (a busy DB), and a
+            # reset stranded behind it would leave the flag set on a released
+            # switch — silencing the ERROR on the NEXT genuine entry into safe
+            # mode, which is the one announcement that must never be missed.
+            # A merely-successful refresh while the latch is still down does not
+            # clear it (stop_new_orders is still True), so the sticky rule holds.
+            self._safe_mode_announced = False
         self._record("kill_switch_refreshed")
         return True
 
@@ -354,6 +404,15 @@ class KillSwitchManager:
         cancels our live orders, leaving them resting for the wallet-wide
         trigger to sweep — which also takes out the non-bot orders §19.3 says
         never to touch.
+
+        The retry re-runs the whole sweep, which is safe because it re-enumerates
+        ``open_orders()`` — orders the first attempt cancelled are simply gone.
+        Residual, accepted: if the first attempt cancelled orders and then died
+        on the COMPLETED write, and the exchange's open-orders view is still
+        stale on the retry, the re-cancels answer "unknown order", count as
+        failures, and block the rule-6 disarm. That leaves the wallet-wide
+        trigger armed — the fail-safe direction, and PR 4's reconciliation
+        settles it.
         """
         if self._shutdown_completed:
             return

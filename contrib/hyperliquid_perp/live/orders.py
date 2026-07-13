@@ -529,6 +529,12 @@ class LiveOrderSubmitter:
                 conn,
                 order_id,
                 status=local_status,
+                # An accepted order has no failure reason. Cleared explicitly,
+                # not left untouched: a row can legitimately have been patched
+                # 'rejected' (with a reason) and then, under rule 5, carry a
+                # later successful send — leaving the old text behind would put
+                # a rejection reason on a filled order.
+                status_reason=None,
                 exchange_order_id=ack.exchange_order_id,
                 exchange_status=exchange_status,
                 exchange_raw_status=ack.status,
@@ -727,17 +733,44 @@ _EXCHANGE_TO_LOCAL_STATUS = {
 
 
 def _local_status_for_exchange_status(exchange_status: str) -> str:
+    """Map an exchange status word to the local orders.status vocabulary.
+
+    The exact table above is the AUTHORITY — it carries Hyperliquid's full
+    documented vocabulary, including every ...Rejected word. Below it sits a
+    substring fallback for words the exchange may add later, and that fallback
+    obeys one rule: **it may never produce "rejected"**.
+
+    "rejected" is not just a label here. It becomes SubmitOutcomeKind.REJECTED,
+    which under §8.3 rule 9 LICENSES the caller to mint a brand-new logical
+    order. Guessing it from a substring means a future status word that merely
+    contains "reject" — attached to an order that is actually resting — mints a
+    second cloid for a live position. That is the same "a partial status test
+    drives a safety verdict" bug class as the §8.3 rule-10 resend guard, and it
+    is the one direction where guessing wrong costs real money.
+
+    So an unrecognised word is treated exactly like a fully unknown one:
+    recorded as "open" with a warning, left for PR 4's reconciliation to settle
+    against the exchange. Overstating LIVENESS is recoverable (reconciliation
+    closes it); overstating REJECTION mints cloids. The remaining substring arms
+    are safe in that direction — neither "canceled" nor "filled" authorises a
+    resend — and stay as a best-effort convenience.
+    """
     mapped = _EXCHANGE_TO_LOCAL_STATUS.get(exchange_status)
     if mapped is not None:
         return mapped
     lowered = exchange_status.lower()
-    # "reject" outranks "cancel": iocCancelRejected — the documented
-    # vocabulary's one both-words status, "rejected due to IOC not able to
-    # match" — is a placement rejection (nothing ever rested), and reading it
-    # as canceled would report a never-placed order as RECOVERED_EXISTING
-    # instead of REJECTED.
+    # Deliberately checked BEFORE "cancel": a new word carrying both (the
+    # documented iocCancelRejected is the existing example) is a placement
+    # rejection, not a cancel — but it still falls open to "open" below rather
+    # than being guessed into the resend-authorising verdict.
     if "reject" in lowered:
-        return "rejected"
+        logger.warning(
+            "unrecognised exchange order status %r looks like a rejection, but a "
+            "guessed rejection would license a NEW order for a possibly-live one — "
+            "recording as 'open' until reconciliation resolves it",
+            exchange_status,
+        )
+        return "open"
     if "cancel" in lowered:
         return "canceled"
     if "filled" in lowered:

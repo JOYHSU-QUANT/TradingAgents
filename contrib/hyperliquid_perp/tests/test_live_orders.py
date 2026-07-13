@@ -335,6 +335,29 @@ def test_retry_after_acknowledged_send_never_blind_resends(env):
     assert client.status_calls == [_HEX]
 
 
+def test_a_resent_order_does_not_keep_its_old_rejection_reason(env):
+    # A rejected attempt is NOT exchange-known (only acknowledged/duplicate are),
+    # so rule 5 permits a resend of the same cloid once orderStatus confirms the
+    # cloid is absent — and that resend patches the SAME orders row. The accepted
+    # patch must therefore CLEAR status_reason, not leave it untouched: a filled
+    # order carrying the previous attempt's rejection text would misread as a
+    # rejected fill to anyone (PR 4's reconciliation included) reading the row.
+    db, client, _, submitter = env
+    client.place_results = [_REJECT_ACK]
+    client.status_results = [_UNKNOWN_STATUS]
+    assert _submit(submitter).outcome == "rejected"
+    row = repo.get_order(db.conn, "o1")
+    assert row["status"] == "rejected" and row["status_reason"] is not None
+
+    # Same cloid, resent (rule 5: orderStatus says the exchange never took it).
+    client.place_results = [_RESTING_ACK]
+    client.status_results = [_UNKNOWN_STATUS]
+    assert _submit(submitter).outcome == "acknowledged"
+    row = repo.get_order(db.conn, "o1")
+    assert row["status"] == "open"
+    assert row["status_reason"] is None  # the stale rejection text is gone
+
+
 def test_recovered_rejected_status_reports_rejected_not_recovered(env):
     db, client, _, submitter = env
     client.place_results = [ExchangeRequestError("timeout")]
@@ -500,9 +523,12 @@ def test_retry_after_unknown_outcome_resends_when_exchange_confirms_absent(env):
 
 
 def test_exchange_status_family_classifier():
-    # "reject" outranks "cancel": iocCancelRejected — the vocabulary's one
-    # both-words status — is a placement rejection (nothing ever rested), and
-    # reading it as canceled would report a never-placed order as recovered.
+    # The EXACT table is the authority for every documented word — including
+    # iocCancelRejected, the vocabulary's one both-words status ("rejected
+    # because the IOC could not match"): a placement rejection, nothing ever
+    # rested, and reading it as canceled would report a never-placed order as
+    # recovered. (The substring arms below the table no longer decide this one,
+    # and can never produce "rejected" at all — see the guessed-rejection test.)
     assert _local_status_for_exchange_status("iocCancelRejected") == "rejected"
     assert _local_status_for_exchange_status("tickRejected") == "rejected"
     assert _local_status_for_exchange_status("minTradeNtlRejected") == "rejected"
@@ -520,6 +546,21 @@ def test_unrecognised_exchange_status_falls_open_to_local_open():
     # and must NOT default to a terminal status (that would silently strand a
     # live order as settled).
     assert _local_status_for_exchange_status("someBrandNewStatusWord") == "open"
+
+
+def test_a_guessed_rejection_never_authorises_a_resend():
+    # No heuristic may produce "rejected". That verdict becomes REJECTED, which
+    # under §8.3 rule 9 LICENSES the caller to mint a NEW logical order — so a
+    # future exchange word that merely CONTAINS "reject", attached to an order
+    # that is actually resting, would mint a second cloid for a live position.
+    # Same bug class as the rule-10 resend guard: a partial status test driving
+    # a safety verdict. Every real rejection is in the exact table above; an
+    # unrecognised reject-ish word falls open to "open" like any other unknown.
+    assert _local_status_for_exchange_status("someNewThingRejected") == "open"
+    assert _local_status_for_exchange_status("rejectedForAReasonWeDoNotKnow") == "open"
+    # The documented rejections still map exactly — the table, not the guess.
+    assert _local_status_for_exchange_status("tickRejected") == "rejected"
+    assert _local_status_for_exchange_status("iocCancelRejected") == "rejected"
 
 
 def test_recovery_of_an_unrecognised_status_lands_open_and_does_not_resend(env):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -22,6 +23,10 @@ from contrib.hyperliquid_perp.persistence.ids import live_order_attempt_id
 _NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
 _HEX = "0x" + "ab" * 16
 _HEX2 = "0x" + "cd" * 16
+# The live loop's tick period. With the KillSwitchConfig defaults (refresh 30s,
+# deadline 120s) the worst-case gap between refreshes is 30 + 30 = 60s, well
+# inside the deadline — so the manager's construction-time invariant holds.
+_LOOP_PERIOD_S = 30.0
 
 
 class _FakeClient:
@@ -86,6 +91,7 @@ def env():
         db=db,
         run_id="r",
         config=KillSwitchConfig(),
+        loop_period_seconds=_LOOP_PERIOD_S,
         clock=clock,
     )
     yield db, client, gate, clock, manager
@@ -117,7 +123,49 @@ def test_disabled_config_cannot_build_a_manager():
             db=Database(":memory:"),
             run_id="r",
             config=KillSwitchConfig(enabled=False),
+            loop_period_seconds=_LOOP_PERIOD_S,
         )
+
+
+def _manager_with(config: KillSwitchConfig, *, loop_period_seconds: float):
+    gate = _gate()
+    return KillSwitchManager(
+        client=_FakeClient(gate),
+        gate=gate,
+        db=Database(":memory:"),
+        run_id="r",
+        config=config,
+        loop_period_seconds=loop_period_seconds,
+    )
+
+
+def test_a_loop_too_slow_to_refresh_in_time_cannot_build_a_manager():
+    # The manager only refreshes when its owner ticks it, so the LOOP's period —
+    # not the configured interval — bounds how late a refresh can land. The
+    # config guard alone cannot see that number: 60/30 passes it (60 >= 2 x 30),
+    # yet a loop that wakes every 60s can leave 30 + 60 = 90s between refreshes
+    # against a 60s deadline. The dead man's switch would then fire during normal
+    # operation and cancel every order on the wallet. Enforced, not assumed.
+    cfg = KillSwitchConfig(schedule_cancel_seconds=60, refresh_interval_seconds=30)
+    with pytest.raises(ValueError, match="cannot be refreshed in time"):
+        _manager_with(cfg, loop_period_seconds=60.0)
+
+
+def test_a_loop_fast_enough_to_beat_the_deadline_builds():
+    cfg = KillSwitchConfig(schedule_cancel_seconds=120, refresh_interval_seconds=30)
+    assert _manager_with(cfg, loop_period_seconds=60.0) is not None  # 30 + 60 < 120
+
+
+def test_the_worst_case_gap_must_be_strictly_inside_the_deadline():
+    # Landing exactly ON the deadline is a race, not a margin.
+    cfg = KillSwitchConfig(schedule_cancel_seconds=60, refresh_interval_seconds=30)
+    with pytest.raises(ValueError, match="cannot be refreshed in time"):
+        _manager_with(cfg, loop_period_seconds=30.0)  # 30 + 30 == 60
+
+
+def test_a_nonpositive_loop_period_is_a_wiring_error():
+    with pytest.raises(ValueError, match="loop_period_seconds"):
+        _manager_with(KillSwitchConfig(), loop_period_seconds=0)
 
 
 def test_arm_schedules_the_120s_deadline_and_records(env):
@@ -281,6 +329,51 @@ def test_release_safe_mode_without_a_latch_is_a_noop(env):
     assert manager.release_safe_mode() is True
     assert gate.kill_switch_active
     assert _event_types(db) == ["kill_switch_armed"]  # nothing to release
+
+
+def _safe_mode_errors(caplog) -> int:
+    return sum("entering safe mode" in r.message for r in caplog.records if r.levelname == "ERROR")
+
+
+def test_entering_safe_mode_is_announced_once_not_on_every_retry(env, caplog):
+    # The ERROR is the operator's one signal that new orders are BLOCKED. It must
+    # fire on the transition — and NOT again on each failed release attempt of an
+    # unchanged state, or a PR 4 reconciliation loop retrying on a cadence would
+    # bury the real signal under its own repetitions.
+    _, client, _, clock, manager = env
+    manager.arm()
+    caplog.set_level(logging.ERROR, logger="contrib.hyperliquid_perp.live.kill_switch")
+
+    clock.advance(30)
+    client.schedule_error = ExchangeRequestError("timeout")
+    manager.refresh()
+    assert _safe_mode_errors(caplog) == 1
+
+    clock.advance(30)
+    manager.refresh()  # still failing, still safe mode — no new transition
+    assert manager.release_safe_mode() is False  # a failed release is not one either
+    assert _safe_mode_errors(caplog) == 1
+
+
+def test_a_second_entry_into_safe_mode_is_announced_again(env, caplog):
+    # The flag tracks "an announcement is outstanding", so a genuine re-entry
+    # after a successful release must speak up again.
+    _, client, _, clock, manager = env
+    manager.arm()
+    caplog.set_level(logging.ERROR, logger="contrib.hyperliquid_perp.live.kill_switch")
+
+    clock.advance(30)
+    client.schedule_error = ExchangeRequestError("timeout")
+    manager.refresh()
+    assert _safe_mode_errors(caplog) == 1
+
+    client.schedule_error = None
+    assert manager.release_safe_mode() is True
+
+    clock.advance(30)
+    client.schedule_error = ExchangeRequestError("timeout again")
+    manager.refresh()
+    assert _safe_mode_errors(caplog) == 2
 
 
 def test_release_safe_mode_fails_closed_when_the_switch_still_cannot_refresh(env):
@@ -774,6 +867,7 @@ def test_cross_run_cancel_evidence_spans_runs_without_index_collision(env):
         db=db,
         run_id="r-new",
         config=KillSwitchConfig(),
+        loop_period_seconds=_LOOP_PERIOD_S,
         clock=clock,
     )
     manager.arm()

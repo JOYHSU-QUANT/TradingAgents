@@ -433,6 +433,17 @@ order、都有自己的 cloid——不存在 v2 native TWAP 母單「cloid_hex, 
     rule 1 同 cloid retry、由 pre-check 的 orderStatus 解決——transient 失敗不得
     消耗 cloid、不得在審計留下永久 rejected；rule 9 的「error ack」只指 `statuses`
     內的 per-order error（v6 新增，2026-07-13）。
+12. **猜測不得授權重送**（v7 新增，2026-07-13）：exchange status → local status 的
+    對照以「完整文件化詞彙 exact 表」為權威；表外新詞走 substring fallback，而該
+    fallback **永遠不得產出 `rejected`**。理由：`rejected` 不只是一個標籤，它會變成
+    `SubmitOutcomeKind.REJECTED`，依 rule 9 這個判決**授權呼叫方開一張新的 logical
+    order**。若一個未來新增、字面含 "reject" 但訂單其實還掛在場上的狀態被猜成
+    rejected，就會替一個活著的部位再鑄一個 cloid——這與 rule 10 的 resend guard
+    是同一個 bug class（用不完整的 status 判斷驅動安全判決），而且是唯一「猜錯要
+    賠真錢」的方向。因此表外的 reject-ish 新詞與完全未知的新詞一視同仁：記為
+    `open` + warning，交給 PR 4 reconciliation 對帳。高估「還活著」是可回復的
+    （對帳會關掉它），高估「被拒絕」會鑄新單。fallback 剩下的 cancel / filled 兩臂
+    在這個方向上是安全的（都不授權重送），維持 best-effort。
 
 ## 9. Sliced TWAP Execution（v3 全章改寫）
 
@@ -1067,13 +1078,25 @@ interval**。`refresh=119 / schedule_cancel=120` 這種舊規則接受的 config
    必須尊重 sticky `stop_new_orders`（`kill_switch_active = not stop_new_orders`，
    與 refresh 同一條式子）——否則第二次 arm 會把刷新失敗關上的 §4.1 gate 靠運氣
    重開，而不是走 §13.4 reconciliation（v7 新增，2026-07-13）。
-2. Live loop 運行期間，必須每 30 秒刷新 schedule cancel deadline。
+2. Live loop 運行期間，必須依 `refresh_interval_seconds` 刷新 schedule cancel deadline。
    `refresh_due()` 的 interval 語意是「至少這麼頻繁」而非「不得早於」：live loop 的
    週期**等於** refresh_interval（都是 30s），tick 必然比它比較的那個排程時刻晚幾
    毫秒，若用嚴格 `elapsed >= interval` 判斷，這點抖動就會 skip 掉刷新、讓真實節奏
    悄悄砍半成「每兩輪一次」（只有事件時間戳的空隙看得出來）。因此保留一個遠大於
    抖動、又遠小於 interval 的 slack（0.5s）——只會讓刷新稍微提早，永遠不會推遲過
    deadline（v7 新增，2026-07-13）。
+   **loop 週期是 manager 的建構參數，不是註解裡的假設**（v7 新增，2026-07-13）：
+   manager 只在 owner 呼叫 tick() 時刷新，所以真正決定「刷新最晚會多晚到」的是
+   **loop 的週期**，不是設定的 interval。因此 `KillSwitchManager.__init__` 收
+   `loop_period_seconds` 並在建構期強制
+   `refresh_interval_seconds + loop_period_seconds < schedule_cancel_seconds`
+   （兩次刷新之間的最壞間隔必須嚴格小於 deadline；剛好等於是 race 不是 margin）。
+   §18.1 的 `schedule_cancel >= 2 × refresh_interval` config guard 只是「loop 剛好
+   以 interval 為週期」的特例，它看不到 loop 週期——例如 `schedule_cancel=60 /
+   refresh=30` 能通過 config guard，但配上一個 60 秒才醒一次的 loop（既有
+   `_run_loop` 的 `sleep(min(delay, 60))` 就是這個形狀）就會留下 90 秒空窗、讓
+   dead man's switch 在正常運行中觸發並掃掉全錢包掛單。PR 5 接線 live loop 時把
+   loop 週期傳進來即可，不必記得任何口頭約定。
 3. 若刷新失敗，必須進入 safe mode。解除 safe mode 只有一個入口：
    `release_safe_mode()`（§13.4 呼叫），它必須**同時**清掉 sticky latch 與重開
    §4.1 gate——只清 latch 會讓 gate 一直關到下次成功刷新，只開 gate 會被下次

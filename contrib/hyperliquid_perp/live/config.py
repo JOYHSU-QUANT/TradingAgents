@@ -397,23 +397,30 @@ class KillSwitchConfig:
                 f"live.kill_switch.refresh_interval_seconds must be > 0, "
                 f"got {self.refresh_interval_seconds}"
             )
-        # The refresh must land before the scheduled cancel fires, with a whole
-        # missed cycle to spare. A bare `refresh < schedule_cancel` is not
-        # enough: the live loop only refreshes on a tick, so the real cadence is
+        # A NECESSARY condition, not a sufficient one. The refresh must land
+        # before the scheduled cancel fires with a whole missed cycle to spare:
+        # the live loop only refreshes on a tick, so the real cadence is
         # quantized to the loop period and one skipped or slow cycle pushes the
         # next refresh out to ~2x the interval. Under `refresh=119,
-        # schedule_cancel=120` — which that weaker rule accepts — the first tick
-        # at or after 119s lands at ~120s and the dead man's switch fires DURING
-        # NORMAL OPERATION, cancelling every order on the wallet. Requiring the
-        # deadline to cover two full intervals makes a missed cycle survivable
-        # instead of fatal. The defaults (120 / 30) sit at 4x.
+        # schedule_cancel=120` — which a bare `refresh < schedule_cancel` accepts
+        # — the first tick at or after 119s lands at ~120s and the dead man's
+        # switch fires DURING NORMAL OPERATION, cancelling every order on the
+        # wallet. The defaults (120 / 30) sit at 4x.
+        #
+        # What this rule CANNOT see is the loop's actual period, which is what
+        # really bounds how late a refresh lands — so it is only the special case
+        # where the loop ticks at the interval. The binding check lives in
+        # KillSwitchManager.__init__, which is handed the loop period and enforces
+        # refresh_interval + loop_period < schedule_cancel. A config that passes
+        # here can still be rejected there (e.g. 60/30 under a 60s-waking loop).
         if self.schedule_cancel_seconds < 2 * self.refresh_interval_seconds:
             raise ValueError(
                 f"live.kill_switch.schedule_cancel_seconds "
                 f"({self.schedule_cancel_seconds}) must be >= 2 x "
                 f"refresh_interval_seconds ({self.refresh_interval_seconds}), or a "
                 "single missed refresh cycle lets the dead man's switch fire and "
-                "cancel every order on the wallet"
+                "cancel every order on the wallet (the live loop's period is checked "
+                "separately, when the kill switch manager is built)"
             )
         _coerce_enum(
             self,

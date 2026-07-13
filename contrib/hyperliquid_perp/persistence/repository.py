@@ -46,7 +46,7 @@ __all__ = [
     "get_run",
     "get_run_seed_positions",
     "get_scheduler_state",
-    "has_exchange_known_place_attempt",
+    "has_exchange_known_cloid",
     "has_place_attempt",
     "insert_account_snapshot",
     "insert_ai_input",
@@ -812,8 +812,9 @@ LIVE_ORDER_STATUSES: tuple[str, ...] = (
 # "failed" mean the outcome is unknown, and "rejected" means the exchange
 # answered but created no order; all three leave the cloid resendable once
 # orderStatus confirms it is absent. Read this through
-# has_exchange_known_place_attempt(), never by hand: an acknowledged CANCEL
-# proves the exchange saw the cancel, not the place.
+# has_exchange_known_cloid(), never by hand: an acknowledged CANCEL proves the
+# exchange saw the cancel, not the place — and the attempt rows are only HALF the
+# evidence (a recovered order's proof lives on orders.exchange_order_id).
 EXCHANGE_KNOWN_ATTEMPT_STATUSES: tuple[str, ...] = ("acknowledged", "duplicate")
 _NOT_EXCHANGE_KNOWN_ATTEMPT_STATUSES: tuple[str, ...] = ("submitted", "rejected", "failed")
 
@@ -1691,32 +1692,53 @@ def has_place_attempt(conn: sqlite3.Connection, run_id: str, *, cloid_hex: str) 
     return row is not None
 
 
-def has_exchange_known_place_attempt(
-    conn: sqlite3.Connection, run_id: str, *, cloid_hex: str
-) -> bool:
+def has_exchange_known_cloid(conn: sqlite3.Connection, run_id: str, *, cloid_hex: str) -> bool:
     """§8.3 rule 10: does durable local evidence prove the exchange took this cloid?
 
-    True when a PLACE attempt for the cloid reached a status in
-    EXCHANGE_KNOWN_ATTEMPT_STATUSES. Such evidence outranks a later
-    "unknownOid" from orderStatus (Info lag, retention expiry): the send was
-    received, so a resend would be accepted as a brand-new order — a double
-    position if the original filled.
+    Such evidence outranks a later "unknownOid" from orderStatus (Info lag,
+    retention expiry): the send WAS received, so a resend would be accepted as a
+    brand-new order — a double position if the original is live or filled.
 
-    The ``action = 'place'`` filter lives INSIDE this helper on purpose. The
-    kill switch writes 'acknowledged' on ``cancel_by_cloid`` rows too, and an
-    acknowledged CANCEL proves the exchange saw the cancel, not the place —
-    a caller that hand-rolled the status test could drop the action filter and
+    The evidence lives in TWO places, and both must be consulted:
+
+    1. A PLACE attempt in EXCHANGE_KNOWN_ATTEMPT_STATUSES (acknowledged /
+       duplicate) — the exchange answered this process directly.
+    2. ``orders.exchange_order_id`` non-NULL — the exchange handed us an oid for
+       this cloid. This is the ONLY record a successful §8.3 recovery leaves:
+       recovery deliberately does not back-patch the attempt row (the orders row
+       is PR 4's reconciliation authority), and the pre-check path recovers with
+       no attempt row at all. Without this arm, the sequence "send times out
+       (attempt 'failed') -> retry recovers the resting order via orderStatus ->
+       a LATER retry gets unknownOid" reads as "the exchange never took it", and
+       a live order is resent.
+
+    Only an exchange-supplied oid ever reaches that column (the accepted ack and
+    the orderStatus recovery); a rejected ack deliberately leaves it NULL, and
+    OrderAck forbids an oid on an error status. So it is exact proof of receipt,
+    and it does not narrow rule 5's legitimate resend of a cloid the exchange
+    truly never took.
+
+    The ``action = 'place'`` filter lives INSIDE this helper on purpose. The kill
+    switch writes 'acknowledged' on ``cancel_by_cloid`` rows too, and an
+    acknowledged CANCEL proves the exchange saw the cancel, not the place — a
+    caller that hand-rolled the status test could drop the action filter and
     silently read one as the other.
     """
     placeholders = ", ".join("?" for _ in EXCHANGE_KNOWN_ATTEMPT_STATUSES)
-    row = conn.execute(
+    attempt = conn.execute(
         "SELECT 1 FROM live_order_attempts "
         "WHERE run_id = ? AND cloid_hex = ? AND action = 'place' "
         f"AND status IN ({placeholders}) "
         "LIMIT 1",
         (run_id, cloid_hex, *EXCHANGE_KNOWN_ATTEMPT_STATUSES),
     ).fetchone()
-    return row is not None
+    if attempt is not None:
+        return True
+    order = conn.execute(
+        "SELECT 1 FROM orders WHERE cloid_hex = ? AND exchange_order_id IS NOT NULL LIMIT 1",
+        (cloid_hex,),
+    ).fetchone()
+    return order is not None
 
 
 def next_live_attempt_index(conn: sqlite3.Connection, *, action: str, cloid_hex: str) -> int:

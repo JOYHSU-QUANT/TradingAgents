@@ -149,6 +149,11 @@ class KillSwitchManager:
         # still be retryable, or a signal-handler + finally pair would swallow
         # the one call that cancels our live orders.
         self._shutdown_completed = False
+        # The WIRE fact, kept apart from the audit fact: True the instant
+        # clear_scheduled_cancel() returns, so a shutdown retry can never re-gate
+        # the disarm on a fresh sweep and "un-disarm" a trigger the exchange has
+        # already forgotten. See shutdown().
+        self._scheduled_cancel_cleared = False
         self._last_scheduled_at: datetime | None = None
         # The schedule epoch whose lapse has already been reported, so one fired
         # switch produces one event. Keyed on the schedule, not on the latch —
@@ -526,7 +531,7 @@ class KillSwitchManager:
         # the run records a completed event with `canceled: []` and disarms,
         # reading as a perfectly clean shutdown while the local rows still say
         # 'open' and nothing anywhere says the orders were cancelled for us.
-        if self._armed:
+        if self._armed and not self._scheduled_cancel_cleared:
             self._detect_expired_deadline()
         # The boundary is self-enforcing, not a caller convention: from here on
         # no new order may pass the §4.1 gate (the sweep must not race fresh
@@ -623,10 +628,13 @@ class KillSwitchManager:
             ),
             error=sweep_error,
         )
-        # The sweep ran and its outcome is durable. From here a re-entry is a
-        # genuine no-op; before here it was a retry of unfinished work.
-        self._shutdown_completed = True
-        if sweep_error is None and not failures and self._armed:
+        # A clean sweep earns the disarm — but so does "we already cleared it on a
+        # previous attempt whose audit write died". The wire fact outranks a fresh
+        # sweep: without it, a retry whose open_orders() happens to fail would skip
+        # the disarm block entirely and log "left ARMED, the trigger will fire" for
+        # a trigger the exchange has already forgotten.
+        disarm_due = self._scheduled_cancel_cleared or (sweep_error is None and not failures)
+        if self._armed and disarm_due:
             # Clean sweep: no bot order is left for the wallet-wide trigger to
             # protect, and letting it fire would cancel the skipped non-bot
             # orders. Disarm; a disarm failure stays armed (fail-safe) and is
@@ -634,16 +642,26 @@ class KillSwitchManager:
             # manager has nothing to disarm — a shutdown before arm() must
             # not record a phantom disarmed event.
             try:
-                self._client.clear_scheduled_cancel()
+                if not self._scheduled_cancel_cleared:
+                    self._client.clear_scheduled_cancel()
+                    # Latched the instant the wire call returns, BEFORE anything
+                    # that can raise: from here the trigger is physically gone,
+                    # and no retry may issue the call (or judge the disarm) again.
+                    self._scheduled_cancel_cleared = True
             except Exception as exc:
                 # Same ordering rule as refresh(): log first so a failing
                 # event write cannot erase the disarm failure's root cause.
                 logger.warning("kill switch disarm failed: %s", exc)
                 self._record("kill_switch_disarm_failed", error=str(exc))
             else:
-                self._armed = False
                 logger.info("kill switch disarmed after a clean shutdown sweep")
                 self._record("kill_switch_disarmed", detail="clean shutdown sweep")
+                # Cleared LAST, for the same reason _shutdown_completed is: this
+                # flag is what makes the disarm re-attemptable. If the event write
+                # above dies on a busy DB, the retry must still find _armed True
+                # and land the event — otherwise the audit trail would claim the
+                # wallet-wide backstop is still armed when it is not.
+                self._armed = False
         elif self._armed:
             # The other half of the operator's question: the wallet-wide trigger
             # is STILL LIVE and will fire at the deadline. That is the intended
@@ -652,3 +670,12 @@ class KillSwitchManager:
                 "kill switch left ARMED after shutdown (sweep not clean): the "
                 "wallet-wide scheduled cancel will fire at its deadline"
             )
+        # Marked complete LAST — every durable write above (the sweep outcome AND
+        # the disarm verdict) is now on disk. Latching before the disarm block
+        # would let one failed audit write lose the kill_switch_disarmed event
+        # forever: _record is fail-loud, the exception would unwind shutdown(),
+        # and the signal-handler/finally retry this flag exists to serve would
+        # early-return over the very write that failed. Same rule as
+        # _detect_expired_deadline's report mark: the flag that suppresses a
+        # retry is set only once the thing it suppresses is durable.
+        self._shutdown_completed = True

@@ -603,19 +603,20 @@ class LiveOrderSubmitter:
             # order. Same fail-loud posture as the duplicate/unknownOid
             # contradiction in submit_ioc_limit.
             #
-            # "Took it" is EXCHANGE_KNOWN_ATTEMPT_STATUSES — acknowledged OR
-            # duplicate. A duplicate row is proof at least as strong as an ack
-            # (the exchange itself said the cloid exists); reading only
-            # 'acknowledged' here let a duplicate-then-unknownOid retry fall
-            # through to a resend — the double order rules 5/9/10 exist to
-            # prevent. The named set and its partition guard are what keep this
-            # test complete: do not hand-roll the status literals back in.
-            if repo.has_exchange_known_place_attempt(
-                self._db.conn, self._run_id, cloid_hex=cloid_hex
-            ):
+            # "Took it" means BOTH kinds of durable proof: an acknowledged or
+            # duplicate place attempt, AND an orders row already carrying an
+            # exchange-supplied oid — the latter being the ONLY trace a
+            # successful earlier recovery leaves, since recovery deliberately
+            # does not back-patch the attempt row. Reading only the attempt row
+            # let "timeout -> recover the resting order -> a later unknownOid"
+            # fall through to a resend of a live order. has_exchange_known_cloid
+            # owns that definition; do not hand-roll either half back in here.
+            if repo.has_exchange_known_cloid(self._db.conn, self._run_id, cloid_hex=cloid_hex):
                 raise ExchangeError(
-                    f"orderStatus does not know cloid {cloid_hex} but a prior place "
-                    f"attempt reached the exchange — refusing to resend (§8.3 rule 5)"
+                    f"orderStatus does not know cloid {cloid_hex}, but durable local "
+                    "evidence says it reached the exchange (a prior place attempt was "
+                    "acknowledged/duplicate, or the order already carries an "
+                    "exchange order id) — refusing to resend (§8.3 rule 5)"
                 )
             return None
         exchange_order_id, exchange_status = parsed

@@ -401,6 +401,68 @@ def test_a_firing_during_an_api_outage_is_still_reported(env, caplog):
     assert not gate.kill_switch_active
 
 
+def test_a_failed_disarm_write_does_not_swallow_the_disarm_event(env, monkeypatch):
+    # The disarm verdict is what tells an operator (and PR 4) whether the
+    # wallet-wide backstop is still armed. _record is fail-loud, so if the flags
+    # that suppress a retry (_shutdown_completed, _armed) were set BEFORE that
+    # write, one busy-DB moment would lose the kill_switch_disarmed event
+    # forever: the signal-handler/finally retry would early-return over it.
+    db, client, _, _, manager = env
+    manager.arm()
+    client.open_orders_result = []  # nothing to cancel: a clean sweep
+
+    real_record = manager._record
+
+    def _flaky_record(event_type, **kw):
+        if event_type == "kill_switch_disarmed":
+            monkeypatch.setattr(manager, "_record", real_record)  # fail only once
+            raise sqlite3.OperationalError("database is locked")
+        return real_record(event_type, **kw)
+
+    monkeypatch.setattr(manager, "_record", _flaky_record)
+    with pytest.raises(sqlite3.OperationalError):
+        manager.shutdown()
+    assert "kill_switch_disarmed" not in _event_types(db)
+
+    manager.shutdown()  # the retry must still land the disarm event
+    assert _event_types(db).count("kill_switch_disarmed") == 1
+    assert not manager.armed
+
+
+def test_a_disarm_that_physically_happened_is_never_revoked_by_a_retry(env, monkeypatch, caplog):
+    # The wire fact outranks a fresh sweep. If clear_scheduled_cancel() SUCCEEDED
+    # and only its audit write died, the trigger is already gone from the
+    # exchange. A retry whose open_orders() then fails must NOT skip the disarm
+    # block and announce "left ARMED — the trigger will fire at its deadline":
+    # that statement would be false, and it would be latched forever.
+    db, client, _, _, manager = env
+    caplog.set_level(logging.WARNING, logger="contrib.hyperliquid_perp.live.kill_switch")
+    manager.arm()
+    client.open_orders_result = []  # clean sweep
+
+    real_record = manager._record
+
+    def _flaky_record(event_type, **kw):
+        if event_type == "kill_switch_disarmed":
+            monkeypatch.setattr(manager, "_record", real_record)
+            raise sqlite3.OperationalError("database is locked")
+        return real_record(event_type, **kw)
+
+    monkeypatch.setattr(manager, "_record", _flaky_record)
+    with pytest.raises(sqlite3.OperationalError):
+        manager.shutdown()
+    assert client.clear_calls == 1  # the exchange HAS forgotten the trigger
+
+    # The retry's enumeration now fails — this sweep is "not clean".
+    client.open_orders_result = ExchangeRequestError("api wobble")
+    manager.shutdown()
+
+    assert client.clear_calls == 1  # not re-issued: the wire fact was latched
+    assert _event_types(db).count("kill_switch_disarmed") == 1
+    assert not manager.armed
+    assert not any("left ARMED" in r.message for r in caplog.records)
+
+
 def test_a_failed_audit_write_does_not_swallow_the_firing(env, monkeypatch):
     # The event write is fail-loud by design (a busy DB raises). If the "already
     # reported" mark were set BEFORE it, that single failure would permanently

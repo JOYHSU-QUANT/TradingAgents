@@ -419,14 +419,24 @@ order、都有自己的 cloid——不存在 v2 native TWAP 母單「cloid_hex, 
     （交易所確定收過），unknownOid 是矛盾（retention 過期／Info 不一致），必須具名
     報錯拒絕重送，不得讀成「前次未成功」（v5 新增 2026-07-13；v7 補上 duplicate，
     2026-07-13）。
-    「交易所確定收過」的狀態集合＝`repository.EXCHANGE_KNOWN_ATTEMPT_STATUSES`
-    = {acknowledged, duplicate}，一律經 `has_exchange_known_place_attempt()` 讀取
-    （`action='place'` 過濾寫在 helper 內部：acknowledged 的 **cancel** attempt 只
-    證明交易所收過 cancel、不證明收過 place）。duplicate 的證據力不低於
-    acknowledged——那是交易所自己說「這個 cloid 已存在」。只讀 acknowledged 會讓
-    「timeout(failed) → 重試撞 duplicate → 再重試」這條路徑把 unknownOid 讀成
-    「確認不存在」而重送；原單若已成交即為雙倉。該狀態集合有 import 期 partition
-    guard：日後新增 attempt status 必須被明確歸類，不得預設落進安全的那一半。
+    「交易所確定收過」的證據**有兩處，兩處都要查**，統一由 `has_exchange_known_cloid()`
+    判定（v7 擴充；原 `has_exchange_known_place_attempt` 只查第 1 處）：
+    1. **attempt 列**：place attempt 落在 `repository.EXCHANGE_KNOWN_ATTEMPT_STATUSES`
+       = {acknowledged, duplicate}（`action='place'` 過濾寫在 helper 內部：
+       acknowledged 的 **cancel** attempt 只證明交易所收過 cancel、不證明收過 place）。
+       duplicate 的證據力不低於 acknowledged——那是交易所自己說「這個 cloid 已存在」。
+       只讀 acknowledged 會讓「timeout(failed) → 重試撞 duplicate → 再重試」這條路徑把
+       unknownOid 讀成「確認不存在」而重送。
+    2. **orders 列的 `exchange_order_id` 非 NULL**：交易所給過我們這個 cloid 的 oid。
+       這是「成功的 §8.3 恢復」唯一留下的痕跡——恢復刻意**不回補 attempt 列**（orders
+       列才是 PR4 對帳權威），而 pre-check 路徑的恢復根本不寫 attempt 列。少了這一臂，
+       「timeout(attempt=failed) → 重試經 orderStatus 恢復到仍掛著的原單 → 更晚一次重試
+       遇到 unknownOid」會被讀成「交易所從未收過」而**重送一張還活著的單**（出場檢查以
+       真實類別重現，實際送出兩次）。只有交易所給的 oid 會寫進這欄（accepted ack 與
+       orderStatus 恢復；rejected ack 刻意不寫，OrderAck 也禁止 error 狀態帶 oid），
+       所以它是精確的收據，不會誤擋 rule 5 對「交易所真的沒收過」的合法重送。
+    狀態集合有 import 期 partition guard：日後新增 attempt status 必須被明確歸類，
+    不得預設落進安全的那一半。
 11. 頂層 `{"status":"err"}` envelope（壞簽名、壞 payload、invalid nonce 等 action
     層失敗）不是 per-order error ack：訂單可能根本沒進撮合引擎，transport 層具名
     raise（`ExchangeRequestError`），attempt 記 'failed'（outcome unknown），依

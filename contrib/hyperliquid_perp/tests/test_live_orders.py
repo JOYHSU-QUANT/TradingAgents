@@ -401,6 +401,38 @@ def test_acknowledged_cloid_missing_from_order_status_fails_loud(env):
     assert len(client.place_calls) == 1  # never resent
 
 
+def test_a_recovered_order_is_never_resent_when_order_status_later_forgets_it(env):
+    # §8.3 rule 10, the arm the ATTEMPT rows cannot see. A successful recovery
+    # writes its proof (the exchange's own oid) to the ORDERS row and
+    # deliberately does not back-patch the attempt row — and on the pre-check
+    # path it recovers with no attempt row at all. So the durable evidence that
+    # "the exchange took this cloid" can live only on orders.exchange_order_id:
+    #
+    #   1. send times out -> attempt 'failed' (the order actually rests)
+    #   2. retry: orderStatus finds it RESTING (oid 111) -> recovered_existing,
+    #      orders row back-filled; the attempt row still says 'failed'
+    #   3. retry again: orderStatus now answers unknownOid (Info lag/retention).
+    #      Reading only the attempts (['failed']) would call that "confirmed
+    #      absent" and RESEND — a second live order for one logical order.
+    db, client, _, submitter = env
+    client.place_results = [ExchangeRequestError("timeout")]
+    with pytest.raises(ExchangeRequestError):
+        _submit(submitter)
+
+    client.status_results = [
+        {"status": "order", "order": {"order": {"oid": 111}, "status": "resting"}}
+    ]
+    assert _submit(submitter).outcome == "recovered_existing"
+    assert repo.get_order(db.conn, "o1")["exchange_order_id"] == "111"
+    # Recovery leaves the attempt row untouched — that is the trap.
+    assert [a["status"] for a in repo.iter_live_order_attempts(db.conn, "r")] == ["failed"]
+
+    client.status_results = [_UNKNOWN_STATUS]
+    with pytest.raises(ExchangeError, match="reached the exchange"):
+        _submit(submitter)
+    assert len(client.place_calls) == 1  # NOT 2 — the recovered oid forbade it
+
+
 def test_duplicate_cloid_missing_from_order_status_never_resends(env):
     # §8.3 rule 10, the other half of the evidence. A 'duplicate' attempt row is
     # proof at least as strong as an ack — the EXCHANGE ITSELF said the cloid

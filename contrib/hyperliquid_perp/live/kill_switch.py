@@ -49,16 +49,16 @@ __all__ = ["KillSwitchManager"]
 
 logger = logging.getLogger(__name__)
 
-# Jitter budget for refresh_due(). The live loop's period equals
-# refresh_interval_seconds by default, so a bare `elapsed >= interval` test
-# skips every other refresh over mere milliseconds of scheduling drift (tick()
-# runs a hair later in the cycle than the schedule it is compared against).
-# Half a second dwarfs that drift while staying well inside the interval, so it
-# only ever pulls a refresh slightly EARLIER — never pushes one past the
-# deadline it exists to renew, and never turns a genuinely early call into a
-# refresh. The real backstop, if a loop's jitter ever exceeds this, is the
-# constructor invariant (refresh_interval + loop_period < schedule_cancel) —
-# the config guard alone cannot be one, because it cannot see the loop's period.
+# Jitter budget for refresh_due(). When a caller ticks at the same period as
+# refresh_interval_seconds (the intended 30s/30s wiring), a bare
+# `elapsed >= interval` test skips every other refresh over mere milliseconds of
+# scheduling drift — tick() runs a hair later in the cycle than the schedule it
+# is compared against. Half a second dwarfs that drift while staying well inside
+# the interval, so it only ever pulls a refresh slightly EARLIER — never pushes
+# one past the deadline it exists to renew, and never turns a genuinely early
+# call into a refresh. The backstop for a gap LARGER than this is the constructor
+# invariant (refresh_interval + worst-case tick gap < schedule_cancel); the config
+# guard cannot be one, because it cannot see the caller's tick gap at all.
 _REFRESH_DUE_SLACK_S = 0.5
 
 # NOTE on breadth: the refresh/shutdown paths deliberately catch ``Exception``,
@@ -82,7 +82,7 @@ class KillSwitchManager:
         db: Database,
         run_id: str,
         config: KillSwitchConfig,
-        loop_period_seconds: float,
+        max_tick_gap_seconds: float,
         clock: Clock | None = None,
     ) -> None:
         if not config.enabled:
@@ -90,29 +90,39 @@ class KillSwitchManager:
             # constructing a manager from a disabled config means the caller's
             # wiring is wrong, not that we should silently no-op a safety net.
             raise ValueError("KillSwitchManager requires live.kill_switch.enabled")
-        # The manager only ever refreshes when its owner ticks it, so the LOOP's
-        # period — not the configured interval — is what really bounds how late
-        # a refresh can land. That number lives in the caller (PR 5's live loop;
-        # the paper loop it rides sleeps up to 60s), so it is passed in and the
-        # invariant is ENFORCED here rather than assumed in a comment: the
-        # deadline must survive a refresh that is one whole loop period late.
+        # The manager only ever refreshes when its owner ticks it, so what really
+        # bounds how late a refresh can land is the caller's TICK GAP, not the
+        # configured interval. That number lives in the caller, so it is passed
+        # in and the invariant is ENFORCED here instead of assumed in a comment:
+        # the deadline must survive a refresh that is one whole tick gap late.
         #
-        # Worst case between two refreshes is refresh_interval + loop_period
-        # (the tick after the interval elapses can be a full period away). The
+        # ``max_tick_gap_seconds`` is the caller's WORST-CASE WALL TIME BETWEEN
+        # TWO tick() CALLS — not its sleep interval. Read the contract literally:
+        # in the paper loop this manager's owner will ride, one iteration runs
+        # engine.tick() and scheduler.poll() SYNCHRONOUSLY before it sleeps, and
+        # poll() can run a full multi-agent AI decision — MINUTES, not seconds.
+        # A caller that passes its sleep cap (60s) while its cycle can block for
+        # three minutes has satisfied this check and will still be cancelled off
+        # the book mid-decision. §18.2: PR 5 must therefore refresh the switch
+        # from INSIDE the decision cycle (or from a dedicated refresher), not
+        # only at the top of the loop — and pass the true worst-case gap here.
+        #
+        # Worst case between two refreshes is refresh_interval + the tick gap
+        # (the tick after the interval elapses can be a whole gap away). The
         # config guard's `schedule_cancel >= 2 x refresh_interval` is only the
-        # special case of this where the loop ticks at the interval — it cannot
-        # see the loop's period, so it cannot catch e.g. schedule_cancel=60 /
-        # refresh=30 driven by a 60s-waking loop, which fires the switch DURING
-        # NORMAL OPERATION and cancels every order on the wallet.
-        if loop_period_seconds <= 0:
-            raise ValueError(f"loop_period_seconds must be > 0, got {loop_period_seconds}")
-        worst_case_gap = config.refresh_interval_seconds + loop_period_seconds
+        # special case where the caller ticks exactly at the interval — it cannot
+        # see the caller at all, so it cannot catch e.g. schedule_cancel=60 /
+        # refresh=30 under a 60s tick gap, which fires the switch DURING NORMAL
+        # OPERATION and cancels every order on the wallet.
+        if max_tick_gap_seconds <= 0:
+            raise ValueError(f"max_tick_gap_seconds must be > 0, got {max_tick_gap_seconds}")
+        worst_case_gap = config.refresh_interval_seconds + max_tick_gap_seconds
         if worst_case_gap >= config.schedule_cancel_seconds:
             raise ValueError(
                 f"the kill switch cannot be refreshed in time: a refresh may land "
                 f"{worst_case_gap}s apart (refresh_interval "
-                f"{config.refresh_interval_seconds}s + loop period "
-                f"{loop_period_seconds}s), but the scheduled cancel fires after "
+                f"{config.refresh_interval_seconds}s + max_tick_gap "
+                f"{max_tick_gap_seconds}s), but the scheduled cancel fires after "
                 f"{config.schedule_cancel_seconds}s — the dead man's switch would "
                 "cancel every order on the wallet during normal operation"
             )
@@ -243,14 +253,14 @@ class KillSwitchManager:
     def refresh_due(self) -> bool:
         """True when the §18.2 rule-2 cadence calls for a refresh.
 
-        The interval means "at least this often", not "no sooner than". The
-        live loop's period EQUALS refresh_interval_seconds by default (both
-        30s), so an exact ``>=`` test lets ordinary scheduling jitter — the
-        milliseconds between the loop's tick boundary and this call — push
-        elapsed just under the interval and SKIP the refresh, halving the real
-        cadence to every other cycle. The slack keeps that from happening at
-        all; what makes a skipped cycle SURVIVABLE if it happens anyway is the
-        constructor invariant (refresh_interval + loop_period < schedule_cancel).
+        The interval means "at least this often", not "no sooner than". A caller
+        ticking at the same period as refresh_interval_seconds (the intended
+        30s/30s wiring) would otherwise let ordinary scheduling jitter — the
+        milliseconds between its tick boundary and this call — push elapsed just
+        under the interval and SKIP the refresh, halving the real cadence to
+        every other cycle. The slack keeps that from happening at all; what makes
+        a skipped cycle SURVIVABLE if it happens anyway is the constructor
+        invariant (refresh_interval + worst-case tick gap < schedule_cancel).
         """
         if self._last_scheduled_at is None:
             return True
@@ -314,7 +324,13 @@ class KillSwitchManager:
         return True
 
     def tick(self) -> None:
-        """Refresh if due — the live loop calls this every cycle (30s)."""
+        """Refresh if due.
+
+        The owner must call this at least once per ``max_tick_gap_seconds`` —
+        INCLUDING from inside a long decision cycle. Ticking only at the top of
+        the loop is not enough: the decision cycle runs synchronously and can
+        block for minutes, and the switch does not refresh itself (§18.2).
+        """
         if self._shutdown_started:
             raise RuntimeError("KillSwitchManager.tick() after shutdown()")
         if self.refresh_due():

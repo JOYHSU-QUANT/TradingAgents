@@ -23,10 +23,12 @@ from contrib.hyperliquid_perp.persistence.ids import live_order_attempt_id
 _NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
 _HEX = "0x" + "ab" * 16
 _HEX2 = "0x" + "cd" * 16
-# The live loop's tick period. With the KillSwitchConfig defaults (refresh 30s,
-# deadline 120s) the worst-case gap between refreshes is 30 + 30 = 60s, well
-# inside the deadline — so the manager's construction-time invariant holds.
-_LOOP_PERIOD_S = 30.0
+# The caller's WORST-CASE wall time between two tick() calls — not its sleep
+# interval (the real loop runs the AI decision synchronously in-cycle, so those
+# differ by minutes). With the KillSwitchConfig defaults (refresh 30s, deadline
+# 120s) the worst-case gap between refreshes is 30 + 30 = 60s, well inside the
+# deadline — so the manager's construction-time invariant holds.
+_MAX_TICK_GAP_S = 30.0
 
 
 class _FakeClient:
@@ -91,7 +93,7 @@ def env():
         db=db,
         run_id="r",
         config=KillSwitchConfig(),
-        loop_period_seconds=_LOOP_PERIOD_S,
+        max_tick_gap_seconds=_MAX_TICK_GAP_S,
         clock=clock,
     )
     yield db, client, gate, clock, manager
@@ -123,11 +125,11 @@ def test_disabled_config_cannot_build_a_manager():
             db=Database(":memory:"),
             run_id="r",
             config=KillSwitchConfig(enabled=False),
-            loop_period_seconds=_LOOP_PERIOD_S,
+            max_tick_gap_seconds=_MAX_TICK_GAP_S,
         )
 
 
-def _manager_with(config: KillSwitchConfig, *, loop_period_seconds: float):
+def _manager_with(config: KillSwitchConfig, *, max_tick_gap_seconds: float):
     gate = _gate()
     return KillSwitchManager(
         client=_FakeClient(gate),
@@ -135,37 +137,37 @@ def _manager_with(config: KillSwitchConfig, *, loop_period_seconds: float):
         db=Database(":memory:"),
         run_id="r",
         config=config,
-        loop_period_seconds=loop_period_seconds,
+        max_tick_gap_seconds=max_tick_gap_seconds,
     )
 
 
-def test_a_loop_too_slow_to_refresh_in_time_cannot_build_a_manager():
-    # The manager only refreshes when its owner ticks it, so the LOOP's period —
-    # not the configured interval — bounds how late a refresh can land. The
-    # config guard alone cannot see that number: 60/30 passes it (60 >= 2 x 30),
-    # yet a loop that wakes every 60s can leave 30 + 60 = 90s between refreshes
-    # against a 60s deadline. The dead man's switch would then fire during normal
-    # operation and cancel every order on the wallet. Enforced, not assumed.
+def test_a_caller_too_slow_to_refresh_in_time_cannot_build_a_manager():
+    # The manager only refreshes when its owner ticks it, so the caller's TICK
+    # GAP — not the configured interval — bounds how late a refresh can land.
+    # The config guard cannot see that number: 60/30 passes it (60 >= 2 x 30),
+    # yet a 60s tick gap leaves 30 + 60 = 90s between refreshes against a 60s
+    # deadline. The dead man's switch would then fire during normal operation and
+    # cancel every order on the wallet. Enforced at construction, not assumed.
     cfg = KillSwitchConfig(schedule_cancel_seconds=60, refresh_interval_seconds=30)
     with pytest.raises(ValueError, match="cannot be refreshed in time"):
-        _manager_with(cfg, loop_period_seconds=60.0)
+        _manager_with(cfg, max_tick_gap_seconds=60.0)
 
 
-def test_a_loop_fast_enough_to_beat_the_deadline_builds():
+def test_a_caller_fast_enough_to_beat_the_deadline_builds():
     cfg = KillSwitchConfig(schedule_cancel_seconds=120, refresh_interval_seconds=30)
-    assert _manager_with(cfg, loop_period_seconds=60.0) is not None  # 30 + 60 < 120
+    assert _manager_with(cfg, max_tick_gap_seconds=60.0) is not None  # 30 + 60 < 120
 
 
 def test_the_worst_case_gap_must_be_strictly_inside_the_deadline():
     # Landing exactly ON the deadline is a race, not a margin.
     cfg = KillSwitchConfig(schedule_cancel_seconds=60, refresh_interval_seconds=30)
     with pytest.raises(ValueError, match="cannot be refreshed in time"):
-        _manager_with(cfg, loop_period_seconds=30.0)  # 30 + 30 == 60
+        _manager_with(cfg, max_tick_gap_seconds=30.0)  # 30 + 30 == 60
 
 
-def test_a_nonpositive_loop_period_is_a_wiring_error():
-    with pytest.raises(ValueError, match="loop_period_seconds"):
-        _manager_with(KillSwitchConfig(), loop_period_seconds=0)
+def test_a_nonpositive_tick_gap_is_a_wiring_error():
+    with pytest.raises(ValueError, match="max_tick_gap_seconds"):
+        _manager_with(KillSwitchConfig(), max_tick_gap_seconds=0)
 
 
 def test_arm_schedules_the_120s_deadline_and_records(env):
@@ -352,6 +354,19 @@ def test_entering_safe_mode_is_announced_once_not_on_every_retry(env, caplog):
     clock.advance(30)
     manager.refresh()  # still failing, still safe mode — no new transition
     assert manager.release_safe_mode() is False  # a failed release is not one either
+    assert _safe_mode_errors(caplog) == 1
+
+    # A LUCKY successful refresh does not leave safe mode either — the latch is
+    # sticky until §13.4 releases it — so it must not clear the announcement.
+    # Were it to, the next failure would re-announce a transition that never
+    # happened.
+    client.schedule_error = None
+    clock.advance(30)
+    assert manager.refresh() is True
+    assert manager.stop_new_orders  # still latched
+    clock.advance(30)
+    client.schedule_error = ExchangeRequestError("timeout")
+    manager.refresh()
     assert _safe_mode_errors(caplog) == 1
 
 
@@ -867,7 +882,7 @@ def test_cross_run_cancel_evidence_spans_runs_without_index_collision(env):
         db=db,
         run_id="r-new",
         config=KillSwitchConfig(),
-        loop_period_seconds=_LOOP_PERIOD_S,
+        max_tick_gap_seconds=_MAX_TICK_GAP_S,
         clock=clock,
     )
     manager.arm()

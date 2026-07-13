@@ -523,12 +523,11 @@ def test_retry_after_unknown_outcome_resends_when_exchange_confirms_absent(env):
 
 
 def test_exchange_status_family_classifier():
-    # The EXACT table is the authority for every documented word — including
-    # iocCancelRejected, the vocabulary's one both-words status ("rejected
-    # because the IOC could not match"): a placement rejection, nothing ever
-    # rested, and reading it as canceled would report a never-placed order as
-    # recovered. (The substring arms below the table no longer decide this one,
-    # and can never produce "rejected" at all — see the guessed-rejection test.)
+    # The EXACT table is the ONLY authority — including for iocCancelRejected,
+    # the vocabulary's one both-words status ("rejected because the IOC could
+    # not match"): a placement rejection, nothing ever rested, and reading it as
+    # canceled would report a never-placed order as recovered. No substring
+    # heuristic decides any of these.
     assert _local_status_for_exchange_status("iocCancelRejected") == "rejected"
     assert _local_status_for_exchange_status("tickRejected") == "rejected"
     assert _local_status_for_exchange_status("minTradeNtlRejected") == "rejected"
@@ -538,29 +537,29 @@ def test_exchange_status_family_classifier():
     assert _local_status_for_exchange_status("filled") == "filled"
 
 
-def test_unrecognised_exchange_status_falls_open_to_local_open():
-    # The deliberate fail-open net: Hyperliquid can add a status word this map
-    # has never seen, and overstating liveness is the conservative direction —
-    # PR 4's reconciliation resolves it against the exchange. It must NOT raise
-    # (that would break §8.3 recovery for every order carrying the new word)
-    # and must NOT default to a terminal status (that would silently strand a
-    # live order as settled).
+def test_an_unknown_exchange_status_is_never_guessed_at():
+    # The table carries Hyperliquid's complete documented vocabulary, so anything
+    # outside it is a word the exchange gained afterwards — and EVERY guess about
+    # such a word is unsafe in some direction, so we make none:
+    #
+    #   * guessing "rejected" licenses the caller to mint a NEW logical order
+    #     (§8.3 rule 9), so a reject-ish word on a still-RESTING order = double
+    #     position — the same bug class as the rule-10 resend guard;
+    #   * guessing a TERMINAL status abandons a possibly-live order (a word like
+    #     cancelRequested = cancel in flight, order still resting, would be booked
+    #     canceled and a later fill would land against a canceled order).
+    #
+    # "open" is the one conservative reading: the order keeps being watched and
+    # PR 4's reconciliation settles it against the exchange. It must also not
+    # raise — that would break §8.3 recovery for every order carrying the word.
     assert _local_status_for_exchange_status("someBrandNewStatusWord") == "open"
-
-
-def test_a_guessed_rejection_never_authorises_a_resend():
-    # No heuristic may produce "rejected". That verdict becomes REJECTED, which
-    # under §8.3 rule 9 LICENSES the caller to mint a NEW logical order — so a
-    # future exchange word that merely CONTAINS "reject", attached to an order
-    # that is actually resting, would mint a second cloid for a live position.
-    # Same bug class as the rule-10 resend guard: a partial status test driving
-    # a safety verdict. Every real rejection is in the exact table above; an
-    # unrecognised reject-ish word falls open to "open" like any other unknown.
+    # ...reject-ish: must NOT become "rejected".
     assert _local_status_for_exchange_status("someNewThingRejected") == "open"
-    assert _local_status_for_exchange_status("rejectedForAReasonWeDoNotKnow") == "open"
-    # The documented rejections still map exactly — the table, not the guess.
-    assert _local_status_for_exchange_status("tickRejected") == "rejected"
-    assert _local_status_for_exchange_status("iocCancelRejected") == "rejected"
+    assert _local_status_for_exchange_status("someNewCancelRejected") == "open"
+    # ...terminal-ish: must NOT become "canceled" / "filled".
+    assert _local_status_for_exchange_status("cancelRequested") == "open"
+    assert _local_status_for_exchange_status("pendingCancel") == "open"
+    assert _local_status_for_exchange_status("partiallyFilledSomehow") == "open"
 
 
 def test_recovery_of_an_unrecognised_status_lands_open_and_does_not_resend(env):

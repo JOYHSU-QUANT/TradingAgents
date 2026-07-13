@@ -1085,18 +1085,24 @@ interval**。`refresh=119 / schedule_cancel=120` 這種舊規則接受的 config
    悄悄砍半成「每兩輪一次」（只有事件時間戳的空隙看得出來）。因此保留一個遠大於
    抖動、又遠小於 interval 的 slack（0.5s）——只會讓刷新稍微提早，永遠不會推遲過
    deadline（v7 新增，2026-07-13）。
-   **loop 週期是 manager 的建構參數，不是註解裡的假設**（v7 新增，2026-07-13）：
+   **tick 間隔是 manager 的建構參數，不是註解裡的假設**（v7 新增，2026-07-13）：
    manager 只在 owner 呼叫 tick() 時刷新，所以真正決定「刷新最晚會多晚到」的是
-   **loop 的週期**，不是設定的 interval。因此 `KillSwitchManager.__init__` 收
-   `loop_period_seconds` 並在建構期強制
-   `refresh_interval_seconds + loop_period_seconds < schedule_cancel_seconds`
+   **呼叫方兩次 tick() 之間的最壞牆鐘時間**，不是設定的 interval。因此
+   `KillSwitchManager.__init__` 收 `max_tick_gap_seconds` 並在建構期強制
+   `refresh_interval_seconds + max_tick_gap_seconds < schedule_cancel_seconds`
    （兩次刷新之間的最壞間隔必須嚴格小於 deadline；剛好等於是 race 不是 margin）。
-   §18.1 的 `schedule_cancel >= 2 × refresh_interval` config guard 只是「loop 剛好
-   以 interval 為週期」的特例，它看不到 loop 週期——例如 `schedule_cancel=60 /
-   refresh=30` 能通過 config guard，但配上一個 60 秒才醒一次的 loop（既有
-   `_run_loop` 的 `sleep(min(delay, 60))` 就是這個形狀）就會留下 90 秒空窗、讓
-   dead man's switch 在正常運行中觸發並掃掉全錢包掛單。PR 5 接線 live loop 時把
-   loop 週期傳進來即可，不必記得任何口頭約定。
+   §18.1 的 `schedule_cancel >= 2 × refresh_interval` config guard 只是「呼叫方剛好
+   以 interval 為週期 tick」的特例，它根本看不到呼叫方——例如 `schedule_cancel=60 /
+   refresh=30` 能通過 config guard，但配上 60 秒的 tick 間隔就會留下 90 秒空窗、讓
+   dead man's switch 在正常運行中觸發並掃掉全錢包掛單。
+
+   **`max_tick_gap_seconds` 的語意要照字面讀：兩次 tick() 之間的最壞牆鐘時間，不是
+   sleep 間隔**（v7 新增，2026-07-13）。既有 `_run_loop` 的一輪是
+   `engine.tick()` → `scheduler.poll()` → `sleep(min(delay, 60))` **同步**執行，而
+   `poll()` 會跑完整的多 agent AI 決策——**數分鐘**，不是數秒。若 PR 5 傳入 sleep 上限
+   （60s）卻讓一輪 block 三分鐘，這道檢查會放行，然後在決策途中被交易所掃單。因此
+   **§18.2 對 PR 5 的硬性要求：kill switch 必須在決策 cycle *內部*（或由獨立的
+   refresher）刷新，不能只在 loop 頂端刷新**；傳進來的必須是真實的最壞 tick 間隔。
 3. 若刷新失敗，必須進入 safe mode。解除 safe mode 只有一個入口：
    `release_safe_mode()`（§13.4 呼叫），它必須**同時**清掉 sticky latch 與重開
    §4.1 gate——只清 latch 會讓 gate 一直關到下次成功刷新，只開 gate 會被下次

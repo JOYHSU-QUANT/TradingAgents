@@ -687,14 +687,13 @@ class LiveOrderSubmitter:
 
 
 # The exchange's order-status vocabulary mapped to the local orders.status
-# column. The documented set is enumerated EXACTLY — a heuristic must never
-# stand in for a known, closed vocabulary (iocCancelRejected contains both
-# "cancel" and "reject"; only the exact entry can classify it reliably). The
-# substring fallback below covers only words the docs gain after this list;
-# truly unknown statuses map to 'open' WITH a warning: overstating liveness
-# is the conservative direction (an 'open' order keeps being watched and
-# reconciled — PR 4 owns the exhaustive treatment), whereas guessing terminal
-# would silently stop managing a possibly-live order.
+# column. The documented set is enumerated EXACTLY, and it is the ONLY thing
+# that classifies a status: a heuristic must never stand in for a known, closed
+# vocabulary (iocCancelRejected contains both "cancel" and "reject"; only the
+# exact entry can classify it reliably). Anything not in this table is a word
+# the exchange gained after it was written — and every guess about such a word
+# is unsafe in one direction or another, so we make none. See
+# _local_status_for_exchange_status.
 _EXCHANGE_TO_LOCAL_STATUS = {
     # Live on the book (a fired trigger order is a live order).
     "open": "open",
@@ -735,49 +734,38 @@ _EXCHANGE_TO_LOCAL_STATUS = {
 def _local_status_for_exchange_status(exchange_status: str) -> str:
     """Map an exchange status word to the local orders.status vocabulary.
 
-    The exact table above is the AUTHORITY — it carries Hyperliquid's full
-    documented vocabulary, including every ...Rejected word. Below it sits a
-    substring fallback for words the exchange may add later, and that fallback
-    obeys one rule: **it may never produce "rejected"**.
+    The exact table is the ONLY authority. A word it does not carry is recorded
+    as "open" with a warning and left for PR 4's reconciliation to settle
+    against the exchange — we never guess, in any direction, because every
+    guess about an unknown word is unsafe in some direction:
 
-    "rejected" is not just a label here. It becomes SubmitOutcomeKind.REJECTED,
-    which under §8.3 rule 9 LICENSES the caller to mint a brand-new logical
-    order. Guessing it from a substring means a future status word that merely
-    contains "reject" — attached to an order that is actually resting — mints a
-    second cloid for a live position. That is the same "a partial status test
-    drives a safety verdict" bug class as the §8.3 rule-10 resend guard, and it
-    is the one direction where guessing wrong costs real money.
+    - Guessing **"rejected"** is the expensive one. It becomes
+      SubmitOutcomeKind.REJECTED, which under §8.3 rule 9 LICENSES the caller to
+      mint a brand-new logical order — so a future word merely CONTAINING
+      "reject", attached to an order that is actually resting, mints a second
+      cloid for a live position.
+    - Guessing a **terminal** status ("canceled"/"filled") silently stops us
+      managing an order that may still be live: a word like ``cancelRequested``
+      (cancel in flight, order still resting) would be booked as canceled, and a
+      later fill would land against a locally-canceled order.
 
-    So an unrecognised word is treated exactly like a fully unknown one:
-    recorded as "open" with a warning, left for PR 4's reconciliation to settle
-    against the exchange. Overstating LIVENESS is recoverable (reconciliation
-    closes it); overstating REJECTION mints cloids. The remaining substring arms
-    are safe in that direction — neither "canceled" nor "filled" authorises a
-    resend — and stay as a best-effort convenience.
+    Both are the same bug class as the §8.3 rule-10 resend guard — a partial
+    status test driving a safety verdict — and the table already enumerates
+    Hyperliquid's complete documented vocabulary, so a heuristic buys nothing
+    on the words that matter and only ever fires where it is least trustworthy.
+
+    Recording an unknown word as "open" is the one conservative reading:
+    overstating LIVENESS is recoverable (the order keeps being watched, and
+    reconciliation closes it), while overstating rejection mints cloids and
+    overstating settlement abandons live orders.
     """
     mapped = _EXCHANGE_TO_LOCAL_STATUS.get(exchange_status)
     if mapped is not None:
         return mapped
-    lowered = exchange_status.lower()
-    # Deliberately checked BEFORE "cancel": a new word carrying both (the
-    # documented iocCancelRejected is the existing example) is a placement
-    # rejection, not a cancel — but it still falls open to "open" below rather
-    # than being guessed into the resend-authorising verdict.
-    if "reject" in lowered:
-        logger.warning(
-            "unrecognised exchange order status %r looks like a rejection, but a "
-            "guessed rejection would license a NEW order for a possibly-live one — "
-            "recording as 'open' until reconciliation resolves it",
-            exchange_status,
-        )
-        return "open"
-    if "cancel" in lowered:
-        return "canceled"
-    if "filled" in lowered:
-        return "filled"
     logger.warning(
-        "unknown exchange order status %r — recording the order as 'open' "
-        "until reconciliation resolves it",
+        "unknown exchange order status %r — recording the order as 'open' until "
+        "reconciliation resolves it (guessing from the word would risk either a "
+        "double order or an abandoned live one)",
         exchange_status,
     )
     return "open"

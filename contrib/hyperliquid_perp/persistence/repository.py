@@ -28,9 +28,12 @@ from .ids import _canonical_instant
 from .models import DECIMAL_CONTEXT, AccountLedger, PositionState, Side
 
 __all__ = [
+    "ACCOUNTING_ADJUSTMENT_TYPES",
     "EXCHANGE_KNOWN_ATTEMPT_STATUSES",
     "KILL_SWITCH_EVENT_TYPES",
+    "LIVE_LIQUIDITY_ROLES",
     "find_in_progress_attempt",
+    "get_accounting_adjustment_event",
     "get_all_current_positions",
     "get_cloid_by_hex",
     "get_cloid_by_logical",
@@ -38,10 +41,13 @@ __all__ = [
     "get_current_position",
     "get_decision_attempt",
     "get_execution_plan",
+    "get_fill",
+    "get_fill_by_exchange_key",
     "get_funding_event",
     "get_live_order_attempt",
     "get_order",
     "get_order_by_cloid_hex",
+    "get_order_by_exchange_order_id",
     "get_position_protection",
     "get_run",
     "get_run_seed_positions",
@@ -49,6 +55,7 @@ __all__ = [
     "has_exchange_known_cloid",
     "has_place_attempt",
     "insert_account_snapshot",
+    "insert_accounting_adjustment_event",
     "insert_ai_input",
     "insert_ai_output",
     "insert_cloid_mapping",
@@ -57,15 +64,18 @@ __all__ = [
     "insert_fill",
     "insert_funding_event",
     "insert_kill_switch_event",
+    "insert_live_fill",
     "insert_live_order_attempt",
     "insert_order",
     "insert_position_snapshot",
     "insert_run",
     "insert_run_seed_position",
+    "iter_accounting_adjustment_events",
     "iter_execution_plans",
     "iter_fills",
     "iter_funding_events",
     "iter_kill_switch_events",
+    "iter_live_fills",
     "iter_live_order_attempts",
     "iter_orders",
     "max_engine_seq",
@@ -87,6 +97,16 @@ __all__ = [
 # writers land in PR3).
 _MODES = frozenset({"paper", "live"})
 _LIQUIDITY_TYPES = frozenset({"maker", "taker", "simulated"})
+# §14 live fills: the exchange marks each fill maker or taker (``crossed``); a
+# simulated paper fill has no exchange liquidity role, so "simulated" is NOT a
+# member here — a live fill must land on one of the two real roles.
+LIVE_LIQUIDITY_ROLES = frozenset({"maker", "taker"})
+# §15 accounting corrections: a backfilled fee, funding, or realized-PnL amount
+# is an explicit adjustment event, never a silent overwrite of the recorded
+# fill/funding row. Live replay FOLDS these deltas (accounting.replay), so the
+# vocabulary is the fold's contract — a type not listed here has no defined
+# ledger effect and is rejected at the write boundary.
+ACCOUNTING_ADJUSTMENT_TYPES = frozenset({"fee", "funding", "realized_pnl"})
 _FLIP_LEGS = frozenset({"open", "close"})
 _FUNDING_STATUSES = frozenset({"pending", "posted"})
 # phase2-data §10 funding provenance vocabulary.
@@ -555,6 +575,169 @@ def insert_fill(
 def iter_fills(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
     """All fills for a run in insertion (chronological) order — the replay input."""
     return conn.execute("SELECT * FROM fills WHERE run_id = ? ORDER BY rowid", (run_id,)).fetchall()
+
+
+def get_fill(conn: sqlite3.Connection, fill_id: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM fills WHERE fill_id = ?", (fill_id,)).fetchone()
+
+
+def get_fill_by_exchange_key(
+    conn: sqlite3.Connection, exchange_fill_key: str
+) -> sqlite3.Row | None:
+    """The live fill row a §14.2 dedupe key belongs to, or ``None``.
+
+    ``exchange_fill_key`` is UNIQUE (schema v6), so at most one row matches — the
+    exactly-once guard :func:`insert_live_fill` leans on. A caller uses this to
+    tell "already applied" (skip) from "new" without depending on catching the
+    IntegrityError, which is the same fact but only observable mid-transaction.
+    """
+    return conn.execute(
+        "SELECT * FROM fills WHERE exchange_fill_key = ?", (exchange_fill_key,)
+    ).fetchone()
+
+
+def insert_live_fill(
+    conn: sqlite3.Connection,
+    *,
+    fill_id: str,
+    run_id: str,
+    order_id: str,
+    symbol: str,
+    side: str,
+    fill_qty: Decimal,
+    fill_price: Decimal,
+    fill_notional: Decimal,
+    exchange_fill_key: str,
+    exchange_closed_pnl: Decimal,
+    liquidity_role: str,
+    exchange_fee: Decimal | None = None,
+    exchange_fill_id: str | None = None,
+    exchange_order_id: str | None = None,
+    cloid_logical: str | None = None,
+    cloid_hex: str | None = None,
+    exchange_fill_time: datetime | None = None,
+    plan_id: str | None = None,
+    flip_leg: str | None = None,
+    slice_index: int | None = None,
+    fill_reason: str | None = None,
+    raw_exchange_payload_path: str | None = None,
+    timestamp: datetime | None = None,
+) -> None:
+    """Insert one live (exchange-sourced) fill. Raises ``IntegrityError`` on a duplicate key.
+
+    The UNIQUE ``exchange_fill_key`` (§14.2 — the ``tid``, or the composite
+    fallback) is the §14.3-rule-1 exactly-once guard: the SAME exchange fill
+    arriving again from any of the three sources (WS userFills, REST
+    userFillsByTime, orderStatus) is rejected here instead of double-posting.
+
+    Unlike :func:`insert_fill` (the paper simulation), a live fill's money is
+    exchange-authoritative (§15): ``realized_pnl_delta`` is the exchange's
+    ``closedPnl`` and the posted ``fee`` is the exchange's ``fee`` — NOT the
+    paper ``fill_notional * fee_rate`` model, so the ``fee == notional * rate``
+    identity :func:`insert_fill` enforces deliberately does NOT apply here (the
+    effective ``fee_rate`` is stored derived-for-display only). ``fill_notional``
+    is still checked against ``|qty * price|`` — that identity is pure and holds
+    for any fill.
+
+    ``exchange_fee`` is ``None`` when the fill arrived without a fee (§15.1 rule
+    2 — fee pending): the row records it AS-RECORDED and the posted ``fee`` column
+    is ``0``. The later correction is an ``accounting_adjustment_events`` row
+    (never an overwrite of this immutable fill), which live replay folds — so the
+    recorded fill and its corrections together are the single accounting basis.
+    """
+    side = Side.parse(side)
+    check_enum(liquidity_role, LIVE_LIQUIDITY_ROLES, name="liquidity_role")
+    if flip_leg is not None:
+        check_enum(flip_leg, _FLIP_LEGS, name="flip_leg")
+    if not exchange_fill_key:
+        raise ValueError("a live fill must carry a non-empty exchange_fill_key (§14.2)")
+    if (cloid_logical is None) != (cloid_hex is None):
+        raise ValueError(
+            "cloid_logical and cloid_hex must be provided together (the §8.2 "
+            "two-layer id is one unit)"
+        )
+    with localcontext(DECIMAL_CONTEXT):  # round exactly like the producing math
+        expected_notional = abs(fill_qty * fill_price)
+        if fill_notional != expected_notional:
+            raise ValueError(
+                f"fill_notional {fill_notional} != |fill_qty * fill_price| {expected_notional}"
+            )
+        # The posted fee is the exchange's fee, or 0 while it is pending (§15.1).
+        # fee_rate is display-only for a live fill (the exchange fee is not a
+        # modelled rate) — derived so the CSV export column is populated, never
+        # re-derived by replay.
+        posted_fee = Decimal(0) if exchange_fee is None else exchange_fee
+        fee_rate = Decimal(0) if fill_notional == 0 else posted_fee / fill_notional
+    _insert(
+        conn,
+        "fills",
+        {
+            "fill_id": fill_id,
+            "timestamp": timestamp or datetime.now(timezone.utc),
+            "mode": "live",
+            "run_id": run_id,
+            "order_id": order_id,
+            "slice_id": None,
+            "plan_id": plan_id,
+            "flip_leg": flip_leg,
+            "slice_index": slice_index,
+            "exchange_fill_id": exchange_fill_id,
+            "exchange_order_id": exchange_order_id,
+            "symbol": symbol,
+            "side": side.value,
+            "fill_qty": fill_qty,
+            "fill_price": fill_price,
+            "fill_notional": fill_notional,
+            "fee": posted_fee,
+            "fee_rate": fee_rate,
+            "realized_pnl_delta": exchange_closed_pnl,
+            "liquidity_type": liquidity_role,
+            "fill_reason": fill_reason,
+            "exchange_fill_key": exchange_fill_key,
+            "cloid_logical": cloid_logical,
+            "cloid_hex": cloid_hex,
+            "liquidity_role": liquidity_role,
+            # AS-RECORDED: None means the fee was pending at ingest — kept as-is
+            # (the correction is an adjustment event, never an overwrite).
+            "exchange_fee": exchange_fee,
+            "exchange_closed_pnl": exchange_closed_pnl,
+            "exchange_fill_time": exchange_fill_time,
+            "raw_exchange_payload_path": raw_exchange_payload_path,
+        },
+    )
+
+
+def iter_live_fills(
+    conn: sqlite3.Connection, run_id: str, *, pending_fee_only: bool = False
+) -> list[sqlite3.Row]:
+    """A run's live fills in insertion order; optionally only fee-pending ones.
+
+    ``pending_fee_only`` selects the §15.1-rule-3 backlog a reconciliation job
+    must clear: fills whose fee was pending at ingest (``exchange_fee`` NULL) AND
+    have no fee correction yet. The recorded fill is immutable, so a backfilled
+    fee lives only in an ``accounting_adjustment_events`` row (§15.1 rule 5, never
+    an overwrite) — without the NOT EXISTS clause an already-corrected fill would
+    reappear as pending forever and the job would re-post it every pass (the
+    adjustment id dedupe blocks the double-post, but the churn is real).
+    ``mode = 'live'`` guards against a mixed-mode store, though a run is
+    single-mode by construction.
+    """
+    if pending_fee_only:
+        return conn.execute(
+            "SELECT * FROM fills f WHERE f.run_id = ? AND f.mode = 'live' "
+            "AND f.exchange_fill_key IS NOT NULL AND f.exchange_fee IS NULL "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM accounting_adjustment_events a "
+            "  WHERE a.run_id = f.run_id AND a.target_table = 'fills' "
+            "  AND a.target_id = f.fill_id AND a.adjustment_type = 'fee'"
+            ") ORDER BY f.rowid",
+            (run_id,),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM fills WHERE run_id = ? AND mode = 'live' "
+        "AND exchange_fill_key IS NOT NULL ORDER BY rowid",
+        (run_id,),
+    ).fetchall()
 
 
 # --------------------------------------------------------------------------
@@ -1146,6 +1329,30 @@ def get_order_by_cloid_hex(conn: sqlite3.Connection, cloid_hex: str) -> sqlite3.
     if len(rows) > 1:
         ids = ", ".join(r["order_id"] for r in rows)
         raise ValueError(f"cloid_hex {cloid_hex!r} maps to {len(rows)} orders ({ids})")
+    return rows[0] if rows else None
+
+
+def get_order_by_exchange_order_id(
+    conn: sqlite3.Connection, exchange_order_id: str
+) -> sqlite3.Row | None:
+    """The local order row an exchange ``oid`` belongs to, or ``None`` (§14 mapping).
+
+    A live fill carries the exchange order id (``oid``) it settled, not our
+    ``order_id``; this is how the fill ingester resolves the fill to the bot
+    order that produced it (and thence its cloid / roles). The exchange assigns
+    one oid per order, so at most one row can match — fail loud if the store ever
+    contradicts that, matching :func:`get_order_by_cloid_hex`. No run filter: an
+    oid is globally unique at the exchange, and a later run may ingest a fill for
+    an order an earlier run placed.
+    """
+    rows = conn.execute(
+        "SELECT * FROM orders WHERE exchange_order_id = ?", (exchange_order_id,)
+    ).fetchall()
+    if len(rows) > 1:
+        ids = ", ".join(r["order_id"] for r in rows)
+        raise ValueError(
+            f"exchange_order_id {exchange_order_id!r} maps to {len(rows)} orders ({ids})"
+        )
     return rows[0] if rows else None
 
 
@@ -1890,4 +2097,81 @@ def insert_kill_switch_event(
 def iter_kill_switch_events(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT * FROM kill_switch_events WHERE run_id = ? ORDER BY event_id", (run_id,)
+    ).fetchall()
+
+
+# --------------------------------------------------------------------------
+# accounting_adjustment_events (phase3-spec §15 / §16.5)
+# --------------------------------------------------------------------------
+
+
+def insert_accounting_adjustment_event(
+    conn: sqlite3.Connection,
+    *,
+    adjustment_id: str,
+    run_id: str,
+    adjustment_type: str,
+    target_table: str | None = None,
+    target_id: str | None = None,
+    field: str | None = None,
+    old_value: Decimal | None = None,
+    new_value: Decimal | None = None,
+    reason: str | None = None,
+    source: str | None = None,
+    timestamp: datetime | None = None,
+) -> None:
+    """Record one §15 accounting correction. Raises ``IntegrityError`` on a duplicate id.
+
+    The deterministic ``adjustment_id`` (see :mod:`.ids`) makes a backfill
+    exactly-once: a reconciliation job that re-learns the same fee/funding
+    re-derives the same id and the PRIMARY KEY rejects the second write, so the
+    correction never posts to the wallet twice (the atomicity is the caller's —
+    the ledger delta and this insert share one transaction).
+
+    ``old_value`` / ``new_value`` are the correction's before/after amounts; live
+    replay folds ``new_value - old_value`` into the ledger per ``adjustment_type``
+    (fee reduces the wallet, funding / realized_pnl move it by their sign), so the
+    pair is load-bearing, not just descriptive.
+    """
+    check_enum(adjustment_type, ACCOUNTING_ADJUSTMENT_TYPES, name="adjustment_type")
+    _insert(
+        conn,
+        "accounting_adjustment_events",
+        {
+            "adjustment_id": adjustment_id,
+            "run_id": run_id,
+            "timestamp": timestamp or datetime.now(timezone.utc),
+            "adjustment_type": adjustment_type,
+            "target_table": target_table,
+            "target_id": target_id,
+            "field": field,
+            "old_value": old_value,
+            "new_value": new_value,
+            "reason": reason,
+            "source": source,
+        },
+    )
+
+
+def get_accounting_adjustment_event(
+    conn: sqlite3.Connection, adjustment_id: str
+) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM accounting_adjustment_events WHERE adjustment_id = ?", (adjustment_id,)
+    ).fetchone()
+
+
+def iter_accounting_adjustment_events(
+    conn: sqlite3.Connection, run_id: str, *, target_id: str | None = None
+) -> list[sqlite3.Row]:
+    """A run's accounting adjustments in insertion order, optionally for one target."""
+    if target_id is None:
+        return conn.execute(
+            "SELECT * FROM accounting_adjustment_events WHERE run_id = ? ORDER BY rowid",
+            (run_id,),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM accounting_adjustment_events WHERE run_id = ? AND target_id = ? "
+        "ORDER BY rowid",
+        (run_id, target_id),
     ).fetchall()

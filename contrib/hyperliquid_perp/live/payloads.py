@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,19 @@ from ..persistence.repository import UNSET, Unset
 __all__ = ["payload_column", "write_raw_payload"]
 
 logger = logging.getLogger(__name__)
+
+# Anything outside this set is replaced in the FILENAME (not the recorded value).
+# A §14.2 fill dedupe key is a ``|``-joined composite ("tid|1", "fill|BTC|777|…"),
+# and ``|`` is an illegal path character on Windows — an unsanitised key would
+# make every live-fill payload write fail (silently, since the writer is
+# fail-soft), losing the very evidence §16.2 exists to keep. The path is only an
+# opaque handle stored on the row, so a lossy filename is fine; uniqueness still
+# comes from the timestamp suffix.
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _safe_key(key: str) -> str:
+    return _UNSAFE_FILENAME_CHARS.sub("_", key)
 
 
 def write_raw_payload(
@@ -47,7 +61,7 @@ def write_raw_payload(
     raised, because the exchange action this documents has already taken effect.
     """
     stamp = now.strftime("%Y%m%dT%H%M%S_%fZ")
-    path = payload_dir / f"{kind}-{key}-{stamp}.json"
+    path = payload_dir / f"{kind}-{_safe_key(key)}-{stamp}.json"
     try:
         payload_dir.mkdir(parents=True, exist_ok=True)
         # default=str keeps Decimal/datetime serialisable; TypeError and

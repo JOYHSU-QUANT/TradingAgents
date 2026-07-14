@@ -1,0 +1,352 @@
+"""WebSocket ingestion: a thread-safe queue + connection lifecycle (phase3-spec §11).
+
+The SDK's WebSocket manager delivers events on a background thread; this system
+keeps the Phase 2 single-threaded 30-second tick loop (§11.4). The bridge is
+:class:`LiveWsStream`: the WS callback does ONE thing — drop the raw event into a
+thread-safe queue (no SQLite, no business logic — §11.4 rule 1) — and the tick
+loop drains it, so SQLite stays single-writer and event order is deterministic.
+
+The stream also tracks the connection lifecycle the rest of §11 rests on:
+
+- ``mark_connected`` / ``mark_disconnected`` record transitions; every reconnect
+  (and the first connect) raises ``needs_backfill`` — §11.2 rule 5 / §11 startup:
+  a REST backfill must fill whatever the socket missed while it was down.
+- ``disconnected_for`` / ``is_stale`` expose how long the socket has been down;
+  past ``stale_after_seconds`` (default 300 — §11.2 rule 7) the run is stale and
+  PR 4's safe-mode state machine takes over. This module only reports the fact.
+
+:class:`WsConnectionSupervisor` drives (re)connection from the tick, matching the
+single-thread model: :meth:`ensure_connected` opens a connection when there is
+none (with a bounded backoff), and the socket layer calls :meth:`note_closed`
+when it drops. The ``connect`` seam (which builds the SDK Info and binds the
+subscriptions) is injected, so the policy is testable without a real socket.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+from collections import deque
+from collections.abc import Callable
+from datetime import datetime
+from typing import Any, Protocol
+
+from ..paper.clock import Clock, WallClock
+
+__all__ = [
+    "CLEARINGHOUSE_CHANNEL",
+    "ORDER_UPDATES_CHANNEL",
+    "USER_FILLS_CHANNEL",
+    "LiveWsStream",
+    "WsConnection",
+    "WsConnectionSupervisor",
+    "bind_user_subscriptions",
+    "user_stream_subscriptions",
+]
+
+logger = logging.getLogger(__name__)
+
+# §11.1 required streams. userFills is the accounting source PR 3 consumes;
+# orderUpdates and the clearinghouse (account state) stream are enqueued too but
+# their consumer is PR 4's reconciliation — PR 3 drains and ignores them so the
+# queue never grows unbounded while they wait for their owner.
+USER_FILLS_CHANNEL = "userFills"
+ORDER_UPDATES_CHANNEL = "orderUpdates"
+# webData2 carries clearinghouseState (the account/position snapshot) over WS;
+# the basic openOrders/user_state endpoints have no WS equivalent that includes it.
+CLEARINGHOUSE_CHANNEL = "webData2"
+
+# §11.2 rule 7: disconnected longer than this → the run is stale and PR 4 enters
+# recoverable safe mode. Named here (not only in the loop) so the WS layer and
+# the state machine agree on the threshold.
+DEFAULT_STALE_AFTER_SECONDS = 300.0
+
+
+class LiveWsStream:
+    """A thread-safe raw-event queue plus the §11 connection-state bookkeeping.
+
+    The WS callback thread only ever calls :meth:`enqueue`; the tick thread calls
+    :meth:`drain` and the lifecycle/query methods. One lock guards all mutable
+    state so the two threads never see a torn view.
+    """
+
+    def __init__(
+        self,
+        *,
+        stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
+        clock: Clock | None = None,
+    ) -> None:
+        if stale_after_seconds <= 0:
+            raise ValueError(f"stale_after_seconds must be > 0, got {stale_after_seconds}")
+        self._stale_after = stale_after_seconds
+        self._clock = clock or WallClock()
+        self._lock = threading.Lock()
+        self._events: deque[Any] = deque()
+        self._connected = False
+        # None until the first connect/disconnect gives a basis: a stream that
+        # has never connected is not "disconnected for N seconds" (there is no
+        # prior connection to have dropped), so disconnected_for reads 0 there.
+        self._disconnected_since: datetime | None = None
+        self._needs_backfill = False
+        self._last_event_at: datetime | None = None
+
+    def enqueue(self, event: Any) -> None:
+        """Append one raw WS event (the callback's ONLY job — §11.4 rule 1).
+
+        Runs on the SDK's background thread. It does not parse, touch SQLite, or
+        decide anything — parsing (which may fail — §11.3) happens on the tick
+        thread when the event is drained, so a malformed payload can never crash
+        the socket callback and drop the subscription.
+        """
+        with self._lock:
+            self._events.append(event)
+            self._last_event_at = self._clock.now()
+
+    def drain(self) -> list[Any]:
+        """Remove and return every queued event in arrival order (tick thread)."""
+        with self._lock:
+            drained = list(self._events)
+            self._events.clear()
+        return drained
+
+    def pending(self) -> int:
+        with self._lock:
+            return len(self._events)
+
+    def mark_connected(self) -> None:
+        """Record that the socket is (re)connected; always request a backfill.
+
+        Both the first connect (startup) and every reconnect must be followed by
+        a REST backfill (§11 startup / §11.2 rule 5): the socket cannot deliver
+        what happened before it was subscribed, so ``needs_backfill`` is raised on
+        every transition into connected and cleared by :meth:`mark_backfill_done`
+        once the backfill has actually run.
+
+        Takes no ``now``, deliberately — unlike :meth:`mark_disconnected`, which
+        anchors the disconnect clock, nothing here is timestamped. An accepted-
+        but-ignored ``now`` sitting next to a sibling that DOES record it invites
+        a maintainer to assume a "connected since" is being kept when it is not.
+        """
+        with self._lock:
+            self._connected = True
+            self._disconnected_since = None
+            self._needs_backfill = True
+
+    def mark_disconnected(self, now: datetime | None = None) -> None:
+        """Record that the socket has dropped; start the disconnect clock once.
+
+        Idempotent while already disconnected: the clock is anchored at the FIRST
+        drop, so repeated calls (a reconnect attempt that fails again) do not keep
+        resetting how long we have been down — otherwise the §11.2-rule-7 stale
+        threshold could never be reached under a flapping socket.
+        """
+        stamp = now or self._clock.now()
+        with self._lock:
+            self._connected = False
+            if self._disconnected_since is None:
+                self._disconnected_since = stamp
+
+    @property
+    def connected(self) -> bool:
+        with self._lock:
+            return self._connected
+
+    @property
+    def needs_backfill(self) -> bool:
+        with self._lock:
+            return self._needs_backfill
+
+    def mark_backfill_done(self) -> None:
+        """Clear the backfill request once the REST backfill has run (§11.2 rule 5)."""
+        with self._lock:
+            self._needs_backfill = False
+
+    def disconnected_for(self, now: datetime | None = None) -> float:
+        """Seconds the socket has been down; ``0`` while connected or never-connected."""
+        stamp = now or self._clock.now()
+        with self._lock:
+            if self._connected or self._disconnected_since is None:
+                return 0.0
+            return (stamp - self._disconnected_since).total_seconds()
+
+    def is_stale(self, now: datetime | None = None) -> bool:
+        """True once disconnected longer than ``stale_after_seconds`` (§11.2 rule 7).
+
+        The signal PR 4's state machine reads to enter recoverable safe mode; this
+        module only reports it, never acts on it.
+        """
+        return self.disconnected_for(now) > self._stale_after
+
+    def last_event_at(self) -> datetime | None:
+        with self._lock:
+            return self._last_event_at
+
+
+def user_stream_subscriptions(wallet_address: str) -> list[dict[str, Any]]:
+    """The §11.1 subscription payloads for one wallet.
+
+    ``userFills`` and the clearinghouse (``webData2``) stream are per-wallet;
+    ``orderUpdates`` is not (it multiplexes on the connection). Kept as one
+    function so the production binder and the tests subscribe to the same set.
+    """
+    return [
+        {"type": USER_FILLS_CHANNEL, "user": wallet_address},
+        {"type": ORDER_UPDATES_CHANNEL},
+        {"type": CLEARINGHOUSE_CHANNEL, "user": wallet_address},
+    ]
+
+
+class _WsSubscriber(Protocol):
+    """The SDK ``Info``'s subscribe surface — the only method the binder needs."""
+
+    def subscribe(self, subscription: dict[str, Any], callback: Callable[[Any], None]) -> int: ...
+
+
+def bind_user_subscriptions(
+    subscriber: _WsSubscriber, wallet_address: str, stream: LiveWsStream
+) -> list[int]:
+    """Register the §11.1 subscriptions so every event lands in ``stream``.
+
+    Each subscription's callback is ``stream.enqueue`` and nothing else (§11.4
+    rule 1). Returns the subscription ids the SDK assigns. Takes only the
+    ``subscribe`` surface (Protocol), so a test binds a fake and drives the
+    callbacks directly, no socket required.
+    """
+    return [
+        subscriber.subscribe(subscription, stream.enqueue)
+        for subscription in user_stream_subscriptions(wallet_address)
+    ]
+
+
+class WsConnection(Protocol):
+    """A live subscription handle — the supervisor only needs to close it."""
+
+    def close(self) -> None: ...
+
+
+class WsConnectionSupervisor:
+    """Tick-driven (re)connection for one WS stream (§11.2 rules 4–5).
+
+    Fits the single-thread tick model: :meth:`ensure_connected` is called each
+    tick and opens a connection whenever there is none, honouring a minimum
+    backoff so a hard-down endpoint is not hammered every 30 s. The socket layer
+    reports a drop through :meth:`note_closed`. ``connect`` — which builds the SDK
+    Info and binds the subscriptions to the stream — is injected, so the whole
+    policy is testable with a fake that can be made to fail or succeed.
+    """
+
+    def __init__(
+        self,
+        *,
+        connect: Callable[[], WsConnection],
+        stream: LiveWsStream,
+        clock: Clock | None = None,
+        reconnect_min_interval_seconds: float = 5.0,
+    ) -> None:
+        if reconnect_min_interval_seconds < 0:
+            raise ValueError("reconnect_min_interval_seconds must be >= 0")
+        self._connect = connect
+        self._stream = stream
+        self._clock = clock or WallClock()
+        self._min_interval = reconnect_min_interval_seconds
+        # This object is touched from BOTH threads — note_closed() runs on the
+        # SDK's socket thread (on_close / on_error) while ensure_connected() and
+        # close() run on the tick thread — so its state is locked, exactly like
+        # LiveWsStream's. The lock is never held across the connect() call (that
+        # is network I/O and would block the socket thread's close callback);
+        # instead a generation counter detects a close that raced the connect.
+        self._lock = threading.Lock()
+        self._handle: WsConnection | None = None
+        self._last_attempt_at: datetime | None = None
+        self._generation = 0
+
+    @property
+    def connected(self) -> bool:
+        with self._lock:
+            return self._handle is not None
+
+    def note_closed(self) -> None:
+        """The socket dropped (on_close / on_error). Mark disconnected, drop the handle.
+
+        Safe to call more than once — ``mark_disconnected`` anchors the disconnect
+        clock only on the first drop, so a close followed by a failed reconnect
+        does not reset how long the run has been stale.
+
+        Bumping the generation is what makes a close that lands DURING an
+        in-flight ``ensure_connected`` win: that connect will see the generation
+        has moved, discard the connection it just opened, and refuse to mark the
+        stream connected. Without it, the tick thread would overwrite this
+        disconnect with ``mark_connected`` and the stream would report a healthy
+        socket that is actually dead — silently defeating §11.2 rule 6 (no new
+        entries while down) and postponing rule 7's 5-minute stale detection.
+        """
+        with self._lock:
+            self._handle = None
+            self._generation += 1
+        self._stream.mark_disconnected(self._clock.now())
+
+    def ensure_connected(self) -> bool:
+        """Open a connection if there is none, respecting the backoff. Returns connected.
+
+        A connect failure marks the stream disconnected and returns False — the
+        caller keeps ticking (monitoring / protection stay live — §11.2 rule 6
+        blocks new ENTRIES while down, not the loop), and the next tick past the
+        backoff retries. A success marks the stream connected, which raises
+        ``needs_backfill`` for the caller to satisfy before trusting live data.
+        """
+        with self._lock:
+            if self._handle is not None:
+                return True
+            now = self._clock.now()
+            if (
+                self._last_attempt_at is not None
+                and (now - self._last_attempt_at).total_seconds() < self._min_interval
+            ):
+                return False  # backing off from the previous failed attempt
+            self._last_attempt_at = now
+            generation = self._generation
+
+        # Outside the lock: connect() is network I/O, and holding the lock across
+        # it would block the socket thread's note_closed().
+        try:
+            handle = self._connect()
+        except Exception as exc:  # noqa: BLE001 — any connect failure is "still down"
+            self._stream.mark_disconnected(now)
+            logger.warning("websocket connect failed: %s", exc)
+            return False
+
+        with self._lock:
+            superseded = self._generation != generation
+            if not superseded:
+                self._handle = handle
+        if superseded:
+            # A close landed while we were connecting: the socket we just opened
+            # is already stale. Drop it rather than claim a healthy connection —
+            # the disconnect note_closed() recorded must stand.
+            logger.warning("websocket connect superseded by a concurrent close; discarding it")
+            try:
+                handle.close()
+            except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+                logger.warning("discarding superseded websocket failed to close: %s", exc)
+            return False
+
+        self._stream.mark_connected()
+        logger.info("websocket connected")
+        return True
+
+    def close(self) -> None:
+        """Tear down the connection on shutdown; a close failure is logged, not raised."""
+        with self._lock:
+            handle = self._handle
+            self._handle = None
+            # Retire this generation too: a connect racing shutdown must not
+            # install a fresh handle on a supervisor we have just torn down.
+            self._generation += 1
+        if handle is None:
+            return
+        try:
+            handle.close()
+        except Exception as exc:  # noqa: BLE001 — shutdown teardown must not raise
+            logger.warning("websocket close failed: %s", exc)
+        finally:
+            self._stream.mark_disconnected(self._clock.now())

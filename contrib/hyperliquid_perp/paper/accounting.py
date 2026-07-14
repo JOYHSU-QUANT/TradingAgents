@@ -49,12 +49,15 @@ __all__ = [
     "AccountMetrics",
     "FillEffect",
     "FundingResult",
+    "LiveFillEffect",
     "PositionValuation",
     "ReplayResult",
     "account_equity",
+    "adjustment_ledger_delta",
     "apply_fill",
     "available_balance",
     "compute_fill_effect",
+    "compute_live_fill_effect",
     "effective_leverage",
     "fee_for_notional",
     "funding_pnl",
@@ -77,6 +80,16 @@ logger = logging.getLogger(__name__)
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _dec(value: object) -> Decimal | None:
+    """Decode a stored TEXT value back to Decimal; ``None`` stays ``None``.
+
+    A local twin of the repository's decoder, used by the live-replay branch to
+    read the exchange-basis columns (``exchange_fee``, adjustment ``old/new_value``)
+    without importing a private helper across the module boundary.
+    """
+    return None if value is None else Decimal(value)  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------------
@@ -248,6 +261,85 @@ def compute_fill_effect(
             fill_notional=fill_notional,
             wallet_delta=realized_delta - fee,
         )
+
+
+# --------------------------------------------------------------------------
+# Live fill effect (pure) — exchange-authoritative basis (phase3-spec §15)
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LiveFillEffect:
+    """The effect of one *live* (exchange-sourced) fill — money from the exchange.
+
+    The live counterpart of :class:`FillEffect`. Its size/entry transition is
+    identical (a fill moves a position the same way in either mode), but the
+    MONEY is not modelled: ``realized_pnl_delta`` is the exchange's ``closedPnl``
+    and ``fee`` is the exchange's ``fee`` as posted at ingest (``0`` while the fee
+    is still pending — §15.1). ``wallet_delta`` is ``realized_pnl_delta - fee``.
+
+    Unlike :class:`FillEffect`, ``fee`` is NOT constrained ``>= 0``: an exchange
+    fee is whatever the venue reported — a maker rebate is legitimately negative,
+    and a pending fill posts ``0``. Only the ``wallet_delta`` identity and a
+    non-negative notional are invariants a hand-built (test/recovery) instance
+    must still satisfy.
+    """
+
+    position: PositionState
+    realized_pnl_delta: Decimal
+    fee: Decimal
+    fill_notional: Decimal
+    wallet_delta: Decimal
+
+    def __post_init__(self) -> None:
+        if self.fill_notional < 0:
+            raise ValueError(f"LiveFillEffect.fill_notional must be >= 0, got {self.fill_notional}")
+        if self.wallet_delta != self.realized_pnl_delta - self.fee:
+            raise ValueError(
+                f"LiveFillEffect.wallet_delta {self.wallet_delta} != "
+                f"realized_pnl_delta - fee {self.realized_pnl_delta - self.fee}"
+            )
+
+
+def compute_live_fill_effect(
+    position: PositionState,
+    *,
+    side: Side | str,
+    qty: Decimal,
+    price: Decimal,
+    exchange_fee: Decimal,
+    exchange_closed_pnl: Decimal,
+) -> LiveFillEffect:
+    """Apply one exchange fill to ``position`` with the venue's fee / closedPnl (§15).
+
+    The size/entry transition reuses :func:`compute_fill_effect` verbatim (passing
+    ``fee_rate=0`` — its modelled fee/realized are discarded), so the two paths can
+    never disagree about how a fill moves a position. The realized PnL and fee then
+    come from the exchange, not the model: the returned position's ``realized_pnl``
+    advances by ``exchange_closed_pnl`` (not the computed delta), and the wallet
+    moves by ``exchange_closed_pnl - exchange_fee``.
+
+    ``exchange_fee`` is the amount POSTED for this fill (``0`` while a fee is
+    pending — the correction arrives later as an ``accounting_adjustment_events``
+    row that replay folds, never as a mutation of the recorded fill).
+    """
+    transition = compute_fill_effect(position, side=side, qty=qty, price=price, fee_rate=Decimal(0))
+    moved = transition.position
+    with localcontext(DECIMAL_CONTEXT):
+        new_position = PositionState(
+            coin=moved.coin,
+            size=moved.size,
+            entry_price=moved.entry_price,
+            realized_pnl=position.realized_pnl + exchange_closed_pnl,
+        )
+        wallet_delta = exchange_closed_pnl - exchange_fee
+    return LiveFillEffect(
+        position=new_position,
+        realized_pnl_delta=exchange_closed_pnl,
+        fee=exchange_fee,
+        fill_notional=transition.fill_notional,
+        wallet_delta=wallet_delta,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -802,8 +894,105 @@ def record_funding(
 
 
 # --------------------------------------------------------------------------
-# Accounting replay (spec §5)
+# Accounting replay (spec §5; live basis phase3-spec §15)
 # --------------------------------------------------------------------------
+
+
+def adjustment_ledger_delta(
+    adjustment_type: str,
+    old_value: Decimal | None,
+    new_value: Decimal | None,
+) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+    """The ``(wallet, realized, fees, funding)`` deltas one §15 correction folds.
+
+    A correction moves the ledger by ``new_value - old_value`` (a missing ``None``
+    reads as ``0`` — the amount before/after the correction), routed by type:
+
+    - ``fee`` — a learned/backfilled fee REDUCES the wallet and RAISES total fees;
+    - ``funding`` — a funding settlement moves the wallet and net funding by its
+      signed pnl;
+    - ``realized_pnl`` — a realized-PnL correction moves the wallet and realized.
+
+    This is the one definition of what an adjustment event *means* to the books,
+    shared by the wallet posting (``backfill_*`` in :mod:`...live.fills`) and by
+    live replay's fold below, so the two can never drift. Pinned to
+    ``DECIMAL_CONTEXT`` so the fold rounds exactly like the posting did.
+    """
+    check_enum(adjustment_type, repo.ACCOUNTING_ADJUSTMENT_TYPES, name="adjustment_type")
+    with localcontext(DECIMAL_CONTEXT):
+        delta = (Decimal(0) if new_value is None else new_value) - (
+            Decimal(0) if old_value is None else old_value
+        )
+        zero = Decimal(0)
+        if adjustment_type == "fee":
+            return (-delta, zero, delta, zero)
+        if adjustment_type == "funding":
+            return (delta, zero, zero, delta)
+        # realized_pnl
+        return (delta, delta, zero, zero)
+
+
+def _require_live_basis(fill: sqlite3.Row) -> Decimal:
+    """A live fill's exchange ``closedPnl`` — the §15 realized basis — or fail loud.
+
+    ``insert_live_fill`` always records ``exchange_closed_pnl`` (closedPnl arrives
+    with the fill; only the fee can be pending), so a NULL here means a fill was
+    written into a live run through a non-live path — replaying it against the
+    paper fee model would silently misstate the books. Refuse rather than guess.
+    """
+    value = fill["exchange_closed_pnl"]
+    if value is None:
+        raise ValueError(
+            f"live run fill {fill['fill_id']!r} has no exchange_closed_pnl — it was not "
+            "recorded through insert_live_fill; the live accounting basis is missing"
+        )
+    return Decimal(value)
+
+
+def _fold_posted_funding(
+    conn: sqlite3.Connection, run_id: str, *, wallet: Decimal, net_funding: Decimal
+) -> tuple[Decimal, Decimal]:
+    """Add every posted funding settlement to the running wallet / net funding.
+
+    Shared by both replay modes: funding is settled identically (a posted
+    ``funding_events`` row carries its full basis) whether the run is paper or
+    live, so the fold lives once here.
+    """
+    for event in repo.iter_funding_events(conn, run_id, status="posted"):
+        pnl = funding_pnl(
+            Decimal(event["position_size"]) * Decimal(event["mark_price"]),
+            Decimal(event["funding_rate"]),
+        )
+        wallet += pnl
+        net_funding += pnl
+    return wallet, net_funding
+
+
+def _fold_adjustments(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    wallet: Decimal,
+    realized: Decimal,
+    fees: Decimal,
+    net_funding: Decimal,
+) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+    """Fold every §15 accounting correction into the running ledger totals.
+
+    Live-only: the recorded fill / funding rows are immutable, so a fee or
+    funding learned after the fact lives ONLY in an ``accounting_adjustment_events``
+    row (§15.1 rule 5 — never a silent overwrite). Replay must therefore fold
+    these deltas to reproduce the materialized state a ``backfill_*`` call left.
+    """
+    for adj in repo.iter_accounting_adjustment_events(conn, run_id):
+        w, r, f, nf = adjustment_ledger_delta(
+            adj["adjustment_type"], _dec(adj["old_value"]), _dec(adj["new_value"])
+        )
+        wallet += w
+        realized += r
+        fees += f
+        net_funding += nf
+    return wallet, realized, fees, net_funding
 
 
 @dataclass(frozen=True)
@@ -891,32 +1080,55 @@ def replay_within(conn: sqlite3.Connection, *, run_id: str) -> ReplayResult:
         realized_total = Decimal(0)
         total_fees = Decimal(0)
 
+        # A run is single-mode (runs.mode), so which fill math to trust is a
+        # per-run choice, never a per-fill one: a paper run recomputes fee /
+        # realized from the modelled (side, qty, price, fee_rate); a live run
+        # takes them from the exchange as recorded on the fill (§15). Live also
+        # folds the §15 accounting adjustments, which paper never has.
+        live = run["mode"] == "live"
         for fill in repo.iter_fills(conn, run_id):
             symbol = fill["symbol"]
             current = positions.get(symbol) or PositionState.flat(symbol)
-            effect = compute_fill_effect(
-                current,
-                side=fill["side"],
-                qty=Decimal(fill["fill_qty"]),
-                price=Decimal(fill["fill_price"]),
-                fee_rate=Decimal(fill["fee_rate"]),
-            )
+            if live:
+                effect: FillEffect | LiveFillEffect = compute_live_fill_effect(
+                    current,
+                    side=fill["side"],
+                    qty=Decimal(fill["fill_qty"]),
+                    price=Decimal(fill["fill_price"]),
+                    # AS-RECORDED: a pending-fee fill posted 0 at ingest, and the
+                    # correction is a folded adjustment below — never read here.
+                    exchange_fee=_dec(fill["exchange_fee"]) or Decimal(0),
+                    exchange_closed_pnl=_require_live_basis(fill),
+                )
+            else:
+                effect = compute_fill_effect(
+                    current,
+                    side=fill["side"],
+                    qty=Decimal(fill["fill_qty"]),
+                    price=Decimal(fill["fill_price"]),
+                    fee_rate=Decimal(fill["fee_rate"]),
+                )
             positions[symbol] = effect.position
             wallet += effect.wallet_delta
             realized_total += effect.realized_pnl_delta
             total_fees += effect.fee
 
         net_funding = Decimal(0)
-        for event in repo.iter_funding_events(conn, run_id, status="posted"):
-            # From the stored settlement basis, symmetric with the fill
-            # loop above — the write boundary guarantees a posted row
-            # carries all three basis fields.
-            pnl = funding_pnl(
-                Decimal(event["position_size"]) * Decimal(event["mark_price"]),
-                Decimal(event["funding_rate"]),
+        # From the stored settlement basis, symmetric with the fill loop above —
+        # the write boundary guarantees a posted funding row carries all three
+        # basis fields. Same in both modes.
+        wallet, net_funding = _fold_posted_funding(
+            conn, run_id, wallet=wallet, net_funding=net_funding
+        )
+        if live:
+            wallet, realized_total, total_fees, net_funding = _fold_adjustments(
+                conn,
+                run_id,
+                wallet=wallet,
+                realized=realized_total,
+                fees=total_fees,
+                net_funding=net_funding,
             )
-            wallet += pnl
-            net_funding += pnl
 
     ledger = AccountLedger(
         wallet_balance=wallet,

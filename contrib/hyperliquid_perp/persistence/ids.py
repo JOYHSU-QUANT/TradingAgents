@@ -199,25 +199,40 @@ def live_fill_id(run_id: str, exchange_fill_key: str) -> str:
     return f"{_part(run_id, name='run_id')}{_SEP}livefill{_SEP}{exchange_fill_key}"
 
 
-def accounting_adjustment_id(run_id: str, adjustment_type: str, target_id: str) -> str:
+def accounting_adjustment_id(
+    run_id: str, adjustment_type: str, target_id: str, seq: int = 0
+) -> str:
     """Unique key for one §15 accounting correction (exactly-once backfill).
 
-    Keyed on the target being corrected (a fill id, a funding event id) and the
-    correction TYPE, so a reconciliation job that re-learns the same missing fee
-    or funding re-derives the same id and the PRIMARY KEY rejects the second
-    write — the correction posts to the wallet exactly once. One correction of
-    each type per target is the model: a fee learned once, a funding settled
-    once; a second, genuinely different correction of the same target is out of
-    scope (and would need a richer key), so this deliberately does not admit one.
+    Keyed on the target being corrected (a fill id, a funding event id), the
+    correction TYPE, and WHICH correction of that type it is: ``seq`` counts the
+    corrections already posted for that (target, type) — the first is ``0``, a
+    later and genuinely different one is ``1``, ``2``, …
 
-    ``target_id`` may itself be a ``|``-joined composite (a live ``fill_id`` is),
-    so — like ``live_fill_id`` — it is embedded VERBATIM as the trailing segment
-    rather than through ``_part``: the id is a PRIMARY KEY, never parsed, and the
-    fixed ``<run_id>|<type>|`` prefix keeps it unambiguous.
+    The sequence exists because a target can legitimately be corrected more than
+    once: a referral discount, a staking-tier rebate applied after the fact, an
+    exchange fee correction. Keyed on (target, type) alone, that second correction
+    would collide with the first on the PRIMARY KEY and be refused — which does not
+    merely lose the correction, it WEDGES the reconciliation job, which re-hits the
+    same target and fails again on every pass, forever.
+
+    Exactly-once is therefore no longer the id's job alone. The caller derives
+    ``seq`` from the corrections already recorded (see ``backfill_fill_fee``, which
+    counts them inside the posting transaction) and must treat a re-learned but
+    UNCHANGED amount as a no-op rather than as a new correction. What the id still
+    guarantees is that two writers racing to post the same sequence collide instead
+    of double-posting.
+
+    ``target_id`` may itself be a ``|``-joined composite (a live ``fill_id`` is), so
+    — as in ``live_fill_id`` — it is embedded VERBATIM as the TRAILING segment rather
+    than through ``_part``: the id is a PRIMARY KEY, never parsed back into fields,
+    and the fixed ``<run_id>|<type>|<seq>|`` prefix keeps it unambiguous. That is why
+    ``seq`` sits before it, not after.
     """
     return (
         f"{_part(run_id, name='run_id')}{_SEP}"
         f"{_part(adjustment_type, name='adjustment_type')}{_SEP}"
+        f"{_part(seq, name='seq')}{_SEP}"
         f"{_part_nonempty(target_id, name='target_id')}"
     )
 

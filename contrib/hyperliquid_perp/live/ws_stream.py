@@ -61,6 +61,16 @@ CLEARINGHOUSE_CHANNEL = "webData2"
 # the state machine agree on the threshold.
 DEFAULT_STALE_AFTER_SECONDS = 300.0
 
+# The other half of rule 7. A socket can fail WITHOUT ever reporting a close —
+# a half-open TCP connection (the usual outcome behind NAT / a load balancer)
+# leaves the SDK believing it is connected while nothing is delivered, so a
+# liveness test that only measures "how long have we been disconnected" reads a
+# dead feed as healthy forever and the bot keeps opening entries on a stale
+# position model. ``webData2`` pushes account state continuously, so silence on a
+# genuinely-open socket is unambiguous: past this many seconds with no event at
+# all, the connection is presumed dead even though it claims otherwise.
+DEFAULT_SILENT_AFTER_SECONDS = 120.0
+
 
 class LiveWsStream:
     """A thread-safe raw-event queue plus the §11 connection-state bookkeeping.
@@ -74,11 +84,15 @@ class LiveWsStream:
         self,
         *,
         stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
+        silent_after_seconds: float = DEFAULT_SILENT_AFTER_SECONDS,
         clock: Clock | None = None,
     ) -> None:
         if stale_after_seconds <= 0:
             raise ValueError(f"stale_after_seconds must be > 0, got {stale_after_seconds}")
+        if silent_after_seconds <= 0:
+            raise ValueError(f"silent_after_seconds must be > 0, got {silent_after_seconds}")
         self._stale_after = stale_after_seconds
+        self._silent_after = silent_after_seconds
         self._clock = clock or WallClock()
         self._lock = threading.Lock()
         self._events: deque[Any] = deque()
@@ -87,7 +101,9 @@ class LiveWsStream:
         # has never connected is not "disconnected for N seconds" (there is no
         # prior connection to have dropped), so disconnected_for reads 0 there.
         self._disconnected_since: datetime | None = None
+        self._connected_since: datetime | None = None
         self._needs_backfill = False
+        self._backfill_epoch = 0
         self._last_event_at: datetime | None = None
 
     def enqueue(self, event: Any) -> None:
@@ -113,24 +129,33 @@ class LiveWsStream:
         with self._lock:
             return len(self._events)
 
-    def mark_connected(self) -> None:
+    def mark_connected(self, now: datetime | None = None) -> None:
         """Record that the socket is (re)connected; always request a backfill.
 
         Both the first connect (startup) and every reconnect must be followed by
         a REST backfill (§11 startup / §11.2 rule 5): the socket cannot deliver
-        what happened before it was subscribed, so ``needs_backfill`` is raised on
-        every transition into connected and cleared by :meth:`mark_backfill_done`
-        once the backfill has actually run.
+        what happened before it was subscribed, so a backfill request is raised on
+        every transition into connected, and :meth:`mark_backfill_done` clears
+        only the request whose backfill actually ran.
 
-        Takes no ``now``, deliberately — unlike :meth:`mark_disconnected`, which
-        anchors the disconnect clock, nothing here is timestamped. An accepted-
-        but-ignored ``now`` sitting next to a sibling that DOES record it invites
-        a maintainer to assume a "connected since" is being kept when it is not.
+        ``now`` anchors the connect clock, which is the silence baseline until the
+        first event arrives: a socket that connects and then delivers nothing has
+        no ``last_event_at`` to measure against, and without a "connected since"
+        the half-open case (see :meth:`is_stale`) would stay invisible for as long
+        as the socket sat silently open.
         """
+        stamp = now or self._clock.now()
         with self._lock:
             self._connected = True
+            self._connected_since = stamp
             self._disconnected_since = None
             self._needs_backfill = True
+            # Every transition into connected is a DISTINCT backfill request — it
+            # has its own gap to close. The epoch names it, so a backfill that was
+            # already in flight when the socket dropped and came back cannot clear
+            # the request the newer reconnect raised, whose gap its window never
+            # covered (see :meth:`mark_backfill_done`).
+            self._backfill_epoch += 1
 
     def mark_disconnected(self, now: datetime | None = None) -> None:
         """Record that the socket has dropped; start the disconnect clock once.
@@ -156,10 +181,29 @@ class LiveWsStream:
         with self._lock:
             return self._needs_backfill
 
-    def mark_backfill_done(self) -> None:
-        """Clear the backfill request once the REST backfill has run (§11.2 rule 5)."""
+    def backfill_epoch(self) -> int:
+        """Which backfill request is currently outstanding (see :meth:`mark_backfill_done`)."""
         with self._lock:
+            return self._backfill_epoch
+
+    def mark_backfill_done(self, epoch: int) -> bool:
+        """Clear the backfill request ``epoch`` once ITS backfill has run (§11.2 rule 5).
+
+        Read the epoch, run the backfill, then clear with the epoch you read —
+        never unconditionally. The REST fetch is a network round-trip, and the
+        socket can drop and reconnect while it is in flight; that reconnect raises
+        a NEW request, for a gap the in-flight window closed before it existed.
+        An unconditional clear would retire that newer request too, and the fills
+        from the second outage would land in neither the socket (it was down) nor
+        any REST window (the request that would have fetched them was cleared) —
+        a silently short ledger. Returns False when the request has been superseded,
+        which means: run another backfill.
+        """
+        with self._lock:
+            if epoch != self._backfill_epoch:
+                return False
             self._needs_backfill = False
+            return True
 
     def disconnected_for(self, now: datetime | None = None) -> float:
         """Seconds the socket has been down; ``0`` while connected or never-connected."""
@@ -169,13 +213,43 @@ class LiveWsStream:
                 return 0.0
             return (stamp - self._disconnected_since).total_seconds()
 
+    def silent_for(self, now: datetime | None = None) -> float:
+        """Seconds since the last event on a socket that CLAIMS to be connected.
+
+        Measured from the last event, or — before any event has arrived — from the
+        connect itself, so a socket that comes up and immediately goes quiet is not
+        given an infinite grace period. Reads ``0`` while disconnected: that case is
+        :meth:`disconnected_for`'s, and reporting both would double-count one outage.
+        """
+        stamp = now or self._clock.now()
+        with self._lock:
+            if not self._connected:
+                return 0.0
+            since = self._last_event_at or self._connected_since
+            if since is None:
+                return 0.0
+            return (stamp - since).total_seconds()
+
     def is_stale(self, now: datetime | None = None) -> bool:
-        """True once disconnected longer than ``stale_after_seconds`` (§11.2 rule 7).
+        """True once the feed cannot be trusted — §11.2 rule 7, both ways it fails.
+
+        A socket fails in two shapes, and only one of them announces itself:
+
+        - it CLOSES — ``disconnected_for`` passes ``stale_after_seconds`` (300);
+        - it goes SILENT while still claiming to be open — a half-open TCP
+          connection, the usual outcome behind NAT or a load balancer. Nothing
+          calls ``note_closed``, ``_connected`` stays True, and a liveness test
+          that only measured downtime would read a dead feed as healthy forever.
+          ``webData2`` pushes account state continuously, so silence past
+          ``silent_after_seconds`` is unambiguous.
 
         The signal PR 4's state machine reads to enter recoverable safe mode; this
         module only reports it, never acts on it.
         """
-        return self.disconnected_for(now) > self._stale_after
+        return (
+            self.disconnected_for(now) > self._stale_after
+            or self.silent_for(now) > self._silent_after
+        )
 
     def last_event_at(self) -> datetime | None:
         with self._lock:
@@ -279,11 +353,14 @@ class WsConnectionSupervisor:
         disconnect with ``mark_connected`` and the stream would report a healthy
         socket that is actually dead — silently defeating §11.2 rule 6 (no new
         entries while down) and postponing rule 7's 5-minute stale detection.
+
+        The stream transition is published INSIDE the lock, with the handle drop
+        and the generation bump — see :meth:`ensure_connected`.
         """
         with self._lock:
             self._handle = None
             self._generation += 1
-        self._stream.mark_disconnected(self._clock.now())
+            self._stream.mark_disconnected(self._clock.now())
 
     def ensure_connected(self) -> bool:
         """Open a connection if there is none, respecting the backoff. Returns connected.
@@ -325,6 +402,22 @@ class WsConnectionSupervisor:
             superseded = self._generation != generation or self._handle is not None
             if not superseded:
                 self._handle = handle
+                # Publish the stream transition HERE, under the same lock that
+                # installed the handle — not after releasing it. The supervisor's
+                # handle/generation and the stream's connected flag describe one
+                # fact and must move as one unit: a note_closed() landing in the
+                # gap between them would drop the handle, bump the generation and
+                # mark the stream disconnected, and then this call would overwrite
+                # that with "connected" — leaving a stream that reports a healthy
+                # socket the supervisor no longer holds, with the disconnect clock
+                # reset so rule 7's stale trip never accumulates. (The mirror case
+                # is worse: publishing note_closed's mark_disconnected outside the
+                # lock let a connect that started AFTER the generation bump install
+                # a live handle and then be overwritten by the late disconnect —
+                # every later tick short-circuits on ``_handle is not None``, so the
+                # stream stayed permanently "disconnected" on a working socket and
+                # the run sat in safe mode forever.)
+                self._stream.mark_connected(now)
         if superseded:
             # A close landed while we were connecting: the socket we just opened
             # is already stale. Drop it rather than claim a healthy connection —
@@ -336,7 +429,6 @@ class WsConnectionSupervisor:
                 logger.warning("discarding superseded websocket failed to close: %s", exc)
             return False
 
-        self._stream.mark_connected()
         logger.info("websocket connected")
         return True
 
@@ -348,11 +440,13 @@ class WsConnectionSupervisor:
             # Retire this generation too: a connect racing shutdown must not
             # install a fresh handle on a supervisor we have just torn down.
             self._generation += 1
+            # Published under the lock, with the handle drop and the generation bump,
+            # exactly as in note_closed() / ensure_connected() — the supervisor's
+            # state and the stream's flag describe one fact and move as one unit.
+            self._stream.mark_disconnected(self._clock.now())
         if handle is None:
             return
         try:
             handle.close()
         except Exception as exc:  # noqa: BLE001 — shutdown teardown must not raise
             logger.warning("websocket close failed: %s", exc)
-        finally:
-            self._stream.mark_disconnected(self._clock.now())

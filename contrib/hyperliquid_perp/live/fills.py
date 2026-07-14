@@ -44,7 +44,11 @@ from typing import Any
 
 from ..exchanges.hyperliquid.errors import MalformedResponseError
 from ..exchanges.hyperliquid.mapper import require_decimal
-from ..paper.accounting import LiveFillEffect, compute_live_fill_effect
+from ..paper.accounting import (
+    LiveFillEffect,
+    adjustment_ledger_delta,
+    compute_live_fill_effect,
+)
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
 from ..persistence.db import Database
@@ -156,6 +160,16 @@ class ExchangeFill:
 
         The raised error routes the WS/REST layer to record the raw payload and
         skip application (§11.3) — never to apply a fill it could not fully read.
+
+        EVERY rejection of an exchange payload leaves here as ``MalformedResponseError``
+        and nothing else. The §11.3 skip-one-and-continue handler keys on that class,
+        so a rejection raised as anything else — a bare ``ValueError`` from a
+        constructor invariant or from an id helper — would escape that handler and
+        abort the whole batch: on the WS path the already-drained siblings are lost,
+        and on the REST path the same fill re-arrives in every window and wedges the
+        backfill forever. The value checks below therefore run BEFORE the constructor,
+        and the construction itself is wrapped, so the two exception vocabularies
+        cannot drift apart again.
         """
         if not isinstance(raw, dict):
             raise MalformedResponseError(f"fill payload is not a dict: {raw!r}")
@@ -188,25 +202,48 @@ class ExchangeFill:
         # payload and the fill is NOT applied, surfacing for reconciliation
         # instead of being miscounted.
         tid = _require(raw, "tid")
+        if str(tid) == "":
+            raise MalformedResponseError(f"fill 'tid' must be non-empty (§14.2): {raw!r}")
+
+        # The fill math assumes a strictly positive size and price. The exchange
+        # should never send otherwise, but a zero/negative one is a PAYLOAD defect,
+        # not an impossible internal state — so it is rejected in the malformed
+        # vocabulary (recorded + skipped), not as the ValueError the constructor
+        # invariant below would raise. See the class docstring: a ValueError here
+        # would escape §11.3 and take the whole batch down with it.
+        if qty <= 0:
+            raise MalformedResponseError(f"fill 'sz' must be > 0, got {qty}: {raw!r}")
+        if price <= 0:
+            raise MalformedResponseError(f"fill 'px' must be > 0, got {price}: {raw!r}")
+
         fee = _parse_optional_fee(raw)
-        key = exchange_fill_key(tid=tid)
         with localcontext(DECIMAL_CONTEXT):
             fill_notional = abs(qty * price)
-        return cls(
-            coin=coin,
-            side=Side.parse(_HL_SIDE[raw_side]),
-            qty=qty,
-            price=price,
-            closed_pnl=closed_pnl,
-            fee=fee,
-            liquidity_role=liquidity_role,
-            exchange_order_id=exchange_order_id,
-            exchange_fill_id=None if tid is None else str(tid),
-            fill_time=fill_time,
-            fill_notional=fill_notional,
-            exchange_fill_key=key,
-            raw=raw,
-        )
+        try:
+            key = exchange_fill_key(tid=tid)
+            return cls(
+                coin=coin,
+                side=Side.parse(_HL_SIDE[raw_side]),
+                qty=qty,
+                price=price,
+                closed_pnl=closed_pnl,
+                fee=fee,
+                liquidity_role=liquidity_role,
+                exchange_order_id=exchange_order_id,
+                exchange_fill_id=str(tid),
+                fill_time=fill_time,
+                fill_notional=fill_notional,
+                exchange_fill_key=key,
+                raw=raw,
+            )
+        except ValueError as exc:
+            # Backstop, so the two exception vocabularies cannot drift apart again:
+            # every check above already rejects in the malformed vocabulary, but a
+            # future invariant added to __post_init__ (or to an id helper) would
+            # otherwise silently re-open the §11.3 escape hatch this guards.
+            raise MalformedResponseError(
+                f"fill payload violates a fill invariant: {raw!r}"
+            ) from exc
 
 
 # --------------------------------------------------------------------------
@@ -255,7 +292,7 @@ def apply_live_fill(
     position = repo.get_current_position(conn, run_id, fill.coin) or PositionState.flat(fill.coin)
     ledger = _require_ledger(conn, run_id)
 
-    posted_fee = Decimal(0) if fill.fee is None else fill.fee
+    posted_fee = repo.posted_exchange_fee(fill.fee)
     effect = compute_live_fill_effect(
         position,
         side=fill.side,
@@ -358,15 +395,38 @@ def post_live_fill(
 class BackfillOutcome(str, Enum):
     """The verdict of one :func:`backfill_fill_fee` call."""
 
-    POSTED = "posted"  # the fee was learned and posted for the first time
-    ALREADY_POSTED = "already_posted"  # a prior backfill already posted it (no-op)
+    POSTED = "posted"  # the fee moved: a correction was recorded and the wallet moved
+    ALREADY_POSTED = "already_posted"  # the books already carry this fee — no-op
 
 
 @dataclass(frozen=True)
 class BackfillResult:
+    """What the books now say — never merely what the caller asked for.
+
+    ``fee`` is the fee EFFECTIVE on the fill after this call, and ``adjustment_id``
+    is the correction this call recorded (``None`` on a no-op that recorded none).
+    On ``ALREADY_POSTED`` these describe what was already there, so a caller that
+    logs the result cannot report an amount the ledger never took.
+    """
+
     outcome: BackfillOutcome
-    adjustment_id: str
+    adjustment_id: str | None
     fee: Decimal
+
+
+def _effective_fee(fill_row: sqlite3.Row, fee_adjustments: list[sqlite3.Row]) -> Decimal:
+    """The fee currently effective on a fill: as ingested, plus every correction.
+
+    A pending fill posted ``0`` at ingest (``exchange_fee`` NULL), and each later
+    correction moved it to its ``new_value``. The fill row itself is immutable, so
+    the effective amount is the newest correction's ``new_value``, or — with no
+    corrections — whatever was recorded at ingest.
+    """
+    if fee_adjustments:
+        latest = fee_adjustments[-1]["new_value"]
+        return Decimal(0) if latest is None else Decimal(latest)
+    recorded = fill_row["exchange_fee"]
+    return Decimal(0) if recorded is None else Decimal(recorded)
 
 
 def backfill_fill_fee(
@@ -379,23 +439,30 @@ def backfill_fill_fee(
     reason: str | None = None,
     timestamp: datetime | None = None,
 ) -> BackfillResult:
-    """Post a §15.1 fee that was pending at ingest — as an adjustment, exactly once.
+    """Post the §15.1 fee a fill did not carry at ingest — as an adjustment, exactly once.
 
-    The recorded fill is immutable: the learned fee never overwrites it (§15.1
-    rule 5). Instead it becomes one ``accounting_adjustment_events`` row — which
-    live replay folds — and the wallet is moved (``-fee``) and total fees raised
-    (``+fee``) in the SAME transaction that records it, so a crash cannot post
-    the fee without recording why. The deterministic ``adjustment_id`` makes a
-    re-run a no-op: a reconciliation job that re-learns the same fee cannot post
-    it twice.
+    The recorded fill is immutable: a learned fee never overwrites it (§15.1 rule 5).
+    It becomes one ``accounting_adjustment_events`` row — which live replay folds —
+    and the ledger moves in the SAME transaction that records it, so a crash cannot
+    post the fee without recording why.
 
-    Refuses to touch a fill whose fee was NOT pending (``exchange_fee`` already
-    recorded) — that is not a backfill, and silently re-posting would double the
-    fee. A non-finite fee is rejected outright (a NaN would poison the ledger).
+    Corrections are CUMULATIVE, not one-shot. The ledger moves by the delta from the
+    fee currently effective on the fill to the one being learned, which makes this
+    both idempotent and re-correctable:
+
+    - re-learning the SAME amount moves nothing and records nothing (``ALREADY_POSTED``)
+      — a reconciliation job may call this on every pass;
+    - learning a DIFFERENT amount (a referral discount, a late rebate, an exchange fee
+      correction) posts the difference as the next correction in the sequence. Refusing
+      it — as a one-correction-per-target key would — would not just lose the amount, it
+      would wedge the job that keeps re-hitting that fill.
+
+    The delta is routed through ``adjustment_ledger_delta``, the same definition live
+    replay folds with, so the materialized ledger and the replayed one cannot drift.
+    A non-finite fee is rejected outright (a NaN would poison the ledger irreversibly).
     """
     if not exchange_fee.is_finite():
         raise ValueError(f"backfilled fee must be finite, got {exchange_fee}")
-    adjustment_id = accounting_adjustment_id(run_id, "fee", fill_id)
     now = timestamp or datetime.now(timezone.utc)
     with db.transaction() as conn:
         row = repo.get_fill(conn, fill_id)
@@ -405,15 +472,25 @@ def backfill_fill_fee(
             raise ValueError(
                 f"fill {fill_id!r} is not a live fill; §15 fee backfill does not apply"
             )
-        if row["exchange_fee"] is not None:
+        if row["run_id"] != run_id:
+            # The ledger this moves is run_id's. A fill id from another run (they do
+            # circulate — the oid→order lookup is wallet-scoped) would otherwise debit
+            # the wrong run's wallet for a fee it never paid.
             raise ValueError(
-                f"fill {fill_id!r} already recorded exchange_fee {row['exchange_fee']!r}; its "
-                "fee was not pending — refusing to re-post (would double the fee)"
+                f"fill {fill_id!r} belongs to run {row['run_id']!r}, not {run_id!r}; "
+                "refusing to move this run's ledger for another run's fill"
             )
-        if repo.get_accounting_adjustment_event(conn, adjustment_id) is not None:
-            # A prior backfill already posted this fee; the ledger already moved.
-            return BackfillResult(BackfillOutcome.ALREADY_POSTED, adjustment_id, exchange_fee)
 
+        prior = repo.iter_accounting_adjustment_events(conn, run_id, target_id=fill_id)
+        fee_adjustments = [a for a in prior if a["adjustment_type"] == "fee"]
+        effective = _effective_fee(row, fee_adjustments)
+        if exchange_fee == effective:
+            # The books already carry exactly this fee. Report what is actually
+            # recorded, not the argument we were handed.
+            last_id = fee_adjustments[-1]["adjustment_id"] if fee_adjustments else None
+            return BackfillResult(BackfillOutcome.ALREADY_POSTED, last_id, effective)
+
+        adjustment_id = accounting_adjustment_id(run_id, "fee", fill_id, seq=len(fee_adjustments))
         repo.insert_accounting_adjustment_event(
             conn,
             adjustment_id=adjustment_id,
@@ -422,20 +499,25 @@ def backfill_fill_fee(
             target_table="fills",
             target_id=fill_id,
             field="exchange_fee",
-            # old = the amount posted at ingest for a pending fill: 0.
-            old_value=Decimal(0),
+            # The amount the books currently carry — 0 for a fill that ingested with
+            # its fee pending, or the previous correction's amount. Replay folds
+            # (new - old), so this pair IS the ledger movement, not a description of it.
+            old_value=effective,
             new_value=exchange_fee,
             reason=reason,
             source=source,
             timestamp=now,
         )
+        wallet_d, realized_d, fees_d, funding_d = adjustment_ledger_delta(
+            "fee", effective, exchange_fee
+        )
         ledger = _require_ledger(conn, run_id)
         with localcontext(DECIMAL_CONTEXT):
             new_ledger = AccountLedger(
-                wallet_balance=ledger.wallet_balance - exchange_fee,
-                realized_pnl=ledger.realized_pnl,
-                total_fees=ledger.total_fees + exchange_fee,
-                net_funding_pnl=ledger.net_funding_pnl,
+                wallet_balance=ledger.wallet_balance + wallet_d,
+                realized_pnl=ledger.realized_pnl + realized_d,
+                total_fees=ledger.total_fees + fees_d,
+                net_funding_pnl=ledger.net_funding_pnl + funding_d,
             )
         if new_ledger.wallet_balance < 0:
             logger.warning(
@@ -463,9 +545,24 @@ class IngestOutcome(str, Enum):
 
 @dataclass(frozen=True)
 class IngestResult:
+    """One fill's verdict. ``effect`` is present exactly when the fill was APPLIED.
+
+    The coupling is enforced, not merely observed: PR 5's engine is expected to read
+    "APPLIED implies there is an effect" (that is the whole point of the outcome), and
+    a DUPLICATE/UNMAPPED result carrying an effect would be a fill counted twice. Same
+    contract, and the same enforcement, as ``FundingResult``'s posted/pnl pairing.
+    """
+
     outcome: IngestOutcome
     fill: ExchangeFill
     effect: LiveFillEffect | None = None
+
+    def __post_init__(self) -> None:
+        if (self.outcome is IngestOutcome.APPLIED) != (self.effect is not None):
+            raise ValueError(
+                f"IngestResult.effect must be present iff the fill was applied; got "
+                f"outcome={self.outcome.value!r} with effect={self.effect!r}"
+            )
 
 
 class LiveFillProcessor:
@@ -490,9 +587,15 @@ class LiveFillProcessor:
         self._payload_dir = payload_dir
         self._clock = clock or WallClock()
 
-    def ingest(self, raw_fill: Any) -> IngestResult:
-        """Apply one raw fill (parse may raise ``MalformedResponseError`` — §11.3)."""
-        fill = ExchangeFill.parse(raw_fill)
+    def ingest(self, raw_fill: Any, *, fill: ExchangeFill | None = None) -> IngestResult:
+        """Apply one raw fill (parse may raise ``MalformedResponseError`` — §11.3).
+
+        ``fill`` lets a caller that has ALREADY parsed the payload pass the result
+        in rather than paying for a second parse — :meth:`ingest_message` parses its
+        whole batch up front so it can order it by exchange time before applying any
+        of it. It must be the parse of ``raw_fill``; nothing else is a valid pairing.
+        """
+        fill = fill if fill is not None else ExchangeFill.parse(raw_fill)
 
         # Dedupe pre-check: cheap, and lets the caller distinguish "already had it"
         # from "new" without racing the UNIQUE constraint. The constraint is still
@@ -501,28 +604,47 @@ class LiveFillProcessor:
             return IngestResult(IngestOutcome.DUPLICATE, fill)
 
         order = repo.get_order_by_exchange_order_id(self._db.conn, fill.exchange_order_id)
-        if order is None:
-            # §12.3: a fill for an order we do not know is a reconciliation case,
-            # not something to force-apply — there is no owning order to attach it
-            # to, and inventing one would corrupt the local position model. PR 4
-            # reconciles it; once §8.3 recovery records the order's exchange id, a
-            # REST backfill re-ingests this fill and the dedupe key keeps it once.
+        unmapped_reason = (
+            "no local bot order for this exchange order id"
+            if order is None
+            else self._unmapped_reason(fill, order)
+        )
+        if order is None or unmapped_reason is not None:
+            # §12.3: a fill we cannot confidently attach to one of THIS run's orders
+            # is a reconciliation case, not something to force-apply — there is no
+            # owning order to attach it to, and inventing one would corrupt the local
+            # position model. PR 4 reconciles it; once §8.3 recovery records the
+            # order's exchange id, a REST backfill re-ingests this fill and the
+            # dedupe key keeps it exactly-once.
+            #
+            # The raw payload is persisted, exactly as a malformed fill's is: this is
+            # a fill the exchange really executed and whose money we did NOT book, so
+            # it is evidence, and it must outlive both the log and the REST lookback
+            # window that PR 4 might arrive after.
             logger.warning(
-                "live fill %s references exchange order %s with no local bot order — "
-                "left for reconciliation (§12.3)",
+                "live fill %s (exchange order %s) not applied — %s; left for "
+                "reconciliation (§12.3)",
                 fill.exchange_fill_key,
                 fill.exchange_order_id,
+                unmapped_reason,
+            )
+            write_raw_payload(
+                payload_dir=self._payload_dir,
+                kind="fill_unmapped",
+                key=fill.exchange_fill_key,
+                payload={"reason": unmapped_reason, "raw": raw_fill},
+                now=self._clock.now(),
             )
             return IngestResult(IngestOutcome.UNMAPPED, fill)
 
+        now = self._clock.now()
         raw_path = write_raw_payload(
             payload_dir=self._payload_dir,
             kind="fill",
             key=fill.exchange_fill_key,
             payload=raw_fill,
-            now=self._clock.now(),
+            now=now,
         )
-        now = self._clock.now()
         try:
             with self._db.transaction() as conn:
                 effect = apply_live_fill(
@@ -537,10 +659,42 @@ class LiveFillProcessor:
                     timestamp=now,
                 )
         except sqlite3.IntegrityError:
-            # The dedupe key rejected it between the pre-check and here (a fill
-            # already applied) — the exactly-once guarantee held; report no-op.
+            # ONLY the dedupe key may be read as "already applied". IntegrityError
+            # also covers NOT NULL / CHECK / FOREIGN KEY violations, and reporting
+            # one of those as DUPLICATE would drop a real fill forever while the
+            # counters claimed the exactly-once guard had held — the fill is never
+            # posted, and every retry repeats the sequence (the pre-check finds no
+            # row, the insert fails, it is called a duplicate again). So confirm the
+            # row actually exists; if it does not, this was some OTHER constraint and
+            # it must fail loud.
+            if repo.get_fill_by_exchange_key(self._db.conn, fill.exchange_fill_key) is None:
+                raise
             return IngestResult(IngestOutcome.DUPLICATE, fill)
         return IngestResult(IngestOutcome.APPLIED, fill, effect)
+
+    def _unmapped_reason(self, fill: ExchangeFill, order: sqlite3.Row) -> str | None:
+        """Why this fill cannot be attached to one of THIS run's orders, or ``None``.
+
+        The oid→order lookup is deliberately wallet-scoped (an oid is globally unique
+        at the exchange and is not run-qualified), so the row it returns still has to
+        be checked against the run and the symbol before its money is booked here. A
+        restart RESUMES its run id, so a fill resolving to ANOTHER run's order is a
+        genuine anomaly, not the ordinary case — booking it would post the fill under
+        this run's ledger while pointing ``order_id`` at a different run's order. A
+        symbol mismatch means the mapping itself is wrong, and applying it would open
+        a position in a coin we never traded. Both are recorded as evidence and left
+        for §12.3 reconciliation rather than guessed at.
+        """
+        if order["run_id"] != self._run_id:
+            return (
+                f"exchange order belongs to run {order['run_id']!r}, not this run {self._run_id!r}"
+            )
+        if order["symbol"] != fill.coin:
+            return (
+                f"exchange order is for symbol {order['symbol']!r} but the fill is for "
+                f"{fill.coin!r}"
+            )
+        return None
 
     def ingest_message(self, message: Any) -> list[IngestResult]:
         """Ingest every fill in one drained WS message (§11.3 parse-fail handling).
@@ -551,6 +705,26 @@ class LiveFillProcessor:
         crashes the drain nor blocks its well-formed siblings. Non-``userFills``
         messages (orderUpdates / clearinghouse) belong to PR 4's reconciliation and
         return ``[]`` here — drained and ignored so the queue never grows unbounded.
+
+        Fills are applied in EXCHANGE-TIME order, not arrival order. The money does
+        not care (realized PnL comes per-fill from the exchange's ``closedPnl``), but
+        the position's weighted-average ``entry_price`` does: a reconnect backfill
+        that posts an older missed fill AFTER newer socket fills would compute the
+        average against the wrong running position and be permanently wrong — and
+        because replay folds live fills in the same exchange-time order, replay
+        would faithfully reproduce the wrong number, so the §5 consistency check
+        could never catch it. Entry price feeds unrealized PnL, equity, the
+        liquidation estimate and the levels PR 5 anchors SL/TP to.
+
+        ONLY ``MalformedResponseError`` is skipped, deliberately. Every rejection of
+        an exchange payload is raised in that vocabulary (see ``ExchangeFill.parse``),
+        so anything else reaching here — a ``ValueError`` from the repository's
+        write-boundary identities or from an uninitialised run's missing ledger, a
+        ``sqlite3`` error — is an impossible internal state or an infrastructure
+        failure, NOT one bad fill. Those must fail loud: nothing was committed (the
+        fill posts in one transaction), and the dedupe key makes the caller's retry
+        safe. Do not widen this except clause to make a batch "more robust" — it
+        would convert a broken run into a silently short ledger.
         """
         if not isinstance(message, dict) or message.get("channel") != USER_FILLS_CHANNEL:
             return []
@@ -562,13 +736,23 @@ class LiveFillProcessor:
             # gets, rather than raising into the drain loop.
             self._record_malformed(message, "userFills message has no fills list")
             return []
-        results: list[IngestResult] = []
+
+        # Parse first, so the batch can be ordered before ANY of it is applied; a
+        # fill that will not parse is recorded and dropped here, exactly as before.
+        parsed: list[tuple[ExchangeFill, Any]] = []
         for raw_fill in fills:
             try:
-                results.append(self.ingest(raw_fill))
+                parsed.append((ExchangeFill.parse(raw_fill), raw_fill))
             except MalformedResponseError as exc:
                 self._record_malformed(raw_fill, str(exc))
-        return results
+
+        # Sort key = the DB's live-replay ORDER BY (exchange_fill_time, then the
+        # fill id as TEXT). The two must agree or the materialized books and the
+        # replayed books would fold the same fills in different orders. Ties (the
+        # same coin, the same millisecond) only need to be broken DETERMINISTICALLY,
+        # and both sides break them the same way.
+        parsed.sort(key=lambda item: (item[0].fill_time, item[0].exchange_fill_key))
+        return [self.ingest(raw_fill, fill=fill) for fill, raw_fill in parsed]
 
     def _record_malformed(self, raw: Any, error: str) -> None:
         """Persist a malformed event's raw payload + error, applying nothing (§11.3).

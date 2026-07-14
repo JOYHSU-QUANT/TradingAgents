@@ -322,6 +322,19 @@ def compute_live_fill_effect(
     ``exchange_fee`` is the amount POSTED for this fill (``0`` while a fee is
     pending — the correction arrives later as an ``accounting_adjustment_events``
     row that replay folds, never as a mutation of the recorded fill).
+
+    ``closedPnl`` is GROSS of the fill's fee, so subtracting ``exchange_fee`` here
+    is a subtraction, NOT a double-subtraction. Verified empirically against live
+    mainnet ``userFills`` (2026-07-14): over clean round trips on six coins, both
+    directions, maker and taker tiers, ``closedPnl == side * (exit - entry) * size``
+    exactly — residual zero, never ``-fee`` — and an OPENING fill reports
+    ``closedPnl == "0.0"`` even when it charged a fee. Beware the official "Entry
+    price and PnL" docs page, which gives ``closed pnl = fee + side * (mark -
+    entry) * size``: that page scopes itself to the FRONTEND's column and does not
+    describe this API field — do not "correct" the formula from it. A maker rebate
+    arrives as a NEGATIVE ``fee``, which this expression credits correctly.
+    (``builderFee`` is a SEPARATE field, not folded into ``fee``; if we ever route
+    orders through a builder it has to be subtracted here too.)
     """
     transition = compute_fill_effect(position, side=side, qty=qty, price=price, fee_rate=Decimal(0))
     moved = transition.position
@@ -1086,18 +1099,27 @@ def replay_within(conn: sqlite3.Connection, *, run_id: str) -> ReplayResult:
         # takes them from the exchange as recorded on the fill (§15). Live also
         # folds the §15 accounting adjustments, which paper never has.
         live = run["mode"] == "live"
-        for fill in repo.iter_fills(conn, run_id):
+        # Live fills fold in EXCHANGE-time order, not insertion order — the two
+        # differ whenever a reconnect backfill posts fills older than ones the
+        # socket already delivered, and entry price is order-dependent. This is the
+        # same order the ingester applies them in; see repo.iter_fills.
+        for fill in repo.iter_fills(conn, run_id, chronological=live):
             symbol = fill["symbol"]
             current = positions.get(symbol) or PositionState.flat(symbol)
             if live:
+                # AS-RECORDED: a pending-fee fill posted 0 at ingest, and its
+                # correction is a folded adjustment below — never read here. NULL
+                # (pending) and a recorded 0 are the same posted amount, but they are
+                # NOT the same fact, so the None check is explicit: `_dec(...) or
+                # Decimal(0)` would also rewrite a legitimately-recorded zero, which
+                # is the very NULL-vs-zero distinction this model rests on.
+                recorded_fee = _dec(fill["exchange_fee"])
                 effect: FillEffect | LiveFillEffect = compute_live_fill_effect(
                     current,
                     side=fill["side"],
                     qty=Decimal(fill["fill_qty"]),
                     price=Decimal(fill["fill_price"]),
-                    # AS-RECORDED: a pending-fee fill posted 0 at ingest, and the
-                    # correction is a folded adjustment below — never read here.
-                    exchange_fee=_dec(fill["exchange_fee"]) or Decimal(0),
+                    exchange_fee=Decimal(0) if recorded_fee is None else recorded_fee,
                     exchange_closed_pnl=_require_live_basis(fill),
                 )
             else:

@@ -466,14 +466,66 @@ def test_fee_backfill_is_exactly_once(db):
     assert db.conn.execute("SELECT COUNT(*) FROM accounting_adjustment_events").fetchone()[0] == 1
 
 
-def test_fee_backfill_refuses_non_pending_fill(db):
+def test_fee_backfill_of_an_unchanged_fee_is_a_no_op(db):
+    """A fill already carrying this fee needs no correction — and the result says so."""
     _live_run(db)
     _live_order(db)
     fill = ExchangeFill.parse(_fill(sz="1", fee="0.05"))  # fee present at ingest
     post_live_fill(db, run_id="r", fill=fill, order_id="o1")
     fid = live_fill_id("r", fill.exchange_fill_key)
-    with pytest.raises(ValueError, match="not pending"):
-        backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.05"))
+
+    result = backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.05"))
+    assert result.outcome is BackfillOutcome.ALREADY_POSTED
+    assert result.fee == Decimal("0.05")
+    assert result.adjustment_id is None  # nothing was recorded, so nothing is named
+    assert _ledger(db).total_fees == Decimal("0.05")  # not doubled
+    assert db.conn.execute("SELECT COUNT(*) FROM accounting_adjustment_events").fetchone()[0] == 0
+
+
+def test_fee_can_be_corrected_more_than_once(db):
+    """A second, genuinely different correction posts its DELTA — it must not be refused.
+
+    Refusing it (as a one-correction-per-target key did) would not merely lose the
+    amount: the reconciliation job re-hits the same fill on every pass, so it would
+    wedge there forever.
+    """
+    _live_run(db)
+    _live_order(db)
+    fill = ExchangeFill.parse(_fill(sz="1", fee=None))  # fee pending at ingest → posts 0
+    post_live_fill(db, run_id="r", fill=fill, order_id="o1")
+    fid = live_fill_id("r", fill.exchange_fill_key)
+
+    first = backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.05"))
+    assert first.outcome is BackfillOutcome.POSTED
+    assert _ledger(db).total_fees == Decimal("0.05")
+
+    # The exchange later corrects the fee downward (a referral discount / late rebate).
+    second = backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.03"))
+    assert second.outcome is BackfillOutcome.POSTED
+    assert second.adjustment_id != first.adjustment_id
+    # The books carry the CORRECTED fee: the ledger moved by the delta (-0.02), not +0.03.
+    assert _ledger(db).total_fees == Decimal("0.03")
+    assert db.conn.execute("SELECT COUNT(*) FROM accounting_adjustment_events").fetchone()[0] == 2
+
+    # ...and re-learning the corrected amount is still a no-op.
+    assert (
+        backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.03")).outcome
+        is BackfillOutcome.ALREADY_POSTED
+    )
+    assert _ledger(db).total_fees == Decimal("0.03")
+
+
+def test_fee_backfill_refuses_another_runs_fill(db):
+    """The ledger this moves is run_id's — another run's fill must not debit it."""
+    _live_run(db)
+    _live_order(db)
+    fill = ExchangeFill.parse(_fill(sz="1", fee=None))
+    post_live_fill(db, run_id="r", fill=fill, order_id="o1")
+    fid = live_fill_id("r", fill.exchange_fill_key)
+
+    _live_run(db, run_id="other")
+    with pytest.raises(ValueError, match="belongs to run"):
+        backfill_fill_fee(db, run_id="other", fill_id=fid, exchange_fee=Decimal("0.05"))
 
 
 # ---------------------------------------------------------------------------
@@ -646,3 +698,162 @@ def test_live_replay_detects_position_mismatch(db):
         )
     result = accounting.replay(db, run_id="r")
     assert "BTC" in result.position_mismatches
+
+
+# ---------------------------------------------------------------------------
+# §11.3 fault isolation: one bad fill must never take the batch down with it
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("bad", "why"),
+    [
+        ({"sz": "0"}, "zero size"),
+        ({"sz": "-1"}, "negative size"),
+        ({"px": "0"}, "zero price"),
+        ({"tid": ""}, "empty tid"),
+    ],
+)
+def test_a_value_defect_is_malformed_not_a_crash(bad, why):
+    """A payload defect must raise in the MALFORMED vocabulary, never a bare ValueError.
+
+    ``ingest_message`` skips ``MalformedResponseError`` and nothing else — by design,
+    since everything else reaching it is an impossible internal state. A ValueError
+    from a constructor invariant would escape that handler and abort the whole batch.
+    """
+    with pytest.raises(MalformedResponseError):
+        ExchangeFill.parse(_fill(**bad))
+
+
+def test_one_poison_fill_does_not_abort_its_batch(db, tmp_path, clock):
+    """The regression that wedged backfill forever: sibling fills must still apply.
+
+    On the WS path the drained siblings would simply be lost. On the REST path it is
+    worse: the same poison fill sits in every trailing window, so every later pass
+    raises on it again and the gap never closes.
+    """
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+
+    results = proc.ingest_message(
+        {
+            "channel": "userFills",
+            "data": {
+                "fills": [
+                    _fill(tid=1, sz="0"),  # poison: zero size
+                    _fill(tid=2, sz="0.5"),  # a perfectly good fill behind it
+                ]
+            },
+        }
+    )
+
+    assert [r.outcome for r in results] == [IngestOutcome.APPLIED]
+    assert results[0].fill.exchange_fill_id == "2"
+    # The poison fill left evidence rather than vanishing.
+    assert list(tmp_path.glob("fill_parse_error-*.json"))
+
+
+# ---------------------------------------------------------------------------
+# Order mapping: a fill is only booked against THIS run's order for THIS coin
+# ---------------------------------------------------------------------------
+
+
+def test_unmapped_fill_records_evidence(db, tmp_path, clock):
+    """A fill the exchange really executed and we did not book is EVIDENCE (§12.3)."""
+    _live_run(db)  # no order with this oid
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+
+    result = proc.ingest(_fill(oid=999))
+
+    assert result.outcome is IngestOutcome.UNMAPPED
+    assert result.effect is None
+    assert list(tmp_path.glob("fill_unmapped-*.json"))  # outlives the log and the REST window
+    assert _ledger(db).wallet_balance == Decimal("1000")  # nothing booked
+
+
+def test_fill_for_another_runs_order_is_not_booked(db, tmp_path, clock):
+    """The oid lookup is wallet-scoped; a restart RESUMES its run, so this is an anomaly."""
+    _live_run(db)
+    _live_run(db, run_id="older")
+    _live_order(db, run_id="older", order_id="o-old", oid="777")
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+
+    result = proc.ingest(_fill(oid=777))
+
+    assert result.outcome is IngestOutcome.UNMAPPED
+    assert _ledger(db).wallet_balance == Decimal("1000")
+    assert list(tmp_path.glob("fill_unmapped-*.json"))
+
+
+def test_fill_whose_symbol_contradicts_its_order_is_not_booked(db, tmp_path, clock):
+    """A wrong mapping would otherwise open a position in a coin we never traded."""
+    _live_run(db)
+    _live_order(db, coin="BTC", oid="777")
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+
+    result = proc.ingest(_fill(oid=777, coin="ETH"))
+
+    assert result.outcome is IngestOutcome.UNMAPPED
+    assert repo.get_current_position(db.conn, "r", "ETH") is None
+
+
+def test_a_non_dedupe_integrity_error_is_not_reported_as_duplicate(
+    db, tmp_path, clock, monkeypatch
+):
+    """IntegrityError also covers NOT NULL / CHECK / FK — those must fail loud.
+
+    Read as DUPLICATE, such a failure would drop a real fill forever while the counters
+    claimed the exactly-once guard had held, and every retry would repeat it.
+    """
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+
+    def _boom(*args, **kwargs):
+        raise sqlite3.IntegrityError("NOT NULL constraint failed: fills.symbol")
+
+    monkeypatch.setattr(repo, "insert_live_fill", _boom)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        proc.ingest(_fill())
+
+
+# ---------------------------------------------------------------------------
+# §14 ordering: entry price is order-dependent, so exchange time is authoritative
+# ---------------------------------------------------------------------------
+
+
+def test_fills_apply_in_exchange_time_order_not_arrival_order(db, tmp_path, clock):
+    """A reconnect backfill posts fills OLDER than ones the socket already delivered.
+
+    Realized money is order-independent (it comes per-fill from closedPnl), but the
+    weighted-average entry price is not — and replay folds in the same order, so it
+    would faithfully reproduce a wrong entry price and no check could see it.
+    """
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+
+    # Delivered newest-first: buy 1 @200 (t+1s) arrives BEFORE buy 1 @100 (t).
+    proc.ingest_message(
+        {
+            "channel": "userFills",
+            "data": {
+                "fills": [
+                    _fill(tid=2, sz="1", px="200", fee=None, time_ms=_TIME_MS + 1000),
+                    _fill(tid=1, sz="1", px="100", fee=None, time_ms=_TIME_MS),
+                ]
+            },
+        }
+    )
+
+    position = repo.get_current_position(db.conn, "r", "BTC")
+    assert position.size == Decimal("2")
+    assert position.entry_price == Decimal("150")  # (100 + 200) / 2, in trade order
+
+    # And replay — which folds live fills chronologically too — agrees.
+    replayed = accounting.replay(db, run_id="r")
+    assert replayed.position_mismatches == ()
+    assert replayed.account_matches
+    assert replayed.positions["BTC"].entry_price == Decimal("150")

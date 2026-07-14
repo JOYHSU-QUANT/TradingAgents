@@ -8,7 +8,7 @@ and the trailing-window REST backfill converging with the WS path (§14).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -80,11 +80,29 @@ def test_reconnect_requests_backfill():
     assert not stream.needs_backfill
     stream.mark_connected()  # first connect (startup) also backfills
     assert stream.needs_backfill
-    stream.mark_backfill_done()
+    assert stream.mark_backfill_done(stream.backfill_epoch()) is True
     assert not stream.needs_backfill
     stream.mark_disconnected(clock.now())
     stream.mark_connected()  # reconnect
     assert stream.needs_backfill
+
+
+def test_backfill_done_cannot_clear_a_newer_request():
+    """A reconnect during an in-flight backfill must not have its request swallowed."""
+    clock = ManualClock(_NOW)
+    stream = LiveWsStream(clock=clock)
+    stream.mark_connected()
+    in_flight = stream.backfill_epoch()  # the pass the caller is about to run
+
+    # ... the socket drops and comes back while that pass is still fetching. The new
+    # gap is NOT covered by the in-flight window, which closed before it existed.
+    stream.mark_disconnected(clock.now())
+    stream.mark_connected()
+
+    assert stream.mark_backfill_done(in_flight) is False  # superseded — owe another pass
+    assert stream.needs_backfill
+    assert stream.mark_backfill_done(stream.backfill_epoch()) is True
+    assert not stream.needs_backfill
 
 
 def test_never_connected_stream_is_not_stale():
@@ -276,7 +294,7 @@ def test_supervisor_note_closed_then_reconnect_requests_backfill():
         connect=_FakeHandle, stream=stream, clock=clock, reconnect_min_interval_seconds=0
     )
     sup.ensure_connected()
-    stream.mark_backfill_done()
+    stream.mark_backfill_done(stream.backfill_epoch())
     sup.note_closed()
     assert not sup.connected
     assert not stream.connected
@@ -325,7 +343,7 @@ def _live_run_with_order(db):
         )
 
 
-def _rest_fill(tid):
+def _rest_fill(tid, time_ms=_TIME_MS):
     return {
         "coin": "BTC",
         "side": "B",
@@ -334,7 +352,7 @@ def _rest_fill(tid):
         "closedPnl": "0",
         "crossed": True,
         "oid": 777,
-        "time": _TIME_MS,
+        "time": time_ms,
         "tid": tid,
         "fee": "0.05",
         "feeToken": "USDC",
@@ -351,7 +369,9 @@ def test_backfill_applies_new_fills(db, tmp_path):
         captured["window"] = (start_ms, end_ms)
         return [_rest_fill(1)]
 
-    bf = FillBackfiller(fetch=fetch, processor=proc, clock=clock, lookback_seconds=3600)
+    bf = FillBackfiller(
+        fetch=fetch, processor=proc, cursor=lambda: None, clock=clock, lookback_seconds=3600
+    )
     summary = bf.backfill()
     assert (summary.fetched, summary.applied) == (1, 1)
     assert captured["window"] == (_TIME_MS - 3600 * 1000, _TIME_MS)
@@ -365,7 +385,10 @@ def test_backfill_dedupes_against_ws_applied_fill(db, tmp_path):
     # WS already applied tid=1; REST re-fetches it plus a new tid=2.
     proc.ingest(_rest_fill(1))
     bf = FillBackfiller(
-        fetch=lambda s, e: [_rest_fill(1), _rest_fill(2)], processor=proc, clock=clock
+        fetch=lambda s, e: [_rest_fill(1), _rest_fill(2)],
+        processor=proc,
+        cursor=lambda: None,
+        clock=clock,
     )
     summary = bf.backfill()
     assert (summary.applied, summary.duplicate) == (1, 1)
@@ -378,7 +401,9 @@ def test_backfill_records_malformed_and_counts_it(db, tmp_path):
     proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
     bad = _rest_fill(2)
     del bad["closedPnl"]
-    bf = FillBackfiller(fetch=lambda s, e: [_rest_fill(1), bad], processor=proc, clock=clock)
+    bf = FillBackfiller(
+        fetch=lambda s, e: [_rest_fill(1), bad], processor=proc, cursor=lambda: None, clock=clock
+    )
     summary = bf.backfill()
     assert (summary.applied, summary.malformed) == (1, 1)
     assert list(tmp_path.glob("fill_parse_error-*.json"))
@@ -393,7 +418,7 @@ def test_backfill_non_list_response_fails_loud(db, tmp_path, bad):
     _live_run_with_order(db)
     clock = ManualClock(_NOW)
     proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
-    bf = FillBackfiller(fetch=lambda s, e: bad, processor=proc, clock=clock)
+    bf = FillBackfiller(fetch=lambda s, e: bad, processor=proc, cursor=lambda: None, clock=clock)
     with pytest.raises(MalformedResponseError):
         bf.backfill()
 
@@ -403,7 +428,7 @@ def test_backfill_empty_list_is_a_legitimate_no_fills(db, tmp_path):
     _live_run_with_order(db)
     clock = ManualClock(_NOW)
     proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
-    bf = FillBackfiller(fetch=lambda s, e: [], processor=proc, clock=clock)
+    bf = FillBackfiller(fetch=lambda s, e: [], processor=proc, cursor=lambda: None, clock=clock)
     assert bf.backfill().fetched == 0
 
 
@@ -415,7 +440,7 @@ def test_backfill_transport_failure_propagates(db, tmp_path):
     def fetch(s, e):
         raise ConnectionError("rest down")
 
-    bf = FillBackfiller(fetch=fetch, processor=proc, clock=clock)
+    bf = FillBackfiller(fetch=fetch, processor=proc, cursor=lambda: None, clock=clock)
     with pytest.raises(ConnectionError):
         bf.backfill()
 
@@ -428,7 +453,221 @@ def test_backfill_and_ws_converge_on_exactly_once(db, tmp_path):
     proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
     fill = _rest_fill(1)
     # REST first...
-    FillBackfiller(fetch=lambda s, e: [fill], processor=proc, clock=clock).backfill()
+    FillBackfiller(
+        fetch=lambda s, e: [fill], processor=proc, cursor=lambda: None, clock=clock
+    ).backfill()
     # ...then the WS delivers the same fill.
     assert proc.ingest(fill).outcome is IngestOutcome.DUPLICATE
     assert db.conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# §11.2 rule 7: a socket also fails by going SILENT, not only by closing
+# ---------------------------------------------------------------------------
+
+
+def test_half_open_socket_goes_stale():
+    """A half-open TCP connection never calls note_closed — silence is the only signal.
+
+    Without this, `_connected` stays True forever and a dead feed reads as healthy,
+    while the bot keeps opening entries against a position model nothing is updating.
+    """
+    clock = ManualClock(_NOW)
+    stream = LiveWsStream(silent_after_seconds=120, clock=clock)
+    stream.mark_connected()
+    stream.enqueue({"channel": "userFills"})
+
+    clock.advance(119)
+    assert not stream.is_stale()
+
+    clock.advance(2)  # 121s with nothing delivered, on a socket that claims to be up
+    assert stream.connected  # it still believes it is connected...
+    assert stream.is_stale()  # ...and it is still stale
+
+
+def test_a_connected_but_never_delivering_socket_goes_stale():
+    """No event has ever arrived, so silence is measured from the connect itself."""
+    clock = ManualClock(_NOW)
+    stream = LiveWsStream(silent_after_seconds=120, clock=clock)
+    stream.mark_connected()
+    clock.advance(121)
+    assert stream.is_stale()
+
+
+def test_events_keep_a_connected_stream_fresh():
+    clock = ManualClock(_NOW)
+    stream = LiveWsStream(silent_after_seconds=120, clock=clock)
+    stream.mark_connected()
+    for _ in range(5):
+        clock.advance(100)
+        stream.enqueue({"channel": "webData2"})
+        assert not stream.is_stale()
+
+
+# ---------------------------------------------------------------------------
+# Supervisor/stream state must move as ONE unit (both directions)
+# ---------------------------------------------------------------------------
+
+
+def test_connect_publishes_stream_state_under_the_supervisor_lock():
+    """Installing the handle and marking the stream connected must be one atomic step.
+
+    Published after the lock is released, a note_closed() landing in the gap would be
+    overwritten: the stream would report a healthy socket the supervisor no longer
+    holds, with the disconnect clock reset so rule 7's stale trip never accumulates.
+    """
+    clock = ManualClock(_NOW)
+    stream = LiveWsStream(clock=clock)
+    sup = WsConnectionSupervisor(connect=_FakeHandle, stream=stream, clock=clock)
+    observed = {}
+    original = stream.mark_connected
+
+    def spy(now=None):
+        observed["lock_held"] = sup._lock.locked()
+        original(now)
+
+    stream.mark_connected = spy  # type: ignore[method-assign]
+    assert sup.ensure_connected() is True
+    assert observed["lock_held"] is True
+
+
+def test_close_publishes_stream_state_under_the_supervisor_lock():
+    """The mirror case, and the worse one: a late mark_disconnected fails CLOSED.
+
+    Published outside the lock, a connect starting AFTER the generation bump is not
+    "superseded", installs a live handle and marks the stream connected — then the
+    late disconnect lands on top. Every later tick short-circuits on `_handle is not
+    None`, so the stream stays permanently disconnected on a working socket and the
+    run sits in safe mode forever.
+    """
+    clock = ManualClock(_NOW)
+    stream = LiveWsStream(clock=clock)
+    sup = WsConnectionSupervisor(connect=_FakeHandle, stream=stream, clock=clock)
+    sup.ensure_connected()
+    observed = {}
+    original = stream.mark_disconnected
+
+    def spy(now=None):
+        observed["lock_held"] = sup._lock.locked()
+        original(now)
+
+    stream.mark_disconnected = spy  # type: ignore[method-assign]
+    sup.note_closed()
+    assert observed["lock_held"] is True
+    assert not stream.connected
+    assert not sup.connected
+
+
+# ---------------------------------------------------------------------------
+# FillBackfiller — the cursor and the page budget (the gap must really close)
+# ---------------------------------------------------------------------------
+
+
+def test_window_start_falls_back_to_the_lookback_with_no_cursor():
+    clock = ManualClock(_NOW)
+    seen = []
+
+    bf = FillBackfiller(
+        fetch=lambda s, e: seen.append((s, e)) or [],
+        processor=None,  # never reached: the fetch returns no fills
+        cursor=lambda: None,
+        clock=clock,
+        lookback_seconds=3600,
+    )
+    bf.backfill()
+
+    start_ms, end_ms = seen[0]
+    assert end_ms - start_ms == 3600 * 1000
+
+
+def test_cursor_pulls_the_window_back_past_a_long_outage():
+    """Down for longer than the lookback: those fills are ingested by NO other path.
+
+    A fixed trailing window would silently skip them — no error, no gap reported.
+    """
+    clock = ManualClock(_NOW)
+    last_fill_at = _NOW - timedelta(hours=30)  # we were down far longer than the lookback
+    seen = []
+
+    bf = FillBackfiller(
+        fetch=lambda s, e: seen.append((s, e)) or [],
+        processor=None,
+        cursor=lambda: last_fill_at,
+        clock=clock,
+        lookback_seconds=6 * 3600,
+    )
+    bf.backfill()
+
+    start_ms, _ = seen[0]
+    assert start_ms == int(last_fill_at.timestamp() * 1000)  # the REAL gap, not the window
+
+
+def test_a_recent_cursor_does_not_shrink_the_overlap():
+    """The lookback is a floor: a fresh cursor must not narrow the window below it."""
+    clock = ManualClock(_NOW)
+    seen = []
+
+    bf = FillBackfiller(
+        fetch=lambda s, e: seen.append((s, e)) or [],
+        processor=None,
+        cursor=lambda: _NOW - timedelta(minutes=1),  # a fill a minute ago
+        clock=clock,
+        lookback_seconds=3600,
+    )
+    bf.backfill()
+
+    start_ms, end_ms = seen[0]
+    assert end_ms - start_ms == 3600 * 1000  # still the full trailing hour
+
+
+def test_a_capped_response_is_paged_not_truncated(db, tmp_path):
+    """A full page is a truncated view of its window — paging is how the gap closes."""
+    clock = ManualClock(_NOW)
+    _live_run_with_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+
+    # Cap of 2: page 1 comes back FULL (so there must be more), page 2 short (so there
+    # is not). Every fill is distinct and later than the last, as the exchange sends them.
+    page1 = [_rest_fill(1, time_ms=_TIME_MS + 1), _rest_fill(2, time_ms=_TIME_MS + 2)]
+    page2 = [_rest_fill(3, time_ms=_TIME_MS + 3)]
+    pages = [page1, page2]
+
+    bf = FillBackfiller(
+        fetch=lambda s, e: pages.pop(0) if pages else [],
+        processor=proc,
+        cursor=lambda: None,
+        clock=clock,
+        response_fill_cap=2,
+    )
+    summary = bf.backfill()
+
+    assert summary.fetched == 3
+    assert summary.applied == 3  # the fills BEHIND the cap were not lost
+    assert summary.complete is True  # the short page proved the window was covered
+
+
+def test_an_exhausted_page_budget_reports_the_window_uncovered(db, tmp_path):
+    """Never report a gap closed when it is not — the caller must run another pass."""
+    clock = ManualClock(_NOW)
+    _live_run_with_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+
+    calls = {"n": 0}
+
+    def always_capped(start_ms, end_ms):
+        calls["n"] += 1
+        base = start_ms + 1
+        return [_rest_fill(base + i, time_ms=base + i) for i in range(2)]
+
+    bf = FillBackfiller(
+        fetch=always_capped,
+        processor=proc,
+        cursor=lambda: None,
+        clock=clock,
+        max_pages=3,
+        response_fill_cap=2,
+    )
+    summary = bf.backfill()
+
+    assert calls["n"] == 3  # it kept paging...
+    assert summary.complete is False  # ...and still could not prove the window covered

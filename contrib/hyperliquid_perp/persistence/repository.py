@@ -74,11 +74,13 @@ __all__ = [
     "iter_execution_plans",
     "iter_fills",
     "iter_funding_events",
+    "last_live_fill_time",
     "iter_kill_switch_events",
     "iter_live_fills",
     "iter_live_order_attempts",
     "iter_orders",
     "max_engine_seq",
+    "posted_exchange_fee",
     "next_live_attempt_index",
     "set_funding_status",
     "set_position_protection",
@@ -572,9 +574,72 @@ def insert_fill(
     )
 
 
-def iter_fills(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
-    """All fills for a run in insertion (chronological) order — the replay input."""
+def iter_fills(
+    conn: sqlite3.Connection, run_id: str, *, chronological: bool = False
+) -> list[sqlite3.Row]:
+    """A run's fills — in insertion order, or in EXCHANGE-time order for live replay.
+
+    Paper fills keep ``rowid``: they are simulated, insertion IS execution order, and
+    they carry no ``exchange_fill_time`` to sort on.
+
+    ``chronological`` orders by the exchange's clock instead of ours, which live
+    replay needs because insertion order is NOT trade order there: live fills arrive
+    from two racing sources, and a reconnect backfill posts fills that happened
+    BEFORE the ones the socket just delivered. The realized money is order-independent
+    (it comes per-fill from the exchange's ``closedPnl``), but the position's
+    weighted-average entry price is not — so replay must fold live fills in the order
+    the exchange executed them, which is the same order the ingester applies them in
+    (``LiveFillProcessor.ingest_message`` sorts on these very columns). The two
+    orderings MUST stay identical: if they drifted, the materialized books and the
+    replayed books would disagree on entry price, and each would be internally
+    consistent, so no check could see it.
+    """
+    if chronological:
+        return conn.execute(
+            "SELECT * FROM fills WHERE run_id = ? "
+            "ORDER BY exchange_fill_time, exchange_fill_key, rowid",
+            (run_id,),
+        ).fetchall()
     return conn.execute("SELECT * FROM fills WHERE run_id = ? ORDER BY rowid", (run_id,)).fetchall()
+
+
+def last_live_fill_time(conn: sqlite3.Connection, run_id: str) -> datetime | None:
+    """The exchange timestamp of this run's most recent live fill, or ``None``.
+
+    The REST backfill's cursor (§11.2 / §14.1). A FIXED trailing window silently
+    fails the one case that matters: down for longer than the window (an overnight
+    outage, a bad deploy, a restart loop) and the fills older than it are ingested by
+    NO path — no error, no gap reported, the summary just states what it happened to
+    fetch. Anchoring the window's start at the last fill actually booked makes the
+    catch-up cover the real gap, however long it turns out to be.
+    """
+    row = conn.execute(
+        "SELECT MAX(exchange_fill_time) AS last_at FROM fills "
+        "WHERE run_id = ? AND mode = 'live' AND exchange_fill_time IS NOT NULL",
+        (run_id,),
+    ).fetchone()
+    if row is None or row["last_at"] is None:
+        return None
+    return datetime.fromisoformat(row["last_at"])
+
+
+def posted_exchange_fee(exchange_fee: Decimal | None) -> Decimal:
+    """The fee AMOUNT POSTED to the books for a live fill: the exchange's, or 0 (§15.1).
+
+    A fill can arrive with no usable fee (absent, or denominated in a non-USDC token),
+    and it is still posted — with the fee PENDING, which books ``0`` now and corrects
+    it later through an ``accounting_adjustment_events`` row.
+
+    The one definition of that "0", because three places must agree on it: the LEDGER
+    delta (``live.fills.apply_live_fill``), the stored ``fills.fee`` column (and its
+    derived ``fee_rate``) in :func:`insert_live_fill`, and the ``old_value`` a later
+    correction folds from (``live.fills.backfill_fill_fee``). Were the pending
+    placeholder ever to change — say to an ESTIMATED fee — a copy left behind would
+    have the backfill book ``new - 0`` against a ledger that had already taken the
+    estimate, double-charging the fee; and replay would reproduce the double-charge
+    exactly, so the books would be consistently, invisibly wrong.
+    """
+    return Decimal(0) if exchange_fee is None else exchange_fee
 
 
 def get_fill(conn: sqlite3.Connection, fill_id: str) -> sqlite3.Row | None:
@@ -662,11 +727,12 @@ def insert_live_fill(
             raise ValueError(
                 f"fill_notional {fill_notional} != |fill_qty * fill_price| {expected_notional}"
             )
-        # The posted fee is the exchange's fee, or 0 while it is pending (§15.1).
+        # The posted fee is the exchange's fee, or 0 while it is pending (§15.1) —
+        # one definition, shared with the ledger delta and the correction fold.
         # fee_rate is display-only for a live fill (the exchange fee is not a
         # modelled rate) — derived so the CSV export column is populated, never
         # re-derived by replay.
-        posted_fee = Decimal(0) if exchange_fee is None else exchange_fee
+        posted_fee = posted_exchange_fee(exchange_fee)
         fee_rate = Decimal(0) if fill_notional == 0 else posted_fee / fill_notional
     _insert(
         conn,

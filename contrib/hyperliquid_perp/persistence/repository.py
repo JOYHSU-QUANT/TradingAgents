@@ -80,6 +80,7 @@ __all__ = [
     "iter_live_order_attempts",
     "iter_orders",
     "max_engine_seq",
+    "newest_live_fill_order_key",
     "posted_exchange_fee",
     "next_live_attempt_index",
     "set_funding_status",
@@ -603,38 +604,52 @@ def iter_fills(
     return conn.execute("SELECT * FROM fills WHERE run_id = ? ORDER BY rowid", (run_id,)).fetchall()
 
 
-def last_live_fill_time(
-    conn: sqlite3.Connection, run_id: str, *, symbol: str | None = None
-) -> datetime | None:
-    """The exchange timestamp of the newest live fill already booked, or ``None``.
+def last_live_fill_time(conn: sqlite3.Connection, run_id: str) -> datetime | None:
+    """The exchange timestamp of this run's newest booked live fill, or ``None``.
 
-    Two callers, both asking "what is the newest fill on the books":
-
-    - per-SYMBOL (``symbol=``) — the out-of-order test in ``apply_live_fill``: a fill
-      older than this one cannot be folded incrementally, because position is the one
-      piece of state that does not commute.
-    - per-RUN — a STARTUP-only backfill floor: at startup nothing newer has been
-      booked yet, so the newest fill really is where the gap begins. It is NOT a
-      general backfill cursor: once the run books anything newer (a reconnect drains
-      HL's isSnapshot batch before the backfill runs), the MAX jumps forward and the
-      window would collapse back onto the lookback, silently skipping the gap. The
-      gap's start is a fact only the caller holds — see ``FillBackfiller.backfill``.
+    A STARTUP-only backfill floor: at startup nothing newer has been booked yet, so the
+    newest fill really is where the gap begins. It is NOT a general backfill cursor —
+    once the run books anything newer (a reconnect drains HL's isSnapshot batch before
+    the backfill runs), this MAX jumps forward and the window would collapse back onto
+    the lookback, silently skipping the outage. The gap's start is a fact only the
+    caller holds; see ``FillBackfiller.backfill``.
     """
-    if symbol is None:
-        row = conn.execute(
-            "SELECT MAX(exchange_fill_time) AS last_at FROM fills "
-            "WHERE run_id = ? AND mode = 'live' AND exchange_fill_time IS NOT NULL",
-            (run_id,),
-        ).fetchone()
-    else:
-        row = conn.execute(
-            "SELECT MAX(exchange_fill_time) AS last_at FROM fills "
-            "WHERE run_id = ? AND mode = 'live' AND symbol = ? AND exchange_fill_time IS NOT NULL",
-            (run_id, symbol),
-        ).fetchone()
+    row = conn.execute(
+        "SELECT MAX(exchange_fill_time) AS last_at FROM fills "
+        "WHERE run_id = ? AND mode = 'live' AND exchange_fill_time IS NOT NULL",
+        (run_id,),
+    ).fetchone()
     if row is None or row["last_at"] is None:
         return None
     return datetime.fromisoformat(row["last_at"])
+
+
+def newest_live_fill_order_key(
+    conn: sqlite3.Connection, run_id: str, symbol: str
+) -> tuple[datetime, str] | None:
+    """The fold position of the newest booked fill for one symbol, or ``None``.
+
+    The ordering key — ``(exchange_fill_time, exchange_fill_key)`` — not just the
+    timestamp, because that pair IS the order live fills are folded in (see
+    :func:`iter_fills`), and the out-of-order test in ``apply_live_fill`` has to ask
+    the same question the fold answers.
+
+    A timestamp alone is not enough. Two fills can land in the SAME millisecond, and
+    the fold breaks that tie on the key: a later-arriving fill whose key sorts BEFORE
+    the booked one belongs earlier in the fold even though its timestamp is not older.
+    Compared on time alone it would look in-order, be folded incrementally on top, and
+    the materialized position would then disagree with the replayed one — the very
+    divergence the re-fold exists to prevent.
+    """
+    row = conn.execute(
+        "SELECT exchange_fill_time, exchange_fill_key FROM fills "
+        "WHERE run_id = ? AND mode = 'live' AND symbol = ? AND exchange_fill_time IS NOT NULL "
+        "ORDER BY exchange_fill_time DESC, exchange_fill_key DESC LIMIT 1",
+        (run_id, symbol),
+    ).fetchone()
+    if row is None:
+        return None
+    return datetime.fromisoformat(row["exchange_fill_time"]), row["exchange_fill_key"]
 
 
 def posted_exchange_fee(exchange_fee: Decimal | None) -> Decimal:

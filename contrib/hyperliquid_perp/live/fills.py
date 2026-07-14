@@ -289,6 +289,18 @@ def _rebuild_position(conn: sqlite3.Connection, run_id: str, coin: str) -> Posit
         for row in repo.iter_fills(conn, run_id, chronological=True):
             if row["symbol"] != coin:
                 continue
+            basis = row["exchange_closed_pnl"]
+            if basis is None:
+                # The same fail-loud replay applies (``_require_live_basis``): a live
+                # run's fill with no exchange basis was not written through
+                # insert_live_fill, and folding it against the paper fee model would
+                # silently misstate the books. Named here rather than left to raise a
+                # bare TypeError out of Decimal(None).
+                raise ValueError(
+                    f"live fill {row['fill_id']!r} has no exchange_closed_pnl — it was "
+                    "not recorded through insert_live_fill; the live accounting basis "
+                    "is missing"
+                )
             recorded_fee = row["exchange_fee"]
             effect = compute_live_fill_effect(
                 position,
@@ -298,7 +310,7 @@ def _rebuild_position(conn: sqlite3.Connection, run_id: str, coin: str) -> Posit
                 exchange_fee=repo.posted_exchange_fee(
                     None if recorded_fee is None else Decimal(recorded_fee)
                 ),
-                exchange_closed_pnl=Decimal(row["exchange_closed_pnl"]),
+                exchange_closed_pnl=Decimal(basis),
             )
             position = effect.position
     return position
@@ -339,11 +351,24 @@ def apply_live_fill(
     ledger = _require_ledger(conn, run_id)
 
     # Read BEFORE the insert, so it is the newest fill already on the books, not this
-    # one. A fill older than that is out of order: the socket and the REST backfill are
-    # two racing sources, and §12.3's re-ingest of a once-unmapped fill lands it after
+    # one. A fill that sorts BEFORE it is out of order: the socket and the REST backfill
+    # are two racing sources, and §12.3's re-ingest of a once-unmapped fill lands after
     # newer ones by design.
-    newest_booked = repo.last_live_fill_time(conn, run_id, symbol=fill.coin)
-    out_of_order = newest_booked is not None and fill.fill_time < newest_booked
+    #
+    # Compared on the FOLD's key — (time, exchange_fill_key) — not on time alone. Two
+    # fills can share a millisecond, and the fold breaks that tie on the key, so a fill
+    # whose key sorts earlier belongs earlier in the fold even though its timestamp is
+    # not older. Judged on time alone it would look in-order and be stacked on top, and
+    # the materialized position would then disagree with the replayed one.
+    newest_booked = repo.newest_live_fill_order_key(conn, run_id, fill.coin)
+    out_of_order = (
+        newest_booked is not None
+        and (
+            fill.fill_time,
+            fill.exchange_fill_key,
+        )
+        < newest_booked
+    )
 
     posted_fee = repo.posted_exchange_fee(fill.fee)
     effect = compute_live_fill_effect(

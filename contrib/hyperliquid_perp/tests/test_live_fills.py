@@ -970,3 +970,26 @@ def test_malformed_evidence_is_written_once_not_once_per_sighting(db, tmp_path, 
         proc.ingest_message({"channel": "userFills", "data": {"fills": [_fill(tid=7, sz="0")]}})
 
     assert len(list(tmp_path.glob("fill_parse_error-*.json"))) == 1
+
+
+def test_same_millisecond_fill_that_sorts_earlier_is_out_of_order(db, tmp_path, clock):
+    """Two fills in one millisecond: the fold breaks the tie on the key, so must we.
+
+    tid|10 sorts BEFORE tid|5 (lexicographic, the same comparison the SQL ORDER BY
+    makes), so a later-arriving tid|10 belongs EARLIER in the fold even though its
+    timestamp is not older. Judged on time alone it looks in-order, gets stacked on
+    top, and the materialized position silently disagrees with the replayed one.
+    """
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+
+    # Booked first, but sorts LAST: buy 1 @ 200, tid 5.
+    proc.ingest(_fill(tid=5, sz="1", px="200", fee=None, time_ms=_TIME_MS))
+    # Arrives second, but sorts FIRST (tid|10 < tid|5): buy 1 @ 100, same millisecond.
+    proc.ingest(_fill(tid=10, sz="1", px="100", fee=None, time_ms=_TIME_MS))
+
+    replayed = accounting.replay(db, run_id="r")
+    assert replayed.position_mismatches == ()  # materialized == replayed
+    assert replayed.account_matches
+    assert _position(db).entry_price == replayed.positions["BTC"].entry_price

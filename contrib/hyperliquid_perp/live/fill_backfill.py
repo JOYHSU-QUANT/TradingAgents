@@ -178,6 +178,11 @@ class FillBackfiller:
         floor = stamp - timedelta(seconds=self._lookback)
         if since is None:
             return floor
+        if since.tzinfo is None:
+            # A naive datetime would otherwise blow up inside min() with an opaque
+            # "can't compare offset-naive and offset-aware" TypeError, from a caller
+            # far from the mistake. Every instant in this system is aware UTC.
+            raise ValueError(f"backfill 'since' must be timezone-aware (UTC), got {since!r}")
         return min(floor, since)
 
     def backfill(

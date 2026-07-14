@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 from enum import Enum
@@ -217,9 +217,14 @@ class ExchangeFill:
             raise MalformedResponseError(f"fill 'px' must be > 0, got {price}: {raw!r}")
 
         fee = _parse_optional_fee(raw)
-        with localcontext(DECIMAL_CONTEXT):
-            fill_notional = abs(qty * price)
         try:
+            # Inside the guard: DECIMAL_CONTEXT keeps the arithmetic traps armed, and
+            # an absurd-but-finite exponent ("px": "1e1000000") clears require_decimal's
+            # NaN/Inf check and then raises decimal.Overflow here. That is an
+            # ArithmeticError, not a ValueError — so the backstop below catches BOTH,
+            # or a payload could still escape §11.3 through the arithmetic door.
+            with localcontext(DECIMAL_CONTEXT):
+                fill_notional = abs(qty * price)
             key = exchange_fill_key(tid=tid)
             return cls(
                 coin=coin,
@@ -236,11 +241,12 @@ class ExchangeFill:
                 exchange_fill_key=key,
                 raw=raw,
             )
-        except ValueError as exc:
+        except (ValueError, ArithmeticError) as exc:
             # Backstop, so the two exception vocabularies cannot drift apart again:
             # every check above already rejects in the malformed vocabulary, but a
-            # future invariant added to __post_init__ (or to an id helper) would
-            # otherwise silently re-open the §11.3 escape hatch this guards.
+            # future invariant added to __post_init__ (or to an id helper), or a new
+            # piece of Decimal arithmetic, would otherwise silently re-open the §11.3
+            # escape hatch this guards.
             raise MalformedResponseError(
                 f"fill payload violates a fill invariant: {raw!r}"
             ) from exc
@@ -256,6 +262,46 @@ def _require_ledger(conn: sqlite3.Connection, run_id: str) -> AccountLedger:
     if ledger is None:
         raise ValueError(f"run {run_id!r} has no account state; call initialize_run first")
     return ledger
+
+
+def _rebuild_position(conn: sqlite3.Connection, run_id: str, coin: str) -> PositionState:
+    """Re-fold one symbol's live fills in exchange-time order, from the run's genesis.
+
+    The repair for a fill that arrives OUT OF ORDER. Position is the one piece of
+    state that does not commute: size and the weighted-average entry price depend on
+    the order the fills are folded in, so a fill applied incrementally on top of newer
+    ones lands on the wrong running position and stays wrong forever.
+
+    Folded exactly the way ``accounting.replay_within`` folds it — same genesis (the
+    run's seed positions), same chronological order, same per-fill math — so the
+    materialized position and the replayed one agree BY CONSTRUCTION rather than by
+    coincidence. If they could drift, each would still be internally consistent, and
+    the §5 check could not tell which was right.
+
+    Per-symbol, because that is all replay's fold needs: positions are independent
+    across symbols, so re-folding one cannot disturb another. The ledger is untouched
+    — wallet, realized and fees are SUMS of per-fill deltas and commute, so an
+    out-of-order fill leaves them already correct.
+    """
+    seeds = {p.coin: p for p in repo.get_run_seed_positions(conn, run_id)}
+    position = seeds.get(coin) or PositionState.flat(coin)
+    with localcontext(DECIMAL_CONTEXT):
+        for row in repo.iter_fills(conn, run_id, chronological=True):
+            if row["symbol"] != coin:
+                continue
+            recorded_fee = row["exchange_fee"]
+            effect = compute_live_fill_effect(
+                position,
+                side=row["side"],
+                qty=Decimal(row["fill_qty"]),
+                price=Decimal(row["fill_price"]),
+                exchange_fee=repo.posted_exchange_fee(
+                    None if recorded_fee is None else Decimal(recorded_fee)
+                ),
+                exchange_closed_pnl=Decimal(row["exchange_closed_pnl"]),
+            )
+            position = effect.position
+    return position
 
 
 def apply_live_fill(
@@ -291,6 +337,13 @@ def apply_live_fill(
     now = timestamp or datetime.now(timezone.utc)
     position = repo.get_current_position(conn, run_id, fill.coin) or PositionState.flat(fill.coin)
     ledger = _require_ledger(conn, run_id)
+
+    # Read BEFORE the insert, so it is the newest fill already on the books, not this
+    # one. A fill older than that is out of order: the socket and the REST backfill are
+    # two racing sources, and §12.3's re-ingest of a once-unmapped fill lands it after
+    # newer ones by design.
+    newest_booked = repo.last_live_fill_time(conn, run_id, symbol=fill.coin)
+    out_of_order = newest_booked is not None and fill.fill_time < newest_booked
 
     posted_fee = repo.posted_exchange_fee(fill.fee)
     effect = compute_live_fill_effect(
@@ -349,6 +402,21 @@ def apply_live_fill(
         raw_exchange_payload_path=raw_exchange_payload_path,
         timestamp=now,
     )
+    if out_of_order:
+        # The incremental fold above stacked this fill on top of NEWER ones, so its
+        # size / weighted-average entry price are wrong — and would stay wrong, since
+        # nothing revisits a booked position. Re-fold this symbol from genesis in
+        # exchange-time order, which is exactly how replay folds it, so the two agree
+        # by construction. The ledger needs no repair: its three totals are sums of
+        # per-fill deltas and commute (only the position does not).
+        logger.info(
+            "live fill %s (%s) is older than the newest booked fill for %s — re-folding "
+            "the position in exchange-time order",
+            fill.exchange_fill_key,
+            fill.fill_time.isoformat(),
+            fill.coin,
+        )
+        effect = replace(effect, position=_rebuild_position(conn, run_id, fill.coin))
     repo.upsert_current_position(conn, run_id, effect.position, updated_at=now)
     repo.upsert_current_account_state(conn, run_id, new_ledger, updated_at=now)
     return effect
@@ -634,6 +702,11 @@ class LiveFillProcessor:
                 key=fill.exchange_fill_key,
                 payload={"reason": unmapped_reason, "raw": raw_fill},
                 now=self._clock.now(),
+                # Once per fill, not once per sighting. An unapplied fill is never
+                # inserted, so the backfill cursor never advances past it and every
+                # later pass re-fetches and re-reports the same fill — an unbounded
+                # write of the same evidence, for as long as it stays unreconciled.
+                once=True,
             )
             return IngestResult(IngestOutcome.UNMAPPED, fill)
 
@@ -762,6 +835,11 @@ class LiveFillProcessor:
         the books drifted. ``write_raw_payload`` is itself fail-soft (a failed write
         warns, never raises), so recording the evidence can never turn a skipped
         fill into a crashed drain.
+
+        Written ONCE per fill, like the unmapped path and for the same reason: a
+        malformed fill is never inserted either, so it sits inside every subsequent
+        REST window and is re-reported on every backfill pass. One file per sighting
+        would grow without bound for as long as the exchange kept sending it.
         """
         key = "unparsed"
         if isinstance(raw, dict):
@@ -773,4 +851,5 @@ class LiveFillProcessor:
             key=key,
             payload={"error": error, "raw": raw},
             now=self._clock.now(),
+            once=True,
         )

@@ -369,9 +369,7 @@ def test_backfill_applies_new_fills(db, tmp_path):
         captured["window"] = (start_ms, end_ms)
         return [_rest_fill(1)]
 
-    bf = FillBackfiller(
-        fetch=fetch, processor=proc, cursor=lambda: None, clock=clock, lookback_seconds=3600
-    )
+    bf = FillBackfiller(fetch=fetch, processor=proc, clock=clock, lookback_seconds=3600)
     summary = bf.backfill()
     assert (summary.fetched, summary.applied) == (1, 1)
     assert captured["window"] == (_TIME_MS - 3600 * 1000, _TIME_MS)
@@ -387,7 +385,6 @@ def test_backfill_dedupes_against_ws_applied_fill(db, tmp_path):
     bf = FillBackfiller(
         fetch=lambda s, e: [_rest_fill(1), _rest_fill(2)],
         processor=proc,
-        cursor=lambda: None,
         clock=clock,
     )
     summary = bf.backfill()
@@ -401,9 +398,7 @@ def test_backfill_records_malformed_and_counts_it(db, tmp_path):
     proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
     bad = _rest_fill(2)
     del bad["closedPnl"]
-    bf = FillBackfiller(
-        fetch=lambda s, e: [_rest_fill(1), bad], processor=proc, cursor=lambda: None, clock=clock
-    )
+    bf = FillBackfiller(fetch=lambda s, e: [_rest_fill(1), bad], processor=proc, clock=clock)
     summary = bf.backfill()
     assert (summary.applied, summary.malformed) == (1, 1)
     assert list(tmp_path.glob("fill_parse_error-*.json"))
@@ -418,7 +413,7 @@ def test_backfill_non_list_response_fails_loud(db, tmp_path, bad):
     _live_run_with_order(db)
     clock = ManualClock(_NOW)
     proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
-    bf = FillBackfiller(fetch=lambda s, e: bad, processor=proc, cursor=lambda: None, clock=clock)
+    bf = FillBackfiller(fetch=lambda s, e: bad, processor=proc, clock=clock)
     with pytest.raises(MalformedResponseError):
         bf.backfill()
 
@@ -428,7 +423,7 @@ def test_backfill_empty_list_is_a_legitimate_no_fills(db, tmp_path):
     _live_run_with_order(db)
     clock = ManualClock(_NOW)
     proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
-    bf = FillBackfiller(fetch=lambda s, e: [], processor=proc, cursor=lambda: None, clock=clock)
+    bf = FillBackfiller(fetch=lambda s, e: [], processor=proc, clock=clock)
     assert bf.backfill().fetched == 0
 
 
@@ -440,7 +435,7 @@ def test_backfill_transport_failure_propagates(db, tmp_path):
     def fetch(s, e):
         raise ConnectionError("rest down")
 
-    bf = FillBackfiller(fetch=fetch, processor=proc, cursor=lambda: None, clock=clock)
+    bf = FillBackfiller(fetch=fetch, processor=proc, clock=clock)
     with pytest.raises(ConnectionError):
         bf.backfill()
 
@@ -453,9 +448,7 @@ def test_backfill_and_ws_converge_on_exactly_once(db, tmp_path):
     proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
     fill = _rest_fill(1)
     # REST first...
-    FillBackfiller(
-        fetch=lambda s, e: [fill], processor=proc, cursor=lambda: None, clock=clock
-    ).backfill()
+    FillBackfiller(fetch=lambda s, e: [fill], processor=proc, clock=clock).backfill()
     # ...then the WS delivers the same fill.
     assert proc.ingest(fill).outcome is IngestOutcome.DUPLICATE
     assert db.conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 1
@@ -559,62 +552,59 @@ def test_close_publishes_stream_state_under_the_supervisor_lock():
 
 
 # ---------------------------------------------------------------------------
-# FillBackfiller — the cursor and the page budget (the gap must really close)
+# FillBackfiller — the gap start and the page budget (the gap must really close)
 # ---------------------------------------------------------------------------
 
 
-def test_window_start_falls_back_to_the_lookback_with_no_cursor():
+def test_window_start_falls_back_to_the_lookback_with_no_gap():
     clock = ManualClock(_NOW)
     seen = []
 
     bf = FillBackfiller(
         fetch=lambda s, e: seen.append((s, e)) or [],
         processor=None,  # never reached: the fetch returns no fills
-        cursor=lambda: None,
         clock=clock,
         lookback_seconds=3600,
     )
-    bf.backfill()
+    bf.backfill()  # a routine heartbeat pass: no known gap
 
     start_ms, end_ms = seen[0]
     assert end_ms - start_ms == 3600 * 1000
 
 
-def test_cursor_pulls_the_window_back_past_a_long_outage():
+def test_since_pulls_the_window_back_past_a_long_outage():
     """Down for longer than the lookback: those fills are ingested by NO other path.
 
     A fixed trailing window would silently skip them — no error, no gap reported.
     """
     clock = ManualClock(_NOW)
-    last_fill_at = _NOW - timedelta(hours=30)  # we were down far longer than the lookback
+    gap_start = _NOW - timedelta(hours=30)  # we were down far longer than the lookback
     seen = []
 
     bf = FillBackfiller(
         fetch=lambda s, e: seen.append((s, e)) or [],
         processor=None,
-        cursor=lambda: last_fill_at,
         clock=clock,
         lookback_seconds=6 * 3600,
     )
-    bf.backfill()
+    bf.backfill(since=gap_start)
 
     start_ms, _ = seen[0]
-    assert start_ms == int(last_fill_at.timestamp() * 1000)  # the REAL gap, not the window
+    assert start_ms == int(gap_start.timestamp() * 1000)  # the REAL gap, not the window
 
 
-def test_a_recent_cursor_does_not_shrink_the_overlap():
-    """The lookback is a floor: a fresh cursor must not narrow the window below it."""
+def test_a_recent_since_does_not_shrink_the_overlap():
+    """The lookback is a floor: a fresh gap start must not narrow the window below it."""
     clock = ManualClock(_NOW)
     seen = []
 
     bf = FillBackfiller(
         fetch=lambda s, e: seen.append((s, e)) or [],
         processor=None,
-        cursor=lambda: _NOW - timedelta(minutes=1),  # a fill a minute ago
         clock=clock,
         lookback_seconds=3600,
     )
-    bf.backfill()
+    bf.backfill(since=_NOW - timedelta(minutes=1))
 
     start_ms, end_ms = seen[0]
     assert end_ms - start_ms == 3600 * 1000  # still the full trailing hour
@@ -635,7 +625,6 @@ def test_a_capped_response_is_paged_not_truncated(db, tmp_path):
     bf = FillBackfiller(
         fetch=lambda s, e: pages.pop(0) if pages else [],
         processor=proc,
-        cursor=lambda: None,
         clock=clock,
         response_fill_cap=2,
     )
@@ -662,7 +651,6 @@ def test_an_exhausted_page_budget_reports_the_window_uncovered(db, tmp_path):
     bf = FillBackfiller(
         fetch=always_capped,
         processor=proc,
-        cursor=lambda: None,
         clock=clock,
         max_pages=3,
         response_fill_cap=2,

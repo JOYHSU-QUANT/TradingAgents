@@ -51,7 +51,7 @@ def _safe_key(key: str) -> str:
 
 
 def write_raw_payload(
-    *, payload_dir: Path, kind: str, key: str, payload: Any, now: datetime
+    *, payload_dir: Path, kind: str, key: str, payload: Any, now: datetime, once: bool = False
 ) -> str | None:
     """Persist one raw exchange response; return its path, or None on failure.
 
@@ -59,9 +59,23 @@ def write_raw_payload(
     the cloid it belongs to. Rule 1 above: every failure mode — the directory,
     the disk, or a payload that will not serialise — is caught and warned, never
     raised, because the exchange action this documents has already taken effect.
+
+    ``once`` keeps only the FIRST payload recorded for a ``(kind, key)`` and returns
+    that file's path on every later call. It is OFF by default because the order
+    round-trips each document a DISTINCT event that merely shares a cloid — a retry's
+    ack is not the first ack, and collapsing them would destroy the audit trail. Turn
+    it on where the same unchanging fact is re-observed on a schedule: a fill the REST
+    backfill keeps re-fetching (an unapplied fill is never inserted, so no cursor ever
+    advances past it) would otherwise write one more identical file every pass, without
+    bound, until the disk filled.
     """
+    safe_key = _safe_key(key)
+    if once:
+        existing = sorted(payload_dir.glob(f"{kind}-{safe_key}-*.json"))
+        if existing:
+            return str(existing[0])
     stamp = now.strftime("%Y%m%dT%H%M%S_%fZ")
-    path = payload_dir / f"{kind}-{_safe_key(key)}-{stamp}.json"
+    path = payload_dir / f"{kind}-{safe_key}-{stamp}.json"
     try:
         payload_dir.mkdir(parents=True, exist_ok=True)
         # default=str keeps Decimal/datetime serialisable; TypeError and

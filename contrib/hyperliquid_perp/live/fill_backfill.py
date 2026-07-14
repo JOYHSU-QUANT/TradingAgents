@@ -13,12 +13,14 @@ up), after every reconnect (catch the outage gap — driven by the stream's
 silently-dropped WS event). The overlap re-fetches recent fills every time and the
 dedupe key absorbs the repeats, so a pass is always safe to repeat.
 
-The window's start is the trailing lookback OR the last fill actually booked,
-whichever is EARLIER (the cursor). A fixed trailing window alone would silently fail
-the one case that matters: down for longer than the window — an overnight outage, a
-bad deploy, a restart loop — and the fills older than it are ingested by no path at
-all, with no error and no gap reported. The cursor keeps the catch-up honest however
-long the outage ran; the lookback then just guarantees a generous overlap on top.
+The window's start is the trailing lookback OR the caller's ``since``, whichever is
+EARLIER. A fixed trailing window alone would silently fail the one case that matters:
+down for longer than the window — an overnight outage, a bad deploy, a restart loop —
+and the fills older than it are ingested by no path at all, with no error and no gap
+reported. ``since`` is the start of the gap the caller knows it has (the newest booked
+fill at startup; the disconnect time after a reconnect); the lookback then just adds a
+generous overlap on top. Deriving it here from the fills table instead would look
+right and be wrong — see ``_window_start``.
 
 The window is also PAGED, since the endpoint caps a response: a full page is a
 truncated view, not a complete one, and a pass that cannot finish walking its pages
@@ -127,13 +129,9 @@ class FillBackfiller:
     :class:`LiveFillProcessor` the WS drain feeds, which is what makes WS and REST
     converge on one exactly-once ledger.
 
-    ``cursor`` returns the exchange time of the last fill already booked (in
-    production: ``repo.last_live_fill_time``), and is REQUIRED — no default. A
-    defaulted cursor would silently degrade this back to a fixed trailing window,
-    whose failure mode is invisible: an outage longer than the lookback leaves fills
-    that no path ever ingests, with no error and a summary that looks healthy.
-    Passing ``lambda: None`` is a deliberate opt-out (a cold start has no cursor);
-    forgetting to pass one should not be possible.
+    How far BACK a pass reads is decided per call, by the caller, through
+    :meth:`backfill`'s ``since`` — see :meth:`_window_start` for why the fills table
+    cannot answer that question for itself.
     """
 
     def __init__(
@@ -141,7 +139,6 @@ class FillBackfiller:
         *,
         fetch: Callable[[int, int], Any],
         processor: LiveFillProcessor,
-        cursor: Callable[[], datetime | None],
         clock: Clock | None = None,
         lookback_seconds: float = DEFAULT_LOOKBACK_SECONDS,
         max_pages: int = DEFAULT_MAX_PAGES,
@@ -155,31 +152,38 @@ class FillBackfiller:
             raise ValueError(f"response_fill_cap must be >= 1, got {response_fill_cap}")
         self._fetch = fetch
         self._processor = processor
-        self._cursor = cursor
         self._clock = clock or WallClock()
         self._lookback = lookback_seconds
         self._max_pages = max_pages
         self._response_cap = response_fill_cap
 
-    def _window_start(self, stamp: datetime) -> datetime:
-        """Where this pass must start reading — the trailing window, or further back.
+    def _window_start(self, stamp: datetime, since: datetime | None) -> datetime:
+        """Where this pass must start reading: the trailing window, or the gap's start.
 
-        The trailing window alone is a floor, not a guarantee: it covers the normal
-        reconnect, and nothing longer. Down for more than ``lookback_seconds`` — an
-        overnight outage, a bad deploy, a systemd restart loop — and every fill older
-        than the window is ingested by NO path, with no error raised and no gap
-        reported. So the start is pulled back to the last fill actually booked
-        whenever that is older, which makes the catch-up cover the REAL gap however
-        long it ran. With no fills yet (a cold start), the window is all there is.
+        The trailing window is a FLOOR, not a guarantee — it covers the routine case
+        and nothing longer. ``since`` is what makes a long outage recoverable, and the
+        caller must supply it, because the gap's start is a fact only the caller holds:
+
+        - at STARTUP it is the newest fill already booked (``repo.last_live_fill_time``
+          — correct there precisely because nothing newer exists yet);
+        - after a RECONNECT it is when the socket dropped (``LiveWsStream`` anchors it);
+        - on the routine heartbeat there is no gap, and ``None`` leaves the window.
+
+        The fills table cannot answer this on its own. A ``MAX(exchange_fill_time)``
+        cursor looks like it can, but it collapses: let one newer fill be booked — a
+        reconnect drains HL's isSnapshot batch before the backfill runs — and the MAX
+        jumps to now, the window snaps back to the lookback, and every fill in the
+        outage is fetched by no path at all while the pass reports success.
         """
         floor = stamp - timedelta(seconds=self._lookback)
-        last_at = self._cursor() if self._cursor is not None else None
-        if last_at is None:
+        if since is None:
             return floor
-        return min(floor, last_at)
+        return min(floor, since)
 
-    def backfill(self, now: datetime | None = None) -> BackfillSummary:
-        """Fetch everything since the cursor and apply every new fill (dedupe-safe).
+    def backfill(
+        self, now: datetime | None = None, *, since: datetime | None = None
+    ) -> BackfillSummary:
+        """Fetch everything back to ``since`` and apply every new fill (dedupe-safe).
 
         A transport failure PROPAGATES: the caller (the engine loop) leaves the
         stream's ``needs_backfill`` flag set so the next tick retries — swallowing it
@@ -195,7 +199,7 @@ class FillBackfiller:
         """
         stamp = now or self._clock.now()
         end_ms = int(stamp.timestamp() * 1000)
-        start_ms = int(self._window_start(stamp).timestamp() * 1000)
+        start_ms = int(self._window_start(stamp, since).timestamp() * 1000)
 
         fetched = applied = duplicate = unmapped = malformed = 0
         complete = True

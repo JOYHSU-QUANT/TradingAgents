@@ -857,3 +857,116 @@ def test_fills_apply_in_exchange_time_order_not_arrival_order(db, tmp_path, cloc
     assert replayed.position_mismatches == ()
     assert replayed.account_matches
     assert replayed.positions["BTC"].entry_price == Decimal("150")
+
+
+# ---------------------------------------------------------------------------
+# Out-of-order arrival: materialized books must equal replayed books
+# ---------------------------------------------------------------------------
+
+
+def test_a_fill_arriving_out_of_order_re_folds_the_position(db, tmp_path, clock):
+    """A fill older than the newest booked one cannot be folded incrementally.
+
+    Position is the one piece of state that does not commute. This is a designed path,
+    not an edge case: an UNMAPPED fill re-ingested after §8.3 recovery records its oid
+    lands AFTER newer fills, and a heartbeat backfill can do the same. Folded on top of
+    the newer ones, its weighted-average entry price is wrong and nothing ever revisits
+    it — and because replay folds chronologically, the two books would disagree while
+    each stayed internally consistent, so no check could say which was right.
+    """
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+
+    # Booked first (it arrived first): the LATER trade, buy 1 @ 200 at t+10s.
+    proc.ingest(_fill(tid=2, sz="1", px="200", fee=None, time_ms=_TIME_MS + 10_000))
+    # Then the backfill delivers the EARLIER trade it had missed: buy 1 @ 100 at t.
+    proc.ingest(_fill(tid=1, sz="1", px="100", fee=None, time_ms=_TIME_MS))
+
+    position = _position(db)
+    assert position.size == Decimal("2")
+    assert position.entry_price == Decimal("150")  # (100 + 200) / 2 — trade order
+
+    # The materialized books and the replayed books agree BY CONSTRUCTION.
+    replayed = accounting.replay(db, run_id="r")
+    assert replayed.position_mismatches == ()
+    assert replayed.account_matches
+    assert replayed.positions["BTC"].entry_price == Decimal("150")
+
+
+def test_out_of_order_refold_survives_a_reduce(db, tmp_path, clock):
+    """The case where order actually changes the answer: a close folded before its open."""
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+
+    # Arrival order: the t+20s buy is seen first, then the t and t+10s fills backfill in.
+    proc.ingest(_fill(tid=3, sz="1", px="300", fee=None, time_ms=_TIME_MS + 20_000))
+    proc.ingest(_fill(tid=1, sz="1", px="100", fee=None, time_ms=_TIME_MS))
+    proc.ingest(
+        _fill(tid=2, side="A", sz="1", px="150", closed="50", fee=None, time_ms=_TIME_MS + 10_000)
+    )
+
+    # True chronology: buy 1 @100 → sell 1 @150 (flat, +50 realized) → buy 1 @300.
+    position = _position(db)
+    assert position.size == Decimal("1")
+    assert position.entry_price == Decimal("300")
+    assert position.realized_pnl == Decimal("50")
+
+    replayed = accounting.replay(db, run_id="r")
+    assert replayed.position_mismatches == ()
+    assert replayed.account_matches
+
+
+def test_in_order_fills_do_not_trigger_a_refold(db, tmp_path, clock, caplog):
+    """The rebuild is the exception, not the rule — the common path stays incremental."""
+    import logging
+
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+
+    with caplog.at_level(logging.INFO):
+        proc.ingest(_fill(tid=1, sz="1", px="100", fee=None, time_ms=_TIME_MS))
+        proc.ingest(_fill(tid=2, sz="1", px="200", fee=None, time_ms=_TIME_MS + 10_000))
+
+    assert "re-folding" not in caplog.text
+    assert _position(db).entry_price == Decimal("150")
+
+
+def test_an_absurd_exponent_is_malformed_not_an_arithmetic_crash():
+    """decimal.Overflow is an ArithmeticError, not a ValueError — it escaped the backstop.
+
+    "1e1000000" is finite, so require_decimal's NaN/Inf guard passes it; the notional
+    multiply then overflows. Escaping §11.3, it would abort the whole batch.
+    """
+    with pytest.raises(MalformedResponseError):
+        ExchangeFill.parse(_fill(px="1e1000000", sz="1e1000000"))
+
+
+def test_unmapped_evidence_is_written_once_not_once_per_sighting(db, tmp_path, clock):
+    """An unapplied fill is re-fetched by every backfill pass — evidence must not pile up.
+
+    It is never inserted, so no cursor advances past it; it sits inside every subsequent
+    REST window forever. One file per sighting would grow without bound until the disk
+    filled.
+    """
+    _live_run(db)  # no order → every pass leaves this fill UNMAPPED
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+
+    for _ in range(5):  # five backfill passes re-fetch the same fill
+        assert proc.ingest(_fill(oid=999)).outcome is IngestOutcome.UNMAPPED
+
+    assert len(list(tmp_path.glob("fill_unmapped-*.json"))) == 1
+
+
+def test_malformed_evidence_is_written_once_not_once_per_sighting(db, tmp_path, clock):
+    """Same shape as the unmapped path: a malformed fill is never inserted either."""
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+
+    for _ in range(5):
+        proc.ingest_message({"channel": "userFills", "data": {"fills": [_fill(tid=7, sz="0")]}})
+
+    assert len(list(tmp_path.glob("fill_parse_error-*.json"))) == 1

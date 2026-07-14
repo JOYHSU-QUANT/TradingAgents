@@ -603,21 +603,35 @@ def iter_fills(
     return conn.execute("SELECT * FROM fills WHERE run_id = ? ORDER BY rowid", (run_id,)).fetchall()
 
 
-def last_live_fill_time(conn: sqlite3.Connection, run_id: str) -> datetime | None:
-    """The exchange timestamp of this run's most recent live fill, or ``None``.
+def last_live_fill_time(
+    conn: sqlite3.Connection, run_id: str, *, symbol: str | None = None
+) -> datetime | None:
+    """The exchange timestamp of the newest live fill already booked, or ``None``.
 
-    The REST backfill's cursor (§11.2 / §14.1). A FIXED trailing window silently
-    fails the one case that matters: down for longer than the window (an overnight
-    outage, a bad deploy, a restart loop) and the fills older than it are ingested by
-    NO path — no error, no gap reported, the summary just states what it happened to
-    fetch. Anchoring the window's start at the last fill actually booked makes the
-    catch-up cover the real gap, however long it turns out to be.
+    Two callers, both asking "what is the newest fill on the books":
+
+    - per-SYMBOL (``symbol=``) — the out-of-order test in ``apply_live_fill``: a fill
+      older than this one cannot be folded incrementally, because position is the one
+      piece of state that does not commute.
+    - per-RUN — a STARTUP-only backfill floor: at startup nothing newer has been
+      booked yet, so the newest fill really is where the gap begins. It is NOT a
+      general backfill cursor: once the run books anything newer (a reconnect drains
+      HL's isSnapshot batch before the backfill runs), the MAX jumps forward and the
+      window would collapse back onto the lookback, silently skipping the gap. The
+      gap's start is a fact only the caller holds — see ``FillBackfiller.backfill``.
     """
-    row = conn.execute(
-        "SELECT MAX(exchange_fill_time) AS last_at FROM fills "
-        "WHERE run_id = ? AND mode = 'live' AND exchange_fill_time IS NOT NULL",
-        (run_id,),
-    ).fetchone()
+    if symbol is None:
+        row = conn.execute(
+            "SELECT MAX(exchange_fill_time) AS last_at FROM fills "
+            "WHERE run_id = ? AND mode = 'live' AND exchange_fill_time IS NOT NULL",
+            (run_id,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT MAX(exchange_fill_time) AS last_at FROM fills "
+            "WHERE run_id = ? AND mode = 'live' AND symbol = ? AND exchange_fill_time IS NOT NULL",
+            (run_id, symbol),
+        ).fetchone()
     if row is None or row["last_at"] is None:
         return None
     return datetime.fromisoformat(row["last_at"])

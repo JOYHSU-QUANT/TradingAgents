@@ -392,6 +392,12 @@ class WsConnectionSupervisor:
             logger.warning("websocket connect failed: %s", exc)
             return False
 
+        # The connect is done; re-read the clock. ``now`` above was stamped BEFORE the
+        # network round-trip (it anchors the backoff), and a slow handshake can take
+        # tens of seconds. Stamping "connected since" with the attempt time would
+        # charge that latency to the silence budget, so a socket that connects slowly
+        # and then delivers promptly could still be judged half-open (is_stale).
+        connected_at = self._clock.now()
         with self._lock:
             # Superseded on EITHER count: a close bumped the generation while we
             # were connecting, or another caller already installed a handle. The
@@ -417,7 +423,7 @@ class WsConnectionSupervisor:
                 # every later tick short-circuits on ``_handle is not None``, so the
                 # stream stayed permanently "disconnected" on a working socket and
                 # the run sat in safe mode forever.)
-                self._stream.mark_connected(now)
+                self._stream.mark_connected(connected_at)
         if superseded:
             # A close landed while we were connecting: the socket we just opened
             # is already stale. Drop it rather than claim a healthy connection —

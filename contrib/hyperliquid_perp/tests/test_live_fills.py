@@ -1025,3 +1025,29 @@ def test_two_distinct_unparseable_payloads_keep_distinct_evidence(db, tmp_path, 
             }
         )
     assert len(list(tmp_path.glob("fill_parse_error-*.json"))) == 3
+
+
+def test_a_payload_that_will_not_serialise_still_cannot_crash_the_drain(db, tmp_path, clock):
+    """Deriving the evidence KEY is part of recording evidence — it must be fail-soft too.
+
+    `json.dumps(..., sort_keys=True)` raises TypeError on mixed-type dict keys. Real
+    WS/REST payloads are JSON-decoded (string keys only), but a malformed payload gets no
+    benefit of the doubt: if the digest input will not serialise, the key falls back to
+    repr() rather than letting the exception escape `_record_malformed` — which would
+    abort the batch's well-formed siblings and wedge every backfill retry on one payload.
+    """
+    _live_run(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+
+    undumpable = {1: "mixed", "keys": "boom"}  # tid-less AND unserialisable under sort_keys
+    # A well-formed sibling in the same batch: the one payload that cannot even be
+    # digested must not take its batch down with it.
+    sibling = _fill(tid=None, px="100")
+    results = proc.ingest_message(
+        {"channel": "userFills", "data": {"fills": [undumpable, sibling]}}
+    )
+
+    assert results == []  # both skipped as malformed, nothing raised
+    # The undumpable payload's evidence WRITE also degrades (write_raw_payload's own
+    # fail-soft: no file, a warning) — but the sibling's evidence is still kept.
+    assert len(list(tmp_path.glob("fill_parse_error-*.json"))) == 1

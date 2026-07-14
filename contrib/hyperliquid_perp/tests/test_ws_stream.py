@@ -713,6 +713,31 @@ def test_the_gap_anchor_survives_the_reconnect_that_raised_it():
     assert stream.backfill_since() == drop_at  # ...but the gap still knows where it began
 
 
+def test_a_failed_first_connect_anchors_no_gap():
+    """Never-connected is not a gap: `None` must keep meaning "use the startup floor".
+
+    The supervisor marks the stream disconnected when a connect ATTEMPT fails, so the
+    liveness clock runs and a boot that cannot connect still goes stale — but nothing
+    was ever subscribed, so there is no drop instant to anchor. Anchoring one at boot
+    would hand PR5 a "gap" starting ≈now; trusting it, the caller skips the
+    `repo.last_live_fill_time` startup floor, the window snaps back to the trailing
+    lookback, and every older fill is fetched by nothing while the pass reports success.
+    """
+    clock = ManualClock(_NOW)
+    stream = LiveWsStream(clock=clock)
+
+    stream.mark_disconnected(clock.now())  # a failed first connect attempt
+    clock.advance(60)
+    assert stream.disconnected_for() == 60  # the liveness clock DOES run...
+    assert stream.backfill_since() is None  # ...but no gap: startup floor territory
+
+    stream.mark_connected()
+    assert stream.backfill_since() is None  # still startup — nothing was ever missed
+
+    stream.mark_disconnected(clock.now())  # the FIRST real drop...
+    assert stream.backfill_since() == clock.now()  # ...is the first anchor
+
+
 def test_the_gap_anchor_is_retired_only_by_the_backfill_that_covered_it():
     """A pass that never ran, or could not prove it covered its window, leaves it standing."""
     clock = ManualClock(_NOW)

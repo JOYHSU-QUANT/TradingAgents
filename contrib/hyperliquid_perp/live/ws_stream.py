@@ -101,6 +101,9 @@ class LiveWsStream:
         # has never connected is not "disconnected for N seconds" (there is no
         # prior connection to have dropped), so disconnected_for reads 0 there.
         self._disconnected_since: datetime | None = None
+        # Doubles as "has EVER connected" (it is never cleared): mark_disconnected's
+        # gap anchoring keys off that — clearing this on disconnect would silently
+        # disable the anchor and reintroduce the startup-floor bypass it prevents.
         self._connected_since: datetime | None = None
         self._needs_backfill = False
         self._backfill_epoch = 0
@@ -175,7 +178,7 @@ class LiveWsStream:
             self._connected = False
             if self._disconnected_since is None:
                 self._disconnected_since = stamp
-            if self._gap_since is None:
+            if self._gap_since is None and self._connected_since is not None:
                 # Anchor the gap the next backfill must cover. Anchored at the FIRST
                 # drop and kept across the reconnect (unlike the liveness clock above,
                 # which mark_connected resets), because a gap does not stop existing
@@ -183,6 +186,17 @@ class LiveWsStream:
                 # has actually covered it. A second drop before that backfill runs must
                 # NOT move the anchor forward, or the first outage's fills fall out of
                 # the window and are fetched by nothing.
+                #
+                # Never-connected is NOT a gap — hence the ``_connected_since`` gate. A
+                # FAILED first connect lands here too (the supervisor marks the stream
+                # disconnected so the liveness clock runs and a boot that cannot connect
+                # still goes stale), but nothing was ever subscribed, so there is no drop
+                # instant to anchor: the whole pre-connect era belongs to the STARTUP
+                # floor (``repo.last_live_fill_time``), which ``backfill_since()``'s
+                # ``None`` routes the caller to. Anchoring here instead would hand the
+                # caller a "gap" starting at boot, the startup floor would be skipped,
+                # and every fill older than the trailing lookback would be fetched by
+                # no path — the exact silent loss the anchor exists to prevent.
                 self._gap_since = stamp
 
     @property
@@ -208,8 +222,10 @@ class LiveWsStream:
         ``disconnected_for`` cannot serve here, because it is the liveness clock and
         reads 0 the moment the socket is back.
 
-        ``None`` means no outage created this request: the first connect at startup.
-        The caller supplies the startup floor itself (the newest fill already booked —
+        ``None`` means no outage created this request: the first connect at startup —
+        including a first connect that only succeeded after failed attempts, which run
+        the liveness clock but anchor no gap (see :meth:`mark_disconnected`). The
+        caller supplies the startup floor itself (the newest fill already booked —
         ``repo.last_live_fill_time``, correct there precisely because nothing newer
         exists yet), and a routine heartbeat passes nothing at all.
 
@@ -238,9 +254,11 @@ class LiveWsStream:
                 return False
             self._needs_backfill = False
             # The gap this request named has now been covered, so it stops being a gap.
-            # Retired HERE and nowhere else — not on reconnect — so that a backfill which
-            # never ran, or ran and could not prove it covered its window, leaves the
-            # anchor standing for the next pass.
+            # Retired HERE and nowhere else — not on reconnect — so a backfill that never
+            # ran leaves the anchor standing. The epoch gate cannot see COVERAGE, though:
+            # a pass that ran but could not prove it covered its window reports
+            # ``BackfillSummary.complete = False``, and it is the CALLER's obligation not
+            # to call this method for that pass — same contract as ``needs_backfill``.
             self._gap_since = None
             return True
 

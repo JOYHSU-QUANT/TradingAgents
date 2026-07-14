@@ -582,7 +582,8 @@ def iter_fills(
     chronological: bool = False,
     symbol: str | None = None,
 ) -> list[sqlite3.Row]:
-    """A run's fills — in insertion order, or in EXCHANGE-time order for live replay.
+    """A run's fills (optionally one ``symbol``'s) — in insertion order, or in
+    EXCHANGE-time order for live replay.
 
     Paper fills keep ``rowid``: they are simulated, insertion IS execution order, and
     they carry no ``exchange_fill_time`` to sort on.

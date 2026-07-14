@@ -88,8 +88,11 @@ _FEE_TOKEN_USDC = "USDC"
 def _malformed_key(raw: Any) -> str:
     """A stable, COLLISION-FREE evidence key for a payload that would not parse.
 
-    The raw payload's ``tid`` when it has one — the same key its parsed form would
-    carry. Otherwise a digest of the payload itself, because everything else on hand is
+    The raw payload's bare ``tid`` when it has one. NOT ``ids.exchange_fill_key``'s
+    ``tid|<tid>`` form — a malformed payload's tid is untrusted and may violate that
+    derivation's invariants (raising inside the evidence path), and no alignment is
+    needed: the ``kind=`` prefix already namespaces these files apart from a parsed
+    fill's. Otherwise a digest of the payload itself, because everything else on hand is
     ambiguous: two tid-less fills on one ``oid`` share an oid, and a non-dict payload has
     no fields at all. Since the evidence file is written once per key, an ambiguous key
     silently discards the second distinct payload — while the digest keeps a RE-sighting
@@ -100,9 +103,14 @@ def _malformed_key(raw: Any) -> str:
         tid = raw.get("tid")
         if tid is not None and str(tid) != "":
             return str(tid)
-    digest = hashlib.sha256(
-        json.dumps(raw, default=str, sort_keys=True).encode("utf-8", "replace")
-    ).hexdigest()[:16]
+    try:
+        # Deriving the key is part of RECORDING EVIDENCE, which must never crash the
+        # drain (``_record_malformed``'s contract) — and the payload here is malformed
+        # by definition, so it gets no benefit of the doubt that it will serialise.
+        canonical = json.dumps(raw, default=str, sort_keys=True)
+    except (TypeError, ValueError):
+        canonical = repr(raw)
+    digest = hashlib.sha256(canonical.encode("utf-8", "replace")).hexdigest()[:16]
     return f"unparsed-{digest}"
 
 

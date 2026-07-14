@@ -32,6 +32,7 @@ from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 
 _NOW = datetime(2026, 7, 14, 8, 0, tzinfo=timezone.utc)
 _TIME_MS = int(_NOW.timestamp() * 1000)
+_NAIVE = datetime(2026, 7, 14, 8, 0)  # no tzinfo — rejected at the backfill boundary
 
 
 # ---------------------------------------------------------------------------
@@ -659,3 +660,32 @@ def test_an_exhausted_page_budget_reports_the_window_uncovered(db, tmp_path):
 
     assert calls["n"] == 3  # it kept paging...
     assert summary.complete is False  # ...and still could not prove the window covered
+
+
+@pytest.mark.parametrize("kwargs", [{"now": _NAIVE}, {"since": _NAIVE}], ids=["now", "since"])
+def test_a_naive_instant_is_rejected_at_the_boundary(kwargs):
+    """A naive `now` is the dangerous one: it does not raise, it silently shifts the window.
+
+    `.timestamp()` reads a naive datetime as LOCAL time, so on the Tokyo box the whole
+    window slides 9 hours into the past — the fetch returns nothing, the pass reports
+    complete, and the caller declares a gap closed that it never looked at.
+    """
+    bf = FillBackfiller(
+        fetch=lambda s, e: [], processor=None, clock=ManualClock(_NOW), lookback_seconds=3600
+    )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        bf.backfill(**kwargs)
+
+
+def test_last_live_fill_time_is_the_startup_backfill_floor(db, tmp_path):
+    """PR5's startup floor: the newest booked fill is where the gap begins."""
+    clock = ManualClock(_NOW)
+    _live_run_with_order(db)
+    assert repo.last_live_fill_time(db.conn, "r") is None  # cold start: no floor
+
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    proc.ingest(_rest_fill(1, time_ms=_TIME_MS))
+    proc.ingest(_rest_fill(2, time_ms=_TIME_MS + 60_000))
+
+    newest = repo.last_live_fill_time(db.conn, "r")
+    assert newest == datetime.fromtimestamp((_TIME_MS + 60_000) / 1000, tz=timezone.utc)

@@ -72,6 +72,12 @@ RESPONSE_FILL_CAP = 2000
 DEFAULT_MAX_PAGES = 20
 
 
+def _require_aware(value: datetime, *, name: str) -> None:
+    """Reject a naive datetime at the boundary (every instant here is aware UTC)."""
+    if value.tzinfo is None:
+        raise ValueError(f"backfill {name!r} must be timezone-aware (UTC), got {value!r}")
+
+
 def _newest_fill_ms(fills: list[Any]) -> int | None:
     """The newest ``time`` (epoch ms) in a REST page, or ``None`` if none is readable.
 
@@ -175,14 +181,18 @@ class FillBackfiller:
         jumps to now, the window snaps back to the lookback, and every fill in the
         outage is fetched by no path at all while the pass reports success.
         """
+        # Both instants are checked, not just ``since``. A naive ``now`` is the more
+        # dangerous of the two and the quieter: it does not raise, it makes
+        # ``.timestamp()`` read the wall clock as LOCAL time, so the window silently
+        # shifts by the UTC offset and the fetch asks the exchange for the wrong hours.
+        # A naive ``since`` merely blows up inside min() with an opaque "can't compare
+        # offset-naive and offset-aware", far from the caller that got it wrong. Every
+        # instant in this system is aware UTC; neither is accepted.
+        _require_aware(stamp, name="now")
         floor = stamp - timedelta(seconds=self._lookback)
         if since is None:
             return floor
-        if since.tzinfo is None:
-            # A naive datetime would otherwise blow up inside min() with an opaque
-            # "can't compare offset-naive and offset-aware" TypeError, from a caller
-            # far from the mistake. Every instant in this system is aware UTC.
-            raise ValueError(f"backfill 'since' must be timezone-aware (UTC), got {since!r}")
+        _require_aware(since, name="since")
         return min(floor, since)
 
     def backfill(

@@ -74,15 +74,15 @@ __all__ = [
     "iter_execution_plans",
     "iter_fills",
     "iter_funding_events",
-    "last_live_fill_time",
     "iter_kill_switch_events",
     "iter_live_fills",
     "iter_live_order_attempts",
     "iter_orders",
+    "last_live_fill_time",
     "max_engine_seq",
     "newest_live_fill_order_key",
-    "posted_exchange_fee",
     "next_live_attempt_index",
+    "posted_exchange_fee",
     "set_funding_status",
     "set_position_protection",
     "update_decision_attempt",
@@ -576,7 +576,11 @@ def insert_fill(
 
 
 def iter_fills(
-    conn: sqlite3.Connection, run_id: str, *, chronological: bool = False
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    chronological: bool = False,
+    symbol: str | None = None,
 ) -> list[sqlite3.Row]:
     """A run's fills — in insertion order, or in EXCHANGE-time order for live replay.
 
@@ -595,13 +599,17 @@ def iter_fills(
     replayed books would disagree on entry price, and each would be internally
     consistent, so no check could see it.
     """
-    if chronological:
-        return conn.execute(
-            "SELECT * FROM fills WHERE run_id = ? "
-            "ORDER BY exchange_fill_time, exchange_fill_key, rowid",
-            (run_id,),
-        ).fetchall()
-    return conn.execute("SELECT * FROM fills WHERE run_id = ? ORDER BY rowid", (run_id,)).fetchall()
+    where = "run_id = ?"
+    params: list[object] = [run_id]
+    if symbol is not None:
+        # Filtered in SQL, not by the caller: the position re-fold needs ONE symbol's
+        # fills, and on a reconnect every backfilled fill is out of order, so this runs
+        # once per fill inside a write transaction. Pulling the whole run's fills back
+        # each time just to drop most of them holds the DB lock for no reason.
+        where += " AND symbol = ?"
+        params.append(symbol)
+    order = "exchange_fill_time, exchange_fill_key, rowid" if chronological else "rowid"
+    return conn.execute(f"SELECT * FROM fills WHERE {where} ORDER BY {order}", params).fetchall()
 
 
 def last_live_fill_time(conn: sqlite3.Connection, run_id: str) -> datetime | None:
@@ -719,10 +727,13 @@ def insert_live_fill(
 ) -> None:
     """Insert one live (exchange-sourced) fill. Raises ``IntegrityError`` on a duplicate key.
 
-    The UNIQUE ``exchange_fill_key`` (§14.2 — the ``tid``, or the composite
-    fallback) is the §14.3-rule-1 exactly-once guard: the SAME exchange fill
-    arriving again from any of the three sources (WS userFills, REST
-    userFillsByTime, orderStatus) is rejected here instead of double-posting.
+    The UNIQUE ``exchange_fill_key`` (§14.2 — the exchange's ``tid``) is the
+    §14.3-rule-1 exactly-once guard: the SAME exchange fill arriving again from any of
+    the three sources (WS userFills, REST userFillsByTime, orderStatus) is rejected here
+    instead of double-posting. (§14.2's composite fallback is deliberately NOT
+    implemented and never will be — it can collide two genuinely distinct fills and
+    silently drop one; see ``ids.exchange_fill_key``. Do not reintroduce it from this
+    docstring.)
 
     Unlike :func:`insert_fill` (the paper simulation), a live fill's money is
     exchange-authoritative (§15): ``realized_pnl_delta`` is the exchange's

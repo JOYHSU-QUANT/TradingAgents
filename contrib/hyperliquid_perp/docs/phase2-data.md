@@ -215,7 +215,7 @@ AI input
 | `available_balance` | 當時可用餘額 |
 | `realized_pnl` | 累積已實現損益 |
 | `unrealized_pnl` | 當時未實現損益 |
-| `total_fees` | 累積手續費 |
+| `total_fees` | 累積手續費（paper：模型 fee，恆 >= 0；**live：交易所 fee 之和，maker rebate 為負，故總額可能為負**——`AccountLedger` 的 `>= 0` 約束已因此移除） |
 | `net_funding_pnl` | 累積 signed funding PnL |
 | `effective_leverage` | 當時帳戶實際槓桿 |
 | `margin_ratio` | 當時 margin ratio |
@@ -451,7 +451,7 @@ Live trading：
 | `realized_pnl` | 累積已實現損益 |
 | `unrealized_pnl` | 總未實現損益 |
 | `total_pnl` | 總損益 |
-| `total_fees` | 累積手續費 |
+| `total_fees` | 累積手續費（paper：模型 fee，恆 >= 0；**live：交易所 fee 之和，maker rebate 為負，故總額可能為負**——`AccountLedger` 的 `>= 0` 約束已因此移除） |
 | `net_funding_pnl` | 累積 signed funding PnL；收入為正，成本為負 |
 | `total_position_notional` | 總名目曝險 |
 | `effective_leverage` | 實際槓桿 |

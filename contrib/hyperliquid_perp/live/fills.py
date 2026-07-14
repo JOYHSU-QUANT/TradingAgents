@@ -33,6 +33,8 @@ fill and the dedupe key keeps it exactly-once.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import sqlite3
 from dataclasses import dataclass, replace
@@ -81,6 +83,27 @@ _HL_SIDE = {"B": "buy", "A": "sell"}
 # to the USDC ledger as-is, so it is treated as PENDING (§15.1) and left for a
 # reconciliation job that can value it — never silently added as if it were USDC.
 _FEE_TOKEN_USDC = "USDC"
+
+
+def _malformed_key(raw: Any) -> str:
+    """A stable, COLLISION-FREE evidence key for a payload that would not parse.
+
+    The raw payload's ``tid`` when it has one — the same key its parsed form would
+    carry. Otherwise a digest of the payload itself, because everything else on hand is
+    ambiguous: two tid-less fills on one ``oid`` share an oid, and a non-dict payload has
+    no fields at all. Since the evidence file is written once per key, an ambiguous key
+    silently discards the second distinct payload — while the digest keeps a RE-sighting
+    of the same payload (every backfill window re-delivers it) collapsing onto one file,
+    which is the point of writing it once.
+    """
+    if isinstance(raw, dict):
+        tid = raw.get("tid")
+        if tid is not None and str(tid) != "":
+            return str(tid)
+    digest = hashlib.sha256(
+        json.dumps(raw, default=str, sort_keys=True).encode("utf-8", "replace")
+    ).hexdigest()[:16]
+    return f"unparsed-{digest}"
 
 
 def _require(raw: Any, key: str) -> Any:
@@ -286,9 +309,7 @@ def _rebuild_position(conn: sqlite3.Connection, run_id: str, coin: str) -> Posit
     seeds = {p.coin: p for p in repo.get_run_seed_positions(conn, run_id)}
     position = seeds.get(coin) or PositionState.flat(coin)
     with localcontext(DECIMAL_CONTEXT):
-        for row in repo.iter_fills(conn, run_id, chronological=True):
-            if row["symbol"] != coin:
-                continue
+        for row in repo.iter_fills(conn, run_id, chronological=True, symbol=coin):
             basis = row["exchange_closed_pnl"]
             if basis is None:
                 # The same fail-loud replay applies (``_require_live_basis``): a live
@@ -865,10 +886,15 @@ class LiveFillProcessor:
         malformed fill is never inserted either, so it sits inside every subsequent
         REST window and is re-reported on every backfill pass. One file per sighting
         would grow without bound for as long as the exchange kept sending it.
+
+        Which makes the KEY load-bearing: ``once`` keeps the first payload per key, so
+        two distinct payloads sharing a key would collapse onto one file and the second
+        would be lost — and a malformed fill has no reliable id by definition (that is
+        often WHY it is malformed). A content digest is therefore folded in whenever the
+        ``tid`` is missing, so distinct evidence stays distinct while a re-sighting of
+        the SAME payload still dedupes.
         """
-        key = "unparsed"
-        if isinstance(raw, dict):
-            key = str(raw.get("tid") or raw.get("oid") or "unparsed")
+        key = _malformed_key(raw)
         logger.warning("skipping malformed live fill (%s): %r", error, raw)
         write_raw_payload(
             payload_dir=self._payload_dir,

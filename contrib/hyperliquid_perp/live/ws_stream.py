@@ -104,6 +104,11 @@ class LiveWsStream:
         self._connected_since: datetime | None = None
         self._needs_backfill = False
         self._backfill_epoch = 0
+        # The start of the gap a backfill still has to cover. Distinct from
+        # ``_disconnected_since``, which is the LIVENESS clock and is cleared the moment
+        # the socket comes back: the gap outlives the reconnect that created it, and is
+        # retired only when a backfill has actually covered it.
+        self._gap_since: datetime | None = None
         self._last_event_at: datetime | None = None
 
     def enqueue(self, event: Any) -> None:
@@ -170,6 +175,15 @@ class LiveWsStream:
             self._connected = False
             if self._disconnected_since is None:
                 self._disconnected_since = stamp
+            if self._gap_since is None:
+                # Anchor the gap the next backfill must cover. Anchored at the FIRST
+                # drop and kept across the reconnect (unlike the liveness clock above,
+                # which mark_connected resets), because a gap does not stop existing
+                # just because the socket came back — it is retired only once a backfill
+                # has actually covered it. A second drop before that backfill runs must
+                # NOT move the anchor forward, or the first outage's fills fall out of
+                # the window and are fetched by nothing.
+                self._gap_since = stamp
 
     @property
     def connected(self) -> bool:
@@ -185,6 +199,26 @@ class LiveWsStream:
         """Which backfill request is currently outstanding (see :meth:`mark_backfill_done`)."""
         with self._lock:
             return self._backfill_epoch
+
+    def backfill_since(self) -> datetime | None:
+        """When the gap the pending backfill must cover BEGAN, or ``None``.
+
+        Pass this as ``FillBackfiller.backfill(since=...)``. It is the socket's drop
+        instant, kept alive across the reconnect that raised the backfill request —
+        ``disconnected_for`` cannot serve here, because it is the liveness clock and
+        reads 0 the moment the socket is back.
+
+        ``None`` means no outage created this request: the first connect at startup.
+        The caller supplies the startup floor itself (the newest fill already booked —
+        ``repo.last_live_fill_time``, correct there precisely because nothing newer
+        exists yet), and a routine heartbeat passes nothing at all.
+
+        Without this, an outage longer than the trailing lookback is unrecoverable and
+        SILENT: the window falls back to the lookback, the older fills are fetched by no
+        path, and the pass still reports success.
+        """
+        with self._lock:
+            return self._gap_since
 
     def mark_backfill_done(self, epoch: int) -> bool:
         """Clear the backfill request ``epoch`` once ITS backfill has run (§11.2 rule 5).
@@ -203,6 +237,11 @@ class LiveWsStream:
             if epoch != self._backfill_epoch:
                 return False
             self._needs_backfill = False
+            # The gap this request named has now been covered, so it stops being a gap.
+            # Retired HERE and nowhere else — not on reconnect — so that a backfill which
+            # never ran, or ran and could not prove it covered its window, leaves the
+            # anchor standing for the next pass.
+            self._gap_since = None
             return True
 
     def disconnected_for(self, now: datetime | None = None) -> float:

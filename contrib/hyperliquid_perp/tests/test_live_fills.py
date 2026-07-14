@@ -993,3 +993,35 @@ def test_same_millisecond_fill_that_sorts_earlier_is_out_of_order(db, tmp_path, 
     assert replayed.position_mismatches == ()  # materialized == replayed
     assert replayed.account_matches
     assert _position(db).entry_price == replayed.positions["BTC"].entry_price
+
+
+def test_two_distinct_unparseable_payloads_keep_distinct_evidence(db, tmp_path, clock):
+    """`once` dedupes by key, so an ambiguous key would silently discard real evidence.
+
+    A malformed fill often has no usable id — that can be *why* it is malformed. Keyed on
+    a fallback, two different bad payloads collapse onto one file and the second is lost.
+    """
+    _live_run(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+
+    # Two DIFFERENT tid-less payloads (same oid), plus a non-dict one.
+    proc.ingest_message(
+        {
+            "channel": "userFills",
+            "data": {"fills": [_fill(tid=None, px="100"), _fill(tid=None, px="200"), "garbage"]},
+        }
+    )
+    assert len(list(tmp_path.glob("fill_parse_error-*.json"))) == 3
+
+    # ...but re-sighting the SAME payloads (every backfill window re-delivers them) still
+    # collapses onto the files already written.
+    for _ in range(3):
+        proc.ingest_message(
+            {
+                "channel": "userFills",
+                "data": {
+                    "fills": [_fill(tid=None, px="100"), _fill(tid=None, px="200"), "garbage"]
+                },
+            }
+        )
+    assert len(list(tmp_path.glob("fill_parse_error-*.json"))) == 3

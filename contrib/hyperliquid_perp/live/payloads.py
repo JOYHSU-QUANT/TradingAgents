@@ -37,7 +37,7 @@ __all__ = ["payload_column", "write_raw_payload"]
 logger = logging.getLogger(__name__)
 
 # Anything outside this set is replaced in the FILENAME (not the recorded value).
-# A §14.2 fill dedupe key is a ``|``-joined composite ("tid|1", "fill|BTC|777|…"),
+# A §14.2 fill dedupe key is a ``|``-joined value ("tid|4521"),
 # and ``|`` is an illegal path character on Windows — an unsanitised key would
 # make every live-fill payload write fail (silently, since the writer is
 # fail-soft), losing the very evidence §16.2 exists to keep. The path is only an
@@ -70,13 +70,16 @@ def write_raw_payload(
     bound, until the disk filled.
     """
     safe_key = _safe_key(key)
-    if once:
-        existing = sorted(payload_dir.glob(f"{kind}-{safe_key}-*.json"))
-        if existing:
-            return str(existing[0])
     stamp = now.strftime("%Y%m%dT%H%M%S_%fZ")
     path = payload_dir / f"{kind}-{safe_key}-{stamp}.json"
     try:
+        if once:
+            # Inside the guard, with everything else: Rule 1 is that this function never
+            # raises, and callers lean on that ("recording the evidence can never turn a
+            # skipped fill into a crashed drain"). The glob is I/O like any other here.
+            existing = sorted(payload_dir.glob(f"{kind}-{safe_key}-*.json"))
+            if existing:
+                return str(existing[0])
         payload_dir.mkdir(parents=True, exist_ok=True)
         # default=str keeps Decimal/datetime serialisable; TypeError and
         # ValueError are caught regardless, so an exotic payload degrades to a

@@ -684,9 +684,31 @@ open orders updates（orderUpdates）
 2. REST polling 必須作為補漏、重啟與 reconciliation 來源。
 3. WebSocket event 寫入 SQLite 前必須去重。
 4. WebSocket 斷線後必須重連。
-5. 重連後必須用 REST 補查斷線期間可能錯過的 fills / orders / positions。
+5. 啟動與每次重連後都必須用 REST 補查可能錯過的 fills / orders / positions
+   （`needs_backfill` 旗標）。**（v3 新增）backfill 契約**：
+   - **視窗起點 = `min(now - trailing lookback, since)`，`since` 由呼叫方提供**：啟動時
+     是帳上最新 fill 的時間、重連後是斷線的時間點、例行 heartbeat 為 None。單靠固定
+     trailing window 會在「斷線比視窗久」時（隔夜斷線、壞掉的部署、systemd 重啟迴圈）
+     把那一段 fills 漏成**沒有任何路徑會撈到**，而且不報錯。**這個起點是只有呼叫方知道
+     的事實**：fills 表本身答不出來——只要有任何一筆較新的 fill 入帳（重連時 HL 會推
+     `isSnapshot` 批次），`MAX(exchange_fill_time)` 就會跳到現在，視窗縮回 lookback。
+   - 回應**分頁**（`userFillsByTime` 單次上限 2000 筆）：整頁滿代表被截斷，必須續頁。
+   - 一次 pass 若無法證明它覆蓋了整個視窗（頁數預算用盡、游標無法前進），必須回報
+     `complete = False`：**gap 仍然開著，呼叫方不得清掉 `needs_backfill`**。
+   - `needs_backfill` 的清除以 **epoch** 為閘：先讀 epoch → 跑 backfill → 用讀到的 epoch
+     清。期間若又發生重連（epoch 遞增），這次清除會被拒絕——那個新的 gap 不會被一個
+     在它出現之前就關窗的 pass 誤判為已補完。
+   - transport error 直接往上拋（旗標留著、下一 tick 重試）；非 list 的 REST payload 是
+     malformed，不是「沒有 fills」。
 6. WebSocket 斷線期間禁止 new entry / add / rebalance。
-7. WebSocket disconnected 超過 5 分鐘時，進入 safe mode。
+7. **（v3 修訂）下列任一成立即視為 stale，進入 recoverable safe mode**：
+   - a. socket 已關閉，且斷線超過 5 分鐘（`stale_after_seconds`，預設 300）；
+   - b. socket **自稱仍連著**但靜默超過 2 分鐘（`silent_after_seconds`，預設 120）。
+     half-open TCP（NAT／load balancer 的常態）不會回報 close，只量「斷線多久」的存活
+     判斷會把一條死掉的 feed 永遠讀成健康，機器人就在一條收不到任何東西的 socket 上
+     繼續開新倉。`webData2` 會持續推送帳戶狀態，所以一條真正活著的 socket 不會這麼久
+     完全沒有事件。靜默的計時基準是「最後一則事件」，在還沒收到任何事件前則是**連上
+     的那一刻**（否則一連上就沒動靜的 socket 永遠不會 stale）。
 
 ### 11.3 WebSocket Failure Handling
 
@@ -696,7 +718,7 @@ ws_disconnected
 → disable new entry / rebalance
 → REST polling continues
 
-ws_disconnected > 5 minutes
+ws_disconnected > 5 min  OR  ws_silent_while_connected > 2 min
 → recoverable_safe_mode
 
 ws_reconnected
@@ -873,12 +895,23 @@ v3 註記：因採自管切片，所有 fills 都是一般 order fills（帶 oid
 
 ### 14.2 Live Fill Dedupe Key
 
-優先使用 exchange-provided unique fill id（`tid`）。若交易所沒有穩定 fill id，
-使用 composite key：
+`exchange_fill_key` = 交易所自帶的穩定 fill id：`tid|<tid>`。Hyperliquid 在
+`userFills`（WS）與 `userFillsByTime`（REST）都必帶 `tid`（SDK 的 `Fill` 型別中
+是必填 int），所以同一筆 fill 從任何來源都導出同一把 key（§14.3 rule 5）。
 
-```
-exchange_fill_key = symbol + oid + fill_time + side + price + size
-```
+無 `tid` 的 fill 一律視為 **malformed**：記 raw payload、不入帳（§11.3），留給
+reconciliation，不得改用 composite key。
+
+**（v3 修訂）composite fallback `symbol + oid + fill_time + side + price + size`
+刻意不實作**：
+
+- 它會把「同一張單、同一毫秒、同 side／price／size 撞到兩筆 resting order」的
+  兩筆**真實** fill 撞成同一把 key，第二筆被當 duplicate **靜默丟掉**——而 replay
+  只重算已記錄的東西，偵測不到這種漏記；
+- 任一來源若曾漏 `tid`，同一筆 fill 會導出兩把 key 而**重複計帳**。
+
+兩個方向都不安全，所以一個都不猜。若未來的交易所真的沒有穩定 fill id，composite
+才回到這裡討論，而且必須正面處理碰撞風險，不是繼承這段文字。
 
 ### 14.3 Fill Application Rules
 
@@ -888,6 +921,18 @@ exchange_fill_key = symbol + oid + fill_time + side + price + size
 3. 若 transaction commit 前 crash，該 fill 不算套用完成。
 4. 若 transaction 已 commit，重啟後不得再次套用。
 5. REST 補查與 WebSocket 回報不得造成重複計帳。
+6. **（v3 新增）套用與 replay 一律依交易所時間排序**，排序鍵為
+   `(exchange_fill_time, exchange_fill_key)`——兩筆 fill 可能落在同一毫秒，故以
+   dedupe key 破平手。「先到＝先發生」不成立：WS 與 REST backfill 是兩個競速來源，
+   而 §12.3 的 unmapped fill 一旦重新 ingest，必然晚於較新的 fill 進來。
+7. **（v3 新增）若一筆 fill 的排序鍵早於帳上最新的 fill（out-of-order），該 symbol
+   的 position 必須從 run genesis（seed positions）依交易所時間重折一次**：size 與
+   加權平均 entry price 不可交換，疊在較新的 fill 之上會永久錯誤，而 entry price 會
+   流進 unrealized PnL、equity、清算價與 PR5 要掛的 SL/TP 價位。ledger（wallet /
+   realized / total_fees）不需修復——它們是 per-fill delta 的總和，可交換。
+8. **（v3 新增）materialized position 與 accounting replay 用同一個 genesis、同一個
+   排序、同一套 per-fill 數學**，兩者一致是 by construction 而非巧合。若兩者會漂移，
+   各自都仍是內部自洽的，§5 一致性檢查就無法判斷誰才是對的。
 
 ## 15. Fee and Funding Reconciliation
 
@@ -902,11 +947,30 @@ accounting replay 從這些事件重建 position / account，必須與 materiali
 
 ### 15.1 Fee Rules
 
-1. 若 fill payload 直接提供 fee，立即入帳。
-2. 若 fee 暫時缺失，先標記 fee_status = pending。
+1. 若 fill payload 直接提供（USDC）fee，立即入帳。
+2. 若 fee 暫時缺失、或以非 USDC token 計價，該 fill **仍照常入帳**，posted fee 記 0，
+   `fills.exchange_fee` 保持 NULL 表示 **pending**（沒有獨立的 `fee_status` 欄位；
+   pending 的定義就是 `exchange_fee IS NULL`，見 `iter_live_fills(pending_fee_only=True)`）。
 3. Pending fee 不得永久留空，需由 reconciliation job 回補。
-4. 回補後重新計算 realized PnL / account state。
-5. Fee correction 必須產生 accounting adjustment event，不得靜默覆蓋。
+4. 回補**不得覆寫**已記錄的 fill（fill row 不可變）。它寫一筆
+   `accounting_adjustment_events`（`old_value` = 帳上現行 fee、`new_value` = 新學到的
+   fee），ledger 在**同一個 transaction** 內依 `new - old` 移動，live replay 折算同一組
+   delta——所以 materialized 與 replay 不會漂移。
+5. **（v3 修訂）更正是累積且有序的，不是一次性的**：
+   - `adjustment_id` 帶 `seq`（該 (target, type) 已有幾筆更正：0、1、2…）；
+   - 重複學到**相同**金額 = no-op，不寫事件（reconciliation job 可以每一輪安全呼叫）；
+   - 學到**不同**金額（referral 折扣、事後 rebate、交易所自己更正 fee）寫下一筆更正，
+     只 post 差額。若以 (target, type) 為唯一鍵拒絕第二筆，不只會漏掉那筆金額，還會讓
+     不斷重試同一筆 fill 的 reconciliation job **永久卡死**在那裡。
+6. **（v3 新增）exchange fee 可以是負的**（maker rebate，已在 mainnet 實測到）。
+   `AccountLedger.total_fees` 因此**不再有 `>= 0` 約束**——真收到 rebate 時那個 guard 會讓
+   ingester crash → rollback → 每次 backfill 重試再 crash，整條 ingestion 卡死。paper 模型的
+   非負性仍由 paper 的 fill 邊界（`compute_fill_effect` / `FillEffect`）強制。
+7. **（v3 新增）`closedPnl` 是 gross of fee**（未扣該筆 fee），已對 live mainnet `userFills`
+   實測確認（六個幣、兩個方向、maker 與 taker，殘差恆為 0），故
+   `wallet_delta = closedPnl - fee`。注意官方「Entry price and PnL」文件頁寫的
+   `closed pnl = fee + side * (mark - entry) * size` 描述的是**前端顯示欄位**，不是這個
+   API 欄位，不要照它「修正」公式。
 
 ### 15.2 Funding Rules
 
@@ -1474,7 +1538,7 @@ Capital scaling is manual only.
 |---|---|---|
 | **PR 1** | live config gates（mode / live: / allow_real_orders / absolute_notional_ceiling 檢查）＋ agent key 環境變數與啟動授權驗證 ＋ signed exchange client wrapper（尚不下單） | §3–§6 |
 | **PR 2** | schema migration v6（新欄位 + 7 張新表 + scheduler_state 欄位）＋ cloid_logical / cloid_hex 推導與 cloid_registry ＋ order / cancel / cancelByCloid / orderStatus ＋ live order persistence ＋ scheduleCancel kill switch | §7、§8、§16、§18 |
-| **PR 3** | WebSocket user fills ingestion（queue + tick 消化）＋ REST fill backfill ＋ fill 去重與 accounting transaction ＋ fee / funding pending 與 adjustment events | §11、§14、§15 |
+| **PR 3** | WebSocket user fills ingestion（queue + tick 消化）＋ REST fill backfill（分頁、gap 起點由呼叫方給）＋ fill 去重（tid）與 accounting transaction（含 out-of-order 重折）＋ **fee** pending 與 adjustment events ＋ live accounting replay | §11、§14、§15.1 |
 | **PR 4** | live account / position reconciliation（含 cloid_registry lookup）＋ startup reconciliation ＋ safe mode 狀態機與 CLI safe-mode 子命令 | §12、§13、§19 |
 | **PR 5** | live SL / TP create / modify / cancel（protection manager）＋ 自管切片執行引擎（live/，含 flip 兩腿）＋ daily / consecutive loss guards | §9、§10、§17 |
 | **PR 6** | testnet smoke tests ＋ live 驗收指標與 validate 擴充 ＋ live RUNBOOK | §20、§21 |

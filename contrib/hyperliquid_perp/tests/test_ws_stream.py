@@ -689,3 +689,47 @@ def test_last_live_fill_time_is_the_startup_backfill_floor(db, tmp_path):
 
     newest = repo.last_live_fill_time(db.conn, "r")
     assert newest == datetime.fromtimestamp((_TIME_MS + 60_000) / 1000, tz=timezone.utc)
+
+
+def test_the_gap_anchor_survives_the_reconnect_that_raised_it():
+    """The drop instant IS the backfill's `since` — it must outlive the reconnect.
+
+    `disconnected_for` cannot serve: it is the liveness clock and reads 0 the moment the
+    socket is back. Without a surviving anchor, PR5 has nothing to pass as `since`, falls
+    back to the trailing lookback, and an outage longer than it loses its fills silently.
+    """
+    clock = ManualClock(_NOW)
+    stream = LiveWsStream(clock=clock)
+    stream.mark_connected()
+    assert stream.backfill_since() is None  # startup: no outage created this request
+
+    drop_at = clock.now()
+    stream.mark_disconnected(drop_at)
+    clock.advance(10 * 3600)  # a ten-hour outage, far beyond any trailing window
+    stream.mark_connected()
+
+    assert stream.connected
+    assert stream.disconnected_for() == 0  # the liveness clock has reset...
+    assert stream.backfill_since() == drop_at  # ...but the gap still knows where it began
+
+
+def test_the_gap_anchor_is_retired_only_by_the_backfill_that_covered_it():
+    """A pass that never ran, or could not prove it covered its window, leaves it standing."""
+    clock = ManualClock(_NOW)
+    stream = LiveWsStream(clock=clock)
+    stream.mark_connected()
+    first_drop = clock.now()
+    stream.mark_disconnected(first_drop)
+    clock.advance(60)
+    stream.mark_connected()
+
+    # A second outage before any backfill ran must NOT move the anchor forward, or the
+    # first outage's fills fall outside the window and are fetched by nothing.
+    clock.advance(60)
+    stream.mark_disconnected(clock.now())
+    clock.advance(60)
+    stream.mark_connected()
+    assert stream.backfill_since() == first_drop
+
+    stream.mark_backfill_done(stream.backfill_epoch())
+    assert stream.backfill_since() is None  # covered — it stops being a gap

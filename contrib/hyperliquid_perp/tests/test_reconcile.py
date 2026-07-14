@@ -85,10 +85,8 @@ def _engine_with_plan(db, *, slices_filled: int):
 class _Rates:
     def __init__(self, rate):
         self._rate = rate
-        self.calls = 0
 
     def rate_at(self, coin, ts):
-        self.calls += 1
         return self._rate
 
 

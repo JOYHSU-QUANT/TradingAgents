@@ -23,29 +23,41 @@ from decimal import Decimal, localcontext
 from typing import Any
 
 from ..domains.perp.enum_guard import check_enum
+from .cloid import LIVE_ORDER_ROLES
 from .ids import _canonical_instant
 from .models import DECIMAL_CONTEXT, AccountLedger, PositionState, Side
 
 __all__ = [
+    "EXCHANGE_KNOWN_ATTEMPT_STATUSES",
+    "KILL_SWITCH_EVENT_TYPES",
     "find_in_progress_attempt",
     "get_all_current_positions",
+    "get_cloid_by_hex",
+    "get_cloid_by_logical",
     "get_current_account_state",
     "get_current_position",
     "get_decision_attempt",
     "get_execution_plan",
     "get_funding_event",
+    "get_live_order_attempt",
     "get_order",
+    "get_order_by_cloid_hex",
     "get_position_protection",
     "get_run",
     "get_run_seed_positions",
     "get_scheduler_state",
+    "has_exchange_known_cloid",
+    "has_place_attempt",
     "insert_account_snapshot",
     "insert_ai_input",
     "insert_ai_output",
+    "insert_cloid_mapping",
     "insert_decision_attempt",
     "insert_execution_plan",
     "insert_fill",
     "insert_funding_event",
+    "insert_kill_switch_event",
+    "insert_live_order_attempt",
     "insert_order",
     "insert_position_snapshot",
     "insert_run",
@@ -53,12 +65,16 @@ __all__ = [
     "iter_execution_plans",
     "iter_fills",
     "iter_funding_events",
+    "iter_kill_switch_events",
+    "iter_live_order_attempts",
     "iter_orders",
     "max_engine_seq",
+    "next_live_attempt_index",
     "set_funding_status",
     "set_position_protection",
     "update_decision_attempt",
     "update_execution_plan",
+    "update_live_order_attempt",
     "update_order",
     "upsert_current_account_state",
     "upsert_current_position",
@@ -87,6 +103,31 @@ _REPLAY_STATUSES = frozenset({"ok", "mismatch", "failed"})
 # Config-drift-on-resume breadcrumb states (schema v5): "drift" = the resumed
 # run's risk/decision/paper_trading blocks differ from the genesis record.
 _CONFIG_DRIFT_STATUSES = frozenset({"ok", "drift"})
+# live_order_attempts vocabulary (schema v6, phase3-spec §8.3): which exchange
+# action the round-trip was, and where it ended. "submitted" is written BEFORE
+# the network call — a row stuck there means the outcome is unknown and the
+# duplicate-retry protocol must query the exchange before resending.
+_LIVE_ATTEMPT_ACTIONS = frozenset({"place", "cancel", "cancel_by_cloid"})
+_LIVE_ATTEMPT_STATUSES = frozenset({"submitted", "acknowledged", "rejected", "duplicate", "failed"})
+# §18.5: the complete kill-switch event vocabulary. Public: PR 6's acceptance
+# metrics read them. The PR 2 kill switch manager writes eight of the nine —
+# kill_switch_cancel_triggered included, since PR 2 detects the case where the
+# deadline lapsed and the exchange demonstrably fired the switch on us.
+# emergency_kill_switch_triggered belongs to the §18.3 emergency-trigger state
+# machine, which is NOT in PR 2 — no rows with that type exist yet.
+KILL_SWITCH_EVENT_TYPES = frozenset(
+    {
+        "kill_switch_armed",
+        "kill_switch_refreshed",
+        "kill_switch_refresh_failed",
+        "kill_switch_cancel_triggered",
+        "kill_switch_disarmed",
+        "kill_switch_disarm_failed",
+        "emergency_kill_switch_triggered",
+        "shutdown_cancel_orders_started",
+        "shutdown_cancel_orders_completed",
+    }
+)
 
 
 def _check_funding_identities(
@@ -195,14 +236,26 @@ def _dec(value: Any) -> Decimal | None:
     return None if value is None else Decimal(value)
 
 
-class _Unset:
+class Unset:
     """Sentinel type: a keyword the caller did not supply (vs an explicit ``None``)."""
 
 
 # Defined near the top so every patch-style writer below (orders, execution
 # plans, scheduler state) can use it as a default argument value — defaults are
 # bound at function-definition (import) time, so the sentinel must exist first.
-_UNSET = _Unset()
+#
+# PUBLIC, unlike most of this module's helpers: a caller sometimes has to say
+# "leave this column ALONE" as a *value*, and the distinction matters. The live
+# payload path is the case — a failed payload write must omit the column, not
+# clear it (an explicit None CLEARS), so live.payloads hands this back instead of
+# None. Without a name for "unset", that caller can only pass None and silently
+# erase whatever an earlier successful write recorded.
+UNSET = Unset()
+
+# Internal spellings kept so the many `x: T | _Unset = _UNSET` signatures below
+# read unchanged; they are the same object/type.
+_Unset = Unset
+_UNSET = UNSET
 
 
 # --------------------------------------------------------------------------
@@ -747,7 +800,35 @@ _ATTEMPT_STATUSES = frozenset({"in_progress", "completed", "api_failed", "invali
 # membership, never completeness).
 TERMINAL_ATTEMPT_STATUSES: tuple[str, ...] = ("completed", "api_failed", "invalid_output")
 LIVE_PLAN_STATUSES: tuple[str, ...] = ("active", "paused_market_data")
-LIVE_ORDER_STATUSES: tuple[str, ...] = ("pending_market_data", "open", "partially_filled")
+# "submitted" belongs here: a pre-ack live order is non-terminal — it may be
+# resting on the exchange — so the restart cancel sweep and PR 4's
+# reconciliation must see it, never skip it as already-settled.
+#
+# CAVEAT for PR 4/5: the PAPER restart sweep (paper/reconcile.reconcile_on_restart)
+# marks everything in this tuple canceled locally with NO exchange call — sound
+# for paper, where nothing ever rested. Pointing that sweep at a LIVE run would
+# silently mark a genuinely resting order canceled on no evidence, the exact
+# opposite of §8.3's query-before-assume protocol. Live reconciliation must ask
+# the exchange; do not reuse the paper sweep as-is.
+LIVE_ORDER_STATUSES: tuple[str, ...] = (
+    "pending_market_data",
+    "submitted",
+    "open",
+    "partially_filled",
+)
+# §8.3 rule 10: the live-attempt statuses that are DURABLE PROOF the exchange
+# received the order — the only local evidence that can contradict an
+# "unknownOid" answer and forbid a resend. "duplicate" is proof at least as
+# strong as "acknowledged": it is written ONLY when the exchange itself said
+# the cloid already exists. The other three are not proof — "submitted" and
+# "failed" mean the outcome is unknown, and "rejected" means the exchange
+# answered but created no order; all three leave the cloid resendable once
+# orderStatus confirms it is absent. Read this through
+# has_exchange_known_cloid(), never by hand: an acknowledged CANCEL proves the
+# exchange saw the cancel, not the place — and the attempt rows are only HALF the
+# evidence (a recovered order's proof lives on orders.exchange_order_id).
+EXCHANGE_KNOWN_ATTEMPT_STATUSES: tuple[str, ...] = ("acknowledged", "duplicate")
+_NOT_EXCHANGE_KNOWN_ATTEMPT_STATUSES: tuple[str, ...] = ("submitted", "rejected", "failed")
 
 
 def insert_decision_attempt(conn: sqlite3.Connection, **fields: Any) -> None:
@@ -850,11 +931,51 @@ def update_decision_attempt(
 # orders (phase2-data §8) — typed insert + patch update, first used by PR3
 # --------------------------------------------------------------------------
 
-_ORDER_ROLES = frozenset({"entry", "rebalance", "stop_loss", "take_profit"})
-_ORDER_TYPES = frozenset({"paper_market", "paper_twap_slice", "stop_market", "take_market"})
-_ORDER_STATUSES = frozenset(
-    {"pending_market_data", "open", "partially_filled", "filled", "canceled", "rejected"}
+# §8.1: the live roles are a superset of the four Phase 2 paper roles (close /
+# emergency_close / cleanup_cancel are live-only vocabulary). One shared
+# frozenset (defined next to the cloid derivation that also stamps roles) so
+# the id layer and the write boundary can never accept different vocabularies.
+_ORDER_ROLES = LIVE_ORDER_ROLES
+# ``ioc_limit`` is the live wire type: every §9 slice (and §9.4 close /
+# emergency close) is an IOC limit order; the four paper_* / trigger types are
+# the Phase 2 simulation vocabulary.
+_ORDER_TYPES = frozenset(
+    {"paper_market", "paper_twap_slice", "stop_market", "take_market", "ioc_limit"}
 )
+# "submitted" is the live-only pre-ack state (phase3-spec §8.3): the order row
+# is written before the network call and patched once the exchange answers.
+_ORDER_STATUSES = frozenset(
+    {
+        "pending_market_data",
+        "submitted",
+        "open",
+        "partially_filled",
+        "filled",
+        "canceled",
+        "rejected",
+    }
+)
+# The terminal half of the same vocabulary. Private (no consumer needs it): it
+# exists so the partition guard below can prove LIVE_ORDER_STATUSES is not
+# merely a valid subset but a COMPLETE one — a new non-terminal status that
+# nobody added to LIVE_ORDER_STATUSES would otherwise be skipped as settled by
+# the restart cancel sweep and PR 4's reconciliation.
+_TERMINAL_ORDER_STATUSES: tuple[str, ...] = ("filled", "canceled", "rejected")
+# §16.1 vocabulary contract: orders.exchange_status carries the NORMALIZED
+# status family, exchange_raw_status the exchange's verbatim word. The families
+# are exactly these four (§16.1 names them) — a strict subset of
+# _ORDER_STATUSES, because the pre-ack local states (pending_market_data,
+# submitted) and partially_filled describe OUR record, not any word the
+# exchange answers with.
+#
+# Validated at the write boundary because the column is otherwise a free string
+# that PR 4's reconciliation joins on: at the very call site that writes it, the
+# ack path is also holding the RAW wire word (`resting` / `error`), and passing
+# that into the normalized column would produce a plausible-looking row that
+# silently never matches. The same-named parameter on update_live_order_attempt
+# takes the opposite vocabulary (verbatim) — which is precisely how such a slip
+# would happen.
+_EXCHANGE_STATUS_FAMILIES = frozenset({"open", "filled", "canceled", "rejected"})
 # Execution-plan lifecycle: ``active`` / ``paused_market_data`` are live; the rest
 # are terminal (execution §1.1 / §1.3 / §4.1).
 _PLAN_STATUSES = frozenset(
@@ -872,17 +993,41 @@ _PLAN_STATUSES = frozenset(
     }
 )
 
-# The live/terminal splits above must stay subsets of their canonical sets —
-# checked at import so a renamed status can't leave a stale split member behind.
+# A split with no declared complement can only be checked for membership: it must
+# stay a subset of its vocabulary, so a renamed status cannot leave a stale member
+# behind. Checked at import.
 for _split, _whole, _name in (
     (TERMINAL_ATTEMPT_STATUSES, _ATTEMPT_STATUSES, "TERMINAL_ATTEMPT_STATUSES"),
     (LIVE_PLAN_STATUSES, _PLAN_STATUSES, "LIVE_PLAN_STATUSES"),
-    (LIVE_ORDER_STATUSES, _ORDER_STATUSES, "LIVE_ORDER_STATUSES"),
 ):
     _extra = set(_split) - _whole
     if _extra:
         raise ValueError(f"{_name} contains statuses outside its vocabulary: {sorted(_extra)}")
 del _split, _whole, _name, _extra
+
+# Subset alone cannot catch the failure mode the comment above describes: a status
+# ADDED to a vocabulary is silently absent from every split (check_enum validates
+# membership, never completeness). Where a vocabulary declares both halves, assert
+# the PARTITION instead — strictly stronger than the subset check (an alien member
+# shows up as "unknown"), and a newly added status fails at import until it is
+# deliberately classified, rather than defaulting into the safe-looking half.
+# §8.3's resend guard is the one that must never silently widen.
+for _split, _rest, _whole, _name in (
+    (
+        EXCHANGE_KNOWN_ATTEMPT_STATUSES,
+        _NOT_EXCHANGE_KNOWN_ATTEMPT_STATUSES,
+        _LIVE_ATTEMPT_STATUSES,
+        "the live-attempt statuses",
+    ),
+    (LIVE_ORDER_STATUSES, _TERMINAL_ORDER_STATUSES, _ORDER_STATUSES, "the order statuses"),
+):
+    _union = set(_split) | set(_rest)
+    if _union != _whole:
+        raise ValueError(
+            f"{_name} are no longer partitioned by their splits — "
+            f"unclassified: {sorted(_whole - _union)}, unknown: {sorted(_union - _whole)}"
+        )
+del _split, _rest, _whole, _name, _union
 
 
 def insert_order(
@@ -912,14 +1057,37 @@ def insert_order(
     active_from: datetime | None = None,
     timestamp: datetime | None = None,
     updated_at: datetime | None = None,
+    cloid_logical: str | None = None,
+    cloid_hex: str | None = None,
+    exchange_status: str | None = None,
+    exchange_raw_status: str | None = None,
+    submitted_at: datetime | None = None,
+    acknowledged_at: datetime | None = None,
+    canceled_at: datetime | None = None,
+    cancel_reason: str | None = None,
+    is_bot_owned: bool | None = None,
+    raw_exchange_payload_path: str | None = None,
 ) -> None:
-    """Insert one order row (phase2-data §8). Enums validated at the write boundary."""
+    """Insert one order row (phase2-data §8; live columns phase3-spec §16.1).
+
+    Enums validated at the write boundary. A live order writes the cloid pair
+    (``client_order_id`` is deprecated — old paper rows only, no new writers);
+    the pair travels together or not at all so no order can be queryable on the
+    wire (§8.3 rule 7 uses cloid_hex) but unreadable in the audit trail.
+    """
     check_enum(mode, _MODES, name="mode")
     check_enum(order_role, _ORDER_ROLES, name="order_role")
     check_enum(order_type, _ORDER_TYPES, name="type")
     check_enum(status, _ORDER_STATUSES, name="status")
+    if exchange_status is not None:
+        check_enum(exchange_status, _EXCHANGE_STATUS_FAMILIES, name="exchange_status")
     if flip_leg is not None:
         check_enum(flip_leg, _FLIP_LEGS, name="flip_leg")
+    if (cloid_logical is None) != (cloid_hex is None):
+        raise ValueError(
+            "cloid_logical and cloid_hex must be provided together (the §8.2 "
+            "two-layer id is one unit)"
+        )
     now = timestamp or datetime.now(timezone.utc)
     _insert(
         conn,
@@ -949,12 +1117,36 @@ def insert_order(
             "reduce_only": reduce_only,
             "active_from": active_from,
             "updated_at": updated_at or now,
+            "cloid_logical": cloid_logical,
+            "cloid_hex": cloid_hex,
+            "exchange_status": exchange_status,
+            "exchange_raw_status": exchange_raw_status,
+            "submitted_at": submitted_at,
+            "acknowledged_at": acknowledged_at,
+            "canceled_at": canceled_at,
+            "cancel_reason": cancel_reason,
+            "is_bot_owned": is_bot_owned,
+            "raw_exchange_payload_path": raw_exchange_payload_path,
         },
     )
 
 
 def get_order(conn: sqlite3.Connection, order_id: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,)).fetchone()
+
+
+def get_order_by_cloid_hex(conn: sqlite3.Connection, cloid_hex: str) -> sqlite3.Row | None:
+    """The local order row an exchange-echoed cloid belongs to (§19.3 back-link).
+
+    cloid_hex is unique per logical order by construction (one registry row per
+    hex, one orders row per logical order), so at most one row can match; fail
+    loud if the store ever contradicts that instead of picking one silently.
+    """
+    rows = conn.execute("SELECT * FROM orders WHERE cloid_hex = ?", (cloid_hex,)).fetchall()
+    if len(rows) > 1:
+        ids = ", ".join(r["order_id"] for r in rows)
+        raise ValueError(f"cloid_hex {cloid_hex!r} maps to {len(rows)} orders ({ids})")
+    return rows[0] if rows else None
 
 
 def max_engine_seq(conn: sqlite3.Connection, run_id: str) -> int:
@@ -993,16 +1185,34 @@ def update_order(
     status: str | _Unset = _UNSET,
     status_reason: str | None | _Unset = _UNSET,
     exchange_order_id: str | None | _Unset = _UNSET,
+    exchange_status: str | None | _Unset = _UNSET,
+    exchange_raw_status: str | None | _Unset = _UNSET,
+    submitted_at: datetime | None | _Unset = _UNSET,
+    acknowledged_at: datetime | None | _Unset = _UNSET,
+    canceled_at: datetime | None | _Unset = _UNSET,
+    cancel_reason: str | None | _Unset = _UNSET,
+    is_bot_owned: bool | None | _Unset = _UNSET,
+    # No `None` in this union, deliberately: an explicit None CLEARS the column,
+    # and clearing it would delete the pointer to a live order's exchange evidence.
+    # Nothing ever wants that, so a caller holding a `str | None` path (a write that
+    # may have failed) cannot pass it here without first turning None into UNSET —
+    # live.payloads.payload_column does exactly that. Enforced by the type, not by
+    # every call site remembering.
+    raw_exchange_payload_path: str | _Unset = _UNSET,
     updated_at: datetime | None = None,
 ) -> None:
     """Patch-update an order's mutable columns; always stamp ``updated_at``.
 
     Only supplied columns change (an omitted keyword is left untouched, an explicit
     ``None`` clears — same convention as :func:`upsert_scheduler_state`). The row
-    must exist (an order is always inserted before it is updated).
+    must exist (an order is always inserted before it is updated). The cloid pair
+    is deliberately NOT patchable: it is identity, fixed at insert (§8.3 rule 6 —
+    a logical order never changes cloid).
     """
     if not isinstance(status, _Unset):
         check_enum(status, _ORDER_STATUSES, name="status")
+    if not isinstance(exchange_status, _Unset) and exchange_status is not None:
+        check_enum(exchange_status, _EXCHANGE_STATUS_FAMILIES, name="exchange_status")
     if get_order(conn, order_id) is None:
         raise ValueError(f"order {order_id!r} does not exist")
     provided: dict[str, Any] = {}
@@ -1012,6 +1222,14 @@ def update_order(
         ("status", status),
         ("status_reason", status_reason),
         ("exchange_order_id", exchange_order_id),
+        ("exchange_status", exchange_status),
+        ("exchange_raw_status", exchange_raw_status),
+        ("submitted_at", submitted_at),
+        ("acknowledged_at", acknowledged_at),
+        ("canceled_at", canceled_at),
+        ("cancel_reason", cancel_reason),
+        ("is_bot_owned", is_bot_owned),
+        ("raw_exchange_payload_path", raw_exchange_payload_path),
     ):
         if not isinstance(val, _Unset):
             provided[col] = _encode(val)
@@ -1270,3 +1488,406 @@ def upsert_scheduler_state(
 
 def get_scheduler_state(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM scheduler_state WHERE run_id = ?", (run_id,)).fetchone()
+
+
+# --------------------------------------------------------------------------
+# cloid_registry (phase3-spec §8.2 / §19.3) — the bot-owned lookup table
+# --------------------------------------------------------------------------
+
+
+def insert_cloid_mapping(
+    conn: sqlite3.Connection,
+    *,
+    cloid_logical: str,
+    cloid_hex: str,
+    run_id: str,
+    symbol: str,
+    order_role: str,
+    created_at: datetime | None = None,
+) -> None:
+    """Register one logical↔wire id pair; idempotent for the exact same pair.
+
+    §8.3 rule 1: a retry reuses the same cloid, and the registry write happens
+    before every send attempt — so re-registering an identical mapping is a
+    no-op, while the same hex arriving with a DIFFERENT logical id (or vice
+    versa) is a real corruption of the bot-owned lookup and fails loud.
+    """
+    check_enum(order_role, _ORDER_ROLES, name="order_role")
+    existing = get_cloid_by_hex(conn, cloid_hex)
+    if existing is not None:
+        # A retry legitimately re-registers the exact same pair; the same hex
+        # with a different logical id would re-point the §19.3 lookup.
+        if existing["cloid_logical"] != cloid_logical:
+            raise ValueError(
+                f"cloid_registry conflict: ({cloid_logical!r}, {cloid_hex!r}) collides "
+                f"with existing ({existing['cloid_logical']!r}, {existing['cloid_hex']!r})"
+            )
+        return
+    try:
+        _insert(
+            conn,
+            "cloid_registry",
+            {
+                "cloid_hex": cloid_hex,
+                "cloid_logical": cloid_logical,
+                "run_id": run_id,
+                "symbol": symbol,
+                "order_role": order_role,
+                "created_at": created_at or datetime.now(timezone.utc),
+            },
+        )
+    except sqlite3.IntegrityError:
+        # The hex was free, so this hit the cloid_logical UNIQUE index: the
+        # same logical id already maps to a DIFFERENT hex. Name the collision
+        # instead of leaking the raw constraint error.
+        row = get_cloid_by_logical(conn, cloid_logical)
+        existing_pair = (
+            "<row vanished mid-transaction>"
+            if row is None
+            else f"({row['cloid_logical']!r}, {row['cloid_hex']!r})"
+        )
+        raise ValueError(
+            f"cloid_registry conflict: ({cloid_logical!r}, {cloid_hex!r}) collides "
+            f"with existing {existing_pair}"
+        ) from None
+
+
+def get_cloid_by_hex(conn: sqlite3.Connection, cloid_hex: str) -> sqlite3.Row | None:
+    """§19.3 reverse lookup: the one way to decide an exchange order is bot-owned."""
+    return conn.execute("SELECT * FROM cloid_registry WHERE cloid_hex = ?", (cloid_hex,)).fetchone()
+
+
+def get_cloid_by_logical(conn: sqlite3.Connection, cloid_logical: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM cloid_registry WHERE cloid_logical = ?", (cloid_logical,)
+    ).fetchone()
+
+
+# --------------------------------------------------------------------------
+# live_order_attempts (phase3-spec §8.3 / §16.5) — one row per exchange round-trip
+# --------------------------------------------------------------------------
+
+
+def insert_live_order_attempt(
+    conn: sqlite3.Connection,
+    *,
+    attempt_id: str,
+    run_id: str,
+    action: str,
+    symbol: str,
+    attempt_index: int,
+    status: str = "submitted",
+    order_id: str | None = None,
+    cloid_logical: str | None = None,
+    cloid_hex: str | None = None,
+    exchange_order_id: str | None = None,
+    side: str | None = None,
+    qty: Decimal | None = None,
+    price: Decimal | None = None,
+    reduce_only: bool | None = None,
+    order_role: str | None = None,
+    requested_at: datetime | None = None,
+) -> None:
+    """Record an exchange round-trip BEFORE the network call (status 'submitted').
+
+    A crash between this insert and the outcome patch leaves durable evidence
+    that an order MAY exist on the exchange — the state §8.3's query-before-
+    resend protocol resolves. The UNIQUE (cloid_hex, action, attempt_index)
+    makes a retry a new row rather than an overwrite of that evidence.
+    """
+    check_enum(action, _LIVE_ATTEMPT_ACTIONS, name="action")
+    check_enum(status, _LIVE_ATTEMPT_STATUSES, name="status")
+    if order_role is not None:
+        check_enum(order_role, _ORDER_ROLES, name="order_role")
+    if attempt_index < 0:
+        raise ValueError(f"attempt_index must be >= 0, got {attempt_index}")
+    if (cloid_logical is None) != (cloid_hex is None):
+        raise ValueError(
+            "cloid_logical and cloid_hex must be provided together (the §8.2 "
+            "two-layer id is one unit)"
+        )
+    if action == "place":
+        if cloid_hex is None:
+            raise ValueError("a 'place' attempt must carry its cloid pair (§8.3 rule 1)")
+        # The identifiers alone are not evidence. §8.3/§16.5 exist so a recovery
+        # or PR 4's reconciliation can compare what we INTENDED to send against
+        # what the exchange holds; an attempt row with NULL side/qty/price cannot
+        # support either, and it is written before the network call, so it is the
+        # only record of the intent if the process dies inside the send window.
+        missing = [
+            name
+            for name, value in (
+                ("side", side),
+                ("qty", qty),
+                ("price", price),
+                ("order_role", order_role),
+            )
+            if value is None
+        ]
+        if missing:
+            raise ValueError(
+                f"a 'place' attempt must carry the order parameters it sent; "
+                f"missing {', '.join(missing)} (§8.3 / §16.5)"
+            )
+    if action == "cancel" and exchange_order_id is None:
+        raise ValueError("a 'cancel' attempt must carry exchange_order_id")
+    if action == "cancel_by_cloid" and cloid_hex is None:
+        raise ValueError("a 'cancel_by_cloid' attempt must carry its cloid pair")
+    _insert(
+        conn,
+        "live_order_attempts",
+        {
+            "attempt_id": attempt_id,
+            "run_id": run_id,
+            "order_id": order_id,
+            "action": action,
+            "cloid_logical": cloid_logical,
+            "cloid_hex": cloid_hex,
+            "exchange_order_id": exchange_order_id,
+            "symbol": symbol,
+            "side": None if side is None else Side.parse(side).value,
+            "qty": qty,
+            "price": price,
+            "reduce_only": reduce_only,
+            "order_role": order_role,
+            "attempt_index": attempt_index,
+            "status": status,
+            "requested_at": requested_at or datetime.now(timezone.utc),
+        },
+    )
+
+
+def update_live_order_attempt(
+    conn: sqlite3.Connection,
+    attempt_id: str,
+    *,
+    status: str | _Unset = _UNSET,
+    exchange_order_id: str | None | _Unset = _UNSET,
+    exchange_status: str | None | _Unset = _UNSET,
+    error_message: str | None | _Unset = _UNSET,
+    # No `None` in this union, deliberately: an explicit None CLEARS the column,
+    # and clearing it would delete the pointer to a live order's exchange evidence.
+    # Nothing ever wants that, so a caller holding a `str | None` path (a write that
+    # may have failed) cannot pass it here without first turning None into UNSET —
+    # live.payloads.payload_column does exactly that. Enforced by the type, not by
+    # every call site remembering.
+    raw_exchange_payload_path: str | _Unset = _UNSET,
+    acknowledged_at: datetime | None | _Unset = _UNSET,
+) -> None:
+    """Patch an attempt with its outcome (same _UNSET convention as update_order).
+
+    An attempt row is patched exactly once, from ``submitted`` to its outcome:
+    the trail is append-only evidence (schema §16.5), and the §8.3 pre-send
+    check trusts these statuses to decide whether an earlier send's outcome is
+    known — rewriting a settled attempt would falsify that record.
+
+    A row that stays ``submitted`` forever is a defined terminal state, not a
+    leak: it means the process died inside that send's network window and the
+    attempt's own ack was never observed. §8.3 recovery resolves the ORDER's
+    fate via orderStatus and records it on the orders row (the authoritative
+    surface PR 4 reconciles against); it deliberately does not back-patch the
+    dangling attempt, because that send's direct result is genuinely unknown
+    (several attempts may exist and any one of them could be the winner).
+    """
+    if not isinstance(status, _Unset):
+        check_enum(status, _LIVE_ATTEMPT_STATUSES, name="status")
+    row = get_live_order_attempt(conn, attempt_id)
+    if row is None:
+        raise ValueError(f"live order attempt {attempt_id!r} does not exist")
+    if row["status"] != "submitted":
+        raise ValueError(
+            f"live order attempt {attempt_id!r} already settled as {row['status']!r} "
+            "— the evidence trail is immutable; a retry is a NEW attempt row"
+        )
+    provided: dict[str, Any] = {}
+    for col, val in (
+        ("status", status),
+        ("exchange_order_id", exchange_order_id),
+        ("exchange_status", exchange_status),
+        ("error_message", error_message),
+        ("raw_exchange_payload_path", raw_exchange_payload_path),
+        ("acknowledged_at", acknowledged_at),
+    ):
+        if not isinstance(val, _Unset):
+            provided[col] = _encode(val)
+    if not provided:
+        return
+    assignments = ", ".join(f"{col} = ?" for col in provided)
+    conn.execute(
+        f"UPDATE live_order_attempts SET {assignments} WHERE attempt_id = ?",
+        (*provided.values(), attempt_id),
+    )
+
+
+def get_live_order_attempt(conn: sqlite3.Connection, attempt_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM live_order_attempts WHERE attempt_id = ?", (attempt_id,)
+    ).fetchone()
+
+
+def iter_live_order_attempts(
+    conn: sqlite3.Connection, run_id: str, *, cloid_hex: str | None = None
+) -> list[sqlite3.Row]:
+    """A run's attempts in insertion order, optionally for one cloid."""
+    if cloid_hex is None:
+        return conn.execute(
+            "SELECT * FROM live_order_attempts WHERE run_id = ? ORDER BY rowid", (run_id,)
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM live_order_attempts WHERE run_id = ? AND cloid_hex = ? ORDER BY rowid",
+        (run_id, cloid_hex),
+    ).fetchall()
+
+
+def has_place_attempt(conn: sqlite3.Connection, *, cloid_hex: str) -> bool:
+    """§8.3 rules 3–5 pre-check: was this cloid EVER sent, whatever the outcome?
+
+    Any prior place attempt — including one still stuck at 'submitted', and
+    including an 'acknowledged' one — forces the caller through orderStatus
+    before it may send: the exchange's duplicate rejection guards only OPEN
+    orders, so a filled or expired cloid would be accepted again as a brand-new
+    order. Deliberately status-blind, which is what makes it total.
+
+    Keyed on the cloid ALONE, with no run filter — one scope for one evidence
+    trail, matching next_live_attempt_index and the orders arm of
+    has_exchange_known_cloid. A run filter would be redundant today (a
+    cloid_logical embeds its run_id, and assert_cloid_provenance enforces it) but
+    is not harmless: PR 4's reconciliation asks these predicates about orders it
+    found on the EXCHANGE, which may belong to an earlier run, and a run-scoped
+    answer of False would read as "never sent" — licensing exactly the resend
+    rule 10 exists to forbid.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM live_order_attempts WHERE cloid_hex = ? AND action = 'place' LIMIT 1",
+        (cloid_hex,),
+    ).fetchone()
+    return row is not None
+
+
+def has_exchange_known_cloid(conn: sqlite3.Connection, *, cloid_hex: str) -> bool:
+    """§8.3 rule 10: does durable local evidence prove the exchange took this cloid?
+
+    Such evidence outranks a later "unknownOid" from orderStatus (Info lag,
+    retention expiry): the send WAS received, so a resend would be accepted as a
+    brand-new order — a double position if the original is live or filled.
+
+    The evidence lives in TWO places, and both must be consulted:
+
+    1. A PLACE attempt in EXCHANGE_KNOWN_ATTEMPT_STATUSES (acknowledged /
+       duplicate) — the exchange answered this process directly.
+    2. ``orders.exchange_order_id`` non-NULL — the exchange handed us an oid for
+       this cloid. This is the ONLY record a successful §8.3 recovery leaves:
+       recovery deliberately does not back-patch the attempt row (the orders row
+       is PR 4's reconciliation authority), and the pre-check path recovers with
+       no attempt row at all. Without this arm, the sequence "send times out
+       (attempt 'failed') -> retry recovers the resting order via orderStatus ->
+       a LATER retry gets unknownOid" reads as "the exchange never took it", and
+       a live order is resent.
+
+    Only an exchange-supplied oid ever reaches that column (the accepted ack and
+    the orderStatus recovery); a rejected ack deliberately leaves it NULL, and
+    OrderAck forbids an oid on an error status. So it is exact proof of receipt,
+    and it does not narrow rule 5's legitimate resend of a cloid the exchange
+    truly never took.
+
+    The ``action = 'place'`` filter lives INSIDE this helper on purpose. The kill
+    switch writes 'acknowledged' on ``cancel_by_cloid`` rows too, and an
+    acknowledged CANCEL proves the exchange saw the cancel, not the place — a
+    caller that hand-rolled the status test could drop the action filter and
+    silently read one as the other.
+
+    Neither arm is run-scoped, and that is deliberate: proof that the exchange
+    took a cloid does not expire when a run does. The orders arm never was
+    scoped; the attempts arm no longer is either, so one evidence trail has one
+    scope. PR 4 reconciles orders found on the EXCHANGE — which may have been
+    placed by an earlier run — and a run-scoped False there would mean "not this
+    run" while reading as "never sent".
+    """
+    placeholders = ", ".join("?" for _ in EXCHANGE_KNOWN_ATTEMPT_STATUSES)
+    attempt = conn.execute(
+        "SELECT 1 FROM live_order_attempts "
+        "WHERE cloid_hex = ? AND action = 'place' "
+        f"AND status IN ({placeholders}) "
+        "LIMIT 1",
+        (cloid_hex, *EXCHANGE_KNOWN_ATTEMPT_STATUSES),
+    ).fetchone()
+    if attempt is not None:
+        return True
+    order = conn.execute(
+        "SELECT 1 FROM orders WHERE cloid_hex = ? AND exchange_order_id IS NOT NULL LIMIT 1",
+        (cloid_hex,),
+    ).fetchone()
+    return order is not None
+
+
+def iter_open_live_orders(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every LIVE order this store still believes is non-terminal — any run.
+
+    The §18.2 rule-6 disarm cross-check reads this. The shutdown sweep's notion
+    of "clean" otherwise rests on one exchange read, and an empty open-orders
+    answer cannot be told apart from an Info view that has not caught up with an
+    order placed a second ago — so the local row is the durable counter-evidence,
+    exactly as it is for §8.3 rule 10 (has_exchange_known_cloid).
+
+    No run filter, for the same reason next_live_attempt_index has none: a later
+    run's shutdown sweep is responsible for an earlier run's surviving orders.
+    Paper rows never carry a cloid_hex, so they cannot appear here.
+    """
+    placeholders = ", ".join("?" for _ in LIVE_ORDER_STATUSES)
+    return conn.execute(
+        "SELECT * FROM orders WHERE mode = 'live' AND cloid_hex IS NOT NULL "
+        f"AND status IN ({placeholders}) ORDER BY rowid",
+        LIVE_ORDER_STATUSES,
+    ).fetchall()
+
+
+def next_live_attempt_index(conn: sqlite3.Connection, *, action: str, cloid_hex: str) -> int:
+    """The next free attempt_index for one (cloid, action) — 0 for a first send.
+
+    Derived from the store, not an in-memory counter, and with NO run filter:
+    the UNIQUE (cloid_hex, action, attempt_index) evidence trail spans runs —
+    a later run's shutdown sweep cancels an earlier run's surviving order —
+    so the index namespace must span them too, or the second run re-derives
+    an index the constraint already holds and every cancel of that order
+    fails on the INSERT before a round-trip is even attempted.
+    """
+    check_enum(action, _LIVE_ATTEMPT_ACTIONS, name="action")
+    row = conn.execute(
+        "SELECT MAX(attempt_index) FROM live_order_attempts WHERE action = ? AND cloid_hex = ?",
+        (action, cloid_hex),
+    ).fetchone()
+    return 0 if row[0] is None else row[0] + 1
+
+
+# --------------------------------------------------------------------------
+# kill_switch_events (phase3-spec §18.5)
+# --------------------------------------------------------------------------
+
+
+def insert_kill_switch_event(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    event_type: str,
+    detail: str | None = None,
+    error_message: str | None = None,
+    timestamp: datetime | None = None,
+) -> None:
+    check_enum(event_type, KILL_SWITCH_EVENT_TYPES, name="event_type")
+    _insert(
+        conn,
+        "kill_switch_events",
+        {
+            "run_id": run_id,
+            "timestamp": timestamp or datetime.now(timezone.utc),
+            "event_type": event_type,
+            "detail": detail,
+            "error_message": error_message,
+        },
+    )
+
+
+def iter_kill_switch_events(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM kill_switch_events WHERE run_id = ? ORDER BY event_id", (run_id,)
+    ).fetchall()

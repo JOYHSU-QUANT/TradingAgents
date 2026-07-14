@@ -192,21 +192,41 @@ live:
 
 ### 4.1 Real Order Gate
 
-系統只有在以下條件全部成立時，才允許送出 exchange order：
+系統只有在以下條件全部成立時，才允許**建立新的交易目標**（new target）：
 
 ```
-allow_real_orders = true
-mode in {testnet_live, mainnet_tiny, mainnet_live}
-agent key exists（且通過 §6 的啟動授權驗證）
-startup reconciliation passed
-kill switch active
-symbol is allowed
-risk gate approved target
-current account / position state is reconciled
-no unresolved protection failure
-no active slice plan
-no manual_safe_mode
+allow_real_orders = true                             # wire-scoped
+mode in {testnet_live, mainnet_tiny, mainnet_live}   # wire-scoped
+agent key exists（且通過 §6 的啟動授權驗證）          # wire-scoped
+startup reconciliation passed                        # wire-scoped
+kill switch active                                   # wire-scoped
+symbol is allowed                                    # wire-scoped
+risk gate approved target                            # DECISION-scoped
+current account / position state is reconciled       # wire-scoped
+no unresolved protection failure                     # DECISION-scoped
+no active slice plan                                 # DECISION-scoped
+no manual_safe_mode                                  # wire-scoped
 ```
+
+**兩種粒度（v7 修訂，2026-07-13）**：標記 DECISION-scoped 的三條，語意是「這個決策
+cycle 可不可以開新目標」，**不是**「這一張單可不可以上線」。把它們套用在每一張單上
+會自相矛盾——§9.3 明文規定 active slice plan 期間「不建立新的 entry / rebalance
+plan」但「允許 SL repair、允許 emergency close」，而一個 plan 會跨數十個 decision
+cycle 執行約一小時。若每張單都查這三條，引擎一旦設下 `active_slice_plan`，就會擋掉
+**自己這個 plan 的每一張切片**，以及 §9.3 保證允許的 SL repair 與 emergency close
+——正是 plan 執行期間最需要送出的那一張。引擎屆時只能「不設旗標」（條件淪為裝飾）或
+繞過 submitter（繞過 gate），兩條都是錯的。同理 `risk_gate_approved`（per-cycle 的
+核准無法涵蓋一小時的切片）與 `unresolved_protection_failure`（要修復它的 SL repair
+本身必須送得出去）。
+
+因此 gate 提供兩個入口，而條件表只有一份（`RealOrderGate._first_failed`，依上表順序
+求值，回報第一條失敗的條件，兩個入口不會漂移）：
+
+- `check_new_target(symbol)` / `require_new_target` — **完整** §4.1 列表。PR 5 引擎在
+  每個 decision cycle 建立 plan **之前**問一次。
+- `check_order(symbol)` / `require_order` — 上表 wire-scoped 子集。**每一張**真正送上
+  交易所的單都必須通過（`LiveOrderSubmitter.submit_ioc_limit` 送出前查一次，signed
+  client 綁定的 gate 在 wire 再查一次當 backstop）。
 
 若任一條件不成立，系統必須拒絕建立 live order，並記錄：
 
@@ -406,6 +426,60 @@ order、都有自己的 cloid——不存在 v2 native TWAP 母單「cloid_hex, 
 6. 不得用不同 cloid 重複提交同一個 logical order。
 7. 所有對交易所的查詢（orderStatus、cancelByCloid 等）一律使用 cloid_hex；
    cloid_logical 只在本地系統內部使用，不送給交易所。
+8. Retry 同一個 logical order 時，參數（side / size / price / reduce_only）必須與
+   前次送出完全一致（byte-identical）：恢復路徑（rule 4 的補寫）以呼叫方參數回填
+   本地 order record、不與交易所回報逐欄比對，引擎不得在 retry 時用新價重算 qty——
+   同一 cloid_logical ⇔ 同一組參數；要改參數就開新 logical order（v4 新增，2026-07-12）。
+9. 任何 error ack 在判定 rejected 之前，必須先以 cloid_hex 查詢 orderStatus：
+   duplicate 錯誤文案比對只是 fast-path（rule 2 的觸發器），orderStatus 才是
+   rejected-vs-exists 的權威——rejected 判定授權呼叫方開新 logical order，若實際上
+   訂單存在（文案改字造成 duplicate 漏判）就是雙倉（v5 新增，2026-07-13）。
+10. rule 5 的「cloid_hex 不存在」以 orderStatus 回 unknownOid 為準——但若本地
+    live_order_attempts 已有該 cloid 的 **acknowledged 或 duplicate** place attempt
+    （交易所確定收過），unknownOid 是矛盾（retention 過期／Info 不一致），必須具名
+    報錯拒絕重送，不得讀成「前次未成功」（v5 新增 2026-07-13；v7 補上 duplicate，
+    2026-07-13）。
+    「交易所確定收過」的證據**有兩處，兩處都要查**，統一由 `has_exchange_known_cloid()`
+    判定（v7 擴充；原 `has_exchange_known_place_attempt` 只查第 1 處）：
+    1. **attempt 列**：place attempt 落在 `repository.EXCHANGE_KNOWN_ATTEMPT_STATUSES`
+       = {acknowledged, duplicate}（`action='place'` 過濾寫在 helper 內部：
+       acknowledged 的 **cancel** attempt 只證明交易所收過 cancel、不證明收過 place）。
+       duplicate 的證據力不低於 acknowledged——那是交易所自己說「這個 cloid 已存在」。
+       只讀 acknowledged 會讓「timeout(failed) → 重試撞 duplicate → 再重試」這條路徑把
+       unknownOid 讀成「確認不存在」而重送。
+    2. **orders 列的 `exchange_order_id` 非 NULL**：交易所給過我們這個 cloid 的 oid。
+       這是「成功的 §8.3 恢復」唯一留下的痕跡——恢復刻意**不回補 attempt 列**（orders
+       列才是 PR4 對帳權威），而 pre-check 路徑的恢復根本不寫 attempt 列。少了這一臂，
+       「timeout(attempt=failed) → 重試經 orderStatus 恢復到仍掛著的原單 → 更晚一次重試
+       遇到 unknownOid」會被讀成「交易所從未收過」而**重送一張還活著的單**（出場檢查以
+       真實類別重現，實際送出兩次）。只有交易所給的 oid 會寫進這欄（accepted ack 與
+       orderStatus 恢復；rejected ack 刻意不寫，OrderAck 也禁止 error 狀態帶 oid），
+       所以它是精確的收據，不會誤擋 rule 5 對「交易所真的沒收過」的合法重送。
+    狀態集合有 import 期 partition guard：日後新增 attempt status 必須被明確歸類，
+    不得預設落進安全的那一半。
+11. 頂層 `{"status":"err"}` envelope（壞簽名、壞 payload、invalid nonce 等 action
+    層失敗）不是 per-order error ack：訂單可能根本沒進撮合引擎，transport 層具名
+    raise（`ExchangeRequestError`），attempt 記 'failed'（outcome unknown），依
+    rule 1 同 cloid retry、由 pre-check 的 orderStatus 解決——transient 失敗不得
+    消耗 cloid、不得在審計留下永久 rejected；rule 9 的「error ack」只指 `statuses`
+    內的 per-order error（v6 新增，2026-07-13）。
+12. **exchange status 一律只查 exact 表，表外的字一律不猜**（v7 新增，2026-07-13）：
+    exchange status → local status 的對照，**唯一權威是「完整文件化詞彙 exact 表」**
+    （`_EXCHANGE_TO_LOCAL_STATUS`，已涵蓋 Hyperliquid 文件列出的全部 30 個字）。
+    表外的字＝交易所在這張表寫完之後新增的字；對這種字**任何方向的猜測都不安全**，
+    所以一個都不猜——一律記為 `open` + warning，交給 PR 4 reconciliation 對帳：
+    - 猜成 `rejected` 是最貴的：它會變成 `SubmitOutcomeKind.REJECTED`，依 rule 9
+      **授權呼叫方開一張新的 logical order**。一個字面含 "reject" 但訂單其實還掛在
+      場上的新狀態，就會替一個活著的部位再鑄一個 cloid（雙倉）。
+    - 猜成**終態**（`canceled` / `filled`）則會靜默放棄一張可能還活著的單：像
+      `cancelRequested`（取消在途、單還在場上）會被記成 canceled，之後真的成交時，
+      fill 會落在一張本地已 canceled 的單上。
+    兩者與 rule 10 的 resend guard 是同一個 bug class（用不完整的 status 判斷驅動
+    安全判決）。exact 表既然已涵蓋全部文件化詞彙，heuristic 對「真正重要的字」毫無
+    貢獻，只會在「最不該猜」的地方開火——因此 substring fallback 已整個移除（v6 曾
+    保留 reject/cancel/filled 三臂，v7 全數刪除）。記為 `open` 是唯一保守的讀法：
+    高估「還活著」可回復（單會繼續被看管、對帳會關掉它），高估「被拒絕」會鑄新單，
+    高估「已結束」會丟掉活單。
 
 ## 9. Sliced TWAP Execution（v3 全章改寫）
 
@@ -863,6 +937,15 @@ raw_exchange_payload_path
 
 （`exchange_order_id`、`order_role`、`reduce_only` Phase 2 schema 已有，不重複新增。）
 
+詞彙契約（v5 新增，2026-07-13）：`exchange_status` 一律寫正規化家族詞（與
+`orders.status` 同詞彙：open / filled / canceled / rejected），`exchange_raw_status`
+一律寫交易所 verbatim 原字；ack 路徑與 §8.3 rule 4 恢復路徑都必須兩欄齊寫。
+`cloid_hex` 有 UNIQUE index（一 cloid 一 orders row；NULL——所有 paper 舊列——互異）。
+恢復路徑插入的 orders row `submitted_at` / `acknowledged_at` 保持 NULL：真實送出
+時間未知，消費者必須把 NULL 讀成「未知」而非「未送出」。IOC ack 部分成交
+（totalSz < 請求 size）時 `status` 寫 `partially_filled`，不得寫 `filled`；
+成交數量真相仍由 PR 3 fill ingestion 擁有。
+
 ### 16.2 fills Additions
 
 ```
@@ -1008,15 +1091,139 @@ kill_switch:
   emergency_close_on_shutdown: false
 ```
 
+（`emergency_close_on_shutdown` 的行為（reduce-only emergency close，§8.1/§17）
+隨 PR 5 的 protection manager 進場；在那之前 config 建構期拒絕 `true`——
+未實作的行為不得被 config 靜默接受，v4 註記。）
+
+（`schedule_cancel_seconds` 建構期要求 > 5：Hyperliquid 拒絕觸發時間距今不足
+5 秒的 scheduleCancel，≤ 5 的值永遠 arm 不起來，而 §18.2 rule 1 把 arm 失敗
+定為硬錯誤——無法實作的 config 值在載入期拒絕，v5 新增，2026-07-13。）
+
+（`schedule_cancel_seconds >= 2 × refresh_interval_seconds` 建構期強制（v7 新增，
+2026-07-13）：舊規則只要求 `refresh < schedule_cancel`，但 manager 只在被 tick 時
+刷新，實際節奏被**呼叫方的 tick 間隔**量化，**一次 skip 或慢一拍就把下次刷新推到
+約 2× interval**。`refresh=119 / schedule_cancel=120` 這種舊規則接受的 config，第一個
+≥119s 的 tick 會落在約 120s——dead man's switch 在**正常運行中**觸發，掃掉該錢包
+全部掛單。要求 deadline 至少涵蓋兩個完整 interval，讓「漏掉一輪」是可存活的而非
+致命的。預設值 120/30 是 4×。**這是必要條件、不是充分條件**——它看不到呼叫方的
+tick 間隔，真正綁定的檢查是 §18.2 rule 2 的 `max_tick_gap_seconds` 建構期不變量。）
+
+（**主機時鐘偏移在 arm() 檢查（v8 新增，2026-07-13）**：scheduleCancel 收的是**絕對**
+deadline，而我們用**本地時鐘**算出它；`_detect_expired_deadline` 又以同一個本地時鐘量測
+逾期——兩者自洽，於是主機時鐘漂移對 manager 完全隱形，卻默默改變交易所端真正的保護
+窗。主機快 4 分鐘時，120s 的 dead man's switch 實際上變成 360s：process 死掉後掛單會
+曝險 3 倍長的時間，而日誌與事件裡沒有任何跡象。`max_tick_gap` 不變量抓不到它——那條完全
+在本地時間裡推理。因此 arm() 送出第一個 deadline 前，先用交易所回覆的時間戳
+（`clearinghouseState.time`）比對本地時鐘，偏差 ≥ 5s 即拒絕啟動並要求修 NTP。只有「主機
+偏快」這個方向是無聲的，故只有它需要防護：主機偏慢送出的 deadline 太近，交易所直接拒絕，
+arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——時間戳拿不到應該降級這項**檢查**，
+不該擋掉一個其他方面都健康的啟動。）
+
 ### 18.2 Required Behavior
 
 1. Process 啟動後，完成 exchange client 初始化時，必須立刻 schedule cancel。
-2. Live loop 運行期間，必須每 30 秒刷新 schedule cancel deadline。
-3. 若刷新失敗，必須進入 safe mode。
-4. Process crash 時，交易所應在 deadline 後自動取消 bot-owned open orders。
-5. 正常 shutdown 時，應取消 bot-owned open orders。
-6. 正常 shutdown 預設不強制平倉。
-7. 持倉繼續依靠既有 SL protection。
+   `arm()` 只在啟動期呼叫一次：重複 arm 是接線錯誤（具名 RuntimeError），且 arm
+   必須尊重 sticky `stop_new_orders`（`kill_switch_active = not stop_new_orders`，
+   與 refresh 同一條式子）——否則第二次 arm 會把刷新失敗關上的 §4.1 gate 靠運氣
+   重開，而不是走 §13.4 reconciliation（v7 新增，2026-07-13）。
+2. Live loop 運行期間，必須依 `refresh_interval_seconds` 刷新 schedule cancel deadline。
+   `refresh_due()` 的 interval 語意是「至少這麼頻繁」而非「不得早於」：當呼叫方以與
+   refresh_interval 相同的週期 tick（預期的 30s／30s 接線），tick 必然比它比較的那個
+   排程時刻晚幾毫秒，若用嚴格 `elapsed >= interval` 判斷，這點抖動就會 skip 掉刷新、讓真實節奏
+   悄悄砍半成「每兩輪一次」（只有事件時間戳的空隙看得出來）。因此保留一個遠大於
+   抖動、又遠小於 interval 的 slack（0.5s）——只會讓刷新稍微提早，永遠不會推遲過
+   deadline（v7 新增，2026-07-13）。
+   **tick 間隔是 manager 的建構參數，不是註解裡的假設**（v7 新增，2026-07-13）：
+   manager 只在 owner 呼叫 tick() 時刷新，所以真正決定「刷新最晚會多晚到」的是
+   **呼叫方兩次 tick() 之間的最壞牆鐘時間**，不是設定的 interval。因此
+   `KillSwitchManager.__init__` 收 `max_tick_gap_seconds` 並在建構期強制
+   `refresh_interval_seconds + max_tick_gap_seconds < schedule_cancel_seconds`
+   （兩次刷新之間的最壞間隔必須嚴格小於 deadline；剛好等於是 race 不是 margin）。
+   §18.1 的 `schedule_cancel >= 2 × refresh_interval` config guard 只是「呼叫方剛好
+   以 interval 為週期 tick」的特例，它根本看不到呼叫方——例如 `schedule_cancel=60 /
+   refresh=30` 能通過 config guard，但配上 60 秒的 tick 間隔就會留下 90 秒空窗、讓
+   dead man's switch 在正常運行中觸發並掃掉全錢包掛單。
+
+   **`max_tick_gap_seconds` 的語意要照字面讀：兩次 tick() 之間的最壞牆鐘時間，不是
+   sleep 間隔**（v7 新增，2026-07-13）。既有 `_paper_loop`（cli.py）的一輪是
+   `engine.tick()` → `scheduler.poll()` → `sleep(min(delay, 60))` **同步**執行，而
+   `poll()` 會跑完整的多 agent AI 決策——**數分鐘**，不是數秒。若 PR 5 傳入 sleep 上限
+   （60s）卻讓一輪 block 三分鐘，這道檢查會放行，然後在決策途中被交易所掃單。因此
+   **§18.2 對 PR 5 的硬性要求：kill switch 必須在決策 cycle *內部*（或由獨立的
+   refresher）刷新，不能只在 loop 頂端刷新**；傳進來的必須是真實的最壞 tick 間隔。
+   **刷新（與 shutdown）必須先偵測「switch 是否已經觸發過了」**（v7 新增，
+   2026-07-13）：`max_tick_gap_seconds` 是呼叫方在建構期做出的**承諾**，而這是唯一
+   會去查核它有沒有兌現的地方。若距離上次成功排程已超過 `schedule_cancel_seconds`，
+   交易所**已經**把該錢包的掛單全部取消了；此時若 refresh 只是若無其事地重新排程並
+   重開 §4.1 gate，引擎就會對著一本它以為還在、其實已被清空的簿子繼續下單，而唯一的
+   線索只有事件時間戳上的一個空隙。因此偵測到逾期時：latch `stop_new_orders`（與刷新
+   失敗同一條 sticky 規則，只能由 §13.4 reconciliation 解除）、關閉 §4.1 gate、記
+   `kill_switch_cancel_triggered` 事件（§18.5 詞彙既有成員；PR2 現在寫 9 之 8）、
+   log ERROR。仍會重新排程（往後的保護要接上），但 latch 讓新單進不來；本地 order
+   rows 在 reconciliation 之前是 stale 的（still 'open'）。
+   **報一次、且以「排程紀元」為鍵**：latch 也會被刷新失敗拉起，而「連續刷新失敗」正是
+   讓 deadline 逾期最可能的原因（API 斷線跨過 deadline），所以若以 latch 為去重鍵，
+   最可能的真實觸發反而會靜默無聲。以 `_last_scheduled_at` 為鍵則每個逾期的 deadline
+   恰好報一次。shutdown 也要做同一個偵測——它是呼叫方停止 tick 之後唯一還會跑的方法，
+   而逾期後 `open_orders()` 會回空集合，sweep 會「乾淨」收場並 disarm，產生一份「什麼
+   都不用取消的完美關機」假象。
+3. 若刷新失敗，必須進入 safe mode。解除 safe mode 只有一個入口：
+   `release_safe_mode()`（§13.4 呼叫），它必須**同時**清掉 sticky latch 與重開
+   §4.1 gate——只清 latch 會讓 gate 一直關到下次成功刷新，只開 gate 會被下次
+   refresh 依 latch 重算而還原。兩個狀態要一起動，所以只開一道門、不留兩個旋鈕。
+   而且解除必須是**掙來的、不是宣告的**：能呼叫它的唯一狀態就是「上次刷新失敗」，
+   此時交易所端 deadline 已經過期或即將觸發，直接重開 gate 等於放新單去對撞一個
+   正要取消它們的 switch。因此實作是「落下 latch → 立刻 refresh」：刷新成功才重開
+   §4.1（refresh 本來就依 latch 重算 gate），刷新失敗則自動重新上鎖、回到原狀並回傳
+   False。附帶效果是 §18.5 只在真的送出 scheduleCancel 時才寫 `kill_switch_refreshed`
+   ——PR 6 的 acceptance metrics 靠這個事件推算 deadline，不能有「沒刷新卻記了刷新」
+   的假事件（v7 新增，2026-07-13）。
+4. Process crash 時，交易所在 deadline 後自動取消**該錢包全部** open orders
+   （scheduleCancel 是全錢包觸發，無法只限 bot-owned；crash backstop 接受此代價，
+   v4 修訂措辭）。
+5. 正常 shutdown 時，應取消 bot-owned open orders。shutdown 的第一步即關閉
+   §4.1 gate（kill_switch_active 落下）——sweep 不得與新單競速；shutdown 開始後
+   tick / refresh 一律拒絕（不論 disarm 成敗），邊界由 manager 自我封鎖、不依賴
+   呼叫方自律（v5 新增，2026-07-13）；arm 同受此封鎖——重新 arm 會重開剛關閉的
+   gate（v6 新增，2026-07-13）。shutdown **完成後**冪等：sweep 跑完並寫下 completed
+   事件之後，再呼叫直接 return——signal handler 加 `finally` 兩路都會走到 shutdown
+   是很現實的接線，重跑會對已取消的訂單再送一次 cancel、把交易所回的「unknown
+   order」記成新的 failures，並在 §18.5 審計留下第二組 started/completed 事件；反過來
+   raise 則會讓良性的重複呼叫在 teardown 期炸掉、蓋掉真正的關閉原因。
+   但**中途失敗的 shutdown 必須可重試**：抑制條件是「已完成」而非「已開始」——
+   started 事件的寫入刻意不設防（審計遺失必須 fail loud），DB 被鎖住就會在 manager
+   已自我封鎖之後把 shutdown 炸掉；若以「已開始」抑制，那個 signal handler + finally
+   的組合就會吞掉唯一一次真正取消我方掛單的呼叫，讓單子留在場上等全錢包 trigger 掃
+   ——連帶掃掉 §19.3 明令不得碰的非 bot 訂單（v7 新增，2026-07-13）。
+6. 正常 shutdown 的 cancel sweep 完全乾淨（open orders 枚舉成功且零 cancel 失敗）時，
+   必須解除 scheduleCancel（unset），避免全錢包觸發掃掉 sweep 依 §19.3 刻意跳過的
+   非 bot 訂單；sweep 有任何失敗則維持武裝，作為殘單的 backstop（v4 新增，2026-07-12）。
+   **wire fact 一旦落地即 outrank 後續 sweep**（v7 新增，2026-07-13）：disarm 的判準是
+   「這次 sweep 乾淨」**或**「先前某次 attempt 已實際送出 unset」（`clear_scheduled_cancel()`
+   回來的當下就 latch，先於任何可能 raise 的動作）。理由：unset 成功、但它的 audit write
+   撞上鎖住的 DB 而 unwind 時，重試若又以「新的一次 sweep」重新裁決，只要這次 open_orders
+   枚舉失敗就會跳過 disarm 區塊、警告「left ARMED，觸發器將在 deadline 引爆」——而交易所
+   其實早就忘了那個觸發器，這句話是假的。因此重試不得重送 unset、不得因新 sweep 不乾淨而
+   謊報 still-armed；`kill_switch_disarmed` 的 detail 也要據實寫明是哪一次 attempt 掙來的
+   （「clean shutdown sweep」vs「先前 attempt 已清除」），否則審計會出現兩列互相矛盾的紀錄。
+   「乾淨」的認定：registry 命中（確定 bot-owned）但 open orders payload 缺 coin
+   無法下 cancel 的訂單計入 failures（「我們的但動不了」≠「不是我們的」），擋 disarm；
+   從未 arm 過的 shutdown 沒有東西可解除——不呼叫 unset、不寫 disarmed 事件。
+   **「乾淨」必須雙邊認定，不得只信一次 `open_orders()` 讀取（v8 新增，2026-07-13）**：
+   Info 是最終一致的視圖，空 list 無法與「剛送出的單還沒出現在視圖裡」區分——照舊寫法
+   此時 failures 為空、sweep 判為乾淨，於是在一張活單之上永久解除全錢包 backstop。這正是
+   §8.3 rule 10（`has_exchange_known_cloid`）拒絕相信的那種「交易所的沉默」，只是這次賭的是
+   安全網本身。因此 disarm 前必須拿本地紀錄交叉檢查：凡 SQLite 仍判為非終態
+   （`LIVE_ORDER_STATUSES`）且帶 cloid 的 live orders row，若 sweep 沒有處理過它，就逐一
+   `orderStatus` 問交易所——確認終態才放行；仍活著、或問不到（含 unknownOid 但本地有收據
+   證據＝§8.3 rule 10 的矛盾）一律計入 failures，維持武裝。反向也要成立：本地 'submitted'
+   但交易所確認 unknownOid 且無收據證據者＝那次 send 根本沒送達，沒有東西需要保護，不得
+   永久擋住 disarm
+   （v5 新增，2026-07-13）。形狀不明的 open orders 條目（非 dict）＝所有權不明，
+   計入 failures 擋 disarm 且不得中斷 sweep；open_orders 回傳非 list 視同枚舉失敗
+   （v6 新增，2026-07-13）。
+7. 正常 shutdown 預設不強制平倉。
+8. 持倉繼續依靠既有 SL protection。
 
 ### 18.3 Emergency Kill Switch Triggers
 
@@ -1052,10 +1259,15 @@ kill_switch_armed
 kill_switch_refreshed
 kill_switch_refresh_failed
 kill_switch_cancel_triggered
+kill_switch_disarmed
+kill_switch_disarm_failed
 emergency_kill_switch_triggered
 shutdown_cancel_orders_started
 shutdown_cancel_orders_completed
 ```
+
+（`kill_switch_disarmed` / `kill_switch_disarm_failed` 隨 §18.2 規則 6 的
+clean-shutdown 解除行為新增，v4。）
 
 ## 19. Startup / Restart Recovery
 

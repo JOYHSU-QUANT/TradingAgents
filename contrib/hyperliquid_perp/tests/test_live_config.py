@@ -421,15 +421,58 @@ def test_out_of_range_safety_values_are_rejected(overrides):
         (
             "kill_switch",
             {"schedule_cancel_seconds": 30, "refresh_interval_seconds": 30},
-            "fires between refreshes",
+            "single missed refresh cycle",
         ),
         ("kill_switch", {"on_refresh_failed": "ignore"}, "safe_mode"),
         ("kill_switch", {"on_shutdown": "leave_orders"}, "cancel_bot_owned_open_orders"),
+        # §18.1: the flag exists but its behavior lands with PR 5 — true would
+        # configure protection that silently does not exist yet.
+        ("kill_switch", {"emergency_close_on_shutdown": True}, "not implemented yet"),
     ],
 )
 def test_bad_sub_block_values_are_rejected(block, overrides, match):
     with pytest.raises(ValueError, match=match):
         LiveConfig.from_dict(_live_block(**{block: overrides}))
+
+
+def test_schedule_cancel_at_exchange_floor_is_rejected():
+    # Hyperliquid rejects a scheduleCancel whose trigger is less than 5
+    # seconds in the future, and §18.2 rule 1 makes an arming failure a hard
+    # startup error — a window that could never arm dies at config load.
+    with pytest.raises(ValueError, match="Hyperliquid rejects"):
+        LiveConfig.from_dict(
+            _live_block(kill_switch={"schedule_cancel_seconds": 5, "refresh_interval_seconds": 1})
+        )
+
+
+def test_schedule_cancel_just_above_floor_is_accepted():
+    # The floor is a strict >: 6 seconds can arm — with a refresh interval that
+    # leaves the deadline a whole spare cycle (6 >= 2 x 3).
+    cfg = LiveConfig.from_dict(
+        _live_block(kill_switch={"schedule_cancel_seconds": 6, "refresh_interval_seconds": 3})
+    )
+    assert cfg.kill_switch.schedule_cancel_seconds == 6
+
+
+def test_a_deadline_under_two_refresh_intervals_is_rejected():
+    # `refresh < schedule_cancel` alone is not enough. The live loop refreshes
+    # only on a tick, so one skipped or slow cycle pushes the next refresh out
+    # to ~2x the interval. Under 119/120 — which the weaker rule accepted — the
+    # first tick at or after 119s lands at ~120s and the dead man's switch fires
+    # during NORMAL OPERATION, cancelling every order on the wallet.
+    with pytest.raises(ValueError, match="single missed refresh cycle"):
+        LiveConfig.from_dict(
+            _live_block(
+                kill_switch={"schedule_cancel_seconds": 120, "refresh_interval_seconds": 119}
+            )
+        )
+
+
+def test_a_deadline_of_exactly_two_refresh_intervals_is_accepted():
+    cfg = LiveConfig.from_dict(
+        _live_block(kill_switch={"schedule_cancel_seconds": 60, "refresh_interval_seconds": 30})
+    )
+    assert cfg.kill_switch.schedule_cancel_seconds == 60
 
 
 # ---------------------------------------------------------------------------

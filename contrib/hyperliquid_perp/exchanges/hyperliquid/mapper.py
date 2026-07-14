@@ -55,6 +55,14 @@ def _dec(value: Any, *, field: str) -> Decimal:
     return result
 
 
+# Public alias: signed_client's ack parser needs exactly this contract — a
+# REQUIRED numeric wire field, or MalformedResponseError — and the non-finite
+# guard above is why it must not hand-roll its own. A NaN avgPx parses happily
+# through Decimal(str(...)) and would reach OrderAck, the orders row, and every
+# PnL computed from it. Aliased rather than renamed: _dec has 33 call sites here.
+require_decimal = _dec
+
+
 def _opt_dec(value: Any, *, field: str) -> Decimal | None:
     """Parse an optional HL numeric string; ``None``/blank -> ``None``.
 

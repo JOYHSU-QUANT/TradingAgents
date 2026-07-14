@@ -52,6 +52,12 @@ __all__ = [
 # mode) rather than run a bot that is structurally unable to trade.
 EXCHANGE_MIN_ORDER_NOTIONAL_USDC = Decimal("10")
 
+# Hyperliquid rejects a scheduleCancel whose trigger is less than 5 seconds in
+# the future, so a window at or under this could never arm — and §18.2 rule 1
+# makes an arming failure a hard startup error. Same posture as the notional
+# minimum above: a config value that cannot work is rejected at load.
+MIN_SCHEDULE_CANCEL_SECONDS = 5
+
 # §21.1/§24.2: the caps that DEFINE mainnet_tiny. The hard config gate pins
 # them at load — a tighter value is fine, a looser one is a different mode.
 # They equal the LiveSafetyConfig field defaults today, but the anchors differ
@@ -379,24 +385,45 @@ class KillSwitchConfig:
     emergency_close_on_shutdown: bool = False
 
     def __post_init__(self) -> None:
-        if self.schedule_cancel_seconds <= 0:
+        if self.schedule_cancel_seconds <= MIN_SCHEDULE_CANCEL_SECONDS:
             raise ValueError(
-                f"live.kill_switch.schedule_cancel_seconds must be > 0, "
-                f"got {self.schedule_cancel_seconds}"
+                f"live.kill_switch.schedule_cancel_seconds must be > "
+                f"{MIN_SCHEDULE_CANCEL_SECONDS} (Hyperliquid rejects a "
+                f"scheduleCancel trigger less than {MIN_SCHEDULE_CANCEL_SECONDS} "
+                f"seconds in the future), got {self.schedule_cancel_seconds}"
             )
         if self.refresh_interval_seconds <= 0:
             raise ValueError(
                 f"live.kill_switch.refresh_interval_seconds must be > 0, "
                 f"got {self.refresh_interval_seconds}"
             )
-        # The refresh must land before the scheduled cancel fires, or every
-        # refresh cycle races the exchange-side deadline it exists to push back.
-        if self.refresh_interval_seconds >= self.schedule_cancel_seconds:
+        # A NECESSARY condition, not a sufficient one. The refresh must land
+        # before the scheduled cancel fires with a whole missed cycle to spare:
+        # the switch only refreshes when its owner ticks it, so the real cadence
+        # is quantized to the caller's tick gap and one skipped or slow cycle
+        # pushes the next refresh out to ~2x the interval. Under `refresh=119,
+        # schedule_cancel=120` — which a bare `refresh < schedule_cancel` accepts
+        # — the first tick at or after 119s lands at ~120s and the dead man's
+        # switch fires DURING NORMAL OPERATION, cancelling every order on the
+        # wallet. The defaults (120 / 30) sit at 4x.
+        #
+        # What this rule CANNOT see is the CALLER — how long it may actually go
+        # between two tick() calls, which is what really bounds how late a refresh
+        # lands. So it is only the special case where the caller ticks exactly at
+        # the interval. The binding check lives in KillSwitchManager.__init__,
+        # which is handed `max_tick_gap_seconds` (the caller's WORST-CASE wall time
+        # between ticks — minutes, if a synchronous AI decision runs in-cycle) and
+        # enforces refresh_interval + max_tick_gap < schedule_cancel. A config that
+        # passes here can still be rejected there (e.g. 60/30 under a 60s tick gap).
+        if self.schedule_cancel_seconds < 2 * self.refresh_interval_seconds:
             raise ValueError(
-                f"live.kill_switch.refresh_interval_seconds "
-                f"({self.refresh_interval_seconds}) must be < "
-                f"schedule_cancel_seconds ({self.schedule_cancel_seconds}), or the "
-                "dead man's switch fires between refreshes"
+                f"live.kill_switch.schedule_cancel_seconds "
+                f"({self.schedule_cancel_seconds}) must be >= 2 x "
+                f"refresh_interval_seconds ({self.refresh_interval_seconds}), or a "
+                "single missed refresh cycle lets the dead man's switch fire and "
+                "cancel every order on the wallet (the caller's worst-case gap "
+                "between tick() calls is checked separately, as max_tick_gap_seconds, "
+                "when the kill switch manager is built)"
             )
         _coerce_enum(
             self,
@@ -412,6 +439,17 @@ class KillSwitchConfig:
             key="live.kill_switch.on_shutdown",
             expected="'cancel_bot_owned_open_orders' (the only §18 policy)",
         )
+        # §18.1 declares the flag but the behavior (reduce-only emergency
+        # close, §8.1/§17) lands with PR 5's protection manager. Until then a
+        # true value would configure protection that silently does not exist —
+        # same rule as the single-member policy enums above: unimplemented
+        # behavior must not be accepted by config.
+        if self.emergency_close_on_shutdown:
+            raise ValueError(
+                "live.kill_switch.emergency_close_on_shutdown: true is not "
+                "implemented yet (emergency close arrives with the protection "
+                "manager, PR 5); set it to false"
+            )
 
     @classmethod
     def from_dict(cls, cfg: dict | None) -> KillSwitchConfig:

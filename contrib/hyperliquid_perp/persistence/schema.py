@@ -4,7 +4,9 @@ SQLite is the single source of truth (phase2-data §1). This module owns the DDL
 the eight export logical tables (§5–§12, one-to-one with the CSV exports) and the
 seven internal runtime tables (§1.2, plus ``run_seed_positions`` — the persisted
 replay genesis). ``db.apply_migrations`` runs these in version order and records
-each in ``schema_migrations``.
+each in ``schema_migrations``. Phase 3 live execution extends the store in v6
+(phase3-spec §16): exchange-facing columns on the Phase 2 tables plus the seven
+§16.5 live internal tables.
 
 Storage conventions (this module's rule, so no money value ever passes through
 a REAL float):
@@ -26,7 +28,7 @@ from __future__ import annotations
 
 __all__ = ["MIGRATIONS", "SCHEMA_MIGRATIONS_DDL", "SCHEMA_VERSION"]
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # --------------------------------------------------------------------------
 # Export logical tables (phase2-data §5–§12) — one-to-one with CSV exports.
@@ -338,6 +340,137 @@ CREATE TABLE run_seed_positions (
 )
 """
 
+# --------------------------------------------------------------------------
+# Phase 3 live internal tables (phase3-spec §16.5) — not exported to CSV.
+# --------------------------------------------------------------------------
+
+# cloid_logical <-> cloid_hex mapping (§8.2). The exchange only ever sees (and
+# echoes back) cloid_hex, so reverse lookup through this table is the ONE way
+# to decide an exchange order is bot-owned (§19.3) — a human-readable prefix
+# does not survive the hash. Both columns are unique: one logical order maps to
+# exactly one wire id, and a hex value resolving to two logical ids would make
+# the bot-owned decision ambiguous.
+_CLOID_REGISTRY = """
+CREATE TABLE cloid_registry (
+    cloid_hex     TEXT PRIMARY KEY,
+    cloid_logical TEXT NOT NULL UNIQUE,
+    run_id        TEXT NOT NULL,
+    symbol        TEXT NOT NULL,
+    order_role    TEXT NOT NULL,
+    created_at    TEXT NOT NULL
+)
+"""
+
+# One row per exchange round-trip attempt (§8.3): written BEFORE the network
+# call (status 'submitted'), patched with the outcome after. A crash between
+# the two leaves a durable record that an order MAY exist on the exchange —
+# exactly the state the §8.3 duplicate-retry protocol (query by cloid_hex
+# before resending) exists to resolve. ``attempt_index`` counts retries of the
+# same logical action; the UNIQUE triple makes a retry a new row, never a
+# silent overwrite of the previous attempt's evidence.
+_LIVE_ORDER_ATTEMPTS = """
+CREATE TABLE live_order_attempts (
+    attempt_id                TEXT PRIMARY KEY,
+    run_id                    TEXT NOT NULL,
+    order_id                  TEXT,
+    action                    TEXT NOT NULL,
+    cloid_logical             TEXT,
+    cloid_hex                 TEXT,
+    exchange_order_id         TEXT,
+    symbol                    TEXT NOT NULL,
+    side                      TEXT,
+    qty                       TEXT,
+    price                     TEXT,
+    reduce_only               INTEGER,
+    order_role                TEXT,
+    attempt_index             INTEGER NOT NULL,
+    status                    TEXT NOT NULL,
+    exchange_status           TEXT,
+    error_message             TEXT,
+    raw_exchange_payload_path TEXT,
+    requested_at              TEXT NOT NULL,
+    acknowledged_at           TEXT,
+    UNIQUE (cloid_hex, action, attempt_index)
+)
+"""
+
+# §18.5 event log — every dead-man's-switch state change is auditable.
+_KILL_SWITCH_EVENTS = """
+CREATE TABLE kill_switch_events (
+    event_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id        TEXT NOT NULL,
+    timestamp     TEXT NOT NULL,
+    event_type    TEXT NOT NULL,
+    detail        TEXT,
+    error_message TEXT
+)
+"""
+
+# §12.3 case log (consumed by PR 4's reconciliation module; the table lands
+# with the rest of the §16.5 DDL so live rows written by PR 2/3 never race a
+# later migration).
+_EXCHANGE_RECONCILIATION_EVENTS = """
+CREATE TABLE exchange_reconciliation_events (
+    event_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id         TEXT NOT NULL,
+    timestamp      TEXT NOT NULL,
+    trigger        TEXT NOT NULL,
+    case_type      TEXT NOT NULL,
+    symbol         TEXT,
+    local_value    TEXT,
+    exchange_value TEXT,
+    action_taken   TEXT,
+    detail         TEXT
+)
+"""
+
+# §17 protection lifecycle log (PR 5 writes it).
+_PROTECTION_ORDER_EVENTS = """
+CREATE TABLE protection_order_events (
+    event_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id     TEXT NOT NULL,
+    timestamp  TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    symbol     TEXT NOT NULL,
+    order_id   TEXT,
+    cloid_hex  TEXT,
+    detail     TEXT
+)
+"""
+
+# §15 fee/funding corrections: a backfilled or corrected amount is an explicit
+# adjustment event, never a silent overwrite (PR 3 writes it).
+_ACCOUNTING_ADJUSTMENT_EVENTS = """
+CREATE TABLE accounting_adjustment_events (
+    adjustment_id   TEXT PRIMARY KEY,
+    run_id          TEXT NOT NULL,
+    timestamp       TEXT NOT NULL,
+    adjustment_type TEXT NOT NULL,
+    target_table    TEXT,
+    target_id       TEXT,
+    field           TEXT,
+    old_value       TEXT,
+    new_value       TEXT,
+    reason          TEXT,
+    source          TEXT
+)
+"""
+
+# §13.6 safe-mode history (current state lives on scheduler_state; PR 4 owns
+# the state machine).
+_SAFE_MODE_EVENTS = """
+CREATE TABLE safe_mode_events (
+    event_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id         TEXT NOT NULL,
+    timestamp      TEXT NOT NULL,
+    event_type     TEXT NOT NULL,
+    safe_mode_type TEXT,
+    reason         TEXT,
+    released_by    TEXT,
+    detail         TEXT
+)
+"""
+
 # schema_migrations is created by ``db.apply_migrations`` before any migration
 # runs (it is the bookkeeping table that records which migrations ran), so it is
 # intentionally separate from the versioned statement list below.
@@ -407,5 +540,77 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE scheduler_state ADD COLUMN last_config_drift_status TEXT",
         "ALTER TABLE scheduler_state ADD COLUMN last_config_drift_error TEXT",
         "ALTER TABLE scheduler_state ADD COLUMN last_config_drift_at TEXT",
+    ),
+    # v6: Phase 3 live execution (phase3-spec §16). Exchange-facing columns on
+    # the four Phase 2 tables (§16.1–16.4), the seven §16.5 internal tables,
+    # and the safe-mode / loss-guard state on scheduler_state (§16.6). All new
+    # columns are nullable so every existing paper row stays valid.
+    # ``exchange_order_id`` / ``order_role`` / ``reduce_only`` (orders) and
+    # ``exchange_fill_id`` / ``exchange_order_id`` (fills) already exist in v1
+    # and are NOT re-added. ``orders.client_order_id`` is deprecated in place:
+    # live orders write cloid_logical / cloid_hex instead (§16.1); the column
+    # stays for old paper rows but gains no new writers.
+    6: (
+        # §16.1 orders additions. exchange_status carries the normalized
+        # status family (the orders.status vocabulary) and exchange_raw_status
+        # the verbatim exchange word — every live write path fills both.
+        "ALTER TABLE orders ADD COLUMN cloid_logical TEXT",
+        "ALTER TABLE orders ADD COLUMN cloid_hex TEXT",
+        "ALTER TABLE orders ADD COLUMN exchange_status TEXT",
+        "ALTER TABLE orders ADD COLUMN exchange_raw_status TEXT",
+        "ALTER TABLE orders ADD COLUMN submitted_at TEXT",
+        "ALTER TABLE orders ADD COLUMN acknowledged_at TEXT",
+        "ALTER TABLE orders ADD COLUMN canceled_at TEXT",
+        "ALTER TABLE orders ADD COLUMN cancel_reason TEXT",
+        "ALTER TABLE orders ADD COLUMN is_bot_owned INTEGER",
+        "ALTER TABLE orders ADD COLUMN raw_exchange_payload_path TEXT",
+        # One orders row per cloid: cloid_registry's PK pins the pair itself;
+        # this pins the row count. NULLs (every paper row) stay distinct, same
+        # as idx_fills_exchange_fill_key below.
+        "CREATE UNIQUE INDEX idx_orders_cloid_hex ON orders (cloid_hex)",
+        # §16.2 fills additions. exchange_fill_key is the §14.2 dedupe key;
+        # SQLite cannot ADD COLUMN with a UNIQUE constraint, so the guard is a
+        # UNIQUE index (NULLs stay distinct — paper fills never carry the key).
+        "ALTER TABLE fills ADD COLUMN exchange_fill_key TEXT",
+        "ALTER TABLE fills ADD COLUMN cloid_logical TEXT",
+        "ALTER TABLE fills ADD COLUMN cloid_hex TEXT",
+        "ALTER TABLE fills ADD COLUMN liquidity_role TEXT",
+        "ALTER TABLE fills ADD COLUMN exchange_fee TEXT",
+        "ALTER TABLE fills ADD COLUMN exchange_closed_pnl TEXT",
+        "ALTER TABLE fills ADD COLUMN exchange_fill_time TEXT",
+        "ALTER TABLE fills ADD COLUMN raw_exchange_payload_path TEXT",
+        "CREATE UNIQUE INDEX idx_fills_exchange_fill_key ON fills (exchange_fill_key)",
+        # §16.3 account_snapshots additions.
+        "ALTER TABLE account_snapshots ADD COLUMN exchange_account_value TEXT",
+        "ALTER TABLE account_snapshots ADD COLUMN exchange_withdrawable TEXT",
+        "ALTER TABLE account_snapshots ADD COLUMN exchange_margin_used TEXT",
+        "ALTER TABLE account_snapshots ADD COLUMN exchange_unrealized_pnl TEXT",
+        "ALTER TABLE account_snapshots ADD COLUMN exchange_raw_payload_path TEXT",
+        "ALTER TABLE account_snapshots ADD COLUMN reconciliation_status TEXT",
+        "ALTER TABLE account_snapshots ADD COLUMN reconciliation_diff TEXT",
+        # §16.4 position_snapshots additions (exchange_liquidation_price
+        # already exists in v1 and is NOT re-added).
+        "ALTER TABLE position_snapshots ADD COLUMN exchange_position_size TEXT",
+        "ALTER TABLE position_snapshots ADD COLUMN exchange_entry_price TEXT",
+        "ALTER TABLE position_snapshots ADD COLUMN exchange_unrealized_pnl TEXT",
+        "ALTER TABLE position_snapshots ADD COLUMN exchange_margin_used TEXT",
+        "ALTER TABLE position_snapshots ADD COLUMN exchange_raw_payload_path TEXT",
+        "ALTER TABLE position_snapshots ADD COLUMN reconciliation_status TEXT",
+        "ALTER TABLE position_snapshots ADD COLUMN reconciliation_diff TEXT",
+        # §16.5 internal tables.
+        _CLOID_REGISTRY,
+        _LIVE_ORDER_ATTEMPTS,
+        _KILL_SWITCH_EVENTS,
+        _EXCHANGE_RECONCILIATION_EVENTS,
+        _PROTECTION_ORDER_EVENTS,
+        _ACCOUNTING_ADJUSTMENT_EVENTS,
+        _SAFE_MODE_EVENTS,
+        # §16.6 scheduler_state additions (PR 4 state machine / PR 5 loss guards).
+        "ALTER TABLE scheduler_state ADD COLUMN safe_mode_type TEXT",
+        "ALTER TABLE scheduler_state ADD COLUMN safe_mode_reason TEXT",
+        "ALTER TABLE scheduler_state ADD COLUMN safe_mode_entered_at TEXT",
+        "ALTER TABLE scheduler_state ADD COLUMN day_start_equity TEXT",
+        "ALTER TABLE scheduler_state ADD COLUMN day_start_date TEXT",
+        "ALTER TABLE scheduler_state ADD COLUMN consecutive_loss_count INTEGER",
     ),
 }

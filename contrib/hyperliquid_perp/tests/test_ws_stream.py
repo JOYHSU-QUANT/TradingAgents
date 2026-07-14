@@ -200,6 +200,35 @@ def test_supervisor_does_not_reconnect_while_already_connected():
     assert len(calls) == 1
 
 
+def test_supervisor_never_leaks_a_second_connection():
+    # If two ensure_connected calls ever overlap (out of contract — only the tick
+    # thread calls it — but the backoff is 0 here), the loser's socket must be
+    # closed, never silently overwritten: an overwritten handle is a live
+    # connection nobody holds a reference to any more.
+    clock = ManualClock(_NOW)
+    stream = LiveWsStream(clock=clock)
+    opened = []
+    holder = {}
+
+    def connect():
+        handle = _FakeHandle()
+        opened.append(handle)
+        if len(opened) == 1:
+            # Re-enter while the first connect is still in flight.
+            holder["sup"].ensure_connected()
+        return handle
+
+    sup = WsConnectionSupervisor(
+        connect=connect, stream=stream, clock=clock, reconnect_min_interval_seconds=0
+    )
+    holder["sup"] = sup
+    sup.ensure_connected()
+    assert len(opened) == 2  # both attempts really opened a socket
+    # Exactly one is installed; the other was closed, not leaked.
+    assert sum(1 for h in opened if not h.closed) == 1
+    assert sup.connected
+
+
 def test_supervisor_note_closed_is_idempotent():
     clock = ManualClock(_NOW)
     stream = LiveWsStream(clock=clock)

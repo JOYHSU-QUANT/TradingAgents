@@ -316,7 +316,13 @@ class WsConnectionSupervisor:
             return False
 
         with self._lock:
-            superseded = self._generation != generation
+            # Superseded on EITHER count: a close bumped the generation while we
+            # were connecting, or another caller already installed a handle. The
+            # second is out of contract (only the tick thread calls this), but
+            # without the check a concurrent pair would both open a socket and the
+            # loser would overwrite ``_handle`` — leaking the winner's live
+            # connection with nothing left holding a reference to close it.
+            superseded = self._generation != generation or self._handle is not None
             if not superseded:
                 self._handle = handle
         if superseded:

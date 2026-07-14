@@ -17,10 +17,10 @@ The window's start is the trailing lookback OR the caller's ``since``, whichever
 EARLIER. A fixed trailing window alone would silently fail the one case that matters:
 down for longer than the window — an overnight outage, a bad deploy, a restart loop —
 and the fills older than it are ingested by no path at all, with no error and no gap
-reported. ``since`` is the start of the gap the caller knows it has (the newest booked
-fill at startup; the disconnect time after a reconnect); the lookback then just adds a
-generous overlap on top. Deriving it here from the fills table instead would look
-right and be wrong — see ``_window_start``.
+reported. ``since`` is ``LiveWsStream.backfill_since()`` — the stream's earliest
+still-uncovered obligation (startup floor folded with any reconnect gap anchor); the
+lookback then just adds a generous overlap on top. Deriving it here from the fills
+table instead would look right and be wrong — see ``_window_start``.
 
 The window is also PAGED, since the endpoint caps a response: a full page is a
 truncated view, not a complete one, and a pass that cannot finish walking its pages
@@ -170,10 +170,13 @@ class FillBackfiller:
         and nothing longer. ``since`` is what makes a long outage recoverable, and the
         caller must supply it, because the gap's start is a fact only the caller holds:
 
-        - at STARTUP it is the newest fill already booked (``repo.last_live_fill_time``
-          — correct there precisely because nothing newer exists yet);
-        - after a RECONNECT it is when the socket dropped (``LiveWsStream`` anchors it);
-        - on the routine heartbeat there is no gap, and ``None`` leaves the window.
+        - pass ``LiveWsStream.backfill_since()`` VERBATIM. It is the earliest
+          still-uncovered obligation — the startup floor (registered at boot via
+          ``set_startup_floor``: the newest booked fill, or the run's genesis when no
+          fill exists yet) folded with any reconnect gap anchor. Folded by the STREAM,
+          not dispatched here, so a drop right after a successful first connect cannot
+          shadow a still-uncovered floor with its own few-minute gap;
+        - on the routine heartbeat nothing is owed, and ``None`` leaves the window.
 
         The fills table cannot answer this on its own. A ``MAX(exchange_fill_time)``
         cursor looks like it can, but it collapses: let one newer fill be booked — a

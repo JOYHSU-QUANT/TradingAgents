@@ -738,6 +738,49 @@ def test_a_failed_first_connect_anchors_no_gap():
     assert stream.backfill_since() == clock.now()  # ...is the first anchor
 
 
+def test_a_post_boot_drop_cannot_shadow_the_startup_floor():
+    """The two obligations fold into one `since`; covering the anchor alone is not enough.
+
+    Dispatched caller-side ("floor at startup, anchor afterwards"), a drop seconds after
+    a successful first connect anchors a post-boot gap, the caller reads the non-None
+    anchor as the whole story, and the pass that covers those few minutes clears the
+    request — while the floor's day-long gap was never fetched by anything. The stream
+    holds both, returns the earlier, and retires them only together.
+    """
+    clock = ManualClock(_NOW)
+    stream = LiveWsStream(clock=clock)
+    floor = _NOW - timedelta(days=1)  # newest booked fill: the process was down a day
+    stream.set_startup_floor(floor)
+    assert stream.backfill_since() == floor  # the floor IS an obligation pre-connect
+
+    stream.mark_connected()
+    clock.advance(30)
+    stream.mark_disconnected(clock.now())  # flapping right after boot
+    clock.advance(30)
+    stream.mark_connected()
+
+    # The anchor exists, but the floor is EARLIER and still uncovered — it wins.
+    assert stream.backfill_since() == floor
+
+    # A stale-epoch acknowledgement retires nothing.
+    stale = stream.backfill_epoch() - 1
+    assert not stream.mark_backfill_done(stale)
+    assert stream.backfill_since() == floor
+
+    # The epoch-matched acknowledgement covered min(floor, anchor) == floor, so BOTH
+    # obligations retire together.
+    assert stream.mark_backfill_done(stream.backfill_epoch())
+    assert stream.backfill_since() is None
+
+
+def test_startup_floor_rejects_a_naive_instant():
+    stream = LiveWsStream(clock=ManualClock(_NOW))
+    with pytest.raises(ValueError, match="timezone-aware"):
+        stream.set_startup_floor(_NAIVE)
+    stream.set_startup_floor(None)  # "no obligation" stays expressible
+    assert stream.backfill_since() is None
+
+
 def test_the_gap_anchor_is_retired_only_by_the_backfill_that_covered_it():
     """A pass that never ran, or could not prove it covered its window, leaves it standing."""
     clock = ManualClock(_NOW)

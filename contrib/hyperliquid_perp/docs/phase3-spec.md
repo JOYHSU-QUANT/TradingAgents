@@ -686,8 +686,14 @@ open orders updates（orderUpdates）
 4. WebSocket 斷線後必須重連。
 5. 啟動與每次重連後都必須用 REST 補查可能錯過的 fills / orders / positions
    （`needs_backfill` 旗標）。**（v3 新增）backfill 契約**：
-   - **視窗起點 = `min(now - trailing lookback, since)`，`since` 由呼叫方提供**：啟動時
-     是帳上最新 fill 的時間、重連後是斷線的時間點、例行 heartbeat 為 None。單靠固定
+   - **視窗起點 = `min(now - trailing lookback, since)`，`since` = `stream.backfill_since()`
+     原樣傳入**：stream 自持兩個義務——startup floor（開機時以 `set_startup_floor` 登記
+     一次：帳上最新 fill 的時間、帳上無 fill 則用 run genesis）與重連的 gap anchor
+     （斷線時刻）——回傳兩者中較早者，且**只**由同一個 epoch-gated 清除一起退休；例行
+     heartbeat 什麼都不欠、`since` 為 None。**fold 放在 stream、不由呼叫方 dispatch**：
+     「啟動用 floor、之後用 anchor」的分派有個靜默漏洞——首連成功後幾秒內斷線（長時間
+     停機後網路不穩正是這個窗口）會錨出一個開機後的小 gap，呼叫方把非 None 的 anchor
+     當成全部，蓋掉還沒補的 floor，那一整段停機 fills 從此沒有任何 pass 會撈。單靠固定
      trailing window 會在「斷線比視窗久」時（隔夜斷線、壞掉的部署、systemd 重啟迴圈）
      把那一段 fills 漏成**沒有任何路徑會撈到**，而且不報錯。**這個起點是只有呼叫方知道
      的事實**：fills 表本身答不出來——只要有任何一筆較新的 fill 入帳（重連時 HL 會推

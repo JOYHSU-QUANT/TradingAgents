@@ -112,6 +112,14 @@ class LiveWsStream:
         # the socket comes back: the gap outlives the reconnect that created it, and is
         # retired only when a backfill has actually covered it.
         self._gap_since: datetime | None = None
+        # The OTHER backfill obligation: everything that happened while the process was
+        # not running (see :meth:`set_startup_floor`). Held here, beside the gap anchor,
+        # because the two must be retired by the same epoch-gated clear — held apart
+        # (the caller dispatching "floor at startup, anchor after") they can shadow each
+        # other: a drop right after a successful first connect anchors a post-boot gap,
+        # the caller reads the anchor as authoritative, and the still-uncovered floor is
+        # silently forgotten (see :meth:`backfill_since`).
+        self._startup_floor: datetime | None = None
         self._last_event_at: datetime | None = None
 
     def enqueue(self, event: Any) -> None:
@@ -214,27 +222,55 @@ class LiveWsStream:
         with self._lock:
             return self._backfill_epoch
 
+    def set_startup_floor(self, floor: datetime | None) -> None:
+        """Register the boot-time backfill obligation, ONCE, before the first connect.
+
+        ``floor`` is where the process-was-down gap begins: the newest fill already
+        booked (``repo.last_live_fill_time``), or — when the run has booked no fill yet,
+        which still says nothing about its resting orders — the run's genesis timestamp.
+        ``None`` declares there is no startup obligation at all; prefer the genesis
+        fallback over ``None``, it is never wrong and the dedupe key absorbs the overlap.
+
+        Held on the stream, not dispatched by the caller, so that it and the gap anchor
+        are ONE obligation stream retired by the same epoch-gated clear. Dispatching
+        caller-side ("floor at startup, anchor afterwards") has a silent hole: a drop
+        seconds after a successful first connect — a flapping network right after a long
+        outage is exactly this window — anchors a post-boot gap, the caller reads the
+        non-``None`` anchor as the whole story, and the pass that covers the anchor's
+        few minutes clears the request while the floor's day-long gap was never fetched
+        by anything.
+        """
+        if floor is not None and floor.tzinfo is None:
+            raise ValueError(f"startup floor must be timezone-aware (UTC), got {floor!r}")
+        with self._lock:
+            self._startup_floor = floor
+
     def backfill_since(self) -> datetime | None:
-        """When the gap the pending backfill must cover BEGAN, or ``None``.
+        """Where the pending backfill's window must begin, or ``None``.
 
-        Pass this as ``FillBackfiller.backfill(since=...)``. It is the socket's drop
-        instant, kept alive across the reconnect that raised the backfill request —
-        ``disconnected_for`` cannot serve here, because it is the liveness clock and
-        reads 0 the moment the socket is back.
+        Pass this as ``FillBackfiller.backfill(since=...)``, verbatim. It is the
+        EARLIEST still-uncovered obligation: the startup floor (everything since the
+        process was last running — :meth:`set_startup_floor`) and/or the gap anchor
+        (the socket's drop instant, kept alive across the reconnect that raised the
+        request — ``disconnected_for`` cannot serve here, because it is the liveness
+        clock and reads 0 the moment the socket is back).
 
-        ``None`` means no outage created this request: the first connect at startup —
-        including a first connect that only succeeded after failed attempts, which run
-        the liveness clock but anchor no gap (see :meth:`mark_disconnected`). The
-        caller supplies the startup floor itself (the newest fill already booked —
-        ``repo.last_live_fill_time``, correct there precisely because nothing newer
-        exists yet), and a routine heartbeat passes nothing at all.
+        ``None`` means nothing is owed beyond the trailing lookback: every registered
+        obligation has been retired by an epoch-gated :meth:`mark_backfill_done`, and
+        no socket that was ever subscribed has dropped since — the routine-heartbeat
+        state. Failed connect attempts do not disturb this: they run the liveness
+        clock but anchor no gap (see :meth:`mark_disconnected`).
 
         Without this, an outage longer than the trailing lookback is unrecoverable and
         SILENT: the window falls back to the lookback, the older fills are fetched by no
         path, and the pass still reports success.
         """
         with self._lock:
-            return self._gap_since
+            if self._startup_floor is None:
+                return self._gap_since
+            if self._gap_since is None:
+                return self._startup_floor
+            return min(self._startup_floor, self._gap_since)
 
     def mark_backfill_done(self, epoch: int) -> bool:
         """Clear the backfill request ``epoch`` once ITS backfill has run (§11.2 rule 5).
@@ -253,13 +289,16 @@ class LiveWsStream:
             if epoch != self._backfill_epoch:
                 return False
             self._needs_backfill = False
-            # The gap this request named has now been covered, so it stops being a gap.
-            # Retired HERE and nowhere else — not on reconnect — so a backfill that never
-            # ran leaves the anchor standing. The epoch gate cannot see COVERAGE, though:
-            # a pass that ran but could not prove it covered its window reports
+            # BOTH obligations retire together, HERE and nowhere else — not on
+            # reconnect — so a backfill that never ran leaves them standing. Together,
+            # because the pass being acknowledged read its window from
+            # ``backfill_since()``, which folds them into one start: a pass that covered
+            # that start covered both. The epoch gate cannot see COVERAGE, though: a
+            # pass that ran but could not prove it covered its window reports
             # ``BackfillSummary.complete = False``, and it is the CALLER's obligation not
             # to call this method for that pass — same contract as ``needs_backfill``.
             self._gap_since = None
+            self._startup_floor = None
             return True
 
     def disconnected_for(self, now: datetime | None = None) -> float:

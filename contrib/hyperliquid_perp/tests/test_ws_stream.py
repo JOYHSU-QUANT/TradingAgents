@@ -773,12 +773,46 @@ def test_a_post_boot_drop_cannot_shadow_the_startup_floor():
     assert stream.backfill_since() is None
 
 
-def test_startup_floor_rejects_a_naive_instant():
+def test_startup_floor_rejects_a_naive_instant_and_a_second_registration():
     stream = LiveWsStream(clock=ManualClock(_NOW))
     with pytest.raises(ValueError, match="timezone-aware"):
         stream.set_startup_floor(_NAIVE)
     stream.set_startup_floor(None)  # "no obligation" stays expressible
     assert stream.backfill_since() is None
+    # Set-ONCE is enforced: re-registering (fills booked since boot make the floor
+    # read ~now) could move it forward past an uncovered obligation — the exact
+    # shadowing hole the stream-held fold closes.
+    with pytest.raises(ValueError, match="once per stream"):
+        stream.set_startup_floor(_NOW)
+
+
+def test_an_ack_while_the_socket_is_down_reanchors_the_ongoing_outage():
+    """Only mark_connected bumps the epoch — a drop mid-pass does not stale the ack.
+
+    The pass's window closed before the drop's fills stopped flowing, so its outage is
+    still open at the acknowledgement: clearing the anchor to None would let the
+    reconnect raise a request with backfill_since() None, snapping the window back to
+    the trailing lookback and silently losing an outage longer than it.
+    """
+    clock = ManualClock(_NOW)
+    stream = LiveWsStream(clock=clock)
+    stream.mark_connected()
+    epoch = stream.backfill_epoch()  # the pass reads its epoch, then runs...
+
+    clock.advance(5)
+    drop_at = clock.now()
+    stream.mark_disconnected(drop_at)  # ...and the socket drops mid-flight
+
+    assert stream.mark_backfill_done(epoch)  # epoch unchanged: the ack is accepted
+    # But the outage is ongoing — the gap re-anchors at its start instead of vanishing.
+    assert stream.backfill_since() == drop_at
+
+    clock.advance(10 * 3600)  # far beyond any trailing lookback
+    stream.mark_connected()
+    assert stream.backfill_since() == drop_at  # the reconnect's pass still knows
+
+    assert stream.mark_backfill_done(stream.backfill_epoch())
+    assert stream.backfill_since() is None  # connected at THIS ack: nothing re-anchors
 
 
 def test_the_gap_anchor_is_retired_only_by_the_backfill_that_covered_it():

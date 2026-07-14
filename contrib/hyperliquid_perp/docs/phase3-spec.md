@@ -695,9 +695,10 @@ open orders updates（orderUpdates）
      停機後網路不穩正是這個窗口）會錨出一個開機後的小 gap，呼叫方把非 None 的 anchor
      當成全部，蓋掉還沒補的 floor，那一整段停機 fills 從此沒有任何 pass 會撈。單靠固定
      trailing window 會在「斷線比視窗久」時（隔夜斷線、壞掉的部署、systemd 重啟迴圈）
-     把那一段 fills 漏成**沒有任何路徑會撈到**，而且不報錯。**這個起點是只有呼叫方知道
-     的事實**：fills 表本身答不出來——只要有任何一筆較新的 fill 入帳（重連時 HL 會推
-     `isSnapshot` 批次），`MAX(exchange_fill_time)` 就會跳到現在，視窗縮回 lookback。
+     把那一段 fills 漏成**沒有任何路徑會撈到**，而且不報錯。**這個起點是只有 stream 的
+     bookkeeping（開機登記＋斷線錨定）知道的事實**：fills 表本身答不出來——只要有任何
+     一筆較新的 fill 入帳（重連時 HL 會推 `isSnapshot` 批次），`MAX(exchange_fill_time)`
+     就會跳到現在，視窗縮回 lookback。
    - 回應**分頁**（`userFillsByTime` 單次上限 2000 筆）：整頁滿代表被截斷，必須續頁。
    - 一次 pass 若無法證明它覆蓋了整個視窗（頁數預算用盡、游標無法前進），必須回報
      `complete = False`：**gap 仍然開著，呼叫方不得清掉 `needs_backfill`**。

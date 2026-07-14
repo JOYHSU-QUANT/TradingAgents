@@ -120,6 +120,9 @@ class LiveWsStream:
         # the caller reads the anchor as authoritative, and the still-uncovered floor is
         # silently forgotten (see :meth:`backfill_since`).
         self._startup_floor: datetime | None = None
+        # Guards set_startup_floor's set-ONCE contract; separate from the floor itself
+        # because None ("no obligation") is a legitimate registration.
+        self._floor_registered = False
         self._last_event_at: datetime | None = None
 
     def enqueue(self, event: Any) -> None:
@@ -243,6 +246,13 @@ class LiveWsStream:
         if floor is not None and floor.tzinfo is None:
             raise ValueError(f"startup floor must be timezone-aware (UTC), got {floor!r}")
         with self._lock:
+            # Set-ONCE, enforced: a second registration could move the floor FORWARD
+            # (fills booked since boot make ``last_live_fill_time`` read ≈now) past an
+            # obligation no pass has covered — reopening exactly the shadowing hole the
+            # stream-held fold exists to close. One stream instance = one boot = one floor.
+            if self._floor_registered:
+                raise ValueError("set_startup_floor may only be called once per stream")
+            self._floor_registered = True
             self._startup_floor = floor
 
     def backfill_since(self) -> datetime | None:
@@ -291,14 +301,33 @@ class LiveWsStream:
             self._needs_backfill = False
             # BOTH obligations retire together, HERE and nowhere else — not on
             # reconnect — so a backfill that never ran leaves them standing. Together,
-            # because the pass being acknowledged read its window from
-            # ``backfill_since()``, which folds them into one start: a pass that covered
-            # that start covered both. The epoch gate cannot see COVERAGE, though: a
-            # pass that ran but could not prove it covered its window reports
-            # ``BackfillSummary.complete = False``, and it is the CALLER's obligation not
-            # to call this method for that pass — same contract as ``needs_backfill``.
+            # because the acknowledged pass is REQUIRED to have read its window from
+            # ``backfill_since()`` (a precondition, like the epoch discipline — the
+            # class cannot see the window itself), which folds them into one start: a
+            # pass that covered that start covered both. The epoch gate cannot see
+            # COVERAGE either: a pass that ran but could not prove it covered its
+            # window reports ``BackfillSummary.complete = False``, and it is the
+            # CALLER's obligation not to call this method for that pass — same
+            # contract as ``needs_backfill``.
             self._gap_since = None
             self._startup_floor = None
+            if (
+                not self._connected
+                and self._disconnected_since is not None
+                and self._connected_since is not None  # never-connected anchors no gap
+            ):
+                # The socket is down AT the acknowledgement, and only mark_connected
+                # bumps the epoch — so a drop that landed while the pass was in flight
+                # does NOT make this ack stale. The pass's window necessarily closed
+                # before that drop's fills stopped flowing, so the outage it belongs to
+                # is still open: re-anchor it at the outage's own start instead of
+                # declaring nothing owed. Without this, the reconnect raises a request
+                # whose backfill_since() is None, the window snaps back to the trailing
+                # lookback, and an outage longer than it silently loses its fills — the
+                # same shape as every other hole this class exists to close. (The
+                # startup floor stays retired: pre-boot fills all precede the window's
+                # END, so any pass whose start included the floor covered them.)
+                self._gap_since = self._disconnected_since
             return True
 
     def disconnected_for(self, now: datetime | None = None) -> float:

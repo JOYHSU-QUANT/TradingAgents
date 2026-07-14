@@ -135,9 +135,10 @@ class FillBackfiller:
     :class:`LiveFillProcessor` the WS drain feeds, which is what makes WS and REST
     converge on one exactly-once ledger.
 
-    How far BACK a pass reads is decided per call, by the caller, through
-    :meth:`backfill`'s ``since`` — see :meth:`_window_start` for why the fills table
-    cannot answer that question for itself.
+    How far BACK a pass reads comes per call through :meth:`backfill`'s ``since`` —
+    the caller relays ``LiveWsStream.backfill_since()`` verbatim; see
+    :meth:`_window_start` for why the fills table cannot answer that question for
+    itself.
     """
 
     def __init__(
@@ -168,7 +169,8 @@ class FillBackfiller:
 
         The trailing window is a FLOOR, not a guarantee — it covers the routine case
         and nothing longer. ``since`` is what makes a long outage recoverable, and the
-        caller must supply it, because the gap's start is a fact only the caller holds:
+        caller must relay it, because the gap's start is a fact only the STREAM's
+        bookkeeping holds (registered at boot, anchored at drops):
 
         - pass ``LiveWsStream.backfill_since()`` VERBATIM. It is the earliest
           still-uncovered obligation — the startup floor (registered at boot via

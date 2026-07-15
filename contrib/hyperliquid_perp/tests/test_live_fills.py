@@ -1310,3 +1310,254 @@ def test_a_payload_that_will_not_serialise_still_cannot_crash_the_drain(db, tmp_
     # The undumpable payload's evidence WRITE also degrades (write_raw_payload's own
     # fail-soft: no file, a warning) — but the sibling's evidence is still kept.
     assert len(list(tmp_path.glob("fill_parse_error-*.json"))) == 1
+
+
+# ---------------------------------------------------------------------------
+# parse type guards — payload drift must stay in the malformed vocabulary
+# ---------------------------------------------------------------------------
+
+
+def test_unhashable_side_is_malformed_not_a_type_error():
+    """``in`` on a dict hashes its operand: ["B"] must be malformed, not TypeError.
+
+    A TypeError escapes both the §11.3 handlers and parse's (ValueError,
+    ArithmeticError) backstop — one drifted fill would wedge the REST backfill
+    forever (re-fetched every window, crashing every pass).
+    """
+    with pytest.raises(MalformedResponseError, match="side"):
+        ExchangeFill.parse(_fill(side=["B"]))
+
+
+@pytest.mark.parametrize("coin", [["BTC"], {"c": 1}, 7, ""])
+def test_non_string_coin_is_malformed(coin):
+    # An untyped coin would flow to the _unmapped_reason symbol comparison, always
+    # mismatch, and mislabel payload drift as a §12.3 unmapped case.
+    with pytest.raises(MalformedResponseError, match="coin"):
+        ExchangeFill.parse(_fill(coin=coin))
+
+
+def test_hand_built_fill_with_non_string_coin_is_rejected():
+    fill = ExchangeFill.parse(_fill())
+    with pytest.raises(ValueError, match="coin"):
+        replace(fill, coin=123)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("key", ["oid", "tid"])
+@pytest.mark.parametrize("value", [[123], {"id": 1}, True])
+def test_non_scalar_id_is_malformed(key, value):
+    # str() coerces anything without error, so a non-scalar oid would mislabel a
+    # readable fill as unmapped and a non-scalar tid would mint a nonsense-but-
+    # permanent dedupe key — both must be the malformed verdict instead.
+    with pytest.raises(MalformedResponseError, match=key):
+        ExchangeFill.parse({**_fill(), key: value})
+
+
+def test_a_drifted_side_type_does_not_wedge_the_batch(db, clock, tmp_path):
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    good = _fill(tid=2)
+    bad = _fill(side=["B"], tid=3)
+    results = proc.ingest_message({"channel": "userFills", "data": {"fills": [bad, good]}})
+    assert [r.outcome for r in results] == [IngestOutcome.APPLIED]
+    assert list(tmp_path.glob("fill_parse_error-*.json"))
+
+
+# ---------------------------------------------------------------------------
+# §15.1 rule 8 — redelivery verification (fee corrections + identity drift)
+# ---------------------------------------------------------------------------
+
+
+def test_redelivered_fee_correction_posts_the_difference(db, clock, tmp_path):
+    """The heartbeat's redelivery is rule 5's automatic feeder: a booked fill
+    re-arriving with a different USDC fee posts the correction, exactly once."""
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    assert proc.ingest(_fill(fee="0.05", tid=7)).outcome is IngestOutcome.APPLIED
+    assert _ledger(db).total_fees == Decimal("0.05")
+
+    corrected = _fill(fee="0.03", tid=7)
+    assert proc.ingest(corrected).outcome is IngestOutcome.DUPLICATE
+    assert _ledger(db).total_fees == Decimal("0.03")
+    assert _ledger(db).wallet_balance == Decimal("999.97")
+
+    # Every later pass redelivers the same corrected payload: no further writes.
+    assert proc.ingest(corrected).outcome is IngestOutcome.DUPLICATE
+    fid = live_fill_id("r", "tid|7")
+    fee_adj = [
+        a
+        for a in repo.iter_accounting_adjustment_events(db.conn, "r", target_id=fid)
+        if a["adjustment_type"] == "fee"
+    ]
+    assert len(fee_adj) == 1
+    # The fill row stayed immutable — the correction lives only in the adjustment.
+    assert repo.get_fill(db.conn, fid)["exchange_fee"] == "0.05"
+
+
+def test_redelivery_matching_the_books_writes_nothing(db, clock, tmp_path):
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    raw = _fill(fee="0.05", tid=8)
+    assert proc.ingest(raw).outcome is IngestOutcome.APPLIED
+    assert proc.ingest(raw).outcome is IngestOutcome.DUPLICATE
+    assert db.conn.execute("SELECT COUNT(*) FROM accounting_adjustment_events").fetchone()[0] == 0
+    assert db.conn.execute("SELECT COUNT(*) FROM exchange_reconciliation_events").fetchone()[0] == 0
+
+
+def test_stale_redelivery_does_not_flip_flop_a_manual_valuation(db, clock, tmp_path):
+    """The comparison baseline is the AS-INGESTED fee, not the effective fee.
+
+    A manual valuation (rule 3's non-USDC lane) moves the effective fee; the same
+    stale payload then re-arrives every heartbeat still carrying the original
+    amount. Compared against the effective fee it would "correct" the valuation
+    right back, every pass, forever.
+    """
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    raw = _fill(fee="0.05", tid=9)
+    assert proc.ingest(raw).outcome is IngestOutcome.APPLIED
+    fid = live_fill_id("r", "tid|9")
+    backfill_fill_fee(
+        db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.07"), fee_token="USDC", source="manual"
+    )
+    assert _ledger(db).total_fees == Decimal("0.07")
+
+    assert proc.ingest(raw).outcome is IngestOutcome.DUPLICATE  # same stale payload
+    assert _ledger(db).total_fees == Decimal("0.07")  # the valuation stands
+    assert db.conn.execute("SELECT COUNT(*) FROM accounting_adjustment_events").fetchone()[0] == 1
+
+
+def test_pending_fee_resolves_from_a_redelivery(db, clock, tmp_path):
+    """A pending fill's redelivery WITH a USDC fee is its first resolution."""
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    assert proc.ingest(_fill(fee=None, tid=10)).outcome is IngestOutcome.APPLIED
+    fid = live_fill_id("r", "tid|10")
+    assert repo.iter_live_fills(db.conn, "r", pending_fee_only=True) != []
+
+    assert proc.ingest(_fill(fee="0.04", tid=10)).outcome is IngestOutcome.DUPLICATE
+    assert _ledger(db).total_fees == Decimal("0.04")
+    assert _ledger(db).wallet_balance == Decimal("999.96")
+    assert repo.iter_live_fills(db.conn, "r", pending_fee_only=True) == []
+    assert repo.get_fill(db.conn, fid)["exchange_fee"] is None  # row stays immutable
+
+
+def test_redelivered_identity_drift_is_recorded_not_applied(db, clock, tmp_path):
+    """Same tid, different money: no lane can re-book it — evidence + case row only.
+
+    The fee is deliberately NOT posted on top of an identity mismatch: a payload
+    that disagrees about which fill this is cannot be trusted about its cost.
+    """
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    assert proc.ingest(_fill(px="100", fee="0.05", tid=11)).outcome is IngestOutcome.APPLIED
+    wallet_before = _ledger(db).wallet_balance
+
+    drifted = _fill(px="101", fee="0.99", tid=11)
+    assert proc.ingest(drifted).outcome is IngestOutcome.DUPLICATE
+    assert _ledger(db).wallet_balance == wallet_before
+    assert db.conn.execute("SELECT COUNT(*) FROM accounting_adjustment_events").fetchone()[0] == 0
+    cases = repo.iter_exchange_reconciliation_events(db.conn, "r", case_type="fill_money_drift")
+    assert len(cases) == 1
+    assert cases[0]["local_value"] == live_fill_id("r", "tid|11")
+    assert list(tmp_path.glob("fill_money_drift-*.json"))
+
+    # The same drifted payload re-arrives every pass: one record, not one per pass.
+    assert proc.ingest(drifted).outcome is IngestOutcome.DUPLICATE
+    assert (
+        len(repo.iter_exchange_reconciliation_events(db.conn, "r", case_type="fill_money_drift"))
+        == 1
+    )
+    assert len(list(tmp_path.glob("fill_money_drift-*.json"))) == 1
+
+    # A SECOND, different drift on the same fill is new evidence — its own record
+    # (the case key folds in a digest of the drift, not just the fill key).
+    assert proc.ingest(_fill(px="102", tid=11)).outcome is IngestOutcome.DUPLICATE
+    assert (
+        len(repo.iter_exchange_reconciliation_events(db.conn, "r", case_type="fill_money_drift"))
+        == 2
+    )
+
+
+def test_a_failed_case_row_write_cannot_crash_the_drain(db, clock, tmp_path, monkeypatch):
+    """_record_malformed's contract: recording evidence never crashes the drain.
+
+    The case-row INSERT is part of recording evidence, so a store that cannot take
+    it (locked, corrupt) must degrade to a logged error — the §11.3 skip stands and
+    the batch's well-formed siblings still apply. (The unmapped lane is deliberately
+    fail-LOUD by contrast; this pins only the malformed recorder's lane.)
+    """
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+
+    def boom(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(repo, "insert_exchange_reconciliation_event", boom)
+    bad = _fill(tid=15)
+    del bad["px"]
+    good = _fill(tid=16)
+    results = proc.ingest_message({"channel": "userFills", "data": {"fills": [bad, good]}})
+    assert [r.outcome for r in results] == [IngestOutcome.APPLIED]  # sibling still books
+    assert list(tmp_path.glob("fill_parse_error-*.json"))  # file evidence still kept
+
+
+def test_cross_run_duplicate_never_touches_this_runs_ledger(db, clock, tmp_path):
+    """A fill booked under another run is not this run's ledger to correct."""
+    _live_run(db, run_id="r")
+    _live_order(db, run_id="r")
+    proc_r = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    assert proc_r.ingest(_fill(fee="0.05", tid=12)).outcome is IngestOutcome.APPLIED
+
+    _live_run(db, run_id="s")
+    proc_s = LiveFillProcessor(db=db, run_id="s", payload_dir=tmp_path, clock=clock)
+    assert proc_s.ingest(_fill(fee="0.03", tid=12)).outcome is IngestOutcome.DUPLICATE
+    assert db.conn.execute("SELECT COUNT(*) FROM accounting_adjustment_events").fetchone()[0] == 0
+    assert _ledger(db, run_id="r").total_fees == Decimal("0.05")
+    assert _ledger(db, run_id="s").total_fees == Decimal("0")
+
+
+# ---------------------------------------------------------------------------
+# §12.3 sighting rows — the queryable backlog behind the evidence files
+# ---------------------------------------------------------------------------
+
+
+def test_unmapped_sighting_lands_one_case_row(db, clock, tmp_path):
+    _live_run(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    raw = _fill(oid=555, tid=13)
+    assert proc.ingest(raw).outcome is IngestOutcome.UNMAPPED
+    assert proc.ingest(raw).outcome is IngestOutcome.UNMAPPED  # re-sighted next pass
+    cases = repo.iter_exchange_reconciliation_events(db.conn, "r", case_type="fill_unmapped")
+    assert len(cases) == 1
+    assert cases[0]["exchange_value"] == "tid|13"
+    assert cases[0]["symbol"] == "BTC"
+    assert '"exchange_fill_time"' in cases[0]["detail"]  # PR 4's backfill-window locator
+
+    # Resolution: the case rows are a log — booking the fill later leaves them in
+    # place; "resolved" is defined by the anti-join against fills, not a mutation.
+    _live_order(db, oid="555")
+    assert proc.ingest(raw).outcome is IngestOutcome.APPLIED
+    assert (
+        len(repo.iter_exchange_reconciliation_events(db.conn, "r", case_type="fill_unmapped")) == 1
+    )
+    assert repo.get_fill_by_exchange_key(db.conn, "tid|13") is not None  # anti-join now misses
+
+
+def test_malformed_sighting_lands_one_case_row(db, clock, tmp_path):
+    _live_run(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    bad = _fill(tid=14)
+    del bad["px"]
+    msg = {"channel": "userFills", "data": {"fills": [bad]}}
+    assert proc.ingest_message(msg) == []
+    assert proc.ingest_message(msg) == []  # re-sighted next backfill pass
+    cases = repo.iter_exchange_reconciliation_events(db.conn, "r", case_type="fill_malformed")
+    assert len(cases) == 1
+    assert cases[0]["exchange_value"] == "14"  # the bare-tid malformed evidence key

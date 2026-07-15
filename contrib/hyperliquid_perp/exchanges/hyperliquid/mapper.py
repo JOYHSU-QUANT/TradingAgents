@@ -97,6 +97,24 @@ def _opt_dec(value: Any, *, field: str) -> Decimal | None:
 # --------------------------------------------------------------------------
 
 
+def _meta_dict(meta: Any) -> dict:
+    """The ``meta`` element of ``metaAndAssetCtxs`` as a dict (empty for null).
+
+    The one type guard for the top-level ``meta``. ``(meta or {})`` alone only
+    neutralises FALSY drift — a truthy non-dict (an error string, a list) passes
+    through it and raises a bare ``AttributeError`` on ``.get``, escaping the
+    mapper's declared MalformedResponseError vocabulary exactly the way the
+    universe / ctx / assetPositions entry guards elsewhere exist to prevent.
+    """
+    if meta is None:
+        return {}
+    if not isinstance(meta, dict):
+        raise MalformedResponseError(
+            f"metaAndAssetCtxs[0] (meta) is {type(meta).__name__}, expected dict"
+        )
+    return meta
+
+
 def map_market_snapshot(meta_and_asset_ctxs: Any, coin: str) -> MarketSnapshot:
     """Pick ``coin`` out of the ``metaAndAssetCtxs`` response.
 
@@ -107,7 +125,7 @@ def map_market_snapshot(meta_and_asset_ctxs: Any, coin: str) -> MarketSnapshot:
         raise MalformedResponseError("metaAndAssetCtxs must be [meta, assetCtxs]")
     meta, asset_ctxs = meta_and_asset_ctxs[0], meta_and_asset_ctxs[1]
 
-    universe = (meta or {}).get("universe")
+    universe = _meta_dict(meta).get("universe")
     if not isinstance(universe, list) or not isinstance(asset_ctxs, list):
         raise MalformedResponseError("metaAndAssetCtxs missing universe / assetCtxs lists")
 
@@ -195,8 +213,8 @@ def map_margin_schedule(meta_and_asset_ctxs: Any, coin: str) -> MarginSchedule:
     """
     if not isinstance(meta_and_asset_ctxs, (list, tuple)) or not meta_and_asset_ctxs:
         raise MalformedResponseError("metaAndAssetCtxs must be [meta, assetCtxs]")
-    meta = meta_and_asset_ctxs[0]
-    universe = (meta or {}).get("universe")
+    meta = _meta_dict(meta_and_asset_ctxs[0])
+    universe = meta.get("universe")
     if not isinstance(universe, list):
         raise MalformedResponseError("meta missing universe list")
     entry = next((a for a in universe if isinstance(a, dict) and a.get("name") == coin), None)
@@ -213,7 +231,7 @@ def map_margin_schedule(meta_and_asset_ctxs: Any, coin: str) -> MarginSchedule:
     # a missing list entry. The converse — tables present but this entry carries
     # no ``marginTableId`` — is the normal shape for an untiered asset in a mixed
     # universe, and falls through to the maxLeverage fallback below.
-    raw_tables = (meta or {}).get("marginTables")
+    raw_tables = meta.get("marginTables")
     table_id = entry.get("marginTableId")
     if table_id is not None:
         if not isinstance(raw_tables, list):
@@ -270,7 +288,7 @@ def map_sz_decimals(meta_and_asset_ctxs: Any, coin: str) -> int:
     """
     if not isinstance(meta_and_asset_ctxs, (list, tuple)) or not meta_and_asset_ctxs:
         raise MalformedResponseError("metaAndAssetCtxs must be [meta, assetCtxs]")
-    universe = (meta_and_asset_ctxs[0] or {}).get("universe")
+    universe = _meta_dict(meta_and_asset_ctxs[0]).get("universe")
     if not isinstance(universe, list):
         raise MalformedResponseError("meta missing universe list")
     entry = next((a for a in universe if isinstance(a, dict) and a.get("name") == coin), None)

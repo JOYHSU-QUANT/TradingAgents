@@ -32,6 +32,7 @@ __all__ = [
     "EXCHANGE_KNOWN_ATTEMPT_STATUSES",
     "KILL_SWITCH_EVENT_TYPES",
     "LIVE_LIQUIDITY_ROLES",
+    "RECONCILIATION_CASE_TYPES",
     "find_in_progress_attempt",
     "get_accounting_adjustment_event",
     "get_all_current_positions",
@@ -53,6 +54,7 @@ __all__ = [
     "get_run_seed_positions",
     "get_scheduler_state",
     "has_exchange_known_cloid",
+    "has_exchange_reconciliation_case",
     "has_place_attempt",
     "insert_account_snapshot",
     "insert_accounting_adjustment_event",
@@ -60,6 +62,7 @@ __all__ = [
     "insert_ai_output",
     "insert_cloid_mapping",
     "insert_decision_attempt",
+    "insert_exchange_reconciliation_event",
     "insert_execution_plan",
     "insert_fill",
     "insert_funding_event",
@@ -71,6 +74,7 @@ __all__ = [
     "insert_run",
     "insert_run_seed_position",
     "iter_accounting_adjustment_events",
+    "iter_exchange_reconciliation_events",
     "iter_execution_plans",
     "iter_fills",
     "iter_funding_events",
@@ -2332,4 +2336,108 @@ def iter_accounting_adjustment_events(
         "SELECT * FROM accounting_adjustment_events WHERE run_id = ? AND target_id = ? "
         "ORDER BY rowid",
         (run_id, target_id),
+    ).fetchall()
+
+
+# --------------------------------------------------------------------------
+# exchange_reconciliation_events (phase3-spec §12.3 / §16.5)
+# --------------------------------------------------------------------------
+
+# The §12.3 sighting cases PR 3's fill ingestion records (PR 4's reconciliation
+# module extends this vocabulary with its own case marks). Each row is a durable,
+# QUERYABLE record that exchange money exists which the books do not carry — the
+# evidence JSON file alone cannot be a backlog (the payload dir is write-only
+# evidence, and a file older than every backfill window is reachable by nothing).
+# PR 4's discovery query is: case rows whose ``exchange_value`` (the fill's §14.2
+# dedupe key / malformed evidence key) has no matching ``fills`` row.
+RECONCILIATION_CASE_TYPES = frozenset({"fill_unmapped", "fill_malformed", "fill_money_drift"})
+
+# Which code path observed the case. PR 3 writes only the ingest sighting; PR 4's
+# reconciliation sweeps add their own trigger words when they land.
+_RECONCILIATION_TRIGGERS = frozenset({"live_fill_ingest"})
+
+
+def insert_exchange_reconciliation_event(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    trigger: str,
+    case_type: str,
+    symbol: str | None = None,
+    local_value: str | None = None,
+    exchange_value: str | None = None,
+    detail: str | None = None,
+    timestamp: datetime | None = None,
+) -> bool:
+    """Record one §12.3 reconciliation case sighting; ``True`` iff a row was written.
+
+    Once per FACT rather than once per sighting, and the guard lives HERE at the
+    write boundary: an unmapped/malformed fill is re-observed by every backfill
+    pass over its window, and a writer that forgot the check-then-insert dance
+    would bury the backlog in repeats of itself — so no writer gets to forget it.
+    A re-sighting of an already-recorded ``(run_id, case_type, exchange_value)``
+    writes nothing and returns ``False``. Rows with no ``exchange_value`` (a PR 4
+    sweep case with no per-fill key) are not deduped — each is its own event.
+
+    (``action_taken`` stays NULL at this boundary — no PR 3 writer acts on a case;
+    the column gains a writer with PR 4's sweeps.)
+    """
+    check_enum(case_type, RECONCILIATION_CASE_TYPES, name="case_type")
+    check_enum(trigger, _RECONCILIATION_TRIGGERS, name="trigger")
+    if exchange_value is not None and has_exchange_reconciliation_case(
+        conn, run_id, case_type=case_type, exchange_value=exchange_value
+    ):
+        return False
+    _insert(
+        conn,
+        "exchange_reconciliation_events",
+        {
+            "run_id": run_id,
+            "timestamp": timestamp or datetime.now(timezone.utc),
+            "trigger": trigger,
+            "case_type": case_type,
+            "symbol": symbol,
+            "local_value": local_value,
+            "exchange_value": exchange_value,
+            "action_taken": None,
+            "detail": detail,
+        },
+    )
+    return True
+
+
+def has_exchange_reconciliation_case(
+    conn: sqlite3.Connection, run_id: str, *, case_type: str, exchange_value: str
+) -> bool:
+    """Whether this exact case was already recorded (the once-per-fact guard).
+
+    Keyed on ``(run_id, case_type, exchange_value)`` — the fill key for an
+    unmapped fill, the malformed evidence key for one that would not parse, the
+    key + drift digest for a money-drift sighting. Resolution does NOT delete or
+    flip these rows (they are a log); staying recorded after the fill is booked
+    is what keeps a later re-sighting from re-inserting.
+    """
+    return (
+        conn.execute(
+            "SELECT 1 FROM exchange_reconciliation_events "
+            "WHERE run_id = ? AND case_type = ? AND exchange_value = ? LIMIT 1",
+            (run_id, case_type, exchange_value),
+        ).fetchone()
+        is not None
+    )
+
+
+def iter_exchange_reconciliation_events(
+    conn: sqlite3.Connection, run_id: str, *, case_type: str | None = None
+) -> list[sqlite3.Row]:
+    """A run's §12.3 case rows in insertion order, optionally one case type."""
+    if case_type is None:
+        return conn.execute(
+            "SELECT * FROM exchange_reconciliation_events WHERE run_id = ? ORDER BY event_id",
+            (run_id,),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM exchange_reconciliation_events WHERE run_id = ? AND case_type = ? "
+        "ORDER BY event_id",
+        (run_id, case_type),
     ).fetchall()

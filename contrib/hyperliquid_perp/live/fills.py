@@ -13,7 +13,10 @@ money is exchange-authoritative (§15). This module owns three things:
    (§14.3): the fill row, the exchange fee / closedPnl, and the ``current_*``
    position + account update commit in ONE transaction, or none of it does. The
    UNIQUE ``exchange_fill_key`` makes it exactly-once: the SAME fill from a second
-   source is rejected, never double-counted.
+   source is rejected, never double-counted. A redelivered duplicate is not merely
+   dropped — its content is VERIFIED against the booked row (`_verify_redelivery`):
+   a fee difference feeds the §15.1 correction lane, an identity difference is
+   recorded as a §12.3 case, and matching content (the common case) writes nothing.
 
 3. :func:`backfill_fill_fee` — the §15.1 fee-pending correction. A fill that
    arrived without a fee posts ``0`` at ingest; when the fee is later learned the
@@ -28,7 +31,10 @@ A fill is applied only when its exchange order id maps to a known bot order
 reconciliation case (PR 4): it is logged and left, not force-applied — recording
 a fill with no owning order would corrupt the bot's local position model. Once
 §8.3 recovery records the order's exchange id, a REST backfill re-ingests the
-fill and the dedupe key keeps it exactly-once.
+fill and the dedupe key keeps it exactly-once. Every unmapped / malformed /
+money-drift sighting also lands as an ``exchange_reconciliation_events`` row
+(once per fact): the evidence FILE outlives the log, but only the DB row is a
+queryable backlog once the fill ages out of every backfill window.
 """
 
 from __future__ import annotations
@@ -103,15 +109,23 @@ def _malformed_key(raw: Any) -> str:
         tid = raw.get("tid")
         if tid is not None and str(tid) != "":
             return str(tid)
+    return f"unparsed-{_payload_digest(raw)}"
+
+
+def _payload_digest(obj: Any) -> str:
+    """A short, stable content digest — the one derivation for every evidence key.
+
+    Deriving a key is part of RECORDING EVIDENCE, which must never crash the
+    drain (``_record_malformed``'s contract) — and a payload reaching here gets
+    no benefit of the doubt that it will serialise, hence the ``repr`` fallback.
+    Shared by ``_malformed_key`` and the drift-case key so the two truncated-digest
+    derivations cannot drift apart.
+    """
     try:
-        # Deriving the key is part of RECORDING EVIDENCE, which must never crash the
-        # drain (``_record_malformed``'s contract) — and the payload here is malformed
-        # by definition, so it gets no benefit of the doubt that it will serialise.
-        canonical = json.dumps(raw, default=str, sort_keys=True)
+        canonical = json.dumps(obj, default=str, sort_keys=True)
     except (TypeError, ValueError):
-        canonical = repr(raw)
-    digest = hashlib.sha256(canonical.encode("utf-8", "replace")).hexdigest()[:16]
-    return f"unparsed-{digest}"
+        canonical = repr(obj)
+    return hashlib.sha256(canonical.encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def _require(raw: Any, key: str) -> Any:
@@ -119,6 +133,23 @@ def _require(raw: Any, key: str) -> Any:
     if not isinstance(raw, dict) or key not in raw or raw[key] is None:
         raise MalformedResponseError(f"fill payload is missing required field {key!r}: {raw!r}")
     return raw[key]
+
+
+def _require_scalar_id(raw: Any, key: str) -> str | int:
+    """A required id field as its documented wire type (str/int), or fail loud.
+
+    ``oid`` / ``tid`` are ints on the wire and get ``str()``-coerced downstream —
+    which is exactly why a non-scalar must be rejected HERE: ``str([123])``
+    stringifies without error into an id that matches nothing, so a genuinely
+    readable fill would be mislabeled as a §12.3 unmapped case (oid) or get a
+    nonsense-but-permanent dedupe key (tid), instead of the malformed verdict the
+    drift actually is. ``bool`` is excluded (an int subclass; ``"True"`` is not
+    an id).
+    """
+    value = _require(raw, key)
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise MalformedResponseError(f"fill {key!r} must be a string or int, got {value!r}")
+    return value
 
 
 def _parse_epoch_ms(value: Any) -> datetime:
@@ -180,6 +211,10 @@ class ExchangeFill:
     def __post_init__(self) -> None:
         # Parse-time invariants, enforced so a hand-built instance can't smuggle
         # a non-positive size/price into the fill math (which assumes both > 0).
+        if not isinstance(self.coin, str) or not self.coin:
+            # ``coin`` is a SQL bind parameter and the position-model key; a
+            # non-str would surface as sqlite3.InterfaceError far from here.
+            raise ValueError(f"ExchangeFill.coin must be a non-empty str, got {self.coin!r}")
         if self.qty <= 0:
             raise ValueError(f"ExchangeFill.qty must be > 0, got {self.qty}")
         if self.price <= 0:
@@ -219,15 +254,25 @@ class ExchangeFill:
         if not isinstance(raw, dict):
             raise MalformedResponseError(f"fill payload is not a dict: {raw!r}")
         coin = _require(raw, "coin")
+        if not isinstance(coin, str) or not coin:
+            # An untyped coin would not crash here — it would flow to the symbol
+            # comparison in _unmapped_reason, always mismatch, and file a genuinely
+            # readable fill under "unmapped". That mislabels payload drift as a
+            # §12.3 reconciliation case; drift is a MALFORMED payload and must say so.
+            raise MalformedResponseError(f"fill 'coin' must be a non-empty string: {raw!r}")
         raw_side = _require(raw, "side")
-        if raw_side not in _HL_SIDE:
+        # isinstance BEFORE the membership test: ``in`` on a dict HASHES its operand,
+        # so an unhashable payload value (["B"]) would raise TypeError — which neither
+        # the §11.3 handlers nor the (ValueError, ArithmeticError) backstop below
+        # catches, and one drifted fill would wedge the REST backfill forever.
+        if not isinstance(raw_side, str) or raw_side not in _HL_SIDE:
             raise MalformedResponseError(
                 f"fill side must be one of {sorted(_HL_SIDE)} (bid/ask), got {raw_side!r}"
             )
         price = require_decimal(_require(raw, "px"), field="fill px")
         qty = require_decimal(_require(raw, "sz"), field="fill sz")
         closed_pnl = require_decimal(_require(raw, "closedPnl"), field="fill closedPnl")
-        exchange_order_id = str(_require(raw, "oid"))
+        exchange_order_id = str(_require_scalar_id(raw, "oid"))
         fill_time = _parse_epoch_ms(_require(raw, "time"))
 
         # ``crossed`` = taker (this order crossed the book); its absence is a
@@ -246,7 +291,7 @@ class ExchangeFill:
         # ids.exchange_fill_key). Treat it as malformed: §11.3 records the raw
         # payload and the fill is NOT applied, surfacing for reconciliation
         # instead of being miscounted.
-        tid = _require(raw, "tid")
+        tid = _require_scalar_id(raw, "tid")
         if str(tid) == "":
             raise MalformedResponseError(f"fill 'tid' must be non-empty (§14.2): {raw!r}")
 
@@ -764,8 +809,9 @@ class LiveFillProcessor:
         # Dedupe pre-check: cheap, and lets the caller distinguish "already had it"
         # from "new" without racing the UNIQUE constraint. The constraint is still
         # the authority — a concurrent insert would surface as IntegrityError below.
-        if repo.get_fill_by_exchange_key(self._db.conn, fill.exchange_fill_key) is not None:
-            return IngestResult(IngestOutcome.DUPLICATE, fill)
+        booked = repo.get_fill_by_exchange_key(self._db.conn, fill.exchange_fill_key)
+        if booked is not None:
+            return self._verify_redelivery(fill, booked)
 
         order = repo.get_order_by_exchange_order_id(self._db.conn, fill.exchange_order_id)
         unmapped_reason = (
@@ -792,7 +838,7 @@ class LiveFillProcessor:
                 fill.exchange_order_id,
                 unmapped_reason,
             )
-            write_raw_payload(
+            raw_path = write_raw_payload(
                 payload_dir=self._payload_dir,
                 kind="fill_unmapped",
                 key=fill.exchange_fill_key,
@@ -803,6 +849,25 @@ class LiveFillProcessor:
                 # later pass re-fetches and re-reports the same fill — an unbounded
                 # write of the same evidence, for as long as it stays unreconciled.
                 once=True,
+            )
+            # The DB row is what makes the sighting a BACKLOG, not just evidence:
+            # once this fill ages out of every backfill window (trailing 6h, floor
+            # and gap obligations all retired), no path re-fetches it — the payload
+            # file and the log line are then unreachable by any query, and this row
+            # is the one durable, queryable record that exchange money exists which
+            # the books do not carry (PR 4's §12.3 discovery reads it). Fail-loud:
+            # a store that cannot record the case is the same infrastructure
+            # failure as one that cannot record a fill.
+            self._record_case(
+                case_type="fill_unmapped",
+                exchange_value=fill.exchange_fill_key,
+                symbol=fill.coin,
+                detail={
+                    "reason": unmapped_reason,
+                    "exchange_order_id": fill.exchange_order_id,
+                    "exchange_fill_time": fill.fill_time.isoformat(),
+                    "payload_path": raw_path,
+                },
             )
             return IngestResult(IngestOutcome.UNMAPPED, fill)
 
@@ -836,9 +901,10 @@ class LiveFillProcessor:
             # row, the insert fails, it is called a duplicate again). So confirm the
             # row actually exists; if it does not, this was some OTHER constraint and
             # it must fail loud.
-            if repo.get_fill_by_exchange_key(self._db.conn, fill.exchange_fill_key) is None:
+            booked = repo.get_fill_by_exchange_key(self._db.conn, fill.exchange_fill_key)
+            if booked is None:
                 raise
-            return IngestResult(IngestOutcome.DUPLICATE, fill)
+            return self._verify_redelivery(fill, booked)
         return IngestResult(IngestOutcome.APPLIED, fill, effect)
 
     def _unmapped_reason(self, fill: ExchangeFill, order: sqlite3.Row) -> str | None:
@@ -864,6 +930,178 @@ class LiveFillProcessor:
                 f"{fill.coin!r}"
             )
         return None
+
+    def _verify_redelivery(self, fill: ExchangeFill, booked: sqlite3.Row) -> IngestResult:
+        """One DUPLICATE verdict, with the redelivered payload's content VERIFIED.
+
+        The heartbeat re-fetches the trailing window every pass, so an already-booked
+        fill is re-delivered on a schedule — which makes the redelivery the one free,
+        automatic channel through which the exchange can tell us a booked amount
+        changed (§15.1 rule 5's referral discounts / late rebates / fee corrections).
+        Matching content is the overwhelmingly common case and returns without a
+        write. Two kinds of mismatch are handled asymmetrically:
+
+        - a FEE difference is exchange-authoritative new information with a built
+          correction path: it is posted through :func:`backfill_fill_fee` (cumulative,
+          idempotent, replay-folded) — never by touching the immutable fill row;
+        - any IDENTITY difference (size, price, side, symbol, closedPnl, liquidity
+          role) means "same tid, different fill" — there is no lane that can re-book
+          money already folded into the position, so it is recorded as evidence + a
+          §12.3 case row and NOT applied. The fee is deliberately not auto-posted on
+          top of an identity mismatch: a payload that disagrees about WHICH fill this
+          is cannot be trusted about what the fill cost.
+
+        A fill booked under ANOTHER run is not this run's ledger to correct
+        (:func:`backfill_fill_fee` would rightly refuse); drift on it is still
+        recorded — it is evidence either way — but nothing is posted.
+        """
+        drift = self._money_drift(fill, booked)
+        if drift:
+            self._record_money_drift(fill, booked, drift)
+        elif booked["run_id"] == self._run_id:
+            self._reconcile_redelivered_fee(fill, booked)
+        return IngestResult(IngestOutcome.DUPLICATE, fill)
+
+    @staticmethod
+    def _money_drift(fill: ExchangeFill, booked: sqlite3.Row) -> dict[str, tuple[str, str]]:
+        """Identity fields where the redelivered payload contradicts the booked row.
+
+        ``{field: (booked, redelivered)}``, empty when they agree. The fee is NOT
+        compared here — it has its own correction lane (`_reconcile_redelivered_fee`);
+        these are the fields with no lane, where a mismatch can only be evidence.
+        Decimal comparison is numeric (the row stores canonical text), so a
+        formatting-only difference ("1.0" vs "1.00") is not drift.
+        """
+        booked_pnl = booked["exchange_closed_pnl"]
+        pairs: dict[str, tuple[object, object]] = {
+            "side": (booked["side"], fill.side.value),
+            "coin": (booked["symbol"], fill.coin),
+            "sz": (Decimal(booked["fill_qty"]), fill.qty),
+            "px": (Decimal(booked["fill_price"]), fill.price),
+            "closedPnl": (
+                None if booked_pnl is None else Decimal(booked_pnl),
+                fill.closed_pnl,
+            ),
+            "liquidity_role": (booked["liquidity_role"], fill.liquidity_role),
+        }
+        return {
+            field: (str(recorded), str(redelivered))
+            for field, (recorded, redelivered) in pairs.items()
+            if recorded != redelivered
+        }
+
+    def _record_money_drift(
+        self, fill: ExchangeFill, booked: sqlite3.Row, drift: dict[str, tuple[str, str]]
+    ) -> None:
+        """Persist a same-tid-different-money sighting: evidence file + §12.3 case row.
+
+        Keyed on the fill key PLUS a digest of the drift itself: the same drifted
+        payload is re-delivered every pass (dedupe to one record), while a SECOND,
+        different drift on the same fill is new evidence and gets its own record.
+        """
+        case_key = f"{fill.exchange_fill_key}|{_payload_digest(drift)}"
+        logger.warning(
+            "redelivered fill %s contradicts the booked row on %s — recorded, not applied "
+            "(a booked fill's identity is immutable; left for §12.3 reconciliation)",
+            fill.exchange_fill_key,
+            sorted(drift),
+        )
+        raw_path = write_raw_payload(
+            payload_dir=self._payload_dir,
+            kind="fill_money_drift",
+            key=case_key,
+            payload={"drift": drift, "raw": fill.raw},
+            now=self._clock.now(),
+            once=True,
+        )
+        self._record_case(
+            case_type="fill_money_drift",
+            exchange_value=case_key,
+            symbol=fill.coin,
+            local_value=booked["fill_id"],
+            detail={"drift": drift, "payload_path": raw_path},
+        )
+
+    def _reconcile_redelivered_fee(self, fill: ExchangeFill, booked: sqlite3.Row) -> None:
+        """Post a redelivered fee that differs from the books (§15.1 rule 5's feeder).
+
+        Ordered cheapest-first, because this runs for every duplicate on every pass:
+
+        1. no USDC-proven fee on the redelivery — nothing to learn (a pending fee
+           stays pending; §15.1 rule 2);
+        2. the redelivery agrees with the AS-INGESTED fee — no new information from
+           the exchange, no queries. Deliberately compared against the ingested
+           column, not the corrections-folded effective fee: a manual valuation
+           (say, of a non-USDC rebate) must not be flip-flopped back by the same
+           stale-but-identical payload arriving on every heartbeat;
+        3. otherwise delegate to :func:`backfill_fill_fee` — whose OWN idempotence
+           decides between posting and ``ALREADY_POSTED`` (the corrections already
+           carry this amount: silent). One definition of "do the books already carry
+           this fee", not a caller-side copy that could drift from it; the cost is a
+           no-op transaction per pass for the RARE already-corrected fill still
+           inside the window.
+        """
+        if fill.fee is None:
+            return
+        recorded = booked["exchange_fee"]
+        if recorded is not None and Decimal(recorded) == fill.fee:
+            return
+        result = backfill_fill_fee(
+            self._db,
+            run_id=self._run_id,
+            fill_id=booked["fill_id"],
+            exchange_fee=fill.fee,
+            fee_token=_FEE_TOKEN_USDC,
+            source="live_fill_redelivery",
+            reason=f"redelivered payload carries fee {fill.fee}",
+            timestamp=self._clock.now(),
+        )
+        if result.outcome is BackfillOutcome.POSTED:
+            logger.info(
+                "fee correction from redelivered fill %s: posted %s",
+                fill.exchange_fill_key,
+                result.fee,
+            )
+
+    def _record_case(
+        self,
+        *,
+        case_type: str,
+        exchange_value: str,
+        symbol: str | None = None,
+        local_value: str | None = None,
+        detail: dict | None = None,
+    ) -> None:
+        """Record one §12.3 case row, once per fact (see repository docstrings).
+
+        The steady state is the RE-sighting (every backfill pass re-observes the
+        same unbooked fill), so the already-recorded check runs first as a pure
+        read on the plain connection — no write lock, no detail serialisation.
+        The insert itself re-checks inside its transaction (the once-per-fact
+        guard lives at the write boundary), so this pre-check is purely a fast
+        path, not the guarantee.
+
+        Opens its own transaction on first sighting, so it must be called OUTSIDE
+        any open unit of work — true of every call site (the unmapped lane, the
+        malformed recorder and the drift recorder all run before/after the fill
+        transaction, never inside it).
+        """
+        if repo.has_exchange_reconciliation_case(
+            self._db.conn, self._run_id, case_type=case_type, exchange_value=exchange_value
+        ):
+            return
+        with self._db.transaction() as conn:
+            repo.insert_exchange_reconciliation_event(
+                conn,
+                run_id=self._run_id,
+                trigger="live_fill_ingest",
+                case_type=case_type,
+                symbol=symbol,
+                local_value=local_value,
+                exchange_value=exchange_value,
+                detail=None if detail is None else json.dumps(detail, sort_keys=True),
+                timestamp=self._clock.now(),
+            )
 
     def ingest_message(self, message: Any) -> list[IngestResult]:
         """Ingest every fill in one drained WS message (§11.3 parse-fail handling).
@@ -946,7 +1184,7 @@ class LiveFillProcessor:
         """
         key = _malformed_key(raw)
         logger.warning("skipping malformed live fill (%s): %r", error, raw)
-        write_raw_payload(
+        raw_path = write_raw_payload(
             payload_dir=self._payload_dir,
             kind="fill_parse_error",
             key=key,
@@ -954,3 +1192,17 @@ class LiveFillProcessor:
             now=self._clock.now(),
             once=True,
         )
+        try:
+            # The same durable backlog row the unmapped lane writes, and for the same
+            # reason: once the payload ages out of every backfill window, this row is
+            # the only queryable trace that the exchange sent money-shaped data we
+            # never booked. Fail-SOFT here, unlike the unmapped lane: this recorder's
+            # contract is that recording evidence never crashes the drain, and the
+            # §11.3 skip must stand even when the store cannot take the breadcrumb.
+            self._record_case(
+                case_type="fill_malformed",
+                exchange_value=key,
+                detail={"error": error, "payload_path": raw_path},
+            )
+        except sqlite3.Error as exc:
+            logger.error("failed to record malformed-fill case row for %s: %s", key, exc)

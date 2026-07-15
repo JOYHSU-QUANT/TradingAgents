@@ -812,6 +812,17 @@ SQLite 不得覆蓋交易所事實。若兩者衝突，系統必須進入 reconc
 | Exchange account equity 與 SQLite 差異超過 tolerance | 進入 safe mode |
 | 交易所有 active position 但沒有 valid SL | 立即 repair；repair 失敗則 emergency close |
 
+**（v10 新增，2026-07-15）PR 3 的 ingest 端 sighting rows**：unmapped／malformed／
+money-drift 三種 fill 觀察在第一次看到時即寫入 `exchange_reconciliation_events`
+（`case_type` = `fill_unmapped` / `fill_malformed` / `fill_money_drift`；once per
+fact——同一事實每輪 backfill 重見不重複寫，`(run_id, case_type, exchange_value)`
+為去重鍵）。理由：evidence 檔是 write-only 證據、log 會滾動，而 fill 一旦老出所有
+backfill 窗口（trailing 6h、floor/gap 義務皆清）就沒有任何路徑會再抓到它——DB row
+是唯一可查詢的 backlog。PR 4 的 discovery 以 case rows 對 `fills.exchange_fill_key`
+反查（anti-join）找出仍未入帳的 sighting，作為「交易所有 fill 但 SQLite 沒記錄」
+那一列的已知起點清單（含 `detail` JSON 內的 `exchange_fill_time`，給補抓窗口定位）。
+resolution 不改寫 case rows（它們是 log）；「已解決」的定義就是 anti-join 不再命中。
+
 ## 13. Safe Mode
 
 safe mode 不是整個程式停掉，而是系統還活著、繼續監控與保護倉位，
@@ -1011,6 +1022,21 @@ accounting replay 從這些事件重建 position / account，必須與 materiali
    `wallet_delta = closedPnl - fee`。注意官方「Entry price and PnL」文件頁寫的
    `closed pnl = fee + side * (mark - entry) * size` 描述的是**前端顯示欄位**，不是這個
    API 欄位，不要照它「修正」公式。
+8. **（v10 新增，2026-07-15）重投遞（redelivery）是 rule 5 的自動偵測管道**：heartbeat
+   REST backfill 每輪重抓 trailing 窗口，已入帳的 fill 會被排程性重投遞，所以 ingest 的
+   DUPLICATE 車道不只憑 key 丟棄，而是驗證內容（`_verify_redelivery`）：
+   - **fee 與帳上不同** → 走 rule 5 的 `backfill_fill_fee` 自動 post 差額（交易所帳單是
+     唯一基準）。比較基準是「入帳時記錄的 `exchange_fee`」，刻意**不是**折算後的
+     effective fee——同一份 stale payload 每輪重來，不得把 rule 3 的人工估值回補
+     flip-flop 回去；payload 金額真的變了才查更正鏈並補差額。pending fill 的重投遞
+     若帶 USDC fee，即為首次回補（rule 5 的 pending 例外照常適用）。
+   - **身份欄位（sz/px/side/coin/closedPnl/liquidity_role）不同** = 「同 tid、不同
+     fill」，沒有可重記的車道：記證據檔＋`fill_money_drift` case row（§12.3），
+     不套用；也不在身份漂移之上補 fee——連「這是哪筆 fill」都說不清的 payload，
+     它宣稱的 fee 不可信。
+   - **內容一致**（絕大多數）→ 無任何寫入。
+   跨 run 的 duplicate 不動本 run 的 ledger（`backfill_fill_fee` 的 run 檢查會拒絕）；
+   漂移仍記證據。
 
 ### 15.2 Funding Rules
 

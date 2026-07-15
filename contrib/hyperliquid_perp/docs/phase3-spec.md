@@ -720,8 +720,15 @@ open orders updates（orderUpdates）
      half-open TCP（NAT／load balancer 的常態）不會回報 close，只量「斷線多久」的存活
      判斷會把一條死掉的 feed 永遠讀成健康，機器人就在一條收不到任何東西的 socket 上
      繼續開新倉。`webData2` 會持續推送帳戶狀態，所以一條真正活著的 socket 不會這麼久
-     完全沒有事件。靜默的計時基準是「最後一則事件」，在還沒收到任何事件前則是**連上
-     的那一刻**（否則一連上就沒動靜的 socket 永遠不會 stale）。
+     完全沒有事件。靜默的計時基準是「最後一則事件」與「連上的那一刻」**取較晚者**
+     （沒基準的話一連上就沒動靜的 socket 永遠不會 stale；不取較晚者的話，上一條連線
+     的舊事件會讓長斷線後的健康重連立刻被誤判）；
+   - c. **曾收過事件、而距最後一則事件超過 5 分鐘**（同 `stale_after_seconds`），
+     **不因重連重置**——這是 proof-of-life 時鐘。少了它，一條劣化成 flapping 的
+     feed（每次都連得上、連上後從不送事件就又斷，週期短於上面兩個門檻）會把
+     a、b 兩個 per-connection 時鐘無限重置、永遠不 stale。反向的含義是 **stale 具
+     黏性**：超過門檻後光重連不算恢復，要等第一則事件（真恢復時 `webData2` 秒級
+     就會推）才解除。
 
 ### 11.3 WebSocket Failure Handling
 
@@ -732,6 +739,7 @@ ws_disconnected
 → REST polling continues
 
 ws_disconnected > 5 min  OR  ws_silent_while_connected > 2 min
+  OR  ws_event_quiet > 5 min (proof-of-life，不因重連重置)
 → recoverable_safe_mode
 
 ws_reconnected

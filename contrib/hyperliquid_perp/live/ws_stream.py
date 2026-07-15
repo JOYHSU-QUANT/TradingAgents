@@ -360,10 +360,28 @@ class LiveWsStream:
                 return 0.0
             return (stamp - max(marks)).total_seconds()
 
-    def is_stale(self, now: datetime | None = None) -> bool:
-        """True once the feed cannot be trusted — §11.2 rule 7, both ways it fails.
+    def event_quiet_for(self, now: datetime | None = None) -> float:
+        """Seconds since the last event EVER; ``0`` before any event has arrived.
 
-        A socket fails in two shapes, and only one of them announces itself:
+        The proof-of-life clock. Unlike :meth:`silent_for` (whose baseline
+        ``mark_connected`` resets, by design) and :meth:`disconnected_for` (which
+        a reconnect zeroes), NOTHING resets this but an actual event — so a
+        stream that once delivered and then degraded into flapping (reconnects
+        fast enough to keep both per-connection clocks under their thresholds,
+        yet never delivers again) still runs out this clock. Reads ``0`` with no
+        event history: a stream that has never delivered is the startup case,
+        and its grace period is :meth:`silent_for`'s connect baseline.
+        """
+        stamp = now or self._clock.now()
+        with self._lock:
+            if self._last_event_at is None:
+                return 0.0
+            return (stamp - self._last_event_at).total_seconds()
+
+    def is_stale(self, now: datetime | None = None) -> bool:
+        """True once the feed cannot be trusted — §11.2 rule 7, every way it fails.
+
+        A socket fails in three shapes, and only one of them announces itself:
 
         - it CLOSES — ``disconnected_for`` passes ``stale_after_seconds`` (300);
         - it goes SILENT while still claiming to be open — a half-open TCP
@@ -371,7 +389,16 @@ class LiveWsStream:
           calls ``note_closed``, ``_connected`` stays True, and a liveness test
           that only measured downtime would read a dead feed as healthy forever.
           ``webData2`` pushes account state continuously, so silence past
-          ``silent_after_seconds`` is unambiguous.
+          ``silent_after_seconds`` is unambiguous;
+        - it FLAPS — every reconnect succeeds, no connection ever delivers, and
+          each cycle is short enough to keep resetting the two clocks above.
+          ``event_quiet_for`` (which no reconnect resets) passes
+          ``stale_after_seconds``.
+
+        The third clause makes stale sticky across an outage: once a stream with
+        event history has been quiet past the threshold, reconnecting alone does
+        not read as healthy — only an event (proof of life, seconds away on a
+        real recovery since ``webData2`` pushes continuously) clears it.
 
         The signal PR 4's state machine reads to enter recoverable safe mode; this
         module only reports it, never acts on it.
@@ -379,6 +406,7 @@ class LiveWsStream:
         return (
             self.disconnected_for(now) > self._stale_after
             or self.silent_for(now) > self._silent_after
+            or self.event_quiet_for(now) > self._stale_after
         )
 
     def last_event_at(self) -> datetime | None:

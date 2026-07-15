@@ -489,11 +489,14 @@ def test_a_connected_but_never_delivering_socket_goes_stale():
 
 
 def test_a_reconnect_does_not_inherit_the_previous_connections_silence_clock():
-    """The silence baseline is the LATER of last-event and connect, not a mere fallback.
+    """The silence baseline is the LATER of last-event and connect — and stale is sticky.
 
-    An event from the previous connection must not seed the new connection's clock:
-    after an outage longer than the silence threshold, that stale baseline would brand
-    a healthy reconnect stale before its first event had a chance to arrive.
+    An event from the previous connection must not seed the new connection's
+    SILENCE clock (a stale baseline there would misfire the 120s rule on every
+    reconnect). But after an outage past ``stale_after``, the reconnect alone does
+    not read healthy either: the proof-of-life clock ran out during the outage,
+    and only an actual event clears it — reconnecting is a claim, delivering is
+    proof.
     """
     clock = ManualClock(_NOW)
     stream = LiveWsStream(silent_after_seconds=120, clock=clock)
@@ -502,15 +505,44 @@ def test_a_reconnect_does_not_inherit_the_previous_connections_silence_clock():
 
     clock.advance(60)
     stream.mark_disconnected(clock.now())
-    clock.advance(600)  # down far longer than silent_after — the old event is ancient
+    clock.advance(600)  # down far longer than stale_after — the old event is ancient
     stream.mark_connected()  # a healthy reconnect
 
     assert stream.silent_for() == 0  # measured from the reconnect, not the old event
+    assert stream.is_stale()  # sticky: no event since before the outage
+
+    stream.enqueue({"channel": "webData2"})  # proof of life
     assert not stream.is_stale()
 
     # The new baseline still ages: silence past the threshold with no event is stale.
     clock.advance(121)
     assert stream.is_stale()
+
+
+def test_a_flapping_stream_that_never_delivers_goes_stale():
+    """Reconnect cycles shorter than every per-connection threshold still run out.
+
+    A stream that once delivered and then degrades into flapping — every
+    reconnect succeeds, no connection ever delivers again — keeps resetting both
+    per-connection clocks (``disconnected_for`` zeroes on connect, ``silent_for``
+    re-baselines). The proof-of-life clock is the one no reconnect resets: past
+    ``stale_after`` without a single event, the feed is stale even though each
+    individual connection looks fresh.
+    """
+    clock = ManualClock(_NOW)
+    stream = LiveWsStream(silent_after_seconds=120, stale_after_seconds=300, clock=clock)
+    stream.mark_connected()
+    stream.enqueue({"channel": "webData2"})  # it was alive once
+
+    for _ in range(10):  # 10 cycles x 60s = 600s of flapping, each cycle under both thresholds
+        clock.advance(30)
+        stream.mark_disconnected(clock.now())
+        clock.advance(30)
+        stream.mark_connected()
+
+    assert stream.silent_for() <= 30  # this connection's own clocks never fired...
+    assert stream.disconnected_for() == 0
+    assert stream.is_stale()  # ...but 600s without one event is not a healthy feed
 
 
 def test_events_keep_a_connected_stream_fresh():

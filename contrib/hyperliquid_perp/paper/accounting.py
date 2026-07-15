@@ -14,9 +14,11 @@ Two layers:
   wallet moves only on the ``pending -> posted`` (or first ``posted``)
   transition, never on a retry.
 
-:func:`replay` rebuilds positions and the ledger from the committed fills and
-posted funding alone and compares them to the materialized ``current_*`` tables,
-reporting any mismatch (spec §5 accounting-replay acceptance check).
+:func:`replay` rebuilds positions and the ledger from the committed fills,
+posted funding and — for a live run — the recorded accounting adjustments
+(§15.1 fee corrections, folded through :func:`adjustment_ledger_delta`), and
+compares them to the materialized ``current_*`` tables, reporting any mismatch
+(spec §5 accounting-replay acceptance check).
 
 Ledger convention (execution §6.1/§6.5): ``wallet_balance`` already includes
 realized PnL, fees and funding, so ``account_equity = wallet_balance +

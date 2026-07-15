@@ -145,6 +145,9 @@ def test_bind_subscribes_all_three_streams_and_callbacks_enqueue():
     assert len(ids) == 3
     types = {s["type"] for s, _ in sub.subscriptions}
     assert types == {USER_FILLS_CHANNEL, ORDER_UPDATES_CHANNEL, CLEARINGHOUSE_CHANNEL}
+    # All three payloads carry ``user`` (see user_stream_subscriptions) — a
+    # user-less payload subscribes to nothing, silently.
+    assert all(s["user"] == "0xWALLET" for s, _ in sub.subscriptions)
     # A delivered event lands in the queue (and nowhere else — no parse, no DB).
     sub.deliver(USER_FILLS_CHANNEL, {"channel": USER_FILLS_CHANNEL, "data": {"fills": []}})
     assert stream.pending() == 1

@@ -730,6 +730,14 @@ open orders updates（orderUpdates）
      黏性**：超過門檻後光重連不算恢復，要等第一則事件（真恢復時 `webData2` 秒級
      就會推）才解除。
 
+   **（v9 註記，2026-07-15）三個時鐘都是連線層級**：任何頻道的事件都算
+   proof-of-life。`webData2` 持續推送，所以若單一訂閱（如 `userFills`）在 server 端
+   單獨死掉（訂閱被拒、被 drop），stream 仍讀作健康——那段期間 fills 由 heartbeat
+   REST backfill 兜底（rule 5；dedupe 保證不重不漏，缺口 bound 在一個 heartbeat
+   間隔內）。頻道層級的 staleness **刻意不做**：`userFills` 只在有成交時才有事件，
+   安靜市場會恆誤報 stale，而它沒有自己的「應該要有事件」基準。PR 5 接 SL/TP 時
+   必須知道 position 在這個窗口內可能過時。
+
 ### 11.3 WebSocket Failure Handling
 
 ```
@@ -974,7 +982,12 @@ accounting replay 從這些事件重建 position / account，必須與 materiali
    該 fill **仍照常入帳**，posted fee 記 0，
    `fills.exchange_fee` 保持 NULL 表示 **pending**（沒有獨立的 `fee_status` 欄位；
    pending 的定義就是 `exchange_fee IS NULL`，見 `iter_live_fills(pending_fee_only=True)`）。
-3. Pending fee 不得永久留空，需由 reconciliation job 回補。
+3. Pending fee 不得永久留空，需由 reconciliation job 回補。**（v9 新增，2026-07-15）
+   回補入口即要求幣別證明**：`backfill_fill_fee` 除金額外必收 `fee_token`，非
+   `"USDC"` 一律拒絕——與 rule 2 的 ingest 端 fail-safe 對稱。fill 進 pending lane
+   正是因為 fee 未能證明是 USDC；若解決入口不再要求同一份證明，「從 raw payload
+   讀 `fee` 直接回補」這個最直覺的 job 實作會把非 USDC 金額記成 USDC——pending lane
+   要防的就是這個。非 USDC fee 必須先估值，再以 USDC 金額（`fee_token="USDC"`）回補。
 4. 回補**不得覆寫**已記錄的 fill（fill row 不可變）。它寫一筆
    `accounting_adjustment_events`（`old_value` = 帳上現行 fee、`new_value` = 新學到的
    fee），ledger 在**同一個 transaction** 內依 `new - old` 移動，live replay 折算同一組
@@ -1005,6 +1018,19 @@ accounting replay 從這些事件重建 position / account，必須與 materiali
 2. Funding 缺失時標記 funding_status = pending。
 3. REST reconciliation 需補齊 missed funding。
 4. Funding correction 必須產生 accounting adjustment event。
+5. **（v9 新增，2026-07-15）兩扇門的分工——事實 vs 更正**：漏掉／遲到的 funding
+   結算是「還沒記錄的事實」，一律走 rule 3 → `funding_events`（首次記錄，
+   pending→posted 的 exactly-once 閘）；**只有已 posted 的 funding event 金額事後
+   被證明錯誤**，才走 rule 4 → `adjustment_type='funding'` 的更正。同一筆結算絕不能
+   兩扇門都走：live replay 對 funding_events 與 adjustment 兩者都 fold，重複記錄會讓
+   wallet double-count，而且 §5 replay 檢查**抓不到**（materialized 與 replay 兩側
+   同樣 double-fold，恆等式照樣成立）。
+6. **（v9 新增，2026-07-15）adjustment 是 ledger-only**：任何型別的 accounting
+   adjustment event（fee／funding／realized_pnl）只移動 ledger 四個總額（wallet／
+   realized／fees／funding，經 `adjustment_ledger_delta`，replay 的 fold 也只在
+   ledger 層），**永不觸碰 position row**。`realized_pnl` 型別目前沒有 writer
+   （詞彙刻意保留給未來的更正場景）；它的 writer 進場時必須遵守本條，否則
+   materialized position 與 replay position 會分歧。
 
 ## 16. Schema Additions
 

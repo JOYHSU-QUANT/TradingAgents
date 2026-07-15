@@ -195,9 +195,9 @@ class Database:
 
         A deferred ``BEGIN``: the snapshot is pinned at the first SELECT and
         WAL lets it overlap the PR3 writer loops without blocking them. Replay
-        needs this — its six reads compared against each other would otherwise
-        interleave with a concurrent COMMIT and report a spurious (or masked)
-        mismatch. Reads only: ``PRAGMA query_only`` makes a stray write inside
+        needs this — the reads it compares against each other (fills, funding,
+        adjustments, seeds, ``current_*``) would otherwise interleave with a
+        concurrent COMMIT and report a spurious (or masked) mismatch. Reads only: ``PRAGMA query_only`` makes a stray write inside
         the block fail loud instead of being silently discarded by the closing
         ROLLBACK. Nesting is rejected for the same reason as ``transaction``.
         """

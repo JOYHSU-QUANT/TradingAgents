@@ -11,12 +11,14 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import MalformedResponseError
 from contrib.hyperliquid_perp.live.fills import (
     BackfillOutcome,
+    BackfillResult,
     ExchangeFill,
     IngestOutcome,
     LiveFillProcessor,
@@ -379,6 +381,50 @@ def test_same_fill_from_three_sources_applied_once(db, clock, tmp_path):
     assert _ledger(db).total_fees == Decimal("0.05")
 
 
+def test_applied_fill_evidence_file_survives_the_dedupe_key_pipe(db, clock, tmp_path):
+    """The §16.2 evidence write must survive the ``|`` in every fill's dedupe key.
+
+    ``exchange_fill_key`` is ``"tid|<tid>"`` and ``|`` is an illegal filename
+    character on Windows. ``write_raw_payload`` is deliberately fail-soft, so a
+    broken ``_safe_key`` would not raise — it would silently record NO evidence
+    path for every applied fill (and a Linux-only CI would never notice, since
+    the pipe is legal there). Assert the path is recorded and the file exists.
+    """
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    result = proc.ingest(_fill(sz="1", tid=42))
+    assert result.outcome is IngestOutcome.APPLIED
+    fid = live_fill_id("r", result.fill.exchange_fill_key)
+    path = repo.get_fill(db.conn, fid)["raw_exchange_payload_path"]
+    assert path is not None
+    assert Path(path).exists()
+
+
+def test_insert_live_fill_requires_the_exchange_fill_time(db):
+    """The write boundary refuses a NULL exchange_fill_time — it is the §14.3
+    ordering key; full rationale at the ``insert_live_fill`` guard."""
+    _live_run(db)
+    _live_order(db)
+    with pytest.raises(ValueError, match="exchange_fill_time"), db.transaction() as conn:
+        repo.insert_live_fill(
+            conn,
+            fill_id="f-null-time",
+            run_id="r",
+            order_id="o1",
+            symbol="BTC",
+            side="buy",
+            fill_qty=Decimal("1"),
+            fill_price=Decimal("100"),
+            fill_notional=Decimal("100"),
+            exchange_fill_key="tid|9999",
+            exchange_fill_time=None,  # type: ignore[arg-type]
+            exchange_closed_pnl=Decimal("0"),
+            liquidity_role="taker",
+        )
+    assert db.conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
+
+
 def test_duplicate_insert_rolls_back_whole_unit(db):
     # "Crash 前後冪等": a re-post of an applied fill aborts on the UNIQUE key and
     # rolls back atomically — no partial state, the books unchanged.
@@ -448,7 +494,7 @@ def test_pending_fee_posts_zero_then_backfill_adjusts(db):
 
     # Backfill the learned fee → adjustment event + ledger move.
     res = backfill_fill_fee(
-        db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.05"), source="recon"
+        db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.05"), fee_token="USDC", source="recon"
     )
     assert res.outcome is BackfillOutcome.POSTED
     assert _ledger(db).total_fees == Decimal("0.05")
@@ -467,8 +513,10 @@ def test_fee_backfill_is_exactly_once(db):
     fill = ExchangeFill.parse(_fill(sz="1", fee=None))
     post_live_fill(db, run_id="r", fill=fill, order_id="o1")
     fid = live_fill_id("r", fill.exchange_fill_key)
-    backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.05"))
-    again = backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.05"))
+    backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.05"), fee_token="USDC")
+    again = backfill_fill_fee(
+        db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.05"), fee_token="USDC"
+    )
     assert again.outcome is BackfillOutcome.ALREADY_POSTED
     # The wallet moved once, not twice.
     assert _ledger(db).total_fees == Decimal("0.05")
@@ -513,7 +561,9 @@ def test_first_resolution_of_a_pending_fee_to_zero_still_posts(db):
     fid = live_fill_id("r", fill.exchange_fill_key)
     before = _ledger(db)
 
-    res = backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=Decimal("0"))
+    res = backfill_fill_fee(
+        db, run_id="r", fill_id=fid, exchange_fee=Decimal("0"), fee_token="USDC"
+    )
 
     assert res.outcome is BackfillOutcome.POSTED  # the FIRST resolution always writes
     assert res.adjustment_id is not None
@@ -526,7 +576,9 @@ def test_first_resolution_of_a_pending_fee_to_zero_still_posts(db):
     assert repo.iter_live_fills(db.conn, "r", pending_fee_only=True) == []  # out of the backlog
 
     # Re-learning the same 0 afterwards IS a no-op: resolved, and nothing new to say.
-    again = backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=Decimal("0"))
+    again = backfill_fill_fee(
+        db, run_id="r", fill_id=fid, exchange_fee=Decimal("0"), fee_token="USDC"
+    )
     assert again.outcome is BackfillOutcome.ALREADY_POSTED
     assert db.conn.execute("SELECT COUNT(*) FROM accounting_adjustment_events").fetchone()[0] == 1
 
@@ -542,7 +594,7 @@ def test_fee_backfill_rejects_a_non_finite_fee(db, bad):
     before = _ledger(db)
 
     with pytest.raises(ValueError, match="finite"):
-        backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=bad)
+        backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=bad, fee_token="USDC")
 
     # Nothing was written and the ledger did not move.
     assert db.conn.execute("SELECT COUNT(*) FROM accounting_adjustment_events").fetchone()[0] == 0
@@ -554,6 +606,40 @@ def test_fee_backfill_rejects_a_non_finite_fee(db, bad):
     )
 
 
+@pytest.mark.parametrize("token", ["ETH", "USDT", ""], ids=["eth", "usdt", "empty"])
+def test_fee_backfill_rejects_an_unproven_denomination(db, token):
+    """Resolution demands the same USDC proof ingest did (§15.1 rule 3)."""
+    _live_run(db)
+    _live_order(db)
+    fill = ExchangeFill.parse(_fill(sz="1", fee=None))
+    post_live_fill(db, run_id="r", fill=fill, order_id="o1")
+    fid = live_fill_id("r", fill.exchange_fill_key)
+    before = _ledger(db)
+
+    with pytest.raises(ValueError, match="USDC"):
+        backfill_fill_fee(
+            db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.05"), fee_token=token
+        )
+
+    # Nothing was written, the ledger did not move, and the fill is STILL pending —
+    # the backlog keeps resurfacing it until a proven USDC amount arrives.
+    assert db.conn.execute("SELECT COUNT(*) FROM accounting_adjustment_events").fetchone()[0] == 0
+    assert _ledger(db).wallet_balance == before.wallet_balance
+    assert [r["fill_id"] for r in repo.iter_live_fills(db.conn, "r", pending_fee_only=True)] == [
+        fid
+    ]
+
+
+def test_backfill_result_posted_must_name_its_adjustment():
+    """POSTED means a correction row exists, so the result must name it (enforced)."""
+    with pytest.raises(ValueError, match="POSTED"):
+        BackfillResult(BackfillOutcome.POSTED, None, Decimal("0.05"))
+    # ALREADY_POSTED legitimately carries either shape: the newest correction's id,
+    # or None when the ingested fee was simply confirmed.
+    BackfillResult(BackfillOutcome.ALREADY_POSTED, None, Decimal("0.05"))
+    BackfillResult(BackfillOutcome.ALREADY_POSTED, "adj-1", Decimal("0.05"))
+
+
 def test_fee_backfill_of_an_unchanged_fee_is_a_no_op(db):
     """A fill already carrying this fee needs no correction — and the result says so."""
     _live_run(db)
@@ -562,7 +648,9 @@ def test_fee_backfill_of_an_unchanged_fee_is_a_no_op(db):
     post_live_fill(db, run_id="r", fill=fill, order_id="o1")
     fid = live_fill_id("r", fill.exchange_fill_key)
 
-    result = backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.05"))
+    result = backfill_fill_fee(
+        db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.05"), fee_token="USDC"
+    )
     assert result.outcome is BackfillOutcome.ALREADY_POSTED
     assert result.fee == Decimal("0.05")
     assert result.adjustment_id is None  # nothing was recorded, so nothing is named
@@ -583,12 +671,16 @@ def test_fee_can_be_corrected_more_than_once(db):
     post_live_fill(db, run_id="r", fill=fill, order_id="o1")
     fid = live_fill_id("r", fill.exchange_fill_key)
 
-    first = backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.05"))
+    first = backfill_fill_fee(
+        db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.05"), fee_token="USDC"
+    )
     assert first.outcome is BackfillOutcome.POSTED
     assert _ledger(db).total_fees == Decimal("0.05")
 
     # The exchange later corrects the fee downward (a referral discount / late rebate).
-    second = backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.03"))
+    second = backfill_fill_fee(
+        db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.03"), fee_token="USDC"
+    )
     assert second.outcome is BackfillOutcome.POSTED
     assert second.adjustment_id != first.adjustment_id
     # The books carry the CORRECTED fee: the ledger moved by the delta (-0.02), not +0.03.
@@ -597,7 +689,9 @@ def test_fee_can_be_corrected_more_than_once(db):
 
     # ...and re-learning the corrected amount is still a no-op.
     assert (
-        backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.03")).outcome
+        backfill_fill_fee(
+            db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.03"), fee_token="USDC"
+        ).outcome
         is BackfillOutcome.ALREADY_POSTED
     )
     assert _ledger(db).total_fees == Decimal("0.03")
@@ -613,7 +707,9 @@ def test_fee_backfill_refuses_another_runs_fill(db):
 
     _live_run(db, run_id="other")
     with pytest.raises(ValueError, match="belongs to run"):
-        backfill_fill_fee(db, run_id="other", fill_id=fid, exchange_fee=Decimal("0.05"))
+        backfill_fill_fee(
+            db, run_id="other", fill_id=fid, exchange_fee=Decimal("0.05"), fee_token="USDC"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -670,12 +766,35 @@ def test_live_replay_consistent_after_fee_backfill(db):
         run_id="r",
         fill_id=live_fill_id("r", fill.exchange_fill_key),
         exchange_fee=Decimal("0.05"),
+        fee_token="USDC",
     )
     # Replay folds the adjustment; the rebuilt ledger matches materialized state.
     result = accounting.replay(db, run_id="r")
     assert result.is_consistent, result.mismatch_detail
     assert result.ledger.total_fees == Decimal("0.05")
     assert result.ledger.wallet_balance == Decimal("999.95")
+
+
+def test_live_replay_consistent_after_a_second_fee_correction(db):
+    """Replay folds EVERY adjustment row; the posting side reads only the newest.
+
+    Two different traversals of ``accounting_adjustment_events`` that must
+    telescope to the same answer — a double-count in ``_fold_adjustments`` or a
+    wrong target/type filter is observable only with 2+ corrections on the same
+    fill, so pin that exact shape against replay.
+    """
+    _live_run(db)
+    _live_order(db)
+    fill = ExchangeFill.parse(_fill(sz="1", px="100", closed="0", fee=None))
+    post_live_fill(db, run_id="r", fill=fill, order_id="o1")
+    fid = live_fill_id("r", fill.exchange_fill_key)
+    backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.05"), fee_token="USDC")
+    backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=Decimal("0.03"), fee_token="USDC")
+
+    result = accounting.replay(db, run_id="r")
+    assert result.is_consistent, result.mismatch_detail
+    assert result.ledger.total_fees == Decimal("0.03")
+    assert result.ledger.wallet_balance == Decimal("999.97")
 
 
 def test_live_replay_detects_corrupted_materialized_state(db):

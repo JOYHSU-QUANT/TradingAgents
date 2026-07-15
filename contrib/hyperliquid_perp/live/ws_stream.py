@@ -417,13 +417,18 @@ class LiveWsStream:
 def user_stream_subscriptions(wallet_address: str) -> list[dict[str, Any]]:
     """The §11.1 subscription payloads for one wallet.
 
-    ``userFills`` and the clearinghouse (``webData2``) stream are per-wallet;
-    ``orderUpdates`` is not (it multiplexes on the connection). Kept as one
-    function so the production binder and the tests subscribe to the same set.
+    All three SUBSCRIBE payloads carry ``user`` — the SDK's subscription types
+    (``OrderUpdatesSubscription`` included) require it. What ``orderUpdates``
+    lacks is the user on its MESSAGES, which is why the SDK refuses a second
+    orderUpdates subscription on one connection (it cannot demultiplex replies);
+    that does not make the subscribe payload wallet-less, and a payload without
+    ``user`` subscribes to nothing — the channel would stay silent with no error
+    anywhere. Kept as one function so the production binder and the tests
+    subscribe to the same set.
     """
     return [
         {"type": USER_FILLS_CHANNEL, "user": wallet_address},
-        {"type": ORDER_UPDATES_CHANNEL},
+        {"type": ORDER_UPDATES_CHANNEL, "user": wallet_address},
         {"type": CLEARINGHOUSE_CHANNEL, "user": wallet_address},
     ]
 

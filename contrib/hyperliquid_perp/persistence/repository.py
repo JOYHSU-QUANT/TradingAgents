@@ -714,6 +714,7 @@ def insert_live_fill(
     fill_price: Decimal,
     fill_notional: Decimal,
     exchange_fill_key: str,
+    exchange_fill_time: datetime,
     exchange_closed_pnl: Decimal,
     liquidity_role: str,
     exchange_fee: Decimal | None = None,
@@ -721,7 +722,6 @@ def insert_live_fill(
     exchange_order_id: str | None = None,
     cloid_logical: str | None = None,
     cloid_hex: str | None = None,
-    exchange_fill_time: datetime | None = None,
     plan_id: str | None = None,
     flip_leg: str | None = None,
     slice_index: int | None = None,
@@ -760,6 +760,15 @@ def insert_live_fill(
         check_enum(flip_leg, _FLIP_LEGS, name="flip_leg")
     if not exchange_fill_key:
         raise ValueError("a live fill must carry a non-empty exchange_fill_key (§14.2)")
+    if exchange_fill_time is None:
+        # Not merely a missing datum: (exchange_fill_time, exchange_fill_key) is the
+        # §14.3 fold/ordering key. A NULL time sorts before genesis in chronological
+        # replay yet is filtered out of newest_live_fill_order_key/last_live_fill_time
+        # (both IS NOT NULL) — the fill folds first in one world and is invisible to
+        # out-of-order detection and the startup floor in the other, an undetectable
+        # materialized-vs-replay divergence. The ingest path always has it
+        # (ExchangeFill.parse requires ``time``), so a None here is caller error.
+        raise ValueError("a live fill must carry its exchange_fill_time (§14.3 ordering key)")
     if (cloid_logical is None) != (cloid_hex is None):
         raise ValueError(
             "cloid_logical and cloid_hex must be provided together (the §8.2 "

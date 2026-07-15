@@ -1,7 +1,8 @@
 """Raw exchange payload evidence: one JSON file per round-trip (§16.1 / §16.5).
 
-Both live writers — the order submitter and the kill switch's shutdown cancel
-sweep — persist the untouched exchange response beside the row that summarises
+The live writers — the order submitter, the kill switch's shutdown cancel
+sweep, and the fill processor's evidence trail (applied / unmapped / malformed
+fills) — persist the untouched exchange payload beside the row that summarises
 it, and record that file's path on the row. The two rules that make the evidence
 trustworthy live here, once, instead of once per caller:
 

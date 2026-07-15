@@ -533,11 +533,21 @@ class BackfillResult:
     is the correction this call recorded (``None`` on a no-op that recorded none).
     On ``ALREADY_POSTED`` these describe what was already there, so a caller that
     logs the result cannot report an amount the ledger never took.
+
+    The one-way coupling (POSTED must name its correction) is enforced in
+    ``__post_init__``, same family as ``IngestResult``/``FundingResult``.
     """
 
     outcome: BackfillOutcome
     adjustment_id: str | None
     fee: Decimal
+
+    def __post_init__(self) -> None:
+        if self.outcome is BackfillOutcome.POSTED and self.adjustment_id is None:
+            raise ValueError(
+                "BackfillResult: a POSTED outcome must name the adjustment it recorded; "
+                "only ALREADY_POSTED may carry adjustment_id=None"
+            )
 
 
 def _effective_fee(fill_row: sqlite3.Row, fee_adjustments: list[sqlite3.Row]) -> Decimal:
@@ -563,11 +573,18 @@ def backfill_fill_fee(
     run_id: str,
     fill_id: str,
     exchange_fee: Decimal,
+    fee_token: str,
     source: str | None = None,
     reason: str | None = None,
     timestamp: datetime | None = None,
 ) -> BackfillResult:
     """Post the §15.1 fee a fill did not carry at ingest — as an adjustment, exactly once.
+
+    ``fee_token`` is the denomination PROOF, not metadata: anything but
+    ``"USDC"`` is rejected, symmetric with ``_parse_optional_fee`` on the ingest
+    side — §15.1 rule 3 explains why the obvious backfill job would otherwise
+    mis-book a non-USDC amount. A caller resolving a non-USDC fee must VALUE it
+    first and pass the resulting USDC figure.
 
     The recorded fill is immutable: a learned fee never overwrites it (§15.1 rule 5).
     It becomes one ``accounting_adjustment_events`` row — which live replay folds —
@@ -592,6 +609,11 @@ def backfill_fill_fee(
     replay folds with, so the materialized ledger and the replayed one cannot drift.
     A non-finite fee is rejected outright (a NaN would poison the ledger irreversibly).
     """
+    if fee_token != _FEE_TOKEN_USDC:
+        raise ValueError(
+            f"backfilled fee must be proven USDC, got fee_token={fee_token!r}; "
+            "value the amount first and pass the USDC figure (§15.1 rule 3)"
+        )
     if not exchange_fee.is_finite():
         raise ValueError(f"backfilled fee must be finite, got {exchange_fee}")
     now = timestamp or datetime.now(timezone.utc)

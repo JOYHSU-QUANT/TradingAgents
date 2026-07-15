@@ -179,6 +179,15 @@ def test_parse_non_usdc_fee_is_pending():
     assert ExchangeFill.parse(raw).fee is None
 
 
+def test_parse_fee_without_fee_token_is_pending():
+    # feeToken is documented as always present, so its absence is payload drift:
+    # an amount we cannot prove is USDC must ride the pending lane, never be
+    # booked as if it were USDC.
+    raw = _fill(fee="0.01")
+    del raw["feeToken"]
+    assert ExchangeFill.parse(raw).fee is None
+
+
 @pytest.mark.parametrize(
     "missing", ["coin", "side", "px", "sz", "closedPnl", "oid", "time", "crossed", "tid"]
 )
@@ -464,6 +473,85 @@ def test_fee_backfill_is_exactly_once(db):
     # The wallet moved once, not twice.
     assert _ledger(db).total_fees == Decimal("0.05")
     assert db.conn.execute("SELECT COUNT(*) FROM accounting_adjustment_events").fetchone()[0] == 1
+
+
+def test_fee_without_fee_token_ingests_with_the_fee_pending(db, clock, tmp_path):
+    """A fill whose fee has no feeToken still books — with the fee PENDING, not as USDC."""
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    raw = _fill(sz="1", px="100", closed="0", fee="0.05")
+    del raw["feeToken"]  # fee present, token missing — cannot prove it is USDC
+
+    result = proc.ingest(raw)
+
+    assert result.outcome is IngestOutcome.APPLIED  # the fill itself books normally
+    fid = live_fill_id("r", result.fill.exchange_fill_key)
+    assert repo.get_fill(db.conn, fid)["exchange_fee"] is None  # pending, not 0.05
+    assert [r["fill_id"] for r in repo.iter_live_fills(db.conn, "r", pending_fee_only=True)] == [
+        fid
+    ]
+    ledger = _ledger(db)
+    assert ledger.total_fees == Decimal("0")  # the unproven amount never hit the ledger
+    assert ledger.wallet_balance == Decimal("1000")
+
+
+def test_first_resolution_of_a_pending_fee_to_zero_still_posts(db):
+    """A pending fee genuinely resolved to 0 must leave the backlog via an adjustment.
+
+    0 equals the placeholder the ingest posted, but the fee being genuinely 0 is new
+    information, and only an adjustment row records it — skipping the write would
+    leave the fill in the pending_fee_only backlog forever (§15.1 rule 3). The ledger
+    simply moves by 0.
+    """
+    _live_run(db)
+    _live_order(db)
+    raw = _fill(sz="1", fee="0.01")
+    raw["feeToken"] = "ETH"  # fee pending: not proven USDC
+    fill = ExchangeFill.parse(raw)
+    post_live_fill(db, run_id="r", fill=fill, order_id="o1")
+    fid = live_fill_id("r", fill.exchange_fill_key)
+    before = _ledger(db)
+
+    res = backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=Decimal("0"))
+
+    assert res.outcome is BackfillOutcome.POSTED  # the FIRST resolution always writes
+    assert res.adjustment_id is not None
+    after = _ledger(db)
+    assert (after.wallet_balance, after.realized_pnl, after.total_fees) == (
+        before.wallet_balance,
+        before.realized_pnl,
+        before.total_fees,
+    )  # the ledger moved by exactly 0
+    assert repo.iter_live_fills(db.conn, "r", pending_fee_only=True) == []  # out of the backlog
+
+    # Re-learning the same 0 afterwards IS a no-op: resolved, and nothing new to say.
+    again = backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=Decimal("0"))
+    assert again.outcome is BackfillOutcome.ALREADY_POSTED
+    assert db.conn.execute("SELECT COUNT(*) FROM accounting_adjustment_events").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("bad", [Decimal("NaN"), Decimal("Infinity")], ids=["nan", "infinity"])
+def test_fee_backfill_rejects_a_non_finite_fee(db, bad):
+    """A NaN would poison the ledger irreversibly — rejected before anything is written."""
+    _live_run(db)
+    _live_order(db)
+    fill = ExchangeFill.parse(_fill(sz="1", fee=None))
+    post_live_fill(db, run_id="r", fill=fill, order_id="o1")
+    fid = live_fill_id("r", fill.exchange_fill_key)
+    before = _ledger(db)
+
+    with pytest.raises(ValueError, match="finite"):
+        backfill_fill_fee(db, run_id="r", fill_id=fid, exchange_fee=bad)
+
+    # Nothing was written and the ledger did not move.
+    assert db.conn.execute("SELECT COUNT(*) FROM accounting_adjustment_events").fetchone()[0] == 0
+    after = _ledger(db)
+    assert (after.wallet_balance, after.realized_pnl, after.total_fees) == (
+        before.wallet_balance,
+        before.realized_pnl,
+        before.total_fees,
+    )
 
 
 def test_fee_backfill_of_an_unchanged_fee_is_a_no_op(db):

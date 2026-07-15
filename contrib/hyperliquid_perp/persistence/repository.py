@@ -668,10 +668,13 @@ def posted_exchange_fee(exchange_fee: Decimal | None) -> Decimal:
     and it is still posted — with the fee PENDING, which books ``0`` now and corrects
     it later through an ``accounting_adjustment_events`` row.
 
-    The one definition of that "0", because three places must agree on it: the LEDGER
-    delta (``live.fills.apply_live_fill``), the stored ``fills.fee`` column (and its
-    derived ``fee_rate``) in :func:`insert_live_fill`, and the ``old_value`` a later
-    correction folds from (``live.fills.backfill_fill_fee``). Were the pending
+    The one definition of that "0", because every consumer must agree on it: the
+    LEDGER delta (``live.fills.apply_live_fill``), the stored ``fills.fee`` column
+    (and its derived ``fee_rate``) in :func:`insert_live_fill`, the ``old_value`` a
+    later correction folds from (``live.fills._effective_fee``, for
+    ``backfill_fill_fee``), the out-of-order position re-fold
+    (``live.fills._rebuild_position``), and the §5 replay's live fold
+    (``paper.accounting.replay_within``). Were the pending
     placeholder ever to change — say to an ESTIMATED fee — a copy left behind would
     have the backfill book ``new - 0`` against a ledger that had already taken the
     estimate, double-charging the fee; and replay would reproduce the double-charge

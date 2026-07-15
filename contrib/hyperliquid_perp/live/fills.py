@@ -130,19 +130,23 @@ def _parse_epoch_ms(value: Any) -> datetime:
 
 
 def _parse_optional_fee(raw: dict) -> Decimal | None:
-    """The fill's USDC fee, or ``None`` (pending) when absent / non-USDC (§15.1).
+    """The fill's USDC fee, or ``None`` (pending) when absent / not proven USDC (§15.1).
 
     A fee reported in a non-USDC token cannot be posted to the USDC ledger, so it
     is left pending for a reconciliation job to value — never dropped silently,
-    never coerced. A present but unparseable ``fee`` is malformed and fails loud.
+    never coerced. A fee whose ``feeToken`` is MISSING rides the same pending lane:
+    the field is documented as always present, so its absence is payload drift, and
+    booking an amount we cannot prove is USDC risks recording a non-USDC number as
+    USDC — pending merely defers the fee, never mis-books it. A present but
+    unparseable ``fee`` is malformed and fails loud.
     """
     if raw.get("fee") is None:
         return None
     fee_token = raw.get("feeToken")
-    if fee_token is not None and fee_token != _FEE_TOKEN_USDC:
+    if fee_token != _FEE_TOKEN_USDC:
         logger.warning(
-            "fill fee is in %r, not USDC — recording fee as pending for reconciliation",
-            fee_token,
+            "fill fee token is %s — recording fee as pending for reconciliation",
+            "absent" if fee_token is None else f"{fee_token!r}, not USDC",
         )
         return None
     return require_decimal(raw["fee"], field="fill fee")
@@ -542,13 +546,15 @@ def _effective_fee(fill_row: sqlite3.Row, fee_adjustments: list[sqlite3.Row]) ->
     A pending fill posted ``0`` at ingest (``exchange_fee`` NULL), and each later
     correction moved it to its ``new_value``. The fill row itself is immutable, so
     the effective amount is the newest correction's ``new_value``, or — with no
-    corrections — whatever was recorded at ingest.
+    corrections — whatever was recorded at ingest. Both legs read the pending
+    placeholder through :func:`repo.posted_exchange_fee`, the one definition of
+    that "0" (its docstring explains why a private copy here would be a bug).
     """
     if fee_adjustments:
         latest = fee_adjustments[-1]["new_value"]
-        return Decimal(0) if latest is None else Decimal(latest)
+        return repo.posted_exchange_fee(None if latest is None else Decimal(latest))
     recorded = fill_row["exchange_fee"]
-    return Decimal(0) if recorded is None else Decimal(recorded)
+    return repo.posted_exchange_fee(None if recorded is None else Decimal(recorded))
 
 
 def backfill_fill_fee(
@@ -573,7 +579,10 @@ def backfill_fill_fee(
     both idempotent and re-correctable:
 
     - re-learning the SAME amount moves nothing and records nothing (``ALREADY_POSTED``)
-      — a reconciliation job may call this on every pass;
+      — a reconciliation job may call this on every pass. The one exception is the
+      FIRST resolution of a still-pending fee: even a learned fee of exactly 0 (the
+      placeholder amount) writes an adjustment row, because that row is what takes
+      the fill out of the §15.1-rule-3 pending backlog (the ledger moves by 0);
     - learning a DIFFERENT amount (a referral discount, a late rebate, an exchange fee
       correction) posts the difference as the next correction in the sequence. Refusing
       it — as a one-correction-per-target key would — would not just lose the amount, it
@@ -606,7 +615,15 @@ def backfill_fill_fee(
         prior = repo.iter_accounting_adjustment_events(conn, run_id, target_id=fill_id)
         fee_adjustments = [a for a in prior if a["adjustment_type"] == "fee"]
         effective = _effective_fee(row, fee_adjustments)
-        if exchange_fee == effective:
+        # A pending fill (exchange_fee NULL) with no correction yet is NOT "already
+        # posted" even when the learned fee equals the placeholder: the fee being
+        # genuinely 0 is new information, and only an adjustment row records it.
+        # Skipping the write would leave the fill in the pending_fee_only backlog
+        # (keyed on NULL + no fee correction) forever — §15.1 rule 3 says pending
+        # must be clearable, so the first resolution always writes, and the
+        # ledger simply moves by 0.
+        resolved = bool(fee_adjustments) or row["exchange_fee"] is not None
+        if exchange_fee == effective and resolved:
             # The books already carry exactly this fee. Report what is actually
             # recorded, not the argument we were handed.
             last_id = fee_adjustments[-1]["adjustment_id"] if fee_adjustments else None

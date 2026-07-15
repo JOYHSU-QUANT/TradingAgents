@@ -341,19 +341,24 @@ class LiveWsStream:
     def silent_for(self, now: datetime | None = None) -> float:
         """Seconds since the last event on a socket that CLAIMS to be connected.
 
-        Measured from the last event, or — before any event has arrived — from the
-        connect itself, so a socket that comes up and immediately goes quiet is not
-        given an infinite grace period. Reads ``0`` while disconnected: that case is
-        :meth:`disconnected_for`'s, and reporting both would double-count one outage.
+        Measured from the last event or the connect, whichever is LATER. The
+        connect side keeps a socket that comes up and immediately goes quiet from
+        getting an infinite grace period; taking the later of the two (not merely
+        falling back when no event exists) keeps an event from a PREVIOUS
+        connection from seeding this one's clock — after an outage longer than the
+        silence threshold, that stale baseline would brand a healthy reconnect
+        stale before its first event had a chance to arrive. Reads ``0`` while
+        disconnected: that case is :meth:`disconnected_for`'s, and reporting both
+        would double-count one outage.
         """
         stamp = now or self._clock.now()
         with self._lock:
             if not self._connected:
                 return 0.0
-            since = self._last_event_at or self._connected_since
-            if since is None:
+            marks = [t for t in (self._last_event_at, self._connected_since) if t is not None]
+            if not marks:
                 return 0.0
-            return (stamp - since).total_seconds()
+            return (stamp - max(marks)).total_seconds()
 
     def is_stale(self, now: datetime | None = None) -> bool:
         """True once the feed cannot be trusted — §11.2 rule 7, both ways it fails.

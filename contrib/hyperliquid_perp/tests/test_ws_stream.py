@@ -488,6 +488,31 @@ def test_a_connected_but_never_delivering_socket_goes_stale():
     assert stream.is_stale()
 
 
+def test_a_reconnect_does_not_inherit_the_previous_connections_silence_clock():
+    """The silence baseline is the LATER of last-event and connect, not a mere fallback.
+
+    An event from the previous connection must not seed the new connection's clock:
+    after an outage longer than the silence threshold, that stale baseline would brand
+    a healthy reconnect stale before its first event had a chance to arrive.
+    """
+    clock = ManualClock(_NOW)
+    stream = LiveWsStream(silent_after_seconds=120, clock=clock)
+    stream.mark_connected()
+    stream.enqueue({"channel": "webData2"})  # the OLD connection's last event
+
+    clock.advance(60)
+    stream.mark_disconnected(clock.now())
+    clock.advance(600)  # down far longer than silent_after — the old event is ancient
+    stream.mark_connected()  # a healthy reconnect
+
+    assert stream.silent_for() == 0  # measured from the reconnect, not the old event
+    assert not stream.is_stale()
+
+    # The new baseline still ages: silence past the threshold with no event is stale.
+    clock.advance(121)
+    assert stream.is_stale()
+
+
 def test_events_keep_a_connected_stream_fresh():
     clock = ManualClock(_NOW)
     stream = LiveWsStream(silent_after_seconds=120, clock=clock)
@@ -660,6 +685,56 @@ def test_an_exhausted_page_budget_reports_the_window_uncovered(db, tmp_path):
 
     assert calls["n"] == 3  # it kept paging...
     assert summary.complete is False  # ...and still could not prove the window covered
+
+
+def test_a_full_page_with_no_readable_cursor_stops_and_reports_uncovered(db, tmp_path):
+    """A capped page whose times are all unreadable cannot advance the cursor.
+
+    Paging again would re-fetch the same page forever — the pass must stop after ONE
+    fetch and report the window uncovered, never page on a guess or spin.
+    """
+    clock = ManualClock(_NOW)
+    _live_run_with_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    calls = {"n": 0}
+
+    def fetch(start_ms, end_ms):
+        calls["n"] += 1
+        no_time = _rest_fill(1)
+        del no_time["time"]
+        garbage_time = _rest_fill(2)
+        garbage_time["time"] = "garbage"
+        return [no_time, garbage_time]  # a FULL page (cap 2) with no usable cursor
+
+    bf = FillBackfiller(fetch=fetch, processor=proc, clock=clock, max_pages=5, response_fill_cap=2)
+    summary = bf.backfill()
+
+    assert calls["n"] == 1  # it stopped, it did not spin its whole page budget
+    assert summary.complete is False  # the gap stays open — do not clear needs_backfill
+    assert summary.malformed == 2  # both fills were recorded and skipped (§11.3)
+
+
+def test_a_page_whose_cursor_moves_backwards_reports_the_window_uncovered(db, tmp_path):
+    """A capped page whose newest time predates the window start cannot advance either.
+
+    Resuming from it would move the cursor BACKWARDS and re-cover ground already read;
+    the pass stops and reports the window uncovered instead.
+    """
+    clock = ManualClock(_NOW)
+    _live_run_with_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    calls = {"n": 0}
+
+    def fetch(start_ms, end_ms):
+        calls["n"] += 1
+        # A full page whose fills all predate the window it was asked for.
+        return [_rest_fill(1, time_ms=start_ms - 2), _rest_fill(2, time_ms=start_ms - 1)]
+
+    bf = FillBackfiller(fetch=fetch, processor=proc, clock=clock, max_pages=5, response_fill_cap=2)
+    summary = bf.backfill()
+
+    assert calls["n"] == 1  # stopped rather than paging backwards forever
+    assert summary.complete is False
 
 
 @pytest.mark.parametrize("kwargs", [{"now": _NAIVE}, {"since": _NAIVE}], ids=["now", "since"])

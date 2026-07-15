@@ -1108,18 +1108,16 @@ def replay_within(conn: sqlite3.Connection, *, run_id: str) -> ReplayResult:
             current = positions.get(symbol) or PositionState.flat(symbol)
             if live:
                 # AS-RECORDED: a pending-fee fill posted 0 at ingest, and its
-                # correction is a folded adjustment below — never read here. NULL
-                # (pending) and a recorded 0 are the same posted amount, but they are
-                # NOT the same fact, so the None check is explicit: `_dec(...) or
-                # Decimal(0)` would also rewrite a legitimately-recorded zero, which
-                # is the very NULL-vs-zero distinction this model rests on.
-                recorded_fee = _dec(fill["exchange_fee"])
+                # correction is a folded adjustment below — never read here. The
+                # NULL→0 pending placeholder is repo.posted_exchange_fee's single
+                # definition (its docstring explains why a private copy of that
+                # "0" here would let the replayed and materialized ledgers drift).
                 effect: FillEffect | LiveFillEffect = compute_live_fill_effect(
                     current,
                     side=fill["side"],
                     qty=Decimal(fill["fill_qty"]),
                     price=Decimal(fill["fill_price"]),
-                    exchange_fee=Decimal(0) if recorded_fee is None else recorded_fee,
+                    exchange_fee=repo.posted_exchange_fee(_dec(fill["exchange_fee"])),
                     exchange_closed_pnl=_require_live_basis(fill),
                 )
             else:

@@ -194,9 +194,10 @@ def live_fill_id(run_id: str, exchange_fill_key: str) -> str:
     fill_id is a PRIMARY KEY, never parsed back into fields, and the leading
     ``<run_id>|livefill|`` tag keeps it unambiguous against every other id shape.
     """
-    if not exchange_fill_key:
-        raise ValueError("exchange_fill_key must be non-empty")
-    return f"{_part(run_id, name='run_id')}{_SEP}livefill{_SEP}{exchange_fill_key}"
+    return (
+        f"{_part(run_id, name='run_id')}{_SEP}livefill{_SEP}"
+        f"{_part_nonempty(exchange_fill_key, name='exchange_fill_key')}"
+    )
 
 
 def accounting_adjustment_id(

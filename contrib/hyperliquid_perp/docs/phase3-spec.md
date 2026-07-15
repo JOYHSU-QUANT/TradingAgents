@@ -702,6 +702,12 @@ open orders updates（orderUpdates）
    - 回應**分頁**（`userFillsByTime` 單次上限 2000 筆）：整頁滿代表被截斷，必須續頁。
    - 一次 pass 若無法證明它覆蓋了整個視窗（頁數預算用盡、游標無法前進），必須回報
      `complete = False`：**gap 仍然開著，呼叫方不得清掉 `needs_backfill`**。
+   - `complete = False` 的 pass **不推進 gap anchor、不持久化部分進度**——下一次 pass 從
+     同一起點重走。這是刻意的 fail-loud：頁數預算（20 頁 × 2000 筆 ≈ 40k fills）對這隻
+     bot 的成交量而言遠不可達，走到這裡代表狀態異常（起點錯了、時鐘錯了、或帳戶被
+     別的東西狂刷成交），要人來看，而不是讓 anchor 悄悄前移去「收斂」一個不該存在的
+     視窗。代價是超過預算的 gap 會**持續卡在 incomplete**（每 tick 一條 warning）；
+     PR 4 的 safe-mode 狀態機必須把「backfill 長期 incomplete」納入停機判準。
    - `needs_backfill` 的清除以 **epoch** 為閘：先讀 epoch → 跑 backfill → 用讀到的 epoch
      清。期間若又發生重連（epoch 遞增），這次清除會被拒絕——那個新的 gap 不會被一個
      在它出現之前就關窗的 pass 誤判為已補完。
@@ -955,7 +961,9 @@ accounting replay 從這些事件重建 position / account，必須與 materiali
 ### 15.1 Fee Rules
 
 1. 若 fill payload 直接提供（USDC）fee，立即入帳。
-2. 若 fee 暫時缺失、或以非 USDC token 計價，該 fill **仍照常入帳**，posted fee 記 0，
+2. 若 fee 暫時缺失、以非 USDC token 計價、**或 `feeToken` 欄位缺失（無法證明是
+   USDC——該欄位文件上恆帶，缺失即 payload 漂移，寧可延後入 fee 也不冒記錯幣別的險）**，
+   該 fill **仍照常入帳**，posted fee 記 0，
    `fills.exchange_fee` 保持 NULL 表示 **pending**（沒有獨立的 `fee_status` 欄位；
    pending 的定義就是 `exchange_fee IS NULL`，見 `iter_live_fills(pending_fee_only=True)`）。
 3. Pending fee 不得永久留空，需由 reconciliation job 回補。
@@ -965,7 +973,11 @@ accounting replay 從這些事件重建 position / account，必須與 materiali
    delta——所以 materialized 與 replay 不會漂移。
 5. **（v3 修訂）更正是累積且有序的，不是一次性的**：
    - `adjustment_id` 帶 `seq`（該 (target, type) 已有幾筆更正：0、1、2…）；
-   - 重複學到**相同**金額 = no-op，不寫事件（reconciliation job 可以每一輪安全呼叫）；
+   - 重複學到**相同**金額 = no-op，不寫事件（reconciliation job 可以每一輪安全呼叫）。
+     **唯一例外：仍在 pending（`exchange_fee` NULL 且尚無 fee 更正）的 fill，首次回補
+     即使金額恰等於 placeholder 0 也要寫事件**（ledger 移動 0）——那筆事件才是把 fill
+     帶離 pending backlog 的東西，不寫的話 rule 3 永遠無法對「真實 fee 恰為 0」的 fill
+     成立；
    - 學到**不同**金額（referral 折扣、事後 rebate、交易所自己更正 fee）寫下一筆更正，
      只 post 差額。若以 (target, type) 為唯一鍵拒絕第二筆，不只會漏掉那筆金額，還會讓
      不斷重試同一筆 fill 的 reconciliation job **永久卡死**在那裡。

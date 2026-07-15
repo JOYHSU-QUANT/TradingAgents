@@ -713,6 +713,26 @@ open orders updates（orderUpdates）
      在它出現之前就關窗的 pass 誤判為已補完。
    - transport error 直接往上拋（旗標留著、下一 tick 重試）；非 list 的 REST payload 是
      malformed，不是「沒有 fills」。
+
+   **（v12 新增，2026-07-15）backfill 義務必須耐重啟——持久化歸 PR 4**：上述兩個義務
+   （startup floor 登記、gap anchor）與 fail-loud 的卡住態（`complete = False` 而
+   `needs_backfill` 未清）在 PR 3 都只活在 process 記憶體。重啟後 floor 重新取
+   「帳上最新 fill」，這個推導**只在前一個 process 沒有帶著未退休的義務死掉時才安全**。
+   兩條靜默漏 fill 路徑：(a) 長於 trailing lookback 的斷線結束、重連的 `isSnapshot`
+   批次已入帳、gap backfill pass 完成前 crash——重啟後 floor 跳到最新入帳 fill、視窗縮回
+   lookback，斷線段的舊 fills 從此沒有任何 pass 會撈，§5 replay 也驗不出（replay 只能
+   重折已記錄的事件）；(b) 頁預算耗盡的卡住態被 systemd 自動重啟抹掉，刻意的 fail-loud
+   變成永久的靜默缺口。因此 **PR 4 接 daemon 接線時必須把義務持久化**：完成一次
+   `complete = True` 的 pass 才推進一個 durable watermark（如 `scheduler_state` 上的
+   「最後一次乾淨 backfill 覆蓋到 T」），startup floor 取 `min(watermark, 帳上最新 fill)`
+   ——多撈的部分由去重鍵吸收；卡住態隨之自然耐重啟（watermark 不前進，重啟後視窗
+   重新張開、warning 繼續響）。PR 3 刻意**不**先加欄位與 migration：讀寫點（tick 迴圈
+   的 backfill 呼叫方）到 PR 4 才存在，比照「欄位等首個 writer 再加」原則。同族掃描
+   確認其餘 in-memory 狀態（kill-switch latch、gate 旗標、engine halt/pause、scheduler
+   pending）都有 fail-closed 後盾或持久化證據，唯一殘餘是 rule 7c 的 proof-of-life
+   時鐘：「曾收過事件」的跨斷線歷史同樣只活在記憶體，重啟會讓 flap-never-deliver
+   的 feed 讀回 0、永不 stale（a、b 兩時鐘對它也各自被短週期重置）——PR 4 持久化
+   義務時應一併評估把最後事件時戳納入。
 6. WebSocket 斷線期間禁止 new entry / add / rebalance。
 7. **（v3 修訂）下列任一成立即視為 stale，進入 recoverable safe mode**：
    - a. socket 已關閉，且斷線超過 5 分鐘（`stale_after_seconds`，預設 300）；

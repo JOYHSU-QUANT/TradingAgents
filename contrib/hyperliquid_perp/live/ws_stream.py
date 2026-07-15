@@ -234,6 +234,14 @@ class LiveWsStream:
         ``None`` declares there is no startup obligation at all; prefer the genesis
         fallback over ``None``, it is never wrong and the dedupe key absorbs the overlap.
 
+        The ``last_live_fill_time`` derivation is only safe when the previous process
+        did not die holding an unretired obligation: obligations live in process memory
+        (this PR has no daemon caller yet), so a crash between booking a reconnect's
+        ``isSnapshot`` batch and completing the gap pass — or a systemd restart erasing
+        the stuck-incomplete state — would make the fresh floor read ≈now and skip the
+        outage. §11.2 rule 5 (v12) therefore requires the PR 4 caller to fold a durable
+        watermark: floor = min(persisted clean-backfill watermark, newest booked fill).
+
         Held on the stream, not dispatched by the caller, so that it and the gap anchor
         are ONE obligation stream retired by the same epoch-gated clear. Dispatching
         caller-side ("floor at startup, anchor afterwards") has a silent hole: a drop

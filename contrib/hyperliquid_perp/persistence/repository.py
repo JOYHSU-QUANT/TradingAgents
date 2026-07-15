@@ -877,7 +877,7 @@ def iter_live_fills(
     ``pending_fee_only`` selects the §15.1-rule-3 backlog a reconciliation job
     must clear: fills whose fee was pending at ingest (``exchange_fee`` NULL) AND
     have no fee correction yet. The recorded fill is immutable, so a backfilled
-    fee lives only in an ``accounting_adjustment_events`` row (§15.1 rule 5, never
+    fee lives only in an ``accounting_adjustment_events`` row (§15.1 rule 4, never
     an overwrite) — without the NOT EXISTS clause an already-corrected fill would
     reappear as pending forever and the job would re-post it every pass (the
     adjustment id dedupe blocks the double-post, but the churn is real).
@@ -2345,12 +2345,17 @@ def iter_accounting_adjustment_events(
 
 # The §12.3 sighting cases PR 3's fill ingestion records (PR 4's reconciliation
 # module extends this vocabulary with its own case marks). Each row is a durable,
-# QUERYABLE record that exchange money exists which the books do not carry — the
-# evidence JSON file alone cannot be a backlog (the payload dir is write-only
-# evidence, and a file older than every backfill window is reachable by nothing).
-# PR 4's discovery query is: case rows whose ``exchange_value`` (the fill's §14.2
-# dedupe key / malformed evidence key) has no matching ``fills`` row.
-RECONCILIATION_CASE_TYPES = frozenset({"fill_unmapped", "fill_malformed", "fill_money_drift"})
+# QUERYABLE record of an exchange fact the books do not carry — the evidence JSON
+# file alone cannot be a backlog (the payload dir is write-only evidence, and a
+# file older than every backfill window is reachable by nothing). Resolution is
+# PER TYPE (§12.3): only ``fill_unmapped`` rows carry the §14.2 dedupe key in
+# ``exchange_value`` and resolve by anti-join against ``fills.exchange_fill_key``;
+# ``fill_malformed`` (bare tid / content digest) and the two drift types
+# (``key|digest`` describing fills that ARE booked) can never match that column
+# and resolve by human review via PR 4's ``action_taken``.
+RECONCILIATION_CASE_TYPES = frozenset(
+    {"fill_unmapped", "fill_malformed", "fill_money_drift", "fill_fee_drift"}
+)
 
 # Which code path observed the case. PR 3 writes only the ingest sighting; PR 4's
 # reconciliation sweeps add their own trigger words when they land.

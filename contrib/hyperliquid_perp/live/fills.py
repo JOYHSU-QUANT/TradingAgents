@@ -15,8 +15,10 @@ money is exchange-authoritative (§15). This module owns three things:
    UNIQUE ``exchange_fill_key`` makes it exactly-once: the SAME fill from a second
    source is rejected, never double-counted. A redelivered duplicate is not merely
    dropped — its content is VERIFIED against the booked row (`_verify_redelivery`):
-   a fee difference feeds the §15.1 correction lane, an identity difference is
-   recorded as a §12.3 case, and matching content (the common case) writes nothing.
+   a fee difference feeds the §15.1 correction lane (or, on another run's fill,
+   a §12.3 fee-drift case — that ledger is not ours to move), an identity
+   difference is recorded as a §12.3 case, and matching content (the common
+   case) writes nothing.
 
 3. :func:`backfill_fill_fee` — the §15.1 fee-pending correction. A fill that
    arrived without a fee posts ``0`` at ingest; when the fee is later learned the
@@ -32,7 +34,7 @@ reconciliation case (PR 4): it is logged and left, not force-applied — recordi
 a fill with no owning order would corrupt the bot's local position model. Once
 §8.3 recovery records the order's exchange id, a REST backfill re-ingests the
 fill and the dedupe key keeps it exactly-once. Every unmapped / malformed /
-money-drift sighting also lands as an ``exchange_reconciliation_events`` row
+money-drift / fee-drift sighting also lands as an ``exchange_reconciliation_events`` row
 (once per fact): the evidence FILE outlives the log, but only the DB row is a
 queryable backlog once the fill ages out of every backfill window.
 """
@@ -603,6 +605,31 @@ def _effective_fee(fill_row: sqlite3.Row, fee_adjustments: list[sqlite3.Row]) ->
     return repo.posted_exchange_fee(None if recorded is None else Decimal(recorded))
 
 
+def _fee_books_state(
+    conn: sqlite3.Connection, run_id: str, fill_row: sqlite3.Row
+) -> tuple[list[sqlite3.Row], Decimal, bool]:
+    """One definition of "do the books already carry this fee", for every lane.
+
+    Returns the fill's fee-correction chain (insertion order), the fee currently
+    effective on it, and whether that fee is RESOLVED — corrected at least once,
+    or carried at ingest. A pending fill (``exchange_fee`` NULL, no correction)
+    reads as effective 0 but UNRESOLVED: §15.1 rule 5's pending exception —
+    learning even the placeholder amount is new information, and only an
+    adjustment row takes the fill out of the rule-3 backlog.
+
+    :func:`backfill_fill_fee` gates ``ALREADY_POSTED`` on this;
+    ``_record_cross_run_fee_drift`` asks the same question read-only about
+    another run's fill. A caller-side copy of this computation could silently
+    drift from the posting lane (see ``_reconcile_redelivered_fee``'s "one
+    definition" note) — which is why it lives here and nowhere else.
+    """
+    prior = repo.iter_accounting_adjustment_events(conn, run_id, target_id=fill_row["fill_id"])
+    fee_adjustments = [a for a in prior if a["adjustment_type"] == "fee"]
+    effective = _effective_fee(fill_row, fee_adjustments)
+    resolved = bool(fee_adjustments) or fill_row["exchange_fee"] is not None
+    return fee_adjustments, effective, resolved
+
+
 def backfill_fill_fee(
     db: Database,
     *,
@@ -622,7 +649,7 @@ def backfill_fill_fee(
     mis-book a non-USDC amount. A caller resolving a non-USDC fee must VALUE it
     first and pass the resulting USDC figure.
 
-    The recorded fill is immutable: a learned fee never overwrites it (§15.1 rule 5).
+    The recorded fill is immutable: a learned fee never overwrites it (§15.1 rule 4).
     It becomes one ``accounting_adjustment_events`` row — which live replay folds —
     and the ledger moves in the SAME transaction that records it, so a crash cannot
     post the fee without recording why.
@@ -670,17 +697,7 @@ def backfill_fill_fee(
                 "refusing to move this run's ledger for another run's fill"
             )
 
-        prior = repo.iter_accounting_adjustment_events(conn, run_id, target_id=fill_id)
-        fee_adjustments = [a for a in prior if a["adjustment_type"] == "fee"]
-        effective = _effective_fee(row, fee_adjustments)
-        # A pending fill (exchange_fee NULL) with no correction yet is NOT "already
-        # posted" even when the learned fee equals the placeholder: the fee being
-        # genuinely 0 is new information, and only an adjustment row records it.
-        # Skipping the write would leave the fill in the pending_fee_only backlog
-        # (keyed on NULL + no fee correction) forever — §15.1 rule 3 says pending
-        # must be clearable, so the first resolution always writes, and the
-        # ledger simply moves by 0.
-        resolved = bool(fee_adjustments) or row["exchange_fee"] is not None
+        fee_adjustments, effective, resolved = _fee_books_state(conn, run_id, row)
         if exchange_fee == effective and resolved:
             # The books already carry exactly this fee. Report what is actually
             # recorded, not the argument we were handed.
@@ -952,14 +969,21 @@ class LiveFillProcessor:
           is cannot be trusted about what the fill cost.
 
         A fill booked under ANOTHER run is not this run's ledger to correct
-        (:func:`backfill_fill_fee` would rightly refuse); drift on it is still
-        recorded — it is evidence either way — but nothing is posted.
+        (:func:`backfill_fill_fee` would rightly refuse), so nothing is ever
+        posted for it — but a mismatch is still recorded either way: identity
+        drift through `_record_money_drift`, a fee-only difference through
+        `_record_cross_run_fee_drift`. Without the latter, an exchange fee
+        correction on a finished run's fill would vanish silently (the fee lane
+        cannot post, and fee is excluded from `_money_drift`), leaving the
+        predecessor run's frozen books wrong with no breadcrumb.
         """
         drift = self._money_drift(fill, booked)
         if drift:
             self._record_money_drift(fill, booked, drift)
         elif booked["run_id"] == self._run_id:
             self._reconcile_redelivered_fee(fill, booked)
+        else:
+            self._record_cross_run_fee_drift(fill, booked)
         return IngestResult(IngestOutcome.DUPLICATE, fill)
 
     @staticmethod
@@ -1063,6 +1087,70 @@ class LiveFillProcessor:
                 result.fee,
             )
 
+    def _record_cross_run_fee_drift(self, fill: ExchangeFill, booked: sqlite3.Row) -> None:
+        """A fee difference on ANOTHER run's fill: breadcrumb only, nothing posted.
+
+        The same-run lane routes a redelivered fee through :func:`backfill_fill_fee`;
+        a fill booked under another run has no lane at all (that run's ledger is not
+        ours to move), so without this recorder an exchange fee correction landing
+        after a run ends would vanish silently — the predecessor run's frozen books
+        stay wrong and nothing anywhere says so. Mirrors the same-run lane's NET
+        semantics gate for gate:
+
+        1. no USDC-proven fee on the redelivery — nothing to learn;
+        2. agrees with the AS-INGESTED fee — the ordinary redelivery, no news;
+        3. agrees with the corrections-folded EFFECTIVE fee of a RESOLVED fill —
+           the other run already carries this amount (the same question
+           `backfill_fill_fee` answers with ``ALREADY_POSTED``); recording it
+           would plant a breadcrumb known to be false. An UNRESOLVED pending
+           fill is never silenced by this gate — same as the rule-5 pending
+           exception, a fee equal to the placeholder 0 is still new information;
+        4. otherwise: evidence file + §12.3 ``fill_fee_drift`` case row, keyed on
+           the fill key plus a digest of ``(effective, redelivered)`` — the same
+           stale payload every pass dedupes to one row, a later different
+           correction is new evidence.
+        """
+        if fill.fee is None:
+            return
+        recorded = booked["exchange_fee"]
+        if recorded is not None and Decimal(recorded) == fill.fee:
+            return
+        _, effective, resolved = _fee_books_state(self._db.conn, booked["run_id"], booked)
+        if resolved and fill.fee == effective:
+            return
+        fee_change = (str(effective), str(fill.fee))
+        case_key = f"{fill.exchange_fill_key}|{_payload_digest({'fee': fee_change})}"
+        logger.warning(
+            "redelivered fill %s carries fee %s but is booked under run %r "
+            "(effective fee %s) — recorded, not posted (another run's ledger; "
+            "left for §12.3 reconciliation)",
+            fill.exchange_fill_key,
+            fill.fee,
+            booked["run_id"],
+            effective,
+        )
+        raw_path = write_raw_payload(
+            payload_dir=self._payload_dir,
+            kind="fill_fee_drift",
+            key=case_key,
+            payload={"fee": fee_change, "raw": fill.raw},
+            now=self._clock.now(),
+            once=True,
+        )
+        self._record_case(
+            case_type="fill_fee_drift",
+            exchange_value=case_key,
+            symbol=fill.coin,
+            local_value=booked["fill_id"],
+            detail={
+                "booked_run_id": booked["run_id"],
+                "as_ingested": recorded,
+                "effective": str(effective),
+                "redelivered": str(fill.fee),
+                "payload_path": raw_path,
+            },
+        )
+
     def _record_case(
         self,
         *,
@@ -1083,8 +1171,8 @@ class LiveFillProcessor:
 
         Opens its own transaction on first sighting, so it must be called OUTSIDE
         any open unit of work — true of every call site (the unmapped lane, the
-        malformed recorder and the drift recorder all run before/after the fill
-        transaction, never inside it).
+        malformed recorder and the two drift recorders all run before/after the
+        fill transaction, never inside it).
         """
         if repo.has_exchange_reconciliation_case(
             self._db.conn, self._run_id, case_type=case_type, exchange_value=exchange_value

@@ -971,7 +971,7 @@ def _fold_adjustments(
 
     Live-only: the recorded fill / funding rows are immutable, so a fee or
     funding learned after the fact lives ONLY in an ``accounting_adjustment_events``
-    row (§15.1 rule 5 — never a silent overwrite). Replay must therefore fold
+    row (§15.1 rule 4 — never a silent overwrite). Replay must therefore fold
     these deltas to reproduce the materialized state a ``backfill_*`` call left.
     """
     for adj in repo.iter_accounting_adjustment_events(conn, run_id):

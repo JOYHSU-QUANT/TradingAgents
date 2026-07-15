@@ -8,6 +8,7 @@ and live replay from the recorded exchange events.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -1078,6 +1079,42 @@ def test_a_non_dedupe_integrity_error_is_not_reported_as_duplicate(
         proc.ingest(_fill())
 
 
+def test_dedupe_precheck_race_falls_back_to_verified_redelivery(db, tmp_path, clock, monkeypatch):
+    """The UNIQUE key is the real dedupe guard; the pre-check is only a fast path.
+
+    When the pre-check misses a fill that IS booked (the concurrent-insert race the
+    except-branch exists for), the real INSERT hits the genuine UNIQUE constraint,
+    and ingest must re-query and route the REAL booked row into _verify_redelivery —
+    not re-raise, and not double-post. The redelivered payload here carries a
+    corrected fee, proving the recovery path still runs full content verification:
+    the correction posts exactly once through the normal lane.
+    """
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    assert proc.ingest(_fill(fee="0.05", tid=33)).outcome is IngestOutcome.APPLIED
+    wallet_before = _ledger(db).wallet_balance
+
+    real_lookup = repo.get_fill_by_exchange_key
+    calls = {"n": 0}
+
+    def racy(conn, key):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None  # the pre-check loses the race
+        return real_lookup(conn, key)
+
+    monkeypatch.setattr(repo, "get_fill_by_exchange_key", racy)
+
+    result = proc.ingest(_fill(fee="0.07", tid=33))
+
+    assert result.outcome is IngestOutcome.DUPLICATE
+    assert calls["n"] >= 2  # the insert was really attempted and the handler re-queried
+    assert _ledger(db).total_fees == Decimal("0.07")  # verified, corrected — once
+    assert _ledger(db).wallet_balance == wallet_before - Decimal("0.02")
+    assert db.conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 1
+
+
 # ---------------------------------------------------------------------------
 # §14 ordering: entry price is order-dependent, so exchange time is authoritative
 # ---------------------------------------------------------------------------
@@ -1521,6 +1558,99 @@ def test_cross_run_duplicate_never_touches_this_runs_ledger(db, clock, tmp_path)
     assert db.conn.execute("SELECT COUNT(*) FROM accounting_adjustment_events").fetchone()[0] == 0
     assert _ledger(db, run_id="r").total_fees == Decimal("0.05")
     assert _ledger(db, run_id="s").total_fees == Decimal("0")
+
+
+def test_cross_run_fee_only_difference_lands_a_fee_drift_case(db, clock, tmp_path):
+    """An exchange fee correction on a finished run's fill: breadcrumb, never a post.
+
+    The fee lane cannot move another run's ledger and fee is excluded from the
+    identity-drift set, so without its own §12.3 case type this difference would
+    leave zero trace anywhere (§15.1 rule 8) — the predecessor run's frozen books
+    would be wrong with nothing saying so.
+    """
+    _live_run(db, run_id="r")
+    _live_order(db, run_id="r")
+    proc_r = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    assert proc_r.ingest(_fill(fee="0.05", tid=31)).outcome is IngestOutcome.APPLIED
+
+    _live_run(db, run_id="s")
+    proc_s = LiveFillProcessor(db=db, run_id="s", payload_dir=tmp_path, clock=clock)
+
+    # An agreeing redelivery is the ordinary case, and a redelivery with no
+    # USDC-proven fee has nothing to teach: neither leaves a breadcrumb.
+    assert proc_s.ingest(_fill(fee="0.05", tid=31)).outcome is IngestOutcome.DUPLICATE
+    assert proc_s.ingest(_fill(fee=None, tid=31)).outcome is IngestOutcome.DUPLICATE
+    assert repo.iter_exchange_reconciliation_events(db.conn, "s", case_type="fill_fee_drift") == []
+
+    # A differing fee records once (per distinct amount) and posts nothing.
+    differing = _fill(fee="0.03", tid=31)
+    assert proc_s.ingest(differing).outcome is IngestOutcome.DUPLICATE
+    assert proc_s.ingest(differing).outcome is IngestOutcome.DUPLICATE  # next pass: deduped
+    cases = repo.iter_exchange_reconciliation_events(db.conn, "s", case_type="fill_fee_drift")
+    assert len(cases) == 1
+    assert cases[0]["local_value"] == live_fill_id("r", "tid|31")
+    assert cases[0]["exchange_value"].startswith("tid|31|")
+    detail = json.loads(cases[0]["detail"])
+    assert detail["booked_run_id"] == "r"
+    assert detail["redelivered"] == "0.03"
+    assert list(tmp_path.glob("fill_fee_drift-*.json"))
+    assert db.conn.execute("SELECT COUNT(*) FROM accounting_adjustment_events").fetchone()[0] == 0
+    assert _ledger(db, run_id="r").total_fees == Decimal("0.05")
+    assert _ledger(db, run_id="s").total_fees == Decimal("0")
+
+
+def test_cross_run_fee_drift_compares_against_the_other_runs_effective_fee(db, clock, tmp_path):
+    """An amount the dead run's correction chain already carries is not news.
+
+    Mirrors the same-run lane's NET semantics (backfill_fill_fee's ALREADY_POSTED
+    gate): recording a breadcrumb for a fee the other run's books already carry
+    would plant evidence known to be false.
+    """
+    _live_run(db, run_id="r")
+    _live_order(db, run_id="r")
+    proc_r = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    assert proc_r.ingest(_fill(fee="0.05", tid=32)).outcome is IngestOutcome.APPLIED
+    backfill_fill_fee(
+        db,
+        run_id="r",
+        fill_id=live_fill_id("r", "tid|32"),
+        exchange_fee=Decimal("0.03"),
+        fee_token="USDC",
+        source="manual",
+    )
+
+    _live_run(db, run_id="s")
+    proc_s = LiveFillProcessor(db=db, run_id="s", payload_dir=tmp_path, clock=clock)
+
+    # Differs from as-ingested (0.05) but matches the effective fee: no case.
+    assert proc_s.ingest(_fill(fee="0.03", tid=32)).outcome is IngestOutcome.DUPLICATE
+    assert repo.iter_exchange_reconciliation_events(db.conn, "s", case_type="fill_fee_drift") == []
+
+    # Differs from both: a real breadcrumb.
+    assert proc_s.ingest(_fill(fee="0.07", tid=32)).outcome is IngestOutcome.DUPLICATE
+    assert (
+        len(repo.iter_exchange_reconciliation_events(db.conn, "s", case_type="fill_fee_drift")) == 1
+    )
+
+
+def test_cross_run_pending_fill_is_not_silenced_by_the_placeholder(db, clock, tmp_path):
+    """A pending fill's fee resolving to 0 is still news — same as the rule-5 exception.
+
+    The effective-fee gate must not read the pending placeholder 0 as "already
+    carried": the other run never resolved this fee at all, so ANY USDC-proven
+    amount on the redelivery (including 0) is information its books do not have.
+    """
+    _live_run(db, run_id="r")
+    _live_order(db, run_id="r")
+    proc_r = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    assert proc_r.ingest(_fill(fee=None, tid=34)).outcome is IngestOutcome.APPLIED
+
+    _live_run(db, run_id="s")
+    proc_s = LiveFillProcessor(db=db, run_id="s", payload_dir=tmp_path, clock=clock)
+    assert proc_s.ingest(_fill(fee="0", tid=34)).outcome is IngestOutcome.DUPLICATE
+    assert (
+        len(repo.iter_exchange_reconciliation_events(db.conn, "s", case_type="fill_fee_drift")) == 1
+    )
 
 
 # ---------------------------------------------------------------------------

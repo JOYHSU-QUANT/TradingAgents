@@ -738,6 +738,15 @@ open orders updates（orderUpdates）
    安靜市場會恆誤報 stale，而它沒有自己的「應該要有事件」基準。PR 5 接 SL/TP 時
    必須知道 position 在這個窗口內可能過時。
 
+   **（v11 新增，2026-07-15）stale 的修復動作歸 PR 4 safe-mode 狀態機**：偵測（本節
+   三時鐘）與修復是兩件事，而修復在 half-open 情境**不會自己發生**——半開 socket 的
+   handle 仍在，`ensure_connected` 讀作已連線而 no-op；SDK 的 `on_close`（PR 5 接線）
+   在正好這種情境也不會 fire；stale 又具黏性、要第一則事件才解除。所以 PR 4 的
+   safe-mode 狀態機在讀到 `is_stale` 時，除了進 recoverable safe mode，**必須主動強制
+   重連**（`supervisor.close()` ＋ `ensure_connected()`，現有 API 已足）。ws_stream
+   維持「只報告、不行動」——重連策略（頻率、退避）是 safe-mode 的決策，不是
+   bookkeeping 的。
+
 ### 11.3 WebSocket Failure Handling
 
 ```
@@ -812,16 +821,30 @@ SQLite 不得覆蓋交易所事實。若兩者衝突，系統必須進入 reconc
 | Exchange account equity 與 SQLite 差異超過 tolerance | 進入 safe mode |
 | 交易所有 active position 但沒有 valid SL | 立即 repair；repair 失敗則 emergency close |
 
-**（v10 新增，2026-07-15）PR 3 的 ingest 端 sighting rows**：unmapped／malformed／
-money-drift 三種 fill 觀察在第一次看到時即寫入 `exchange_reconciliation_events`
-（`case_type` = `fill_unmapped` / `fill_malformed` / `fill_money_drift`；once per
-fact——同一事實每輪 backfill 重見不重複寫，`(run_id, case_type, exchange_value)`
-為去重鍵）。理由：evidence 檔是 write-only 證據、log 會滾動，而 fill 一旦老出所有
-backfill 窗口（trailing 6h、floor/gap 義務皆清）就沒有任何路徑會再抓到它——DB row
-是唯一可查詢的 backlog。PR 4 的 discovery 以 case rows 對 `fills.exchange_fill_key`
-反查（anti-join）找出仍未入帳的 sighting，作為「交易所有 fill 但 SQLite 沒記錄」
-那一列的已知起點清單（含 `detail` JSON 內的 `exchange_fill_time`，給補抓窗口定位）。
-resolution 不改寫 case rows（它們是 log）；「已解決」的定義就是 anti-join 不再命中。
+**（v10 新增、v11 修訂，2026-07-15）PR 3 的 ingest 端 sighting rows**：unmapped／
+malformed／money-drift／fee-drift 四種 fill 觀察在第一次看到時即寫入
+`exchange_reconciliation_events`（`case_type` = `fill_unmapped` / `fill_malformed` /
+`fill_money_drift` / `fill_fee_drift`；once per fact——同一事實每輪 backfill 重見不
+重複寫，`(run_id, case_type, exchange_value)` 為去重鍵）。理由：evidence 檔是
+write-only 證據、log 會滾動，而 fill 一旦老出所有 backfill 窗口（trailing 6h、
+floor/gap 義務皆清）就沒有任何路徑會再抓到它——DB row 是唯一可查詢的 backlog。
+resolution 不改寫 case rows（它們是 log），且**「已解決」的定義是分型的**——
+`exchange_value` 的內容形狀每型不同，一條共用的 anti-join 對其中三型永遠不會除帳：
+
+- **`fill_unmapped`**：`exchange_value` 就是 §14.2 去重鍵。PR 4 的 discovery 以它對
+  `fills.exchange_fill_key` 反查（anti-join）找出仍未入帳的 sighting，作為「交易所有
+  fill 但 SQLite 沒記錄」那一列的已知起點清單（含 `detail` JSON 內的
+  `exchange_fill_time`，給補抓窗口定位）；「已解決」= anti-join 不再命中（§8.3
+  recovery 補上 mapping 後 re-ingest 入帳即自然除帳）。
+- **`fill_malformed`**：`exchange_value` 是裸 tid 或 content digest（§11.3 的 malformed
+  key），**永遠 join 不到** `fills.exchange_fill_key`。它代表「有一筆看不懂的 payload」
+  而非「有一筆確定的 fill 沒入帳」；解決路徑是人工檢視證據檔（修 parser、或確認
+  payload 本來就是垃圾），由 PR 4 的 sweep 以 `action_taken` 標記處置。
+- **`fill_money_drift` / `fill_fee_drift`**：`exchange_value` 是 `去重鍵|drift digest`，
+  且描述的 fill **已經入帳**——它們根本不屬於「帳上沒有的錢」backlog，出現在
+  anti-join 結果裡是誤列。它們是「同 tid 但內容矛盾」（money drift）或「別的 run 的
+  fill 其 fee 有更正」（fee drift，見 §15.1 rule 8）的審計線索，解決路徑是人工核對後
+  以 `action_taken` 標記。
 
 ## 13. Safe Mode
 
@@ -1035,8 +1058,23 @@ accounting replay 從這些事件重建 position / account，必須與 materiali
      不套用；也不在身份漂移之上補 fee——連「這是哪筆 fill」都說不清的 payload，
      它宣稱的 fee 不可信。
    - **內容一致**（絕大多數）→ 無任何寫入。
-   跨 run 的 duplicate 不動本 run 的 ledger（`backfill_fill_fee` 的 run 檢查會拒絕）；
-   漂移仍記證據。
+   跨 run 的 duplicate 不動**任何** ledger（`backfill_fill_fee` 的 run 檢查會拒絕）；
+   漂移仍記證據——身份漂移走 `fill_money_drift`，**（v11 新增）fee-only 差異走
+   `fill_fee_drift` case row**（§12.3）：fee 車道對別的 run 無法 post，而 fee 又刻意
+   不在身份比對集合裡，沒有這個 recorder 的話，交易所對已結束 run 的 fill 發出的
+   fee 更正會無聲消失。比對語意鏡像同 run 車道的**淨**行為：先比 as-ingested（無新
+   資訊即返回），再比該 run 折算後的 effective fee（那個 run 的更正鏈已載有此金額＝
+   `ALREADY_POSTED` 的同義，不記已知為假的線索）；仍 pending 的 fill 不受 effective
+   閘靜默（rule 5 的 pending 例外同義，fee 恰為 placeholder 0 也是新資訊）。
+
+**（v11 新增，2026-07-15）per-fill fee 的讀者義務**：`fills.exchange_fee` 是**入帳當下**
+的快照（pending = NULL，posted 0），rule 4/5 的更正**只**活在
+`accounting_adjustment_events`，fill row 永不回寫。因此任何 per-fill fee 的消費者
+（CSV export、§21 驗收指標、摩擦占比分析）**不得**直接讀 `fills.exchange_fee` 當生效
+值——直接讀會對 pending fill 拿到 0、對已更正 fill 拿到過期值，per-fill 加總也不會等於
+ledger 的 `total_fees`。生效 fee 的唯一定義是「as-ingested ＋ 折上全部 fee 更正」
+（`_effective_fee` / `posted_exchange_fee` 那組 helper）；PR 4/PR 6 的 export 與指標
+實作必須走共用 helper（或等價的 join），不得手刻第二份定義。
 
 ### 15.2 Funding Rules
 
@@ -1088,6 +1126,16 @@ raw_exchange_payload_path
 時間未知，消費者必須把 NULL 讀成「未知」而非「未送出」。IOC ack 部分成交
 （totalSz < 請求 size）時 `status` 寫 `partially_filled`，不得寫 `filled`；
 成交數量真相仍由 PR 3 fill ingestion 擁有。
+
+**（v11 新增，2026-07-15）live fill 的 plan/slice 歸因契約**：paper fill 的
+`plan_id`／`slice_index` 由 engine 從記憶體內的 plan context 同步填入；live fill 走
+非同步的 WS/REST ingest，唯一可用的 context 是 oid 反查到的 orders row——而 orders
+目前沒有 plan/slice 欄位可抄（`flip_plan_id` 有、但 slice 沒有），所以 PR 3 的 live
+fill 這兩欄暫為 NULL。**PR 5 動 schema 時必須把歸因欄位補上 orders**（`plan_id`／
+`slice_index`，或等價的 slice→cloid 對照），讓 ingest 抄進 live fill——paper 與 live
+的 fill row 形狀必須一致，per-slice TWAP 執行帳務（§9）與 export 分析才不用對 live
+另走 order join 的第二套查法。這是刻意記在 PR 3 的前置契約：等 PR 5 的下單路徑
+寫好才發現 fill 歸因斷鏈，補欄位就要回填資料而不是只加欄。
 
 ### 16.2 fills Additions
 

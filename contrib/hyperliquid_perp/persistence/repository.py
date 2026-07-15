@@ -83,6 +83,8 @@ __all__ = [
     "newest_live_fill_order_key",
     "next_live_attempt_index",
     "posted_exchange_fee",
+    "require_current_account_state",
+    "require_live_fill_basis",
     "set_funding_status",
     "set_position_protection",
     "update_decision_attempt",
@@ -399,6 +401,20 @@ def get_current_account_state(conn: sqlite3.Connection, run_id: str) -> AccountL
     )
 
 
+def require_current_account_state(conn: sqlite3.Connection, run_id: str) -> AccountLedger:
+    """The run's current ledger — fail loud when ``initialize_run`` never ran.
+
+    The one definition of the check, because every poster that folds a delta into
+    the ledger (paper ``apply_fill``/``record_funding``, live ``apply_live_fill``/
+    ``backfill_fill_fee``) must agree that a missing ledger is an impossible state
+    to refuse, never a zero to default to.
+    """
+    ledger = get_current_account_state(conn, run_id)
+    if ledger is None:
+        raise ValueError(f"run {run_id!r} has no account state; call initialize_run first")
+    return ledger
+
+
 # --------------------------------------------------------------------------
 # current_positions (materialized per-symbol position)
 # --------------------------------------------------------------------------
@@ -681,6 +697,29 @@ def posted_exchange_fee(exchange_fee: Decimal | None) -> Decimal:
     exactly, so the books would be consistently, invisibly wrong.
     """
     return Decimal(0) if exchange_fee is None else exchange_fee
+
+
+def require_live_fill_basis(fill: sqlite3.Row) -> Decimal:
+    """A live fill's exchange ``closedPnl`` — the §15 realized basis — or fail loud.
+
+    ``insert_live_fill`` always records ``exchange_closed_pnl`` (closedPnl arrives
+    with the fill; only the fee can be pending), so a NULL here means a fill was
+    written into a live run through a non-live path — folding it against the paper
+    fee model would silently misstate the books. Refuse rather than guess.
+
+    The one definition of the check, because the two live folds must agree on it:
+    the out-of-order position re-fold (``live.fills._rebuild_position``) and the §5
+    replay's live fold (``paper.accounting.replay_within``). Were one to grow a
+    fallback the other lacks, materialized and replayed state would diverge on
+    exactly the row the check exists to catch.
+    """
+    value = fill["exchange_closed_pnl"]
+    if value is None:
+        raise ValueError(
+            f"live fill {fill['fill_id']!r} has no exchange_closed_pnl — it was not "
+            "recorded through insert_live_fill; the live accounting basis is missing"
+        )
+    return Decimal(value)
 
 
 def get_fill(conn: sqlite3.Connection, fill_id: str) -> sqlite3.Row | None:

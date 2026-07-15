@@ -9,6 +9,7 @@ and live replay from the recorded exchange events.
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -203,6 +204,30 @@ def test_parse_missing_required_field_fails_loud(missing):
 def test_parse_unknown_side_fails_loud():
     with pytest.raises(MalformedResponseError, match="side"):
         ExchangeFill.parse(_fill(side="X"))
+
+
+def test_hand_built_fill_with_naive_time_is_rejected():
+    # fill_time is half the §14.3 ordering key: a naive datetime would surface as
+    # an opaque "can't compare offset-naive and offset-aware" TypeError deep in
+    # apply_live_fill's newest-key comparison, far from whoever built the instance.
+    # parse always supplies aware UTC, so only a hand-built instance can trip this.
+    ef = ExchangeFill.parse(_fill())
+    with pytest.raises(ValueError, match="timezone-aware"):
+        replace(ef, fill_time=ef.fill_time.replace(tzinfo=None))
+
+
+def test_ingest_rejects_fill_paired_with_wrong_payload(db, clock, tmp_path):
+    # The documented fill=/raw_fill= pairing is enforced: a mismatched pair would
+    # apply one fill's money while recording the OTHER fill's payload as evidence,
+    # and both the dedupe key and the audit trail would look internally consistent.
+    # A plain ValueError (caller contract), NOT MalformedResponseError — the §11.3
+    # skip-one-and-continue handlers must not swallow it as a payload defect.
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    with pytest.raises(ValueError, match="parse of raw_fill"):
+        proc.ingest(_fill(tid=1), fill=ExchangeFill.parse(_fill(tid=2)))
+    assert db.conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -754,6 +779,33 @@ def test_live_replay_is_consistent(db):
     assert result.is_consistent, result.mismatch_detail
     assert result.positions["BTC"].is_flat
     assert result.ledger.realized_pnl == Decimal("15.7")
+
+
+def test_live_replay_refuses_fill_without_exchange_basis(db):
+    # require_live_fill_basis: a fill in a LIVE run whose exchange_closed_pnl is
+    # NULL was written through a non-live path; folding it against the paper fee
+    # model would silently misstate the books, so replay must refuse — never guess.
+    _live_run(db)
+    _live_order(db)
+    with db.transaction() as conn:
+        repo.insert_fill(
+            conn,
+            fill_id="rogue",
+            mode="live",
+            run_id="r",
+            order_id="o1",
+            symbol="BTC",
+            side="buy",
+            fill_qty=Decimal("1"),
+            fill_price=Decimal("100"),
+            fill_notional=Decimal("100"),
+            fee=Decimal("0"),
+            fee_rate=Decimal("0"),
+            realized_pnl_delta=Decimal("0"),
+            timestamp=_NOW,
+        )
+    with pytest.raises(ValueError, match="no exchange_closed_pnl"):
+        accounting.replay(db, run_id="r")
 
 
 def test_live_replay_consistent_after_fee_backfill(db):

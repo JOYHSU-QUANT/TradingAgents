@@ -171,7 +171,7 @@ class ExchangeFill:
     fee: Decimal | None
     liquidity_role: str
     exchange_order_id: str
-    exchange_fill_id: str | None
+    exchange_fill_id: str  # the exchange's tid as text; ``parse`` requires it (§14.2)
     fill_time: datetime
     fill_notional: Decimal
     exchange_fill_key: str
@@ -187,6 +187,16 @@ class ExchangeFill:
         if self.liquidity_role not in repo.LIVE_LIQUIDITY_ROLES:
             raise ValueError(
                 f"ExchangeFill.liquidity_role must be maker/taker, got {self.liquidity_role!r}"
+            )
+        # ``fill_time`` is half of the §14.3 ordering key: it is compared against
+        # ``newest_live_fill_order_key`` and sorted on in ``ingest_message``. A
+        # naive datetime would fail those comparisons with an opaque TypeError far
+        # from whoever built the instance — reject it here instead, the same
+        # boundary discipline as ids._canonical_instant / fill_backfill._require_aware.
+        # (``parse`` always supplies an aware UTC time via _parse_epoch_ms.)
+        if self.fill_time.tzinfo is None:
+            raise ValueError(
+                f"ExchangeFill.fill_time must be timezone-aware, got {self.fill_time!r}"
             )
 
     @classmethod
@@ -292,13 +302,6 @@ class ExchangeFill:
 # --------------------------------------------------------------------------
 
 
-def _require_ledger(conn: sqlite3.Connection, run_id: str) -> AccountLedger:
-    ledger = repo.get_current_account_state(conn, run_id)
-    if ledger is None:
-        raise ValueError(f"run {run_id!r} has no account state; call initialize_run first")
-    return ledger
-
-
 def _rebuild_position(conn: sqlite3.Connection, run_id: str, coin: str) -> PositionState:
     """Re-fold one symbol's live fills in exchange-time order, from the run's genesis.
 
@@ -322,18 +325,6 @@ def _rebuild_position(conn: sqlite3.Connection, run_id: str, coin: str) -> Posit
     position = seeds.get(coin) or PositionState.flat(coin)
     with localcontext(DECIMAL_CONTEXT):
         for row in repo.iter_fills(conn, run_id, chronological=True, symbol=coin):
-            basis = row["exchange_closed_pnl"]
-            if basis is None:
-                # The same fail-loud replay applies (``_require_live_basis``): a live
-                # run's fill with no exchange basis was not written through
-                # insert_live_fill, and folding it against the paper fee model would
-                # silently misstate the books. Named here rather than left to raise a
-                # bare TypeError out of Decimal(None).
-                raise ValueError(
-                    f"live fill {row['fill_id']!r} has no exchange_closed_pnl — it was "
-                    "not recorded through insert_live_fill; the live accounting basis "
-                    "is missing"
-                )
             recorded_fee = row["exchange_fee"]
             effect = compute_live_fill_effect(
                 position,
@@ -343,7 +334,7 @@ def _rebuild_position(conn: sqlite3.Connection, run_id: str, coin: str) -> Posit
                 exchange_fee=repo.posted_exchange_fee(
                     None if recorded_fee is None else Decimal(recorded_fee)
                 ),
-                exchange_closed_pnl=Decimal(basis),
+                exchange_closed_pnl=repo.require_live_fill_basis(row),
             )
             position = effect.position
     return position
@@ -381,7 +372,7 @@ def apply_live_fill(
         )
     now = timestamp or datetime.now(timezone.utc)
     position = repo.get_current_position(conn, run_id, fill.coin) or PositionState.flat(fill.coin)
-    ledger = _require_ledger(conn, run_id)
+    ledger = repo.require_current_account_state(conn, run_id)
 
     # Read BEFORE the insert, so it is the newest fill already on the books, not this
     # one. A fill that sorts BEFORE it is out of order: the socket and the REST backfill
@@ -672,7 +663,7 @@ def backfill_fill_fee(
         wallet_d, realized_d, fees_d, funding_d = adjustment_ledger_delta(
             "fee", effective, exchange_fee
         )
-        ledger = _require_ledger(conn, run_id)
+        ledger = repo.require_current_account_state(conn, run_id)
         with localcontext(DECIMAL_CONTEXT):
             new_ledger = AccountLedger(
                 wallet_balance=ledger.wallet_balance + wallet_d,
@@ -754,9 +745,21 @@ class LiveFillProcessor:
         ``fill`` lets a caller that has ALREADY parsed the payload pass the result
         in rather than paying for a second parse — :meth:`ingest_message` parses its
         whole batch up front so it can order it by exchange time before applying any
-        of it. It must be the parse of ``raw_fill``; nothing else is a valid pairing.
+        of it. It must be the parse of ``raw_fill``; nothing else is a valid pairing,
+        and the pairing is ENFORCED (by identity, below): a mismatched pair would
+        apply one fill's money while recording the OTHER fill's payload as its
+        evidence, and both the dedupe key and the audit trail would look internally
+        consistent. The mismatch is a caller-contract violation, so it raises a
+        plain ``ValueError`` — deliberately NOT ``MalformedResponseError``, which
+        the §11.3 skip-one-and-continue handlers would swallow as a payload defect.
         """
-        fill = fill if fill is not None else ExchangeFill.parse(raw_fill)
+        if fill is None:
+            fill = ExchangeFill.parse(raw_fill)
+        elif fill.raw is not raw_fill:
+            raise ValueError(
+                "ingest(fill=...) must be the parse of raw_fill — the passed fill "
+                f"was parsed from a different payload (dedupe key {fill.exchange_fill_key})"
+            )
 
         # Dedupe pre-check: cheap, and lets the caller distinguish "already had it"
         # from "new" without racing the UNIQUE constraint. The constraint is still

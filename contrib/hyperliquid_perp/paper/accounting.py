@@ -492,14 +492,6 @@ def summarize_account(
 # --------------------------------------------------------------------------
 
 
-def _require_ledger(conn: sqlite3.Connection, run_id: str) -> AccountLedger:
-    """The run's current ledger — fail loud when ``initialize_run`` never ran."""
-    ledger = repo.get_current_account_state(conn, run_id)
-    if ledger is None:
-        raise ValueError(f"run {run_id!r} has no account state; call initialize_run first")
-    return ledger
-
-
 def initialize_run(
     db: Database,
     *,
@@ -537,7 +529,7 @@ def initialize_run(
     with db.transaction() as conn:
         # Re-initializing an existing run is a lifecycle error (a restart replays,
         # it does not re-init). Surface it as the same clean domain error the
-        # missing-run path gives (_require_ledger), not the raw sqlite3.IntegrityError
+        # missing-run path gives (repo.require_current_account_state), not the raw sqlite3.IntegrityError
         # a bare insert_run PK conflict would raise.
         if repo.get_run(conn, run_id) is not None:
             raise ValueError(
@@ -656,7 +648,7 @@ def apply_fill(
     side = Side.parse(side)  # parse once; compute/insert below accept the enum as-is
     now = timestamp or _utcnow()
     position = repo.get_current_position(conn, run_id, symbol) or PositionState.flat(symbol)
-    ledger = _require_ledger(conn, run_id)
+    ledger = repo.require_current_account_state(conn, run_id)
 
     effect = compute_fill_effect(position, side=side, qty=qty, price=price, fee_rate=fee_rate)
 
@@ -884,7 +876,7 @@ def record_funding(
                 updated_at=now,
             )
 
-        ledger = _require_ledger(conn, run_id)
+        ledger = repo.require_current_account_state(conn, run_id)
         # Pinned for the same reason as post_fill's ledger sums: the persisted
         # wallet must match what replay re-derives under DECIMAL_CONTEXT.
         with localcontext(DECIMAL_CONTEXT):
@@ -945,23 +937,6 @@ def adjustment_ledger_delta(
             return (delta, zero, zero, delta)
         # realized_pnl
         return (delta, delta, zero, zero)
-
-
-def _require_live_basis(fill: sqlite3.Row) -> Decimal:
-    """A live fill's exchange ``closedPnl`` — the §15 realized basis — or fail loud.
-
-    ``insert_live_fill`` always records ``exchange_closed_pnl`` (closedPnl arrives
-    with the fill; only the fee can be pending), so a NULL here means a fill was
-    written into a live run through a non-live path — replaying it against the
-    paper fee model would silently misstate the books. Refuse rather than guess.
-    """
-    value = fill["exchange_closed_pnl"]
-    if value is None:
-        raise ValueError(
-            f"live run fill {fill['fill_id']!r} has no exchange_closed_pnl — it was not "
-            "recorded through insert_live_fill; the live accounting basis is missing"
-        )
-    return Decimal(value)
 
 
 def _fold_posted_funding(
@@ -1120,7 +1095,7 @@ def replay_within(conn: sqlite3.Connection, *, run_id: str) -> ReplayResult:
                     qty=Decimal(fill["fill_qty"]),
                     price=Decimal(fill["fill_price"]),
                     exchange_fee=repo.posted_exchange_fee(_dec(fill["exchange_fee"])),
-                    exchange_closed_pnl=_require_live_basis(fill),
+                    exchange_closed_pnl=repo.require_live_fill_basis(fill),
                 )
             else:
                 effect = compute_fill_effect(

@@ -30,9 +30,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 __all__ = [
+    "accounting_adjustment_id",
     "decision_attempt_id",
+    "exchange_fill_key",
     "fill_id",
     "funding_event_id",
+    "live_fill_id",
     "live_order_attempt_id",
     "slice_id",
 ]
@@ -142,3 +145,106 @@ def decision_attempt_id(run_id: str, scheduled_at: datetime) -> str:
             _part(_canonical_instant(scheduled_at, name="scheduled_at"), name="scheduled_at"),
         )
     )
+
+
+def exchange_fill_key(*, tid: object) -> str:
+    """The §14.2 dedupe key for one live fill — exactly-once across all sources.
+
+    The key is the exchange's own stable fill id: ``tid|<value>``. Hyperliquid
+    supplies ``tid`` on EVERY fill — the SDK's ``Fill`` type declares it a
+    required ``int``, on both the ``userFills`` socket stream and the
+    ``userFillsByTime`` REST endpoint — so the same fill derives the same key
+    from every source, which is exactly what §14.3 rule 5 demands.
+
+    §14.2's composite fallback (``symbol + oid + fill_time + side + price +
+    size``) is deliberately NOT implemented. Its precondition — "the exchange has
+    no stable fill id" — is false for Hyperliquid, and the composite is not a
+    safe substitute where it does apply:
+
+    - it can COLLIDE two genuinely distinct fills (one order matching two resting
+      orders at the same price, side, size and millisecond derives one key), so
+      the second real fill is silently dropped as a duplicate — an undercount
+      that replay cannot detect, because replay only re-derives what was recorded;
+    - it can DIVERGE from the tid form for the same fill if any source ever
+      omitted ``tid``, double-posting the money.
+
+    So a live fill without a ``tid`` is treated as MALFORMED (see
+    ``ExchangeFill.parse``): its raw payload is recorded and it is not applied
+    (§11.3), surfacing for reconciliation rather than being keyed on something
+    that can silently miscount. If a future venue genuinely lacks a stable fill
+    id, the composite belongs here — with its collision risk confronted, not
+    inherited.
+    """
+    if tid is None or str(tid) == "":
+        raise ValueError("a live fill dedupe key requires the exchange's tid (§14.2)")
+    return _SEP.join((_part("tid", name="tag"), _part(tid, name="tid")))
+
+
+def live_fill_id(run_id: str, exchange_fill_key: str) -> str:
+    """Unique key for one live fill row (exactly-once on re-ingest).
+
+    Derived from the §14.2 dedupe key, so the same exchange fill re-arriving from
+    any source re-derives the same ``fill_id`` and the ``fills`` PRIMARY KEY
+    rejects it — a second, independent guard beside the UNIQUE ``exchange_fill_key``
+    index. Run-prefixed so the id reads like the paper engine's ids in the store,
+    though the exchange key alone is already unique.
+
+    ``exchange_fill_key`` is itself a ``|``-joined composite, so it is embedded
+    VERBATIM rather than through ``_part`` (which forbids the separator): a
+    fill_id is a PRIMARY KEY, never parsed back into fields, and the leading
+    ``<run_id>|livefill|`` tag keeps it unambiguous against every other id shape.
+    """
+    return (
+        f"{_part(run_id, name='run_id')}{_SEP}livefill{_SEP}"
+        f"{_part_nonempty(exchange_fill_key, name='exchange_fill_key')}"
+    )
+
+
+def accounting_adjustment_id(
+    run_id: str, adjustment_type: str, target_id: str, seq: int = 0
+) -> str:
+    """Unique key for one §15 accounting correction (exactly-once backfill).
+
+    Keyed on the target being corrected (a fill id, a funding event id), the
+    correction TYPE, and WHICH correction of that type it is: ``seq`` counts the
+    corrections already posted for that (target, type) — the first is ``0``, a
+    later and genuinely different one is ``1``, ``2``, …
+
+    The sequence exists because a target can legitimately be corrected more than
+    once: a referral discount, a staking-tier rebate applied after the fact, an
+    exchange fee correction. Keyed on (target, type) alone, that second correction
+    would collide with the first on the PRIMARY KEY and be refused — which does not
+    merely lose the correction, it WEDGES the reconciliation job, which re-hits the
+    same target and fails again on every pass, forever.
+
+    Exactly-once is therefore no longer the id's job alone. The caller derives
+    ``seq`` from the corrections already recorded (see ``backfill_fill_fee``, which
+    counts them inside the posting transaction) and must treat a re-learned but
+    UNCHANGED amount as a no-op rather than as a new correction. What the id still
+    guarantees is that two writers racing to post the same sequence collide instead
+    of double-posting.
+
+    ``target_id`` may itself be a ``|``-joined composite (a live ``fill_id`` is), so
+    — as in ``live_fill_id`` — it is embedded VERBATIM as the TRAILING segment rather
+    than through ``_part``: the id is a PRIMARY KEY, never parsed back into fields,
+    and the fixed ``<run_id>|<type>|<seq>|`` prefix keeps it unambiguous. That is why
+    ``seq`` sits before it, not after.
+    """
+    return (
+        f"{_part(run_id, name='run_id')}{_SEP}"
+        f"{_part(adjustment_type, name='adjustment_type')}{_SEP}"
+        f"{_part(seq, name='seq')}{_SEP}"
+        f"{_part_nonempty(target_id, name='target_id')}"
+    )
+
+
+def _part_nonempty(value: object, *, name: str) -> str:
+    """Like :func:`_part` but permits the ``|`` separator (a trailing composite id).
+
+    Only safe for the LAST segment of a composite that is never parsed back into
+    fields — the fixed prefix ahead of it is what keeps the whole id unambiguous.
+    """
+    text = str(value)
+    if not text:
+        raise ValueError(f"id component {name!r} must not be empty")
+    return text

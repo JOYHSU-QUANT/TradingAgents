@@ -34,6 +34,7 @@ stay unposted.
 from __future__ import annotations
 
 import logging
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -127,6 +128,24 @@ def backfill_pending_funding(
                 "funding backfill for %s could not post %s @ %s: %s — the event "
                 "stays pending and its funding P&L stays uncounted (corrupt "
                 "stored row; fix it in the store to resolve it)",
+                run_id,
+                event["symbol"],
+                event["funding_timestamp"],
+                exc,
+            )
+            continue
+        except sqlite3.Error as exc:
+            # A STORE failure, not a corrupt row — and it must take the same per-event
+            # lane. ``record_funding`` opens its OWN transaction, so a transient
+            # "database is locked" is reachable right here; escaping, it aborts the
+            # whole pass, and at restart that abort fires BEFORE the protection-only
+            # fallback — a live position left unwatched, crash-looping on the same
+            # event. Logged apart from the corrupt lane so a transient lock is never
+            # misdiagnosed as a bad row: the event stays pending, the next pass retries.
+            corrupt += 1
+            logger.error(
+                "funding backfill for %s hit a store error posting %s @ %s: %s — the "
+                "event stays pending and will be retried on the next pass",
                 run_id,
                 event["symbol"],
                 event["funding_timestamp"],

@@ -408,6 +408,22 @@ class HyperliquidSignedClient:
             int(exchange_order_id),
         )
 
+    def user_fills_by_time(self, start_time_ms: int, end_time_ms: int | None = None) -> Any:
+        """The main wallet's fills in ``[start_time_ms, end_time_ms]`` (read-only; §14.1).
+
+        The REST backfill source (:class:`~...live.fill_backfill.FillBackfiller`):
+        it catches fills the WebSocket missed while it was down or before it
+        subscribed. Times are epoch-ms, the form the API takes; the raw fill list
+        is returned untouched for the ingester to parse and dedupe (§14.2/§14.3).
+        Ungated — a read never places or moves anything.
+        """
+        return call_sdk(
+            self._exchange.info.user_fills_by_time,
+            self.wallet_address,
+            int(start_time_ms),
+            None if end_time_ms is None else int(end_time_ms),
+        )
+
     def exchange_time(self) -> datetime | None:
         """The exchange's own clock, or None if this response does not carry it.
 

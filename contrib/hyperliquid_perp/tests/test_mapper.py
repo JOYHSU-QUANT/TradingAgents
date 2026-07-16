@@ -63,6 +63,18 @@ def test_market_snapshot_assetctxs_shorter_than_universe_raises():
         mapper.map_market_snapshot([meta, [{"markPx": "60000"}]], "ETH")
 
 
+@pytest.mark.parametrize(
+    "fn",
+    [mapper.map_market_snapshot, mapper.map_margin_schedule, mapper.map_sz_decimals],
+)
+def test_truthy_non_dict_meta_is_malformed_not_an_attribute_error(fn):
+    """``(meta or {})`` only neutralises FALSY drift — a truthy non-dict meta (an
+    error string, a list) must land in the mapper's MalformedResponseError
+    vocabulary, not escape as a bare AttributeError on ``.get``."""
+    with pytest.raises(MalformedResponseError, match="meta"):
+        fn(["oops", []], "BTC")
+
+
 def test_candles_sorted_oldest_first_from_unordered_input():
     # Indicators read series.iloc[-1] as "current"; newest-first input would make
     # every indicator compute on the oldest candle unless the sort actually runs.

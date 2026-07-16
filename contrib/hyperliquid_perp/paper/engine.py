@@ -51,7 +51,7 @@ import logging
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from decimal import Decimal, localcontext
+from decimal import Decimal, InvalidOperation, localcontext
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
@@ -496,10 +496,21 @@ class PaperExecutionEngine:
         tick-driven/trading writes): a genuine store failure still resurfaces
         fatally at the next trading write, so nothing is hidden for long.
         Returns whether the snapshot was written.
+
+        The guard catches the STORE errors AND the value errors, because both are
+        reachable and either one escaping defeats the entire point of this method.
+        ``_read_position`` / ``_read_ledger`` rebuild Decimals and dataclasses out of
+        stored TEXT — a missing account state raises ``ValueError``, a corrupt cell
+        raises ``InvalidOperation`` — and ``_write_snapshots`` runs the account math
+        before it writes anything, which can raise either. Caught, the tick loses one
+        audit row. Escaping, it kills the process that is the only thing watching the
+        live position's SL/TP: exactly the outcome the paragraph above promises cannot
+        happen. (A genuine store failure still resurfaces fatally at the next trading
+        write, so nothing stays hidden for long.)
         """
         try:
             self._write_snapshots(now, mark, self._read_position())
-        except (sqlite3.Error, OSError):
+        except (sqlite3.Error, OSError, ValueError, InvalidOperation):
             logger.warning(
                 "cycle-end snapshot write failed at mark %s; skipped, will re-snapshot next tick",
                 mark,

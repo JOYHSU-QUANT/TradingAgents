@@ -104,6 +104,17 @@ class AccountLedger:
     total_fees: Decimal = Decimal(0)
     net_funding_pnl: Decimal = Decimal(0)
 
-    def __post_init__(self) -> None:
-        if self.total_fees < 0:
-            raise ValueError(f"AccountLedger.total_fees must be >= 0, got {self.total_fees}")
+    # ``total_fees`` is deliberately NOT constrained ``>= 0``. It is a cumulative
+    # accumulator whose sign is a property of the FEE MODEL, not a money invariant:
+    # a live maker rebate is a NEGATIVE exchange fee (phase3-spec §15 — the exchange
+    # is the truth source), so a run whose rebates outweigh its costs legitimately
+    # carries a negative total. Rejecting it here would crash the live fill ingester
+    # on a fill the exchange really executed, roll the transaction back, and then
+    # crash again on every REST-backfill retry — wedging ingestion over a value that
+    # is simply true.
+    #
+    # The paper model's non-negativity is unaffected, and is still enforced where it
+    # belongs — at the paper fill boundary: ``compute_fill_effect`` rejects a negative
+    # ``fee_rate`` and ``FillEffect`` rejects a negative ``fee``, so a paper run can
+    # never accumulate one. (Its live counterpart ``LiveFillEffect`` documents the
+    # rebate as legitimate — this guard used to contradict it.)

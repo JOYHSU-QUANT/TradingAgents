@@ -642,3 +642,44 @@ def test_corrupt_next_decision_at_is_overwritten_not_fatal(tmp_path):
     state = repo.get_scheduler_state(db.conn, "r")
     assert parse_instant(state["next_decision_at"]) == now  # repaired in place
     db.close()
+
+
+def test_backfill_contains_a_store_error(tmp_path, caplog, monkeypatch):
+    """A transient store failure must take the same per-event lane as a corrupt row.
+
+    ``record_funding`` opens its OWN transaction, so "database is locked" is reachable
+    inside the loop. Escaping, it aborts the pass — and at restart that abort fires
+    BEFORE the protection-only fork, leaving a live position unwatched and crash-looping
+    on the same event.
+    """
+    import sqlite3
+
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
+    from contrib.hyperliquid_perp.paper.reconcile import backfill_pending_funding
+
+    hour = _T0.replace(minute=0)
+    db = _init(tmp_path)
+    accounting.record_funding(
+        db,
+        run_id="r",
+        mode="paper",
+        symbol="BTC",
+        funding_timestamp=hour,
+        position_size=D("0.001"),
+        funding_rate=None,  # pending
+        mark_price=_MARK,
+    )
+
+    def _locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(reconcile_mod.accounting, "record_funding", _locked)
+
+    with caplog.at_level(logging.ERROR):
+        posted, still_pending = backfill_pending_funding(
+            db, run_id="r", now=hour, funding_source=_Rates(D("0.0001"))
+        )
+
+    assert posted == 0
+    assert still_pending == 1  # left pending for the next pass, not lost
+    assert "store error" in caplog.text

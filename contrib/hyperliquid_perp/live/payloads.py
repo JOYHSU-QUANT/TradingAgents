@@ -1,7 +1,8 @@
 """Raw exchange payload evidence: one JSON file per round-trip (§16.1 / §16.5).
 
-Both live writers — the order submitter and the kill switch's shutdown cancel
-sweep — persist the untouched exchange response beside the row that summarises
+The live writers — the order submitter, the kill switch's shutdown cancel
+sweep, and the fill processor's evidence trail (applied / unmapped / malformed
+fills) — persist the untouched exchange payload beside the row that summarises
 it, and record that file's path on the row. The two rules that make the evidence
 trustworthy live here, once, instead of once per caller:
 
@@ -25,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -35,9 +37,22 @@ __all__ = ["payload_column", "write_raw_payload"]
 
 logger = logging.getLogger(__name__)
 
+# Anything outside this set is replaced in the FILENAME (not the recorded value).
+# A §14.2 fill dedupe key is a ``|``-joined value ("tid|4521"),
+# and ``|`` is an illegal path character on Windows — an unsanitised key would
+# make every live-fill payload write fail (silently, since the writer is
+# fail-soft), losing the very evidence §16.2 exists to keep. The path is only an
+# opaque handle stored on the row, so a lossy filename is fine; uniqueness still
+# comes from the timestamp suffix.
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _safe_key(key: str) -> str:
+    return _UNSAFE_FILENAME_CHARS.sub("_", key)
+
 
 def write_raw_payload(
-    *, payload_dir: Path, kind: str, key: str, payload: Any, now: datetime
+    *, payload_dir: Path, kind: str, key: str, payload: Any, now: datetime, once: bool = False
 ) -> str | None:
     """Persist one raw exchange response; return its path, or None on failure.
 
@@ -45,10 +60,27 @@ def write_raw_payload(
     the cloid it belongs to. Rule 1 above: every failure mode — the directory,
     the disk, or a payload that will not serialise — is caught and warned, never
     raised, because the exchange action this documents has already taken effect.
+
+    ``once`` keeps only the FIRST payload recorded for a ``(kind, key)`` and returns
+    that file's path on every later call. It is OFF by default because the order
+    round-trips each document a DISTINCT event that merely shares a cloid — a retry's
+    ack is not the first ack, and collapsing them would destroy the audit trail. Turn
+    it on where the same unchanging fact is re-observed on a schedule: a fill the REST
+    backfill keeps re-fetching (an unapplied fill is never inserted, so no cursor ever
+    advances past it) would otherwise write one more identical file every pass, without
+    bound, until the disk filled.
     """
+    safe_key = _safe_key(key)
     stamp = now.strftime("%Y%m%dT%H%M%S_%fZ")
-    path = payload_dir / f"{kind}-{key}-{stamp}.json"
+    path = payload_dir / f"{kind}-{safe_key}-{stamp}.json"
     try:
+        if once:
+            # Inside the guard, with everything else: Rule 1 is that this function never
+            # raises, and callers lean on that ("recording the evidence can never turn a
+            # skipped fill into a crashed drain"). The glob is I/O like any other here.
+            existing = sorted(payload_dir.glob(f"{kind}-{safe_key}-*.json"))
+            if existing:
+                return str(existing[0])
         payload_dir.mkdir(parents=True, exist_ok=True)
         # default=str keeps Decimal/datetime serialisable; TypeError and
         # ValueError are caught regardless, so an exotic payload degrades to a

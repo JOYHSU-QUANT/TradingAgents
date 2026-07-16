@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import pytest
 
@@ -1177,3 +1177,32 @@ def test_cancel_active_plans_with_nothing_inflight_is_a_noop(tmp_path):
     assert engine.cancel_active_plans() is False  # terminal leg: nothing to cancel
     assert _plan_status(db, plan_id) == ("completed", None)
     db.close()
+
+
+@pytest.mark.parametrize(
+    "boom",
+    [ValueError("run has no account state"), InvalidOperation("corrupt stored cell")],
+    ids=["value-error", "invalid-operation"],
+)
+def test_cycle_snapshot_failure_never_strands_the_sl_tp_monitor(
+    boom, tmp_path, monkeypatch, caplog
+):
+    """A snapshot write error must be swallowed — it is an audit row, not the trade.
+
+    This guard is what keeps the daemon alive, and the daemon is the only thing watching
+    a live position's SL/TP. Value errors ARE reachable here: the snapshot path rebuilds
+    Decimals and dataclasses out of stored TEXT and runs the account math before it
+    writes anything. A guard that caught only store errors would let precisely those
+    kill the monitor — the outcome it exists to prevent.
+    """
+    import logging as _logging
+
+    _db, _clock, engine, _spec = _engine(tmp_path)
+
+    def _raise(*args, **kwargs):
+        raise boom
+
+    monkeypatch.setattr(engine, "_write_snapshots", _raise)
+    with caplog.at_level(_logging.WARNING):
+        assert engine.write_cycle_snapshot(Decimal("100")) is False  # swallowed, not raised
+    assert "snapshot write failed" in caplog.text

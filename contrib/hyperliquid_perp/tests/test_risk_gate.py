@@ -279,6 +279,20 @@ def test_clamped_same_side_resize_below_resize_bar_rejects_and_drops_clamp():
     assert result.approved_target_margin_pct is None
 
 
+def test_clamped_same_side_resize_at_resize_bar_stays_clamped():
+    # The remaining cell of the clamp x resize matrix: requested 90 clamps to
+    # the 60 cap, clears the deadband from 20, and confidence 0.7 clears the
+    # resize bar — the clamp verdict, both margin values and the order must all
+    # survive the resize check untouched (a confident size-up past the cap on
+    # an existing position is the common production shape of this path).
+    current = _long_state(margin_pct="20", notional="200")
+    result = _evaluate(_parsed(margin=90, confidence="0.7"), current=current)
+    assert result.risk_action is RiskAction.CLAMPED
+    assert result.requested_target_margin_pct == 90
+    assert result.approved_target_margin_pct == 60
+    assert result.order_created is True
+
+
 def test_zero_delta_reaffirmation_is_exempt_from_resize_bar():
     # zero_delta is a distinct no-order path from within_deadband (an unknown
     # margin_pct skips the deadband branch; the exact-delta check fires): like

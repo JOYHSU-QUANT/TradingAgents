@@ -501,6 +501,11 @@ def test_format_instructions_advertise_resize_bar_and_deadband():
     # Normalized: the phrase spans a template line wrap.
     normalized = " ".join(text.split())
     assert "same-side resize that would actually trade" in normalized
+    # The deadband is advertised with the gate's strict-< boundary (2026-07
+    # review decision): "within 12 points" reads as inclusive, telling the
+    # model an exactly-12 move is a cost-free reaffirmation when the gate
+    # actually orders it through the resize bar.
+    assert "less than 12 percentage points away" in normalized
     # The gate's exemption ranking must stay out of the prompt (2026-07 review
     # decision): a position-blind model can't identify resizes, so comparing
     # bars only teaches that a full close is the guaranteed way past the gate.

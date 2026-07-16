@@ -10,9 +10,9 @@ with ``phase2-data.md`` §7 (``ai_outputs``):
   for same-side resizes (churn control, spec §2.4);
 - clamp to ``max_target_margin_pct`` with both requested and approved values
   preserved (``risk_action = clamped``, phase2-spec.md §2.3);
-- the rebalance deadband — same-side targets within
-  ``rebalance_deadband_pct`` of the current margin allocation create no order
-  (``no_order_reason = within_deadband``); flips and flat closes are exempt;
+- the rebalance deadband — same-side targets less than
+  ``rebalance_deadband_pct`` away from the current margin allocation create no
+  order (``no_order_reason = within_deadband``); flips and flat closes are exempt;
 - independent ``effective_leverage`` and available-margin checks, so the gate
   never relies on the margin-allocation cap alone (spec §2.3).
 

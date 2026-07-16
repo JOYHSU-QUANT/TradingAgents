@@ -544,9 +544,9 @@ never repaired or rounded):
   as margin, from {lo} to {hi} in steps of {step}. Use a value > 0 with
   long/short, exactly 0 with flat, and null with maintain_current.
 - "confidence": a number between 0 and 1. A set_target with confidence below
-  {config.min_confidence} is rejected. A same-side target within
-  {config.rebalance_deadband_pct} percentage points of the current margin
-  creates no order (a cost-free reaffirmation); a same-side resize that would
+  {config.min_confidence} is rejected. A same-side target less than
+  {config.rebalance_deadband_pct} percentage points away from the current
+  margin creates no order (a cost-free reaffirmation); a same-side resize that would
   actually trade needs confidence >= {config.resize_min_confidence} or it is
   rejected — every executed rebalance pays fees. Make your conviction
   consistent with the margin you request — confidence is recorded but never

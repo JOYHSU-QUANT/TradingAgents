@@ -121,14 +121,18 @@ pending funding、accounting replay 驗證、gap SL 檢查；若這次重啟真�
 prompt 的 context／format 契約改 shape 時，另要 bump `cli.py` 的
 `PROMPT_VERSION`，讓 `ai_inputs.prompt_version` 在資料裡標出改版點。
 
+**空倉才換段（硬規則）**：舊 run 還有未平倉倉位時不要換段。換段後那個倉位
+會永遠凍結在舊段 DB——沒人看管、沒有 SL/TP，舊段末端 equity 掛著一筆未實現
+PnL，正是跨段對照要避免的汙染。等 cycle 自然回到空倉（或 AI 自己 flat 平倉）
+再執行下面的順序，讓舊段以 realized PnL 乾淨收尾。
+
 換段的實際順序——push `deploy/paper` 會觸發 workflow 自動 restart `hl-paper`
 （`.github/workflows/deploy.yml`），而 run-id 在伺服器 systemd unit 的
 `ExecStart` 裡，**先 push 就會讓舊 run 直接跨過部署點跑新 code**，所以必須：
 
-1. 先 SSH 上伺服器 `sudo systemctl stop hl-paper`，把 unit 的 `ExecStart` 改成
-   新段參數（`--run-id paper-BTC-2 --create`），`sudo systemctl daemon-reload`，
-   **先不要啟動**。有持倉時注意：停機到重啟之間持倉沒有 SL/TP 看管（同 §3 的
-   警告），盡量挑空倉或倉位小的時候換段。
+1. 確認空倉後，SSH 上伺服器 `sudo systemctl stop hl-paper`，把 unit 的
+   `ExecStart` 改成新段參數（`--run-id paper-BTC-2 --create`），
+   `sudo systemctl daemon-reload`，**先不要啟動**。
 2. 再 push `deploy/paper`——workflow 部署新 code 並 restart，服務直接以新
    run-id 起段。
 3. 確認新段健康後，把 unit 裡的 `--create` 拿掉再 `daemon-reload`：run 已存在

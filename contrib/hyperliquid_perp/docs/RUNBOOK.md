@@ -118,6 +118,8 @@ pending funding、accounting replay 驗證、gap SL 檢查；若這次重啟真�
 警告只比對 YAML——**code 內建預設值的變更**（例如新增的
 `resize_min_confidence` 預設 0.7、prompt 文字改版）不會觸發警告，但一樣改變
 行為，所以調參 code 的部署必須與新 run-id 同批上線，不要讓舊段跨過部署點。
+prompt 的 context／format 契約改 shape 時，另要 bump `cli.py` 的
+`PROMPT_VERSION`，讓 `ai_inputs.prompt_version` 在資料裡標出改版點。
 
 換段的實際順序——push `deploy/paper` 會觸發 workflow 自動 restart `hl-paper`
 （`.github/workflows/deploy.yml`），而 run-id 在伺服器 systemd unit 的

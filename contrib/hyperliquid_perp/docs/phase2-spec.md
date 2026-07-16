@@ -314,7 +314,7 @@ Phase 3 再開始處理：
 ## 6. 建置順序
 
 1. 決策契約遷移 — structured target schema、fail-closed 驗證、prompt 改版（DESIGN Part 2）；退役 Phase 1 的 rating 解析與 tier 設定。
-2. RiskGate — max margin clamp、step / `min_confidence` 檢查、`effective_leverage` 與 available margin 獨立檢查（本文件 §2）。
+2. RiskGate — max margin clamp、step / `min_confidence`（同向 resize 另有 `resize_min_confidence`）檢查、`effective_leverage` 與 available margin 獨立檢查（本文件 §2）。
 3. SQLite persistence 骨架 — tables、transaction 語意、去重鍵、accounting replay 驗證（phase2-data）。
 4. Paper 帳務 — fills / fees / funding exactly-once 過帳、margin 與清算價模型（phase2-execution §6）。
 5. 執行引擎 — `paper_market`、TWAP / flip plan、SL / TP lifecycle、market monitor（phase2-execution §1–5）。

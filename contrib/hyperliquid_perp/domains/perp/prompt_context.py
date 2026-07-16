@@ -32,8 +32,8 @@ _REGIME_NOTE = {
         "holding an established position with the trend usually beats frequent adjustment."
     ),
     MarketRegime.RANGING: (
-        "resizing an existing position rarely earns back its fees — prefer "
-        "maintain_current unless conviction is high."
+        "resizing an existing position rarely earns back its fees — size "
+        "changes need high conviction."
     ),
     MarketRegime.VOLATILE: (
         "wide swings inflate the cost of reactive resizing — change the "

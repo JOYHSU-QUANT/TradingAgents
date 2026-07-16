@@ -35,7 +35,7 @@ decision:
   target_margin_step_pct: 1      # integer percent steps; off-grid values fail closed (no rounding)
   rebalance_deadband_pct: 10     # same-side |approved - current| < this -> no order (flip/flat exempt); paper-tuned from the spec default 1 (2026-07 baseline: small resizes churned fees)
   min_confidence: 0.3            # set_target below this is risk-REJECTED (flat included); confidence never scales sizing
-  resize_min_confidence: 0.7     # same-side resize below this is risk-REJECTED (churn control); open/flip/flat use min_confidence; must be >= min_confidence
+  resize_min_confidence: 0.7     # same-side resize below this is risk-REJECTED (churn control); open/flip/flat use min_confidence; must be >= min_confidence (setting it equal disables the extra bar)
 
 # Phase 2 paper-trading engine defaults (phase2-execution.md §5.4). initial
 # balance / positions apply only when a NEW run_id is created; a restart recovers

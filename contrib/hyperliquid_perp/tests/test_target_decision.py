@@ -480,12 +480,17 @@ def test_decision_config_from_dict_parses_resize_confidence():
     assert cfg.resize_min_confidence == Decimal("0.8")
 
 
-def test_format_instructions_advertise_resize_bar():
-    # The prompt renders the live resize threshold so the model is told the
-    # same-side bar the gate actually enforces.
-    text = decision_format_instructions(DecisionConfig(resize_min_confidence=Decimal("0.75")))
+def test_format_instructions_advertise_resize_bar_and_deadband():
+    # The prompt renders the live resize threshold and the rebalance deadband
+    # so the model is told the same-side bar and the no-trade band the gate
+    # actually enforces — never hardcoded copies that could drift.
+    text = decision_format_instructions(
+        DecisionConfig(resize_min_confidence=Decimal("0.75"), rebalance_deadband_pct=Decimal("12"))
+    )
     assert "0.75" in text
-    assert "Resizing an existing position" in text
+    assert "12" in text
+    # Normalized: the phrase spans a template line wrap.
+    assert "same-side resize that would actually trade" in " ".join(text.split())
 
 
 def test_decision_config_rejects_grid_step_not_reaching_max():

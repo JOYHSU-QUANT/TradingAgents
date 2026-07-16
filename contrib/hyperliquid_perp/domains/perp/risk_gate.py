@@ -71,7 +71,8 @@ class RiskAction(str, Enum):
     ``INVALID_FAIL_CLOSED`` is reserved for contract violations — output the
     parse seam or re-validation could not accept. ``REJECTED`` is a
     schema-valid ``set_target`` the gate refused (``risk_reason`` names why:
-    low confidence, no equity, no grid capacity under the binding cap).
+    low confidence — the base bar or the higher same-side-resize bar — no
+    equity, no grid capacity under the binding cap).
     Keeping them distinct lets alerting treat REJECTED as normal operation
     and INVALID_FAIL_CLOSED as the model-drift alarm.
     """

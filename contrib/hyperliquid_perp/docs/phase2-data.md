@@ -293,7 +293,7 @@ AI input
 | `target_side` | `long` / `short` / `flat` / 空 |
 | `requested_target_margin_pct` | AI 要求的 account equity margin allocation 比例；合法範圍 `0–100` |
 | `approved_target_margin_pct` | RiskGate 核准後用於下單的比例；目前上限 `60` |
-| `risk_action` | `approved` / `clamped` / `rejected`（契約合法但被風控拒絕：low confidence、無淨值、無 grid 容量）/ `invalid_fail_closed`（契約違規，model-drift 告警訊號） |
+| `risk_action` | `approved` / `clamped` / `rejected`（契約合法但被風控拒絕：low confidence——基本門檻或同向 resize 的較高門檻（`low_confidence_resize`）——無淨值、無 grid 容量）/ `invalid_fail_closed`（契約違規，model-drift 告警訊號） |
 | `risk_reason` | RiskGate 調整或拒絕的原因；未調整可留空 |
 | `target_margin` | `account_equity * approved_target_margin_pct / 100` |
 | `configured_leverage` | 本次目標倉位使用的槓桿 |

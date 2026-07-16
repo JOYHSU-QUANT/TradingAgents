@@ -488,10 +488,12 @@ def parse_target_decision(raw: object, config: DecisionConfig) -> ParsedDecision
 def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None = None) -> str:
     """The output-format contract text injected at the tail of the engine context.
 
-    Rendered from the live :class:`DecisionConfig` so the legal margin grid and
-    the ``min_confidence`` threshold in the prompt can never drift from what the
-    parser and RiskGate actually enforce. ``max_pct`` (when given) advertises the
-    *effective* ceiling — ``risk_gate.effective_max_target_margin_pct``, the
+    Rendered from the live :class:`DecisionConfig` so the legal margin grid,
+    the confidence thresholds (``min_confidence`` and the same-side
+    ``resize_min_confidence`` bar) and the rebalance deadband in the prompt can
+    never drift from what the parser and RiskGate actually enforce.
+    ``max_pct`` (when given) advertises the *effective* ceiling —
+    ``risk_gate.effective_max_target_margin_pct``, the
     grid ceiling capped by ``risk.max_target_margin_pct`` — so the model is
     never told a margin is legal that the gate deterministically clamps; a
     ``clamped`` audit record then means the risk gate genuinely intervened, not
@@ -534,12 +536,14 @@ never repaired or rounded):
   as margin, from {lo} to {hi} in steps of {step}. Use a value > 0 with
   long/short, exactly 0 with flat, and null with maintain_current.
 - "confidence": a number between 0 and 1. A set_target with confidence below
-  {config.min_confidence} is rejected. Resizing an existing position without
-  changing its side needs confidence >= {config.resize_min_confidence} or it
-  is rejected — every rebalance pays fees, so a small same-side adjustment
-  must clear a higher bar than opening, flipping, or closing. Make your
-  conviction consistent with the margin you request — confidence is recorded
-  but never scales the size.
+  {config.min_confidence} is rejected. A same-side target within
+  {config.rebalance_deadband_pct} percentage points of the current margin
+  creates no order (a cost-free reaffirmation); a same-side resize that would
+  actually trade needs confidence >= {config.resize_min_confidence} or it is
+  rejected — every executed rebalance pays fees, so changing the size of an
+  existing position must clear a higher bar than opening, flipping, or
+  closing. Make your conviction consistent with the margin you request —
+  confidence is recorded but never scales the size.
 - "rationale": non-empty. "key_risks": 1 to {_MAX_KEY_RISKS} short strings (at least one).
 
 Legal combinations — anything else is invalid:

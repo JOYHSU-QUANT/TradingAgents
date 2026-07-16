@@ -44,16 +44,14 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from ..exchanges.hyperliquid.errors import ExchangeError
 from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
 from ..persistence.db import Database
-from ..persistence.ids import live_order_attempt_id
+from .cancel import cancel_bot_order_with_evidence
 from .config import KillSwitchConfig
 from .order_gate import RealOrderGate
 from .orders import local_status_for_exchange_status, parse_order_status
-from .payloads import payload_column, write_raw_payload
 
 __all__ = ["KillSwitchManager"]
 
@@ -515,85 +513,23 @@ class KillSwitchManager:
     def _cancel_with_evidence(self, *, coin: str, cloid_hex: str, cloid_logical: str) -> None:
         """One bot-owned cancel under the §8.3/§16.5 evidence protocol.
 
-        Attempt row before the wire, outcome patch after; a successful cancel
-        also settles the local orders row (status/canceled_at/cancel_reason)
-        so shutdown never leaves phantom 'open' rows behind. Raises the
-        underlying failure — the sweep loop records it and carries on.
+        Delegates to the shared :func:`~.cancel.cancel_bot_order_with_evidence`
+        (the §19.3 startup sweep runs the identical protocol); this wrapper
+        binds the manager's dependencies and the shutdown-specific
+        ``cancel_reason``. Raises the underlying failure — the sweep loop
+        records it in the §18.5 completed event and carries on.
         """
-        attempt_index = repo.next_live_attempt_index(
-            self._db.conn, action="cancel_by_cloid", cloid_hex=cloid_hex
-        )
-        attempt_id = live_order_attempt_id(
-            self._run_id, "cancel_by_cloid", cloid_hex, attempt_index
-        )
-        now = self._clock.now()
-        local_order = repo.get_order_by_cloid_hex(self._db.conn, cloid_hex)
-        with self._db.transaction() as conn:
-            repo.insert_live_order_attempt(
-                conn,
-                attempt_id=attempt_id,
-                run_id=self._run_id,
-                action="cancel_by_cloid",
-                symbol=coin,
-                attempt_index=attempt_index,
-                order_id=None if local_order is None else local_order["order_id"],
-                cloid_logical=cloid_logical,
-                cloid_hex=cloid_hex,
-                requested_at=now,
-            )
-        try:
-            ack = self._client.cancel_by_cloid(coin=coin, cloid_hex=cloid_hex)
-        except Exception as exc:
-            # Record 'failed' WITHOUT letting the record replace `exc`. The
-            # original is the diagnosis, and it is doubly load-bearing here: the
-            # sweep loop puts it verbatim into the §18.5 completed event, so a
-            # busy DB would make the permanent audit record of a failed cancel
-            # read "database is locked" instead of the exchange's actual reason.
-            # Log first (this file's standing ordering rule), then record.
-            logger.warning("kill switch cancel of cloid %s failed: %s", cloid_hex, exc)
-            try:
-                with self._db.transaction() as conn:
-                    repo.update_live_order_attempt(
-                        conn, attempt_id, status="failed", error_message=str(exc)
-                    )
-            except Exception:
-                logger.exception(
-                    "could not record cancel attempt %s as 'failed'; it stays "
-                    "'submitted' (outcome unknown)",
-                    attempt_id,
-                )
-            raise
-        done_at = self._clock.now()
-        # The cancel's raw response is evidence too — same protocol the order
-        # path follows, and the attempt row has carried the column all along.
-        raw_path = write_raw_payload(
+        cancel_bot_order_with_evidence(
+            db=self._db,
+            client=self._client,
+            run_id=self._run_id,
             payload_dir=self._payload_dir,
-            kind="cancel",
-            key=cloid_hex,
-            payload=ack.raw,
-            now=done_at,
+            clock=self._clock,
+            coin=coin,
+            cloid_hex=cloid_hex,
+            cloid_logical=cloid_logical,
+            cancel_reason="shutdown_cancel",
         )
-        with self._db.transaction() as conn:
-            repo.update_live_order_attempt(
-                conn,
-                attempt_id,
-                status="acknowledged" if ack.success else "rejected",
-                error_message=ack.error,
-                acknowledged_at=done_at,
-                raw_exchange_payload_path=payload_column(raw_path),
-            )
-            if ack.success and local_order is not None:
-                repo.update_order(
-                    conn,
-                    local_order["order_id"],
-                    status="canceled",
-                    exchange_status="canceled",
-                    canceled_at=done_at,
-                    cancel_reason="shutdown_cancel",
-                    updated_at=done_at,
-                )
-        if not ack.success:
-            raise ExchangeError(f"cancel rejected: {ack.error}")
 
     def _confirm_settled(self, order_id: str, cloid_hex: str) -> bool:
         """Ask the EXCHANGE whether a locally-live order is really finished.

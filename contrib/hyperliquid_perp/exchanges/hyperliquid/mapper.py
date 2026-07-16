@@ -549,6 +549,13 @@ def map_account_snapshot(clearinghouse_state: Any) -> AccountSnapshot:
         withdrawable=_dec(state.get("withdrawable"), field="withdrawable"),
         total_margin_used=_dec(margin.get("totalMarginUsed"), field="totalMarginUsed"),
         positions=positions,
+        # Optional (older fixtures may omit them): the exchange's own
+        # account-level maintenance margin and total notional, recorded verbatim
+        # by the Phase 3 live snapshot writer rather than re-derived locally.
+        cross_maintenance_margin_used=_opt_dec(
+            state.get("crossMaintenanceMarginUsed"), field="crossMaintenanceMarginUsed"
+        ),
+        total_position_notional=_opt_dec(margin.get("totalNtlPos"), field="totalNtlPos"),
     )
 
 

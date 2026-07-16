@@ -56,7 +56,7 @@ from .persistence.db import Database
 
 logger = logging.getLogger(__name__)
 
-_SUBCOMMANDS = ("paper", "export", "validate", "live")
+_SUBCOMMANDS = ("paper", "export", "validate", "live", "safe-mode")
 
 # Version stamp for the ai_inputs.prompt_version column: bump when the injected
 # context/format contract changes shape (the payload hash tracks content).
@@ -101,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_validate(rest)
         if command == "live":
             return _cmd_live(rest)
+        if command == "safe-mode":
+            return _cmd_safe_mode(rest)
         return _cmd_paper(rest)
     except KeyboardInterrupt:
         print("interrupted.", file=sys.stderr)
@@ -190,7 +192,120 @@ def _cmd_validate(argv: list[str]) -> int:
 
 
 # --------------------------------------------------------------------------
-# live — the Phase 3 startup skeleton (PR 1: gates + authorization, no loop)
+# safe-mode — inspect / manually release a live run's safe mode (§13.6)
+# --------------------------------------------------------------------------
+
+
+def _cmd_safe_mode(argv: list[str]) -> int:
+    """§13.6: the ONE manual-release interface (no config-flag release exists).
+
+    ``--status`` (the default) prints the persisted current state and recent
+    history; ``--release --reason "<人工確認說明>"`` releases a MANUAL safe
+    mode, writing the ``safe_mode_released`` audit event. Releasing does not
+    resume trading: the run must still pass its next full reconciliation
+    (§13.6 rule 3) — the released state only lifts the manual latch.
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m contrib.hyperliquid_perp safe-mode",
+        description="Inspect or manually release a live run's safe mode (§13.6).",
+    )
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--db", default="live_trading.db", help="SQLite store path.")
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument(
+        "--status",
+        action="store_true",
+        help="Print the current safe-mode state and recent history (the default action).",
+    )
+    action.add_argument(
+        "--release",
+        action="store_true",
+        help="Release a MANUAL safe mode (writes the §13.6 audit event).",
+    )
+    parser.add_argument(
+        "--reason",
+        default=None,
+        help="Required with --release: the human confirmation recorded on the release event.",
+    )
+    parser.add_argument(
+        "--released-by",
+        default=None,
+        help="Operator identity for the audit trail (default: the OS user name).",
+    )
+    args = parser.parse_args(argv)
+
+    import getpass
+
+    from .live.safe_mode import SafeModeManager
+    from .persistence import repository as repo
+
+    db = _open_existing_db(args.db)
+    if db is None:
+        return 1
+    with db:
+        if repo.get_run(db.conn, args.run_id) is None:
+            print(f"error: run {args.run_id!r} does not exist in {args.db}.", file=sys.stderr)
+            return 1
+        # gate=None: this is the offline wiring — no live process, so the
+        # persisted state IS the whole effect; the next startup hydrates it.
+        manager = SafeModeManager(db=db, run_id=args.run_id, gate=None)
+        state = manager.current()
+
+        if not args.release:
+            if state is None:
+                print("safe_mode: none")
+            else:
+                print(f"safe_mode: {state.safe_mode_type}")
+                print(f"reason: {state.reason}")
+                print(f"entered_at: {state.entered_at}")
+            history = repo.iter_safe_mode_events(db.conn, args.run_id)
+            if history:
+                print("history (most recent last):")
+                for row in history[-10:]:
+                    who = f" by {row['released_by']}" if row["released_by"] else ""
+                    print(
+                        f"  {row['timestamp']}  {row['event_type']}"
+                        f"{'' if row['safe_mode_type'] is None else ' ' + row['safe_mode_type']}"
+                        f"{'' if row['reason'] is None else ': ' + row['reason']}{who}"
+                    )
+            return 0
+
+        if args.reason is None or not args.reason.strip():
+            print(
+                'error: --release requires --reason "<人工確認說明>" — the release '
+                "event must record why a human decided the state is safe (§13.6 rule 2).",
+                file=sys.stderr,
+            )
+            return 1
+        # A RUNNING live process holds its gate flags in memory and only
+        # hydrates them at startup — a release landing under it takes effect
+        # in the store but not in that process until its next restart. Warn,
+        # don't block: the §13.6 release is deliberately store-first.
+        state_row = repo.get_scheduler_state(db.conn, args.run_id)
+        if state_row is not None and state_row["lock_pid"] is not None:
+            print(
+                f"warning: run {args.run_id!r} has a run-lock held by pid "
+                f"{state_row['lock_pid']} (heartbeat {state_row['lock_heartbeat_at']}) — "
+                "a live process that is still running will not see this release "
+                "until it restarts.",
+                file=sys.stderr,
+            )
+        released_by = args.released_by or getpass.getuser()
+        try:
+            manager.release_manual(released_by=released_by, reason=args.reason)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"manual safe mode released by {released_by}.")
+        print(
+            "NOTE: trading does not resume yet — the run must pass its next full "
+            "reconciliation before new orders are allowed (§13.6 rule 3)."
+        )
+        return 0
+
+
+# --------------------------------------------------------------------------
+# live — Phase 3 startup: gates + authorization (PR 1), §19.1 recovery (PR 4)
 # --------------------------------------------------------------------------
 
 
@@ -207,11 +322,46 @@ def _cmd_live(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m contrib.hyperliquid_perp live",
         description=(
-            "Phase 3 startup skeleton: validate live config gates + agent "
-            "authorization, print effective caps, and exit (no trading loop)."
+            "Phase 3 live startup: validate the config gates + agent "
+            "authorization and print effective caps; with --run-id, run the "
+            "full §19.1 startup recovery (arm kill switch, reconcile, cancel "
+            "stale bot-owned orders) and report the verdict. No trading loop "
+            "yet — that arrives with PR 5."
         ),
     )
     parser.add_argument("--config", default=None, help="Config YAML path.")
+    parser.add_argument(
+        "--db",
+        default="live_trading.db",
+        help="SQLite store path for the live run (only used with --run-id).",
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help=(
+            "Run the full §19.1 startup recovery against this run. Omitted: "
+            "config-check mode (the PR 1 gates), which never signs anything."
+        ),
+    )
+    parser.add_argument(
+        "--create",
+        action="store_true",
+        help=(
+            "Create the run (genesis from the live exchange snapshot) instead "
+            "of resuming an existing one — same explicit-identity rule as the "
+            "paper subcommand."
+        ),
+    )
+    parser.add_argument(
+        "--adopt-positions",
+        action="store_true",
+        help=(
+            "Allow --create to seed an EXISTING exchange position into the new "
+            "run's genesis. Without it, --create refuses a non-flat account — "
+            "a typo'd --run-id must not silently adopt a live position into a "
+            "fresh ledger."
+        ),
+    )
     args = parser.parse_args(argv)
 
     # Same rationale as ``paper``: startup diagnostics need timestamps; the
@@ -439,11 +589,263 @@ def _cmd_live(argv: list[str]) -> int:
     print(f"account_equity: {snapshot.account_value} USDC")
     print(f"pct_cap_notional: {caps.pct_cap_notional} USDC")
     print(f"effective_notional_cap: {caps.effective_notional_cap} USDC")
-    print(
-        "live startup gates OK — exiting (PR 1 skeleton; the trading loop arrives in a later PR).",
-        file=sys.stderr,
+    if args.run_id is None:
+        print(
+            "live startup gates OK — exiting (config-check mode; pass --run-id "
+            "to run the full §19.1 startup recovery).",
+            file=sys.stderr,
+        )
+        return 0
+    return _live_startup_recovery(
+        args,
+        config=config,
+        raw_live=raw_live,
+        live_cfg=live_cfg,
+        client=client,
+        wallet=addr,
+        agent_key=agent_key,
+        snapshot=snapshot,
     )
-    return 0
+
+
+def _live_startup_recovery(
+    args,
+    *,
+    config: dict,
+    raw_live: dict,
+    live_cfg,
+    client,
+    wallet: str,
+    agent_key: str | None,
+    snapshot,
+) -> int:
+    """The §19.1 startup recovery tail of ``live --run-id`` (steps 5–16).
+
+    Steps 1–4 (config gates, §6.1 authorization, exchange client, account
+    read) were proven by the caller; this builds the PR 2–4 components — a
+    runtime-flagged gate, the signed client, kill switch, safe-mode machine
+    and reconciler — creates or resumes the live run, and hands off to
+    :func:`~.live.startup.run_startup_recovery`. The command is one-shot: it
+    reports the verdict, runs the §18.2 shutdown sweep, and exits — the
+    long-running loop that would keep the kill switch refreshed arrives with
+    PR 5. Exit codes: 0 = the §19.1 step-16 verdict allows a new AI cycle;
+    4 = recovery executed but the verdict is unclean (the run is in safe
+    mode); 1 = hard failure (config/arming/creation errors).
+    """
+    import signal
+    from decimal import Decimal
+
+    from .exchanges.hyperliquid.sdk_client import call_sdk
+    from .exchanges.hyperliquid.signed_client import HyperliquidSignedClient
+    from .live.fill_backfill import FillBackfiller
+    from .live.fills import LiveFillProcessor
+    from .live.kill_switch import KillSwitchManager
+    from .live.order_gate import RealOrderGate
+    from .live.reconcile import LiveReconciler
+    from .live.safe_mode import SafeModeManager
+    from .live.startup import run_startup_recovery
+    from .paper import accounting
+    from .paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
+    from .persistence import repository as repo
+    from .persistence.models import PositionState
+    from .persistence.schema import SCHEMA_VERSION
+
+    if agent_key is None:
+        print(
+            "error: the §19.1 startup recovery signs exchange actions (kill "
+            "switch, stale-order cancels) — it needs the agent key. Run without "
+            "--run-id for a keyless gate check.",
+            file=sys.stderr,
+        )
+        return 1
+    if not live_cfg.allow_real_orders:
+        print(
+            "error: live.allow_real_orders is false — the §19.1 startup recovery "
+            "arms the kill switch and cancels stale bot-owned orders, which are "
+            "signed exchange actions. Enable it, or run without --run-id for a "
+            "gate check that never signs anything.",
+            file=sys.stderr,
+        )
+        return 1
+
+    run_id: str = args.run_id
+    coin = live_cfg.safety.allowed_symbols[0]
+    db_path = Path(args.db)
+    payload_dir = db_path.resolve().parent / "payloads" / run_id
+    now = datetime.now(timezone.utc)
+
+    # The runtime gate: config pins the wire conditions; §6.1 passed above.
+    gate = RealOrderGate.from_config(live_cfg)
+    gate.agent_authorized = True
+    signed = HyperliquidSignedClient(
+        live_cfg.network,
+        agent_key,
+        wallet_address=wallet,
+        gate=gate,
+        timeout=client.timeout,
+    )
+
+    def fetch_clearinghouse():
+        return call_sdk(client.info.user_state, wallet)
+
+    with Database(db_path) as db:
+        is_restart = repo.get_run(db.conn, run_id) is not None
+        if not is_restart and not args.create:
+            print(
+                f"error: run {run_id!r} does not exist in {db_path}. Pass --create "
+                "to start it, or fix --run-id / --db to resume the intended run.",
+                file=sys.stderr,
+            )
+            return 1
+        if is_restart and args.create:
+            print(
+                f"error: run {run_id!r} already exists in {db_path}. Drop --create "
+                "to resume it, or pick a new --run-id for a fresh run.",
+                file=sys.stderr,
+            )
+            return 1
+        if not is_restart:
+            if snapshot.positions and not args.adopt_positions:
+                # Creating a live-money ledger over a non-flat account must be
+                # explicit: a typo'd --run-id plus --create would otherwise
+                # silently adopt a live position into a fresh ledger with zero
+                # history explaining it (decided 2026-07-16).
+                held = ", ".join(f"{p.coin} {p.size}" for p in snapshot.positions)
+                print(
+                    f"error: the account already holds a position ({held}) — pass "
+                    "--adopt-positions to seed it into the new run's genesis, or "
+                    "resume the run that owns it.",
+                    file=sys.stderr,
+                )
+                return 1
+            # Live genesis = the exchange snapshot, verbatim: the opening
+            # ledger balance is equity net of unrealized PnL (wallet form) and
+            # any existing position is seeded as-is, so the first equity
+            # reconciliation compares like against like. Historical fills that
+            # PREDATE this run belong to other runs' orders (or none) and are
+            # routed to unmapped/cross-run audit by the PR 3 processor — they
+            # can never double-book onto this genesis.
+            unrealized = sum((p.unrealized_pnl for p in snapshot.positions), Decimal(0))
+            seeds = [
+                PositionState(coin=p.coin, size=p.size, entry_price=p.entry_price)
+                for p in snapshot.positions
+            ]
+            subset = _run_config_subset(config, coin)
+            subset["live"] = raw_live
+            accounting.initialize_run(
+                db,
+                run_id=run_id,
+                mode="live",
+                initial_balance_usdc=snapshot.account_value - unrealized,
+                schema_version=SCHEMA_VERSION,
+                initial_positions=seeds,
+                config_json=json.dumps(subset, ensure_ascii=False, default=str),
+                created_at=now,
+            )
+            print(f"created live run {run_id!r} in {db_path}", file=sys.stderr)
+
+        try:
+            acquire_run_lock(db, run_id, pid=os.getpid(), now=now)
+        except RunLockError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+        try:
+            kill_switch = KillSwitchManager(
+                client=signed,
+                gate=gate,
+                db=db,
+                run_id=run_id,
+                config=live_cfg.kill_switch,
+                # This command's worst-case gap between kill-switch touches is
+                # one reconciliation sweep (network reads, seconds) — 30s is
+                # generous and keeps the constructor invariant honest under
+                # the default 120s/30s switch config.
+                max_tick_gap_seconds=30.0,
+                payload_dir=payload_dir,
+            )
+            safe_mode = SafeModeManager(db=db, run_id=run_id, gate=gate)
+            processor = LiveFillProcessor(db=db, run_id=run_id, payload_dir=payload_dir)
+            backfiller = FillBackfiller(fetch=signed.user_fills_by_time, processor=processor)
+            reconciler = LiveReconciler(
+                db=db,
+                run_id=run_id,
+                coin=coin,
+                fetch_open_orders=signed.open_orders,
+                fetch_clearinghouse=fetch_clearinghouse,
+                query_order_by_cloid=signed.query_order_by_cloid,
+                fetch_fills=signed.user_fills_by_time,
+                backfiller=backfiller,
+                payload_dir=payload_dir,
+            )
+            try:
+                result = run_startup_recovery(
+                    db=db,
+                    run_id=run_id,
+                    client=signed,
+                    fetch_clearinghouse=fetch_clearinghouse,
+                    gate=gate,
+                    kill_switch=kill_switch,
+                    reconciler=reconciler,
+                    safe_mode=safe_mode,
+                    payload_dir=payload_dir,
+                )
+            except Exception as exc:  # noqa: BLE001 — arming is the one hard-error step
+                # Full traceback to the log (this is the signed live path);
+                # the message alone would leave a failure here undiagnosable.
+                logger.exception("startup recovery failed")
+                print(f"error: startup recovery failed — {exc}", file=sys.stderr)
+                return 1
+            finally:
+                if snapshot.positions:
+                    # Decided 2026-07-16: the §18.2 semantics stand (shutdown
+                    # cancels ALL bot-owned orders, the §19.3-kept SL/TP
+                    # included), but never silently over a live position.
+                    held = ", ".join(f"{p.coin} {p.size}" for p in snapshot.positions)
+                    print(
+                        f"WARNING: the account holds a live position ({held}) and "
+                        "this one-shot command's §18.2 shutdown sweep cancels "
+                        "bot-owned protection orders — the position is UNPROTECTED "
+                        "after exit until a live loop (PR 5) or manual action "
+                        "re-covers it.",
+                        file=sys.stderr,
+                    )
+                # One-shot command: leave nothing resting behind a dead man's
+                # switch nobody will refresh. The §18.2 shutdown sweep cancels
+                # bot-owned open orders and disarms only on a clean sweep.
+                # (The §12.2 "before shutdown" reconciliation is the verdict
+                # pass that just ran — this command places no orders after it.)
+                if kill_switch.armed:
+                    kill_switch.shutdown()
+
+            print(f"startup_reconciliation_passed: {'true' if result.passed else 'false'}")
+            print(f"canceled_stale_orders: {len(result.canceled_stale)}")
+            print(f"kept_orders: {len(result.kept_orders)}")
+            state = safe_mode.current()
+            print(f"safe_mode: {'none' if state is None else state.safe_mode_type}")
+            if state is not None:
+                print(f"safe_mode_reason: {state.reason}")
+            if result.sweep_failures:
+                for failure in result.sweep_failures:
+                    print(f"error: stale-order sweep — {failure}", file=sys.stderr)
+            if result.passed:
+                print(
+                    "startup recovery passed — a live loop could start from this "
+                    "state (the loop arrives with PR 5).",
+                    file=sys.stderr,
+                )
+                return 0
+            print(
+                "startup recovery did NOT pass — the run is in safe mode; see the "
+                "reconciliation events / safe-mode state above (§19.1 step 15).",
+                file=sys.stderr,
+            )
+            # Exit 4, not 1: "executed fine, verdict unclean" is an operator
+            # signal distinct from a hard failure — same multi-code convention
+            # as validate's 4/5 (decided 2026-07-16).
+            return 4
+        finally:
+            release_run_lock(db, run_id, pid=os.getpid(), now=datetime.now(timezone.utc))
 
 
 # --------------------------------------------------------------------------

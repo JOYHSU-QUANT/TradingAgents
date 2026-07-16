@@ -439,7 +439,8 @@ def test_flat_when_already_flat_is_noop():
 
 def test_deadband_skipped_when_current_margin_unknown():
     # Unknown margin_pct on a sized position: the deadband cannot be evaluated,
-    # so the (safety-neutral) optimisation is skipped and the order executes.
+    # so the (safety-neutral) optimisation is skipped and, at this confidence
+    # (helper default 0.78, above the resize bar), the order executes.
     current = CurrentPositionState(
         side=TargetSide.LONG, signed_notional=Decimal("355"), margin_pct=None
     )
@@ -459,8 +460,9 @@ def test_same_target_zero_delta_creates_no_order():
 def test_deadband_disabled_on_leverage_mismatch():
     # A manually opened 5x position under risk.leverage=1: margin 10% carries
     # ~50%-of-equity notional, while a 10% target at 1x means 10% notional.
-    # Equal margin%% must NOT be swallowed by the deadband — the order executes
-    # and delta_notional converges the true exposure to the target.
+    # Equal margin%% must NOT be swallowed by the deadband — at this confidence
+    # (helper default 0.78, above the resize bar) the order executes and
+    # delta_notional converges the true exposure to the target.
     current = CurrentPositionState(
         side=TargetSide.LONG,
         signed_notional=Decimal("500"),

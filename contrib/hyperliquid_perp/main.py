@@ -553,7 +553,8 @@ def run_engine(config: dict, coin: str) -> int:
     if current.side is not None and current.margin_pct is None:
         # A sized position with no usable margin_used (degraded account read):
         # the gate cannot evaluate the rebalance deadband, so a same-side
-        # rebalance executes unconditionally this cycle. Same operator-visibility
+        # rebalance skips it this cycle (the zero-delta check and the resize
+        # confidence bar still apply). Same operator-visibility
         # contract as the leverage-mismatch warning above — warned every cycle
         # the degraded read persists.
         _warn_dual(

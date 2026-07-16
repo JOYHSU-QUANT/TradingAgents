@@ -140,8 +140,9 @@ class CurrentPositionState:
     percent of account equity (the established exposure basis — committed
     margin, not gross notional); ``None`` when a sized position carries no
     usable ``margin_used``, in which case the deadband cannot be evaluated and
-    is skipped (the order executes — the deadband is a churn optimisation, not
-    a safety check). ``leverage`` is the position's *actual* leverage from the
+    is skipped — order necessity then falls to the zero-delta check and the
+    resize confidence bar (the deadband is a churn optimisation, not a safety
+    check). ``leverage`` is the position's *actual* leverage from the
     exchange (``None`` when unreported): margin%% only tracks notional when it
     matches the configured ``risk.leverage``, so ``evaluate`` disables the
     deadband on a known mismatch (e.g. a manually opened position) rather than
@@ -686,7 +687,8 @@ def evaluate(
         # margin percentages, which only track notional when the position's real
         # leverage matches the configured ``risk.leverage`` the target is sized
         # with — on a known mismatch (e.g. a manually opened 5x position under
-        # ``leverage: 1``) the deadband is disabled so the rebalance executes and
+        # ``leverage: 1``) the deadband is disabled so the convergence order is
+        # not swallowed here (the resize bar below still applies) and
         # ``delta_notional`` converges the true exposure to the target. An
         # unknown leverage (``None``) keeps the deadband: it is a churn
         # optimisation, and Phase-2-opened positions always match.

@@ -101,7 +101,7 @@ decision:
 abs(approved_target_margin_pct - current_margin_pct) < rebalance_deadband_pct
 ```
 
-則不建立 order，記 `order_created = false`、`no_order_reason = within_deadband`。**Flip 與 flat 平倉不適用 deadband**——方向相反或要求歸零時，再小的差距都必須執行。Deadband 也只在倉位**實際槓桿**與 `risk.leverage` 一致（或交易所未回報）時適用：margin% 只有在槓桿一致時才代表名目曝險，已知不一致（例如手動開的倉）時 deadband 停用，讓訂單執行、把真實名目收斂到 target。本節是 phase2-data.md 的 `ai_outputs.csv` 一章 `no_order_reason = within_deadband` 的正式定義。
+則不建立 order，記 `order_created = false`、`no_order_reason = within_deadband`。**Flip 與 flat 平倉不適用 deadband**——方向相反或要求歸零時，再小的差距都必須執行。Deadband 也只在倉位**實際槓桿**與 `risk.leverage` 一致（或交易所未回報）時適用：margin% 只有在槓桿一致時才代表名目曝險，已知不一致（例如手動開的倉）時 deadband 停用，收斂單不被 deadband 吞掉（仍受 resize 信心門檻約束，見下方互動註記）、把真實名目收斂到 target。本節是 phase2-data.md 的 `ai_outputs.csv` 一章 `no_order_reason = within_deadband` 的正式定義。
 
 **信心門檻（`min_confidence`）**：`confidence` 僅作記錄與事後分析，**不參與 sizing**——`approved_target_margin_pct` 不得乘上 `confidence`。驗證規則：
 

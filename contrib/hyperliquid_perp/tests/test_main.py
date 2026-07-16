@@ -783,8 +783,8 @@ def test_run_engine_warns_on_position_leverage_mismatch(monkeypatch, capsys):
 def test_run_engine_warns_on_unusable_position_margin(monkeypatch, capsys):
     # A sized position with no usable margin_used (degraded account read) means
     # the gate cannot evaluate the rebalance deadband, so the same-side rebalance
-    # skips it (only the zero-delta check and the resize confidence bar still
-    # stand before an order) — the operator must see that condition named on
+    # skips it (the zero-delta check and the resize confidence bar still
+    # apply) — the operator must see that condition named on
     # stderr, same visibility contract as the leverage-mismatch warning above.
     # leverage stays None (unreported) so only the margin warning fires.
     written = {}

@@ -294,7 +294,7 @@ sizing／clamp／下單判定（`target_*` 皆 mark 定價，`approved 35% × eq
 `mark_price`／`account_equity` 是決策當下的 sizing 輸入——沒有它們，REJECTED／
 maintain_current 紀錄（`target_*` 全為 null）無法事後重現成幣量。
 `prompt_hash` 是本模組注入引擎的完整文本——perp context **加上** output-format
-契約（內含當時的 margin grid 與 `min_confidence`）——的 sha256，所以改了
+契約（內含當時的 margin grid、兩個信心門檻與 deadband）——的 sha256，所以改了
 `decision:`／`risk:` config 的兩筆紀錄不可能帶同一個 hash；配合 `models` 與
 `timestamp`，任何一筆 decision 都能重建並做 post-mortem。各欄位定義見
 [DESIGN](./DESIGN.md) Part 2 與 [phase2-spec](./phase2-spec.md)。

@@ -68,6 +68,25 @@ def test_regime_note_covers_every_regime_without_directional_framing(regime):
     assert "short" not in note
 
 
+# One distinctive substring per regime: the shape checks above pass even if
+# two _REGIME_NOTE entries are swapped or copy-pasted (each note individually
+# is non-empty and direction-free), which would silently feed the model the
+# wrong regime's cost advice. Indexing by regime keeps this exhaustive — a new
+# MarketRegime member fails here with a KeyError until it gets its own marker.
+_NOTE_MARKER = {
+    MarketRegime.TRENDING: "with the trend",
+    MarketRegime.RANGING: "rarely earns back its fees",
+    MarketRegime.VOLATILE: "on conviction, not on noise",
+}
+
+
+@pytest.mark.parametrize("regime", list(MarketRegime))
+def test_regime_note_renders_each_regimes_own_text(regime):
+    text = render_market_context(_ctx(market_regime=regime.value))
+    note = next(line for line in text.splitlines() if line.strip().startswith("Regime note:"))
+    assert _NOTE_MARKER[regime] in note
+
+
 def test_render_funding_in_basis_points_and_signed_zscore():
     text = render_market_context(_ctx())
     # 0.0000125 * 1e4 = 0.125 bps.
@@ -82,6 +101,20 @@ def test_render_day_change_and_indicator_formatting():
     # Known indicators get their label; values use 4 decimals.
     assert "RSI(14): 55.5000" in text
     assert "EMA(20): 60,100.0000" in text
+
+
+def test_render_every_known_indicator_gets_its_own_label():
+    # Each _INDICATOR_LABEL entry paired with a distinct value: a swapped or
+    # copy-pasted label (e.g. ema_50 rendered as "EMA(20)") passes any
+    # subset/shape check but mislabels the indicator the model reasons over.
+    text = render_market_context(
+        _ctx(indicators={"rsi_14": 1.0, "ema_20": 2.0, "ema_50": 3.0, "atr_14": 4.0, "macd": 5.0})
+    )
+    assert "RSI(14): 1.0000" in text
+    assert "EMA(20): 2.0000" in text
+    assert "EMA(50): 3.0000" in text
+    assert "ATR(14): 4.0000" in text
+    assert "MACD: 5.0000" in text
 
 
 def test_render_none_values_become_na_never_nan():

@@ -475,6 +475,15 @@ def test_decision_config_rejects_bad_resize_confidence():
         DecisionConfig(min_confidence=Decimal("0.5"), resize_min_confidence=Decimal("0.4"))
 
 
+def test_decision_config_equal_confidence_bars_accepted():
+    # Equal bars are the documented off-switch (SETUP.md / example yaml:
+    # resize_min_confidence == min_confidence disables the extra resize bar).
+    # Only a strictly lower resize bar is dead config — a `<` → `<=` slip in
+    # __post_init__ would break the escape hatch with no test failing.
+    cfg = DecisionConfig(min_confidence=Decimal("0.5"), resize_min_confidence=Decimal("0.5"))
+    assert cfg.resize_min_confidence == cfg.min_confidence
+
+
 def test_decision_config_from_dict_parses_resize_confidence():
     cfg = DecisionConfig.from_dict({"resize_min_confidence": 0.8})
     assert cfg.resize_min_confidence == Decimal("0.8")
@@ -490,7 +499,12 @@ def test_format_instructions_advertise_resize_bar_and_deadband():
     assert "0.75" in text
     assert "12" in text
     # Normalized: the phrase spans a template line wrap.
-    assert "same-side resize that would actually trade" in " ".join(text.split())
+    normalized = " ".join(text.split())
+    assert "same-side resize that would actually trade" in normalized
+    # The gate's exemption ranking must stay out of the prompt (2026-07 review
+    # decision): a position-blind model can't identify resizes, so comparing
+    # bars only teaches that a full close is the guaranteed way past the gate.
+    assert "higher bar than" not in normalized
 
 
 def test_decision_config_rejects_grid_step_not_reaching_max():

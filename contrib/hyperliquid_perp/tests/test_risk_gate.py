@@ -309,6 +309,18 @@ def test_leverage_mismatch_convergence_order_is_gated_by_resize_bar():
     assert result.risk_reason == risk_gate.RISK_REASON_LOW_CONFIDENCE_RESIZE
 
 
+def test_equal_thresholds_off_switch_disables_resize_bar():
+    # resize_min_confidence == min_confidence is the documented off-switch
+    # (SETUP.md / example yaml): with the bars equal, a same-side resize at
+    # exactly the shared bar trades like any other set_target — the resize
+    # gate adds nothing on top of the base gate.
+    cfg = DecisionConfig(min_confidence=Decimal("0.3"), resize_min_confidence=Decimal("0.3"))
+    current = _long_state(margin_pct="20", notional="200")
+    result = _evaluate(_parsed(margin=45, confidence="0.3"), current=current, cfg=cfg)
+    assert result.risk_action is RiskAction.APPROVED
+    assert result.order_created is True
+
+
 def test_zero_capacity_reject_outranks_resize_bar():
     # A same-side resize with no cross-margin capacity left: the zero-capacity
     # fail-close returns before the resize bar, so the binding constraint —

@@ -12,7 +12,7 @@ structured target schema (``docs/DESIGN.md`` Part 2). This module owns:
   (phase2-spec.md §2.4: no silent rounding, no inference from old ratings or
   a previous round's target);
 - :class:`DecisionConfig` — the ``decision:`` config block (margin grid,
-  deadband, ``min_confidence``);
+  deadband, ``min_confidence``, ``resize_min_confidence``);
 - :func:`decision_format_instructions` — the output-format contract appended
   to the engine context by ``integration/trading_graph.py``.
 
@@ -500,6 +500,14 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     business as usual. Requests above ``max_pct`` but on the grid stay
     schema-valid (they clamp rather than fail closed).
 
+    The resize bar is advertised as a per-action fact only; the gate's
+    exemption ranking (open/flip/flat need just ``min_confidence``) is
+    deliberately not spelled out. A position-blind model cannot tell which
+    of its targets is a resize, so the comparison is non-actionable — the
+    only thing it could teach is that a full close is the one exposure
+    change guaranteed past the gate, funneling mid-confidence de-risking
+    into fee-heavier flat exits.
+
     The worked example is deliberately a ``maintain_current``: models routinely
     echo format examples verbatim, and :func:`extract_json_block` takes the last
     parseable object — an echoed directional example would become a live sized
@@ -540,10 +548,9 @@ never repaired or rounded):
   {config.rebalance_deadband_pct} percentage points of the current margin
   creates no order (a cost-free reaffirmation); a same-side resize that would
   actually trade needs confidence >= {config.resize_min_confidence} or it is
-  rejected — every executed rebalance pays fees, so changing the size of an
-  existing position must clear a higher bar than opening, flipping, or
-  closing. Make your conviction consistent with the margin you request —
-  confidence is recorded but never scales the size.
+  rejected — every executed rebalance pays fees. Make your conviction
+  consistent with the margin you request — confidence is recorded but never
+  scales the size.
 - "rationale": non-empty. "key_risks": 1 to {_MAX_KEY_RISKS} short strings (at least one).
 
 Legal combinations — anything else is invalid:

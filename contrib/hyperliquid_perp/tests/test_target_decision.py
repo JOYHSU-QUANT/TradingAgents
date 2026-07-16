@@ -442,7 +442,11 @@ def test_format_instructions_reflect_config():
     )
     text = decision_format_instructions(cfg)
     assert "from 0 to 80 in steps of 5" in text
-    assert "0.4" in text
+    # Bind the value to its clause: a bare `"0.4" in text` would still pass if
+    # the min_confidence and resize_min_confidence substitutions were swapped.
+    normalized = " ".join(text.split())
+    assert "confidence below 0.4 is rejected" in normalized
+    assert "needs confidence >= 0.7" in normalized  # default resize bar, other clause
     # The instructions' own example must survive the parser it feeds.
     assert parse_target_decision(text, cfg).is_valid
 
@@ -501,6 +505,11 @@ def test_format_instructions_advertise_resize_bar_and_deadband():
     # Normalized: the phrase spans a template line wrap.
     normalized = " ".join(text.split())
     assert "same-side resize that would actually trade" in normalized
+    # Bind each threshold to its clause — bare value-presence checks would
+    # still pass if the two confidence substitutions were swapped, silently
+    # advertising the wrong bar for opens vs. resizes.
+    assert "needs confidence >= 0.75" in normalized
+    assert "confidence below 0.3 is rejected" in normalized  # default base bar
     # The deadband is advertised with the gate's strict-< boundary (2026-07
     # review decision): "within 12 points" reads as inclusive, telling the
     # model an exactly-12 move is a cost-free reaffirmation when the gate

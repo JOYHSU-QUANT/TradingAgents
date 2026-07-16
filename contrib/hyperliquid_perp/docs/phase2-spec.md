@@ -115,7 +115,8 @@ set_target 且 target_side 與目前持倉方向相同        → 同方向 resi
 且該目標會實際產生訂單                               maintain_current，記 risk_action = rejected、
 且 confidence < 0.7                                  risk_reason = low_confidence_resize。
                                                      只 gate「會下單」的 resize——deadband 內或
-                                                     zero-delta 的重申不付費，維持原本的 approved +
+                                                     zero-delta 的重申不付費，維持原本判定
+                                                     （approved；cap 拉回 deadband 時 clamped）+
                                                      within_deadband／zero_delta；權益歸零仍先記
                                                      no_account_equity（門檻檢查排在兩者之後）。
                                                      加倉與減倉**都適用**；flat→建倉、方向翻轉
@@ -151,6 +152,16 @@ set_target 且 target_side 與目前持倉方向相同        → 同方向 resi
   放大到 `(50, 60]`：PnL 把倉位漂到這一區後，唯一的改倉出路是大幅減倉
   （≥ deadband 且過 resize 門檻）、翻向或 flat。prompt 廣告的有效上限在此區間內
   實際不可達，屬已知並接受的取捨。
+- **「不付費不 gate」原則僅適用本門檻**：基本 `min_confidence` 門檻刻意無條件
+  先檢（評估順序在前）——deadband 內的重申若 confidence 低於基本門檻仍記
+  `rejected`／`low_confidence`。不要以本門檻的 order-necessity 原則「調和」
+  基本門檻的檢查時機。
+- **兩步繞道與量測盲點**：本門檻不阻止「flat 平倉（只需 min_confidence）→
+  下一 cycle 同方向重開」的兩步改倉。position-blind 模型無法刻意繞道，但
+  發生時付兩條全倉費用，且 churn 偵測若只配對相鄰 rebalance 的
+  reduce→rebuild（/paper-review 的凍結定義），看不到這種形狀——平倉腿
+  `target_side = flat`、重開腿 `order_role = entry`。檢討 gate 成效時
+  churn=0 不能單獨當證據：摩擦佔比未同步下降時，先查 flat→同向重開配對。
 - **Phase 3 live 路徑同樣適用**：本門檻是共用 RiskGate 的一部分（含 code 預設
   0.7，即使 YAML 未列出此 key），合回 `hyperliquid-adapter` 後 live 執行一體
   繼承——paper 段即其驗證段。

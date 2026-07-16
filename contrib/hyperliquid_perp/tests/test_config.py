@@ -18,6 +18,11 @@ from contrib.hyperliquid_perp.config import (
     load_dotenv_files,
     wallet_address,
 )
+from contrib.hyperliquid_perp.domains.perp.risk_gate import (
+    RiskConfig,
+    validate_risk_decision_config,
+)
+from contrib.hyperliquid_perp.domains.perp.target_decision import DecisionConfig
 
 
 @pytest.mark.parametrize(
@@ -42,6 +47,19 @@ def test_load_config_reads_example_by_default():
     assert config["network"] == "mainnet"
     assert config["coins"] == ["BTC"]
     assert "market_data" in config
+
+
+def test_example_yaml_risk_decision_blocks_validate():
+    # Tuning edits the shipped example config in place (deadband width,
+    # resize_min_confidence), and the cross-field invariants — e.g.
+    # resize_min_confidence >= min_confidence — fail the process at load with
+    # exit 1. Round-trip the real file through the real constructors (the same
+    # sequence main.py runs) so a bad edit fails here instead of taking down
+    # the paper service on its next deploy.
+    config = load_config()
+    risk_cfg = RiskConfig.from_dict(config.get("risk"))
+    decision_cfg = DecisionConfig.from_dict(config.get("decision"))
+    validate_risk_decision_config(risk_cfg, decision_cfg)
 
 
 def test_load_config_missing_path_raises(tmp_path):

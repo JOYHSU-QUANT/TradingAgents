@@ -238,8 +238,10 @@ def test_flat_close_keeps_base_confidence_bar():
 def test_within_deadband_reaffirmation_is_exempt_from_resize_bar():
     # The resize bar only gates targets that would actually trade: a same-side
     # target inside the deadband creates no order and pays no fees, so it stays
-    # an APPROVED within_deadband no-op even at low confidence — rejecting it
-    # would conflate cost-free reaffirmations with real churn in the analytics.
+    # a within_deadband no-op even at low confidence — rejecting it would
+    # conflate cost-free reaffirmations with real churn in the analytics.
+    # Uncapped here so the verdict is APPROVED; a capped request landing in the
+    # deadband keeps CLAMPED (test_clamped_target_can_still_land_within_deadband).
     current = _long_state(margin_pct="35.5", notional="355")
     result = _evaluate(_parsed(margin=35, confidence="0.5"), current=current)
     assert result.risk_action is RiskAction.APPROVED

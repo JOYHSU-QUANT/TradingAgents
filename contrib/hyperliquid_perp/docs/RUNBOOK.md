@@ -135,8 +135,10 @@ PnL，正是跨段對照要避免的汙染。等 cycle 自然回到空倉（或 
    `sudo systemctl daemon-reload`，**先不要啟動**。
 2. 再 push `deploy/paper`——workflow 部署新 code 並 restart，服務直接以新
    run-id 起段。
-3. 確認新段健康後，把 unit 裡的 `--create` 拿掉再 `daemon-reload`：run 已存在
-   時帶 `--create` 是硬錯誤，留著會讓下一次 deploy 的自動 restart 直接失敗。
+3. 確認新段健康後，**立刻**把 unit 裡的 `--create` 拿掉再 `daemon-reload`：
+   run 已存在時帶 `--create` 是硬錯誤，留著的話**任何**後續 restart——crash
+   自動重啟、主機重開機、下一次 deploy——都會直接失敗（systemd `Restart=`
+   還可能因此 crash-loop），不是只有下次 deploy 才危險。
 
 deploy 自動 restart 的三個既有行為，換段與日常部署都要知道：push 落在 cycle
 中間會中斷 in-flight 的 execution plan——安全但 off-schedule（見上方重啟

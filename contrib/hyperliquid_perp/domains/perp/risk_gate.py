@@ -707,7 +707,9 @@ def evaluate(
     # resize bar (spec §2.4): every executed rebalance pays fees, so a
     # mid-conviction size tweak on an existing position is churn, not signal.
     # Deliberately last — a within-deadband or zero-delta reaffirmation costs
-    # nothing and stays an APPROVED no-op, and a dead account already reported
+    # nothing and stays a no-op under its existing verdict (APPROVED, or
+    # CLAMPED when a cap pulled the request into the deadband), and a dead
+    # account already reported
     # no_account_equity above. ``side is current.side`` is exactly the
     # same-direction case (a flat account's ``current.side`` is ``None``, never
     # FLAT), so opening from flat, flips — including the flip re-run's second

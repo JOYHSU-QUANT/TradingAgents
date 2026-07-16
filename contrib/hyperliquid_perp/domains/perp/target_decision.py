@@ -488,10 +488,16 @@ def parse_target_decision(raw: object, config: DecisionConfig) -> ParsedDecision
 def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None = None) -> str:
     """The output-format contract text injected at the tail of the engine context.
 
-    Rendered from the live :class:`DecisionConfig` so the legal margin grid,
-    the confidence thresholds (``min_confidence`` and the same-side
-    ``resize_min_confidence`` bar) and the rebalance deadband in the prompt can
-    never drift from what the parser and RiskGate actually enforce.
+    Rendered from the live :class:`DecisionConfig` so the *numeric values* in
+    the prompt — the legal margin grid, the confidence thresholds
+    (``min_confidence`` and the same-side ``resize_min_confidence`` bar) and
+    the rebalance deadband — can never drift from what the parser and RiskGate
+    actually enforce. The deadband sentence itself is a deliberately
+    simplified contract for the normal case: the gate skips the deadband
+    entirely on an unreadable ``margin_pct`` or a leverage mismatch (the
+    target then trades, or hits the resize bar). Those degraded states are
+    rare in Phase 2 and non-actionable for a position-blind model, so the
+    prompt does not carry the conditional.
     ``max_pct`` (when given) advertises the *effective* ceiling —
     ``risk_gate.effective_max_target_margin_pct``, the
     grid ceiling capped by ``risk.max_target_margin_pct`` — so the model is

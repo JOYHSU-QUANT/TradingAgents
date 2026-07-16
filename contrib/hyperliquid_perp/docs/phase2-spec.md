@@ -148,7 +148,7 @@ set_target 且 target_side 與目前持倉方向相同        → 同方向 resi
   0.7，即使 YAML 未列出此 key），合回 `hyperliquid-adapter` 後 live 執行一體
   繼承——paper 段即其驗證段。
 
-理由：LLM 的 confidence 未經校準，直接乘進 sizing 會把噪音放大成倉位；AI 的 conviction 應直接反映在 `requested_target_margin_pct`，prompt 必須明確要求兩者一致。本門檻只負責擋下「高倉位、低信心」這類自相矛盾的輸出。是否引入 confidence-aware sizing，待 Phase 2 paper 累積的 confidence 與績效資料驗證其預測力後，於 Phase 3+ 再議。
+理由：LLM 的 confidence 未經校準，直接乘進 sizing 會把噪音放大成倉位；AI 的 conviction 應直接反映在 `requested_target_margin_pct`，prompt 必須明確要求兩者一致。`min_confidence` 門檻只負責擋下「高倉位、低信心」這類自相矛盾的輸出。是否引入 confidence-aware sizing，待 Phase 2 paper 累積的 confidence 與績效資料驗證其預測力後，於 Phase 3+ 再議。
 
 ---
 

@@ -506,10 +506,18 @@ def test_decision_config_rejects_grid_step_not_reaching_max():
 
 def test_decision_config_from_dict_nulls_fall_back():
     cfg = DecisionConfig.from_dict(
-        {"ai_target_margin_max_pct": None, "min_confidence": None, "target_margin_step_pct": 2}
+        {
+            "ai_target_margin_max_pct": None,
+            "min_confidence": None,
+            "resize_min_confidence": None,
+            "target_margin_step_pct": 2,
+        }
     )
     assert cfg.ai_target_margin_max_pct == 100
     assert cfg.min_confidence == Decimal("0.3")
+    # Pins the built-in 0.7 default the spec's live-inheritance note and the
+    # __post_init__ error message both advertise for an absent/null key.
+    assert cfg.resize_min_confidence == Decimal("0.7")
     assert cfg.target_margin_step_pct == 2
 
 

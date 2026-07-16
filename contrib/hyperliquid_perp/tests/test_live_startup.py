@@ -420,3 +420,24 @@ def test_an_arming_failure_propagates_hard(env):
     with pytest.raises(ExchangeRequestError):
         env.recover()
     assert env.gate.startup_reconciliation_passed is False
+
+
+def test_the_kill_switch_is_ticked_between_recovery_legs(env, monkeypatch):
+    # The recovery's legs are network round-trips that can stretch past the
+    # scheduled-cancel deadline; the switch must be ticked between them (and
+    # per swept order), or it fires mid-recovery.
+    ticks = {"n": 0}
+    real_tick = env.kill_switch.tick
+
+    def counting_tick():
+        ticks["n"] += 1
+        real_tick()
+
+    monkeypatch.setattr(env.kill_switch, "tick", counting_tick)
+    env.register_order(order_id="o-e", hex_id=_HEX_ENTRY, logical="log-e", role="entry")
+    env.client.open_orders_result = [
+        {"oid": 7, "coin": "BTC", "cloid": _HEX_ENTRY, "side": "B", "sz": "0.001"}
+    ]
+    env.recover()
+    # After pass 1, once per swept order, and after the sweep: >= 3 here.
+    assert ticks["n"] >= 3

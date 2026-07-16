@@ -628,6 +628,12 @@ def test_an_exchange_open_order_with_a_terminal_local_row_is_reopened(env):
     seams.open_orders = [
         {"oid": 42, "coin": "BTC", "cloid": _HEX, "side": "B", "sz": "0.001", "origSz": "0.001"}
     ]
+    # orderStatus is the tiebreaker: it must CONFIRM the order live before the
+    # terminal row is reopened.
+    seams.order_status[_HEX] = {
+        "status": "order",
+        "order": {"order": {"oid": 42}, "status": "open"},
+    }
     report = reconciler.run("heartbeat")
     assert report.orders_reconciled  # resolved in-pass, per §12.1 the exchange wins
     order = repo.get_order(db.conn, "o1")
@@ -636,6 +642,39 @@ def test_an_exchange_open_order_with_a_terminal_local_row_is_reopened(env):
     assert order["exchange_order_id"] == "42"
     (case,) = _cases(db, "orphan_exchange_order")
     assert case["action_taken"] == "local_row_reopened"
+
+
+def test_a_stale_open_orders_listing_of_a_cancelled_order_is_not_reopened(env):
+    # The run just cancelled the order (row terminal); open_orders is merely
+    # behind, and orderStatus confirms the cancel — reopening would resurrect
+    # a phantom-open row for an order the run itself retired.
+    db, seams, reconciler = env
+    _insert_local_order(db, status="canceled")
+    seams.open_orders = [
+        {"oid": 42, "coin": "BTC", "cloid": _HEX, "side": "B", "sz": "0.001", "origSz": "0.001"}
+    ]
+    seams.order_status[_HEX] = {
+        "status": "order",
+        "order": {"order": {"oid": 42}, "status": "canceled"},
+    }
+    report = reconciler.run("heartbeat")
+    assert report.orders_reconciled
+    assert repo.get_order(db.conn, "o1")["status"] == "canceled"  # untouched
+    assert _cases(db, "orphan_exchange_order") == []  # not a conflict, no case
+
+
+def test_contradictory_exchange_answers_on_a_terminal_row_stay_unproven(env):
+    # open_orders lists it, orderStatus denies it: never guessed either way.
+    db, seams, reconciler = env
+    _insert_local_order(db, status="rejected")
+    seams.open_orders = [
+        {"oid": 42, "coin": "BTC", "cloid": _HEX, "side": "B", "sz": "0.001", "origSz": "0.001"}
+    ]
+    report = reconciler.run("heartbeat")  # order_status defaults to unknownOid
+    assert not report.orders_reconciled
+    assert repo.get_order(db.conn, "o1")["status"] == "rejected"  # untouched
+    (case,) = _cases(db, "orphan_exchange_order")
+    assert case["action_taken"] is None
 
 
 def test_a_wrong_side_sl_does_not_count_as_protection(env):
@@ -722,6 +761,27 @@ def test_an_sl_only_mismatch_enters_safe_mode_under_its_own_reason(env):
     assert not report.position_protected
     state = safe_mode.current()
     assert state is not None and state.reason == REASON_SL_MISSING
+
+
+def test_a_failed_snapshot_write_keeps_the_case_rows_and_the_verdict(env, monkeypatch):
+    # The case rows are the durable evidence of WHY safe mode fired; a snapshot
+    # write failing in the same unit of work must not roll them back, and the
+    # pass must still return its verdict ("records everything, raises nothing"
+    # includes the recording leg itself).
+    db, seams, reconciler = env
+    seams.open_orders = [{"oid": 9, "coin": "BTC", "cloid": None, "sz": "1"}]  # manual case
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(LiveReconciler, "_write_snapshots", boom)
+    report = reconciler.run("heartbeat")  # must not raise
+    assert not report.clean
+    assert report.manual_cases  # the in-memory verdict survives
+    (case,) = _cases(db, "non_bot_owned_order")  # the durable evidence survives
+    assert case["case_type"] == "non_bot_owned_order"
+    rows = db.conn.execute("SELECT COUNT(*) FROM account_snapshots WHERE run_id='r'").fetchone()
+    assert rows[0] == 0  # only the snapshot leg was lost
 
 
 def test_a_case_cannot_be_both_manual_and_resolved(env):

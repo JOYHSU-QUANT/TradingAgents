@@ -60,7 +60,7 @@ from .cancel import cancel_bot_order_with_evidence
 from .kill_switch import KillSwitchManager
 from .order_gate import RealOrderGate
 from .reconcile import LiveReconciler, ReconciliationReport
-from .safe_mode import REASON_STALE_ORDER_CANCEL_FAILED, SafeModeManager
+from .safe_mode import REASON_STALE_ORDER_SWEEP_FAILED, SafeModeManager
 
 __all__ = ["StartupResult", "run_startup_recovery"]
 
@@ -127,6 +127,13 @@ def run_startup_recovery(
     # fixes (settle stuck rows, back-fill orphans, book missing fills).
     reconciler.run("startup")
 
+    # The recovery is this manager's ONLY owner until the CLI's shutdown, and
+    # its legs are network round-trips that can stretch past the scheduled
+    # deadline on a degraded link — tick between every leg (and per order in
+    # the sweep below), or the constructor's max-tick-gap promise is never
+    # kept and the exchange fires the wallet-wide cancel MID-recovery.
+    kill_switch.tick()
+
     # Step 12: the §19.3 stale-order sweep over the CURRENT exchange view.
     canceled, kept, failures = _sweep_stale_orders(
         db=db,
@@ -135,13 +142,16 @@ def run_startup_recovery(
         fetch_clearinghouse=fetch_clearinghouse,
         payload_dir=payload_dir,
         clock=clock,
+        tick=kill_switch.tick,
     )
+    kill_switch.tick()
 
-    # Steps 13–15: the verdict pass over the post-cancel state. The kill
-    # switch was just armed, so its latch can only be up if arming's first
-    # refresh window already lapsed — pass the truth either way. No WS stream
-    # exists in this wiring (the live loop is PR 5), so ws_restored is
-    # vacuously true.
+    # Steps 13–15: the verdict pass over the post-cancel state. The ticks
+    # above also ran _detect_expired_deadline, so a switch that fired during
+    # the recovery has latched stop_new_orders by the time it is read here —
+    # a lapsed deadline can never attest "kill switch healthy" to §13.4. No
+    # WS stream exists in this wiring (the live loop is PR 5), so ws_restored
+    # is vacuously true.
     report = reconciler.reconcile_and_apply(
         "startup",
         safe_mode=safe_mode,
@@ -155,7 +165,7 @@ def run_startup_recovery(
         # mode is the same fail-safe direction as any other mismatch.
         safe_mode.enter(
             "recoverable",
-            REASON_STALE_ORDER_CANCEL_FAILED,
+            REASON_STALE_ORDER_SWEEP_FAILED,
             detail="; ".join(failures),
         )
 
@@ -186,13 +196,16 @@ def _sweep_stale_orders(
     fetch_clearinghouse: Callable[[], Any],
     payload_dir: Path,
     clock: Clock,
+    tick: Callable[[], None] = lambda: None,
 ) -> tuple[list[str], list[str], list[str]]:
     """§19.3: classify every bot-owned open order; cancel the stale ones.
 
     Returns ``(canceled oids, kept oids, failure descriptions)``. Enumeration
     failure is one failure entry (the verdict pass will also fail its orders
     leg); per-order failures never stop the sweep — the same discipline as the
-    §18.2 shutdown sweep.
+    §18.2 shutdown sweep. ``tick`` (the kill-switch tick) runs once per order:
+    each cancel is a network round-trip, and a long sweep must keep the dead
+    man's switch refreshed or it fires mid-sweep.
     """
     canceled: list[str] = []
     kept: list[str] = []
@@ -208,6 +221,7 @@ def _sweep_stale_orders(
     positions = _exchange_positions(fetch_clearinghouse, failures)
 
     for order in raw_orders:
+        tick()
         if not isinstance(order, dict):
             failures.append(f"malformed open_orders entry ({type(order).__name__})")
             continue

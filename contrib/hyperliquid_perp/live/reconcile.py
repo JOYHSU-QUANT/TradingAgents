@@ -242,7 +242,16 @@ class LiveReconciler:
             backfill_complete=backfill_summary is None or backfill_summary.complete,
             errors=tuple(errors),
         )
-        self._record(report, snapshot, raw_clearinghouse, backfill_summary)
+        try:
+            self._record(report, snapshot, raw_clearinghouse, backfill_summary)
+        except Exception:  # noqa: BLE001 — the verdict must survive its own recording
+            # "Records everything, raises nothing" includes the recording leg
+            # itself: a DB failure here must not crash the pass — the caller
+            # still gets the in-memory verdict and drives safe mode off it
+            # (an unclean pass stays unclean; a clean one is only unrecorded).
+            logger.exception(
+                "reconciliation (%s) verdict computed but could not be recorded", trigger
+            )
         if not report.clean:
             logger.warning(
                 "reconciliation (%s) UNCLEAN: orders=%s fills=%s position=%s account=%s "
@@ -407,16 +416,18 @@ class LiveReconciler:
             verdict_end = now - _FILL_CROSSCHECK_EDGE_MARGIN
             for fill in repo.iter_live_fills(conn, self._run_id):
                 fill_time = fill["exchange_fill_time"]
-                if fill_time is None:
-                    continue
                 try:
+                    # NULL and unparseable land in the SAME lane: the writer
+                    # requires exchange_fill_time (PR 3 guard), so either shape
+                    # is store corruption, and a silent exemption would leave
+                    # that fill permanently outside the §12.3 verdict.
                     stamp = datetime.fromisoformat(fill_time)
-                except ValueError:
+                except (TypeError, ValueError):
                     # run()'s contract is "records everything, raises nothing";
-                    # an unparseable stored timestamp is a verdict, not a crash.
+                    # a bad stored timestamp is a verdict, not a crash.
                     errors.append(
-                        f"fill {fill['fill_id']} has unparseable exchange_fill_time "
-                        f"{fill_time!r} — fills leg cannot be proven"
+                        f"fill {fill['fill_id']} has missing/unparseable "
+                        f"exchange_fill_time {fill_time!r} — fills leg cannot be proven"
                     )
                     ok = False
                     continue
@@ -478,7 +489,12 @@ class LiveReconciler:
             if len(raw) < RESPONSE_FILL_CAP:
                 return keys  # the exchange gave everything: the window is covered
             if newest_ms is None or newest_ms <= start_ms:
-                break  # cannot advance: paging again would refetch the same page
+                # Cannot advance: paging again would refetch the same page.
+                errors.append(
+                    "fill cross-check window not covered (capped page with no "
+                    "advanceable timestamp) — invalid-fill verdicts withheld"
+                )
+                return None
             start_ms = newest_ms
         errors.append(
             "fill cross-check window not covered (response still capped after "
@@ -551,39 +567,21 @@ class LiveReconciler:
                 if not resolved:
                     ok = False
             elif local["status"] not in repo.LIVE_ORDER_STATUSES:
-                # The exchange lists the order OPEN but the local row is
-                # terminal — the local record contradicts the exchange (§12.1).
-                # The usual path here: a past pass settled the row 'rejected'
-                # off an unknownOid answer, and the send had in fact landed.
-                # The exchange wins: the row reopens (making the order visible
-                # again to iter_open_live_orders and the shutdown cross-check),
-                # never the other way around.
-                with self._db.transaction() as tx:
-                    repo.update_order(
-                        tx,
-                        local["order_id"],
-                        status="open",
-                        status_reason="reopened_from_exchange_reconciliation",
-                        exchange_order_id=str(order.get("oid")),
-                        exchange_status="open",
-                        updated_at=now,
-                    )
-                cases.append(
-                    ReconciliationCase(
-                        case_type="orphan_exchange_order",
-                        symbol=registry["symbol"],
-                        local_value=f"{local['order_id']}:{local['status']}",
-                        # Distinct fact key: a later re-settle of the same cloid
-                        # must not dedupe against a plain-orphan sighting.
-                        exchange_value=f"{cloid}|local_terminal",
-                        detail=(
-                            f"exchange lists oid={oid} open but the local row was "
-                            f"terminal ({local['status']}) — reopened per §12.1"
-                        ),
-                        action_taken="local_row_reopened",
-                        resolved=True,
-                    )
-                )
+                # The exchange's open-orders view lists the order but the local
+                # row is terminal. TWO very different stories fit this shape:
+                # a past pass settled the row off a wrong unknownOid answer
+                # (the send had landed — the row must reopen, §12.1), or the
+                # open-orders view is merely BEHIND a cancel this very startup
+                # just landed (reopening would resurrect a phantom-open row
+                # for an order the run itself retired). orderStatus is the
+                # tiebreaker, same as the mirror direction's non-case reading:
+                # two eventually-consistent reads disagreeing is not a
+                # local/exchange conflict.
+                reopened, case = self._maybe_reopen_terminal_order(order, registry, local, now)
+                if case is not None:
+                    cases.append(case)
+                if not reopened:
+                    ok = False
 
         # §12.3 row 1: locally-live orders the exchange's open-orders view did
         # not list. Ask orderStatus directly; never resend (§8.3).
@@ -597,6 +595,86 @@ class LiveReconciler:
             if not settled:
                 ok = False
         return ok
+
+    def _maybe_reopen_terminal_order(
+        self, order: dict, registry: Any, local: Any, now: datetime
+    ) -> tuple[bool, ReconciliationCase | None]:
+        """Reopen a terminal local row ONLY when orderStatus proves it live.
+
+        Returns ``(ok, case)``. orderStatus is the authority (§8.3): a LIVE
+        answer proves the terminal row was wrong — reopen it (§12.1, the
+        exchange wins). A TERMINAL answer proves the open-orders view is
+        merely behind (typically a cancel this very startup just landed) —
+        no case, nothing touched. Anything else (unknownOid contradicting the
+        listing, a failed read) is an unproven conflict: recorded, unclean,
+        never guessed.
+        """
+        cloid = local["cloid_hex"]
+        oid = str(order.get("oid", "?"))
+        try:
+            parsed = parse_order_status(self._query_order_by_cloid(cloid))
+        except Exception as exc:  # noqa: BLE001 — a failed read is a verdict
+            return False, ReconciliationCase(
+                case_type="orphan_exchange_order",
+                symbol=registry["symbol"],
+                local_value=f"{local['order_id']}:{local['status']}",
+                exchange_value=f"{cloid}|local_terminal",
+                detail=(
+                    f"exchange lists oid={oid} open but the local row is terminal "
+                    f"({local['status']}) and orderStatus failed: {exc}"
+                ),
+            )
+        if parsed is not None:
+            exchange_order_id, raw_status = parsed
+            if local_status_for_exchange_status(raw_status) in repo.LIVE_ORDER_STATUSES:
+                # Confirmed live: the terminal row was wrong (the usual story:
+                # a past pass settled it off a wrong unknownOid answer). The
+                # row reopens, making the order visible again to
+                # iter_open_live_orders and the shutdown cross-check.
+                with self._db.transaction() as tx:
+                    repo.update_order(
+                        tx,
+                        local["order_id"],
+                        status="open",
+                        status_reason="reopened_from_exchange_reconciliation",
+                        exchange_order_id=exchange_order_id,
+                        exchange_status="open",
+                        exchange_raw_status=raw_status,
+                        updated_at=now,
+                    )
+                return True, ReconciliationCase(
+                    case_type="orphan_exchange_order",
+                    symbol=registry["symbol"],
+                    local_value=f"{local['order_id']}:{local['status']}",
+                    # Distinct fact key: a later re-settle of the same cloid
+                    # must not dedupe against a plain-orphan sighting.
+                    exchange_value=f"{cloid}|local_terminal",
+                    detail=(
+                        f"exchange lists oid={oid} open, orderStatus confirms "
+                        f"{raw_status!r}, but the local row was terminal "
+                        f"({local['status']}) — reopened per §12.1"
+                    ),
+                    action_taken="local_row_reopened",
+                    resolved=True,
+                )
+            # orderStatus says terminal too: the open-orders view is behind
+            # (a cancel this startup just landed is the common cause). Two
+            # eventually-consistent reads disagreeing for a moment is not a
+            # local/exchange conflict — same reading as the mirror direction.
+            return True, None
+        # unknownOid while open_orders LISTS the order: contradictory exchange
+        # answers — unproven either way, never guessed.
+        return False, ReconciliationCase(
+            case_type="orphan_exchange_order",
+            symbol=registry["symbol"],
+            local_value=f"{local['order_id']}:{local['status']}",
+            exchange_value=f"{cloid}|local_terminal",
+            detail=(
+                f"exchange lists oid={oid} open but orderStatus answers unknownOid "
+                f"and the local row is terminal ({local['status']}) — contradictory "
+                "exchange answers, left for the next pass"
+            ),
+        )
 
     def _backfill_orphan_order(self, order: dict, registry: Any, now: datetime) -> bool:
         """Insert the missing local row for a bot-owned exchange order."""
@@ -993,8 +1071,21 @@ class LiveReconciler:
                     ),
                     timestamp=now,
                 )
-            if snapshot is not None:
-                self._write_snapshots(conn, snapshot, status, diff, raw_path, now)
+        if snapshot is not None:
+            # A SEPARATE transaction, fail-soft: the case rows above are the
+            # record a human needs to understand why safe mode fired, and a
+            # snapshot-write failure (constraint, disk, lock timeout) inside
+            # the same unit would roll them back too — losing exactly the
+            # durable evidence of the pass that found the problem. A failed
+            # snapshot degrades to "cases recorded, snapshot rows skipped",
+            # same convention as write_raw_payload.
+            try:
+                with self._db.transaction() as conn:
+                    self._write_snapshots(conn, snapshot, status, diff, raw_path, now)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "reconciliation snapshot rows could not be written (case rows are safe)"
+                )
 
     def _write_snapshots(
         self,
@@ -1026,20 +1117,23 @@ class LiveReconciler:
         equity = ledger.wallet_balance + exch_unrealized
         total_notional = snapshot.total_position_notional
         if total_notional is None:
+            if any(p.position_value is None for p in snapshot.positions):
+                # A position without positionValue cannot be summed: writing
+                # the partial total would UNDERSTATE exposure (and a fully
+                # unpriced book would read 0 — the same zero-looks-like-flat
+                # trap AccountSnapshot guards for account_value). Skip the row
+                # rather than write a number known to be wrong.
+                logger.warning(
+                    "skipping reconciliation snapshot rows: open position(s) carry no "
+                    "positionValue to derive total notional from"
+                )
+                return
+            # The `any` guard above proved every position_value non-None; the
+            # inline filter is for the type checker, not a second policy.
             total_notional = sum(
                 (p.position_value for p in snapshot.positions if p.position_value is not None),
                 Decimal(0),
             )
-            if snapshot.positions and total_notional == 0:
-                # Every open position lacked positionValue: a 0 here would read
-                # as "no exposure" on an account that demonstrably has some —
-                # the same zero-looks-like-flat trap AccountSnapshot guards for
-                # account_value. Skip the row rather than write a guessed 0.
-                logger.warning(
-                    "skipping reconciliation snapshot rows: open positions carry no "
-                    "positionValue to derive total notional from"
-                )
-                return
         repo.insert_account_snapshot(
             conn,
             timestamp=now,

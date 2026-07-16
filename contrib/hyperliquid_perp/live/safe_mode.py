@@ -50,7 +50,7 @@ __all__ = [
     "REASON_RECONCILIATION_MISMATCH",
     "REASON_REPEATED_MISMATCH",
     "REASON_SL_MISSING",
-    "REASON_STALE_ORDER_CANCEL_FAILED",
+    "REASON_STALE_ORDER_SWEEP_FAILED",
     "REASON_UNKNOWN_POSITION",
     "REASON_WS_DISCONNECT",
     "SafeModeManager",
@@ -70,7 +70,10 @@ REASON_NON_BOT_OWNED_ORDER = "non_bot_owned_order"  # §13.5: manual
 REASON_INVALID_LOCAL_FILL = "invalid_local_fill"  # §12.3: manual (money state unknown)
 REASON_UNKNOWN_POSITION = "unknown_exchange_position"  # §13.5: manual
 REASON_SL_MISSING = "position_sl_missing"  # §12.3: recoverable (repair lands in PR 5)
-REASON_STALE_ORDER_CANCEL_FAILED = "stale_order_cancel_failed"  # §19.3: recoverable
+# §19.3: recoverable. Covers every way the startup stale-order sweep can fail —
+# a cancel that would not land AND a positions read it could not prove — so a
+# reason-keyed query never misclassifies a read failure as a cancel failure.
+REASON_STALE_ORDER_SWEEP_FAILED = "stale_order_sweep_failed"
 
 # §13.5 "repeated reconciliation mismatch": this many CONSECUTIVE unclean
 # passes escalate a recoverable safe mode to manual. In-memory (a restart

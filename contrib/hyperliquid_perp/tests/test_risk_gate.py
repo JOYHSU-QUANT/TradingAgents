@@ -306,6 +306,21 @@ def test_zero_delta_reaffirmation_is_exempt_from_resize_bar():
     assert result.no_order_reason == risk_gate.NO_ORDER_ZERO_DELTA
 
 
+def test_unknown_margin_resize_below_resize_bar_is_rejected():
+    # Unknown margin_pct skips the deadband branch entirely, so for this state
+    # the resize bar is the only guard left against low-confidence churn: a
+    # same-side, non-zero-delta target must still be rejected below the bar.
+    # Locks the gate against a refactor that reuses the deadband's
+    # `margin_pct is not None` guard on the resize check.
+    current = CurrentPositionState(
+        side=TargetSide.LONG, signed_notional=Decimal("355"), margin_pct=None
+    )
+    result = _evaluate(_parsed(margin=20, confidence="0.5"), current=current)
+    assert result.risk_action is RiskAction.REJECTED
+    assert result.risk_reason == risk_gate.RISK_REASON_LOW_CONFIDENCE_RESIZE
+    assert result.order_created is False
+
+
 def test_leverage_mismatch_convergence_order_is_gated_by_resize_bar():
     # With the deadband disabled on a leverage mismatch, a same-side target at
     # the same margin% still creates a convergence order — which must clear the

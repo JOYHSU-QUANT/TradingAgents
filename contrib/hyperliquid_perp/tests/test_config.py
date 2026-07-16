@@ -12,6 +12,7 @@ import os
 import pytest
 
 from contrib.hyperliquid_perp.config import (
+    _EXAMPLE,
     _WALLET_PLACEHOLDER,
     dotenv_diagnosis,
     load_config,
@@ -55,8 +56,10 @@ def test_example_yaml_risk_decision_blocks_validate():
     # resize_min_confidence >= min_confidence — fail the process at load with
     # exit 1. Round-trip the real file through the real constructors (the same
     # sequence main.py runs) so a bad edit fails here instead of taking down
-    # the paper service on its next deploy.
-    config = load_config()
+    # the paper service on its next deploy. Explicitly target the example file:
+    # bare load_config() prefers a developer's gitignored local.yaml, which
+    # would silently swap the file under test on any machine that has one.
+    config = load_config(_EXAMPLE)
     risk_cfg = RiskConfig.from_dict(config.get("risk"))
     decision_cfg = DecisionConfig.from_dict(config.get("decision"))
     validate_risk_decision_config(risk_cfg, decision_cfg)

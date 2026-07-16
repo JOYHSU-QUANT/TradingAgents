@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.hyperliquid_perp.config import load_config
+from contrib.hyperliquid_perp.config import _EXAMPLE, load_config
 from contrib.hyperliquid_perp.paper.config import InitialPosition, PaperTradingConfig
 
 
@@ -106,7 +106,9 @@ def test_non_mapping_block_rejected():
 
 def test_example_yaml_paper_block_parses():
     # The committed example config must round-trip through the typed parser.
-    raw = load_config()
+    # Explicit path: bare load_config() prefers a gitignored local.yaml, which
+    # would silently swap the file under test on any machine that has one.
+    raw = load_config(_EXAMPLE)
     cfg = PaperTradingConfig.from_dict(raw.get("paper_trading"))
     assert cfg.execution.taker_fee_rate == Decimal("0.00045")
     assert cfg.account.initial_balance_usdc == Decimal("1000")

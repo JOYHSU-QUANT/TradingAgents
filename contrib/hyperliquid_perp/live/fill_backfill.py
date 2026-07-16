@@ -121,10 +121,6 @@ class BackfillSummary:
     malformed: int
     complete: bool = True
 
-    @property
-    def new_fills(self) -> int:
-        return self.applied
-
 
 class FillBackfiller:
     """Poll REST ``userFillsByTime`` over a trailing window into a processor.

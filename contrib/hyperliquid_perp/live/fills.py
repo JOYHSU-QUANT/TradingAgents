@@ -50,7 +50,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..exchanges.hyperliquid.errors import MalformedResponseError
 from ..exchanges.hyperliquid.mapper import require_decimal
@@ -234,6 +234,16 @@ class ExchangeFill:
         if self.fill_time.tzinfo is None:
             raise ValueError(
                 f"ExchangeFill.fill_time must be timezone-aware, got {self.fill_time!r}"
+            )
+        # ``exchange_fill_key`` is derived state: §14.2 pins it to the same tid that
+        # ``exchange_fill_id`` records. A hand-built instance whose key disagrees with
+        # its id would dedupe under one identity while auditing another — the row's
+        # advertised tid and its dedupe slot silently diverge, and no later read can
+        # tell. (``parse`` derives both fields from the one tid, so it cannot trip this.)
+        if self.exchange_fill_key != exchange_fill_key(tid=self.exchange_fill_id):
+            raise ValueError(
+                f"ExchangeFill.exchange_fill_key {self.exchange_fill_key!r} does not "
+                f"match exchange_fill_id {self.exchange_fill_id!r} (§14.2: tid|<tid>)"
             )
 
     @classmethod
@@ -605,9 +615,23 @@ def _effective_fee(fill_row: sqlite3.Row, fee_adjustments: list[sqlite3.Row]) ->
     return repo.posted_exchange_fee(None if recorded is None else Decimal(recorded))
 
 
+class _FeeBooksState(NamedTuple):
+    """``_fee_books_state``'s answer, slot by NAME.
+
+    ``fee_adjustments`` (a list) and ``resolved`` (a bool) are only ever consumed
+    in truthy contexts, so a bare-tuple transposition of the two would keep
+    running with backwards pending/resolved logic instead of raising — named
+    access is what makes that a visible error.
+    """
+
+    fee_adjustments: list[sqlite3.Row]
+    effective: Decimal
+    resolved: bool
+
+
 def _fee_books_state(
     conn: sqlite3.Connection, run_id: str, fill_row: sqlite3.Row
-) -> tuple[list[sqlite3.Row], Decimal, bool]:
+) -> _FeeBooksState:
     """One definition of "do the books already carry this fee", for every lane.
 
     Returns the fill's fee-correction chain (insertion order), the fee currently
@@ -627,7 +651,7 @@ def _fee_books_state(
     fee_adjustments = [a for a in prior if a["adjustment_type"] == "fee"]
     effective = _effective_fee(fill_row, fee_adjustments)
     resolved = bool(fee_adjustments) or fill_row["exchange_fee"] is not None
-    return fee_adjustments, effective, resolved
+    return _FeeBooksState(fee_adjustments=fee_adjustments, effective=effective, resolved=resolved)
 
 
 def backfill_fill_fee(
@@ -697,14 +721,15 @@ def backfill_fill_fee(
                 "refusing to move this run's ledger for another run's fill"
             )
 
-        fee_adjustments, effective, resolved = _fee_books_state(conn, run_id, row)
-        if exchange_fee == effective and resolved:
+        books = _fee_books_state(conn, run_id, row)
+        chain = books.fee_adjustments
+        if exchange_fee == books.effective and books.resolved:
             # The books already carry exactly this fee. Report what is actually
             # recorded, not the argument we were handed.
-            last_id = fee_adjustments[-1]["adjustment_id"] if fee_adjustments else None
-            return BackfillResult(BackfillOutcome.ALREADY_POSTED, last_id, effective)
+            last_id = chain[-1]["adjustment_id"] if chain else None
+            return BackfillResult(BackfillOutcome.ALREADY_POSTED, last_id, books.effective)
 
-        adjustment_id = accounting_adjustment_id(run_id, "fee", fill_id, seq=len(fee_adjustments))
+        adjustment_id = accounting_adjustment_id(run_id, "fee", fill_id, seq=len(chain))
         repo.insert_accounting_adjustment_event(
             conn,
             adjustment_id=adjustment_id,
@@ -716,22 +741,20 @@ def backfill_fill_fee(
             # The amount the books currently carry — 0 for a fill that ingested with
             # its fee pending, or the previous correction's amount. Replay folds
             # (new - old), so this pair IS the ledger movement, not a description of it.
-            old_value=effective,
+            old_value=books.effective,
             new_value=exchange_fee,
             reason=reason,
             source=source,
             timestamp=now,
         )
-        wallet_d, realized_d, fees_d, funding_d = adjustment_ledger_delta(
-            "fee", effective, exchange_fee
-        )
+        deltas = adjustment_ledger_delta("fee", books.effective, exchange_fee)
         ledger = repo.require_current_account_state(conn, run_id)
         with localcontext(DECIMAL_CONTEXT):
             new_ledger = AccountLedger(
-                wallet_balance=ledger.wallet_balance + wallet_d,
-                realized_pnl=ledger.realized_pnl + realized_d,
-                total_fees=ledger.total_fees + fees_d,
-                net_funding_pnl=ledger.net_funding_pnl + funding_d,
+                wallet_balance=ledger.wallet_balance + deltas.wallet,
+                realized_pnl=ledger.realized_pnl + deltas.realized,
+                total_fees=ledger.total_fees + deltas.fees,
+                net_funding_pnl=ledger.net_funding_pnl + deltas.funding,
             )
         if new_ledger.wallet_balance < 0:
             logger.warning(
@@ -1115,8 +1138,9 @@ class LiveFillProcessor:
         recorded = booked["exchange_fee"]
         if recorded is not None and Decimal(recorded) == fill.fee:
             return
-        _, effective, resolved = _fee_books_state(self._db.conn, booked["run_id"], booked)
-        if resolved and fill.fee == effective:
+        books = _fee_books_state(self._db.conn, booked["run_id"], booked)
+        effective = books.effective
+        if books.resolved and fill.fee == effective:
             return
         fee_change = (str(effective), str(fill.fee))
         case_key = f"{fill.exchange_fill_key}|{_payload_digest({'fee': fee_change})}"
@@ -1285,8 +1309,10 @@ class LiveFillProcessor:
             # reason: once the payload ages out of every backfill window, this row is
             # the only queryable trace that the exchange sent money-shaped data we
             # never booked. Fail-SOFT here, unlike the unmapped lane: this recorder's
-            # contract is that recording evidence never crashes the drain, and the
+            # contract is that a STORAGE failure never crashes the drain, and the
             # §11.3 skip must stand even when the store cannot take the breadcrumb.
+            # (Only storage: an invalid case_type/trigger literal raises ValueError
+            # past this catch — a programming error here, not a store failure.)
             self._record_case(
                 case_type="fill_malformed",
                 exchange_value=key,

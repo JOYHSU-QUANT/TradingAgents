@@ -30,10 +30,11 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 from types import MappingProxyType
+from typing import NamedTuple
 
 from ..domains.perp.enum_guard import check_enum
 from ..domains.perp.margin import (
@@ -51,6 +52,7 @@ __all__ = [
     "AccountMetrics",
     "FillEffect",
     "FundingResult",
+    "LedgerDeltas",
     "LiveFillEffect",
     "PositionValuation",
     "ReplayResult",
@@ -905,11 +907,26 @@ def record_funding(
 # --------------------------------------------------------------------------
 
 
+class LedgerDeltas(NamedTuple):
+    """One §15 correction's ledger movement, slot by NAME.
+
+    All four slots are Decimals, so a bare tuple would let a producer/consumer
+    transposition (a fee posted as funding) pass the type checker — and pass the
+    §5 replay comparison too, because replay folds the SAME function and would
+    drift identically. Construct and consume these by field name.
+    """
+
+    wallet: Decimal
+    realized: Decimal
+    fees: Decimal
+    funding: Decimal
+
+
 def adjustment_ledger_delta(
     adjustment_type: str,
     old_value: Decimal | None,
     new_value: Decimal | None,
-) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+) -> LedgerDeltas:
     """The ``(wallet, realized, fees, funding)`` deltas one §15 correction folds.
 
     A correction moves the ledger by ``new_value - old_value`` (a missing ``None``
@@ -932,22 +949,26 @@ def adjustment_ledger_delta(
         )
         zero = Decimal(0)
         if adjustment_type == "fee":
-            return (-delta, zero, delta, zero)
+            return LedgerDeltas(wallet=-delta, realized=zero, fees=delta, funding=zero)
         if adjustment_type == "funding":
-            return (delta, zero, zero, delta)
+            return LedgerDeltas(wallet=delta, realized=zero, fees=zero, funding=delta)
         # realized_pnl
-        return (delta, delta, zero, zero)
+        return LedgerDeltas(wallet=delta, realized=delta, fees=zero, funding=zero)
 
 
 def _fold_posted_funding(
-    conn: sqlite3.Connection, run_id: str, *, wallet: Decimal, net_funding: Decimal
-) -> tuple[Decimal, Decimal]:
-    """Add every posted funding settlement to the running wallet / net funding.
+    conn: sqlite3.Connection, run_id: str, ledger: AccountLedger
+) -> AccountLedger:
+    """Fold every posted funding settlement into the ledger's wallet / net funding.
 
     Shared by both replay modes: funding is settled identically (a posted
     ``funding_events`` row carries its full basis) whether the run is paper or
-    live, so the fold lives once here.
+    live, so the fold lives once here. Taking and returning the ledger type
+    itself keeps the money slots named end to end — there is no bare tuple for
+    a producer/consumer transposition to hide in.
     """
+    wallet = ledger.wallet_balance
+    net_funding = ledger.net_funding_pnl
     for event in repo.iter_funding_events(conn, run_id, status="posted"):
         pnl = funding_pnl(
             Decimal(event["position_size"]) * Decimal(event["mark_price"]),
@@ -955,34 +976,40 @@ def _fold_posted_funding(
         )
         wallet += pnl
         net_funding += pnl
-    return wallet, net_funding
+    return replace(ledger, wallet_balance=wallet, net_funding_pnl=net_funding)
 
 
 def _fold_adjustments(
-    conn: sqlite3.Connection,
-    run_id: str,
-    *,
-    wallet: Decimal,
-    realized: Decimal,
-    fees: Decimal,
-    net_funding: Decimal,
-) -> tuple[Decimal, Decimal, Decimal, Decimal]:
-    """Fold every §15 accounting correction into the running ledger totals.
+    conn: sqlite3.Connection, run_id: str, ledger: AccountLedger
+) -> AccountLedger:
+    """Fold every §15 accounting correction into the replayed ledger.
 
     Live-only: the recorded fill / funding rows are immutable, so a fee or
     funding learned after the fact lives ONLY in an ``accounting_adjustment_events``
     row (§15.1 rule 4 — never a silent overwrite). Replay must therefore fold
     these deltas to reproduce the materialized state a ``backfill_*`` call left.
+    Each event moves the running totals one at a time — the same per-correction
+    association the posting side used — so materialized and replayed ledgers
+    stay equal by construction, not just numerically.
     """
+    wallet = ledger.wallet_balance
+    realized = ledger.realized_pnl
+    fees = ledger.total_fees
+    net_funding = ledger.net_funding_pnl
     for adj in repo.iter_accounting_adjustment_events(conn, run_id):
-        w, r, f, nf = adjustment_ledger_delta(
+        deltas = adjustment_ledger_delta(
             adj["adjustment_type"], _dec(adj["old_value"]), _dec(adj["new_value"])
         )
-        wallet += w
-        realized += r
-        fees += f
-        net_funding += nf
-    return wallet, realized, fees, net_funding
+        wallet += deltas.wallet
+        realized += deltas.realized
+        fees += deltas.fees
+        net_funding += deltas.funding
+    return AccountLedger(
+        wallet_balance=wallet,
+        realized_pnl=realized,
+        total_fees=fees,
+        net_funding_pnl=net_funding,
+    )
 
 
 @dataclass(frozen=True)
@@ -1110,29 +1137,18 @@ def replay_within(conn: sqlite3.Connection, *, run_id: str) -> ReplayResult:
             realized_total += effect.realized_pnl_delta
             total_fees += effect.fee
 
-        net_funding = Decimal(0)
+        ledger = AccountLedger(
+            wallet_balance=wallet,
+            realized_pnl=realized_total,
+            total_fees=total_fees,
+            net_funding_pnl=Decimal(0),
+        )
         # From the stored settlement basis, symmetric with the fill loop above —
         # the write boundary guarantees a posted funding row carries all three
         # basis fields. Same in both modes.
-        wallet, net_funding = _fold_posted_funding(
-            conn, run_id, wallet=wallet, net_funding=net_funding
-        )
+        ledger = _fold_posted_funding(conn, run_id, ledger)
         if live:
-            wallet, realized_total, total_fees, net_funding = _fold_adjustments(
-                conn,
-                run_id,
-                wallet=wallet,
-                realized=realized_total,
-                fees=total_fees,
-                net_funding=net_funding,
-            )
-
-    ledger = AccountLedger(
-        wallet_balance=wallet,
-        realized_pnl=realized_total,
-        total_fees=total_fees,
-        net_funding_pnl=net_funding,
-    )
+            ledger = _fold_adjustments(conn, run_id, ledger)
 
     # Compare to the materialized state over the union of symbols.
     materialized = {p.coin: p for p in repo.get_all_current_positions(conn, run_id)}

@@ -217,6 +217,16 @@ def test_hand_built_fill_with_naive_time_is_rejected():
         replace(ef, fill_time=ef.fill_time.replace(tzinfo=None))
 
 
+def test_hand_built_fill_with_mismatched_dedupe_key_is_rejected():
+    # exchange_fill_key is derived state (§14.2: tid|<tid>). A hand-built instance
+    # whose key disagrees with its exchange_fill_id would dedupe under one identity
+    # while auditing another — parse derives both from the same tid, so only a
+    # hand-built instance can trip this.
+    ef = ExchangeFill.parse(_fill())
+    with pytest.raises(ValueError, match="exchange_fill_key"):
+        replace(ef, exchange_fill_key="tid|999999")
+
+
 def test_ingest_rejects_fill_paired_with_wrong_payload(db, clock, tmp_path):
     # The documented fill=/raw_fill= pairing is enforced: a mismatched pair would
     # apply one fill's money while recording the OTHER fill's payload as evidence,
@@ -447,8 +457,60 @@ def test_insert_live_fill_requires_the_exchange_fill_time(db):
             exchange_fill_time=None,  # type: ignore[arg-type]
             exchange_closed_pnl=Decimal("0"),
             liquidity_role="taker",
+            exchange_fill_id="9999",
+            exchange_order_id="1",
         )
     assert db.conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("missing", ["exchange_fill_id", "exchange_order_id"])
+def test_insert_live_fill_requires_the_exchange_ids(db, missing):
+    """The write boundary refuses an empty tid/oid: every live fill has both by
+    construction (parse requires them; an unmapped-oid fill is never inserted),
+    and a NULL would silently break the evidence keys, §15.1 rule-8 redelivery
+    verification and the §12.3 drift recorders that assume them on every row."""
+    _live_run(db)
+    _live_order(db)
+    ids = {"exchange_fill_id": "9999", "exchange_order_id": "1", missing: ""}
+    with pytest.raises(ValueError, match="exchange_fill_id"), db.transaction() as conn:
+        repo.insert_live_fill(
+            conn,
+            fill_id="f-no-ids",
+            run_id="r",
+            order_id="o1",
+            symbol="BTC",
+            side="buy",
+            fill_qty=Decimal("1"),
+            fill_price=Decimal("100"),
+            fill_notional=Decimal("100"),
+            exchange_fill_key="tid|9999",
+            exchange_fill_time=_NOW,
+            exchange_closed_pnl=Decimal("0"),
+            liquidity_role="taker",
+            **ids,
+        )
+    assert db.conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
+
+
+def test_insert_adjustment_requires_its_target(db):
+    """A correction with no target would be folded by replay (which iterates every
+    event) yet be invisible to the per-fill fee chain (target_id filtered) — the
+    two reads would silently disagree; the write boundary refuses it instead."""
+    _live_run(db)
+    with pytest.raises(ValueError, match="target_table"), db.transaction() as conn:
+        repo.insert_accounting_adjustment_event(
+            conn,
+            adjustment_id="adj-no-target",
+            run_id="r",
+            adjustment_type="fee",
+            target_table="",
+            target_id="",
+            field="",
+            old_value=Decimal("0"),
+            new_value=Decimal("0.1"),
+            timestamp=_NOW,
+        )
+    assert db.conn.execute("SELECT COUNT(*) FROM accounting_adjustment_events").fetchone()[0] == 0
 
 
 def test_duplicate_insert_rolls_back_whole_unit(db):

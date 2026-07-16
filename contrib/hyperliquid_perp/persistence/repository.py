@@ -761,8 +761,8 @@ def insert_live_fill(
     exchange_closed_pnl: Decimal,
     liquidity_role: str,
     exchange_fee: Decimal | None = None,
-    exchange_fill_id: str | None = None,
-    exchange_order_id: str | None = None,
+    exchange_fill_id: str,
+    exchange_order_id: str,
     cloid_logical: str | None = None,
     cloid_hex: str | None = None,
     plan_id: str | None = None,
@@ -803,6 +803,15 @@ def insert_live_fill(
         check_enum(flip_leg, _FLIP_LEGS, name="flip_leg")
     if not exchange_fill_key:
         raise ValueError("a live fill must carry a non-empty exchange_fill_key (§14.2)")
+    if not exchange_fill_id or not exchange_order_id:
+        # Present on every live fill by construction (ExchangeFill.parse requires
+        # tid and oid, and an unmapped-oid fill is never inserted) — so a NULL here
+        # is caller error, and it would silently break what assumes them on every
+        # live row: the evidence keys, §15.1 rule-8 redelivery verification, and
+        # the §12.3 drift recorders.
+        raise ValueError(
+            "a live fill must carry its exchange_fill_id (tid) and exchange_order_id (oid)"
+        )
     if exchange_fill_time is None:
         # Not merely a missing datum: (exchange_fill_time, exchange_fill_key) is the
         # §14.3 fold/ordering key. A NULL time sorts before genesis in chronological
@@ -2273,9 +2282,9 @@ def insert_accounting_adjustment_event(
     adjustment_id: str,
     run_id: str,
     adjustment_type: str,
-    target_table: str | None = None,
-    target_id: str | None = None,
-    field: str | None = None,
+    target_table: str,
+    target_id: str,
+    field: str,
     old_value: Decimal | None = None,
     new_value: Decimal | None = None,
     reason: str | None = None,
@@ -2294,8 +2303,19 @@ def insert_accounting_adjustment_event(
     replay folds ``new_value - old_value`` into the ledger per ``adjustment_type``
     (fee reduces the wallet, funding / realized_pnl move it by their sign), so the
     pair is load-bearing, not just descriptive.
+
+    The target trio is REQUIRED: every §15 correction amends one recorded row.
+    A NULL ``target_id`` would be folded into the replayed ledger by
+    ``_fold_adjustments`` (which iterates every event) yet be invisible to the
+    per-fill fee chain (``iter_accounting_adjustment_events(target_id=...)``) —
+    the two reads would silently disagree about the same correction.
     """
     check_enum(adjustment_type, ACCOUNTING_ADJUSTMENT_TYPES, name="adjustment_type")
+    if not target_table or not target_id or not field:
+        raise ValueError(
+            "an accounting adjustment must name its target_table, target_id and field "
+            "(§15 corrections amend one recorded row)"
+        )
     _insert(
         conn,
         "accounting_adjustment_events",

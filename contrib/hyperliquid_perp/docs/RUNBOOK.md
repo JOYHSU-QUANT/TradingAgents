@@ -119,6 +119,26 @@ pending funding、accounting replay 驗證、gap SL 檢查；若這次重啟真�
 `resize_min_confidence` 預設 0.7、prompt 文字改版）不會觸發警告，但一樣改變
 行為，所以調參 code 的部署必須與新 run-id 同批上線，不要讓舊段跨過部署點。
 
+換段的實際順序——push `deploy/paper` 會觸發 workflow 自動 restart `hl-paper`
+（`.github/workflows/deploy.yml`），而 run-id 在伺服器 systemd unit 的
+`ExecStart` 裡，**先 push 就會讓舊 run 直接跨過部署點跑新 code**，所以必須：
+
+1. 先 SSH 上伺服器 `sudo systemctl stop hl-paper`，把 unit 的 `ExecStart` 改成
+   新段參數（`--run-id paper-BTC-2 --create`），`sudo systemctl daemon-reload`，
+   **先不要啟動**。有持倉時注意：停機到重啟之間持倉沒有 SL/TP 看管（同 §3 的
+   警告），盡量挑空倉或倉位小的時候換段。
+2. 再 push `deploy/paper`——workflow 部署新 code 並 restart，服務直接以新
+   run-id 起段。
+3. 確認新段健康後，把 unit 裡的 `--create` 拿掉再 `daemon-reload`：run 已存在
+   時帶 `--create` 是硬錯誤，留著會讓下一次 deploy 的自動 restart 直接失敗。
+
+deploy 自動 restart 的三個既有行為，換段與日常部署都要知道：push 落在 cycle
+中間會中斷 in-flight 的 execution plan——安全但 off-schedule（見上方重啟
+reconciliation 段）；若舊 process 是被硬殺而非 graceful shutdown，
+single-instance lock lease 最長 15 分鐘才過期，新 process 會先起不來，deploy
+的 15 秒健檢在這個窗口內可能誤報；服務處在 protection-only／keyless 狀態時，
+deploy 的 restart 不是修復（§3 的警告同樣適用）——先照 §5 調查再部署。
+
 ## 5. 日常監控（每天看一眼）
 
 | 看什麼 | 在哪裡 | 正常 | 異常時 |

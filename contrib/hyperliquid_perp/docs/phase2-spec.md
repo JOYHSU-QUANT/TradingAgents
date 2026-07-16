@@ -133,6 +133,21 @@ set_target 且 target_side 與目前持倉方向相同        → 同方向 resi
 去險」被擋、但 flat 平倉只需 min_confidence 的不連續——是接受過的取捨，緊急
 去險路徑（flat 平倉、SL/TP）永遠不受此門檻影響。
 
+**與其他機制的交互**（皆為刻意行為，2026-07 review 定案）：
+
+- **先 clamp、後查 resize 門檻**——「會不會下單」以 clamp 後的 approved 值計算。
+  cap 把大請求拉回到 deadband 內時，記 `within_deadband`（不視為 churn 意圖、
+  不觸發本門檻）；clamp 後仍會下單而信心不足時，REJECTED 蓋過 clamp——依既有
+  REJECTED 契約，audit 只保留 requested、`approved_target_margin_pct = null`，
+  cap-binding 統計因此不含這些列。
+- **leverage-mismatch 收斂單同樣受此門檻約束**：實際槓桿與 `risk.leverage` 不一致
+  而停用 deadband 的同方向收斂單也是「會下單的 resize」，信心不足一樣被拒。
+  Phase 2 paper 不會產生這種倉位；Phase 3 的 adopt／手動倉位需注意——緊急收斂
+  一律走 flat 平倉或 SL/TP。
+- **Phase 3 live 路徑同樣適用**：本門檻是共用 RiskGate 的一部分（含 code 預設
+  0.7，即使 YAML 未列出此 key），合回 `hyperliquid-adapter` 後 live 執行一體
+  繼承——paper 段即其驗證段。
+
 理由：LLM 的 confidence 未經校準，直接乘進 sizing 會把噪音放大成倉位；AI 的 conviction 應直接反映在 `requested_target_margin_pct`，prompt 必須明確要求兩者一致。本門檻只負責擋下「高倉位、低信心」這類自相矛盾的輸出。是否引入 confidence-aware sizing，待 Phase 2 paper 累積的 confidence 與績效資料驗證其預測力後，於 Phase 3+ 再議。
 
 ---

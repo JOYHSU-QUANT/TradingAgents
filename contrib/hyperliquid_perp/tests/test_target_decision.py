@@ -467,6 +467,27 @@ def test_decision_config_rejects_bad_grid():
         DecisionConfig(rebalance_deadband_pct=Decimal("-1"))
 
 
+def test_decision_config_rejects_bad_resize_confidence():
+    with pytest.raises(ValueError, match="resize_min_confidence"):
+        DecisionConfig(resize_min_confidence=Decimal("1.5"))
+    # A resize bar below the base bar is rejected at load (see __post_init__).
+    with pytest.raises(ValueError, match="resize_min_confidence"):
+        DecisionConfig(min_confidence=Decimal("0.5"), resize_min_confidence=Decimal("0.4"))
+
+
+def test_decision_config_from_dict_parses_resize_confidence():
+    cfg = DecisionConfig.from_dict({"resize_min_confidence": 0.8})
+    assert cfg.resize_min_confidence == Decimal("0.8")
+
+
+def test_format_instructions_advertise_resize_bar():
+    # The prompt renders the live resize threshold so the model is told the
+    # same-side bar the gate actually enforces.
+    text = decision_format_instructions(DecisionConfig(resize_min_confidence=Decimal("0.75")))
+    assert "0.75" in text
+    assert "Resizing an existing position" in text
+
+
 def test_decision_config_rejects_grid_step_not_reaching_max():
     # step must divide (max - min) so the advertised max is actually on the grid;
     # otherwise a model that requests the max fails closed off-grid.

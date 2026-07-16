@@ -80,9 +80,13 @@ class DecisionConfig:
     """Typed view of the YAML ``decision:`` block (phase2-spec.md §2.4 defaults).
 
     The margin grid is ``{min, min+step, …, max}`` — integers ``0–100`` by
-    default. ``rebalance_deadband_pct`` and ``min_confidence`` are consumed by
-    the RiskGate but live here with the rest of the decision-contract knobs so
-    the block round-trips as one unit.
+    default. ``rebalance_deadband_pct``, ``min_confidence`` and
+    ``resize_min_confidence`` are consumed by the RiskGate but live here with
+    the rest of the decision-contract knobs so the block round-trips as one
+    unit. ``resize_min_confidence`` is the higher bar a same-side resize must
+    clear before it may trade (churn control — rationale in phase2-spec §2.4);
+    it must not sit below ``min_confidence``, which would be dead config — the
+    base gate fires first.
     """
 
     ai_target_margin_min_pct: int = 0
@@ -90,6 +94,7 @@ class DecisionConfig:
     target_margin_step_pct: int = 1
     rebalance_deadband_pct: Decimal = Decimal("1")
     min_confidence: Decimal = Decimal("0.3")
+    resize_min_confidence: Decimal = Decimal("0.7")
 
     def __post_init__(self) -> None:
         if self.target_margin_step_pct < 1:
@@ -120,6 +125,18 @@ class DecisionConfig:
             )
         if not Decimal(0) <= self.min_confidence <= Decimal(1):
             raise ValueError(f"min_confidence must be in [0, 1], got {self.min_confidence}")
+        if not Decimal(0) <= self.resize_min_confidence <= Decimal(1):
+            raise ValueError(
+                f"resize_min_confidence must be in [0, 1], got {self.resize_min_confidence}"
+            )
+        if self.resize_min_confidence < self.min_confidence:
+            raise ValueError(
+                f"resize_min_confidence ({self.resize_min_confidence}) must be >= "
+                f"min_confidence ({self.min_confidence}): a lower resize bar can never "
+                "fire because the base gate rejects first. resize_min_confidence "
+                "defaults to 0.7 when absent — raising min_confidence above that "
+                "requires setting decision: resize_min_confidence explicitly too"
+            )
 
     @classmethod
     def from_dict(cls, cfg: dict | None) -> DecisionConfig:
@@ -133,6 +150,7 @@ class DecisionConfig:
                     "target_margin_step_pct": int_from_yaml,
                     "rebalance_deadband_pct": decimal_from_yaml,
                     "min_confidence": decimal_from_yaml,
+                    "resize_min_confidence": decimal_from_yaml,
                 },
             )
         )
@@ -516,8 +534,12 @@ never repaired or rounded):
   as margin, from {lo} to {hi} in steps of {step}. Use a value > 0 with
   long/short, exactly 0 with flat, and null with maintain_current.
 - "confidence": a number between 0 and 1. A set_target with confidence below
-  {config.min_confidence} is rejected; make your conviction consistent with
-  the margin you request — confidence is recorded but never scales the size.
+  {config.min_confidence} is rejected. Resizing an existing position without
+  changing its side needs confidence >= {config.resize_min_confidence} or it
+  is rejected — every rebalance pays fees, so a small same-side adjustment
+  must clear a higher bar than opening, flipping, or closing. Make your
+  conviction consistent with the margin you request — confidence is recorded
+  but never scales the size.
 - "rationale": non-empty. "key_risks": 1 to {_MAX_KEY_RISKS} short strings (at least one).
 
 Legal combinations — anything else is invalid:

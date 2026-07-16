@@ -39,6 +39,7 @@ decision:
   target_margin_step_pct: 1
   rebalance_deadband_pct: 1
   min_confidence: 0.3
+  resize_min_confidence: 0.7
 ```
 
 ### 2.1 Leverage
@@ -89,6 +90,7 @@ decision:
   target_margin_step_pct: 1
   rebalance_deadband_pct: 1
   min_confidence: 0.3
+  resize_min_confidence: 0.7
 ```
 
 **刻度（`target_margin_step_pct`）**：`requested_target_margin_pct` 的合法值集合為 `{min, min+step, …, max}`，依預設值即整數 `0–100`。非整數步進、超出範圍或非數字 → invalid decision，fail-closed 成 `maintain_current`，記 `risk_action = invalid_fail_closed`。不做 silent rounding：四捨五入會讓 requested 與實際使用值對不上，並掩蓋 AI 輸出品質問題。
@@ -109,7 +111,27 @@ decision_mode = set_target 且 confidence < 0.3     → 契約合法但被風控
                                                      記 risk_action = rejected、risk_reason = low_confidence
                                                      （rejected 是正常風控運作；invalid_fail_closed
                                                      保留給契約違規，供 model-drift 告警使用）
+set_target 且 target_side 與目前持倉方向相同        → 同方向 resize 專用門檻（resize_min_confidence）：
+且該目標會實際產生訂單                               maintain_current，記 risk_action = rejected、
+且 confidence < 0.7                                  risk_reason = low_confidence_resize。
+                                                     只 gate「會下單」的 resize——deadband 內或
+                                                     zero-delta 的重申不付費，維持原本的 approved +
+                                                     within_deadband／zero_delta；權益歸零仍先記
+                                                     no_account_equity（門檻檢查排在兩者之後）。
+                                                     加倉與減倉**都適用**；flat→建倉、方向翻轉
+                                                     （含 flip 第二腿——從 flat 出發）、明確 flat
+                                                     平倉都只走 min_confidence。
+                                                     載入時要求 resize_min_confidence >= min_confidence
+                                                     （更低的 resize 門檻永遠不會生效——基本門檻先拒）。
 ```
+
+**同方向 resize 門檻（`resize_min_confidence`）的理由**：2026-07 paper baseline
+顯示，中等信心（0.6–0.68）的同方向倉位微調構成主要的手續費 churn——先減後加的
+來回把費用付了兩次，而方向 edge 不足以賺回。開倉／翻轉／平倉是方向性決策，
+維持原門檻；改變既有倉位大小則必須有更高的 conviction 才值得付 rebalance 成本。
+**減倉刻意包含在內**（churn 的第一腿就是中等信心的減倉）：這造成「中等信心大幅
+去險」被擋、但 flat 平倉只需 min_confidence 的不連續——是接受過的取捨，緊急
+去險路徑（flat 平倉、SL/TP）永遠不受此門檻影響。
 
 理由：LLM 的 confidence 未經校準，直接乘進 sizing 會把噪音放大成倉位；AI 的 conviction 應直接反映在 `requested_target_margin_pct`，prompt 必須明確要求兩者一致。本門檻只負責擋下「高倉位、低信心」這類自相矛盾的輸出。是否引入 confidence-aware sizing，待 Phase 2 paper 累積的 confidence 與績效資料驗證其預測力後，於 Phase 3+ 再議。
 

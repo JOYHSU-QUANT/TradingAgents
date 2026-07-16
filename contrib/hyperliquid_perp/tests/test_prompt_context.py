@@ -52,6 +52,20 @@ def test_render_full_context_includes_all_sections():
     for header in ("Price:", "Market:", "Funding:", "Indicators:"):
         assert header in text
     assert "Regime (computed): trending" in text
+    assert "Regime note:" in text
+
+
+@pytest.mark.parametrize("regime", list(MarketRegime))
+def test_regime_note_covers_every_regime_without_directional_framing(regime):
+    # The cost-awareness note is keyed to the computed regime (exhaustive over
+    # MarketRegime) and must stay free of long/short directional framing —
+    # asserted on the note line only, so unrelated context wording (e.g.
+    # "longer window") can never trip this guard.
+    text = render_market_context(_ctx(market_regime=regime.value))
+    note = next(line for line in text.splitlines() if line.strip().startswith("Regime note:"))
+    assert note.strip() != "Regime note:"
+    assert "long" not in note
+    assert "short" not in note
 
 
 def test_render_funding_in_basis_points_and_signed_zscore():

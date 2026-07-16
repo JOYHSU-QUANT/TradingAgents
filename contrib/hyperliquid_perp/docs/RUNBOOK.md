@@ -111,6 +111,14 @@ pending funding、accounting replay 驗證、gap SL 檢查；若這次重啟真�
 是硬錯誤；`risk:`／`decision:`／`engine:` 等與 genesis 不同會印 drift 警告並
 記進 store。
 
+**策略調參換段**：改動策略參數（如 `rebalance_deadband_pct`、
+`resize_min_confidence`）時，用 `--create` 開新 run-id（例如 `paper-BTC-2`）
+而不是讓舊 run 帶著 drift 續跑——新段有自己的 genesis config，跨段指標比較
+才乾淨。舊 run 的 DB 與 exports 原地保留，當作對照的 baseline。注意：drift
+警告只比對 YAML——**code 內建預設值的變更**（例如新增的
+`resize_min_confidence` 預設 0.7、prompt 文字改版）不會觸發警告，但一樣改變
+行為，所以調參 code 的部署必須與新 run-id 同批上線，不要讓舊段跨過部署點。
+
 ## 5. 日常監控（每天看一眼）
 
 | 看什麼 | 在哪裡 | 正常 | 異常時 |

@@ -6,7 +6,8 @@ with ``phase2-data.md`` §7 (``ai_outputs``):
 
 - step / range / type validation of the requested margin (integer grid);
 - the ``min_confidence`` gate (**set_target only** — confidence never scales
-  sizing, phase2-spec.md §2.4);
+  sizing, phase2-spec.md §2.4), plus the higher ``resize_min_confidence`` bar
+  for same-side resizes (churn control, spec §2.4);
 - clamp to ``max_target_margin_pct`` with both requested and approved values
   preserved (``risk_action = clamped``, phase2-spec.md §2.3);
 - the rebalance deadband — same-side targets within
@@ -50,6 +51,7 @@ __all__ = [
 
 # Stable machine tags for ai_outputs.risk_reason / no_order_reason.
 RISK_REASON_LOW_CONFIDENCE = "low_confidence"
+RISK_REASON_LOW_CONFIDENCE_RESIZE = "low_confidence_resize"
 RISK_REASON_MAX_TARGET_MARGIN = "exceeds_max_target_margin_pct"
 RISK_REASON_EFFECTIVE_LEVERAGE = "effective_leverage_cap"
 RISK_REASON_AVAILABLE_MARGIN = "insufficient_available_margin"
@@ -697,6 +699,28 @@ def evaluate(
         # honest: this is an exact-delta no-op, not churn suppression.
         order_created = False
         no_order_reason = NO_ORDER_ZERO_DELTA
+
+    # 8. A same-side resize that would actually trade must clear the higher
+    # resize bar (spec §2.4): every executed rebalance pays fees, so a
+    # mid-conviction size tweak on an existing position is churn, not signal.
+    # Deliberately last — a within-deadband or zero-delta reaffirmation costs
+    # nothing and stays an APPROVED no-op, and a dead account already reported
+    # no_account_equity above. ``side is current.side`` is exactly the
+    # same-direction case (a flat account's ``current.side`` is ``None``, never
+    # FLAT), so opening from flat, flips — including the flip re-run's second
+    # leg, which starts from flat — and explicit flat closes all keep the base
+    # gate. Reductions are gated on purpose: the baseline churn's first leg was
+    # always a mid-confidence reduce; urgent de-risking stays available via the
+    # flat close and SL/TP.
+    if order_created and side is current.side and confidence < decision_cfg.resize_min_confidence:
+        return _rejected(
+            risk_reason=RISK_REASON_LOW_CONFIDENCE_RESIZE,
+            current=current,
+            risk=risk,
+            requested=requested,
+            target_side=side,
+            confidence=confidence,
+        )
 
     return RiskGateResult(
         decision_mode=DecisionMode.SET_TARGET,

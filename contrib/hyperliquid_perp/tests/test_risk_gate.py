@@ -187,6 +187,75 @@ def test_low_confidence_does_not_gate_maintain_current():
 
 
 # --------------------------------------------------------------------------
+# resize_min_confidence gate (spec §2.4): same-side resizes need the higher bar
+# --------------------------------------------------------------------------
+
+
+def test_same_side_resize_below_resize_bar_is_rejected():
+    # 0.65 clears min_confidence (0.3) but not resize_min_confidence (0.7):
+    # exactly the churn profile the baseline segment paid fees for.
+    current = _long_state(margin_pct="20", notional="200")
+    result = _evaluate(_parsed(margin=45, confidence="0.65"), current=current)
+    assert result.risk_action is RiskAction.REJECTED
+    assert result.risk_reason == risk_gate.RISK_REASON_LOW_CONFIDENCE_RESIZE
+    assert result.order_created is False
+    assert result.no_order_reason == risk_gate.NO_ORDER_REJECTED
+    assert result.requested_target_margin_pct == 45  # audit keeps the ask
+    assert result.approved_target_margin_pct is None
+
+
+def test_same_side_resize_at_resize_bar_passes():
+    current = _long_state(margin_pct="20", notional="200")
+    result = _evaluate(_parsed(margin=45, confidence="0.7"), current=current)
+    assert result.risk_action is RiskAction.APPROVED
+    assert result.order_created is True
+
+
+def test_open_from_flat_keeps_base_confidence_bar():
+    # Opening is a directional decision, not a resize: 0.65 from flat passes.
+    result = _evaluate(_parsed(margin=45, confidence="0.65"))
+    assert result.risk_action is RiskAction.APPROVED
+    assert result.order_created is True
+
+
+def test_flip_keeps_base_confidence_bar():
+    # A flip changes side, so the resize bar does not apply.
+    current = _long_state(margin_pct="20", notional="200")
+    result = _evaluate(_parsed(side="short", margin=20, confidence="0.65"), current=current)
+    assert result.risk_action is RiskAction.APPROVED
+    assert result.order_created is True
+
+
+def test_flat_close_keeps_base_confidence_bar():
+    # An explicit close is exempt: a flat account's side is None, never FLAT,
+    # so `side is current.side` cannot match — 0.4 clears the base gate.
+    current = _long_state(margin_pct="20", notional="200")
+    result = _evaluate(_parsed(side="flat", margin=0, confidence="0.4"), current=current)
+    assert result.risk_action is RiskAction.APPROVED
+    assert result.order_created is True
+
+
+def test_within_deadband_reaffirmation_is_exempt_from_resize_bar():
+    # The resize bar only gates targets that would actually trade: a same-side
+    # target inside the deadband creates no order and pays no fees, so it stays
+    # an APPROVED within_deadband no-op even at low confidence — rejecting it
+    # would conflate cost-free reaffirmations with real churn in the analytics.
+    current = _long_state(margin_pct="35.5", notional="355")
+    result = _evaluate(_parsed(margin=35, confidence="0.5"), current=current)
+    assert result.risk_action is RiskAction.APPROVED
+    assert result.order_created is False
+    assert result.no_order_reason == risk_gate.NO_ORDER_WITHIN_DEADBAND
+
+
+def test_no_equity_outranks_resize_bar():
+    # A dead account is the structural problem; the resize bar must not mask it.
+    current = _long_state(margin_pct="35", notional="350")
+    result = _evaluate(_parsed(margin=20, confidence="0.5"), current=current, equity=Decimal(0))
+    assert result.risk_action is RiskAction.REJECTED
+    assert result.risk_reason == risk_gate.RISK_REASON_NO_EQUITY
+
+
+# --------------------------------------------------------------------------
 # Deadband (spec §2.4): same-side only; flip and flat are exempt
 # --------------------------------------------------------------------------
 

@@ -955,6 +955,10 @@ authentication / permission error
    ```
 
    解除動作寫入一筆 `safe_mode_released` 事件（含 reason）留審計軌跡。
+   同一子命令的 `--status`（預設動作）查詢現態與近期歷史，exit code
+   0＝不在 safe mode、4＝latch 中（supervisor 探針可據此分支）；
+   `--reason`／`--released-by` 只配 `--release`，status 模式下具名拒絕，
+   非 live run 的 `--run-id` 亦具名報錯。
 3. 解除後系統**不會**直接恢復交易：仍須通過下一輪完整 reconciliation
    （§13.4 恢復條件）才允許新單。
 4. 不提供 config 旗標式解除（容易忘記改回、審計不乾淨）。
@@ -1521,7 +1525,7 @@ repair failed             → emergency close
 |---|---|
 | bot-owned stale entry / rebalance order | cancel |
 | bot-owned stale close order | inspect before cancel |
-| bot-owned SL / TP | validate quantity and trigger |
+| bot-owned SL / TP | validate quantity and trigger（sweep 逐單只驗結構——reduce-only／平倉方向／SL trigger；quantity 覆蓋由 reconciliation 的 SL leg 聚合驗證，分腿 SL 合計） |
 | non-bot-owned order | manual safe mode |
 | unknown order | manual safe mode |
 

@@ -579,3 +579,22 @@ def test_exchange_time_degrades_to_none_rather_than_raising(fake_exchange, state
     client = _client()
     client._exchange.info.user_state_result = state
     assert client.exchange_time() is None
+
+
+def test_exchange_time_logs_a_present_but_unparseable_timestamp(fake_exchange, caplog):
+    # Same discipline as mapper._opt_dec: "present but corrupt" must leave a
+    # trace at the point of capture — the skew check's own degradation message
+    # says "returned no timestamp", which would mislabel corruption as absence.
+    client = _client()
+    client._exchange.info.user_state_result = {"time": "not-a-number"}
+    with caplog.at_level("WARNING"):
+        assert client.exchange_time() is None
+    assert any("present but unparseable" in r.getMessage() for r in caplog.records)
+
+
+def test_exchange_time_is_silent_when_the_field_is_simply_absent(fake_exchange, caplog):
+    client = _client()
+    client._exchange.info.user_state_result = {"marginSummary": {}}
+    with caplog.at_level("WARNING"):
+        assert client.exchange_time() is None
+    assert not any("present but unparseable" in r.getMessage() for r in caplog.records)

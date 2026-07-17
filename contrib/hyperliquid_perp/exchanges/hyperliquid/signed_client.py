@@ -25,6 +25,7 @@ only public addresses (§6 rule 2: the key must not reach logs).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -45,6 +46,8 @@ from .sdk_client import (
 
 if TYPE_CHECKING:
     from ...live.order_gate import RealOrderGate
+
+logger = logging.getLogger(__name__)
 
 # The keyword arguments we pass to ``Exchange(...)`` in __init__, for the same
 # signature-based version-mismatch triage sdk_client applies to ``Info``
@@ -445,6 +448,16 @@ class HyperliquidSignedClient:
         try:
             return datetime.fromtimestamp(int(stamp) / 1000, tz=timezone.utc)
         except (TypeError, ValueError, OSError, OverflowError):
+            # Same discipline as mapper._opt_dec: a PRESENT-but-unparseable
+            # value is a data-quality signal, not an omitted field. Still
+            # None (the degradation stands), but logged — the skew check's
+            # own message says "returned no timestamp", which would mislabel
+            # this corruption as absence with no trace of the real cause.
+            logger.warning(
+                "clearinghouseState 'time' is present but unparseable as epoch "
+                "ms: %r — clock-skew check degrades as if it were absent",
+                stamp,
+            )
             return None
 
     def open_orders(self) -> Any:

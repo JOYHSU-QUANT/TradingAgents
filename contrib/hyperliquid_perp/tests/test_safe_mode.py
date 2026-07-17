@@ -208,7 +208,10 @@ def test_auto_recovery_releases_recoverable_when_all_conditions_hold(env):
     manager.enter("recoverable", REASON_WS_DISCONNECT)
     assert (
         manager.try_auto_recover(
-            reconciliation_clean=True, ws_restored=True, kill_switch_active=True
+            reconciliation_clean=True,
+            ws_restored=True,
+            kill_switch_active=True,
+            fully_wired=True,
         )
         is True
     )
@@ -220,14 +223,21 @@ def test_auto_recovery_releases_recoverable_when_all_conditions_hold(env):
 
 
 @pytest.mark.parametrize(
-    ("clean", "ws", "ks"),
-    [(False, True, True), (True, False, True), (True, True, False)],
+    ("clean", "ws", "ks", "wired"),
+    [
+        (False, True, True, True),
+        (True, False, True, True),
+        (True, True, False, True),
+        (True, True, True, False),
+    ],
 )
-def test_auto_recovery_requires_every_condition(env, clean, ws, ks):
+def test_auto_recovery_requires_every_condition(env, clean, ws, ks, wired):
     db, gate, manager = env
     manager.enter("recoverable", REASON_WS_DISCONNECT)
     assert (
-        manager.try_auto_recover(reconciliation_clean=clean, ws_restored=ws, kill_switch_active=ks)
+        manager.try_auto_recover(
+            reconciliation_clean=clean, ws_restored=ws, kill_switch_active=ks, fully_wired=wired
+        )
         is False
     )
     assert manager.current() is not None
@@ -238,7 +248,10 @@ def test_auto_recovery_never_releases_manual(env):
     manager.enter("manual", REASON_NON_BOT_OWNED_ORDER)
     assert (
         manager.try_auto_recover(
-            reconciliation_clean=True, ws_restored=True, kill_switch_active=True
+            reconciliation_clean=True,
+            ws_restored=True,
+            kill_switch_active=True,
+            fully_wired=True,
         )
         is False
     )
@@ -249,7 +262,10 @@ def test_auto_recovery_outside_safe_mode_is_a_noop(env):
     db, _, manager = env
     assert (
         manager.try_auto_recover(
-            reconciliation_clean=True, ws_restored=True, kill_switch_active=True
+            reconciliation_clean=True,
+            ws_restored=True,
+            kill_switch_active=True,
+            fully_wired=True,
         )
         is False
     )

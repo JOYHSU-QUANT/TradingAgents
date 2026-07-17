@@ -32,8 +32,13 @@ run will actually trade from, not the one it found.
 
 - ``entry`` / ``rebalance``  → cancel (a stale intention from a dead plan);
 - ``close`` / ``emergency_close`` / ``cleanup_cancel`` → inspect before
-  cancel: kept ONLY while a reduce-only order still closes an existing
-  exchange position in the right direction and within its size — else stale;
+  cancel: kept while a reduce-only order still acts against an existing
+  exchange position in the closing direction — else stale. Size is
+  deliberately NOT judged (decided 2026-07-17): a position shrunk during
+  downtime (ADL, a manual partial close) leaves the resting close order's
+  remaining size above the position, and cancelling the ONLY closing order
+  over that — with no PR 4 re-placement path — would leave the position
+  open; reduce-only means the exchange clamps the excess;
 - ``stop_loss`` / ``take_profit`` → validated structurally (reduce-only,
   closing side, SL trigger — size coverage is the reconciler SL leg's
   aggregate job), never cancelled here: PR 4 has no repair path, and dropping
@@ -52,7 +57,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from ..exchanges.hyperliquid.mapper import map_account_snapshot
+from ..exchanges.hyperliquid.mapper import hl_closing_side, map_account_snapshot
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
 from ..persistence.cloid import LIVE_ORDER_ROLES
@@ -351,14 +356,18 @@ def _exchange_positions(
 def _close_order_still_applies(order: dict, positions: dict[str, Decimal] | None) -> bool:
     """A reduce-only close order is live-relevant iff it still closes something.
 
-    Kept only when a position exists in the order's coin, the order is
-    reduce-only, it is on the CLOSING side, and its size does not exceed the
-    position — anything else is a leftover from a position that has since
-    changed, and resting it risks an unintended (or reduce-only-rejected)
-    execution. ``positions is None`` (the read failed) keeps the order:
-    "unknown" is not "flat", and keeping is the reversible direction — the
-    already-recorded failure holds the run in safe mode until a later pass
-    can prove the verdict.
+    Kept when a position exists in the order's coin, the order is reduce-only,
+    and it is on the CLOSING side — anything else is a leftover from a
+    position that has since changed. Size is deliberately not compared
+    (decided 2026-07-17): an order whose remaining size exceeds the position
+    (it shrank during downtime — ADL, a manual partial close) still embodies
+    the live closing intent, reduce-only means the exchange clamps the
+    excess, and cancelling what may be the ONLY closing order — PR 4 has no
+    re-placement path — would leave the position open until manual action.
+    ``positions is None`` (the read failed) keeps the order: "unknown" is not
+    "flat", and keeping is the reversible direction — the already-recorded
+    failure holds the run in safe mode until a later pass can prove the
+    verdict.
     """
     if positions is None:
         return True
@@ -366,14 +375,7 @@ def _close_order_still_applies(order: dict, positions: dict[str, Decimal] | None
     size = positions.get(coin, Decimal(0)) if isinstance(coin, str) else Decimal(0)
     if size == 0 or not bool(order.get("reduceOnly", False)):
         return False
-    side = order.get("side")
-    closing_side = "A" if size > 0 else "B"  # sell closes a long, buy closes a short
-    if side != closing_side:
-        return False
-    try:
-        return Decimal(str(order.get("sz"))) <= abs(size)
-    except Exception:  # noqa: BLE001 — an unparseable size is not provably applicable
-        return False
+    return order.get("side") == hl_closing_side(size)
 
 
 def _protection_order_valid(order: dict, positions: dict[str, Decimal] | None, role: str) -> bool:
@@ -401,9 +403,7 @@ def _protection_order_valid(order: dict, positions: dict[str, Decimal] | None, r
         return False  # protection with no position: §17.1 rule 4 territory (PR 5 cleans up)
     if not bool(order.get("reduceOnly", False)):
         return False
-    side = order.get("side")
-    closing_side = "A" if size > 0 else "B"
-    if side != closing_side:
+    if order.get("side") != hl_closing_side(size):
         return False
     # §19.3's "and trigger": a stop_loss-role order that is actually a plain
     # resting limit (no trigger) protects nothing at the trigger level.

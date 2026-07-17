@@ -577,6 +577,9 @@ def test_a_mismatch_enters_recoverable_safe_mode_and_a_clean_pass_recovers_it(en
     db, seams, reconciler = env
     gate = _gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
+    # §13.4 auto-release demands a FULLY wired reconciler (no legs_skipped):
+    # bind the backfill seam the shared fixture leaves out.
+    reconciler._backfiller = _StubBackfiller()
 
     seams.clearinghouse = _clearinghouse(account_value="90")  # equity mismatch
     report = reconciler.reconcile_and_apply(
@@ -935,6 +938,9 @@ def test_a_clean_pass_does_not_reopen_the_gate_while_release_conditions_are_unme
     db, seams, reconciler = env
     gate = _gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
+    # Fully wired (no legs_skipped): this test's subject is the §13.4
+    # attestation conditions, not the wiring gate.
+    reconciler._backfiller = _StubBackfiller()
     seams.clearinghouse = _clearinghouse(account_value="90")  # mismatch → recoverable
     reconciler.reconcile_and_apply(
         "heartbeat", safe_mode=safe_mode, ws_restored=True, kill_switch_active=True
@@ -1117,3 +1123,148 @@ def test_a_persistent_equity_mismatch_writes_one_audit_row_across_passes(env):
     reconciler.run("heartbeat")
     (row,) = _cases(db, "equity_mismatch")
     assert row["exchange_value"] == "equity_out_of_tolerance"
+
+
+# -- round-4 hardening: wiring gate, short positions, guarded legs, paging ----
+
+
+def test_a_clean_pass_with_skipped_legs_never_auto_releases(env):
+    # §13.4's "reconciliation clean" means the FULL sweep: the shared fixture
+    # has no backfiller, so its clean verdicts carry legs_skipped and must
+    # hold — never lift — a latched recoverable safe mode (decided
+    # 2026-07-17; the tempting PR 5 shape is a cheap heartbeat wiring
+    # without the fill seams).
+    db, seams, reconciler = env
+    gate = _gate()
+    safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
+    seams.clearinghouse = _clearinghouse(account_value="90")  # mismatch → recoverable
+    reconciler.reconcile_and_apply(
+        "heartbeat", safe_mode=safe_mode, ws_restored=True, kill_switch_active=True
+    )
+    assert safe_mode.current() is not None
+
+    seams.clearinghouse = _clearinghouse(account_value="100")  # healed...
+    report = reconciler.reconcile_and_apply(
+        "heartbeat", safe_mode=safe_mode, ws_restored=True, kill_switch_active=True
+    )
+    assert report.clean
+    assert report.legs_skipped == ("fill_backfill",)
+    state = safe_mode.current()
+    assert state is not None and state.safe_mode_type == "recoverable"  # NOT released
+    assert gate.state_reconciled is False  # the internal refusal held the line
+
+
+def test_a_reconciler_without_fill_seams_names_both_skipped_legs():
+    db = Database(":memory:")
+    accounting.initialize_run(
+        db,
+        run_id="r",
+        mode="live",
+        initial_balance_usdc=Decimal(100),
+        schema_version=SCHEMA_VERSION,
+        created_at=_NOW - timedelta(days=1),
+    )
+    seams = _Seams()
+    reconciler = LiveReconciler(
+        db=db,
+        run_id="r",
+        coin="BTC",
+        fetch_open_orders=seams.fetch_open_orders,
+        fetch_clearinghouse=seams.fetch_clearinghouse,
+        query_order_by_cloid=seams.query_order_by_cloid,
+        clock=ManualClock(_NOW),
+    )
+    report = reconciler.run("heartbeat")
+    assert report.clean  # run()'s verdict still speaks for the legs it ran
+    assert report.legs_skipped == ("fill_backfill", "invalid_local_fill_crosscheck")
+    db.close()
+
+
+def test_a_fully_wired_clean_pass_reports_no_skipped_legs(env):
+    db, seams, reconciler = env
+    reconciler._backfiller = _StubBackfiller()
+    report = reconciler.run("heartbeat")
+    assert report.clean
+    assert report.legs_skipped == ()
+
+
+def test_short_position_sl_coverage_counts_only_buy_side_stops(env):
+    # The closing side of a SHORT is the bid ("B"): a buy-side reduce-only SL
+    # protects it, and a sell-side one (the long direction's stop) must not.
+    # Every prior test used long positions — a sign flip in the short branch
+    # of hl_closing_side would otherwise pass the suite silently.
+    db, seams, reconciler = env
+    _register_cloid(db, hex_id=_HEX_SL, logical="log-sl", role="stop_loss")
+    short = _btc_position(szi="-0.001")
+    seams.clearinghouse = _clearinghouse(account_value="101", positions=[short], maintenance="1")
+    seams.open_orders = [
+        {
+            "oid": 7,
+            "coin": "BTC",
+            "cloid": _HEX_SL,
+            "side": "B",
+            "sz": "0.001",
+            "reduceOnly": True,
+            "isTrigger": True,
+            "triggerPx": "60000",
+        }
+    ]
+    report = reconciler.run("heartbeat")
+    assert report.position_protected
+
+    # The same order on the ask side rests in the SHORT-ADDING direction: it
+    # can never close the short, so coverage must read zero.
+    seams.open_orders[0]["side"] = "A"
+    report = reconciler.run("heartbeat")
+    assert not report.position_protected
+    assert [c.case_type for c in report.cases if c.case_type == "position_sl_missing"]
+
+
+@pytest.mark.parametrize(
+    "leg",
+    ["_run_fill_backfill", "_reconcile_fills", "_reconcile_positions", "_reconcile_account"],
+)
+def test_every_guarded_leg_maps_a_crash_to_an_unclean_verdict(env, monkeypatch, leg):
+    # run()'s "records everything, raises nothing" is enforced per leg by the
+    # guarded() wrapper — prove it for each wrapped site, not just orders
+    # (a future edit dropping one wrapper must fail a test, §18.2 callers
+    # rely on run() never raising).
+    db, seams, reconciler = env
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(LiveReconciler, leg, boom)
+    report = reconciler.run("heartbeat")  # must not raise
+    assert not report.clean
+    assert any("leg crashed" in e for e in report.errors)
+
+
+def test_fill_crosscheck_accumulates_keys_across_pages(env):
+    # A capped first page must not evict its keys when page two completes the
+    # window: a genuinely booked fill seen only on page one would otherwise be
+    # flagged invalid_local_fill — a false MANUAL safe-mode verdict.
+    from contrib.hyperliquid_perp.live.fill_backfill import RESPONSE_FILL_CAP
+
+    db, seams, reconciler = env
+    booked_tid = "1000"
+    fill_time = _NOW - timedelta(hours=1)
+    _insert_booked_fill(db, tid=booked_tid, fill_time=fill_time)
+    base_ms = int((_NOW - timedelta(hours=2)).timestamp() * 1000)
+    page1 = [
+        {"tid": booked_tid if i == 0 else f"p1-{i}", "time": base_ms + i}
+        for i in range(RESPONSE_FILL_CAP)
+    ]
+    page2 = [{"tid": "p2-1", "time": base_ms + RESPONSE_FILL_CAP + 1}]
+    calls: list[int] = []
+
+    def pager(start_ms, end_ms):
+        calls.append(start_ms)
+        return page1 if len(calls) == 1 else page2
+
+    reconciler._fetch_fills = pager
+    report = reconciler.run("heartbeat")
+    assert len(calls) == 2  # page one was capped, page two completed the window
+    assert calls[1] == base_ms + RESPONSE_FILL_CAP - 1  # advanced to page 1's newest
+    assert report.fills_reconciled  # the page-1 key still counted
+    assert not [c for c in report.cases if c.case_type == "invalid_local_fill"]

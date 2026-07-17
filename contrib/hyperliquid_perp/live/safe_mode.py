@@ -333,17 +333,26 @@ class SafeModeManager:
             )
 
     def try_auto_recover(
-        self, *, reconciliation_clean: bool, ws_restored: bool, kill_switch_active: bool
+        self,
+        *,
+        reconciliation_clean: bool,
+        ws_restored: bool,
+        kill_switch_active: bool,
+        fully_wired: bool,
     ) -> bool:
         """§13.4: release a RECOVERABLE safe mode when every condition holds.
 
         The caller proves the conditions THIS tick — a clean reconciliation
         pass it just ran (orders/fills/position/account reconciled, backfill
         complete, position protected, no unresolved mismatch), the WS stream
-        restored, and the kill switch healthy (its own sticky latch released
+        restored, the kill switch healthy (its own sticky latch released
         through ``release_safe_mode()``, which earns it with a proving
-        refresh). Manual safe mode never auto-recovers (§13.5); returns True
-        when the release happened.
+        refresh), and the reconciler fully wired (``fully_wired`` = the pass
+        carried no skipped legs; see ``ReconciliationReport.legs_skipped``).
+        Every attestation is REQUIRED, no defaults, on this signature — so no
+        call site, present or future, can auto-release without evidence.
+        Manual safe mode never auto-recovers (§13.5); returns True when the
+        release happened.
 
         The PR 5 daily-loss entry adds its "past next UTC midnight" condition
         when it lands — its trigger does not exist yet, so no reason gets a
@@ -352,7 +361,7 @@ class SafeModeManager:
         current = self.current()
         if current is None or current.is_manual:
             return False
-        if not (reconciliation_clean and ws_restored and kill_switch_active):
+        if not (reconciliation_clean and ws_restored and kill_switch_active and fully_wired):
             return False
         self._release(
             released_by="auto_recovery",

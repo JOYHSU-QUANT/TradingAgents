@@ -39,6 +39,27 @@ logger = logging.getLogger(__name__)
 # series skews them with no abort. Callers can override per-call (e.g. from config).
 _MAX_DROP_FRACTION = 0.10
 
+# Hyperliquid encodes order/fill direction as bid/ask, not buy/sell: "B" is the
+# bid side (a buy), "A" the ask side (a sell). THE one definition of the wire
+# vocabulary, imported by the live ingest/reconcile/startup modules — private
+# per-module copies of this dict (and inline copies of the closing-side rule
+# below) could drift apart under a single-site edit, and the sites disagree
+# SILENTLY: the startup sweep would keep an order the reconciler's protection
+# math does not count, or vice versa.
+HL_SIDE_TO_LOCAL = {"B": "buy", "A": "sell"}
+
+
+def hl_closing_side(size: Decimal) -> str:
+    """The HL wire side letter that CLOSES a signed position.
+
+    The ask side (``"A"``, a sell) closes a long; the bid side (``"B"``, a
+    buy) closes a short. Shared by the reconciler's SL-coverage authority
+    (``_has_valid_sl``) and the startup sweep's inspect/validate steps so the
+    two judges of "does this order act against the position" can never
+    disagree on which side that is.
+    """
+    return "A" if size > 0 else "B"
+
 
 def _dec(value: Any, *, field: str) -> Decimal:
     """Parse a required HL numeric string into Decimal, or fail loudly."""

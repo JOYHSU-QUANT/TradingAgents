@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from ..exchanges.hyperliquid.errors import MalformedResponseError
-from ..exchanges.hyperliquid.mapper import require_decimal
+from ..exchanges.hyperliquid.mapper import HL_SIDE_TO_LOCAL, require_decimal
 from ..paper.accounting import (
     LiveFillEffect,
     adjustment_ledger_delta,
@@ -86,11 +86,11 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# Hyperliquid encodes fill direction as bid/ask, not buy/sell: "B" is a fill on
-# the bid (a buy), "A" a fill on the ask (a sell). Mapped to the persistence
-# Side vocabulary at the boundary, failing loud on anything else — a third code
-# would otherwise be coerced by Side.parse into an opaque error far from here.
-_HL_SIDE = {"B": "buy", "A": "sell"}
+# Fill direction arrives in the shared HL bid/ask vocabulary (the mapper's
+# ``HL_SIDE_TO_LOCAL``: "B" a buy on the bid, "A" a sell on the ask) and is
+# mapped to the persistence Side words at the boundary, failing loud on
+# anything else — a third code would otherwise be coerced by Side.parse into
+# an opaque error far from here.
 
 # Perp fees settle in USDC. A fee reported in any other token cannot be posted
 # to the USDC ledger as-is, so it is treated as PENDING (§15.1) and left for a
@@ -282,9 +282,9 @@ class ExchangeFill:
         # so an unhashable payload value (["B"]) would raise TypeError — which neither
         # the §11.3 handlers nor the (ValueError, ArithmeticError) backstop below
         # catches, and one drifted fill would wedge the REST backfill forever.
-        if not isinstance(raw_side, str) or raw_side not in _HL_SIDE:
+        if not isinstance(raw_side, str) or raw_side not in HL_SIDE_TO_LOCAL:
             raise MalformedResponseError(
-                f"fill side must be one of {sorted(_HL_SIDE)} (bid/ask), got {raw_side!r}"
+                f"fill side must be one of {sorted(HL_SIDE_TO_LOCAL)} (bid/ask), got {raw_side!r}"
             )
         price = require_decimal(_require(raw, "px"), field="fill px")
         qty = require_decimal(_require(raw, "sz"), field="fill sz")
@@ -338,7 +338,7 @@ class ExchangeFill:
             key = exchange_fill_key(tid=tid)
             return cls(
                 coin=coin,
-                side=Side.parse(_HL_SIDE[raw_side]),
+                side=Side.parse(HL_SIDE_TO_LOCAL[raw_side]),
                 qty=qty,
                 price=price,
                 closed_pnl=closed_pnl,

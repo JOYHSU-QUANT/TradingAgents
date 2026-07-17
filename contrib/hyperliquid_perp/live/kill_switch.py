@@ -53,7 +53,7 @@ from .config import KillSwitchConfig
 from .order_gate import RealOrderGate
 from .orders import local_status_for_exchange_status, parse_order_status
 
-__all__ = ["KillSwitchManager"]
+__all__ = ["KillSwitchManager", "kill_switch_timing_violation"]
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,43 @@ _MAX_CLOCK_SKEW_S = 5.0
 # orders but must not stop monitoring and protection). The error type travels in
 # the recorded event, so a code bug is loud in the audit trail, never re-raised
 # into the safety path.
+
+
+def kill_switch_timing_violation(
+    config: KillSwitchConfig, max_tick_gap_seconds: float
+) -> str | None:
+    """The constructor's refresh-timing invariant as a checkable message.
+
+    THE canonical account of the invariant (other sites point here). Worst
+    case between two refreshes is ``refresh_interval + the tick gap`` — the
+    tick after the interval elapses can land a whole gap late — and that must
+    stay strictly inside ``schedule_cancel``, or the dead man's switch fires
+    during normal operation and cancels every order on the wallet. The config
+    layer's own guard (``schedule_cancel >= 2 × refresh``) is only the
+    special case of a caller ticking exactly at the interval: it cannot see
+    the caller's tick gap at all.
+
+    Returns the violation text, or None when the timing is sound. ONE
+    definition, used by the constructor (which raises on it) and by the CLI's
+    live preflight — the preflight exists because the constructor runs only
+    AFTER ``--create`` has written the run row and taken the run lock, so a
+    violating config would otherwise surface as a late ValueError → generic
+    exit 2 outside the documented 0/4/1 contract, with side effects already
+    on disk (decided 2026-07-17).
+    """
+    if max_tick_gap_seconds <= 0:
+        return f"max_tick_gap_seconds must be > 0, got {max_tick_gap_seconds}"
+    worst_case_gap = config.refresh_interval_seconds + max_tick_gap_seconds
+    if worst_case_gap >= config.schedule_cancel_seconds:
+        return (
+            f"the kill switch cannot be refreshed in time: a refresh may land "
+            f"{worst_case_gap}s apart (refresh_interval "
+            f"{config.refresh_interval_seconds}s + max_tick_gap "
+            f"{max_tick_gap_seconds}s), but the scheduled cancel fires after "
+            f"{config.schedule_cancel_seconds}s — the dead man's switch would "
+            "cancel every order on the wallet during normal operation"
+        )
+    return None
 
 
 class KillSwitchManager:
@@ -127,26 +164,11 @@ class KillSwitchManager:
         # the book mid-decision. §18.2: PR 5 must therefore refresh the switch
         # from INSIDE the decision cycle (or from a dedicated refresher), not
         # only at the top of the loop — and pass the true worst-case gap here.
-        #
-        # Worst case between two refreshes is refresh_interval + the tick gap
-        # (the tick after the interval elapses can be a whole gap away). The
-        # config guard's `schedule_cancel >= 2 x refresh_interval` is only the
-        # special case where the caller ticks exactly at the interval — it cannot
-        # see the caller at all, so it cannot catch e.g. schedule_cancel=60 /
-        # refresh=30 under a 60s tick gap, which fires the switch DURING NORMAL
-        # OPERATION and cancels every order on the wallet.
-        if max_tick_gap_seconds <= 0:
-            raise ValueError(f"max_tick_gap_seconds must be > 0, got {max_tick_gap_seconds}")
-        worst_case_gap = config.refresh_interval_seconds + max_tick_gap_seconds
-        if worst_case_gap >= config.schedule_cancel_seconds:
-            raise ValueError(
-                f"the kill switch cannot be refreshed in time: a refresh may land "
-                f"{worst_case_gap}s apart (refresh_interval "
-                f"{config.refresh_interval_seconds}s + max_tick_gap "
-                f"{max_tick_gap_seconds}s), but the scheduled cancel fires after "
-                f"{config.schedule_cancel_seconds}s — the dead man's switch would "
-                "cancel every order on the wallet during normal operation"
-            )
+        # The invariant itself (worst-case math, config-guard blindness) is
+        # kill_switch_timing_violation's docstring.
+        violation = kill_switch_timing_violation(config, max_tick_gap_seconds)
+        if violation is not None:
+            raise ValueError(violation)
         self._client = client
         self._gate = gate
         self._db = db

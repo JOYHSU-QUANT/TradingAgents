@@ -523,3 +523,97 @@ def test_a_plain_limit_stop_loss_still_warns_structurally(env, caplog):
         result = env.recover()
     assert "5" in result.kept_orders  # protection is never cancelled here
     assert [r for r in caplog.records if "does not validate" in r.getMessage()]
+
+
+# -- round-4 hardening: oversized close orders, short-position closing side ---
+
+
+def test_an_oversized_close_order_is_kept_not_cancelled(env):
+    # The position shrank during downtime (ADL, a manual partial close): the
+    # resting reduce-only close order's remaining size now exceeds the
+    # position. Cancelling the ONLY closing order over that — PR 4 has no
+    # re-placement path — would leave the position open, so size is
+    # deliberately not judged (decided 2026-07-17); reduce-only means the
+    # exchange clamps the excess.
+    with env.db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("0.001"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+    env.register_order(order_id="o-c", hex_id=_HEX_CLOSE, logical="log-c", role="close")
+    env.clearinghouse = _clearinghouse(
+        account_value="101", maintenance="1", positions=[_btc_position()]
+    )
+    env.client.open_orders_result = [
+        {
+            "oid": 8,
+            "coin": "BTC",
+            "cloid": _HEX_CLOSE,
+            "side": "A",
+            "sz": "0.002",  # exceeds the 0.001 position
+            "reduceOnly": True,
+        }
+    ]
+    result = env.recover()
+    assert "8" in result.kept_orders
+    assert ("BTC", _HEX_CLOSE) not in env.client.cancel_calls
+
+
+def test_a_short_position_keeps_its_bid_side_close_order(env):
+    # The closing side of a SHORT is the bid ("B"). Every prior sweep test
+    # used long positions — a sign flip in hl_closing_side's short branch
+    # would silently invert keep/cancel for shorts.
+    with env.db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("-0.001"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+    env.register_order(order_id="o-c", hex_id=_HEX_CLOSE, logical="log-c", role="close")
+    env.clearinghouse = _clearinghouse(
+        account_value="101", maintenance="1", positions=[_btc_position(szi="-0.001")]
+    )
+    env.client.open_orders_result = [
+        {
+            "oid": 8,
+            "coin": "BTC",
+            "cloid": _HEX_CLOSE,
+            "side": "B",  # a buy closes a short
+            "sz": "0.001",
+            "reduceOnly": True,
+        }
+    ]
+    result = env.recover()
+    assert "8" in result.kept_orders
+    assert ("BTC", _HEX_CLOSE) not in env.client.cancel_calls
+
+
+def test_a_short_position_cancels_an_ask_side_close_order(env):
+    # A sell-side "close" order on a short rests in the short-ADDING
+    # direction: it can never close the position and is stale.
+    with env.db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("-0.001"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+    env.register_order(order_id="o-c", hex_id=_HEX_CLOSE, logical="log-c", role="close")
+    env.clearinghouse = _clearinghouse(
+        account_value="101", maintenance="1", positions=[_btc_position(szi="-0.001")]
+    )
+    env.client.open_orders_result = [
+        {
+            "oid": 8,
+            "coin": "BTC",
+            "cloid": _HEX_CLOSE,
+            "side": "A",
+            "sz": "0.001",
+            "reduceOnly": True,
+        }
+    ]
+    result = env.recover()
+    assert result.canceled_stale == ("8",)

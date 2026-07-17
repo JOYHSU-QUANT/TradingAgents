@@ -235,6 +235,13 @@ def _cmd_safe_mode(argv: list[str]) -> int:
         default=None,
         help="Operator identity for the audit trail (default: the OS user name).",
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="With --status: how many recent history rows to print "
+        "(default 10; 0 prints the full history).",
+    )
     args = parser.parse_args(argv)
 
     import getpass
@@ -279,6 +286,12 @@ def _cmd_safe_mode(argv: list[str]) -> int:
                     file=sys.stderr,
                 )
                 return 1
+            if args.limit is not None and args.limit < 0:
+                print(
+                    "error: --limit must be >= 0 (0 prints the full history).",
+                    file=sys.stderr,
+                )
+                return 1
             if state is None:
                 print("safe_mode: none")
             else:
@@ -287,8 +300,15 @@ def _cmd_safe_mode(argv: list[str]) -> int:
                 print(f"entered_at: {state.entered_at}")
             history = repo.iter_safe_mode_events(db.conn, args.run_id)
             if history:
+                # Default 10 keeps the probe output lean; a long manual
+                # episode (one reason_added row per distinct reason) can push
+                # the episode's anchoring safe_mode_entered row out of a
+                # fixed tail, so the operator can widen it (--limit 0 = all)
+                # without querying the DB (decided 2026-07-17).
+                limit = 10 if args.limit is None else args.limit
+                rows = history if limit == 0 else history[-limit:]
                 print("history (most recent last):")
-                for row in history[-10:]:
+                for row in rows:
                     who = f" by {row['released_by']}" if row["released_by"] else ""
                     print(
                         f"  {row['timestamp']}  {row['event_type']}"
@@ -301,6 +321,14 @@ def _cmd_safe_mode(argv: list[str]) -> int:
             # 2026-07-17).
             return 0 if state is None else 4
 
+        if args.limit is not None:
+            # Same named-rejection discipline as --reason on the status path:
+            # the flag only means something when history is printed.
+            print(
+                "error: --limit applies only with --status; the release action prints no history.",
+                file=sys.stderr,
+            )
+            return 1
         if args.reason is None or not args.reason.strip():
             print(
                 'error: --release requires --reason "<人工確認說明>" — the release '
@@ -639,6 +667,15 @@ def _cmd_live(argv: list[str]) -> int:
     )
 
 
+# This command's worst-case wall time between two kill-switch tick() calls is
+# one reconciliation sweep (network reads, seconds) — 30s is generous and keeps
+# the constructor invariant honest under the default 120s/30s switch config.
+# ONE constant, read by both the pre-side-effect preflight check and the
+# KillSwitchManager construction below, so the number the preflight proves is
+# the number the constructor enforces.
+_RECOVERY_MAX_TICK_GAP_SECONDS = 30.0
+
+
 def _live_startup_recovery(
     args,
     *,
@@ -671,7 +708,7 @@ def _live_startup_recovery(
     from .exchanges.hyperliquid.signed_client import HyperliquidSignedClient
     from .live.fill_backfill import FillBackfiller
     from .live.fills import LiveFillProcessor
-    from .live.kill_switch import KillSwitchManager
+    from .live.kill_switch import KillSwitchManager, kill_switch_timing_violation
     from .live.order_gate import RealOrderGate
     from .live.reconcile import LiveReconciler
     from .live.safe_mode import SafeModeManager
@@ -696,6 +733,18 @@ def _live_startup_recovery(
             "arms the kill switch and cancels stale bot-owned orders, which are "
             "signed exchange actions. Enable it, or run without --run-id for a "
             "gate check that never signs anything.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Refuse a violating kill-switch timing BEFORE any side effect (run row,
+    # run lock) with a named exit 1 — kill_switch_timing_violation's docstring
+    # owns the invariant and the why-a-preflight story.
+    violation = kill_switch_timing_violation(live_cfg.kill_switch, _RECOVERY_MAX_TICK_GAP_SECONDS)
+    if violation is not None:
+        print(
+            f"error: {violation}. Raise live.kill_switch.schedule_cancel_seconds "
+            "or lower live.kill_switch.refresh_interval_seconds.",
             file=sys.stderr,
         )
         return 1
@@ -849,11 +898,9 @@ def _live_startup_recovery(
                 db=db,
                 run_id=run_id,
                 config=live_cfg.kill_switch,
-                # This command's worst-case gap between kill-switch touches is
-                # one reconciliation sweep (network reads, seconds) — 30s is
-                # generous and keeps the constructor invariant honest under
-                # the default 120s/30s switch config.
-                max_tick_gap_seconds=30.0,
+                # The preflight above already proved this invariant with the
+                # SAME constant, so this constructor cannot raise on timing.
+                max_tick_gap_seconds=_RECOVERY_MAX_TICK_GAP_SECONDS,
                 payload_dir=payload_dir,
             )
             safe_mode = SafeModeManager(db=db, run_id=run_id, gate=gate)

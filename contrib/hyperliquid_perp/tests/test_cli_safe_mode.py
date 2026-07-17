@@ -165,3 +165,60 @@ def test_unknown_run_and_missing_store_are_named_errors(store, capsys, tmp_path)
     assert "does not exist" in capsys.readouterr().err
     assert main(["safe-mode", "--run-id", "r", "--db", str(tmp_path / "absent.db")]) == 1
     assert "does not exist" in capsys.readouterr().err
+
+
+def test_status_limit_widens_and_zero_prints_the_full_history(store, capsys):
+    # A long manual episode (one reason_added row per distinct reason) can
+    # push the episode's anchoring safe_mode_entered row out of the default
+    # 10-row tail — --limit widens it, 0 prints everything (decided
+    # 2026-07-17).
+    path, db = store
+    manager = SafeModeManager(db=db, run_id="r", gate=None, clock=ManualClock(_NOW))
+    manager.enter("manual", REASON_NON_BOT_OWNED_ORDER)
+    for i in range(12):
+        manager.enter("manual", f"distinct_reason_{i}")  # one reason_added each
+    db.close()
+
+    assert main(["safe-mode", "--run-id", "r", "--db", str(path)]) == 4
+    default_out = capsys.readouterr().out
+    assert "safe_mode_entered" not in default_out  # the anchor fell off the tail
+    assert default_out.count("\n  ") == 10  # exactly ten history rows
+
+    assert main(["safe-mode", "--run-id", "r", "--db", str(path), "--limit", "0"]) == 4
+    full_out = capsys.readouterr().out
+    assert "safe_mode_entered" in full_out  # the anchor is visible again
+    assert full_out.count("\n  ") == 13
+
+
+def test_status_rejects_a_negative_limit(store, capsys):
+    path, db = store
+    db.close()
+    assert main(["safe-mode", "--run-id", "r", "--db", str(path), "--limit", "-1"]) == 1
+    assert "--limit must be >= 0" in capsys.readouterr().err
+
+
+def test_release_rejects_limit(store, capsys):
+    # Same named-rejection discipline as --reason on the status path.
+    path, db = store
+    _enter(db, "manual", REASON_NON_BOT_OWNED_ORDER)
+    db.close()
+    assert (
+        main(
+            [
+                "safe-mode",
+                "--run-id",
+                "r",
+                "--db",
+                str(path),
+                "--release",
+                "--reason",
+                "x",
+                "--limit",
+                "5",
+            ]
+        )
+        == 1
+    )
+    assert "--limit applies only with --status" in capsys.readouterr().err
+    with Database(path) as db2:
+        assert repo.get_scheduler_state(db2.conn, "r")["safe_mode_type"] == "manual"

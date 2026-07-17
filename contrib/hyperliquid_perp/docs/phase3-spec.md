@@ -928,6 +928,11 @@ no unresolved mismatch
 （daily-loss 觸發者另須：已過次日 UTC 00:00）
 ```
 
+附註（2026-07-17）：上列條件要求 reconciler **全接線**——backfill／invalid-fill
+交叉檢查 seam 缺席的 pass（report 記入 `legs_skipped`）證明不了「REST backfill
+completed／fills reconciled」，即使其餘 legs 全 clean 也不得自動解除；半接線
+（例如未綁 fill seams 的心跳 wiring）的 clean pass 只能維持、不能解除 latch。
+
 ### 13.5 Manual Safe Mode
 
 以下情況需要人工解除：

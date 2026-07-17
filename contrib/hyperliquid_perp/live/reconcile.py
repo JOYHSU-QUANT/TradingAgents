@@ -35,7 +35,11 @@ from typing import Any
 
 from ..domains.perp.enum_guard import check_enum
 from ..domains.perp.schema import AccountSnapshot, PerpPosition
-from ..exchanges.hyperliquid.mapper import map_account_snapshot
+from ..exchanges.hyperliquid.mapper import (
+    HL_SIDE_TO_LOCAL,
+    hl_closing_side,
+    map_account_snapshot,
+)
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
 from ..persistence.db import Database
@@ -97,8 +101,6 @@ _FILL_CROSSCHECK_EDGE_MARGIN = timedelta(minutes=2)
 _FAILED_BACKFILL = BackfillSummary(
     fetched=0, applied=0, duplicate=0, unmapped=0, malformed=0, complete=False
 )
-
-_HL_SIDE = {"B": "buy", "A": "sell"}
 
 # §13.5 manual case → safe-mode entry reason. ONE definition, tied to the
 # construction sites by ``ReconciliationCase.__post_init__`` (a manual case
@@ -191,6 +193,17 @@ class ReconciliationReport:
     position_protected: bool
     backfill_complete: bool
     errors: tuple[str, ...] = field(default_factory=tuple)
+    # Legs this pass never ran, appended by the SKIPPING SITE itself (a None
+    # ``backfiller`` / ``fetch_fills`` seam) so the report can never disagree
+    # with what actually ran. THE canonical statement of the rule (other
+    # sites just point here): a skipped leg is unproven, not proven. It is
+    # deliberately OUTSIDE ``clean`` — run()'s verdict speaks for the legs it
+    # ran, which the unit wirings rely on — but §13.4 auto-release attests
+    # ``fully_wired`` (= no skipped legs) on try_auto_recover's signature, so
+    # a half-wired caller's clean pass can hold, never lift, a latched safe
+    # mode (decided 2026-07-17; the tempting shape is a PR 5 heartbeat
+    # wiring without the fill seams).
+    legs_skipped: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def clean(self) -> bool:
@@ -219,7 +232,8 @@ class LiveReconciler:
     ``user_fills_by_time``). ``backfiller`` + ``stream`` are the PR 3 fill
     leg; either may be None in reads-only wirings (tests, offline verdicts),
     which skips booking and reports the fill leg from the sighting backlog
-    alone.
+    alone — every skipped seam lands in the report's ``legs_skipped`` (see
+    that field for the §13.4 consequence).
     """
 
     def __init__(
@@ -263,6 +277,9 @@ class LiveReconciler:
         now = self._clock.now()
         cases: list[ReconciliationCase] = []
         errors: list[str] = []
+        # Filled by the legs themselves (the skipping site is the reporting
+        # site — see ReconciliationReport.legs_skipped), like ``errors``.
+        legs_skipped: list[str] = []
 
         # -- exchange reads (each leg degrades independently) ---------------
         open_orders: list | None = None
@@ -305,12 +322,14 @@ class LiveReconciler:
                 return fallback
 
         backfill_summary = guarded(
-            "fill backfill", lambda: self._run_fill_backfill(errors), _FAILED_BACKFILL
+            "fill backfill", lambda: self._run_fill_backfill(errors, legs_skipped), _FAILED_BACKFILL
         )
         orders_ok = guarded(
             "orders", lambda: self._reconcile_orders(open_orders, cases, errors, now), False
         )
-        fills_ok = guarded("fills", lambda: self._reconcile_fills(cases, errors, now), False)
+        fills_ok = guarded(
+            "fills", lambda: self._reconcile_fills(cases, errors, now, legs_skipped), False
+        )
         # Fallback (False, False): unknown ≠ protected — the same fail-safe
         # direction as a failed clearinghouse read (§17.1 rule 1 demands
         # proof, not absence of disproof).
@@ -334,6 +353,7 @@ class LiveReconciler:
             position_protected=protected,
             backfill_complete=backfill_summary is None or backfill_summary.complete,
             errors=tuple(errors),
+            legs_skipped=tuple(legs_skipped),
         )
         try:
             self._record(report, snapshot, raw_clearinghouse, backfill_summary)
@@ -379,7 +399,9 @@ class LiveReconciler:
         when the kill-switch latch is up). The attestations are deliberately
         REQUIRED (no defaults): they are §13.4 release conditions the caller
         proves THIS tick, and a defaulted ``True`` would let a future call
-        site auto-release a recoverable safe mode without evidence.
+        site auto-release a recoverable safe mode without evidence. The
+        reconciler's own wiring is attested the same way (``fully_wired`` —
+        see ReconciliationReport.legs_skipped).
         """
         report = self.run(trigger)
         for case in report.manual_cases:
@@ -388,10 +410,20 @@ class LiveReconciler:
             safe_mode.enter("manual", reason, detail=case.detail or case.case_type)
         safe_mode.note_reconciliation_outcome(report.clean)
         if report.clean:
+            if report.legs_skipped:
+                # See ReconciliationReport.legs_skipped: fully_wired=False
+                # below withholds the release; the latch holds.
+                logger.info(
+                    "reconciliation (%s) clean but skipped leg(s): %s — §13.4 "
+                    "auto-release withheld (partially wired reconciler)",
+                    trigger,
+                    ", ".join(report.legs_skipped),
+                )
             if not safe_mode.try_auto_recover(
                 reconciliation_clean=True,
                 ws_restored=ws_restored,
                 kill_switch_active=kill_switch_active,
+                fully_wired=not report.legs_skipped,
             ):
                 # Not in recoverable safe mode (nothing to release), or manual
                 # is still latched: a clean pass still re-proves the §4.1
@@ -421,7 +453,9 @@ class LiveReconciler:
 
     # ------------------------------------------------------------- fills leg
 
-    def _run_fill_backfill(self, errors: list[str]) -> BackfillSummary | None:
+    def _run_fill_backfill(
+        self, errors: list[str], legs_skipped: list[str]
+    ) -> BackfillSummary | None:
         """§12.3 "交易所有 fill，但 SQLite 沒記錄": book them via the PR 3 path.
 
         The epoch discipline mirrors the stream's contract: read the epoch,
@@ -429,6 +463,7 @@ class LiveReconciler:
         pass, so a capped window never retires the gap it failed to cover.
         """
         if self._backfiller is None:
+            legs_skipped.append("fill_backfill")
             return None
         epoch = self._stream.backfill_epoch() if self._stream is not None else None
         if self._stream is not None:
@@ -473,7 +508,11 @@ class LiveReconciler:
         return summary
 
     def _reconcile_fills(
-        self, cases: list[ReconciliationCase], errors: list[str], now: datetime
+        self,
+        cases: list[ReconciliationCase],
+        errors: list[str],
+        now: datetime,
+        legs_skipped: list[str],
     ) -> bool:
         """The fill-ledger legs: sighting backlog + the invalid-local check."""
         ok = True
@@ -511,6 +550,10 @@ class LiveReconciler:
 
         # §12.3 "SQLite 有 fill，但交易所查不到" → invalid_local_fill (manual:
         # money the exchange denies is booked money we cannot trust).
+        if self._fetch_fills is None:
+            # The skipping site is the reporting site — see
+            # ReconciliationReport.legs_skipped.
+            legs_skipped.append("invalid_local_fill_crosscheck")
         if self._fetch_fills is not None:
             window_start = now - _FILL_CROSSCHECK_LOOKBACK
             logger.debug(
@@ -742,6 +785,11 @@ class LiveReconciler:
         try:
             parsed = parse_order_status(self._query_order_by_cloid(cloid))
         except Exception as exc:  # noqa: BLE001 — a failed read is a verdict
+            # Log-at-origin, same as _settle_absent_order's sibling tiebreaker:
+            # the case detail is an in-memory value (and its row write is
+            # fail-soft), so without this line a transient API error here
+            # would leave no trace of WHY this order failed to reconcile.
+            logger.warning("orderStatus tiebreaker for cloid %s failed: %s", cloid, exc)
             return False, ReconciliationCase(
                 case_type="orphan_exchange_order",
                 symbol=registry["symbol"],
@@ -808,7 +856,7 @@ class LiveReconciler:
         """Insert the missing local row for a bot-owned exchange order."""
         try:
             side_raw = order.get("side")
-            side = _HL_SIDE.get(side_raw) if isinstance(side_raw, str) else None
+            side = HL_SIDE_TO_LOCAL.get(side_raw) if isinstance(side_raw, str) else None
             if side is None:
                 raise ValueError(f"open_orders entry side {side_raw!r} not recognised")
             # `is None` fallback, not dict.get's default: a PRESENT-but-null
@@ -1055,7 +1103,7 @@ class LiveReconciler:
             return False
         conn = self._db.conn
         need = abs(position.size)
-        closing_side = "A" if position.size > 0 else "B"  # sell closes long, buy closes short
+        closing_side = hl_closing_side(position.size)
         covered = Decimal(0)
         for order in open_orders:
             if not isinstance(order, dict):

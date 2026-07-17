@@ -307,6 +307,82 @@ def test_stamping_requires_an_action_and_refuses_to_overwrite_one(store, capsys)
     assert "already disposed of as 'first call'" in capsys.readouterr().err
 
 
+def test_an_unmapped_sighting_is_refused_and_labelled_not_silently_stamped(store, capsys):
+    # fill_unmapped resolves by an ANTI-JOIN against fills that never reads
+    # action_taken — stamping one clears no verdict and would hide the row from
+    # the only listing that enumerates the backlog. That is the exact wedge this
+    # command exists to prevent, so it must be refused by name, and the listing
+    # must not invite it.
+    path, db = store
+    event_id = _open_case(db, case_type="fill_unmapped", exchange_value="tid|0xdead-77")
+
+    assert main(["safe-mode", "--run-id", "r", "--db", str(path), "--status"]) == 0
+    out = capsys.readouterr().out
+    assert f"[{event_id}]" in out  # still discoverable...
+    assert "not by stamping" in out  # ...but labelled with its real resolution path
+
+    rc = main(
+        [
+            "safe-mode",
+            "--run-id",
+            "r",
+            "--db",
+            str(path),
+            "--stamp-case",
+            str(event_id),
+            "--action",
+            "looked at it",
+        ]
+    )
+    assert rc == 1
+    assert "resolves by BOOKING that fill" in capsys.readouterr().err
+    with Database(path) as db2:
+        (row,) = [
+            r
+            for r in repo.iter_exchange_reconciliation_events(db2.conn, "r")
+            if r["event_id"] == event_id
+        ]
+        assert row["action_taken"] is None  # untouched: still visible as backlog
+
+
+def test_stamping_cannot_reach_another_runs_case(store, capsys):
+    # repo.set_reconciliation_action has NO run_id filter — the CLI's own
+    # run-scoped lookup is the only thing preventing a typo'd --run-id from
+    # stamping a different run's audit row.
+    path, db = store
+    other_event_id = _open_case(db)
+    accounting.initialize_run(
+        db,
+        run_id="other",
+        mode="live",
+        initial_balance_usdc=Decimal(100),
+        schema_version=SCHEMA_VERSION,
+        created_at=_NOW - timedelta(days=1),
+    )
+    rc = main(
+        [
+            "safe-mode",
+            "--run-id",
+            "other",
+            "--db",
+            str(path),
+            "--stamp-case",
+            str(other_event_id),
+            "--action",
+            "x",
+        ]
+    )
+    assert rc == 1
+    assert f"no reconciliation case with event_id {other_event_id}" in capsys.readouterr().err
+    with Database(path) as db2:
+        (row,) = [
+            r
+            for r in repo.iter_exchange_reconciliation_events(db2.conn, "r")
+            if r["event_id"] == other_event_id
+        ]
+        assert row["action_taken"] is None  # run "r"'s case survived untouched
+
+
 def test_stamping_an_unknown_case_id_is_named_not_silent(store, capsys):
     path, _ = store
     rc = main(

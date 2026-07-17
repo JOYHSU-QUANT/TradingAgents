@@ -870,6 +870,12 @@ resolution 不改寫 case rows（它們是 log），且**「已解決」的定�
   sighting 永遠 join 不到 fills、自動車道永遠救不了它，若無此指令，交易所丟一筆
   看不懂的 payload 就會讓 run 永久卡在 safe mode，只能對正式庫手寫 SQL。已記錄的
   處置不覆寫（第一筆就是稽核事實），且 stamp 不等於恢復交易——仍須過下一輪對帳。
+  **`fill_unmapped` 具名拒絕 stamp**：它的「已解決」是對 `fills` 的 anti-join（見
+  上），根本不讀 `action_taken`——stamp 它清不掉任何 verdict，卻會把該列從 open-cases
+  清單抹掉（那是操作者唯一的 backlog 列舉面），等於製造出這個指令本來要防的死結。
+  故 open-cases 清單對兩種 resolution model 用**兩個**判準：`fill_unmapped` 以
+  anti-join 判定是否仍未解（無視 `action_taken`）、其餘以 `action_taken IS NULL`，
+  且逐列標明真正的解決路徑。
 - **`fill_money_drift` / `fill_fee_drift`**：`exchange_value` 是 `去重鍵|drift digest`，
   且描述的 fill **已經入帳**——它們根本不屬於「帳上沒有的錢」backlog，出現在
   anti-join 結果裡是誤列。它們是「同 tid 但內容矛盾」（money drift）或「別的 run 的

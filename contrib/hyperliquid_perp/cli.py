@@ -231,9 +231,10 @@ def _cmd_safe_mode(argv: list[str]) -> int:
         type=int,
         default=None,
         metavar="EVENT_ID",
-        help="Record a human disposition on an un-actioned §12.3 reconciliation "
-        "case (see --status for the ids), lifting the block it holds on the "
-        "verdict. Requires --action.",
+        help="Record a human disposition on an open §12.3 reconciliation case "
+        "(see --status for the ids). A fill_malformed case stops blocking the "
+        "verdict once stamped; a fill_unmapped one is refused (it resolves by "
+        "booking the fill, not by stamping). Requires --action.",
     )
     parser.add_argument(
         "--reason",
@@ -334,28 +335,48 @@ def _cmd_safe_mode(argv: list[str]) -> int:
                         f"{'' if row['safe_mode_type'] is None else ' ' + row['safe_mode_type']}"
                         f"{'' if row['reason'] is None else ': ' + row['reason']}{who}"
                     )
-            # The §12.3 cases still awaiting a human disposition. Printed HERE
-            # because this is the only place their event_ids surface: an
-            # un-actioned case (a malformed fill sighting, a drift observation)
-            # holds the verdict unclean until it is stamped, and the safe-mode
-            # detail names the count, not the ids — without this listing the
-            # --stamp-case path would be unreachable short of hand-written SQL.
+            # The §12.3 cases still open. Printed HERE because this is the only
+            # place their event_ids surface: an open case can hold the verdict
+            # unclean, and the safe-mode detail names a count, not ids.
+            #
+            # TWO resolution models, so two predicates — keying everything on
+            # action_taken would list an unmapped sighting as stampable, and
+            # stamping it changes NO verdict while hiding it from this very
+            # listing (the operator's only enumeration of the backlog):
+            #   - fill_unmapped  → open until the fill BOOKS (an anti-join that
+            #     never reads action_taken); resolved by §8.3 re-ingest.
+            #   - everything else → open until a human stamps action_taken.
+            unmapped_open = repo.iter_unresolved_fill_sightings(db.conn, args.run_id)
+            unmapped_ids = {row["event_id"] for row in unmapped_open}
             open_cases = [
                 row
                 for row in repo.iter_exchange_reconciliation_events(db.conn, args.run_id)
-                if row["action_taken"] is None
+                if (
+                    row["event_id"] in unmapped_ids
+                    if row["case_type"] == "fill_unmapped"
+                    else row["action_taken"] is None
+                )
             ]
             if open_cases:
                 shown = open_cases if limit == 0 else open_cases[-limit:]
                 print(
-                    f"open reconciliation cases ({len(open_cases)}; stamp with "
-                    '--stamp-case <event_id> --action "<disposition>"):'
+                    f"open reconciliation cases ({len(open_cases)}; stamp the "
+                    'human-disposable ones with --stamp-case <event_id> --action "<disposition>"):'
                 )
                 for row in shown:
+                    # Name the resolution path per row: an operator following a
+                    # blanket "stamp these" instruction onto an unmapped sighting
+                    # would believe they had cleared a block they had not.
+                    how = (
+                        " — resolved by booking the fill (§8.3 re-ingest), not by stamping"
+                        if row["case_type"] == "fill_unmapped"
+                        else ""
+                    )
                     print(
                         f"  [{row['event_id']}] {row['timestamp']}  {row['case_type']}"
                         f"{'' if row['symbol'] is None else ' ' + row['symbol']}"
                         f"{'' if row['exchange_value'] is None else ' ' + row['exchange_value']}"
+                        f"{how}"
                     )
             # Exit 4 while a safe mode is latched (0 = none): a supervisor
             # probe can branch without parsing stdout — the same multi-code
@@ -470,6 +491,21 @@ def _stamp_reconciliation_case(db, repo, args) -> int:
         )
         return 1
     (row,) = match
+    if row["case_type"] == "fill_unmapped":
+        # Stamping this would be a verdict NO-OP that also HIDES the row: an
+        # unmapped sighting's block is an anti-join against the fills table
+        # (repo.iter_unresolved_fill_sightings) which never reads action_taken,
+        # so the pass stays unclean while the operator's only enumeration of the
+        # backlog loses the row — the very wedge --stamp-case exists to prevent.
+        print(
+            f"error: case {args.stamp_case} is a fill_unmapped sighting — the "
+            "exchange reported a fill the ledger still lacks, and it resolves by "
+            "BOOKING that fill (§8.3 re-ingest / the next backfill), never by "
+            "stamping: its block is an anti-join that does not read action_taken, "
+            "so a stamp would clear no verdict and only hide the row from --status.",
+            file=sys.stderr,
+        )
+        return 1
     if row["action_taken"] is not None:
         # Append-only in spirit: the first disposition is the audit record, and
         # silently overwriting it would erase what a human already attested.

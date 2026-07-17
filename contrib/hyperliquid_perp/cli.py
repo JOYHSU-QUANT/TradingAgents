@@ -859,6 +859,17 @@ def _live_startup_recovery(
                                 "orders may still rest and the wallet-wide "
                                 "scheduleCancel will fire at the deadline"
                             )
+                            logger.error("§18.2 %s", shutdown_problem)
+                    if shutdown_problem is not None:
+                        # Surfaced HERE, inside the ``finally``: when the body
+                        # above raised (the except path already returned 1),
+                        # the summary prints below never run — and "the
+                        # wallet-wide trigger is still armed" is the one fact
+                        # that must never exit silently, on any path.
+                        print(
+                            f"error: §18.2 shutdown unclean — {shutdown_problem}",
+                            file=sys.stderr,
+                        )
 
             print(f"startup_reconciliation_passed: {'true' if result.passed else 'false'}")
             print(f"canceled_stale_orders: {len(result.canceled_stale)}")
@@ -870,8 +881,6 @@ def _live_startup_recovery(
             if result.sweep_failures:
                 for failure in result.sweep_failures:
                     print(f"error: stale-order sweep — {failure}", file=sys.stderr)
-            if shutdown_problem is not None:
-                print(f"error: §18.2 shutdown unclean — {shutdown_problem}", file=sys.stderr)
             if result.passed:
                 if shutdown_problem is not None:
                     # Decided 2026-07-17: exit 0 means "all quiet" to a

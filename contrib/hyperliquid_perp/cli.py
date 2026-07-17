@@ -217,18 +217,34 @@ def _cmd_safe_mode(argv: list[str]) -> int:
     action.add_argument(
         "--status",
         action="store_true",
-        help="Print the current safe-mode state and recent history (the default "
-        "action). Exit 0 when not in safe mode, 4 while one is latched.",
+        help="Print the current safe-mode state, recent history and the open "
+        "reconciliation cases (the default action). Exit 0 when not in safe "
+        "mode, 4 while one is latched.",
     )
     action.add_argument(
         "--release",
         action="store_true",
         help="Release a MANUAL safe mode (writes the §13.6 audit event).",
     )
+    action.add_argument(
+        "--stamp-case",
+        type=int,
+        default=None,
+        metavar="EVENT_ID",
+        help="Record a human disposition on an un-actioned §12.3 reconciliation "
+        "case (see --status for the ids), lifting the block it holds on the "
+        "verdict. Requires --action.",
+    )
     parser.add_argument(
         "--reason",
         default=None,
         help="Required with --release: the human confirmation recorded on the release event.",
+    )
+    parser.add_argument(
+        "--action",
+        default=None,
+        help='Required with --stamp-case: what the human decided, recorded as '
+        "the case's action_taken.",
     )
     parser.add_argument(
         "--released-by",
@@ -239,8 +255,8 @@ def _cmd_safe_mode(argv: list[str]) -> int:
         "--limit",
         type=int,
         default=None,
-        help="With --status: how many recent history rows to print "
-        "(default 10; 0 prints the full history).",
+        help="With --status: how many recent history rows and open cases to "
+        "print (default 10; 0 prints everything).",
     )
     args = parser.parse_args(argv)
 
@@ -274,15 +290,18 @@ def _cmd_safe_mode(argv: list[str]) -> int:
         manager = SafeModeManager(db=db, run_id=args.run_id, gate=None)
         state = manager.current()
 
+        if args.stamp_case is not None:
+            return _stamp_reconciliation_case(db, repo, args)
+
         if not args.release:
-            if args.reason is not None or args.released_by is not None:
+            if args.reason is not None or args.released_by is not None or args.action is not None:
                 # Named rejection, not silence: these flags only mean something
-                # on the release path, and an operator who typed them almost
-                # certainly meant --release — dropping them without a word
-                # would read as "release recorded".
+                # on the release/stamp paths, and an operator who typed them
+                # almost certainly meant one of those — dropping them without a
+                # word would read as "release recorded".
                 print(
-                    "error: --reason/--released-by apply only with --release; "
-                    "the status action records nothing.",
+                    "error: --reason/--released-by apply only with --release and "
+                    "--action only with --stamp-case; the status action records nothing.",
                     file=sys.stderr,
                 )
                 return 1
@@ -298,14 +317,14 @@ def _cmd_safe_mode(argv: list[str]) -> int:
                 print(f"safe_mode: {state.safe_mode_type}")
                 print(f"reason: {state.reason}")
                 print(f"entered_at: {state.entered_at}")
+            # Default 10 keeps the probe output lean; a long manual episode (one
+            # reason_added row per distinct reason) can push the episode's
+            # anchoring safe_mode_entered row out of a fixed tail, so the
+            # operator can widen it (--limit 0 = all) without querying the DB
+            # (decided 2026-07-17).
+            limit = 10 if args.limit is None else args.limit
             history = repo.iter_safe_mode_events(db.conn, args.run_id)
             if history:
-                # Default 10 keeps the probe output lean; a long manual
-                # episode (one reason_added row per distinct reason) can push
-                # the episode's anchoring safe_mode_entered row out of a
-                # fixed tail, so the operator can widen it (--limit 0 = all)
-                # without querying the DB (decided 2026-07-17).
-                limit = 10 if args.limit is None else args.limit
                 rows = history if limit == 0 else history[-limit:]
                 print("history (most recent last):")
                 for row in rows:
@@ -314,6 +333,29 @@ def _cmd_safe_mode(argv: list[str]) -> int:
                         f"  {row['timestamp']}  {row['event_type']}"
                         f"{'' if row['safe_mode_type'] is None else ' ' + row['safe_mode_type']}"
                         f"{'' if row['reason'] is None else ': ' + row['reason']}{who}"
+                    )
+            # The §12.3 cases still awaiting a human disposition. Printed HERE
+            # because this is the only place their event_ids surface: an
+            # un-actioned case (a malformed fill sighting, a drift observation)
+            # holds the verdict unclean until it is stamped, and the safe-mode
+            # detail names the count, not the ids — without this listing the
+            # --stamp-case path would be unreachable short of hand-written SQL.
+            open_cases = [
+                row
+                for row in repo.iter_exchange_reconciliation_events(db.conn, args.run_id)
+                if row["action_taken"] is None
+            ]
+            if open_cases:
+                shown = open_cases if limit == 0 else open_cases[-limit:]
+                print(
+                    f"open reconciliation cases ({len(open_cases)}; stamp with "
+                    '--stamp-case <event_id> --action "<disposition>"):'
+                )
+                for row in shown:
+                    print(
+                        f"  [{row['event_id']}] {row['timestamp']}  {row['case_type']}"
+                        f"{'' if row['symbol'] is None else ' ' + row['symbol']}"
+                        f"{'' if row['exchange_value'] is None else ' ' + row['exchange_value']}"
                     )
             # Exit 4 while a safe mode is latched (0 = none): a supervisor
             # probe can branch without parsing stdout — the same multi-code
@@ -326,6 +368,13 @@ def _cmd_safe_mode(argv: list[str]) -> int:
             # the flag only means something when history is printed.
             print(
                 "error: --limit applies only with --status; the release action prints no history.",
+                file=sys.stderr,
+            )
+            return 1
+        if args.action is not None:
+            print(
+                "error: --action applies only with --stamp-case; a release records "
+                "its human confirmation via --reason.",
                 file=sys.stderr,
             )
             return 1
@@ -369,6 +418,76 @@ def _cmd_safe_mode(argv: list[str]) -> int:
             "reconciliation before new orders are allowed (§13.6 rule 3)."
         )
         return 0
+
+
+def _stamp_reconciliation_case(db, repo, args) -> int:
+    """`safe-mode --stamp-case`: the §12.3 "人工核對後標記 action_taken" path.
+
+    The tool that rule always implied and never had. Several case types can
+    only ever be disposed of by a human — a ``fill_malformed`` sighting keyed
+    by content digest can never be auto-resolved (nothing will ever join it to
+    a booked fill), and money/fee-drift observations describe already-booked
+    fills. Since an un-actioned case holds the verdict unclean, without this
+    the exchange emitting ONE unparseable payload would wedge the run in safe
+    mode permanently, with hand-written SQL against the live store as the only
+    remedy.
+
+    Stamping does not resume trading: the next reconciliation pass still has to
+    prove the books (§13.6 rule 3's discipline, for the same reason).
+    """
+    if args.reason is not None or args.released_by is not None:
+        print(
+            "error: --reason/--released-by apply only with --release; a case "
+            'disposition is recorded with --action "<disposition>".',
+            file=sys.stderr,
+        )
+        return 1
+    if args.limit is not None:
+        print(
+            "error: --limit applies only with --status; the stamp action prints no history.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.action is None or not args.action.strip():
+        print(
+            'error: --stamp-case requires --action "<disposition>" — the audit row '
+            "must record what the human decided about this case (§12.3).",
+            file=sys.stderr,
+        )
+        return 1
+    # Scoped to THIS run: the id comes off a --status listing, and a typo'd
+    # --run-id/--db must name that mistake rather than stamp another run's case.
+    match = [
+        row
+        for row in repo.iter_exchange_reconciliation_events(db.conn, args.run_id)
+        if row["event_id"] == args.stamp_case
+    ]
+    if not match:
+        print(
+            f"error: run {args.run_id!r} has no reconciliation case with event_id "
+            f"{args.stamp_case} — see `safe-mode --status` for the open cases.",
+            file=sys.stderr,
+        )
+        return 1
+    (row,) = match
+    if row["action_taken"] is not None:
+        # Append-only in spirit: the first disposition is the audit record, and
+        # silently overwriting it would erase what a human already attested.
+        print(
+            f"error: case {args.stamp_case} ({row['case_type']}) was already "
+            f"disposed of as {row['action_taken']!r} — a recorded disposition is "
+            "not overwritten.",
+            file=sys.stderr,
+        )
+        return 1
+    with db.transaction() as conn:
+        repo.set_reconciliation_action(conn, args.stamp_case, args.action)
+    print(f"case {args.stamp_case} ({row['case_type']}) stamped: {args.action}")
+    print(
+        "NOTE: trading does not resume yet — the run must pass its next full "
+        "reconciliation before new orders are allowed."
+    )
+    return 0
 
 
 # --------------------------------------------------------------------------

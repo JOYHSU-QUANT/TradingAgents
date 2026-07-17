@@ -222,3 +222,105 @@ def test_release_rejects_limit(store, capsys):
     assert "--limit applies only with --status" in capsys.readouterr().err
     with Database(path) as db2:
         assert repo.get_scheduler_state(db2.conn, "r")["safe_mode_type"] == "manual"
+
+
+# -- --stamp-case: the §12.3 human-disposition path ---------------------------
+
+
+def _open_case(db, *, case_type="fill_malformed", exchange_value="unparsed-deadbeef"):
+    """One un-actioned case — the shape that holds the verdict unclean."""
+    with db.transaction() as conn:
+        repo.insert_exchange_reconciliation_event(
+            conn,
+            run_id="r",
+            trigger="live_fill_ingest",
+            case_type=case_type,
+            exchange_value=exchange_value,
+            timestamp=_NOW,
+        )
+    return [
+        row
+        for row in repo.iter_exchange_reconciliation_events(db.conn, "r")
+        if row["action_taken"] is None
+    ][-1]["event_id"]
+
+
+def test_status_lists_open_cases_with_the_ids_stamping_needs(store, capsys):
+    # --status is the ONLY place a case's event_id surfaces: the safe-mode
+    # detail names a count, not ids. Without this listing --stamp-case would be
+    # unreachable short of hand-written SQL against the live store.
+    path, db = store
+    event_id = _open_case(db)
+    assert main(["safe-mode", "--run-id", "r", "--db", str(path), "--status"]) == 0
+    out = capsys.readouterr().out
+    assert "open reconciliation cases (1;" in out
+    assert f"[{event_id}]" in out
+    assert "fill_malformed" in out
+
+
+def test_stamping_a_case_records_the_disposition_and_unblocks_it(store, capsys):
+    # A digest-keyed malformed sighting can NEVER be auto-resolved (nothing will
+    # ever join it to a booked fill), and an un-actioned case holds the verdict
+    # unclean — so without this path one unparseable payload wedges the run in
+    # safe mode forever.
+    path, db = store
+    event_id = _open_case(db)
+    rc = main(
+        [
+            "safe-mode",
+            "--run-id",
+            "r",
+            "--db",
+            str(path),
+            "--stamp-case",
+            str(event_id),
+            "--action",
+            "reviewed evidence: payload was garbage",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"case {event_id} (fill_malformed) stamped" in out
+    assert "trading does not resume yet" in out
+    with Database(path) as db2:
+        (row,) = [
+            r
+            for r in repo.iter_exchange_reconciliation_events(db2.conn, "r")
+            if r["event_id"] == event_id
+        ]
+        assert row["action_taken"] == "reviewed evidence: payload was garbage"
+
+
+def test_stamping_requires_an_action_and_refuses_to_overwrite_one(store, capsys):
+    path, db = store
+    event_id = _open_case(db)
+    assert (
+        main(["safe-mode", "--run-id", "r", "--db", str(path), "--stamp-case", str(event_id)]) == 1
+    )
+    assert "requires --action" in capsys.readouterr().err
+
+    base = ["safe-mode", "--run-id", "r", "--db", str(path), "--stamp-case", str(event_id)]
+    assert main([*base, "--action", "first call"]) == 0
+    capsys.readouterr()
+    # The first disposition is the audit record: a second must not erase it.
+    assert main([*base, "--action", "second call"]) == 1
+    assert "already disposed of as 'first call'" in capsys.readouterr().err
+
+
+def test_stamping_an_unknown_case_id_is_named_not_silent(store, capsys):
+    path, _ = store
+    rc = main(
+        [
+            "safe-mode",
+            "--run-id",
+            "r",
+            "--db",
+            str(path),
+            "--stamp-case",
+            "999",
+            "--action",
+            "x",
+        ]
+    )
+    assert rc == 1
+    assert "no reconciliation case with event_id 999" in capsys.readouterr().err

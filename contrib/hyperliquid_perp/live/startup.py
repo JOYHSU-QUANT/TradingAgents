@@ -108,7 +108,14 @@ class StartupResult:
     def passed(self) -> bool:
         """Step 16: may a new AI cycle start? Derived, never stored — a free
         boolean could drift from the facts it summarizes when a future caller
-        (PR 5's loop) constructs this type directly."""
+        (PR 5's loop) constructs this type directly.
+
+        ``not self.sweep_failures`` is redundant against a report THIS module
+        built (``report.clean`` already folds ``report.sweep_failures`` in) and
+        is kept deliberately: it guards exactly the drift the paragraph above
+        names — a future caller pairing a sweep-less report with a non-empty
+        sweep list. Do not "simplify" it away.
+        """
         return self.report.clean and not self.sweep_failures and not self.safe_mode_active
 
 

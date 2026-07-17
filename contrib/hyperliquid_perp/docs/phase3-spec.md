@@ -865,6 +865,11 @@ resolution 不改寫 case rows（它們是 log），且**「已解決」的定�
   倉位尺寸推歪、又藏在 equity 容差內，audit-only 會讓 run 判 clean 照常交易——故
   改為擋 clean、在 report 的 `errors` 具名，直到人工 stamp 才放行；裸 tid 的 sighting
   若事後被 §8.3 recovery 補入帳，sweep 仍自動標 `resolved_fill_booked` 除帳。
+  人工標記的**工具**是 `safe-mode --stamp-case <event_id> --action "<處置說明>"`
+  （event_id 由 `safe-mode --status` 的 open-cases 清單提供）：digest-keyed 的
+  sighting 永遠 join 不到 fills、自動車道永遠救不了它，若無此指令，交易所丟一筆
+  看不懂的 payload 就會讓 run 永久卡在 safe mode，只能對正式庫手寫 SQL。已記錄的
+  處置不覆寫（第一筆就是稽核事實），且 stamp 不等於恢復交易——仍須過下一輪對帳。
 - **`fill_money_drift` / `fill_fee_drift`**：`exchange_value` 是 `去重鍵|drift digest`，
   且描述的 fill **已經入帳**——它們根本不屬於「帳上沒有的錢」backlog，出現在
   anti-join 結果裡是誤列。它們是「同 tid 但內容矛盾」（money drift）或「別的 run 的

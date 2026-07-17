@@ -649,8 +649,8 @@ def test_a_manual_fact_seen_only_by_the_first_pass_still_latches_safe_mode(env):
     ]
     real_run = env.reconciler.run
 
-    def run_then_vanish(trigger):
-        report = real_run(trigger)
+    def run_then_vanish(trigger, **kwargs):
+        report = real_run(trigger, **kwargs)
         env.client.open_orders_result = []  # the owner pulls it mid-recovery
         return report
 

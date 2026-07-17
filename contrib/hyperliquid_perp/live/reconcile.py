@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal, localcontext
 from pathlib import Path
@@ -207,10 +207,27 @@ class ReconciliationReport:
     # mode (decided 2026-07-17; the tempting shape is a PR 5 heartbeat
     # wiring without the fill seams).
     legs_skipped: tuple[str, ...] = field(default_factory=tuple)
+    # The §19.3 startup stale-order sweep's per-order failures, passed in by
+    # the caller that ran the sweep. A cancel that would not land leaves a
+    # stale order resting, so this is a VERDICT INPUT, not an after-the-fact
+    # note (decided 2026-07-17): it is inside ``clean`` — unlike
+    # ``legs_skipped`` — so the pass can never read clean over it, and it is
+    # carried ON the report (rather than folded into ``errors`` by the caller
+    # afterwards) so that it exists BEFORE ``_record`` persists the pass.
+    # Folding it in after run() returned would leave the durable
+    # ``reconciliation_diff`` — and the row's ``reconciliation_status`` —
+    # claiming "ok" for a pass whose verdict was unclean and which fired safe
+    # mode.
+    sweep_failures: tuple[str, ...] = field(default_factory=tuple)
 
     @property
-    def clean(self) -> bool:
-        """§13.4's "no unresolved mismatch": every leg proved, nothing open."""
+    def reconciliation_clean(self) -> bool:
+        """Every RECONCILIATION leg proved, nothing open — ignoring the §19.3 sweep.
+
+        The verdict over what this module itself checked. ``reconcile_and_apply``
+        reads it to tell "the books are fine, only the sweep failed" (which earns
+        the specific ``stale_order_sweep_failed`` reason) from a real mismatch.
+        """
         return (
             self.orders_reconciled
             and self.fills_reconciled
@@ -220,6 +237,11 @@ class ReconciliationReport:
             and self.backfill_complete
             and not self.errors
         )
+
+    @property
+    def clean(self) -> bool:
+        """§13.4's "no unresolved mismatch": every leg proved, nothing open."""
+        return self.reconciliation_clean and not self.sweep_failures
 
     @property
     def manual_cases(self) -> tuple[ReconciliationCase, ...]:
@@ -268,13 +290,18 @@ class LiveReconciler:
 
     # ------------------------------------------------------------------ run
 
-    def run(self, trigger: str) -> ReconciliationReport:
+    def run(self, trigger: str, *, sweep_failures: tuple[str, ...] = ()) -> ReconciliationReport:
         """One full §12.3 sweep; records everything, raises nothing.
 
         A leg whose exchange read fails is reported UNRECONCILED (with the
         error) rather than raising: §12.2 runs this from heartbeats and
         shutdown paths that must keep running, and "could not prove" already
         maps to the fail-safe verdict (unclean → safe mode).
+
+        ``sweep_failures`` carries the §19.3 startup stale-order sweep's
+        per-order failures into the verdict — see
+        ``ReconciliationReport.sweep_failures`` for why they must arrive here
+        (before the pass is recorded) rather than be folded in afterwards.
         """
         check_enum(trigger, repo.RECONCILIATION_TRIGGERS, name="trigger")
         now = self._clock.now()
@@ -357,6 +384,7 @@ class LiveReconciler:
             backfill_complete=backfill_summary is None or backfill_summary.complete,
             errors=tuple(errors),
             legs_skipped=tuple(legs_skipped),
+            sweep_failures=tuple(sweep_failures),
         )
         try:
             self._record(report, snapshot, raw_clearinghouse, backfill_summary)
@@ -371,7 +399,7 @@ class LiveReconciler:
         if not report.clean:
             logger.warning(
                 "reconciliation (%s) UNCLEAN: orders=%s fills=%s position=%s account=%s "
-                "protected=%s backfill=%s cases=%d errors=%s",
+                "protected=%s backfill=%s cases=%d errors=%s sweep_failures=%s",
                 trigger,
                 orders_ok,
                 fills_ok,
@@ -381,6 +409,7 @@ class LiveReconciler:
                 report.backfill_complete,
                 len([c for c in cases if not c.resolved]),
                 "; ".join(errors) or "none",
+                "; ".join(report.sweep_failures) or "none",
             )
         return report
 
@@ -426,20 +455,15 @@ class LiveReconciler:
 
         ``sweep_failures`` (the §19.3 startup stale-order sweep's per-order
         failures) are a verdict INPUT, not a separate post-hoc entry: a cancel
-        that could not land leaves a stale order resting, so folding them into
-        the report's errors BEFORE any release keeps a reconciliation-clean
-        pass from auto-releasing — and re-anchoring ``entered_at`` on — an
-        episode the sweep already made unhealthy (decided 2026-07-17). The
-        entry names ``stale_order_sweep_failed`` specifically when the
-        reconciliation legs were otherwise clean.
+        that could not land leaves a stale order resting, so carrying them into
+        the pass BEFORE any release keeps a reconciliation-clean pass from
+        auto-releasing — and re-anchoring ``entered_at`` on — an episode the
+        sweep already made unhealthy (decided 2026-07-17). They go through
+        ``run()`` so the recorded pass agrees with the verdict; the entry names
+        ``stale_order_sweep_failed`` specifically when the reconciliation legs
+        were otherwise clean.
         """
-        report = self.run(trigger)
-        # Capture the reconciliation-only verdict BEFORE folding the sweep in,
-        # so a stale-order-only failure can be named specifically below rather
-        # than under the generic mismatch reason.
-        reconciliation_clean = report.clean
-        if sweep_failures:
-            report = replace(report, errors=report.errors + tuple(sweep_failures))
+        report = self.run(trigger, sweep_failures=tuple(sweep_failures))
         self.apply_manual_cases(report, safe_mode)
         safe_mode.note_reconciliation_outcome(report.clean)
         if report.clean:
@@ -469,21 +493,28 @@ class LiveReconciler:
             safe_mode.set_state_reconciled(False)
             if not report.manual_cases:
                 unresolved = sorted({c.case_type for c in report.cases if not c.resolved})
-                # The one unclean shape with its own named reason: a position
-                # whose only problem is a missing/insufficient SL (repair is
-                # PR 5's manager) — queryable in safe_mode_events as such.
-                if reconciliation_clean and sweep_failures:
-                    # Every reconciliation leg proved clean; the ONLY problem is
-                    # the §19.3 stale-order sweep. Name it, not the mismatch.
+                # EVERY cause this pass found, not just the first kind of cause:
+                # unresolved case types, errors-only legs (an unmapped-fill
+                # backlog, an incomplete backfill) and sweep failures live in
+                # three separate channels, and a compound failure used to let
+                # whichever channel came first suppress the others from the
+                # §13.6 triage surface entirely.
+                causes = [*unresolved, *report.errors, *report.sweep_failures]
+                # The named reasons: a sweep-only failure and a position whose
+                # only problem is a missing/insufficient SL (repair is PR 5's
+                # manager) are each queryable in safe_mode_events as such;
+                # anything else is the generic mismatch.
+                if report.reconciliation_clean and report.sweep_failures:
                     reason = REASON_STALE_ORDER_SWEEP_FAILED
-                    detail = "; ".join(sweep_failures)
-                elif unresolved == ["position_sl_missing"] and not report.errors:
+                elif (
+                    unresolved == ["position_sl_missing"]
+                    and not report.errors
+                    and not report.sweep_failures
+                ):
                     reason = REASON_SL_MISSING
-                    detail = "; ".join(unresolved)
                 else:
                     reason = REASON_RECONCILIATION_MISMATCH
-                    detail = "; ".join(unresolved) or "; ".join(report.errors)
-                safe_mode.enter("recoverable", reason, detail=detail)
+                safe_mode.enter("recoverable", reason, detail="; ".join(causes))
         return report
 
     # ------------------------------------------------------------- fills leg
@@ -1302,6 +1333,11 @@ class LiveReconciler:
                     for c in report.cases
                 ],
                 "errors": list(report.errors),
+                # A verdict input like any other (see the field's comment): the
+                # durable diff is what a post-mortem reads, and a row marked
+                # "mismatch" whose diff named no cause would send that reader
+                # hunting through a CLI transcript they no longer have.
+                "sweep_failures": list(report.sweep_failures),
                 "backfill": None
                 if backfill_summary is None
                 else {

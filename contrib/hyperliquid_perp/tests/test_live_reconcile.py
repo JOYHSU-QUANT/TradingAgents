@@ -1464,7 +1464,16 @@ def test_sweep_failures_make_the_pass_unclean_without_a_release_flap(env):
         sweep_failures=("123 (entry): ExchangeError: nope",),
     )
     assert not report.clean  # reconciliation was clean; the sweep failure isn't
-    assert "123 (entry)" in "; ".join(report.errors)
+    assert report.reconciliation_clean  # ...but the books themselves proved out
+    assert "123 (entry)" in "; ".join(report.sweep_failures)
+    # The PERSISTED pass must agree with the verdict: the row is recorded inside
+    # run(), so a sweep failure folded in afterwards would leave a "mismatch"
+    # verdict stored as reconciliation_status "ok" with no cause in its diff —
+    # exactly what a post-mortem reader (who no longer has the CLI transcript)
+    # would be misled by.
+    row = db.conn.execute("SELECT * FROM account_snapshots WHERE run_id='r'").fetchone()
+    assert row["reconciliation_status"] == "mismatch"
+    assert "123 (entry)" in row["reconciliation_diff"]
     state = safe_mode.current()
     assert state is not None  # the latch was NOT released
     assert gate.state_reconciled is False
@@ -1472,3 +1481,34 @@ def test_sweep_failures_make_the_pass_unclean_without_a_release_flap(env):
     assert "safe_mode_released" not in types  # no release→re-enter flap
     reasons = [e["reason"] for e in repo.iter_safe_mode_events(db.conn, "r")]
     assert "stale_order_sweep_failed" in reasons  # named specifically
+
+
+def test_a_compound_failure_names_every_cause_in_the_safe_mode_detail(env):
+    # Causes arrive on three separate channels — unresolved case types, the
+    # errors-only legs, and the sweep. A compound failure must not let whichever
+    # channel is checked first suppress the others from the §13.6 triage
+    # surface: an operator reading "equity_mismatch" would never learn that
+    # exchange fills are also unbooked and a stale order is still resting.
+    db, seams, reconciler = env
+    gate = _gate()
+    safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
+    seams.clearinghouse = _clearinghouse(account_value="90")  # equity mismatch (a case)
+    with db.transaction() as conn:
+        repo.insert_exchange_reconciliation_event(  # an unmapped backlog (an error)
+            conn,
+            run_id="r",
+            trigger="live_fill_ingest",
+            case_type="fill_unmapped",
+            exchange_value=exchange_fill_key(tid="777"),
+        )
+    reconciler.reconcile_and_apply(
+        "heartbeat",
+        safe_mode=safe_mode,
+        ws_restored=True,
+        kill_switch_active=True,
+        sweep_failures=("123 (entry): ExchangeError: nope",),
+    )
+    (event,) = [e for e in repo.iter_safe_mode_events(db.conn, "r") if e["detail"]]
+    assert "equity_mismatch" in event["detail"]
+    assert "unmapped fill sighting" in event["detail"]
+    assert "123 (entry)" in event["detail"]

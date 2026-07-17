@@ -945,10 +945,16 @@ recoverable latch，會被一個從未連過 WS 的 process 以「帳本乾淨�
 latch 留給 PR 5 daemon（真正握著恢復後的 stream 時）解除。
 
 §19.3 stale-order sweep 的撤單失敗是 **verdict 輸入**（2026-07-17）：撤不掉的單
-仍在交易所掛著，該 pass 不得讀成 clean。失敗折進 report 的 `errors` 後才過
-release 門，故不會出現「clean pass 先自動解除 latch、事後才因 sweep 失敗重進」
-的 release→enter flap 與 `entered_at` 重錨；reconciliation legs 本身全 clean 時，
-進入原因具名為 `stale_order_sweep_failed` 而非泛用 mismatch。
+仍在交易所掛著，該 pass 不得讀成 clean。失敗以 `ReconciliationReport.sweep_failures`
+欄位隨 pass 一起帶進 `run()`（即在 `_record` 落庫**之前**），故不會出現「clean pass
+先自動解除 latch、事後才因 sweep 失敗重進」的 release→enter flap 與 `entered_at`
+重錨；也不會發生「in-memory 判 unclean、落庫的 `reconciliation_status` 卻寫成 ok
+且 diff 沒有任何原因」的稽核背離（事後才折進 `errors` 就會如此）。
+`legs_skipped` 在 `clean` 之外，`sweep_failures` 在 `clean` 之內——前者是「這個
+wiring 沒查」，後者是「查了而且失敗」。reconciliation legs 本身全 clean 時（
+`ReconciliationReport.reconciliation_clean`），進入原因具名為
+`stale_order_sweep_failed` 而非泛用 mismatch；複合失敗（case + errors-only 腿 +
+sweep）則三個管道的原因**全部**寫進 safe-mode detail，不得互相蓋掉。
 
 ### 13.5 Manual Safe Mode
 

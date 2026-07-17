@@ -441,3 +441,85 @@ def test_the_kill_switch_is_ticked_between_recovery_legs(env, monkeypatch):
     env.recover()
     # After pass 1, once per swept order, and after the sweep: >= 3 here.
     assert ticks["n"] >= 3
+
+
+# -- round-3 hardening (2026-07-17 review loop) ---------------------------------
+
+_HEX_SL2 = "0x" + "12" * 16
+_HEX_TP = "0x" + "34" * 16
+
+
+def test_split_sl_legs_and_a_partial_tp_are_not_falsely_flagged(env, caplog):
+    # Size coverage is the reconciler leg's AGGREGATE job: two SLs jointly
+    # covering the position, and a deliberately partial take_profit
+    # (a scale-out), are legitimate shapes — the sweep's per-order structural
+    # check must not warn "does not validate" over them.
+    import logging
+
+    with env.db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("0.002"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+    env.register_order(order_id="o-sl1", hex_id=_HEX_SL, logical="log-sl1", role="stop_loss")
+    env.register_order(order_id="o-sl2", hex_id=_HEX_SL2, logical="log-sl2", role="stop_loss")
+    env.register_order(order_id="o-tp", hex_id=_HEX_TP, logical="log-tp", role="take_profit")
+    env.clearinghouse = _clearinghouse(
+        account_value="101", maintenance="1", positions=[_btc_position(szi="0.002", value="102")]
+    )
+    env.client.open_orders_result = [
+        {
+            "oid": 5,
+            "coin": "BTC",
+            "cloid": _HEX_SL,
+            "side": "A",
+            "sz": "0.001",
+            "reduceOnly": True,
+            "isTrigger": True,
+            "triggerPx": "48000",
+        },
+        {
+            "oid": 6,
+            "coin": "BTC",
+            "cloid": _HEX_SL2,
+            "side": "A",
+            "sz": "0.001",
+            "reduceOnly": True,
+            "isTrigger": True,
+            "triggerPx": "48000",
+        },
+        # A partial TP resting as a plain reduce-only limit: legitimate.
+        {"oid": 9, "coin": "BTC", "cloid": _HEX_TP, "side": "A", "sz": "0.001", "reduceOnly": True},
+    ]
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.live.startup"):
+        result = env.recover()
+    assert result.passed  # the two SL legs jointly cover 0.002 (§17.1)
+    assert sorted(result.kept_orders) == ["5", "6", "9"]
+    assert not [r for r in caplog.records if "does not validate" in r.getMessage()]
+
+
+def test_a_plain_limit_stop_loss_still_warns_structurally(env, caplog):
+    # The trigger requirement stays: a stop_loss-role order resting as a plain
+    # limit protects nothing at the trigger level — kept, but named in the log.
+    import logging
+
+    with env.db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("0.001"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+    env.register_order(order_id="o-sl", hex_id=_HEX_SL, logical="log-sl", role="stop_loss")
+    env.clearinghouse = _clearinghouse(
+        account_value="101", maintenance="1", positions=[_btc_position()]
+    )
+    env.client.open_orders_result = [
+        {"oid": 5, "coin": "BTC", "cloid": _HEX_SL, "side": "A", "sz": "0.001", "reduceOnly": True}
+    ]
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.live.startup"):
+        result = env.recover()
+    assert "5" in result.kept_orders  # protection is never cancelled here
+    assert [r for r in caplog.records if "does not validate" in r.getMessage()]

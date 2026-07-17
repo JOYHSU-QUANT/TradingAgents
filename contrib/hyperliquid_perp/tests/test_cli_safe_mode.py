@@ -56,11 +56,44 @@ def test_status_reports_the_current_state_and_history(store, capsys):
     path, db = store
     _enter(db, "manual", REASON_NON_BOT_OWNED_ORDER)
     db.close()
-    assert main(["safe-mode", "--run-id", "r", "--db", str(path), "--status"]) == 0
+    # Exit 4 while a safe mode is latched (0 = none): the scriptable-probe
+    # contract (decided 2026-07-17).
+    assert main(["safe-mode", "--run-id", "r", "--db", str(path), "--status"]) == 4
     out = capsys.readouterr().out
     assert "safe_mode: manual" in out
     assert REASON_NON_BOT_OWNED_ORDER in out
     assert "safe_mode_entered" in out
+
+
+def test_status_refuses_release_only_flags(store, capsys):
+    # --reason/--released-by without --release: named rejection, not silence —
+    # an operator who typed them almost certainly meant --release, and
+    # dropping them without a word would read as "release recorded".
+    path, db = store
+    _enter(db, "manual", REASON_NON_BOT_OWNED_ORDER)
+    db.close()
+    assert main(["safe-mode", "--run-id", "r", "--db", str(path), "--reason", "x"]) == 1
+    assert "apply only with --release" in capsys.readouterr().err
+    with Database(path) as db2:
+        assert repo.get_scheduler_state(db2.conn, "r")["safe_mode_type"] == "manual"
+
+
+def test_wrong_mode_run_is_a_named_error(store, capsys, tmp_path):
+    # Safe mode is live-run state: a paper run id (a typo'd --run-id/--db)
+    # must be named as such, not answered with a misleading "safe_mode: none".
+    path = tmp_path / "paper_trading.db"
+    db = Database(path)
+    accounting.initialize_run(
+        db,
+        run_id="p",
+        mode="paper",
+        initial_balance_usdc=Decimal(100),
+        schema_version=SCHEMA_VERSION,
+        created_at=_NOW,
+    )
+    db.close()
+    assert main(["safe-mode", "--run-id", "p", "--db", str(path)]) == 1
+    assert "is a paper run" in capsys.readouterr().err
 
 
 def test_release_clears_the_state_and_leaves_the_audit_trail(store, capsys):

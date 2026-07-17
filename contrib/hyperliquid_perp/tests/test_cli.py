@@ -417,6 +417,27 @@ def test_paper_resume_with_off_coin_position_exits_1(tmp_path, capsys, paper_sea
     assert "protection" in err
 
 
+def test_paper_resume_refuses_a_live_mode_run(tmp_path, capsys, paper_seams):
+    # Run-identity discipline (decided 2026-07-17): a live run's genesis
+    # carries the same coin, so the drift check alone would wave a typo'd
+    # --run-id/--db through — and the paper daemon would then trade over a
+    # LIVE run's books. Named refusal before the run lock touches the row.
+    path = tmp_path / "live_store.db"
+    db = Database(path)
+    accounting.initialize_run(
+        db,
+        run_id="r",
+        mode="live",
+        initial_balance_usdc=D(1000),
+        schema_version=1,
+    )
+    db.close()
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "is a live run" in err
+
+
 def test_paper_resume_ignores_flat_off_coin_position(tmp_path, capsys, monkeypatch, paper_seams):
     # The resume guard blocks only OPEN off-coin positions: a closed one is
     # inert everywhere (zero equity contribution, nothing to protect), so it

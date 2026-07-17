@@ -305,7 +305,9 @@ def test_reconcile_and_apply_routes_a_non_bot_order_to_manual_safe_mode(env):
     seams.open_orders = [{"oid": 9, "coin": "BTC", "cloid": None, "sz": "1"}]
     gate = _gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
-    reconciler.reconcile_and_apply("heartbeat", safe_mode=safe_mode)
+    reconciler.reconcile_and_apply(
+        "heartbeat", safe_mode=safe_mode, ws_restored=True, kill_switch_active=True
+    )
     state = safe_mode.current()
     assert state is not None and state.is_manual
     assert gate.manual_safe_mode is True
@@ -424,7 +426,11 @@ def test_equity_beyond_tolerance_is_a_mismatch(env):
     report = reconciler.run("heartbeat")
     assert not report.account_reconciled
     (case,) = [c for c in report.cases if c.case_type == "equity_mismatch"]
-    assert case.exchange_value == "95"
+    # The fact key is a CONSTANT (the observed account value drifts with mark
+    # prices — a drifting key would defeat the once-per-fact dedupe and write
+    # one audit row per pass); the live magnitudes live in the detail.
+    assert case.exchange_value == "equity_out_of_tolerance"
+    assert "95" in (case.detail or "")
 
 
 def test_equity_within_tolerance_is_clean(env):
@@ -573,14 +579,18 @@ def test_a_mismatch_enters_recoverable_safe_mode_and_a_clean_pass_recovers_it(en
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
 
     seams.clearinghouse = _clearinghouse(account_value="90")  # equity mismatch
-    report = reconciler.reconcile_and_apply("heartbeat", safe_mode=safe_mode)
+    report = reconciler.reconcile_and_apply(
+        "heartbeat", safe_mode=safe_mode, ws_restored=True, kill_switch_active=True
+    )
     assert not report.clean
     state = safe_mode.current()
     assert state is not None and state.safe_mode_type == "recoverable"
     assert gate.state_reconciled is False
 
     seams.clearinghouse = _clearinghouse(account_value="100")  # healed
-    report = reconciler.reconcile_and_apply("heartbeat", safe_mode=safe_mode)
+    report = reconciler.reconcile_and_apply(
+        "heartbeat", safe_mode=safe_mode, ws_restored=True, kill_switch_active=True
+    )
     assert report.clean
     assert safe_mode.current() is None
     assert gate.state_reconciled is True
@@ -590,7 +600,9 @@ def test_a_clean_pass_with_no_safe_mode_reproves_the_gate(env):
     db, seams, reconciler = env
     gate = _gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
-    reconciler.reconcile_and_apply("heartbeat", safe_mode=safe_mode)
+    reconciler.reconcile_and_apply(
+        "heartbeat", safe_mode=safe_mode, ws_restored=True, kill_switch_active=True
+    )
     assert gate.state_reconciled is True
     assert safe_mode.current() is None
 
@@ -757,7 +769,9 @@ def test_an_sl_only_mismatch_enters_safe_mode_under_its_own_reason(env):
     )
     gate = _gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
-    report = reconciler.reconcile_and_apply("heartbeat", safe_mode=safe_mode)
+    report = reconciler.reconcile_and_apply(
+        "heartbeat", safe_mode=safe_mode, ws_restored=True, kill_switch_active=True
+    )
     assert not report.position_protected
     state = safe_mode.current()
     assert state is not None and state.reason == REASON_SL_MISSING
@@ -922,13 +936,16 @@ def test_a_clean_pass_does_not_reopen_the_gate_while_release_conditions_are_unme
     gate = _gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
     seams.clearinghouse = _clearinghouse(account_value="90")  # mismatch → recoverable
-    reconciler.reconcile_and_apply("heartbeat", safe_mode=safe_mode)
+    reconciler.reconcile_and_apply(
+        "heartbeat", safe_mode=safe_mode, ws_restored=True, kill_switch_active=True
+    )
     assert safe_mode.current() is not None
 
     seams.clearinghouse = _clearinghouse(account_value="100")  # healed...
     report = reconciler.reconcile_and_apply(
         "heartbeat",
         safe_mode=safe_mode,
+        ws_restored=True,
         kill_switch_active=False,  # ...but KS unhealthy
     )
     assert report.clean
@@ -936,15 +953,18 @@ def test_a_clean_pass_does_not_reopen_the_gate_while_release_conditions_are_unme
     assert state is not None and state.safe_mode_type == "recoverable"  # not released
     assert gate.state_reconciled is False  # trading must NOT resume
 
-    report = reconciler.reconcile_and_apply("heartbeat", safe_mode=safe_mode)
+    report = reconciler.reconcile_and_apply(
+        "heartbeat", safe_mode=safe_mode, ws_restored=True, kill_switch_active=True
+    )
     assert report.clean
     assert safe_mode.current() is None  # every §13.4 condition proven → released
     assert gate.state_reconciled is True
 
 
 def test_manual_reason_mapping_reaches_the_safe_mode_record(env):
-    # The case_type → REASON_* dict in reconcile_and_apply: a typo'd key would
-    # silently fall through to the generic mismatch reason.
+    # The case_type → REASON_* vocabulary (_MANUAL_CASE_REASONS): a manual case
+    # missing there now fails loud at construction, and the safe-mode record
+    # must carry the specific reason end to end.
     db, seams, reconciler = env
     gate = _gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
@@ -957,7 +977,9 @@ def test_manual_reason_mapping_reaches_the_safe_mode_record(env):
         "marginUsed": "300",
     }
     seams.clearinghouse = _clearinghouse(account_value="101", positions=[eth], maintenance="1")
-    reconciler.reconcile_and_apply("heartbeat", safe_mode=safe_mode)
+    reconciler.reconcile_and_apply(
+        "heartbeat", safe_mode=safe_mode, ws_restored=True, kill_switch_active=True
+    )
     state = safe_mode.current()
     assert state is not None and state.is_manual
     assert state.reason == "unknown_exchange_position"
@@ -1024,3 +1046,74 @@ def test_an_action_taken_without_resolved_fails_loud_at_construction(env):
             action_taken="settled_canceled",
             resolved=False,
         )
+
+
+# -- round-3 hardening (2026-07-17 review loop) ---------------------------------
+
+
+def test_a_manual_case_without_a_reason_mapping_fails_loud_at_construction(env):
+    # _MANUAL_CASE_REASONS is the ONE manual → safe-mode-reason vocabulary; a
+    # manual case_type missing there would silently enter safe mode under the
+    # generic mismatch reason.
+    from contrib.hyperliquid_perp.live.reconcile import ReconciliationCase
+
+    with pytest.raises(ValueError, match="_MANUAL_CASE_REASONS"):
+        ReconciliationCase(
+            case_type="order_missing_on_exchange",  # valid type, but never manual
+            symbol="BTC",
+            local_value="o1",
+            exchange_value="x",
+            manual=True,
+        )
+
+
+def test_a_tidless_window_entry_withholds_the_invalid_fill_verdict(env):
+    # An entry the cross-check cannot key is an entry the membership verdict
+    # cannot see — the window must count as NOT covered (withhold), or a
+    # genuinely booked local fill gets flagged invalid_local_fill (MANUAL
+    # safe mode) on a false premise.
+    db, seams, reconciler = env
+    _insert_booked_fill(db, fill_time=_NOW - timedelta(hours=1))
+    seams.fills = [{"time": 1}]  # the same window read came back tid-less
+    report = reconciler.run("heartbeat")
+    assert not report.fills_reconciled  # inconclusive, not clean
+    assert not [c for c in report.cases if c.case_type == "invalid_local_fill"]
+    assert any("no usable tid" in e for e in report.errors)
+
+
+def test_one_case_rows_write_failure_does_not_lose_its_siblings(env, monkeypatch):
+    # Each case row is an independent fact in its own transaction: the manual
+    # row a human most needs must survive an unrelated row's write failure.
+    db, seams, reconciler = env
+    seams.open_orders = [
+        {"oid": 9, "coin": "BTC", "cloid": None, "sz": "1"},  # non_bot_owned_order
+    ]
+    seams.clearinghouse = _clearinghouse(account_value="90")  # + equity_mismatch
+    real_insert = repo.insert_exchange_reconciliation_event
+
+    def sometimes_boom(conn, **kwargs):
+        if kwargs.get("case_type") == "equity_mismatch":
+            raise RuntimeError("disk full")
+        return real_insert(conn, **kwargs)
+
+    monkeypatch.setattr(
+        "contrib.hyperliquid_perp.live.reconcile.repo.insert_exchange_reconciliation_event",
+        sometimes_boom,
+    )
+    report = reconciler.run("heartbeat")  # must not raise
+    assert not report.clean
+    (case,) = _cases(db, "non_bot_owned_order")  # the sibling fact landed
+    assert case["case_type"] == "non_bot_owned_order"
+    assert not _cases(db, "equity_mismatch")  # only the failed row was lost
+
+
+def test_a_persistent_equity_mismatch_writes_one_audit_row_across_passes(env):
+    # The fact key is constant: the drifting account value must not defeat the
+    # once-per-fact dedupe and write one row per pass on the heartbeat cadence.
+    db, seams, reconciler = env
+    seams.clearinghouse = _clearinghouse(account_value="90")
+    reconciler.run("heartbeat")
+    seams.clearinghouse = _clearinghouse(account_value="89")  # mark drifted
+    reconciler.run("heartbeat")
+    (row,) = _cases(db, "equity_mismatch")
+    assert row["exchange_value"] == "equity_out_of_tolerance"

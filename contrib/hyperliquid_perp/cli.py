@@ -200,10 +200,12 @@ def _cmd_safe_mode(argv: list[str]) -> int:
     """§13.6: the ONE manual-release interface (no config-flag release exists).
 
     ``--status`` (the default) prints the persisted current state and recent
-    history; ``--release --reason "<人工確認說明>"`` releases a MANUAL safe
-    mode, writing the ``safe_mode_released`` audit event. Releasing does not
-    resume trading: the run must still pass its next full reconciliation
-    (§13.6 rule 3) — the released state only lifts the manual latch.
+    history — exit 0 when not in safe mode, 4 while one is latched, so a
+    supervisor probe can branch without parsing stdout; ``--release --reason
+    "<人工確認說明>"`` releases a MANUAL safe mode, writing the
+    ``safe_mode_released`` audit event. Releasing does not resume trading:
+    the run must still pass its next full reconciliation (§13.6 rule 3) —
+    the released state only lifts the manual latch.
     """
     parser = argparse.ArgumentParser(
         prog="python -m contrib.hyperliquid_perp safe-mode",
@@ -215,7 +217,8 @@ def _cmd_safe_mode(argv: list[str]) -> int:
     action.add_argument(
         "--status",
         action="store_true",
-        help="Print the current safe-mode state and recent history (the default action).",
+        help="Print the current safe-mode state and recent history (the default "
+        "action). Exit 0 when not in safe mode, 4 while one is latched.",
     )
     action.add_argument(
         "--release",
@@ -243,8 +246,21 @@ def _cmd_safe_mode(argv: list[str]) -> int:
     if db is None:
         return 1
     with db:
-        if repo.get_run(db.conn, args.run_id) is None:
+        run_row = repo.get_run(db.conn, args.run_id)
+        if run_row is None:
             print(f"error: run {args.run_id!r} does not exist in {args.db}.", file=sys.stderr)
+            return 1
+        if run_row["mode"] != "live":
+            # Same run-identity discipline as the live/paper resume guards: a
+            # paper run has no safe-mode state, and letting the id through
+            # would answer "safe_mode: none" (or a misleading release refusal)
+            # instead of naming the actual mistake — a wrong --run-id / --db.
+            print(
+                f"error: run {args.run_id!r} in {args.db} is a "
+                f"{run_row['mode']} run — safe mode is live-run state (§13.6). "
+                "Fix --run-id / --db.",
+                file=sys.stderr,
+            )
             return 1
         # gate=None: this is the offline wiring — no live process, so the
         # persisted state IS the whole effect; the next startup hydrates it.
@@ -252,6 +268,17 @@ def _cmd_safe_mode(argv: list[str]) -> int:
         state = manager.current()
 
         if not args.release:
+            if args.reason is not None or args.released_by is not None:
+                # Named rejection, not silence: these flags only mean something
+                # on the release path, and an operator who typed them almost
+                # certainly meant --release — dropping them without a word
+                # would read as "release recorded".
+                print(
+                    "error: --reason/--released-by apply only with --release; "
+                    "the status action records nothing.",
+                    file=sys.stderr,
+                )
+                return 1
             if state is None:
                 print("safe_mode: none")
             else:
@@ -268,7 +295,11 @@ def _cmd_safe_mode(argv: list[str]) -> int:
                         f"{'' if row['safe_mode_type'] is None else ' ' + row['safe_mode_type']}"
                         f"{'' if row['reason'] is None else ': ' + row['reason']}{who}"
                     )
-            return 0
+            # Exit 4 while a safe mode is latched (0 = none): a supervisor
+            # probe can branch without parsing stdout — the same multi-code
+            # convention as validate's 4/5 and live's 0/4/1 (decided
+            # 2026-07-17).
+            return 0 if state is None else 4
 
         if args.reason is None or not args.reason.strip():
             print(
@@ -635,6 +666,7 @@ def _live_startup_recovery(
     import signal
     from decimal import Decimal
 
+    from .exchanges.hyperliquid.mapper import map_account_snapshot
     from .exchanges.hyperliquid.sdk_client import call_sdk
     from .exchanges.hyperliquid.signed_client import HyperliquidSignedClient
     from .live.fill_backfill import FillBackfiller
@@ -689,7 +721,8 @@ def _live_startup_recovery(
         return call_sdk(client.info.user_state, wallet)
 
     with Database(db_path) as db:
-        is_restart = repo.get_run(db.conn, run_id) is not None
+        existing_run = repo.get_run(db.conn, run_id)
+        is_restart = existing_run is not None
         if not is_restart and not args.create:
             print(
                 f"error: run {run_id!r} does not exist in {db_path}. Pass --create "
@@ -704,7 +737,46 @@ def _live_startup_recovery(
                 file=sys.stderr,
             )
             return 1
-        if not is_restart:
+        if existing_run is not None:
+            # Resume validates the run's IDENTITY before any side effect (the
+            # lock, arming the wallet-wide kill switch, reconciliation writes)
+            # — the same discipline as the paper daemon's resume (decided
+            # 2026-07-17). A typo'd --run-id/--db pointing at a paper run
+            # would otherwise arm the kill switch over a paper ledger and
+            # write live snapshots into it; a coin edit under an existing run
+            # would re-enter manual safe mode every pass with nothing naming
+            # the true cause.
+            if existing_run["mode"] != "live":
+                print(
+                    f"error: run {run_id!r} in {db_path} is a {existing_run['mode']} "
+                    "run — resuming it here would arm the kill switch and "
+                    f"reconcile a {existing_run['mode']} ledger against the live "
+                    "exchange. Fix --run-id / --db.",
+                    file=sys.stderr,
+                )
+                return 1
+            drift = _config_drift_report(existing_run["config_json"], config, coin)
+            if drift is not None:
+                kind, message = drift
+                if kind == "coin":
+                    print(f"error: {message}", file=sys.stderr)
+                    return 1
+                logger.warning("config drift on live resume for %s: %s", run_id, message)
+                print(f"WARNING: {message}", file=sys.stderr)
+            if args.adopt_positions:
+                # Named rejection, not silence: the flag seeds a NEW run's
+                # genesis and has no meaning on resume — an operator who
+                # passed it may believe the current exchange position was
+                # adopted into the resumed books (it was not; a mismatch
+                # surfaces as a reconciliation case instead).
+                print(
+                    "error: --adopt-positions seeds a new run's genesis and "
+                    "requires --create — resuming an existing run never "
+                    "re-seeds its books.",
+                    file=sys.stderr,
+                )
+                return 1
+        else:
             # Same convention as the paper path's initial_positions guard: a
             # run manages exactly one coin. An off-coin position CAN'T be
             # adopted meaningfully — the reconciler classifies every non-run
@@ -818,19 +890,40 @@ def _live_startup_recovery(
                 print(f"error: startup recovery failed — {exc}", file=sys.stderr)
                 return 1
             finally:
-                if snapshot.positions:
-                    # Decided 2026-07-16: the §18.2 semantics stand (shutdown
-                    # cancels ALL bot-owned orders, the §19.3-kept SL/TP
-                    # included), but never silently over a live position.
-                    held = ", ".join(f"{p.coin} {p.size}" for p in snapshot.positions)
+                # Decided 2026-07-16: the §18.2 semantics stand (shutdown
+                # cancels ALL bot-owned orders, the §19.3-kept SL/TP
+                # included), but never silently over a live position. The
+                # position that decides the warning is read FRESH here
+                # (decided 2026-07-17): the boot snapshot can be minutes
+                # stale after arming/backfill/two reconcile passes, and a
+                # position acquired mid-recovery would otherwise lose its
+                # protection to the sweep below without a word. Unreadable
+                # ≠ flat (the startup sweep's own rule) — warn then too.
+                try:
+                    fresh_positions = map_account_snapshot(fetch_clearinghouse()).positions
+                except Exception:  # noqa: BLE001 — the warning must not mask the verdict
+                    logger.exception("shutdown position re-read failed")
+                    # Truthful wording: "could not look" is not "holds" — but
+                    # the operator action is the same (unknown ≠ flat).
                     print(
-                        f"WARNING: the account holds a live position ({held}) and "
+                        "WARNING: positions could NOT be re-read at shutdown and "
                         "this one-shot command's §18.2 shutdown sweep cancels "
-                        "bot-owned protection orders — the position is UNPROTECTED "
-                        "after exit until a live loop (PR 5) or manual action "
-                        "re-covers it.",
+                        "bot-owned protection orders — any live position is "
+                        "UNPROTECTED after exit until a live loop (PR 5) or "
+                        "manual action re-covers it.",
                         file=sys.stderr,
                     )
+                else:
+                    if fresh_positions:
+                        held = ", ".join(f"{p.coin} {p.size}" for p in fresh_positions)
+                        print(
+                            f"WARNING: the account holds a live position ({held}) "
+                            "and this one-shot command's §18.2 shutdown sweep "
+                            "cancels bot-owned protection orders — the position "
+                            "is UNPROTECTED after exit until a live loop (PR 5) "
+                            "or manual action re-covers it.",
+                            file=sys.stderr,
+                        )
                 # One-shot command: leave nothing resting behind a dead man's
                 # switch nobody will refresh. The §18.2 shutdown sweep cancels
                 # bot-owned open orders and disarms only on a clean sweep.
@@ -1137,7 +1230,8 @@ def _cmd_paper(argv: list[str]) -> int:
     funding_source = _HistoryFundingSource(market)
 
     with Database(db_path) as db:
-        is_restart = repo.get_run(db.conn, run_id) is not None
+        existing_run = repo.get_run(db.conn, run_id)
+        is_restart = existing_run is not None
         now = clock.now()
         if not is_restart and not args.create:
             print(
@@ -1155,6 +1249,19 @@ def _cmd_paper(argv: list[str]) -> int:
             print(
                 f"error: run {run_id!r} already exists in {db_path}. Drop --create "
                 "to resume it, or pick a new --run-id for a fresh run.",
+                file=sys.stderr,
+            )
+            return 1
+        if existing_run is not None and existing_run["mode"] != "paper":
+            # Same identity discipline as the live resume (decided
+            # 2026-07-17): a live run's genesis carries the same coin, so the
+            # drift check alone would wave a typo'd --run-id/--db through —
+            # and the paper daemon would then trade over a LIVE run's books.
+            # Checked before the run lock touches the row.
+            print(
+                f"error: run {run_id!r} in {db_path} is a "
+                f"{existing_run['mode']} run — the paper daemon would trade "
+                "over its books. Fix --run-id / --db.",
                 file=sys.stderr,
             )
             return 1
@@ -1251,9 +1358,10 @@ def _cmd_paper(argv: list[str]) -> int:
                 # change behaviour mid-run while every metric treats it as one
                 # homogeneous run: a coin mismatch is a hard error, parameter
                 # drift a loud warning.
-                run_row = repo.get_run(db.conn, run_id)
-                assert run_row is not None  # is_restart established the row exists
-                drift = _config_drift_report(run_row["config_json"], config, coin)
+                # ``existing_run`` was fetched once at the top of the block
+                # (is_restart proved it non-None); no writer touches the runs
+                # row between there and here.
+                drift = _config_drift_report(existing_run["config_json"], config, coin)
                 if drift is None:
                     # Stamp clean resumes too, so a reverted config doesn't
                     # leave a stale "drift" as the last word in the store.

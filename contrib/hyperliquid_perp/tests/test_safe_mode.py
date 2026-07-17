@@ -360,3 +360,17 @@ def test_safe_mode_event_validation(env):
             repo.insert_safe_mode_event(conn, run_id="r", event_type="safe_mode_released")
         with pytest.raises(ValueError, match="event_type"):
             repo.insert_safe_mode_event(conn, run_id="r", event_type="safe_mode_paused")
+
+
+def test_a_corrupted_stored_safe_mode_type_fails_loud_on_read(env):
+    # Round-3 hardening (2026-07-17): both release doors branch on is_manual,
+    # so a corrupted stored safe_mode_type (direct SQL fix, bad migration)
+    # must raise at construction — silently reading as "not manual" would let
+    # try_auto_recover release a safe mode a human was supposed to lift while
+    # release_manual refuses the legitimate CLI release.
+    db, _, manager = env
+    manager.enter("manual", REASON_NON_BOT_OWNED_ORDER)
+    with db.transaction() as conn:
+        conn.execute("UPDATE scheduler_state SET safe_mode_type='manuel' WHERE run_id='r'")
+    with pytest.raises(ValueError, match="safe_mode_type"):
+        manager.current()

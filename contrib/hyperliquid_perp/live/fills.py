@@ -62,7 +62,12 @@ from ..paper.accounting import (
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
 from ..persistence.db import Database
-from ..persistence.ids import accounting_adjustment_id, exchange_fill_key, live_fill_id
+from ..persistence.ids import (
+    accounting_adjustment_id,
+    exchange_fill_key,
+    live_fill_id,
+    usable_fill_tid,
+)
 from ..persistence.models import DECIMAL_CONTEXT, AccountLedger, PositionState, Side
 from .payloads import write_raw_payload
 from .ws_stream import USER_FILLS_CHANNEL
@@ -304,7 +309,10 @@ class ExchangeFill:
         # payload and the fill is NOT applied, surfacing for reconciliation
         # instead of being miscounted.
         tid = _require_scalar_id(raw, "tid")
-        if str(tid) == "":
+        # The scalar check above narrowed the wire type; the shared predicate
+        # (ids.usable_fill_tid — the reconciliation cross-check keys on the
+        # SAME definition) can now only fail on blankness.
+        if not usable_fill_tid(tid):
             raise MalformedResponseError(f"fill 'tid' must be non-empty (§14.2): {raw!r}")
 
         # The fill math assumes a strictly positive size and price. The exchange

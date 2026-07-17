@@ -34,8 +34,9 @@ run will actually trade from, not the one it found.
 - ``close`` / ``emergency_close`` / ``cleanup_cancel`` → inspect before
   cancel: kept ONLY while a reduce-only order still closes an existing
   exchange position in the right direction and within its size — else stale;
-- ``stop_loss`` / ``take_profit`` → validated (reduce-only, quantity covers
-  the position), never cancelled here: PR 4 has no repair path, and dropping
+- ``stop_loss`` / ``take_profit`` → validated structurally (reduce-only,
+  closing side, SL trigger — size coverage is the reconciler SL leg's
+  aggregate job), never cancelled here: PR 4 has no repair path, and dropping
   an imperfect SL would trade protection for tidiness. An insufficient SL
   keeps the position "unprotected" and the run in safe mode until PR 5;
 - non-bot-owned → untouched (§25); the reconciler's case row already routes
@@ -77,17 +78,33 @@ if _CANCEL_ROLES | _INSPECT_ROLES | _PROTECTION_ROLES != LIVE_ORDER_ROLES:
         "the §19.3 startup sweep's role buckets no longer partition "
         f"LIVE_ORDER_ROLES: {sorted(LIVE_ORDER_ROLES)}"
     )
+# The same discipline for the role → order_type vocabulary: the reconciler's
+# orphan back-fill derives order_type via ``repo.ROLE_TO_ORDER_TYPE.get(role,
+# "ioc_limit")``, so a new protection role added to the buckets above but not
+# to that mapping would silently label a backfilled trigger order "ioc_limit".
+if set(repo.ROLE_TO_ORDER_TYPE) != _PROTECTION_ROLES:
+    raise AssertionError(
+        "repo.ROLE_TO_ORDER_TYPE keys no longer mirror the §19.3 protection "
+        f"roles: {sorted(repo.ROLE_TO_ORDER_TYPE)} vs {sorted(_PROTECTION_ROLES)}"
+    )
 
 
 @dataclass(frozen=True)
 class StartupResult:
     """What the §19 recovery concluded — the CLI prints it, PR 5's loop gates on it."""
 
-    passed: bool  # step 16: may a new AI cycle start?
     report: ReconciliationReport  # the verdict pass
+    safe_mode_active: bool  # any safe mode still latched after the verdict pass
     canceled_stale: tuple[str, ...] = ()  # oids cancelled by the §19.3 sweep
     kept_orders: tuple[str, ...] = ()  # bot-owned orders deliberately left resting
     sweep_failures: tuple[str, ...] = ()  # per-order cancel failures (sweep continued)
+
+    @property
+    def passed(self) -> bool:
+        """Step 16: may a new AI cycle start? Derived, never stored — a free
+        boolean could drift from the facts it summarizes when a future caller
+        (PR 5's loop) constructs this type directly."""
+        return self.report.clean and not self.sweep_failures and not self.safe_mode_active
 
 
 def run_startup_recovery(
@@ -170,22 +187,22 @@ def run_startup_recovery(
         )
 
     # Step 16: only a clean verdict with no live safe mode admits a new cycle.
-    passed = report.clean and not failures and not safe_mode.active
-    gate.startup_reconciliation_passed = passed
-    if passed:
+    result = StartupResult(
+        report=report,
+        safe_mode_active=safe_mode.active,
+        canceled_stale=tuple(canceled),
+        kept_orders=tuple(kept),
+        sweep_failures=tuple(failures),
+    )
+    gate.startup_reconciliation_passed = result.passed
+    if result.passed:
         logger.info("startup reconciliation passed — new AI cycles are allowed (§19.1 step 16)")
     else:
         logger.error(
             "startup reconciliation DID NOT pass — the run stays in safe mode; "
             "no new AI cycle may start (§19.1 step 15)"
         )
-    return StartupResult(
-        passed=passed,
-        report=report,
-        canceled_stale=tuple(canceled),
-        kept_orders=tuple(kept),
-        sweep_failures=tuple(failures),
-    )
+    return result
 
 
 def _sweep_stale_orders(
@@ -215,6 +232,11 @@ def _sweep_stale_orders(
         if not isinstance(raw_orders, list):
             raise TypeError(f"open_orders returned {type(raw_orders).__name__}, expected a list")
     except Exception as exc:  # noqa: BLE001 — the sweep must not kill startup
+        # Logged at the point of capture (traceback included): the failures
+        # channel carries only the message into safe-mode detail / CLI stderr,
+        # and a log-watcher needs the origin — same discipline as the §18.2
+        # shutdown sweep's enumeration failure.
+        logger.exception("startup sweep: open-orders enumeration failed")
         failures.append(f"stale-order sweep could not enumerate open orders: {exc}")
         return canceled, kept, failures
 
@@ -259,7 +281,7 @@ def _sweep_stale_orders(
                 # protection, and an imperfect SL beats none. The reconciler's
                 # SL leg is the authority on whether protection is sufficient.
                 kept.append(oid)
-                if not _protection_order_valid(order, positions):
+                if not _protection_order_valid(order, positions, role):
                     # Two causes, two truthful messages: with the positions
                     # read failed the order was never actually examined, and a
                     # log asserting "does not validate" would tell a
@@ -270,7 +292,7 @@ def _sweep_stale_orders(
                         "could not be validated — the positions read failed"
                         if positions is None
                         else "does not validate against the live position "
-                        "(quantity/reduce-only/side/trigger) — repair is PR 5"
+                        "(reduce-only/side/trigger) — repair is PR 5"
                     )
                     logger.warning("startup sweep: %s order %s %s; kept", role, oid, cause)
             else:  # pragma: no cover — the module-level partition check guards this
@@ -319,6 +341,9 @@ def _exchange_positions(
         snapshot = map_account_snapshot(fetch_clearinghouse())
         return {p.coin: p.size for p in snapshot.positions}
     except Exception as exc:  # noqa: BLE001
+        # Log-at-origin, same as the enumeration failure above: the string in
+        # ``failures`` loses the traceback a post-mortem needs.
+        logger.exception("startup sweep: positions read failed")
         failures.append(f"stale-order sweep could not read positions: {exc}")
         return None
 
@@ -351,8 +376,18 @@ def _close_order_still_applies(order: dict, positions: dict[str, Decimal] | None
         return False
 
 
-def _protection_order_valid(order: dict, positions: dict[str, Decimal] | None) -> bool:
-    """§19.3 "validate quantity and trigger" for a resting SL/TP.
+def _protection_order_valid(order: dict, positions: dict[str, Decimal] | None, role: str) -> bool:
+    """§19.3 structural validation for a resting SL/TP — per-order shape only.
+
+    Checks what a SINGLE order can prove about itself: reduce-only, the
+    closing side of the live position, and — for a ``stop_loss`` — a real
+    trigger. SIZE coverage is deliberately not judged here: protection may be
+    legitimately split across legs (two SLs jointly covering the position)
+    and a take_profit may cover a fraction by design (a scale-out), so a
+    per-order size test misreads both. The one size authority is the
+    reconciler's SL leg (``LiveReconciler._has_valid_sl``), which SUMS
+    closing-side reduce-only stop_loss coverage and holds the run in safe
+    mode when it falls short.
 
     Validation only (the sweep never cancels protection); a failed positions
     read (``None``) reports invalid — the same "cannot prove" reading the
@@ -372,10 +407,10 @@ def _protection_order_valid(order: dict, positions: dict[str, Decimal] | None) -
         return False
     # §19.3's "and trigger": a stop_loss-role order that is actually a plain
     # resting limit (no trigger) protects nothing at the trigger level.
-    # frontendOpenOrders carries isTrigger/triggerPx on trigger orders.
-    if not bool(order.get("isTrigger", False)) and order.get("triggerPx") is None:
-        return False
-    try:
-        return Decimal(str(order.get("sz"))) >= abs(size)
-    except Exception:  # noqa: BLE001
-        return False
+    # frontendOpenOrders carries isTrigger/triggerPx on trigger orders. A
+    # take_profit resting as a plain reduce-only limit is a legitimate shape.
+    return (
+        role != "stop_loss"
+        or bool(order.get("isTrigger", False))
+        or order.get("triggerPx") is not None
+    )

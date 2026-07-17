@@ -90,6 +90,17 @@ class SafeModeState:
     reason: str
     entered_at: str  # ISO-8601 UTC, as stored
 
+    def __post_init__(self) -> None:
+        # Loud at construction (mirrors ReconciliationCase): both release
+        # doors branch on ``is_manual``, so a corrupted stored safe_mode_type
+        # (a direct SQL fix, a bad migration) would otherwise silently read as
+        # "not manual" — try_auto_recover would auto-release a safe mode a
+        # human was supposed to lift (§13.5) while release_manual refuses the
+        # legitimate CLI release. The writers validate via check_enum; the
+        # read side must be just as strict or the write-side guard proves
+        # nothing about what the doors actually see.
+        check_enum(self.safe_mode_type, repo.SAFE_MODE_TYPES, name="safe_mode_type")
+
     @property
     def is_manual(self) -> bool:
         return self.safe_mode_type == "manual"

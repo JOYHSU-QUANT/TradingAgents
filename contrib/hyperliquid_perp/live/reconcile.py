@@ -39,7 +39,7 @@ from ..exchanges.hyperliquid.mapper import map_account_snapshot
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
 from ..persistence.db import Database
-from ..persistence.ids import exchange_fill_key
+from ..persistence.ids import exchange_fill_key, usable_fill_tid
 from .fill_backfill import (
     DEFAULT_MAX_PAGES,
     RESPONSE_FILL_CAP,
@@ -100,6 +100,26 @@ _FAILED_BACKFILL = BackfillSummary(
 
 _HL_SIDE = {"B": "buy", "A": "sell"}
 
+# §13.5 manual case → safe-mode entry reason. ONE definition, tied to the
+# construction sites by ``ReconciliationCase.__post_init__`` (a manual case
+# whose case_type is missing here fails loud at construction): without that
+# guard, a future manual case type added without its reason would silently
+# enter safe mode under the generic mismatch reason, hiding the specific fact
+# from the §13.6 triage surface.
+_MANUAL_CASE_REASONS = {
+    "non_bot_owned_order": REASON_NON_BOT_OWNED_ORDER,
+    "invalid_local_fill": REASON_INVALID_LOCAL_FILL,
+    "exchange_position_mismatch": REASON_UNKNOWN_POSITION,
+}
+
+# The equity-mismatch case row's once-per-fact key. Deliberately a CONSTANT:
+# the observed account value drifts with mark prices between passes, so keying
+# on it (the way position rows key on their stable size) would defeat the
+# (case_type, exchange_value) dedupe and write one audit row per pass for the
+# same unhealed fact (decided 2026-07-17). The live magnitudes stay visible in
+# the first row's detail and in every pass's warning log.
+_EQUITY_MISMATCH_FACT_KEY = "equity_out_of_tolerance"
+
 
 @dataclass(frozen=True)
 class ReconciliationCase:
@@ -144,6 +164,16 @@ class ReconciliationCase:
                 f"a ReconciliationCase with action_taken={self.action_taken!r} "
                 f"must be resolved ({self.case_type}): recorded dispositions and "
                 "the pass verdict must agree"
+            )
+        # Every manual case must carry a specific safe-mode reason:
+        # ``reconcile_and_apply`` routes manual cases through
+        # ``_MANUAL_CASE_REASONS``, and a manual case_type missing there would
+        # silently enter safe mode under the generic mismatch reason.
+        if self.manual and self.case_type not in _MANUAL_CASE_REASONS:
+            raise ValueError(
+                f"manual ReconciliationCase {self.case_type!r} has no entry in "
+                "_MANUAL_CASE_REASONS — add its §13.5 safe-mode reason before "
+                "constructing it as manual"
             )
 
 
@@ -243,6 +273,11 @@ class LiveReconciler:
             else:
                 errors.append(f"open_orders returned {type(raw_orders).__name__}, expected a list")
         except Exception as exc:  # noqa: BLE001 — a failed read is a verdict, not a crash
+            # Logged at the point of capture (traceback included), like the
+            # guarded() legs below: the errors channel carries only the message
+            # string into the verdict/safe-mode detail, and a log-watcher must
+            # not need the CLI's aggregated stderr to diagnose the origin.
+            logger.exception("reconciliation open_orders read failed")
             errors.append(f"open_orders failed: {exc}")
 
         snapshot: AccountSnapshot | None = None
@@ -251,6 +286,7 @@ class LiveReconciler:
             raw_clearinghouse = self._fetch_clearinghouse()
             snapshot = map_account_snapshot(raw_clearinghouse)
         except Exception as exc:  # noqa: BLE001
+            logger.exception("reconciliation clearinghouse state read failed")
             errors.append(f"clearinghouse state read failed: {exc}")
 
         # -- legs -----------------------------------------------------------
@@ -330,8 +366,8 @@ class LiveReconciler:
         trigger: str,
         *,
         safe_mode: SafeModeManager,
-        ws_restored: bool = True,
-        kill_switch_active: bool = True,
+        ws_restored: bool,
+        kill_switch_active: bool,
     ) -> ReconciliationReport:
         """Run a pass and drive the safe-mode machine from its verdict.
 
@@ -340,15 +376,15 @@ class LiveReconciler:
         counts toward §13.4 auto-recovery, with the caller attesting the two
         conditions the reconciler cannot see (WS restored, kill switch
         healthy — pass ``kill_switch.release_safe_mode()``'s verdict there
-        when the kill-switch latch is up).
+        when the kill-switch latch is up). The attestations are deliberately
+        REQUIRED (no defaults): they are §13.4 release conditions the caller
+        proves THIS tick, and a defaulted ``True`` would let a future call
+        site auto-release a recoverable safe mode without evidence.
         """
         report = self.run(trigger)
         for case in report.manual_cases:
-            reason = {
-                "non_bot_owned_order": REASON_NON_BOT_OWNED_ORDER,
-                "invalid_local_fill": REASON_INVALID_LOCAL_FILL,
-                "exchange_position_mismatch": REASON_UNKNOWN_POSITION,
-            }.get(case.case_type, REASON_RECONCILIATION_MISMATCH)
+            # Membership is guaranteed by ReconciliationCase.__post_init__.
+            reason = _MANUAL_CASE_REASONS[case.case_type]
             safe_mode.enter("manual", reason, detail=case.detail or case.case_type)
         safe_mode.note_reconciliation_outcome(report.clean)
         if report.clean:
@@ -429,6 +465,7 @@ class LiveReconciler:
         try:
             summary = self._backfiller.backfill(self._clock.now(), since=since)
         except Exception as exc:  # noqa: BLE001 — transport failure = gap still open
+            logger.exception("reconciliation fill backfill failed")
             errors.append(f"fill backfill failed: {exc}")
             return _FAILED_BACKFILL
         if summary.complete and self._stream is not None and epoch is not None:
@@ -552,16 +589,31 @@ class LiveReconciler:
                 if not isinstance(raw, list):
                     raise ValueError(f"user_fills_by_time returned {type(raw).__name__}")
             except Exception as exc:  # noqa: BLE001 — a failed read is a verdict
+                logger.exception("fill cross-check fetch failed")
                 errors.append(f"fill cross-check fetch failed: {exc}")
                 return None
             newest_ms: int | None = None
             for f in raw:
-                if isinstance(f, dict):
-                    if f.get("tid") not in (None, ""):
-                        keys.add(exchange_fill_key(tid=f["tid"]))
-                    t = f.get("time")
-                    if isinstance(t, int) and (newest_ms is None or t > newest_ms):
-                        newest_ms = t
+                tid = f.get("tid") if isinstance(f, dict) else None
+                if not usable_fill_tid(tid):
+                    # An entry this pass cannot key (non-dict entry, or a tid
+                    # shape ingest treats as malformed — one shared predicate,
+                    # so the two legs cannot drift) is an entry the membership
+                    # verdict below cannot see. Treating the window as covered
+                    # anyway would flag a genuinely booked local fill as
+                    # invalid_local_fill and force MANUAL safe mode on a false
+                    # premise — the one lane where unprovable coverage would
+                    # have produced a verdict instead of this leg's own
+                    # withhold rule.
+                    errors.append(
+                        "fill cross-check window contains an entry with no usable "
+                        "tid — invalid-fill verdicts withheld"
+                    )
+                    return None
+                keys.add(exchange_fill_key(tid=tid))
+                t = f.get("time")
+                if isinstance(t, int) and (newest_ms is None or t > newest_ms):
+                    newest_ms = t
             if len(raw) < RESPONSE_FILL_CAP:
                 return keys  # the exchange gave everything: the window is covered
             if newest_ms is None or newest_ms <= start_ms:
@@ -1059,12 +1111,23 @@ class LiveReconciler:
         diff = abs(snapshot.account_value - local_equity)
         tolerance = max(EQUITY_TOLERANCE_ABS_USDC, snapshot.account_value * EQUITY_TOLERANCE_REL)
         if diff > tolerance:
+            # Logged with the LIVE magnitudes every pass: the case row below
+            # dedupes on a stable fact key, so later passes of the same
+            # unhealed mismatch land here (and in the verdict), not in new
+            # audit rows.
+            logger.warning(
+                "equity mismatch: |exchange %s − local %s| = %s exceeds tolerance %s",
+                snapshot.account_value,
+                local_equity,
+                diff,
+                tolerance,
+            )
             cases.append(
                 ReconciliationCase(
                     case_type="equity_mismatch",
                     symbol=None,
                     local_value=str(local_equity),
-                    exchange_value=str(snapshot.account_value),
+                    exchange_value=_EQUITY_MISMATCH_FACT_KEY,
                     detail=(
                         f"|exchange {snapshot.account_value} − local {local_equity}| = "
                         f"{diff} exceeds tolerance {tolerance} "
@@ -1125,55 +1188,73 @@ class LiveReconciler:
                 payload=raw_clearinghouse,
                 now=now,
             )
-        with self._db.transaction() as conn:
-            for case in report.cases:
-                wrote = repo.insert_exchange_reconciliation_event(
-                    conn,
-                    run_id=self._run_id,
-                    trigger=report.trigger,
-                    case_type=case.case_type,
-                    symbol=case.symbol,
-                    local_value=case.local_value,
-                    exchange_value=case.exchange_value,
-                    action_taken=case.action_taken,
-                    detail=case.detail,
-                    timestamp=now,
-                )
-                if not wrote and case.action_taken is not None and case.exchange_value:
-                    # The once-per-fact dedupe swallowed this insert, but THIS
-                    # pass resolved the fact (a retry settling an order the
-                    # first pass could only record) — stamp the disposition on
-                    # the existing row, or the backlog permanently shows as
-                    # unresolved a case that was in fact settled.
-                    existing = repo.get_exchange_reconciliation_case(
+        # Each case is an INDEPENDENT fact and gets its own transaction (the
+        # same isolation the snapshot rows below already have): one case's
+        # write failing on a busy store must not roll back — or stop — the
+        # sibling facts observed in the same pass. The row a human most needs
+        # (the manual case that fired safe mode) would otherwise vanish with
+        # an unrelated row's failure, leaving the pass's audit trail empty.
+        for case in report.cases:
+            try:
+                with self._db.transaction() as conn:
+                    wrote = repo.insert_exchange_reconciliation_event(
                         conn,
-                        self._run_id,
+                        run_id=self._run_id,
+                        trigger=report.trigger,
                         case_type=case.case_type,
+                        symbol=case.symbol,
+                        local_value=case.local_value,
                         exchange_value=case.exchange_value,
+                        action_taken=case.action_taken,
+                        detail=case.detail,
+                        timestamp=now,
                     )
-                    if existing is not None and existing["action_taken"] is None:
-                        repo.set_reconciliation_action(
-                            conn, existing["event_id"], case.action_taken
+                    if not wrote and case.action_taken is not None and case.exchange_value:
+                        # The once-per-fact dedupe swallowed this insert, but
+                        # THIS pass resolved the fact (a retry settling an
+                        # order the first pass could only record) — stamp the
+                        # disposition on the existing row, or the backlog
+                        # permanently shows as unresolved a case that was in
+                        # fact settled.
+                        existing = repo.get_exchange_reconciliation_case(
+                            conn,
+                            self._run_id,
+                            case_type=case.case_type,
+                            exchange_value=case.exchange_value,
                         )
-            if backfill_summary is not None and backfill_summary.applied > 0:
-                # §12.3 row 5, resolved in-pass: fills the exchange had that
-                # SQLite lacked were booked through the PR 3 path. Not deduped
-                # (no exchange_value): each pass that booked something is its
-                # own event.
-                repo.insert_exchange_reconciliation_event(
-                    conn,
-                    run_id=self._run_id,
-                    trigger=report.trigger,
-                    case_type="exchange_fill_missing_local",
-                    symbol=self._coin,
-                    action_taken="backfilled",
-                    detail=(
-                        f"booked {backfill_summary.applied} missing fill(s) via REST "
-                        f"backfill ({backfill_summary.fetched} fetched, "
-                        f"{backfill_summary.duplicate} duplicate)"
-                    ),
-                    timestamp=now,
+                        if existing is not None and existing["action_taken"] is None:
+                            repo.set_reconciliation_action(
+                                conn, existing["event_id"], case.action_taken
+                            )
+            except Exception:  # noqa: BLE001 — sibling case rows must still land
+                logger.exception(
+                    "reconciliation case row could not be recorded (%s, %s)",
+                    case.case_type,
+                    case.exchange_value,
                 )
+        if backfill_summary is not None and backfill_summary.applied > 0:
+            # §12.3 row 5, resolved in-pass: fills the exchange had that
+            # SQLite lacked were booked through the PR 3 path. Not deduped
+            # (no exchange_value): each pass that booked something is its
+            # own event.
+            try:
+                with self._db.transaction() as conn:
+                    repo.insert_exchange_reconciliation_event(
+                        conn,
+                        run_id=self._run_id,
+                        trigger=report.trigger,
+                        case_type="exchange_fill_missing_local",
+                        symbol=self._coin,
+                        action_taken="backfilled",
+                        detail=(
+                            f"booked {backfill_summary.applied} missing fill(s) via REST "
+                            f"backfill ({backfill_summary.fetched} fetched, "
+                            f"{backfill_summary.duplicate} duplicate)"
+                        ),
+                        timestamp=now,
+                    )
+            except Exception:  # noqa: BLE001 — same isolation as the case rows
+                logger.exception("reconciliation backfill event row could not be recorded")
         if snapshot is not None:
             # A SEPARATE transaction, fail-soft: the case rows above are the
             # record a human needs to understand why safe mode fired, and a

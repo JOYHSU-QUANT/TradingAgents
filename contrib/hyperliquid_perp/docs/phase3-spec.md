@@ -860,6 +860,11 @@ resolution 不改寫 case rows（它們是 log），且**「已解決」的定�
   key），**永遠 join 不到** `fills.exchange_fill_key`。它代表「有一筆看不懂的 payload」
   而非「有一筆確定的 fill 沒入帳」；解決路徑是人工檢視證據檔（修 parser、或確認
   payload 本來就是垃圾），由 PR 4 的 sweep 以 `action_taken` 標記處置。
+  **未 stamp `action_taken` 者擋住 verdict（2026-07-17 定案）**：交易所報過、SQLite
+  沒入帳的錢就是「交易所有 fill、本地沒記錄」，只是無法 key。小額 malformed 若沒把
+  倉位尺寸推歪、又藏在 equity 容差內，audit-only 會讓 run 判 clean 照常交易——故
+  改為擋 clean、在 report 的 `errors` 具名，直到人工 stamp 才放行；裸 tid 的 sighting
+  若事後被 §8.3 recovery 補入帳，sweep 仍自動標 `resolved_fill_booked` 除帳。
 - **`fill_money_drift` / `fill_fee_drift`**：`exchange_value` 是 `去重鍵|drift digest`，
   且描述的 fill **已經入帳**——它們根本不屬於「帳上沒有的錢」backlog，出現在
   anti-join 結果裡是誤列。它們是「同 tid 但內容矛盾」（money drift）或「別的 run 的
@@ -932,6 +937,18 @@ no unresolved mismatch
 交叉檢查 seam 缺席的 pass（report 記入 `legs_skipped`）證明不了「REST backfill
 completed／fills reconciled」，即使其餘 legs 全 clean 也不得自動解除；半接線
 （例如未綁 fill seams 的心跳 wiring）的 clean pass 只能維持、不能解除 latch。
+
+同一立場適用於 "WebSocket restored, if required"：**沒有 WS 可恢復 ≠ WS 已恢復**。
+PR 4 的 one-shot `live --run-id` wiring 完全沒有 WS stream，故一律 attest
+`ws_restored=False`——否則前一個 process 因 `ws_disconnect` 進入並持久化的
+recoverable latch，會被一個從未連過 WS 的 process 以「帳本乾淨」為由解除。該
+latch 留給 PR 5 daemon（真正握著恢復後的 stream 時）解除。
+
+§19.3 stale-order sweep 的撤單失敗是 **verdict 輸入**（2026-07-17）：撤不掉的單
+仍在交易所掛著，該 pass 不得讀成 clean。失敗折進 report 的 `errors` 後才過
+release 門，故不會出現「clean pass 先自動解除 latch、事後才因 sweep 失敗重進」
+的 release→enter flap 與 `entered_at` 重錨；reconciliation legs 本身全 clean 時，
+進入原因具名為 `stale_order_sweep_failed` 而非泛用 mismatch。
 
 ### 13.5 Manual Safe Mode
 

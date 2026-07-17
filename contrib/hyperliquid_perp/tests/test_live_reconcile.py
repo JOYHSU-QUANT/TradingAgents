@@ -514,11 +514,17 @@ def test_an_unbooked_unmapped_sighting_blocks_the_fills_leg(env):
         )
     report = reconciler.run("heartbeat")
     assert not report.fills_reconciled
+    # The flip to unclean must NAME itself in report.errors: that channel is what
+    # the persisted reconciliation_diff and the safe-mode detail are built from,
+    # so a bare log line would fire safe mode with no cause on any
+    # operator-facing surface.
+    assert any("unmapped fill sighting" in e for e in report.errors)
     # Booking the fill resolves it with no row edits: the anti-join stops hitting.
     _insert_booked_fill(db, tid="777", fill_time=_NOW - timedelta(hours=1))
     seams.fills = [{"tid": "777"}]
     report = reconciler.run("heartbeat")
     assert report.fills_reconciled
+    assert not report.errors
 
 
 def test_a_malformed_sighting_whose_tid_was_booked_is_swept_resolved(env):
@@ -539,7 +545,11 @@ def test_a_malformed_sighting_whose_tid_was_booked_is_swept_resolved(env):
     assert row["action_taken"] == "resolved_fill_booked"
 
 
-def test_a_digest_keyed_malformed_sighting_stays_open_but_does_not_block(env):
+def test_a_digest_keyed_malformed_sighting_blocks_until_a_human_stamps_it(env):
+    # Decided 2026-07-17: an un-actioned malformed sighting (the exchange
+    # reported a fill SQLite never booked) BLOCKS the verdict — unbooked money a
+    # human must stamp, not an audit backlog the pass may read past. The reason
+    # reaches report.errors (→ safe-mode detail, persisted reconciliation_diff).
     db, seams, reconciler = env
     with db.transaction() as conn:
         repo.insert_exchange_reconciliation_event(
@@ -550,9 +560,15 @@ def test_a_digest_keyed_malformed_sighting_stays_open_but_does_not_block(env):
             exchange_value="unparsed-deadbeef00000000",
         )
     report = reconciler.run("heartbeat")
-    assert report.fills_reconciled
+    assert not report.fills_reconciled
+    assert any("malformed fill sighting" in e for e in report.errors)
     (row,) = _cases(db, "fill_malformed")
     assert row["action_taken"] is None
+    # A human stamping action_taken clears the block on the next pass.
+    with db.transaction() as conn:
+        repo.set_reconciliation_action(conn, row["event_id"], "resolved_manual")
+    report = reconciler.run("heartbeat")
+    assert report.fills_reconciled
 
 
 # -- degraded reads ---------------------------------------------------------------
@@ -837,7 +853,9 @@ def test_both_nonzero_but_different_sizes_are_a_mismatch(env):
     assert not report.position_reconciled
     (case,) = [c for c in report.cases if c.case_type == "exchange_position_mismatch"]
     assert case.local_value == "0.001"
-    assert case.exchange_value == "0.003"
+    # The once-per-fact dedupe key encodes the coin and the (local → exchange)
+    # transition so distinct facts never collide on a bare size.
+    assert case.exchange_value == "BTC:0.001->0.003"
     assert "sizes differ" in (case.detail or "")
 
 
@@ -1268,3 +1286,189 @@ def test_fill_crosscheck_accumulates_keys_across_pages(env):
     assert calls[1] == base_ms + RESPONSE_FILL_CAP - 1  # advanced to page 1's newest
     assert report.fills_reconciled  # the page-1 key still counted
     assert not [c for c in report.cases if c.case_type == "invalid_local_fill"]
+
+
+# -- §6.1/§6.6 snapshot identities (the mode-agnostic validator's contract) ----
+
+
+def _account_identities_hold(db) -> bool:
+    """Re-run `validate`'s OWN identity check over every live snapshot row.
+
+    ``validate`` is mode-agnostic: it recomputes these identities for every
+    account_snapshots row regardless of mode, under DECIMAL_CONTEXT (see
+    _snapshot_mismatches). Calling the real checker — rather than restating its
+    arithmetic here — is what makes this a contract test: a live writer that
+    drifts from the paper writer's canonical formulas fails it.
+    """
+    from decimal import localcontext
+
+    from contrib.hyperliquid_perp.paper.validation import _account_row_identities_ok
+    from contrib.hyperliquid_perp.persistence.models import DECIMAL_CONTEXT
+
+    rows = db.conn.execute("SELECT * FROM account_snapshots WHERE run_id = 'r'").fetchall()
+    assert rows, "expected at least one snapshot row to check"
+    with localcontext(DECIMAL_CONTEXT):
+        return all(_account_row_identities_ok(row) for row in rows)
+
+
+def test_a_flat_snapshot_satisfies_the_validator_identities_with_a_null_ratio(env):
+    # A flat live account (maintenance margin 0) must store margin_ratio NULL:
+    # the ratio is undefined with no position, and a 0 would both break the
+    # identity and read downstream as a real (maximally safe) ratio.
+    db, seams, reconciler = env
+    report = reconciler.run("heartbeat")
+    assert report.clean
+    row = db.conn.execute("SELECT * FROM account_snapshots WHERE run_id='r'").fetchone()
+    assert row["margin_ratio"] is None
+    assert _account_identities_hold(db)
+
+
+def test_a_live_snapshot_satisfies_the_validator_identities_with_a_position(env):
+    # The open-position shape, where the pre-fix writer broke THREE identities:
+    # margin_ratio was stored inverted (maint/equity), available_balance was a
+    # duplicate of the raw exchange withdrawable rather than equity − used_im,
+    # and total_pnl dropped its −fees +funding terms.
+    db, seams, reconciler = env
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("0.001"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+    seams.clearinghouse = _clearinghouse(
+        account_value="101",
+        withdrawable="49",
+        margin_used="51",
+        maintenance="2",
+        positions=[_btc_position(szi="0.001", value="51")],
+    )
+    reconciler.run("heartbeat")
+    row = db.conn.execute("SELECT * FROM account_snapshots WHERE run_id='r'").fetchone()
+    equity = Decimal(row["account_equity"])
+    maint = Decimal(row["total_maintenance_margin"])
+    # equity/maint (50.5), NOT its reciprocal — the §6.6 risk metric.
+    assert Decimal(row["margin_ratio"]) == equity / maint
+    # The local view is derived; the exchange's withdrawable keeps its own column.
+    assert Decimal(row["available_balance"]) == equity - Decimal(row["used_initial_margin"])
+    assert row["exchange_withdrawable"] == "49"
+    assert Decimal(row["available_balance"]) != Decimal(row["exchange_withdrawable"])
+    assert _account_identities_hold(db)
+
+
+# -- once-per-fact dedupe keys ------------------------------------------------
+
+
+def test_an_off_coin_and_a_same_coin_position_fact_never_collide(env):
+    # The dedupe key is (run_id, case_type, exchange_value) — there is NO symbol
+    # column in it. Both facts below are exchange_position_mismatch and shared a
+    # bare size of "2.5" before the fix, so the second insert was swallowed and
+    # its audit row lost — possibly the MANUAL off-coin one that fires safe mode.
+    db, seams, reconciler = env
+    seams.clearinghouse = _clearinghouse(
+        account_value="101",
+        maintenance="1",
+        positions=[
+            _btc_position(szi="2.5", value="153"),
+            {
+                "coin": "ETH",
+                "szi": "2.5",
+                "entryPx": "3000",
+                "unrealizedPnl": "0",
+                "positionValue": "7500",
+                "marginUsed": "7500",
+            },
+        ],
+    )
+    reconciler.run("heartbeat")
+    rows = _cases(db, "exchange_position_mismatch")
+    assert len(rows) == 2  # both facts survived
+    assert {r["exchange_value"] for r in rows} == {"ETH:2.5", "BTC:0->2.5"}
+
+
+def test_two_phantoms_of_different_sizes_each_get_their_own_row(env):
+    # A phantom's exchange side is ALWAYS 0, so keying the fact on the exchange
+    # size alone collapsed every phantom this run ever saw onto one row. The
+    # local size is the distinguishing datum.
+    db, seams, reconciler = env
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("0.001"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+    reconciler.run("heartbeat")  # exchange flat, local 0.001 → phantom
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("0.004"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+    reconciler.run("heartbeat")  # an independent, larger phantom later
+    rows = _cases(db, "local_position_phantom")
+    assert {r["exchange_value"] for r in rows} == {"BTC:0.001->0", "BTC:0.004->0"}
+    # The SAME unhealed phantom re-observed still dedupes to its one row.
+    reconciler.run("heartbeat")
+    assert len(_cases(db, "local_position_phantom")) == 2
+
+
+# -- the verdict's reason reaches the operator --------------------------------
+
+
+def test_an_unmapped_backlog_enters_safe_mode_with_a_named_detail(env):
+    # The end-to-end shape of the silent-failure fix: the backlog blocks the
+    # pass, and the reason survives all the way into the safe-mode entry detail
+    # (and the persisted diff) instead of entering with detail="".
+    db, seams, reconciler = env
+    gate = _gate()
+    safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
+    with db.transaction() as conn:
+        repo.insert_exchange_reconciliation_event(
+            conn,
+            run_id="r",
+            trigger="live_fill_ingest",
+            case_type="fill_unmapped",
+            exchange_value=exchange_fill_key(tid="777"),
+        )
+    report = reconciler.reconcile_and_apply(
+        "heartbeat", safe_mode=safe_mode, ws_restored=True, kill_switch_active=True
+    )
+    assert not report.clean
+    state = safe_mode.current()
+    assert state is not None and state.safe_mode_type == "recoverable"
+    (event,) = [e for e in repo.iter_safe_mode_events(db.conn, "r") if e["detail"]]
+    assert "unmapped fill sighting" in event["detail"]
+    # The persisted audit diff names it too.
+    row = db.conn.execute("SELECT * FROM account_snapshots WHERE run_id='r'").fetchone()
+    assert "unmapped fill sighting" in row["reconciliation_diff"]
+
+
+def test_sweep_failures_make_the_pass_unclean_without_a_release_flap(env):
+    # Decided 2026-07-17: a §19.3 cancel that would not land is a verdict INPUT.
+    # Folding it in BEFORE the release door means a reconciliation-clean pass
+    # can neither auto-release the latch nor re-anchor the episode — and the
+    # entry names the sweep, not the generic mismatch.
+    db, seams, reconciler = env
+    gate = _gate()
+    safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
+    reconciler._backfiller = _StubBackfiller()
+    safe_mode.enter("recoverable", "ws_disconnect")  # a latch a clean pass would lift
+
+    report = reconciler.reconcile_and_apply(
+        "heartbeat",
+        safe_mode=safe_mode,
+        ws_restored=True,
+        kill_switch_active=True,
+        sweep_failures=("123 (entry): ExchangeError: nope",),
+    )
+    assert not report.clean  # reconciliation was clean; the sweep failure isn't
+    assert "123 (entry)" in "; ".join(report.errors)
+    state = safe_mode.current()
+    assert state is not None  # the latch was NOT released
+    assert gate.state_reconciled is False
+    types = [e["event_type"] for e in repo.iter_safe_mode_events(db.conn, "r")]
+    assert "safe_mode_released" not in types  # no release→re-enter flap
+    reasons = [e["reason"] for e in repo.iter_safe_mode_events(db.conn, "r")]
+    assert "stale_order_sweep_failed" in reasons  # named specifically

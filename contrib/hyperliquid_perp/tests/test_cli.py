@@ -889,6 +889,53 @@ def test_config_drift_covers_engine_market_data_and_indicators():
     assert "engine" in msg and "market_data" in msg and "indicators" in msg
 
 
+def _live_subset_json(config: dict, coin: str) -> str:
+    """Exactly what LIVE run creation persists: the shared subset plus `live:`."""
+    subset = _run_config_subset(config, coin)
+    subset["live"] = config.get("live")
+    return json.dumps(subset, ensure_ascii=False, default=str)
+
+
+def test_config_drift_live_network_change_is_hard_error():
+    # live.network is run IDENTITY, like coin (decided 2026-07-17): resuming a
+    # testnet-created run against a mainnet config would arm the wallet-wide
+    # kill switch on the mainnet wallet and reconcile a testnet ledger against
+    # the mainnet exchange — every leg mismatching, with nothing naming why.
+    genesis = {"live": {"network": "testnet", "allow_real_orders": True}}
+    stored = _live_subset_json(genesis, "BTC")
+    current = {"live": {"network": "mainnet", "allow_real_orders": True}}
+    kind, msg = _config_drift_report(stored, current, "BTC")
+    assert kind == "network"
+    assert "'testnet'" in msg and "'mainnet'" in msg
+
+
+def test_config_drift_live_network_case_change_is_not_drift():
+    # LiveConfig reads network case-insensitively, so `TestNet` must not
+    # false-flag a hard error against a stored `testnet`.
+    stored = _live_subset_json({"live": {"network": "testnet"}}, "BTC")
+    assert _config_drift_report(stored, {"live": {"network": "TestNet"}}, "BTC") is None
+
+
+def test_config_drift_non_network_live_change_warns():
+    # Safety caps / kill-switch timings redefine behaviour from here on: the
+    # operator may intend it, so warn rather than refuse.
+    genesis = {"live": {"network": "testnet", "safety": {"max_notional_usdc": 100}}}
+    stored = _live_subset_json(genesis, "BTC")
+    current = {"live": {"network": "testnet", "safety": {"max_notional_usdc": 500}}}
+    kind, msg = _config_drift_report(stored, current, "BTC")
+    assert kind == "params"
+    assert "live" in msg
+
+
+def test_config_drift_paper_genesis_never_reaches_the_live_checks():
+    # A paper run's genesis never stores `live:`, but the same YAML may well
+    # carry one — absence in the record means "not part of this run's identity",
+    # so neither the network hard-fail nor the live warning may fire.
+    stored = _subset_json({"risk": {"leverage": 5}}, "BTC")
+    current = {"risk": {"leverage": 5}, "live": {"network": "mainnet"}}
+    assert _config_drift_report(stored, current, "BTC") is None
+
+
 def test_config_drift_pre_upgrade_record_skips_later_keys():
     # A genesis record written before engine/market_data/indicators joined the
     # subset lacks those keys entirely; absence means "unknown", not "was
@@ -2255,6 +2302,18 @@ def test_live_missing_live_block_exits_1(tmp_path, capsys, live_seams):
     rc = cli_main(["live", "--config", str(_live_yaml(tmp_path, live_lines=None))])
     assert rc == 1
     assert "no live: block" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", ["--create", "--adopt-positions"])
+def test_live_create_flags_without_run_id_are_rejected_by_name(tmp_path, capsys, live_seams, flag):
+    # Without --run-id the command is config-check mode: it creates and seeds
+    # nothing, so these flags had no effect and were silently ignored — an
+    # operator would read the "gates OK" exit 0 as "run created". Named
+    # rejection, the same discipline the resume/safe-mode flag guards use.
+    cfg = _live_yaml(tmp_path)
+    rc = cli_main(["live", "--config", str(cfg), flag])
+    assert rc == 1
+    assert "require --run-id" in capsys.readouterr().err
 
 
 def test_live_paper_mode_exits_1(tmp_path, capsys, live_seams):

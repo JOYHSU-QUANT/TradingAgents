@@ -98,7 +98,12 @@ class _FakeSigned:
             raise result
         if result.success:
             self.open_orders_result = [
-                o for o in self.open_orders_result if o.get("cloid") != cloid_hex
+                o
+                for o in self.open_orders_result
+                # A non-dict entry (the exchange returning junk) is never the
+                # order being cancelled, and must survive the filter — the fake
+                # must not fail where the real client would not.
+                if not isinstance(o, dict) or o.get("cloid") != cloid_hex
             ]
         return result
 
@@ -617,3 +622,123 @@ def test_a_short_position_cancels_an_ask_side_close_order(env):
     ]
     result = env.recover()
     assert result.canceled_stale == ("8",)
+
+
+# -- manual evidence is sticky across the two passes --------------------------
+
+
+class _StubBackfiller:
+    """A fully-wired fill leg, so legs_skipped cannot withhold the release."""
+
+    def backfill(self, now, *, since=None):
+        from contrib.hyperliquid_perp.live.fill_backfill import BackfillSummary
+
+        return BackfillSummary(
+            fetched=0, applied=0, duplicate=0, unmapped=0, malformed=0, complete=True
+        )
+
+
+def test_a_manual_fact_seen_only_by_the_first_pass_still_latches_safe_mode(env):
+    # Decided 2026-07-17: a non-bot order proves someone else operates this
+    # wallet. If its owner pulls it between the two recovery passes, the verdict
+    # pass reads clean — but the evidence still happened, and §13.5 requires a
+    # human to acknowledge it. Without the first-pass latch the run would start
+    # trading with nothing but a DB row nobody is forced to read.
+    env.client.open_orders_result = [
+        {"oid": 99, "coin": "BTC", "cloid": None, "side": "B", "sz": "1"}
+    ]
+    real_run = env.reconciler.run
+
+    def run_then_vanish(trigger):
+        report = real_run(trigger)
+        env.client.open_orders_result = []  # the owner pulls it mid-recovery
+        return report
+
+    env.reconciler.run = run_then_vanish
+    result = env.recover()
+
+    assert result.report.clean  # the verdict pass saw a clean book
+    state = env.safe_mode.current()
+    assert state is not None and state.is_manual
+    assert state.reason == REASON_NON_BOT_OWNED_ORDER
+    assert env.gate.manual_safe_mode is True
+    assert not result.passed  # step 16 refuses: manual safe mode is latched
+
+
+def test_startup_never_attests_ws_restored_from_a_wiring_with_no_ws(env):
+    # Decided 2026-07-17: "no WS to restore" is not "WS restored". A recoverable
+    # safe mode a PRIOR process entered for ws_disconnect must NOT be auto-
+    # released by this one-shot recovery, which has no WS stream at all — the
+    # same "absent machinery ≠ healthy" stance the §13.4 seam gate takes.
+    env.safe_mode.enter("recoverable", "ws_disconnect")
+    env.reconciler._backfiller = _StubBackfiller()
+
+    result = env.recover()
+
+    assert result.report.clean  # the books themselves are fine
+    state = env.safe_mode.current()
+    assert state is not None  # the ws_disconnect latch still holds
+    assert state.reason == "ws_disconnect"
+    assert not result.passed
+
+
+# -- the sweep's defensive guards over malformed exchange data ----------------
+
+
+def test_a_malformed_open_orders_entry_is_recorded_and_the_sweep_continues(env):
+    # The sweep must keep going over a junk entry (recording the failure), not
+    # crash startup on `order.get` — an unparseable neighbour must not strand
+    # the real orders behind it.
+    env.register_order(order_id="o-e", hex_id=_HEX_ENTRY, logical="log-e", role="entry")
+    env.client.open_orders_result = [
+        "not-a-dict",
+        {"oid": 5, "coin": "BTC", "cloid": _HEX_ENTRY, "side": "B", "sz": "0.001"},
+    ]
+    result = env.recover()
+    assert result.canceled_stale == ("5",)  # the valid order was still swept
+    assert any("malformed open_orders entry" in f for f in result.sweep_failures)
+    assert not result.passed
+
+
+def test_an_open_orders_read_that_is_not_a_list_is_a_sweep_failure_not_a_crash(env):
+    env.client.open_orders = lambda: {"unexpected": "shape"}
+    result = env.recover()
+    assert any("could not enumerate open orders" in f for f in result.sweep_failures)
+    assert not result.passed
+
+
+# -- the shared cancel helper's double-failure path ---------------------------
+
+
+def test_a_cancel_failure_that_cannot_be_recorded_still_raises_the_original(
+    env, monkeypatch, caplog
+):
+    # Both halves fail: the exchange rejects the cancel AND the write recording
+    # that rejection dies on a busy store. The ORIGINAL exchange error must
+    # propagate — it is the diagnosis the caller puts verbatim into its audit
+    # event and the sweep's failure list, and "database is locked" must never
+    # become the permanent record of why a cancel failed. The attempt row is
+    # left 'submitted' (outcome unknown), which the log must name.
+    from contrib.hyperliquid_perp.live import cancel as cancel_mod
+
+    env.register_order(order_id="o-e", hex_id=_HEX_ENTRY, logical="log-e", role="entry")
+    env.client.cancel_results[_HEX_ENTRY] = ExchangeRequestError("exchange said no")
+
+    def boom(conn, attempt_id, **kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(cancel_mod.repo, "update_live_order_attempt", boom)
+
+    with pytest.raises(ExchangeRequestError, match="exchange said no"):
+        cancel_mod.cancel_bot_order_with_evidence(
+            db=env.db,
+            client=env.client,
+            run_id="r",
+            payload_dir=env.payload_dir,
+            clock=env.clock,
+            coin="BTC",
+            cloid_hex=_HEX_ENTRY,
+            cloid_logical="log-e",
+            cancel_reason="stale_startup_cancel",
+        )
+    assert "stays 'submitted'" in caplog.text

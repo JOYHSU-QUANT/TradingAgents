@@ -13,7 +13,9 @@ from contrib.hyperliquid_perp.live.safe_mode import (
     REASON_INVALID_LOCAL_FILL,
     REASON_KILL_SWITCH_REFRESH_FAILED,
     REASON_NON_BOT_OWNED_ORDER,
+    REASON_RECONCILIATION_MISMATCH,
     REASON_REPEATED_MISMATCH,
+    REASON_SL_MISSING,
     REASON_UNKNOWN_POSITION,
     REASON_WS_DISCONNECT,
     SafeModeManager,
@@ -89,15 +91,44 @@ def test_entering_manual_raises_the_manual_gate_flag(env):
     assert manager.current().is_manual
 
 
-def test_reentering_the_same_level_is_idempotent(env):
+def test_reentering_the_same_reason_is_idempotent(env):
     db, gate, manager = env
     manager.enter("recoverable", REASON_WS_DISCONNECT)
     entered_at = manager.current().entered_at
-    # A stale WS re-reported every tick must neither spam history nor reset the clock.
-    assert manager.enter("recoverable", REASON_KILL_SWITCH_REFRESH_FAILED) is False
+    # A stale WS re-reported every tick (the SAME reason) must neither spam
+    # history nor reset the clock.
+    assert manager.enter("recoverable", REASON_WS_DISCONNECT) is False
     assert manager.current().entered_at == entered_at
     assert manager.current().reason == REASON_WS_DISCONNECT
     assert len(_events(db)) == 1
+
+
+def test_a_distinct_recoverable_reason_during_recoverable_gets_its_own_row(env):
+    # Decided 2026-07-17 (extending the manual rule to recoverable): the
+    # current-state trio keeps the FIRST reason, but a NEW independent
+    # recoverable fact at the same severity must reach the §13.6 history — a
+    # position_sl_missing arising while latched for reconciliation_mismatch is
+    # a distinct fact triage (and PR 5's time-gated daily_loss) must see.
+    db, gate, manager = env
+    manager.enter("recoverable", REASON_RECONCILIATION_MISMATCH)
+    assert manager.enter("recoverable", REASON_SL_MISSING, detail="sl gone") is False
+    assert manager.current().reason == REASON_RECONCILIATION_MISMATCH  # trio untouched
+    assert _events(db) == [
+        ("safe_mode_entered", "recoverable", REASON_RECONCILIATION_MISMATCH, None),
+        ("safe_mode_reason_added", "recoverable", REASON_SL_MISSING, None),
+    ]
+    # Idempotent per reason per episode; a THIRD distinct recoverable reason
+    # still lands.
+    assert manager.enter("recoverable", REASON_SL_MISSING) is False
+    assert len(_events(db)) == 2
+    assert manager.enter("recoverable", REASON_KILL_SWITCH_REFRESH_FAILED) is False
+    assert len(_events(db)) == 3
+    # A recoverable trigger during a manual episode is a LOWER severity absorbed
+    # under a higher one — NOT a same-level fact, so it stays silently absorbed.
+    manager.enter("manual", REASON_NON_BOT_OWNED_ORDER)  # escalates
+    events_before = len(_events(db))
+    assert manager.enter("recoverable", REASON_WS_DISCONNECT) is False
+    assert len(_events(db)) == events_before
 
 
 def test_manual_escalates_over_recoverable_and_is_recorded(env):

@@ -186,9 +186,10 @@ class SafeModeManager:
         ORIGINAL entry instant. A recoverable trigger during a manual safe
         mode is absorbed (manual outranks it); a manual trigger during a
         recoverable one escalates, recorded as ``safe_mode_escalated``; a
-        manual trigger with a NEW reason during a manual one keeps the state
-        untouched but leaves a ``safe_mode_reason_added`` history row (once
-        per reason per episode) so the §13.6 triage surface shows every
+        trigger with a NEW reason at the SAME severity already latched
+        (manual-during-manual or recoverable-during-recoverable) keeps the
+        state untouched but leaves a ``safe_mode_reason_added`` history row
+        (once per reason per episode) so the §13.6 triage surface shows every
         independent fact.
         """
         check_enum(safe_mode_type, repo.SAFE_MODE_TYPES, name="safe_mode_type")
@@ -198,16 +199,19 @@ class SafeModeManager:
         if current is not None:
             if current.is_manual or safe_mode_type == "recoverable":
                 # Already at (or above) the requested severity — the state does
-                # not change. But a DISTINCT manual reason surfacing while
-                # manual is latched is a new independent fact the §13.6 triage
-                # surface must show (decided 2026-07-17): record it as its own
-                # history row, idempotent per episode keyed on the reason —
-                # the same fact re-observed every pass gets one row, like the
-                # first reason does. The current-state trio keeps the FIRST
-                # reason; recoverable triggers stay absorbed as before.
+                # not change. But a DISTINCT reason surfacing at the SAME
+                # severity already latched is a new independent fact the §13.6
+                # triage surface must show (decided 2026-07-17, extended from
+                # manual to recoverable the same day): record it as its own
+                # history row, idempotent per episode keyed on the reason — the
+                # same fact re-observed every pass gets one row, like the first
+                # reason does. The current-state trio keeps the FIRST reason. A
+                # LOWER severity absorbed under a higher one (a recoverable
+                # trigger during a manual episode) is NOT a same-level fact and
+                # stays silently absorbed — the manual episode is what triage
+                # acts on.
                 if (
-                    safe_mode_type == "manual"
-                    and current.is_manual
+                    safe_mode_type == current.safe_mode_type
                     and reason != current.reason
                     and not repo.has_safe_mode_reason_event(
                         self._db.conn,
@@ -217,8 +221,9 @@ class SafeModeManager:
                     )
                 ):
                     logger.error(
-                        "additional manual safe-mode reason observed: %s%s (episode "
+                        "additional %s safe-mode reason observed: %s%s (episode "
                         "entered %s for: %s)",
+                        safe_mode_type,
                         reason,
                         f" ({detail})" if detail else "",
                         current.entered_at,
@@ -229,7 +234,7 @@ class SafeModeManager:
                             conn,
                             run_id=self._run_id,
                             event_type="safe_mode_reason_added",
-                            safe_mode_type="manual",
+                            safe_mode_type=safe_mode_type,
                             reason=reason,
                             detail=detail,
                             timestamp=now,

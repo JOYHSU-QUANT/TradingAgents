@@ -66,7 +66,7 @@ from .cancel import cancel_bot_order_with_evidence
 from .kill_switch import KillSwitchManager
 from .order_gate import RealOrderGate
 from .reconcile import LiveReconciler, ReconciliationReport
-from .safe_mode import REASON_STALE_ORDER_SWEEP_FAILED, SafeModeManager
+from .safe_mode import SafeModeManager
 
 __all__ = ["StartupResult", "run_startup_recovery"]
 
@@ -146,8 +146,13 @@ def run_startup_recovery(
     kill_switch.arm()
 
     # Steps 6–11: the first sweep — reads, records, and the safe mechanical
-    # fixes (settle stuck rows, back-fill orphans, book missing fills).
-    reconciler.run("startup")
+    # fixes (settle stuck rows, back-fill orphans, book missing fills). Manual
+    # evidence seen HERE is sticky: latch it now (decided 2026-07-17) so a
+    # non-bot order / unknown-coin position that clears before the verdict pass
+    # still forces §13.5 human acknowledgement rather than degrading to a bare
+    # audit row the run would trade straight past.
+    first_pass = reconciler.run("startup")
+    reconciler.apply_manual_cases(first_pass, safe_mode)
 
     # The recovery is this manager's ONLY owner until the CLI's shutdown, and
     # its legs are network round-trips that can stretch past the scheduled
@@ -171,25 +176,24 @@ def run_startup_recovery(
     # Steps 13–15: the verdict pass over the post-cancel state. The ticks
     # above also ran _detect_expired_deadline, so a switch that fired during
     # the recovery has latched stop_new_orders by the time it is read here —
-    # a lapsed deadline can never attest "kill switch healthy" to §13.4. No
-    # WS stream exists in this wiring (the live loop is PR 5), so ws_restored
-    # is vacuously true.
+    # a lapsed deadline can never attest "kill switch healthy" to §13.4.
+    #
+    # ws_restored is FALSE, not vacuously true: no WS stream exists in this
+    # wiring (the live loop is PR 5), and "no WS to restore" is not "WS
+    # restored" — attesting True would let this one-shot auto-release a
+    # recoverable safe mode a PRIOR process entered for ws_disconnect, exactly
+    # the "absent checking machinery ≠ healthy" stance the §13.4 seam gate
+    # takes (decided 2026-07-17). The stale-order sweep failures are fed into
+    # the verdict so a cancel that could not land keeps the pass unclean
+    # WITHOUT a release→re-enter flap (they used to drive a separate enter
+    # AFTER a possibly-clean pass had already re-anchored the episode).
     report = reconciler.reconcile_and_apply(
         "startup",
         safe_mode=safe_mode,
-        ws_restored=True,
+        ws_restored=False,
         kill_switch_active=not kill_switch.stop_new_orders,
+        sweep_failures=tuple(failures),
     )
-    if failures:
-        # A cancel the sweep could not land leaves a stale order resting —
-        # the verdict must not read clean over it. Its orders row is still
-        # live locally, so every later pass re-checks it; recoverable safe
-        # mode is the same fail-safe direction as any other mismatch.
-        safe_mode.enter(
-            "recoverable",
-            REASON_STALE_ORDER_SWEEP_FAILED,
-            detail="; ".join(failures),
-        )
 
     # Step 16: only a clean verdict with no live safe mode admits a new cycle.
     result = StartupResult(

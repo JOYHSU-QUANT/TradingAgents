@@ -27,9 +27,9 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 from typing import Any
 
@@ -40,10 +40,12 @@ from ..exchanges.hyperliquid.mapper import (
     hl_closing_side,
     map_account_snapshot,
 )
+from ..paper import accounting
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.ids import exchange_fill_key, usable_fill_tid
+from ..persistence.models import DECIMAL_CONTEXT
 from .fill_backfill import (
     DEFAULT_MAX_PAGES,
     RESPONSE_FILL_CAP,
@@ -57,6 +59,7 @@ from .safe_mode import (
     REASON_NON_BOT_OWNED_ORDER,
     REASON_RECONCILIATION_MISMATCH,
     REASON_SL_MISSING,
+    REASON_STALE_ORDER_SWEEP_FAILED,
     REASON_UNKNOWN_POSITION,
     SafeModeManager,
 )
@@ -381,6 +384,23 @@ class LiveReconciler:
             )
         return report
 
+    def apply_manual_cases(self, report: ReconciliationReport, safe_mode: SafeModeManager) -> None:
+        """Latch manual safe mode for every unresolved manual case in ``report``.
+
+        Public because §19 startup drives it from BOTH recovery passes: a
+        manual fact (a non-bot order, an unknown-coin position) observed in the
+        first record-and-fix pass is STICKY evidence that someone else operates
+        this wallet (§13.5 requires human acknowledgement), so it must latch
+        even if the fact clears before the verdict pass (decided 2026-07-17).
+        Idempotent: a reason re-entered while manual is latched records one
+        ``safe_mode_reason_added`` row per episode and never resets
+        ``entered_at``, so calling it in both passes is safe.
+        """
+        for case in report.manual_cases:
+            # Membership is guaranteed by ReconciliationCase.__post_init__.
+            reason = _MANUAL_CASE_REASONS[case.case_type]
+            safe_mode.enter("manual", reason, detail=case.detail or case.case_type)
+
     def reconcile_and_apply(
         self,
         trigger: str,
@@ -388,6 +408,7 @@ class LiveReconciler:
         safe_mode: SafeModeManager,
         ws_restored: bool,
         kill_switch_active: bool,
+        sweep_failures: tuple[str, ...] = (),
     ) -> ReconciliationReport:
         """Run a pass and drive the safe-mode machine from its verdict.
 
@@ -402,12 +423,24 @@ class LiveReconciler:
         site auto-release a recoverable safe mode without evidence. The
         reconciler's own wiring is attested the same way (``fully_wired`` —
         see ReconciliationReport.legs_skipped).
+
+        ``sweep_failures`` (the §19.3 startup stale-order sweep's per-order
+        failures) are a verdict INPUT, not a separate post-hoc entry: a cancel
+        that could not land leaves a stale order resting, so folding them into
+        the report's errors BEFORE any release keeps a reconciliation-clean
+        pass from auto-releasing — and re-anchoring ``entered_at`` on — an
+        episode the sweep already made unhealthy (decided 2026-07-17). The
+        entry names ``stale_order_sweep_failed`` specifically when the
+        reconciliation legs were otherwise clean.
         """
         report = self.run(trigger)
-        for case in report.manual_cases:
-            # Membership is guaranteed by ReconciliationCase.__post_init__.
-            reason = _MANUAL_CASE_REASONS[case.case_type]
-            safe_mode.enter("manual", reason, detail=case.detail or case.case_type)
+        # Capture the reconciliation-only verdict BEFORE folding the sweep in,
+        # so a stale-order-only failure can be named specifically below rather
+        # than under the generic mismatch reason.
+        reconciliation_clean = report.clean
+        if sweep_failures:
+            report = replace(report, errors=report.errors + tuple(sweep_failures))
+        self.apply_manual_cases(report, safe_mode)
         safe_mode.note_reconciliation_outcome(report.clean)
         if report.clean:
             if report.legs_skipped:
@@ -439,16 +472,18 @@ class LiveReconciler:
                 # The one unclean shape with its own named reason: a position
                 # whose only problem is a missing/insufficient SL (repair is
                 # PR 5's manager) — queryable in safe_mode_events as such.
-                reason = (
-                    REASON_SL_MISSING
-                    if unresolved == ["position_sl_missing"] and not report.errors
-                    else REASON_RECONCILIATION_MISMATCH
-                )
-                safe_mode.enter(
-                    "recoverable",
-                    reason,
-                    detail="; ".join(unresolved) or "; ".join(report.errors),
-                )
+                if reconciliation_clean and sweep_failures:
+                    # Every reconciliation leg proved clean; the ONLY problem is
+                    # the §19.3 stale-order sweep. Name it, not the mismatch.
+                    reason = REASON_STALE_ORDER_SWEEP_FAILED
+                    detail = "; ".join(sweep_failures)
+                elif unresolved == ["position_sl_missing"] and not report.errors:
+                    reason = REASON_SL_MISSING
+                    detail = "; ".join(unresolved)
+                else:
+                    reason = REASON_RECONCILIATION_MISMATCH
+                    detail = "; ".join(unresolved) or "; ".join(report.errors)
+                safe_mode.enter("recoverable", reason, detail=detail)
         return report
 
     # ------------------------------------------------------------- fills leg
@@ -503,6 +538,18 @@ class LiveReconciler:
             logger.exception("reconciliation fill backfill failed")
             errors.append(f"fill backfill failed: {exc}")
             return _FAILED_BACKFILL
+        if not summary.complete:
+            # An incomplete pass (page budget exhausted / capped window that did
+            # not raise) already flips backfill_complete → the verdict is
+            # unclean, but without a trace here the safe-mode detail and the
+            # reconciliation_diff would carry no reason. Name it, like every
+            # other blocking leg does (the exception path above already does).
+            errors.append(
+                f"fill backfill incomplete ({summary.applied} booked, page budget "
+                "exhausted or window uncovered) — some exchange fills may remain "
+                "unbooked (§12.3)"
+            )
+            logger.warning("reconciliation fill backfill incomplete — gap not fully covered")
         if summary.complete and self._stream is not None and epoch is not None:
             self._stream.mark_backfill_done(epoch)
         return summary
@@ -519,9 +566,15 @@ class LiveReconciler:
         conn = self._db.conn
 
         # Sweep the malformed backlog first: a sighting whose bare-tid key has
-        # since been booked (a §8.3 recovery re-ingested it) resolves itself;
-        # digest-keyed sightings are human territory (§12.3 v11) and do not
-        # block the pass — they are an audit backlog, not a proven missing fill.
+        # since been booked (a §8.3 recovery re-ingested it) resolves itself.
+        # Any malformed sighting still un-actioned after this AGE blocks the
+        # pass (decided 2026-07-17): a fill the exchange reported but SQLite
+        # never booked (an unusable tid, a digest-keyed body) is "交易所有
+        # fill、本地沒記錄" — unbooked money a human must stamp action_taken on,
+        # not an audit backlog the verdict may read past. The reason flows into
+        # ``errors`` so the fact reaches the safe-mode detail and the persisted
+        # reconciliation_diff, like every other blocking leg.
+        unresolved_malformed = 0
         for row in repo.iter_exchange_reconciliation_events(
             conn, self._run_id, case_type="fill_malformed"
         ):
@@ -529,20 +582,38 @@ class LiveReconciler:
                 continue
             key = row["exchange_value"]
             if not key or key.startswith("unparsed-"):
+                unresolved_malformed += 1  # digest-keyed: unkeyable, human territory
                 continue
             try:
                 booked = repo.get_fill_by_exchange_key(conn, exchange_fill_key(tid=key))
             except ValueError:
-                continue  # the malformed tid violates the key derivation: human territory
+                unresolved_malformed += 1  # the malformed tid violates the key derivation
+                continue
             if booked is not None:
                 with self._db.transaction() as tx:
                     repo.set_reconciliation_action(tx, row["event_id"], "resolved_fill_booked")
+            else:
+                unresolved_malformed += 1
+        if unresolved_malformed:
+            ok = False
+            errors.append(
+                f"{unresolved_malformed} malformed fill sighting(s) unresolved — the "
+                "exchange reported fills SQLite never booked; a human must stamp "
+                "action_taken (§12.3)"
+            )
 
         # §12.3 (v10/v11): unmapped sightings still absent from the ledger are
-        # the known "exchange has a fill we have not booked" backlog.
+        # the known "exchange has a fill we have not booked" backlog. Record it
+        # in ``errors`` (not just the log): the flip to unclean must reach the
+        # safe-mode detail and the persisted reconciliation_diff, or an operator
+        # sees safe mode fire with no cause named on any operator-facing surface.
         unbooked = repo.iter_unresolved_fill_sightings(conn, self._run_id)
         if unbooked:
             ok = False
+            errors.append(
+                f"{len(unbooked)} unmapped fill sighting(s) still unbooked — exchange "
+                "fills absent from the local ledger (§12.3)"
+            )
             logger.warning(
                 "%d unmapped fill sighting(s) still unbooked — fills are not reconciled",
                 len(unbooked),
@@ -1019,7 +1090,14 @@ class LiveReconciler:
                         case_type="exchange_position_mismatch",
                         symbol=pos.coin,
                         local_value=None,
-                        exchange_value=str(pos.size),
+                        # The once-per-fact dedupe key is (run_id, case_type,
+                        # exchange_value) — NO symbol. A bare size would let an
+                        # off-coin ETH 2.5 and a same-coin BTC exch_size 2.5
+                        # (or two different off-coins of equal size) collide and
+                        # silently drop the second audit row, losing a manual
+                        # safe-mode fact. Prefix the coin so distinct positions
+                        # never share a key.
+                        exchange_value=f"{pos.coin}:{pos.size}",
                         detail=(
                             f"exchange holds a {pos.coin} position but this run trades "
                             f"only {self._coin} — unknown position (§13.5), manual safe mode"
@@ -1058,7 +1136,14 @@ class LiveReconciler:
                     case_type=case_type,
                     symbol=self._coin,
                     local_value=str(local_size),
-                    exchange_value=str(exch_size),
+                    # The distinct fact is the (local → exchange) size
+                    # transition, not the exchange size alone: a phantom
+                    # (local X, exchange 0) always has exch_size 0, so keying
+                    # on it would collide EVERY phantom this run ever sees onto
+                    # one row. Encode the coin and both sides so an independent
+                    # later mismatch of a different magnitude gets its own audit
+                    # row while an unhealed one still dedupes across passes.
+                    exchange_value=f"{self._coin}:{local_size}->{exch_size}",
                     detail=detail,
                 )
             )
@@ -1346,7 +1431,6 @@ class LiveReconciler:
             )
             return
         exch_unrealized = sum((p.unrealized_pnl for p in snapshot.positions), Decimal(0))
-        equity = ledger.wallet_balance + exch_unrealized
         total_notional = snapshot.total_position_notional
         if total_notional is None:
             if any(p.position_value is None for p in snapshot.positions):
@@ -1366,6 +1450,29 @@ class LiveReconciler:
                 (p.position_value for p in snapshot.positions if p.position_value is not None),
                 Decimal(0),
             )
+        # The local-view columns must satisfy the §6.1/§6.6 arithmetic
+        # identities the mode-agnostic ``validate`` recomputes over every
+        # account_snapshots row (paper/validation.py _account_row_identities_ok,
+        # under DECIMAL_CONTEXT). Derive them with the SAME canonical formulas
+        # the paper engine's writer uses (paper.accounting) under the SAME
+        # pinned context — a hand-rolled expression here once stored an INVERTED
+        # margin_ratio (maint/equity) and a duplicate of exchange_withdrawable,
+        # which read as corruption to the auditor. The exchange's own figures
+        # are preserved verbatim in the exchange_* columns below; the local
+        # available_balance is equity − used_initial_margin, never the raw
+        # withdrawable. ``used_initial_margin`` / ``total_maintenance_margin``
+        # are the exchange's account-level margin (§25 #4 single symbol), and
+        # every derived column keys off them and the local equity.
+        maint = snapshot.cross_maintenance_margin_used
+        used_im = snapshot.total_margin_used
+        with localcontext(DECIMAL_CONTEXT):
+            equity = accounting.account_equity(ledger.wallet_balance, exch_unrealized)
+            total_pnl = (
+                ledger.realized_pnl + exch_unrealized - ledger.total_fees + ledger.net_funding_pnl
+            )
+            leverage = accounting.effective_leverage(total_notional, equity)
+            available = accounting.available_balance(equity, used_im)
+            ratio = accounting.margin_ratio(equity, maint)
         repo.insert_account_snapshot(
             conn,
             timestamp=now,
@@ -1373,17 +1480,17 @@ class LiveReconciler:
             run_id=self._run_id,
             wallet_balance=ledger.wallet_balance,
             account_equity=equity,
-            available_balance=snapshot.withdrawable,
+            available_balance=available,
             realized_pnl=ledger.realized_pnl,
             unrealized_pnl=exch_unrealized,
-            total_pnl=ledger.realized_pnl + exch_unrealized,
+            total_pnl=total_pnl,
             total_fees=ledger.total_fees,
             net_funding_pnl=ledger.net_funding_pnl,
             total_position_notional=total_notional,
-            effective_leverage=None if equity <= 0 else total_notional / equity,
-            used_initial_margin=snapshot.total_margin_used,
-            total_maintenance_margin=snapshot.cross_maintenance_margin_used,
-            margin_ratio=None if equity <= 0 else snapshot.cross_maintenance_margin_used / equity,
+            effective_leverage=leverage,
+            used_initial_margin=used_im,
+            total_maintenance_margin=maint,
+            margin_ratio=ratio,
             exchange_account_value=snapshot.account_value,
             exchange_withdrawable=snapshot.withdrawable,
             exchange_margin_used=snapshot.total_margin_used,

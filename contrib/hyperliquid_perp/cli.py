@@ -356,6 +356,14 @@ def _cmd_safe_mode(argv: list[str]) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 1
         print(f"manual safe mode released by {released_by}.")
+        if state is not None:
+            # Name what was cleared: the current-state trio carries the episode's
+            # FIRST reason (entered_at anchors it) — additional reasons this
+            # episode accrued are the safe_mode_reason_added rows in --status
+            # history. Printing it lets the operator confirm the release matched
+            # the fact they reviewed. (state was read just above; the CLI is
+            # single-threaded, so nothing changed it before release_manual.)
+            print(f"released episode: {state.reason} (entered {state.entered_at}).")
         print(
             "NOTE: trading does not resume yet — the run must pass its next full "
             "reconciliation before new orders are allowed (§13.6 rule 3)."
@@ -422,6 +430,21 @@ def _cmd_live(argv: list[str]) -> int:
         ),
     )
     args = parser.parse_args(argv)
+
+    if args.run_id is None and (args.create or args.adopt_positions):
+        # Named rejection, not silent-ignore: without --run-id this command is
+        # config-check mode — it creates and seeds nothing — so --create /
+        # --adopt-positions have no effect. An operator who passed them almost
+        # certainly meant the §19.1 recovery and would otherwise read the
+        # "gates OK" exit 0 as "run created". Same discipline as the resume and
+        # safe-mode flag guards.
+        print(
+            "error: --create / --adopt-positions require --run-id — without it this "
+            "command only checks the config gates and creates nothing. Pass --run-id "
+            "to run the §19.1 startup recovery.",
+            file=sys.stderr,
+        )
+        return 1
 
     # Same rationale as ``paper``: startup diagnostics need timestamps; the
     # basicConfig no-ops when an embedding application already configured one.
@@ -807,7 +830,7 @@ def _live_startup_recovery(
             drift = _config_drift_report(existing_run["config_json"], config, coin)
             if drift is not None:
                 kind, message = drift
-                if kind == "coin":
+                if kind in ("coin", "network"):
                     print(f"error: {message}", file=sys.stderr)
                     return 1
                 logger.warning("config drift on live resume for %s: %s", run_id, message)
@@ -1101,23 +1124,33 @@ def _resume_effective(key: str, block: object) -> object:
     return block
 
 
+def _norm_network(live_block: dict) -> object:
+    """``live.network`` normalised the way LiveConfig reads it (case-insensitive)."""
+    net = live_block.get("network")
+    return net.strip().lower() if isinstance(net, str) else net
+
+
 def _config_drift_report(
     stored_json: str | None, config: dict, coin: str
 ) -> tuple[str, str] | None:
     """Compare today's config against the run's genesis record.
 
-    Returns ``("coin", msg)`` for a coin mismatch (hard error — a different
-    instrument is a different run, not a resumption), ``("params", msg)`` for
-    risk/decision/paper_trading(execution)/engine/market_data/indicators drift
-    (warning — behaviour changes mid-run but the operator may intend it;
-    genesis-only ``paper_trading.account`` edits are inert on resume and don't
-    warn, and a genesis record predating a key in ``_DRIFT_KEYS_ADDED_LATER``
-    skips that comparison rather than false-flagging), or ``None`` when
-    nothing drifted or no record
-    exists (a pre-drift-check store). A genesis record this process cannot
-    parse also reports as ``("params", ...)``: the homogeneity check became
-    impossible, which is breadcrumb-grade — never a startup abort (that would
-    fire before the protection-only fork, leaving a live position unwatched).
+    Returns ``("coin", msg)`` for a coin mismatch or ``("network", msg)`` for a
+    ``live.network`` mismatch (both hard errors — a different instrument or a
+    different exchange is a different run, not a resumption), ``("params",
+    msg)`` for risk/decision/paper_trading(execution)/engine/market_data/
+    indicators / non-network ``live:`` drift (warning — behaviour changes
+    mid-run but the operator may intend it; genesis-only
+    ``paper_trading.account`` edits are inert on resume and don't warn, and a
+    genesis record predating a key in ``_DRIFT_KEYS_ADDED_LATER`` skips that
+    comparison rather than false-flagging), or ``None`` when nothing drifted or
+    no record exists (a pre-drift-check store). A genesis record this process
+    cannot parse also reports as ``("params", ...)``: the homogeneity check
+    became impossible, which is breadcrumb-grade — never a startup abort (that
+    would fire before the protection-only fork, leaving a live position
+    unwatched). The ``live:`` checks fire only for records that stored the
+    block (a live run's genesis — a paper run never stores it), so paper
+    resumes reach neither the network hard-fail nor the live-block warning.
     """
     if not stored_json:
         return None
@@ -1140,12 +1173,46 @@ def _config_drift_report(
             f"targets {coin!r} — refusing to continue a run on a different "
             "instrument (use a new --run-id).",
         )
+    # live.network is run IDENTITY, like coin (decided 2026-07-17): a
+    # testnet↔mainnet swap on resume would arm the wallet-wide kill switch and
+    # reconcile the WRONG exchange against this ledger — every position/equity
+    # leg mismatches and the operator sees "reconciliation mismatch" instead of
+    # the true cause. The live create path stores the whole ``live:`` block; a
+    # paper run never does, so ``stored_live`` is absent there and the check
+    # is skipped. current_live is round-tripped through JSON to match the
+    # stored block's serialized shape.
+    stored_live = stored.get("live")
+    raw_current_live = config.get("live")
+    current_live = (
+        json.loads(json.dumps(raw_current_live, default=str))
+        if isinstance(raw_current_live, dict)
+        else None
+    )
+    both_have_live_block = isinstance(stored_live, dict) and isinstance(current_live, dict)
+    if both_have_live_block and _norm_network(stored_live) != _norm_network(current_live):
+        return (
+            "network",
+            f"run was created against live.network {_norm_network(stored_live)!r} "
+            f"but this resume targets {_norm_network(current_live)!r} — refusing to "
+            "arm the kill switch and reconcile a different exchange (use a new "
+            "--run-id).",
+        )
     drifted = sorted(
         key
         for key in _DRIFT_COMPARED_KEYS
         if not (key in _DRIFT_KEYS_ADDED_LATER and key not in stored)
         and _resume_effective(key, stored.get(key)) != _resume_effective(key, current.get(key))
     )
+    # Non-network ``live:`` drift is a warning (network already hard-failed
+    # above): safety caps, kill-switch timings, allow_real_orders wiring etc.
+    # redefine behaviour mid-run and the operator should be told, even though
+    # they may intend it. Compared with network excluded so an equal-network
+    # block that changed elsewhere still surfaces.
+    if both_have_live_block:
+        stored_live_rest = {k: v for k, v in stored_live.items() if k != "network"}
+        current_live_rest = {k: v for k, v in current_live.items() if k != "network"}
+        if stored_live_rest != current_live_rest:
+            drifted = sorted([*drifted, "live"])
     if drifted:
         return (
             "params",
@@ -1415,7 +1482,7 @@ def _cmd_paper(argv: list[str]) -> int:
                     _stamp_breadcrumb(db, run_id, "config_drift", "ok", None)
                 else:
                     kind, message = drift
-                    if kind == "coin":
+                    if kind in ("coin", "network"):
                         print(f"error: {message}", file=sys.stderr)
                         return 1
                     logger.warning("config drift on resume for %s: %s", run_id, message)

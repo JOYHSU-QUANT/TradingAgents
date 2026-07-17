@@ -796,3 +796,231 @@ def test_a_case_cannot_be_both_manual_and_resolved(env):
             manual=True,
             resolved=True,
         )
+
+
+# -- round-2 hardening (2026-07-17 review loop) ---------------------------------
+
+
+def test_both_nonzero_but_different_sizes_are_a_mismatch(env):
+    # A missed partial fill's exact shape: both sides hold a position, the
+    # sizes disagree. Shares a case_type with the "local flat" branch, so only
+    # this test proves the elif is actually reachable.
+    db, seams, reconciler = env
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("0.001"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+    seams.clearinghouse = _clearinghouse(
+        account_value="101", positions=[_btc_position(szi="0.003", value="153")], maintenance="1"
+    )
+    report = reconciler.run("heartbeat")
+    assert not report.position_reconciled
+    (case,) = [c for c in report.cases if c.case_type == "exchange_position_mismatch"]
+    assert case.local_value == "0.001"
+    assert case.exchange_value == "0.003"
+    assert "sizes differ" in (case.detail or "")
+
+
+def test_snapshot_rows_are_skipped_when_maintenance_margin_is_unreported(env, caplog):
+    # "Never fabricate": a clearinghouse payload without
+    # crossMaintenanceMarginUsed must skip the snapshot rows (warning), not
+    # write a guessed 0 into the audit trail.
+    db, seams, reconciler = env
+    ch = _clearinghouse()
+    del ch["crossMaintenanceMarginUsed"]
+    seams.clearinghouse = ch
+    with caplog.at_level("WARNING"):
+        reconciler.run("heartbeat")
+    row = db.conn.execute("SELECT COUNT(*) FROM account_snapshots WHERE run_id='r'").fetchone()
+    assert row[0] == 0
+    assert any("crossMaintenanceMarginUsed" in r.getMessage() for r in caplog.records)
+
+
+def test_snapshot_rows_are_skipped_when_a_position_has_no_value(env, caplog):
+    # An unpriced position cannot be summed into total notional; writing the
+    # partial total would understate exposure — skip, never guess.
+    db, seams, reconciler = env
+    pos = _btc_position()
+    del pos["positionValue"]
+    ch = _clearinghouse(account_value="101", positions=[pos], maintenance="1")
+    del ch["marginSummary"]["totalNtlPos"]
+    seams.clearinghouse = ch
+    with caplog.at_level("WARNING"):
+        reconciler.run("heartbeat")
+    row = db.conn.execute("SELECT COUNT(*) FROM account_snapshots WHERE run_id='r'").fetchone()
+    assert row[0] == 0
+    assert any("positionValue" in r.getMessage() for r in caplog.records)
+
+
+def test_an_unfillable_orphan_stays_an_unresolved_mismatch(env):
+    # The backfill raising (unrecognised side) must flow through to an
+    # UNRESOLVED case and an unclean orders leg — an orphan the pass could not
+    # adopt is still a live local/exchange conflict.
+    db, seams, reconciler = env
+    _register_cloid(db, hex_id=_HEX, logical="log-entry", role="entry")
+    seams.open_orders = [
+        {"oid": 42, "coin": "BTC", "cloid": _HEX, "side": "X", "sz": "0.001", "origSz": "0.002"}
+    ]
+    report = reconciler.run("startup")
+    assert not report.orders_reconciled
+    (case,) = _cases(db, "orphan_exchange_order")
+    assert case["action_taken"] is None
+    assert repo.get_order_by_cloid_hex(db.conn, _HEX) is None  # nothing half-written
+
+
+def test_a_reopen_tiebreaker_read_failure_leaves_the_row_untouched(env):
+    # Terminal local row, open_orders lists it, and the orderStatus tiebreaker
+    # read itself fails: unproven either way — never reopened, leg unclean.
+    db, seams, reconciler = env
+    _insert_local_order(db, status="rejected")
+    seams.open_orders = [
+        {"oid": 42, "coin": "BTC", "cloid": _HEX, "side": "B", "sz": "0.001", "origSz": "0.001"}
+    ]
+    seams.order_status[_HEX] = RuntimeError("api down")
+    report = reconciler.run("heartbeat")
+    assert not report.orders_reconciled
+    assert repo.get_order(db.conn, "o1")["status"] == "rejected"  # untouched
+
+
+def test_a_crashed_leg_is_an_unclean_verdict_not_a_crash(env, monkeypatch):
+    # run()'s "records everything, raises nothing" covers the legs' own DB
+    # work too: a raise inside a leg maps to the fail-safe unproven verdict.
+    db, seams, reconciler = env
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(LiveReconciler, "_reconcile_orders", boom)
+    report = reconciler.run("heartbeat")  # must not raise
+    assert not report.clean
+    assert not report.orders_reconciled
+    assert any("orders leg crashed" in e for e in report.errors)
+
+
+def test_sl_absence_is_not_asserted_off_a_failed_open_orders_read(env):
+    # unknown ≠ unprotected-as-a-fact: the verdict stays fail-safe
+    # (protected=False) but no durable row may claim "no valid SL" when the
+    # truth is "could not look".
+    db, seams, reconciler = env
+    seams.open_orders = RuntimeError("api down")
+    seams.clearinghouse = _clearinghouse(
+        account_value="101", positions=[_btc_position()], maintenance="1"
+    )
+    report = reconciler.run("heartbeat")
+    assert not report.position_protected
+    assert _cases(db, "position_sl_missing") == []
+
+
+def test_a_clean_pass_does_not_reopen_the_gate_while_release_conditions_are_unmet(env):
+    # try_auto_recover declining because the §13.4 conditions are unmet must
+    # NOT fall through to set_state_reconciled(True): for recoverable safe
+    # mode that flag is the gate's only blocking line.
+    db, seams, reconciler = env
+    gate = _gate()
+    safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
+    seams.clearinghouse = _clearinghouse(account_value="90")  # mismatch → recoverable
+    reconciler.reconcile_and_apply("heartbeat", safe_mode=safe_mode)
+    assert safe_mode.current() is not None
+
+    seams.clearinghouse = _clearinghouse(account_value="100")  # healed...
+    report = reconciler.reconcile_and_apply(
+        "heartbeat",
+        safe_mode=safe_mode,
+        kill_switch_active=False,  # ...but KS unhealthy
+    )
+    assert report.clean
+    state = safe_mode.current()
+    assert state is not None and state.safe_mode_type == "recoverable"  # not released
+    assert gate.state_reconciled is False  # trading must NOT resume
+
+    report = reconciler.reconcile_and_apply("heartbeat", safe_mode=safe_mode)
+    assert report.clean
+    assert safe_mode.current() is None  # every §13.4 condition proven → released
+    assert gate.state_reconciled is True
+
+
+def test_manual_reason_mapping_reaches_the_safe_mode_record(env):
+    # The case_type → REASON_* dict in reconcile_and_apply: a typo'd key would
+    # silently fall through to the generic mismatch reason.
+    db, seams, reconciler = env
+    gate = _gate()
+    safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
+    eth = {
+        "coin": "ETH",
+        "szi": "1",
+        "entryPx": "3000",
+        "unrealizedPnl": "1",
+        "positionValue": "3000",
+        "marginUsed": "300",
+    }
+    seams.clearinghouse = _clearinghouse(account_value="101", positions=[eth], maintenance="1")
+    reconciler.reconcile_and_apply("heartbeat", safe_mode=safe_mode)
+    state = safe_mode.current()
+    assert state is not None and state.is_manual
+    assert state.reason == "unknown_exchange_position"
+
+
+def test_a_missing_genesis_floor_degradation_is_logged(env, caplog):
+    # The backfill floor silently degrading from "since genesis" to the bare
+    # trailing lookback is money-relevant (an outage longer than 6h loses
+    # fills) — it must leave a trace.
+    db, seams, reconciler = env
+    stub = _StubBackfiller()
+    reconciler._backfiller = stub
+    with db.transaction() as conn:
+        conn.execute("UPDATE runs SET created_at = 'not-a-timestamp' WHERE run_id = 'r'")
+    with caplog.at_level("WARNING"):
+        reconciler.run("heartbeat")
+    assert stub.calls == [None]  # the floor really did degrade
+    assert any("degrades to the trailing 6h lookback" in r.getMessage() for r in caplog.records)
+
+
+def test_an_orphan_protection_order_backfills_with_its_role_type(env):
+    # The registry role is the durable record of what the bot placed: an
+    # orphaned SL must not be backfilled as "ioc_limit" (a permanent audit
+    # mislabel once PR 5 places trigger orders).
+    db, seams, reconciler = env
+    _register_cloid(db, hex_id=_HEX_SL, logical="log-sl", role="stop_loss")
+    seams.open_orders = [
+        {
+            "oid": 43,
+            "coin": "BTC",
+            "cloid": _HEX_SL,
+            "side": "A",
+            "sz": "0.001",
+            "origSz": "0.001",
+            "limitPx": "45000",
+            "reduceOnly": True,
+        }
+    ]
+    reconciler.run("startup")
+    row = repo.get_order_by_cloid_hex(db.conn, _HEX_SL)
+    assert row is not None
+    assert row["type"] == "stop_market"
+    assert row["exchange_raw_status"] == "open"
+
+
+def test_an_unknown_case_type_fails_loud_at_construction(env):
+    from contrib.hyperliquid_perp.live.reconcile import ReconciliationCase
+
+    with pytest.raises(ValueError, match="case_type"):
+        ReconciliationCase(
+            case_type="tpyo_case", symbol="BTC", local_value=None, exchange_value="x"
+        )
+
+
+def test_an_action_taken_without_resolved_fails_loud_at_construction(env):
+    from contrib.hyperliquid_perp.live.reconcile import ReconciliationCase
+
+    with pytest.raises(ValueError, match="must be resolved"):
+        ReconciliationCase(
+            case_type="order_missing_on_exchange",
+            symbol="BTC",
+            local_value="o1",
+            exchange_value="x",
+            action_taken="settled_canceled",
+            resolved=False,
+        )

@@ -174,7 +174,11 @@ class SafeModeManager:
         "daily loss until next UTC midnight" style conditions key off the
         ORIGINAL entry instant. A recoverable trigger during a manual safe
         mode is absorbed (manual outranks it); a manual trigger during a
-        recoverable one escalates, recorded as ``safe_mode_escalated``.
+        recoverable one escalates, recorded as ``safe_mode_escalated``; a
+        manual trigger with a NEW reason during a manual one keeps the state
+        untouched but leaves a ``safe_mode_reason_added`` history row (once
+        per reason per episode) so the §13.6 triage surface shows every
+        independent fact.
         """
         check_enum(safe_mode_type, repo.SAFE_MODE_TYPES, name="safe_mode_type")
         current = self.current()
@@ -182,7 +186,44 @@ class SafeModeManager:
         entered_at: datetime = now
         if current is not None:
             if current.is_manual or safe_mode_type == "recoverable":
-                return False  # already at (or above) the requested severity
+                # Already at (or above) the requested severity — the state does
+                # not change. But a DISTINCT manual reason surfacing while
+                # manual is latched is a new independent fact the §13.6 triage
+                # surface must show (decided 2026-07-17): record it as its own
+                # history row, idempotent per episode keyed on the reason —
+                # the same fact re-observed every pass gets one row, like the
+                # first reason does. The current-state trio keeps the FIRST
+                # reason; recoverable triggers stay absorbed as before.
+                if (
+                    safe_mode_type == "manual"
+                    and current.is_manual
+                    and reason != current.reason
+                    and not repo.has_safe_mode_reason_event(
+                        self._db.conn,
+                        self._run_id,
+                        reason=reason,
+                        since_iso=current.entered_at,
+                    )
+                ):
+                    logger.error(
+                        "additional manual safe-mode reason observed: %s%s (episode "
+                        "entered %s for: %s)",
+                        reason,
+                        f" ({detail})" if detail else "",
+                        current.entered_at,
+                        current.reason,
+                    )
+                    with self._db.transaction() as conn:
+                        repo.insert_safe_mode_event(
+                            conn,
+                            run_id=self._run_id,
+                            event_type="safe_mode_reason_added",
+                            safe_mode_type="manual",
+                            reason=reason,
+                            detail=detail,
+                            timestamp=now,
+                        )
+                return False
             event_type = "safe_mode_escalated"
             # An escalation is a severity change on the SAME unhealthy episode:
             # the entry instant is preserved, so time-gated release conditions
@@ -242,9 +283,24 @@ class SafeModeManager:
         reports its verdict here rather than reaching into the gate itself.
         A ``True`` never overrides safe mode — the manual flag (and, for
         recoverable, the §13.4 door) still decide whether trading resumes.
+        The recoverable half of that promise is enforced HERE, not left to
+        caller discipline: while a recoverable safe mode is latched this flag
+        is the gate's ONLY blocking line, so a ``True`` is refused (only
+        :meth:`try_auto_recover`'s release — the §13.4 door — raises it).
         """
-        if self._gate is not None:
-            self._gate.state_reconciled = proven
+        if self._gate is None:
+            return
+        if proven:
+            current = self.current()
+            if current is not None and not current.is_manual:
+                logger.info(
+                    "clean pass acknowledged, but recoverable safe mode (%s) is "
+                    "still latched — the gate stays shut until every §13.4 "
+                    "release condition is proven",
+                    current.reason,
+                )
+                return
+        self._gate.state_reconciled = proven
 
     def note_reconciliation_outcome(self, clean: bool) -> None:
         """Track §13.5's "repeated reconciliation mismatch" escalation.

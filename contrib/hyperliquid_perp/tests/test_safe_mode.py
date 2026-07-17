@@ -10,9 +10,11 @@ import pytest
 from contrib.hyperliquid_perp.live.config import ExecutionMode
 from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
 from contrib.hyperliquid_perp.live.safe_mode import (
+    REASON_INVALID_LOCAL_FILL,
     REASON_KILL_SWITCH_REFRESH_FAILED,
     REASON_NON_BOT_OWNED_ORDER,
     REASON_REPEATED_MISMATCH,
+    REASON_UNKNOWN_POSITION,
     REASON_WS_DISCONNECT,
     SafeModeManager,
 )
@@ -112,6 +114,52 @@ def test_manual_escalates_over_recoverable_and_is_recorded(env):
     # An escalation is a severity change on the SAME unhealthy episode: the
     # original entry instant survives (time-gated release conditions key off it).
     assert manager.current().entered_at == original_entered_at
+
+
+def test_a_distinct_manual_reason_during_manual_gets_its_own_history_row(env):
+    # Decided 2026-07-17: the current-state trio keeps the FIRST reason, but a
+    # NEW independent manual fact must reach the §13.6 history — an operator
+    # triaging non_bot_owned_order must also see the scarier invalid fill.
+    db, gate, manager = env
+    manager.enter("manual", REASON_NON_BOT_OWNED_ORDER)
+    assert manager.enter("manual", REASON_INVALID_LOCAL_FILL, detail="fill f1") is False
+    assert manager.current().reason == REASON_NON_BOT_OWNED_ORDER  # trio untouched
+    assert _events(db) == [
+        ("safe_mode_entered", "manual", REASON_NON_BOT_OWNED_ORDER, None),
+        ("safe_mode_reason_added", "manual", REASON_INVALID_LOCAL_FILL, None),
+    ]
+    # Idempotent per reason per episode: the same facts re-observed every
+    # reconciliation pass must not spam the history.
+    assert manager.enter("manual", REASON_INVALID_LOCAL_FILL) is False
+    assert manager.enter("manual", REASON_NON_BOT_OWNED_ORDER) is False
+    assert len(_events(db)) == 2
+    # A THIRD distinct reason still lands.
+    assert manager.enter("manual", REASON_UNKNOWN_POSITION) is False
+    assert len(_events(db)) == 3
+
+
+def test_a_repeat_reason_after_release_starts_a_fresh_episode_row(env):
+    # The reason-added idempotence is bounded by the episode (entered_at):
+    # after a release, the same reason recurring is a NEW fact and must be
+    # recorded again.
+    db, gate, _ = env
+    clock = ManualClock(_NOW)
+    manager = SafeModeManager(db=db, run_id="r", gate=gate, clock=clock)
+    manager.enter("manual", REASON_NON_BOT_OWNED_ORDER)
+    manager.enter("manual", REASON_INVALID_LOCAL_FILL)
+    clock.advance(60)
+    manager.release_manual(released_by="op", reason="reviewed")
+    clock.advance(60)
+    manager.enter("manual", REASON_NON_BOT_OWNED_ORDER)
+    assert manager.enter("manual", REASON_INVALID_LOCAL_FILL) is False
+    types = [e[0] for e in _events(db)]
+    assert types == [
+        "safe_mode_entered",
+        "safe_mode_reason_added",
+        "safe_mode_released",
+        "safe_mode_entered",
+        "safe_mode_reason_added",
+    ]
 
 
 def test_recoverable_never_downgrades_manual(env):

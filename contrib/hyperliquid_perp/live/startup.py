@@ -260,12 +260,19 @@ def _sweep_stale_orders(
                 # SL leg is the authority on whether protection is sufficient.
                 kept.append(oid)
                 if not _protection_order_valid(order, positions):
-                    logger.warning(
-                        "startup sweep: %s order %s does not validate against the live "
-                        "position (quantity/reduce-only/side) — kept; repair is PR 5",
-                        role,
-                        oid,
+                    # Two causes, two truthful messages: with the positions
+                    # read failed the order was never actually examined, and a
+                    # log asserting "does not validate" would tell a
+                    # post-mortem reader protection had lapsed when the truth
+                    # is "could not look" (the read failure itself is already
+                    # in ``failures`` → safe mode).
+                    cause = (
+                        "could not be validated — the positions read failed"
+                        if positions is None
+                        else "does not validate against the live position "
+                        "(quantity/reduce-only/side/trigger) — repair is PR 5"
                     )
+                    logger.warning("startup sweep: %s order %s %s; kept", role, oid, cause)
             else:  # pragma: no cover — the module-level partition check guards this
                 failures.append(f"{label}: unknown order role")
         except Exception as exc:  # noqa: BLE001 — per-order failures never stop the sweep

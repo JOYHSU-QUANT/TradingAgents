@@ -81,8 +81,22 @@ EQUITY_TOLERANCE_REL = Decimal("0.01")
 # 不到"). Mirrors the backfiller's trailing lookback; fills near the window
 # edges are excluded from the verdict — a fill booked milliseconds ago (or one
 # at the window's far edge) can be absent from one read without being invalid.
+# KNOWN EXEMPTION (decided 2026-07-17): the window slides, so a local fill
+# older than the lookback is permanently outside this leg's verdict — a
+# double-booked fill caught inside 6h is manual severity, the same fill outside
+# it is seen only by the equity-tolerance leg. Accepted for PR 4 because a
+# genesis floor would page the full history every pass (and withhold the
+# verdict whenever the 2000/20-page budget runs out); PR 5's durable
+# "cross-checked-through" watermark extends coverage without that cost.
 _FILL_CROSSCHECK_LOOKBACK = timedelta(hours=6)
 _FILL_CROSSCHECK_EDGE_MARGIN = timedelta(minutes=2)
+
+# The fail-safe fill-leg fallback: nothing fetched, nothing proven. Shared by
+# every "the backfill could not run/complete" path so the two sites can never
+# drift on what an unproven backfill looks like.
+_FAILED_BACKFILL = BackfillSummary(
+    fetched=0, applied=0, duplicate=0, unmapped=0, malformed=0, complete=False
+)
 
 _HL_SIDE = {"B": "buy", "A": "sell"}
 
@@ -105,6 +119,11 @@ class ReconciliationCase:
     resolved: bool = False
 
     def __post_init__(self) -> None:
+        # Loud at construction, not at the write: the only other place this is
+        # checked is ``_record``'s insert, which run() wraps in a swallow-all —
+        # a typo'd case_type there would lose the audit row with nothing but a
+        # log line. Validating here turns it into a failed (unclean) leg.
+        check_enum(self.case_type, repo.RECONCILIATION_CASE_TYPES, name="case_type")
         # Mutually exclusive by the module's model: a manual case is one only a
         # human may dispose of, so nothing in this pass can have resolved it.
         # Enforced because ``manual_cases`` filters on ``not resolved`` — a
@@ -114,6 +133,17 @@ class ReconciliationCase:
             raise ValueError(
                 f"a ReconciliationCase cannot be both manual and resolved "
                 f"({self.case_type}): manual means only a human may dispose of it"
+            )
+        # A disposition implies a resolution: ``_record``'s once-per-fact
+        # restamp keys off ``action_taken`` alone, so a case carrying an action
+        # while still unresolved would stamp the persisted row as disposed of
+        # while the in-memory verdict (which keys off ``resolved``) stays
+        # unclean — the audit trail and the verdict would diverge.
+        if self.action_taken is not None and not self.resolved:
+            raise ValueError(
+                f"a ReconciliationCase with action_taken={self.action_taken!r} "
+                f"must be resolved ({self.case_type}): recorded dispositions and "
+                "the pass verdict must agree"
             )
 
 
@@ -224,11 +254,38 @@ class LiveReconciler:
             errors.append(f"clearinghouse state read failed: {exc}")
 
         # -- legs -----------------------------------------------------------
-        backfill_summary = self._run_fill_backfill(errors)
-        orders_ok = self._reconcile_orders(open_orders, cases, errors, now)
-        fills_ok = self._reconcile_fills(cases, errors, now)
-        position_ok, protected = self._reconcile_positions(open_orders, snapshot, cases)
-        account_ok = self._reconcile_account(snapshot, cases, errors)
+        # Each leg is individually guarded: the docstring's "raises nothing"
+        # must hold for the legs' own DB reads/writes too (a transient
+        # `database is locked` mid-settle is a routine hazard, not an edge
+        # case), and a crashed leg maps to the same fail-safe verdict as a
+        # failed exchange read — unproven, unclean, safe mode. Cases a leg
+        # appended before crashing are kept: records everything.
+        def guarded(name: str, leg: Callable[[], Any], fallback: Any) -> Any:
+            try:
+                return leg()
+            except Exception as exc:  # noqa: BLE001 — a crashed leg is an unproven leg
+                logger.exception("%s leg crashed", name)
+                errors.append(f"{name} leg crashed: {exc}")
+                return fallback
+
+        backfill_summary = guarded(
+            "fill backfill", lambda: self._run_fill_backfill(errors), _FAILED_BACKFILL
+        )
+        orders_ok = guarded(
+            "orders", lambda: self._reconcile_orders(open_orders, cases, errors, now), False
+        )
+        fills_ok = guarded("fills", lambda: self._reconcile_fills(cases, errors, now), False)
+        # Fallback (False, False): unknown ≠ protected — the same fail-safe
+        # direction as a failed clearinghouse read (§17.1 rule 1 demands
+        # proof, not absence of disproof).
+        position_ok, protected = guarded(
+            "position",
+            lambda: self._reconcile_positions(open_orders, snapshot, cases),
+            (False, False),
+        )
+        account_ok = guarded(
+            "account", lambda: self._reconcile_account(snapshot, cases, errors), False
+        )
 
         report = ReconciliationReport(
             trigger=trigger,
@@ -302,8 +359,10 @@ class LiveReconciler:
             ):
                 # Not in recoverable safe mode (nothing to release), or manual
                 # is still latched: a clean pass still re-proves the §4.1
-                # "state is reconciled" line — the manual flag keeps blocking
-                # on its own until the §13.6 CLI release.
+                # "state is reconciled" line. The third decline cause —
+                # recoverable safe mode whose §13.4 conditions are not yet
+                # proven — is refused by set_state_reconciled itself (that
+                # flag is recoverable safe mode's only gate line).
                 safe_mode.set_state_reconciled(True)
         else:
             safe_mode.set_state_reconciled(False)
@@ -350,18 +409,28 @@ class LiveReconciler:
             since = repo.last_live_fill_time(self._db.conn, self._run_id)
             if since is None:
                 run_row = repo.get_run(self._db.conn, self._run_id)
-                if run_row is not None:
-                    try:
-                        since = datetime.fromisoformat(run_row["created_at"])
-                    except (TypeError, ValueError):
-                        since = None  # unparseable genesis: fall back to the lookback
+                genesis_raw = None if run_row is None else run_row["created_at"]
+                try:
+                    since = datetime.fromisoformat(genesis_raw)
+                except (TypeError, ValueError):
+                    since = None
+                    # Our own writer always stores ISO-8601, so this is store
+                    # corruption (same reading as safe_mode's entered_at) — and
+                    # the degradation is money-relevant: the floor silently
+                    # becomes the bare trailing lookback, which skips any
+                    # outage longer than 6h. Never degrade without a trace.
+                    logger.warning(
+                        "run %s genesis timestamp %r is missing/unparseable; fill "
+                        "backfill floor degrades to the trailing 6h lookback — an "
+                        "outage longer than that may leave fills unbooked",
+                        self._run_id,
+                        genesis_raw,
+                    )
         try:
             summary = self._backfiller.backfill(self._clock.now(), since=since)
         except Exception as exc:  # noqa: BLE001 — transport failure = gap still open
             errors.append(f"fill backfill failed: {exc}")
-            return BackfillSummary(
-                fetched=0, applied=0, duplicate=0, unmapped=0, malformed=0, complete=False
-            )
+            return _FAILED_BACKFILL
         if summary.complete and self._stream is not None and epoch is not None:
             self._stream.mark_backfill_done(epoch)
         return summary
@@ -407,6 +476,13 @@ class LiveReconciler:
         # money the exchange denies is booked money we cannot trust).
         if self._fetch_fills is not None:
             window_start = now - _FILL_CROSSCHECK_LOOKBACK
+            logger.debug(
+                "invalid-local-fill cross-check window %s → %s; local fills older "
+                "than the window are outside this leg's verdict (known exemption, "
+                "PR 5 watermark extends coverage)",
+                window_start.isoformat(),
+                now.isoformat(),
+            )
             exchange_keys = self._fetch_window_fill_keys(
                 self._fetch_fills, window_start, now, errors
             )
@@ -692,6 +768,12 @@ class LiveReconciler:
             qty = Decimal(str(raw_orig))
             remaining = Decimal(str(order.get("sz")))
             price = order.get("limitPx")
+            # The registry role is the bot's own durable record of what it
+            # placed — through PR 4 the only wire type is ioc_limit, but the
+            # registry already carries stop_loss/take_profit roles, and once
+            # PR 5 places trigger orders an orphaned SL backfilled as
+            # "ioc_limit" would be a permanent audit-row mislabel.
+            order_type = repo.ROLE_TO_ORDER_TYPE.get(registry["order_role"], "ioc_limit")
             with self._db.transaction() as conn:
                 repo.insert_order(
                     conn,
@@ -703,7 +785,7 @@ class LiveReconciler:
                     symbol=registry["symbol"],
                     order_role=registry["order_role"],
                     side=side,
-                    order_type="ioc_limit",
+                    order_type=order_type,
                     qty=qty,
                     filled_qty=qty - remaining,
                     remaining_qty=remaining,
@@ -715,7 +797,12 @@ class LiveReconciler:
                     cloid_hex=registry["cloid_hex"],
                     exchange_order_id=str(order.get("oid")),
                     exchange_status="open",
-                    exchange_raw_status=str(order.get("orderType", "open")),
+                    # The raw-status column stores the exchange's STATUS word
+                    # (every other writer stores "open"/"filled"/…); the source
+                    # here is presence in the open-orders listing, so "open" —
+                    # the earlier draft stored the orderType word ("Limit"),
+                    # which polluted the status vocabulary.
+                    exchange_raw_status="open",
                     is_bot_owned=True,
                     timestamp=now,
                 )
@@ -880,7 +967,13 @@ class LiveReconciler:
         protected = True
         if exch is not None:
             protected = self._has_valid_sl(open_orders, exch)
-            if not protected:
+            # The case row is written only when the absence was OBSERVED: with
+            # open_orders None the truth is "could not look", already carried
+            # by the orders-leg error and the fail-safe ``protected=False`` —
+            # a durable row asserting "no valid SL" off a failed read would
+            # tell a post-mortem reader protection had lapsed when it may not
+            # have (and occupy the fact's once-per-fact dedupe slot).
+            if not protected and open_orders is not None:
                 cases.append(
                     ReconciliationCase(
                         case_type="position_sl_missing",
@@ -930,6 +1023,16 @@ class LiveReconciler:
             try:
                 covered += Decimal(str(order.get("sz")))
             except Exception:  # noqa: BLE001 — an unparseable size covers nothing
+                # Fail-safe direction (counts as zero coverage), but never
+                # silently: the sibling degradation paths in this module all
+                # leave a trace, and "SL judged missing because a size failed
+                # to parse" must be diagnosable from the log.
+                logger.warning(
+                    "SL order sz %r (cloid %s) is unparseable while proving §17.1 "
+                    "coverage; counting it as zero",
+                    order.get("sz"),
+                    cloid,
+                )
                 continue
         return covered >= need
 

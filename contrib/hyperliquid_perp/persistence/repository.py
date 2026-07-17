@@ -34,6 +34,7 @@ __all__ = [
     "LIVE_LIQUIDITY_ROLES",
     "RECONCILIATION_CASE_TYPES",
     "RECONCILIATION_TRIGGERS",
+    "ROLE_TO_ORDER_TYPE",
     "SAFE_MODE_EVENT_TYPES",
     "SAFE_MODE_TYPES",
     "find_in_progress_attempt",
@@ -58,6 +59,7 @@ __all__ = [
     "get_run_seed_positions",
     "get_scheduler_state",
     "has_exchange_known_cloid",
+    "has_safe_mode_reason_event",
     "has_exchange_reconciliation_case",
     "has_place_attempt",
     "insert_account_snapshot",
@@ -1304,6 +1306,12 @@ _ORDER_ROLES = LIVE_ORDER_ROLES
 _ORDER_TYPES = frozenset(
     {"paper_market", "paper_twap_slice", "stop_market", "take_market", "ioc_limit"}
 )
+# The trigger-role → order-type spelling, next to the vocabulary it draws from:
+# writers that derive a type from a registry/protection role (the live orphan
+# backfill; the paper engine's protection placement) must share one mapping or
+# they drift and audit rows get mislabeled. Non-trigger roles take each
+# writer's own wire-type default.
+ROLE_TO_ORDER_TYPE = {"stop_loss": "stop_market", "take_profit": "take_market"}
 # "submitted" is the live-only pre-ack state (phase3-spec §8.3): the order row
 # is written before the network call and patched once the exchange answers.
 _ORDER_STATUSES = frozenset(
@@ -2612,9 +2620,19 @@ SAFE_MODE_TYPES = frozenset({"recoverable", "manual"})
 # §13.6 history vocabulary. ``safe_mode_entered`` records every entry,
 # ``safe_mode_escalated`` a recoverable→manual upgrade while already inside,
 # ``safe_mode_released`` every exit — CLI (§13.6 rule 2) and §13.4 auto-recovery
-# alike, distinguished by ``released_by``.
+# alike, distinguished by ``released_by``. ``safe_mode_reason_added`` records a
+# DISTINCT manual reason observed while manual safe mode is already latched
+# (decided 2026-07-17): the current-state trio keeps the FIRST reason, but the
+# operator's §13.6 triage surface must show every independent fact — a second
+# reason absorbed silently would hide, say, an invalid local fill behind an
+# already-reported non-bot order.
 SAFE_MODE_EVENT_TYPES = frozenset(
-    {"safe_mode_entered", "safe_mode_escalated", "safe_mode_released"}
+    {
+        "safe_mode_entered",
+        "safe_mode_escalated",
+        "safe_mode_released",
+        "safe_mode_reason_added",
+    }
 )
 
 
@@ -2631,15 +2649,18 @@ def insert_safe_mode_event(
 ) -> None:
     """Append one §13.6 safe-mode history row (state changes are auditable).
 
-    An entered/escalated event must name the type and reason it moved to; a
-    released event must name who released it (``"auto_recovery"`` or the CLI
-    operator string) — a release row with no author would defeat the §13.6
-    audit trail the CLI subcommand exists to leave.
+    An entered/escalated/reason-added event must name the type and reason it
+    moved to (or observed); a released event must name who released it
+    (``"auto_recovery"`` or the CLI operator string) — a release row with no
+    author would defeat the §13.6 audit trail the CLI subcommand exists to
+    leave.
     """
     check_enum(event_type, SAFE_MODE_EVENT_TYPES, name="event_type")
-    if event_type in ("safe_mode_entered", "safe_mode_escalated") and (
-        safe_mode_type is None or reason is None
-    ):
+    if event_type in (
+        "safe_mode_entered",
+        "safe_mode_escalated",
+        "safe_mode_reason_added",
+    ) and (safe_mode_type is None or reason is None):
         raise ValueError(f"{event_type} requires safe_mode_type and reason")
     if event_type == "safe_mode_released" and not released_by:
         raise ValueError("safe_mode_released requires released_by (§13.6 audit trail)")
@@ -2666,3 +2687,29 @@ def iter_safe_mode_events(conn: sqlite3.Connection, run_id: str) -> list[sqlite3
         "SELECT * FROM safe_mode_events WHERE run_id = ? ORDER BY event_id",
         (run_id,),
     ).fetchall()
+
+
+def has_safe_mode_reason_event(
+    conn: sqlite3.Connection, run_id: str, *, reason: str, since_iso: str
+) -> bool:
+    """Whether this episode already carries a history row for ``reason``.
+
+    The idempotence key for ``safe_mode_reason_added`` (decided 2026-07-17):
+    an episode is bounded below by the current state's ``entered_at``, and a
+    reason already named by ANY entered/escalated/reason-added row inside it
+    needs no second row — the same mismatch re-observed every pass must not
+    spam the history, exactly the discipline ``enter()`` keeps for the first
+    reason. The comparison is lexicographic on our own ISO-8601 UTC stamps
+    (single writer, single format), the same convention the store uses
+    elsewhere.
+    """
+    return (
+        conn.execute(
+            "SELECT 1 FROM safe_mode_events WHERE run_id = ? AND reason = ? "
+            "AND timestamp >= ? AND event_type IN "
+            "('safe_mode_entered', 'safe_mode_escalated', 'safe_mode_reason_added') "
+            "LIMIT 1",
+            (run_id, reason, since_iso),
+        ).fetchone()
+        is not None
+    )

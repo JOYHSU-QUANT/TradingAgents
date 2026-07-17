@@ -705,6 +705,26 @@ def _live_startup_recovery(
             )
             return 1
         if not is_restart:
+            # Same convention as the paper path's initial_positions guard: a
+            # run manages exactly one coin. An off-coin position CAN'T be
+            # adopted meaningfully — the reconciler classifies every non-run
+            # coin position as §13.5 "unknown exchange position" (manual safe
+            # mode, re-entered every pass), so --adopt-positions over it would
+            # create a run that is unreleasable from the first sweep (decided
+            # 2026-07-17). Named rejection before anything is written.
+            off_coin = sorted({p.coin for p in snapshot.positions} - {coin})
+            if off_coin:
+                print(
+                    f"error: the account holds position(s) in "
+                    f"{', '.join(map(repr, off_coin))} but this run trades only "
+                    f"{coin!r} — a live run manages exactly one coin, and the "
+                    "reconciler would flag any other coin's position as an "
+                    "unknown exchange position (manual safe mode) on every "
+                    "pass. Close or move those positions, or run them under a "
+                    "separate wallet.",
+                    file=sys.stderr,
+                )
+                return 1
             if snapshot.positions and not args.adopt_positions:
                 # Creating a live-money ledger over a non-flat account must be
                 # explicit: a typo'd --run-id plus --create would otherwise
@@ -778,6 +798,7 @@ def _live_startup_recovery(
                 backfiller=backfiller,
                 payload_dir=payload_dir,
             )
+            shutdown_problem: str | None = None
             try:
                 result = run_startup_recovery(
                     db=db,
@@ -816,7 +837,28 @@ def _live_startup_recovery(
                 # (The §12.2 "before shutdown" reconciliation is the verdict
                 # pass that just ran — this command places no orders after it.)
                 if kill_switch.armed:
-                    kill_switch.shutdown()
+                    # Guarded because a raise inside this ``finally`` would
+                    # DISCARD the computed verdict (nothing prints, the
+                    # documented 0/4/1 contract becomes a generic exit 2) —
+                    # shutdown()'s audit writes are fail-loud by design, so a
+                    # busy DB here is a realistic raise, not an edge case.
+                    try:
+                        kill_switch.shutdown()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.exception("§18.2 shutdown sweep raised")
+                        shutdown_problem = f"shutdown sweep raised: {exc}"
+                    else:
+                        if kill_switch.armed:
+                            # shutdown() disarms only on a clean sweep: still
+                            # armed means bot orders may rest and the
+                            # wallet-wide scheduleCancel WILL fire at the
+                            # deadline — taking out non-bot orders §25 says
+                            # never to touch. Loud, and never exit 0.
+                            shutdown_problem = (
+                                "shutdown sweep left the kill switch armed — bot "
+                                "orders may still rest and the wallet-wide "
+                                "scheduleCancel will fire at the deadline"
+                            )
 
             print(f"startup_reconciliation_passed: {'true' if result.passed else 'false'}")
             print(f"canceled_stale_orders: {len(result.canceled_stale)}")
@@ -828,7 +870,16 @@ def _live_startup_recovery(
             if result.sweep_failures:
                 for failure in result.sweep_failures:
                     print(f"error: stale-order sweep — {failure}", file=sys.stderr)
+            if shutdown_problem is not None:
+                print(f"error: §18.2 shutdown unclean — {shutdown_problem}", file=sys.stderr)
             if result.passed:
+                if shutdown_problem is not None:
+                    # Decided 2026-07-17: exit 0 means "all quiet" to a
+                    # supervisor — a passing verdict with an unclean shutdown
+                    # sweep is NOT that; it folds into the same
+                    # executed-but-unclean code 4 the verdict path uses (the
+                    # "§18.2 shutdown unclean" line above carries the detail).
+                    return 4
                 print(
                     "startup recovery passed — a live loop could start from this "
                     "state (the loop arrives with PR 5).",
@@ -845,7 +896,15 @@ def _live_startup_recovery(
             # as validate's 4/5 (decided 2026-07-16).
             return 4
         finally:
-            release_run_lock(db, run_id, pid=os.getpid(), now=datetime.now(timezone.utc))
+            # Guarded: the release opens its own transaction (BEGIN IMMEDIATE),
+            # which can raise on a busy store — and a raise in this ``finally``
+            # would clobber the 0/4/1 verdict the body just computed,
+            # surfacing as a generic exit 2. A lock row left behind is
+            # diagnosable and reapable; a clobbered verdict is not.
+            try:
+                release_run_lock(db, run_id, pid=os.getpid(), now=datetime.now(timezone.utc))
+            except Exception:  # noqa: BLE001
+                logger.exception("run-lock release failed (the verdict above stands)")
 
 
 # --------------------------------------------------------------------------
@@ -1404,7 +1463,12 @@ def _cmd_paper(argv: list[str]) -> int:
         try:
             return _run_locked()
         finally:
-            release_run_lock(db, run_id, pid=os.getpid(), now=clock.now())
+            # Same guard as the live path: a raise here would clobber
+            # _run_locked()'s exit code into a generic exit 2.
+            try:
+                release_run_lock(db, run_id, pid=os.getpid(), now=clock.now())
+            except Exception:  # noqa: BLE001
+                logger.exception("run-lock release failed (the exit code above stands)")
 
 
 def _paper_loop(

@@ -1396,8 +1396,24 @@ def _run_live_loop(
             now = clock.now()
             heartbeat_run_lock(db, run_id, pid=pid, now=now)
             try:
-                engine.tick()
-                driver.pump()
+                tick = engine.tick()
+                cycle = driver.pump()
+                # Per-tick operator visibility: the live loop is otherwise silent
+                # between the startup banner and whatever individual components
+                # warn about (the paper loop logs its cycle events likewise). Only
+                # a tick that DID something is logged, so an idle 10s cadence stays
+                # quiet; the decision-cycle tag is logged whenever it advances.
+                if tick.events or tick.slices_submitted or tick.fills_ingested:
+                    logger.info(
+                        "live tick %s: fills=%d slices=%d protection=%s events=%s",
+                        tick.status.value,
+                        tick.fills_ingested,
+                        tick.slices_submitted,
+                        None if tick.protection is None else tick.protection.value,
+                        list(tick.events),
+                    )
+                if cycle is not None:
+                    logger.info("live decision cycle: %s", cycle)
             except Exception:  # noqa: BLE001 — a tick error must not tear down the loop or strip SL/TP
                 # A single transient tick failure (DB lock, a reconciler read, an
                 # unexpected raise) must not propagate out to the caller's §18.2

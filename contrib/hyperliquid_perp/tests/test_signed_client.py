@@ -207,6 +207,53 @@ def test_place_ioc_limit_sends_ioc_with_cloid_and_parses_resting(fake_exchange):
     assert cloid.to_raw() == _CLOID  # the wire id is the cloid_hex (§8.3 rule 7)
 
 
+def test_place_trigger_order_rides_the_protective_gate_in_safe_mode(fake_exchange):
+    # An SL/TP is a protective order (§13.1): placeable while a safe mode has
+    # dropped state_reconciled and raised manual_safe_mode, unlike a risk-adding
+    # order — else the SL repair that heals a §12.3 SL-missing safe mode can never
+    # send and the position rides unprotected.
+    gate = _open_gate()
+    gate.state_reconciled = False
+    gate.manual_safe_mode = True
+    client = _client(gate=gate)
+    ack = client.place_trigger_order(
+        coin="BTC",
+        is_buy=False,
+        size=Decimal("0.01"),
+        limit_price=Decimal("99"),
+        trigger_price=Decimal("100"),
+        tpsl="sl",
+        cloid_hex=_CLOID,
+    )
+    assert ack.accepted  # not gate-rejected
+
+
+def test_place_ioc_limit_protective_flag_routes_to_the_protective_gate(fake_exchange):
+    # The §17.2 emergency close (protective=True) clears in safe mode; the same
+    # IOC without the flag is refused — the exemption is opt-in per order.
+    gate = _open_gate()
+    gate.state_reconciled = False
+    client = _client(gate=gate)
+    ack = client.place_ioc_limit(
+        coin="BTC",
+        is_buy=True,
+        size=Decimal("0.01"),
+        limit_price=Decimal("100"),
+        cloid_hex=_CLOID,
+        protective=True,
+    )
+    assert ack.accepted
+    with pytest.raises(LiveOrderGateRejected):
+        client.place_ioc_limit(
+            coin="BTC",
+            is_buy=True,
+            size=Decimal("0.01"),
+            limit_price=Decimal("100"),
+            cloid_hex=_CLOID,
+            protective=False,
+        )
+
+
 def test_place_ioc_limit_parses_filled_and_error_statuses(fake_exchange):
     client = _client()
     client._exchange.order_result = {

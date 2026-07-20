@@ -55,7 +55,7 @@ from ..persistence.cloid import assert_cloid_provenance, cloid_hex as derive_clo
 from ..persistence.db import Database
 from ..persistence.ids import live_order_attempt_id
 from ..persistence.models import Side
-from .order_gate import RealOrderGate
+from .order_gate import PROTECTIVE_ORDER_ROLES, RealOrderGate
 from .payloads import payload_column, write_raw_payload
 
 __all__ = [
@@ -350,8 +350,14 @@ class LiveOrderSubmitter:
         # §4.1 first, before any evidence is written: a gate-blocked order
         # must leave no phantom 'submitted' rows behind (the caller records
         # order_created=false / no_order_reason instead). The client's bound
-        # gate re-checks at the wire as a backstop.
-        self._gate.require_order(coin)
+        # gate re-checks at the wire as a backstop. A protection / de-risking
+        # role (the §17.2 emergency close) rides the protective gate so it stays
+        # sendable in safe mode; every risk-adding role uses the ordinary gate.
+        protective = order_role in PROTECTIVE_ORDER_ROLES
+        if protective:
+            self._gate.require_protective_order(coin)
+        else:
+            self._gate.require_order(coin)
 
         # The cloid and the provenance fields beside it describe the same order
         # twice; both reach the audit trail, and only this check makes them
@@ -497,6 +503,7 @@ class LiveOrderSubmitter:
                 limit_price=limit_price,
                 cloid_hex=hex_id,
                 reduce_only=reduce_only,
+                protective=protective,
             )
         except Exception as exc:
             # Records 'failed' WITHOUT letting a busy DB replace `exc` — the

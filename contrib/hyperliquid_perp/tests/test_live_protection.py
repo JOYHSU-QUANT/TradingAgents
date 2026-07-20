@@ -389,6 +389,38 @@ def test_cancel_refused_by_exchange_does_not_mark_row_canceled(env):
     assert row["status"] == "open"  # NOT canceled — the refusal was respected
 
 
+def test_degraded_protection_cleared_event_on_recovery(env):
+    """§17 audit: recovering from DEGRADED (TP failed) to PROTECTED emits a
+    degraded_protection_cleared event, so the trail shows protection RESTORED, not
+    only that degradation was entered."""
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    # First sync: SL placed, TP fails all 3 attempts -> DEGRADED.
+    client.place_script = ["ok", "error", "error", "error"]
+    mgr = _manager(db, client, gate)
+    first = mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert first is ProtectionOutcome.DEGRADED
+    assert gate.unresolved_protection_failure is True
+    # Second sync: SL is a no-op (unchanged), TP now succeeds -> PROTECTED, and the
+    # recovery emits degraded_protection_cleared.
+    client.place_script = ["ok"]
+    second = mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert second is ProtectionOutcome.PROTECTED
+    events = [e["event_type"] for e in repo.iter_protection_order_events(db.conn, "r")]
+    assert "degraded_protection_cleared" in events
+
+
 def test_kill_switch_refreshed_across_repair_delays(env):
     """§18.2: each blocking repair delay refreshes the dead man's switch, so a
     repair episode cannot stretch the refresh cadence toward max_tick_gap."""

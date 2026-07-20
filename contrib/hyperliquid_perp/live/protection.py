@@ -137,6 +137,10 @@ class ProtectionManager:
         ``unresolved_protection_failure`` line from the result.
         """
         now = self._clock.now()
+        # Whether this sync began already carrying an unresolved protection failure
+        # — so a recovery to PROTECTED can emit degraded_protection_cleared (the §17
+        # audit trail should show protection RESTORED, not only degradation entered).
+        was_failed = self._gate.unresolved_protection_failure
         if position.is_flat:
             self._clear(now)
             self._gate.unresolved_protection_failure = False
@@ -199,6 +203,12 @@ class ProtectionManager:
                     now=now,
                 )
                 return ProtectionOutcome.DEGRADED
+            if was_failed:
+                self._record_event(
+                    "degraded_protection_cleared",
+                    detail="protection restored (SL up, TP suspended for the active plan)",
+                    now=now,
+                )
             self._gate.unresolved_protection_failure = False
             return ProtectionOutcome.PROTECTED
 
@@ -220,6 +230,12 @@ class ProtectionManager:
             )
             return ProtectionOutcome.DEGRADED
 
+        if was_failed:
+            self._record_event(
+                "degraded_protection_cleared",
+                detail="protection restored (SL and TP re-established)",
+                now=now,
+            )
         self._gate.unresolved_protection_failure = False
         return ProtectionOutcome.PROTECTED
 
@@ -234,6 +250,15 @@ class ProtectionManager:
         moved with ``modify``; otherwise a fresh order is placed. Retries up to
         ``sl_repair_max_attempts`` on failure, ``sl_repair_retry_delay_seconds``
         apart. Returns True once the order is acknowledged on the book.
+
+        v1 LIMITATION (deferred to the PR 6 restart recovery, alongside the
+        ``_emergency_close_pending`` persistence): unlike ``LiveOrderSubmitter``
+        this does NOT write intent BEFORE the wire call — a crash between a
+        successful ack and ``_persist_placed`` leaves a live, resting SL/TP with no
+        ``orders`` / ``cloid_registry`` row, which reconciliation then reads as
+        §12.3 SL-missing. The §12.3 SL-missing recoverable safe mode is the interim
+        net (and, with the protective-gate fix, the repair it triggers can still
+        send); intent-first protection writes land with restart recovery.
         """
         with localcontext(DECIMAL_CONTEXT):
             size = floor_to_step(abs(position.size), self._qty_step)

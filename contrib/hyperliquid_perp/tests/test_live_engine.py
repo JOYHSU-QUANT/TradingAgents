@@ -506,3 +506,72 @@ def test_flip_open_leg_uses_shared_budget_and_linkage(tmp_path):
     assert plan["flip_leg"] == "open"
     assert plan["flip_plan_id"] == "flip1"
     assert plan["planned_slices"] <= 2  # capped by open_budget, not MAX_SLICES (would be 4)
+
+
+def test_flip_open_leg_retries_on_transient_decline_until_it_registers(tmp_path):
+    """§9.1 rule 5 (retry): a transient no-order reason at the settle tick must NOT
+    abandon the flip's open leg — hold it and retry within the envelope, so a single
+    market-data blip no longer silently drops the second leg."""
+    from contrib.hyperliquid_perp.live.engine import _PendingFlip
+
+    db, clock, engine, gate, sub = _build(tmp_path)  # run flat
+    engine._leg = None
+    engine._flip = _PendingFlip(
+        flip_plan_id="flip1",
+        parsed=_decision("long", 5),
+        output_id="o",
+        deadline=_T0.replace(hour=13),  # far future
+        open_budget=2,
+    )
+    gate.active_slice_plan = True
+    # Tick 1: no market data -> start_plan returns pending_market_data -> hold + retry.
+    _script(engine, [SnapshotOutcome.TIMEOUT])
+    engine._maybe_advance_flip(None, clock.now(), [])
+    assert engine._flip is not None  # held, not abandoned
+    assert engine._leg is None
+    assert gate.active_slice_plan is True  # kept raised so no new target slips in
+    # Tick 2: market data returns -> the open leg registers.
+    _script(engine, [_snap()])
+    engine._maybe_advance_flip(None, clock.now(), [])
+    assert engine._flip is None
+    assert engine._leg is not None and engine._leg.flip_leg == "open"
+
+
+def test_flip_open_leg_abandoned_at_deadline_when_flat(tmp_path):
+    """If the open leg still cannot be gated at the flip deadline, the pending flip
+    is abandoned rather than held forever."""
+    from contrib.hyperliquid_perp.live.engine import _PendingFlip
+
+    db, clock, engine, gate, sub = _build(tmp_path)  # run flat
+    engine._leg = None
+    engine._flip = _PendingFlip(
+        flip_plan_id="flip1",
+        parsed=_decision("long", 5),
+        output_id="o",
+        deadline=_T0,  # already at the deadline
+        open_budget=2,
+    )
+    gate.active_slice_plan = True
+    clock.advance(1)  # now > deadline
+    engine._maybe_advance_flip(None, clock.now(), [])
+    assert engine._flip is None
+    assert gate.active_slice_plan is False
+
+
+def test_emergency_close_records_triggered_event(tmp_path):
+    """§17 audit: the §17.2 emergency close leaves an emergency_close_triggered
+    protection event (recorded whether or not the submit landed)."""
+    prot = _FakeProtection(outcome=ProtectionOutcome.NEEDS_EMERGENCY_CLOSE)
+    db, clock, engine, gate, sub = _build(tmp_path, protection=prot)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.05"), entry_price=D(50000)),
+            updated_at=_T0,
+        )
+    engine._was_flat = False
+    _script(engine, [_snap()])
+    engine.tick()
+    events = [e["event_type"] for e in repo.iter_protection_order_events(db.conn, "r")]
+    assert "emergency_close_triggered" in events

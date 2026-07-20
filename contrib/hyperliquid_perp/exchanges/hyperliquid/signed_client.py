@@ -341,6 +341,7 @@ class HyperliquidSignedClient:
         limit_price: Decimal,
         cloid_hex: str,
         reduce_only: bool = False,
+        protective: bool = False,
     ) -> OrderAck:
         """Submit one IOC limit order carrying its cloid (§7 ``order``, §9).
 
@@ -358,8 +359,17 @@ class HyperliquidSignedClient:
         top-level ``err`` envelope (action-level: signature/payload/nonce)
         raises ``ExchangeRequestError`` — the order may never have reached
         the matching engine, so it must not consume the cloid as 'rejected'.
+
+        ``protective`` routes the wire-side gate backstop through
+        :meth:`~..order_gate.RealOrderGate.check_protective_order` for a §17.2
+        emergency close (a de-risking IOC that must clear in safe mode); the
+        caller (:class:`~..live.orders.LiveOrderSubmitter`) sets it from the
+        order role so this backstop and its own pre-check agree.
         """
-        self._gate.require_order(coin)
+        if protective:
+            self._gate.require_protective_order(coin)
+        else:
+            self._gate.require_order(coin)
         response = call_sdk(
             self._exchange.order,
             coin,
@@ -402,7 +412,9 @@ class HyperliquidSignedClient:
         """
         if tpsl not in ("sl", "tp"):
             raise ValueError(f"tpsl must be 'sl' or 'tp' (§17 trigger order), got {tpsl!r}")
-        self._gate.require_order(coin)
+        # A reduce-only SL/TP is always protective (§13.1): it must be placeable
+        # while a safe mode is active, so it rides the protective gate.
+        self._gate.require_protective_order(coin)
         response = call_sdk(
             self._exchange.order,
             coin,
@@ -441,7 +453,8 @@ class HyperliquidSignedClient:
         """
         if tpsl not in ("sl", "tp"):
             raise ValueError(f"tpsl must be 'sl' or 'tp' (§17 trigger order), got {tpsl!r}")
-        self._gate.require_order(coin)
+        # Moving a resting SL/TP is protective (§13.1/§17.4): sendable in safe mode.
+        self._gate.require_protective_order(coin)
         response = call_sdk(
             self._exchange.modify_order,
             int(target),

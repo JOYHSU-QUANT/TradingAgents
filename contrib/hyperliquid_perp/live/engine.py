@@ -733,13 +733,36 @@ class LiveExecutionEngine:
                 events.append(f"flip_abandoned:{flip_id}")
             return
         flip = self._flip
-        self._flip = None
+        if now >= flip.deadline:
+            # The open leg could not be gated within the flip's envelope (a
+            # transient decline every tick until here, or a persistent one) —
+            # abandon it; the next cycle re-gates from current state.
+            self._flip = None
+            self._gate.active_slice_plan = False
+            logger.warning(
+                "flip %s abandoned at deadline — the open leg could not be gated "
+                "in time; next cycle re-gates from current state",
+                flip.flip_plan_id,
+            )
+            events.append(f"flip_abandoned:{flip.flip_plan_id}")
+            return
+        # Re-gate the open leg (fresh state, never re-ask the AI) with the flip's
+        # shared budget/deadline and audit linkage (§9.1 rule 5). active_slice_plan
+        # must be down for check_new_target to admit it; _register_leg raises it
+        # again on success.
         self._gate.active_slice_plan = False
-        # Re-run the gate for the open leg (fresh state, never re-ask the AI), but
-        # build it with the flip's shared budget/deadline and audit linkage (§9.1
-        # rule 5) — not as an independent full-grid entry.
         reg = self.start_plan(flip.parsed, output_id=flip.output_id, flip_open=flip)
-        events.append(f"flip_open:{flip.flip_plan_id}:{reg.reason or reg.plan_id}")
+        if self._leg is not None:
+            # The open leg registered — the flip is complete.
+            self._flip = None
+            events.append(f"flip_open:{flip.flip_plan_id}:{reg.plan_id}")
+        else:
+            # A transient decline (pending_market_data, a momentary cap / gate
+            # line): HOLD the pending flip and retry next tick within the envelope
+            # rather than abandoning the second leg on a single blip. Keep
+            # active_slice_plan raised so a fresh AI target cannot slip in mid-flip.
+            self._gate.active_slice_plan = True
+            events.append(f"flip_open_pending:{flip.flip_plan_id}:{reg.reason}")
 
     # -- emergency close (§9.4 aggressive reduce-only IOC) --------------------
 
@@ -793,6 +816,19 @@ class LiveExecutionEngine:
             )
         except Exception:  # noqa: BLE001 — recorded by the submitter; reconciliation catches a miss
             logger.exception("emergency close submit raised for %s", self._run_id)
+        # §17 audit: the emergency close was triggered (recorded whether or not the
+        # submit landed — the submitter tracks the order itself; this row is the
+        # protection-lifecycle event that a §17.2 close happened at all).
+        with self._db.transaction() as conn:
+            repo.insert_protection_order_event(
+                conn,
+                run_id=self._run_id,
+                event_type="emergency_close_triggered",
+                symbol=self._coin,
+                order_id=order_id,
+                detail=f"§17.2 aggressive reduce-only IOC size={size} limit={limit_price}",
+                timestamp=now,
+            )
         # §13.5: escalate to MANUAL safe mode once this close reaches flat (handled
         # in _detect_settlement, post-flat, so the gate never blocks the close).
         # Set even if the submit raised — the submitter recorded it and the close

@@ -209,6 +209,11 @@ class LiveExecutionEngine:
         # Set when a §17.2 emergency close is fired, cleared once the position
         # reaches flat — at which point the run escalates to MANUAL safe mode
         # (§13.5). Deferred to post-flat so the gate never blocks the close itself.
+        # v1 LIMITATION (deferred to the PR 6 live-loop restart recovery): this
+        # flag is in-memory only. A process restart in the narrow submit→fill
+        # window drops the manual escalation for that episode; the reconciler's
+        # §12.3 SL-missing check still enters RECOVERABLE safe mode as a partial
+        # net. Persisting it (a scheduler_state column) lands with restart recovery.
         self._emergency_close_pending = False
         self._order_seq = repo.max_engine_seq(db.conn, run_id)
         # A restart abandons any dangling in-flight plan: without its in-memory

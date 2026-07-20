@@ -32,11 +32,14 @@ __all__ = [
     "EXCHANGE_KNOWN_ATTEMPT_STATUSES",
     "KILL_SWITCH_EVENT_TYPES",
     "LIVE_LIQUIDITY_ROLES",
+    "PROTECTION_ORDER_EVENT_TYPES",
     "RECONCILIATION_CASE_TYPES",
     "RECONCILIATION_TRIGGERS",
     "ROLE_TO_ORDER_TYPE",
     "SAFE_MODE_EVENT_TYPES",
     "SAFE_MODE_TYPES",
+    "active_protection_order",
+    "count_orders_by_role",
     "find_in_progress_attempt",
     "get_accounting_adjustment_event",
     "get_all_current_positions",
@@ -77,6 +80,7 @@ __all__ = [
     "insert_live_order_attempt",
     "insert_order",
     "insert_position_snapshot",
+    "insert_protection_order_event",
     "insert_run",
     "insert_run_seed_position",
     "insert_safe_mode_event",
@@ -89,6 +93,7 @@ __all__ = [
     "iter_live_fills",
     "iter_live_order_attempts",
     "iter_orders",
+    "iter_protection_order_events",
     "iter_safe_mode_events",
     "iter_unresolved_fill_sightings",
     "last_live_fill_time",
@@ -1505,6 +1510,43 @@ def get_order(conn: sqlite3.Connection, order_id: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,)).fetchone()
 
 
+def active_protection_order(
+    conn: sqlite3.Connection, run_id: str, symbol: str, order_role: str
+) -> sqlite3.Row | None:
+    """The resting (non-terminal) SL or TP order for a position, if any (§17).
+
+    The §17 protection manager owns at most one live order per protection role
+    at a time (one SL, one TP), so the modify-before-cancel path needs to find
+    the current one to update or cancel it. Non-terminal = still on the book
+    (``submitted`` before the ack, ``open`` / ``partially_filled`` after);
+    a filled / canceled / rejected protection order is history. Returns the
+    most recent match so a just-replaced order never shadows its replacement.
+    """
+    return conn.execute(
+        "SELECT * FROM orders WHERE run_id = ? AND symbol = ? AND order_role = ? "
+        "AND status IN ('submitted', 'open', 'partially_filled') "
+        "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+        (run_id, symbol, order_role),
+    ).fetchone()
+
+
+def count_orders_by_role(conn: sqlite3.Connection, run_id: str, symbol: str, order_role: str) -> int:
+    """How many orders of ``order_role`` a run has ever written for ``symbol``.
+
+    The §17 protection manager derives each new SL/TP order's cloid sequence
+    from this monotonic count, so successive protection orders get distinct
+    cloids (a modify is a new logical identity, §17.4) while a retry — which
+    writes no row until it succeeds — reuses the same count and therefore the
+    same cloid (§8.3 idempotent resend).
+    """
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) FROM orders WHERE run_id = ? AND symbol = ? AND order_role = ?",
+            (run_id, symbol, order_role),
+        ).fetchone()[0]
+    )
+
+
 def get_order_by_cloid_hex(conn: sqlite3.Connection, cloid_hex: str) -> sqlite3.Row | None:
     """The local order row an exchange-echoed cloid belongs to (§19.3 back-link).
 
@@ -1817,6 +1859,10 @@ def upsert_scheduler_state(
     safe_mode_type: str | None | _Unset = _UNSET,
     safe_mode_reason: str | None | _Unset = _UNSET,
     safe_mode_entered_at: datetime | None | _Unset = _UNSET,
+    day_start_equity: Decimal | None | _Unset = _UNSET,
+    day_start_date: str | None | _Unset = _UNSET,
+    consecutive_loss_count: int | None | _Unset = _UNSET,
+    last_settlement_wallet_balance: Decimal | None | _Unset = _UNSET,
     updated_at: datetime | None = None,
 ) -> None:
     """Patch-style upsert: only the columns actually supplied change.
@@ -1849,6 +1895,17 @@ def upsert_scheduler_state(
             )
         if safe_mode_type is not None and not isinstance(safe_mode_type, _Unset):
             check_enum(safe_mode_type, SAFE_MODE_TYPES, name="safe_mode_type")
+    # §10.3 daily-loss baseline: the equity and the UTC date it was captured on
+    # are one fact (the day's starting point). Writing one without the other
+    # would leave a baseline that either has no equity or no day to compare
+    # against — same one-unit discipline as the safe-mode trio above.
+    day_pair = (day_start_equity, day_start_date)
+    provided_pair = [v for v in day_pair if not isinstance(v, _Unset)]
+    if provided_pair and len(provided_pair) != 2:
+        raise ValueError(
+            "day_start_equity / day_start_date must be supplied together (the "
+            "§10.3 daily-loss baseline is one fact)"
+        )
     if not isinstance(last_export_status, _Unset) and last_export_status is not None:
         check_enum(last_export_status, _EXPORT_STATUSES, name="last_export_status")
     if not isinstance(last_replay_status, _Unset) and last_replay_status is not None:
@@ -1896,6 +1953,14 @@ def upsert_scheduler_state(
         provided["safe_mode_reason"] = _encode(safe_mode_reason)
     if not isinstance(safe_mode_entered_at, _Unset):
         provided["safe_mode_entered_at"] = _encode(safe_mode_entered_at)
+    if not isinstance(day_start_equity, _Unset):
+        provided["day_start_equity"] = _encode(day_start_equity)
+    if not isinstance(day_start_date, _Unset):
+        provided["day_start_date"] = _encode(day_start_date)
+    if not isinstance(consecutive_loss_count, _Unset):
+        provided["consecutive_loss_count"] = _encode(consecutive_loss_count)
+    if not isinstance(last_settlement_wallet_balance, _Unset):
+        provided["last_settlement_wallet_balance"] = _encode(last_settlement_wallet_balance)
     provided["updated_at"] = _iso_utc(updated_at or datetime.now(timezone.utc))
 
     # Column names come from the fixed keyword list above, never caller data.
@@ -2314,6 +2379,70 @@ def insert_kill_switch_event(
 def iter_kill_switch_events(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT * FROM kill_switch_events WHERE run_id = ? ORDER BY event_id", (run_id,)
+    ).fetchall()
+
+
+# --------------------------------------------------------------------------
+# protection_order_events (phase3-spec §17 / §16.5) — PR 5 SL/TP lifecycle
+# --------------------------------------------------------------------------
+
+# §17 protection lifecycle audit vocabulary. Placement / in-place modify
+# (§17.4 modify-before-cancel) / repair failures / the two escalations
+# (§17.2 SL repair exhausted → emergency close; §17.3 TP failure → degraded
+# protection) / clearing a zeroed position's residual (§17.1 rule 4).
+PROTECTION_ORDER_EVENT_TYPES = frozenset(
+    {
+        "stop_loss_placed",
+        "stop_loss_modified",
+        "stop_loss_repair_failed",
+        "stop_loss_repair_exhausted",
+        "take_profit_placed",
+        "take_profit_modified",
+        "take_profit_repair_failed",
+        "protection_cleared",
+        "emergency_close_triggered",
+        "degraded_protection_entered",
+        "degraded_protection_cleared",
+    }
+)
+
+
+def insert_protection_order_event(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    event_type: str,
+    symbol: str,
+    order_id: str | None = None,
+    cloid_hex: str | None = None,
+    detail: str | None = None,
+    timestamp: datetime | None = None,
+) -> None:
+    """Append one §17 SL/TP protection-lifecycle event (audit trail).
+
+    ``order_id`` / ``cloid_hex`` name the protection order the event is about
+    when there is one (a placement / modify / repair failure); the escalation
+    and clear events may carry only the reason in ``detail``.
+    """
+    check_enum(event_type, PROTECTION_ORDER_EVENT_TYPES, name="event_type")
+    _insert(
+        conn,
+        "protection_order_events",
+        {
+            "run_id": run_id,
+            "timestamp": timestamp or datetime.now(timezone.utc),
+            "event_type": event_type,
+            "symbol": symbol,
+            "order_id": order_id,
+            "cloid_hex": cloid_hex,
+            "detail": detail,
+        },
+    )
+
+
+def iter_protection_order_events(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM protection_order_events WHERE run_id = ? ORDER BY event_id", (run_id,)
     ).fetchall()
 
 

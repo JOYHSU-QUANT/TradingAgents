@@ -584,19 +584,30 @@ def _cmd_live(argv: list[str]) -> int:
             "fresh ledger."
         ),
     )
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        help=(
+            "After the §19.1 startup recovery passes, run the PR 5 live trading "
+            "loop (30s tick: WS drain → kill-switch refresh → reconciliation → "
+            "SL/TP protection → due slices, with the 4h AI decision cycle off "
+            "the tick thread). Ctrl-C / SIGTERM stops it and runs the §18.2 "
+            "shutdown sweep. Without it, --run-id is the one-shot recovery check."
+        ),
+    )
     args = parser.parse_args(argv)
 
-    if args.run_id is None and (args.create or args.adopt_positions):
+    if args.run_id is None and (args.create or args.adopt_positions or args.loop):
         # Named rejection, not silent-ignore: without --run-id this command is
-        # config-check mode — it creates and seeds nothing — so --create /
-        # --adopt-positions have no effect. An operator who passed them almost
-        # certainly meant the §19.1 recovery and would otherwise read the
-        # "gates OK" exit 0 as "run created". Same discipline as the resume and
-        # safe-mode flag guards.
+        # config-check mode — it creates and seeds nothing and runs no loop — so
+        # --create / --adopt-positions / --loop have no effect. An operator who
+        # passed them almost certainly meant the §19.1 recovery (and, for --loop,
+        # the live trading loop) and would otherwise read the "gates OK" exit 0
+        # as "run started". Same discipline as the resume and safe-mode guards.
         print(
-            "error: --create / --adopt-positions require --run-id — without it this "
-            "command only checks the config gates and creates nothing. Pass --run-id "
-            "to run the §19.1 startup recovery.",
+            "error: --create / --adopt-positions / --loop require --run-id — without "
+            "it this command only checks the config gates. Pass --run-id to run the "
+            "§19.1 startup recovery (add --loop to continue into the live trading loop).",
             file=sys.stderr,
         )
         return 1
@@ -1108,6 +1119,26 @@ def _live_startup_recovery(
                     safe_mode=safe_mode,
                     payload_dir=payload_dir,
                 )
+                # PR 5: with --loop, a passing recovery hands off to the live
+                # trading loop; it returns on Ctrl-C / SIGTERM, and the §18.2
+                # shutdown sweep in the ``finally`` below then disarms the switch.
+                if args.loop and result.passed:
+                    _run_live_loop(
+                        db=db,
+                        run_id=run_id,
+                        coin=coin,
+                        config=config,
+                        live_cfg=live_cfg,
+                        client=client,
+                        signed=signed,
+                        gate=gate,
+                        kill_switch=kill_switch,
+                        safe_mode=safe_mode,
+                        reconciler=reconciler,
+                        processor=processor,
+                        payload_dir=payload_dir,
+                        fetch_clearinghouse=fetch_clearinghouse,
+                    )
             except Exception as exc:  # noqa: BLE001 — arming is the one hard-error step
                 # Full traceback to the log (this is the signed live path);
                 # the message alone would leave a failure here undiagnosable.
@@ -1232,6 +1263,144 @@ def _live_startup_recovery(
                 release_run_lock(db, run_id, pid=os.getpid(), now=datetime.now(timezone.utc))
             except Exception:  # noqa: BLE001
                 logger.exception("run-lock release failed (the verdict above stands)")
+
+
+# The live loop's tick period. Kept well inside the kill-switch tick budget
+# (max_tick_gap 30s) so the §18.2 refresh never lands late even when a tick does
+# real work (reconciliation network reads, an SL repair). engine.tick() refreshes
+# the switch every call; the AI decision runs off-thread and never blocks it.
+_LIVE_TICK_SECONDS = 10.0
+
+
+def _run_live_loop(
+    *,
+    db,
+    run_id: str,
+    coin: str,
+    config: dict,
+    live_cfg,
+    client,
+    signed,
+    gate,
+    kill_switch,
+    safe_mode,
+    reconciler,
+    processor,
+    payload_dir: Path,
+    fetch_clearinghouse,
+) -> None:
+    """The PR 5 live trading loop (§9/§11.4): tick the engine + pump the 4h cycle.
+
+    Builds the execution engine, §17 protection manager, §10 loss guards and the
+    off-thread decision worker/driver over the recovery components, then loops
+    every ~10s (well inside the kill-switch tick budget). Returns on Ctrl-C /
+    SIGTERM (SIGTERM is already mapped to KeyboardInterrupt by the caller); the
+    caller's §18.2 shutdown sweep disarms the switch afterwards.
+
+    v1 scope note: this wires a :class:`LiveWsStream` WITHOUT a live socket
+    connection — fills are ingested by the reconciler's REST backfill at the
+    §12.2 timings (heartbeat / post-cycle) rather than in real time. The live WS
+    connection wiring lands in a later pass (§11 / PR 6).
+    """
+    from .exchanges.hyperliquid.market_data import HyperliquidMarketData
+    from .live.decision import LiveDecisionDriver, LiveDecisionWorker
+    from .live.engine import LiveExecutionEngine
+    from .live.loss_guards import LossGuards
+    from .live.orders import LiveOrderSubmitter
+    from .live.protection import ProtectionManager
+    from .live.ws_stream import LiveWsStream
+    from .main import _load_risk_decision
+    from .paper.clock import WallClock
+    from .paper.engine import AssetSpec
+    from .paper.market_feed import PortSnapshotProvider
+    from .paper.run_lock import heartbeat_run_lock
+    from .paper.stops import StopConfig
+    from .persistence import repository as repo
+
+    cfgs = _load_risk_decision(config)
+    if cfgs is None:
+        return  # bad risk/decision config — already reported; never loop on it
+    risk_cfg, decision_cfg = cfgs
+    clock = WallClock()
+    market = HyperliquidMarketData(client)
+    sz_decimals, schedule = market.get_asset_meta(coin)
+    asset = AssetSpec(coin=coin, sz_decimals=sz_decimals, margin_schedule=schedule)
+    provider = PortSnapshotProvider(market, clock)
+    submitter = LiveOrderSubmitter(
+        client=signed, gate=gate, db=db, run_id=run_id, payload_dir=payload_dir, clock=clock
+    )
+    protection = ProtectionManager(
+        db=db,
+        run_id=run_id,
+        coin=coin,
+        client=signed,
+        gate=gate,
+        tick_size=asset.tick_size,
+        qty_step=asset.qty_step,
+        stop_config=StopConfig(),
+        max_slippage_pct=live_cfg.execution.max_slippage_pct,
+        protection_config=live_cfg.protection,
+        owner_prefix=live_cfg.order_owner_prefix,
+        clock=clock,
+    )
+    loss_guards = LossGuards(db=db, run_id=run_id, safety=live_cfg.safety, safe_mode=safe_mode)
+    ledger = repo.get_current_account_state(db.conn, run_id)
+    if ledger is not None:
+        loss_guards.ensure_settlement_anchor(ledger.wallet_balance, now=clock.now())
+    ws_stream = LiveWsStream()
+    engine = LiveExecutionEngine(
+        db=db,
+        run_id=run_id,
+        asset=asset,
+        live_config=live_cfg,
+        risk_config=risk_cfg,
+        decision_config=decision_cfg,
+        provider=provider,
+        submitter=submitter,
+        gate=gate,
+        kill_switch=kill_switch,
+        safe_mode=safe_mode,
+        reconciler=reconciler,
+        protection=protection,
+        loss_guards=loss_guards,
+        fill_processor=processor,
+        ws_stream=ws_stream,
+        fetch_open_orders=signed.open_orders,
+        fetch_clearinghouse=fetch_clearinghouse,
+        clock=clock,
+    )
+    decision_provider = _EngineDecisionProvider(
+        config, risk_cfg=risk_cfg, decision_cfg=decision_cfg, payload_dir=payload_dir
+    )
+    worker = LiveDecisionWorker(provider=decision_provider)
+    driver = LiveDecisionDriver(
+        db=db,
+        run_id=run_id,
+        coin=coin,
+        asset=asset,
+        risk_config=risk_cfg,
+        engine=engine,
+        worker=worker,
+        provider=decision_provider,
+        clock=clock,
+    )
+    pid = os.getpid()
+    print(
+        f"live loop started for {run_id!r} ({live_cfg.mode.value}) — Ctrl-C to stop",
+        file=sys.stderr,
+    )
+    try:
+        while True:
+            now = clock.now()
+            heartbeat_run_lock(db, run_id, pid=pid, now=now)
+            engine.tick()
+            driver.pump()
+            time.sleep(_LIVE_TICK_SECONDS)
+    except KeyboardInterrupt:
+        print("\nlive loop stopping — running the §18.2 shutdown sweep...", file=sys.stderr)
+        # Let the off-thread AI decision settle so no worker thread writes to the
+        # store after teardown begins (§11.4 single writer).
+        worker.join(timeout=5.0)
 
 
 # --------------------------------------------------------------------------

@@ -229,7 +229,7 @@ AI input
 | `stop_loss_price` | 目前 active SL；無則留空 |
 | `take_profit_price` | 目前 active TP；無則留空 |
 | `active_twap` | 是否有 active TWAP / flip plan |
-| `remaining_twap_qty` | Active plan 剩餘數量；無 active plan 為空 |
+| `remaining_twap_qty` | Active plan 剩餘數量；無 active plan 為空。**live v1 恆為空**——live fill 尚未歸屬到 plan（fill→plan 歸屬隨 Phase 3 PR 6 落地），與其回報凍結的原始計畫量誤導 AI，寧可誠實回報 unknown |
 | `last_fill_time` | 最後一筆 paper fill 時間；無 fill 為空 |
 | `max_target_margin_pct` | 當時 RiskGate 上限；預設 `60` |
 | `input_payload_path` | 完整 AI input JSON 檔路徑 |

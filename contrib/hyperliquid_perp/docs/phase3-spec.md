@@ -202,10 +202,10 @@ startup reconciliation passed                        # wire-scoped
 kill switch active                                   # wire-scoped
 symbol is allowed                                    # wire-scoped
 risk gate approved target                            # DECISION-scoped
-current account / position state is reconciled       # wire-scoped
+current account / position state is reconciled       # SAFE-MODE-scoped
 no unresolved protection failure                     # DECISION-scoped
 no active slice plan                                 # DECISION-scoped
-no manual_safe_mode                                  # wire-scoped
+no manual_safe_mode                                  # SAFE-MODE-scoped
 ```
 
 **兩種粒度（v7 修訂，2026-07-13）**：標記 DECISION-scoped 的三條，語意是「這個決策
@@ -219,14 +219,28 @@ cycle 執行約一小時。若每張單都查這三條，引擎一旦設下 `act
 核准無法涵蓋一小時的切片）與 `unresolved_protection_failure`（要修復它的 SL repair
 本身必須送得出去）。
 
-因此 gate 提供兩個入口，而條件表只有一份（`RealOrderGate._first_failed`，依上表順序
-求值，回報第一條失敗的條件，兩個入口不會漂移）：
+**SAFE-MODE-scoped 兩條（PR 5 review-loop 修訂，2026-07-20）**：`state_reconciled`
+與 `manual_safe_mode` 對「加風險的單」是 wire 級的硬條件，但**保護／去風險單**
+（`stop_loss` / `take_profit` / `emergency_close`，即 `PROTECTIVE_ORDER_ROLES`）
+必須豁免：任何 safe mode 進場都會清掉 `state_reconciled`（§13），而 §13.1 明定
+safe mode 期間「持續保護」、§17.2 的急平單正是 safe mode 下最需要送出的那一張。
+若不豁免，§12.3 `position_sl_missing` 進 recoverable safe mode 後，修復它的 SL
+place/modify 與急平單全被 gate 擋死，而能重升 `state_reconciled` 的乾淨
+reconciliation pass 又要求場上已有有效 SL——死鎖，倉位裸奔到人工介入。豁免僅限這
+兩條：基礎 wire 前置條件與 kill switch（dead man's switch）對保護單**仍然生效**。
+
+因此 gate 提供三個入口，而條件表只有一份（`RealOrderGate._first_failed`，依上表順序
+求值，回報第一條失敗的條件，入口之間不會漂移）：
 
 - `check_new_target(symbol)` / `require_new_target` — **完整** §4.1 列表。PR 5 引擎在
   每個 decision cycle 建立 plan **之前**問一次。
-- `check_order(symbol)` / `require_order` — 上表 wire-scoped 子集。**每一張**真正送上
-  交易所的單都必須通過（`LiveOrderSubmitter.submit_ioc_limit` 送出前查一次，signed
-  client 綁定的 gate 在 wire 再查一次當 backstop）。
+- `check_order(symbol)` / `require_order` — 上表扣除 DECISION-scoped 三條。每一張
+  **加風險**的單（entry / rebalance 切片）都必須通過（`LiveOrderSubmitter.
+  submit_ioc_limit` 送出前查一次，signed client 綁定的 gate 在 wire 再查一次當
+  backstop）。
+- `check_protective_order(symbol)` / `require_protective_order` — 再扣除
+  SAFE-MODE-scoped 兩條。保護／去風險單（SL / TP trigger、§17.2 急平 IOC）走這個
+  入口；submitter 依 `order_role` 自動選路，trigger-order 方法固定走此入口。
 
 若任一條件不成立，系統必須拒絕建立 live order，並記錄：
 

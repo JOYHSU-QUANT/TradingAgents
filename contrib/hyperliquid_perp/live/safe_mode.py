@@ -46,8 +46,10 @@ from .order_gate import RealOrderGate
 __all__ = [
     "REASON_CONSECUTIVE_LOSS",
     "REASON_DAILY_LOSS",
+    "REASON_EMERGENCY_CLOSE",
     "REASON_INVALID_LOCAL_FILL",
     "REASON_KILL_SWITCH_REFRESH_FAILED",
+    "REASON_LIVE_TICK_ERROR",
     "REASON_NON_BOT_OWNED_ORDER",
     "REASON_RECONCILIATION_MISMATCH",
     "REASON_REPEATED_MISMATCH",
@@ -82,6 +84,16 @@ REASON_STALE_ORDER_SWEEP_FAILED = "stale_order_sweep_failed"
 # strategy problem — a human must confirm before trading resumes, §13.6).
 REASON_DAILY_LOSS = "daily_loss"  # §10.3: recoverable
 REASON_CONSECUTIVE_LOSS = "consecutive_loss"  # §10.4: manual
+# §13.5 SL-repair-exhausted → §17.2 emergency close: MANUAL. Repeated SL failure
+# forcing a de-risking close signals a real problem a human must confirm before
+# trading resumes. Entered only AFTER the close reaches flat (the position is
+# already de-risked), so the gate's manual-safe-mode block never blocks the
+# emergency-close order itself.
+REASON_EMERGENCY_CLOSE = "emergency_close"  # §13.5 / §17.2: manual
+# §13.4 live tick raised an unexpected error: RECOVERABLE. The loop keeps ticking
+# and re-attempts protection; a clean reconciliation pass auto-releases. Keeps a
+# single transient tick failure from tearing down the run and stripping SL/TP.
+REASON_LIVE_TICK_ERROR = "live_tick_error"  # §13.4: recoverable
 
 # §13.5 "repeated reconciliation mismatch": this many CONSECUTIVE unclean
 # passes escalate a recoverable safe mode to manual. In-memory (a restart

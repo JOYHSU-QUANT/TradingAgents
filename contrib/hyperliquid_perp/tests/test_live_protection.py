@@ -31,8 +31,14 @@ class _FakeClient:
         self.modified: list[dict] = []
         self.canceled: list[str] = []
         self._oid = 1000
-        self.place_script: list[str] = []  # "ok" | "error" | "raise", consumed per call
+        self.place_script: list[str] = []  # "ok" | "error" | "raise" | "gate", consumed per call
         self.modify_script: list[str] = []
+        self.status_queries: list[str] = []
+        # Scripted §8.3 orderStatus-by-cloid answers, consumed per call; the
+        # default (empty) answers "unknownOid" so a raised/duplicate attempt whose
+        # order did NOT land resolves to "not recovered" and the repair retries.
+        self.status_script: list[dict] = []
+        self.cancel_script: list[str] = []  # "ok" | "raise", consumed per cancel
 
     def _next_oid(self) -> str:
         self._oid += 1
@@ -60,7 +66,15 @@ class _FakeClient:
 
     def cancel_by_cloid(self, *, coin: str, cloid_hex: str):
         self.canceled.append(cloid_hex)
+        if self.cancel_script and self.cancel_script.pop(0) == "raise":
+            raise ExchangeRequestError("cancel down")
         return None
+
+    def query_order_by_cloid(self, cloid_hex: str) -> dict:
+        self.status_queries.append(cloid_hex)
+        if self.status_script:
+            return self.status_script.pop(0)
+        return {"status": "unknownOid"}
 
 
 def _gate() -> RealOrderGate:
@@ -91,7 +105,17 @@ def env():
     db.close()
 
 
-def _manager(db, client, gate, *, sleeps=None, protection=None):
+class _FakeKillSwitch:
+    """Counts §18.2 refresh ticks (the protection repair delay refreshes it)."""
+
+    def __init__(self) -> None:
+        self.ticks = 0
+
+    def tick(self) -> None:
+        self.ticks += 1
+
+
+def _manager(db, client, gate, *, sleeps=None, protection=None, kill_switch=None):
     sleep = (lambda s: sleeps.append(s)) if sleeps is not None else (lambda s: None)
     return ProtectionManager(
         db=db,
@@ -107,6 +131,7 @@ def _manager(db, client, gate, *, sleeps=None, protection=None):
         owner_prefix="hta",
         clock=ManualClock(_NOW),
         sleep=sleep,
+        kill_switch=kill_switch,
     )
 
 
@@ -246,6 +271,78 @@ def test_sl_repair_exhausted_needs_emergency_close(env):
     events = [e["event_type"] for e in repo.iter_protection_order_events(db.conn, "r")]
     assert events.count("stop_loss_repair_failed") == 3
     assert "stop_loss_repair_exhausted" in events
+
+
+def test_sl_repair_recovers_landed_order_from_order_status(env):
+    """§8.3: a lost ack on a SUCCESSFUL place is recovered via orderStatus, never
+    re-sent — so a benign network blip cannot force a spurious emergency close of
+    an already-protected position."""
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    client.place_script = ["raise"]  # the first attempt's ack is lost
+    client.status_script = [
+        {"status": "order", "order": {"order": {"oid": 4242}, "status": "open"}}
+    ]
+    mgr = _manager(db, client, gate)
+    outcome = mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+    assert outcome is ProtectionOutcome.PROTECTED  # NOT emergency close
+    assert client.status_queries  # orderStatus was consulted
+    assert len(client.placed) == 1  # recovered, not re-sent
+    active = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
+    assert active is not None and active["exchange_order_id"] == "4242"
+    assert gate.unresolved_protection_failure is False
+
+
+def test_kill_switch_refreshed_across_repair_delays(env):
+    """§18.2: each blocking repair delay refreshes the dead man's switch, so a
+    repair episode cannot stretch the refresh cadence toward max_tick_gap."""
+    db = env
+    _seed_long(db)
+    client, gate = _all_fail_client()  # 3 attempts → 2 delays
+    ks = _FakeKillSwitch()
+    mgr = _manager(db, client, gate, kill_switch=ks)
+    mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+    assert ks.ticks == 2  # one refresh per retry delay
+
+
+def test_tp_cancel_failure_during_plan_degrades(env):
+    """§17.1 rule 5: a TP suspend-cancel that could not land must NOT report
+    PROTECTED — the stale reduce-only TP can still fire against the plan."""
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    mgr = _manager(db, client, gate)
+    # No plan yet: establishes both SL and TP.
+    mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert repo.active_protection_order(db.conn, "r", "BTC", "take_profit") is not None
+    # A plan starts; the TP must be suspended, but its cancel FAILS.
+    client.cancel_script = ["raise"]
+    outcome = mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+    assert outcome is ProtectionOutcome.DEGRADED
+    assert gate.unresolved_protection_failure is True
+    # The stale TP is still resting (the cancel did not land).
+    assert repo.active_protection_order(db.conn, "r", "BTC", "take_profit") is not None
 
 
 def test_no_safe_sl_band_needs_emergency_close(env):

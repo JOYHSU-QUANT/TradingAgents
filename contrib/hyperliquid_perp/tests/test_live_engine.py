@@ -368,3 +368,106 @@ def test_flip_abandoned_at_deadline_when_not_flat(tmp_path):
     engine._maybe_advance_flip(None, clock.now(), [])
     assert engine._flip is None
     assert gate.active_slice_plan is False
+
+
+def test_open_orders_read_failure_fails_closed(tmp_path):
+    """§10.5: an open-orders read failure is fail-closed — an unknowable count must
+    NOT wave a new plan through (the fabricated-sentinel version read as count 0)."""
+    db, clock, engine, gate, sub = _build(tmp_path)
+
+    def _boom():
+        raise RuntimeError("open-orders read down")
+
+    engine._fetch_open_orders = _boom
+    _script(engine, [_snap()])
+    reg = engine.start_plan(_decision("long", 5))
+    assert reg.reason == "max_open_orders"
+    assert reg.plan_id is None
+    assert gate.active_slice_plan is False
+
+
+def test_emergency_close_clears_pending_flip(tmp_path):
+    """A §17.2 emergency close during a pending-flip window must drop the flip, so
+    once the close reaches flat _maybe_advance_flip cannot re-open the flip's
+    ORIGINAL target off a stale decision."""
+    from contrib.hyperliquid_perp.live.engine import _PendingFlip
+
+    prot = _FakeProtection(outcome=ProtectionOutcome.NEEDS_EMERGENCY_CLOSE)
+    db, clock, engine, gate, sub = _build(tmp_path, protection=prot)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.05"), entry_price=D(50000)),
+            updated_at=_T0,
+        )
+    engine._was_flat = False
+    engine._leg = None
+    engine._flip = _PendingFlip(
+        flip_plan_id="flip1",
+        parsed=_decision("short", 5),
+        output_id="o",
+        deadline=_T0.replace(hour=13),  # future: only emergency close can clear it here
+        open_budget=60,
+    )
+    gate.active_slice_plan = True
+    _script(engine, [_snap()])
+    engine.tick()
+    assert [c for c in sub.calls if c["order_role"] == "emergency_close"]
+    assert engine._flip is None  # the pending flip was abandoned by the close
+    assert gate.active_slice_plan is False
+
+
+def test_emergency_close_escalates_to_manual_safe_mode_after_flat(tmp_path):
+    """§13.5: a §17.2 emergency close escalates to MANUAL safe mode once the
+    position reaches flat — deferred to post-flat so the gate never blocks the
+    close order itself."""
+    prot = _FakeProtection(outcome=ProtectionOutcome.NEEDS_EMERGENCY_CLOSE)
+    db, clock, engine, gate, sub = _build(tmp_path, protection=prot)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.05"), entry_price=D(50000)),
+            updated_at=_T0,
+        )
+    engine._was_flat = False
+    _script(engine, [_snap()])
+    engine.tick()  # emergency close fires; position not yet flat
+    assert engine._safe_mode.current() is None  # not escalated until flat
+    # The close fills → the position reaches flat.
+    with db.transaction() as conn:
+        repo.upsert_current_position(conn, "r", PositionState.flat("BTC"), updated_at=_T0)
+    _script(engine, [_snap()])
+    engine.tick()  # detects the flat transition → manual safe mode
+    state = engine._safe_mode.current()
+    assert state is not None and state.safe_mode_type == "manual"
+    assert state.reason == "emergency_close"
+    assert gate.manual_safe_mode is True
+
+
+def test_flip_open_leg_uses_shared_budget_and_linkage(tmp_path):
+    """§9.1 rule 5: a flip's open leg builds with the flip's shared slice budget
+    and carries flip_plan_id / flip_leg='open' — not a fresh full-grid entry."""
+    from contrib.hyperliquid_perp.live.engine import _PendingFlip
+
+    db, clock, engine, gate, sub = _build(tmp_path)  # run starts flat
+    engine._leg = None
+    engine._flip = _PendingFlip(
+        flip_plan_id="flip1",
+        parsed=_decision("long", 5),  # 200 notional -> 4 slices at full grid
+        output_id="o",
+        deadline=_T0.replace(hour=13),
+        open_budget=2,
+    )
+    gate.active_slice_plan = True
+    _script(engine, [_snap()])
+    engine._maybe_advance_flip(None, clock.now(), [])
+    assert engine._flip is None
+    assert engine._leg is not None
+    assert engine._leg.flip_leg == "open"
+    assert engine._leg.flip_plan_id == "flip1"
+    plan = repo.get_execution_plan(db.conn, engine._leg.plan_id)
+    assert plan["flip_leg"] == "open"
+    assert plan["flip_plan_id"] == "flip1"
+    assert plan["planned_slices"] <= 2  # capped by open_budget, not MAX_SLICES (would be 4)

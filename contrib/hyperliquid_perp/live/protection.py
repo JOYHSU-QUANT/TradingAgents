@@ -44,7 +44,7 @@ from enum import Enum
 
 from ..domains.perp.margin import DECIMAL_CONTEXT
 from ..exchanges.hyperliquid.errors import ExchangeError
-from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient, OrderAck
+from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
 from ..paper.clock import Clock, WallClock
 from ..paper.stops import (
     StopAction,
@@ -60,6 +60,7 @@ from ..persistence.db import Database
 from ..persistence.models import PositionState, Side
 from .config import LiveProtectionConfig
 from .order_gate import LiveOrderGateRejected, RealOrderGate
+from .orders import local_status_for_exchange_status, parse_order_status
 
 __all__ = ["ProtectionManager", "ProtectionOutcome"]
 
@@ -97,6 +98,7 @@ class ProtectionManager:
         owner_prefix: str,
         clock: Clock | None = None,
         sleep: Callable[[float], None] | None = None,
+        kill_switch=None,
     ) -> None:
         self._db = db
         self._run_id = run_id
@@ -111,6 +113,12 @@ class ProtectionManager:
         self._prefix = owner_prefix
         self._clock = clock or WallClock()
         self._sleep = sleep or time.sleep
+        # §18.2 / §10.3 kill-switch timing: SL/TP repair blocks the single-threaded
+        # tick with a synchronous delay between attempts. Refreshing the dead man's
+        # switch across that delay (as the startup sweep does) keeps the refresh
+        # cadence inside ``max_tick_gap`` even during a repair episode, so the
+        # switch cannot self-trip when the system is least healthy.
+        self._kill_switch = kill_switch
 
     # -- public entry ---------------------------------------------------------
 
@@ -173,6 +181,24 @@ class ProtectionManager:
             # §17.1 rule 5: TP suspended while a plan runs; SL stays. Cancel a
             # stale TP so it can't fire against the in-flight plan.
             self._cancel_role("take_profit", now)
+            if (
+                repo.active_protection_order(self._db.conn, self._run_id, self._coin, "take_profit")
+                is not None
+            ):
+                # The cancel could not land — a stale reduce-only TP is still
+                # resting and can fire mid-plan, selling into the very position the
+                # plan is building. That is not "protected": degrade so the gate
+                # blocks new entry/rebalance until a later tick confirms the TP is
+                # gone (the cancel is retried every sync). Never report PROTECTED
+                # over an un-suspended TP (the raw cancel result was previously
+                # discarded, masking exactly this).
+                self._gate.unresolved_protection_failure = True
+                self._record_event(
+                    "degraded_protection_entered",
+                    detail="stale take-profit could not be suspended during active plan (§17.1 rule 5)",
+                    now=now,
+                )
+                return ProtectionOutcome.DEGRADED
             self._gate.unresolved_protection_failure = False
             return ProtectionOutcome.PROTECTED
 
@@ -237,6 +263,7 @@ class ProtectionManager:
         # resend); the next placement's count is one higher (a modify is a new
         # logical identity, §17.4).
         seq = repo.count_orders_by_role(self._db.conn, self._run_id, self._coin, role)
+        side = Side.BUY if is_buy else Side.SELL
         attempts = self._config.sl_repair_max_attempts
         for attempt in range(1, attempts + 1):
             order_id, logical, hexid = self._mint_ids(role, seq)
@@ -264,24 +291,36 @@ class ProtectionManager:
                         cloid_hex=hexid,
                         reduce_only=True,
                     )
-            except (ExchangeError, LiveOrderGateRejected) as exc:
-                # LiveOrderGateRejected (raised by the bound §4.1 gate INSIDE the
-                # client's place/modify, before any network I/O) is a plain
-                # Exception, not an ExchangeError — a gate that is momentarily
+            except LiveOrderGateRejected as exc:
+                # Raised by the bound §4.1 gate INSIDE place/modify, BEFORE any
+                # network I/O — nothing reached the exchange, so nothing can be
+                # resting (no orderStatus recovery). A gate that is momentarily
                 # closed (manual safe mode, state not reconciled) must count as a
                 # failed repair attempt, never crash the tick loop out from under
                 # the position it is protecting.
-                logger.warning(
-                    "%s %s attempt %d/%d raised: %s",
-                    "modify" if existing_oid else "place",
-                    role,
-                    attempt,
-                    attempts,
-                    exc,
-                )
-                self._record_event(
-                    f"{role}_repair_failed", detail=f"attempt {attempt}: {exc}", now=now
-                )
+                self._log_attempt_failed(role, attempt, attempts, existing_oid, exc, now)
+                self._maybe_delay(attempt, attempts)
+                continue
+            except ExchangeError as exc:
+                # Unknown outcome (§8.3 rule 11): a lost ack / timeout may have left
+                # the order LIVE on the exchange. Ask orderStatus BEFORE counting a
+                # failure — a landed-but-ack-lost SL/TP must not be blind-resent
+                # (the resend hits a duplicate-cloid rejection) and must NOT drive a
+                # spurious emergency close of an already-protected position.
+                if self._recover_placed_order(
+                    role=role,
+                    order_id=order_id,
+                    logical=logical,
+                    hexid=hexid,
+                    size=size,
+                    side=side,
+                    trigger_price=trigger_price,
+                    limit_price=limit_price,
+                    replaced=existing,
+                    now=now,
+                ):
+                    return True
+                self._log_attempt_failed(role, attempt, attempts, existing_oid, exc, now)
                 self._maybe_delay(attempt, attempts)
                 continue
 
@@ -292,32 +331,132 @@ class ProtectionManager:
                     logical=logical,
                     hexid=hexid,
                     size=size,
-                    side=Side.BUY if is_buy else Side.SELL,
+                    side=side,
                     trigger_price=trigger_price,
                     limit_price=limit_price,
-                    ack=ack,
+                    exchange_order_id=ack.exchange_order_id,
+                    exchange_raw_status=ack.status,
                     replaced=existing,
                     now=now,
                 )
                 return True
 
-            logger.warning(
-                "%s %s attempt %d/%d rejected: %s",
-                "modify" if existing_oid else "place",
-                role,
-                attempt,
-                attempts,
-                ack.error,
-            )
-            self._record_event(
-                f"{role}_repair_failed", detail=f"attempt {attempt}: {ack.error}", now=now
-            )
+            if ack.is_duplicate and self._recover_placed_order(
+                role=role,
+                order_id=order_id,
+                logical=logical,
+                hexid=hexid,
+                size=size,
+                side=side,
+                trigger_price=trigger_price,
+                limit_price=limit_price,
+                replaced=existing,
+                now=now,
+            ):
+                # The exchange already knows this cloid from a prior attempt whose
+                # ack we never observed; orderStatus confirms it is resting (§8.3
+                # rules 2–4) → recovered, no resend.
+                return True
+
+            self._log_attempt_failed(role, attempt, attempts, existing_oid, ack.error, now)
             self._maybe_delay(attempt, attempts)
         return False
 
+    def _log_attempt_failed(
+        self,
+        role: str,
+        attempt: int,
+        attempts: int,
+        existing_oid,
+        error,
+        now: datetime,
+    ) -> None:
+        logger.warning(
+            "%s %s attempt %d/%d failed: %s",
+            "modify" if existing_oid else "place",
+            role,
+            attempt,
+            attempts,
+            error,
+        )
+        self._record_event(f"{role}_repair_failed", detail=f"attempt {attempt}: {error}", now=now)
+
+    def _recover_placed_order(
+        self,
+        *,
+        role: str,
+        order_id: str,
+        logical: str,
+        hexid: str,
+        size: Decimal,
+        side: Side,
+        trigger_price: Decimal,
+        limit_price: Decimal,
+        replaced,
+        now: datetime,
+    ) -> bool:
+        """§8.3 rules 3–4: did this cloid actually land? Persist it if so.
+
+        Called after an unknown outcome (an ``ExchangeError``) or a duplicate-cloid
+        rejection. Queries orderStatus by cloid: a resting / live order means the
+        placement succeeded and only the ack was lost — persist it (the same
+        ``orders`` / registry / protection-price writes an accepted ack does) and
+        report success, so a benign network blip never forces a spurious emergency
+        close. An unknown cloid or a rejected order means the placement did NOT
+        take — return False so the caller records a failed attempt and retries
+        (and, if attempts exhaust, emergency-closes — the safe outcome for a
+        genuinely un-placeable stop). Recovery only ever returns True on a POSITIVE
+        confirmation; any read/parse failure is unresolved → return False (retry,
+        eventually emergency-close is the safe fallback) and never crash the tick.
+        """
+        try:
+            parsed = parse_order_status(self._client.query_order_by_cloid(hexid))
+        except Exception:  # noqa: BLE001 — an unresolvable recovery must not crash the tick
+            logger.warning(
+                "orderStatus recovery for %s cloid %s could not resolve", role, hexid, exc_info=True
+            )
+            return False
+        if parsed is None:
+            return False  # the exchange does not know this cloid — nothing landed
+        exchange_oid, exchange_status = parsed
+        if local_status_for_exchange_status(exchange_status) == "rejected":
+            return False  # known to the exchange but rejected — not a live order
+        logger.warning(
+            "recovered %s order for cloid %s from orderStatus (%s) after a lost ack",
+            role,
+            hexid,
+            exchange_status,
+        )
+        self._persist_placed(
+            role=role,
+            order_id=order_id,
+            logical=logical,
+            hexid=hexid,
+            size=size,
+            side=side,
+            trigger_price=trigger_price,
+            limit_price=limit_price,
+            exchange_order_id=exchange_oid,
+            exchange_raw_status=exchange_status,
+            replaced=replaced,
+            now=now,
+        )
+        return True
+
     def _maybe_delay(self, attempt: int, attempts: int) -> None:
-        if attempt < attempts:
-            self._sleep(float(self._config.sl_repair_retry_delay_seconds))
+        if attempt >= attempts:
+            return
+        self._sleep(float(self._config.sl_repair_retry_delay_seconds))
+        # §18.2: this delay blocked the single-threaded tick — refresh the dead
+        # man's switch across it (as the startup sweep does) so a repair episode
+        # never stretches the kill-switch refresh cadence toward ``max_tick_gap``
+        # and self-trips the switch when the system is least healthy. Guarded so a
+        # refresh miss never aborts the repair out from under the position.
+        if self._kill_switch is not None:
+            try:
+                self._kill_switch.tick()
+            except Exception:  # noqa: BLE001 — a refresh miss must not abort the repair
+                logger.warning("kill-switch refresh during SL/TP repair failed", exc_info=True)
 
     def _persist_placed(
         self,
@@ -330,11 +469,12 @@ class ProtectionManager:
         side: Side,
         trigger_price: Decimal,
         limit_price: Decimal,
-        ack: OrderAck,
+        exchange_order_id: str | None,
+        exchange_raw_status: str | None,
         replaced,
         now: datetime,
     ) -> None:
-        """Record an acknowledged SL/TP: registry, orders row, protection state."""
+        """Record an acknowledged (or orderStatus-recovered) SL/TP: registry, orders row, protection state."""
         with self._db.transaction() as conn:
             repo.insert_cloid_mapping(
                 conn,
@@ -362,8 +502,8 @@ class ProtectionManager:
                 reduce_only=True,
                 cloid_logical=logical,
                 cloid_hex=hexid,
-                exchange_order_id=ack.exchange_order_id,
-                exchange_raw_status=ack.status,
+                exchange_order_id=exchange_order_id,
+                exchange_raw_status=exchange_raw_status,
                 is_bot_owned=True,
                 active_from=now,
                 submitted_at=now,

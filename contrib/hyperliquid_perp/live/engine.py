@@ -66,6 +66,7 @@ from .loss_guards import LossGuards
 from .order_gate import RealOrderGate
 from .orders import LiveOrderSubmitter
 from .protection import ProtectionManager, ProtectionOutcome
+from .safe_mode import REASON_EMERGENCY_CLOSE
 
 __all__ = ["LiveExecutionEngine", "LiveTickResult", "PlanRegistration"]
 
@@ -205,6 +206,10 @@ class LiveExecutionEngine:
         self._flip: _PendingFlip | None = None
         self._last_reconcile_at: datetime | None = None
         self._was_flat = self._read_position().is_flat
+        # Set when a §17.2 emergency close is fired, cleared once the position
+        # reaches flat — at which point the run escalates to MANUAL safe mode
+        # (§13.5). Deferred to post-flat so the gate never blocks the close itself.
+        self._emergency_close_pending = False
         self._order_seq = repo.max_engine_seq(db.conn, run_id)
         # A restart abandons any dangling in-flight plan: without its in-memory
         # slice sizes the remaining slices cannot be resumed precisely, and the
@@ -359,6 +364,18 @@ class LiveExecutionEngine:
         is_flat = self._read_position().is_flat
         if is_flat and not self._was_flat:
             self._loss_guards.record_settlement(wallet_balance=self._wallet_balance(), now=now)
+            if self._emergency_close_pending:
+                # §13.5: a §17.2 emergency close has now reached flat — escalate to
+                # MANUAL safe mode so a human confirms before trading resumes (the
+                # repeated SL failure that forced the close is a real problem).
+                # Done HERE, post-flat, so the gate's manual-safe-mode block never
+                # blocked the close order itself.
+                self._safe_mode.enter(
+                    "manual",
+                    REASON_EMERGENCY_CLOSE,
+                    detail="§17.2 SL-repair-exhausted emergency close reached flat (§13.5)",
+                )
+                self._emergency_close_pending = False
         self._was_flat = is_flat
 
     def _sync_protection(
@@ -448,14 +465,20 @@ class LiveExecutionEngine:
     # -- plan build (start_plan) ----------------------------------------------
 
     def start_plan(
-        self, parsed: ParsedDecision, *, output_id: str | None = None
+        self,
+        parsed: ParsedDecision,
+        *,
+        output_id: str | None = None,
+        flip_open: _PendingFlip | None = None,
     ) -> PlanRegistration:
         """Gate a decision against fresh state and register its slice plan (§9).
 
         Re-runs the shared RiskGate, applies the §10.1/§10.5 live checks and the
         full §4.1 gate, then builds a rebalance plan or a sequential flip's close
         leg. Never re-asks the AI; returns an order-less reason when the gate or
-        a live check declines.
+        a live check declines. ``flip_open`` is set only when advancing a flip's
+        second (open) leg — it makes the resulting plan share the flip's one
+        §9.1-rule-5 envelope/budget and carry its audit linkage.
         """
         now = self._clock.now()
         snap_result = self._provider.fetch(
@@ -478,10 +501,12 @@ class LiveExecutionEngine:
         self._gate.risk_gate_approved = gate.order_created
         # The gate's sizing inputs (mark / equity) ride EVERY post-snapshot
         # outcome onto the ai_outputs audit row — filled once, here.
-        reg = self._gate_and_build(parsed, gate, position, snap, output_id)
+        reg = self._gate_and_build(parsed, gate, position, snap, output_id, flip_open)
         return replace(reg, mark_price=snap.mark_price, account_equity=equity)
 
-    def _gate_and_build(self, parsed, gate, position, snap, output_id) -> PlanRegistration:
+    def _gate_and_build(
+        self, parsed, gate, position, snap, output_id, flip_open=None
+    ) -> PlanRegistration:
         if not gate.order_created:
             return PlanRegistration(gate, None, None, gate.no_order_reason)
         assert gate.target_notional is not None and gate.target_signed_notional is not None
@@ -491,10 +516,15 @@ class LiveExecutionEngine:
             self._gate.risk_gate_approved = False
             return PlanRegistration(gate, None, None, "max_notional_usdc")
 
-        # §10.5 max open orders: count bot-owned exchange orders, trigger a
-        # reconciliation on breach (an abnormal signal on a single-symbol run).
-        if self._loss_guards.max_open_orders_reached(self._safe_fetch_open_orders()):
-            self._reconcile("mismatch")
+        # §10.5 max open orders: count bot-owned exchange orders and refuse a new
+        # plan at/over the cap. A read failure is fail-closed — an unknowable count
+        # must not wave a new order through — so treat it as at-cap. A genuine
+        # breach also triggers a reconciliation (an abnormal signal on a
+        # single-symbol run); a read failure does not (its own reads just failed).
+        open_orders = self._safe_fetch_open_orders()
+        if open_orders is None or self._loss_guards.max_open_orders_reached(open_orders):
+            if open_orders is not None:
+                self._reconcile("mismatch")
             self._gate.risk_gate_approved = False
             return PlanRegistration(gate, None, None, "max_open_orders")
 
@@ -510,9 +540,9 @@ class LiveExecutionEngine:
         )
         if is_flip:
             return self._start_flip(parsed, gate, position, snap, output_id)
-        return self._start_rebalance(gate, position, snap, output_id)
+        return self._start_rebalance(gate, position, snap, output_id, flip_open)
 
-    def _start_rebalance(self, gate, position, snap, output_id) -> PlanRegistration:
+    def _start_rebalance(self, gate, position, snap, output_id, flip_open=None) -> PlanRegistration:
         delta = rebalance_delta(
             target_signed_notional=gate.target_signed_notional,
             mark_price=snap.mark_price,
@@ -522,13 +552,17 @@ class LiveExecutionEngine:
             return PlanRegistration(gate, None, None, "zero_delta")
         reduce_only = position.size != 0 and delta.signed_delta_size * position.size < 0
         role = "rebalance" if position.size != 0 else "entry"
+        # A flip's open leg shares the flip's ONE 1-hour envelope and slice budget
+        # (§9.1 rule 5) and carries the flip audit linkage (flip_plan_id / leg);
+        # an ordinary rebalance gets the full grid and its own fresh deadline.
+        max_slices = flip_open.open_budget if flip_open is not None else MAX_SLICES
         plan = build_slice_plan(
             delta.raw_total_qty,
             side=delta.side,
             qty_step=self._asset.qty_step,
             min_notional=EXCHANGE_MIN_ORDER_NOTIONAL_USDC,
             mid=snap.mid_price,
-            max_slices=MAX_SLICES,
+            max_slices=max_slices,
         )
         return self._register_leg(
             plan,
@@ -536,9 +570,9 @@ class LiveExecutionEngine:
             output_id=output_id,
             reduce_only=reduce_only,
             order_role=role,
-            flip_plan_id=None,
-            flip_leg=None,
-            deadline=None,
+            flip_plan_id=flip_open.flip_plan_id if flip_open is not None else None,
+            flip_leg="open" if flip_open is not None else None,
+            deadline=flip_open.deadline if flip_open is not None else None,
         )
 
     def _start_flip(self, parsed, gate, position, snap, output_id) -> PlanRegistration:
@@ -697,8 +731,10 @@ class LiveExecutionEngine:
         flip = self._flip
         self._flip = None
         self._gate.active_slice_plan = False
-        # Re-run the gate for the open leg (fresh state, never re-ask the AI).
-        reg = self.start_plan(flip.parsed, output_id=flip.output_id)
+        # Re-run the gate for the open leg (fresh state, never re-ask the AI), but
+        # build it with the flip's shared budget/deadline and audit linkage (§9.1
+        # rule 5) — not as an independent full-grid entry.
+        reg = self.start_plan(flip.parsed, output_id=flip.output_id, flip_open=flip)
         events.append(f"flip_open:{flip.flip_plan_id}:{reg.reason or reg.plan_id}")
 
     # -- emergency close (§9.4 aggressive reduce-only IOC) --------------------
@@ -706,11 +742,19 @@ class LiveExecutionEngine:
     def _emergency_close(self, position, mark: Decimal, now: datetime, events: list[str]) -> None:
         """§17.2 / §9.4: close the whole position with one aggressive reduce-only IOC.
 
-        Cancels any in-flight plan first (building more exposure while trying to
-        exit is self-defeating), then submits a single full-size IOC.
+        Cancels any in-flight plan AND any pending flip first (building — or
+        re-opening — exposure while trying to exit is self-defeating), then
+        submits a single full-size IOC. Clearing the pending flip is what stops
+        ``_maybe_advance_flip`` from re-opening the flip's ORIGINAL target off a
+        stale decision once this close reaches flat.
         """
         if self._leg is not None:
             self._terminate_leg(self._leg, now, "canceled", events)
+        if self._flip is not None:
+            flip_id = self._flip.flip_plan_id
+            self._flip = None
+            events.append(f"flip_abandoned:{flip_id}")
+        self._gate.active_slice_plan = False
         with localcontext(DECIMAL_CONTEXT):
             size = abs(position.size)
         if size <= 0:
@@ -745,6 +789,11 @@ class LiveExecutionEngine:
             )
         except Exception:  # noqa: BLE001 — recorded by the submitter; reconciliation catches a miss
             logger.exception("emergency close submit raised for %s", self._run_id)
+        # §13.5: escalate to MANUAL safe mode once this close reaches flat (handled
+        # in _detect_settlement, post-flat, so the gate never blocks the close).
+        # Set even if the submit raised — the submitter recorded it and the close
+        # is retried next tick; the escalation waits for a confirmed flat.
+        self._emergency_close_pending = True
         events.append("emergency_close")
 
     # -- helpers --------------------------------------------------------------
@@ -767,12 +816,18 @@ class LiveExecutionEngine:
         )
 
     def _safe_fetch_open_orders(self):
+        """The bot's open orders, or ``None`` when the read failed (fail-closed).
+
+        A fabricated over-cap list cannot express "unknown": ``count_bot_open_orders``
+        only counts registry-known str cloids, so a sentinel list of ``{"cloid": None}``
+        reads as count 0 (fail-OPEN — the opposite of the intent). Signal the failure
+        with ``None`` and let the caller treat an unknowable count as at-cap.
+        """
         try:
             return self._fetch_open_orders()
         except Exception:  # noqa: BLE001 — a read failure must not size an order past the cap
             logger.exception("open-orders read failed; treating as at-cap (fail-closed)")
-            # Fail-closed: an unknowable count must not wave a new order through.
-            return [{"cloid": None}] * (self._live.safety.max_open_orders + 1)
+            return None
 
     def _next_order_id(self, tag: str) -> str:
         self._order_seq += 1

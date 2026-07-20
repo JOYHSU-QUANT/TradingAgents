@@ -1308,6 +1308,7 @@ def _run_live_loop(
     from .live.loss_guards import LossGuards
     from .live.orders import LiveOrderSubmitter
     from .live.protection import ProtectionManager
+    from .live.safe_mode import REASON_LIVE_TICK_ERROR
     from .live.ws_stream import LiveWsStream
     from .main import _load_risk_decision
     from .paper.clock import WallClock
@@ -1342,6 +1343,7 @@ def _run_live_loop(
         protection_config=live_cfg.protection,
         owner_prefix=live_cfg.order_owner_prefix,
         clock=clock,
+        kill_switch=kill_switch,
     )
     loss_guards = LossGuards(db=db, run_id=run_id, safety=live_cfg.safety, safe_mode=safe_mode)
     ledger = repo.get_current_account_state(db.conn, run_id)
@@ -1393,8 +1395,26 @@ def _run_live_loop(
         while True:
             now = clock.now()
             heartbeat_run_lock(db, run_id, pid=pid, now=now)
-            engine.tick()
-            driver.pump()
+            try:
+                engine.tick()
+                driver.pump()
+            except Exception:  # noqa: BLE001 — a tick error must not tear down the loop or strip SL/TP
+                # A single transient tick failure (DB lock, a reconciler read, an
+                # unexpected raise) must not propagate out to the caller's §18.2
+                # shutdown sweep, which would cancel the resting SL/TP and leave the
+                # position naked. Log, enter recoverable safe mode (new orders pause
+                # until the next clean reconcile auto-releases), and keep ticking —
+                # protection re-attempts next tick. KeyboardInterrupt is a
+                # BaseException, so Ctrl-C / SIGTERM still reaches the handler below.
+                logger.exception("live tick raised — entering recoverable safe mode and continuing")
+                try:
+                    safe_mode.enter(
+                        "recoverable",
+                        REASON_LIVE_TICK_ERROR,
+                        detail="live tick raised (see log)",
+                    )
+                except Exception:  # noqa: BLE001 — a safe-mode write miss must not itself end the loop
+                    logger.exception("failed to enter safe mode after a live tick error")
             time.sleep(_LIVE_TICK_SECONDS)
     except KeyboardInterrupt:
         print("\nlive loop stopping — running the §18.2 shutdown sweep...", file=sys.stderr)

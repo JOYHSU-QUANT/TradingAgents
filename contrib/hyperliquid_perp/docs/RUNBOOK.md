@@ -111,6 +111,42 @@ pending funding、accounting replay 驗證、gap SL 檢查；若這次重啟真�
 是硬錯誤；`risk:`／`decision:`／`engine:` 等與 genesis 不同會印 drift 警告並
 記進 store。
 
+**策略調參換段**：改動策略參數（如 `rebalance_deadband_pct`、
+`resize_min_confidence`）時，用 `--create` 開新 run-id（例如 `paper-BTC-2`）
+而不是讓舊 run 帶著 drift 續跑——新段有自己的 genesis config，跨段指標比較
+才乾淨。舊 run 的 DB 與 exports 原地保留，當作對照的 baseline。注意：drift
+警告只比對 YAML——**code 內建預設值的變更**（例如新增的
+`resize_min_confidence` 預設 0.7、prompt 文字改版）不會觸發警告，但一樣改變
+行為，所以調參 code 的部署必須與新 run-id 同批上線，不要讓舊段跨過部署點。
+prompt 的 context／format 契約改 shape 時，另要 bump `cli.py` 的
+`PROMPT_VERSION`，讓 `ai_inputs.prompt_version` 在資料裡標出改版點。
+
+**空倉才換段（硬規則）**：舊 run 還有未平倉倉位時不要換段。換段後那個倉位
+會永遠凍結在舊段 DB——沒人看管、沒有 SL/TP，舊段末端 equity 掛著一筆未實現
+PnL，正是跨段對照要避免的汙染。等 cycle 自然回到空倉（或 AI 自己 flat 平倉）
+再執行下面的順序，讓舊段以 realized PnL 乾淨收尾。
+
+換段的實際順序——push `deploy/paper` 會觸發 workflow 自動 restart `hl-paper`
+（`deploy/paper` 分支上的 `.github/workflows/deploy.yml`），而 run-id 在伺服器 systemd unit 的
+`ExecStart` 裡，**先 push 就會讓舊 run 直接跨過部署點跑新 code**，所以必須：
+
+1. 確認空倉後，SSH 上伺服器 `sudo systemctl stop hl-paper`，把 unit 的
+   `ExecStart` 改成新段參數（`--run-id paper-BTC-2 --create`），
+   `sudo systemctl daemon-reload`，**先不要啟動**。
+2. 再 push `deploy/paper`——workflow 部署新 code 並 restart，服務直接以新
+   run-id 起段。
+3. 確認新段健康後，**立刻**把 unit 裡的 `--create` 拿掉再 `daemon-reload`：
+   run 已存在時帶 `--create` 是硬錯誤，留著的話**任何**後續 restart——crash
+   自動重啟、主機重開機、下一次 deploy——都會直接失敗（systemd `Restart=`
+   還可能因此 crash-loop），不是只有下次 deploy 才危險。
+
+deploy 自動 restart 的三個既有行為，換段與日常部署都要知道：push 落在 cycle
+中間會中斷 in-flight 的 execution plan——安全但 off-schedule（見上方重啟
+reconciliation 段）；若舊 process 是被硬殺而非 graceful shutdown，
+single-instance lock lease 最長 15 分鐘才過期，新 process 會先起不來，deploy
+的 15 秒健檢在這個窗口內可能誤報；服務處在 protection-only／keyless 狀態時，
+deploy 的 restart 不是修復（§3 的警告同樣適用）——先照 §5 調查再部署。
+
 ## 5. 日常監控（每天看一眼）
 
 | 看什麼 | 在哪裡 | 正常 | 異常時 |

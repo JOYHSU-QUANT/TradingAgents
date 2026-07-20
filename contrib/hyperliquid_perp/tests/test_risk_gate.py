@@ -187,6 +187,185 @@ def test_low_confidence_does_not_gate_maintain_current():
 
 
 # --------------------------------------------------------------------------
+# resize_min_confidence gate (spec §2.4): same-side resizes need the higher bar
+# --------------------------------------------------------------------------
+
+
+def test_same_side_resize_below_resize_bar_is_rejected():
+    # 0.65 clears min_confidence (0.3) but not resize_min_confidence (0.7):
+    # exactly the churn profile the baseline segment paid fees for.
+    current = _long_state(margin_pct="20", notional="200")
+    result = _evaluate(_parsed(margin=45, confidence="0.65"), current=current)
+    assert result.risk_action is RiskAction.REJECTED
+    assert result.risk_reason == risk_gate.RISK_REASON_LOW_CONFIDENCE_RESIZE
+    assert result.order_created is False
+    assert result.no_order_reason == risk_gate.NO_ORDER_REJECTED
+    assert result.requested_target_margin_pct == 45  # audit keeps the ask
+    assert result.approved_target_margin_pct is None
+
+
+def test_same_side_resize_at_resize_bar_passes():
+    current = _long_state(margin_pct="20", notional="200")
+    result = _evaluate(_parsed(margin=45, confidence="0.7"), current=current)
+    assert result.risk_action is RiskAction.APPROVED
+    assert result.order_created is True
+
+
+def test_open_from_flat_keeps_base_confidence_bar():
+    # Opening is a directional decision, not a resize: 0.65 from flat passes.
+    result = _evaluate(_parsed(margin=45, confidence="0.65"))
+    assert result.risk_action is RiskAction.APPROVED
+    assert result.order_created is True
+
+
+def test_flip_keeps_base_confidence_bar():
+    # A flip changes side, so the resize bar does not apply.
+    current = _long_state(margin_pct="20", notional="200")
+    result = _evaluate(_parsed(side="short", margin=20, confidence="0.65"), current=current)
+    assert result.risk_action is RiskAction.APPROVED
+    assert result.order_created is True
+
+
+def test_flat_close_keeps_base_confidence_bar():
+    # An explicit close is exempt: a flat account's side is None, never FLAT,
+    # so `side is current.side` cannot match — 0.4 clears the base gate.
+    current = _long_state(margin_pct="20", notional="200")
+    result = _evaluate(_parsed(side="flat", margin=0, confidence="0.4"), current=current)
+    assert result.risk_action is RiskAction.APPROVED
+    assert result.order_created is True
+
+
+def test_within_deadband_reaffirmation_is_exempt_from_resize_bar():
+    # The resize bar only gates targets that would actually trade: a same-side
+    # target inside the deadband creates no order and pays no fees, so it stays
+    # a within_deadband no-op even at low confidence — rejecting it would
+    # conflate cost-free reaffirmations with real churn in the analytics.
+    # Uncapped here so the verdict is APPROVED; a capped request landing in the
+    # deadband keeps CLAMPED (test_clamped_target_can_still_land_within_deadband).
+    current = _long_state(margin_pct="35.5", notional="355")
+    result = _evaluate(_parsed(margin=35, confidence="0.5"), current=current)
+    assert result.risk_action is RiskAction.APPROVED
+    assert result.order_created is False
+    assert result.no_order_reason == risk_gate.NO_ORDER_WITHIN_DEADBAND
+
+
+def test_no_equity_outranks_resize_bar():
+    # A dead account is the structural problem; the resize bar must not mask it.
+    current = _long_state(margin_pct="35", notional="350")
+    result = _evaluate(_parsed(margin=20, confidence="0.5"), current=current, equity=Decimal(0))
+    assert result.risk_action is RiskAction.REJECTED
+    assert result.risk_reason == risk_gate.RISK_REASON_NO_EQUITY
+
+
+def test_same_side_reduction_below_resize_bar_is_rejected():
+    # Reductions are gated on purpose (spec §2.4: the baseline churn's first
+    # leg was always a mid-confidence reduce). This locks the debated call so a
+    # well-intentioned "de-risking should be easy" exemption can't sneak back.
+    current = _long_state(margin_pct="45", notional="450")
+    result = _evaluate(_parsed(margin=20, confidence="0.5"), current=current)
+    assert result.risk_action is RiskAction.REJECTED
+    assert result.risk_reason == risk_gate.RISK_REASON_LOW_CONFIDENCE_RESIZE
+    assert result.order_created is False
+
+
+def test_clamped_same_side_resize_below_resize_bar_rejects_and_drops_clamp():
+    # requested 90 clamps to the 60 cap and still clears the deadband from 20,
+    # so an order would be created — the resize bar then rejects. Per the
+    # REJECTED contract the clamp verdict and approved value are discarded:
+    # audit keeps only the raw ask (cap-binding stats exclude these rows).
+    current = _long_state(margin_pct="20", notional="200")
+    result = _evaluate(_parsed(margin=90, confidence="0.5"), current=current)
+    assert result.risk_action is RiskAction.REJECTED
+    assert result.risk_reason == risk_gate.RISK_REASON_LOW_CONFIDENCE_RESIZE
+    assert result.requested_target_margin_pct == 90
+    assert result.approved_target_margin_pct is None
+
+
+def test_clamped_same_side_resize_at_resize_bar_stays_clamped():
+    # The remaining cell of the clamp x resize matrix: requested 90 clamps to
+    # the 60 cap, clears the deadband from 20, and confidence 0.7 clears the
+    # resize bar — the clamp verdict, both margin values and the order must all
+    # survive the resize check untouched (a confident size-up past the cap on
+    # an existing position is the common production shape of this path).
+    current = _long_state(margin_pct="20", notional="200")
+    result = _evaluate(_parsed(margin=90, confidence="0.7"), current=current)
+    assert result.risk_action is RiskAction.CLAMPED
+    assert result.requested_target_margin_pct == 90
+    assert result.approved_target_margin_pct == 60
+    assert result.order_created is True
+
+
+def test_zero_delta_reaffirmation_is_exempt_from_resize_bar():
+    # zero_delta is a distinct no-order path from within_deadband (an unknown
+    # margin_pct skips the deadband branch; the exact-delta check fires): like
+    # the deadband case it costs nothing, so low confidence must not reject it.
+    current = CurrentPositionState(
+        side=TargetSide.LONG, signed_notional=Decimal("350"), margin_pct=None
+    )
+    result = _evaluate(_parsed(margin=35, confidence="0.4"), current=current)
+    assert result.risk_action is RiskAction.APPROVED
+    assert result.order_created is False
+    assert result.no_order_reason == risk_gate.NO_ORDER_ZERO_DELTA
+
+
+def test_unknown_margin_resize_below_resize_bar_is_rejected():
+    # Unknown margin_pct skips the deadband branch entirely, so for this state
+    # the resize bar is the only guard left against low-confidence churn: a
+    # same-side, non-zero-delta target must still be rejected below the bar.
+    # Locks the gate against a refactor that reuses the deadband's
+    # `margin_pct is not None` guard on the resize check.
+    current = CurrentPositionState(
+        side=TargetSide.LONG, signed_notional=Decimal("355"), margin_pct=None
+    )
+    result = _evaluate(_parsed(margin=20, confidence="0.5"), current=current)
+    assert result.risk_action is RiskAction.REJECTED
+    assert result.risk_reason == risk_gate.RISK_REASON_LOW_CONFIDENCE_RESIZE
+    assert result.order_created is False
+
+
+def test_leverage_mismatch_convergence_order_is_gated_by_resize_bar():
+    # With the deadband disabled on a leverage mismatch, a same-side target at
+    # the same margin% still creates a convergence order — which must clear the
+    # resize bar like any other order-creating resize (spec §2.4 interaction notes).
+    # Identical numbers with matching leverage would be an APPROVED
+    # within-deadband no-op instead.
+    current = CurrentPositionState(
+        side=TargetSide.LONG,
+        signed_notional=Decimal("500"),
+        margin_pct=Decimal("10"),
+        leverage=Decimal(5),
+    )
+    result = _evaluate(_parsed(margin=10, confidence="0.5"), current=current)
+    assert result.risk_action is RiskAction.REJECTED
+    assert result.risk_reason == risk_gate.RISK_REASON_LOW_CONFIDENCE_RESIZE
+
+
+def test_equal_thresholds_off_switch_disables_resize_bar():
+    # resize_min_confidence == min_confidence is the documented off-switch
+    # (SETUP.md / example yaml): with the bars equal, a same-side resize at
+    # exactly the shared bar trades like any other set_target — the resize
+    # gate adds nothing on top of the base gate.
+    cfg = DecisionConfig(min_confidence=Decimal("0.3"), resize_min_confidence=Decimal("0.3"))
+    current = _long_state(margin_pct="20", notional="200")
+    result = _evaluate(_parsed(margin=45, confidence="0.3"), current=current, cfg=cfg)
+    assert result.risk_action is RiskAction.APPROVED
+    assert result.order_created is True
+
+
+def test_zero_capacity_reject_outranks_resize_bar():
+    # A same-side resize with no cross-margin capacity left: the zero-capacity
+    # fail-close returns before the resize bar, so the binding constraint —
+    # the structural problem — wins the audit reason over low_confidence_resize
+    # (same precedence guarantee as test_no_equity_outranks_resize_bar).
+    current = _long_state(margin_pct="35", notional="350")
+    result = _evaluate(
+        _parsed(margin=40, confidence="0.5"), current=current, other_used_margin=Decimal("1000")
+    )
+    assert result.risk_action is RiskAction.REJECTED
+    assert result.risk_reason == risk_gate.RISK_REASON_AVAILABLE_MARGIN
+
+
+# --------------------------------------------------------------------------
 # Deadband (spec §2.4): same-side only; flip and flat are exempt
 # --------------------------------------------------------------------------
 
@@ -205,8 +384,11 @@ def test_clamped_target_can_still_land_within_deadband():
     # within the deadband of the current same-side position: risk_action stays
     # CLAMPED (the clamp really happened) while order_created is False. Both the
     # "clamped" verdict and the "no order" outcome must be reported together.
+    # Confidence 0.5 also locks the spec §2.4 interaction note: order necessity
+    # is judged on the clamped value, so a request absorbed into the deadband
+    # never reaches the resize bar even below it.
     current = _long_state(margin_pct="60", notional="600")
-    result = _evaluate(_parsed(margin=100), current=current)
+    result = _evaluate(_parsed(margin=100, confidence="0.5"), current=current)
     assert result.risk_action is RiskAction.CLAMPED
     assert result.approved_target_margin_pct == 60
     assert result.requested_target_margin_pct == 100
@@ -259,7 +441,8 @@ def test_flat_when_already_flat_is_noop():
 
 def test_deadband_skipped_when_current_margin_unknown():
     # Unknown margin_pct on a sized position: the deadband cannot be evaluated,
-    # so the (safety-neutral) optimisation is skipped and the order executes.
+    # so the (safety-neutral) optimisation is skipped and, at this confidence
+    # (helper default 0.78, above the resize bar), the order executes.
     current = CurrentPositionState(
         side=TargetSide.LONG, signed_notional=Decimal("355"), margin_pct=None
     )
@@ -279,8 +462,9 @@ def test_same_target_zero_delta_creates_no_order():
 def test_deadband_disabled_on_leverage_mismatch():
     # A manually opened 5x position under risk.leverage=1: margin 10% carries
     # ~50%-of-equity notional, while a 10% target at 1x means 10% notional.
-    # Equal margin%% must NOT be swallowed by the deadband — the order executes
-    # and delta_notional converges the true exposure to the target.
+    # Equal margin%% must NOT be swallowed by the deadband — at this confidence
+    # (helper default 0.78, above the resize bar) the order executes and
+    # delta_notional converges the true exposure to the target.
     current = CurrentPositionState(
         side=TargetSide.LONG,
         signed_notional=Decimal("500"),

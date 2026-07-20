@@ -6,12 +6,13 @@ with ``phase2-data.md`` §7 (``ai_outputs``):
 
 - step / range / type validation of the requested margin (integer grid);
 - the ``min_confidence`` gate (**set_target only** — confidence never scales
-  sizing, phase2-spec.md §2.4);
+  sizing, phase2-spec.md §2.4), plus the higher ``resize_min_confidence`` bar
+  for same-side resizes (churn control, spec §2.4);
 - clamp to ``max_target_margin_pct`` with both requested and approved values
   preserved (``risk_action = clamped``, phase2-spec.md §2.3);
-- the rebalance deadband — same-side targets within
-  ``rebalance_deadband_pct`` of the current margin allocation create no order
-  (``no_order_reason = within_deadband``); flips and flat closes are exempt;
+- the rebalance deadband — same-side targets less than
+  ``rebalance_deadband_pct`` away from the current margin allocation create no
+  order (``no_order_reason = within_deadband``); flips and flat closes are exempt;
 - independent ``effective_leverage`` and available-margin checks, so the gate
   never relies on the margin-allocation cap alone (spec §2.3).
 
@@ -50,6 +51,7 @@ __all__ = [
 
 # Stable machine tags for ai_outputs.risk_reason / no_order_reason.
 RISK_REASON_LOW_CONFIDENCE = "low_confidence"
+RISK_REASON_LOW_CONFIDENCE_RESIZE = "low_confidence_resize"
 RISK_REASON_MAX_TARGET_MARGIN = "exceeds_max_target_margin_pct"
 RISK_REASON_EFFECTIVE_LEVERAGE = "effective_leverage_cap"
 RISK_REASON_AVAILABLE_MARGIN = "insufficient_available_margin"
@@ -69,7 +71,8 @@ class RiskAction(str, Enum):
     ``INVALID_FAIL_CLOSED`` is reserved for contract violations — output the
     parse seam or re-validation could not accept. ``REJECTED`` is a
     schema-valid ``set_target`` the gate refused (``risk_reason`` names why:
-    low confidence, no equity, no grid capacity under the binding cap).
+    low confidence — the base bar or the higher same-side-resize bar — no
+    equity, no grid capacity under the binding cap).
     Keeping them distinct lets alerting treat REJECTED as normal operation
     and INVALID_FAIL_CLOSED as the model-drift alarm.
     """
@@ -137,8 +140,9 @@ class CurrentPositionState:
     percent of account equity (the established exposure basis — committed
     margin, not gross notional); ``None`` when a sized position carries no
     usable ``margin_used``, in which case the deadband cannot be evaluated and
-    is skipped (the order executes — the deadband is a churn optimisation, not
-    a safety check). ``leverage`` is the position's *actual* leverage from the
+    is skipped — order necessity then falls to the zero-delta check and the
+    resize confidence bar (the deadband is a churn optimisation, not a safety
+    check). ``leverage`` is the position's *actual* leverage from the
     exchange (``None`` when unreported): margin%% only tracks notional when it
     matches the configured ``risk.leverage``, so ``evaluate`` disables the
     deadband on a known mismatch (e.g. a manually opened position) rather than
@@ -683,7 +687,8 @@ def evaluate(
         # margin percentages, which only track notional when the position's real
         # leverage matches the configured ``risk.leverage`` the target is sized
         # with — on a known mismatch (e.g. a manually opened 5x position under
-        # ``leverage: 1``) the deadband is disabled so the rebalance executes and
+        # ``leverage: 1``) the deadband is disabled so the convergence order is
+        # not swallowed here (the resize bar below still applies) and
         # ``delta_notional`` converges the true exposure to the target. An
         # unknown leverage (``None``) keeps the deadband: it is a churn
         # optimisation, and Phase-2-opened positions always match.
@@ -697,6 +702,30 @@ def evaluate(
         # honest: this is an exact-delta no-op, not churn suppression.
         order_created = False
         no_order_reason = NO_ORDER_ZERO_DELTA
+
+    # 8. A same-side resize that would actually trade must clear the higher
+    # resize bar (spec §2.4): every executed rebalance pays fees, so a
+    # mid-conviction size tweak on an existing position is churn, not signal.
+    # Deliberately last — a within-deadband or zero-delta reaffirmation costs
+    # nothing and stays a no-op under its existing verdict (APPROVED, or
+    # CLAMPED when a cap pulled the request into the deadband), and a dead
+    # account already reported
+    # no_account_equity above. ``side is current.side`` is exactly the
+    # same-direction case (a flat account's ``current.side`` is ``None``, never
+    # FLAT), so opening from flat, flips — including the flip re-run's second
+    # leg, which starts from flat — and explicit flat closes all keep the base
+    # gate. Reductions are gated on purpose: the baseline churn's first leg was
+    # always a mid-confidence reduce; urgent de-risking stays available via the
+    # flat close and SL/TP.
+    if order_created and side is current.side and confidence < decision_cfg.resize_min_confidence:
+        return _rejected(
+            risk_reason=RISK_REASON_LOW_CONFIDENCE_RESIZE,
+            current=current,
+            risk=risk,
+            requested=requested,
+            target_side=side,
+            confidence=confidence,
+        )
 
     return RiskGateResult(
         decision_mode=DecisionMode.SET_TARGET,

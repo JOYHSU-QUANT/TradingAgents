@@ -60,7 +60,7 @@ _SUBCOMMANDS = ("paper", "export", "validate", "live", "safe-mode")
 
 # Version stamp for the ai_inputs.prompt_version column: bump when the injected
 # context/format contract changes shape (the payload hash tracks content).
-PROMPT_VERSION = "phase2-target-v1"
+PROMPT_VERSION = "phase2-target-v2"
 
 
 def _raise_keyboard_interrupt(signum, frame) -> None:

@@ -39,6 +39,7 @@ decision:
   target_margin_step_pct: 1
   rebalance_deadband_pct: 1
   min_confidence: 0.3
+  resize_min_confidence: 0.7
 ```
 
 ### 2.1 Leverage
@@ -89,6 +90,7 @@ decision:
   target_margin_step_pct: 1
   rebalance_deadband_pct: 1
   min_confidence: 0.3
+  resize_min_confidence: 0.7
 ```
 
 **刻度（`target_margin_step_pct`）**：`requested_target_margin_pct` 的合法值集合為 `{min, min+step, …, max}`，依預設值即整數 `0–100`。非整數步進、超出範圍或非數字 → invalid decision，fail-closed 成 `maintain_current`，記 `risk_action = invalid_fail_closed`。不做 silent rounding：四捨五入會讓 requested 與實際使用值對不上，並掩蓋 AI 輸出品質問題。
@@ -99,7 +101,7 @@ decision:
 abs(approved_target_margin_pct - current_margin_pct) < rebalance_deadband_pct
 ```
 
-則不建立 order，記 `order_created = false`、`no_order_reason = within_deadband`。**Flip 與 flat 平倉不適用 deadband**——方向相反或要求歸零時，再小的差距都必須執行。Deadband 也只在倉位**實際槓桿**與 `risk.leverage` 一致（或交易所未回報）時適用：margin% 只有在槓桿一致時才代表名目曝險，已知不一致（例如手動開的倉）時 deadband 停用，讓訂單執行、把真實名目收斂到 target。本節是 phase2-data.md 的 `ai_outputs.csv` 一章 `no_order_reason = within_deadband` 的正式定義。
+則不建立 order，記 `order_created = false`、`no_order_reason = within_deadband`。**Flip 與 flat 平倉不適用 deadband**——方向相反或要求歸零時，再小的差距都必須執行。Deadband 也只在倉位**實際槓桿**與 `risk.leverage` 一致（或交易所未回報）時適用：margin% 只有在槓桿一致時才代表名目曝險，已知不一致（例如手動開的倉）時 deadband 停用，收斂單不被 deadband 吞掉（仍受 resize 信心門檻約束，見下方互動註記）、把真實名目收斂到 target。本節是 phase2-data.md 的 `ai_outputs.csv` 一章 `no_order_reason = within_deadband` 的正式定義。
 
 **信心門檻（`min_confidence`）**：`confidence` 僅作記錄與事後分析，**不參與 sizing**——`approved_target_margin_pct` 不得乘上 `confidence`。驗證規則：
 
@@ -109,9 +111,62 @@ decision_mode = set_target 且 confidence < 0.3     → 契約合法但被風控
                                                      記 risk_action = rejected、risk_reason = low_confidence
                                                      （rejected 是正常風控運作；invalid_fail_closed
                                                      保留給契約違規，供 model-drift 告警使用）
+set_target 且 target_side 與目前持倉方向相同        → 同方向 resize 專用門檻（resize_min_confidence）：
+且該目標會實際產生訂單                               maintain_current，記 risk_action = rejected、
+且 confidence < 0.7                                  risk_reason = low_confidence_resize。
+                                                     只 gate「會下單」的 resize——deadband 內或
+                                                     zero-delta 的重申不付費，維持原本判定
+                                                     （approved；cap 拉回 deadband 時 clamped）+
+                                                     within_deadband／zero_delta；權益歸零仍先記
+                                                     no_account_equity（門檻檢查排在兩者之後）。
+                                                     加倉與減倉**都適用**；flat→建倉、方向翻轉
+                                                     （含 flip 第二腿——從 flat 出發）、明確 flat
+                                                     平倉都只走 min_confidence。
+                                                     載入時要求 resize_min_confidence >= min_confidence
+                                                     （更低的 resize 門檻永遠不會生效——基本門檻先拒）。
 ```
 
-理由：LLM 的 confidence 未經校準，直接乘進 sizing 會把噪音放大成倉位；AI 的 conviction 應直接反映在 `requested_target_margin_pct`，prompt 必須明確要求兩者一致。本門檻只負責擋下「高倉位、低信心」這類自相矛盾的輸出。是否引入 confidence-aware sizing，待 Phase 2 paper 累積的 confidence 與績效資料驗證其預測力後，於 Phase 3+ 再議。
+**同方向 resize 門檻（`resize_min_confidence`）的理由**：2026-07 paper baseline
+顯示，中等信心（0.6–0.68）的同方向倉位微調構成主要的手續費 churn——先減後加的
+來回把費用付了兩次，而方向 edge 不足以賺回。開倉／翻轉／平倉是方向性決策，
+維持原門檻；改變既有倉位大小則必須有更高的 conviction 才值得付 rebalance 成本。
+**減倉刻意包含在內**（churn 的第一腿就是中等信心的減倉）：這造成「中等信心大幅
+去險」被擋、但 flat 平倉只需 min_confidence 的不連續——是接受過的取捨，緊急
+去險路徑（flat 平倉、SL/TP）永遠不受此門檻影響。
+
+**與其他機制的交互**（皆為刻意行為，2026-07 review 定案）：
+
+- **先 clamp、後查 resize 門檻**——「會不會下單」以 clamp 後的 approved 值計算。
+  cap 把大請求拉回到 deadband 內時，記 `within_deadband`（不視為 churn 意圖、
+  不觸發本門檻）；clamp 後仍會下單而信心不足時，REJECTED 蓋過 clamp——依既有
+  REJECTED 契約，audit 只保留 requested、`approved_target_margin_pct = null`，
+  cap-binding 統計因此不含這些列。
+- **leverage-mismatch 收斂單同樣受此門檻約束**：實際槓桿與 `risk.leverage` 不一致
+  而停用 deadband 的同方向收斂單也是「會下單的 resize」，信心不足一樣被拒。
+  Phase 2 paper 不會產生這種倉位；Phase 3 的 adopt／手動倉位需注意——緊急收斂
+  一律走 flat 平倉或 SL/TP。
+- **cap 與 deadband 的遮蔽區（不可增倉區）**：保證金已落在
+  `(有效上限 − deadband, 有效上限]` 的同方向倉位無法再加倉——任何更高的請求都會
+  被 clamp 到有效上限、隨即落入 deadband，記 `within_deadband` 不下單。這是
+  deadband 遮蔽 cap 的固有現象，但 paper 調參（deadband=10、cap=60）把遮蔽區
+  放大到 `(50, 60]`：PnL 把倉位漂到這一區後，唯一的改倉出路是大幅減倉
+  （≥ deadband 且過 resize 門檻）、翻向或 flat。prompt 廣告的有效上限在此區間內
+  實際不可達，屬已知並接受的取捨。
+- **「不付費不 gate」原則僅適用本門檻**：基本 `min_confidence` 門檻刻意無條件
+  先檢（評估順序在前）——deadband 內的重申若 confidence 低於基本門檻仍記
+  `rejected`／`low_confidence`。不要以本門檻的 order-necessity 原則「調和」
+  基本門檻的檢查時機。
+- **兩步繞道與量測盲點**：本門檻不阻止「flat 平倉（只需 min_confidence）→
+  下一 cycle 同方向重開」的兩步改倉。position-blind 模型無法刻意繞道，但
+  發生時付兩條全倉費用，且 churn 偵測若只配對相鄰 rebalance 的
+  reduce→rebuild（/paper-review 的凍結定義），看不到這種形狀——平倉腿
+  `target_side = flat`、重開腿 `order_role = entry`。檢討 gate 成效時
+  churn=0 不能單獨當證據：摩擦佔比未同步下降時，先查 flat→同向重開配對。
+- **Phase 3 live 路徑同樣適用**：本門檻是共用 RiskGate 的一部分（含 code 預設
+  0.7，即使 YAML 未列出此 key），合回 `hyperliquid-adapter` 後 live 執行一體
+  繼承——paper 段即其驗證段。
+
+理由：LLM 的 confidence 未經校準，直接乘進 sizing 會把噪音放大成倉位；AI 的 conviction 應直接反映在 `requested_target_margin_pct`，prompt 必須明確要求兩者一致。`min_confidence` 門檻只負責擋下「高倉位、低信心」這類自相矛盾的輸出。是否引入 confidence-aware sizing，待 Phase 2 paper 累積的 confidence 與績效資料驗證其預測力後，於 Phase 3+ 再議。**分析 caveat**：prompt v2 起已向模型廣告 `min_confidence` 與 `resize_min_confidence` 的具體數值，模型因此有動機在想改倉位時報出跨過門檻的值——v2 段資料裡的 confidence 是 threshold-aware 的策略性變數，不再是未受激勵的純評估；預測力分析必須以廣告門檻為條件（例如分開檢視門檻上下的分佈與聚集），並注意與 v1 段（未廣告門檻）不可直接混併。
 
 ---
 
@@ -277,7 +332,7 @@ Phase 3 再開始處理：
 ## 6. 建置順序
 
 1. 決策契約遷移 — structured target schema、fail-closed 驗證、prompt 改版（DESIGN Part 2）；退役 Phase 1 的 rating 解析與 tier 設定。
-2. RiskGate — max margin clamp、step / `min_confidence` 檢查、`effective_leverage` 與 available margin 獨立檢查（本文件 §2）。
+2. RiskGate — max margin clamp、step / `min_confidence`（同向 resize 另有 `resize_min_confidence`）檢查、`effective_leverage` 與 available margin 獨立檢查（本文件 §2）。
 3. SQLite persistence 骨架 — tables、transaction 語意、去重鍵、accounting replay 驗證（phase2-data）。
 4. Paper 帳務 — fills / fees / funding exactly-once 過帳、margin 與清算價模型（phase2-execution §6）。
 5. 執行引擎 — `paper_market`、TWAP / flip plan、SL / TP lifecycle、market monitor（phase2-execution §1–5）。

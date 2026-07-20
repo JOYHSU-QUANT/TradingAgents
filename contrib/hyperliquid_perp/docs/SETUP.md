@@ -55,7 +55,7 @@ cp contrib/hyperliquid_perp/configs/hyperliquid.example.yaml \
 | `indicators` | `rsi_14, ema_20, ema_50, atr_14, macd`，由 `context_builder` 計算。 |
 | `engine` | `llm_provider: openrouter`、`deep_think_llm`、`quick_think_llm`、`selected_analysts: [market, social, news]`。 |
 | `risk` | Phase 2 RiskGate：`leverage`（Phase 2 = 1x）、`margin_mode`（cross-only）、`max_target_margin_pct`（clamp 上限，requested 61–100 → approved 60）。cap 低於 decision grid 上限（也就是會實際生效）時必須落在 grid 上，否則有效上限會被靜默收緊 → config load 時具名 exit 1；cap 等於或高於 grid 上限則一律合法——它永遠不生效（有效上限 = min(grid 上限, cap) 由 grid 綁住），只是後備上限，不要求 grid 對齊。若 cap snap 到 grid 後 ≤ 0（低於 grid 最小值，或 grid 由 0 起算但 cap 小於一個 step）→ 每個方向性 target 都會 clamp 成 0 被風控拒絕（REJECTED），同樣 load 時 exit 1，不靜默上線。 |
-| `decision` | 決策契約 grid：`ai_target_margin_min_pct`／`ai_target_margin_max_pct`／`target_margin_step_pct`（合法 `requested_target_margin_pct` = {min, min+step, …, max}；off-grid 直接 fail closed，不四捨五入；`(max − min)` 必須為 `step` 的整數倍，否則廣告的 `max` 落在 grid 外、config load 時 exit 1）、`rebalance_deadband_pct`（同向 \|approved − current\| 小於此值 → 不下單；flip/flat 例外）、`min_confidence`（低於此值的 set_target 被風控拒絕 REJECTED——包含 flat 請求；confidence 永不縮放 sizing）。 |
+| `decision` | 決策契約 grid：`ai_target_margin_min_pct`／`ai_target_margin_max_pct`／`target_margin_step_pct`（合法 `requested_target_margin_pct` = {min, min+step, …, max}；off-grid 直接 fail closed，不四捨五入；`(max − min)` 必須為 `step` 的整數倍，否則廣告的 `max` 落在 grid 外、config load 時 exit 1）、`rebalance_deadband_pct`（同向 \|approved − current\| 小於此值 → 不下單；flip/flat 例外）、`min_confidence`（低於此值的 set_target 被風控拒絕 REJECTED——包含 flat 請求；confidence 永不縮放 sizing）、`resize_min_confidence`（同向且會實際下單的 resize 需 ≥ 此門檻，否則 REJECTED（`low_confidence_resize`）；加倉減倉皆適用，flat→建倉／flip／flat 平倉走 `min_confidence`；必須 ≥ `min_confidence`，否則 config load 時具名 exit 1；設成等於 `min_confidence` 即等效停用這道較高門檻）。 |
 | `paper_trading` | Phase 2 紙上帳戶＋撮合模型：`initial_balance_usdc`（開帳淨值，必須 > 0）、`initial_positions`（可選種倉；幣種必須等於 run 幣種——引擎只管理 run 幣種，off-coin 種倉會整段 run 不入 equity/保護，`paper` 啟動時具名 exit 1）、`execution.fill_model.slippage_bps`／`execution.market_monitor.interval_seconds`（1–30；TWAP 每 tick 最多吃一片、slice 節奏 30s，interval 超過 30 會讓大計畫在 1h 死線內吃不完而被具名拒絕）／`request_timeout_seconds`、`taker_fee_rate` 等。整個區塊在 config load 時就驗證——未知／打錯的 key、非 mapping、或無效值（如非正的 `initial_balance_usdc`、負費率）都具名 exit 1，不靜默套預設。 |
 
 > 沒有任何 `*.local.yaml` 時，loader 會退回 `hyperliquid.example.yaml`，
@@ -295,7 +295,7 @@ sizing／clamp／下單判定（`target_*` 皆 mark 定價，`approved 35% × eq
 `mark_price`／`account_equity` 是決策當下的 sizing 輸入——沒有它們，REJECTED／
 maintain_current 紀錄（`target_*` 全為 null）無法事後重現成幣量。
 `prompt_hash` 是本模組注入引擎的完整文本——perp context **加上** output-format
-契約（內含當時的 margin grid 與 `min_confidence`）——的 sha256，所以改了
+契約（內含當時的 margin grid、兩個信心門檻與 deadband）——的 sha256，所以改了
 `decision:`／`risk:` config 的兩筆紀錄不可能帶同一個 hash；配合 `models` 與
 `timestamp`，任何一筆 decision 都能重建並做 post-mortem。各欄位定義見
 [DESIGN](./DESIGN.md) Part 2 與 [phase2-spec](./phase2-spec.md)。

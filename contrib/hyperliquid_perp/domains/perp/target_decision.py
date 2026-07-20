@@ -12,7 +12,7 @@ structured target schema (``docs/DESIGN.md`` Part 2). This module owns:
   (phase2-spec.md §2.4: no silent rounding, no inference from old ratings or
   a previous round's target);
 - :class:`DecisionConfig` — the ``decision:`` config block (margin grid,
-  deadband, ``min_confidence``);
+  deadband, ``min_confidence``, ``resize_min_confidence``);
 - :func:`decision_format_instructions` — the output-format contract appended
   to the engine context by ``integration/trading_graph.py``.
 
@@ -80,9 +80,13 @@ class DecisionConfig:
     """Typed view of the YAML ``decision:`` block (phase2-spec.md §2.4 defaults).
 
     The margin grid is ``{min, min+step, …, max}`` — integers ``0–100`` by
-    default. ``rebalance_deadband_pct`` and ``min_confidence`` are consumed by
-    the RiskGate but live here with the rest of the decision-contract knobs so
-    the block round-trips as one unit.
+    default. ``rebalance_deadband_pct``, ``min_confidence`` and
+    ``resize_min_confidence`` are consumed by the RiskGate but live here with
+    the rest of the decision-contract knobs so the block round-trips as one
+    unit. ``resize_min_confidence`` is the higher bar a same-side resize must
+    clear before it may trade (churn control — rationale in phase2-spec §2.4);
+    it must not sit below ``min_confidence``, which would be dead config — the
+    base gate fires first.
     """
 
     ai_target_margin_min_pct: int = 0
@@ -90,6 +94,7 @@ class DecisionConfig:
     target_margin_step_pct: int = 1
     rebalance_deadband_pct: Decimal = Decimal("1")
     min_confidence: Decimal = Decimal("0.3")
+    resize_min_confidence: Decimal = Decimal("0.7")
 
     def __post_init__(self) -> None:
         if self.target_margin_step_pct < 1:
@@ -120,6 +125,18 @@ class DecisionConfig:
             )
         if not Decimal(0) <= self.min_confidence <= Decimal(1):
             raise ValueError(f"min_confidence must be in [0, 1], got {self.min_confidence}")
+        if not Decimal(0) <= self.resize_min_confidence <= Decimal(1):
+            raise ValueError(
+                f"resize_min_confidence must be in [0, 1], got {self.resize_min_confidence}"
+            )
+        if self.resize_min_confidence < self.min_confidence:
+            raise ValueError(
+                f"resize_min_confidence ({self.resize_min_confidence}) must be >= "
+                f"min_confidence ({self.min_confidence}): a lower resize bar can never "
+                "fire because the base gate rejects first. resize_min_confidence "
+                "defaults to 0.7 when absent — raising min_confidence above that "
+                "requires setting decision: resize_min_confidence explicitly too"
+            )
 
     @classmethod
     def from_dict(cls, cfg: dict | None) -> DecisionConfig:
@@ -133,6 +150,7 @@ class DecisionConfig:
                     "target_margin_step_pct": int_from_yaml,
                     "rebalance_deadband_pct": decimal_from_yaml,
                     "min_confidence": decimal_from_yaml,
+                    "resize_min_confidence": decimal_from_yaml,
                 },
             )
         )
@@ -470,15 +488,31 @@ def parse_target_decision(raw: object, config: DecisionConfig) -> ParsedDecision
 def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None = None) -> str:
     """The output-format contract text injected at the tail of the engine context.
 
-    Rendered from the live :class:`DecisionConfig` so the legal margin grid and
-    the ``min_confidence`` threshold in the prompt can never drift from what the
-    parser and RiskGate actually enforce. ``max_pct`` (when given) advertises the
-    *effective* ceiling — ``risk_gate.effective_max_target_margin_pct``, the
+    Rendered from the live :class:`DecisionConfig` so the *numeric values* in
+    the prompt — the legal margin grid, the confidence thresholds
+    (``min_confidence`` and the same-side ``resize_min_confidence`` bar) and
+    the rebalance deadband — can never drift from what the parser and RiskGate
+    actually enforce. The deadband sentence itself is a deliberately
+    simplified contract for the normal case: the gate skips the deadband
+    entirely on an unreadable ``margin_pct`` or a leverage mismatch (the
+    target then trades, or hits the resize bar). Those degraded states are
+    rare in Phase 2 and non-actionable for a position-blind model, so the
+    prompt does not carry the conditional.
+    ``max_pct`` (when given) advertises the *effective* ceiling —
+    ``risk_gate.effective_max_target_margin_pct``, the
     grid ceiling capped by ``risk.max_target_margin_pct`` — so the model is
     never told a margin is legal that the gate deterministically clamps; a
     ``clamped`` audit record then means the risk gate genuinely intervened, not
     business as usual. Requests above ``max_pct`` but on the grid stay
     schema-valid (they clamp rather than fail closed).
+
+    The resize bar is advertised as a per-action fact only; the gate's
+    exemption ranking (open/flip/flat need just ``min_confidence``) is
+    deliberately not spelled out. A position-blind model cannot tell which
+    of its targets is a resize, so the comparison is non-actionable — the
+    only thing it could teach is that a full close is the one exposure
+    change guaranteed past the gate, funneling mid-confidence de-risking
+    into fee-heavier flat exits.
 
     The worked example is deliberately a ``maintain_current``: models routinely
     echo format examples verbatim, and :func:`extract_json_block` takes the last
@@ -516,8 +550,13 @@ never repaired or rounded):
   as margin, from {lo} to {hi} in steps of {step}. Use a value > 0 with
   long/short, exactly 0 with flat, and null with maintain_current.
 - "confidence": a number between 0 and 1. A set_target with confidence below
-  {config.min_confidence} is rejected; make your conviction consistent with
-  the margin you request — confidence is recorded but never scales the size.
+  {config.min_confidence} is rejected. A same-side target less than
+  {config.rebalance_deadband_pct} percentage points away from the current
+  margin creates no order (a cost-free reaffirmation); a same-side resize that would
+  actually trade needs confidence >= {config.resize_min_confidence} or it is
+  rejected — every executed rebalance pays fees. Make your conviction
+  consistent with the margin you request — confidence is recorded but never
+  scales the size.
 - "rationale": non-empty. "key_risks": 1 to {_MAX_KEY_RISKS} short strings (at least one).
 
 Legal combinations — anything else is invalid:

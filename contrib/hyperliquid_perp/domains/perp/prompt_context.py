@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from .schema import PerpMarketContext
+from .schema import MarketRegime, PerpMarketContext
 
 _INDICATOR_LABEL = {
     "rsi_14": "RSI(14)",
@@ -21,6 +21,24 @@ _INDICATOR_LABEL = {
     "ema_50": "EMA(50)",
     "atr_14": "ATR(14)",
     "macd": "MACD",
+}
+
+# Cost-awareness note keyed to the computed regime (paper-tuning, 2026-07).
+# Behavioral, not directional — keep long/short framing out of these strings.
+# The mapping is exhaustive over MarketRegime; a new member fails loud at
+# render time instead of silently inheriting another regime's advice.
+_REGIME_NOTE = {
+    MarketRegime.TRENDING: (
+        "holding an established position with the trend usually beats frequent adjustment."
+    ),
+    MarketRegime.RANGING: (
+        "resizing an existing position rarely earns back its fees — size "
+        "changes need high conviction."
+    ),
+    MarketRegime.VOLATILE: (
+        "wide swings inflate the cost of reactive resizing — change the "
+        "position on conviction, not on noise."
+    ),
 }
 
 
@@ -61,6 +79,7 @@ def render_market_context(ctx: PerpMarketContext) -> str:
     lines.append(f"  Open interest: {_num(ctx.open_interest)}")
     lines.append(f"  24h notional volume: {_num(ctx.day_ntl_volume)}")
     lines.append(f"  Regime (computed): {ctx.market_regime.value}")
+    lines.append(f"  Regime note: {_REGIME_NOTE[ctx.market_regime]}")
     lines.append("")
 
     # Neutral funding wording — placeholder; do not add directional framing here.

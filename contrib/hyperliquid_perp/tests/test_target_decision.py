@@ -442,7 +442,11 @@ def test_format_instructions_reflect_config():
     )
     text = decision_format_instructions(cfg)
     assert "from 0 to 80 in steps of 5" in text
-    assert "0.4" in text
+    # Bind the value to its clause: a bare `"0.4" in text` would still pass if
+    # the min_confidence and resize_min_confidence substitutions were swapped.
+    normalized = " ".join(text.split())
+    assert "confidence below 0.4 is rejected" in normalized
+    assert "needs confidence >= 0.7" in normalized  # default resize bar, other clause
     # The instructions' own example must survive the parser it feeds.
     assert parse_target_decision(text, cfg).is_valid
 
@@ -467,6 +471,56 @@ def test_decision_config_rejects_bad_grid():
         DecisionConfig(rebalance_deadband_pct=Decimal("-1"))
 
 
+def test_decision_config_rejects_bad_resize_confidence():
+    with pytest.raises(ValueError, match="resize_min_confidence"):
+        DecisionConfig(resize_min_confidence=Decimal("1.5"))
+    # A resize bar below the base bar is rejected at load (see __post_init__).
+    with pytest.raises(ValueError, match="resize_min_confidence"):
+        DecisionConfig(min_confidence=Decimal("0.5"), resize_min_confidence=Decimal("0.4"))
+
+
+def test_decision_config_equal_confidence_bars_accepted():
+    # Equal bars are the documented off-switch (SETUP.md / example yaml:
+    # resize_min_confidence == min_confidence disables the extra resize bar).
+    # Only a strictly lower resize bar is dead config — a `<` → `<=` slip in
+    # __post_init__ would break the escape hatch with no test failing.
+    cfg = DecisionConfig(min_confidence=Decimal("0.5"), resize_min_confidence=Decimal("0.5"))
+    assert cfg.resize_min_confidence == cfg.min_confidence
+
+
+def test_decision_config_from_dict_parses_resize_confidence():
+    cfg = DecisionConfig.from_dict({"resize_min_confidence": 0.8})
+    assert cfg.resize_min_confidence == Decimal("0.8")
+
+
+def test_format_instructions_advertise_resize_bar_and_deadband():
+    # The prompt renders the live resize threshold and the rebalance deadband
+    # so the model is told the same-side bar and the no-trade band the gate
+    # actually enforces — never hardcoded copies that could drift.
+    text = decision_format_instructions(
+        DecisionConfig(resize_min_confidence=Decimal("0.75"), rebalance_deadband_pct=Decimal("12"))
+    )
+    assert "0.75" in text
+    assert "12" in text
+    # Normalized: the phrase spans a template line wrap.
+    normalized = " ".join(text.split())
+    assert "same-side resize that would actually trade" in normalized
+    # Bind each threshold to its clause — bare value-presence checks would
+    # still pass if the two confidence substitutions were swapped, silently
+    # advertising the wrong bar for opens vs. resizes.
+    assert "needs confidence >= 0.75" in normalized
+    assert "confidence below 0.3 is rejected" in normalized  # default base bar
+    # The deadband is advertised with the gate's strict-< boundary (2026-07
+    # review decision): "within 12 points" reads as inclusive, telling the
+    # model an exactly-12 move is a cost-free reaffirmation when the gate
+    # actually orders it through the resize bar.
+    assert "less than 12 percentage points away" in normalized
+    # The gate's exemption ranking must stay out of the prompt (2026-07 review
+    # decision): a position-blind model can't identify resizes, so comparing
+    # bars only teaches that a full close is the guaranteed way past the gate.
+    assert "higher bar than" not in normalized
+
+
 def test_decision_config_rejects_grid_step_not_reaching_max():
     # step must divide (max - min) so the advertised max is actually on the grid;
     # otherwise a model that requests the max fails closed off-grid.
@@ -485,10 +539,18 @@ def test_decision_config_rejects_grid_step_not_reaching_max():
 
 def test_decision_config_from_dict_nulls_fall_back():
     cfg = DecisionConfig.from_dict(
-        {"ai_target_margin_max_pct": None, "min_confidence": None, "target_margin_step_pct": 2}
+        {
+            "ai_target_margin_max_pct": None,
+            "min_confidence": None,
+            "resize_min_confidence": None,
+            "target_margin_step_pct": 2,
+        }
     )
     assert cfg.ai_target_margin_max_pct == 100
     assert cfg.min_confidence == Decimal("0.3")
+    # Pins the built-in 0.7 default the spec's live-inheritance note and the
+    # __post_init__ error message both advertise for an absent/null key.
+    assert cfg.resize_min_confidence == Decimal("0.7")
     assert cfg.target_margin_step_pct == 2
 
 

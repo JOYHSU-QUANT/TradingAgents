@@ -127,7 +127,7 @@ PnL，正是跨段對照要避免的汙染。等 cycle 自然回到空倉（或 
 再執行下面的順序，讓舊段以 realized PnL 乾淨收尾。
 
 換段的實際順序——push `deploy/paper` 會觸發 workflow 自動 restart `hl-paper`
-（`.github/workflows/deploy.yml`），而 run-id 在伺服器 systemd unit 的
+（`deploy/paper` 分支上的 `.github/workflows/deploy.yml`），而 run-id 在伺服器 systemd unit 的
 `ExecStart` 裡，**先 push 就會讓舊 run 直接跨過部署點跑新 code**，所以必須：
 
 1. 確認空倉後，SSH 上伺服器 `sudo systemctl stop hl-paper`，把 unit 的

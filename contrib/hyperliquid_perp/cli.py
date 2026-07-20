@@ -244,7 +244,7 @@ def _cmd_safe_mode(argv: list[str]) -> int:
     parser.add_argument(
         "--action",
         default=None,
-        help='Required with --stamp-case: what the human decided, recorded as '
+        help="Required with --stamp-case: what the human decided, recorded as "
         "the case's action_taken.",
     )
     parser.add_argument(

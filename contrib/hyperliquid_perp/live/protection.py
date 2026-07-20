@@ -402,8 +402,9 @@ class ProtectionManager:
         placement succeeded and only the ack was lost — persist it (the same
         ``orders`` / registry / protection-price writes an accepted ack does) and
         report success, so a benign network blip never forces a spurious emergency
-        close. An unknown cloid or a rejected order means the placement did NOT
-        take — return False so the caller records a failed attempt and retries
+        close. An unknown cloid, or a rejected / canceled order, means no live
+        protective order is resting — return False so the caller records a failed
+        attempt and retries
         (and, if attempts exhaust, emergency-closes — the safe outcome for a
         genuinely un-placeable stop). Recovery only ever returns True on a POSITIVE
         confirmation; any read/parse failure is unresolved → return False (retry,
@@ -419,8 +420,14 @@ class ProtectionManager:
         if parsed is None:
             return False  # the exchange does not know this cloid — nothing landed
         exchange_oid, exchange_status = parsed
-        if local_status_for_exchange_status(exchange_status) == "rejected":
-            return False  # known to the exchange but rejected — not a live order
+        if local_status_for_exchange_status(exchange_status) in ("canceled", "rejected"):
+            # Known to the exchange but no longer a live protective order: rejected
+            # (never accepted) or a *Canceled — e.g. reduceOnlyCanceled — that was
+            # removed from the book. Report it as a FAILED placement so the caller
+            # retries / eventually emergency-closes, never a false "protected" over a
+            # stop that is not resting. (Only "rejected" was checked before, so the
+            # whole Canceled family slipped through and was persisted as live.)
+            return False
         logger.warning(
             "recovered %s order for cloid %s from orderStatus (%s) after a lost ack",
             role,
@@ -475,6 +482,17 @@ class ProtectionManager:
         now: datetime,
     ) -> None:
         """Record an acknowledged (or orderStatus-recovered) SL/TP: registry, orders row, protection state."""
+        # Persist the LOCAL status the exchange actually reported, never a hardcoded
+        # "open": an accepted ack can be "filled" (an immediately-fired trigger), and
+        # an orderStatus-recovered order carries the exchange's real word. Recording a
+        # filled order as "open" would make active_protection_order treat it as live
+        # protection and let the no-op guard skip re-arming a stop that is not resting.
+        local_status = (
+            local_status_for_exchange_status(exchange_raw_status)
+            if exchange_raw_status is not None
+            else "open"
+        )
+        remaining = Decimal(0) if local_status == "filled" else size
         with self._db.transaction() as conn:
             repo.insert_cloid_mapping(
                 conn,
@@ -495,10 +513,10 @@ class ProtectionManager:
                 side=side.value,
                 order_type=_ROLE_ORDER_TYPE[role],
                 qty=size,
-                status="open",
+                status=local_status,
                 price=limit_price,
                 trigger_price=trigger_price,
-                remaining_qty=size,
+                remaining_qty=remaining,
                 reduce_only=True,
                 cloid_logical=logical,
                 cloid_hex=hexid,
@@ -561,13 +579,27 @@ class ProtectionManager:
         if existing is None or existing["cloid_hex"] is None:
             return False
         try:
-            self._client.cancel_by_cloid(coin=self._coin, cloid_hex=existing["cloid_hex"])
+            ack = self._client.cancel_by_cloid(coin=self._coin, cloid_hex=existing["cloid_hex"])
         except (ExchangeError, LiveOrderGateRejected) as exc:
             # Fail-soft: a cancel that could not land — or a gate rejection raised
             # inside the client (LiveOrderGateRejected, not an ExchangeError) — is
             # a reconciliation concern (§12.3 orphan / §18.2 shutdown sweep), not a
             # reason to crash the protection pass. Leave the row; log loud.
             logger.warning("cancel of resting %s (%s) failed: %s", role, existing["order_id"], exc)
+            return False
+        if not ack.success:
+            # A NON-exceptional refusal (cancel_by_cloid returns CancelAck(success=
+            # False) without raising — e.g. "already filled" / "unknown oid"): the
+            # cancel is NOT confirmed, so do not mark the row canceled. A resting SL
+            # that actually FILLED would otherwise be mislabeled canceled, and a
+            # later-arriving fill could no longer reconcile against it. Leave the row
+            # for §12.3 reconciliation / the §18.2 shutdown sweep to settle.
+            logger.warning(
+                "cancel of resting %s (%s) refused by exchange: %s",
+                role,
+                existing["order_id"],
+                ack.error,
+            )
             return False
         with self._db.transaction() as conn:
             repo.update_order(

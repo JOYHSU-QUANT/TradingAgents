@@ -262,6 +262,41 @@ def test_max_open_orders_rejects_and_reconciles(tmp_path):
     assert "mismatch" in recon.calls  # §10.5 triggers a reconciliation
 
 
+def test_non_list_open_orders_is_fail_closed_at_cap(tmp_path):
+    """A malformed (non-list) open-orders response cannot express a trustworthy
+    count — count_bot_open_orders would read it as 0 (fail-OPEN). It must be treated
+    as at-cap (fail-closed), exactly like a read failure, and must NOT reconcile
+    (its own read just failed, unlike a genuine over-cap breach)."""
+    recon = _FakeReconciler()
+    db, clock, engine, gate, sub = _build(
+        tmp_path, reconciler=recon, open_orders={"unexpected": "envelope"}
+    )
+    _script(engine, [_snap()])
+    reg = engine.start_plan(_decision("long", 5))
+    assert reg.reason == "max_open_orders"  # refused past the §10.5 cap
+    assert gate.active_slice_plan is False
+    assert "mismatch" not in recon.calls  # a read failure does not reconcile
+
+
+def test_terminated_plan_records_unknown_residual(tmp_path):
+    """v1 does not attribute live fills to their plan, so a terminated plan's
+    residual is recorded as NULL (unknown), never the frozen planned-total, which
+    would falsely claim the whole plan went unfilled. Real per-plan fill tracking
+    (and an authoritative residual) lands with PR 6."""
+    db, clock, engine, gate, sub = _build(tmp_path)
+    _script(engine, [_snap()])
+    reg = engine.start_plan(_decision("long", 5), output_id="o1")  # 4 slices
+    _script(engine, [_snap()] * 6)
+    engine.tick()  # slice 0
+    clock.advance(30)
+    engine.tick()  # slice 1
+    clock.advance(120)  # catch up the remaining slices -> plan completes
+    engine.tick()
+    plan = repo.get_execution_plan(db.conn, reg.plan_id)
+    assert plan["status"] == "completed"
+    assert plan["residual_qty"] is None  # unknown in v1, not the planned total
+
+
 # -- emergency close --------------------------------------------------------
 
 

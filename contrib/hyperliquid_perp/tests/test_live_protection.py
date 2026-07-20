@@ -8,7 +8,7 @@ from decimal import Decimal
 import pytest
 
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeRequestError
-from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import OrderAck
+from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import CancelAck, OrderAck
 from contrib.hyperliquid_perp.live.config import ExecutionMode, LiveProtectionConfig
 from contrib.hyperliquid_perp.live.order_gate import LiveOrderGateRejected, RealOrderGate
 from contrib.hyperliquid_perp.live.protection import ProtectionManager, ProtectionOutcome
@@ -64,11 +64,15 @@ class _FakeClient:
         self.modified.append(kw)
         return self._ack(self.modify_script)
 
-    def cancel_by_cloid(self, *, coin: str, cloid_hex: str):
+    def cancel_by_cloid(self, *, coin: str, cloid_hex: str) -> CancelAck:
         self.canceled.append(cloid_hex)
-        if self.cancel_script and self.cancel_script.pop(0) == "raise":
+        outcome = self.cancel_script.pop(0) if self.cancel_script else "ok"
+        if outcome == "raise":
             raise ExchangeRequestError("cancel down")
-        return None
+        if outcome == "refused":
+            # A non-exceptional per-order rejection (e.g. "already filled").
+            return CancelAck(success=False, error="already filled")
+        return CancelAck(success=True)
 
     def query_order_by_cloid(self, cloid_hex: str) -> dict:
         self.status_queries.append(cloid_hex)
@@ -297,6 +301,92 @@ def test_sl_repair_recovers_landed_order_from_order_status(env):
     active = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
     assert active is not None and active["exchange_order_id"] == "4242"
     assert gate.unresolved_protection_failure is False
+
+
+def test_sl_recovery_of_canceled_order_is_not_treated_as_protected(env):
+    """§8.3 recovery: an orderStatus that comes back in the CANCELED family (e.g.
+    reduceOnlyCanceled) is NOT a live protective order. It must not be persisted as
+    open and reported protected — it counts as a failed attempt, so repair exhausts
+    to emergency close. (Previously only 'rejected' was filtered, so the whole
+    Canceled family slipped through as a false 'protected'.)"""
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    client.place_script = ["raise", "raise", "raise"]  # every ack lost
+    client.status_script = [
+        {"status": "order", "order": {"order": {"oid": 7}, "status": "reduceOnlyCanceled"}}
+        for _ in range(3)
+    ]
+    mgr = _manager(db, client, gate)
+    outcome = mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+    assert outcome is ProtectionOutcome.NEEDS_EMERGENCY_CLOSE
+    assert repo.active_protection_order(db.conn, "r", "BTC", "stop_loss") is None
+    assert gate.unresolved_protection_failure is True
+
+
+def test_sl_recovery_of_filled_order_persists_filled_not_open(env):
+    """A recovered SL whose orderStatus is FILLED (the trigger already fired) is
+    recorded with its true 'filled' status, never a hardcoded 'open' — so
+    active_protection_order cannot mistake a spent stop for live protection and let
+    the no-op guard skip re-arming."""
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    client.place_script = ["raise"]  # ack lost; the order actually filled
+    client.status_script = [
+        {"status": "order", "order": {"order": {"oid": 99}, "status": "filled"}}
+    ]
+    mgr = _manager(db, client, gate)
+    outcome = mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+    assert outcome is ProtectionOutcome.PROTECTED  # the placement landed (and fired)
+    assert repo.active_protection_order(db.conn, "r", "BTC", "stop_loss") is None
+    row = db.conn.execute(
+        "SELECT status, remaining_qty FROM orders WHERE run_id='r' AND order_role='stop_loss'"
+    ).fetchone()
+    assert row["status"] == "filled"
+    assert Decimal(row["remaining_qty"]) == Decimal(0)
+
+
+def test_cancel_refused_by_exchange_does_not_mark_row_canceled(env):
+    """A cancel the exchange REFUSES without raising (CancelAck.success=False, e.g.
+    'already filled') must not mislabel the row canceled — a resting SL that actually
+    filled would then be lost to reconciliation. The raw ack was previously discarded."""
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    mgr = _manager(db, client, gate)
+    # Place an SL first (a resting stop_loss row to clear later).
+    mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+    assert repo.active_protection_order(db.conn, "r", "BTC", "stop_loss") is not None
+    # Position goes flat -> _clear -> _cancel_role, but the exchange refuses the cancel.
+    client.cancel_script = ["refused"]
+    outcome = mgr.sync(
+        position=PositionState.flat("BTC"),
+        liquidation_price=None,
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert outcome is ProtectionOutcome.FLAT
+    assert client.canceled  # a cancel was attempted
+    row = db.conn.execute(
+        "SELECT status FROM orders WHERE run_id='r' AND order_role='stop_loss'"
+    ).fetchone()
+    assert row["status"] == "open"  # NOT canceled — the refusal was respected
 
 
 def test_kill_switch_refreshed_across_repair_delays(env):

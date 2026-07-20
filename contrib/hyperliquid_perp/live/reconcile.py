@@ -904,16 +904,20 @@ class LiveReconciler:
             )
         if parsed is not None:
             exchange_order_id, raw_status = parsed
-            if local_status_for_exchange_status(raw_status) in repo.LIVE_ORDER_STATUSES:
+            local_status = local_status_for_exchange_status(raw_status)
+            if local_status in repo.LIVE_ORDER_STATUSES:
                 # Confirmed live: the terminal row was wrong (the usual story:
                 # a past pass settled it off a wrong unknownOid answer). The
                 # row reopens, making the order visible again to
-                # iter_open_live_orders and the shutdown cross-check.
+                # iter_open_live_orders and the shutdown cross-check. Persist the
+                # MAPPED local status, never a literal "open": only "open" passes the
+                # guard today, but hardcoding it is the same idiom that let the
+                # protection manager misrecord a filled/canceled recovery as live.
                 with self._db.transaction() as tx:
                     repo.update_order(
                         tx,
                         local["order_id"],
-                        status="open",
+                        status=local_status,
                         status_reason="reopened_from_exchange_reconciliation",
                         exchange_order_id=exchange_order_id,
                         exchange_status="open",

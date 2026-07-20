@@ -27,7 +27,11 @@ from contrib.hyperliquid_perp.live.decision import LiveDecisionDriver, LiveDecis
 from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.paper.engine import AssetSpec
-from contrib.hyperliquid_perp.paper.scheduler import DecisionInput, RetryableDecisionError
+from contrib.hyperliquid_perp.paper.scheduler import (
+    DecisionInput,
+    RetryableDecisionError,
+    parse_instant,
+)
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 
@@ -140,10 +144,11 @@ def _gate_result():
 
 
 class _DriverProvider:
-    def __init__(self, decision_input, *, parsed, build_error=None) -> None:
+    def __init__(self, decision_input, *, parsed, build_error=None, request_error=None) -> None:
         self._di = decision_input
         self._parsed = parsed
         self._build_error = build_error
+        self._request_error = request_error
         self.builds = 0
 
     def build_input(self, *, coin, as_of):
@@ -153,15 +158,20 @@ class _DriverProvider:
         return self._di
 
     def request_decision(self, decision_input):
+        if self._request_error is not None:
+            raise self._request_error
         return self._parsed
 
 
 class _DriverEngine:
-    def __init__(self, reg) -> None:
+    def __init__(self, reg, *, start_error=None) -> None:
         self._reg = reg
+        self._start_error = start_error
         self.plans: list = []
 
     def start_plan(self, parsed, *, output_id):
+        if self._start_error is not None:
+            raise self._start_error
         self.plans.append(output_id)
         return self._reg
 
@@ -184,7 +194,7 @@ def _decision_input():
     )
 
 
-def _driver(tmp_path, *, build_error=None):
+def _driver(tmp_path, *, build_error=None, request_error=None, start_error=None):
     from contrib.hyperliquid_perp.live.engine import PlanRegistration
 
     db = Database(tmp_path / "d.db")
@@ -200,8 +210,13 @@ def _driver(tmp_path, *, build_error=None):
         mark_price=Decimal(50000),
         account_equity=Decimal(4000),
     )
-    engine = _DriverEngine(reg)
-    provider = _DriverProvider(_decision_input(), parsed=_decision(), build_error=build_error)
+    engine = _DriverEngine(reg, start_error=start_error)
+    provider = _DriverProvider(
+        _decision_input(),
+        parsed=_decision(),
+        build_error=build_error,
+        request_error=request_error,
+    )
     worker = LiveDecisionWorker(provider=provider)
     driver = LiveDecisionDriver(
         db=db,
@@ -246,3 +261,81 @@ def test_driver_build_failure_is_api_failed(tmp_path):
     assert engine.plans == []  # no order on a failed cycle (§10.2 fail closed)
     state = repo.get_scheduler_state(db.conn, "r")
     assert state["next_decision_at"] is not None  # re-anchored to the next cycle
+
+
+def test_driver_build_nonretryable_error_fails_closed_and_recovers(tmp_path):
+    """A NON-retryable exception in build_input is a bug, not a §6.2 API failure. The
+    driver must still fail the cycle CLOSED — never leave an unresolved in_progress
+    row with next_decision_at in the past, which crash-loops every tick on the
+    duplicate attempt_id (C2)."""
+    db, clock, driver, engine, worker, provider = _driver(tmp_path, build_error=ValueError("boom"))
+    assert driver.pump() == "api_failed"
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "api_failed"
+    assert row["error_type"] is None  # not a §6.2 vocabulary word
+    assert "boom" in (row["error_message"] or "")
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["next_decision_at"] is not None  # re-anchored, not stuck in the past
+    assert driver.pump() is None  # not due -> no per-tick crash-loop
+    # The next boundary starts a FRESH attempt id (re-anchored), so it fails cleanly
+    # again rather than raising IntegrityError on the old duplicate row.
+    clock.set(parse_instant(state["next_decision_at"]))
+    assert driver.pump() == "api_failed"
+
+
+def test_driver_worker_nonretryable_error_fails_closed_and_recovers(tmp_path):
+    """A NON-retryable exception on the worker thread must not wedge the driver:
+    _inflight has to be cleared so the loop keeps deciding, rather than silently
+    stalling forever on the empty one-shot poll slot (C1)."""
+    db, clock, driver, engine, worker, provider = _driver(
+        tmp_path, request_error=RuntimeError("kaboom")
+    )
+    assert driver.pump() == "cycle_started"  # submitted to the worker
+    _await(worker)  # the worker finishes with the error
+    assert driver.pump() == "api_failed"  # collected, failed closed (not wedged)
+    assert driver._inflight is None  # the wedge is gone
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "api_failed"
+    assert row["error_type"] is None
+    assert engine.plans == []  # no order off a failed decision (§10.2)
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["next_decision_at"] is not None  # re-anchored
+    assert driver.pump() is None  # not the old silent "not ready" forever
+    # A later boundary starts a brand-new cycle — the driver recovered.
+    clock.set(parse_instant(state["next_decision_at"]))
+    assert driver.pump() == "cycle_started"
+
+
+def test_driver_worker_retryable_error_is_api_failed(tmp_path):
+    """A RETRYABLE worker error surfaced through poll() is handled by pump's in-flight
+    guard with its §6.2 error_type preserved (not misrecorded as an internal bug)."""
+    db, clock, driver, engine, worker, provider = _driver(
+        tmp_path, request_error=RetryableDecisionError("timeout", "model timed out")
+    )
+    assert driver.pump() == "cycle_started"
+    _await(worker)
+    assert driver.pump() == "api_failed"
+    assert driver._inflight is None
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "api_failed"
+    assert row["error_type"] == "timeout"  # retryable type preserved
+
+
+def test_driver_gate_nonretryable_error_fails_closed_and_recovers(tmp_path):
+    """A non-retryable error in the GATE step (start_plan / persist) must also fail
+    the cycle closed via pump's guard, not wedge the driver — _gate is reachable both
+    from pump directly and from _collect's tail, outside _collect's own body."""
+    db, clock, driver, engine, worker, provider = _driver(
+        tmp_path, start_error=RuntimeError("gate boom")
+    )
+    assert driver.pump() == "cycle_started"
+    _await(worker)  # the worker returns a valid decision; the gate is what fails
+    assert driver.pump() == "api_failed"  # _collect -> _gate raises -> pump guard
+    assert driver._inflight is None
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "api_failed"
+    assert row["error_type"] is None
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["next_decision_at"] is not None
+    clock.set(parse_instant(state["next_decision_at"]))
+    assert driver.pump() == "cycle_started"  # recovered, not wedged on the gate

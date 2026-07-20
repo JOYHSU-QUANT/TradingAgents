@@ -185,9 +185,26 @@ class LiveDecisionDriver:
         if self._worker.busy:
             return None
         if self._inflight is not None:
-            if self._inflight.parsed is None:
-                return self._collect(now)
-            return self._gate(now)
+            # One guard for the whole in-flight lifecycle (collect + gate): ANY error
+            # advancing an already-started cycle fails it CLOSED and clears _inflight,
+            # so a bug in poll() / start_plan / persist can never wedge the driver — a
+            # stuck _inflight either stalls the loop forever (the empty poll slot reads
+            # as "not ready", C1) or crash-loops the gate every tick (C2). A retryable
+            # (§6.2) failure keeps its error_type; anything else is a non-retryable bug
+            # that still fails closed. _start owns its own pre-inflight failure (it has
+            # no _inflight yet, and its attempt id/schedule are still local).
+            try:
+                if self._inflight.parsed is None:
+                    return self._collect(now)
+                return self._gate(now)
+            except RetryableDecisionError as exc:
+                self._fail(self._inflight.attempt_id, self._inflight.scheduled_at, exc)
+                self._inflight = None
+                return "api_failed"
+            except Exception as exc:  # noqa: BLE001 — a bug must still fail the cycle closed
+                self._fail_internal(self._inflight.attempt_id, self._inflight.scheduled_at, exc)
+                self._inflight = None
+                return "api_failed"
         if self._due(now):
             return self._start(now)
         return None
@@ -235,19 +252,23 @@ class LiveDecisionDriver:
         except RetryableDecisionError as exc:
             self._fail(attempt_id, scheduled_at, exc)
             return "api_failed"
+        except Exception as exc:  # noqa: BLE001 — a bug must fail the cycle CLOSED, never wedge it
+            # The attempt row is already `in_progress`; leaving it unresolved with
+            # next_decision_at in the past crash-loops every tick on the duplicate
+            # attempt_id. Fail it closed so the driver recovers next cycle.
+            self._fail_internal(attempt_id, scheduled_at, exc)
+            return "api_failed"
         self._inflight = _InFlight(attempt_id, input_id, output_id, scheduled_at)
         self._worker.submit(decision_input)
         return "cycle_started"
 
     def _collect(self, now: datetime) -> str | None:
+        # Failure handling lives in pump()'s in-flight guard: poll() re-raising a
+        # retryable (§6.2) or a non-retryable worker error both land there, so this
+        # step is pure happy-path.
         inflight = self._inflight
         assert inflight is not None
-        try:
-            parsed = self._worker.poll()
-        except RetryableDecisionError as exc:
-            self._fail(inflight.attempt_id, inflight.scheduled_at, exc)
-            self._inflight = None
-            return "api_failed"
+        parsed = self._worker.poll()
         if parsed is None:
             return None  # not ready (worker still settling)
         # Persist the response before gating (§3.1: a crash resumes from stored
@@ -297,6 +318,38 @@ class LiveDecisionDriver:
         return status
 
     def _fail(self, attempt_id: str, scheduled_at: datetime, exc: RetryableDecisionError) -> None:
+        """§10.2 fail-closed for a retryable (§6.2) failure — hold, re-anchor, retry."""
+        self._fail_cycle(
+            attempt_id, scheduled_at, error_type=exc.error_type, error_message=exc.message
+        )
+
+    def _fail_internal(self, attempt_id: str, scheduled_at: datetime, exc: BaseException) -> None:
+        """Fail the cycle CLOSED after a NON-retryable error (a bug, not a §6.2 failure).
+
+        The synchronous paper scheduler lets such an exception propagate and crash;
+        the live loop cannot. Bare propagation wedges the driver — a lost
+        ``_inflight`` (the loop silently stops deciding, C1) or an unresolved
+        ``in_progress`` row that duplicate-crash-loops every tick (C2) — and a hard
+        teardown would strip the position's SL/TP. So log it LOUDLY (a real problem
+        to fix) but still hold the position and re-anchor to the next cycle, exactly
+        like the §10.2 retryable path. ``error_type`` stays NULL: it is not a §6.2
+        vocabulary word, and the detail rides ``error_message``.
+        """
+        logger.exception(
+            "live decision cycle %s hit a non-retryable error — failing closed", attempt_id
+        )
+        self._fail_cycle(
+            attempt_id, scheduled_at, error_type=None, error_message=f"non-retryable: {exc!r}"
+        )
+
+    def _fail_cycle(
+        self,
+        attempt_id: str,
+        scheduled_at: datetime,
+        *,
+        error_type: str | None,
+        error_message: str,
+    ) -> None:
         now = self._clock.now()
         next_at = scheduled_at + self._cycle_interval
         if next_at <= now:
@@ -304,8 +357,8 @@ class LiveDecisionDriver:
         logger.warning(
             "live decision cycle %s failed (%s): %s — holding position, retry at %s",
             attempt_id,
-            exc.error_type,
-            exc.message,
+            error_type,
+            error_message,
             next_at.isoformat(),
         )
         with self._db.transaction() as conn:
@@ -313,8 +366,8 @@ class LiveDecisionDriver:
                 conn,
                 attempt_id,
                 status="api_failed",
-                error_type=exc.error_type,
-                error_message=exc.message,
+                error_type=error_type,
+                error_message=error_message,
                 next_decision_at=next_at,
                 timestamp=now,
             )
@@ -351,10 +404,6 @@ class LiveDecisionDriver:
             conn, self._run_id, statuses=repo.LIVE_PLAN_STATUSES
         )
         with localcontext(DECIMAL_CONTEXT):
-            remaining_twap = sum(
-                (Decimal(p["remaining_qty"]) for p in active_plans if p["remaining_qty"]),
-                Decimal(0),
-            )
             notional = abs(position.size * ctx.mark_price)
             margin_pct = (
                 notional / self._risk.leverage / metrics.account_equity * 100
@@ -398,7 +447,12 @@ class LiveDecisionDriver:
                 stop_loss_price=stop_loss,
                 take_profit_price=take_profit,
                 active_twap=bool(active_plans),
-                remaining_twap_qty=remaining_twap if active_plans else None,
+                # v1 does not yet attribute live fills to their plan, so a running
+                # plan's remaining quantity is not truthfully known here; report it as
+                # unknown (None) rather than the plan's frozen original total, which
+                # would over-state outstanding TWAP exposure to the AI every cycle.
+                # Authoritative tracking lands with the PR 6 WS/fill routing.
+                remaining_twap_qty=None,
                 last_fill_time=last_fill,
                 max_target_margin_pct=Decimal(self._risk.max_target_margin_pct),
                 input_payload_path=decision_input.input_payload_path,

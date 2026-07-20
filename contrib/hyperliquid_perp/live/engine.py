@@ -683,26 +683,25 @@ class LiveExecutionEngine:
     def _terminate_leg(self, leg: _Leg, now: datetime, status: str, events: list[str]) -> None:
         if self._leg is not leg:
             return
-        residual = self._plan_residual(leg)
         with self._db.transaction() as conn:
             repo.update_execution_plan(
                 conn,
                 leg.plan_id,
                 status=status,  # completed / expired / canceled — all terminal
                 status_reason=status,
-                residual_qty=residual,
+                # v1 does NOT attribute live fills to their plan: fills.py ingests
+                # without a plan_id (the orders table carries none), so nothing ever
+                # decrements execution_plans.remaining_qty and the true unfilled
+                # residual is not yet knowable here. Record NULL ("unknown") rather
+                # than the frozen planned-total, which would falsely claim the whole
+                # plan went unfilled. Authoritative per-plan fill tracking (and a real
+                # residual) lands with the PR 6 WS/fill routing.
+                residual_qty=None,
                 updated_at=now,
             )
         self._leg = None
         self._gate.active_slice_plan = self._flip is not None
         events.append(f"plan_terminal:{leg.plan_id}:{status}")
-
-    def _plan_residual(self, leg: _Leg) -> Decimal:
-        """Unfilled remainder = planned total minus what filled (§9.2 rule 2)."""
-        plan = repo.get_execution_plan(self._db.conn, leg.plan_id)
-        if plan is None or plan["remaining_qty"] is None:
-            return Decimal(0)
-        return max(Decimal(plan["remaining_qty"]), Decimal(0))
 
     def _maybe_expire_plan(self, now: datetime, events: list[str]) -> None:
         leg = self._leg
@@ -829,10 +828,22 @@ class LiveExecutionEngine:
         with ``None`` and let the caller treat an unknowable count as at-cap.
         """
         try:
-            return self._fetch_open_orders()
+            result = self._fetch_open_orders()
         except Exception:  # noqa: BLE001 — a read failure must not size an order past the cap
             logger.exception("open-orders read failed; treating as at-cap (fail-closed)")
             return None
+        if not isinstance(result, list):
+            # A malformed, non-raising response (schema drift, an error envelope,
+            # None) is just as unknowable as a raised failure: count_bot_open_orders
+            # would read a non-list as 0 (fail-OPEN) and wave a new order past the
+            # §10.5 cap. Signal the failure with None so the caller treats it as
+            # at-cap, exactly like the exception path.
+            logger.warning(
+                "open-orders read returned a non-list (%s); treating as at-cap (fail-closed)",
+                type(result).__name__,
+            )
+            return None
+        return result
 
     def _next_order_id(self, tag: str) -> str:
         self._order_seq += 1

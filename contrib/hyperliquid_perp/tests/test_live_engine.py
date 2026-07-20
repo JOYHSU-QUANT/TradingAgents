@@ -575,3 +575,55 @@ def test_emergency_close_records_triggered_event(tmp_path):
     engine.tick()
     events = [e["event_type"] for e in repo.iter_protection_order_events(db.conn, "r")]
     assert "emergency_close_triggered" in events
+
+
+def test_emergency_close_sets_escalation_flag_even_if_audit_write_fails(tmp_path, monkeypatch):
+    """The §13.5 escalation flag must survive a failure of the (non-critical)
+    emergency_close_triggered audit write — the flag is set first, the write is
+    best-effort."""
+    prot = _FakeProtection(outcome=ProtectionOutcome.NEEDS_EMERGENCY_CLOSE)
+    db, clock, engine, gate, sub = _build(tmp_path, protection=prot)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.05"), entry_price=D(50000)),
+            updated_at=_T0,
+        )
+    engine._was_flat = False
+
+    def _boom(*a, **k):
+        raise RuntimeError("audit write down")
+
+    monkeypatch.setattr(repo, "insert_protection_order_event", _boom)
+    _script(engine, [_snap()])
+    engine.tick()
+    assert engine._emergency_close_pending is True  # escalation survives the audit miss
+
+
+def test_flip_open_leg_abandoned_on_structural_decline(tmp_path, monkeypatch):
+    """A structural open-leg decline (no_legal_slice / zero_delta) won't change
+    within the envelope, so the flip is abandoned at once — not retried every tick
+    (which would re-insert a rejected plan row until the deadline)."""
+    from contrib.hyperliquid_perp.live.engine import PlanRegistration, _PendingFlip
+
+    db, clock, engine, gate, sub = _build(tmp_path)  # flat
+    engine._leg = None
+    engine._flip = _PendingFlip(
+        flip_plan_id="flip1",
+        parsed=_decision("long", 5),
+        output_id="o",
+        deadline=_T0.replace(hour=13),
+        open_budget=2,
+    )
+    gate.active_slice_plan = True
+    monkeypatch.setattr(
+        engine,
+        "start_plan",
+        lambda *a, **k: PlanRegistration(
+            gate=None, plan_id=None, disposition=None, reason="no_legal_slice"
+        ),
+    )
+    engine._maybe_advance_flip(None, clock.now(), [])
+    assert engine._flip is None  # abandoned, not retried
+    assert gate.active_slice_plan is False

@@ -756,11 +756,22 @@ class LiveExecutionEngine:
             # The open leg registered — the flip is complete.
             self._flip = None
             events.append(f"flip_open:{flip.flip_plan_id}:{reg.plan_id}")
+        elif reg.reason in ("no_legal_slice", "zero_delta"):
+            # A STRUCTURAL decline won't change within the envelope (the open leg is
+            # too small to slice, or there is nothing left to open) — abandon now
+            # rather than re-inserting a rejected plan row every tick to the deadline.
+            self._flip = None
+            logger.warning(
+                "flip %s open leg not executable (%s) — abandoned",
+                flip.flip_plan_id,
+                reg.reason,
+            )
+            events.append(f"flip_abandoned:{flip.flip_plan_id}")
         else:
-            # A transient decline (pending_market_data, a momentary cap / gate
-            # line): HOLD the pending flip and retry next tick within the envelope
-            # rather than abandoning the second leg on a single blip. Keep
-            # active_slice_plan raised so a fresh AI target cannot slip in mid-flip.
+            # A TRANSIENT decline (pending_market_data, a momentary cap / gate line):
+            # HOLD the pending flip and retry next tick within the envelope rather
+            # than abandoning the second leg on a single blip. Keep active_slice_plan
+            # raised so a fresh AI target cannot slip in mid-flip.
             self._gate.active_slice_plan = True
             events.append(f"flip_open_pending:{flip.flip_plan_id}:{reg.reason}")
 
@@ -816,25 +827,29 @@ class LiveExecutionEngine:
             )
         except Exception:  # noqa: BLE001 — recorded by the submitter; reconciliation catches a miss
             logger.exception("emergency close submit raised for %s", self._run_id)
-        # §17 audit: the emergency close was triggered (recorded whether or not the
-        # submit landed — the submitter tracks the order itself; this row is the
-        # protection-lifecycle event that a §17.2 close happened at all).
-        with self._db.transaction() as conn:
-            repo.insert_protection_order_event(
-                conn,
-                run_id=self._run_id,
-                event_type="emergency_close_triggered",
-                symbol=self._coin,
-                order_id=order_id,
-                detail=f"§17.2 aggressive reduce-only IOC size={size} limit={limit_price}",
-                timestamp=now,
-            )
         # §13.5: escalate to MANUAL safe mode once this close reaches flat (handled
         # in _detect_settlement, post-flat, so the gate never blocks the close).
-        # Set even if the submit raised — the submitter recorded it and the close
-        # is retried next tick; the escalation waits for a confirmed flat.
+        # Set even if the submit raised — the submitter recorded it and the close is
+        # retried next tick; the escalation waits for a confirmed flat. Set BEFORE the
+        # (non-critical) audit write below, so a DB miss on that write can never drop
+        # this safety escalation.
         self._emergency_close_pending = True
         events.append("emergency_close")
+        # §17 audit (best-effort): a §17.2 close was triggered. Guarded so a write
+        # miss logs but never aborts the §13.5 escalation set just above.
+        try:
+            with self._db.transaction() as conn:
+                repo.insert_protection_order_event(
+                    conn,
+                    run_id=self._run_id,
+                    event_type="emergency_close_triggered",
+                    symbol=self._coin,
+                    order_id=order_id,
+                    detail=f"§17.2 aggressive reduce-only IOC size={size} limit={limit_price}",
+                    timestamp=now,
+                )
+        except Exception:  # noqa: BLE001 — the audit write must not abort the §13.5 escalation
+            logger.exception("failed to record emergency_close_triggered event")
 
     # -- helpers --------------------------------------------------------------
 

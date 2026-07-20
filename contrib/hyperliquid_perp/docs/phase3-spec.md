@@ -860,6 +860,22 @@ resolution 不改寫 case rows（它們是 log），且**「已解決」的定�
   key），**永遠 join 不到** `fills.exchange_fill_key`。它代表「有一筆看不懂的 payload」
   而非「有一筆確定的 fill 沒入帳」；解決路徑是人工檢視證據檔（修 parser、或確認
   payload 本來就是垃圾），由 PR 4 的 sweep 以 `action_taken` 標記處置。
+  **未 stamp `action_taken` 者擋住 verdict（2026-07-17 定案）**：交易所報過、SQLite
+  沒入帳的錢就是「交易所有 fill、本地沒記錄」，只是無法 key。小額 malformed 若沒把
+  倉位尺寸推歪、又藏在 equity 容差內，audit-only 會讓 run 判 clean 照常交易——故
+  改為擋 clean、在 report 的 `errors` 具名，直到人工 stamp 才放行；裸 tid 的 sighting
+  若事後被 §8.3 recovery 補入帳，sweep 仍自動標 `resolved_fill_booked` 除帳。
+  人工標記的**工具**是 `safe-mode --stamp-case <event_id> --action "<處置說明>"`
+  （event_id 由 `safe-mode --status` 的 open-cases 清單提供）：digest-keyed 的
+  sighting 永遠 join 不到 fills、自動車道永遠救不了它，若無此指令，交易所丟一筆
+  看不懂的 payload 就會讓 run 永久卡在 safe mode，只能對正式庫手寫 SQL。已記錄的
+  處置不覆寫（第一筆就是稽核事實），且 stamp 不等於恢復交易——仍須過下一輪對帳。
+  **`fill_unmapped` 具名拒絕 stamp**：它的「已解決」是對 `fills` 的 anti-join（見
+  上），根本不讀 `action_taken`——stamp 它清不掉任何 verdict，卻會把該列從 open-cases
+  清單抹掉（那是操作者唯一的 backlog 列舉面），等於製造出這個指令本來要防的死結。
+  故 open-cases 清單對兩種 resolution model 用**兩個**判準：`fill_unmapped` 以
+  anti-join 判定是否仍未解（無視 `action_taken`）、其餘以 `action_taken IS NULL`，
+  且逐列標明真正的解決路徑。
 - **`fill_money_drift` / `fill_fee_drift`**：`exchange_value` 是 `去重鍵|drift digest`，
   且描述的 fill **已經入帳**——它們根本不屬於「帳上沒有的錢」backlog，出現在
   anti-join 結果裡是誤列。它們是「同 tid 但內容矛盾」（money drift）或「別的 run 的
@@ -928,6 +944,29 @@ no unresolved mismatch
 （daily-loss 觸發者另須：已過次日 UTC 00:00）
 ```
 
+附註（2026-07-17）：上列條件要求 reconciler **全接線**——backfill／invalid-fill
+交叉檢查 seam 缺席的 pass（report 記入 `legs_skipped`）證明不了「REST backfill
+completed／fills reconciled」，即使其餘 legs 全 clean 也不得自動解除；半接線
+（例如未綁 fill seams 的心跳 wiring）的 clean pass 只能維持、不能解除 latch。
+
+同一立場適用於 "WebSocket restored, if required"：**沒有 WS 可恢復 ≠ WS 已恢復**。
+PR 4 的 one-shot `live --run-id` wiring 完全沒有 WS stream，故一律 attest
+`ws_restored=False`——否則前一個 process 因 `ws_disconnect` 進入並持久化的
+recoverable latch，會被一個從未連過 WS 的 process 以「帳本乾淨」為由解除。該
+latch 留給 PR 5 daemon（真正握著恢復後的 stream 時）解除。
+
+§19.3 stale-order sweep 的撤單失敗是 **verdict 輸入**（2026-07-17）：撤不掉的單
+仍在交易所掛著，該 pass 不得讀成 clean。失敗以 `ReconciliationReport.sweep_failures`
+欄位隨 pass 一起帶進 `run()`（即在 `_record` 落庫**之前**），故不會出現「clean pass
+先自動解除 latch、事後才因 sweep 失敗重進」的 release→enter flap 與 `entered_at`
+重錨；也不會發生「in-memory 判 unclean、落庫的 `reconciliation_status` 卻寫成 ok
+且 diff 沒有任何原因」的稽核背離（事後才折進 `errors` 就會如此）。
+`legs_skipped` 在 `clean` 之外，`sweep_failures` 在 `clean` 之內——前者是「這個
+wiring 沒查」，後者是「查了而且失敗」。reconciliation legs 本身全 clean 時（
+`ReconciliationReport.reconciliation_clean`），進入原因具名為
+`stale_order_sweep_failed` 而非泛用 mismatch；複合失敗（case + errors-only 腿 +
+sweep）則三個管道的原因**全部**寫進 safe-mode detail，不得互相蓋掉。
+
 ### 13.5 Manual Safe Mode
 
 以下情況需要人工解除：
@@ -955,6 +994,10 @@ authentication / permission error
    ```
 
    解除動作寫入一筆 `safe_mode_released` 事件（含 reason）留審計軌跡。
+   同一子命令的 `--status`（預設動作）查詢現態與近期歷史，exit code
+   0＝不在 safe mode、4＝latch 中（supervisor 探針可據此分支）；
+   `--reason`／`--released-by` 只配 `--release`，status 模式下具名拒絕，
+   非 live run 的 `--run-id` 亦具名報錯。
 3. 解除後系統**不會**直接恢復交易：仍須通過下一輪完整 reconciliation
    （§13.4 恢復條件）才允許新單。
 4. 不提供 config 旗標式解除（容易忘記改回、審計不乾淨）。
@@ -1521,7 +1564,7 @@ repair failed             → emergency close
 |---|---|
 | bot-owned stale entry / rebalance order | cancel |
 | bot-owned stale close order | inspect before cancel |
-| bot-owned SL / TP | validate quantity and trigger |
+| bot-owned SL / TP | validate quantity and trigger（sweep 逐單只驗結構——reduce-only／平倉方向／SL trigger；quantity 覆蓋由 reconciliation 的 SL leg 聚合驗證，分腿 SL 合計） |
 | non-bot-owned order | manual safe mode |
 | unknown order | manual safe mode |
 

@@ -1360,3 +1360,19 @@ def test_a_settled_order_is_written_back_so_a_later_shutdown_need_not_ask_again(
     assert row["exchange_raw_status"] == "filled"
     # ...and it is no longer something a later shutdown must chase.
     assert repo.iter_open_live_orders(db.conn) == []
+
+
+def test_the_timing_invariant_is_checkable_without_side_effects():
+    # kill_switch_timing_violation is the constructor invariant as a PURE
+    # check: the CLI's live preflight refuses a violating config before the
+    # run row / run lock exist (decided 2026-07-17), and sharing the one
+    # definition is what keeps the number the preflight proves identical to
+    # the number the constructor enforces.
+    from contrib.hyperliquid_perp.live.kill_switch import kill_switch_timing_violation
+
+    bad = KillSwitchConfig(schedule_cancel_seconds=60, refresh_interval_seconds=30)
+    msg = kill_switch_timing_violation(bad, 30.0)
+    assert msg is not None and "cannot be refreshed in time" in msg
+    ok = KillSwitchConfig(schedule_cancel_seconds=120, refresh_interval_seconds=30)
+    assert kill_switch_timing_violation(ok, 30.0) is None
+    assert kill_switch_timing_violation(ok, 0) is not None  # nonpositive tick gap

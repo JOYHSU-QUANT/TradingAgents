@@ -165,7 +165,8 @@ python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db --crea
 # 之後重啟（不帶 --create；DB 或 run 不存在會具名報錯）。重啟時自動做
 # execution §1.2 的 reconciliation（取消舊 plan、補帳 pending funding、replay 驗證、
 # gap SL 檢查；真的取消到未完成 plan 才立即開新 cycle，否則沿用原排程），
-# 並比對 genesis config：換 coin 硬錯、
+# 並比對 genesis config：run mode 非 paper（指到 live run 的 store/--run-id）
+# 具名硬錯、換 coin 硬錯、
 # risk/decision/paper_trading(execution)/engine/market_data/indicators 漂移警告
 # （同時落地 scheduler_state 的 last_config_drift_* breadcrumb，事後可從 store 還原；
 # paper_trading.account 是 genesis-only、resume 改動無效故不警告，早於新鍵的

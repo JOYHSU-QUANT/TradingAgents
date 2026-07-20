@@ -56,7 +56,7 @@ from .persistence.db import Database
 
 logger = logging.getLogger(__name__)
 
-_SUBCOMMANDS = ("paper", "export", "validate", "live")
+_SUBCOMMANDS = ("paper", "export", "validate", "live", "safe-mode")
 
 # Version stamp for the ai_inputs.prompt_version column: bump when the injected
 # context/format contract changes shape (the payload hash tracks content).
@@ -101,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_validate(rest)
         if command == "live":
             return _cmd_live(rest)
+        if command == "safe-mode":
+            return _cmd_safe_mode(rest)
         return _cmd_paper(rest)
     except KeyboardInterrupt:
         print("interrupted.", file=sys.stderr)
@@ -190,7 +192,342 @@ def _cmd_validate(argv: list[str]) -> int:
 
 
 # --------------------------------------------------------------------------
-# live — the Phase 3 startup skeleton (PR 1: gates + authorization, no loop)
+# safe-mode — inspect / manually release a live run's safe mode (§13.6)
+# --------------------------------------------------------------------------
+
+
+def _cmd_safe_mode(argv: list[str]) -> int:
+    """§13.6: the ONE manual-release interface (no config-flag release exists).
+
+    ``--status`` (the default) prints the persisted current state and recent
+    history — exit 0 when not in safe mode, 4 while one is latched, so a
+    supervisor probe can branch without parsing stdout; ``--release --reason
+    "<人工確認說明>"`` releases a MANUAL safe mode, writing the
+    ``safe_mode_released`` audit event. Releasing does not resume trading:
+    the run must still pass its next full reconciliation (§13.6 rule 3) —
+    the released state only lifts the manual latch.
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m contrib.hyperliquid_perp safe-mode",
+        description="Inspect or manually release a live run's safe mode (§13.6).",
+    )
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--db", default="live_trading.db", help="SQLite store path.")
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument(
+        "--status",
+        action="store_true",
+        help="Print the current safe-mode state, recent history and the open "
+        "reconciliation cases (the default action). Exit 0 when not in safe "
+        "mode, 4 while one is latched.",
+    )
+    action.add_argument(
+        "--release",
+        action="store_true",
+        help="Release a MANUAL safe mode (writes the §13.6 audit event).",
+    )
+    action.add_argument(
+        "--stamp-case",
+        type=int,
+        default=None,
+        metavar="EVENT_ID",
+        help="Record a human disposition on an open §12.3 reconciliation case "
+        "(see --status for the ids). A fill_malformed case stops blocking the "
+        "verdict once stamped; a fill_unmapped one is refused (it resolves by "
+        "booking the fill, not by stamping). Requires --action.",
+    )
+    parser.add_argument(
+        "--reason",
+        default=None,
+        help="Required with --release: the human confirmation recorded on the release event.",
+    )
+    parser.add_argument(
+        "--action",
+        default=None,
+        help="Required with --stamp-case: what the human decided, recorded as "
+        "the case's action_taken.",
+    )
+    parser.add_argument(
+        "--released-by",
+        default=None,
+        help="Operator identity for the audit trail (default: the OS user name).",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="With --status: how many recent history rows and open cases to "
+        "print (default 10; 0 prints everything).",
+    )
+    args = parser.parse_args(argv)
+
+    import getpass
+
+    from .live.safe_mode import SafeModeManager
+    from .persistence import repository as repo
+
+    db = _open_existing_db(args.db)
+    if db is None:
+        return 1
+    with db:
+        run_row = repo.get_run(db.conn, args.run_id)
+        if run_row is None:
+            print(f"error: run {args.run_id!r} does not exist in {args.db}.", file=sys.stderr)
+            return 1
+        if run_row["mode"] != "live":
+            # Same run-identity discipline as the live/paper resume guards: a
+            # paper run has no safe-mode state, and letting the id through
+            # would answer "safe_mode: none" (or a misleading release refusal)
+            # instead of naming the actual mistake — a wrong --run-id / --db.
+            print(
+                f"error: run {args.run_id!r} in {args.db} is a "
+                f"{run_row['mode']} run — safe mode is live-run state (§13.6). "
+                "Fix --run-id / --db.",
+                file=sys.stderr,
+            )
+            return 1
+        # gate=None: this is the offline wiring — no live process, so the
+        # persisted state IS the whole effect; the next startup hydrates it.
+        manager = SafeModeManager(db=db, run_id=args.run_id, gate=None)
+        state = manager.current()
+
+        if args.stamp_case is not None:
+            return _stamp_reconciliation_case(db, repo, args)
+
+        if not args.release:
+            if args.reason is not None or args.released_by is not None or args.action is not None:
+                # Named rejection, not silence: these flags only mean something
+                # on the release/stamp paths, and an operator who typed them
+                # almost certainly meant one of those — dropping them without a
+                # word would read as "release recorded".
+                print(
+                    "error: --reason/--released-by apply only with --release and "
+                    "--action only with --stamp-case; the status action records nothing.",
+                    file=sys.stderr,
+                )
+                return 1
+            if args.limit is not None and args.limit < 0:
+                print(
+                    "error: --limit must be >= 0 (0 prints the full history).",
+                    file=sys.stderr,
+                )
+                return 1
+            if state is None:
+                print("safe_mode: none")
+            else:
+                print(f"safe_mode: {state.safe_mode_type}")
+                print(f"reason: {state.reason}")
+                print(f"entered_at: {state.entered_at}")
+            # Default 10 keeps the probe output lean; a long manual episode (one
+            # reason_added row per distinct reason) can push the episode's
+            # anchoring safe_mode_entered row out of a fixed tail, so the
+            # operator can widen it (--limit 0 = all) without querying the DB
+            # (decided 2026-07-17).
+            limit = 10 if args.limit is None else args.limit
+            history = repo.iter_safe_mode_events(db.conn, args.run_id)
+            if history:
+                rows = history if limit == 0 else history[-limit:]
+                print("history (most recent last):")
+                for row in rows:
+                    who = f" by {row['released_by']}" if row["released_by"] else ""
+                    print(
+                        f"  {row['timestamp']}  {row['event_type']}"
+                        f"{'' if row['safe_mode_type'] is None else ' ' + row['safe_mode_type']}"
+                        f"{'' if row['reason'] is None else ': ' + row['reason']}{who}"
+                    )
+            # The §12.3 cases still open. Printed HERE because this is the only
+            # place their event_ids surface: an open case can hold the verdict
+            # unclean, and the safe-mode detail names a count, not ids.
+            #
+            # TWO resolution models, so two predicates — keying everything on
+            # action_taken would list an unmapped sighting as stampable, and
+            # stamping it changes NO verdict while hiding it from this very
+            # listing (the operator's only enumeration of the backlog):
+            #   - fill_unmapped  → open until the fill BOOKS (an anti-join that
+            #     never reads action_taken); resolved by §8.3 re-ingest.
+            #   - everything else → open until a human stamps action_taken.
+            unmapped_open = repo.iter_unresolved_fill_sightings(db.conn, args.run_id)
+            unmapped_ids = {row["event_id"] for row in unmapped_open}
+            open_cases = [
+                row
+                for row in repo.iter_exchange_reconciliation_events(db.conn, args.run_id)
+                if (
+                    row["event_id"] in unmapped_ids
+                    if row["case_type"] == "fill_unmapped"
+                    else row["action_taken"] is None
+                )
+            ]
+            if open_cases:
+                shown = open_cases if limit == 0 else open_cases[-limit:]
+                print(
+                    f"open reconciliation cases ({len(open_cases)}; stamp the "
+                    'human-disposable ones with --stamp-case <event_id> --action "<disposition>"):'
+                )
+                for row in shown:
+                    # Name the resolution path per row: an operator following a
+                    # blanket "stamp these" instruction onto an unmapped sighting
+                    # would believe they had cleared a block they had not.
+                    how = (
+                        " — resolved by booking the fill (§8.3 re-ingest), not by stamping"
+                        if row["case_type"] == "fill_unmapped"
+                        else ""
+                    )
+                    print(
+                        f"  [{row['event_id']}] {row['timestamp']}  {row['case_type']}"
+                        f"{'' if row['symbol'] is None else ' ' + row['symbol']}"
+                        f"{'' if row['exchange_value'] is None else ' ' + row['exchange_value']}"
+                        f"{how}"
+                    )
+            # Exit 4 while a safe mode is latched (0 = none): a supervisor
+            # probe can branch without parsing stdout — the same multi-code
+            # convention as validate's 4/5 and live's 0/4/1 (decided
+            # 2026-07-17).
+            return 0 if state is None else 4
+
+        if args.limit is not None:
+            # Same named-rejection discipline as --reason on the status path:
+            # the flag only means something when history is printed.
+            print(
+                "error: --limit applies only with --status; the release action prints no history.",
+                file=sys.stderr,
+            )
+            return 1
+        if args.action is not None:
+            print(
+                "error: --action applies only with --stamp-case; a release records "
+                "its human confirmation via --reason.",
+                file=sys.stderr,
+            )
+            return 1
+        if args.reason is None or not args.reason.strip():
+            print(
+                'error: --release requires --reason "<人工確認說明>" — the release '
+                "event must record why a human decided the state is safe (§13.6 rule 2).",
+                file=sys.stderr,
+            )
+            return 1
+        # A RUNNING live process holds its gate flags in memory and only
+        # hydrates them at startup — a release landing under it takes effect
+        # in the store but not in that process until its next restart. Warn,
+        # don't block: the §13.6 release is deliberately store-first.
+        state_row = repo.get_scheduler_state(db.conn, args.run_id)
+        if state_row is not None and state_row["lock_pid"] is not None:
+            print(
+                f"warning: run {args.run_id!r} has a run-lock held by pid "
+                f"{state_row['lock_pid']} (heartbeat {state_row['lock_heartbeat_at']}) — "
+                "a live process that is still running will not see this release "
+                "until it restarts.",
+                file=sys.stderr,
+            )
+        released_by = args.released_by or getpass.getuser()
+        try:
+            manager.release_manual(released_by=released_by, reason=args.reason)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"manual safe mode released by {released_by}.")
+        if state is not None:
+            # Name what was cleared: the current-state trio carries the episode's
+            # FIRST reason (entered_at anchors it) — additional reasons this
+            # episode accrued are the safe_mode_reason_added rows in --status
+            # history. Printing it lets the operator confirm the release matched
+            # the fact they reviewed. (state was read just above; the CLI is
+            # single-threaded, so nothing changed it before release_manual.)
+            print(f"released episode: {state.reason} (entered {state.entered_at}).")
+        print(
+            "NOTE: trading does not resume yet — the run must pass its next full "
+            "reconciliation before new orders are allowed (§13.6 rule 3)."
+        )
+        return 0
+
+
+def _stamp_reconciliation_case(db, repo, args) -> int:
+    """`safe-mode --stamp-case`: the §12.3 "人工核對後標記 action_taken" path.
+
+    The tool that rule always implied and never had. Several case types can
+    only ever be disposed of by a human — a ``fill_malformed`` sighting keyed
+    by content digest can never be auto-resolved (nothing will ever join it to
+    a booked fill), and money/fee-drift observations describe already-booked
+    fills. Since an un-actioned case holds the verdict unclean, without this
+    the exchange emitting ONE unparseable payload would wedge the run in safe
+    mode permanently, with hand-written SQL against the live store as the only
+    remedy.
+
+    Stamping does not resume trading: the next reconciliation pass still has to
+    prove the books (§13.6 rule 3's discipline, for the same reason).
+    """
+    if args.reason is not None or args.released_by is not None:
+        print(
+            "error: --reason/--released-by apply only with --release; a case "
+            'disposition is recorded with --action "<disposition>".',
+            file=sys.stderr,
+        )
+        return 1
+    if args.limit is not None:
+        print(
+            "error: --limit applies only with --status; the stamp action prints no history.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.action is None or not args.action.strip():
+        print(
+            'error: --stamp-case requires --action "<disposition>" — the audit row '
+            "must record what the human decided about this case (§12.3).",
+            file=sys.stderr,
+        )
+        return 1
+    # Scoped to THIS run: the id comes off a --status listing, and a typo'd
+    # --run-id/--db must name that mistake rather than stamp another run's case.
+    match = [
+        row
+        for row in repo.iter_exchange_reconciliation_events(db.conn, args.run_id)
+        if row["event_id"] == args.stamp_case
+    ]
+    if not match:
+        print(
+            f"error: run {args.run_id!r} has no reconciliation case with event_id "
+            f"{args.stamp_case} — see `safe-mode --status` for the open cases.",
+            file=sys.stderr,
+        )
+        return 1
+    (row,) = match
+    if row["case_type"] == "fill_unmapped":
+        # Stamping this would be a verdict NO-OP that also HIDES the row: an
+        # unmapped sighting's block is an anti-join against the fills table
+        # (repo.iter_unresolved_fill_sightings) which never reads action_taken,
+        # so the pass stays unclean while the operator's only enumeration of the
+        # backlog loses the row — the very wedge --stamp-case exists to prevent.
+        print(
+            f"error: case {args.stamp_case} is a fill_unmapped sighting — the "
+            "exchange reported a fill the ledger still lacks, and it resolves by "
+            "BOOKING that fill (§8.3 re-ingest / the next backfill), never by "
+            "stamping: its block is an anti-join that does not read action_taken, "
+            "so a stamp would clear no verdict and only hide the row from --status.",
+            file=sys.stderr,
+        )
+        return 1
+    if row["action_taken"] is not None:
+        # Append-only in spirit: the first disposition is the audit record, and
+        # silently overwriting it would erase what a human already attested.
+        print(
+            f"error: case {args.stamp_case} ({row['case_type']}) was already "
+            f"disposed of as {row['action_taken']!r} — a recorded disposition is "
+            "not overwritten.",
+            file=sys.stderr,
+        )
+        return 1
+    with db.transaction() as conn:
+        repo.set_reconciliation_action(conn, args.stamp_case, args.action)
+    print(f"case {args.stamp_case} ({row['case_type']}) stamped: {args.action}")
+    print(
+        "NOTE: trading does not resume yet — the run must pass its next full "
+        "reconciliation before new orders are allowed."
+    )
+    return 0
+
+
+# --------------------------------------------------------------------------
+# live — Phase 3 startup: gates + authorization (PR 1), §19.1 recovery (PR 4)
 # --------------------------------------------------------------------------
 
 
@@ -207,12 +544,62 @@ def _cmd_live(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m contrib.hyperliquid_perp live",
         description=(
-            "Phase 3 startup skeleton: validate live config gates + agent "
-            "authorization, print effective caps, and exit (no trading loop)."
+            "Phase 3 live startup: validate the config gates + agent "
+            "authorization and print effective caps; with --run-id, run the "
+            "full §19.1 startup recovery (arm kill switch, reconcile, cancel "
+            "stale bot-owned orders) and report the verdict. No trading loop "
+            "yet — that arrives with PR 5."
         ),
     )
     parser.add_argument("--config", default=None, help="Config YAML path.")
+    parser.add_argument(
+        "--db",
+        default="live_trading.db",
+        help="SQLite store path for the live run (only used with --run-id).",
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help=(
+            "Run the full §19.1 startup recovery against this run. Omitted: "
+            "config-check mode (the PR 1 gates), which never signs anything."
+        ),
+    )
+    parser.add_argument(
+        "--create",
+        action="store_true",
+        help=(
+            "Create the run (genesis from the live exchange snapshot) instead "
+            "of resuming an existing one — same explicit-identity rule as the "
+            "paper subcommand."
+        ),
+    )
+    parser.add_argument(
+        "--adopt-positions",
+        action="store_true",
+        help=(
+            "Allow --create to seed an EXISTING exchange position into the new "
+            "run's genesis. Without it, --create refuses a non-flat account — "
+            "a typo'd --run-id must not silently adopt a live position into a "
+            "fresh ledger."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    if args.run_id is None and (args.create or args.adopt_positions):
+        # Named rejection, not silent-ignore: without --run-id this command is
+        # config-check mode — it creates and seeds nothing — so --create /
+        # --adopt-positions have no effect. An operator who passed them almost
+        # certainly meant the §19.1 recovery and would otherwise read the
+        # "gates OK" exit 0 as "run created". Same discipline as the resume and
+        # safe-mode flag guards.
+        print(
+            "error: --create / --adopt-positions require --run-id — without it this "
+            "command only checks the config gates and creates nothing. Pass --run-id "
+            "to run the §19.1 startup recovery.",
+            file=sys.stderr,
+        )
+        return 1
 
     # Same rationale as ``paper``: startup diagnostics need timestamps; the
     # basicConfig no-ops when an embedding application already configured one.
@@ -439,11 +826,412 @@ def _cmd_live(argv: list[str]) -> int:
     print(f"account_equity: {snapshot.account_value} USDC")
     print(f"pct_cap_notional: {caps.pct_cap_notional} USDC")
     print(f"effective_notional_cap: {caps.effective_notional_cap} USDC")
-    print(
-        "live startup gates OK — exiting (PR 1 skeleton; the trading loop arrives in a later PR).",
-        file=sys.stderr,
+    if args.run_id is None:
+        print(
+            "live startup gates OK — exiting (config-check mode; pass --run-id "
+            "to run the full §19.1 startup recovery).",
+            file=sys.stderr,
+        )
+        return 0
+    return _live_startup_recovery(
+        args,
+        config=config,
+        raw_live=raw_live,
+        live_cfg=live_cfg,
+        client=client,
+        wallet=addr,
+        agent_key=agent_key,
+        snapshot=snapshot,
     )
-    return 0
+
+
+# This command's worst-case wall time between two kill-switch tick() calls is
+# one reconciliation sweep (network reads, seconds) — 30s is generous and keeps
+# the constructor invariant honest under the default 120s/30s switch config.
+# ONE constant, read by both the pre-side-effect preflight check and the
+# KillSwitchManager construction below, so the number the preflight proves is
+# the number the constructor enforces.
+_RECOVERY_MAX_TICK_GAP_SECONDS = 30.0
+
+
+def _live_startup_recovery(
+    args,
+    *,
+    config: dict,
+    raw_live: dict,
+    live_cfg,
+    client,
+    wallet: str,
+    agent_key: str | None,
+    snapshot,
+) -> int:
+    """The §19.1 startup recovery tail of ``live --run-id`` (steps 5–16).
+
+    Steps 1–4 (config gates, §6.1 authorization, exchange client, account
+    read) were proven by the caller; this builds the PR 2–4 components — a
+    runtime-flagged gate, the signed client, kill switch, safe-mode machine
+    and reconciler — creates or resumes the live run, and hands off to
+    :func:`~.live.startup.run_startup_recovery`. The command is one-shot: it
+    reports the verdict, runs the §18.2 shutdown sweep, and exits — the
+    long-running loop that would keep the kill switch refreshed arrives with
+    PR 5. Exit codes: 0 = the §19.1 step-16 verdict allows a new AI cycle;
+    4 = recovery executed but the verdict is unclean (the run is in safe
+    mode); 1 = hard failure (config/arming/creation errors).
+    """
+    import signal
+    from decimal import Decimal
+
+    from .exchanges.hyperliquid.mapper import map_account_snapshot
+    from .exchanges.hyperliquid.sdk_client import call_sdk
+    from .exchanges.hyperliquid.signed_client import HyperliquidSignedClient
+    from .live.fill_backfill import FillBackfiller
+    from .live.fills import LiveFillProcessor
+    from .live.kill_switch import KillSwitchManager, kill_switch_timing_violation
+    from .live.order_gate import RealOrderGate
+    from .live.reconcile import LiveReconciler
+    from .live.safe_mode import SafeModeManager
+    from .live.startup import run_startup_recovery
+    from .paper import accounting
+    from .paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
+    from .persistence import repository as repo
+    from .persistence.models import PositionState
+    from .persistence.schema import SCHEMA_VERSION
+
+    if agent_key is None:
+        print(
+            "error: the §19.1 startup recovery signs exchange actions (kill "
+            "switch, stale-order cancels) — it needs the agent key. Run without "
+            "--run-id for a keyless gate check.",
+            file=sys.stderr,
+        )
+        return 1
+    if not live_cfg.allow_real_orders:
+        print(
+            "error: live.allow_real_orders is false — the §19.1 startup recovery "
+            "arms the kill switch and cancels stale bot-owned orders, which are "
+            "signed exchange actions. Enable it, or run without --run-id for a "
+            "gate check that never signs anything.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Refuse a violating kill-switch timing BEFORE any side effect (run row,
+    # run lock) with a named exit 1 — kill_switch_timing_violation's docstring
+    # owns the invariant and the why-a-preflight story.
+    violation = kill_switch_timing_violation(live_cfg.kill_switch, _RECOVERY_MAX_TICK_GAP_SECONDS)
+    if violation is not None:
+        print(
+            f"error: {violation}. Raise live.kill_switch.schedule_cancel_seconds "
+            "or lower live.kill_switch.refresh_interval_seconds.",
+            file=sys.stderr,
+        )
+        return 1
+
+    run_id: str = args.run_id
+    coin = live_cfg.safety.allowed_symbols[0]
+    db_path = Path(args.db)
+    payload_dir = db_path.resolve().parent / "payloads" / run_id
+    now = datetime.now(timezone.utc)
+
+    # The runtime gate: config pins the wire conditions; §6.1 passed above.
+    gate = RealOrderGate.from_config(live_cfg)
+    gate.agent_authorized = True
+    signed = HyperliquidSignedClient(
+        live_cfg.network,
+        agent_key,
+        wallet_address=wallet,
+        gate=gate,
+        timeout=client.timeout,
+    )
+
+    def fetch_clearinghouse():
+        return call_sdk(client.info.user_state, wallet)
+
+    with Database(db_path) as db:
+        existing_run = repo.get_run(db.conn, run_id)
+        is_restart = existing_run is not None
+        if not is_restart and not args.create:
+            print(
+                f"error: run {run_id!r} does not exist in {db_path}. Pass --create "
+                "to start it, or fix --run-id / --db to resume the intended run.",
+                file=sys.stderr,
+            )
+            return 1
+        if is_restart and args.create:
+            print(
+                f"error: run {run_id!r} already exists in {db_path}. Drop --create "
+                "to resume it, or pick a new --run-id for a fresh run.",
+                file=sys.stderr,
+            )
+            return 1
+        if existing_run is not None:
+            # Resume validates the run's IDENTITY before any side effect (the
+            # lock, arming the wallet-wide kill switch, reconciliation writes)
+            # — the same discipline as the paper daemon's resume (decided
+            # 2026-07-17). A typo'd --run-id/--db pointing at a paper run
+            # would otherwise arm the kill switch over a paper ledger and
+            # write live snapshots into it; a coin edit under an existing run
+            # would re-enter manual safe mode every pass with nothing naming
+            # the true cause.
+            if existing_run["mode"] != "live":
+                print(
+                    f"error: run {run_id!r} in {db_path} is a {existing_run['mode']} "
+                    "run — resuming it here would arm the kill switch and "
+                    f"reconcile a {existing_run['mode']} ledger against the live "
+                    "exchange. Fix --run-id / --db.",
+                    file=sys.stderr,
+                )
+                return 1
+            drift = _config_drift_report(existing_run["config_json"], config, coin)
+            if drift is not None:
+                kind, message = drift
+                if kind in ("coin", "network"):
+                    print(f"error: {message}", file=sys.stderr)
+                    return 1
+                logger.warning("config drift on live resume for %s: %s", run_id, message)
+                print(f"WARNING: {message}", file=sys.stderr)
+            if args.adopt_positions:
+                # Named rejection, not silence: the flag seeds a NEW run's
+                # genesis and has no meaning on resume — an operator who
+                # passed it may believe the current exchange position was
+                # adopted into the resumed books (it was not; a mismatch
+                # surfaces as a reconciliation case instead).
+                print(
+                    "error: --adopt-positions seeds a new run's genesis and "
+                    "requires --create — resuming an existing run never "
+                    "re-seeds its books.",
+                    file=sys.stderr,
+                )
+                return 1
+        else:
+            # Same convention as the paper path's initial_positions guard: a
+            # run manages exactly one coin. An off-coin position CAN'T be
+            # adopted meaningfully — the reconciler classifies every non-run
+            # coin position as §13.5 "unknown exchange position" (manual safe
+            # mode, re-entered every pass), so --adopt-positions over it would
+            # create a run that is unreleasable from the first sweep (decided
+            # 2026-07-17). Named rejection before anything is written.
+            off_coin = sorted({p.coin for p in snapshot.positions} - {coin})
+            if off_coin:
+                print(
+                    f"error: the account holds position(s) in "
+                    f"{', '.join(map(repr, off_coin))} but this run trades only "
+                    f"{coin!r} — a live run manages exactly one coin, and the "
+                    "reconciler would flag any other coin's position as an "
+                    "unknown exchange position (manual safe mode) on every "
+                    "pass. Close or move those positions, or run them under a "
+                    "separate wallet.",
+                    file=sys.stderr,
+                )
+                return 1
+            if snapshot.positions and not args.adopt_positions:
+                # Creating a live-money ledger over a non-flat account must be
+                # explicit: a typo'd --run-id plus --create would otherwise
+                # silently adopt a live position into a fresh ledger with zero
+                # history explaining it (decided 2026-07-16).
+                held = ", ".join(f"{p.coin} {p.size}" for p in snapshot.positions)
+                print(
+                    f"error: the account already holds a position ({held}) — pass "
+                    "--adopt-positions to seed it into the new run's genesis, or "
+                    "resume the run that owns it.",
+                    file=sys.stderr,
+                )
+                return 1
+            # Live genesis = the exchange snapshot, verbatim: the opening
+            # ledger balance is equity net of unrealized PnL (wallet form) and
+            # any existing position is seeded as-is, so the first equity
+            # reconciliation compares like against like. Historical fills that
+            # PREDATE this run belong to other runs' orders (or none) and are
+            # routed to unmapped/cross-run audit by the PR 3 processor — they
+            # can never double-book onto this genesis.
+            unrealized = sum((p.unrealized_pnl for p in snapshot.positions), Decimal(0))
+            seeds = [
+                PositionState(coin=p.coin, size=p.size, entry_price=p.entry_price)
+                for p in snapshot.positions
+            ]
+            subset = _run_config_subset(config, coin)
+            subset["live"] = raw_live
+            accounting.initialize_run(
+                db,
+                run_id=run_id,
+                mode="live",
+                initial_balance_usdc=snapshot.account_value - unrealized,
+                schema_version=SCHEMA_VERSION,
+                initial_positions=seeds,
+                config_json=json.dumps(subset, ensure_ascii=False, default=str),
+                created_at=now,
+            )
+            print(f"created live run {run_id!r} in {db_path}", file=sys.stderr)
+
+        try:
+            acquire_run_lock(db, run_id, pid=os.getpid(), now=now)
+        except RunLockError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+        try:
+            kill_switch = KillSwitchManager(
+                client=signed,
+                gate=gate,
+                db=db,
+                run_id=run_id,
+                config=live_cfg.kill_switch,
+                # The preflight above already proved this invariant with the
+                # SAME constant, so this constructor cannot raise on timing.
+                max_tick_gap_seconds=_RECOVERY_MAX_TICK_GAP_SECONDS,
+                payload_dir=payload_dir,
+            )
+            safe_mode = SafeModeManager(db=db, run_id=run_id, gate=gate)
+            processor = LiveFillProcessor(db=db, run_id=run_id, payload_dir=payload_dir)
+            backfiller = FillBackfiller(fetch=signed.user_fills_by_time, processor=processor)
+            reconciler = LiveReconciler(
+                db=db,
+                run_id=run_id,
+                coin=coin,
+                fetch_open_orders=signed.open_orders,
+                fetch_clearinghouse=fetch_clearinghouse,
+                query_order_by_cloid=signed.query_order_by_cloid,
+                fetch_fills=signed.user_fills_by_time,
+                backfiller=backfiller,
+                payload_dir=payload_dir,
+            )
+            shutdown_problem: str | None = None
+            try:
+                result = run_startup_recovery(
+                    db=db,
+                    run_id=run_id,
+                    client=signed,
+                    fetch_clearinghouse=fetch_clearinghouse,
+                    gate=gate,
+                    kill_switch=kill_switch,
+                    reconciler=reconciler,
+                    safe_mode=safe_mode,
+                    payload_dir=payload_dir,
+                )
+            except Exception as exc:  # noqa: BLE001 — arming is the one hard-error step
+                # Full traceback to the log (this is the signed live path);
+                # the message alone would leave a failure here undiagnosable.
+                logger.exception("startup recovery failed")
+                print(f"error: startup recovery failed — {exc}", file=sys.stderr)
+                return 1
+            finally:
+                # Decided 2026-07-16: the §18.2 semantics stand (shutdown
+                # cancels ALL bot-owned orders, the §19.3-kept SL/TP
+                # included), but never silently over a live position. The
+                # position that decides the warning is read FRESH here
+                # (decided 2026-07-17): the boot snapshot can be minutes
+                # stale after arming/backfill/two reconcile passes, and a
+                # position acquired mid-recovery would otherwise lose its
+                # protection to the sweep below without a word. Unreadable
+                # ≠ flat (the startup sweep's own rule) — warn then too.
+                try:
+                    fresh_positions = map_account_snapshot(fetch_clearinghouse()).positions
+                except Exception:  # noqa: BLE001 — the warning must not mask the verdict
+                    logger.exception("shutdown position re-read failed")
+                    # Truthful wording: "could not look" is not "holds" — but
+                    # the operator action is the same (unknown ≠ flat).
+                    print(
+                        "WARNING: positions could NOT be re-read at shutdown and "
+                        "this one-shot command's §18.2 shutdown sweep cancels "
+                        "bot-owned protection orders — any live position is "
+                        "UNPROTECTED after exit until a live loop (PR 5) or "
+                        "manual action re-covers it.",
+                        file=sys.stderr,
+                    )
+                else:
+                    if fresh_positions:
+                        held = ", ".join(f"{p.coin} {p.size}" for p in fresh_positions)
+                        print(
+                            f"WARNING: the account holds a live position ({held}) "
+                            "and this one-shot command's §18.2 shutdown sweep "
+                            "cancels bot-owned protection orders — the position "
+                            "is UNPROTECTED after exit until a live loop (PR 5) "
+                            "or manual action re-covers it.",
+                            file=sys.stderr,
+                        )
+                # One-shot command: leave nothing resting behind a dead man's
+                # switch nobody will refresh. The §18.2 shutdown sweep cancels
+                # bot-owned open orders and disarms only on a clean sweep.
+                # (The §12.2 "before shutdown" reconciliation is the verdict
+                # pass that just ran — this command places no orders after it.)
+                if kill_switch.armed:
+                    # Guarded because a raise inside this ``finally`` would
+                    # DISCARD the computed verdict (nothing prints, the
+                    # documented 0/4/1 contract becomes a generic exit 2) —
+                    # shutdown()'s audit writes are fail-loud by design, so a
+                    # busy DB here is a realistic raise, not an edge case.
+                    try:
+                        kill_switch.shutdown()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.exception("§18.2 shutdown sweep raised")
+                        shutdown_problem = f"shutdown sweep raised: {exc}"
+                    else:
+                        if kill_switch.armed:
+                            # shutdown() disarms only on a clean sweep: still
+                            # armed means bot orders may rest and the
+                            # wallet-wide scheduleCancel WILL fire at the
+                            # deadline — taking out non-bot orders §25 says
+                            # never to touch. Loud, and never exit 0.
+                            shutdown_problem = (
+                                "shutdown sweep left the kill switch armed — bot "
+                                "orders may still rest and the wallet-wide "
+                                "scheduleCancel will fire at the deadline"
+                            )
+                            logger.error("§18.2 %s", shutdown_problem)
+                    if shutdown_problem is not None:
+                        # Surfaced HERE, inside the ``finally``: when the body
+                        # above raised (the except path already returned 1),
+                        # the summary prints below never run — and "the
+                        # wallet-wide trigger is still armed" is the one fact
+                        # that must never exit silently, on any path.
+                        print(
+                            f"error: §18.2 shutdown unclean — {shutdown_problem}",
+                            file=sys.stderr,
+                        )
+
+            print(f"startup_reconciliation_passed: {'true' if result.passed else 'false'}")
+            print(f"canceled_stale_orders: {len(result.canceled_stale)}")
+            print(f"kept_orders: {len(result.kept_orders)}")
+            state = safe_mode.current()
+            print(f"safe_mode: {'none' if state is None else state.safe_mode_type}")
+            if state is not None:
+                print(f"safe_mode_reason: {state.reason}")
+            if result.sweep_failures:
+                for failure in result.sweep_failures:
+                    print(f"error: stale-order sweep — {failure}", file=sys.stderr)
+            if result.passed:
+                if shutdown_problem is not None:
+                    # Decided 2026-07-17: exit 0 means "all quiet" to a
+                    # supervisor — a passing verdict with an unclean shutdown
+                    # sweep is NOT that; it folds into the same
+                    # executed-but-unclean code 4 the verdict path uses (the
+                    # "§18.2 shutdown unclean" line above carries the detail).
+                    return 4
+                print(
+                    "startup recovery passed — a live loop could start from this "
+                    "state (the loop arrives with PR 5).",
+                    file=sys.stderr,
+                )
+                return 0
+            print(
+                "startup recovery did NOT pass — the run is in safe mode; see the "
+                "reconciliation events / safe-mode state above (§19.1 step 15).",
+                file=sys.stderr,
+            )
+            # Exit 4, not 1: "executed fine, verdict unclean" is an operator
+            # signal distinct from a hard failure — same multi-code convention
+            # as validate's 4/5 (decided 2026-07-16).
+            return 4
+        finally:
+            # Guarded: the release opens its own transaction (BEGIN IMMEDIATE),
+            # which can raise on a busy store — and a raise in this ``finally``
+            # would clobber the 0/4/1 verdict the body just computed,
+            # surfacing as a generic exit 2. A lock row left behind is
+            # diagnosable and reapable; a clobbered verdict is not.
+            try:
+                release_run_lock(db, run_id, pid=os.getpid(), now=datetime.now(timezone.utc))
+            except Exception:  # noqa: BLE001
+                logger.exception("run-lock release failed (the verdict above stands)")
 
 
 # --------------------------------------------------------------------------
@@ -491,23 +1279,33 @@ def _resume_effective(key: str, block: object) -> object:
     return block
 
 
+def _norm_network(live_block: dict) -> object:
+    """``live.network`` normalised the way LiveConfig reads it (case-insensitive)."""
+    net = live_block.get("network")
+    return net.strip().lower() if isinstance(net, str) else net
+
+
 def _config_drift_report(
     stored_json: str | None, config: dict, coin: str
 ) -> tuple[str, str] | None:
     """Compare today's config against the run's genesis record.
 
-    Returns ``("coin", msg)`` for a coin mismatch (hard error — a different
-    instrument is a different run, not a resumption), ``("params", msg)`` for
-    risk/decision/paper_trading(execution)/engine/market_data/indicators drift
-    (warning — behaviour changes mid-run but the operator may intend it;
-    genesis-only ``paper_trading.account`` edits are inert on resume and don't
-    warn, and a genesis record predating a key in ``_DRIFT_KEYS_ADDED_LATER``
-    skips that comparison rather than false-flagging), or ``None`` when
-    nothing drifted or no record
-    exists (a pre-drift-check store). A genesis record this process cannot
-    parse also reports as ``("params", ...)``: the homogeneity check became
-    impossible, which is breadcrumb-grade — never a startup abort (that would
-    fire before the protection-only fork, leaving a live position unwatched).
+    Returns ``("coin", msg)`` for a coin mismatch or ``("network", msg)`` for a
+    ``live.network`` mismatch (both hard errors — a different instrument or a
+    different exchange is a different run, not a resumption), ``("params",
+    msg)`` for risk/decision/paper_trading(execution)/engine/market_data/
+    indicators / non-network ``live:`` drift (warning — behaviour changes
+    mid-run but the operator may intend it; genesis-only
+    ``paper_trading.account`` edits are inert on resume and don't warn, and a
+    genesis record predating a key in ``_DRIFT_KEYS_ADDED_LATER`` skips that
+    comparison rather than false-flagging), or ``None`` when nothing drifted or
+    no record exists (a pre-drift-check store). A genesis record this process
+    cannot parse also reports as ``("params", ...)``: the homogeneity check
+    became impossible, which is breadcrumb-grade — never a startup abort (that
+    would fire before the protection-only fork, leaving a live position
+    unwatched). The ``live:`` checks fire only for records that stored the
+    block (a live run's genesis — a paper run never stores it), so paper
+    resumes reach neither the network hard-fail nor the live-block warning.
     """
     if not stored_json:
         return None
@@ -530,12 +1328,46 @@ def _config_drift_report(
             f"targets {coin!r} — refusing to continue a run on a different "
             "instrument (use a new --run-id).",
         )
+    # live.network is run IDENTITY, like coin (decided 2026-07-17): a
+    # testnet↔mainnet swap on resume would arm the wallet-wide kill switch and
+    # reconcile the WRONG exchange against this ledger — every position/equity
+    # leg mismatches and the operator sees "reconciliation mismatch" instead of
+    # the true cause. The live create path stores the whole ``live:`` block; a
+    # paper run never does, so ``stored_live`` is absent there and the check
+    # is skipped. current_live is round-tripped through JSON to match the
+    # stored block's serialized shape.
+    stored_live = stored.get("live")
+    raw_current_live = config.get("live")
+    current_live = (
+        json.loads(json.dumps(raw_current_live, default=str))
+        if isinstance(raw_current_live, dict)
+        else None
+    )
+    both_have_live_block = isinstance(stored_live, dict) and isinstance(current_live, dict)
+    if both_have_live_block and _norm_network(stored_live) != _norm_network(current_live):
+        return (
+            "network",
+            f"run was created against live.network {_norm_network(stored_live)!r} "
+            f"but this resume targets {_norm_network(current_live)!r} — refusing to "
+            "arm the kill switch and reconcile a different exchange (use a new "
+            "--run-id).",
+        )
     drifted = sorted(
         key
         for key in _DRIFT_COMPARED_KEYS
         if not (key in _DRIFT_KEYS_ADDED_LATER and key not in stored)
         and _resume_effective(key, stored.get(key)) != _resume_effective(key, current.get(key))
     )
+    # Non-network ``live:`` drift is a warning (network already hard-failed
+    # above): safety caps, kill-switch timings, allow_real_orders wiring etc.
+    # redefine behaviour mid-run and the operator should be told, even though
+    # they may intend it. Compared with network excluded so an equal-network
+    # block that changed elsewhere still surfaces.
+    if both_have_live_block:
+        stored_live_rest = {k: v for k, v in stored_live.items() if k != "network"}
+        current_live_rest = {k: v for k, v in current_live.items() if k != "network"}
+        if stored_live_rest != current_live_rest:
+            drifted = sorted([*drifted, "live"])
     if drifted:
         return (
             "params",
@@ -667,7 +1499,8 @@ def _cmd_paper(argv: list[str]) -> int:
     funding_source = _HistoryFundingSource(market)
 
     with Database(db_path) as db:
-        is_restart = repo.get_run(db.conn, run_id) is not None
+        existing_run = repo.get_run(db.conn, run_id)
+        is_restart = existing_run is not None
         now = clock.now()
         if not is_restart and not args.create:
             print(
@@ -685,6 +1518,19 @@ def _cmd_paper(argv: list[str]) -> int:
             print(
                 f"error: run {run_id!r} already exists in {db_path}. Drop --create "
                 "to resume it, or pick a new --run-id for a fresh run.",
+                file=sys.stderr,
+            )
+            return 1
+        if existing_run is not None and existing_run["mode"] != "paper":
+            # Same identity discipline as the live resume (decided
+            # 2026-07-17): a live run's genesis carries the same coin, so the
+            # drift check alone would wave a typo'd --run-id/--db through —
+            # and the paper daemon would then trade over a LIVE run's books.
+            # Checked before the run lock touches the row.
+            print(
+                f"error: run {run_id!r} in {db_path} is a "
+                f"{existing_run['mode']} run — the paper daemon would trade "
+                "over its books. Fix --run-id / --db.",
                 file=sys.stderr,
             )
             return 1
@@ -781,16 +1627,17 @@ def _cmd_paper(argv: list[str]) -> int:
                 # change behaviour mid-run while every metric treats it as one
                 # homogeneous run: a coin mismatch is a hard error, parameter
                 # drift a loud warning.
-                run_row = repo.get_run(db.conn, run_id)
-                assert run_row is not None  # is_restart established the row exists
-                drift = _config_drift_report(run_row["config_json"], config, coin)
+                # ``existing_run`` was fetched once at the top of the block
+                # (is_restart proved it non-None); no writer touches the runs
+                # row between there and here.
+                drift = _config_drift_report(existing_run["config_json"], config, coin)
                 if drift is None:
                     # Stamp clean resumes too, so a reverted config doesn't
                     # leave a stale "drift" as the last word in the store.
                     _stamp_breadcrumb(db, run_id, "config_drift", "ok", None)
                 else:
                     kind, message = drift
-                    if kind == "coin":
+                    if kind in ("coin", "network"):
                         print(f"error: {message}", file=sys.stderr)
                         return 1
                     logger.warning("config drift on resume for %s: %s", run_id, message)
@@ -1002,7 +1849,12 @@ def _cmd_paper(argv: list[str]) -> int:
         try:
             return _run_locked()
         finally:
-            release_run_lock(db, run_id, pid=os.getpid(), now=clock.now())
+            # Same guard as the live path: a raise here would clobber
+            # _run_locked()'s exit code into a generic exit 2.
+            try:
+                release_run_lock(db, run_id, pid=os.getpid(), now=clock.now())
+            except Exception:  # noqa: BLE001
+                logger.exception("run-lock release failed (the exit code above stands)")
 
 
 def _paper_loop(

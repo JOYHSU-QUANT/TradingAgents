@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from ..exchanges.hyperliquid.errors import MalformedResponseError
-from ..exchanges.hyperliquid.mapper import require_decimal
+from ..exchanges.hyperliquid.mapper import HL_SIDE_TO_LOCAL, require_decimal
 from ..paper.accounting import (
     LiveFillEffect,
     adjustment_ledger_delta,
@@ -62,7 +62,12 @@ from ..paper.accounting import (
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
 from ..persistence.db import Database
-from ..persistence.ids import accounting_adjustment_id, exchange_fill_key, live_fill_id
+from ..persistence.ids import (
+    accounting_adjustment_id,
+    exchange_fill_key,
+    live_fill_id,
+    usable_fill_tid,
+)
 from ..persistence.models import DECIMAL_CONTEXT, AccountLedger, PositionState, Side
 from .payloads import write_raw_payload
 from .ws_stream import USER_FILLS_CHANNEL
@@ -81,11 +86,11 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# Hyperliquid encodes fill direction as bid/ask, not buy/sell: "B" is a fill on
-# the bid (a buy), "A" a fill on the ask (a sell). Mapped to the persistence
-# Side vocabulary at the boundary, failing loud on anything else — a third code
-# would otherwise be coerced by Side.parse into an opaque error far from here.
-_HL_SIDE = {"B": "buy", "A": "sell"}
+# Fill direction arrives in the shared HL bid/ask vocabulary (the mapper's
+# ``HL_SIDE_TO_LOCAL``: "B" a buy on the bid, "A" a sell on the ask) and is
+# mapped to the persistence Side words at the boundary, failing loud on
+# anything else — a third code would otherwise be coerced by Side.parse into
+# an opaque error far from here.
 
 # Perp fees settle in USDC. A fee reported in any other token cannot be posted
 # to the USDC ledger as-is, so it is treated as PENDING (§15.1) and left for a
@@ -277,9 +282,9 @@ class ExchangeFill:
         # so an unhashable payload value (["B"]) would raise TypeError — which neither
         # the §11.3 handlers nor the (ValueError, ArithmeticError) backstop below
         # catches, and one drifted fill would wedge the REST backfill forever.
-        if not isinstance(raw_side, str) or raw_side not in _HL_SIDE:
+        if not isinstance(raw_side, str) or raw_side not in HL_SIDE_TO_LOCAL:
             raise MalformedResponseError(
-                f"fill side must be one of {sorted(_HL_SIDE)} (bid/ask), got {raw_side!r}"
+                f"fill side must be one of {sorted(HL_SIDE_TO_LOCAL)} (bid/ask), got {raw_side!r}"
             )
         price = require_decimal(_require(raw, "px"), field="fill px")
         qty = require_decimal(_require(raw, "sz"), field="fill sz")
@@ -304,7 +309,10 @@ class ExchangeFill:
         # payload and the fill is NOT applied, surfacing for reconciliation
         # instead of being miscounted.
         tid = _require_scalar_id(raw, "tid")
-        if str(tid) == "":
+        # The scalar check above narrowed the wire type; the shared predicate
+        # (ids.usable_fill_tid — the reconciliation cross-check keys on the
+        # SAME definition) can now only fail on blankness.
+        if not usable_fill_tid(tid):
             raise MalformedResponseError(f"fill 'tid' must be non-empty (§14.2): {raw!r}")
 
         # The fill math assumes a strictly positive size and price. The exchange
@@ -330,7 +338,7 @@ class ExchangeFill:
             key = exchange_fill_key(tid=tid)
             return cls(
                 coin=coin,
-                side=Side.parse(_HL_SIDE[raw_side]),
+                side=Side.parse(HL_SIDE_TO_LOCAL[raw_side]),
                 qty=qty,
                 price=price,
                 closed_pnl=closed_pnl,

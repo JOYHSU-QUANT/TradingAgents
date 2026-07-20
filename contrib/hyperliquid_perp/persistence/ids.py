@@ -38,6 +38,7 @@ __all__ = [
     "live_fill_id",
     "live_order_attempt_id",
     "slice_id",
+    "usable_fill_tid",
 ]
 
 _SEP = "|"
@@ -145,6 +146,21 @@ def decision_attempt_id(run_id: str, scheduled_at: datetime) -> str:
             _part(_canonical_instant(scheduled_at, name="scheduled_at"), name="scheduled_at"),
         )
     )
+
+
+def usable_fill_tid(tid: object) -> bool:
+    """Whether a raw ``tid`` can serve as the §14.2 dedupe identity.
+
+    THE single definition of a usable fill tid, shared by the ingest side
+    (``live/fills.py``, which raises ``MalformedResponseError`` on failure)
+    and the reconciliation cross-check (``live/reconcile.py``, which
+    withholds invalid-fill verdicts) — one vocabulary, so the two legs that
+    together decide MANUAL safe mode can never drift. Usable means the
+    exchange's documented wire types (str/int; ``bool`` is an int subclass,
+    not an id) and non-empty under the ``str()`` coercion
+    :func:`exchange_fill_key` applies.
+    """
+    return isinstance(tid, (str, int)) and not isinstance(tid, bool) and str(tid) != ""
 
 
 def exchange_fill_key(*, tid: object) -> str:

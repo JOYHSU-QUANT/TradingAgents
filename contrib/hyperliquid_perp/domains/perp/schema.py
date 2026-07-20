@@ -214,12 +214,22 @@ class PerpPosition:
 
 @dataclass(frozen=True)
 class AccountSnapshot:
-    """Account-level margin state plus the open positions."""
+    """Account-level margin state plus the open positions.
+
+    ``cross_maintenance_margin_used`` and ``total_position_notional`` are the
+    exchange's own account-level figures (``crossMaintenanceMarginUsed`` /
+    ``marginSummary.totalNtlPos``), carried for the Phase 3 live snapshot
+    writer — the reconciler records what the exchange reported rather than
+    re-deriving a maintenance model. Optional: Phase 1/2 consumers never read
+    them and older payload fixtures may omit the fields.
+    """
 
     account_value: Decimal
     withdrawable: Decimal
     total_margin_used: Decimal
     positions: tuple[PerpPosition, ...] = ()
+    cross_maintenance_margin_used: Decimal | None = None
+    total_position_notional: Decimal | None = None
 
     def __post_init__(self) -> None:
         # ``account_value`` must be strictly positive: a zero/negative value makes
@@ -230,10 +240,14 @@ class AccountSnapshot:
         # corrupt state surfaces instead of being read as "nothing to do".
         if self.account_value <= 0:
             raise ValueError(f"AccountSnapshot.account_value must be > 0, got {self.account_value}")
-        # ``withdrawable`` and ``total_margin_used`` are magnitudes (>= 0).
+        # The remaining money fields are magnitudes (>= 0).
         for name in ("withdrawable", "total_margin_used"):
             value = getattr(self, name)
             if value < 0:
+                raise ValueError(f"AccountSnapshot.{name} must be >= 0, got {value}")
+        for name in ("cross_maintenance_margin_used", "total_position_notional"):
+            value = getattr(self, name)
+            if value is not None and value < 0:
                 raise ValueError(f"AccountSnapshot.{name} must be >= 0, got {value}")
         # ``position_for`` returns the first match, so a duplicate coin would silently
         # drop the second position — and the exchange should never report two open

@@ -33,6 +33,10 @@ __all__ = [
     "KILL_SWITCH_EVENT_TYPES",
     "LIVE_LIQUIDITY_ROLES",
     "RECONCILIATION_CASE_TYPES",
+    "RECONCILIATION_TRIGGERS",
+    "ROLE_TO_ORDER_TYPE",
+    "SAFE_MODE_EVENT_TYPES",
+    "SAFE_MODE_TYPES",
     "find_in_progress_attempt",
     "get_accounting_adjustment_event",
     "get_all_current_positions",
@@ -41,6 +45,7 @@ __all__ = [
     "get_current_account_state",
     "get_current_position",
     "get_decision_attempt",
+    "get_exchange_reconciliation_case",
     "get_execution_plan",
     "get_fill",
     "get_fill_by_exchange_key",
@@ -54,6 +59,7 @@ __all__ = [
     "get_run_seed_positions",
     "get_scheduler_state",
     "has_exchange_known_cloid",
+    "has_safe_mode_reason_event",
     "has_exchange_reconciliation_case",
     "has_place_attempt",
     "insert_account_snapshot",
@@ -73,6 +79,7 @@ __all__ = [
     "insert_position_snapshot",
     "insert_run",
     "insert_run_seed_position",
+    "insert_safe_mode_event",
     "iter_accounting_adjustment_events",
     "iter_exchange_reconciliation_events",
     "iter_execution_plans",
@@ -82,6 +89,8 @@ __all__ = [
     "iter_live_fills",
     "iter_live_order_attempts",
     "iter_orders",
+    "iter_safe_mode_events",
+    "iter_unresolved_fill_sightings",
     "last_live_fill_time",
     "max_engine_seq",
     "newest_live_fill_order_key",
@@ -90,6 +99,7 @@ __all__ = [
     "require_current_account_state",
     "require_live_fill_basis",
     "set_funding_status",
+    "set_reconciliation_action",
     "set_position_protection",
     "update_decision_attempt",
     "update_execution_plan",
@@ -1296,6 +1306,12 @@ _ORDER_ROLES = LIVE_ORDER_ROLES
 _ORDER_TYPES = frozenset(
     {"paper_market", "paper_twap_slice", "stop_market", "take_market", "ioc_limit"}
 )
+# The trigger-role → order-type spelling, next to the vocabulary it draws from:
+# writers that derive a type from a registry/protection role (the live orphan
+# backfill; the paper engine's protection placement) must share one mapping or
+# they drift and audit rows get mislabeled. Non-trigger roles take each
+# writer's own wire-type default.
+ROLE_TO_ORDER_TYPE = {"stop_loss": "stop_market", "take_profit": "take_market"}
 # "submitted" is the live-only pre-ack state (phase3-spec §8.3): the order row
 # is written before the network call and patched once the exchange answers.
 _ORDER_STATUSES = frozenset(
@@ -1798,6 +1814,9 @@ def upsert_scheduler_state(
     last_config_drift_status: str | None | _Unset = _UNSET,
     last_config_drift_error: str | None | _Unset = _UNSET,
     last_config_drift_at: datetime | None | _Unset = _UNSET,
+    safe_mode_type: str | None | _Unset = _UNSET,
+    safe_mode_reason: str | None | _Unset = _UNSET,
+    safe_mode_entered_at: datetime | None | _Unset = _UNSET,
     updated_at: datetime | None = None,
 ) -> None:
     """Patch-style upsert: only the columns actually supplied change.
@@ -1808,7 +1827,28 @@ def upsert_scheduler_state(
     field — one forgotten keyword and the crash-recovery breadcrumbs
     (``last_input_id`` / ``current_attempt_id``) this table exists to keep
     would be silently NULLed. ``updated_at`` is always stamped.
+
+    The §16.6 safe-mode trio moves as ONE unit: entering safe mode without a
+    reason (or clearing the type while a reason lingers) would leave the §13.6
+    current-state record self-contradictory across a restart, so a caller that
+    touches any of the three must supply all three, all set or all ``None``.
     """
+    safe_mode_trio = (safe_mode_type, safe_mode_reason, safe_mode_entered_at)
+    provided_trio = [v for v in safe_mode_trio if not isinstance(v, _Unset)]
+    if provided_trio and len(provided_trio) != 3:
+        raise ValueError(
+            "safe_mode_type / safe_mode_reason / safe_mode_entered_at must be "
+            "supplied together (the §16.6 current state is one fact)"
+        )
+    if provided_trio:
+        set_count = sum(1 for v in provided_trio if v is not None)
+        if set_count not in (0, 3):
+            raise ValueError(
+                "safe_mode_type / safe_mode_reason / safe_mode_entered_at must be "
+                "all set (entering) or all None (clearing), got a partial state"
+            )
+        if safe_mode_type is not None and not isinstance(safe_mode_type, _Unset):
+            check_enum(safe_mode_type, SAFE_MODE_TYPES, name="safe_mode_type")
     if not isinstance(last_export_status, _Unset) and last_export_status is not None:
         check_enum(last_export_status, _EXPORT_STATUSES, name="last_export_status")
     if not isinstance(last_replay_status, _Unset) and last_replay_status is not None:
@@ -1850,6 +1890,12 @@ def upsert_scheduler_state(
         provided["last_config_drift_error"] = _encode(last_config_drift_error)
     if not isinstance(last_config_drift_at, _Unset):
         provided["last_config_drift_at"] = _encode(last_config_drift_at)
+    if not isinstance(safe_mode_type, _Unset):
+        provided["safe_mode_type"] = _encode(safe_mode_type)
+    if not isinstance(safe_mode_reason, _Unset):
+        provided["safe_mode_reason"] = _encode(safe_mode_reason)
+    if not isinstance(safe_mode_entered_at, _Unset):
+        provided["safe_mode_entered_at"] = _encode(safe_mode_entered_at)
     provided["updated_at"] = _iso_utc(updated_at or datetime.now(timezone.utc))
 
     # Column names come from the fixed keyword list above, never caller data.
@@ -2374,12 +2420,44 @@ def iter_accounting_adjustment_events(
 # (``key|digest`` describing fills that ARE booked) can never match that column
 # and resolve by human review via PR 4's ``action_taken``.
 RECONCILIATION_CASE_TYPES = frozenset(
-    {"fill_unmapped", "fill_malformed", "fill_money_drift", "fill_fee_drift"}
+    {
+        # PR 3 ingest-side sightings (once per fact, deduped on exchange_value).
+        "fill_unmapped",
+        "fill_malformed",
+        "fill_money_drift",
+        "fill_fee_drift",
+        # PR 4 sweep cases — the §12.3 table, one type per row, in its order.
+        "order_missing_on_exchange",
+        "orphan_exchange_order",
+        "non_bot_owned_order",
+        "invalid_local_fill",
+        "exchange_fill_missing_local",
+        "exchange_position_mismatch",
+        "local_position_phantom",
+        "equity_mismatch",
+        "position_sl_missing",
+    }
 )
 
-# Which code path observed the case. PR 3 writes only the ingest sighting; PR 4's
-# reconciliation sweeps add their own trigger words when they land.
-_RECONCILIATION_TRIGGERS = frozenset({"live_fill_ingest"})
+# Which code path observed the case: the PR 3 ingest sighting, or one of the
+# §12.2 reconciliation timings PR 4's sweep runs at. Public: the reconciler
+# names its trigger from this set and the acceptance metrics group by it.
+RECONCILIATION_TRIGGERS = frozenset(
+    {
+        "live_fill_ingest",
+        "startup",
+        "pre_cycle",
+        "post_cycle",
+        "order_ack",
+        "fill",
+        "protection_change",
+        "heartbeat",
+        "shutdown",
+        "mismatch",
+    }
+)
+# Backwards-compatible private alias (PR 3 callers/tests referenced the old name).
+_RECONCILIATION_TRIGGERS = RECONCILIATION_TRIGGERS
 
 
 def insert_exchange_reconciliation_event(
@@ -2391,6 +2469,7 @@ def insert_exchange_reconciliation_event(
     symbol: str | None = None,
     local_value: str | None = None,
     exchange_value: str | None = None,
+    action_taken: str | None = None,
     detail: str | None = None,
     timestamp: datetime | None = None,
 ) -> bool:
@@ -2404,8 +2483,10 @@ def insert_exchange_reconciliation_event(
     writes nothing and returns ``False``. Rows with no ``exchange_value`` (a PR 4
     sweep case with no per-fill key) are not deduped — each is its own event.
 
-    (``action_taken`` stays NULL at this boundary — no PR 3 writer acts on a case;
-    the column gains a writer with PR 4's sweeps.)
+    ``action_taken`` stays NULL from the PR 3 ingest writers (no ingest path acts
+    on a case); the PR 4 sweep passes it when the disposition is known at write
+    time (an orphan it back-filled, a stuck row it settled), and stamps it later
+    through :func:`set_reconciliation_action` otherwise.
     """
     check_enum(case_type, RECONCILIATION_CASE_TYPES, name="case_type")
     check_enum(trigger, _RECONCILIATION_TRIGGERS, name="trigger")
@@ -2424,7 +2505,7 @@ def insert_exchange_reconciliation_event(
             "symbol": symbol,
             "local_value": local_value,
             "exchange_value": exchange_value,
-            "action_taken": None,
+            "action_taken": action_taken,
             "detail": detail,
         },
     )
@@ -2443,13 +2524,31 @@ def has_exchange_reconciliation_case(
     is what keeps a later re-sighting from re-inserting.
     """
     return (
-        conn.execute(
-            "SELECT 1 FROM exchange_reconciliation_events "
-            "WHERE run_id = ? AND case_type = ? AND exchange_value = ? LIMIT 1",
-            (run_id, case_type, exchange_value),
-        ).fetchone()
+        get_exchange_reconciliation_case(
+            conn, run_id, case_type=case_type, exchange_value=exchange_value
+        )
         is not None
     )
+
+
+def get_exchange_reconciliation_case(
+    conn: sqlite3.Connection, run_id: str, *, case_type: str, exchange_value: str
+) -> sqlite3.Row | None:
+    """The earliest recorded row for one deduped fact, or ``None``.
+
+    The lookup side of the once-per-fact guard: when a later pass RESOLVES a
+    fact whose sighting was already recorded (the dedupe swallows the fresh
+    insert), the reconciler stamps the disposition onto THIS row via
+    :func:`set_reconciliation_action` instead of losing it — otherwise the
+    backlog would permanently show as unresolved a case that was in fact
+    settled on a retry.
+    """
+    return conn.execute(
+        "SELECT * FROM exchange_reconciliation_events "
+        "WHERE run_id = ? AND case_type = ? AND exchange_value = ? "
+        "ORDER BY event_id LIMIT 1",
+        (run_id, case_type, exchange_value),
+    ).fetchone()
 
 
 def iter_exchange_reconciliation_events(
@@ -2466,3 +2565,151 @@ def iter_exchange_reconciliation_events(
         "ORDER BY event_id",
         (run_id, case_type),
     ).fetchall()
+
+
+def set_reconciliation_action(conn: sqlite3.Connection, event_id: int, action_taken: str) -> None:
+    """Stamp a case row's disposition (the §12.3 v10/v11 ``action_taken`` writer).
+
+    Case rows are a log — resolution never rewrites ``case_type`` or the
+    observed values, it only records what was DONE about the sighting (PR 4's
+    sweep marking a malformed payload inspected, a drift audited, an orphan
+    order cancelled). The row must exist; a second stamp overwrites the first
+    (the disposition can be revised, the observation cannot).
+    """
+    if not action_taken or not action_taken.strip():
+        raise ValueError("action_taken must be a non-empty string")
+    cur = conn.execute(
+        "UPDATE exchange_reconciliation_events SET action_taken = ? WHERE event_id = ?",
+        (action_taken, event_id),
+    )
+    if cur.rowcount != 1:
+        raise ValueError(f"exchange_reconciliation_events row {event_id!r} does not exist")
+
+
+def iter_unresolved_fill_sightings(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    """``fill_unmapped`` sightings whose §14.2 key STILL has no fills row.
+
+    The §12.3 (v10/v11) discovery list: for an unmapped sighting the
+    ``exchange_value`` IS the dedupe key, so an anti-join against
+    ``fills.exchange_fill_key`` yields exactly the fills the exchange reported
+    that the ledger still lacks — "resolved" is the join starting to hit
+    (re-ingest after a §8.3 recovery books the fill), never a flag on the row.
+    Only ``fill_unmapped`` joins this way: a malformed sighting's key never
+    matches a fills row by construction, and drift sightings describe fills
+    that are ALREADY booked — both are excluded here and handled by the
+    sweep's ``action_taken`` marking instead.
+    """
+    return conn.execute(
+        "SELECT * FROM exchange_reconciliation_events e "
+        "WHERE e.run_id = ? AND e.case_type = 'fill_unmapped' "
+        "AND NOT EXISTS ("
+        "  SELECT 1 FROM fills f WHERE f.exchange_fill_key = e.exchange_value"
+        ") ORDER BY e.event_id",
+        (run_id,),
+    ).fetchall()
+
+
+# --------------------------------------------------------------------------
+# safe_mode_events (phase3-spec §13.6) — safe-mode history; current state
+# lives on scheduler_state (§16.6)
+# --------------------------------------------------------------------------
+
+# §13.3: the two safe-mode types. Also validates the scheduler_state column.
+SAFE_MODE_TYPES = frozenset({"recoverable", "manual"})
+
+# §13.6 history vocabulary. ``safe_mode_entered`` records every entry,
+# ``safe_mode_escalated`` a recoverable→manual upgrade while already inside,
+# ``safe_mode_released`` every exit — CLI (§13.6 rule 2) and §13.4 auto-recovery
+# alike, distinguished by ``released_by``. ``safe_mode_reason_added`` records a
+# DISTINCT manual reason observed while manual safe mode is already latched
+# (decided 2026-07-17): the current-state trio keeps the FIRST reason, but the
+# operator's §13.6 triage surface must show every independent fact — a second
+# reason absorbed silently would hide, say, an invalid local fill behind an
+# already-reported non-bot order.
+SAFE_MODE_EVENT_TYPES = frozenset(
+    {
+        "safe_mode_entered",
+        "safe_mode_escalated",
+        "safe_mode_released",
+        "safe_mode_reason_added",
+    }
+)
+
+
+def insert_safe_mode_event(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    event_type: str,
+    safe_mode_type: str | None = None,
+    reason: str | None = None,
+    released_by: str | None = None,
+    detail: str | None = None,
+    timestamp: datetime | None = None,
+) -> None:
+    """Append one §13.6 safe-mode history row (state changes are auditable).
+
+    An entered/escalated/reason-added event must name the type and reason it
+    moved to (or observed); a released event must name who released it
+    (``"auto_recovery"`` or the CLI operator string) — a release row with no
+    author would defeat the §13.6 audit trail the CLI subcommand exists to
+    leave.
+    """
+    check_enum(event_type, SAFE_MODE_EVENT_TYPES, name="event_type")
+    if event_type in (
+        "safe_mode_entered",
+        "safe_mode_escalated",
+        "safe_mode_reason_added",
+    ) and (safe_mode_type is None or reason is None):
+        raise ValueError(f"{event_type} requires safe_mode_type and reason")
+    if event_type == "safe_mode_released" and not released_by:
+        raise ValueError("safe_mode_released requires released_by (§13.6 audit trail)")
+    if safe_mode_type is not None:
+        check_enum(safe_mode_type, SAFE_MODE_TYPES, name="safe_mode_type")
+    _insert(
+        conn,
+        "safe_mode_events",
+        {
+            "run_id": run_id,
+            "timestamp": timestamp or datetime.now(timezone.utc),
+            "event_type": event_type,
+            "safe_mode_type": safe_mode_type,
+            "reason": reason,
+            "released_by": released_by,
+            "detail": detail,
+        },
+    )
+
+
+def iter_safe_mode_events(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    """A run's safe-mode history in insertion order."""
+    return conn.execute(
+        "SELECT * FROM safe_mode_events WHERE run_id = ? ORDER BY event_id",
+        (run_id,),
+    ).fetchall()
+
+
+def has_safe_mode_reason_event(
+    conn: sqlite3.Connection, run_id: str, *, reason: str, since_iso: str
+) -> bool:
+    """Whether this episode already carries a history row for ``reason``.
+
+    The idempotence key for ``safe_mode_reason_added`` (decided 2026-07-17):
+    an episode is bounded below by the current state's ``entered_at``, and a
+    reason already named by ANY entered/escalated/reason-added row inside it
+    needs no second row — the same mismatch re-observed every pass must not
+    spam the history, exactly the discipline ``enter()`` keeps for the first
+    reason. The comparison is lexicographic on our own ISO-8601 UTC stamps
+    (single writer, single format), the same convention the store uses
+    elsewhere.
+    """
+    return (
+        conn.execute(
+            "SELECT 1 FROM safe_mode_events WHERE run_id = ? AND reason = ? "
+            "AND timestamp >= ? AND event_type IN "
+            "('safe_mode_entered', 'safe_mode_escalated', 'safe_mode_reason_added') "
+            "LIMIT 1",
+            (run_id, reason, since_iso),
+        ).fetchone()
+        is not None
+    )

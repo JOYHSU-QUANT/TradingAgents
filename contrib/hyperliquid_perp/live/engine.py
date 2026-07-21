@@ -231,6 +231,13 @@ class LiveExecutionEngine:
         # current position. Mark it terminal so §9.3's "no active plan" holds.
         self._abandon_dangling_plans()
         self._gate.active_slice_plan = False
+        # v1 LIMITATION (deferred to the PR 6 restart recovery, alongside the
+        # _emergency_close_pending persistence): a _PendingFlip is memory-only,
+        # so a restart between a flip's two legs DROPS the AI-approved open leg
+        # — the run sits on the close leg's outcome until the next 4h cycle
+        # (the decision cycle is already `completed`, its raw response cleared;
+        # nothing can resume it). The drop must not be silent:
+        self._warn_orphan_flip_close_leg()
 
     # -- construction helpers -------------------------------------------------
 
@@ -245,6 +252,33 @@ class LiveExecutionEngine:
                         status_reason="restart_abandoned",
                         updated_at=self._clock.now(),
                     )
+
+    def _warn_orphan_flip_close_leg(self) -> None:
+        """Make the v1 pending-flip restart drop VISIBLE (fix lands in PR 6).
+
+        The run's newest plan being a flip CLOSE leg with no open-leg row for
+        its ``flip_plan_id`` means the process died between the flip's two legs
+        and the in-memory ``_PendingFlip`` is gone. A newer plan of any other
+        shape means a later decision already superseded the flip — silent is
+        correct there. The orphan rows themselves are the queryable audit
+        trail; this warning is the real-time operator signal.
+        """
+        plans = repo.iter_execution_plans(self._db.conn, self._run_id)
+        if not plans:
+            return
+        last = plans[-1]  # insertion order (ORDER BY rowid)
+        if last["flip_leg"] != "close":
+            return
+        flip_id = last["flip_plan_id"]
+        if any(p["flip_plan_id"] == flip_id and p["flip_leg"] == "open" for p in plans):
+            return
+        logger.warning(
+            "flip %s lost its pending open leg across a restart (v1 gap, PR 6): "
+            "close leg %s is the newest plan and no open leg was registered — "
+            "the run re-plans at the next scheduled decision cycle",
+            flip_id,
+            last["plan_id"],
+        )
 
     # -- reads ----------------------------------------------------------------
 
@@ -445,6 +479,13 @@ class LiveExecutionEngine:
             # can sit above the live bids (or below the asks) — a band computed
             # off it can miss the book entirely and the IOC cancels unfilled.
             self._emergency_close(position, snap.mid_price, now, events)
+        elif outcome is ProtectionOutcome.BLOCKED:
+            # No SL is resting and nothing can be sent (wire gate closed) — the
+            # single most operator-urgent state must never be console-invisible.
+            # The CLI's per-tick log only fires when a tick DID something; this
+            # event makes a blocked tick count as something, every tick, until
+            # the gate reopens (protection.py already writes the DB audit row).
+            events.append("protection_blocked")
         elif self._emergency_close_pending and outcome in (
             ProtectionOutcome.PROTECTED,
             ProtectionOutcome.DEGRADED,

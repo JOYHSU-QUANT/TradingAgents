@@ -79,7 +79,7 @@ accounting_replay_mismatch_count = 0
 | 23 | Absolute notional ceiling | mainnet_tiny 階段 absolute_notional_ceiling = 500 USDC，config-load-time 檢查 max_notional_usdc 不得超過此值（見 §5 規則 5） |
 | 24 | **（v3 新增）Agent key 佈建** | 分網路兩個環境變數 `HYPERLIQUID_AGENT_KEY_TESTNET` / `HYPERLIQUID_AGENT_KEY_MAINNET`；啟動時由 key 推導地址、以 Info API 驗證已被 wallet_address 授權且未過期，失敗拒絕啟動（見 §6） |
 | 25 | **（v3 新增）Safety 參數語意** | max_daily_loss_pct：UTC 日切、含未實現，觸發進 recoverable safe mode 至次日；max_consecutive_loss_count：倉位歸零結算計次、達 3 進 manual safe mode；max_open_orders：達上限拒新單（見 §10.3–§10.5） |
-| 26 | **（v3 新增）架構原則** | live 執行引擎為平行 `live/` 套件（paper engine 零改動）；WebSocket 事件經 thread-safe queue 由既有 30s tick 迴圈消化；live 帳務以記錄的交易所事件為單一基準（見 §2.1、§11.4、§15） |
+| 26 | **（v3 新增）架構原則** | live 執行引擎為平行 `live/` 套件（paper engine 零改動）；WebSocket 事件經 thread-safe queue 由既有 tick 迴圈消化（PR 5 實作：live loop 為 10s tick，見 §11.4）；live 帳務以記錄的交易所事件為單一基準（見 §2.1、§11.4、§15） |
 | 27 | **（v3 新增）Build order** | 6 個小 PR（見 §23） |
 
 ## 2. Phase 3 Goal
@@ -552,6 +552,15 @@ sell limit = mid_price × 0.995
    由後續切片自然吸收；plan 到期仍未吃完 → terminal `expired`，殘量記
    `residual_qty`（與 paper 語意一致）。
 3. 每張切片單有獨立 cloid（§8.2），retry（網路錯誤等）重用同一 cloid。
+4. **每 tick 最多送一張切片；pre-send gate 拒絕不吃進度（PR 5 修訂，2026-07-21）**：
+   30 秒 interval 是排程節奏，停滯後的 catch-up 也是一 tick 一張，不得在同一個
+   價位 burst 整批 backlog。§4.1 wire gate 在送出**前**拒絕（safe mode /
+   kill switch）時，該切片**從未上線**，rule 2 的「不重送」不適用——cursor 停在
+   原地（事件 `slices_paused`），gate 重開後從同一張續送；反之，凡已觸及（或可能
+   觸及）wire 的結果——ack、交易所拒絕、ambiguous 送單失敗（§8.3 冪等層以同
+   cloid 查證定讞）——cursor 一律前進、不重送。plan deadline 照常束縛：被 gate
+   擋到期的 plan 誠實 terminal `expired`（殘量記 `residual_qty`），不得記成
+   completed。
 
 ### 9.3 Active Plan Overlap
 
@@ -649,6 +658,13 @@ open order count below max_open_orders（§10.5）
 Fail closed: stale AI output must not create live orders.
 ```
 
+v1 live 補充（PR 5，2026-07-21）：live **不複製** paper（phase2-spec §3.1）的
+within-cycle 三段 retry ladder——retryable 失敗當場記 `api_failed` fail-closed，
+下一個 4h cycle 再試。process 於 cycle 途中中斷時，重啟由 loop 啟動先領養
+stranded 的 `in_progress` attempt：已存有 raw response → 從 gate 續跑（絕不重問
+AI）；AI 從未回應 → 記 `api_failed` 收場並 re-anchor 到下一個 cycle。plan 已
+註冊後的 audit persist 失敗只重試 persist、絕不重跑 gate。
+
 ### 10.3 Daily Loss Cap（v3 新增行為定義）
 
 `max_daily_loss_pct = 2` 的衡量方式：
@@ -669,6 +685,12 @@ Fail closed: stale AI output must not create live orders.
 2. 任一段結算為獲利 → 計數歸零。
 3. 連續達 3 次 → 進 **manual safe mode**（連虧暗示策略性問題，
    須人工確認後以 §13.6 介面解除）。
+4. 計次 anchor 為 `scheduler_state.last_settlement_wallet_balance`（schema v7，
+   PR 5 修訂，2026-07-21）：每次 settlement 以 wallet balance 對前一 anchor 的
+   差額為該段 realized PnL（wallet 已折入 fee / funding）。停機期間整段平倉
+   （如 SL 於 offline 成交、由 startup recovery 補帳）者，loop 啟動時以
+   「已 flat 且 wallet 偏離 anchor」補記一次 settlement（`settle_offline_flat`），
+   不得把該段輸贏靜默併入下一段。
 
 ### 10.5 Max Open Orders（v3 新增行為定義）
 
@@ -813,6 +835,11 @@ SDK 的 WebSocket manager 是背景執行緒 callback 模型；本系統維持 P
 2. 既有 tick 迴圈每輪先排空 queue（去重、寫 DB、更新狀態），再做其他工作。
 3. SQLite 維持單一寫者，事件處理順序確定。
 4. 代價：fill 入帳最多延遲一個 tick（≤ 30 秒），對 4h 決策週期無影響。
+5. **（PR 5 修訂，2026-07-21）**live loop 的實際 tick 週期為 **10 秒**——遠小於
+   kill-switch 的 `max_tick_gap_seconds = 30`，讓 §18.2 刷新在 tick 做實事
+   （對帳網路讀取、SL repair）時仍不遲到；AI 決策跑背景 thread，不佔 tick。
+   切片仍按 §9 的 30 秒節奏配速（tick 只是檢查點），fill 消化延遲上限相應
+   ≤ 10 秒；paper 迴圈維持 30 秒。
 
 ## 12. Exchange Reconciliation
 
@@ -1413,7 +1440,9 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    重開，而不是走 §13.4 reconciliation（v7 新增，2026-07-13）。
 2. Live loop 運行期間，必須依 `refresh_interval_seconds` 刷新 schedule cancel deadline。
    `refresh_due()` 的 interval 語意是「至少這麼頻繁」而非「不得早於」：當呼叫方以與
-   refresh_interval 相同的週期 tick（預期的 30s／30s 接線），tick 必然比它比較的那個
+   refresh_interval 相同的週期 tick（例如 30s／30s 接線；PR 5 的 live loop 實際為
+   10s tick／30s refresh，見 §11.4——slack 保護的正是「呼叫方剛好以 interval 為週期
+   tick」的接線），tick 必然比它比較的那個
    排程時刻晚幾毫秒，若用嚴格 `elapsed >= interval` 判斷，這點抖動就會 skip 掉刷新、讓真實節奏
    悄悄砍半成「每兩輪一次」（只有事件時間戳的空隙看得出來）。因此保留一個遠大於
    抖動、又遠小於 interval 的 slack（0.5s）——只會讓刷新稍微提早，永遠不會推遲過

@@ -925,3 +925,72 @@ def test_start_plan_opposite_target_starts_sequential_flip(tmp_path):
     assert flip.open_budget == split_flip_budget(D("0.004"), D("0.004"))[1]
     assert flip.deadline == _T0 + timedelta(hours=1)
     assert gate.active_slice_plan is True
+
+
+# -- orphan-flip restart detection + BLOCKED tick visibility (exit round) -----
+
+
+def _insert_plan(db, plan_id, *, flip_plan_id=None, flip_leg=None):
+    with db.transaction() as conn:
+        repo.insert_execution_plan(
+            conn,
+            plan_id=plan_id,
+            run_id="r",
+            symbol="BTC",
+            status="expired",
+            created_at=_T0,
+            flip_plan_id=flip_plan_id,
+            flip_leg=flip_leg,
+            planned_slices=1,
+            total_qty=D("0.004"),
+            remaining_qty=D("0.004"),
+            residual_qty=D(0),
+            rounding_residual_qty=D(0),
+            status_reason="restart_abandoned",
+        )
+
+
+def test_orphan_flip_close_leg_warns_at_startup(tmp_path, caplog):
+    """v1 gap (fix in PR 6): a restart between a flip's two legs drops the
+    pending open leg — the drop must be VISIBLE, not silent."""
+    db, clock, engine, gate, sub = _build(tmp_path)
+    _insert_plan(db, "p-close", flip_plan_id="f1", flip_leg="close")
+    with caplog.at_level("WARNING"):
+        engine._warn_orphan_flip_close_leg()
+    assert "f1" in caplog.text and "open leg" in caplog.text
+
+
+def test_no_orphan_warning_when_open_leg_registered(tmp_path, caplog):
+    db, clock, engine, gate, sub = _build(tmp_path)
+    _insert_plan(db, "p-close", flip_plan_id="f1", flip_leg="close")
+    _insert_plan(db, "p-open", flip_plan_id="f1", flip_leg="open")
+    with caplog.at_level("WARNING"):
+        engine._warn_orphan_flip_close_leg()
+    assert "open leg" not in caplog.text
+
+
+def test_no_orphan_warning_when_a_later_plan_superseded_the_flip(tmp_path, caplog):
+    db, clock, engine, gate, sub = _build(tmp_path)
+    _insert_plan(db, "p-close", flip_plan_id="f1", flip_leg="close")
+    _insert_plan(db, "p-later")  # a later decision re-planned — silent is correct
+    with caplog.at_level("WARNING"):
+        engine._warn_orphan_flip_close_leg()
+    assert "open leg" not in caplog.text
+
+
+def test_blocked_protection_tick_emits_visible_event(tmp_path):
+    """A BLOCKED tick (no SL resting, wire gate closed) must count as a tick
+    that DID something — the event drives the CLI's per-tick operator log."""
+    prot = _FakeProtection(outcome=ProtectionOutcome.BLOCKED)
+    db, clock, engine, gate, sub = _build(tmp_path, protection=prot)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.05"), entry_price=D(50000)),
+            updated_at=_T0,
+        )
+    engine._was_flat = False
+    _script(engine, [_snap()])
+    res = engine.tick()
+    assert "protection_blocked" in res.events

@@ -525,7 +525,8 @@ execution:
    ≥ 交易所最小下單額——最小 clip 額優先於 interval，片數不足時提前完成
    （PR 1 定案；mainnet_tiny 的 100 USDC cap 配預設 120 片即為此情形）。
 5. Flip(反向)沿用 Phase 2 的 sequential 兩腿模型：close leg 完成且倉位歸零後，
-   重跑 RiskGate 才開 open leg；兩腿共用同一個 1 小時 envelope 與切片預算。
+   重跑 RiskGate 才開 open leg；兩腿共用同一個 plan envelope（`plan_duration_minutes`，
+   預設 1 小時）與切片預算——預算下限為 2（每腿至少 1 片；PR 5 r10 修訂，2026-07-21）。
 
 ### 9.2 Slice Slippage Bound
 

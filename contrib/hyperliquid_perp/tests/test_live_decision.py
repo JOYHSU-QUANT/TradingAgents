@@ -150,6 +150,7 @@ class _DriverProvider:
         self._build_error = build_error
         self._request_error = request_error
         self.builds = 0
+        self.requests = 0
 
     def build_input(self, *, coin, as_of):
         self.builds += 1
@@ -158,14 +159,16 @@ class _DriverProvider:
         return self._di
 
     def request_decision(self, decision_input):
+        self.requests += 1
         if self._request_error is not None:
             raise self._request_error
         return self._parsed
 
 
 class _DriverEngine:
-    def __init__(self, reg, *, start_error=None) -> None:
+    def __init__(self, reg, *, start_error=None, first_regs=()) -> None:
         self._reg = reg
+        self._first = list(first_regs)  # served in order before the steady reg
         self._start_error = start_error
         self.plans: list = []
 
@@ -173,6 +176,8 @@ class _DriverEngine:
         if self._start_error is not None:
             raise self._start_error
         self.plans.append(output_id)
+        if self._first:
+            return self._first.pop(0)
         return self._reg
 
     def liquidation_price(self, position, mark):
@@ -194,7 +199,7 @@ def _decision_input():
     )
 
 
-def _driver(tmp_path, *, build_error=None, request_error=None, start_error=None):
+def _driver(tmp_path, *, build_error=None, request_error=None, start_error=None, first_regs=()):
     from contrib.hyperliquid_perp.live.engine import PlanRegistration
 
     db = Database(tmp_path / "d.db")
@@ -210,7 +215,7 @@ def _driver(tmp_path, *, build_error=None, request_error=None, start_error=None)
         mark_price=Decimal(50000),
         account_equity=Decimal(4000),
     )
-    engine = _DriverEngine(reg, start_error=start_error)
+    engine = _DriverEngine(reg, start_error=start_error, first_regs=first_regs)
     provider = _DriverProvider(
         _decision_input(),
         parsed=_decision(),
@@ -224,6 +229,7 @@ def _driver(tmp_path, *, build_error=None, request_error=None, start_error=None)
         coin="BTC",
         asset=AssetSpec(coin="BTC", sz_decimals=3, margin_schedule=_schedule()),
         risk_config=RiskConfig(leverage=Decimal(1), max_target_margin_pct=60),
+        decision_config=DecisionConfig(),
         engine=engine,
         worker=worker,
         provider=provider,
@@ -339,3 +345,134 @@ def test_driver_gate_nonretryable_error_fails_closed_and_recovers(tmp_path):
     assert state["next_decision_at"] is not None
     clock.set(parse_instant(state["next_decision_at"]))
     assert driver.pump() == "cycle_started"  # recovered, not wedged on the gate
+
+
+# -- resume_startup (§3.1 restart adoption) ----------------------------------
+
+_RAW_LONG = (
+    '{"decision_mode": "set_target", "target_side": "long", '
+    '"requested_target_margin_pct": 5, "confidence": 0.8, '
+    '"rationale": "resume", "key_risks": ["a risk"]}'
+)
+
+
+def _strand_attempt(db, *, raw):
+    """Persist the in_progress attempt row a crashed process would leave behind."""
+    from contrib.hyperliquid_perp.persistence import ids
+
+    attempt_id = ids.decision_attempt_id("r", _T0)
+    with db.transaction() as conn:
+        repo.insert_decision_attempt(
+            conn,
+            decision_attempt_id=attempt_id,
+            timestamp=_T0,
+            mode="live",
+            run_id="r",
+            scheduled_at=_T0,
+            attempt_count=1,
+            status="in_progress",
+            first_attempt_at=_T0,
+            last_attempt_at=_T0,
+            pending_raw_response=raw,
+        )
+    return attempt_id
+
+
+def test_resume_startup_resumes_persisted_response_without_reask(tmp_path):
+    """§3.1: a stranded in_progress attempt WITH a stored response resumes at the
+    gate — the parsed decision is reconstructed from the persisted text and the
+    AI is never asked a second time."""
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    attempt_id = _strand_attempt(db, raw=_RAW_LONG)
+    assert driver.resume_startup() == "resumed"
+    assert driver._inflight is not None
+    assert driver._inflight.parsed is not None and driver._inflight.parsed.is_valid
+    # The next pump completes the cycle from the STORED text.
+    assert driver.pump() == "completed"
+    assert provider.requests == 0  # never a second AI call
+    assert engine.plans == [f"{attempt_id}#out1"]
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "completed"
+
+
+def test_resume_startup_without_response_fails_closed(tmp_path):
+    """A stranded attempt the AI never answered fails closed: the row goes
+    api_failed and next_decision_at advances, so the driver no longer wedges on
+    the duplicate attempt id every tick."""
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    _strand_attempt(db, raw=None)
+    assert driver.resume_startup() == "api_failed"
+    assert driver._inflight is None
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "api_failed"
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["next_decision_at"] is not None
+    assert parse_instant(state["next_decision_at"]) > _T0  # re-anchored
+    assert driver.pump() is None  # not due -> no per-tick crash-loop
+    assert engine.plans == []  # no order off the dead cycle (§10.2)
+
+
+def test_resume_startup_with_no_stranded_attempt_is_none(tmp_path):
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    assert driver.resume_startup() is None
+    assert driver._inflight is None
+
+
+# -- S2: post-registration persist failure retries the persist only ----------
+
+
+def test_registered_plan_persist_failure_retries_persist_only(tmp_path, monkeypatch):
+    """S2: once start_plan REGISTERED a plan, a failing audit persist raises
+    _PlanRegisteredPersistError out of pump (never 'api_failed' — that would
+    falsify the audit trail while real slices go out); _inflight is retained and
+    the next pump retries ONLY the persist — start_plan never runs twice."""
+    from contrib.hyperliquid_perp.live.decision import _PlanRegisteredPersistError
+
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    real_insert = repo.insert_ai_output
+    boom = {"left": 1}
+
+    def flaky(*args, **kwargs):
+        if boom["left"]:
+            boom["left"] -= 1
+            raise RuntimeError("ai_outputs store down")
+        return real_insert(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "insert_ai_output", flaky)
+    assert driver.pump() == "cycle_started"
+    _await(worker)
+    with pytest.raises(_PlanRegisteredPersistError):
+        driver.pump()  # the gate ran, the plan registered, the persist failed
+    assert len(engine.plans) == 1  # start_plan ran exactly once
+    assert driver._inflight is not None  # retained, registration cached
+    assert driver._inflight.registration is not None
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "in_progress"  # the failed transaction rolled back
+    # The next pump retries the persist alone — never a second start_plan.
+    assert driver.pump() == "completed"
+    assert len(engine.plans) == 1
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "completed"
+
+
+# -- T4: gate=None (pending market data) holds the parsed decision -----------
+
+
+def test_gate_pending_market_data_holds_parsed_and_retries(tmp_path):
+    """start_plan returning gate=None (no fresh snapshot) means the gate never
+    ran: pump reports pending_market_data, the parsed decision survives, and a
+    later pump retries the GATE — never the AI."""
+    from contrib.hyperliquid_perp.live.engine import PlanRegistration
+
+    pending = PlanRegistration(
+        gate=None, plan_id=None, disposition=None, reason="pending_market_data"
+    )
+    db, clock, driver, engine, worker, provider = _driver(tmp_path, first_regs=[pending])
+    assert driver.pump() == "cycle_started"
+    _await(worker)
+    assert driver.pump() == "pending_market_data"
+    assert driver._inflight is not None and driver._inflight.parsed is not None
+    assert provider.requests == 1  # the AI was asked exactly once
+    assert driver.pump() == "completed"  # the gate retried with fresh data
+    assert provider.requests == 1  # ... and the AI still only once
+    assert len(engine.plans) == 2  # start_plan re-ran; the AI did not

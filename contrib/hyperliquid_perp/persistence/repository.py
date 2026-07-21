@@ -2396,6 +2396,7 @@ PROTECTION_ORDER_EVENT_TYPES = frozenset(
         "stop_loss_modified",
         "stop_loss_repair_failed",
         "stop_loss_repair_exhausted",
+        "stop_loss_repair_blocked",
         "take_profit_placed",
         "take_profit_modified",
         "take_profit_repair_failed",

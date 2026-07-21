@@ -1,9 +1,10 @@
 """§9 live self-managed sliced-TWAP execution engine (PR 5).
 
-The live counterpart of :class:`~..paper.engine.PaperExecutionEngine`: same 30s
-tick discipline and the same shared slice/stop math (:mod:`..paper.twap`,
-:mod:`..paper.stops`), but it drives REAL exchange orders and never simulates a
-fill — fills arrive asynchronously over the WebSocket and are booked by the
+The live counterpart of :class:`~..paper.engine.PaperExecutionEngine`: the same
+shared slice/stop math (:mod:`..paper.twap`, :mod:`..paper.stops`) and the same
+30s inter-slice pacing (``SLICE_INTERVAL_SECONDS``), but the CLI loop drives
+:meth:`tick` every ~10s (well inside the 30s kill-switch budget), it drives REAL
+exchange orders, and it never simulates a fill — fills arrive asynchronously over the WebSocket and are booked by the
 :class:`~.fills.LiveFillProcessor`, so the engine only ever READS the position
 the fills produce.
 
@@ -35,6 +36,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal, localcontext
 from enum import Enum
+from typing import NamedTuple
 
 from ..domains.perp.margin import DECIMAL_CONTEXT
 from ..domains.perp.risk_gate import (
@@ -63,7 +65,7 @@ from ..persistence.db import Database
 from ..persistence.models import PositionState
 from .config import EXCHANGE_MIN_ORDER_NOTIONAL_USDC, LiveConfig
 from .loss_guards import LossGuards
-from .order_gate import RealOrderGate
+from .order_gate import LiveOrderGateRejected, RealOrderGate
 from .orders import LiveOrderSubmitter
 from .protection import ProtectionManager, ProtectionOutcome
 from .safe_mode import REASON_EMERGENCY_CLOSE
@@ -88,6 +90,13 @@ _EMERGENCY_SLIPPAGE_PCT = Decimal("0.03")
 # Per-request market-data timeout. Bounded (never None) so a hung fetch cannot
 # stall the tick thread and starve the §18.2 kill-switch refresh.
 _MARKET_DATA_TIMEOUT_S = Decimal(10)
+
+
+class _SliceSubmit(NamedTuple):
+    """One slice submission attempt: advance the cursor, and did it land."""
+
+    advance: bool
+    ok: bool
 
 
 @dataclass
@@ -153,7 +162,7 @@ class LiveTickResult:
 
 
 class LiveExecutionEngine:
-    """Drives one live run's §9 sliced execution, one 30s tick at a time."""
+    """Drives one live run's §9 sliced execution, one ~10s tick at a time."""
 
     def __init__(
         self,
@@ -266,6 +275,37 @@ class LiveExecutionEngine:
         """Whether the monitor must keep ticking (position, plan, or pending flip)."""
         return not self._read_position().is_flat or self._leg is not None or self._flip is not None
 
+    def settle_offline_flat(self) -> bool:
+        """§10.4: score a segment whose flat arrived while the process was down.
+
+        ``_detect_settlement`` only sees IN-PROCESS flat transitions; a position
+        closed while the loop was stopped (an SL filled offline, backfilled by
+        startup recovery) seeds ``_was_flat=True`` at construction and the
+        transition is absorbed — the loss counter would silently merge that
+        segment into the next one, weakening the §10.4 breaker exactly around
+        crash/restart windows. Called once at loop start (after startup
+        recovery): already flat AND the wallet moved off the stored anchor ⇒
+        record the missed settlement before the first tick. Returns whether a
+        settlement was recorded.
+        """
+        if not self._was_flat:
+            return False  # a live position settles in-process via _detect_settlement
+        row = repo.get_scheduler_state(self._db.conn, self._run_id)
+        anchor = None if row is None else row["last_settlement_wallet_balance"]
+        if anchor is None:
+            return False  # nothing to diff against; ensure_settlement_anchor seeds genesis
+        wallet = self._wallet_balance()
+        if wallet == Decimal(anchor):
+            return False
+        logger.info(
+            "offline flat detected at startup (wallet %s vs anchor %s) — recording "
+            "the missed §10.4 settlement",
+            wallet,
+            anchor,
+        )
+        self._loss_guards.record_settlement(wallet_balance=wallet, now=self._clock.now())
+        return True
+
     def liquidation_price(self, position: PositionState, mark: Decimal) -> Decimal | None:
         """The exchange-reported liquidation estimate for the audit row (§12.1)."""
         return self._liquidation_price(position)
@@ -277,7 +317,8 @@ class LiveExecutionEngine:
     # -- the tick -------------------------------------------------------------
 
     def tick(self) -> LiveTickResult:
-        """One 30s live tick (§11.4). Never simulates a fill — books move on WS."""
+        """One live tick (§11.4; the loop calls this every ~10s). Never simulates
+        a fill — books move on WS."""
         now = self._clock.now()
         events: list[str] = []
 
@@ -314,7 +355,7 @@ class LiveExecutionEngine:
         position = self._read_position()
 
         # §17 protection sync (recompute SL/TP; emergency close on no-safe-SL).
-        protection = self._sync_protection(position, snap.mark_price, now, events)
+        protection = self._sync_protection(position, snap, now, events)
 
         # §10.3 daily-loss cap (unrealized included).
         self._loss_guards.evaluate_daily_loss(
@@ -339,15 +380,20 @@ class LiveExecutionEngine:
     # -- tick steps -----------------------------------------------------------
 
     def _drain_ws(self, now: datetime, events: list[str]) -> int:
-        """Empty the WS queue into the fill processor (§11.4 rule 2)."""
+        """Empty the WS queue into the fill processor (§11.4 rule 2).
+
+        Deliberately NO try/except around ``ingest_message``: it already skips
+        (and evidences) the one legitimate per-fill failure, a
+        ``MalformedResponseError``. Anything else reaching here is an infra/DB
+        failure or a bug — fills.py's own contract says those must fail LOUD,
+        so it propagates to the loop's tick guard (recoverable safe mode).
+        Swallowing it would drop an already-drained fill with no case row, no
+        retry flag and no operator signal: a silently short ledger.
+        """
         drained = self._ws.drain()
         applied = 0
         for message in drained:
-            try:
-                results = self._fill_processor.ingest_message(message)
-            except Exception:  # noqa: BLE001 — one bad message must not stall the loop
-                logger.exception("WS message ingest failed; message dropped from this tick")
-                continue
+            results = self._fill_processor.ingest_message(message)
             applied += sum(1 for r in results if r.outcome.value == "applied")
         if applied:
             events.append(f"fills_applied:{applied}")
@@ -384,31 +430,62 @@ class LiveExecutionEngine:
         self._was_flat = is_flat
 
     def _sync_protection(
-        self, position: PositionState, mark: Decimal, now: datetime, events: list[str]
+        self, position: PositionState, snap, now: datetime, events: list[str]
     ) -> ProtectionOutcome:
         outcome = self._protection.sync(
             position=position,
             liquidation_price=self._liquidation_price(position),
-            mark=mark,
+            mark=snap.mark_price,
             plan_active=self._leg is not None,
         )
         if outcome is ProtectionOutcome.NEEDS_EMERGENCY_CLOSE:
-            self._emergency_close(position, mark, now, events)
+            # The close is an order sent to the BOOK, so it prices off MID, not
+            # mark (market_feed contract: triggers watch mark, fills reference
+            # mid). In exactly the violent move that fires this, a lagging mark
+            # can sit above the live bids (or below the asks) — a band computed
+            # off it can miss the book entirely and the IOC cancels unfilled.
+            self._emergency_close(position, snap.mid_price, now, events)
+        elif self._emergency_close_pending and outcome in (
+            ProtectionOutcome.PROTECTED,
+            ProtectionOutcome.DEGRADED,
+        ):
+            # §13.5 staleness guard: protection visibly recovered (an SL rests
+            # again — DEGRADED still has one) after an emergency close that never
+            # reached flat — that episode is over, and a LATER flat is a normal
+            # exit, not the close landing. Without this, the latch would misfire
+            # hours after a transient repair failure and halt a healthy run on
+            # manual mode. BLOCKED does NOT clear: no SL rests there, the episode
+            # is merely suspended behind the wire gate.
+            self._emergency_close_pending = False
+            events.append("emergency_close_pending_cleared")
         return outcome
 
     def _submit_due_slices(self, mid: Decimal, now: datetime, events: list[str]) -> int:
         leg = self._leg
         if leg is None:
             return 0
-        due = self._due_count(leg, now)
         submitted = 0
-        while leg.submitted < due:
-            idx = leg.submitted
-            leg.submitted += 1  # one slice per tick advances the cursor even on reject
-            size = leg.slice_sizes[idx]
-            if self._submit_slice(leg, idx, size, mid, now):
-                submitted += 1
-                events.append(f"slice:{leg.plan_id}:{idx}")
+        if leg.submitted < self._due_count(leg, now):
+            # At most ONE slice attempt per tick: the 30s inter-slice pacing is
+            # the schedule, and a catch-up after a stall re-sends at one-per-tick
+            # rather than bursting the whole backlog at a single price.
+            reason = self._gate.check_order(self._coin)
+            if reason is not None:
+                # The wire gate is CLOSED (safe mode / kill switch): this slice
+                # was never sent, so §9.2 rule 2 (an executed IOC's remainder is
+                # not re-sent) does not apply — HOLD the cursor and retry once
+                # the gate reopens. The deadline still bounds the plan: a
+                # gate-declined run terminates honestly as ``expired`` instead
+                # of consuming every slice and reading as "completed".
+                events.append(f"slices_paused:{leg.plan_id}:{reason}")
+            else:
+                idx = leg.submitted
+                advance, ok = self._submit_slice(leg, idx, leg.slice_sizes[idx], mid, now)
+                if advance:
+                    leg.submitted += 1
+                if ok:
+                    submitted += 1
+                    events.append(f"slice:{leg.plan_id}:{idx}")
         if leg.submitted >= leg.planned:
             self._terminate_leg(leg, now, "completed", events)
         return submitted
@@ -423,7 +500,16 @@ class LiveExecutionEngine:
 
     def _submit_slice(
         self, leg: _Leg, idx: int, size: Decimal, mid: Decimal, now: datetime
-    ) -> bool:
+    ) -> _SliceSubmit:
+        """Submit one slice; returns a :class:`_SliceSubmit` ``(advance, ok)``.
+
+        The cursor advances for anything that reached — or may have reached —
+        the wire: an ack, an exchange reject (§9.2 rule 2: never re-sent), or
+        an ambiguous transport failure (the submitter recorded the attempt; a
+        §8.3 same-cloid resend would recover it, but v1 keeps rule-2 simplicity
+        and moves on). Only a gate rejection (never transmitted — the pre-check
+        in ``_submit_due_slices`` raced a gate close) holds the cursor.
+        """
         limit_price = self._slice_limit(mid, leg.side)
         order_id = self._next_order_id(leg.order_role)
         logical = cloid_logical(
@@ -450,10 +536,17 @@ class LiveExecutionEngine:
                 flip_plan_id=leg.flip_plan_id,
                 flip_leg=leg.flip_leg,
             )
+        except LiveOrderGateRejected as exc:
+            # TOCTOU backstop: the gate closed between the pre-check and the
+            # wire. Nothing was sent and no evidence row was written — hold.
+            logger.warning(
+                "slice %s[%d] gate-declined pre-wire (%s); cursor held", leg.plan_id, idx, exc
+            )
+            return _SliceSubmit(advance=False, ok=False)
         except Exception:  # noqa: BLE001 — a submit failure is recorded by the submitter
             logger.exception("slice %s[%d] submit raised", leg.plan_id, idx)
-            return False
-        return outcome.outcome.value != "rejected"
+            return _SliceSubmit(advance=True, ok=False)
+        return _SliceSubmit(advance=True, ok=outcome.outcome.value != "rejected")
 
     def _slice_limit(self, mid: Decimal, side: Side, *, slippage: Decimal | None = None) -> Decimal:
         """§9.2: an IOC limit ±slippage — marketable, slippage-bounded.
@@ -777,7 +870,7 @@ class LiveExecutionEngine:
 
     # -- emergency close (§9.4 aggressive reduce-only IOC) --------------------
 
-    def _emergency_close(self, position, mark: Decimal, now: datetime, events: list[str]) -> None:
+    def _emergency_close(self, position, mid: Decimal, now: datetime, events: list[str]) -> None:
         """§17.2 / §9.4: close the whole position with one aggressive reduce-only IOC.
 
         Cancels any in-flight plan AND any pending flip first (building — or
@@ -801,7 +894,7 @@ class LiveExecutionEngine:
         # §9.4 aggressive band: at least the emergency slippage, never tighter
         # than the routine one — so it clears even in the move that triggered it.
         limit_price = self._slice_limit(
-            mark, close_side, slippage=max(self._slippage, _EMERGENCY_SLIPPAGE_PCT)
+            mid, close_side, slippage=max(self._slippage, _EMERGENCY_SLIPPAGE_PCT)
         )
         order_id = self._next_order_id("emergency_close")
         logical = cloid_logical(

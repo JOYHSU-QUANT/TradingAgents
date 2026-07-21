@@ -969,6 +969,14 @@ PR 4 的 one-shot `live --run-id` wiring 完全沒有 WS stream，故一律 atte
 recoverable latch，會被一個從未連過 WS 的 process 以「帳本乾淨」為由解除。該
 latch 留給 PR 5 daemon（真正握著恢復後的 stream 時）解除。
 
+**v1 loop 例外（2026-07-21，使用者拍板）**：PR 5 的 `live --loop` 尚未接真 WS
+（§11 socket wiring 隨 PR 6），fill 來源本來就是 reconciler 的 REST backfill——
+在這個 wiring 下「無 WS 可斷」不構成斷線條件，若照上段 attest `False`，
+daily-loss 過午夜、`live_tick_error` 等所有 recoverable latch 在 v1 全部變成
+只能手動解除。故 v1 loop 傳 `ws_restored=not ws.is_stale()`（從未連線的
+stream 恆為未 stale ⇒ 實務上恆 `True`），接受 clean pass 自動解除各 recoverable
+latch；PR 6 接上真 WS 後改回真實 stream 狀態，屆時上段的嚴格立場恢復適用。
+
 §19.3 stale-order sweep 的撤單失敗是 **verdict 輸入**（2026-07-17）：撤不掉的單
 仍在交易所掛著，該 pass 不得讀成 clean。失敗以 `ReconciliationReport.sweep_failures`
 欄位隨 pass 一起帶進 `run()`（即在 `_record` 落庫**之前**），故不會出現「clean pass
@@ -1315,6 +1323,15 @@ still failed → reduce-only emergency close（aggressive IOC，見 §9.4，不�
 Live position without valid SL is not allowed.
 SL repair failed after retries → emergency close.
 ```
+
+附註（2026-07-21，使用者拍板）：「失敗」指**已上線**的失敗（交易所拒絕、
+timeout、ack 遺失）。pre-send 的 §4.1 wire-gate 拒絕（protective 入口豁免
+safe-mode 兩條後，實務上只剩 kill switch）**不燒修復預算**：整輪 ladder 都是
+gate 拒絕時回報 `blocked`（事件 `stop_loss_repair_blocked`），不記 exhausted、
+不升級急平——同一個 gate 也會擋急平單，升級只是徒勞的 close storm。失敗線
+（`unresolved_protection_failure`）照設，擋新增風險單；下一 sync 重試，
+§12.3 SL-missing 檢查是這段無保護窗口的兜底。ladder 途中的 delay 照跑並
+tick kill switch（Q2 決策），故 gate 可在 ladder 中途重開。
 
 ### 17.3 TP Failure Policy
 

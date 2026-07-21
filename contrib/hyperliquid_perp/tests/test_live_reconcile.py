@@ -671,8 +671,34 @@ def test_an_exchange_open_order_with_a_terminal_local_row_is_reopened(env):
     assert order["status"] == "open"
     assert order["status_reason"] == "reopened_from_exchange_reconciliation"
     assert order["exchange_order_id"] == "42"
+    assert order["exchange_status"] == "open"
+    assert order["exchange_raw_status"] == "open"
     (case,) = _cases(db, "orphan_exchange_order")
     assert case["action_taken"] == "local_row_reopened"
+
+
+def test_a_reopened_row_persists_the_mapped_exchange_status_not_a_literal_open(env):
+    # The reopen persists exchange_status = the MAPPED local status, never a
+    # hardcoded "open" (the idiom that let the protection manager misrecord a
+    # filled recovery as live). Today every live mapping lands on "open", so
+    # this pins the wiring through a raw word that is NOT literally "open":
+    # "triggered" must map to family "open" while exchange_raw_status keeps
+    # the verbatim exchange word.
+    db, seams, reconciler = env
+    _insert_local_order(db, status="rejected")
+    seams.open_orders = [
+        {"oid": 43, "coin": "BTC", "cloid": _HEX, "side": "B", "sz": "0.001", "origSz": "0.001"}
+    ]
+    seams.order_status[_HEX] = {
+        "status": "order",
+        "order": {"order": {"oid": 43}, "status": "triggered"},
+    }
+    report = reconciler.run("heartbeat")
+    assert report.orders_reconciled
+    order = repo.get_order(db.conn, "o1")
+    assert order["status"] == "open"
+    assert order["exchange_status"] == "open"  # the mapped family
+    assert order["exchange_raw_status"] == "triggered"  # the verbatim word
 
 
 def test_a_stale_open_orders_listing_of_a_cancelled_order_is_not_reopened(env):

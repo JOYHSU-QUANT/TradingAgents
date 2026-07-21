@@ -405,10 +405,12 @@ class HyperliquidSignedClient:
         live order, so the caller sets ``limit_price`` to an aggressive but
         bounded price past the trigger (marketable on fire, capped slippage) —
         the "aggressive IOC, price-protected" shape §9.4 pins for stop_loss /
-        take_profit. The bound §4.1 gate (``check_order``) runs first, exactly
-        as for ``place_ioc_limit`` — SL repair is allowed while a slice plan
-        runs (§9.3), so this too is the wire-scoped subset, not the per-cycle
-        list. ``tpsl`` is validated here; the cloid is mandatory (§8.2/§19.3).
+        take_profit. The bound §4.1 gate runs first via
+        ``require_protective_order`` (§13.1: a reduce-only SL/TP must stay
+        placeable while a safe mode is active); like ``place_ioc_limit`` it is
+        a wire-scoped check, not the per-cycle list, so SL repair is allowed
+        while a slice plan runs (§9.3). ``tpsl`` is validated here; the cloid
+        is mandatory (§8.2/§19.3).
         """
         if tpsl not in ("sl", "tp"):
             raise ValueError(f"tpsl must be 'sl' or 'tp' (§17 trigger order), got {tpsl!r}")

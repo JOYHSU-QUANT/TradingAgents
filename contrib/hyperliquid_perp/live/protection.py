@@ -70,6 +70,18 @@ _ROLE_ORDER_TYPE = {"stop_loss": "stop_market", "take_profit": "take_market"}
 _ROLE_TPSL = {"stop_loss": "sl", "take_profit": "tp"}
 
 
+class _EstablishResult(Enum):
+    """How one §17.4 place/modify ladder ended (internal to the manager)."""
+
+    ESTABLISHED = "established"  # the order is acknowledged resting on the book
+    EXHAUSTED = "exhausted"  # real wire failures burned every repair attempt
+    # Every failure was a PRE-SEND §4.1 gate refusal (nothing ever transmitted).
+    # With the protective entrypoint exempting the safe-mode lines (§13.1), in
+    # practice this means the kill switch: escalating to an emergency close is
+    # futile (the same gate blocks it) — hold and retry next sync instead.
+    GATE_BLOCKED = "gate_blocked"
+
+
 class ProtectionOutcome(str, Enum):
     """What the §17 sync established for the current position."""
 
@@ -77,6 +89,10 @@ class ProtectionOutcome(str, Enum):
     PROTECTED = "protected"  # SL (and TP when no plan runs) are on the book
     DEGRADED = "degraded"  # §17.3: SL up but TP could not be (re)established
     NEEDS_EMERGENCY_CLOSE = "needs_emergency_close"  # §17.2: no safe SL — engine must close
+    # The wire gate refused every SL attempt PRE-SEND (kill switch): no SL rests,
+    # but escalating is futile (the same gate blocks the close) — the gate line
+    # stays up, the sync retries next tick, §12.3 SL-missing is the standing net.
+    BLOCKED = "blocked"
 
 
 class ProtectionManager:
@@ -170,8 +186,23 @@ class ProtectionManager:
             return ProtectionOutcome.NEEDS_EMERGENCY_CLOSE
 
         assert sl_decision.price is not None
-        sl_ok = self._establish("stop_loss", position, sl_decision.price, now)
-        if not sl_ok:
+        sl_result = self._establish("stop_loss", position, sl_decision.price, now)
+        if sl_result is _EstablishResult.GATE_BLOCKED:
+            # Every attempt was refused PRE-SEND by the §4.1 wire gate (in
+            # practice: the kill switch — the protective entrypoint exempts the
+            # safe-mode lines). Nothing failed ON the exchange, and the same
+            # gate would refuse the emergency close too, so escalating would be
+            # a futile close storm. Keep the failure line up (blocks new risk),
+            # retry next sync once the gate reopens; §12.3's SL-missing check
+            # remains the standing net for the unprotected window.
+            self._gate.unresolved_protection_failure = True
+            self._record_event(
+                "stop_loss_repair_blocked",
+                detail="wire gate refused every SL attempt pre-send (kill switch); retrying next sync",
+                now=now,
+            )
+            return ProtectionOutcome.BLOCKED
+        if sl_result is not _EstablishResult.ESTABLISHED:
             # §17.2: SL repair exhausted → emergency close.
             self._gate.unresolved_protection_failure = True
             self._record_event(
@@ -218,7 +249,9 @@ class ProtectionManager:
             tick_size=self._tick,
             config=self._stop,
         )
-        tp_ok = self._establish("take_profit", position, tp_price, now)
+        tp_ok = (
+            self._establish("take_profit", position, tp_price, now) is _EstablishResult.ESTABLISHED
+        )
         if not tp_ok:
             # §17.3: TP failure does NOT close — degraded protection (SL kept),
             # new entry/rebalance blocked until TP is repaired.
@@ -243,13 +276,15 @@ class ProtectionManager:
 
     def _establish(
         self, role: str, position: PositionState, trigger_price: Decimal, now: datetime
-    ) -> bool:
+    ) -> _EstablishResult:
         """Place, or modify in place, the resting ``role`` order to cover the position.
 
         Modify-before-cancel (§17.4): an existing order with an exchange id is
         moved with ``modify``; otherwise a fresh order is placed. Retries up to
         ``sl_repair_max_attempts`` on failure, ``sl_repair_retry_delay_seconds``
-        apart. Returns True once the order is acknowledged on the book.
+        apart. ``ESTABLISHED`` once the order is acknowledged on the book;
+        ``GATE_BLOCKED`` when every failure was a pre-send §4.1 refusal (nothing
+        transmitted — not a repair exhaustion); ``EXHAUSTED`` otherwise.
 
         v1 LIMITATION (deferred to the PR 6 restart recovery, alongside the
         ``_emergency_close_pending`` persistence): unlike ``LiveOrderSubmitter``
@@ -263,7 +298,7 @@ class ProtectionManager:
         with localcontext(DECIMAL_CONTEXT):
             size = floor_to_step(abs(position.size), self._qty_step)
         if size <= 0:
-            return False
+            return _EstablishResult.EXHAUSTED
         # Closing direction: a long (size > 0) is protected by a SELL, a short
         # by a BUY — the reduce-only order that shrinks the position.
         is_buy = position.size < 0
@@ -281,7 +316,7 @@ class ProtectionManager:
             and existing["qty"] is not None
             and Decimal(existing["qty"]) == size
         ):
-            return True
+            return _EstablishResult.ESTABLISHED
 
         # One cloid sequence per placement, computed BEFORE the retry loop so
         # all attempts of THIS placement reuse the same cloid (§8.3 idempotent
@@ -290,6 +325,9 @@ class ProtectionManager:
         seq = repo.count_orders_by_role(self._db.conn, self._run_id, self._coin, role)
         side = Side.BUY if is_buy else Side.SELL
         attempts = self._config.sl_repair_max_attempts
+        # Flipped the moment any attempt reaches (or may have reached) the wire;
+        # a ladder that ends with this still True never transmitted anything.
+        all_gate_blocked = True
         for attempt in range(1, attempts + 1):
             order_id, logical, hexid = self._mint_ids(role, seq)
             try:
@@ -319,14 +357,18 @@ class ProtectionManager:
             except LiveOrderGateRejected as exc:
                 # Raised by the bound §4.1 gate INSIDE place/modify, BEFORE any
                 # network I/O — nothing reached the exchange, so nothing can be
-                # resting (no orderStatus recovery). A gate that is momentarily
-                # closed (manual safe mode, state not reconciled) must count as a
-                # failed repair attempt, never crash the tick loop out from under
-                # the position it is protecting.
+                # resting (no orderStatus recovery). Since the protective
+                # entrypoint exempts the safe-mode lines (§13.1), only the kill
+                # switch (or a base precondition) refuses here. The delay still
+                # runs — it ticks the kill switch, so a mid-ladder refresh can
+                # reopen the gate — but a pre-send refusal never counts as a
+                # FAILED repair: a ladder of nothing-but-these resolves to
+                # GATE_BLOCKED (hold, no escalation), not EXHAUSTED.
                 self._log_attempt_failed(role, attempt, attempts, existing_oid, exc, now)
                 self._maybe_delay(attempt, attempts)
                 continue
             except ExchangeError as exc:
+                all_gate_blocked = False
                 # Unknown outcome (§8.3 rule 11): a lost ack / timeout may have left
                 # the order LIVE on the exchange. Ask orderStatus BEFORE counting a
                 # failure — a landed-but-ack-lost SL/TP must not be blind-resent
@@ -344,11 +386,12 @@ class ProtectionManager:
                     replaced=existing,
                     now=now,
                 ):
-                    return True
+                    return _EstablishResult.ESTABLISHED
                 self._log_attempt_failed(role, attempt, attempts, existing_oid, exc, now)
                 self._maybe_delay(attempt, attempts)
                 continue
 
+            all_gate_blocked = False  # an ack came back — this attempt reached the wire
             if ack.accepted:
                 self._persist_placed(
                     role=role,
@@ -364,7 +407,7 @@ class ProtectionManager:
                     replaced=existing,
                     now=now,
                 )
-                return True
+                return _EstablishResult.ESTABLISHED
 
             if ack.is_duplicate and self._recover_placed_order(
                 role=role,
@@ -381,11 +424,11 @@ class ProtectionManager:
                 # The exchange already knows this cloid from a prior attempt whose
                 # ack we never observed; orderStatus confirms it is resting (§8.3
                 # rules 2–4) → recovered, no resend.
-                return True
+                return _EstablishResult.ESTABLISHED
 
             self._log_attempt_failed(role, attempt, attempts, existing_oid, ack.error, now)
             self._maybe_delay(attempt, attempts)
-        return False
+        return _EstablishResult.GATE_BLOCKED if all_gate_blocked else _EstablishResult.EXHAUSTED
 
     def _log_attempt_failed(
         self,

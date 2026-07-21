@@ -30,10 +30,15 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, localcontext
+from typing import TYPE_CHECKING
 
 from ..domains.perp.margin import DECIMAL_CONTEXT
 from ..domains.perp.risk_gate import RiskConfig
-from ..domains.perp.target_decision import ParsedDecision
+from ..domains.perp.target_decision import (
+    DecisionConfig,
+    ParsedDecision,
+    parse_target_decision,
+)
 from ..paper import accounting
 from ..paper.clock import Clock, WallClock
 from ..paper.engine import AssetSpec
@@ -47,6 +52,9 @@ from ..paper.scheduler import (
 from ..persistence import ids, repository as repo
 from ..persistence.db import Database
 from ..persistence.models import PositionState
+
+if TYPE_CHECKING:
+    from .engine import PlanRegistration
 
 __all__ = ["LiveDecisionDriver", "LiveDecisionWorker"]
 
@@ -125,6 +133,19 @@ class LiveDecisionWorker:
             thread.join(timeout)
 
 
+class _PlanRegisteredPersistError(RuntimeError):
+    """A plan WAS registered but its audit persist failed (§18.2 / phase2-data §5).
+
+    Raised out of :meth:`LiveDecisionDriver._gate` INSTEAD of failing the cycle:
+    marking it ``api_failed`` would leave the audit trail claiming "no action"
+    while the engine's just-committed plan sends real slices next tick. The
+    driver keeps ``_inflight`` (with the registration cached) and retries ONLY
+    the persist on subsequent pumps; the exception propagates to the loop's
+    tick guard, which enters recoverable safe mode — pausing the plan's slices
+    at the wire gate until the store heals and a clean reconcile releases it.
+    """
+
+
 @dataclass
 class _InFlight:
     attempt_id: str
@@ -132,6 +153,11 @@ class _InFlight:
     output_id: str
     scheduled_at: datetime
     parsed: ParsedDecision | None = None  # set once the worker returns, gate pending
+    # The engine's start_plan outcome, cached the moment it returns: a persist
+    # failure after registration must retry the PERSIST, never re-gate (a
+    # second start_plan would re-run the RiskGate and could register a second
+    # plan).
+    registration: PlanRegistration | None = None
 
 
 class LiveDecisionDriver:
@@ -159,6 +185,7 @@ class LiveDecisionDriver:
         coin: str,
         asset: AssetSpec,
         risk_config: RiskConfig,
+        decision_config: DecisionConfig,
         engine,
         worker: LiveDecisionWorker,
         provider: DecisionProvider,
@@ -171,6 +198,12 @@ class LiveDecisionDriver:
         self._coin = coin
         self._asset = asset
         self._risk = risk_config
+        # Needed to re-parse a persisted pending_raw_response on restart —
+        # parse_target_decision is deterministic, so the resumed decision is
+        # identical to the one the crashed process held in memory (same
+        # accepted-drift semantics as PaperScheduler: a config change across
+        # the restart applies from resume onward).
+        self._decision_cfg = decision_config
         self._engine = engine
         self._worker = worker
         self._provider = provider
@@ -197,6 +230,12 @@ class LiveDecisionDriver:
                 if self._inflight.parsed is None:
                     return self._collect(now)
                 return self._gate(now)
+            except _PlanRegisteredPersistError:
+                # A plan is REGISTERED and running — failing the cycle closed here
+                # would falsify the audit trail (api_failed while slices go out).
+                # Keep _inflight (registration cached) so the next pump retries
+                # only the persist; propagate so the tick guard alarms (safe mode).
+                raise
             except RetryableDecisionError as exc:
                 self._fail(self._inflight.attempt_id, self._inflight.scheduled_at, exc)
                 self._inflight = None
@@ -208,6 +247,51 @@ class LiveDecisionDriver:
         if self._due(now):
             return self._start(now)
         return None
+
+    def resume_startup(self) -> str | None:
+        """§3.1 restart adoption of a stranded ``in_progress`` attempt.
+
+        Without this, a process killed mid-cycle (Ctrl-C during the minutes-long
+        LLM call included) wedges the driver PERMANENTLY: ``next_decision_at``
+        never advanced, so ``_start`` re-derives the same deterministic attempt
+        id and ``insert_decision_attempt`` raises on its UNIQUE — every tick,
+        forever, while the run looks alive. Mirrors ``PaperScheduler.poll``'s
+        adoption: a persisted raw response resumes at the gate (never a second
+        AI call, §3.1); an attempt the AI never answered fails closed to the
+        next cycle. Call once at loop start, before the first :meth:`pump`.
+        """
+        row = repo.find_in_progress_attempt(self._db.conn, self._run_id)
+        if row is None:
+            return None
+        attempt_id = row["decision_attempt_id"]
+        scheduled_at = parse_instant(row["scheduled_at"])
+        raw = row["pending_raw_response"]
+        if raw is not None:
+            # Live attempts are always try 1 (no within-cycle ladder in v1), so
+            # the per-try ids are re-derived the same way _start minted them.
+            self._inflight = _InFlight(
+                attempt_id,
+                f"{attempt_id}#in1",
+                f"{attempt_id}#out1",
+                scheduled_at,
+                parsed=parse_target_decision(raw, self._decision_cfg),
+            )
+            logger.info("resuming in-progress decision %s from its stored response", attempt_id)
+            return "resumed"
+        # The AI never answered (the LLM call died with the process): fail the
+        # cycle closed — §10.2 hold — and re-anchor, exactly like an in-process
+        # non-retryable failure. The paid-for call is gone either way.
+        logger.warning(
+            "in-progress decision %s had no stored response after restart — failing it closed",
+            attempt_id,
+        )
+        self._fail_cycle(
+            attempt_id,
+            scheduled_at,
+            error_type=None,
+            error_message="process restart interrupted this cycle before the AI answered",
+        )
+        return "api_failed"
 
     # -- cycle steps ----------------------------------------------------------
 
@@ -283,37 +367,49 @@ class LiveDecisionDriver:
     def _gate(self, now: datetime) -> str | None:
         inflight = self._inflight
         assert inflight is not None and inflight.parsed is not None
-        reg = self._engine.start_plan(inflight.parsed, output_id=inflight.output_id)
-        if reg.gate is None:
-            # No fresh snapshot: the gate never ran. Hold the parsed decision and
-            # retry the gate next tick — never re-ask the AI (§3.1).
-            return "pending_market_data"
+        reg = inflight.registration
+        if reg is None:
+            reg = self._engine.start_plan(inflight.parsed, output_id=inflight.output_id)
+            if reg.gate is None:
+                # No fresh snapshot: the gate never ran. Hold the parsed decision and
+                # retry the gate next tick — never re-ask the AI (§3.1).
+                return "pending_market_data"
+            # Cache the outcome the moment it exists: from here on the engine may
+            # have COMMITTED (and armed) a plan, so a persist failure below must
+            # retry the persist against THIS registration — never re-gate.
+            inflight.registration = reg
         decision_at = now
         next_at = decision_at + self._cycle_interval
         status = "completed" if inflight.parsed.is_valid else "invalid_output"
-        with self._db.transaction() as conn:
-            self._persist_ai_output(conn, now, inflight, reg)
-            repo.update_decision_attempt(
-                conn,
-                inflight.attempt_id,
-                status=status,
-                output_id=inflight.output_id,
-                next_decision_at=next_at,
-                error_type=None,
-                error_message=None,
-                pending_raw_response=None,
-                timestamp=now,
-            )
-            repo.upsert_scheduler_state(
-                conn,
-                self._run_id,
-                last_decision_at=decision_at,
-                next_decision_at=next_at,
-                last_input_id=inflight.input_id,
-                last_output_id=inflight.output_id,
-                current_attempt_id=None,
-                updated_at=now,
-            )
+        try:
+            with self._db.transaction() as conn:
+                self._persist_ai_output(conn, now, inflight, reg)
+                repo.update_decision_attempt(
+                    conn,
+                    inflight.attempt_id,
+                    status=status,
+                    output_id=inflight.output_id,
+                    next_decision_at=next_at,
+                    error_type=None,
+                    error_message=None,
+                    pending_raw_response=None,
+                    timestamp=now,
+                )
+                repo.upsert_scheduler_state(
+                    conn,
+                    self._run_id,
+                    last_decision_at=decision_at,
+                    next_decision_at=next_at,
+                    last_input_id=inflight.input_id,
+                    last_output_id=inflight.output_id,
+                    current_attempt_id=None,
+                    updated_at=now,
+                )
+        except Exception as exc:
+            raise _PlanRegisteredPersistError(
+                f"audit persist failed after start_plan for {inflight.attempt_id} "
+                f"(plan_id={reg.plan_id}); retrying the persist next pump"
+            ) from exc
         self._inflight = None
         return status
 

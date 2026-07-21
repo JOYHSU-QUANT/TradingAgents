@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
+
+import pytest
 
 from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier
 from contrib.hyperliquid_perp.domains.perp.risk_gate import RiskConfig
@@ -222,7 +224,9 @@ def test_entry_plan_builds_and_schedules_slices(tmp_path):
     engine.tick()  # t30: slice 1
     assert len(sub.calls) == 2
     clock.advance(90)  # jump past several intervals
-    engine.tick()  # remaining slices catch up (2 and 3), plan completes
+    engine.tick()  # catch-up is one-per-tick: slice 2 only
+    assert len(sub.calls) == 3
+    engine.tick()  # next tick sends slice 3, plan completes
     assert len(sub.calls) == 4
     assert engine._leg is None  # plan terminated
     assert gate.active_slice_plan is False
@@ -290,8 +294,9 @@ def test_terminated_plan_records_unknown_residual(tmp_path):
     engine.tick()  # slice 0
     clock.advance(30)
     engine.tick()  # slice 1
-    clock.advance(120)  # catch up the remaining slices -> plan completes
-    engine.tick()
+    clock.advance(120)  # all remaining slices due; catch-up is one per tick
+    engine.tick()  # slice 2
+    engine.tick()  # slice 3 -> plan completes
     plan = repo.get_execution_plan(db.conn, reg.plan_id)
     assert plan["status"] == "completed"
     assert plan["residual_qty"] is None  # unknown in v1, not the planned total
@@ -627,3 +632,296 @@ def test_flip_open_leg_abandoned_on_structural_decline(tmp_path, monkeypatch):
     engine._maybe_advance_flip(None, clock.now(), [])
     assert engine._flip is None  # abandoned, not retried
     assert gate.active_slice_plan is False
+
+
+# -- round-3 review fixes ----------------------------------------------------
+
+
+def test_emergency_close_prices_off_mid_not_mark(tmp_path):
+    """The §17.2 emergency IOC goes to the BOOK, so its band is computed off MID
+    (market_feed contract: triggers watch mark, fills reference mid) — a lagging
+    mark in exactly the violent move that fires this can miss the book entirely
+    and leave the IOC cancelled unfilled."""
+    from contrib.hyperliquid_perp.paper.stops import round_to_tick
+
+    prot = _FakeProtection(outcome=ProtectionOutcome.NEEDS_EMERGENCY_CLOSE)
+    db, clock, engine, gate, sub = _build(tmp_path, protection=prot)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.05"), entry_price=D(100_000)),
+            updated_at=_T0,
+        )
+    engine._was_flat = False
+    _script(engine, [_snap(mark=100_000, mid=99_000)])
+    engine.tick()
+    close = next(c for c in sub.calls if c["order_role"] == "emergency_close")
+    # SELL close: mid × (1 − 3%) tick-rounded = 96030 — NOT mark-based 97000.
+    expected = round_to_tick(D(99_000) * (1 - D("0.03")), engine._asset.tick_size, up=False)
+    assert close["limit_price"] == expected
+    assert close["limit_price"] < D(97_000)
+
+
+def test_fill_ingest_failure_propagates_out_of_tick(tmp_path):
+    """_drain_ws must NOT swallow ingest failures: an infra/DB error while booking
+    an already-drained fill propagates to the loop's tick guard — swallowing it
+    would drop the fill with no case row, no retry flag and no operator signal."""
+    db, clock, engine, gate, sub = _build(tmp_path, ws=_FakeWs(messages=[{"raw": 1}]))
+
+    class _BoomProcessor:
+        def ingest_message(self, message):
+            raise RuntimeError("ingest infra down")
+
+    engine._fill_processor = _BoomProcessor()
+    _script(engine, [_snap()])
+    with pytest.raises(RuntimeError, match="ingest infra down"):
+        engine.tick()
+
+
+def test_gate_closed_slice_pauses_and_resumes_when_gate_reopens(tmp_path):
+    """A closed wire gate pauses the plan: the slice is never sent, so §9.2 rule 2
+    does not apply — the cursor holds and the plan resumes from the SAME slice
+    once the gate reopens (no slice skipped, none double-sent)."""
+    db, clock, engine, gate, sub = _build(tmp_path)
+    _script(engine, [_snap()])
+    reg = engine.start_plan(_decision("long", 5), output_id="o1")  # 4 slices
+    gate.kill_switch_active = False  # close the wire gate
+    _script(engine, [_snap()] * 6)
+    res = engine.tick()
+    assert sub.calls == []  # nothing sent
+    assert engine._leg.submitted == 0  # cursor held
+    assert any(e.startswith(f"slices_paused:{reg.plan_id}:") for e in res.events)
+    clock.advance(30)
+    engine.tick()
+    assert sub.calls == []  # still paused, cursor still held
+    gate.kill_switch_active = True  # the gate reopens
+    clock.advance(90)  # every slice is due by now
+    for _ in range(4):
+        engine.tick()  # one per tick, starting from slice 0
+    assert len(sub.calls) == 4
+    assert len({c["cloid_logical"] for c in sub.calls}) == 4  # each slice sent once
+    plan = repo.get_execution_plan(db.conn, reg.plan_id)
+    assert plan["status"] == "completed"
+
+
+def test_gate_closed_plan_expires_at_deadline_not_completed(tmp_path):
+    """A plan the gate never admits still terminates honestly at its deadline as
+    ``expired`` — never ``completed`` with zero slices on the wire."""
+    db, clock, engine, gate, sub = _build(tmp_path)
+    _script(engine, [_snap()])
+    reg = engine.start_plan(_decision("long", 5), output_id="o1")
+    gate.kill_switch_active = False
+    _script(engine, [_snap()] * 2)
+    engine.tick()  # paused
+    clock.advance(3601)  # past the 1-hour plan lifetime
+    engine.tick()  # still paused -> the deadline expires the plan
+    assert sub.calls == []
+    plan = repo.get_execution_plan(db.conn, reg.plan_id)
+    assert plan["status"] == "expired"
+    assert engine._leg is None
+    assert gate.active_slice_plan is False
+
+
+def test_exchange_rejected_slice_advances_and_is_never_resent(tmp_path):
+    """§9.2 rule 2: an exchange-rejected slice reached the wire — the cursor
+    advances past it and that slice is never re-sent."""
+    db, clock, engine, gate, sub = _build(tmp_path, submitter=_FakeSubmitter(outcome="rejected"))
+    _script(engine, [_snap()])
+    reg = engine.start_plan(_decision("long", 5), output_id="o1")  # 4 slices
+    _script(engine, [_snap()] * 4)
+    res = engine.tick()
+    assert len(sub.calls) == 1
+    assert res.slices_submitted == 0  # a reject is not an ack
+    assert engine._leg.submitted == 1  # but the cursor advanced
+    clock.advance(120)
+    for _ in range(3):
+        engine.tick()
+    assert len(sub.calls) == 4  # every slice attempted exactly once
+    assert len({c["cloid_logical"] for c in sub.calls}) == 4  # none re-sent
+    plan = repo.get_execution_plan(db.conn, reg.plan_id)
+    assert plan["status"] == "completed"
+
+
+def test_raising_submitter_advances_cursor_without_retry(tmp_path):
+    """An ambiguous transport failure may have reached the wire: the submitter
+    recorded the attempt, so the cursor advances (v1 keeps §9.2 rule-2 simplicity
+    over a §8.3 same-cloid resend) and the tick survives."""
+
+    class _RaisingSubmitter:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def submit_ioc_limit(self, **kw):
+            self.calls.append(kw)
+            raise RuntimeError("transport down")
+
+    db, clock, engine, gate, sub = _build(tmp_path, submitter=_RaisingSubmitter())
+    _script(engine, [_snap()])
+    engine.start_plan(_decision("long", 5), output_id="o1")  # 4 slices
+    _script(engine, [_snap()] * 2)
+    res = engine.tick()
+    assert len(sub.calls) == 1
+    assert res.slices_submitted == 0
+    assert engine._leg.submitted == 1  # advanced — no retry of slice 0
+    clock.advance(30)
+    engine.tick()
+    assert len(sub.calls) == 2
+    assert engine._leg.submitted == 2
+    assert len({c["cloid_logical"] for c in sub.calls}) == 2  # slice 0 never re-sent
+
+
+def test_catch_up_submits_at_most_one_slice_per_tick(tmp_path):
+    """A stalled plan catches up at ONE slice per tick — never a burst of the
+    whole backlog at a single price."""
+    db, clock, engine, gate, sub = _build(tmp_path)
+    _script(engine, [_snap()])
+    engine.start_plan(_decision("long", 5), output_id="o1")  # 4 slices
+    clock.advance(90)  # slices 0..3 all due at once
+    _script(engine, [_snap()] * 2)
+    engine.tick()
+    assert len(sub.calls) == 1  # one attempt this tick, not four
+    engine.tick()
+    assert len(sub.calls) == 2
+
+
+def test_emergency_close_pending_cleared_when_protection_recovers(tmp_path):
+    """§13.5 staleness guard: an emergency close that never reached flat is over
+    once protection visibly recovers (PROTECTED) — a LATER flat is a normal exit,
+    not the close landing, so no manual escalation fires."""
+    prot = _FakeProtection(outcome=ProtectionOutcome.NEEDS_EMERGENCY_CLOSE)
+    db, clock, engine, gate, sub = _build(tmp_path, protection=prot)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.05"), entry_price=D(50000)),
+            updated_at=_T0,
+        )
+    engine._was_flat = False
+    _script(engine, [_snap()])
+    engine.tick()  # the close fires; the position stays open (IOC missed)
+    assert engine._emergency_close_pending is True
+    prot.outcome = ProtectionOutcome.PROTECTED  # an SL rests again — episode over
+    _script(engine, [_snap()])
+    res = engine.tick()
+    assert engine._emergency_close_pending is False
+    assert "emergency_close_pending_cleared" in res.events
+    # A later (normal) flat must NOT escalate to manual safe mode.
+    with db.transaction() as conn:
+        repo.upsert_current_position(conn, "r", PositionState.flat("BTC"), updated_at=_T0)
+    _script(engine, [_snap()])
+    engine.tick()
+    assert engine._safe_mode.current() is None  # no emergency_close manual entry
+
+
+def test_emergency_close_pending_survives_blocked_and_still_escalates(tmp_path):
+    """BLOCKED does NOT clear the §13.5 latch (no SL rests — the episode is only
+    suspended behind the wire gate), so a flat that then arrives still escalates
+    to manual safe mode (regression guard)."""
+    prot = _FakeProtection(outcome=ProtectionOutcome.NEEDS_EMERGENCY_CLOSE)
+    db, clock, engine, gate, sub = _build(tmp_path, protection=prot)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.05"), entry_price=D(50000)),
+            updated_at=_T0,
+        )
+    engine._was_flat = False
+    _script(engine, [_snap()])
+    engine.tick()  # the close fires
+    assert engine._emergency_close_pending is True
+    prot.outcome = ProtectionOutcome.BLOCKED
+    _script(engine, [_snap()])
+    res = engine.tick()
+    assert engine._emergency_close_pending is True  # BLOCKED keeps the latch
+    assert "emergency_close_pending_cleared" not in res.events
+    with db.transaction() as conn:
+        repo.upsert_current_position(conn, "r", PositionState.flat("BTC"), updated_at=_T0)
+    _script(engine, [_snap()])
+    engine.tick()  # the close reached flat with the latch intact -> manual
+    state = engine._safe_mode.current()
+    assert state is not None and state.safe_mode_type == "manual"
+    assert state.reason == "emergency_close"
+
+
+# -- settle_offline_flat (§10.4 offline settlement) --------------------------
+
+
+def test_settle_offline_flat_records_missed_settlement(tmp_path):
+    """§10.4: a run that comes up FLAT with the wallet off the stored anchor lost
+    (or won) a whole segment offline — settle_offline_flat scores it so the loss
+    breaker cannot be blinded by a crash/restart window."""
+    db, clock, engine, gate, sub = _build(tmp_path)  # flat at construction
+    engine._loss_guards.ensure_settlement_anchor(D(4100), now=_T0)  # wallet is 4000
+    assert engine.settle_offline_flat() is True
+    row = repo.get_scheduler_state(db.conn, "r")
+    assert row["consecutive_loss_count"] == 1  # 4000 < 4100 anchor -> one loss
+    assert D(row["last_settlement_wallet_balance"]) == D(4000)  # re-anchored
+
+
+def test_settle_offline_flat_noop_without_anchor(tmp_path):
+    db, clock, engine, gate, sub = _build(tmp_path)
+    assert engine.settle_offline_flat() is False  # nothing to diff against
+
+
+def test_settle_offline_flat_noop_when_wallet_matches_anchor(tmp_path):
+    db, clock, engine, gate, sub = _build(tmp_path)
+    engine._loss_guards.ensure_settlement_anchor(D(4000), now=_T0)
+    assert engine.settle_offline_flat() is False
+    row = repo.get_scheduler_state(db.conn, "r")
+    assert row["consecutive_loss_count"] in (None, 0)  # no segment scored
+
+
+def test_settle_offline_flat_noop_when_not_flat(tmp_path):
+    db, clock, engine, gate, sub = _build(tmp_path)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.05"), entry_price=D(50000)),
+            updated_at=_T0,
+        )
+    engine._was_flat = False  # a live position settles in-process
+    engine._loss_guards.ensure_settlement_anchor(D(4100), now=_T0)
+    assert engine.settle_offline_flat() is False
+
+
+# -- flip construction through the real start_plan path ----------------------
+
+
+def test_start_plan_opposite_target_starts_sequential_flip(tmp_path):
+    """A gated target OPPOSITE the current position goes through _start_flip: the
+    close leg registers reduce-only at full position size, and the pending flip
+    carries the split budget and the shared §9.1-rule-5 envelope deadline."""
+    from contrib.hyperliquid_perp.paper.twap import Side, split_flip_budget
+
+    db, clock, engine, gate, sub = _build(tmp_path)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.004"), entry_price=_MARK),
+            updated_at=_T0,
+        )
+    engine._was_flat = False
+    _script(engine, [_snap()])
+    reg = engine.start_plan(_decision("short", 5), output_id="o1")
+    assert reg.plan_id is not None and reg.reason is None
+    leg = engine._leg
+    assert leg is not None
+    assert leg.flip_leg == "close"
+    assert leg.reduce_only is True
+    assert leg.side is Side.SELL  # closing a long
+    assert sum(leg.slice_sizes) == D("0.004")  # sized to abs(position.size)
+    plan = repo.get_execution_plan(db.conn, reg.plan_id)
+    assert plan["flip_leg"] == "close"
+    assert plan["flip_plan_id"] == leg.flip_plan_id
+    flip = engine._flip
+    assert flip is not None and flip.flip_plan_id == leg.flip_plan_id
+    # open_budget is split_flip_budget's open share over (close_qty, open_qty):
+    # both legs are 0.004 BTC here, so the 120 budget splits 60/60.
+    assert flip.open_budget == split_flip_budget(D("0.004"), D("0.004"))[1]
+    assert flip.deadline == _T0 + timedelta(hours=1)
+    assert gate.active_slice_plan is True

@@ -31,13 +31,15 @@ class _FakeClient:
         self.modified: list[dict] = []
         self.canceled: list[str] = []
         self._oid = 1000
-        self.place_script: list[str] = []  # "ok" | "error" | "raise" | "gate", consumed per call
+        # "ok" | "error" | "raise" | "gate" | "duplicate", consumed per call.
+        self.place_script: list[str] = []
         self.modify_script: list[str] = []
         self.status_queries: list[str] = []
-        # Scripted §8.3 orderStatus-by-cloid answers, consumed per call; the
-        # default (empty) answers "unknownOid" so a raised/duplicate attempt whose
-        # order did NOT land resolves to "not recovered" and the repair retries.
-        self.status_script: list[dict] = []
+        # Scripted §8.3 orderStatus-by-cloid answers, consumed per call; an
+        # Exception entry RAISES (a failed status read). The default (empty)
+        # answers "unknownOid" so a raised/duplicate attempt whose order did
+        # NOT land resolves to "not recovered" and the repair retries.
+        self.status_script: list[dict | Exception] = []
         self.cancel_script: list[str] = []  # "ok" | "raise", consumed per cancel
 
     def _next_oid(self) -> str:
@@ -54,6 +56,11 @@ class _FakeClient:
             raise LiveOrderGateRejected("kill_switch_active")
         if outcome == "error":
             return OrderAck(status="error", error="rejected by exchange")
+        if outcome == "duplicate":
+            # §8.3 rule 2: the exchange already knows this cloid (a prior
+            # attempt landed, its ack lost) — an error ack whose text flips
+            # OrderAck.is_duplicate and routes query-before-resend.
+            return OrderAck(status="error", error="Order already exists: duplicate cloid")
         return OrderAck(status="resting", exchange_order_id=self._next_oid())
 
     def place_trigger_order(self, **kw) -> OrderAck:
@@ -77,7 +84,10 @@ class _FakeClient:
     def query_order_by_cloid(self, cloid_hex: str) -> dict:
         self.status_queries.append(cloid_hex)
         if self.status_script:
-            return self.status_script.pop(0)
+            result = self.status_script.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
         return {"status": "unknownOid"}
 
 
@@ -596,10 +606,13 @@ def test_short_position_sl_is_a_buy(env):
     assert sl["limit_price"] > sl["trigger_price"]  # marketable-up for a buy
 
 
-def test_gate_rejection_does_not_crash_the_protection_pass(env):
+def test_all_gate_rejected_sl_ladder_is_blocked_not_emergency_close(env):
     # A closed §4.1 gate raises LiveOrderGateRejected (a plain Exception, NOT an
-    # ExchangeError) from inside place_trigger_order — it must count as a failed
-    # repair attempt, never crash the tick loop out from under the position.
+    # ExchangeError) from inside place_trigger_order, BEFORE any network I/O. A
+    # ladder in which EVERY attempt was refused pre-send never transmitted
+    # anything, and the same gate would refuse the emergency close too — so it
+    # resolves to BLOCKED (hold, retry next sync), never crashes the tick, and
+    # never escalates: one stop_loss_repair_blocked event, no exhaustion.
     db = env
     _seed_long(db)
     client, gate = _FakeClient(), _gate()
@@ -610,7 +623,117 @@ def test_gate_rejection_does_not_crash_the_protection_pass(env):
         mark=Decimal(50000),
         plan_active=True,
     )
-    assert outcome is ProtectionOutcome.NEEDS_EMERGENCY_CLOSE  # exhausted, not crashed
+    assert outcome is ProtectionOutcome.BLOCKED
     assert len(client.placed) == 3
+    assert gate.unresolved_protection_failure is True  # the failure line stays up
+    events = [e["event_type"] for e in repo.iter_protection_order_events(db.conn, "r")]
+    assert events.count("stop_loss_repair_failed") == 3  # each attempt still audited
+    assert events.count("stop_loss_repair_blocked") == 1
+    assert "stop_loss_repair_exhausted" not in events
+
+
+def test_mixed_gate_and_real_failures_still_exhaust_to_emergency_close(env):
+    # Regression guard on the GATE_BLOCKED carve-out: ONE real wire failure in
+    # the ladder (an ExchangeError, a rejected ack) means an attempt reached —
+    # or may have reached — the exchange, so the ladder keeps §17.2 EXHAUSTED
+    # semantics and escalates to the emergency close.
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    client.place_script = ["gate", "raise", "error"]
+    outcome = _manager(db, client, gate).sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+    assert outcome is ProtectionOutcome.NEEDS_EMERGENCY_CLOSE
+    assert len(client.placed) == 3
+    assert gate.unresolved_protection_failure is True
+    events = [e["event_type"] for e in repo.iter_protection_order_events(db.conn, "r")]
+    assert "stop_loss_repair_exhausted" in events
+    assert "stop_loss_repair_blocked" not in events
+
+
+def test_blocked_sl_ladder_recovers_on_a_later_sync_when_the_gate_reopens(env):
+    # BLOCKED is a hold, not a terminal verdict: once the gate reopens, the
+    # next sync's ladder places the SL, reports PROTECTED, lowers the failure
+    # line, and the audit trail records the restoration.
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    client.place_script = ["gate", "gate", "gate"]
+    mgr = _manager(db, client, gate)
+    first = mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+    assert first is ProtectionOutcome.BLOCKED
+    assert gate.unresolved_protection_failure is True
+    # The gate reopens: the next attempt is scripted to succeed.
+    client.place_script = ["ok"]
+    second = mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+    assert second is ProtectionOutcome.PROTECTED
+    assert gate.unresolved_protection_failure is False
+    assert repo.active_protection_order(db.conn, "r", "BTC", "stop_loss") is not None
+    events = [e["event_type"] for e in repo.iter_protection_order_events(db.conn, "r")]
+    assert "stop_loss_placed" in events
+    assert "degraded_protection_cleared" in events  # protection RESTORED, on the trail
+
+
+def test_duplicate_cloid_ack_recovers_resting_order_without_resend(env):
+    # §8.3 rules 2-4: a place ack rejected as a DUPLICATE cloid means a prior
+    # attempt landed and its ack was lost. orderStatus confirming the order
+    # resting recovers it — PROTECTED, no resend, no burned repair attempts.
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    client.place_script = ["duplicate"]
+    client.status_script = [
+        {"status": "order", "order": {"order": {"oid": 4343}, "status": "open"}}
+    ]
+    outcome = _manager(db, client, gate).sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+    assert outcome is ProtectionOutcome.PROTECTED
+    assert client.status_queries  # orderStatus was consulted
+    assert len(client.placed) == 1  # recovered, never re-sent
+    active = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
+    assert active is not None and active["exchange_order_id"] == "4343"
+    assert gate.unresolved_protection_failure is False
+    events = [e["event_type"] for e in repo.iter_protection_order_events(db.conn, "r")]
+    assert "stop_loss_repair_failed" not in events
+
+
+def test_recovery_query_failure_counts_as_failed_attempt_not_a_crash(env):
+    # An ExchangeError-triggered recovery whose orderStatus read itself RAISES
+    # is unresolved: the attempt counts as failed (never a false "protected"),
+    # the ladder continues and eventually exhausts — and nothing propagates
+    # out of sync() (the tick must survive).
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    client.place_script = ["raise", "raise", "raise"]
+    client.status_script = [RuntimeError("orderStatus down") for _ in range(3)]
+    outcome = _manager(db, client, gate).sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+    assert outcome is ProtectionOutcome.NEEDS_EMERGENCY_CLOSE
+    assert len(client.status_queries) == 3  # every attempt tried the recovery
+    assert repo.active_protection_order(db.conn, "r", "BTC", "stop_loss") is None
     events = [e["event_type"] for e in repo.iter_protection_order_events(db.conn, "r")]
     assert events.count("stop_loss_repair_failed") == 3
+    assert "stop_loss_repair_exhausted" in events

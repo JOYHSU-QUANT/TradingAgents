@@ -589,10 +589,11 @@ def _cmd_live(argv: list[str]) -> int:
         action="store_true",
         help=(
             "After the §19.1 startup recovery passes, run the PR 5 live trading "
-            "loop (30s tick: WS drain → kill-switch refresh → reconciliation → "
-            "SL/TP protection → due slices, with the 4h AI decision cycle off "
-            "the tick thread). Ctrl-C / SIGTERM stops it and runs the §18.2 "
-            "shutdown sweep. Without it, --run-id is the one-shot recovery check."
+            "loop (~10s tick, inside the 30s kill-switch budget: WS drain → "
+            "kill-switch refresh → reconciliation → SL/TP protection → due "
+            "slices, with the 4h AI decision cycle off the tick thread). "
+            "Ctrl-C / SIGTERM stops it and runs the §18.2 shutdown sweep. "
+            "Without it, --run-id is the one-shot recovery check."
         ),
     )
     args = parser.parse_args(argv)
@@ -1272,6 +1273,53 @@ def _live_startup_recovery(
 _LIVE_TICK_SECONDS = 10.0
 
 
+def _contain_as_recoverable_safe_mode(safe_mode, *, log_message: str, detail: str) -> None:
+    """The live loop's ONE containment idiom: log, then best-effort safe mode.
+
+    Used by every except-branch that must keep the loop alive (tick/pump
+    errors, heartbeat blips): the failure is logged with its traceback, the run
+    drops into recoverable safe mode so new risk pauses until a clean reconcile
+    releases it, and a safe-mode write that ITSELF fails is swallowed too —
+    nothing here may end the loop, because the caller's teardown would sweep
+    the resting SL/TP off a live position.
+    """
+    from .live.safe_mode import REASON_LIVE_TICK_ERROR
+
+    logger.exception(log_message)
+    try:
+        safe_mode.enter("recoverable", REASON_LIVE_TICK_ERROR, detail=detail)
+    except Exception:  # noqa: BLE001 — a safe-mode write miss must not itself end the loop
+        logger.exception("failed to enter safe mode after containment (%s)", detail)
+
+
+def _live_heartbeat(db, run_id: str, *, pid: int, now, safe_mode) -> None:
+    """§18.2 lease heartbeat, contained like a tick error.
+
+    ``RunLockError`` (this pid was superseded by a newer process) stays FATAL —
+    two writers must never flip-flop the lease. Any OTHER failure here is a
+    transient store error (an operator's export/validate holding the SQLite
+    lock, say): letting it tear the loop down would run the §18.2 shutdown
+    sweep, cancelling the resting SL/TP — a naked position bought with a
+    heartbeat blip. Contain it exactly like a tick error instead: log, enter
+    recoverable safe mode, retry on the next tick's heartbeat.
+    """
+    from .paper import run_lock
+
+    try:
+        run_lock.heartbeat_run_lock(db, run_id, pid=pid, now=now)
+    except run_lock.RunLockError:
+        raise
+    except Exception:  # noqa: BLE001 — a transient store error must not strip SL/TP
+        _contain_as_recoverable_safe_mode(
+            safe_mode,
+            log_message=(
+                "run-lock heartbeat failed transiently — entering recoverable "
+                "safe mode and continuing"
+            ),
+            detail="run-lock heartbeat write failed (see log)",
+        )
+
+
 def _run_live_loop(
     *,
     db,
@@ -1308,13 +1356,11 @@ def _run_live_loop(
     from .live.loss_guards import LossGuards
     from .live.orders import LiveOrderSubmitter
     from .live.protection import ProtectionManager
-    from .live.safe_mode import REASON_LIVE_TICK_ERROR
     from .live.ws_stream import LiveWsStream
     from .main import _load_risk_decision
     from .paper.clock import WallClock
     from .paper.engine import AssetSpec
     from .paper.market_feed import PortSnapshotProvider
-    from .paper.run_lock import heartbeat_run_lock
     from .paper.stops import StopConfig
     from .persistence import repository as repo
 
@@ -1371,6 +1417,11 @@ def _run_live_loop(
         fetch_clearinghouse=fetch_clearinghouse,
         clock=clock,
     )
+    # §10.4: a flat reached while the process was down (an SL filled offline,
+    # backfilled by startup recovery) never crosses _detect_settlement — score
+    # that segment now, before the first tick, so the loss counter cannot merge
+    # it into the next one.
+    engine.settle_offline_flat()
     decision_provider = _EngineDecisionProvider(
         config, risk_cfg=risk_cfg, decision_cfg=decision_cfg, payload_dir=payload_dir
     )
@@ -1381,11 +1432,18 @@ def _run_live_loop(
         coin=coin,
         asset=asset,
         risk_config=risk_cfg,
+        decision_config=decision_cfg,
         engine=engine,
         worker=worker,
         provider=decision_provider,
         clock=clock,
     )
+    # §3.1: adopt a prior process's stranded in-progress decision (resume from
+    # its stored response, or fail it closed) — without this the deterministic
+    # attempt id collides every tick and the driver never decides again.
+    adopted = driver.resume_startup()
+    if adopted is not None:
+        logger.info("decision driver startup adoption: %s", adopted)
     pid = os.getpid()
     print(
         f"live loop started for {run_id!r} ({live_cfg.mode.value}) — Ctrl-C to stop",
@@ -1394,7 +1452,7 @@ def _run_live_loop(
     try:
         while True:
             now = clock.now()
-            heartbeat_run_lock(db, run_id, pid=pid, now=now)
+            _live_heartbeat(db, run_id, pid=pid, now=now, safe_mode=safe_mode)
             try:
                 tick = engine.tick()
                 cycle = driver.pump()
@@ -1422,15 +1480,11 @@ def _run_live_loop(
                 # until the next clean reconcile auto-releases), and keep ticking —
                 # protection re-attempts next tick. KeyboardInterrupt is a
                 # BaseException, so Ctrl-C / SIGTERM still reaches the handler below.
-                logger.exception("live tick raised — entering recoverable safe mode and continuing")
-                try:
-                    safe_mode.enter(
-                        "recoverable",
-                        REASON_LIVE_TICK_ERROR,
-                        detail="live tick raised (see log)",
-                    )
-                except Exception:  # noqa: BLE001 — a safe-mode write miss must not itself end the loop
-                    logger.exception("failed to enter safe mode after a live tick error")
+                _contain_as_recoverable_safe_mode(
+                    safe_mode,
+                    log_message="live tick raised — entering recoverable safe mode and continuing",
+                    detail="live tick raised (see log)",
+                )
             time.sleep(_LIVE_TICK_SECONDS)
     except KeyboardInterrupt:
         print("\nlive loop stopping — running the §18.2 shutdown sweep...", file=sys.stderr)

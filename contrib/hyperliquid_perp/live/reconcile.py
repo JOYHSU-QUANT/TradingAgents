@@ -920,7 +920,7 @@ class LiveReconciler:
                         status=local_status,
                         status_reason="reopened_from_exchange_reconciliation",
                         exchange_order_id=exchange_order_id,
-                        exchange_status="open",
+                        exchange_status=local_status,
                         exchange_raw_status=raw_status,
                         updated_at=now,
                     )

@@ -179,6 +179,40 @@ def test_daily_loss_new_utc_day_rolls_and_clears(env):
     assert rolled.breached is False
 
 
+def test_daily_loss_non_positive_baseline_is_documented_inert(env):
+    # PINNED as documented behavior: a baseline <= 0 cannot express a
+    # percentage drawdown, so the §10.3 guard is deliberately inert with a
+    # non-positive day-start equity — drawdown_pct 0, never breached, however
+    # far equity falls that day. A margin-called / empty account is blocked by
+    # the other guards layered over this one, not by §10.3.
+    db, _gate_obj, safe_mode, _clock = env
+    guards = _guards(env)
+    # First evaluation of the day with ZERO equity: the baseline rolls to 0.
+    zero = guards.evaluate_daily_loss(account_equity=Decimal(0), now=_NOW)
+    assert zero.rolled is True
+    assert zero.baseline_equity == Decimal(0)
+    assert zero.drawdown_pct == Decimal(0)
+    assert zero.breached is False
+    # Stays False for the rest of the day regardless of equity.
+    later = guards.evaluate_daily_loss(account_equity=Decimal(-25), now=_NOW + timedelta(hours=1))
+    assert later.rolled is False
+    assert later.drawdown_pct == Decimal(0)
+    assert later.breached is False
+    assert safe_mode.active is False
+    # A NEGATIVE baseline on the next day's roll is equally inert.
+    next_day = datetime(2026, 7, 21, 0, 0, 30, tzinfo=timezone.utc)
+    negative = guards.evaluate_daily_loss(account_equity=Decimal(-10), now=next_day)
+    assert negative.rolled is True
+    assert negative.baseline_equity == Decimal(-10)
+    assert negative.breached is False
+    worse = guards.evaluate_daily_loss(
+        account_equity=Decimal(-50), now=next_day + timedelta(hours=2)
+    )
+    assert worse.drawdown_pct == Decimal(0)
+    assert worse.breached is False
+    assert safe_mode.active is False
+
+
 def test_daily_loss_auto_release_time_gate(env):
     db, gate, safe_mode, clock = env
     guards = _guards(env)

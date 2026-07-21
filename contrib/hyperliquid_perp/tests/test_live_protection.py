@@ -370,7 +370,9 @@ def test_sl_recovery_of_filled_order_persists_filled_not_open(env):
 def test_cancel_refused_by_exchange_does_not_mark_row_canceled(env):
     """A cancel the exchange REFUSES without raising (CancelAck.success=False, e.g.
     'already filled') must not mislabel the row canceled — a resting SL that actually
-    filled would then be lost to reconciliation. The raw ack was previously discarded."""
+    filled would then be lost to reconciliation. And the flat sync must NOT report
+    FLAT over the un-confirmed residual (§17.1 rule 4): it degrades, keeps the
+    gate's failure line up, and retries the cancel next sync."""
     db = env
     _seed_long(db)
     client, gate = _FakeClient(), _gate()
@@ -391,12 +393,23 @@ def test_cancel_refused_by_exchange_does_not_mark_row_canceled(env):
         mark=Decimal(50000),
         plan_active=False,
     )
-    assert outcome is ProtectionOutcome.FLAT
+    assert outcome is ProtectionOutcome.DEGRADED  # not FLAT: a residual still rests
+    assert gate.unresolved_protection_failure  # the gate line stays up
     assert client.canceled  # a cancel was attempted
     row = db.conn.execute(
         "SELECT status FROM orders WHERE run_id='r' AND order_role='stop_loss'"
     ).fetchone()
     assert row["status"] == "open"  # NOT canceled — the refusal was respected
+    # Once the cancel lands, sync reports FLAT and lowers the line.
+    client.cancel_script = []
+    outcome = mgr.sync(
+        position=PositionState.flat("BTC"),
+        liquidation_price=None,
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert outcome is ProtectionOutcome.FLAT
+    assert not gate.unresolved_protection_failure
 
 
 def test_degraded_protection_cleared_event_on_recovery(env):
@@ -737,3 +750,37 @@ def test_recovery_query_failure_counts_as_failed_attempt_not_a_crash(env):
     events = [e["event_type"] for e in repo.iter_protection_order_events(db.conn, "r")]
     assert events.count("stop_loss_repair_failed") == 3
     assert "stop_loss_repair_exhausted" in events
+
+
+def test_orders_changed_last_sync_tracks_real_order_changes(env):
+    """§12.2 rule 6 signal: a sync that places (or later cancels) an exchange
+    order reports orders_changed_last_sync True; a steady-state no-op sync
+    reports False — the engine keys its protection_change reconcile off this."""
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    mgr = _manager(db, client, gate)
+    outcome = mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert outcome is ProtectionOutcome.PROTECTED
+    assert mgr.orders_changed_last_sync  # SL + TP were just placed
+    outcome = mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert outcome is ProtectionOutcome.PROTECTED
+    assert not mgr.orders_changed_last_sync  # no-op: same prices, nothing touched
+    outcome = mgr.sync(
+        position=PositionState.flat("BTC"),
+        liquidation_price=None,
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert outcome is ProtectionOutcome.FLAT
+    assert mgr.orders_changed_last_sync  # the flat clear cancelled resting orders

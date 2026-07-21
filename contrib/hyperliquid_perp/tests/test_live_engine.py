@@ -52,21 +52,24 @@ def _decision(side: str, margin: int, conf: str = "0.8") -> ParsedDecision:
     return ParsedDecision(decision=dec, is_valid=True, invalid_reason=None, raw_response="{}")
 
 
-def _live_config(*, max_notional="500", ceiling="1000", max_open_orders=5) -> LiveConfig:
-    return LiveConfig.from_dict(
-        {
-            "mode": "testnet_live",
-            "network": "testnet",
-            "safety": {
-                "allowed_symbols": ["BTC"],
-                "leverage": 1,
-                "max_target_margin_pct": 60,
-                "max_notional_usdc": max_notional,
-                "absolute_notional_ceiling": ceiling,
-                "max_open_orders": max_open_orders,
-            },
-        }
-    )
+def _live_config(
+    *, max_notional="500", ceiling="1000", max_open_orders=5, execution=None
+) -> LiveConfig:
+    cfg = {
+        "mode": "testnet_live",
+        "network": "testnet",
+        "safety": {
+            "allowed_symbols": ["BTC"],
+            "leverage": 1,
+            "max_target_margin_pct": 60,
+            "max_notional_usdc": max_notional,
+            "absolute_notional_ceiling": ceiling,
+            "max_open_orders": max_open_orders,
+        },
+    }
+    if execution is not None:
+        cfg["execution"] = execution
+    return LiveConfig.from_dict(cfg)
 
 
 class _FakeSubmitter:
@@ -102,6 +105,9 @@ class _FakeProtection:
     def __init__(self, outcome=ProtectionOutcome.PROTECTED) -> None:
         self.outcome = outcome
         self.calls = 0
+        # Mirrors ProtectionManager.orders_changed_last_sync (§12.2 rule 6):
+        # tests flip it to assert the engine reconciles a protection-change tick.
+        self.orders_changed_last_sync = False
 
     def sync(self, *, position, liquidation_price, mark, plan_active):
         self.calls += 1
@@ -185,7 +191,6 @@ def _build(
         fill_processor=_FakeFillProcessor(),
         ws_stream=ws or _FakeWs(),
         fetch_open_orders=lambda: open_orders if open_orders is not None else [],
-        fetch_clearinghouse=lambda: {},
         clock=clock,
     )
     return db, clock, engine, gate, fake_sub
@@ -994,3 +999,177 @@ def test_blocked_protection_tick_emits_visible_event(tmp_path):
     _script(engine, [_snap()])
     res = engine.tick()
     assert "protection_blocked" in res.events
+
+
+# -- R4 loop: no-market-data visibility / escalation --------------------------
+
+
+def test_no_market_data_streak_emits_events_and_escalates(tmp_path):
+    from contrib.hyperliquid_perp.live.engine import _NO_MARKET_DATA_SAFE_MODE_TICKS
+    from contrib.hyperliquid_perp.live.safe_mode import REASON_NO_MARKET_DATA
+
+    db, clock, engine, gate, sub = _build(tmp_path)
+    _script(engine, [SnapshotOutcome.TIMEOUT] * _NO_MARKET_DATA_SAFE_MODE_TICKS)
+    for _ in range(_NO_MARKET_DATA_SAFE_MODE_TICKS - 1):
+        result = engine.tick()
+        assert "no_market_data" in result.events  # visible on every miss
+        clock.advance(10)
+    assert engine._safe_mode.current() is None  # below the threshold: no escalation
+    result = engine.tick()  # the threshold tick
+    assert "no_market_data" in result.events
+    state = engine._safe_mode.current()
+    assert state is not None
+    assert state.reason == REASON_NO_MARKET_DATA
+    assert state.safe_mode_type == "recoverable"
+    # A healthy snapshot resets the streak.
+    _script(engine, [_snap()])
+    engine.tick()
+    assert engine._no_data_streak == 0
+
+
+# -- R4 loop: pre-wire slice failure holds the cursor -------------------------
+
+
+def test_slice_presubmit_store_failure_holds_cursor(tmp_path):
+    from contrib.hyperliquid_perp.live.orders import LiveOrderPreSubmitError
+
+    class _PreWireFailSubmitter(_FakeSubmitter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_next = 0
+
+        def submit_ioc_limit(self, **kw):
+            if self.fail_next:
+                self.fail_next -= 1
+                raise LiveOrderPreSubmitError("pre-wire store failure")
+            return super().submit_ioc_limit(**kw)
+
+    sub = _PreWireFailSubmitter()
+    db, clock, engine, gate, _ = _build(tmp_path, submitter=sub)
+    _script(engine, [_snap()])
+    reg = engine.start_plan(_decision("long", 5), output_id="o1")
+    assert reg.plan_id is not None
+    sub.fail_next = 1
+    _script(engine, [_snap(), _snap()])
+    result = engine.tick()  # slice 0 fails pre-wire: nothing sent, nothing recorded
+    assert sub.calls == []  # never reached the wire
+    assert engine._leg.submitted == 0  # cursor HELD (§9.2 rule 2 applies to sent orders only)
+    assert any(e.startswith("slice_held:") for e in result.events)  # visible
+    engine.tick()  # the store healed: the SAME slice is retried
+    assert len(sub.calls) == 1
+    assert engine._leg.submitted == 1
+
+
+# -- R4 loop: settlement double-fault must not re-score the segment -----------
+
+
+def test_settlement_escalation_write_failure_never_rescores_the_segment(tmp_path, monkeypatch):
+    """Sibling of the driver's fail-record double fault: record_settlement COMMITS,
+    then the section 13.5 manual escalation write raises. The flat cursor must have
+    advanced with the commit -- a re-run next tick would read segment_pnl=0
+    (wallet == anchor) and RESET the just-recorded consecutive-loss streak --
+    while the still-set pending flag retries the escalation until it lands."""
+    db, clock, engine, gate, sub = _build(tmp_path)
+    engine._loss_guards.ensure_settlement_anchor(D(4100), now=clock.now())
+    engine._was_flat = False  # simulate: the position reached flat this tick
+    engine._emergency_close_pending = True
+
+    class _Boom(Exception):
+        pass
+
+    real_enter = engine._safe_mode.enter
+    calls = {"n": 0}
+
+    def _flaky_enter(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _Boom()
+        return real_enter(*a, **kw)
+
+    monkeypatch.setattr(engine._safe_mode, "enter", _flaky_enter)
+    with pytest.raises(_Boom):
+        engine._detect_settlement(clock.now())
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["consecutive_loss_count"] == 1  # the -100 loss was scored ONCE
+    assert engine._was_flat is True  # the cursor advanced with the commit
+    assert engine._emergency_close_pending is True  # the escalation is still owed
+    # Next tick: no duplicate settlement (the streak survives), escalation lands.
+    engine._detect_settlement(clock.now())
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["consecutive_loss_count"] == 1  # NOT reset by a wallet==anchor re-score
+    assert engine._emergency_close_pending is False
+    manual = engine._safe_mode.current()
+    assert manual is not None and manual.safe_mode_type == "manual"
+
+
+# -- R4 loop: emergency close clears the flip before the fallible write -------
+
+
+def test_emergency_close_clears_flip_even_when_leg_termination_raises(tmp_path, monkeypatch):
+    from types import SimpleNamespace as _NS
+
+    from contrib.hyperliquid_perp.live.engine import _PendingFlip
+
+    db, clock, engine, gate, sub = _build(tmp_path)
+    engine._flip = _PendingFlip(
+        flip_plan_id="f1",
+        parsed=_decision("long", 5),
+        output_id="o1",
+        deadline=clock.now() + timedelta(hours=1),
+        open_budget=10,
+    )
+    engine._leg = _NS()  # non-None so _terminate_leg is invoked
+
+    def _boom(leg, now, status, events):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(engine, "_terminate_leg", _boom)
+    events: list[str] = []
+    with pytest.raises(RuntimeError):
+        engine._emergency_close(_NS(size=D("0.01")), D(50000), clock.now(), events)
+    # The in-memory flip invariant was restored BEFORE the raising DB write:
+    # a surviving _PendingFlip would re-open the stale flip target post-flat.
+    assert engine._flip is None
+    assert "flip_abandoned:f1" in events
+
+
+# -- R4 loop: execution knobs wire through from config ------------------------
+
+
+def test_execution_knobs_wire_through_from_config(tmp_path):
+    live = _live_config(execution={"plan_duration_minutes": 10, "slice_interval_seconds": 60})
+    db, clock, engine, gate, sub = _build(tmp_path, live=live)
+    assert engine._plan_lifetime == timedelta(minutes=10)
+    assert engine._slice_interval == 60
+    assert engine._max_slices == 10  # 10min * 60s / 60s
+    _script(engine, [_snap()])
+    reg = engine.start_plan(_decision("long", 5), output_id="o1")
+    assert reg.plan_id is not None
+    _script(engine, [_snap()] * 3)
+    engine.tick()  # t0: slice 0
+    assert len(sub.calls) == 1
+    clock.advance(30)
+    engine.tick()  # 30s < the 60s interval: nothing due
+    assert len(sub.calls) == 1
+    clock.advance(30)
+    engine.tick()  # 60s: slice 1
+    assert len(sub.calls) == 2
+
+
+# -- R4 loop: a protection change reconciles that tick (12.2 rule 6) ----------
+
+
+def test_protection_change_triggers_reconcile_pass(tmp_path):
+    rec = _FakeReconciler()
+    prot = _FakeProtection()
+    db, clock, engine, gate, sub = _build(tmp_path, reconciler=rec, protection=prot)
+    prot.orders_changed_last_sync = True
+    _script(engine, [_snap()])
+    engine.tick()
+    assert "protection_change" in rec.calls
+    rec.calls.clear()
+    prot.orders_changed_last_sync = False
+    clock.advance(10)
+    _script(engine, [_snap()])
+    engine.tick()
+    assert "protection_change" not in rec.calls  # quiet sync -> no extra pass

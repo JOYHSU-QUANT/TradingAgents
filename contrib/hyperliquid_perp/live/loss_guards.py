@@ -29,6 +29,7 @@ counter (``consecutive_loss_count``) and its segment anchor
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
@@ -78,11 +79,18 @@ class LossGuards:
         run_id: str,
         safety: LiveSafetyConfig,
         safe_mode: SafeModeManager,
+        day_baseline_source: Callable[[], Decimal] | None = None,
     ) -> None:
         self._db = db
         self._run_id = run_id
         self._safety = safety
         self._safe_mode = safe_mode
+        # §10.3 rule 1: the day baseline is the EXCHANGE's reconciled equity
+        # (accountValue), fetched once at each UTC-day roll. Optional so tests
+        # and non-live contexts fall back to the caller-passed local equity;
+        # a fetch failure also falls back (logged) — the roll must never stall
+        # the tick.
+        self._day_baseline_source = day_baseline_source
 
     # -- §10.1 hard notional cap ---------------------------------------------
 
@@ -143,6 +151,21 @@ class LossGuards:
         rolled = False
         if stored_date != today or stored_equity is None:
             baseline = account_equity
+            if self._day_baseline_source is not None:
+                # §10.3 rule 1: the opening equity is the exchange's own
+                # reconciled accountValue, not the local ledger's view — the
+                # local value lags pending fees/funding, and a skewed baseline
+                # would mis-anchor the whole day's drawdown measurement.
+                try:
+                    baseline = self._day_baseline_source()
+                except Exception:  # noqa: BLE001 — the roll must never stall the tick
+                    logger.warning(
+                        "day-roll baseline fetch from the exchange failed — "
+                        "falling back to local equity %s",
+                        account_equity,
+                        exc_info=True,
+                    )
+                    baseline = account_equity
             with self._db.transaction() as conn:
                 repo.upsert_scheduler_state(
                     conn,
@@ -217,6 +240,15 @@ class LossGuards:
         to v7 without ``ensure_settlement_anchor``), this call only establishes
         the anchor and leaves the count untouched — it cannot invent a segment
         PnL it has no baseline for.
+
+        Known §10.4 measurement window (accepted, documented in the spec): the
+        local ledger books a pending fee (absent / non-USDC at ingest) as 0
+        until the backfill posts the correction, so a segment scored while its
+        closing fill's fee is still pending reads fee-light — a near-zero
+        segment can score as a gain (resetting the streak) that the later
+        correction would have made a small loss. The count is never re-scored;
+        the correction leaks into the NEXT segment's delta. Bounded by one
+        fill's fee and only on the rare pending-fee lane.
         """
         row = repo.get_scheduler_state(self._db.conn, self._run_id)
         stored_anchor = row["last_settlement_wallet_balance"] if row is not None else None

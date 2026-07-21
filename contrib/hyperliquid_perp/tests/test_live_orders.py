@@ -873,3 +873,31 @@ def test_every_outcome_carries_the_exchange_verbatim_status_word(env):
     outcome = _submit(submitter, order_id="o1")
     assert outcome.outcome == "rejected"
     assert outcome.exchange_raw_status == "minTradeNtlRejected"
+
+
+# -- R4 loop: pre-wire store failures are typed, never "outcome unknown" ------
+
+
+def test_pre_wire_store_failure_raises_presubmit_and_leaves_no_evidence(env, monkeypatch):
+    """A transient sqlite failure BEFORE the network call means nothing was sent
+    and nothing recorded — it must surface as LiveOrderPreSubmitError (the caller
+    holds its cursor and retries the same cloid) rather than the generic
+    "attempted, outcome unknown" shape that advances past a never-sent order."""
+    from contrib.hyperliquid_perp.live.orders import LiveOrderPreSubmitError
+
+    db, client, _, submitter = env
+
+    def _locked(conn, *, cloid_hex):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(repo, "has_place_attempt", _locked)
+    with pytest.raises(LiveOrderPreSubmitError):
+        _submit(submitter)
+    monkeypatch.undo()
+    assert client.place_calls == []  # never reached the wire
+    assert repo.get_order(db.conn, "o1") is None  # no evidence row survives
+    # The store healed: the SAME logical order goes through under the same cloid.
+    client.place_results = [_RESTING_ACK]
+    outcome = _submit(submitter)
+    assert outcome.outcome == "acknowledged"
+    assert len(client.place_calls) == 1

@@ -158,6 +158,13 @@ class _InFlight:
     # second start_plan would re-run the RiskGate and could register a second
     # plan).
     registration: PlanRegistration | None = None
+    # Armed when the cycle has FAILED but the api_failed record could not be
+    # written (a double fault: the failure handler's own DB write raised).
+    # While set, pump() retries ONLY that write — it never re-polls the
+    # worker (poll() is one-shot; a second call reads as "not ready" forever,
+    # the C1 wedge) and never re-asks the AI. Mirrors the
+    # _PlanRegisteredPersistError pattern: keep _inflight, retry the persist.
+    pending_fail: tuple[str | None, str] | None = None  # (error_type, message)
 
 
 class LiveDecisionDriver:
@@ -219,13 +226,18 @@ class LiveDecisionDriver:
             return None
         if self._inflight is not None:
             # One guard for the whole in-flight lifecycle (collect + gate): ANY error
-            # advancing an already-started cycle fails it CLOSED and clears _inflight,
-            # so a bug in poll() / start_plan / persist can never wedge the driver — a
-            # stuck _inflight either stalls the loop forever (the empty poll slot reads
-            # as "not ready", C1) or crash-loops the gate every tick (C2). A retryable
-            # (§6.2) failure keeps its error_type; anything else is a non-retryable bug
-            # that still fails closed. _start owns its own pre-inflight failure (it has
-            # no _inflight yet, and its attempt id/schedule are still local).
+            # advancing an already-started cycle fails it CLOSED, so a bug in poll() /
+            # start_plan / persist can never wedge the driver — a stuck _inflight
+            # either stalls the loop forever (the empty poll slot reads as "not
+            # ready", C1) or crash-loops the gate every tick (C2). A retryable (§6.2)
+            # failure keeps its error_type; anything else is a non-retryable bug that
+            # still fails closed. The fail record itself is a DB write that can ALSO
+            # fail — that double fault arms ``pending_fail`` instead of losing the
+            # cycle, and this branch retries only that write until it lands (never
+            # re-polling the one-shot worker slot: the original C1 wedge). _start
+            # owns its own pre-inflight failure the same way.
+            if self._inflight.pending_fail is not None:
+                return self._flush_pending_fail()
             try:
                 if self._inflight.parsed is None:
                     return self._collect(now)
@@ -237,13 +249,9 @@ class LiveDecisionDriver:
                 # only the persist; propagate so the tick guard alarms (safe mode).
                 raise
             except RetryableDecisionError as exc:
-                self._fail(self._inflight.attempt_id, self._inflight.scheduled_at, exc)
-                self._inflight = None
-                return "api_failed"
+                return self._fail_closed(exc.error_type, exc.message)
             except Exception as exc:  # noqa: BLE001 — a bug must still fail the cycle closed
-                self._fail_internal(self._inflight.attempt_id, self._inflight.scheduled_at, exc)
-                self._inflight = None
-                return "api_failed"
+                return self._fail_closed(None, f"non-retryable: {exc!r}")
         if self._due(now):
             return self._start(now)
         return None
@@ -293,6 +301,39 @@ class LiveDecisionDriver:
         )
         return "api_failed"
 
+    def salvage_shutdown(self) -> bool:
+        """Persist a completed-but-unpolled decision at shutdown (best-effort).
+
+        Ctrl-C lands whenever it likes; a worker that finished DURING the
+        shutdown window holds a paid-for decision that only ``_collect`` would
+        have persisted. Storing its raw response here lets ``resume_startup``
+        resume the cycle from stored text after restart (§3.1 — never a second
+        AI call) instead of failing it closed and idling up to 4h. Every
+        failure is contained: shutdown proceeds regardless, and the un-salvaged
+        cycle simply fails closed on restart exactly as before. Call after
+        ``worker.join`` and never on the live tick path.
+        """
+        inflight = self._inflight
+        if inflight is None or inflight.parsed is not None or inflight.pending_fail is not None:
+            return False
+        try:
+            parsed = self._worker.poll()
+        except Exception:  # noqa: BLE001 — the worker failed; restart fails the cycle closed anyway
+            logger.exception("shutdown salvage: worker raised — the cycle fails closed on restart")
+            return False
+        if parsed is None:
+            return False  # still computing (join timed out) — nothing to store
+        try:
+            self._store_pending_response(inflight, parsed, self._clock.now())
+        except Exception:  # noqa: BLE001 — a store miss must not block shutdown
+            logger.exception("shutdown salvage: persist failed — the cycle fails closed on restart")
+            return False
+        logger.info(
+            "shutdown salvage: stored the completed decision for %s — restart resumes it",
+            inflight.attempt_id,
+        )
+        return True
+
     # -- cycle steps ----------------------------------------------------------
 
     def _due(self, now: datetime) -> bool:
@@ -334,14 +375,16 @@ class LiveDecisionDriver:
             decision_input = self._provider.build_input(coin=self._coin, as_of=now)
             self._persist_ai_input(now, input_id, attempt_id, decision_input)
         except RetryableDecisionError as exc:
-            self._fail(attempt_id, scheduled_at, exc)
-            return "api_failed"
-        except Exception as exc:  # noqa: BLE001 — a bug must fail the cycle CLOSED, never wedge it
             # The attempt row is already `in_progress`; leaving it unresolved with
             # next_decision_at in the past crash-loops every tick on the duplicate
-            # attempt_id. Fail it closed so the driver recovers next cycle.
-            self._fail_internal(attempt_id, scheduled_at, exc)
-            return "api_failed"
+            # attempt_id (C2). Adopt it as a failed in-flight so even a double
+            # fault (the fail record's own write raising) retries the record
+            # instead of re-INSERTing the same attempt id forever.
+            self._inflight = _InFlight(attempt_id, input_id, output_id, scheduled_at)
+            return self._fail_closed(exc.error_type, exc.message)
+        except Exception as exc:  # noqa: BLE001 — a bug must fail the cycle CLOSED, never wedge it
+            self._inflight = _InFlight(attempt_id, input_id, output_id, scheduled_at)
+            return self._fail_closed(None, f"non-retryable: {exc!r}")
         self._inflight = _InFlight(attempt_id, input_id, output_id, scheduled_at)
         self._worker.submit(decision_input)
         return "cycle_started"
@@ -357,12 +400,23 @@ class LiveDecisionDriver:
             return None  # not ready (worker still settling)
         # Persist the response before gating (§3.1: a crash resumes from stored
         # text, never a second AI call).
+        self._store_pending_response(inflight, parsed, now)
+        inflight.parsed = parsed
+        return self._gate(now)
+
+    def _store_pending_response(
+        self, inflight: _InFlight, parsed: ParsedDecision, now: datetime
+    ) -> None:
+        """What makes a decision resumable (§3.1): the stored raw response.
+
+        The single writer of ``pending_raw_response`` — ``_collect`` (the normal
+        path) and ``salvage_shutdown`` (the shutdown window) must stamp the SAME
+        record shape, or a salvaged cycle would resume from an incomplete row.
+        """
         with self._db.transaction() as conn:
             repo.update_decision_attempt(
                 conn, inflight.attempt_id, pending_raw_response=parsed.raw_response, timestamp=now
             )
-        inflight.parsed = parsed
-        return self._gate(now)
 
     def _gate(self, now: datetime) -> str | None:
         inflight = self._inflight
@@ -413,30 +467,43 @@ class LiveDecisionDriver:
         self._inflight = None
         return status
 
-    def _fail(self, attempt_id: str, scheduled_at: datetime, exc: RetryableDecisionError) -> None:
-        """§10.2 fail-closed for a retryable (§6.2) failure — hold, re-anchor, retry."""
-        self._fail_cycle(
-            attempt_id, scheduled_at, error_type=exc.error_type, error_message=exc.message
-        )
+    def _fail_closed(self, error_type: str | None, message: str) -> str:
+        """§10.2 fail-closed: record the in-flight cycle as ``api_failed``.
 
-    def _fail_internal(self, attempt_id: str, scheduled_at: datetime, exc: BaseException) -> None:
-        """Fail the cycle CLOSED after a NON-retryable error (a bug, not a §6.2 failure).
-
-        The synchronous paper scheduler lets such an exception propagate and crash;
-        the live loop cannot. Bare propagation wedges the driver — a lost
-        ``_inflight`` (the loop silently stops deciding, C1) or an unresolved
-        ``in_progress`` row that duplicate-crash-loops every tick (C2) — and a hard
-        teardown would strip the position's SL/TP. So log it LOUDLY (a real problem
-        to fix) but still hold the position and re-anchor to the next cycle, exactly
-        like the §10.2 retryable path. ``error_type`` stays NULL: it is not a §6.2
-        vocabulary word, and the detail rides ``error_message``.
+        A retryable (§6.2) failure keeps its ``error_type``; a non-retryable bug
+        passes ``None`` (not a §6.2 vocabulary word — the detail rides
+        ``error_message``). Either way the position and its SL/TP are held and
+        the cycle re-anchors to the next 4h boundary. The fail record is armed
+        on ``_inflight.pending_fail`` BEFORE the write, so if the write itself
+        raises (double fault), the next pump retries only the write — the cycle
+        outcome is already decided and the worker slot is never re-polled.
         """
-        logger.exception(
-            "live decision cycle %s hit a non-retryable error — failing closed", attempt_id
-        )
+        assert self._inflight is not None
+        if error_type is None:
+            # A non-retryable bug, not a §6.2 API failure: log the traceback
+            # LOUDLY (a real problem to fix) — callers invoke this from inside
+            # their except block, so the active exception rides along.
+            logger.exception(
+                "live decision cycle %s hit a non-retryable error — failing closed",
+                self._inflight.attempt_id,
+            )
+        self._inflight.pending_fail = (error_type, message)
+        return self._flush_pending_fail()
+
+    def _flush_pending_fail(self) -> str:
+        """Write the armed ``api_failed`` record; clear ``_inflight`` on success.
+
+        Raises (to the loop's tick guard — visible safe mode) when the write
+        fails, keeping ``_inflight.pending_fail`` armed for the next pump.
+        """
+        inflight = self._inflight
+        assert inflight is not None and inflight.pending_fail is not None
+        error_type, message = inflight.pending_fail
         self._fail_cycle(
-            attempt_id, scheduled_at, error_type=None, error_message=f"non-retryable: {exc!r}"
+            inflight.attempt_id, inflight.scheduled_at, error_type=error_type, error_message=message
         )
+        self._inflight = None
+        return "api_failed"
 
     def _fail_cycle(
         self,

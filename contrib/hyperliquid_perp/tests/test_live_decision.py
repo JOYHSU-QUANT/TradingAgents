@@ -476,3 +476,111 @@ def test_gate_pending_market_data_holds_parsed_and_retries(tmp_path):
     assert driver.pump() == "completed"  # the gate retried with fresh data
     assert provider.requests == 1  # ... and the AI still only once
     assert len(engine.plans) == 2  # start_plan re-ran; the AI did not
+
+
+# -- R4 loop: fail-record double fault (pending-fail retry) -------------------
+
+
+def test_fail_record_double_fault_retries_write_only(tmp_path, monkeypatch):
+    """The fail-closed record itself failing (a double fault) must not lose the
+    cycle: pump keeps _inflight with pending_fail armed, retries ONLY the
+    api_failed write next pump -- never re-polling the one-shot worker slot (the
+    C1 wedge: an emptied slot reads as "not ready" forever) and never re-asking
+    the AI."""
+    import sqlite3
+
+    db, clock, driver, engine, worker, provider = _driver(
+        tmp_path, request_error=RetryableDecisionError("timeout", "model timed out")
+    )
+    assert driver.pump() == "cycle_started"
+    _await(worker)
+    real = repo.update_decision_attempt
+
+    def _locked(conn, attempt_id, **kw):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(repo, "update_decision_attempt", _locked)
+    with pytest.raises(sqlite3.OperationalError):
+        driver.pump()  # the retryable failure's OWN record write fails
+    assert driver._inflight is not None
+    assert driver._inflight.pending_fail is not None  # verdict survived the fault
+    # The wedge this guards against: pump must NOT read the emptied poll slot.
+    monkeypatch.setattr(repo, "update_decision_attempt", real)
+    assert driver.pump() == "api_failed"  # retried ONLY the write
+    assert driver._inflight is None
+    assert provider.requests == 1  # the AI was never re-asked
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "api_failed"
+    assert row["error_type"] == "timeout"  # the original verdict, not a new one
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["next_decision_at"] is not None  # re-anchored
+    # And the driver is alive: the next boundary starts a fresh cycle.
+    clock.set(parse_instant(state["next_decision_at"]))
+    assert driver.pump() == "cycle_started"
+
+
+def test_start_fail_record_double_fault_adopts_and_retries(tmp_path, monkeypatch):
+    """_start's failure path shares the guard: the attempt row is already
+    in_progress, so losing the fail record would duplicate-crash-loop on the
+    deterministic attempt id every tick (C2). The driver adopts the failed
+    cycle as in-flight (pending_fail armed) and retries only the write."""
+    import sqlite3
+
+    err = RetryableDecisionError("connection", "market data unreachable")
+    db, clock, driver, engine, worker, provider = _driver(tmp_path, build_error=err)
+    real = repo.update_decision_attempt
+
+    def _locked(conn, attempt_id, **kw):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(repo, "update_decision_attempt", _locked)
+    with pytest.raises(sqlite3.OperationalError):
+        driver.pump()  # build fails, then the fail record's write also fails
+    assert driver._inflight is not None
+    assert driver._inflight.pending_fail is not None
+    monkeypatch.setattr(repo, "update_decision_attempt", real)
+    assert driver.pump() == "api_failed"  # no duplicate INSERT, just the write
+    assert driver._inflight is None
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "api_failed"
+    assert row["error_type"] == "connection"
+    state = repo.get_scheduler_state(db.conn, "r")
+    clock.set(parse_instant(state["next_decision_at"]))
+    assert driver.pump() == "api_failed"  # fresh cycle, clean failure — no crash-loop
+
+
+# -- R4 loop: shutdown salvage of a completed-but-unpolled decision -----------
+
+
+def test_salvage_shutdown_persists_completed_unpolled_decision(tmp_path):
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    assert driver.pump() == "cycle_started"
+    _await(worker)  # the decision finished, but shutdown lands before the poll
+    assert driver.salvage_shutdown() is True
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "in_progress"
+    assert row["pending_raw_response"]  # stored for resume
+    # A restarted driver resumes from the stored text — never a second AI call.
+    driver2 = LiveDecisionDriver(
+        db=db,
+        run_id="r",
+        coin="BTC",
+        asset=AssetSpec(coin="BTC", sz_decimals=3, margin_schedule=_schedule()),
+        risk_config=RiskConfig(leverage=Decimal(1), max_target_margin_pct=60),
+        decision_config=DecisionConfig(),
+        engine=engine,
+        worker=LiveDecisionWorker(provider=provider),
+        provider=provider,
+        clock=clock,
+    )
+    assert driver2.resume_startup() == "resumed"
+    assert provider.requests == 1  # salvage + resume never re-asked the AI
+
+
+def test_salvage_shutdown_noops_when_nothing_is_pending(tmp_path):
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    assert driver.salvage_shutdown() is False  # no in-flight cycle at all
+    assert driver.pump() == "cycle_started"
+    _await(worker)
+    assert driver.pump() == "completed"  # normally collected
+    assert driver.salvage_shutdown() is False  # nothing left to salvage

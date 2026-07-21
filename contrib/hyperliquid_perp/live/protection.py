@@ -66,6 +66,10 @@ __all__ = ["ProtectionManager", "ProtectionOutcome"]
 
 logger = logging.getLogger(__name__)
 
+# The two RESTING protective roles this manager owns. Deliberately narrower
+# than order_gate.PROTECTIVE_ORDER_ROLES: emergency_close is a one-shot IOC,
+# never a resting trigger, so it has no row for a clear/residual sweep to find.
+_SLTP_ROLES = ("stop_loss", "take_profit")
 _ROLE_ORDER_TYPE = {"stop_loss": "stop_market", "take_profit": "take_market"}
 _ROLE_TPSL = {"stop_loss": "sl", "take_profit": "tp"}
 
@@ -135,6 +139,14 @@ class ProtectionManager:
         # cadence inside ``max_tick_gap`` even during a repair episode, so the
         # switch cannot self-trip when the system is least healthy.
         self._kill_switch = kill_switch
+        # §12.2 rule 6 signal: whether the LAST sync() placed / modified /
+        # cancelled any exchange order — the engine reconciles that tick.
+        self._orders_changed = False
+
+    @property
+    def orders_changed_last_sync(self) -> bool:
+        """Whether the last :meth:`sync` changed any exchange order (§12.2 rule 6)."""
+        return self._orders_changed
 
     # -- public entry ---------------------------------------------------------
 
@@ -153,12 +165,45 @@ class ProtectionManager:
         ``unresolved_protection_failure`` line from the result.
         """
         now = self._clock.now()
+        self._orders_changed = False
         # Whether this sync began already carrying an unresolved protection failure
         # — so a recovery to PROTECTED can emit degraded_protection_cleared (the §17
         # audit trail should show protection RESTORED, not only degradation entered).
         was_failed = self._gate.unresolved_protection_failure
         if position.is_flat:
             self._clear(now)
+            residual = next(
+                (
+                    role
+                    for role in _SLTP_ROLES
+                    if repo.active_protection_order(self._db.conn, self._run_id, self._coin, role)
+                    is not None
+                ),
+                None,
+            )
+            if residual is not None:
+                # §17.1 rule 4 is NOT yet met: a reduce-only trigger the cancel
+                # could not confirm gone still rests on the exchange. Reporting
+                # FLAT here would lower the gate line and admit a NEW entry
+                # under a stale trigger that can fire against it — mirror the
+                # active-plan posture instead: degrade, keep the failure line
+                # up, and retry the cancel every sync until it is confirmed
+                # gone (§12.3 / the §18.2 sweep remain the standing nets).
+                self._gate.unresolved_protection_failure = True
+                self._record_event(
+                    "degraded_protection_entered",
+                    detail=(
+                        f"flat but the resting {residual} could not be cancelled (§17.1 rule 4)"
+                    ),
+                    now=now,
+                )
+                return ProtectionOutcome.DEGRADED
+            if was_failed:
+                self._record_event(
+                    "degraded_protection_cleared",
+                    detail="flat and no protection orders rest",
+                    now=now,
+                )
             self._gate.unresolved_protection_failure = False
             return ProtectionOutcome.FLAT
 
@@ -550,6 +595,7 @@ class ProtectionManager:
         now: datetime,
     ) -> None:
         """Record an acknowledged (or orderStatus-recovered) SL/TP: registry, orders row, protection state."""
+        self._orders_changed = True  # §12.2 rule 6: an exchange order was placed/modified
         # Persist the LOCAL status the exchange actually reported, never a hardcoded
         # "open": an accepted ack can be "filled" (an immediately-fired trigger), and
         # an orderStatus-recovered order carries the exchange's real word. Recording a
@@ -621,7 +667,7 @@ class ProtectionManager:
     def _clear(self, now: datetime) -> None:
         """§17.1 rule 4: a flat position must carry no resting SL / TP."""
         cleared_any = False
-        for role in ("stop_loss", "take_profit"):
+        for role in _SLTP_ROLES:
             cleared_any = self._cancel_role(role, now) or cleared_any
         # Clear the persisted trigger prices whether or not a resting order was
         # found — the position row may hold stale SL/TP after a fill zeroed it.
@@ -669,6 +715,7 @@ class ProtectionManager:
                 ack.error,
             )
             return False
+        self._orders_changed = True  # §12.2 rule 6: an exchange order was cancelled
         with self._db.transaction() as conn:
             repo.update_order(
                 conn,

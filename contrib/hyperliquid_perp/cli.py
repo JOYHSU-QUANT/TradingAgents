@@ -1108,6 +1108,7 @@ def _live_startup_recovery(
                 payload_dir=payload_dir,
             )
             shutdown_problem: str | None = None
+            superseded = False
             try:
                 result = run_startup_recovery(
                     db=db,
@@ -1140,6 +1141,21 @@ def _live_startup_recovery(
                         payload_dir=payload_dir,
                         fetch_clearinghouse=fetch_clearinghouse,
                     )
+            except RunLockError as exc:
+                # §18.2 lease takeover (raised out of the loop's heartbeat): a
+                # successor process owns the run now — its store, its resting
+                # orders (the SL/TP included) and the wallet's dead-man's
+                # switch. ANY exchange action or store write from this process
+                # sabotages the successor: the §18.2 sweep in the ``finally``
+                # below would cancel the successor's live protection orders and
+                # leave ITS position naked. Exit with nothing but the
+                # pid-guarded lock release (a no-op once the successor holds
+                # the lease) — the same contract as the paper loop's
+                # RunLockError exit.
+                superseded = True
+                logger.error("run lease lost: %s", exc)
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
             except Exception as exc:  # noqa: BLE001 — arming is the one hard-error step
                 # Full traceback to the log (this is the signed live path);
                 # the message alone would leave a failure here undiagnosable.
@@ -1147,79 +1163,104 @@ def _live_startup_recovery(
                 print(f"error: startup recovery failed — {exc}", file=sys.stderr)
                 return 1
             finally:
-                # Decided 2026-07-16: the §18.2 semantics stand (shutdown
-                # cancels ALL bot-owned orders, the §19.3-kept SL/TP
-                # included), but never silently over a live position. The
-                # position that decides the warning is read FRESH here
-                # (decided 2026-07-17): the boot snapshot can be minutes
-                # stale after arming/backfill/two reconcile passes, and a
-                # position acquired mid-recovery would otherwise lose its
-                # protection to the sweep below without a word. Unreadable
-                # ≠ flat (the startup sweep's own rule) — warn then too.
-                try:
-                    fresh_positions = map_account_snapshot(fetch_clearinghouse()).positions
-                except Exception:  # noqa: BLE001 — the warning must not mask the verdict
-                    logger.exception("shutdown position re-read failed")
-                    # Truthful wording: "could not look" is not "holds" — but
-                    # the operator action is the same (unknown ≠ flat).
-                    print(
-                        "WARNING: positions could NOT be re-read at shutdown and "
-                        "this one-shot command's §18.2 shutdown sweep cancels "
-                        "bot-owned protection orders — any live position is "
-                        "UNPROTECTED after exit until a live loop (PR 5) or "
-                        "manual action re-covers it.",
-                        file=sys.stderr,
-                    )
+                if superseded:
+                    # Lease lost: the successor owns every resting order and
+                    # the dead-man's switch — skip the position re-read and the
+                    # §18.2 sweep ENTIRELY; only the caller's pid-guarded lock
+                    # release runs (and no-ops).
+                    logger.info("lease takeover — §18.2 shutdown sweep skipped")
                 else:
-                    if fresh_positions:
-                        held = ", ".join(f"{p.coin} {p.size}" for p in fresh_positions)
-                        print(
-                            f"WARNING: the account holds a live position ({held}) "
-                            "and this one-shot command's §18.2 shutdown sweep "
-                            "cancels bot-owned protection orders — the position "
-                            "is UNPROTECTED after exit until a live loop (PR 5) "
-                            "or manual action re-covers it.",
-                            file=sys.stderr,
-                        )
-                # One-shot command: leave nothing resting behind a dead man's
-                # switch nobody will refresh. The §18.2 shutdown sweep cancels
-                # bot-owned open orders and disarms only on a clean sweep.
-                # (The §12.2 "before shutdown" reconciliation is the verdict
-                # pass that just ran — this command places no orders after it.)
-                if kill_switch.armed:
-                    # Guarded because a raise inside this ``finally`` would
-                    # DISCARD the computed verdict (nothing prints, the
-                    # documented 0/4/1 contract becomes a generic exit 2) —
-                    # shutdown()'s audit writes are fail-loud by design, so a
-                    # busy DB here is a realistic raise, not an edge case.
+                    # Decided 2026-07-16: the §18.2 semantics stand (shutdown
+                    # cancels ALL bot-owned orders, the §19.3-kept SL/TP
+                    # included), but never silently over a live position. The
+                    # position that decides the warning is read FRESH here
+                    # (decided 2026-07-17): the boot snapshot can be minutes
+                    # stale after arming/backfill/two reconcile passes, and a
+                    # position acquired mid-recovery would otherwise lose its
+                    # protection to the sweep below without a word. Unreadable
+                    # ≠ flat (the startup sweep's own rule) — warn then too.
                     try:
-                        kill_switch.shutdown()
-                    except Exception as exc:  # noqa: BLE001
-                        logger.exception("§18.2 shutdown sweep raised")
-                        shutdown_problem = f"shutdown sweep raised: {exc}"
-                    else:
-                        if kill_switch.armed:
-                            # shutdown() disarms only on a clean sweep: still
-                            # armed means bot orders may rest and the
-                            # wallet-wide scheduleCancel WILL fire at the
-                            # deadline — taking out non-bot orders §25 says
-                            # never to touch. Loud, and never exit 0.
-                            shutdown_problem = (
-                                "shutdown sweep left the kill switch armed — bot "
-                                "orders may still rest and the wallet-wide "
-                                "scheduleCancel will fire at the deadline"
-                            )
-                            logger.error("§18.2 %s", shutdown_problem)
-                    if shutdown_problem is not None:
-                        # Surfaced HERE, inside the ``finally``: when the body
-                        # above raised (the except path already returned 1),
-                        # the summary prints below never run — and "the
-                        # wallet-wide trigger is still armed" is the one fact
-                        # that must never exit silently, on any path.
+                        fresh_positions = map_account_snapshot(fetch_clearinghouse()).positions
+                    except Exception:  # noqa: BLE001 — the warning must not mask the verdict
+                        logger.exception("shutdown position re-read failed")
+                        # Truthful wording: "could not look" is not "holds" — but
+                        # the operator action is the same (unknown ≠ flat).
                         print(
-                            f"error: §18.2 shutdown unclean — {shutdown_problem}",
+                            "WARNING: positions could NOT be re-read at shutdown and "
+                            "this one-shot command's §18.2 shutdown sweep cancels "
+                            "bot-owned protection orders — any live position is "
+                            "UNPROTECTED after exit until a live loop (PR 5) or "
+                            "manual action re-covers it.",
                             file=sys.stderr,
                         )
+                    else:
+                        if fresh_positions:
+                            held = ", ".join(f"{p.coin} {p.size}" for p in fresh_positions)
+                            print(
+                                f"WARNING: the account holds a live position ({held}) "
+                                "and this one-shot command's §18.2 shutdown sweep "
+                                "cancels bot-owned protection orders — the position "
+                                "is UNPROTECTED after exit until a live loop (PR 5) "
+                                "or manual action re-covers it.",
+                                file=sys.stderr,
+                            )
+                    # §12.2 rule 8 (the --loop path): the loop has been placing
+                    # orders since the startup verdict pass — reconcile once more
+                    # so the sweep below works from fresh exchange state.
+                    # Best-effort: a failure must not block the sweep.
+                    if args.loop:
+                        try:
+                            reconciler.reconcile_and_apply(
+                                "shutdown",
+                                safe_mode=safe_mode,
+                                ws_restored=True,
+                                kill_switch_active=not kill_switch.stop_new_orders,
+                            )
+                        except Exception:  # noqa: BLE001
+                            logger.exception(
+                                "§12.2 pre-shutdown reconciliation failed (sweep proceeds)"
+                            )
+                    # One-shot command: leave nothing resting behind a dead man's
+                    # switch nobody will refresh. The §18.2 shutdown sweep cancels
+                    # bot-owned open orders and disarms only on a clean sweep.
+                    # (The §12.2 "before shutdown" reconciliation: for the
+                    # one-shot command it is the verdict pass that just ran — no
+                    # orders are placed after it; the --loop path runs the fresh
+                    # pass above.)
+                    if kill_switch.armed:
+                        # Guarded because a raise inside this ``finally`` would
+                        # DISCARD the computed verdict (nothing prints, the
+                        # documented 0/4/1 contract becomes a generic exit 2) —
+                        # shutdown()'s audit writes are fail-loud by design, so a
+                        # busy DB here is a realistic raise, not an edge case.
+                        try:
+                            kill_switch.shutdown()
+                        except Exception as exc:  # noqa: BLE001
+                            logger.exception("§18.2 shutdown sweep raised")
+                            shutdown_problem = f"shutdown sweep raised: {exc}"
+                        else:
+                            if kill_switch.armed:
+                                # shutdown() disarms only on a clean sweep: still
+                                # armed means bot orders may rest and the
+                                # wallet-wide scheduleCancel WILL fire at the
+                                # deadline — taking out non-bot orders §25 says
+                                # never to touch. Loud, and never exit 0.
+                                shutdown_problem = (
+                                    "shutdown sweep left the kill switch armed — bot "
+                                    "orders may still rest and the wallet-wide "
+                                    "scheduleCancel will fire at the deadline"
+                                )
+                                logger.error("§18.2 %s", shutdown_problem)
+                        if shutdown_problem is not None:
+                            # Surfaced HERE, inside the ``finally``: when the body
+                            # above raised (the except path already returned 1),
+                            # the summary prints below never run — and "the
+                            # wallet-wide trigger is still armed" is the one fact
+                            # that must never exit silently, on any path.
+                            print(
+                                f"error: §18.2 shutdown unclean — {shutdown_problem}",
+                                file=sys.stderr,
+                            )
 
             print(f"startup_reconciliation_passed: {'true' if result.passed else 'false'}")
             print(f"canceled_stale_orders: {len(result.canceled_stale)}")
@@ -1347,9 +1388,15 @@ def _run_live_loop(
 
     v1 scope note: this wires a :class:`LiveWsStream` WITHOUT a live socket
     connection — fills are ingested by the reconciler's REST backfill at the
-    §12.2 timings (heartbeat / post-cycle) rather than in real time. The live WS
+    implemented §12.2 timings (post-fill / 5-minute heartbeat /
+    protection-change / pre-shutdown) rather than in real time. The live WS
     connection wiring lands in a later pass (§11 / PR 6).
+
+    A ``RunLockError`` from the lease heartbeat propagates OUT of this function
+    by design: the caller exits without the §18.2 sweep (the successor process
+    owns the run's orders — see the caller's ``except RunLockError``).
     """
+    from .exchanges.hyperliquid.mapper import map_account_snapshot
     from .exchanges.hyperliquid.market_data import HyperliquidMarketData
     from .live.decision import LiveDecisionDriver, LiveDecisionWorker
     from .live.engine import LiveExecutionEngine
@@ -1391,7 +1438,16 @@ def _run_live_loop(
         clock=clock,
         kill_switch=kill_switch,
     )
-    loss_guards = LossGuards(db=db, run_id=run_id, safety=live_cfg.safety, safe_mode=safe_mode)
+    loss_guards = LossGuards(
+        db=db,
+        run_id=run_id,
+        safety=live_cfg.safety,
+        safe_mode=safe_mode,
+        # §10.3 rule 1: the UTC-day baseline is the EXCHANGE's reconciled
+        # accountValue, fetched once at each day roll (per-tick drawdown
+        # evaluation stays on the local ledger — zero extra REST per tick).
+        day_baseline_source=lambda: map_account_snapshot(fetch_clearinghouse()).account_value,
+    )
     ledger = repo.get_current_account_state(db.conn, run_id)
     if ledger is not None:
         loss_guards.ensure_settlement_anchor(ledger.wallet_balance, now=clock.now())
@@ -1414,7 +1470,6 @@ def _run_live_loop(
         fill_processor=processor,
         ws_stream=ws_stream,
         fetch_open_orders=signed.open_orders,
-        fetch_clearinghouse=fetch_clearinghouse,
         clock=clock,
     )
     # §10.4: a flat reached while the process was down (an SL filled offline,
@@ -1491,6 +1546,12 @@ def _run_live_loop(
         # Let the off-thread AI decision settle so no worker thread writes to the
         # store after teardown begins (§11.4 single writer).
         worker.join(timeout=5.0)
+        # A decision that finished during the shutdown window is a paid-for
+        # answer only the next pump would have persisted — store its raw
+        # response so resume_startup resumes it after restart (§3.1) instead
+        # of failing the cycle closed and idling up to 4h. Fully contained:
+        # shutdown proceeds on any failure.
+        driver.salvage_shutdown()
 
 
 # --------------------------------------------------------------------------
@@ -2516,6 +2577,17 @@ class _EngineDecisionProvider:
     failures are classified into the §6.2 retry vocabulary and raised as
     :class:`RetryableDecisionError`; contract violations are NOT errors — they
     come back as an invalid ``ParsedDecision`` (fail-closed downstream).
+
+    NOT a pure function of its argument (PR 6 hazard): ``request_decision``
+    reads ``_context_text`` / ``_format_text`` that the LAST ``build_input``
+    call stashed on the instance, not fields of ``decision_input`` — and the
+    one shared instance is handed to both the background worker thread and the
+    main-thread driver. Today this is safe only because the driver's busy-gate
+    serializes ``build_input() → submit()`` strictly. Any future re-send path
+    (a within-cycle retry ladder, a replay harness) MUST re-run ``build_input``
+    immediately before each ``request_decision`` — or first fold the prompt
+    texts into the decision-input type — else it sends a STALE cycle's prompt
+    while the audit trail records the fresh input.
     """
 
     def __init__(self, config: dict, *, risk_cfg, decision_cfg, payload_dir: Path) -> None:

@@ -1530,7 +1530,9 @@ def active_protection_order(
     ).fetchone()
 
 
-def count_orders_by_role(conn: sqlite3.Connection, run_id: str, symbol: str, order_role: str) -> int:
+def count_orders_by_role(
+    conn: sqlite3.Connection, run_id: str, symbol: str, order_role: str
+) -> int:
     """How many orders of ``order_role`` a run has ever written for ``symbol``.
 
     The §17 protection manager derives each new SL/TP order's cloid sequence

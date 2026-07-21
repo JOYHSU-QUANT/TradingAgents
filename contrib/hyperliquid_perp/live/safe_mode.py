@@ -50,6 +50,7 @@ __all__ = [
     "REASON_INVALID_LOCAL_FILL",
     "REASON_KILL_SWITCH_REFRESH_FAILED",
     "REASON_LIVE_TICK_ERROR",
+    "REASON_NO_MARKET_DATA",
     "REASON_NON_BOT_OWNED_ORDER",
     "REASON_RECONCILIATION_MISMATCH",
     "REASON_REPEATED_MISMATCH",
@@ -94,6 +95,13 @@ REASON_EMERGENCY_CLOSE = "emergency_close"  # §13.5 / §17.2: manual
 # and re-attempts protection; a clean reconciliation pass auto-releases. Keeps a
 # single transient tick failure from tearing down the run and stripping SL/TP.
 REASON_LIVE_TICK_ERROR = "live_tick_error"  # §13.4: recoverable
+
+# §10.2/§13: the market-data feed has been down for consecutive ticks past the
+# engine's threshold — protection sync, the daily-loss guard and slice pacing
+# are all held (no fresh price, no action), so the outage must be a visible,
+# gate-blocking state rather than an invisible idle. Recoverable: a clean
+# reconciliation pass after the feed returns auto-releases it.
+REASON_NO_MARKET_DATA = "no_market_data"  # §10.2/§13: recoverable
 
 # §13.5 "repeated reconciliation mismatch": this many CONSECUTIVE unclean
 # passes escalate a recoverable safe mode to manual. In-memory (a restart

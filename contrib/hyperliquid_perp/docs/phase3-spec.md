@@ -560,7 +560,17 @@ sell limit = mid_price × 0.995
    觸及）wire 的結果——ack、交易所拒絕、ambiguous 送單失敗（§8.3 冪等層以同
    cloid 查證定讞）——cursor 一律前進、不重送。plan deadline 照常束縛：被 gate
    擋到期的 plan 誠實 terminal `expired`（殘量記 `residual_qty`），不得記成
-   completed。
+   completed。同一原則涵蓋 **pre-wire 本地 store 故障（PR 5 修訂，2026-07-21）**：
+   submitter 在 network call 之前的 §8.3 pre-check 讀取或 intent transaction 因
+   transient SQLite 錯誤失敗（`LiveOrderPreSubmitError`）時，什麼都沒送、也沒留
+   任何 evidence row——cursor 同樣停在原地（事件 `slice_held`）、下一 tick 以同
+   cloid 重試；否則持續的本地 store 故障會讓整個 plan 一單未發卻記成 completed。
+   §8.3 協議判決（refusing-to-resend 等——該 cloid 先前**已**上過線）與 contract
+   violation（provenance／coherence）不在此列：保留原型別、照舊前進或 fail loud。
+5. **執行參數來源（PR 5 修訂，2026-07-21）**：plan envelope 與切片節奏取自
+   `live.execution.plan_duration_minutes` / `slice_interval_seconds`（預設 60 分
+   / 30 秒；full-grid 切片預算 = duration/interval，上限 120）——config 驗證既有，
+   引擎實際消費，不得驗證了卻靜默忽略（§18.1 原則）。
 
 ### 9.3 Active Plan Overlap
 
@@ -675,6 +685,10 @@ AI）；AI 從未回應 → 記 `api_failed` 收場並 re-anchor 到下一個 cy
 3. 觸發 → 進 **recoverable safe mode**，持倉與 SL/TP 保護照舊，
    停止新 entry / rebalance；次日 UTC 00:00 自動解除（仍須通過 §13.4 恢復條件）。
 4. 觸發事件記入 `safe_mode_events`。
+5. **v1 基準來源（PR 5，2026-07-21，使用者拍板）**：day-roll 當下的 baseline 直接
+   取交易所 clearinghouse `accountValue`（一日一次 REST；讀取失敗 fallback 本地
+   reconciled 值並記 log——roll 不得卡 tick）；盤中 `current_equity` 用本地帳本
+   （wallet_balance＋本地 entry 基準的未實現），偏差由 §12 的 equity 容差比對 bound。
 
 ### 10.4 Consecutive Loss Cap（v3 新增行為定義）
 
@@ -691,6 +705,11 @@ AI）；AI 從未回應 → 記 `api_failed` 收場並 re-anchor 到下一個 cy
    （如 SL 於 offline 成交、由 startup recovery 補帳）者，loop 啟動時以
    「已 flat 且 wallet 偏離 anchor」補記一次 settlement（`settle_offline_flat`），
    不得把該段輸贏靜默併入下一段。
+5. **已知量測窗口（接受並記錄，2026-07-21，使用者拍板）**：若收尾 fill 的 fee 落在
+   pending-fee lane（fee 缺席／非 USDC，暫記 0 等 backfill 修正），該段以 fee-light
+   的 wallet 計分——接近打平的段可能記為非虧（歸零計數），事後 fee 修正不回溯重計，
+   誤差流入下一段 delta。量級為單筆 fee、僅於 pending lane 觸發，回溯改計數器的
+   複雜度不成比例。
 
 ### 10.5 Max Open Orders（v3 新增行為定義）
 
@@ -699,6 +718,11 @@ AI）；AI 從未回應 → 記 `api_failed` 收場並 re-anchor 到下一個 cy
 2. 達 `max_open_orders = 5` → 拒絕建立新單、記錄
    `no_order_reason = max_open_orders`，並觸發一次 reconciliation
    （正常單一 symbol 運行不應接近此上限，接近即是異常訊號）。
+3. **v1 計數點縮限（PR 5，2026-07-21，使用者拍板）**：計數僅在 plan admission
+   （`start_plan`）執行一次。slice IOC 從不 resting、不占 open-order 名額；SL/TP
+   是 protective——若掛單前也過 count 檢查，計數讀取失敗的 fail-closed（視為
+   at-cap）會擋住停損掛單本身，與 §4.1 protective 豁免哲學矛盾。單一 symbol 下
+   實際 resting 上限 ≈ SL＋TP 兩張，plan-admission 檢查已覆蓋風險。
 
 ## 11. WebSocket Streams
 
@@ -868,6 +892,13 @@ SQLite 不得覆蓋交易所事實。若兩者衝突，系統必須進入 reconc
 8. Shutdown 前
 9. 偵測到 WebSocket / REST mismatch 時
 
+**v1 實作範圍（PR 5，2026-07-21，使用者拍板）**：live loop 實作 1（`startup`）、
+5（`fill`）、6（protection sync 有建立／修改／取消任何 SL/TP 的 tick，
+`protection_change`）、7（`heartbeat`）、8（§18.2 sweep 前 best-effort，
+`shutdown`）與 9 的 §10.5 超標子集（`mismatch`）。2（cycle 前）、3（cycle 後）、
+4（每次 order ack 後）延後至 PR 6 隨 WS 接線一併實作——REST backfill 模式下對每張
+slice ack 都跑全量 reconcile，會使 plan 執行期間的 API 負載大約翻倍。
+
 ### 12.3 Reconciliation Cases
 
 | Case | Required behavior |
@@ -968,6 +999,9 @@ manual_safe_mode
 WebSocket 斷線超時（恢復並 backfill 後可解）
 daily loss cap 觸發（§10.3，次日 UTC 00:00 可解）
 kill switch refresh failed（refresh 恢復後可解）
+market data 連續取不到（PR 5：連續 12 tick（約 2 分鐘）NO_MARKET_DATA →
+  reason `no_market_data`；期間 protection sync／daily-loss／slice 全 hold
+  （§10.2 fail-closed），每次 miss 記 `no_market_data` tick 事件保持可視）
 ```
 
 恢復條件（全部滿足才解除）：
@@ -1538,6 +1572,19 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    （v6 新增，2026-07-13）。
 7. 正常 shutdown 預設不強制平倉。
 8. 持倉繼續依靠既有 SL protection。
+9. **Lease 被接管的 process 不執行 shutdown sweep（PR 5 修訂，2026-07-21）**：
+   `--loop` 的 lease heartbeat 拋出 `RunLockError`（此 pid 已被較新 process 取代）
+   時，繼任 process 已擁有該 run 的 store、resting orders（含 SL/TP）與全錢包
+   dead-man's switch——舊 process 的任何 exchange 動作或 store 寫入都是對繼任者的
+   破壞（sweep 會撤掉**繼任者的**保護單、讓真倉裸奔）。因此以 exit 1 直接退出，
+   只做 pid-guarded 的 lock release（繼任者持有 lease 時為 no-op）——與 paper loop
+   的 RunLockError 出口同一契約。
+10. **Shutdown 搶救未收割的 AI 決策（PR 5 修訂，2026-07-21，使用者拍板）**：
+    Ctrl-C/SIGTERM 時 `worker.join(5s)` 之後再 poll 一次，若背景決策已完成、把
+    raw response 寫入 `pending_raw_response`——重啟後 `resume_startup` 從 stored
+    text 續 gate（§3.1，絕不重問 AI），不必把付費的 LLM call 燒掉並空等最多 4h。
+    全程 contained：poll 或寫入失敗只記 log，shutdown 照常進行、該 cycle 重啟時
+    照舊 fail closed。
 
 ### 18.3 Emergency Kill Switch Triggers
 

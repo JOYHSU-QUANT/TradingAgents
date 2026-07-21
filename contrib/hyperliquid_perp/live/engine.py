@@ -1,8 +1,10 @@
 """§9 live self-managed sliced-TWAP execution engine (PR 5).
 
 The live counterpart of :class:`~..paper.engine.PaperExecutionEngine`: the same
-shared slice/stop math (:mod:`..paper.twap`, :mod:`..paper.stops`) and the same
-30s inter-slice pacing (``SLICE_INTERVAL_SECONDS``), but the CLI loop drives
+shared slice/stop math (:mod:`..paper.twap`, :mod:`..paper.stops`), with the
+plan envelope and inter-slice pacing taken from ``live.execution``
+(``plan_duration_minutes`` / ``slice_interval_seconds``, default 60min/30s).
+The CLI loop drives
 :meth:`tick` every ~10s (well inside the 30s kill-switch budget), it drives REAL
 exchange orders, and it never simulates a fill — fills arrive asynchronously over the WebSocket and are booked by the
 :class:`~.fills.LiveFillProcessor`, so the engine only ever READS the position
@@ -52,7 +54,6 @@ from ..paper.market_feed import SnapshotProvider
 from ..paper.stops import round_to_tick
 from ..paper.twap import (
     MAX_SLICES,
-    SLICE_INTERVAL_SECONDS,
     PlanDisposition,
     Side,
     build_slice_plan,
@@ -66,9 +67,9 @@ from ..persistence.models import PositionState
 from .config import EXCHANGE_MIN_ORDER_NOTIONAL_USDC, LiveConfig
 from .loss_guards import LossGuards
 from .order_gate import LiveOrderGateRejected, RealOrderGate
-from .orders import LiveOrderSubmitter
+from .orders import LiveOrderPreSubmitError, LiveOrderSubmitter
 from .protection import ProtectionManager, ProtectionOutcome
-from .safe_mode import REASON_EMERGENCY_CLOSE
+from .safe_mode import REASON_EMERGENCY_CLOSE, REASON_NO_MARKET_DATA
 
 __all__ = ["LiveExecutionEngine", "LiveTickResult", "PlanRegistration"]
 
@@ -76,7 +77,14 @@ logger = logging.getLogger(__name__)
 
 # The §12.2 rule 7 heartbeat reconciliation cadence.
 _HEARTBEAT = timedelta(minutes=5)
-_PLAN_LIFETIME = timedelta(hours=1)
+
+# §10.2/§13: consecutive market-data misses tolerated before the run enters
+# recoverable safe mode (~2 minutes at the ~10s §11.4 loop cadence). While the
+# feed is down, protection sync / daily-loss / slice pacing are all held
+# (fail-closed — no fresh price, no action), so a persistent outage must
+# escalate rather than idle invisibly: fills still arrive via the reconciler
+# backfill and the position can drift while the SL stays stale.
+_NO_MARKET_DATA_SAFE_MODE_TICKS = 12
 
 # §9.4: close / emergency_close is an AGGRESSIVE reduce-only IOC — its whole
 # purpose is to cut risk immediately, so it must actually clear in the violent
@@ -184,7 +192,6 @@ class LiveExecutionEngine:
         fill_processor,
         ws_stream,
         fetch_open_orders,
-        fetch_clearinghouse,
         clock: Clock | None = None,
         timeout_seconds: Decimal = _MARKET_DATA_TIMEOUT_S,
     ) -> None:
@@ -206,10 +213,21 @@ class LiveExecutionEngine:
         self._fill_processor = fill_processor
         self._ws = ws_stream
         self._fetch_open_orders = fetch_open_orders
-        self._fetch_clearinghouse = fetch_clearinghouse
         self._clock = clock or WallClock()
         self._timeout: Decimal = timeout_seconds
-        self._slippage = live_config.execution.max_slippage_pct
+        execution = live_config.execution
+        self._slippage = execution.max_slippage_pct
+        # §9.1 execution pacing, from ``live.execution`` (config-validated):
+        # the plan envelope, the inter-slice schedule, and the slice budget a
+        # full-grid plan may use (the slot count in the envelope, never past
+        # the shared twap ceiling MAX_SLICES).
+        self._plan_lifetime = timedelta(minutes=execution.plan_duration_minutes)
+        self._slice_interval = execution.slice_interval_seconds
+        self._max_slices = min(
+            MAX_SLICES,
+            max(1, (execution.plan_duration_minutes * 60) // execution.slice_interval_seconds),
+        )
+        self._no_data_streak = 0
         self._prefix = live_config.order_owner_prefix
         self._leg: _Leg | None = None
         self._flip: _PendingFlip | None = None
@@ -376,7 +394,23 @@ class LiveExecutionEngine:
         )
         if not snap_result.is_valid:
             # No fresh mark: hold protection and slices this tick (§10.2 fail-closed
-            # posture — the books and kill switch already advanced above).
+            # posture — the books and kill switch already advanced above). Never
+            # silently: every miss is an event (the loop's per-tick log gates on
+            # events), and a persistent outage escalates to recoverable safe mode —
+            # fills still arrive via the reconciler backfill while the feed is down,
+            # so the position can drift under a stale SL and the daily-loss guard
+            # is offline for exactly as long as the outage lasts.
+            self._no_data_streak += 1
+            events.append("no_market_data")
+            if self._no_data_streak >= _NO_MARKET_DATA_SAFE_MODE_TICKS:
+                self._safe_mode.enter(
+                    "recoverable",
+                    REASON_NO_MARKET_DATA,
+                    detail=(
+                        f"market data unavailable for {self._no_data_streak} "
+                        f"consecutive ticks (threshold {_NO_MARKET_DATA_SAFE_MODE_TICKS})"
+                    ),
+                )
             return LiveTickResult(
                 at=now,
                 status=_TickStatus.NO_MARKET_DATA,
@@ -384,12 +418,18 @@ class LiveExecutionEngine:
                 reconciled=reconciled,
                 events=tuple(events),
             )
+        self._no_data_streak = 0
         snap = snap_result.snapshot
         assert snap is not None
         position = self._read_position()
 
         # §17 protection sync (recompute SL/TP; emergency close on no-safe-SL).
         protection = self._sync_protection(position, snap, now, events)
+        # §12.2 rule 6: an SL/TP create / modify / cancel is an exchange-state
+        # change — reconcile it this tick rather than waiting for the 5-minute
+        # heartbeat to notice a mismatch.
+        if self._protection.orders_changed_last_sync:
+            self._reconcile("protection_change")
 
         # §10.3 daily-loss cap (unrealized included).
         self._loss_guards.evaluate_daily_loss(
@@ -449,18 +489,30 @@ class LiveExecutionEngine:
         is_flat = self._read_position().is_flat
         if is_flat and not self._was_flat:
             self._loss_guards.record_settlement(wallet_balance=self._wallet_balance(), now=now)
-            if self._emergency_close_pending:
-                # §13.5: a §17.2 emergency close has now reached flat — escalate to
-                # MANUAL safe mode so a human confirms before trading resumes (the
-                # repeated SL failure that forced the close is a real problem).
-                # Done HERE, post-flat, so the gate's manual-safe-mode block never
-                # blocked the close order itself.
-                self._safe_mode.enter(
-                    "manual",
-                    REASON_EMERGENCY_CLOSE,
-                    detail="§17.2 SL-repair-exhausted emergency close reached flat (§13.5)",
-                )
-                self._emergency_close_pending = False
+            # Advance the flat cursor the moment the settlement COMMITS: if the
+            # §13.5 escalation below raises after it, a re-run next tick must
+            # not re-score the segment — the anchor already moved, so a
+            # duplicate would read segment_pnl=0 (a "non-loss") and RESET the
+            # consecutive-loss streak the first call just recorded.
+            # (record_settlement itself raising rolls back atomically: the
+            # cursor stays put and the next tick retries the whole step.)
+            self._was_flat = True
+        if is_flat and self._emergency_close_pending:
+            # §13.5: a §17.2 emergency close has now reached flat — escalate to
+            # MANUAL safe mode so a human confirms before trading resumes (the
+            # repeated SL failure that forced the close is a real problem).
+            # Done HERE, post-flat, so the gate's manual-safe-mode block never
+            # blocked the close order itself. A step SEPARATE from the flat
+            # transition above: if this write raises, the still-set flag and
+            # the still-flat position retry it next tick (enter() is
+            # idempotent) instead of losing the escalation with the cursor
+            # already advanced.
+            self._safe_mode.enter(
+                "manual",
+                REASON_EMERGENCY_CLOSE,
+                detail="§17.2 SL-repair-exhausted emergency close reached flat (§13.5)",
+            )
+            self._emergency_close_pending = False
         self._was_flat = is_flat
 
     def _sync_protection(
@@ -524,6 +576,12 @@ class LiveExecutionEngine:
                 advance, ok = self._submit_slice(leg, idx, leg.slice_sizes[idx], mid, now)
                 if advance:
                     leg.submitted += 1
+                else:
+                    # Held pre-wire (a gate TOCTOU close or a local pre-submit
+                    # failure): nothing was sent, the cursor retries this slice
+                    # next tick — and, like slices_paused, the hold is VISIBLE
+                    # every tick it recurs.
+                    events.append(f"slice_held:{leg.plan_id}:{idx}")
                 if ok:
                     submitted += 1
                     events.append(f"slice:{leg.plan_id}:{idx}")
@@ -537,7 +595,7 @@ class LiveExecutionEngine:
         if leg.planned == 1:
             return 1  # a single-slice plan fires immediately (PAPER_MARKET shape)
         elapsed = (now - leg.active_from).total_seconds()
-        return min(leg.planned, 1 + int(elapsed // SLICE_INTERVAL_SECONDS))
+        return min(leg.planned, 1 + int(elapsed // self._slice_interval))
 
     def _submit_slice(
         self, leg: _Leg, idx: int, size: Decimal, mid: Decimal, now: datetime
@@ -548,8 +606,12 @@ class LiveExecutionEngine:
         the wire: an ack, an exchange reject (§9.2 rule 2: never re-sent), or
         an ambiguous transport failure (the submitter recorded the attempt; a
         §8.3 same-cloid resend would recover it, but v1 keeps rule-2 simplicity
-        and moves on). Only a gate rejection (never transmitted — the pre-check
-        in ``_submit_due_slices`` raced a gate close) holds the cursor.
+        and moves on). Anything that provably NEVER transmitted holds the
+        cursor: a gate rejection (the pre-check in ``_submit_due_slices`` raced
+        a gate close) or a pre-wire local failure
+        (:class:`LiveOrderPreSubmitError` — nothing sent, nothing recorded);
+        the deadline still bounds a persistently-held plan to an honest
+        ``expired``.
         """
         limit_price = self._slice_limit(mid, leg.side)
         order_id = self._next_order_id(leg.order_role)
@@ -584,7 +646,13 @@ class LiveExecutionEngine:
                 "slice %s[%d] gate-declined pre-wire (%s); cursor held", leg.plan_id, idx, exc
             )
             return _SliceSubmit(advance=False, ok=False)
-        except Exception:  # noqa: BLE001 — a submit failure is recorded by the submitter
+        except LiveOrderPreSubmitError as exc:
+            # Nothing reached the wire and nothing was recorded (the intent
+            # transaction rolled back): §9.2 rule 2 does not apply — hold the
+            # cursor and retry this slice next tick under the same cloid.
+            logger.warning("slice %s[%d] failed pre-wire (%s); cursor held", leg.plan_id, idx, exc)
+            return _SliceSubmit(advance=False, ok=False)
+        except Exception:  # noqa: BLE001 — past pre-wire the submitter recorded the attempt
             logger.exception("slice %s[%d] submit raised", leg.plan_id, idx)
             return _SliceSubmit(advance=True, ok=False)
         return _SliceSubmit(advance=True, ok=outcome.outcome.value != "rejected")
@@ -691,10 +759,10 @@ class LiveExecutionEngine:
             return PlanRegistration(gate, None, None, "zero_delta")
         reduce_only = position.size != 0 and delta.signed_delta_size * position.size < 0
         role = "rebalance" if position.size != 0 else "entry"
-        # A flip's open leg shares the flip's ONE 1-hour envelope and slice budget
+        # A flip's open leg shares the flip's ONE plan envelope and slice budget
         # (§9.1 rule 5) and carries the flip audit linkage (flip_plan_id / leg);
         # an ordinary rebalance gets the full grid and its own fresh deadline.
-        max_slices = flip_open.open_budget if flip_open is not None else MAX_SLICES
+        max_slices = flip_open.open_budget if flip_open is not None else self._max_slices
         plan = build_slice_plan(
             delta.raw_total_qty,
             side=delta.side,
@@ -718,9 +786,11 @@ class LiveExecutionEngine:
         close_qty = abs(position.size)
         with localcontext(DECIMAL_CONTEXT):
             open_qty = abs(gate.target_signed_notional / snap.mark_price)
-        close_budget, open_budget = split_flip_budget(close_qty, open_qty)
+        close_budget, open_budget = split_flip_budget(
+            close_qty, open_qty, total_budget=self._max_slices
+        )
         flip_plan_id = self._next_order_id("flip")
-        deadline = self._clock.now() + _PLAN_LIFETIME
+        deadline = self._clock.now() + self._plan_lifetime
         self._flip = _PendingFlip(
             flip_plan_id=flip_plan_id,
             parsed=parsed,
@@ -778,7 +848,7 @@ class LiveExecutionEngine:
                 self._flip = None
             return PlanRegistration(gate, plan_id, PlanDisposition.REJECT, "no_legal_slice")
         if deadline is None:
-            deadline = now + _PLAN_LIFETIME
+            deadline = now + self._plan_lifetime
         with self._db.transaction() as conn:
             repo.insert_execution_plan(
                 conn,
@@ -920,12 +990,17 @@ class LiveExecutionEngine:
         ``_maybe_advance_flip`` from re-opening the flip's ORIGINAL target off a
         stale decision once this close reaches flat.
         """
-        if self._leg is not None:
-            self._terminate_leg(self._leg, now, "canceled", events)
         if self._flip is not None:
+            # Cleared FIRST — before _terminate_leg's DB write below can raise:
+            # a _PendingFlip surviving this method would let _maybe_advance_flip
+            # re-open the flip's ORIGINAL target off a stale decision once the
+            # close reaches flat. (_terminate_leg raising is retry-safe: sync
+            # re-fires the close next tick and the leg is re-terminated.)
             flip_id = self._flip.flip_plan_id
             self._flip = None
             events.append(f"flip_abandoned:{flip_id}")
+        if self._leg is not None:
+            self._terminate_leg(self._leg, now, "canceled", events)
         self._gate.active_slice_plan = False
         with localcontext(DECIMAL_CONTEXT):
             size = abs(position.size)
@@ -959,14 +1034,15 @@ class LiveExecutionEngine:
                 order_role="emergency_close",
                 reduce_only=True,
             )
-        except Exception:  # noqa: BLE001 — recorded by the submitter; reconciliation catches a miss
+        except Exception:  # noqa: BLE001 — the close is re-fired next tick either way
             logger.exception("emergency close submit raised for %s", self._run_id)
         # §13.5: escalate to MANUAL safe mode once this close reaches flat (handled
         # in _detect_settlement, post-flat, so the gate never blocks the close).
-        # Set even if the submit raised — the submitter recorded it and the close is
-        # retried next tick; the escalation waits for a confirmed flat. Set BEFORE the
-        # (non-critical) audit write below, so a DB miss on that write can never drop
-        # this safety escalation.
+        # Set even if the submit raised — pre-wire or on-wire, the SL-exhausted
+        # EPISODE is real: protection.sync re-fires the close every tick until it
+        # lands (or clears this latch on recovery), and the escalation waits for a
+        # confirmed flat. Set BEFORE the (non-critical) audit write below, so a DB
+        # miss on that write can never drop this safety escalation.
         self._emergency_close_pending = True
         events.append("emergency_close")
         # §17 audit (best-effort): a §17.2 close was triggered. Guarded so a write

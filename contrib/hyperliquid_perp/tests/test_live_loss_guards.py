@@ -305,3 +305,42 @@ def test_consecutive_count_persists_across_manager_instances(env):
     fresh = LossGuards(db=db, run_id="r", safety=_safety(), safe_mode=safe_mode)
     result = fresh.record_settlement(wallet_balance=Decimal(985), now=_NOW + timedelta(hours=2))
     assert result.consecutive_loss_count == 2
+
+
+# -- R4 loop: day-roll baseline from the exchange (10.3 rule 1) ---------------
+
+
+def test_day_roll_baseline_prefers_exchange_source(env):
+    db, _gate_obj, safe_mode, _clock = env
+    guards = LossGuards(
+        db=db,
+        run_id="r",
+        safety=_safety(),
+        safe_mode=safe_mode,
+        day_baseline_source=lambda: Decimal(4200),
+    )
+    res = guards.evaluate_daily_loss(account_equity=Decimal(4000), now=_NOW)
+    assert res.rolled
+    assert res.baseline_equity == Decimal(4200)  # the exchange value, not the local one
+    # Same UTC day: the STORED exchange baseline is reused, no re-fetch skew.
+    res2 = guards.evaluate_daily_loss(account_equity=Decimal(3900), now=_NOW)
+    assert not res2.rolled
+    assert res2.baseline_equity == Decimal(4200)
+
+
+def test_day_roll_baseline_source_failure_falls_back_to_local(env):
+    db, _gate_obj, safe_mode, _clock = env
+
+    def _boom() -> Decimal:
+        raise RuntimeError("clearinghouse unreachable")
+
+    guards = LossGuards(
+        db=db,
+        run_id="r",
+        safety=_safety(),
+        safe_mode=safe_mode,
+        day_baseline_source=_boom,
+    )
+    res = guards.evaluate_daily_loss(account_equity=Decimal(4000), now=_NOW)
+    assert res.rolled
+    assert res.baseline_equity == Decimal(4000)  # the roll never stalls the tick

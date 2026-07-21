@@ -559,9 +559,9 @@ class LiveExecutionEngine:
             return 0
         submitted = 0
         if leg.submitted < self._due_count(leg, now):
-            # At most ONE slice attempt per tick: the 30s inter-slice pacing is
-            # the schedule, and a catch-up after a stall re-sends at one-per-tick
-            # rather than bursting the whole backlog at a single price.
+            # At most ONE slice attempt per tick: the configured inter-slice
+            # pacing is the schedule, and a catch-up after a stall re-sends at
+            # one-per-tick rather than bursting the whole backlog at one price.
             reason = self._gate.check_order(self._coin)
             if reason is not None:
                 # The wire gate is CLOSED (safe mode / kill switch): this slice
@@ -786,8 +786,14 @@ class LiveExecutionEngine:
         close_qty = abs(position.size)
         with localcontext(DECIMAL_CONTEXT):
             open_qty = abs(gate.target_signed_notional / snap.mark_price)
+        # A flip has TWO legs and each needs at least one slice (§9.1 rule 5),
+        # so its envelope budget floors at 2 — split_flip_budget's per-leg ≥1
+        # guarantee assumes total_budget >= 2, and a config whose plan window
+        # holds a single slice slot (duration == interval) would otherwise hand
+        # the open leg a 0 budget that build_slice_plan rejects, crash-looping
+        # the tick until the flip deadline.
         close_budget, open_budget = split_flip_budget(
-            close_qty, open_qty, total_budget=self._max_slices
+            close_qty, open_qty, total_budget=max(2, self._max_slices)
         )
         flip_plan_id = self._next_order_id("flip")
         deadline = self._clock.now() + self._plan_lifetime

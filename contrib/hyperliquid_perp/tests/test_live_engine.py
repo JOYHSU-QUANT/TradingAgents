@@ -1173,3 +1173,37 @@ def test_protection_change_triggers_reconcile_pass(tmp_path):
     _script(engine, [_snap()])
     engine.tick()
     assert "protection_change" not in rec.calls  # quiet sync -> no extra pass
+
+
+def test_flip_under_single_slot_config_still_budgets_both_legs(tmp_path):
+    """Exit-round HIGH fix: a config whose plan window holds ONE slice slot
+    (duration == interval -> _max_slices == 1) must not hand the flip's open
+    leg a zero budget — split_flip_budget assumes total_budget >= 2, and a 0
+    open budget makes build_slice_plan raise on the open leg, crash-looping
+    the tick until the flip deadline. The flip envelope floors at 2."""
+    live = _live_config(execution={"plan_duration_minutes": 1, "slice_interval_seconds": 60})
+    db, clock, engine, gate, sub = _build(tmp_path, live=live)
+    assert engine._max_slices == 1  # the hazardous-but-legal config
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.004"), entry_price=_MARK),
+            updated_at=_T0,
+        )
+    engine._was_flat = False
+    _script(engine, [_snap()])
+    reg = engine.start_plan(_decision("short", 5), output_id="o1")  # opposite side -> flip
+    assert reg.plan_id is not None and reg.reason is None
+    flip = engine._flip
+    assert flip is not None
+    assert flip.open_budget >= 1  # the open leg can always build a plan
+    # Drive the close leg to flat and advance the flip: the open leg must
+    # register without raising (the pre-fix behavior was a ValueError here).
+    with db.transaction() as conn:
+        repo.upsert_current_position(conn, "r", PositionState.flat("BTC"), updated_at=_T0)
+    engine._leg = None  # close leg terminal
+    _script(engine, [_snap(), _snap()])
+    engine.tick()
+    assert engine._flip is None  # the open leg registered (flip consumed)
+    assert engine._leg is not None and engine._leg.flip_leg == "open"

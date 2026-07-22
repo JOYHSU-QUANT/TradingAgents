@@ -1376,3 +1376,18 @@ def test_the_timing_invariant_is_checkable_without_side_effects():
     ok = KillSwitchConfig(schedule_cancel_seconds=120, refresh_interval_seconds=30)
     assert kill_switch_timing_violation(ok, 30.0) is None
     assert kill_switch_timing_violation(ok, 0) is not None  # nonpositive tick gap
+
+
+def test_the_network_timeout_advisory_is_checkable():
+    # network_timeout_warning is the §18.2 residual-risk advisory as a pure
+    # check (PR 5, decided 2026-07-22 "soft mitigation"): the live loop prints
+    # it at startup when the per-request REST timeout cannot keep the
+    # max_tick_gap promise. The defaults (30s timeout, 30s gap) deliberately
+    # warn — the operator earns silence by configuring headroom.
+    from contrib.hyperliquid_perp.live.kill_switch import network_timeout_warning
+
+    assert network_timeout_warning(10.0, 30.0) is None  # headroom: quiet
+    msg = network_timeout_warning(30.0, 30.0)  # the defaults: warn
+    assert msg is not None and "network_timeout_s" in msg
+    assert network_timeout_warning(45.0, 30.0) is not None  # over: warn
+    assert network_timeout_warning(None, 30.0) is not None  # unbounded: warn

@@ -2615,6 +2615,20 @@ def test_live_risk_consistency_mismatch_exits_1(tmp_path, capsys, live_seams):
     assert live_seams.auth_calls == []  # rejected before any network work
 
 
+def test_live_loop_bad_decision_config_exits_1_before_recovery(tmp_path, capsys, live_seams):
+    # PR 5 (decided 2026-07-22): --loop consumes the risk:/decision: grid, so
+    # a typo'd decision: block must be a named exit-1 at the front gate —
+    # never a passing recovery whose loop is then silently skipped behind an
+    # exit 0 a supervisor reads as a clean run.
+    path = _live_yaml(tmp_path)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write("decision:\n  bogus_knob: 1\n")
+    rc = cli_main(["live", "--config", str(path), "--run-id", "r1", "--loop"])
+    assert rc == 1
+    assert "decision" in capsys.readouterr().err
+    assert live_seams.auth_calls == []  # rejected before any network work
+
+
 def test_live_partial_risk_block_exits_1(tmp_path, capsys, live_seams):
     # §24 field granularity: a partial risk: block would let from_dict fill
     # the cross-checked fields from defaults identical to live.safety's,

@@ -71,7 +71,7 @@ from .orders import LiveOrderPreSubmitError, LiveOrderSubmitter
 from .protection import ProtectionManager, ProtectionOutcome
 from .safe_mode import REASON_EMERGENCY_CLOSE, REASON_NO_MARKET_DATA
 
-__all__ = ["LiveExecutionEngine", "LiveTickResult", "PlanRegistration"]
+__all__ = ["LiveExecutionEngine", "LiveTickResult", "PlanRegistration", "TickStatus"]
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +139,7 @@ class _PendingFlip:
     open_budget: int
 
 
-@dataclass
+@dataclass(frozen=True)
 class PlanRegistration:
     """The outcome of :meth:`start_plan` — a plan was built, or an order-less reason."""
 
@@ -153,15 +153,15 @@ class PlanRegistration:
     account_equity: Decimal | None = None
 
 
-class _TickStatus(str, Enum):
+class TickStatus(str, Enum):
     OK = "ok"
     NO_MARKET_DATA = "no_market_data"
 
 
-@dataclass
+@dataclass(frozen=True)
 class LiveTickResult:
     at: datetime
-    status: _TickStatus
+    status: TickStatus
     fills_ingested: int = 0
     slices_submitted: int = 0
     protection: ProtectionOutcome | None = None
@@ -413,7 +413,7 @@ class LiveExecutionEngine:
                 )
             return LiveTickResult(
                 at=now,
-                status=_TickStatus.NO_MARKET_DATA,
+                status=TickStatus.NO_MARKET_DATA,
                 fills_ingested=fills,
                 reconciled=reconciled,
                 events=tuple(events),
@@ -443,7 +443,7 @@ class LiveExecutionEngine:
 
         return LiveTickResult(
             at=now,
-            status=_TickStatus.OK,
+            status=TickStatus.OK,
             fills_ingested=fills,
             slices_submitted=submitted,
             protection=protection,

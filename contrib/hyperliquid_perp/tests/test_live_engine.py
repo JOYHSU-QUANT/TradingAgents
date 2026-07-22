@@ -1207,3 +1207,63 @@ def test_flip_under_single_slot_config_still_budgets_both_legs(tmp_path):
     engine.tick()
     assert engine._flip is None  # the open leg registered (flip consumed)
     assert engine._leg is not None and engine._leg.flip_leg == "open"
+
+
+# -- loss guards wired through the engine (§10.3 / §10.4) --------------------
+#
+# The guards and the engine are unit-tested apart on their own fixtures; these
+# two pin the LINKAGE — the engine, the guards and the gate share ONE object
+# graph, and evaluate_daily_loss runs before _submit_due_slices — so a rewire
+# (a different gate instance, a reordered tick) fails here even though every
+# per-module test stays green.
+
+
+def test_daily_loss_breach_mid_tick_pauses_pending_slice_same_tick(tmp_path):
+    """§10.3 end-to-end: a drawdown past ``max_daily_loss_pct`` computed INSIDE
+    tick() must pause that SAME tick's due slice — no order goes out on the
+    tick that discovered the breach."""
+    from contrib.hyperliquid_perp.live.safe_mode import REASON_DAILY_LOSS
+
+    db, clock, engine, gate, sub = _build(tmp_path)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.004"), entry_price=_MARK),
+            updated_at=_T0,
+        )
+    engine._was_flat = False
+    _script(engine, [_snap()])
+    engine.tick()  # first §10.3 evaluation of the day: baseline = equity 4000
+    _script(engine, [_snap()])
+    reg = engine.start_plan(_decision("long", 10), output_id="o1")  # grow the long
+    assert reg.plan_id is not None and reg.reason is None
+    # Crash the mark: equity 4000 + 0.004*(20000-50000) = 3880 -> 3% drawdown > 2%.
+    _script(engine, [_snap(mark=20000, mid=20000)])
+    res = engine.tick()
+    state = engine._safe_mode.current()
+    assert state is not None and state.reason == REASON_DAILY_LOSS
+    assert sub.calls == []  # the due slice was NOT sent on the breach tick
+    assert engine._leg.submitted == 0  # cursor held (pause, not burn)
+    assert any(e.startswith(f"slices_paused:{reg.plan_id}:") for e in res.events)
+
+
+def test_third_consecutive_loss_blocks_next_start_plan_same_run(tmp_path):
+    """§10.4 rule 3 end-to-end: the third losing segment recorded through the
+    engine's own LossGuards flips the SHARED gate to manual safe mode, and the
+    next start_plan on that engine is refused — not silently admitted."""
+    db, clock, engine, gate, sub = _build(tmp_path)
+    guards = engine._loss_guards
+    guards.ensure_settlement_anchor(D(4000), now=_T0)
+    guards.record_settlement(wallet_balance=D(3990), now=_T0)  # loss 1
+    guards.record_settlement(wallet_balance=D(3980), now=_T0)  # loss 2
+    guards.record_settlement(wallet_balance=D(3970), now=_T0)  # loss 3 -> MANUAL
+    state = engine._safe_mode.current()
+    assert state is not None and state.is_manual
+    assert gate.manual_safe_mode is True
+    _script(engine, [_snap()])
+    reg = engine.start_plan(_decision("long", 5), output_id="o1")
+    assert reg.plan_id is None
+    assert reg.reason is not None  # the §4.1 refusal, verbatim from the gate
+    assert gate.active_slice_plan is False
+    assert sub.calls == []

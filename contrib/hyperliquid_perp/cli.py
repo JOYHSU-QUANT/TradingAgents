@@ -534,12 +534,13 @@ def _stamp_reconciliation_case(db, repo, args) -> int:
 def _cmd_live(argv: list[str]) -> int:
     """Load the ``live:`` gates, verify agent authorization, print caps, exit.
 
-    The PR 1 skeleton of the Phase 3 startup sequence: everything here must
-    pass before a future live loop may run, and every failure is a named
-    exit 1 — this command can never place an order (the signed client exposes
-    no order methods yet, and the run exits before any loop). Config/env
-    problems fail fast (nothing else is checkable without them); the
-    network-dependent gates all run and report every failure in one pass.
+    The Phase 3 startup sequence: everything here must pass before the live
+    loop may run, and every failure is a named exit 1. Without --run-id the
+    command is config-only and can never place an order; with --run-id it runs
+    the §19.1 startup recovery, and --loop then continues into the PR 5 live
+    trading loop (the one lane that trades). Config/env problems fail fast
+    (nothing else is checkable without them); the network-dependent gates all
+    run and report every failure in one pass.
     """
     parser = argparse.ArgumentParser(
         prog="python -m contrib.hyperliquid_perp live",
@@ -547,8 +548,8 @@ def _cmd_live(argv: list[str]) -> int:
             "Phase 3 live startup: validate the config gates + agent "
             "authorization and print effective caps; with --run-id, run the "
             "full §19.1 startup recovery (arm kill switch, reconcile, cancel "
-            "stale bot-owned orders) and report the verdict. No trading loop "
-            "yet — that arrives with PR 5."
+            "stale bot-owned orders) and report the verdict; add --loop to "
+            "continue into the live trading loop."
         ),
     )
     parser.add_argument("--config", default=None, help="Config YAML path.")
@@ -689,6 +690,19 @@ def _cmd_live(argv: list[str]) -> int:
         )
         return 1
 
+    # PR 5 (decided 2026-07-22): --loop consumes the risk:/decision: grid the
+    # same way the paper engine does — validate those blocks HERE, where a typo
+    # is a named exit-1 config error, never after a passing recovery where the
+    # loop would be silently skipped and exit 0 would read as a clean run to a
+    # supervisor. (_cmd_paper makes the same up-front check.)
+    loop_cfgs = None
+    if args.loop:
+        from .main import _load_risk_decision
+
+        loop_cfgs = _load_risk_decision(config)
+        if loop_cfgs is None:
+            return 1
+
     # A top-level ``network:`` that disagrees with ``live.network`` is legal —
     # the same file can drive paper reads on mainnet while live drills on
     # testnet — but it is also how a stale key silently points somewhere
@@ -777,7 +791,7 @@ def _cmd_live(argv: list[str]) -> int:
                 )
         # Prove the signed transport end-to-end (construction + a read on the
         # live network) so a bad SDK/network surfaces now, not on the first
-        # real order in a later PR. The bound gate is fresh-from-config, i.e.
+        # real order a --loop run places. The bound gate is fresh-from-config, i.e.
         # fail-closed: no runtime condition is proven in this config-only
         # command, so the client could not place an order even if asked.
         try:
@@ -854,6 +868,7 @@ def _cmd_live(argv: list[str]) -> int:
         wallet=addr,
         agent_key=agent_key,
         snapshot=snapshot,
+        loop_cfgs=loop_cfgs,
     )
 
 
@@ -876,6 +891,7 @@ def _live_startup_recovery(
     wallet: str,
     agent_key: str | None,
     snapshot,
+    loop_cfgs,
 ) -> int:
     """The §19.1 startup recovery tail of ``live --run-id`` (steps 5–16).
 
@@ -883,10 +899,11 @@ def _live_startup_recovery(
     read) were proven by the caller; this builds the PR 2–4 components — a
     runtime-flagged gate, the signed client, kill switch, safe-mode machine
     and reconciler — creates or resumes the live run, and hands off to
-    :func:`~.live.startup.run_startup_recovery`. The command is one-shot: it
-    reports the verdict, runs the §18.2 shutdown sweep, and exits — the
-    long-running loop that would keep the kill switch refreshed arrives with
-    PR 5. Exit codes: 0 = the §19.1 step-16 verdict allows a new AI cycle;
+    :func:`~.live.startup.run_startup_recovery`. Without --loop the command is
+    one-shot: it reports the verdict, runs the §18.2 shutdown sweep, and
+    exits; with --loop a passing verdict hands off to :func:`_run_live_loop`
+    (which keeps the kill switch refreshed) before the same sweep runs on the
+    way out. Exit codes: 0 = the §19.1 step-16 verdict allows a new AI cycle;
     4 = recovery executed but the verdict is unclean (the run is in safe
     mode); 1 = hard failure (config/arming/creation errors).
     """
@@ -898,7 +915,11 @@ def _live_startup_recovery(
     from .exchanges.hyperliquid.signed_client import HyperliquidSignedClient
     from .live.fill_backfill import FillBackfiller
     from .live.fills import LiveFillProcessor
-    from .live.kill_switch import KillSwitchManager, kill_switch_timing_violation
+    from .live.kill_switch import (
+        KillSwitchManager,
+        kill_switch_timing_violation,
+        network_timeout_warning,
+    )
     from .live.order_gate import RealOrderGate
     from .live.reconcile import LiveReconciler
     from .live.safe_mode import SafeModeManager
@@ -938,6 +959,13 @@ def _live_startup_recovery(
             file=sys.stderr,
         )
         return 1
+    # Its advisory sister (decided 2026-07-22 "soft mitigation"): warn — do
+    # not refuse — when the per-request REST timeout cannot keep the same
+    # max_tick_gap promise. Beside the enforced check so the two halves of
+    # the §18.2 timing story stay in one place for PR 6's hard invariant.
+    timeout_warning = network_timeout_warning(client.timeout, _RECOVERY_MAX_TICK_GAP_SECONDS)
+    if timeout_warning is not None:
+        print(f"WARNING: {timeout_warning}", file=sys.stderr)
 
     run_id: str = args.run_id
     coin = live_cfg.safety.allowed_symbols[0]
@@ -1126,6 +1154,7 @@ def _live_startup_recovery(
                 # shutdown sweep in the ``finally`` below then disarms the switch.
                 if args.loop and result.passed:
                     _run_live_loop(
+                        cfgs=loop_cfgs,
                         db=db,
                         run_id=run_id,
                         coin=coin,
@@ -1280,11 +1309,18 @@ def _live_startup_recovery(
                     # executed-but-unclean code 4 the verdict path uses (the
                     # "§18.2 shutdown unclean" line above carries the detail).
                     return 4
-                print(
-                    "startup recovery passed — a live loop could start from this "
-                    "state (the loop arrives with PR 5).",
-                    file=sys.stderr,
-                )
+                if args.loop:
+                    print(
+                        "live loop exited — §18.2 shutdown sweep done; re-run "
+                        "with --loop to resume this run.",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        "startup recovery passed — a live loop can start from "
+                        "this state (re-run with --loop).",
+                        file=sys.stderr,
+                    )
                 return 0
             print(
                 "startup recovery did NOT pass — the run is in safe mode; see the "
@@ -1363,6 +1399,7 @@ def _live_heartbeat(db, run_id: str, *, pid: int, now, safe_mode) -> None:
 
 def _run_live_loop(
     *,
+    cfgs,
     db,
     run_id: str,
     coin: str,
@@ -1404,16 +1441,16 @@ def _run_live_loop(
     from .live.orders import LiveOrderSubmitter
     from .live.protection import ProtectionManager
     from .live.ws_stream import LiveWsStream
-    from .main import _load_risk_decision
     from .paper.clock import WallClock
     from .paper.engine import AssetSpec
     from .paper.market_feed import PortSnapshotProvider
     from .paper.stops import StopConfig
     from .persistence import repository as repo
 
-    cfgs = _load_risk_decision(config)
-    if cfgs is None:
-        return  # bad risk/decision config — already reported; never loop on it
+    # ``cfgs`` was validated by _cmd_live's front gate (decided 2026-07-22): a
+    # bad risk:/decision:/paper_trading: block is an exit-1 up front, so this
+    # function can no longer be reached with an unusable grid and silently
+    # skip the loop behind a passing recovery's exit 0.
     risk_cfg, decision_cfg = cfgs
     clock = WallClock()
     market = HyperliquidMarketData(client)
@@ -1506,6 +1543,7 @@ def _run_live_loop(
     )
     try:
         while True:
+            tick_started = time.monotonic()
             now = clock.now()
             _live_heartbeat(db, run_id, pid=pid, now=now, safe_mode=safe_mode)
             try:
@@ -1540,7 +1578,15 @@ def _run_live_loop(
                     log_message="live tick raised — entering recoverable safe mode and continuing",
                     detail="live tick raised (see log)",
                 )
-            time.sleep(_LIVE_TICK_SECONDS)
+            # The sleep DEDUCTS the tick's own wall time (decided 2026-07-22):
+            # ``max_tick_gap_seconds`` is a promise about the wall clock BETWEEN
+            # tick() calls, and a fixed sleep would stack on top of a slow tick —
+            # a degraded (slow, not dead) network could then push the §18.2
+            # refresh past the exchange-side deadline and cancel the resting
+            # SL/TP. Deducting keeps the cadence near-constant; the residual
+            # risk of a single call outlasting the gap is warned about at
+            # startup and owned by PR 6's network-layer rework.
+            time.sleep(max(0.0, _LIVE_TICK_SECONDS - (time.monotonic() - tick_started)))
     except KeyboardInterrupt:
         print("\nlive loop stopping — running the §18.2 shutdown sweep...", file=sys.stderr)
         # Let the off-thread AI decision settle so no worker thread writes to the

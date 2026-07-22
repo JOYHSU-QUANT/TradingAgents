@@ -387,9 +387,8 @@ class SafeModeManager:
         Manual safe mode never auto-recovers (§13.5); returns True when the
         release happened.
 
-        The PR 5 daily-loss entry adds its "past next UTC midnight" condition
-        when it lands — its trigger does not exist yet, so no reason gets a
-        time gate here.
+        ``REASON_DAILY_LOSS`` (the PR 5 §10.3 entry) additionally waits for
+        the next UTC midnight — the time gate below.
         """
         current = self.current()
         if current is None or current.is_manual:

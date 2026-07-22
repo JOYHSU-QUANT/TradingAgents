@@ -53,7 +53,7 @@ from .config import KillSwitchConfig
 from .order_gate import RealOrderGate
 from .orders import local_status_for_exchange_status, parse_order_status
 
-__all__ = ["KillSwitchManager", "kill_switch_timing_violation"]
+__all__ = ["KillSwitchManager", "kill_switch_timing_violation", "network_timeout_warning"]
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +126,32 @@ def kill_switch_timing_violation(
             "cancel every order on the wallet during normal operation"
         )
     return None
+
+
+def network_timeout_warning(timeout: float | None, max_tick_gap_seconds: float) -> str | None:
+    """The §18.2 residual-risk advisory as a checkable message (PR 5, decided
+    2026-07-22 "soft mitigation").
+
+    Sister of :func:`kill_switch_timing_violation`, advisory rather than
+    enforced: nothing ties the per-request REST timeout to the caller's
+    ``max_tick_gap_seconds`` promise, a tick makes several sequential REST
+    calls, and one call riding its full timeout on a degraded (slow, not
+    dead) network can stretch the wall gap past the promise — the dead man's
+    switch then cancels the resting SL/TP while the process is still alive
+    (protection re-covers on the next healthy tick, an unprotected window).
+    Returns the warning text when the timeout cannot keep the promise (or is
+    unbounded), None when it fits. The hard construction-time invariant is
+    deferred to PR 6's network-layer rework.
+    """
+    if timeout is not None and timeout < max_tick_gap_seconds:
+        return None
+    return (
+        f"network_timeout_s ({timeout}) is not below the kill switch's max "
+        f"tick gap ({max_tick_gap_seconds:g}s) — one slow REST call on a "
+        "degraded network can push the §18.2 refresh past the exchange-side "
+        "deadline and cancel the resting SL/TP. Set network_timeout_s below "
+        f"{max_tick_gap_seconds:g} in the config for headroom."
+    )
 
 
 class KillSwitchManager:

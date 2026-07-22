@@ -1493,6 +1493,17 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    refresh=30` 能通過 config guard，但配上 60 秒的 tick 間隔就會留下 90 秒空窗、讓
    dead man's switch 在正常運行中觸發並掃掉全錢包掛單。
 
+   **已知殘餘風險：`network_timeout_s` 沒有被掃進這張時序帳**（PR 5 註記，
+   2026-07-22 拍板「軟性緩解」）：上述不變量只綁 `refresh_interval` 與
+   `max_tick_gap`，但 tick 內每一筆 REST 呼叫真正的阻塞上限是頂層
+   `network_timeout_s`（預設 30s），且一個 tick 會連續打多筆——網路降級（慢但
+   沒斷）時，單 tick 牆鐘時間可以拖過 `max_tick_gap` 的建構期承諾，讓交易所端
+   scheduleCancel 在程序還活著時觸發、掃掉含 SL/TP 的全錢包掛單（protection 於
+   下個健康 tick 重建，中間是裸倉窗口）。v1 緩解：live loop 的 sleep 扣除本次
+   tick 實耗（消除疊加放大），且啟動時若 `network_timeout_s >=
+   max_tick_gap_seconds` 印 stderr 警告。硬性建構期不變量（把每筆呼叫逾時納入
+   承諾檢查）與 live 專屬逾時延後 PR 6 網路層重做時一併處理。
+
    **`max_tick_gap_seconds` 的語意要照字面讀：兩次 tick() 之間的最壞牆鐘時間，不是
    sleep 間隔**（v7 新增，2026-07-13）。既有 `_paper_loop`（cli.py）的一輪是
    `engine.tick()` → `scheduler.poll()` → `sleep(min(delay, 60))` **同步**執行，而

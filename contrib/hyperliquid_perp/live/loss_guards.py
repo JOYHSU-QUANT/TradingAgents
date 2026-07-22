@@ -137,7 +137,7 @@ class LossGuards:
         On the first evaluation of a new UTC day (or a run with no baseline yet)
         the baseline rolls to the current reconciled equity — this is the §10.3
         rule 1 "record the day's opening equity at UTC 00:00", captured at the
-        first tick of the day (within one 30s tick of midnight). A drawdown past
+        first tick of the day (within one ~10s live tick of midnight). A drawdown past
         ``max_daily_loss_pct`` (unrealized included — the caller passes reconciled
         account equity) enters recoverable safe mode; the entry is idempotent, so
         calling this every tick while breached keeps the latch without spamming

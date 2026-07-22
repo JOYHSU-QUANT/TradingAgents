@@ -1230,8 +1230,10 @@ class LiveFillProcessor:
         is ingested independently; a malformed one records its raw payload + the
         error and is SKIPPED (§11.3 — never applied), so one bad fill neither
         crashes the drain nor blocks its well-formed siblings. Non-``userFills``
-        messages (orderUpdates / clearinghouse) belong to PR 4's reconciliation and
-        return ``[]`` here — drained and ignored so the queue never grows unbounded.
+        messages (orderUpdates / clearinghouse) have no consumer yet — PR 4/5
+        reconciliation is REST-based; their consumer is PR 6's live-socket
+        rework — so they return ``[]`` here, drained and ignored to keep the
+        queue from growing unbounded.
 
         Fills are applied in EXCHANGE-TIME order, not arrival order. The money does
         not care (realized PnL comes per-fill from the exchange's ``closedPnl``), but

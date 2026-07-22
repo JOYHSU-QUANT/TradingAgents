@@ -1400,6 +1400,21 @@ def test_the_network_timeout_advisory_is_checkable():
     assert network_timeout_warning(None, 30.0) is not None  # unbounded: warn
 
 
+def test_the_sl_repair_delay_advisory_is_checkable():
+    # sl_repair_delay_warning is the repair-ladder sibling of
+    # network_timeout_warning (same 2026-07-22 soft-mitigation family):
+    # protection._maybe_delay sleeps the FULL configured delay BEFORE it
+    # refreshes the kill switch, so a delay at/above the max_tick_gap promise
+    # stretches the refresh gap exactly while the position has no valid stop.
+    # Unlike its sister the default (5s vs 30s) stays quiet.
+    from contrib.hyperliquid_perp.live.kill_switch import sl_repair_delay_warning
+
+    assert sl_repair_delay_warning(5.0, 30.0) is None  # the default: quiet
+    msg = sl_repair_delay_warning(30.0, 30.0)  # at the promise: warn
+    assert msg is not None and "sl_repair_retry_delay_seconds" in msg
+    assert sl_repair_delay_warning(45.0, 30.0) is not None  # over: warn
+
+
 # ---- PR 5: shutdown(keep_protective=True) leaves the resting SL/TP standing --
 
 

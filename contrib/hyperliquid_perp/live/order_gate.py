@@ -34,6 +34,7 @@ condition travels in :class:`LiveOrderGateRejected`.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from .config import ExecutionMode, LiveConfig
 
@@ -46,6 +47,11 @@ __all__ = [
 
 # §4.1: the one no_order_reason vocabulary entry for a gate rejection.
 NO_ORDER_REASON = "live_order_gate_rejected"
+
+# The three §4.1 enforcement scopes (_first_failed's condition table). Literal —
+# not bare str — so a mistyped scope tag on a future condition entry is a type
+# error instead of a silently never-matched (and therefore never-skipped) check.
+_ConditionScope = Literal["always", "decision", "safe_mode"]
 
 # §13.1 / §17.2: the de-risking / protection order roles that stay sendable while
 # a safe mode is active. Safe mode blocks anything that ADDS risk (§13.2), but the
@@ -174,7 +180,7 @@ class RealOrderGate:
         if base is not None:
             return base
         # (scope, failed, reason) — §4.1's order, verbatim.
-        conditions: tuple[tuple[str, bool, str], ...] = (
+        conditions: tuple[tuple[_ConditionScope, bool, str], ...] = (
             (
                 "always",
                 not self.startup_reconciliation_passed,

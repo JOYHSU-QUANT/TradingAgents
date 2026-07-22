@@ -77,7 +77,7 @@ SQLite 另有只供 runtime 使用、預設不匯出 CSV 的 internal tables：
 | Internal table | 用途 |
 | --- | --- |
 | `runs` | `run_id`、mode、初始資金、設定與 schema version |
-| `scheduler_state` | `last_decision_at`、`next_decision_at` 與目前 attempt reference |
+| `scheduler_state` | `last_decision_at`、`next_decision_at` 與目前 attempt reference；Phase 3 追加 safe-mode／loss-guard 欄位（`safe_mode_*`、`day_start_*`、`consecutive_loss_count`、schema v7 的 `last_settlement_wallet_balance`，見 phase3-spec §16.6） |
 | `execution_plans` | TWAP / flip plan、deadline、slice allocation、remaining / residual quantity 與 terminal state |
 | `current_positions` | 每個 symbol 的最新 position、average entry、margin 與 active protection references |
 | `current_account_state` | 最新 wallet balance、equity、margin、fees、funding 與 PnL |

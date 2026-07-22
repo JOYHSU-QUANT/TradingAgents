@@ -919,6 +919,7 @@ def _live_startup_recovery(
         KillSwitchManager,
         kill_switch_timing_violation,
         network_timeout_warning,
+        sl_repair_delay_warning,
     )
     from .live.order_gate import RealOrderGate
     from .live.reconcile import LiveReconciler
@@ -963,9 +964,15 @@ def _live_startup_recovery(
     # not refuse — when the per-request REST timeout cannot keep the same
     # max_tick_gap promise. Beside the enforced check so the two halves of
     # the §18.2 timing story stay in one place for PR 6's hard invariant.
-    timeout_warning = network_timeout_warning(client.timeout, _RECOVERY_MAX_TICK_GAP_SECONDS)
-    if timeout_warning is not None:
-        print(f"WARNING: {timeout_warning}", file=sys.stderr)
+    for advisory in (
+        network_timeout_warning(client.timeout, _RECOVERY_MAX_TICK_GAP_SECONDS),
+        sl_repair_delay_warning(
+            float(live_cfg.protection.sl_repair_retry_delay_seconds),
+            _RECOVERY_MAX_TICK_GAP_SECONDS,
+        ),
+    ):
+        if advisory is not None:
+            print(f"WARNING: {advisory}", file=sys.stderr)
 
     run_id: str = args.run_id
     coin = live_cfg.safety.allowed_symbols[0]

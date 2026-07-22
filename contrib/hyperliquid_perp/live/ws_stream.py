@@ -49,8 +49,9 @@ logger = logging.getLogger(__name__)
 
 # §11.1 required streams. userFills is the accounting source PR 3 consumes;
 # orderUpdates and the clearinghouse (account state) stream are enqueued too but
-# their consumer is PR 4's reconciliation — PR 3 drains and ignores them so the
-# queue never grows unbounded while they wait for their owner.
+# have no consumer yet — PR 4/5 reconciliation is REST-based; their owner is
+# PR 6's live-socket rework — so the drain discards them and the queue never
+# grows unbounded while they wait.
 USER_FILLS_CHANNEL = "userFills"
 ORDER_UPDATES_CHANNEL = "orderUpdates"
 # webData2 carries clearinghouseState (the account/position snapshot) over WS;

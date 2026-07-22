@@ -145,11 +145,14 @@ def _gate_result():
 
 
 class _DriverProvider:
-    def __init__(self, decision_input, *, parsed, build_error=None, request_error=None) -> None:
+    def __init__(
+        self, decision_input, *, parsed, build_error=None, request_error=None, request_gate=None
+    ) -> None:
         self._di = decision_input
         self._parsed = parsed
         self._build_error = build_error
         self._request_error = request_error
+        self._request_gate = request_gate  # hold the LLM call until the test releases it
         self.builds = 0
         self.requests = 0
 
@@ -161,6 +164,8 @@ class _DriverProvider:
 
     def request_decision(self, decision_input):
         self.requests += 1
+        if self._request_gate is not None:
+            self._request_gate.wait(30.0)
         if self._request_error is not None:
             raise self._request_error
         return self._parsed
@@ -200,7 +205,15 @@ def _decision_input():
     )
 
 
-def _driver(tmp_path, *, build_error=None, request_error=None, start_error=None, first_regs=()):
+def _driver(
+    tmp_path,
+    *,
+    build_error=None,
+    request_error=None,
+    start_error=None,
+    first_regs=(),
+    request_gate=None,
+):
     from contrib.hyperliquid_perp.live.engine import PlanRegistration
 
     db = Database(tmp_path / "d.db")
@@ -222,6 +235,7 @@ def _driver(tmp_path, *, build_error=None, request_error=None, start_error=None,
         parsed=_decision(),
         build_error=build_error,
         request_error=request_error,
+        request_gate=request_gate,
     )
     worker = LiveDecisionWorker(provider=provider)
     driver = LiveDecisionDriver(
@@ -638,3 +652,86 @@ def test_salvage_shutdown_noops_when_nothing_is_pending(tmp_path):
     _await(worker)
     assert driver.pump() == "completed"  # normally collected
     assert driver.salvage_shutdown() is False  # nothing left to salvage
+
+
+# -- 2026-07-22 decisions: stall visibility + manual-latch pause --------------
+
+
+def _set_safe_mode(db, type_, reason):
+    """Write (or clear, with ``None, None``) the stored safe-mode triple."""
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(
+            conn,
+            "r",
+            safe_mode_type=type_,
+            safe_mode_reason=reason,
+            safe_mode_entered_at=None if type_ is None else _T0,
+            updated_at=_T0,
+        )
+
+
+def test_stall_warning_fires_on_a_cadence_while_the_llm_call_hangs(tmp_path, caplog):
+    # Decided 2026-07-22 ("warn, don't force"): after 30 minutes of worker-busy
+    # pump() warns, re-warns every 5 minutes, and never forces the cycle — no
+    # api_failed, no second worker; the attempt stays honestly in_progress and
+    # the hung call still completes normally when it finally returns.
+    import logging
+
+    hang = threading.Event()
+    db, clock, driver, engine, worker, provider = _driver(tmp_path, request_gate=hang)
+    try:
+        caplog.set_level(logging.WARNING, logger="contrib.hyperliquid_perp.live.decision")
+        assert driver.pump() == "cycle_started"
+
+        def stalls():
+            return [r for r in caplog.records if "may be hung" in r.getMessage()]
+
+        clock.advance(29 * 60)
+        assert driver.pump() is None  # under the 30-minute threshold: quiet
+        assert stalls() == []
+        clock.advance(2 * 60)  # 31 minutes in flight
+        assert driver.pump() is None
+        assert len(stalls()) == 1
+        clock.advance(2 * 60)  # 33 minutes — inside the 5-minute re-warn window
+        assert driver.pump() is None
+        assert len(stalls()) == 1  # no spam
+        clock.advance(4 * 60)  # 37 minutes — past the cadence
+        assert driver.pump() is None
+        assert len(stalls()) == 2
+        # Never forced: the attempt is still in_progress, the AI asked once.
+        row = db.conn.execute("SELECT status FROM decision_attempts WHERE run_id='r'").fetchone()
+        assert row["status"] == "in_progress"
+        assert provider.requests == 1
+    finally:
+        hang.set()
+    _await(worker)
+    assert driver.pump() == "completed"  # the late answer still lands normally
+
+
+def test_manual_latch_skips_the_llm_spend_until_release(tmp_path):
+    # Decided 2026-07-22: a standing §13.5 manual latch means every target would
+    # be refused at the manual_safe_mode gate line — pump() skips _start entirely
+    # (no attempt row, no build_input, no LLM spend), announces the pause ONCE,
+    # and a release starts a FRESH cycle on the very next pump (next_decision_at
+    # never advanced while paused).
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    _set_safe_mode(db, "manual", "emergency_close")
+    assert driver.pump() == "decision_paused"  # announced once
+    assert driver.pump() is None  # then quiet while the latch stands
+    assert provider.builds == 0 and provider.requests == 0
+    assert db.conn.execute("SELECT COUNT(*) AS c FROM decision_attempts").fetchone()["c"] == 0
+    # A human releases the latch (§13.6): the very next pump decides afresh.
+    _set_safe_mode(db, None, None)
+    assert driver.pump() == "cycle_started"
+    assert provider.builds == 1
+
+
+def test_recoverable_safe_mode_does_not_pause_decisions(tmp_path):
+    # Only the MANUAL latch pauses the spend (decided 2026-07-22): recoverable
+    # safe mode self-heals within minutes, so pausing it could burn a whole 4h
+    # cycle for a transient containment. The gate still refuses the target if
+    # the mode is standing at admission — that refusal is the audited path.
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    _set_safe_mode(db, "recoverable", "reconcile_error")
+    assert driver.pump() == "cycle_started"
+    assert provider.builds == 1

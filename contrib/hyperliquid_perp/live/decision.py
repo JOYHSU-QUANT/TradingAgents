@@ -60,6 +60,16 @@ __all__ = ["LiveDecisionDriver", "LiveDecisionWorker"]
 
 logger = logging.getLogger(__name__)
 
+# §18.2 stall visibility (decided 2026-07-22 — warn, don't force): a wedged LLM
+# call (an SDK hang with no effective timeout) leaves the run silently
+# protection-only while tick / kill switch / SL all look healthy. v1 only makes
+# the condition VISIBLE on a cadence — forcing a deadline would abandon the
+# stuck thread and submit a fresh worker beside it, and two concurrent
+# request_decision calls on one provider instance break the busy-gate
+# serialization its thread-safety relies on (provider purity, deferred PR 6).
+_STALL_WARN_AFTER = timedelta(minutes=30)
+_STALL_REWARN_EVERY = timedelta(minutes=5)
+
 
 class LiveDecisionWorker:
     """Runs one AI decision at a time on a background thread (§18.2 Option A)."""
@@ -165,6 +175,11 @@ class _InFlight:
     # the C1 wedge) and never re-asks the AI. Mirrors the
     # _PlanRegisteredPersistError pattern: keep _inflight, retry the persist.
     pending_fail: tuple[str | None, str] | None = None  # (error_type, message)
+    # Stall visibility: when the LLM call was handed to the worker thread — NOT
+    # scheduled_at, which for an overdue cycle (downtime, latch) lies hours in
+    # the past and would trip the warning on the first busy tick.
+    submitted_at: datetime | None = None
+    last_stall_log_at: datetime | None = None
 
 
 class LiveDecisionDriver:
@@ -218,11 +233,13 @@ class LiveDecisionDriver:
         self._cycle_interval = cycle_interval
         self._mode = mode
         self._inflight: _InFlight | None = None
+        self._paused_for_latch = False  # one log line per manual-latch pause episode
 
     def pump(self) -> str | None:
         """Advance the decision cycle one non-blocking step; return an event tag."""
         now = self._clock.now()
         if self._worker.busy:
+            self._maybe_warn_stalled(now)
             return None
         if self._inflight is not None:
             # One guard for the whole in-flight lifecycle (collect + gate): ANY error
@@ -252,9 +269,27 @@ class LiveDecisionDriver:
                 return self._fail_closed(exc.error_type, exc.message)
             except Exception as exc:  # noqa: BLE001 — a bug must still fail the cycle closed
                 return self._fail_closed(None, f"non-retryable: {exc!r}")
-        if self._due(now):
-            return self._start(now)
-        return None
+        if not self._due(now):
+            return None
+        # A standing §13.5 manual latch means a human must intervene and every
+        # target would be refused at the manual_safe_mode gate line — skip the
+        # multi-agent LLM spend entirely (decided 2026-07-22). Only NEW starts
+        # are skipped: an already-in-flight decision above still collects and
+        # gates (its refusal records the §4.1 rejected row). next_decision_at
+        # never advances while paused, so release starts a FRESH cycle at once.
+        if self._manual_latched():
+            if self._paused_for_latch:
+                return None
+            self._paused_for_latch = True
+            logger.info(
+                "decision cycle due, but a manual safe-mode latch is standing — "
+                "skipping the LLM call until a human releases it (§13.6)"
+            )
+            return "decision_paused"
+        if self._paused_for_latch:
+            self._paused_for_latch = False
+            logger.info("manual safe-mode latch released — decision cycles resume")
+        return self._start(now)
 
     def resume_startup(self) -> str | None:
         """§3.1 restart adoption of a stranded ``in_progress`` attempt.
@@ -336,6 +371,39 @@ class LiveDecisionDriver:
 
     # -- cycle steps ----------------------------------------------------------
 
+    def _maybe_warn_stalled(self, now: datetime) -> None:
+        """Warn on a cadence while the in-flight LLM call outlives all expectation.
+
+        Visibility only (decided 2026-07-22): after ``_STALL_WARN_AFTER`` of
+        worker-busy, log every ``_STALL_REWARN_EVERY`` so a wedged SDK call is
+        distinguishable from a quiet market without inspecting
+        ``decision_attempts``. Never forces the cycle — see the module-level
+        constants for why v1 must not abandon-and-respawn the worker.
+        """
+        inflight = self._inflight
+        if inflight is None or inflight.submitted_at is None:
+            return
+        elapsed = now - inflight.submitted_at
+        if elapsed < _STALL_WARN_AFTER:
+            return
+        last = inflight.last_stall_log_at
+        if last is not None and now - last < _STALL_REWARN_EVERY:
+            return
+        inflight.last_stall_log_at = now
+        logger.warning(
+            "live decision %s has been in flight for %.0f minutes — the LLM call "
+            "may be hung; the run makes no new trading decisions until it returns "
+            "(ticks, kill switch and SL/TP keep running). v1 does not force a "
+            "deadline (PR 6).",
+            inflight.attempt_id,
+            elapsed.total_seconds() / 60,
+        )
+
+    def _manual_latched(self) -> bool:
+        """Whether a §13.5 manual safe-mode latch is standing (scheduler_state)."""
+        state = repo.get_scheduler_state(self._db.conn, self._run_id)
+        return state is not None and state["safe_mode_type"] == "manual"
+
     def _due(self, now: datetime) -> bool:
         state = repo.get_scheduler_state(self._db.conn, self._run_id)
         if state is None or state["next_decision_at"] is None:
@@ -395,6 +463,7 @@ class LiveDecisionDriver:
             # fails. _inflight is already set, so fail it CLOSED like any other
             # start failure; the next due cycle submits a fresh worker thread.
             return self._fail_closed(None, f"non-retryable: {exc!r}")
+        self._inflight.submitted_at = now
         return "cycle_started"
 
     def _collect(self, now: datetime) -> str | None:

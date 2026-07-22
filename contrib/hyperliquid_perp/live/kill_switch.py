@@ -53,7 +53,12 @@ from .config import KillSwitchConfig
 from .order_gate import RealOrderGate
 from .orders import local_status_for_exchange_status, parse_order_status
 
-__all__ = ["KillSwitchManager", "kill_switch_timing_violation", "network_timeout_warning"]
+__all__ = [
+    "KillSwitchManager",
+    "kill_switch_timing_violation",
+    "network_timeout_warning",
+    "sl_repair_delay_warning",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +156,31 @@ def network_timeout_warning(timeout: float | None, max_tick_gap_seconds: float) 
         "degraded network can push the §18.2 refresh past the exchange-side "
         "deadline and cancel the resting SL/TP. Set network_timeout_s below "
         f"{max_tick_gap_seconds:g} in the config for headroom."
+    )
+
+
+def sl_repair_delay_warning(delay_seconds: float, max_tick_gap_seconds: float) -> str | None:
+    """The SL-repair-ladder sibling of :func:`network_timeout_warning` (advisory).
+
+    ``protection._maybe_delay`` sleeps the FULL configured
+    ``sl_repair_retry_delay_seconds`` between repair attempts and only refreshes
+    the kill switch AFTER the sleep — so a delay at or above the
+    ``max_tick_gap_seconds`` promise stretches the refresh gap during an SL
+    repair episode, the one window where the position has no valid stop. Push it
+    past the scheduleCancel budget and the dead man's switch cancels every
+    resting order mid-repair. Config only enforces ``> 0``; like its sister
+    this is a warn-not-refuse preflight, with the hard construction-time
+    invariant deferred to PR 6. The default (5s vs 30s) never warns.
+    """
+    if delay_seconds < max_tick_gap_seconds:
+        return None
+    return (
+        f"live.protection.sl_repair_retry_delay_seconds ({delay_seconds:g}) is "
+        f"not below the kill switch's max tick gap ({max_tick_gap_seconds:g}s) "
+        "— the repair ladder sleeps that long between attempts while the "
+        "position has no valid stop, and can push the §18.2 refresh past the "
+        "exchange-side deadline, cancelling every resting order mid-repair. "
+        f"Set it below {max_tick_gap_seconds:g} for headroom."
     )
 
 

@@ -609,6 +609,13 @@ cleanup_cancel
 衝突。emergency_close 若攤成 60 分鐘，會讓系統在判定需要緊急平倉後，
 仍暴露在市場風險下長達一小時。
 
+> **v1 註記（2026-07-22 拍板）**：AI 決策的平倉目標（flat target）**不是**本節的
+> `close` role——它走 reduce-only rebalance-to-zero 路徑（切片 TWAP，與 paper
+> 同基準、平倉期間仍有 SL 保護），摩擦最低；殘量到期誠實 `expired`。`close`
+> role 在 v1 沒有任何發射路徑，保留給未來的保護性平倉情境。本節的立即成交
+> 規則實際生效的是 stop_loss / take_profit（trigger 單火線）與
+> emergency_close（單張 aggressive IOC）。
+
 ### 9.5 為什麼不是 native TWAP（v3 決策依據，2026-07-11 查證）
 
 v2 原定 native TWAP，v3 改為自管切片。查證到的事實：
@@ -1356,6 +1363,7 @@ safe_mode_entered_at
 day_start_equity          # §10.3 daily loss cap 的當日基準
 day_start_date            # UTC 日期
 consecutive_loss_count    # §10.4
+last_settlement_wallet_balance  # §10.4 segment 淨損益的錨（schema v7）
 ```
 
 ## 17. Stop Loss / Take Profit Protection
@@ -1523,6 +1531,20 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    （`network_timeout_warning`，與硬檢查 `kill_switch_timing_violation`
    併排、純函式可單測）。硬性建構期不變量（把每筆呼叫逾時納入
    承諾檢查）與 live 專屬逾時延後 PR 6 網路層重做時一併處理。
+   同族的 `sl_repair_retry_delay_seconds`（修復梯每次 sleep 完才 tick）也有
+   姊妹 advisory（`sl_repair_delay_warning`，2026-07-22）。
+
+   **殘餘風險的兩個具名 fan-out 貢獻者（PR 5 盤點，2026-07-22——即使
+   `network_timeout_s` 過了 advisory，乘數仍可拖爆 gap；PR 6 網路層重做的
+   收斂清單）：**
+   (1) **決策 cycle 的 `build_input`**：`driver.pump()` 在 tick thread 上做
+   `_build_context`——新建 SDK client（建構即抓 perp meta）＋ snapshot／candles／
+   funding 三讀，~4 筆連續 REST、中間無 kill-switch 刷新；最壞 ≈ 4×
+   `network_timeout_s`（預設值下 ~120s）。每 ~4h 一次（含 retry/resume）。
+   (2) **reconciler 單 pass 的呼叫數乘數**：open-orders＋clearinghouse＋fill
+   backfill 分頁＋每張 terminal/absent 單的 `orderStatus` 查詢——單筆皆有界，
+   但筆數由 `max_open_orders` 與分頁上限驅動，未對 kill-switch 預算驗證；
+   post-fill／heartbeat／protection-change 都會跑。
 
    **`max_tick_gap_seconds` 的語意要照字面讀：兩次 tick() 之間的最壞牆鐘時間，不是
    sleep 間隔**（v7 新增，2026-07-13）。既有 `_paper_loop`（cli.py）的一輪是

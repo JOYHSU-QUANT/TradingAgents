@@ -30,8 +30,10 @@ applies the §10.1/§10.5 live checks, and registers a rebalance plan or a
 sequential flip's close leg. Slice math is ``twap.build_slice_plan``; each slice
 is an IOC limit ±``max_slippage_pct`` (§9.2); an IOC's unfilled remainder is not
 re-sent (§9.2 rule 2) and the plan terminates ``expired`` with the residual at
-its deadline. ``close`` / ``emergency_close`` never slice (§9.4): a single
-aggressive reduce-only IOC.
+its deadline. ``emergency_close`` never slices (§9.4): a single aggressive
+reduce-only IOC. An AI flat target is NOT a §9.4 ``close``: it routes as a
+reduce-only rebalance to zero — sliced, paper-parity, SL-protected while it
+unwinds (decided 2026-07-22; §9.4's ``close`` role has no emitter in v1).
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ from enum import Enum
 
 from ..domains.perp.margin import DECIMAL_CONTEXT
 from ..domains.perp.risk_gate import (
+    NO_ORDER_ZERO_DELTA,
     CurrentPositionState,
     RiskConfig,
     RiskGateResult,
@@ -88,7 +91,7 @@ _HEARTBEAT = timedelta(minutes=5)
 # backfill and the position can drift while the SL stays stale.
 _NO_MARKET_DATA_SAFE_MODE_TICKS = 12
 
-# §9.4: close / emergency_close is an AGGRESSIVE reduce-only IOC — its whole
+# §9.4: emergency_close is an AGGRESSIVE reduce-only IOC — its whole
 # purpose is to cut risk immediately, so it must actually clear in the violent
 # move that triggered it. A routine slice's ±0.5% band can fail to fill exactly
 # then, leaving the position open and (post no-safe-SL) unprotected. This wider
@@ -100,6 +103,17 @@ _EMERGENCY_SLIPPAGE_PCT = Decimal("0.03")
 # Per-request market-data timeout. Bounded (never None) so a hung fetch cannot
 # stall the tick thread and starve the §18.2 kill-switch refresh.
 _MARKET_DATA_TIMEOUT_S = Decimal(10)
+
+# The no-order reason start_plan mints when the plan grid yields no legal slice.
+# No shared home exists for it (zero_delta's is the risk gate's no_order_reason
+# vocabulary) — one constant here feeds both producers and the structural-
+# decline branch below, so a typo cannot silently demote a structural flip
+# decline into the every-tick transient-retry path.
+_NO_LEGAL_SLICE = "no_legal_slice"
+
+# §9.1 rule 5: the two STRUCTURAL open-leg declines — nothing about them changes
+# within the flip envelope, so _maybe_advance_flip abandons instead of retrying.
+_STRUCTURAL_DECLINE_REASONS = frozenset({NO_ORDER_ZERO_DELTA, _NO_LEGAL_SLICE})
 
 
 class _SliceOutcome(Enum):
@@ -136,9 +150,16 @@ class _Leg:
         return len(self.slice_sizes)
 
 
-@dataclass
+@dataclass(frozen=True)
 class _PendingFlip:
-    """A flip whose open leg waits for the close leg to reach flat (§9.1 rule 5)."""
+    """A flip whose open leg waits for the close leg to reach flat (§9.1 rule 5).
+
+    Frozen like its sibling value objects (:class:`PlanRegistration`,
+    :class:`LiveTickResult`): created once when the close leg registers and only
+    ever replaced wholesale (``self._flip = ...``), never patched in place — so
+    the in-memory flip can never drift from what was audited at flip-open time.
+    (``_Leg`` stays mutable on purpose: its ``submitted`` cursor advances.)
+    """
 
     flip_plan_id: str
     parsed: ParsedDecision
@@ -810,7 +831,7 @@ class LiveExecutionEngine:
             position_size=position.size,
         )
         if delta.side is None:
-            return PlanRegistration(gate, None, None, "zero_delta")
+            return PlanRegistration(gate, None, None, NO_ORDER_ZERO_DELTA)
         reduce_only = position.size != 0 and delta.signed_delta_size * position.size < 0
         role = "rebalance" if position.size != 0 else "entry"
         # A flip's open leg shares the flip's ONE plan envelope and slice budget
@@ -911,11 +932,11 @@ class LiveExecutionEngine:
                     remaining_qty=plan.total_qty,
                     residual_qty=plan.total_qty,
                     rounding_residual_qty=plan.rounding_residual_qty,
-                    status_reason="no_legal_slice",
+                    status_reason=_NO_LEGAL_SLICE,
                 )
             # (A close leg landing here needs no flip cleanup: _start_flip
             # assigns self._flip only AFTER a successful registration.)
-            return PlanRegistration(gate, plan_id, PlanDisposition.REJECT, "no_legal_slice")
+            return PlanRegistration(gate, plan_id, PlanDisposition.REJECT, _NO_LEGAL_SLICE)
         if deadline is None:
             deadline = now + self._plan_lifetime
         with self._db.transaction() as conn:
@@ -1036,7 +1057,7 @@ class LiveExecutionEngine:
             # The open leg registered — the flip is complete.
             self._flip = None
             events.append(f"flip_open:{flip.flip_plan_id}:{reg.plan_id}")
-        elif reg.reason in ("no_legal_slice", "zero_delta"):
+        elif reg.reason in _STRUCTURAL_DECLINE_REASONS:
             # A STRUCTURAL decline won't change within the envelope (the open leg is
             # too small to slice, or there is nothing left to open) — abandon now
             # rather than re-inserting a rejected plan row every tick to the deadline.

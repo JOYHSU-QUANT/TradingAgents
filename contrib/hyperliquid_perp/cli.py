@@ -1208,6 +1208,27 @@ def _live_startup_recovery(
                     # release runs (and no-ops).
                     logger.info("lease takeover — §18.2 shutdown sweep skipped")
                 else:
+                    # §12.2 rule 8 (the --loop path): the loop has been placing
+                    # orders since the startup verdict pass — reconcile once
+                    # more so the sweep below works from fresh exchange state.
+                    # Runs FIRST, before the position/safe-mode reads below:
+                    # this pass can itself ENTER safe mode (an unclean final
+                    # reconcile), and a keep decision computed from the
+                    # pre-reconcile snapshot would strip SL/TP at exactly the
+                    # moment the problem was found. Best-effort: a failure must
+                    # not block the sweep.
+                    if args.loop:
+                        try:
+                            reconciler.reconcile_and_apply(
+                                "shutdown",
+                                safe_mode=safe_mode,
+                                ws_restored=True,
+                                kill_switch_active=not kill_switch.stop_new_orders,
+                            )
+                        except Exception:  # noqa: BLE001
+                            logger.exception(
+                                "§12.2 pre-shutdown reconciliation failed (sweep proceeds)"
+                            )
                     # Decided 2026-07-16, revised 2026-07-22: on a PASSING
                     # verdict the §18.2 semantics stand (shutdown cancels ALL
                     # bot-owned orders, the §19.3-kept SL/TP included), but
@@ -1290,22 +1311,6 @@ def _live_startup_recovery(
                                 "is UNPROTECTED after exit until a --loop run "
                                 "or manual action re-covers it.",
                                 file=sys.stderr,
-                            )
-                    # §12.2 rule 8 (the --loop path): the loop has been placing
-                    # orders since the startup verdict pass — reconcile once more
-                    # so the sweep below works from fresh exchange state.
-                    # Best-effort: a failure must not block the sweep.
-                    if args.loop:
-                        try:
-                            reconciler.reconcile_and_apply(
-                                "shutdown",
-                                safe_mode=safe_mode,
-                                ws_restored=True,
-                                kill_switch_active=not kill_switch.stop_new_orders,
-                            )
-                        except Exception:  # noqa: BLE001
-                            logger.exception(
-                                "§12.2 pre-shutdown reconciliation failed (sweep proceeds)"
                             )
                     # Leave nothing resting behind a dead man's switch nobody
                     # will refresh — except the deliberately-kept SL/TP when

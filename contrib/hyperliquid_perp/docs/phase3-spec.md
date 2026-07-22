@@ -561,7 +561,10 @@ sell limit = mid_price × 0.995
    觸及）wire 的結果——ack、交易所拒絕、ambiguous 送單失敗（§8.3 冪等層以同
    cloid 查證定讞）——cursor 一律前進、不重送。plan deadline 照常束縛：被 gate
    擋到期的 plan 誠實 terminal `expired`（殘量記 `residual_qty`），不得記成
-   completed。同一原則涵蓋 **pre-wire 本地 store 故障（PR 5 修訂，2026-07-21）**：
+   completed。**deadline 是硬信封（PR 5 修訂，2026-07-22，使用者拍板）**：到期
+   當下那個 tick（含斷線／safe-mode 暫停跨越 deadline 後恢復的第一個 tick）
+   **先判到期、不送單**——切片的 size 與方向來自一個已超出整個 plan envelope 的
+   決策，不得再上鏈；flip 預算收斂到 2 張時，那最後一張可能是半個倉位。同一原則涵蓋 **pre-wire 本地 store 故障（PR 5 修訂，2026-07-21）**：
    submitter 在 network call 之前的 §8.3 pre-check 讀取或 intent transaction 因
    transient SQLite 錯誤失敗（`LiveOrderPreSubmitError`）時，什麼都沒送、也沒留
    任何 evidence row——cursor 同樣停在原地（事件 `slice_held`）、下一 tick 以同
@@ -651,6 +654,14 @@ daily loss cap not breached（§10.3）
 consecutive loss cap not breached（§10.4）
 open order count below max_open_orders（§10.5）
 ```
+
+**Live-only 拒絕必須留痕（PR 5 修訂，2026-07-22，使用者拍板）**：RiskGate 已核准
+（ai_outputs 記 `order_created=1`）而被 live 檢查擋下的三類拒絕——§10.1 notional
+cap、§10.5 open-order cap、§4.1 gate line——各插一筆 `rejected` execution_plans
+row（`status_reason` 帶拒絕原因、以 `output_id` 連回決策、數量欄 NULL）＋一行
+warning log，與 `no_legal_slice` 對稱；§10.1 觸發代表 gate sizing 超過 live
+上限，是最需要留痕的事件。flip open-leg 的每-tick 重試路徑不插 row（已有
+`flip_open_pending` 事件逐 tick 可見，避免 row 洪水）。
 
 ### 10.2 AI / API Failure
 
@@ -1597,15 +1608,23 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    （v6 新增，2026-07-13）。
 7. 正常 shutdown 預設不強制平倉。
 8. 持倉繼續依靠既有 SL protection。
-   **附註——unclean 啟動裁決的保留豁免（2026-07-22，使用者拍板）**：§19.1 啟動裁決
-   **未通過**（或 recovery 直接拋錯）而帳戶持倉（或倉位讀不到——unknown ≠ flat）時，
-   rule 5 的 cancel sweep **保留** resting SL / TP（reduce-only）不取消，只掃其餘
-   bot 單；保留單計入「已處理」不算 failure，且 rule 6 的 disarm 照做——不 disarm
-   的話全錢包 scheduleCancel 會在 deadline 把保留的 SL / TP 一併掃掉，保留就毫無
-   意義。動機：裁決失敗正是修復機制（safe mode 下 SL repair、§13.4 自動解除）無法
-   啟動的時候，剝掉 reduce-only 保護等於拿 unclean verdict 換一個裸倉。保留的
-   SL / TP 之後無人看管（reduce-only，只會減倉），直到 `--loop` 重跑重新接管或人工
-   處理。通過的裁決（含 --loop 正常退出）維持原語意：全部取消＋stderr 警告。
+   **附註——unclean 出場的保留豁免（2026-07-22，使用者拍板；同日擴充）**：§19.1
+   啟動裁決**未通過**（或 recovery 直接拋錯）、**或 --loop 出場當下 safe mode 仍
+   active**（開機裁決在長跑後已過期——中途 latch 的 manual safe mode 會讓下次開機
+   裁決拒絕啟動，正是保留要防的情境），而帳戶持倉（或倉位讀不到——unknown ≠
+   flat）時，rule 5 的 cancel sweep **保留** resting SL / TP（reduce-only）不
+   取消，只掃其餘 bot 單；保留單計入「已處理」不算 failure，且 rule 6 的 disarm
+   照做——不 disarm 的話全錢包 scheduleCancel 會在 deadline 把保留的 SL / TP 一併
+   掃掉，保留就毫無意義。保留豁免同時作用於 rule 6 的本地交叉檢查：kept-role 的
+   本地非終態 row 若因 open_orders 快照過舊而缺席、但 `orderStatus` **正面確認**
+   仍活著，計入保留、不擋 disarm；問不到（查詢拋錯或枚舉失敗）仍照舊擋 disarm
+   （fail-safe 姿態不變）。動機：裁決失敗正是修復機制（safe mode 下 SL repair、
+   §13.4 自動解除）無法啟動的時候，剝掉 reduce-only 保護等於拿 unclean verdict
+   換一個裸倉。保留的 SL / TP 之後無人看管（reduce-only，只會減倉），直到
+   `--loop` 重跑重新接管或人工處理。通過的裁決且出場時無 safe mode（含 --loop
+   正常退出）維持原語意：全部取消＋stderr 警告；--loop 出場時 safe mode 仍
+   active 者除保留 SL / TP 外，exit code 亦回 4（executed-but-unclean，不得對
+   supervisor 報 0——與一次性路徑裁決發現 safe mode 時的 exit 4 同一慣例）。
 9. **Lease 被接管的 process 不執行 shutdown sweep（PR 5 修訂，2026-07-21）**：
    `--loop` 的 lease heartbeat 拋出 `RunLockError`（此 pid 已被較新 process 取代）
    時，繼任 process 已擁有該 run 的 store、resting orders（含 SL/TP）與全錢包

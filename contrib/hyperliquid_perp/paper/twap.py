@@ -298,9 +298,12 @@ def split_flip_budget(
     share, and the two shares sum to exactly ``total_budget``. With a budget of
     at least 2, each leg is guaranteed one slice when its quantity is positive (a
     leg that must trade is never starved to zero budget); a zero-quantity leg
-    gets zero, and a budget of 1 goes entirely to the close leg (the engine
-    always passes the full 120). The per-leg :func:`build_slice_plan` still
-    floors the share to what the leg's own ``min_order_qty`` can legally fund.
+    gets zero, and a budget of 1 goes entirely to the close leg. Callers keep a
+    genuine flip off that starved path themselves: the paper engine always
+    passes the full 120, and the live engine passes its config-derived budget
+    floored at 2 (``max(2, _max_slices)``). The per-leg :func:`build_slice_plan`
+    still floors the share to what the leg's own ``min_order_qty`` can legally
+    fund.
     """
     if not 1 <= total_budget <= MAX_SLICES:
         raise ValueError(f"total_budget must be in 1..{MAX_SLICES}, got {total_budget}")

@@ -502,8 +502,11 @@ class LiveExecutionEngine:
             # not re-score the segment — the anchor already moved, so a
             # duplicate would read segment_pnl=0 (a "non-loss") and RESET the
             # consecutive-loss streak the first call just recorded.
-            # (record_settlement itself raising rolls back atomically: the
-            # cursor stays put and the next tick retries the whole step.)
+            # (record_settlement raising is retry-safe by ordering: the §10.4
+            # escalation latches BEFORE its anchor/count commit — that commit
+            # is the last fallible step, so a raise leaves the anchor unmoved
+            # and this cursor stays put; the next tick re-scores the same
+            # segment instead of reading a moved anchor as break-even.)
             self._was_flat = True
         if is_flat and self._emergency_close_pending:
             # §13.5: a §17.2 emergency close has now reached flat — escalate to
@@ -566,7 +569,14 @@ class LiveExecutionEngine:
         if leg is None:
             return 0
         submitted = 0
-        if leg.submitted < self._due_count(leg, now):
+        if leg.submitted < self._due_count(leg, now) and now < leg.deadline:
+            # The deadline is a HARD envelope (decided 2026-07-22): a slice's
+            # size and direction come from a decision older than the whole plan
+            # window, so the first tick at/past the deadline expires the plan
+            # (below) rather than sending one last stale slice. This matters
+            # most when an outage or safe-mode pause spans the deadline — the
+            # recovery tick must not fire a leftover slice (for a flip's
+            # 2-slice budget that could be half the position) before expiring.
             # At most ONE slice attempt per tick: the configured inter-slice
             # pacing is the schedule, and a catch-up after a stall re-sends at
             # one-per-tick rather than bursting the whole backlog at one price.
@@ -731,7 +741,7 @@ class LiveExecutionEngine:
         # §10.1 hard notional cap.
         if self._loss_guards.notional_exceeds_cap(gate.target_notional):
             self._gate.risk_gate_approved = False
-            return PlanRegistration(gate, None, None, "max_notional_usdc")
+            return self._record_live_refusal(gate, "max_notional_usdc", output_id, flip_open)
 
         # §10.5 max open orders: count bot-owned exchange orders and refuse a new
         # plan at/over the cap. A read failure is fail-closed — an unknowable count
@@ -743,12 +753,12 @@ class LiveExecutionEngine:
             if open_orders is not None:
                 self._reconcile("mismatch")
             self._gate.risk_gate_approved = False
-            return PlanRegistration(gate, None, None, "max_open_orders")
+            return self._record_live_refusal(gate, "max_open_orders", output_id, flip_open)
 
         # §4.1 full new-target gate (wire + decision conditions in one place).
         reason = self._gate.check_new_target(self._coin)
         if reason is not None:
-            return PlanRegistration(gate, None, None, reason)
+            return self._record_live_refusal(gate, reason, output_id, flip_open)
 
         is_flip = (
             position.size != 0
@@ -758,6 +768,40 @@ class LiveExecutionEngine:
         if is_flip:
             return self._start_flip(parsed, gate, position, snap, output_id)
         return self._start_rebalance(gate, position, snap, output_id, flip_open)
+
+    def _record_live_refusal(self, gate, reason: str, output_id, flip_open) -> PlanRegistration:
+        """§10.1/§10.5/§4.1: a live check refused a gate-APPROVED target (2026-07-22).
+
+        The RiskGate said yes, so the ai_outputs row reads ``order_created=1``
+        with no refusal reason of its own — without a trace here the refusal is
+        invisible everywhere (and a §10.1 hit means the gate sized past the
+        live ceiling, the single most report-worthy refusal). Mirror
+        ``no_legal_slice``: one warning plus a rejected execution_plans row
+        whose ``status_reason`` carries the refusal; quantities stay NULL — no
+        plan was ever built to quantify.
+
+        A flip open-leg retry (``flip_open`` set) skips the row: that path
+        re-gates every tick inside the flip envelope and already surfaces per
+        tick as ``flip_open_pending`` events — a row per tick would spam the
+        table (the r5 ``no_legal_slice`` lesson).
+        """
+        if flip_open is not None:
+            return PlanRegistration(gate, None, None, reason)
+        logger.warning("live check refused the gate-approved target: %s", reason)
+        plan_id = self._next_order_id("plan")
+        with self._db.transaction() as conn:
+            repo.insert_execution_plan(
+                conn,
+                plan_id=plan_id,
+                run_id=self._run_id,
+                symbol=self._coin,
+                status="rejected",
+                created_at=self._clock.now(),
+                output_id=output_id,
+                planned_slices=0,
+                status_reason=reason,
+            )
+        return PlanRegistration(gate, plan_id, PlanDisposition.REJECT, reason)
 
     def _start_rebalance(self, gate, position, snap, output_id, flip_open=None) -> PlanRegistration:
         delta = rebalance_delta(
@@ -807,7 +851,7 @@ class LiveExecutionEngine:
         )
         flip_plan_id = self._next_order_id("flip")
         deadline = self._clock.now() + self._plan_lifetime
-        self._flip = _PendingFlip(
+        pending = _PendingFlip(
             flip_plan_id=flip_plan_id,
             parsed=parsed,
             output_id=output_id,
@@ -823,7 +867,7 @@ class LiveExecutionEngine:
             mid=snap.mid_price,
             max_slices=close_budget,
         )
-        return self._register_leg(
+        reg = self._register_leg(
             plan,
             gate=gate,
             output_id=output_id,
@@ -833,6 +877,15 @@ class LiveExecutionEngine:
             flip_leg="close",
             deadline=deadline,
         )
+        if reg.reason is None:
+            # The pending flip exists only once its close leg COMMITTED — the
+            # same invariant-before-fallible-write rule as _emergency_close's
+            # flip clearing. Set before the registration, a DB raise inside it
+            # would strand a phantom in-memory flip with no plan row for
+            # _warn_orphan_flip_close_leg to find on restart, silently
+            # supersede-able by the next decision.
+            self._flip = pending
+        return reg
 
     def _register_leg(
         self, plan, *, gate, output_id, reduce_only, order_role, flip_plan_id, flip_leg, deadline
@@ -860,8 +913,8 @@ class LiveExecutionEngine:
                     rounding_residual_qty=plan.rounding_residual_qty,
                     status_reason="no_legal_slice",
                 )
-            if flip_leg == "close":
-                self._flip = None
+            # (A close leg landing here needs no flip cleanup: _start_flip
+            # assigns self._flip only AFTER a successful registration.)
             return PlanRegistration(gate, plan_id, PlanDisposition.REJECT, "no_legal_slice")
         if deadline is None:
             deadline = now + self._plan_lifetime
@@ -971,7 +1024,14 @@ class LiveExecutionEngine:
         # must be down for check_new_target to admit it; _register_leg raises it
         # again on success.
         self._gate.active_slice_plan = False
-        reg = self.start_plan(flip.parsed, output_id=flip.output_id, flip_open=flip)
+        try:
+            reg = self.start_plan(flip.parsed, output_id=flip.output_id, flip_open=flip)
+        except BaseException:
+            # Restore the envelope guard before the tick guard contains this:
+            # left False, a fresh AI target could slip in mid-flip while the
+            # pending flip retries — the exact hole the flag exists to close.
+            self._gate.active_slice_plan = True
+            raise
         if self._leg is not None:
             # The open leg registered — the flip is complete.
             self._flip = None

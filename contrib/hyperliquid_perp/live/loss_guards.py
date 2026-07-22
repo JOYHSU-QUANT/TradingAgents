@@ -281,6 +281,26 @@ class LossGuards:
             segment_pnl = wallet_balance - Decimal(stored_anchor)
         is_loss = segment_pnl < 0
         count = prior_count + 1 if is_loss else 0
+        # §10.4 rule 3 escalation BEFORE the anchor/count commit (2026-07-22).
+        # The engine retries this whole step next tick only while it raises,
+        # and the retry re-reads the STORED anchor — committed first, a failing
+        # enter() would hand that retry a moved anchor, a break-even segment
+        # and a count silently reset to 0: the manual breaker lost. Latched
+        # first, both crash directions converge: enter() failing leaves
+        # anchor+count untouched (the retry re-scores the same segment), and
+        # the commit failing after a successful enter() retries into an
+        # idempotent enter().
+        entered_manual = False
+        if count >= self._safety.max_consecutive_loss_count:
+            entered_manual = self._safe_mode.enter(
+                "manual",
+                REASON_CONSECUTIVE_LOSS,
+                detail=(
+                    f"{count} consecutive losing settlements "
+                    f"(>= {self._safety.max_consecutive_loss_count}); "
+                    f"last segment_pnl={segment_pnl}"
+                ),
+            )
         with self._db.transaction() as conn:
             repo.upsert_scheduler_state(
                 conn,
@@ -295,17 +315,6 @@ class LossGuards:
             "loss" if is_loss else "gain/flat",
             count,
         )
-        entered_manual = False
-        if count >= self._safety.max_consecutive_loss_count:
-            entered_manual = self._safe_mode.enter(
-                "manual",
-                REASON_CONSECUTIVE_LOSS,
-                detail=(
-                    f"{count} consecutive losing settlements "
-                    f"(>= {self._safety.max_consecutive_loss_count}); "
-                    f"last segment_pnl={segment_pnl}"
-                ),
-            )
         return SettlementResult(
             segment_pnl=segment_pnl,
             is_loss=is_loss,

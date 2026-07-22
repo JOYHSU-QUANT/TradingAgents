@@ -1138,8 +1138,12 @@ def _live_startup_recovery(
             shutdown_problem: str | None = None
             superseded = False
             # False until the §19.1 verdict PASSES — a recovery that raised
-            # counts as unclean too, and the ``finally`` sweep below keys its
-            # keep-the-SL/TP decision off this (decided 2026-07-22).
+            # counts as unclean too. The ``finally`` sweep below keys its
+            # keep-the-SL/TP decision off this OR'd with the EXIT-TIME safe
+            # mode (both decided 2026-07-22): over a --loop run the boot
+            # verdict goes stale, and safe mode latched mid-loop means the
+            # next boot's verdict will refuse to start — exactly the
+            # "no repair machinery" case the keep exists for.
             verdict_passed = False
             try:
                 result = run_startup_recovery(
@@ -1207,8 +1211,10 @@ def _live_startup_recovery(
                     # Decided 2026-07-16, revised 2026-07-22: on a PASSING
                     # verdict the §18.2 semantics stand (shutdown cancels ALL
                     # bot-owned orders, the §19.3-kept SL/TP included), but
-                    # never silently over a live position. On an UNCLEAN
-                    # verdict (failed, or recovery raised) the sweep now KEEPS
+                    # never silently over a live position. On an UNCLEAN exit
+                    # (verdict failed, recovery raised, or safe mode active at
+                    # exit — the boot verdict goes stale over a loop) the sweep
+                    # now KEEPS
                     # the resting SL/TP over a live — or unreadable, and
                     # unreadable ≠ flat is the startup sweep's own rule —
                     # position: stripping reduce-only protection trades an
@@ -1228,14 +1234,27 @@ def _live_startup_recovery(
                     except Exception:  # noqa: BLE001 — the warning must not mask the verdict
                         logger.exception("shutdown position re-read failed")
                         fresh_positions = None
-                    keep_protective = not verdict_passed and (
+                    # Exit-time safe mode is read FRESH for the same reason the
+                    # position is: the boot verdict is stale after a loop. A
+                    # failed read is unknown ≠ clean — fail toward keeping.
+                    try:
+                        exit_safe_mode = safe_mode.active
+                    except Exception:  # noqa: BLE001
+                        logger.exception("shutdown safe-mode read failed")
+                        exit_safe_mode = True
+                    keep_protective = (not verdict_passed or exit_safe_mode) and (
                         fresh_positions is None or bool(fresh_positions)
+                    )
+                    unclean_note = (
+                        "the startup verdict did not pass"
+                        if not verdict_passed
+                        else "safe mode is active at exit"
                     )
                     if fresh_positions is None:
                         if keep_protective:
                             print(
                                 "WARNING: positions could NOT be re-read at shutdown "
-                                "(unknown ≠ flat) and the startup verdict did not pass "
+                                f"(unknown ≠ flat) and {unclean_note} "
                                 "— the §18.2 shutdown sweep leaves the bot's resting "
                                 "SL/TP STANDING (reduce-only) and cancels other bot "
                                 "orders. Re-run with --loop, or intervene manually.",
@@ -1257,7 +1276,7 @@ def _live_startup_recovery(
                         if keep_protective:
                             print(
                                 f"WARNING: the account holds a live position ({held}) "
-                                "and the startup verdict did not pass — the §18.2 "
+                                f"and {unclean_note} — the §18.2 "
                                 "shutdown sweep leaves the bot's resting SL/TP "
                                 "STANDING (reduce-only) and cancels other bot orders. "
                                 "Re-run with --loop, or intervene manually.",
@@ -1352,6 +1371,19 @@ def _live_startup_recovery(
                     # "§18.2 shutdown unclean" line above carries the detail).
                     return 4
                 if args.loop:
+                    if state is not None:
+                        # Sibling of the keep decision (2026-07-22): the boot
+                        # verdict is stale after a loop, and a run that latched
+                        # safe mode mid-loop must not hand exit 0 ("all quiet")
+                        # to its supervisor. Same executed-but-unclean code 4
+                        # the one-shot path returns when ITS verdict finds safe
+                        # mode active.
+                        print(
+                            "live loop exited IN SAFE MODE — see safe_mode above; "
+                            "resolve it (manual release if required) before resuming.",
+                            file=sys.stderr,
+                        )
+                        return 4
                     print(
                         "live loop exited — §18.2 shutdown sweep done; re-run "
                         "with --loop to resume this run.",

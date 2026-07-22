@@ -568,6 +568,41 @@ def test_start_fail_record_double_fault_adopts_and_retries(tmp_path, monkeypatch
     assert driver.pump() == "api_failed"  # fresh cycle, clean failure — no crash-loop
 
 
+def test_worker_submit_failure_fails_cycle_closed_and_recovers(tmp_path, monkeypatch):
+    """r13 fix: worker.submit raising (Thread.start under resource pressure) is
+    the one wedge the earlier guards could not catch — the attempt row is
+    in_progress, no thread ever ran, and poll() would answer None forever. The
+    wrapped submit fails the cycle CLOSED like any other start failure, and the
+    next due cycle submits a fresh worker thread."""
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    real_submit = worker.submit
+    boom = {"left": 1}
+
+    def _flaky_submit(decision_input):
+        if boom["left"]:
+            boom["left"] -= 1
+            raise RuntimeError("can't start new thread")
+        return real_submit(decision_input)
+
+    monkeypatch.setattr(worker, "submit", _flaky_submit)
+    assert driver.pump() == "api_failed"  # failed closed, never wedged
+    assert driver._inflight is None
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "api_failed"
+    assert row["error_type"] is None  # a bug, not a §6.2 vocabulary word
+    assert "non-retryable" in (row["error_message"] or "")
+    assert "can't start new thread" in (row["error_message"] or "")
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["next_decision_at"] is not None  # re-anchored
+    assert driver.pump() is None  # not due — no per-tick crash-loop
+    # A later due cycle starts FRESH (a new worker thread), not wedged on the
+    # never-started one.
+    clock.set(parse_instant(state["next_decision_at"]))
+    assert driver.pump() == "cycle_started"
+    _await(worker)
+    assert driver.pump() == "completed"
+
+
 # -- R4 loop: shutdown salvage of a completed-but-unpolled decision -----------
 
 

@@ -1452,4 +1452,56 @@ def test_default_shutdown_still_cancels_protective_orders(env):
     assert [c[1] for c in client.cancel_calls] == [_HEX, _HEX2]
     detail = json.loads(repo.iter_kill_switch_events(db.conn, "r")[-2]["detail"])
     assert detail["canceled"] == ["1", "2"]
-    assert detail["kept_protective"] == []
+
+
+def test_keep_protective_confirmed_live_local_sl_counts_kept_not_failed(env):
+    # r13 keep-awareness in the CROSS-CHECK leg: keep_protective + a kept-role
+    # row ABSENT from a stale open_orders() read but POSITIVELY confirmed still
+    # live by orderStatus is a keep found via the local record — appended to
+    # kept_protective and handled, never a failure — so the rule-6 disarm still
+    # lands instead of leaving the wallet-wide trigger armed to sweep the very
+    # SL the keep exists to protect.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _live_order(db, order_id="sl1", cloid_hex=_HEX, role="stop_loss")
+    client.open_orders_result = []  # stale view: the resting SL is missing
+    client.order_status_results = {
+        _HEX: {"status": "order", "order": {"order": {"oid": 900}, "status": "resting"}}
+    }
+
+    manager.shutdown(keep_protective=True)
+
+    assert client.order_status_calls == [_HEX]  # confirmed, never assumed
+    assert client.cancel_calls == []  # kept, not cancelled
+    detail = json.loads(repo.iter_kill_switch_events(db.conn, "r")[-2]["detail"])
+    assert detail["kept_protective"] == ["sl1"]  # by order_id: found locally
+    assert detail["failures"] == []
+    # The rule-6 disarm proceeded, same as the enumeration-listed keep.
+    assert client.clear_calls == 1
+    assert not manager.armed
+    assert _event_types(db)[-1] == "kill_switch_disarmed"
+
+
+def test_keep_protective_unconfirmable_local_sl_still_blocks_the_disarm(env):
+    # Only the POSITIVE confirmation earns the keep exemption: when the
+    # orderStatus query itself raises, the kept-role row is unconfirmable —
+    # unaccounted-for, the fail-safe posture unchanged — and the disarm is
+    # blocked exactly as for any other order.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _live_order(db, order_id="sl1", cloid_hex=_HEX, role="stop_loss")
+    client.open_orders_result = []
+    client.order_status_results = {_HEX: ExchangeRequestError("info node down")}
+
+    manager.shutdown(keep_protective=True)
+
+    assert client.clear_calls == 0
+    assert manager.armed
+    completed = [
+        e
+        for e in repo.iter_kill_switch_events(db.conn, "r")
+        if e["event_type"] == "shutdown_cancel_orders_completed"
+    ][0]
+    detail = json.loads(completed["detail"])
+    assert detail["kept_protective"] == []  # no keep without evidence
+    assert any("could not confirm settled" in f for f in detail["failures"])

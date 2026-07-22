@@ -661,7 +661,12 @@ class KillSwitchManager:
         return True
 
     def _cross_check_local_orders(
-        self, handled_cloids: set[str], *, enumeration_failed: bool
+        self,
+        handled_cloids: set[str],
+        *,
+        enumeration_failed: bool,
+        keep_protective: bool = False,
+        kept_protective: list[str] | None = None,
     ) -> list[str]:
         """Local orders the sweep did not account for — each one blocks the disarm.
 
@@ -678,6 +683,17 @@ class KillSwitchManager:
         sweep's own cancels have already patched their rows terminal, so they drop
         out on their own; anything left is asked about directly. Still live, or
         unconfirmable, counts as a failure — the trigger stays armed.
+
+        ``keep_protective`` (decided 2026-07-22): a kept-role (SL/TP) row that
+        ``orderStatus`` POSITIVELY confirms still live is counted kept — appended
+        to ``kept_protective``, not to the returned unaccounted list — so a stale
+        ``open_orders()`` read (likeliest right after a pre-shutdown modify)
+        cannot block the rule-6 disarm and let the wallet-wide scheduleCancel
+        later sweep exactly the orders the keep exists to protect. Only the
+        positive confirmation earns the exemption: an unconfirmable row (the
+        query raised, or the enumeration failed so no query ran) still blocks
+        the disarm — the fail-safe posture is unchanged where there is no
+        evidence.
 
         ``enumeration_failed`` suppresses the exchange round-trips, and that is a
         LATENCY guard, not a policy one. When ``open_orders()`` has just failed
@@ -722,6 +738,20 @@ class KillSwitchManager:
                 unaccounted.append(f"{order_id}: could not confirm settled: {exc}")
                 continue
             if not settled:
+                if keep_protective and row["order_role"] in _KEEP_PROTECTIVE_ROLES:
+                    # Confirmed live + protective role: this IS a keep, found
+                    # via the local record instead of the (stale) enumeration.
+                    handled_cloids.add(cloid)
+                    if kept_protective is not None:
+                        kept_protective.append(order_id)
+                    logger.warning(
+                        "kill switch shutdown: local protective order %s (cloid %s) "
+                        "confirmed live but absent from open_orders — kept (reduce-only), "
+                        "not counted against the disarm",
+                        order_id,
+                        cloid,
+                    )
+                    continue
                 logger.warning(
                     "kill switch shutdown: local order %s (cloid %s) is still live at the "
                     "exchange but was absent from open_orders",
@@ -753,6 +783,9 @@ class KillSwitchManager:
         scheduleCancel would sweep exactly those kept orders at its deadline.
         They then rest unattended (reduce-only, so they can only shrink the
         position) until a ``--loop`` run re-adopts them or the operator acts.
+        The keep is honored on BOTH accounting legs: the ``open_orders()``
+        enumeration below and the local cross-check (a kept-role row the stale
+        enumeration missed but ``orderStatus`` positively confirms live).
 
         "Clean" is decided from BOTH sides. The exchange's ``open_orders()`` is
         an eventually-consistent read: an empty answer is indistinguishable from
@@ -898,7 +931,10 @@ class KillSwitchManager:
         # sweep_error already keeps the trigger armed, but the operator still
         # wants these orders named in the §18.5 detail.
         unaccounted = self._cross_check_local_orders(
-            handled_cloids, enumeration_failed=sweep_error is not None
+            handled_cloids,
+            enumeration_failed=sweep_error is not None,
+            keep_protective=keep_protective,
+            kept_protective=kept_protective,
         )
         failures.extend(unaccounted)
         # The one line that answers "is real money still exposed?" without

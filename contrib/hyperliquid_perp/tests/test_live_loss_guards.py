@@ -326,6 +326,53 @@ def test_three_consecutive_losses_enter_manual(env):
     assert gate.manual_safe_mode is True
 
 
+def test_escalation_failure_leaves_anchor_and_count_unmoved_then_retries(env, monkeypatch):
+    """r13 fix ordering: the §10.4 rule-3 manual escalation runs BEFORE the
+    anchor/count commit. A failing enter() must leave the STORED anchor and
+    count untouched — committed first, the engine's next-tick retry would
+    re-read a moved anchor, score a break-even segment and silently reset the
+    streak to 0 (the manual breaker lost). With enter() healed, the retry
+    re-scores the SAME segment and commits count=3."""
+    db, _gate_obj, safe_mode, _clock = env
+    guards = _guards(env)  # max_consecutive_loss_count = 3
+    guards.ensure_settlement_anchor(Decimal(1000), now=_NOW)
+    guards.record_settlement(wallet_balance=Decimal(990), now=_NOW + timedelta(hours=1))
+    guards.record_settlement(wallet_balance=Decimal(980), now=_NOW + timedelta(hours=2))
+
+    class _Boom(Exception):
+        pass
+
+    real_enter = safe_mode.enter
+    calls = {"n": 0}
+
+    def _flaky_enter(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _Boom()
+        return real_enter(*a, **kw)
+
+    monkeypatch.setattr(safe_mode, "enter", _flaky_enter)
+    # The third losing segment: the escalation raises BEFORE the commit.
+    with pytest.raises(_Boom):
+        guards.record_settlement(wallet_balance=Decimal(970), now=_NOW + timedelta(hours=3))
+    row = repo.get_scheduler_state(db.conn, "r")
+    assert row["consecutive_loss_count"] == 2  # UNCHANGED — the commit never ran
+    assert Decimal(row["last_settlement_wallet_balance"]) == Decimal(980)  # anchor unmoved
+    assert safe_mode.active is False
+    # enter() healed: the retry re-scores the same segment against the same
+    # anchor — escalates to manual and commits count=3.
+    third = guards.record_settlement(wallet_balance=Decimal(970), now=_NOW + timedelta(hours=4))
+    assert third.is_loss is True
+    assert third.consecutive_loss_count == 3
+    assert third.entered_manual is True
+    row = repo.get_scheduler_state(db.conn, "r")
+    assert row["consecutive_loss_count"] == 3
+    assert Decimal(row["last_settlement_wallet_balance"]) == Decimal(970)
+    state = safe_mode.current()
+    assert state is not None and state.safe_mode_type == "manual"
+    assert state.reason == REASON_CONSECUTIVE_LOSS
+
+
 def test_consecutive_count_persists_across_manager_instances(env):
     db, gate, safe_mode, clock = env
     guards = _guards(env)

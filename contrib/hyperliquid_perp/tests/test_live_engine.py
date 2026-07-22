@@ -241,10 +241,19 @@ def test_notional_cap_rejects(tmp_path):
     db, clock, engine, gate, sub = _build(tmp_path, live=_live_config(max_notional="100"))
     _script(engine, [_snap()])
     # margin 5% of 4000 -> notional 200 > max_notional_usdc 100.
-    reg = engine.start_plan(_decision("long", 5))
+    reg = engine.start_plan(_decision("long", 5), output_id="o1")
     assert reg.reason == "max_notional_usdc"
-    assert reg.plan_id is None
     assert gate.active_slice_plan is False
+    # 2026-07-22: a live check refusing a gate-APPROVED target writes ONE
+    # rejected execution_plans row — the ai_outputs row reads order_created=1,
+    # so without this trace the refusal is invisible everywhere.
+    assert reg.plan_id is not None
+    plan = repo.get_execution_plan(db.conn, reg.plan_id)
+    assert plan["status"] == "rejected"
+    assert plan["status_reason"] == "max_notional_usdc"
+    assert plan["planned_slices"] == 0
+    assert plan["output_id"] == "o1"
+    assert plan["total_qty"] is None  # no plan was ever built to quantify
 
 
 def test_max_open_orders_rejects_and_reconciles(tmp_path):
@@ -269,6 +278,11 @@ def test_max_open_orders_rejects_and_reconciles(tmp_path):
     reg = engine.start_plan(_decision("long", 5))
     assert reg.reason == "max_open_orders"
     assert "mismatch" in recon.calls  # §10.5 triggers a reconciliation
+    # The refusal leaves its one rejected execution_plans row (2026-07-22).
+    assert reg.plan_id is not None
+    plan = repo.get_execution_plan(db.conn, reg.plan_id)
+    assert plan["status"] == "rejected"
+    assert plan["status_reason"] == "max_open_orders"
 
 
 def test_non_list_open_orders_is_fail_closed_at_cap(tmp_path):
@@ -427,8 +441,12 @@ def test_open_orders_read_failure_fails_closed(tmp_path):
     _script(engine, [_snap()])
     reg = engine.start_plan(_decision("long", 5))
     assert reg.reason == "max_open_orders"
-    assert reg.plan_id is None
     assert gate.active_slice_plan is False
+    # The fail-closed refusal is traced like the genuine over-cap one.
+    assert reg.plan_id is not None
+    plan = repo.get_execution_plan(db.conn, reg.plan_id)
+    assert plan["status"] == "rejected"
+    assert plan["status_reason"] == "max_open_orders"
 
 
 def test_emergency_close_clears_pending_flip(tmp_path):
@@ -728,6 +746,26 @@ def test_gate_closed_plan_expires_at_deadline_not_completed(tmp_path):
     assert gate.active_slice_plan is False
 
 
+def test_open_gate_plan_expires_at_deadline_without_sending_final_slice(tmp_path):
+    """The open-gate sibling (r13 fix): the deadline is a HARD envelope even
+    with the wire gate OPEN and an unsent due slice — the first tick at/past
+    the deadline expires the plan rather than firing one last stale slice
+    (which, after an outage spanning the deadline, could be half the position
+    at a decision older than the whole plan window)."""
+    db, clock, engine, gate, sub = _build(tmp_path)
+    _script(engine, [_snap()])
+    reg = engine.start_plan(_decision("long", 5), output_id="o1")  # 4 slices
+    _script(engine, [_snap()] * 2)
+    clock.advance(3600)  # exactly the 1-hour deadline; every slice due, gate OPEN
+    res = engine.tick()
+    assert sub.calls == []  # nothing sent at/past the deadline
+    assert res.slices_submitted == 0
+    plan = repo.get_execution_plan(db.conn, reg.plan_id)
+    assert plan["status"] == "expired"
+    assert engine._leg is None
+    assert gate.active_slice_plan is False
+
+
 def test_exchange_rejected_slice_advances_and_is_never_resent(tmp_path):
     """§9.2 rule 2: an exchange-rejected slice reached the wire — the cursor
     advances past it and that slice is never re-sent."""
@@ -930,6 +968,113 @@ def test_start_plan_opposite_target_starts_sequential_flip(tmp_path):
     assert flip.open_budget == split_flip_budget(D("0.004"), D("0.004"))[1]
     assert flip.deadline == _T0 + timedelta(hours=1)
     assert gate.active_slice_plan is True
+
+
+def test_flip_close_leg_db_failure_leaves_no_phantom_pending_flip(tmp_path, monkeypatch):
+    """r13 fix: _start_flip assigns self._flip only AFTER _register_leg returns
+    with reason None. A DB raise inside the close leg's registration must not
+    strand a phantom in-memory flip with no plan row for
+    _warn_orphan_flip_close_leg to find — silently supersede-able by the next
+    decision."""
+    db, clock, engine, gate, sub = _build(tmp_path)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.004"), entry_price=_MARK),
+            updated_at=_T0,
+        )
+    engine._was_flat = False
+    _script(engine, [_snap()])
+
+    def _boom(*a, **k):
+        raise RuntimeError("plans store down")
+
+    monkeypatch.setattr(repo, "insert_execution_plan", _boom)
+    with pytest.raises(RuntimeError, match="plans store down"):
+        engine.start_plan(_decision("short", 5), output_id="o1")  # opposite -> flip
+    assert engine._flip is None  # no phantom pending flip
+    assert engine._leg is None
+    assert gate.active_slice_plan is False
+    # Subsequent ticks have no flip to advance.
+    _script(engine, [_snap()])
+    res = engine.tick()
+    assert not [e for e in res.events if e.startswith("flip")]
+    assert sub.calls == []
+
+
+def test_flip_open_leg_regate_failure_restores_gate_and_retains_flip(tmp_path):
+    """r13 fix: the open-leg re-gate's start_plan is wrapped — on ANY raise the
+    envelope guard (gate.active_slice_plan) is restored to True and the pending
+    flip is retained for retry. Left False, a fresh AI target could slip in
+    mid-flip while the flip retries — the exact hole the flag exists to close."""
+    from contrib.hyperliquid_perp.live.engine import _PendingFlip
+
+    db, clock, engine, gate, sub = _build(tmp_path)  # run flat
+    engine._leg = None
+    engine._flip = _PendingFlip(
+        flip_plan_id="flip1",
+        parsed=_decision("long", 5),
+        output_id="o",
+        deadline=_T0.replace(hour=13),  # far future
+        open_budget=2,
+    )
+    gate.active_slice_plan = True
+
+    class _BoomProvider:
+        def fetch(self, coin, *, requested_at, timeout_seconds):
+            raise RuntimeError("feed transport down")
+
+    engine._provider = _BoomProvider()
+    with pytest.raises(RuntimeError, match="feed transport down"):
+        engine._maybe_advance_flip(None, clock.now(), [])
+    assert engine._flip is not None  # retained for retry
+    assert gate.active_slice_plan is True  # the envelope guard was restored
+    assert engine._leg is None
+    # A later healthy tick opens the leg — the flip survived the raise.
+    _script(engine, [_snap()])
+    engine._maybe_advance_flip(None, clock.now(), [])
+    assert engine._flip is None
+    assert engine._leg is not None and engine._leg.flip_leg == "open"
+
+
+def test_flip_open_transient_refusal_writes_no_rejected_rows(tmp_path):
+    """The flip open-leg retry path re-gates every tick inside the envelope and
+    already surfaces per tick as flip_open_pending events — _record_live_refusal
+    skips the rejected row there, or the table would gain one row per tick (the
+    r5 no_legal_slice lesson)."""
+    from contrib.hyperliquid_perp.live.engine import _PendingFlip
+
+    db, clock, engine, gate, sub = _build(tmp_path)  # run flat
+    engine._leg = None
+    engine._flip = _PendingFlip(
+        flip_plan_id="flip1",
+        parsed=_decision("long", 5),
+        output_id="o",
+        deadline=_T0.replace(hour=13),
+        open_budget=2,
+    )
+    gate.active_slice_plan = True
+
+    def _boom():
+        raise RuntimeError("open-orders read down")
+
+    engine._fetch_open_orders = _boom  # §10.5 fail-closed -> max_open_orders refusal
+    events: list[str] = []
+    _script(engine, [_snap()])
+    engine._maybe_advance_flip(None, clock.now(), events)
+    _script(engine, [_snap()])
+    engine._maybe_advance_flip(None, clock.now(), events)
+    assert engine._flip is not None  # held for retry, not abandoned
+    assert len([e for e in events if e.startswith("flip_open_pending:")]) == 2  # visible per tick
+    assert repo.iter_execution_plans(db.conn, "r") == []  # NO per-tick rejected-row spam
+    # The read heals -> the open leg registers with its one ACTIVE row.
+    engine._fetch_open_orders = lambda: []
+    _script(engine, [_snap()])
+    engine._maybe_advance_flip(None, clock.now(), [])
+    assert engine._flip is None
+    assert engine._leg is not None and engine._leg.flip_leg == "open"
+    assert [p["status"] for p in repo.iter_execution_plans(db.conn, "r")] == ["active"]
 
 
 # -- orphan-flip restart detection + BLOCKED tick visibility (exit round) -----
@@ -1263,7 +1408,12 @@ def test_third_consecutive_loss_blocks_next_start_plan_same_run(tmp_path):
     assert gate.manual_safe_mode is True
     _script(engine, [_snap()])
     reg = engine.start_plan(_decision("long", 5), output_id="o1")
-    assert reg.plan_id is None
     assert reg.reason is not None  # the §4.1 refusal, verbatim from the gate
     assert gate.active_slice_plan is False
     assert sub.calls == []
+    # The §4.1 refusal of a gate-approved target is traced too (2026-07-22).
+    assert reg.plan_id is not None
+    plan = repo.get_execution_plan(db.conn, reg.plan_id)
+    assert plan["status"] == "rejected"
+    assert plan["status_reason"] == reg.reason
+    assert plan["output_id"] == "o1"

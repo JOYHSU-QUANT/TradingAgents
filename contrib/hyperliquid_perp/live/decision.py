@@ -386,7 +386,15 @@ class LiveDecisionDriver:
             self._inflight = _InFlight(attempt_id, input_id, output_id, scheduled_at)
             return self._fail_closed(None, f"non-retryable: {exc!r}")
         self._inflight = _InFlight(attempt_id, input_id, output_id, scheduled_at)
-        self._worker.submit(decision_input)
+        try:
+            self._worker.submit(decision_input)
+        except Exception as exc:  # noqa: BLE001 — Thread.start() can raise under pressure
+            # Uncontained, this is the one wedge the guards above cannot catch:
+            # the attempt row is in_progress, no thread ever ran, and poll()
+            # would answer None forever — the cycle never completes and never
+            # fails. _inflight is already set, so fail it CLOSED like any other
+            # start failure; the next due cycle submits a fresh worker thread.
+            return self._fail_closed(None, f"non-retryable: {exc!r}")
         return "cycle_started"
 
     def _collect(self, now: datetime) -> str | None:

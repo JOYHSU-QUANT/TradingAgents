@@ -1501,7 +1501,9 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    scheduleCancel 在程序還活著時觸發、掃掉含 SL/TP 的全錢包掛單（protection 於
    下個健康 tick 重建，中間是裸倉窗口）。v1 緩解：live loop 的 sleep 扣除本次
    tick 實耗（消除疊加放大），且啟動時若 `network_timeout_s >=
-   max_tick_gap_seconds` 印 stderr 警告。硬性建構期不變量（把每筆呼叫逾時納入
+   max_tick_gap_seconds` **或未設（unbounded）**即印 stderr 警告
+   （`network_timeout_warning`，與硬檢查 `kill_switch_timing_violation`
+   併排、純函式可單測）。硬性建構期不變量（把每筆呼叫逾時納入
    承諾檢查）與 live 專屬逾時延後 PR 6 網路層重做時一併處理。
 
    **`max_tick_gap_seconds` 的語意要照字面讀：兩次 tick() 之間的最壞牆鐘時間，不是

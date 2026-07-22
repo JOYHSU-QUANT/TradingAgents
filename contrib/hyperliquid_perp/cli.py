@@ -1145,6 +1145,11 @@ def _live_startup_recovery(
             # next boot's verdict will refuse to start — exactly the
             # "no repair machinery" case the keep exists for.
             verdict_passed = False
+            # True when the shutdown-time safe-mode read RAISED: the keep
+            # decision then acted on unknown ≠ clean, and the exit code below
+            # must not let a luckier later read report "all quiet" over
+            # deliberately-kept orders.
+            exit_safe_mode_unknown = False
             try:
                 result = run_startup_recovery(
                     db=db,
@@ -1263,14 +1268,22 @@ def _live_startup_recovery(
                     except Exception:  # noqa: BLE001
                         logger.exception("shutdown safe-mode read failed")
                         exit_safe_mode = True
+                        exit_safe_mode_unknown = True
                     keep_protective = (not verdict_passed or exit_safe_mode) and (
                         fresh_positions is None or bool(fresh_positions)
                     )
-                    unclean_note = (
-                        "the startup verdict did not pass"
-                        if not verdict_passed
-                        else "safe mode is active at exit"
-                    )
+                    # Three distinct causes, three truthful notes: a FAILED
+                    # read is not "safe mode is active" — claiming so would
+                    # contradict the fresh `safe_mode:` line printed later
+                    # when the second read succeeds and finds none.
+                    if not verdict_passed:
+                        unclean_note = "the startup verdict did not pass"
+                    elif exit_safe_mode_unknown:
+                        unclean_note = (
+                            "the exit-time safe-mode state could NOT be read (unknown ≠ clean)"
+                        )
+                    else:
+                        unclean_note = "safe mode is active at exit"
                     if fresh_positions is None:
                         if keep_protective:
                             print(
@@ -1356,6 +1369,21 @@ def _live_startup_recovery(
                                 f"error: §18.2 shutdown unclean — {shutdown_problem}",
                                 file=sys.stderr,
                             )
+                            if keep_protective and kill_switch.armed:
+                                # The calm "left STANDING" warning above and the
+                                # armed trigger are the SAME orders' fate — say
+                                # so, or the operator reads two disconnected
+                                # facts and misses that the kept SL/TP die at
+                                # the scheduleCancel deadline.
+                                print(
+                                    "NOTE: the SL/TP described above as kept "
+                                    "STANDING are NOT safe while the wallet-wide "
+                                    "scheduleCancel stays armed — it cancels them "
+                                    "too at its deadline. Re-adopt with --loop "
+                                    "(a clean recovery disarms it) or clear the "
+                                    "trigger manually.",
+                                    file=sys.stderr,
+                                )
 
             print(f"startup_reconciliation_passed: {'true' if result.passed else 'false'}")
             print(f"canceled_stale_orders: {len(result.canceled_stale)}")
@@ -1376,16 +1404,26 @@ def _live_startup_recovery(
                     # "§18.2 shutdown unclean" line above carries the detail).
                     return 4
                 if args.loop:
-                    if state is not None:
+                    if state is not None or (exit_safe_mode_unknown and keep_protective):
                         # Sibling of the keep decision (2026-07-22): the boot
                         # verdict is stale after a loop, and a run that latched
                         # safe mode mid-loop must not hand exit 0 ("all quiet")
                         # to its supervisor. Same executed-but-unclean code 4
                         # the one-shot path returns when ITS verdict finds safe
-                        # mode active.
+                        # mode active. A FAILED shutdown safe-mode read that
+                        # actually KEPT orders counts too — the sweep just
+                        # acted on unknown ≠ clean, and a luckier later read
+                        # must not talk the exit code back down to 0 over
+                        # deliberately-kept orders. (Unknown read over a
+                        # confirmed-flat book kept nothing and changed nothing:
+                        # exit stays state-driven, no supervisor false alarm.)
                         print(
                             "live loop exited IN SAFE MODE — see safe_mode above; "
-                            "resolve it (manual release if required) before resuming.",
+                            "resolve it (manual release if required) before resuming."
+                            if state is not None
+                            else "live loop exited with protective orders kept behind "
+                            "a FAILED shutdown safe-mode read (unknown ≠ clean) — "
+                            "inspect the run store before resuming.",
                             file=sys.stderr,
                         )
                         return 4

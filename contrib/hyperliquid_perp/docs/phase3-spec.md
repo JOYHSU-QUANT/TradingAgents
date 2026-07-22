@@ -1625,6 +1625,12 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    正常退出）維持原語意：全部取消＋stderr 警告；--loop 出場時 safe mode 仍
    active 者除保留 SL / TP 外，exit code 亦回 4（executed-but-unclean，不得對
    supervisor 報 0——與一次性路徑裁決發現 safe mode 時的 exit 4 同一慣例）。
+   shutdown 時 safe-mode 讀取**失敗**（unknown ≠ clean）視同需保留：有倉（或倉位
+   讀不到）即保留 SL / TP，且 --loop 因此保留了單者同樣 exit 4——事後較幸運的第二
+   次讀取不得把 exit code 講回 0；讀取失敗但已確認 flat（無單被保留）者維持
+   state-driven exit，不對 supervisor 誤報。警語文字須誠實區分「safe mode 確認
+   active」與「讀取失敗（unknown）」兩種情況；disarm 被擋（trigger 仍 armed）而又有
+   保留單時，必須明說保留的 SL / TP 也會在 scheduleCancel deadline 被掃掉。
 9. **Lease 被接管的 process 不執行 shutdown sweep（PR 5 修訂，2026-07-21）**：
    `--loop` 的 lease heartbeat 拋出 `RunLockError`（此 pid 已被較新 process 取代）
    時，繼任 process 已擁有該 run 的 store、resting orders（含 SL/TP）與全錢包

@@ -24,6 +24,7 @@ from contrib.hyperliquid_perp.persistence.ids import live_order_attempt_id
 _NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
 _HEX = "0x" + "ab" * 16
 _HEX2 = "0x" + "cd" * 16
+_HEX3 = "0x" + "ef" * 16
 # The caller's WORST-CASE wall time between two tick() calls — not its sleep
 # interval (the real loop runs the AI decision synchronously in-cycle, so those
 # differ by minutes). With the KillSwitchConfig defaults (refresh 30s, deadline
@@ -128,7 +129,7 @@ def _event_types(db):
     return [e["event_type"] for e in repo.iter_kill_switch_events(db.conn, "r")]
 
 
-def _register_cloid(db, *, logical, hex_id):
+def _register_cloid(db, *, logical, hex_id, role="entry"):
     with db.transaction() as conn:
         repo.insert_cloid_mapping(
             conn,
@@ -136,7 +137,7 @@ def _register_cloid(db, *, logical, hex_id):
             cloid_hex=hex_id,
             run_id="r",
             symbol="BTC",
-            order_role="entry",
+            order_role=role,
         )
 
 
@@ -703,7 +704,12 @@ def test_shutdown_cancels_bot_owned_only_with_evidence_rows(env):
         "kill_switch_disarmed",  # §18.2 rule 6: clean sweep unsets the trigger
     ]
     detail = json.loads(events[-2]["detail"])
-    assert detail == {"canceled": ["1"], "skipped_non_bot": ["2", "3"], "failures": []}
+    assert detail == {
+        "canceled": ["1"],
+        "skipped_non_bot": ["2", "3"],
+        "kept_protective": [],
+        "failures": [],
+    }
     # Skipped non-bot orders must NOT block the disarm — protecting them from
     # the wallet-wide trigger is the very point of rule 6.
     assert client.clear_calls == 1
@@ -930,6 +936,7 @@ def test_shutdown_with_unreachable_exchange_still_completes_the_audit_trail(env)
     assert json.loads(events[-1]["detail"]) == {
         "canceled": [],
         "skipped_non_bot": [],
+        "kept_protective": [],
         "failures": [],
     }
     # An enumeration failure is NOT a clean sweep: the trigger stays armed —
@@ -1122,9 +1129,9 @@ def test_cross_run_cancel_evidence_spans_runs_without_index_collision(env, tmp_p
 # ---- review round 7: the disarm may not rest on one exchange read ----------
 
 
-def _live_order(db, *, order_id, cloid_hex, status="open", exchange_order_id="900"):
+def _live_order(db, *, order_id, cloid_hex, status="open", exchange_order_id="900", role="entry"):
     """An orders row SQLite still believes is live, carrying a bot cloid."""
-    _register_cloid(db, logical=f"log-{order_id}", hex_id=cloid_hex)
+    _register_cloid(db, logical=f"log-{order_id}", hex_id=cloid_hex, role=role)
     with db.transaction() as conn:
         repo.insert_order(
             conn,
@@ -1132,7 +1139,7 @@ def _live_order(db, *, order_id, cloid_hex, status="open", exchange_order_id="90
             mode="live",
             run_id="r",
             symbol="BTC",
-            order_role="entry",
+            order_role=role,
             side="buy",
             order_type="ioc_limit",
             qty=Decimal("0.01"),
@@ -1391,3 +1398,58 @@ def test_the_network_timeout_advisory_is_checkable():
     assert msg is not None and "network_timeout_s" in msg
     assert network_timeout_warning(45.0, 30.0) is not None  # over: warn
     assert network_timeout_warning(None, 30.0) is not None  # unbounded: warn
+
+
+# ---- PR 5: shutdown(keep_protective=True) leaves the resting SL/TP standing --
+
+
+def test_keep_protective_shutdown_leaves_sl_tp_standing_and_still_disarms(env):
+    # keep_protective (decided 2026-07-22): with a live (or unreadable ≠ flat)
+    # position behind them, the resting SL/TP are deliberately LEFT STANDING —
+    # accounted-for, not failed, so their locally-live rows never trip the
+    # cross-check, and the rule-6 disarm still lands (an armed wallet-wide
+    # trigger would sweep the very orders the keep exists to protect).
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _live_order(db, order_id="sl1", cloid_hex=_HEX, role="stop_loss")
+    _live_order(db, order_id="tp1", cloid_hex=_HEX2, role="take_profit")
+    _register_cloid(db, logical="log-entry", hex_id=_HEX3)  # plain bot order
+    client.open_orders_result = [
+        {"oid": 1, "coin": "BTC", "cloid": _HEX},  # bot SL → kept
+        {"oid": 2, "coin": "BTC", "cloid": _HEX2},  # bot TP → kept
+        {"oid": 3, "coin": "BTC", "cloid": _HEX3},  # bot entry → cancelled
+        {"oid": 4, "coin": "BTC"},  # no cloid → non-bot, skipped
+    ]
+    manager.shutdown(keep_protective=True)
+    # Only the non-protective bot order got a cancel round-trip.
+    assert client.cancel_calls == [("BTC", _HEX3)]
+    detail = json.loads(repo.iter_kill_switch_events(db.conn, "r")[-2]["detail"])
+    assert detail["kept_protective"] == ["1", "2"]
+    assert detail["canceled"] == ["3"]
+    assert detail["skipped_non_bot"] == ["4"]
+    assert detail["failures"] == []
+    # The kept orders' still-'open' rows are accounted-for: the cross-check
+    # asked the exchange about nothing and flagged nothing.
+    assert client.order_status_calls == []
+    # The disarm landed, same as the clean-sweep test.
+    assert client.clear_calls == 1
+    assert not manager.armed
+    assert _event_types(db)[-1] == "kill_switch_disarmed"
+
+
+def test_default_shutdown_still_cancels_protective_orders(env):
+    # Without keep_protective the sweep treats SL/TP like any bot-owned order —
+    # the keep is opt-in for the unclean-exit-over-a-position path only.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _register_cloid(db, logical="log-sl", hex_id=_HEX, role="stop_loss")
+    _register_cloid(db, logical="log-tp", hex_id=_HEX2, role="take_profit")
+    client.open_orders_result = [
+        {"oid": 1, "coin": "BTC", "cloid": _HEX},
+        {"oid": 2, "coin": "BTC", "cloid": _HEX2},
+    ]
+    manager.shutdown()
+    assert [c[1] for c in client.cancel_calls] == [_HEX, _HEX2]
+    detail = json.loads(repo.iter_kill_switch_events(db.conn, "r")[-2]["detail"])
+    assert detail["canceled"] == ["1", "2"]
+    assert detail["kept_protective"] == []

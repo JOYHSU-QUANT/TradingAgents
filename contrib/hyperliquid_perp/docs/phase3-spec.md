@@ -1369,6 +1369,13 @@ execution plan terminal 後    → TP 必須涵蓋全部目前倉位
 8. SL / TP 必須使用 reduce-only trigger order。
 9. 第一版採 position-based SL / TP，不綁定單一 parent order。
 
+附註——觸發後執行帶寬（2026-07-22，使用者拍板）：trigger 觸發後的執行單是
+「限價護欄」（§9.2 rule 1 禁止無界 market）。TP 用 routine ±`max_slippage_pct`；
+**SL 的帶寬取 `max(max_slippage_pct, 3%)`**——SL 只在劇烈行情下觸發，routine
+0.5% 帶可能被跳空直接穿過（觸發後掛著不成交、倉位續虧，且下一次 sync 依
+trigger/qty 未變仍回報 PROTECTED），3% 下限與 §9.4 急平單同族（aggressive、
+仍有價格保護）。取捨：漏掉 TP 是機會成本，漏掉 SL 是無上限虧損。
+
 ### 17.2 SL Repair Policy
 
 若 SL create / modify 失敗：
@@ -1510,9 +1517,13 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    sleep 間隔**（v7 新增，2026-07-13）。既有 `_paper_loop`（cli.py）的一輪是
    `engine.tick()` → `scheduler.poll()` → `sleep(min(delay, 60))` **同步**執行，而
    `poll()` 會跑完整的多 agent AI 決策——**數分鐘**，不是數秒。若 PR 5 傳入 sleep 上限
-   （60s）卻讓一輪 block 三分鐘，這道檢查會放行，然後在決策途中被交易所掃單。因此
-   **§18.2 對 PR 5 的硬性要求：kill switch 必須在決策 cycle *內部*（或由獨立的
-   refresher）刷新，不能只在 loop 頂端刷新**；傳進來的必須是真實的最壞 tick 間隔。
+   （60s）卻讓一輪 block 三分鐘，這道檢查會放行，然後在決策途中被交易所掃單。
+   **PR 5 的實作用另一個方向滿足這個承諾（Option A，live/decision.py）：AI 決策整個移到
+   背景 worker thread，live 迴圈的一輪永不 block 在決策上，因此 loop 頂端每輪 tick()
+   的刷新就是真實 cadence——不存在、也不需要 decision-cycle 內部的 refresher**
+   （2026-07-22 文字更正：原「必須在決策 cycle 內部刷新」是 PR 5 實作前的設計指引）；
+   傳進來的仍必須是真實的最壞 tick 間隔（單筆 REST 呼叫拖滿 timeout 仍可拉長 gap——
+   見上方 v1 軟性緩解與 `network_timeout_warning`）。
    **刷新（與 shutdown）必須先偵測「switch 是否已經觸發過了」**（v7 新增，
    2026-07-13）：`max_tick_gap_seconds` 是呼叫方在建構期做出的**承諾**，而這是唯一
    會去查核它有沒有兌現的地方。若距離上次成功排程已超過 `schedule_cancel_seconds`，
@@ -1586,6 +1597,15 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    （v6 新增，2026-07-13）。
 7. 正常 shutdown 預設不強制平倉。
 8. 持倉繼續依靠既有 SL protection。
+   **附註——unclean 啟動裁決的保留豁免（2026-07-22，使用者拍板）**：§19.1 啟動裁決
+   **未通過**（或 recovery 直接拋錯）而帳戶持倉（或倉位讀不到——unknown ≠ flat）時，
+   rule 5 的 cancel sweep **保留** resting SL / TP（reduce-only）不取消，只掃其餘
+   bot 單；保留單計入「已處理」不算 failure，且 rule 6 的 disarm 照做——不 disarm
+   的話全錢包 scheduleCancel 會在 deadline 把保留的 SL / TP 一併掃掉，保留就毫無
+   意義。動機：裁決失敗正是修復機制（safe mode 下 SL repair、§13.4 自動解除）無法
+   啟動的時候，剝掉 reduce-only 保護等於拿 unclean verdict 換一個裸倉。保留的
+   SL / TP 之後無人看管（reduce-only，只會減倉），直到 `--loop` 重跑重新接管或人工
+   處理。通過的裁決（含 --loop 正常退出）維持原語意：全部取消＋stderr 警告。
 9. **Lease 被接管的 process 不執行 shutdown sweep（PR 5 修訂，2026-07-21）**：
    `--loop` 的 lease heartbeat 拋出 `RunLockError`（此 pid 已被較新 process 取代）
    時，繼任 process 已擁有該 run 的 store、resting orders（含 SL/TP）與全錢包

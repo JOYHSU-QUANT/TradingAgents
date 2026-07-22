@@ -154,6 +154,13 @@ def network_timeout_warning(timeout: float | None, max_tick_gap_seconds: float) 
     )
 
 
+# The resting protective roles ``shutdown(keep_protective=True)`` leaves
+# standing (decided 2026-07-22). Narrower than order_gate.PROTECTIVE_ORDER_ROLES
+# for the same reason as protection._SLTP_ROLES: emergency_close is a one-shot
+# IOC, never a resting order for a sweep to keep.
+_KEEP_PROTECTIVE_ROLES = frozenset({"stop_loss", "take_profit"})
+
+
 class KillSwitchManager:
     """One run's dead man's switch: arm, refresh on cadence, cancel on shutdown."""
 
@@ -187,9 +194,13 @@ class KillSwitchManager:
         # poll() can run a full multi-agent AI decision — MINUTES, not seconds.
         # A caller that passes its sleep cap (60s) while its cycle can block for
         # three minutes has satisfied this check and will still be cancelled off
-        # the book mid-decision. §18.2: PR 5 must therefore refresh the switch
-        # from INSIDE the decision cycle (or from a dedicated refresher), not
-        # only at the top of the loop — and pass the true worst-case gap here.
+        # the book mid-decision. The live loop (PR 5) satisfies the contract the
+        # other way around: the AI decision runs on a background worker thread
+        # (Option A, live/decision.py), so one live iteration never blocks on it
+        # and the ordinary top-of-loop tick() IS the refresh cadence — there is
+        # no in-cycle refresher, and none is needed. What can still stretch the
+        # gap is a slow REST call riding its full timeout (§18.2 advisory,
+        # ``network_timeout_warning``) — pass the true worst-case gap here.
         # The invariant itself (worst-case math, config-guard blindness) is
         # kill_switch_timing_violation's docstring.
         violation = kill_switch_timing_violation(config, max_tick_gap_seconds)
@@ -722,7 +733,7 @@ class KillSwitchManager:
                 )
         return unaccounted
 
-    def shutdown(self) -> None:
+    def shutdown(self, *, keep_protective: bool = False) -> None:
         """§18.2 rules 5–7: cancel bot-owned open orders; never force-close.
 
         Per-order failures are recorded and do not stop the sweep — every
@@ -731,6 +742,17 @@ class KillSwitchManager:
         non-bot orders the sweep deliberately skips per §19.3), so a fully
         clean sweep (enumeration succeeded, zero failures) disarms it; any
         failure leaves it armed as the backstop for whatever survived.
+
+        ``keep_protective`` (decided 2026-07-22): the resting SL/TP
+        (``_KEEP_PROTECTIVE_ROLES``) are deliberately LEFT STANDING instead of
+        cancelled — the caller's exit path knows a live (or unreadable ≠ flat)
+        position sits behind them and stripping its reduce-only protection
+        would trade an unclean verdict for a naked position. A kept order is
+        accounted-for, not failed: it does not block the rule-6 disarm, and the
+        disarm is REQUIRED for the keep to mean anything — an armed wallet-wide
+        scheduleCancel would sweep exactly those kept orders at its deadline.
+        They then rest unattended (reduce-only, so they can only shrink the
+        position) until a ``--loop`` run re-adopts them or the operator acts.
 
         "Clean" is decided from BOTH sides. The exchange's ``open_orders()`` is
         an eventually-consistent read: an empty answer is indistinguishable from
@@ -790,6 +812,7 @@ class KillSwitchManager:
         self._record("shutdown_cancel_orders_started")
         canceled: list[str] = []
         skipped_non_bot: list[str] = []
+        kept_protective: list[str] = []
         failures: list[str] = []
         open_orders: list = []
         sweep_error: str | None = None
@@ -837,6 +860,13 @@ class KillSwitchManager:
                     # safe mode.
                     skipped_non_bot.append(oid)
                     continue
+                if keep_protective and row["order_role"] in _KEEP_PROTECTIVE_ROLES:
+                    # Deliberately left standing (see the docstring): accounted
+                    # for, so the cross-check below must not read it as
+                    # unaccounted and the rule-6 disarm must not be blocked.
+                    handled_cloids.add(cloid)
+                    kept_protective.append(oid)
+                    continue
                 if coin is None:
                     # Bot-owned but the payload carries no coin to cancel
                     # with: "ours but uncancelable" is a FAILURE, not "not
@@ -876,11 +906,12 @@ class KillSwitchManager:
         # it deliberately left alone.
         logger.info(
             "kill switch shutdown sweep: %d canceled, %d failed (%d of them local orders "
-            "the exchange never listed), %d skipped (non-bot)",
+            "the exchange never listed), %d skipped (non-bot), %d kept (protective)",
             len(canceled),
             len(failures),
             len(unaccounted),
             len(skipped_non_bot),
+            len(kept_protective),
         )
         self._record(
             "shutdown_cancel_orders_completed",
@@ -888,6 +919,7 @@ class KillSwitchManager:
                 {
                     "canceled": canceled,
                     "skipped_non_bot": skipped_non_bot,
+                    "kept_protective": kept_protective,
                     "failures": failures,
                 }
             ),
@@ -903,7 +935,9 @@ class KillSwitchManager:
         if self._armed and disarm_due:
             # Clean sweep: no bot order is left for the wallet-wide trigger to
             # protect, and letting it fire would cancel the skipped non-bot
-            # orders. Disarm; a disarm failure stays armed (fail-safe) and is
+            # orders — and any deliberately-kept SL/TP, which is exactly what
+            # ``keep_protective`` must prevent. Disarm; a disarm failure stays
+            # armed (fail-safe) and is
             # recorded, never raised out of the shutdown path. An unarmed
             # manager has nothing to disarm — a shutdown before arm() must
             # not record a phantom disarmed event.

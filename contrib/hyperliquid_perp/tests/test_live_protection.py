@@ -13,7 +13,7 @@ from contrib.hyperliquid_perp.live.config import ExecutionMode, LiveProtectionCo
 from contrib.hyperliquid_perp.live.order_gate import LiveOrderGateRejected, RealOrderGate
 from contrib.hyperliquid_perp.live.protection import ProtectionManager, ProtectionOutcome
 from contrib.hyperliquid_perp.paper.clock import ManualClock
-from contrib.hyperliquid_perp.paper.stops import StopConfig
+from contrib.hyperliquid_perp.paper.stops import StopConfig, round_to_tick
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.models import PositionState
@@ -505,6 +505,31 @@ def test_no_safe_sl_band_needs_emergency_close(env):
     assert outcome is ProtectionOutcome.NEEDS_EMERGENCY_CLOSE
     assert client.placed == []  # never even attempted a placement
     assert gate.unresolved_protection_failure is True
+
+
+def test_sl_fire_band_floored_at_3pct_while_tp_keeps_routine_band(env):
+    """§9.4 aggressive family: the SL only fires in the violent move it protects
+    against, so its fire-time limit band is floored at 3% even when the routine
+    max_slippage_pct (0.005 here) is tighter; the TP keeps the routine band — a
+    missed TP is opportunity cost, a missed SL is an uncapped loss."""
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    mgr = _manager(db, client, gate)  # max_slippage_pct = 0.005
+    outcome = mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert outcome is ProtectionOutcome.PROTECTED
+    sl = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
+    tp = repo.active_protection_order(db.conn, "r", "BTC", "take_profit")
+    # Long: SL and TP both fire as a SELL, so each limit sits BELOW its trigger.
+    sl_trigger = Decimal(sl["trigger_price"])
+    tp_trigger = Decimal(tp["trigger_price"])
+    assert Decimal(sl["price"]) == round_to_tick(sl_trigger * Decimal("0.97"), _TICK, up=False)
+    assert Decimal(tp["price"]) == round_to_tick(tp_trigger * Decimal("0.995"), _TICK, up=False)
 
 
 # -- TP lifecycle -----------------------------------------------------------

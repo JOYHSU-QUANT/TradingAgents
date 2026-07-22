@@ -514,7 +514,8 @@ class HyperliquidSignedClient:
 
         The REST backfill source (:class:`~...live.fill_backfill.FillBackfiller`):
         it catches fills the WebSocket missed while it was down or before it
-        subscribed. Times are epoch-ms, the form the API takes; the raw fill list
+        subscribed — and in the v1 live loop, which attaches no socket yet, it
+        is the sole fills source. Times are epoch-ms, the form the API takes; the raw fill list
         is returned untouched for the ingester to parse and dedupe (§14.2/§14.3).
         Ungated — a read never places or moves anything.
         """

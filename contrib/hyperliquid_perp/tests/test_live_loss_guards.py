@@ -213,6 +213,21 @@ def test_daily_loss_non_positive_baseline_is_documented_inert(env):
     assert safe_mode.active is False
 
 
+def test_daily_loss_exactly_at_cap_is_not_breached(env):
+    db, _gate_obj, safe_mode, _clock = env
+    guards = _guards(env)  # max_daily_loss_pct = 2
+    guards.evaluate_daily_loss(account_equity=Decimal(1000), now=_NOW)
+    # A drawdown exactly AT the cap (2% of 1000 → equity 980): the check is
+    # strictly `>`, so the boundary itself does not breach or enter safe mode.
+    at_cap = guards.evaluate_daily_loss(
+        account_equity=Decimal(980), now=_NOW + timedelta(minutes=1)
+    )
+    assert at_cap.drawdown_pct == Decimal(2)
+    assert at_cap.breached is False
+    assert at_cap.entered_safe_mode is False
+    assert safe_mode.active is False
+
+
 def test_daily_loss_auto_release_time_gate(env):
     db, gate, safe_mode, clock = env
     guards = _guards(env)
@@ -278,6 +293,21 @@ def test_gain_resets_consecutive_count(env):
     gain = guards.record_settlement(wallet_balance=Decimal(1010), now=_NOW + timedelta(hours=3))
     assert gain.is_loss is False
     assert gain.consecutive_loss_count == 0
+
+
+def test_breakeven_settlement_resets_not_increments(env):
+    db, *_ = env
+    guards = _guards(env)
+    guards.ensure_settlement_anchor(Decimal(1000), now=_NOW)
+    guards.record_settlement(wallet_balance=Decimal(990), now=_NOW + timedelta(hours=1))
+    two = guards.record_settlement(wallet_balance=Decimal(980), now=_NOW + timedelta(hours=2))
+    assert two.consecutive_loss_count == 2
+    # A break-even segment (wallet exactly at the anchor) is NOT a loss: the
+    # streak resets to zero rather than incrementing toward manual safe mode.
+    flat = guards.record_settlement(wallet_balance=Decimal(980), now=_NOW + timedelta(hours=3))
+    assert flat.segment_pnl == Decimal(0)
+    assert flat.is_loss is False
+    assert flat.consecutive_loss_count == 0
 
 
 def test_three_consecutive_losses_enter_manual(env):

@@ -28,6 +28,7 @@ from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.paper.engine import AssetSpec
 from contrib.hyperliquid_perp.paper.scheduler import (
+    CYCLE_INTERVAL,
     DecisionInput,
     RetryableDecisionError,
     parse_instant,
@@ -325,6 +326,24 @@ def test_driver_worker_retryable_error_is_api_failed(tmp_path):
     row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
     assert row["status"] == "api_failed"
     assert row["error_type"] == "timeout"  # retryable type preserved
+
+
+def test_fail_cycle_past_its_own_boundary_reanchors_from_now(tmp_path):
+    """A cycle that fails AFTER its own next boundary already passed (the failure
+    landed 2.5 cycles late) must re-anchor next_decision_at from NOW —
+    scheduled_at + interval would be in the past, leaving the driver immediately
+    due again every tick."""
+    db, clock, driver, engine, worker, provider = _driver(
+        tmp_path, request_error=RetryableDecisionError("timeout", "model timed out")
+    )
+    assert driver.pump() == "cycle_started"  # scheduled_at = _T0
+    _await(worker)
+    late = _T0 + 2.5 * CYCLE_INTERVAL  # now > scheduled_at + interval
+    clock.set(late)
+    assert driver.pump() == "api_failed"
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert parse_instant(state["next_decision_at"]) == late + CYCLE_INTERVAL
+    assert driver.pump() is None  # not due — the re-anchor is in the future
 
 
 def test_driver_gate_nonretryable_error_fails_closed_and_recovers(tmp_path):

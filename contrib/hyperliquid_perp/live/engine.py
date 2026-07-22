@@ -6,13 +6,16 @@ plan envelope and inter-slice pacing taken from ``live.execution``
 (``plan_duration_minutes`` / ``slice_interval_seconds``, default 60min/30s).
 The CLI loop drives
 :meth:`tick` every ~10s (well inside the 30s kill-switch budget), it drives REAL
-exchange orders, and it never simulates a fill — fills arrive asynchronously over the WebSocket and are booked by the
-:class:`~.fills.LiveFillProcessor`, so the engine only ever READS the position
-the fills produce.
+exchange orders, and it never simulates a fill — the engine only ever READS the
+position that booked fills produce. Fills from the WS queue are booked by the
+:class:`~.fills.LiveFillProcessor` (other message types are drained and
+discarded — their consumer is PR 6 reconciliation); in the v1 loop no live
+socket is attached yet, so fills land via the reconciler's §12.2 REST backfill.
 
 One tick (§11.4 single-threaded, SQLite single-writer) does, in order:
 
-1. drain the WS queue → ingest fills / order updates (books update here);
+1. drain the WS queue → ingest fills (books update here; non-fill messages
+   are discarded);
 2. refresh the kill switch (§18.2 — must tick every loop, the AI decision runs
    off-thread so this cadence is never blocked);
 3. run reconciliation at the §12.2 timings (post-fill, 5-minute heartbeat);
@@ -38,7 +41,6 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal, localcontext
 from enum import Enum
-from typing import NamedTuple
 
 from ..domains.perp.margin import DECIMAL_CONTEXT
 from ..domains.perp.risk_gate import (
@@ -100,11 +102,17 @@ _EMERGENCY_SLIPPAGE_PCT = Decimal("0.03")
 _MARKET_DATA_TIMEOUT_S = Decimal(10)
 
 
-class _SliceSubmit(NamedTuple):
-    """One slice submission attempt: advance the cursor, and did it land."""
+class _SliceOutcome(Enum):
+    """How one slice submission attempt ended.
 
-    advance: bool
-    ok: bool
+    A tri-state on purpose (was two independent bools): "held but landed" is
+    not a thing, and an enum makes that combination unrepresentable instead of
+    a call-site convention. HELD is the only member that keeps the cursor.
+    """
+
+    SENT_OK = "sent_ok"  # reached the wire and landed (non-rejected ack)
+    SENT_FAILED = "sent_failed"  # reached (or may have reached) the wire; did not land
+    HELD = "held"  # provably never transmitted — the cursor retries this slice
 
 
 @dataclass
@@ -573,16 +581,16 @@ class LiveExecutionEngine:
                 events.append(f"slices_paused:{leg.plan_id}:{reason}")
             else:
                 idx = leg.submitted
-                advance, ok = self._submit_slice(leg, idx, leg.slice_sizes[idx], mid, now)
-                if advance:
-                    leg.submitted += 1
-                else:
+                slice_outcome = self._submit_slice(leg, idx, leg.slice_sizes[idx], mid, now)
+                if slice_outcome is _SliceOutcome.HELD:
                     # Held pre-wire (a gate TOCTOU close or a local pre-submit
                     # failure): nothing was sent, the cursor retries this slice
                     # next tick — and, like slices_paused, the hold is VISIBLE
                     # every tick it recurs.
                     events.append(f"slice_held:{leg.plan_id}:{idx}")
-                if ok:
+                else:
+                    leg.submitted += 1
+                if slice_outcome is _SliceOutcome.SENT_OK:
                     submitted += 1
                     events.append(f"slice:{leg.plan_id}:{idx}")
         if leg.submitted >= leg.planned:
@@ -599,8 +607,8 @@ class LiveExecutionEngine:
 
     def _submit_slice(
         self, leg: _Leg, idx: int, size: Decimal, mid: Decimal, now: datetime
-    ) -> _SliceSubmit:
-        """Submit one slice; returns a :class:`_SliceSubmit` ``(advance, ok)``.
+    ) -> _SliceOutcome:
+        """Submit one slice; returns its :class:`_SliceOutcome`.
 
         The cursor advances for anything that reached — or may have reached —
         the wire: an ack, an exchange reject (§9.2 rule 2: never re-sent), or
@@ -645,17 +653,19 @@ class LiveExecutionEngine:
             logger.warning(
                 "slice %s[%d] gate-declined pre-wire (%s); cursor held", leg.plan_id, idx, exc
             )
-            return _SliceSubmit(advance=False, ok=False)
+            return _SliceOutcome.HELD
         except LiveOrderPreSubmitError as exc:
             # Nothing reached the wire and nothing was recorded (the intent
             # transaction rolled back): §9.2 rule 2 does not apply — hold the
             # cursor and retry this slice next tick under the same cloid.
             logger.warning("slice %s[%d] failed pre-wire (%s); cursor held", leg.plan_id, idx, exc)
-            return _SliceSubmit(advance=False, ok=False)
+            return _SliceOutcome.HELD
         except Exception:  # noqa: BLE001 — past pre-wire the submitter recorded the attempt
             logger.exception("slice %s[%d] submit raised", leg.plan_id, idx)
-            return _SliceSubmit(advance=True, ok=False)
-        return _SliceSubmit(advance=True, ok=outcome.outcome.value != "rejected")
+            return _SliceOutcome.SENT_FAILED
+        if outcome.outcome.value != "rejected":
+            return _SliceOutcome.SENT_OK
+        return _SliceOutcome.SENT_FAILED
 
     def _slice_limit(self, mid: Decimal, side: Side, *, slippage: Decimal | None = None) -> Decimal:
         """§9.2: an IOC limit ±slippage — marketable, slippage-bounded.

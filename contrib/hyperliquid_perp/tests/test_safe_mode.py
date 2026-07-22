@@ -10,6 +10,7 @@ import pytest
 from contrib.hyperliquid_perp.live.config import ExecutionMode
 from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
 from contrib.hyperliquid_perp.live.safe_mode import (
+    REASON_DAILY_LOSS,
     REASON_INVALID_LOCAL_FILL,
     REASON_KILL_SWITCH_REFRESH_FAILED,
     REASON_NON_BOT_OWNED_ORDER,
@@ -301,6 +302,33 @@ def test_auto_recovery_outside_safe_mode_is_a_noop(env):
         is False
     )
     assert _events(db) == []
+
+
+def test_auto_recovery_withholds_daily_loss_release_on_corrupted_entered_at(env):
+    # §10.3 fail-safe: the daily-loss time gate keys off the stored entered_at,
+    # so an unparseable value (a direct SQL fix, a bad migration) means the gate
+    # cannot be evaluated — the release is WITHHELD rather than lifting
+    # protection blind, even when every §13.4 attestation holds and the clock
+    # is well past the next UTC midnight.
+    db, gate, _ = env
+    clock = ManualClock(_NOW)
+    manager = SafeModeManager(db=db, run_id="r", gate=gate, clock=clock)
+    manager.enter("recoverable", REASON_DAILY_LOSS)
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE scheduler_state SET safe_mode_entered_at='not-a-timestamp' WHERE run_id='r'"
+        )
+    clock.set(datetime(2026, 7, 17, 0, 0, 30, tzinfo=timezone.utc))  # past next UTC 00:00
+    assert (
+        manager.try_auto_recover(
+            reconciliation_clean=True,
+            ws_restored=True,
+            kill_switch_active=True,
+            fully_wired=True,
+        )
+        is False
+    )
+    assert manager.current() is not None  # still latched
 
 
 # -- §13.6 manual release ------------------------------------------------------

@@ -2,7 +2,9 @@
 
 The WebSocket is the low-latency source, not the only one (§11.2 rules 1–2): it
 cannot deliver a fill that happened before it was subscribed or while it was
-down. :class:`FillBackfiller` polls REST ``userFillsByTime`` over a trailing
+down. (In the v1 live loop no socket is attached yet — PR 6 connects the
+stream — so until then this backfill is the SOLE fills path, not a safety
+net.) :class:`FillBackfiller` polls REST ``userFillsByTime`` over a trailing
 window and feeds every fill through the same :class:`~.fills.LiveFillProcessor` the
 WS drain uses — so a fill already applied from the socket is a no-op here (the
 §14.2 dedupe key), and one the socket missed is applied exactly once.

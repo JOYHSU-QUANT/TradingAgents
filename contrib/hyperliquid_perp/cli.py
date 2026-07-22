@@ -1137,6 +1137,10 @@ def _live_startup_recovery(
             )
             shutdown_problem: str | None = None
             superseded = False
+            # False until the §19.1 verdict PASSES — a recovery that raised
+            # counts as unclean too, and the ``finally`` sweep below keys its
+            # keep-the-SL/TP decision off this (decided 2026-07-22).
+            verdict_passed = False
             try:
                 result = run_startup_recovery(
                     db=db,
@@ -1149,6 +1153,7 @@ def _live_startup_recovery(
                     safe_mode=safe_mode,
                     payload_dir=payload_dir,
                 )
+                verdict_passed = result.passed
                 # PR 5: with --loop, a passing recovery hands off to the live
                 # trading loop; it returns on Ctrl-C / SIGTERM, and the §18.2
                 # shutdown sweep in the ``finally`` below then disarms the switch.
@@ -1199,37 +1204,71 @@ def _live_startup_recovery(
                     # release runs (and no-ops).
                     logger.info("lease takeover — §18.2 shutdown sweep skipped")
                 else:
-                    # Decided 2026-07-16: the §18.2 semantics stand (shutdown
-                    # cancels ALL bot-owned orders, the §19.3-kept SL/TP
-                    # included), but never silently over a live position. The
-                    # position that decides the warning is read FRESH here
+                    # Decided 2026-07-16, revised 2026-07-22: on a PASSING
+                    # verdict the §18.2 semantics stand (shutdown cancels ALL
+                    # bot-owned orders, the §19.3-kept SL/TP included), but
+                    # never silently over a live position. On an UNCLEAN
+                    # verdict (failed, or recovery raised) the sweep now KEEPS
+                    # the resting SL/TP over a live — or unreadable, and
+                    # unreadable ≠ flat is the startup sweep's own rule —
+                    # position: stripping reduce-only protection trades an
+                    # unclean verdict for a naked position, and the repair
+                    # machinery that could re-cover it is exactly what an
+                    # unclean verdict refuses to start. The position that
+                    # decides both the warning and the keep is read FRESH here
                     # (decided 2026-07-17): the boot snapshot can be minutes
                     # stale after arming/backfill/two reconcile passes, and a
                     # position acquired mid-recovery would otherwise lose its
-                    # protection to the sweep below without a word. Unreadable
-                    # ≠ flat (the startup sweep's own rule) — warn then too.
+                    # protection to the sweep below without a word.
+                    # None = could not read (unknown ≠ flat), the same sentinel
+                    # convention as ``_safe_fetch_open_orders``.
+                    fresh_positions: list | None
                     try:
                         fresh_positions = map_account_snapshot(fetch_clearinghouse()).positions
                     except Exception:  # noqa: BLE001 — the warning must not mask the verdict
                         logger.exception("shutdown position re-read failed")
-                        # Truthful wording: "could not look" is not "holds" — but
-                        # the operator action is the same (unknown ≠ flat).
-                        print(
-                            "WARNING: positions could NOT be re-read at shutdown and "
-                            "this one-shot command's §18.2 shutdown sweep cancels "
-                            "bot-owned protection orders — any live position is "
-                            "UNPROTECTED after exit until a live loop (PR 5) or "
-                            "manual action re-covers it.",
-                            file=sys.stderr,
-                        )
-                    else:
-                        if fresh_positions:
-                            held = ", ".join(f"{p.coin} {p.size}" for p in fresh_positions)
+                        fresh_positions = None
+                    keep_protective = not verdict_passed and (
+                        fresh_positions is None or bool(fresh_positions)
+                    )
+                    if fresh_positions is None:
+                        if keep_protective:
+                            print(
+                                "WARNING: positions could NOT be re-read at shutdown "
+                                "(unknown ≠ flat) and the startup verdict did not pass "
+                                "— the §18.2 shutdown sweep leaves the bot's resting "
+                                "SL/TP STANDING (reduce-only) and cancels other bot "
+                                "orders. Re-run with --loop, or intervene manually.",
+                                file=sys.stderr,
+                            )
+                        else:
+                            # Truthful wording: "could not look" is not "holds" —
+                            # but the operator action is the same (unknown ≠ flat).
+                            print(
+                                "WARNING: positions could NOT be re-read at shutdown "
+                                "and this command's §18.2 shutdown sweep cancels "
+                                "bot-owned protection orders — any live position is "
+                                "UNPROTECTED after exit until a --loop run or "
+                                "manual action re-covers it.",
+                                file=sys.stderr,
+                            )
+                    elif fresh_positions:
+                        held = ", ".join(f"{p.coin} {p.size}" for p in fresh_positions)
+                        if keep_protective:
                             print(
                                 f"WARNING: the account holds a live position ({held}) "
-                                "and this one-shot command's §18.2 shutdown sweep "
+                                "and the startup verdict did not pass — the §18.2 "
+                                "shutdown sweep leaves the bot's resting SL/TP "
+                                "STANDING (reduce-only) and cancels other bot orders. "
+                                "Re-run with --loop, or intervene manually.",
+                                file=sys.stderr,
+                            )
+                        else:
+                            print(
+                                f"WARNING: the account holds a live position ({held}) "
+                                "and this command's §18.2 shutdown sweep "
                                 "cancels bot-owned protection orders — the position "
-                                "is UNPROTECTED after exit until a live loop (PR 5) "
+                                "is UNPROTECTED after exit until a --loop run "
                                 "or manual action re-covers it.",
                                 file=sys.stderr,
                             )
@@ -1249,9 +1288,12 @@ def _live_startup_recovery(
                             logger.exception(
                                 "§12.2 pre-shutdown reconciliation failed (sweep proceeds)"
                             )
-                    # One-shot command: leave nothing resting behind a dead man's
-                    # switch nobody will refresh. The §18.2 shutdown sweep cancels
-                    # bot-owned open orders and disarms only on a clean sweep.
+                    # Leave nothing resting behind a dead man's switch nobody
+                    # will refresh — except the deliberately-kept SL/TP when
+                    # ``keep_protective`` is set (reduce-only; the disarm below
+                    # is what lets them outlive the wallet-wide trigger). The
+                    # §18.2 shutdown sweep cancels the rest of the bot-owned
+                    # open orders and disarms only on a clean sweep.
                     # (The §12.2 "before shutdown" reconciliation: for the
                     # one-shot command it is the verdict pass that just ran — no
                     # orders are placed after it; the --loop path runs the fresh
@@ -1263,7 +1305,7 @@ def _live_startup_recovery(
                         # shutdown()'s audit writes are fail-loud by design, so a
                         # busy DB here is a realistic raise, not an edge case.
                         try:
-                            kill_switch.shutdown()
+                            kill_switch.shutdown(keep_protective=keep_protective)
                         except Exception as exc:  # noqa: BLE001
                             logger.exception("§18.2 shutdown sweep raised")
                             shutdown_problem = f"shutdown sweep raised: {exc}"

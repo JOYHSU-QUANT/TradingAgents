@@ -73,6 +73,17 @@ _SLTP_ROLES = ("stop_loss", "take_profit")
 _ROLE_ORDER_TYPE = {"stop_loss": "stop_market", "take_profit": "take_market"}
 _ROLE_TPSL = {"stop_loss": "sl", "take_profit": "tp"}
 
+# §9.4 aggressive family (decided 2026-07-22): a stop-loss trigger only FIRES in
+# the violent move it protects against, so its fire-time limit needs the same
+# "marketable under stress, still price-bounded" band the emergency close uses —
+# a routine ±0.5% band can be gapped straight through, leaving the fired SL
+# resting unfilled while the position keeps losing (and the next sync reading
+# PROTECTED off the untouched trigger/qty row). Floor, not override: a routine
+# band configured wider than this wins. The take-profit keeps the routine band —
+# a missed TP is opportunity cost, a missed SL is an uncapped loss. Keep in sync
+# with engine._EMERGENCY_SLIPPAGE_PCT (same §9.4 rationale, same 3%).
+_SL_FIRE_BAND_FLOOR_PCT = Decimal("0.03")
+
 
 class _EstablishResult(Enum):
     """How one §17.4 place/modify ladder ended (internal to the manager)."""
@@ -348,7 +359,7 @@ class ProtectionManager:
         # by a BUY — the reduce-only order that shrinks the position.
         is_buy = position.size < 0
         trigger_price = round_to_tick(trigger_price, self._tick, up=is_buy)
-        limit_price = self._protected_limit(trigger_price, is_buy)
+        limit_price = self._protected_limit(trigger_price, is_buy, role=role)
 
         existing = repo.active_protection_order(self._db.conn, self._run_id, self._coin, role)
         existing_oid = existing["exchange_order_id"] if existing is not None else None
@@ -729,20 +740,23 @@ class ProtectionManager:
 
     # -- helpers --------------------------------------------------------------
 
-    def _protected_limit(self, trigger_price: Decimal, is_buy: bool) -> Decimal:
+    def _protected_limit(self, trigger_price: Decimal, is_buy: bool, *, role: str) -> Decimal:
         """The §9.2 price-protected limit for a triggered reduce-only order.
 
         A market-like live order is forbidden (§9.2 rule 1), so the trigger
-        order carries a limit set an aggressive ``max_slippage_pct`` past the
-        trigger in the fill direction: marketable when it fires, slippage
-        bounded. A BUY (short's SL) fills up to ``trigger × (1 + slip)``; a SELL
-        (long's SL) down to ``trigger × (1 - slip)``.
+        order carries a limit set past the trigger in the fill direction:
+        marketable when it fires, slippage bounded. A BUY (short's SL) fills up
+        to ``trigger × (1 + slip)``; a SELL (long's SL) down to
+        ``trigger × (1 - slip)``. The band is role-dependent: the stop-loss
+        fires only under stress, so its band is floored at
+        ``_SL_FIRE_BAND_FLOOR_PCT`` (§9.4 aggressive family); the take-profit
+        keeps the routine ``max_slippage_pct``.
         """
+        slip = self._slippage
+        if role == "stop_loss":
+            slip = max(slip, _SL_FIRE_BAND_FLOOR_PCT)
         with localcontext(DECIMAL_CONTEXT):
-            if is_buy:
-                limit = trigger_price * (1 + self._slippage)
-            else:
-                limit = trigger_price * (1 - self._slippage)
+            limit = trigger_price * (1 + slip) if is_buy else trigger_price * (1 - slip)
         # Round toward the more marketable side so the limit never lands short
         # of the trigger's own tick (up for a buy, down for a sell).
         return round_to_tick(limit, self._tick, up=is_buy)

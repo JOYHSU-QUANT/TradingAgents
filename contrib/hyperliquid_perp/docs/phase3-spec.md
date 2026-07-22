@@ -551,7 +551,8 @@ sell limit = mid_price × 0.995
    convenience 方法一律不用；統一走帶限價的 `order`）。
 2. IOC 未成交（或部分成交）的量**不重送同一張**：計入 plan 的落後量，
    由後續切片自然吸收；plan 到期仍未吃完 → terminal `expired`，殘量記
-   `residual_qty`（與 paper 語意一致）。
+   `residual_qty`（paper 為真值；**live v1 寫 NULL＝unknown**——fill→plan
+   歸屬隨 PR 6 WS/fill 路由，見 §16.1 與 phase2-data §6.1）。
 3. 每張切片單有獨立 cloid（§8.2），retry（網路錯誤等）重用同一 cloid。
 4. **每 tick 最多送一張切片；pre-send gate 拒絕不吃進度（PR 5 修訂，2026-07-21）**：
    30 秒 interval 是排程節奏，停滯後的 catch-up 也是一 tick 一張，不得在同一個
@@ -560,8 +561,8 @@ sell limit = mid_price × 0.995
    原地（事件 `slices_paused`），gate 重開後從同一張續送；反之，凡已觸及（或可能
    觸及）wire 的結果——ack、交易所拒絕、ambiguous 送單失敗（§8.3 冪等層以同
    cloid 查證定讞）——cursor 一律前進、不重送。plan deadline 照常束縛：被 gate
-   擋到期的 plan 誠實 terminal `expired`（殘量記 `residual_qty`），不得記成
-   completed。**deadline 是硬信封（PR 5 修訂，2026-07-22，使用者拍板）**：到期
+   擋到期的 plan 誠實 terminal `expired`（殘量同 rule 2——live v1 記 NULL），
+   不得記成 completed。**deadline 是硬信封（PR 5 修訂，2026-07-22，使用者拍板）**：到期
    當下那個 tick（含斷線／safe-mode 暫停跨越 deadline 後恢復的第一個 tick）
    **先判到期、不送單**——切片的 size 與方向來自一個已超出整個 plan envelope 的
    決策，不得再上鏈；flip 預算收斂到 2 張時，那最後一張可能是半個倉位。同一原則涵蓋 **pre-wire 本地 store 故障（PR 5 修訂，2026-07-21）**：
@@ -1083,6 +1084,13 @@ account equity / margin abnormal drop
 authentication / permission error
 ```
 
+Manual latch 掛住期間，AI 決策 cadence 本身**暫停**（PR 5 定案，2026-07-22）：
+每個目標反正都會被 §4.1 `manual_safe_mode` 擋下，live decision driver 於
+due tick 直接跳過整個 multi-agent LLM 呼叫（不建 attempt row、不燒 LLM 成本；
+`next_decision_at` 不推進），§13.6 人工解除後下一個 tick 立即以新鮮輸入重新
+決策。已在途（in-flight）的決策不受影響——照常收集、進 gate、留 §4.1
+rejected row。recoverable safe mode 不暫停決策。
+
 ### 13.6 持久化與人工解除介面（v3 新增）
 
 1. Safe mode **現態**存在 SQLite（`scheduler_state` 新增欄位：
@@ -1301,6 +1309,12 @@ fill 這兩欄暫為 NULL。**PR 5 動 schema 時必須把歸因欄位補上 ord
 的 fill row 形狀必須一致，per-slice TWAP 執行帳務（§9）與 export 分析才不用對 live
 另走 order join 的第二套查法。這是刻意記在 PR 3 的前置契約：等 PR 5 的下單路徑
 寫好才發現 fill 歸因斷鏈，補欄位就要回填資料而不是只加欄。
+
+**（PR 5 定案修訂，2026-07-22）**：PR 5 實際**未**補歸因欄位——fill→plan 歸屬
+與 `remaining_twap_qty`／`residual_qty` 真值一起延後到 PR 6 WS/fill 路由
+（「誠實 NULL」決策，見 §9.2 rule 2 與 phase2-data §6.1）。上段預警的代價
+已被接受：PR 6 補欄位時需回填 PR 5 期間的 live fills，或接受該區間兩欄為
+NULL。
 
 ### 16.2 fills Additions
 

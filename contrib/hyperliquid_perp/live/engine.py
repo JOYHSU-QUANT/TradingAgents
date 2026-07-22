@@ -353,7 +353,13 @@ class LiveExecutionEngine:
         return getattr(pos, "liquidation_price", None) if pos is not None else None
 
     def has_active_work(self) -> bool:
-        """Whether the monitor must keep ticking (position, plan, or pending flip)."""
+        """Whether anything is live: a position, an active leg, or a pending flip.
+
+        Paper-parity surface (``PaperExecutionEngine.has_active_work`` drives the
+        paper loop's cadence). The v1 live loop ticks unconditionally every ~10s
+        and does NOT consult this — kept for a future protection-only cadence
+        (PR 6) and for symmetry, not because any live caller exists today.
+        """
         return not self._read_position().is_flat or self._leg is not None or self._flip is not None
 
     def settle_offline_flat(self) -> bool:

@@ -537,19 +537,41 @@ def get_etf_flow_data(
         ", ".join(f"{name} {flow:+.1f}" for name, flow in breakdown) or "no per-issuer flow"
     )
 
+    if window:
+        cumulative_line = (
+            f"**{look_back_days}d cumulative net flow:** {cumulative:+.1f} "
+            f"({flow_sessions} flow sessions in the window)\n"
+        )
+    else:
+        # The freshest available row predates the window (e.g. a small
+        # look_back_days over a weekend/holiday publishing gap). A window sum of
+        # +0.0 next to a real "Latest" line reads as "flat"; state the gap
+        # instead so the report is not self-contradictory.
+        cumulative_line = (
+            f"**{look_back_days}d cumulative net flow:** no flow rows within the "
+            f"{look_back_days}-day window (latest available is {latest['date']})\n"
+        )
+
     summary = (
         f"\n**Latest ({latest['date']}):** {latest['total']:+.1f} net\n"
-        f"**{look_back_days}d cumulative net flow:** {cumulative:+.1f} "
-        f"({flow_sessions} flow sessions in the window)\n"
-        f"**Streak:** {streak}-day {streak_word} (over all available history)\n"
-        f"**Latest-day leaders:** {breakdown_str}\n"
+        + cumulative_line
+        + f"**Streak:** {streak}-day {streak_word} (over all available history)\n"
+        + f"**Latest-day leaders:** {breakdown_str}\n"
     )
 
-    shown = window
+    # If the freshest row predates the window, show the latest available row(s)
+    # with a caveat (mirroring fear_greed) so the table matches the Latest line
+    # above rather than rendering empty.
+    shown = window or visible[-1:]
     note = ""
     if len(window) > MAX_ROWS:
         shown = window[-MAX_ROWS:]
         note = f"\n_(showing the most recent {MAX_ROWS} of {len(window)} days in the window)_\n"
+    elif not window:
+        note = (
+            f"\n_(no flow rows within the {look_back_days}-day window; showing the "
+            f"latest available)_\n"
+        )
     table = (
         "\n| Date | Net Flow |\n| --- | --- |\n"
         + "\n".join(f"| {r['date']} | {r['total']:+.1f} |" for r in shown)

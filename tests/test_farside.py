@@ -240,6 +240,17 @@ class TestRender:
         assert f"| {recs[-1]['date']} |" in out  # newest row kept
         assert out.count("| +1.0 |") == farside.MAX_ROWS  # exactly MAX_ROWS table rows
 
+    def test_freshest_row_predates_window_shows_latest_not_flat(self):
+        # curr_date is past the freshest available row by more than look_back_days
+        # (a weekend/holiday gap + a short window): the window is empty but
+        # `latest` exists, so the report shows the latest row with a caveat rather
+        # than a misleading "+0.0 / 0 flow sessions / empty table" flat rendering.
+        out = self._render("2026-07-11", look_back_days=1)  # freshest row is 07-09
+        assert "**Latest (2026-07-09):**" in out
+        assert "no flow rows within the 1-day window" in out
+        assert "| 2026-07-09 |" in out  # latest available row still tabled
+        assert "flow sessions in the window" not in out  # not the flat rendering
+
     def test_all_zero_totals_report_flat_streak(self):
         # Every day is a 0.0-total day: no flow sessions and a "0-day flat"
         # streak (streak_sign defaults to 0, the loop never runs).

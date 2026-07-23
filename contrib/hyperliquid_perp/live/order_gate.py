@@ -34,13 +34,34 @@ condition travels in :class:`LiveOrderGateRejected`.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from .config import ExecutionMode, LiveConfig
 
-__all__ = ["NO_ORDER_REASON", "LiveOrderGateRejected", "RealOrderGate"]
+__all__ = [
+    "NO_ORDER_REASON",
+    "PROTECTIVE_ORDER_ROLES",
+    "LiveOrderGateRejected",
+    "RealOrderGate",
+]
 
 # §4.1: the one no_order_reason vocabulary entry for a gate rejection.
 NO_ORDER_REASON = "live_order_gate_rejected"
+
+# The three §4.1 enforcement scopes (_first_failed's condition table). Literal —
+# not bare str — so a mistyped scope tag on a future condition entry is a type
+# error instead of a silently never-matched (and therefore never-skipped) check.
+_ConditionScope = Literal["always", "decision", "safe_mode"]
+
+# §13.1 / §17.2: the de-risking / protection order roles that stay sendable while
+# a safe mode is active. Safe mode blocks anything that ADDS risk (§13.2), but the
+# run keeps PROTECTING (§13.1) and the §17.2 emergency close is the one order most
+# needed then — and the SL repair that heals a §12.3 SL-missing safe mode must
+# itself be sendable, or the clean reconciliation pass that would release it (it
+# needs a valid SL) can never happen. These roles are exempt from the two
+# safe-mode gate lines only (state_reconciled / manual_safe_mode); the base wire
+# preconditions and the armed kill switch still bind them.
+PROTECTIVE_ORDER_ROLES = frozenset({"stop_loss", "take_profit", "emergency_close"})
 
 # The §3 modes in which real orders can exist at all. mainnet_live is included
 # because §4.1 lists it — config load already rejects it (§22), so its presence
@@ -138,37 +159,57 @@ class RealOrderGate:
             return "agent authorization has not passed (§6.1)"
         return None
 
-    def _first_failed(self, symbol: str, *, new_target: bool) -> str | None:
+    def _first_failed(
+        self, symbol: str, *, new_target: bool, protective: bool = False
+    ) -> str | None:
         """The FIRST failed §4.1 line, in the spec's own order.
 
-        ONE ordered list drives both checks, each condition tagged with its
-        scope, so the two can never drift apart and both always report the
-        first failed line of §4.1 — stable for tests and log triage.
+        ONE ordered list drives every check, each condition tagged with the
+        SCOPE that decides who it applies to, so the checks can never drift
+        apart and all report the first failed line of §4.1 — stable for tests
+        and log triage:
+
+        - ``"always"`` — every order (the base wire preconditions).
+        - ``"decision"`` — only a NEW-target admission; skipped per order (§9.3
+          forbids new plans mid-plan but allows SL repair / emergency close).
+        - ``"safe_mode"`` — every order EXCEPT a protection / de-risking one:
+          §13.1 keeps the run protecting and §17.2's emergency close is the one
+          order most needed in safe mode, so ``protective`` orders skip these.
         """
         base = self.check_exchange_action()
         if base is not None:
             return base
-        # (decision_scoped, failed, reason) — §4.1's order, verbatim.
-        conditions: tuple[tuple[bool, bool, str], ...] = (
+        # (scope, failed, reason) — §4.1's order, verbatim.
+        conditions: tuple[tuple[_ConditionScope, bool, str], ...] = (
             (
-                False,
+                "always",
                 not self.startup_reconciliation_passed,
                 "startup reconciliation has not passed",
             ),
-            (False, not self.kill_switch_active, "kill switch is not active"),
+            ("always", not self.kill_switch_active, "kill switch is not active"),
             (
-                False,
+                "always",
                 symbol not in self.allowed_symbols,
                 f"symbol {symbol!r} is not in allowed_symbols",
             ),
-            (True, not self.risk_gate_approved, "risk gate has not approved a target this cycle"),
-            (False, not self.state_reconciled, "account/position state is not reconciled"),
-            (True, self.unresolved_protection_failure, "an unresolved protection failure exists"),
-            (True, self.active_slice_plan, "an active slice plan exists (§9.3)"),
-            (False, self.manual_safe_mode, "manual safe mode is active"),
+            (
+                "decision",
+                not self.risk_gate_approved,
+                "risk gate has not approved a target this cycle",
+            ),
+            ("safe_mode", not self.state_reconciled, "account/position state is not reconciled"),
+            (
+                "decision",
+                self.unresolved_protection_failure,
+                "an unresolved protection failure exists",
+            ),
+            ("decision", self.active_slice_plan, "an active slice plan exists (§9.3)"),
+            ("safe_mode", self.manual_safe_mode, "manual safe mode is active"),
         )
-        for decision_scoped, failed, reason in conditions:
-            if decision_scoped and not new_target:
+        for scope, failed, reason in conditions:
+            if scope == "decision" and not new_target:
+                continue
+            if scope == "safe_mode" and protective:
                 continue
             if failed:
                 return reason
@@ -206,8 +247,30 @@ class RealOrderGate:
 
         Those conditions are not dropped — they moved to
         :meth:`check_new_target`, asked before the plan is built at all.
+
+        A ``check_order`` blocked by a safe-mode line (state_reconciled /
+        manual_safe_mode) is the RIGHT answer for a risk-adding order; a
+        protection / de-risking order (SL, TP, §17.2 emergency close) asks
+        :meth:`check_protective_order` instead, which is additionally exempt.
         """
         return self._first_failed(symbol, new_target=False)
+
+    def check_protective_order(self, symbol: str) -> str | None:
+        """May THIS protection / de-risking order go on the wire? None means yes.
+
+        The SL / TP / emergency-close subset (:data:`PROTECTIVE_ORDER_ROLES`).
+        Like :meth:`check_order` it drops the three decision-scoped conditions,
+        and it ADDITIONALLY drops the two safe-mode lines (``state_reconciled``,
+        ``manual_safe_mode``): §13.1 keeps the run protecting in safe mode and
+        §17.2's emergency close is the one order you most need then — and the SL
+        repair that heals a §12.3 ``position_sl_missing`` safe mode must itself be
+        sendable, or the clean reconciliation pass that would release the safe
+        mode (it requires a resting SL) can never happen and the position rides
+        unprotected until a human intervenes. Still fully bound by the base wire
+        preconditions AND the armed kill switch: a protective order is exempt from
+        the safe-mode gate, never from the dead man's switch.
+        """
+        return self._first_failed(symbol, new_target=False, protective=True)
 
     def require_new_target(self, symbol: str) -> None:
         reason = self.check_new_target(symbol)
@@ -216,6 +279,11 @@ class RealOrderGate:
 
     def require_order(self, symbol: str) -> None:
         reason = self.check_order(symbol)
+        if reason is not None:
+            raise LiveOrderGateRejected(reason)
+
+    def require_protective_order(self, symbol: str) -> None:
+        reason = self.check_protective_order(symbol)
         if reason is not None:
             raise LiveOrderGateRejected(reason)
 

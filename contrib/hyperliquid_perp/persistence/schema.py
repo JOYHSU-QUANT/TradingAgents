@@ -28,7 +28,7 @@ from __future__ import annotations
 
 __all__ = ["MIGRATIONS", "SCHEMA_MIGRATIONS_DDL", "SCHEMA_VERSION"]
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # --------------------------------------------------------------------------
 # Export logical tables (phase2-data §5–§12) — one-to-one with CSV exports.
@@ -613,4 +613,12 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE scheduler_state ADD COLUMN day_start_date TEXT",
         "ALTER TABLE scheduler_state ADD COLUMN consecutive_loss_count INTEGER",
     ),
+    # v7: the §10.4 consecutive-loss segment baseline (PR 5 loss guards). A
+    # "loss" is one position segment (flat → flat) whose net realized PnL
+    # (closedPnl − fees + funding, all already folded into wallet_balance) is
+    # negative; the baseline is the wallet_balance at the PREVIOUS settlement,
+    # so the current segment's PnL is the delta against it. Durable so the
+    # count survives a restart mid-segment (the count column landed in v6).
+    # Internal column, never exported.
+    7: ("ALTER TABLE scheduler_state ADD COLUMN last_settlement_wallet_balance TEXT",),
 }

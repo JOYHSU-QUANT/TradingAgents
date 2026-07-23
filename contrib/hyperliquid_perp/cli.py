@@ -13,7 +13,8 @@ Four subcommands plus full Phase 1/2 backward compatibility:
 - ``python -m contrib.hyperliquid_perp live --config <yaml>`` — the Phase 3
   startup skeleton (phase3-spec PR 1): load the ``live:`` config gates, verify
   the agent-wallet authorization, print the effective notional caps, and exit
-  without entering any trading loop (that arrives in PR 5). Places no orders.
+  without entering any trading loop (that is ``live --run-id --loop``, PR 5).
+  Places no orders.
 
 Empty argv and flag-style invocations (first argument starting with ``-``) —
 including the Phase 1 ``--context-only`` smoke run and the single-shot engine
@@ -534,12 +535,13 @@ def _stamp_reconciliation_case(db, repo, args) -> int:
 def _cmd_live(argv: list[str]) -> int:
     """Load the ``live:`` gates, verify agent authorization, print caps, exit.
 
-    The PR 1 skeleton of the Phase 3 startup sequence: everything here must
-    pass before a future live loop may run, and every failure is a named
-    exit 1 — this command can never place an order (the signed client exposes
-    no order methods yet, and the run exits before any loop). Config/env
-    problems fail fast (nothing else is checkable without them); the
-    network-dependent gates all run and report every failure in one pass.
+    The Phase 3 startup sequence: everything here must pass before the live
+    loop may run, and every failure is a named exit 1. Without --run-id the
+    command is config-only and can never place an order; with --run-id it runs
+    the §19.1 startup recovery, and --loop then continues into the PR 5 live
+    trading loop (the one lane that trades). Config/env problems fail fast
+    (nothing else is checkable without them); the network-dependent gates all
+    run and report every failure in one pass.
     """
     parser = argparse.ArgumentParser(
         prog="python -m contrib.hyperliquid_perp live",
@@ -547,8 +549,8 @@ def _cmd_live(argv: list[str]) -> int:
             "Phase 3 live startup: validate the config gates + agent "
             "authorization and print effective caps; with --run-id, run the "
             "full §19.1 startup recovery (arm kill switch, reconcile, cancel "
-            "stale bot-owned orders) and report the verdict. No trading loop "
-            "yet — that arrives with PR 5."
+            "stale bot-owned orders) and report the verdict; add --loop to "
+            "continue into the live trading loop."
         ),
     )
     parser.add_argument("--config", default=None, help="Config YAML path.")
@@ -584,19 +586,31 @@ def _cmd_live(argv: list[str]) -> int:
             "fresh ledger."
         ),
     )
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        help=(
+            "After the §19.1 startup recovery passes, run the PR 5 live trading "
+            "loop (~10s tick, inside the 30s kill-switch budget: WS drain → "
+            "kill-switch refresh → reconciliation → SL/TP protection → due "
+            "slices, with the 4h AI decision cycle off the tick thread). "
+            "Ctrl-C / SIGTERM stops it and runs the §18.2 shutdown sweep. "
+            "Without it, --run-id is the one-shot recovery check."
+        ),
+    )
     args = parser.parse_args(argv)
 
-    if args.run_id is None and (args.create or args.adopt_positions):
+    if args.run_id is None and (args.create or args.adopt_positions or args.loop):
         # Named rejection, not silent-ignore: without --run-id this command is
-        # config-check mode — it creates and seeds nothing — so --create /
-        # --adopt-positions have no effect. An operator who passed them almost
-        # certainly meant the §19.1 recovery and would otherwise read the
-        # "gates OK" exit 0 as "run created". Same discipline as the resume and
-        # safe-mode flag guards.
+        # config-check mode — it creates and seeds nothing and runs no loop — so
+        # --create / --adopt-positions / --loop have no effect. An operator who
+        # passed them almost certainly meant the §19.1 recovery (and, for --loop,
+        # the live trading loop) and would otherwise read the "gates OK" exit 0
+        # as "run started". Same discipline as the resume and safe-mode guards.
         print(
-            "error: --create / --adopt-positions require --run-id — without it this "
-            "command only checks the config gates and creates nothing. Pass --run-id "
-            "to run the §19.1 startup recovery.",
+            "error: --create / --adopt-positions / --loop require --run-id — without "
+            "it this command only checks the config gates. Pass --run-id to run the "
+            "§19.1 startup recovery (add --loop to continue into the live trading loop).",
             file=sys.stderr,
         )
         return 1
@@ -655,8 +669,8 @@ def _cmd_live(argv: list[str]) -> int:
         )
         return 1
     # The AI gate (risk:) and the live hard caps (live.safety:) must agree on
-    # the sizing regime before PR 5 wires them into one loop — a divergent
-    # pair is a config mistake today, not a runtime surprise later. The block
+    # the sizing regime — PR 5's loop wires them together, so a divergent
+    # pair is a config mistake at load time, not a runtime surprise. The block
     # and its cross-checked fields must be operator-written (§24 — see
     # validate_live_risk_consistency for the vacuous-pass rationale).
     raw_risk = config.get("risk")
@@ -676,6 +690,19 @@ def _cmd_live(argv: list[str]) -> int:
             f"error: invalid risk:/live: config — {exc}. Fix the YAML and re-run.", file=sys.stderr
         )
         return 1
+
+    # PR 5 (decided 2026-07-22): --loop consumes the risk:/decision: grid the
+    # same way the paper engine does — validate those blocks HERE, where a typo
+    # is a named exit-1 config error, never after a passing recovery where the
+    # loop would be silently skipped and exit 0 would read as a clean run to a
+    # supervisor. (_cmd_paper makes the same up-front check.)
+    loop_cfgs = None
+    if args.loop:
+        from .main import _load_risk_decision
+
+        loop_cfgs = _load_risk_decision(config)
+        if loop_cfgs is None:
+            return 1
 
     # A top-level ``network:`` that disagrees with ``live.network`` is legal —
     # the same file can drive paper reads on mainnet while live drills on
@@ -765,7 +792,7 @@ def _cmd_live(argv: list[str]) -> int:
                 )
         # Prove the signed transport end-to-end (construction + a read on the
         # live network) so a bad SDK/network surfaces now, not on the first
-        # real order in a later PR. The bound gate is fresh-from-config, i.e.
+        # real order a --loop run places. The bound gate is fresh-from-config, i.e.
         # fail-closed: no runtime condition is proven in this config-only
         # command, so the client could not place an order even if asked.
         try:
@@ -842,6 +869,7 @@ def _cmd_live(argv: list[str]) -> int:
         wallet=addr,
         agent_key=agent_key,
         snapshot=snapshot,
+        loop_cfgs=loop_cfgs,
     )
 
 
@@ -864,6 +892,7 @@ def _live_startup_recovery(
     wallet: str,
     agent_key: str | None,
     snapshot,
+    loop_cfgs,
 ) -> int:
     """The §19.1 startup recovery tail of ``live --run-id`` (steps 5–16).
 
@@ -871,10 +900,11 @@ def _live_startup_recovery(
     read) were proven by the caller; this builds the PR 2–4 components — a
     runtime-flagged gate, the signed client, kill switch, safe-mode machine
     and reconciler — creates or resumes the live run, and hands off to
-    :func:`~.live.startup.run_startup_recovery`. The command is one-shot: it
-    reports the verdict, runs the §18.2 shutdown sweep, and exits — the
-    long-running loop that would keep the kill switch refreshed arrives with
-    PR 5. Exit codes: 0 = the §19.1 step-16 verdict allows a new AI cycle;
+    :func:`~.live.startup.run_startup_recovery`. Without --loop the command is
+    one-shot: it reports the verdict, runs the §18.2 shutdown sweep, and
+    exits; with --loop a passing verdict hands off to :func:`_run_live_loop`
+    (which keeps the kill switch refreshed) before the same sweep runs on the
+    way out. Exit codes: 0 = the §19.1 step-16 verdict allows a new AI cycle;
     4 = recovery executed but the verdict is unclean (the run is in safe
     mode); 1 = hard failure (config/arming/creation errors).
     """
@@ -886,7 +916,12 @@ def _live_startup_recovery(
     from .exchanges.hyperliquid.signed_client import HyperliquidSignedClient
     from .live.fill_backfill import FillBackfiller
     from .live.fills import LiveFillProcessor
-    from .live.kill_switch import KillSwitchManager, kill_switch_timing_violation
+    from .live.kill_switch import (
+        KillSwitchManager,
+        kill_switch_timing_violation,
+        network_timeout_warning,
+        sl_repair_delay_warning,
+    )
     from .live.order_gate import RealOrderGate
     from .live.reconcile import LiveReconciler
     from .live.safe_mode import SafeModeManager
@@ -926,6 +961,19 @@ def _live_startup_recovery(
             file=sys.stderr,
         )
         return 1
+    # Its advisory sister (decided 2026-07-22 "soft mitigation"): warn — do
+    # not refuse — when the per-request REST timeout cannot keep the same
+    # max_tick_gap promise. Beside the enforced check so the two halves of
+    # the §18.2 timing story stay in one place for PR 6's hard invariant.
+    for advisory in (
+        network_timeout_warning(client.timeout, _RECOVERY_MAX_TICK_GAP_SECONDS),
+        sl_repair_delay_warning(
+            float(live_cfg.protection.sl_repair_retry_delay_seconds),
+            _RECOVERY_MAX_TICK_GAP_SECONDS,
+        ),
+    ):
+        if advisory is not None:
+            print(f"WARNING: {advisory}", file=sys.stderr)
 
     run_id: str = args.run_id
     coin = live_cfg.safety.allowed_symbols[0]
@@ -1096,6 +1144,20 @@ def _live_startup_recovery(
                 payload_dir=payload_dir,
             )
             shutdown_problem: str | None = None
+            superseded = False
+            # False until the §19.1 verdict PASSES — a recovery that raised
+            # counts as unclean too. The ``finally`` sweep below keys its
+            # keep-the-SL/TP decision off this OR'd with the EXIT-TIME safe
+            # mode (both decided 2026-07-22): over a --loop run the boot
+            # verdict goes stale, and safe mode latched mid-loop means the
+            # next boot's verdict will refuse to start — exactly the
+            # "no repair machinery" case the keep exists for.
+            verdict_passed = False
+            # True when the shutdown-time safe-mode read RAISED: the keep
+            # decision then acted on unknown ≠ clean, and the exit code below
+            # must not let a luckier later read report "all quiet" over
+            # deliberately-kept orders.
+            exit_safe_mode_unknown = False
             try:
                 result = run_startup_recovery(
                     db=db,
@@ -1108,6 +1170,43 @@ def _live_startup_recovery(
                     safe_mode=safe_mode,
                     payload_dir=payload_dir,
                 )
+                verdict_passed = result.passed
+                # PR 5: with --loop, a passing recovery hands off to the live
+                # trading loop; it returns on Ctrl-C / SIGTERM, and the §18.2
+                # shutdown sweep in the ``finally`` below then disarms the switch.
+                if args.loop and result.passed:
+                    _run_live_loop(
+                        cfgs=loop_cfgs,
+                        db=db,
+                        run_id=run_id,
+                        coin=coin,
+                        config=config,
+                        live_cfg=live_cfg,
+                        client=client,
+                        signed=signed,
+                        gate=gate,
+                        kill_switch=kill_switch,
+                        safe_mode=safe_mode,
+                        reconciler=reconciler,
+                        processor=processor,
+                        payload_dir=payload_dir,
+                        fetch_clearinghouse=fetch_clearinghouse,
+                    )
+            except RunLockError as exc:
+                # §18.2 lease takeover (raised out of the loop's heartbeat): a
+                # successor process owns the run now — its store, its resting
+                # orders (the SL/TP included) and the wallet's dead-man's
+                # switch. ANY exchange action or store write from this process
+                # sabotages the successor: the §18.2 sweep in the ``finally``
+                # below would cancel the successor's live protection orders and
+                # leave ITS position naked. Exit with nothing but the
+                # pid-guarded lock release (a no-op once the successor holds
+                # the lease) — the same contract as the paper loop's
+                # RunLockError exit.
+                superseded = True
+                logger.error("run lease lost: %s", exc)
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
             except Exception as exc:  # noqa: BLE001 — arming is the one hard-error step
                 # Full traceback to the log (this is the signed live path);
                 # the message alone would leave a failure here undiagnosable.
@@ -1115,79 +1214,184 @@ def _live_startup_recovery(
                 print(f"error: startup recovery failed — {exc}", file=sys.stderr)
                 return 1
             finally:
-                # Decided 2026-07-16: the §18.2 semantics stand (shutdown
-                # cancels ALL bot-owned orders, the §19.3-kept SL/TP
-                # included), but never silently over a live position. The
-                # position that decides the warning is read FRESH here
-                # (decided 2026-07-17): the boot snapshot can be minutes
-                # stale after arming/backfill/two reconcile passes, and a
-                # position acquired mid-recovery would otherwise lose its
-                # protection to the sweep below without a word. Unreadable
-                # ≠ flat (the startup sweep's own rule) — warn then too.
-                try:
-                    fresh_positions = map_account_snapshot(fetch_clearinghouse()).positions
-                except Exception:  # noqa: BLE001 — the warning must not mask the verdict
-                    logger.exception("shutdown position re-read failed")
-                    # Truthful wording: "could not look" is not "holds" — but
-                    # the operator action is the same (unknown ≠ flat).
-                    print(
-                        "WARNING: positions could NOT be re-read at shutdown and "
-                        "this one-shot command's §18.2 shutdown sweep cancels "
-                        "bot-owned protection orders — any live position is "
-                        "UNPROTECTED after exit until a live loop (PR 5) or "
-                        "manual action re-covers it.",
-                        file=sys.stderr,
-                    )
+                if superseded:
+                    # Lease lost: the successor owns every resting order and
+                    # the dead-man's switch — skip the position re-read and the
+                    # §18.2 sweep ENTIRELY; only the caller's pid-guarded lock
+                    # release runs (and no-ops).
+                    logger.info("lease takeover — §18.2 shutdown sweep skipped")
                 else:
-                    if fresh_positions:
-                        held = ", ".join(f"{p.coin} {p.size}" for p in fresh_positions)
-                        print(
-                            f"WARNING: the account holds a live position ({held}) "
-                            "and this one-shot command's §18.2 shutdown sweep "
-                            "cancels bot-owned protection orders — the position "
-                            "is UNPROTECTED after exit until a live loop (PR 5) "
-                            "or manual action re-covers it.",
-                            file=sys.stderr,
-                        )
-                # One-shot command: leave nothing resting behind a dead man's
-                # switch nobody will refresh. The §18.2 shutdown sweep cancels
-                # bot-owned open orders and disarms only on a clean sweep.
-                # (The §12.2 "before shutdown" reconciliation is the verdict
-                # pass that just ran — this command places no orders after it.)
-                if kill_switch.armed:
-                    # Guarded because a raise inside this ``finally`` would
-                    # DISCARD the computed verdict (nothing prints, the
-                    # documented 0/4/1 contract becomes a generic exit 2) —
-                    # shutdown()'s audit writes are fail-loud by design, so a
-                    # busy DB here is a realistic raise, not an edge case.
-                    try:
-                        kill_switch.shutdown()
-                    except Exception as exc:  # noqa: BLE001
-                        logger.exception("§18.2 shutdown sweep raised")
-                        shutdown_problem = f"shutdown sweep raised: {exc}"
-                    else:
-                        if kill_switch.armed:
-                            # shutdown() disarms only on a clean sweep: still
-                            # armed means bot orders may rest and the
-                            # wallet-wide scheduleCancel WILL fire at the
-                            # deadline — taking out non-bot orders §25 says
-                            # never to touch. Loud, and never exit 0.
-                            shutdown_problem = (
-                                "shutdown sweep left the kill switch armed — bot "
-                                "orders may still rest and the wallet-wide "
-                                "scheduleCancel will fire at the deadline"
+                    # §12.2 rule 8 (the --loop path): the loop has been placing
+                    # orders since the startup verdict pass — reconcile once
+                    # more so the sweep below works from fresh exchange state.
+                    # Runs FIRST, before the position/safe-mode reads below:
+                    # this pass can itself ENTER safe mode (an unclean final
+                    # reconcile), and a keep decision computed from the
+                    # pre-reconcile snapshot would strip SL/TP at exactly the
+                    # moment the problem was found. Best-effort: a failure must
+                    # not block the sweep.
+                    if args.loop:
+                        try:
+                            reconciler.reconcile_and_apply(
+                                "shutdown",
+                                safe_mode=safe_mode,
+                                ws_restored=True,
+                                kill_switch_active=not kill_switch.stop_new_orders,
                             )
-                            logger.error("§18.2 %s", shutdown_problem)
-                    if shutdown_problem is not None:
-                        # Surfaced HERE, inside the ``finally``: when the body
-                        # above raised (the except path already returned 1),
-                        # the summary prints below never run — and "the
-                        # wallet-wide trigger is still armed" is the one fact
-                        # that must never exit silently, on any path.
-                        print(
-                            f"error: §18.2 shutdown unclean — {shutdown_problem}",
-                            file=sys.stderr,
+                        except Exception:  # noqa: BLE001
+                            logger.exception(
+                                "§12.2 pre-shutdown reconciliation failed (sweep proceeds)"
+                            )
+                    # Decided 2026-07-16, revised 2026-07-22: on a PASSING
+                    # verdict the §18.2 semantics stand (shutdown cancels ALL
+                    # bot-owned orders, the §19.3-kept SL/TP included), but
+                    # never silently over a live position. On an UNCLEAN exit
+                    # (verdict failed, recovery raised, or safe mode active at
+                    # exit — the boot verdict goes stale over a loop) the sweep
+                    # now KEEPS
+                    # the resting SL/TP over a live — or unreadable, and
+                    # unreadable ≠ flat is the startup sweep's own rule —
+                    # position: stripping reduce-only protection trades an
+                    # unclean verdict for a naked position, and the repair
+                    # machinery that could re-cover it is exactly what an
+                    # unclean verdict refuses to start. The position that
+                    # decides both the warning and the keep is read FRESH here
+                    # (decided 2026-07-17): the boot snapshot can be minutes
+                    # stale after arming/backfill/two reconcile passes, and a
+                    # position acquired mid-recovery would otherwise lose its
+                    # protection to the sweep below without a word.
+                    # None = could not read (unknown ≠ flat), the same sentinel
+                    # convention as ``_safe_fetch_open_orders``.
+                    fresh_positions: list | None
+                    try:
+                        fresh_positions = map_account_snapshot(fetch_clearinghouse()).positions
+                    except Exception:  # noqa: BLE001 — the warning must not mask the verdict
+                        logger.exception("shutdown position re-read failed")
+                        fresh_positions = None
+                    # Exit-time safe mode is read FRESH for the same reason the
+                    # position is: the boot verdict is stale after a loop. A
+                    # failed read is unknown ≠ clean — fail toward keeping.
+                    try:
+                        exit_safe_mode = safe_mode.active
+                    except Exception:  # noqa: BLE001
+                        logger.exception("shutdown safe-mode read failed")
+                        exit_safe_mode = True
+                        exit_safe_mode_unknown = True
+                    keep_protective = (not verdict_passed or exit_safe_mode) and (
+                        fresh_positions is None or bool(fresh_positions)
+                    )
+                    # Three distinct causes, three truthful notes: a FAILED
+                    # read is not "safe mode is active" — claiming so would
+                    # contradict the fresh `safe_mode:` line printed later
+                    # when the second read succeeds and finds none.
+                    if not verdict_passed:
+                        unclean_note = "the startup verdict did not pass"
+                    elif exit_safe_mode_unknown:
+                        unclean_note = (
+                            "the exit-time safe-mode state could NOT be read (unknown ≠ clean)"
                         )
+                    else:
+                        unclean_note = "safe mode is active at exit"
+                    if fresh_positions is None:
+                        if keep_protective:
+                            print(
+                                "WARNING: positions could NOT be re-read at shutdown "
+                                f"(unknown ≠ flat) and {unclean_note} "
+                                "— the §18.2 shutdown sweep leaves the bot's resting "
+                                "SL/TP STANDING (reduce-only) and cancels other bot "
+                                "orders. Re-run with --loop, or intervene manually.",
+                                file=sys.stderr,
+                            )
+                        else:
+                            # Truthful wording: "could not look" is not "holds" —
+                            # but the operator action is the same (unknown ≠ flat).
+                            print(
+                                "WARNING: positions could NOT be re-read at shutdown "
+                                "and this command's §18.2 shutdown sweep cancels "
+                                "bot-owned protection orders — any live position is "
+                                "UNPROTECTED after exit until a --loop run or "
+                                "manual action re-covers it.",
+                                file=sys.stderr,
+                            )
+                    elif fresh_positions:
+                        held = ", ".join(f"{p.coin} {p.size}" for p in fresh_positions)
+                        if keep_protective:
+                            print(
+                                f"WARNING: the account holds a live position ({held}) "
+                                f"and {unclean_note} — the §18.2 "
+                                "shutdown sweep leaves the bot's resting SL/TP "
+                                "STANDING (reduce-only) and cancels other bot orders. "
+                                "Re-run with --loop, or intervene manually.",
+                                file=sys.stderr,
+                            )
+                        else:
+                            print(
+                                f"WARNING: the account holds a live position ({held}) "
+                                "and this command's §18.2 shutdown sweep "
+                                "cancels bot-owned protection orders — the position "
+                                "is UNPROTECTED after exit until a --loop run "
+                                "or manual action re-covers it.",
+                                file=sys.stderr,
+                            )
+                    # Leave nothing resting behind a dead man's switch nobody
+                    # will refresh — except the deliberately-kept SL/TP when
+                    # ``keep_protective`` is set (reduce-only; the disarm below
+                    # is what lets them outlive the wallet-wide trigger). The
+                    # §18.2 shutdown sweep cancels the rest of the bot-owned
+                    # open orders and disarms only on a clean sweep.
+                    # (The §12.2 "before shutdown" reconciliation: for the
+                    # one-shot command it is the verdict pass that just ran — no
+                    # orders are placed after it; the --loop path runs the fresh
+                    # pass above.)
+                    if kill_switch.armed:
+                        # Guarded because a raise inside this ``finally`` would
+                        # DISCARD the computed verdict (nothing prints, the
+                        # documented 0/4/1 contract becomes a generic exit 2) —
+                        # shutdown()'s audit writes are fail-loud by design, so a
+                        # busy DB here is a realistic raise, not an edge case.
+                        try:
+                            kill_switch.shutdown(keep_protective=keep_protective)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.exception("§18.2 shutdown sweep raised")
+                            shutdown_problem = f"shutdown sweep raised: {exc}"
+                        else:
+                            if kill_switch.armed:
+                                # shutdown() disarms only on a clean sweep: still
+                                # armed means bot orders may rest and the
+                                # wallet-wide scheduleCancel WILL fire at the
+                                # deadline — taking out non-bot orders §25 says
+                                # never to touch. Loud, and never exit 0.
+                                shutdown_problem = (
+                                    "shutdown sweep left the kill switch armed — bot "
+                                    "orders may still rest and the wallet-wide "
+                                    "scheduleCancel will fire at the deadline"
+                                )
+                                logger.error("§18.2 %s", shutdown_problem)
+                        if shutdown_problem is not None:
+                            # Surfaced HERE, inside the ``finally``: when the body
+                            # above raised (the except path already returned 1),
+                            # the summary prints below never run — and "the
+                            # wallet-wide trigger is still armed" is the one fact
+                            # that must never exit silently, on any path.
+                            print(
+                                f"error: §18.2 shutdown unclean — {shutdown_problem}",
+                                file=sys.stderr,
+                            )
+                            if keep_protective and kill_switch.armed:
+                                # The calm "left STANDING" warning above and the
+                                # armed trigger are the SAME orders' fate — say
+                                # so, or the operator reads two disconnected
+                                # facts and misses that the kept SL/TP die at
+                                # the scheduleCancel deadline.
+                                print(
+                                    "NOTE: the SL/TP described above as kept "
+                                    "STANDING are NOT safe while the wallet-wide "
+                                    "scheduleCancel stays armed — it cancels them "
+                                    "too at its deadline. Re-adopt with --loop "
+                                    "(a clean recovery disarms it) or clear the "
+                                    "trigger manually.",
+                                    file=sys.stderr,
+                                )
 
             print(f"startup_reconciliation_passed: {'true' if result.passed else 'false'}")
             print(f"canceled_stale_orders: {len(result.canceled_stale)}")
@@ -1207,11 +1411,41 @@ def _live_startup_recovery(
                     # executed-but-unclean code 4 the verdict path uses (the
                     # "§18.2 shutdown unclean" line above carries the detail).
                     return 4
-                print(
-                    "startup recovery passed — a live loop could start from this "
-                    "state (the loop arrives with PR 5).",
-                    file=sys.stderr,
-                )
+                if args.loop:
+                    if state is not None or (exit_safe_mode_unknown and keep_protective):
+                        # Sibling of the keep decision (2026-07-22): the boot
+                        # verdict is stale after a loop, and a run that latched
+                        # safe mode mid-loop must not hand exit 0 ("all quiet")
+                        # to its supervisor. Same executed-but-unclean code 4
+                        # the one-shot path returns when ITS verdict finds safe
+                        # mode active. A FAILED shutdown safe-mode read that
+                        # actually KEPT orders counts too — the sweep just
+                        # acted on unknown ≠ clean, and a luckier later read
+                        # must not talk the exit code back down to 0 over
+                        # deliberately-kept orders. (Unknown read over a
+                        # confirmed-flat book kept nothing and changed nothing:
+                        # exit stays state-driven, no supervisor false alarm.)
+                        print(
+                            "live loop exited IN SAFE MODE — see safe_mode above; "
+                            "resolve it (manual release if required) before resuming."
+                            if state is not None
+                            else "live loop exited with protective orders kept behind "
+                            "a FAILED shutdown safe-mode read (unknown ≠ clean) — "
+                            "inspect the run store before resuming.",
+                            file=sys.stderr,
+                        )
+                        return 4
+                    print(
+                        "live loop exited — §18.2 shutdown sweep done; re-run "
+                        "with --loop to resume this run.",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        "startup recovery passed — a live loop can start from "
+                        "this state (re-run with --loop).",
+                        file=sys.stderr,
+                    )
                 return 0
             print(
                 "startup recovery did NOT pass — the run is in safe mode; see the "
@@ -1232,6 +1466,263 @@ def _live_startup_recovery(
                 release_run_lock(db, run_id, pid=os.getpid(), now=datetime.now(timezone.utc))
             except Exception:  # noqa: BLE001
                 logger.exception("run-lock release failed (the verdict above stands)")
+
+
+# The live loop's tick period. Kept well inside the kill-switch tick budget
+# (max_tick_gap 30s) so the §18.2 refresh never lands late even when a tick does
+# real work (reconciliation network reads, an SL repair). engine.tick() refreshes
+# the switch every call; the AI decision runs off-thread and never blocks it.
+_LIVE_TICK_SECONDS = 10.0
+
+
+def _contain_as_recoverable_safe_mode(safe_mode, *, log_message: str, detail: str) -> None:
+    """The live loop's ONE containment idiom: log, then best-effort safe mode.
+
+    Used by every except-branch that must keep the loop alive (tick/pump
+    errors, heartbeat blips): the failure is logged with its traceback, the run
+    drops into recoverable safe mode so new risk pauses until a clean reconcile
+    releases it, and a safe-mode write that ITSELF fails is swallowed too —
+    nothing here may end the loop, because the caller's teardown would sweep
+    the resting SL/TP off a live position.
+    """
+    from .live.safe_mode import REASON_LIVE_TICK_ERROR
+
+    logger.exception(log_message)
+    try:
+        safe_mode.enter("recoverable", REASON_LIVE_TICK_ERROR, detail=detail)
+    except Exception:  # noqa: BLE001 — a safe-mode write miss must not itself end the loop
+        logger.exception("failed to enter safe mode after containment (%s)", detail)
+
+
+def _live_heartbeat(db, run_id: str, *, pid: int, now, safe_mode) -> None:
+    """§18.2 lease heartbeat, contained like a tick error.
+
+    ``RunLockError`` (this pid was superseded by a newer process) stays FATAL —
+    two writers must never flip-flop the lease. Any OTHER failure here is a
+    transient store error (an operator's export/validate holding the SQLite
+    lock, say): letting it tear the loop down would run the §18.2 shutdown
+    sweep, cancelling the resting SL/TP — a naked position bought with a
+    heartbeat blip. Contain it exactly like a tick error instead: log, enter
+    recoverable safe mode, retry on the next tick's heartbeat.
+    """
+    from .paper import run_lock
+
+    try:
+        run_lock.heartbeat_run_lock(db, run_id, pid=pid, now=now)
+    except run_lock.RunLockError:
+        raise
+    except Exception:  # noqa: BLE001 — a transient store error must not strip SL/TP
+        _contain_as_recoverable_safe_mode(
+            safe_mode,
+            log_message=(
+                "run-lock heartbeat failed transiently — entering recoverable "
+                "safe mode and continuing"
+            ),
+            detail="run-lock heartbeat write failed (see log)",
+        )
+
+
+def _run_live_loop(
+    *,
+    cfgs,
+    db,
+    run_id: str,
+    coin: str,
+    config: dict,
+    live_cfg,
+    client,
+    signed,
+    gate,
+    kill_switch,
+    safe_mode,
+    reconciler,
+    processor,
+    payload_dir: Path,
+    fetch_clearinghouse,
+) -> None:
+    """The PR 5 live trading loop (§9/§11.4): tick the engine + pump the 4h cycle.
+
+    Builds the execution engine, §17 protection manager, §10 loss guards and the
+    off-thread decision worker/driver over the recovery components, then loops
+    every ~10s (well inside the kill-switch tick budget). Returns on Ctrl-C /
+    SIGTERM (SIGTERM is already mapped to KeyboardInterrupt by the caller); the
+    caller's §18.2 shutdown sweep disarms the switch afterwards.
+
+    v1 scope note: this wires a :class:`LiveWsStream` WITHOUT a live socket
+    connection — fills are ingested by the reconciler's REST backfill at the
+    implemented §12.2 timings (post-fill / 5-minute heartbeat /
+    protection-change / pre-shutdown) rather than in real time. The live WS
+    connection wiring lands in a later pass (§11 / PR 6).
+
+    A ``RunLockError`` from the lease heartbeat propagates OUT of this function
+    by design: the caller exits without the §18.2 sweep (the successor process
+    owns the run's orders — see the caller's ``except RunLockError``).
+    """
+    from .exchanges.hyperliquid.mapper import map_account_snapshot
+    from .exchanges.hyperliquid.market_data import HyperliquidMarketData
+    from .live.decision import LiveDecisionDriver, LiveDecisionWorker
+    from .live.engine import LiveExecutionEngine
+    from .live.loss_guards import LossGuards
+    from .live.orders import LiveOrderSubmitter
+    from .live.protection import ProtectionManager
+    from .live.ws_stream import LiveWsStream
+    from .paper.clock import WallClock
+    from .paper.engine import AssetSpec
+    from .paper.market_feed import PortSnapshotProvider
+    from .paper.stops import StopConfig
+    from .persistence import repository as repo
+
+    # ``cfgs`` was validated by _cmd_live's front gate (decided 2026-07-22): a
+    # bad risk:/decision:/paper_trading: block is an exit-1 up front, so this
+    # function can no longer be reached with an unusable grid and silently
+    # skip the loop behind a passing recovery's exit 0.
+    risk_cfg, decision_cfg = cfgs
+    clock = WallClock()
+    market = HyperliquidMarketData(client)
+    sz_decimals, schedule = market.get_asset_meta(coin)
+    asset = AssetSpec(coin=coin, sz_decimals=sz_decimals, margin_schedule=schedule)
+    provider = PortSnapshotProvider(market, clock)
+    submitter = LiveOrderSubmitter(
+        client=signed, gate=gate, db=db, run_id=run_id, payload_dir=payload_dir, clock=clock
+    )
+    protection = ProtectionManager(
+        db=db,
+        run_id=run_id,
+        coin=coin,
+        client=signed,
+        gate=gate,
+        tick_size=asset.tick_size,
+        qty_step=asset.qty_step,
+        stop_config=StopConfig(),
+        max_slippage_pct=live_cfg.execution.max_slippage_pct,
+        protection_config=live_cfg.protection,
+        owner_prefix=live_cfg.order_owner_prefix,
+        clock=clock,
+        kill_switch=kill_switch,
+    )
+    loss_guards = LossGuards(
+        db=db,
+        run_id=run_id,
+        safety=live_cfg.safety,
+        safe_mode=safe_mode,
+        # §10.3 rule 1: the UTC-day baseline is the EXCHANGE's reconciled
+        # accountValue, fetched once at each day roll (per-tick drawdown
+        # evaluation stays on the local ledger — zero extra REST per tick).
+        day_baseline_source=lambda: map_account_snapshot(fetch_clearinghouse()).account_value,
+    )
+    ledger = repo.get_current_account_state(db.conn, run_id)
+    if ledger is not None:
+        loss_guards.ensure_settlement_anchor(ledger.wallet_balance, now=clock.now())
+    ws_stream = LiveWsStream()
+    engine = LiveExecutionEngine(
+        db=db,
+        run_id=run_id,
+        asset=asset,
+        live_config=live_cfg,
+        risk_config=risk_cfg,
+        decision_config=decision_cfg,
+        provider=provider,
+        submitter=submitter,
+        gate=gate,
+        kill_switch=kill_switch,
+        safe_mode=safe_mode,
+        reconciler=reconciler,
+        protection=protection,
+        loss_guards=loss_guards,
+        fill_processor=processor,
+        ws_stream=ws_stream,
+        fetch_open_orders=signed.open_orders,
+        clock=clock,
+    )
+    # §10.4: a flat reached while the process was down (an SL filled offline,
+    # backfilled by startup recovery) never crosses _detect_settlement — score
+    # that segment now, before the first tick, so the loss counter cannot merge
+    # it into the next one.
+    engine.settle_offline_flat()
+    decision_provider = _EngineDecisionProvider(
+        config, risk_cfg=risk_cfg, decision_cfg=decision_cfg, payload_dir=payload_dir
+    )
+    worker = LiveDecisionWorker(provider=decision_provider)
+    driver = LiveDecisionDriver(
+        db=db,
+        run_id=run_id,
+        coin=coin,
+        asset=asset,
+        risk_config=risk_cfg,
+        decision_config=decision_cfg,
+        engine=engine,
+        worker=worker,
+        provider=decision_provider,
+        clock=clock,
+    )
+    # §3.1: adopt a prior process's stranded in-progress decision (resume from
+    # its stored response, or fail it closed) — without this the deterministic
+    # attempt id collides every tick and the driver never decides again.
+    adopted = driver.resume_startup()
+    if adopted is not None:
+        logger.info("decision driver startup adoption: %s", adopted)
+    pid = os.getpid()
+    print(
+        f"live loop started for {run_id!r} ({live_cfg.mode.value}) — Ctrl-C to stop",
+        file=sys.stderr,
+    )
+    try:
+        while True:
+            tick_started = time.monotonic()
+            now = clock.now()
+            _live_heartbeat(db, run_id, pid=pid, now=now, safe_mode=safe_mode)
+            try:
+                tick = engine.tick()
+                cycle = driver.pump()
+                # Per-tick operator visibility: the live loop is otherwise silent
+                # between the startup banner and whatever individual components
+                # warn about (the paper loop logs its cycle events likewise). Only
+                # a tick that DID something is logged, so an idle 10s cadence stays
+                # quiet; the decision-cycle tag is logged whenever it advances.
+                if tick.events or tick.slices_submitted or tick.fills_ingested:
+                    logger.info(
+                        "live tick %s: fills=%d slices=%d protection=%s events=%s",
+                        tick.status.value,
+                        tick.fills_ingested,
+                        tick.slices_submitted,
+                        None if tick.protection is None else tick.protection.value,
+                        list(tick.events),
+                    )
+                if cycle is not None:
+                    logger.info("live decision cycle: %s", cycle)
+            except Exception:  # noqa: BLE001 — a tick error must not tear down the loop or strip SL/TP
+                # A single transient tick failure (DB lock, a reconciler read, an
+                # unexpected raise) must not propagate out to the caller's §18.2
+                # shutdown sweep, which would cancel the resting SL/TP and leave the
+                # position naked. Log, enter recoverable safe mode (new orders pause
+                # until the next clean reconcile auto-releases), and keep ticking —
+                # protection re-attempts next tick. KeyboardInterrupt is a
+                # BaseException, so Ctrl-C / SIGTERM still reaches the handler below.
+                _contain_as_recoverable_safe_mode(
+                    safe_mode,
+                    log_message="live tick raised — entering recoverable safe mode and continuing",
+                    detail="live tick raised (see log)",
+                )
+            # The sleep DEDUCTS the tick's own wall time (decided 2026-07-22):
+            # ``max_tick_gap_seconds`` is a promise about the wall clock BETWEEN
+            # tick() calls, and a fixed sleep would stack on top of a slow tick —
+            # a degraded (slow, not dead) network could then push the §18.2
+            # refresh past the exchange-side deadline and cancel the resting
+            # SL/TP. Deducting keeps the cadence near-constant; the residual
+            # risk of a single call outlasting the gap is warned about at
+            # startup and owned by PR 6's network-layer rework.
+            time.sleep(max(0.0, _LIVE_TICK_SECONDS - (time.monotonic() - tick_started)))
+    except KeyboardInterrupt:
+        print("\nlive loop stopping — running the §18.2 shutdown sweep...", file=sys.stderr)
+        # Let the off-thread AI decision settle so no worker thread writes to the
+        # store after teardown begins (§11.4 single writer).
+        worker.join(timeout=5.0)
+        # A decision that finished during the shutdown window is a paid-for
+        # answer only the next pump would have persisted — store its raw
+        # response so resume_startup resumes it after restart (§3.1) instead
+        # of failing the cycle closed and idling up to 4h. Fully contained:
+        # shutdown proceeds on any failure.
+        driver.salvage_shutdown()
 
 
 # --------------------------------------------------------------------------
@@ -2257,6 +2748,17 @@ class _EngineDecisionProvider:
     failures are classified into the §6.2 retry vocabulary and raised as
     :class:`RetryableDecisionError`; contract violations are NOT errors — they
     come back as an invalid ``ParsedDecision`` (fail-closed downstream).
+
+    NOT a pure function of its argument (PR 6 hazard): ``request_decision``
+    reads ``_context_text`` / ``_format_text`` that the LAST ``build_input``
+    call stashed on the instance, not fields of ``decision_input`` — and the
+    one shared instance is handed to both the background worker thread and the
+    main-thread driver. Today this is safe only because the driver's busy-gate
+    serializes ``build_input() → submit()`` strictly. Any future re-send path
+    (a within-cycle retry ladder, a replay harness) MUST re-run ``build_input``
+    immediately before each ``request_decision`` — or first fold the prompt
+    texts into the decision-input type — else it sends a STALE cycle's prompt
+    while the audit trail records the fresh input.
     """
 
     def __init__(self, config: dict, *, risk_cfg, decision_cfg, payload_dir: Path) -> None:

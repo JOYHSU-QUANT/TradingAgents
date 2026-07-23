@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ..domains.perp.enum_guard import check_enum
 from ..paper.clock import Clock, WallClock
@@ -44,8 +44,13 @@ from ..persistence.db import Database
 from .order_gate import RealOrderGate
 
 __all__ = [
+    "REASON_CONSECUTIVE_LOSS",
+    "REASON_DAILY_LOSS",
+    "REASON_EMERGENCY_CLOSE",
     "REASON_INVALID_LOCAL_FILL",
     "REASON_KILL_SWITCH_REFRESH_FAILED",
+    "REASON_LIVE_TICK_ERROR",
+    "REASON_NO_MARKET_DATA",
     "REASON_NON_BOT_OWNED_ORDER",
     "REASON_RECONCILIATION_MISMATCH",
     "REASON_REPEATED_MISMATCH",
@@ -69,11 +74,34 @@ REASON_REPEATED_MISMATCH = "repeated_reconciliation_mismatch"  # §13.5: manual
 REASON_NON_BOT_OWNED_ORDER = "non_bot_owned_order"  # §13.5: manual
 REASON_INVALID_LOCAL_FILL = "invalid_local_fill"  # §12.3: manual (money state unknown)
 REASON_UNKNOWN_POSITION = "unknown_exchange_position"  # §13.5: manual
-REASON_SL_MISSING = "position_sl_missing"  # §12.3: recoverable (repair lands in PR 5)
+REASON_SL_MISSING = "position_sl_missing"  # §12.3: recoverable (PR 5 loop repairs it)
 # §19.3: recoverable. Covers every way the startup stale-order sweep can fail —
 # a cancel that would not land AND a positions read it could not prove — so a
 # reason-keyed query never misclassifies a read failure as a cancel failure.
 REASON_STALE_ORDER_SWEEP_FAILED = "stale_order_sweep_failed"
+# §10.3 daily loss cap: recoverable (position + SL/TP kept, new entry/rebalance
+# stopped; auto-releases at the next UTC 00:00 baseline roll, still subject to
+# §13.4). §10.4 consecutive loss cap: manual (3 losing settlements suggest a
+# strategy problem — a human must confirm before trading resumes, §13.6).
+REASON_DAILY_LOSS = "daily_loss"  # §10.3: recoverable
+REASON_CONSECUTIVE_LOSS = "consecutive_loss"  # §10.4: manual
+# §13.5 SL-repair-exhausted → §17.2 emergency close: MANUAL. Repeated SL failure
+# forcing a de-risking close signals a real problem a human must confirm before
+# trading resumes. Entered only AFTER the close reaches flat (the position is
+# already de-risked), so the gate's manual-safe-mode block never blocks the
+# emergency-close order itself.
+REASON_EMERGENCY_CLOSE = "emergency_close"  # §13.5 / §17.2: manual
+# §13.4 live tick raised an unexpected error: RECOVERABLE. The loop keeps ticking
+# and re-attempts protection; a clean reconciliation pass auto-releases. Keeps a
+# single transient tick failure from tearing down the run and stripping SL/TP.
+REASON_LIVE_TICK_ERROR = "live_tick_error"  # §13.4: recoverable
+
+# §10.2/§13: the market-data feed has been down for consecutive ticks past the
+# engine's threshold — protection sync, the daily-loss guard and slice pacing
+# are all held (no fresh price, no action), so the outage must be a visible,
+# gate-blocking state rather than an invisible idle. Recoverable: a clean
+# reconciliation pass after the feed returns auto-releases it.
+REASON_NO_MARKET_DATA = "no_market_data"  # §10.2/§13: recoverable
 
 # §13.5 "repeated reconciliation mismatch": this many CONSECUTIVE unclean
 # passes escalate a recoverable safe mode to manual. In-memory (a restart
@@ -359,14 +387,22 @@ class SafeModeManager:
         Manual safe mode never auto-recovers (§13.5); returns True when the
         release happened.
 
-        The PR 5 daily-loss entry adds its "past next UTC midnight" condition
-        when it lands — its trigger does not exist yet, so no reason gets a
-        time gate here.
+        ``REASON_DAILY_LOSS`` (the PR 5 §10.3 entry) additionally waits for
+        the next UTC midnight — the time gate below.
         """
         current = self.current()
         if current is None or current.is_manual:
             return False
         if not (reconciliation_clean and ws_restored and kill_switch_active and fully_wired):
+            return False
+        if current.reason == REASON_DAILY_LOSS and not self._past_daily_loss_window(current):
+            # §10.3 rule 3: the daily-loss safe mode auto-releases only past the
+            # NEXT UTC 00:00, when the loss guard's baseline rolls to the new
+            # day's opening equity and the drawdown resets. Before then the
+            # drawdown still holds, so a clean reconciliation pass alone must not
+            # lift it. (A recovery that lands after midnight releases here; if
+            # the NEW day is itself a loss day, the loss guard re-enters on its
+            # own fresh baseline.)
             return False
         self._release(
             released_by="auto_recovery",
@@ -378,6 +414,27 @@ class SafeModeManager:
             self._gate.state_reconciled = True
         logger.info("recoverable safe mode released by auto-recovery (§13.4)")
         return True
+
+    def _past_daily_loss_window(self, state: SafeModeState) -> bool:
+        """§10.3 rule 3: has the UTC day advanced past a daily-loss entry?
+
+        The daily-loss baseline rolls at the next UTC 00:00, so a daily-loss
+        safe mode entered on day D may only auto-release once ``now`` is on a
+        LATER UTC day than the entry. An unparseable stored ``entered_at`` is
+        store corruption on the safety path — withhold the release (fail safe)
+        rather than lift protection blind.
+        """
+        try:
+            entered = datetime.fromisoformat(state.entered_at)
+        except (TypeError, ValueError):
+            logger.warning(
+                "daily-loss safe_mode_entered_at %r is unparseable — withholding "
+                "auto-release (§10.3)",
+                state.entered_at,
+            )
+            return False
+        now = self._clock.now()
+        return now.astimezone(timezone.utc).date() > entered.astimezone(timezone.utc).date()
 
     def release_manual(self, *, released_by: str, reason: str) -> None:
         """§13.6 rule 2: the CLI's manual release, with its audit trail.

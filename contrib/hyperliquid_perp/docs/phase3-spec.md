@@ -79,7 +79,7 @@ accounting_replay_mismatch_count = 0
 | 23 | Absolute notional ceiling | mainnet_tiny 階段 absolute_notional_ceiling = 500 USDC，config-load-time 檢查 max_notional_usdc 不得超過此值（見 §5 規則 5） |
 | 24 | **（v3 新增）Agent key 佈建** | 分網路兩個環境變數 `HYPERLIQUID_AGENT_KEY_TESTNET` / `HYPERLIQUID_AGENT_KEY_MAINNET`；啟動時由 key 推導地址、以 Info API 驗證已被 wallet_address 授權且未過期，失敗拒絕啟動（見 §6） |
 | 25 | **（v3 新增）Safety 參數語意** | max_daily_loss_pct：UTC 日切、含未實現，觸發進 recoverable safe mode 至次日；max_consecutive_loss_count：倉位歸零結算計次、達 3 進 manual safe mode；max_open_orders：達上限拒新單（見 §10.3–§10.5） |
-| 26 | **（v3 新增）架構原則** | live 執行引擎為平行 `live/` 套件（paper engine 零改動）；WebSocket 事件經 thread-safe queue 由既有 30s tick 迴圈消化；live 帳務以記錄的交易所事件為單一基準（見 §2.1、§11.4、§15） |
+| 26 | **（v3 新增）架構原則** | live 執行引擎為平行 `live/` 套件（paper engine 零改動）；WebSocket 事件經 thread-safe queue 由既有 tick 迴圈消化（PR 5 實作：live loop 為 10s tick，見 §11.4）；live 帳務以記錄的交易所事件為單一基準（見 §2.1、§11.4、§15） |
 | 27 | **（v3 新增）Build order** | 6 個小 PR（見 §23） |
 
 ## 2. Phase 3 Goal
@@ -202,10 +202,10 @@ startup reconciliation passed                        # wire-scoped
 kill switch active                                   # wire-scoped
 symbol is allowed                                    # wire-scoped
 risk gate approved target                            # DECISION-scoped
-current account / position state is reconciled       # wire-scoped
+current account / position state is reconciled       # SAFE-MODE-scoped
 no unresolved protection failure                     # DECISION-scoped
 no active slice plan                                 # DECISION-scoped
-no manual_safe_mode                                  # wire-scoped
+no manual_safe_mode                                  # SAFE-MODE-scoped
 ```
 
 **兩種粒度（v7 修訂，2026-07-13）**：標記 DECISION-scoped 的三條，語意是「這個決策
@@ -219,14 +219,28 @@ cycle 執行約一小時。若每張單都查這三條，引擎一旦設下 `act
 核准無法涵蓋一小時的切片）與 `unresolved_protection_failure`（要修復它的 SL repair
 本身必須送得出去）。
 
-因此 gate 提供兩個入口，而條件表只有一份（`RealOrderGate._first_failed`，依上表順序
-求值，回報第一條失敗的條件，兩個入口不會漂移）：
+**SAFE-MODE-scoped 兩條（PR 5 review-loop 修訂，2026-07-20）**：`state_reconciled`
+與 `manual_safe_mode` 對「加風險的單」是 wire 級的硬條件，但**保護／去風險單**
+（`stop_loss` / `take_profit` / `emergency_close`，即 `PROTECTIVE_ORDER_ROLES`）
+必須豁免：任何 safe mode 進場都會清掉 `state_reconciled`（§13），而 §13.1 明定
+safe mode 期間「持續保護」、§17.2 的急平單正是 safe mode 下最需要送出的那一張。
+若不豁免，§12.3 `position_sl_missing` 進 recoverable safe mode 後，修復它的 SL
+place/modify 與急平單全被 gate 擋死，而能重升 `state_reconciled` 的乾淨
+reconciliation pass 又要求場上已有有效 SL——死鎖，倉位裸奔到人工介入。豁免僅限這
+兩條：基礎 wire 前置條件與 kill switch（dead man's switch）對保護單**仍然生效**。
+
+因此 gate 提供三個入口，而條件表只有一份（`RealOrderGate._first_failed`，依上表順序
+求值，回報第一條失敗的條件，入口之間不會漂移）：
 
 - `check_new_target(symbol)` / `require_new_target` — **完整** §4.1 列表。PR 5 引擎在
   每個 decision cycle 建立 plan **之前**問一次。
-- `check_order(symbol)` / `require_order` — 上表 wire-scoped 子集。**每一張**真正送上
-  交易所的單都必須通過（`LiveOrderSubmitter.submit_ioc_limit` 送出前查一次，signed
-  client 綁定的 gate 在 wire 再查一次當 backstop）。
+- `check_order(symbol)` / `require_order` — 上表扣除 DECISION-scoped 三條。每一張
+  **加風險**的單（entry / rebalance 切片）都必須通過（`LiveOrderSubmitter.
+  submit_ioc_limit` 送出前查一次，signed client 綁定的 gate 在 wire 再查一次當
+  backstop）。
+- `check_protective_order(symbol)` / `require_protective_order` — 再扣除
+  SAFE-MODE-scoped 兩條。保護／去風險單（SL / TP trigger、§17.2 急平 IOC）走這個
+  入口；submitter 依 `order_role` 自動選路，trigger-order 方法固定走此入口。
 
 若任一條件不成立，系統必須拒絕建立 live order，並記錄：
 
@@ -511,7 +525,8 @@ execution:
    ≥ 交易所最小下單額——最小 clip 額優先於 interval，片數不足時提前完成
    （PR 1 定案；mainnet_tiny 的 100 USDC cap 配預設 120 片即為此情形）。
 5. Flip(反向)沿用 Phase 2 的 sequential 兩腿模型：close leg 完成且倉位歸零後，
-   重跑 RiskGate 才開 open leg；兩腿共用同一個 1 小時 envelope 與切片預算。
+   重跑 RiskGate 才開 open leg；兩腿共用同一個 plan envelope（`plan_duration_minutes`，
+   預設 1 小時）與切片預算——預算下限為 2（每腿至少 1 片；PR 5 r10 修訂，2026-07-21）。
 
 ### 9.2 Slice Slippage Bound
 
@@ -536,8 +551,31 @@ sell limit = mid_price × 0.995
    convenience 方法一律不用；統一走帶限價的 `order`）。
 2. IOC 未成交（或部分成交）的量**不重送同一張**：計入 plan 的落後量，
    由後續切片自然吸收；plan 到期仍未吃完 → terminal `expired`，殘量記
-   `residual_qty`（與 paper 語意一致）。
+   `residual_qty`（paper 為真值；**live v1 寫 NULL＝unknown**——fill→plan
+   歸屬隨 PR 6 WS/fill 路由，見 §16.1 與 phase2-data §6.1）。
 3. 每張切片單有獨立 cloid（§8.2），retry（網路錯誤等）重用同一 cloid。
+4. **每 tick 最多送一張切片；pre-send gate 拒絕不吃進度（PR 5 修訂，2026-07-21）**：
+   30 秒 interval 是排程節奏，停滯後的 catch-up 也是一 tick 一張，不得在同一個
+   價位 burst 整批 backlog。§4.1 wire gate 在送出**前**拒絕（safe mode /
+   kill switch）時，該切片**從未上線**，rule 2 的「不重送」不適用——cursor 停在
+   原地（事件 `slices_paused`），gate 重開後從同一張續送；反之，凡已觸及（或可能
+   觸及）wire 的結果——ack、交易所拒絕、ambiguous 送單失敗（§8.3 冪等層以同
+   cloid 查證定讞）——cursor 一律前進、不重送。plan deadline 照常束縛：被 gate
+   擋到期的 plan 誠實 terminal `expired`（殘量同 rule 2——live v1 記 NULL），
+   不得記成 completed。**deadline 是硬信封（PR 5 修訂，2026-07-22，使用者拍板）**：到期
+   當下那個 tick（含斷線／safe-mode 暫停跨越 deadline 後恢復的第一個 tick）
+   **先判到期、不送單**——切片的 size 與方向來自一個已超出整個 plan envelope 的
+   決策，不得再上鏈；flip 預算收斂到 2 張時，那最後一張可能是半個倉位。同一原則涵蓋 **pre-wire 本地 store 故障（PR 5 修訂，2026-07-21）**：
+   submitter 在 network call 之前的 §8.3 pre-check 讀取或 intent transaction 因
+   transient SQLite 錯誤失敗（`LiveOrderPreSubmitError`）時，什麼都沒送、也沒留
+   任何 evidence row——cursor 同樣停在原地（事件 `slice_held`）、下一 tick 以同
+   cloid 重試；否則持續的本地 store 故障會讓整個 plan 一單未發卻記成 completed。
+   §8.3 協議判決（refusing-to-resend 等——該 cloid 先前**已**上過線）與 contract
+   violation（provenance／coherence）不在此列：保留原型別、照舊前進或 fail loud。
+5. **執行參數來源（PR 5 修訂，2026-07-21）**：plan envelope 與切片節奏取自
+   `live.execution.plan_duration_minutes` / `slice_interval_seconds`（預設 60 分
+   / 30 秒；full-grid 切片預算 = duration/interval，上限 120）——config 驗證既有，
+   引擎實際消費，不得驗證了卻靜默忽略（§18.1 原則）。
 
 ### 9.3 Active Plan Overlap
 
@@ -571,6 +609,13 @@ cleanup_cancel
 理由：切片的設計目的是降低大單進出的市場衝擊，這與「立即降低風險」的目標
 衝突。emergency_close 若攤成 60 分鐘，會讓系統在判定需要緊急平倉後，
 仍暴露在市場風險下長達一小時。
+
+> **v1 註記（2026-07-22 拍板）**：AI 決策的平倉目標（flat target）**不是**本節的
+> `close` role——它走 reduce-only rebalance-to-zero 路徑（切片 TWAP，與 paper
+> 同基準、平倉期間仍有 SL 保護），摩擦最低；殘量到期誠實 `expired`。`close`
+> role 在 v1 沒有任何發射路徑，保留給未來的保護性平倉情境。本節的立即成交
+> 規則實際生效的是 stop_loss / take_profit（trigger 單火線）與
+> emergency_close（單張 aggressive IOC）。
 
 ### 9.5 為什麼不是 native TWAP（v3 決策依據，2026-07-11 查證）
 
@@ -618,6 +663,15 @@ consecutive loss cap not breached（§10.4）
 open order count below max_open_orders（§10.5）
 ```
 
+**Live-only 拒絕必須留痕（PR 5 修訂，2026-07-22，使用者拍板）**：RiskGate 已核准
+（ai_outputs 記 `order_created=1`）而被 live 檢查擋下的三類拒絕——§10.1 notional
+cap、§10.5 open-order cap、§4.1 gate line——各插一筆 `rejected` execution_plans
+row（`status_reason` 帶拒絕原因、以 `output_id` 連回決策、數量欄 NULL）＋一行
+warning log；row 與 `no_legal_slice` 對稱（該路徑只留 row、無 warning——warning
+是 live 拒絕路徑自己的）；§10.1 觸發代表 gate sizing 超過 live
+上限，是最需要留痕的事件。flip open-leg 的每-tick 重試路徑不插 row（已有
+`flip_open_pending` 事件逐 tick 可見，避免 row 洪水）。
+
 ### 10.2 AI / API Failure
 
 若本輪 AI / market API / account API 失敗：
@@ -635,6 +689,17 @@ open order count below max_open_orders（§10.5）
 Fail closed: stale AI output must not create live orders.
 ```
 
+v1 live 補充（PR 5，2026-07-21）：live **不複製** paper（phase2-spec §3.1）的
+within-cycle 三段 retry ladder——retryable 失敗當場記 `api_failed` fail-closed，
+下一個 4h cycle 再試。process 於 cycle 途中中斷時，重啟由 loop 啟動先領養
+stranded 的 `in_progress` attempt：已存有 raw response → 從 gate 續跑（絕不重問
+AI）；AI 從未回應 → 記 `api_failed` 收場並 re-anchor 到下一個 cycle。plan 已
+註冊後的 audit persist 失敗只重試 persist、絕不重跑 gate。決策已被 poll 收下、
+但 §3.1 raw-response store 失敗時同樣只重試 store（2026-07-23）：poll 是
+one-shot，此刻 fail-closed 會把已付費的決策作廢——store 落地前不得 gate，下一
+pump 只補寫入，例外上拋 tick guard（recoverable safe mode）；shutdown salvage
+對這個形狀同樣補一次 store。
+
 ### 10.3 Daily Loss Cap（v3 新增行為定義）
 
 `max_daily_loss_pct = 2` 的衡量方式：
@@ -645,6 +710,10 @@ Fail closed: stale AI output must not create live orders.
 3. 觸發 → 進 **recoverable safe mode**，持倉與 SL/TP 保護照舊，
    停止新 entry / rebalance；次日 UTC 00:00 自動解除（仍須通過 §13.4 恢復條件）。
 4. 觸發事件記入 `safe_mode_events`。
+5. **v1 基準來源（PR 5，2026-07-21，使用者拍板）**：day-roll 當下的 baseline 直接
+   取交易所 clearinghouse `accountValue`（一日一次 REST；讀取失敗 fallback 本地
+   reconciled 值並記 log——roll 不得卡 tick）；盤中 `current_equity` 用本地帳本
+   （wallet_balance＋本地 entry 基準的未實現），偏差由 §12 的 equity 容差比對 bound。
 
 ### 10.4 Consecutive Loss Cap（v3 新增行為定義）
 
@@ -655,6 +724,17 @@ Fail closed: stale AI output must not create live orders.
 2. 任一段結算為獲利 → 計數歸零。
 3. 連續達 3 次 → 進 **manual safe mode**（連虧暗示策略性問題，
    須人工確認後以 §13.6 介面解除）。
+4. 計次 anchor 為 `scheduler_state.last_settlement_wallet_balance`（schema v7，
+   PR 5 修訂，2026-07-21）：每次 settlement 以 wallet balance 對前一 anchor 的
+   差額為該段 realized PnL（wallet 已折入 fee / funding）。停機期間整段平倉
+   （如 SL 於 offline 成交、由 startup recovery 補帳）者，loop 啟動時以
+   「已 flat 且 wallet 偏離 anchor」補記一次 settlement（`settle_offline_flat`），
+   不得把該段輸贏靜默併入下一段。
+5. **已知量測窗口（接受並記錄，2026-07-21，使用者拍板）**：若收尾 fill 的 fee 落在
+   pending-fee lane（fee 缺席／非 USDC，暫記 0 等 backfill 修正），該段以 fee-light
+   的 wallet 計分——接近打平的段可能記為非虧（歸零計數），事後 fee 修正不回溯重計，
+   誤差流入下一段 delta。量級為單筆 fee、僅於 pending lane 觸發，回溯改計數器的
+   複雜度不成比例。
 
 ### 10.5 Max Open Orders（v3 新增行為定義）
 
@@ -663,6 +743,11 @@ Fail closed: stale AI output must not create live orders.
 2. 達 `max_open_orders = 5` → 拒絕建立新單、記錄
    `no_order_reason = max_open_orders`，並觸發一次 reconciliation
    （正常單一 symbol 運行不應接近此上限，接近即是異常訊號）。
+3. **v1 計數點縮限（PR 5，2026-07-21，使用者拍板）**：計數僅在 plan admission
+   （`start_plan`）執行一次。slice IOC 從不 resting、不占 open-order 名額；SL/TP
+   是 protective——若掛單前也過 count 檢查，計數讀取失敗的 fail-closed（視為
+   at-cap）會擋住停損掛單本身，與 §4.1 protective 豁免哲學矛盾。單一 symbol 下
+   實際 resting 上限 ≈ SL＋TP 兩張，plan-admission 檢查已覆蓋風險。
 
 ## 11. WebSocket Streams
 
@@ -799,6 +884,11 @@ SDK 的 WebSocket manager 是背景執行緒 callback 模型；本系統維持 P
 2. 既有 tick 迴圈每輪先排空 queue（去重、寫 DB、更新狀態），再做其他工作。
 3. SQLite 維持單一寫者，事件處理順序確定。
 4. 代價：fill 入帳最多延遲一個 tick（≤ 30 秒），對 4h 決策週期無影響。
+5. **（PR 5 修訂，2026-07-21）**live loop 的實際 tick 週期為 **10 秒**——遠小於
+   kill-switch 的 `max_tick_gap_seconds = 30`，讓 §18.2 刷新在 tick 做實事
+   （對帳網路讀取、SL repair）時仍不遲到；AI 決策跑背景 thread，不佔 tick。
+   切片仍按 §9 的 30 秒節奏配速（tick 只是檢查點），fill 消化延遲上限相應
+   ≤ 10 秒；paper 迴圈維持 30 秒。
 
 ## 12. Exchange Reconciliation
 
@@ -826,6 +916,13 @@ SQLite 不得覆蓋交易所事實。若兩者衝突，系統必須進入 reconc
 7. 每 5 分鐘 heartbeat check
 8. Shutdown 前
 9. 偵測到 WebSocket / REST mismatch 時
+
+**v1 實作範圍（PR 5，2026-07-21，使用者拍板）**：live loop 實作 1（`startup`）、
+5（`fill`）、6（protection sync 有建立／修改／取消任何 SL/TP 的 tick，
+`protection_change`）、7（`heartbeat`）、8（§18.2 sweep 前 best-effort，
+`shutdown`）與 9 的 §10.5 超標子集（`mismatch`）。2（cycle 前）、3（cycle 後）、
+4（每次 order ack 後）延後至 PR 6 隨 WS 接線一併實作——REST backfill 模式下對每張
+slice ack 都跑全量 reconcile，會使 plan 執行期間的 API 負載大約翻倍。
 
 ### 12.3 Reconciliation Cases
 
@@ -927,6 +1024,9 @@ manual_safe_mode
 WebSocket 斷線超時（恢復並 backfill 後可解）
 daily loss cap 觸發（§10.3，次日 UTC 00:00 可解）
 kill switch refresh failed（refresh 恢復後可解）
+market data 連續取不到（PR 5：連續 12 tick（約 2 分鐘）NO_MARKET_DATA →
+  reason `no_market_data`；期間 protection sync／daily-loss／slice 全 hold
+  （§10.2 fail-closed），每次 miss 記 `no_market_data` tick 事件保持可視）
 ```
 
 恢復條件（全部滿足才解除）：
@@ -955,6 +1055,22 @@ PR 4 的 one-shot `live --run-id` wiring 完全沒有 WS stream，故一律 atte
 recoverable latch，會被一個從未連過 WS 的 process 以「帳本乾淨」為由解除。該
 latch 留給 PR 5 daemon（真正握著恢復後的 stream 時）解除。
 
+**v1 loop 例外（2026-07-21，使用者拍板）**：PR 5 的 `live --loop` 尚未接真 WS
+（§11 socket wiring 隨 PR 6），fill 來源本來就是 reconciler 的 REST backfill——
+在這個 wiring 下「無 WS 可斷」不構成斷線條件，若照上段 attest `False`，
+daily-loss 過午夜、`live_tick_error` 等所有 recoverable latch 在 v1 全部變成
+只能手動解除。故 v1 loop 傳 `ws_restored=not ws.is_stale()`（從未連線的
+stream 恆為未 stale ⇒ 實務上恆 `True`），接受 clean pass 自動解除各 recoverable
+latch；PR 6 接上真 WS 後改回真實 stream 狀態，屆時上段的嚴格立場恢復適用。
+
+「kill switch active」的 attestation 同樣必須**掙來**（2026-07-23）：live loop 的
+reconcile pass 在 sticky latch up 時走 `release_safe_mode()`（§18.2 的唯一解鎖門，
+帶 proving refresh；已觸發的 switch 會在該 refresh 內重新上鎖）並把其裁決傳給
+`kill_switch_active`——裸讀 latch 沒有任何解除路徑，一次暫時性 refresh 失敗就會
+讓 run 永久卡死（切片停、SL/TP 也掛不上：§4.1 kill-switch 線不在 protective 豁免
+內），只能重啟 process。release 只在 reconcile cadence 嘗試、緊鄰結算 rows 的
+pass，非 retry loop。
+
 §19.3 stale-order sweep 的撤單失敗是 **verdict 輸入**（2026-07-17）：撤不掉的單
 仍在交易所掛著，該 pass 不得讀成 clean。失敗以 `ReconciliationReport.sweep_failures`
 欄位隨 pass 一起帶進 `run()`（即在 `_record` 落庫**之前**），故不會出現「clean pass
@@ -980,6 +1096,13 @@ consecutive loss cap 觸發（§10.4）
 account equity / margin abnormal drop
 authentication / permission error
 ```
+
+Manual latch 掛住期間，AI 決策 cadence 本身**暫停**（PR 5 定案，2026-07-22）：
+每個目標反正都會被 §4.1 `manual_safe_mode` 擋下，live decision driver 於
+due tick 直接跳過整個 multi-agent LLM 呼叫（不建 attempt row、不燒 LLM 成本；
+`next_decision_at` 不推進），§13.6 人工解除後下一個 tick 立即以新鮮輸入重新
+決策。已在途（in-flight）的決策不受影響——照常收集、進 gate、留 §4.1
+rejected row。recoverable safe mode 不暫停決策。
 
 ### 13.6 持久化與人工解除介面（v3 新增）
 
@@ -1200,6 +1323,12 @@ fill 這兩欄暫為 NULL。**PR 5 動 schema 時必須把歸因欄位補上 ord
 另走 order join 的第二套查法。這是刻意記在 PR 3 的前置契約：等 PR 5 的下單路徑
 寫好才發現 fill 歸因斷鏈，補欄位就要回填資料而不是只加欄。
 
+**（PR 5 定案修訂，2026-07-22）**：PR 5 實際**未**補歸因欄位——fill→plan 歸屬
+與 `remaining_twap_qty`／`residual_qty` 真值一起延後到 PR 6 WS/fill 路由
+（「誠實 NULL」決策，見 §9.2 rule 2 與 phase2-data §6.1）。上段預警的代價
+已被接受：PR 6 補欄位時需回填 PR 5 期間的 live fills，或接受該區間兩欄為
+NULL。
+
 ### 16.2 fills Additions
 
 ```
@@ -1261,6 +1390,7 @@ safe_mode_entered_at
 day_start_equity          # §10.3 daily loss cap 的當日基準
 day_start_date            # UTC 日期
 consecutive_loss_count    # §10.4
+last_settlement_wallet_balance  # §10.4 segment 淨損益的錨（schema v7）
 ```
 
 ## 17. Stop Loss / Take Profit Protection
@@ -1285,6 +1415,13 @@ execution plan terminal 後    → TP 必須涵蓋全部目前倉位
 8. SL / TP 必須使用 reduce-only trigger order。
 9. 第一版採 position-based SL / TP，不綁定單一 parent order。
 
+附註——觸發後執行帶寬（2026-07-22，使用者拍板）：trigger 觸發後的執行單是
+「限價護欄」（§9.2 rule 1 禁止無界 market）。TP 用 routine ±`max_slippage_pct`；
+**SL 的帶寬取 `max(max_slippage_pct, 3%)`**——SL 只在劇烈行情下觸發，routine
+0.5% 帶可能被跳空直接穿過（觸發後掛著不成交、倉位續虧，且下一次 sync 依
+trigger/qty 未變仍回報 PROTECTED），3% 下限與 §9.4 急平單同族（aggressive、
+仍有價格保護）。取捨：漏掉 TP 是機會成本，漏掉 SL 是無上限虧損。
+
 ### 17.2 SL Repair Policy
 
 若 SL create / modify 失敗：
@@ -1301,6 +1438,15 @@ still failed → reduce-only emergency close（aggressive IOC，見 §9.4，不�
 Live position without valid SL is not allowed.
 SL repair failed after retries → emergency close.
 ```
+
+附註（2026-07-21，使用者拍板）：「失敗」指**已上線**的失敗（交易所拒絕、
+timeout、ack 遺失）。pre-send 的 §4.1 wire-gate 拒絕（protective 入口豁免
+safe-mode 兩條後，實務上只剩 kill switch）**不燒修復預算**：整輪 ladder 都是
+gate 拒絕時回報 `blocked`（事件 `stop_loss_repair_blocked`），不記 exhausted、
+不升級急平——同一個 gate 也會擋急平單，升級只是徒勞的 close storm。失敗線
+（`unresolved_protection_failure`）照設，擋新增風險單；下一 sync 重試，
+§12.3 SL-missing 檢查是這段無保護窗口的兜底。ladder 途中的 delay 照跑並
+tick kill switch（Q2 決策），故 gate 可在 ladder 中途重開。
 
 ### 17.3 TP Failure Policy
 
@@ -1345,9 +1491,10 @@ kill_switch:
   emergency_close_on_shutdown: false
 ```
 
-（`emergency_close_on_shutdown` 的行為（reduce-only emergency close，§8.1/§17）
-隨 PR 5 的 protection manager 進場；在那之前 config 建構期拒絕 `true`——
-未實作的行為不得被 config 靜默接受，v4 註記。）
+（`emergency_close_on_shutdown` 的行為（shutdown 時 reduce-only emergency
+close）至今未實作——PR 5 的 protection manager 進場後改採 §18.2 rule 8 的
+keep-protective shutdown，close-out 延後 PR 6；config 建構期拒絕 `true`——
+未實作的行為不得被 config 靜默接受，v4 註記、2026-07-23 修訂。）
 
 （`schedule_cancel_seconds` 建構期要求 > 5：Hyperliquid 拒絕觸發時間距今不足
 5 秒的 scheduleCancel，≤ 5 的值永遠 arm 不起來，而 §18.2 rule 1 把 arm 失敗
@@ -1382,7 +1529,9 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    重開，而不是走 §13.4 reconciliation（v7 新增，2026-07-13）。
 2. Live loop 運行期間，必須依 `refresh_interval_seconds` 刷新 schedule cancel deadline。
    `refresh_due()` 的 interval 語意是「至少這麼頻繁」而非「不得早於」：當呼叫方以與
-   refresh_interval 相同的週期 tick（預期的 30s／30s 接線），tick 必然比它比較的那個
+   refresh_interval 相同的週期 tick（例如 30s／30s 接線；PR 5 的 live loop 實際為
+   10s tick／30s refresh，見 §11.4——slack 保護的正是「呼叫方剛好以 interval 為週期
+   tick」的接線），tick 必然比它比較的那個
    排程時刻晚幾毫秒，若用嚴格 `elapsed >= interval` 判斷，這點抖動就會 skip 掉刷新、讓真實節奏
    悄悄砍半成「每兩輪一次」（只有事件時間戳的空隙看得出來）。因此保留一個遠大於
    抖動、又遠小於 interval 的 slack（0.5s）——只會讓刷新稍微提早，永遠不會推遲過
@@ -1398,13 +1547,44 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    refresh=30` 能通過 config guard，但配上 60 秒的 tick 間隔就會留下 90 秒空窗、讓
    dead man's switch 在正常運行中觸發並掃掉全錢包掛單。
 
+   **已知殘餘風險：`network_timeout_s` 沒有被掃進這張時序帳**（PR 5 註記，
+   2026-07-22 拍板「軟性緩解」）：上述不變量只綁 `refresh_interval` 與
+   `max_tick_gap`，但 tick 內每一筆 REST 呼叫真正的阻塞上限是頂層
+   `network_timeout_s`（預設 30s），且一個 tick 會連續打多筆——網路降級（慢但
+   沒斷）時，單 tick 牆鐘時間可以拖過 `max_tick_gap` 的建構期承諾，讓交易所端
+   scheduleCancel 在程序還活著時觸發、掃掉含 SL/TP 的全錢包掛單（protection 於
+   下個健康 tick 重建，中間是裸倉窗口）。v1 緩解：live loop 的 sleep 扣除本次
+   tick 實耗（消除疊加放大），且啟動時若 `network_timeout_s >=
+   max_tick_gap_seconds` **或未設（unbounded）**即印 stderr 警告
+   （`network_timeout_warning`，與硬檢查 `kill_switch_timing_violation`
+   併排、純函式可單測）。硬性建構期不變量（把每筆呼叫逾時納入
+   承諾檢查）與 live 專屬逾時延後 PR 6 網路層重做時一併處理。
+   同族的 `sl_repair_retry_delay_seconds`（修復梯每次 sleep 完才 tick）也有
+   姊妹 advisory（`sl_repair_delay_warning`，2026-07-22）。
+
+   **殘餘風險的兩個具名 fan-out 貢獻者（PR 5 盤點，2026-07-22——即使
+   `network_timeout_s` 過了 advisory，乘數仍可拖爆 gap；PR 6 網路層重做的
+   收斂清單）：**
+   (1) **決策 cycle 的 `build_input`**：`driver.pump()` 在 tick thread 上做
+   `_build_context`——新建 SDK client（建構即抓 perp meta）＋ snapshot／candles／
+   funding 三讀，~4 筆連續 REST、中間無 kill-switch 刷新；最壞 ≈ 4×
+   `network_timeout_s`（預設值下 ~120s）。每 ~4h 一次（含 retry/resume）。
+   (2) **reconciler 單 pass 的呼叫數乘數**：open-orders＋clearinghouse＋fill
+   backfill 分頁＋每張 terminal/absent 單的 `orderStatus` 查詢——單筆皆有界，
+   但筆數由 `max_open_orders` 與分頁上限驅動，未對 kill-switch 預算驗證；
+   post-fill／heartbeat／protection-change 都會跑。
+
    **`max_tick_gap_seconds` 的語意要照字面讀：兩次 tick() 之間的最壞牆鐘時間，不是
    sleep 間隔**（v7 新增，2026-07-13）。既有 `_paper_loop`（cli.py）的一輪是
    `engine.tick()` → `scheduler.poll()` → `sleep(min(delay, 60))` **同步**執行，而
    `poll()` 會跑完整的多 agent AI 決策——**數分鐘**，不是數秒。若 PR 5 傳入 sleep 上限
-   （60s）卻讓一輪 block 三分鐘，這道檢查會放行，然後在決策途中被交易所掃單。因此
-   **§18.2 對 PR 5 的硬性要求：kill switch 必須在決策 cycle *內部*（或由獨立的
-   refresher）刷新，不能只在 loop 頂端刷新**；傳進來的必須是真實的最壞 tick 間隔。
+   （60s）卻讓一輪 block 三分鐘，這道檢查會放行，然後在決策途中被交易所掃單。
+   **PR 5 的實作用另一個方向滿足這個承諾（Option A，live/decision.py）：AI 決策整個移到
+   背景 worker thread，live 迴圈的一輪永不 block 在決策上，因此 loop 頂端每輪 tick()
+   的刷新就是真實 cadence——不存在、也不需要 decision-cycle 內部的 refresher**
+   （2026-07-22 文字更正：原「必須在決策 cycle 內部刷新」是 PR 5 實作前的設計指引）；
+   傳進來的仍必須是真實的最壞 tick 間隔（單筆 REST 呼叫拖滿 timeout 仍可拉長 gap——
+   見上方 v1 軟性緩解與 `network_timeout_warning`）。
    **刷新（與 shutdown）必須先偵測「switch 是否已經觸發過了」**（v7 新增，
    2026-07-13）：`max_tick_gap_seconds` 是呼叫方在建構期做出的**承諾**，而這是唯一
    會去查核它有沒有兌現的地方。若距離上次成功排程已超過 `schedule_cancel_seconds`，
@@ -1478,6 +1658,42 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    （v6 新增，2026-07-13）。
 7. 正常 shutdown 預設不強制平倉。
 8. 持倉繼續依靠既有 SL protection。
+   **附註——unclean 出場的保留豁免（2026-07-22，使用者拍板；同日擴充）**：§19.1
+   啟動裁決**未通過**（或 recovery 直接拋錯）、**或 --loop 出場當下 safe mode 仍
+   active**（開機裁決在長跑後已過期——中途 latch 的 manual safe mode 會讓下次開機
+   裁決拒絕啟動，正是保留要防的情境），而帳戶持倉（或倉位讀不到——unknown ≠
+   flat）時，rule 5 的 cancel sweep **保留** resting SL / TP（reduce-only）不
+   取消，只掃其餘 bot 單；保留單計入「已處理」不算 failure，且 rule 6 的 disarm
+   照做——不 disarm 的話全錢包 scheduleCancel 會在 deadline 把保留的 SL / TP 一併
+   掃掉，保留就毫無意義。保留豁免同時作用於 rule 6 的本地交叉檢查：kept-role 的
+   本地非終態 row 若因 open_orders 快照過舊而缺席、但 `orderStatus` **正面確認**
+   仍活著，計入保留、不擋 disarm；問不到（查詢拋錯或枚舉失敗）仍照舊擋 disarm
+   （fail-safe 姿態不變）。動機：裁決失敗正是修復機制（safe mode 下 SL repair、
+   §13.4 自動解除）無法啟動的時候，剝掉 reduce-only 保護等於拿 unclean verdict
+   換一個裸倉。保留的 SL / TP 之後無人看管（reduce-only，只會減倉），直到
+   `--loop` 重跑重新接管或人工處理。通過的裁決且出場時無 safe mode（含 --loop
+   正常退出）維持原語意：全部取消＋stderr 警告；--loop 出場時 safe mode 仍
+   active 者除保留 SL / TP 外，exit code 亦回 4（executed-but-unclean，不得對
+   supervisor 報 0——與一次性路徑裁決發現 safe mode 時的 exit 4 同一慣例）。
+   shutdown 時 safe-mode 讀取**失敗**（unknown ≠ clean）視同需保留：有倉（或倉位
+   讀不到）即保留 SL / TP，且 --loop 因此保留了單者同樣 exit 4——事後較幸運的第二
+   次讀取不得把 exit code 講回 0；讀取失敗但已確認 flat（無單被保留）者維持
+   state-driven exit，不對 supervisor 誤報。警語文字須誠實區分「safe mode 確認
+   active」與「讀取失敗（unknown）」兩種情況；disarm 被擋（trigger 仍 armed）而又有
+   保留單時，必須明說保留的 SL / TP 也會在 scheduleCancel deadline 被掃掉。
+9. **Lease 被接管的 process 不執行 shutdown sweep（PR 5 修訂，2026-07-21）**：
+   `--loop` 的 lease heartbeat 拋出 `RunLockError`（此 pid 已被較新 process 取代）
+   時，繼任 process 已擁有該 run 的 store、resting orders（含 SL/TP）與全錢包
+   dead-man's switch——舊 process 的任何 exchange 動作或 store 寫入都是對繼任者的
+   破壞（sweep 會撤掉**繼任者的**保護單、讓真倉裸奔）。因此以 exit 1 直接退出，
+   只做 pid-guarded 的 lock release（繼任者持有 lease 時為 no-op）——與 paper loop
+   的 RunLockError 出口同一契約。
+10. **Shutdown 搶救未收割的 AI 決策（PR 5 修訂，2026-07-21，使用者拍板）**：
+    Ctrl-C/SIGTERM 時 `worker.join(5s)` 之後再 poll 一次，若背景決策已完成、把
+    raw response 寫入 `pending_raw_response`——重啟後 `resume_startup` 從 stored
+    text 續 gate（§3.1，絕不重問 AI），不必把付費的 LLM call 燒掉並空等最多 4h。
+    全程 contained：poll 或寫入失敗只記 log，shutdown 照常進行、該 cycle 重啟時
+    照舊 fail closed。
 
 ### 18.3 Emergency Kill Switch Triggers
 

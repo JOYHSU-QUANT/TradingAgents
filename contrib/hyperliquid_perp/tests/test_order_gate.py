@@ -102,6 +102,43 @@ def test_decision_scoped_conditions_do_not_block_an_order_on_the_wire(mutation, 
     assert reason is not None and expected in reason
 
 
+# The two safe-mode lines a PROTECTIVE order (SL / TP / §17.2 emergency close) is
+# ADDITIONALLY exempt from — §13.1 keeps the run protecting in safe mode, and the
+# SL repair that heals a §12.3 SL-missing safe mode must itself be sendable, or the
+# clean reconciliation pass that would release it (it needs a resting SL) never runs.
+_SAFE_MODE_LINES = [
+    ({"state_reconciled": False}, "not reconciled"),
+    ({"manual_safe_mode": True}, "manual safe mode"),
+]
+
+
+@pytest.mark.parametrize(("mutation", "expected"), _SAFE_MODE_LINES)
+def test_protective_order_is_exempt_from_the_safe_mode_lines(mutation, expected):
+    gate = _open_gate(**mutation)
+    assert expected in gate.check_order("BTC")  # a risk-adding order is blocked
+    assert gate.check_protective_order("BTC") is None  # protection stays sendable
+    gate.require_protective_order("BTC")  # does not raise
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ({"kill_switch_active": False}, "kill switch"),
+        ({"agent_authorized": False}, "agent authorization"),
+        ({"startup_reconciliation_passed": False}, "startup reconciliation"),
+        ({"allow_real_orders": False}, "allow_real_orders"),
+    ],
+)
+def test_protective_order_still_bound_by_base_and_kill_switch(mutation, expected):
+    # The exemption is from the safe-mode lines ONLY: a protective order is still
+    # refused when the dead man's switch is down or a base precondition fails.
+    gate = _open_gate(**mutation)
+    reason = gate.check_protective_order("BTC")
+    assert reason is not None and expected in reason
+    with pytest.raises(LiveOrderGateRejected):
+        gate.require_protective_order("BTC")
+
+
 def test_symbol_outside_allowlist_is_rejected():
     gate = _open_gate()
     assert gate.check_order("BTC") is None

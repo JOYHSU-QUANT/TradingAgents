@@ -439,16 +439,18 @@ class KillSwitchConfig:
             key="live.kill_switch.on_shutdown",
             expected="'cancel_bot_owned_open_orders' (the only §18 policy)",
         )
-        # §18.1 declares the flag but the behavior (reduce-only emergency
-        # close, §8.1/§17) lands with PR 5's protection manager. Until then a
-        # true value would configure protection that silently does not exist —
-        # same rule as the single-member policy enums above: unimplemented
-        # behavior must not be accepted by config.
+        # §18.1 declares the flag, but shutdown-time reduce-only emergency
+        # close is still unimplemented: PR 5's protection manager shipped
+        # keep-protective shutdown (§18.2 rule 8) instead, and the close-out is
+        # deferred to PR 6. A true value would configure protection that
+        # silently does not exist — same rule as the single-member policy enums
+        # above: unimplemented behavior must not be accepted by config.
         if self.emergency_close_on_shutdown:
             raise ValueError(
                 "live.kill_switch.emergency_close_on_shutdown: true is not "
-                "implemented yet (emergency close arrives with the protection "
-                "manager, PR 5); set it to false"
+                "implemented yet (shutdown-time emergency close is deferred to "
+                "PR 6; shutdown keeps resting SL/TP instead, §18.2 rule 8); "
+                "set it to false"
             )
 
     @classmethod

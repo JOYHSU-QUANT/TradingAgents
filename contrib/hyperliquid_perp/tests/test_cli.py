@@ -20,6 +20,7 @@ from contrib.hyperliquid_perp.cli import (
     _UNVERIFIED_MARKER,
     _classify_engine_error,
     _config_drift_report,
+    _live_heartbeat,
     _mark_export_verification,
     _post_cycle_export,
     _raise_keyboard_interrupt,
@@ -1038,6 +1039,76 @@ def test_sigterm_shim_raises_keyboard_interrupt():
     # KeyboardInterrupt shutdown-export path.
     with pytest.raises(KeyboardInterrupt):
         _raise_keyboard_interrupt(signal.SIGTERM, None)
+
+
+# --------------------------------------------------------------------------
+# _live_heartbeat: the §18.2 live-loop lease heartbeat's containment contract
+# --------------------------------------------------------------------------
+
+
+class _RecordingSafeMode:
+    """Records enter() calls; optionally raises (the safe-mode write can fail too)."""
+
+    def __init__(self, raises: bool = False) -> None:
+        self.raises = raises
+        self.entered: list[tuple[tuple, dict]] = []
+
+    def enter(self, *args, **kwargs):
+        self.entered.append((args, kwargs))
+        if self.raises:
+            raise RuntimeError("safe-mode write failed")
+        return True
+
+
+def test_live_heartbeat_run_lock_error_stays_fatal(monkeypatch):
+    # The pid fence (RunLockError: this process was superseded by a newer one)
+    # must PROPAGATE — two writers must never flip-flop the lease — and must
+    # not be softened into a safe-mode entry.
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+
+    def fenced(db_, run_id, *, pid, now):
+        raise run_lock_mod.RunLockError("superseded by a newer process")
+
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", fenced)
+    safe_mode = _RecordingSafeMode()
+    with pytest.raises(run_lock_mod.RunLockError):
+        _live_heartbeat(object(), "r", pid=123, now=_T0, safe_mode=safe_mode)
+    assert safe_mode.entered == []
+
+
+def test_live_heartbeat_transient_failure_is_contained_in_safe_mode(monkeypatch):
+    # Any OTHER heartbeat failure (a busy SQLite store, say) is contained: no
+    # raise — tearing the loop down would run the §18.2 shutdown sweep and
+    # strip the resting SL/TP — and exactly one recoverable safe-mode entry
+    # with the live-tick-error reason.
+    from contrib.hyperliquid_perp.live.safe_mode import REASON_LIVE_TICK_ERROR
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+
+    def busy(db_, run_id, *, pid, now):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", busy)
+    safe_mode = _RecordingSafeMode()
+    _live_heartbeat(object(), "r", pid=123, now=_T0, safe_mode=safe_mode)  # no raise
+    assert len(safe_mode.entered) == 1
+    args, kwargs = safe_mode.entered[0]
+    assert args == ("recoverable", REASON_LIVE_TICK_ERROR)
+    assert kwargs.get("detail")
+
+
+def test_live_heartbeat_contains_a_failing_safe_mode_write(monkeypatch):
+    # The containment must not depend on the safe-mode write succeeding: a
+    # store busy enough to fail the heartbeat can fail that write too, and a
+    # raise from EITHER must not end the loop.
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+
+    def busy(db_, run_id, *, pid, now):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", busy)
+    safe_mode = _RecordingSafeMode(raises=True)
+    _live_heartbeat(object(), "r", pid=123, now=_T0, safe_mode=safe_mode)  # still no raise
+    assert len(safe_mode.entered) == 1
 
 
 # --------------------------------------------------------------------------
@@ -2541,6 +2612,20 @@ def test_live_risk_consistency_mismatch_exits_1(tmp_path, capsys, live_seams):
     assert rc == 1
     err = capsys.readouterr().err
     assert "risk.max_target_margin_pct" in err
+    assert live_seams.auth_calls == []  # rejected before any network work
+
+
+def test_live_loop_bad_decision_config_exits_1_before_recovery(tmp_path, capsys, live_seams):
+    # PR 5 (decided 2026-07-22): --loop consumes the risk:/decision: grid, so
+    # a typo'd decision: block must be a named exit-1 at the front gate —
+    # never a passing recovery whose loop is then silently skipped behind an
+    # exit 0 a supervisor reads as a clean run.
+    path = _live_yaml(tmp_path)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write("decision:\n  bogus_knob: 1\n")
+    rc = cli_main(["live", "--config", str(path), "--run-id", "r1", "--loop"])
+    assert rc == 1
+    assert "decision" in capsys.readouterr().err
     assert live_seams.auth_calls == []  # rejected before any network work
 
 

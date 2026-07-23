@@ -1,7 +1,8 @@
 """WebSocket ingestion: a thread-safe queue + connection lifecycle (phase3-spec §11).
 
 The SDK's WebSocket manager delivers events on a background thread; this system
-keeps the Phase 2 single-threaded 30-second tick loop (§11.4). The bridge is
+keeps the Phase 2 single-threaded tick-loop architecture (§11.4; ~10s in the
+live loop, 30s in the paper loop). The bridge is
 :class:`LiveWsStream`: the WS callback does ONE thing — drop the raw event into a
 thread-safe queue (no SQLite, no business logic — §11.4 rule 1) — and the tick
 loop drains it, so SQLite stays single-writer and event order is deterministic.
@@ -48,8 +49,9 @@ logger = logging.getLogger(__name__)
 
 # §11.1 required streams. userFills is the accounting source PR 3 consumes;
 # orderUpdates and the clearinghouse (account state) stream are enqueued too but
-# their consumer is PR 4's reconciliation — PR 3 drains and ignores them so the
-# queue never grows unbounded while they wait for their owner.
+# have no consumer yet — PR 4/5 reconciliation is REST-based; their owner is
+# PR 6's live-socket rework — so the drain discards them and the queue never
+# grows unbounded while they wait.
 USER_FILLS_CHANNEL = "userFills"
 ORDER_UPDATES_CHANNEL = "orderUpdates"
 # webData2 carries clearinghouseState (the account/position snapshot) over WS;
@@ -236,7 +238,8 @@ class LiveWsStream:
 
         The ``last_live_fill_time`` derivation is only safe when the previous process
         did not die holding an unretired obligation: obligations live in process memory
-        (this PR has no daemon caller yet), so a crash between booking a reconnect's
+        (the live loop drains the queue, but no WS socket/reconnect daemon exists
+        until PR 6), so a crash between booking a reconnect's
         ``isSnapshot`` batch and completing the gap pass — or a systemd restart erasing
         the stuck-incomplete state — would make the fresh floor read ≈now and skip the
         outage. §11.2 rule 5 (v12) therefore requires the PR 4 caller to fold a durable

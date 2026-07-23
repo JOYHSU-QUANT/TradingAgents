@@ -33,7 +33,10 @@ from contrib.hyperliquid_perp.live.orders import (
 )
 from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.persistence import repository as repo
-from contrib.hyperliquid_perp.persistence.cloid import cloid_hex as derive_cloid_hex
+from contrib.hyperliquid_perp.persistence.cloid import (
+    cloid_hex as derive_cloid_hex,
+    cloid_logical,
+)
 from contrib.hyperliquid_perp.persistence.db import Database
 
 _NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
@@ -50,7 +53,9 @@ class _FakeClient:
         self.place_calls: list[dict] = []
         self.status_calls: list[str] = []
 
-    def place_ioc_limit(self, *, coin, is_buy, size, limit_price, cloid_hex, reduce_only):
+    def place_ioc_limit(
+        self, *, coin, is_buy, size, limit_price, cloid_hex, reduce_only, protective=False
+    ):
         self.place_calls.append(
             {
                 "coin": coin,
@@ -59,6 +64,7 @@ class _FakeClient:
                 "limit_price": limit_price,
                 "cloid_hex": cloid_hex,
                 "reduce_only": reduce_only,
+                "protective": protective,
             }
         )
         result = self.place_results.pop(0)
@@ -200,6 +206,48 @@ def test_exchange_rejection_is_recorded_not_raised(env):
     assert [a["status"] for a in attempts] == ["rejected"]
     # The attempt keeps the verbatim ack word.
     assert attempts[0]["exchange_status"] == "error"
+
+
+def test_risk_adding_order_still_blocked_in_safe_mode(env):
+    # A safe mode dropped state_reconciled; a risk-adding (entry) order is still
+    # gate-rejected before any evidence — the protective exemption is de-risking only.
+    db, client, gate, submitter = env
+    gate.state_reconciled = False
+    with pytest.raises(LiveOrderGateRejected):
+        _submit(submitter, order_role="entry")
+    assert client.place_calls == []  # rejected before any wire call
+
+
+def test_emergency_close_routes_through_the_protective_gate(env):
+    # §17.2: an emergency_close IOC rides the protective gate (sendable while a safe
+    # mode has dropped state_reconciled / raised manual_safe_mode) and carries
+    # protective=True down to the wire backstop.
+    db, client, gate, submitter = env
+    gate.state_reconciled = False
+    gate.manual_safe_mode = True
+    ec_logical = cloid_logical(
+        prefix="hta",
+        run_id="r",
+        symbol="BTC",
+        output_id="na",
+        plan_id="ec1",
+        leg="na",
+        slice_index=0,
+        order_role="emergency_close",
+    )
+    client.place_results = [_RESTING_ACK]
+    outcome = submitter.submit_ioc_limit(
+        order_id="ec1",
+        coin="BTC",
+        side="sell",
+        size=Decimal("0.01"),
+        limit_price=Decimal("100"),
+        cloid_logical=ec_logical,
+        order_role="emergency_close",
+        reduce_only=True,
+    )
+    assert outcome.outcome == "acknowledged"
+    assert client.place_calls[0]["protective"] is True
 
 
 def test_rejection_ack_with_known_cloid_recovers_instead_of_rejecting(env):
@@ -825,3 +873,31 @@ def test_every_outcome_carries_the_exchange_verbatim_status_word(env):
     outcome = _submit(submitter, order_id="o1")
     assert outcome.outcome == "rejected"
     assert outcome.exchange_raw_status == "minTradeNtlRejected"
+
+
+# -- R4 loop: pre-wire store failures are typed, never "outcome unknown" ------
+
+
+def test_pre_wire_store_failure_raises_presubmit_and_leaves_no_evidence(env, monkeypatch):
+    """A transient sqlite failure BEFORE the network call means nothing was sent
+    and nothing recorded — it must surface as LiveOrderPreSubmitError (the caller
+    holds its cursor and retries the same cloid) rather than the generic
+    "attempted, outcome unknown" shape that advances past a never-sent order."""
+    from contrib.hyperliquid_perp.live.orders import LiveOrderPreSubmitError
+
+    db, client, _, submitter = env
+
+    def _locked(conn, *, cloid_hex):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(repo, "has_place_attempt", _locked)
+    with pytest.raises(LiveOrderPreSubmitError):
+        _submit(submitter)
+    monkeypatch.undo()
+    assert client.place_calls == []  # never reached the wire
+    assert repo.get_order(db.conn, "o1") is None  # no evidence row survives
+    # The store healed: the SAME logical order goes through under the same cloid.
+    client.place_results = [_RESTING_ACK]
+    outcome = _submit(submitter)
+    assert outcome.outcome == "acknowledged"
+    assert len(client.place_calls) == 1

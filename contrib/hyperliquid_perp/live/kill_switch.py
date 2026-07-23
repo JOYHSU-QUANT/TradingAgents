@@ -53,7 +53,12 @@ from .config import KillSwitchConfig
 from .order_gate import RealOrderGate
 from .orders import local_status_for_exchange_status, parse_order_status
 
-__all__ = ["KillSwitchManager", "kill_switch_timing_violation"]
+__all__ = [
+    "KillSwitchManager",
+    "kill_switch_timing_violation",
+    "network_timeout_warning",
+    "sl_repair_delay_warning",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +133,64 @@ def kill_switch_timing_violation(
     return None
 
 
+def network_timeout_warning(timeout: float | None, max_tick_gap_seconds: float) -> str | None:
+    """The §18.2 residual-risk advisory as a checkable message (PR 5, decided
+    2026-07-22 "soft mitigation").
+
+    Sister of :func:`kill_switch_timing_violation`, advisory rather than
+    enforced: nothing ties the per-request REST timeout to the caller's
+    ``max_tick_gap_seconds`` promise, a tick makes several sequential REST
+    calls, and one call riding its full timeout on a degraded (slow, not
+    dead) network can stretch the wall gap past the promise — the dead man's
+    switch then cancels the resting SL/TP while the process is still alive
+    (protection re-covers on the next healthy tick, an unprotected window).
+    Returns the warning text when the timeout cannot keep the promise (or is
+    unbounded), None when it fits. The hard construction-time invariant is
+    deferred to PR 6's network-layer rework.
+    """
+    if timeout is not None and timeout < max_tick_gap_seconds:
+        return None
+    return (
+        f"network_timeout_s ({timeout}) is not below the kill switch's max "
+        f"tick gap ({max_tick_gap_seconds:g}s) — one slow REST call on a "
+        "degraded network can push the §18.2 refresh past the exchange-side "
+        "deadline and cancel the resting SL/TP. Set network_timeout_s below "
+        f"{max_tick_gap_seconds:g} in the config for headroom."
+    )
+
+
+def sl_repair_delay_warning(delay_seconds: float, max_tick_gap_seconds: float) -> str | None:
+    """The SL-repair-ladder sibling of :func:`network_timeout_warning` (advisory).
+
+    ``protection._maybe_delay`` sleeps the FULL configured
+    ``sl_repair_retry_delay_seconds`` between repair attempts and only refreshes
+    the kill switch AFTER the sleep — so a delay at or above the
+    ``max_tick_gap_seconds`` promise stretches the refresh gap during an SL
+    repair episode, the one window where the position has no valid stop. Push it
+    past the scheduleCancel budget and the dead man's switch cancels every
+    resting order mid-repair. Config only enforces ``> 0``; like its sister
+    this is a warn-not-refuse preflight, with the hard construction-time
+    invariant deferred to PR 6. The default (5s vs 30s) never warns.
+    """
+    if delay_seconds < max_tick_gap_seconds:
+        return None
+    return (
+        f"live.protection.sl_repair_retry_delay_seconds ({delay_seconds:g}) is "
+        f"not below the kill switch's max tick gap ({max_tick_gap_seconds:g}s) "
+        "— the repair ladder sleeps that long between attempts while the "
+        "position has no valid stop, and can push the §18.2 refresh past the "
+        "exchange-side deadline, cancelling every resting order mid-repair. "
+        f"Set it below {max_tick_gap_seconds:g} for headroom."
+    )
+
+
+# The resting protective roles ``shutdown(keep_protective=True)`` leaves
+# standing (decided 2026-07-22). Narrower than order_gate.PROTECTIVE_ORDER_ROLES
+# for the same reason as protection._SLTP_ROLES: emergency_close is a one-shot
+# IOC, never a resting order for a sweep to keep.
+_KEEP_PROTECTIVE_ROLES = frozenset({"stop_loss", "take_profit"})
+
+
 class KillSwitchManager:
     """One run's dead man's switch: arm, refresh on cadence, cancel on shutdown."""
 
@@ -161,9 +224,13 @@ class KillSwitchManager:
         # poll() can run a full multi-agent AI decision — MINUTES, not seconds.
         # A caller that passes its sleep cap (60s) while its cycle can block for
         # three minutes has satisfied this check and will still be cancelled off
-        # the book mid-decision. §18.2: PR 5 must therefore refresh the switch
-        # from INSIDE the decision cycle (or from a dedicated refresher), not
-        # only at the top of the loop — and pass the true worst-case gap here.
+        # the book mid-decision. The live loop (PR 5) satisfies the contract the
+        # other way around: the AI decision runs on a background worker thread
+        # (Option A, live/decision.py), so one live iteration never blocks on it
+        # and the ordinary top-of-loop tick() IS the refresh cadence — there is
+        # no in-cycle refresher, and none is needed. What can still stretch the
+        # gap is a slow REST call riding its full timeout (§18.2 advisory,
+        # ``network_timeout_warning``) — pass the true worst-case gap here.
         # The invariant itself (worst-case math, config-guard blindness) is
         # kill_switch_timing_violation's docstring.
         violation = kill_switch_timing_violation(config, max_tick_gap_seconds)
@@ -624,7 +691,12 @@ class KillSwitchManager:
         return True
 
     def _cross_check_local_orders(
-        self, handled_cloids: set[str], *, enumeration_failed: bool
+        self,
+        handled_cloids: set[str],
+        *,
+        enumeration_failed: bool,
+        keep_protective: bool = False,
+        kept_protective: list[str] | None = None,
     ) -> list[str]:
         """Local orders the sweep did not account for — each one blocks the disarm.
 
@@ -641,6 +713,17 @@ class KillSwitchManager:
         sweep's own cancels have already patched their rows terminal, so they drop
         out on their own; anything left is asked about directly. Still live, or
         unconfirmable, counts as a failure — the trigger stays armed.
+
+        ``keep_protective`` (decided 2026-07-22): a kept-role (SL/TP) row that
+        ``orderStatus`` POSITIVELY confirms still live is counted kept — appended
+        to ``kept_protective``, not to the returned unaccounted list — so a stale
+        ``open_orders()`` read (likeliest right after a pre-shutdown modify)
+        cannot block the rule-6 disarm and let the wallet-wide scheduleCancel
+        later sweep exactly the orders the keep exists to protect. Only the
+        positive confirmation earns the exemption: an unconfirmable row (the
+        query raised, or the enumeration failed so no query ran) still blocks
+        the disarm — the fail-safe posture is unchanged where there is no
+        evidence.
 
         ``enumeration_failed`` suppresses the exchange round-trips, and that is a
         LATENCY guard, not a policy one. When ``open_orders()`` has just failed
@@ -685,6 +768,20 @@ class KillSwitchManager:
                 unaccounted.append(f"{order_id}: could not confirm settled: {exc}")
                 continue
             if not settled:
+                if keep_protective and row["order_role"] in _KEEP_PROTECTIVE_ROLES:
+                    # Confirmed live + protective role: this IS a keep, found
+                    # via the local record instead of the (stale) enumeration.
+                    handled_cloids.add(cloid)
+                    if kept_protective is not None:
+                        kept_protective.append(order_id)
+                    logger.warning(
+                        "kill switch shutdown: local protective order %s (cloid %s) "
+                        "confirmed live but absent from open_orders — kept (reduce-only), "
+                        "not counted against the disarm",
+                        order_id,
+                        cloid,
+                    )
+                    continue
                 logger.warning(
                     "kill switch shutdown: local order %s (cloid %s) is still live at the "
                     "exchange but was absent from open_orders",
@@ -696,7 +793,7 @@ class KillSwitchManager:
                 )
         return unaccounted
 
-    def shutdown(self) -> None:
+    def shutdown(self, *, keep_protective: bool = False) -> None:
         """§18.2 rules 5–7: cancel bot-owned open orders; never force-close.
 
         Per-order failures are recorded and do not stop the sweep — every
@@ -705,6 +802,20 @@ class KillSwitchManager:
         non-bot orders the sweep deliberately skips per §19.3), so a fully
         clean sweep (enumeration succeeded, zero failures) disarms it; any
         failure leaves it armed as the backstop for whatever survived.
+
+        ``keep_protective`` (decided 2026-07-22): the resting SL/TP
+        (``_KEEP_PROTECTIVE_ROLES``) are deliberately LEFT STANDING instead of
+        cancelled — the caller's exit path knows a live (or unreadable ≠ flat)
+        position sits behind them and stripping its reduce-only protection
+        would trade an unclean verdict for a naked position. A kept order is
+        accounted-for, not failed: it does not block the rule-6 disarm, and the
+        disarm is REQUIRED for the keep to mean anything — an armed wallet-wide
+        scheduleCancel would sweep exactly those kept orders at its deadline.
+        They then rest unattended (reduce-only, so they can only shrink the
+        position) until a ``--loop`` run re-adopts them or the operator acts.
+        The keep is honored on BOTH accounting legs: the ``open_orders()``
+        enumeration below and the local cross-check (a kept-role row the stale
+        enumeration missed but ``orderStatus`` positively confirms live).
 
         "Clean" is decided from BOTH sides. The exchange's ``open_orders()`` is
         an eventually-consistent read: an empty answer is indistinguishable from
@@ -764,6 +875,7 @@ class KillSwitchManager:
         self._record("shutdown_cancel_orders_started")
         canceled: list[str] = []
         skipped_non_bot: list[str] = []
+        kept_protective: list[str] = []
         failures: list[str] = []
         open_orders: list = []
         sweep_error: str | None = None
@@ -811,6 +923,13 @@ class KillSwitchManager:
                     # safe mode.
                     skipped_non_bot.append(oid)
                     continue
+                if keep_protective and row["order_role"] in _KEEP_PROTECTIVE_ROLES:
+                    # Deliberately left standing (see the docstring): accounted
+                    # for, so the cross-check below must not read it as
+                    # unaccounted and the rule-6 disarm must not be blocked.
+                    handled_cloids.add(cloid)
+                    kept_protective.append(oid)
+                    continue
                 if coin is None:
                     # Bot-owned but the payload carries no coin to cancel
                     # with: "ours but uncancelable" is a FAILURE, not "not
@@ -842,7 +961,10 @@ class KillSwitchManager:
         # sweep_error already keeps the trigger armed, but the operator still
         # wants these orders named in the §18.5 detail.
         unaccounted = self._cross_check_local_orders(
-            handled_cloids, enumeration_failed=sweep_error is not None
+            handled_cloids,
+            enumeration_failed=sweep_error is not None,
+            keep_protective=keep_protective,
+            kept_protective=kept_protective,
         )
         failures.extend(unaccounted)
         # The one line that answers "is real money still exposed?" without
@@ -850,11 +972,12 @@ class KillSwitchManager:
         # it deliberately left alone.
         logger.info(
             "kill switch shutdown sweep: %d canceled, %d failed (%d of them local orders "
-            "the exchange never listed), %d skipped (non-bot)",
+            "the exchange never listed), %d skipped (non-bot), %d kept (protective)",
             len(canceled),
             len(failures),
             len(unaccounted),
             len(skipped_non_bot),
+            len(kept_protective),
         )
         self._record(
             "shutdown_cancel_orders_completed",
@@ -862,6 +985,7 @@ class KillSwitchManager:
                 {
                     "canceled": canceled,
                     "skipped_non_bot": skipped_non_bot,
+                    "kept_protective": kept_protective,
                     "failures": failures,
                 }
             ),
@@ -877,7 +1001,9 @@ class KillSwitchManager:
         if self._armed and disarm_due:
             # Clean sweep: no bot order is left for the wallet-wide trigger to
             # protect, and letting it fire would cancel the skipped non-bot
-            # orders. Disarm; a disarm failure stays armed (fail-safe) and is
+            # orders — and any deliberately-kept SL/TP, which is exactly what
+            # ``keep_protective`` must prevent. Disarm; a disarm failure stays
+            # armed (fail-safe) and is
             # recorded, never raised out of the shutdown path. An unarmed
             # manager has nothing to disarm — a shutdown before arm() must
             # not record a phantom disarmed event.

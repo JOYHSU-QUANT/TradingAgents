@@ -55,10 +55,11 @@ from ..persistence.cloid import assert_cloid_provenance, cloid_hex as derive_clo
 from ..persistence.db import Database
 from ..persistence.ids import live_order_attempt_id
 from ..persistence.models import Side
-from .order_gate import RealOrderGate
+from .order_gate import PROTECTIVE_ORDER_ROLES, LiveOrderGateRejected, RealOrderGate
 from .payloads import payload_column, write_raw_payload
 
 __all__ = [
+    "LiveOrderPreSubmitError",
     "LiveOrderSubmitter",
     "SubmitOutcome",
     "SubmitOutcomeKind",
@@ -67,6 +68,28 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+class LiveOrderPreSubmitError(RuntimeError):
+    """``submit_ioc_limit`` failed LOCALLY before the wire — nothing was sent.
+
+    Raised for a pre-wire-phase failure (the §8.3 pre-check reads or the
+    intent transaction) with no pinned meaning of its own — a ``sqlite3.Error``
+    or an unexpected local bug: nothing was sent and no new evidence row
+    survives (the transaction rolls back), so the caller may treat the logical
+    order as never attempted and retry it later under the same cloid.
+    Treating it like an ambiguous transport failure (outcome unknown, move on)
+    would silently skip an order that was never even recorded — under a
+    persistent store fault, a whole plan could read "completed" with zero
+    notional on the exchange.
+
+    Exceptions that keep their own types (never wrapped): a §4.1 gate refusal
+    (:class:`LiveOrderGateRejected`); every ``ExchangeError`` — §8.3 protocol
+    verdicts ("refusing to resend"), orderStatus transport/parse failures and
+    idempotency contradictions, where a PRIOR send exists so §9.2 rule 2
+    applies; and contract violations (cloid provenance / order-id coherence
+    ``ValueError`` / ``AssertionError``), which fail loud exactly as before.
+    """
 
 
 class SubmitOutcomeKind(str, Enum):
@@ -350,130 +373,159 @@ class LiveOrderSubmitter:
         # §4.1 first, before any evidence is written: a gate-blocked order
         # must leave no phantom 'submitted' rows behind (the caller records
         # order_created=false / no_order_reason instead). The client's bound
-        # gate re-checks at the wire as a backstop.
-        self._gate.require_order(coin)
+        # gate re-checks at the wire as a backstop. A protection / de-risking
+        # role (the §17.2 emergency close) rides the protective gate so it stays
+        # sendable in safe mode; every risk-adding role uses the ordinary gate.
+        protective = order_role in PROTECTIVE_ORDER_ROLES
+        if protective:
+            self._gate.require_protective_order(coin)
+        else:
+            self._gate.require_order(coin)
 
-        # The cloid and the provenance fields beside it describe the same order
-        # twice; both reach the audit trail, and only this check makes them
-        # agree. Before the intent transaction, so a contradictory pair can
-        # never consume a cloid or leave a row behind.
-        assert_cloid_provenance(
-            cloid_logical, run_id=self._run_id, symbol=coin, order_role=order_role
-        )
-
-        hex_id = derive_cloid_hex(cloid_logical)
-        is_buy = Side.parse(side) is Side.BUY
-
-        # One binding for the three §8.3 recovery call sites (pre-check,
-        # duplicate ack, rejected ack) — the parameters never vary, only
-        # which attempt row the outcome should point at.
-        def recover_existing(attempt_id: str | None) -> SubmitOutcome | None:
-            return self._try_recover_existing(
-                order_id=order_id,
-                coin=coin,
-                side=side,
-                size=size,
-                limit_price=limit_price,
-                cloid_logical=cloid_logical,
-                cloid_hex=hex_id,
-                order_role=order_role,
-                reduce_only=reduce_only,
-                output_id=output_id,
-                flip_plan_id=flip_plan_id,
-                flip_leg=flip_leg,
-                parent_order_id=parent_order_id,
-                attempt_id=attempt_id,
+        # Everything from here to the network call is the PRE-WIRE phase:
+        # nothing has been sent yet, and a failure rolls back whatever it was
+        # writing. Wrapped so callers can tell "never attempted — safe to
+        # retry" (LiveOrderPreSubmitError) apart from "attempted, outcome
+        # unknown" (everything past the network call) — the two demand
+        # opposite cursor handling (§9.2 rule 2 applies only to sent orders).
+        try:
+            # The cloid and the provenance fields beside it describe the same
+            # order twice; both reach the audit trail, and only this check makes
+            # them agree. Before the intent transaction, so a contradictory pair
+            # can never consume a cloid or leave a row behind.
+            assert_cloid_provenance(
+                cloid_logical, run_id=self._run_id, symbol=coin, order_role=order_role
             )
 
-        # §8.3 rules 3–5 pre-check: if this cloid was EVER sent before (any
-        # prior place attempt, whatever its recorded outcome), ask the
-        # exchange first. Even an 'acknowledged' prior send must short-circuit
-        # here: the exchange's duplicate rejection only guards OPEN orders, so
-        # a filled/expired cloid would be accepted again as a brand-new order.
-        if repo.has_place_attempt(self._db.conn, cloid_hex=hex_id):
-            # A prior attempt stuck at 'submitted' stays that way — its own
-            # ack was never observed and that is its defined terminal state
-            # (see update_live_order_attempt); the recovered fate lands on
-            # the orders row, which is what PR 4 reconciles against.
-            recovered = recover_existing(attempt_id=None)
-            if recovered is not None:
-                return recovered
+            hex_id = derive_cloid_hex(cloid_logical)
+            is_buy = Side.parse(side) is Side.BUY
 
-        attempt_index = repo.next_live_attempt_index(
-            self._db.conn, action="place", cloid_hex=hex_id
-        )
-        attempt_id = live_order_attempt_id(self._run_id, "place", hex_id, attempt_index)
-        now = self._clock.now()
-
-        # Intent transaction: registry + orders row + attempt, all-or-nothing,
-        # BEFORE any network traffic.
-        with self._db.transaction() as conn:
-            inserted = self._ensure_local_order(
-                conn,
-                order_id=order_id,
-                coin=coin,
-                side=side,
-                size=size,
-                limit_price=limit_price,
-                cloid_logical=cloid_logical,
-                cloid_hex=hex_id,
-                order_role=order_role,
-                reduce_only=reduce_only,
-                output_id=output_id,
-                flip_plan_id=flip_plan_id,
-                flip_leg=flip_leg,
-                parent_order_id=parent_order_id,
-                status="submitted",
-                now=now,
-                submitted_at=now,
-            )
-            if not inserted:
-                # A rule-5 resend: the row survives from the earlier attempt and
-                # still carries ITS verdict — 'rejected', with that rejection's
-                # reason. Re-stamp it to the intent state, or the send below runs
-                # with a TERMINAL local row over a possibly-live order: a crash
-                # inside the network window would leave 'rejected' (not in
-                # LIVE_ORDER_STATUSES) on an order resting at the exchange, PR 4's
-                # reconciliation would skip it as settled, and an engine rebuilding
-                # intent from the DB would read "that one was rejected" — which
-                # §8.3 rule 9 licenses it to answer by minting a NEW logical order.
-                # The pre-check cannot save us there: it only re-derives the SAME
-                # cloid, and a fresh cloid never reaches it.
-                repo.update_order(
-                    conn,
-                    order_id,
-                    status="submitted",
-                    status_reason=None,
-                    submitted_at=now,
-                    # The exchange-side columns describe the PREVIOUS attempt's
-                    # verdict, and this send has no verdict yet. Cleared with the
-                    # status they belong to: a crash inside the network window
-                    # would otherwise leave a row reading status='submitted' with
-                    # exchange_status='rejected' and an acknowledged_at from an
-                    # answer to a different send — self-contradictory evidence in
-                    # the one place PR 4's reconciliation looks.
-                    exchange_status=None,
-                    exchange_raw_status=None,
-                    acknowledged_at=None,
-                    updated_at=now,
+            # One binding for the three §8.3 recovery call sites (pre-check,
+            # duplicate ack, rejected ack) — the parameters never vary, only
+            # which attempt row the outcome should point at.
+            def recover_existing(attempt_id: str | None) -> SubmitOutcome | None:
+                return self._try_recover_existing(
+                    order_id=order_id,
+                    coin=coin,
+                    side=side,
+                    size=size,
+                    limit_price=limit_price,
+                    cloid_logical=cloid_logical,
+                    cloid_hex=hex_id,
+                    order_role=order_role,
+                    reduce_only=reduce_only,
+                    output_id=output_id,
+                    flip_plan_id=flip_plan_id,
+                    flip_leg=flip_leg,
+                    parent_order_id=parent_order_id,
+                    attempt_id=attempt_id,
                 )
-            repo.insert_live_order_attempt(
-                conn,
-                attempt_id=attempt_id,
-                run_id=self._run_id,
-                action="place",
-                symbol=coin,
-                attempt_index=attempt_index,
-                order_id=order_id,
-                cloid_logical=cloid_logical,
-                cloid_hex=hex_id,
-                side=side,
-                qty=size,
-                price=limit_price,
-                reduce_only=reduce_only,
-                order_role=order_role,
-                requested_at=now,
+
+            # §8.3 rules 3–5 pre-check: if this cloid was EVER sent before (any
+            # prior place attempt, whatever its recorded outcome), ask the
+            # exchange first. Even an 'acknowledged' prior send must short-circuit
+            # here: the exchange's duplicate rejection only guards OPEN orders, so
+            # a filled/expired cloid would be accepted again as a brand-new order.
+            if repo.has_place_attempt(self._db.conn, cloid_hex=hex_id):
+                # A prior attempt stuck at 'submitted' stays that way — its own
+                # ack was never observed and that is its defined terminal state
+                # (see update_live_order_attempt); the recovered fate lands on
+                # the orders row, which is what PR 4 reconciles against.
+                recovered = recover_existing(attempt_id=None)
+                if recovered is not None:
+                    return recovered
+
+            attempt_index = repo.next_live_attempt_index(
+                self._db.conn, action="place", cloid_hex=hex_id
             )
+            attempt_id = live_order_attempt_id(self._run_id, "place", hex_id, attempt_index)
+            now = self._clock.now()
+
+            # Intent transaction: registry + orders row + attempt, all-or-nothing,
+            # BEFORE any network traffic.
+            with self._db.transaction() as conn:
+                inserted = self._ensure_local_order(
+                    conn,
+                    order_id=order_id,
+                    coin=coin,
+                    side=side,
+                    size=size,
+                    limit_price=limit_price,
+                    cloid_logical=cloid_logical,
+                    cloid_hex=hex_id,
+                    order_role=order_role,
+                    reduce_only=reduce_only,
+                    output_id=output_id,
+                    flip_plan_id=flip_plan_id,
+                    flip_leg=flip_leg,
+                    parent_order_id=parent_order_id,
+                    status="submitted",
+                    now=now,
+                    submitted_at=now,
+                )
+                if not inserted:
+                    # A rule-5 resend: the row survives from the earlier attempt and
+                    # still carries ITS verdict — 'rejected', with that rejection's
+                    # reason. Re-stamp it to the intent state, or the send below runs
+                    # with a TERMINAL local row over a possibly-live order: a crash
+                    # inside the network window would leave 'rejected' (not in
+                    # LIVE_ORDER_STATUSES) on an order resting at the exchange, PR 4's
+                    # reconciliation would skip it as settled, and an engine rebuilding
+                    # intent from the DB would read "that one was rejected" — which
+                    # §8.3 rule 9 licenses it to answer by minting a NEW logical order.
+                    # The pre-check cannot save us there: it only re-derives the SAME
+                    # cloid, and a fresh cloid never reaches it.
+                    repo.update_order(
+                        conn,
+                        order_id,
+                        status="submitted",
+                        status_reason=None,
+                        submitted_at=now,
+                        # The exchange-side columns describe the PREVIOUS attempt's
+                        # verdict, and this send has no verdict yet. Cleared with the
+                        # status they belong to: a crash inside the network window
+                        # would otherwise leave a row reading status='submitted' with
+                        # exchange_status='rejected' and an acknowledged_at from an
+                        # answer to a different send — self-contradictory evidence in
+                        # the one place PR 4's reconciliation looks.
+                        exchange_status=None,
+                        exchange_raw_status=None,
+                        acknowledged_at=None,
+                        updated_at=now,
+                    )
+                repo.insert_live_order_attempt(
+                    conn,
+                    attempt_id=attempt_id,
+                    run_id=self._run_id,
+                    action="place",
+                    symbol=coin,
+                    attempt_index=attempt_index,
+                    order_id=order_id,
+                    cloid_logical=cloid_logical,
+                    cloid_hex=hex_id,
+                    side=side,
+                    qty=size,
+                    price=limit_price,
+                    reduce_only=reduce_only,
+                    order_role=order_role,
+                    requested_at=now,
+                )
+        except (LiveOrderGateRejected, ExchangeError, ValueError, AssertionError):
+            # Pinned fail-loud / protocol families keep their own types: §4.1
+            # gate refusals; every ExchangeError (§8.3 verdicts like "refusing
+            # to resend", orderStatus transport/parse failures, idempotency
+            # contradictions — a PRIOR send exists on those paths, so §9.2
+            # rule 2 applies and the caller advances); and contract violations
+            # (cloid provenance / order-id coherence).
+            raise
+        except Exception as exc:  # noqa: BLE001 — nothing was sent; hold-and-retry is safe
+            # Everything else in the pre-wire phase — a sqlite3.Error, an
+            # unexpected local bug — sent nothing and recorded nothing.
+            raise LiveOrderPreSubmitError(
+                f"pre-wire failure for {order_id} ({order_role}): nothing "
+                "was sent and no new evidence row survives; the order may be "
+                "retried under the same cloid"
+            ) from exc
 
         # The network call. ANY failure past this point leaves the attempt row
         # patched 'failed' — a durable "outcome unknown" marker (a timeout may
@@ -497,6 +549,7 @@ class LiveOrderSubmitter:
                 limit_price=limit_price,
                 cloid_hex=hex_id,
                 reduce_only=reduce_only,
+                protective=protective,
             )
         except Exception as exc:
             # Records 'failed' WITHOUT letting a busy DB replace `exc` — the

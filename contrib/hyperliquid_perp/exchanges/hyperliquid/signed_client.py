@@ -341,6 +341,7 @@ class HyperliquidSignedClient:
         limit_price: Decimal,
         cloid_hex: str,
         reduce_only: bool = False,
+        protective: bool = False,
     ) -> OrderAck:
         """Submit one IOC limit order carrying its cloid (§7 ``order``, §9).
 
@@ -358,8 +359,17 @@ class HyperliquidSignedClient:
         top-level ``err`` envelope (action-level: signature/payload/nonce)
         raises ``ExchangeRequestError`` — the order may never have reached
         the matching engine, so it must not consume the cloid as 'rejected'.
+
+        ``protective`` routes the wire-side gate backstop through
+        :meth:`~..order_gate.RealOrderGate.check_protective_order` for a §17.2
+        emergency close (a de-risking IOC that must clear in safe mode); the
+        caller (:class:`~..live.orders.LiveOrderSubmitter`) sets it from the
+        order role so this backstop and its own pre-check agree.
         """
-        self._gate.require_order(coin)
+        if protective:
+            self._gate.require_protective_order(coin)
+        else:
+            self._gate.require_order(coin)
         response = call_sdk(
             self._exchange.order,
             coin,
@@ -367,6 +377,94 @@ class HyperliquidSignedClient:
             float(size),
             float(limit_price),
             {"limit": {"tif": "Ioc"}},
+            reduce_only,
+            Cloid.from_str(cloid_hex),
+        )
+        return _parse_order_ack(response)
+
+    def place_trigger_order(
+        self,
+        *,
+        coin: str,
+        is_buy: bool,
+        size: Decimal,
+        limit_price: Decimal,
+        trigger_price: Decimal,
+        tpsl: str,
+        cloid_hex: str,
+        is_market: bool = False,
+        reduce_only: bool = True,
+    ) -> OrderAck:
+        """Place one resting reduce-only trigger order — SL/TP protection (§17).
+
+        The §17 protection order: a resting stop-loss (``tpsl="sl"``) or
+        take-profit (``tpsl="tp"``) that the exchange fills when the mark
+        crosses ``trigger_price``. It defaults to reduce-only (a protection
+        order may only shrink the position) and to a LIMIT trigger
+        (``is_market=False``): §9.2 rule 1 forbids an unprotected market-like
+        live order, so the caller sets ``limit_price`` to an aggressive but
+        bounded price past the trigger (marketable on fire, capped slippage) —
+        the "aggressive IOC, price-protected" shape §9.4 pins for stop_loss /
+        take_profit. The bound §4.1 gate runs first via
+        ``require_protective_order`` (§13.1: a reduce-only SL/TP must stay
+        placeable while a safe mode is active); like ``place_ioc_limit`` it is
+        a wire-scoped check, not the per-cycle list, so SL repair is allowed
+        while a slice plan runs (§9.3). ``tpsl`` is validated here; the cloid
+        is mandatory (§8.2/§19.3).
+        """
+        if tpsl not in ("sl", "tp"):
+            raise ValueError(f"tpsl must be 'sl' or 'tp' (§17 trigger order), got {tpsl!r}")
+        # A reduce-only SL/TP is always protective (§13.1): it must be placeable
+        # while a safe mode is active, so it rides the protective gate.
+        self._gate.require_protective_order(coin)
+        response = call_sdk(
+            self._exchange.order,
+            coin,
+            is_buy,
+            float(size),
+            float(limit_price),
+            {"trigger": {"triggerPx": float(trigger_price), "isMarket": is_market, "tpsl": tpsl}},
+            reduce_only,
+            Cloid.from_str(cloid_hex),
+        )
+        return _parse_order_ack(response)
+
+    def modify_trigger_order(
+        self,
+        *,
+        target: str,
+        coin: str,
+        is_buy: bool,
+        size: Decimal,
+        limit_price: Decimal,
+        trigger_price: Decimal,
+        tpsl: str,
+        cloid_hex: str,
+        is_market: bool = False,
+        reduce_only: bool = True,
+    ) -> OrderAck:
+        """Modify a resting protection order in place (§17.4 modify-before-cancel).
+
+        §17.4 requires updating an existing SL/TP through ``modify`` rather than
+        cancel-then-create, to shrink the window in which the position has no
+        protection. ``target`` is the exchange order id of the order being
+        replaced; the modified order carries a fresh ``cloid_hex`` (its new
+        logical identity — trigger price / size changed), so the registry and
+        the §8.3 retry protocol still map one logical order to one wire cloid.
+        Same reduce-only trigger shape and gate as :meth:`place_trigger_order`.
+        """
+        if tpsl not in ("sl", "tp"):
+            raise ValueError(f"tpsl must be 'sl' or 'tp' (§17 trigger order), got {tpsl!r}")
+        # Moving a resting SL/TP is protective (§13.1/§17.4): sendable in safe mode.
+        self._gate.require_protective_order(coin)
+        response = call_sdk(
+            self._exchange.modify_order,
+            int(target),
+            coin,
+            is_buy,
+            float(size),
+            float(limit_price),
+            {"trigger": {"triggerPx": float(trigger_price), "isMarket": is_market, "tpsl": tpsl}},
             reduce_only,
             Cloid.from_str(cloid_hex),
         )
@@ -416,7 +514,8 @@ class HyperliquidSignedClient:
 
         The REST backfill source (:class:`~...live.fill_backfill.FillBackfiller`):
         it catches fills the WebSocket missed while it was down or before it
-        subscribed. Times are epoch-ms, the form the API takes; the raw fill list
+        subscribed — and in the v1 live loop, which attaches no socket yet, it
+        is the sole fills source. Times are epoch-ms, the form the API takes; the raw fill list
         is returned untouched for the ingester to parse and dedupe (§14.2/§14.3).
         Ungated — a read never places or moves anything.
         """

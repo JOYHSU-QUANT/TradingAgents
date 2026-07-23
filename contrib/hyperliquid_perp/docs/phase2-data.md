@@ -77,7 +77,7 @@ SQLite 另有只供 runtime 使用、預設不匯出 CSV 的 internal tables：
 | Internal table | 用途 |
 | --- | --- |
 | `runs` | `run_id`、mode、初始資金、設定與 schema version |
-| `scheduler_state` | `last_decision_at`、`next_decision_at` 與目前 attempt reference |
+| `scheduler_state` | `last_decision_at`、`next_decision_at` 與目前 attempt reference；Phase 3 追加 safe-mode／loss-guard 欄位（`safe_mode_*`、`day_start_*`、`consecutive_loss_count`、schema v7 的 `last_settlement_wallet_balance`，見 phase3-spec §16.6） |
 | `execution_plans` | TWAP / flip plan、deadline、slice allocation、remaining / residual quantity 與 terminal state |
 | `current_positions` | 每個 symbol 的最新 position、average entry、margin 與 active protection references |
 | `current_account_state` | 最新 wallet balance、equity、margin、fees、funding 與 PnL |
@@ -229,7 +229,7 @@ AI input
 | `stop_loss_price` | 目前 active SL；無則留空 |
 | `take_profit_price` | 目前 active TP；無則留空 |
 | `active_twap` | 是否有 active TWAP / flip plan |
-| `remaining_twap_qty` | Active plan 剩餘數量；無 active plan 為空 |
+| `remaining_twap_qty` | Active plan 剩餘數量；無 active plan 為空。**live v1 恆為空**——live fill 尚未歸屬到 plan（fill→plan 歸屬隨 Phase 3 PR 6 落地），與其回報凍結的原始計畫量誤導 AI，寧可誠實回報 unknown |
 | `last_fill_time` | 最後一筆 paper fill 時間；無 fill 為空 |
 | `max_target_margin_pct` | 當時 RiskGate 上限；預設 `60` |
 | `input_payload_path` | 完整 AI input JSON 檔路徑 |
@@ -246,6 +246,7 @@ AI input
 
 - 每個 scheduled cycle 建立 attempt 時記錄一筆 logical record
 - 每次 retry、成功、或進入 terminal status（`api_failed` / `invalid_output`）時更新同一筆 record
+- Live（Phase 3 PR 5）：`in_progress` 可跨 process 存活——重啟時由 loop 啟動領養：已存有 raw response 者從 gate 續跑至 `completed` / `invalid_output`（不重問 AI），AI 從未回應者記為 `api_failed`；更新的仍是同一筆 record
 
 ### 6.2 欄位
 

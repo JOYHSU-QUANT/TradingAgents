@@ -39,9 +39,10 @@ def _columns(conn, table: str) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_v5_store_upgrades_to_v6_in_place(monkeypatch):
+def test_v5_store_upgrades_to_latest_in_place(monkeypatch):
     # Build a store that stops at v5 (an existing paper DB), then re-open with
-    # the full migration list: only v6 applies, and the paper rows survive.
+    # the full migration list: the later migrations (v6, and v7's additive
+    # ADD COLUMN) apply, and the paper rows survive.
     conn = connect(":memory:")
     v5_only = {version: MIGRATIONS[version] for version in sorted(MIGRATIONS) if version <= 5}
     import contrib.hyperliquid_perp.persistence.db as db_module
@@ -85,7 +86,7 @@ def test_v5_store_upgrades_to_v6_in_place(monkeypatch):
     conn.execute(f"INSERT INTO scheduler_state (run_id, updated_at) VALUES ('r', '{stamp}')")
 
     monkeypatch.setattr(db_module, "MIGRATIONS", MIGRATIONS)
-    assert apply_migrations(conn) == 6
+    assert apply_migrations(conn) == 7
 
     row = conn.execute("SELECT * FROM orders").fetchone()
     assert row["order_id"] == "o1"

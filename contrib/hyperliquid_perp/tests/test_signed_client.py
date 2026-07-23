@@ -126,11 +126,18 @@ class _FakeExchange:
             "status": "ok",
             "response": {"type": "cancel", "data": {"statuses": ["success"]}},
         }
+        self.modify_calls: list[tuple] = []
         self.schedule_calls: list[int] = []
         self.schedule_result = {"status": "ok", "response": {"type": "default"}}
 
     def order(self, name, is_buy, sz, limit_px, order_type, reduce_only=False, cloid=None):
         self.order_calls.append((name, is_buy, sz, limit_px, order_type, reduce_only, cloid))
+        return self.order_result
+
+    def modify_order(
+        self, oid, name, is_buy, sz, limit_px, order_type, reduce_only=False, cloid=None
+    ):
+        self.modify_calls.append((oid, name, is_buy, sz, limit_px, order_type, reduce_only, cloid))
         return self.order_result
 
     def cancel(self, name, oid):
@@ -205,6 +212,80 @@ def test_place_ioc_limit_sends_ioc_with_cloid_and_parses_resting(fake_exchange):
     assert order_type == {"limit": {"tif": "Ioc"}}  # §9: every slice is IOC
     assert sz == 0.01 and px == 100.5  # Decimal→float at the wire boundary
     assert cloid.to_raw() == _CLOID  # the wire id is the cloid_hex (§8.3 rule 7)
+
+
+def test_place_trigger_order_rides_the_protective_gate_in_safe_mode(fake_exchange):
+    # An SL/TP is a protective order (§13.1): placeable while a safe mode has
+    # dropped state_reconciled and raised manual_safe_mode, unlike a risk-adding
+    # order — else the SL repair that heals a §12.3 SL-missing safe mode can never
+    # send and the position rides unprotected.
+    gate = _open_gate()
+    gate.state_reconciled = False
+    gate.manual_safe_mode = True
+    client = _client(gate=gate)
+    ack = client.place_trigger_order(
+        coin="BTC",
+        is_buy=False,
+        size=Decimal("0.01"),
+        limit_price=Decimal("99"),
+        trigger_price=Decimal("100"),
+        tpsl="sl",
+        cloid_hex=_CLOID,
+    )
+    assert ack.accepted  # not gate-rejected
+
+
+def test_modify_trigger_order_wire_shape_and_protective_gate(fake_exchange):
+    # §17.4 modify-before-cancel: the wire call carries the TARGET oid, the new
+    # trigger shape and a FRESH cloid — and it rides the protective gate, so an
+    # SL move still lands while a safe mode has the ordinary gate closed.
+    gate = _open_gate()
+    gate.state_reconciled = False
+    gate.manual_safe_mode = True
+    client = _client(gate=gate)
+    ack = client.modify_trigger_order(
+        target="222",
+        coin="BTC",
+        is_buy=False,
+        size=Decimal("0.01"),
+        limit_price=Decimal("99"),
+        trigger_price=Decimal("100"),
+        tpsl="sl",
+        cloid_hex=_CLOID,
+    )
+    assert ack.accepted  # not gate-rejected
+    (oid, name, is_buy, sz, px, order_type, reduce_only, cloid) = client._exchange.modify_calls[0]
+    assert (oid, name, is_buy) == (222, "BTC", False)
+    assert sz == 0.01 and px == 99.0  # Decimal→float at the wire boundary
+    assert order_type == {"trigger": {"triggerPx": 100.0, "isMarket": False, "tpsl": "sl"}}
+    assert reduce_only is True  # a protection order only ever reduces
+    assert cloid.to_raw() == _CLOID
+
+
+def test_place_ioc_limit_protective_flag_routes_to_the_protective_gate(fake_exchange):
+    # The §17.2 emergency close (protective=True) clears in safe mode; the same
+    # IOC without the flag is refused — the exemption is opt-in per order.
+    gate = _open_gate()
+    gate.state_reconciled = False
+    client = _client(gate=gate)
+    ack = client.place_ioc_limit(
+        coin="BTC",
+        is_buy=True,
+        size=Decimal("0.01"),
+        limit_price=Decimal("100"),
+        cloid_hex=_CLOID,
+        protective=True,
+    )
+    assert ack.accepted
+    with pytest.raises(LiveOrderGateRejected):
+        client.place_ioc_limit(
+            coin="BTC",
+            is_buy=True,
+            size=Decimal("0.01"),
+            limit_price=Decimal("100"),
+            cloid_hex=_CLOID,
+            protective=False,
+        )
 
 
 def test_place_ioc_limit_parses_filled_and_error_statuses(fake_exchange):

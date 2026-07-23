@@ -86,18 +86,30 @@ class _FakeKillSwitch:
     def __init__(self) -> None:
         self.ticks = 0
         self.stop_new_orders = False
+        self.release_calls = 0
+        self.release_result = True
 
     def tick(self) -> None:
         self.ticks += 1
+
+    def release_safe_mode(self) -> bool:
+        # Mirrors KillSwitchManager: success lowers the latch, a failed proving
+        # refresh leaves it up and returns False.
+        self.release_calls += 1
+        if self.release_result:
+            self.stop_new_orders = False
+        return self.release_result
 
 
 class _FakeReconciler:
     def __init__(self, clean=True) -> None:
         self.calls: list[str] = []
+        self.kill_switch_flags: list[bool] = []
         self.clean = clean
 
     def reconcile_and_apply(self, trigger, *, safe_mode, ws_restored, kill_switch_active):
         self.calls.append(trigger)
+        self.kill_switch_flags.append(kill_switch_active)
         return SimpleNamespace(clean=self.clean)
 
 
@@ -1318,6 +1330,51 @@ def test_protection_change_triggers_reconcile_pass(tmp_path):
     _script(engine, [_snap()])
     engine.tick()
     assert "protection_change" not in rec.calls  # quiet sync -> no extra pass
+
+
+# -- 2026-07-23: §13.4 release door on the reconcile path ---------------------
+
+
+def test_reconcile_walks_the_release_door_when_the_latch_is_up(tmp_path):
+    """§13.4: with the sticky latch up, reconcile_and_apply requires
+    release_safe_mode()'s verdict — the raw latch read has no release path at
+    all, wedging the run (no slices, and no SL/TP either: the §4.1 kill-switch
+    line is not in the protective exemption) until a process restart."""
+    rec = _FakeReconciler()
+    db, clock, engine, gate, sub = _build(tmp_path, reconciler=rec)
+    ks = engine._kill_switch
+    ks.stop_new_orders = True  # a transient refresh failure latched the switch
+    engine._reconcile("heartbeat")
+    assert ks.release_calls == 1  # the ONE door was walked, not bypassed
+    assert rec.kill_switch_flags == [True]  # the pass saw the earned verdict
+    assert ks.stop_new_orders is False
+
+
+def test_reconcile_stays_latched_when_the_release_proof_fails(tmp_path):
+    """A release whose proving refresh fails re-latches: the pass must see
+    kill_switch_active=False (§13.4 auto-recovery withheld) and the next
+    reconcile walks the door again — retry at reconcile cadence, never a
+    tight loop."""
+    rec = _FakeReconciler()
+    db, clock, engine, gate, sub = _build(tmp_path, reconciler=rec)
+    ks = engine._kill_switch
+    ks.stop_new_orders = True
+    ks.release_result = False  # the switch is still unhealthy
+    engine._reconcile("heartbeat")
+    assert rec.kill_switch_flags == [False]
+    assert ks.stop_new_orders is True
+    engine._reconcile("heartbeat")
+    assert ks.release_calls == 2
+
+
+def test_reconcile_skips_the_release_door_while_healthy(tmp_path):
+    """No latch -> no release attempt: the door is §13.4 release only, never a
+    routine health probe."""
+    rec = _FakeReconciler()
+    db, clock, engine, gate, sub = _build(tmp_path, reconciler=rec)
+    engine._reconcile("heartbeat")
+    assert engine._kill_switch.release_calls == 0
+    assert rec.kill_switch_flags == [True]
 
 
 def test_flip_under_single_slot_config_still_budgets_both_legs(tmp_path):

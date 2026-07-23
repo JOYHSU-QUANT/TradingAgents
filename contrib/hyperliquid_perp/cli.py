@@ -13,7 +13,8 @@ Four subcommands plus full Phase 1/2 backward compatibility:
 - ``python -m contrib.hyperliquid_perp live --config <yaml>`` — the Phase 3
   startup skeleton (phase3-spec PR 1): load the ``live:`` config gates, verify
   the agent-wallet authorization, print the effective notional caps, and exit
-  without entering any trading loop (that arrives in PR 5). Places no orders.
+  without entering any trading loop (that is ``live --run-id --loop``, PR 5).
+  Places no orders.
 
 Empty argv and flag-style invocations (first argument starting with ``-``) —
 including the Phase 1 ``--context-only`` smoke run and the single-shot engine
@@ -668,8 +669,8 @@ def _cmd_live(argv: list[str]) -> int:
         )
         return 1
     # The AI gate (risk:) and the live hard caps (live.safety:) must agree on
-    # the sizing regime before PR 5 wires them into one loop — a divergent
-    # pair is a config mistake today, not a runtime surprise later. The block
+    # the sizing regime — PR 5's loop wires them together, so a divergent
+    # pair is a config mistake at load time, not a runtime surprise. The block
     # and its cross-checked fields must be operator-written (§24 — see
     # validate_live_risk_consistency for the vacuous-pass rationale).
     raw_risk = config.get("risk")

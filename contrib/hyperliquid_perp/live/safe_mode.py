@@ -74,7 +74,7 @@ REASON_REPEATED_MISMATCH = "repeated_reconciliation_mismatch"  # §13.5: manual
 REASON_NON_BOT_OWNED_ORDER = "non_bot_owned_order"  # §13.5: manual
 REASON_INVALID_LOCAL_FILL = "invalid_local_fill"  # §12.3: manual (money state unknown)
 REASON_UNKNOWN_POSITION = "unknown_exchange_position"  # §13.5: manual
-REASON_SL_MISSING = "position_sl_missing"  # §12.3: recoverable (repair lands in PR 5)
+REASON_SL_MISSING = "position_sl_missing"  # §12.3: recoverable (PR 5 loop repairs it)
 # §19.3: recoverable. Covers every way the startup stale-order sweep can fail —
 # a cancel that would not land AND a positions read it could not prove — so a
 # reason-keyed query never misclassifies a read failure as a cancel failure.

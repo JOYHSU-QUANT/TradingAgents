@@ -511,11 +511,25 @@ class LiveExecutionEngine:
     def _reconcile(self, trigger: str) -> bool:
         """Run a §12.2 reconciliation pass and drive the safe-mode machine."""
         self._last_reconcile_at = self._clock.now()
+        if self._kill_switch.stop_new_orders:
+            # §13.4: the sticky refresh-failure latch is up, and
+            # release_safe_mode() is its ONE door — reconcile_and_apply requires
+            # ITS verdict here, not the raw latch read, or the latch outlives
+            # the outage forever (no slices, and no SL/TP either: the §4.1
+            # kill-switch line is not in the protective exemption). The release
+            # earns itself with a proving refresh — a switch that actually
+            # fired re-latches inside that refresh — and runs only at reconcile
+            # cadence, adjacent to the pass that settles the rows it reopens
+            # the gate for; risk orders stay behind the safe-mode lines until
+            # this pass comes back clean.
+            kill_switch_active = self._kill_switch.release_safe_mode()
+        else:
+            kill_switch_active = True
         report = self._reconciler.reconcile_and_apply(
             trigger,
             safe_mode=self._safe_mode,
             ws_restored=not self._ws.is_stale(),
-            kill_switch_active=not self._kill_switch.stop_new_orders,
+            kill_switch_active=kill_switch_active,
         )
         return report.clean
 
@@ -802,10 +816,11 @@ class LiveExecutionEngine:
         The RiskGate said yes, so the ai_outputs row reads ``order_created=1``
         with no refusal reason of its own — without a trace here the refusal is
         invisible everywhere (and a §10.1 hit means the gate sized past the
-        live ceiling, the single most report-worthy refusal). Mirror
-        ``no_legal_slice``: one warning plus a rejected execution_plans row
-        whose ``status_reason`` carries the refusal; quantities stay NULL — no
-        plan was ever built to quantify.
+        live ceiling, the single most report-worthy refusal). The rejected
+        execution_plans row mirrors ``no_legal_slice`` (``status_reason``
+        carries the refusal; quantities stay NULL — no plan was ever built to
+        quantify); the warning log is this path's own addition —
+        ``no_legal_slice`` itself leaves only the row.
 
         A flip open-leg retry (``flip_open`` set) skips the row: that path
         re-gates every tick inside the flip envelope and already surfaces per

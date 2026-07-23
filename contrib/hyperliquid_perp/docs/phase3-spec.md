@@ -667,7 +667,8 @@ open order count below max_open_orders（§10.5）
 （ai_outputs 記 `order_created=1`）而被 live 檢查擋下的三類拒絕——§10.1 notional
 cap、§10.5 open-order cap、§4.1 gate line——各插一筆 `rejected` execution_plans
 row（`status_reason` 帶拒絕原因、以 `output_id` 連回決策、數量欄 NULL）＋一行
-warning log，與 `no_legal_slice` 對稱；§10.1 觸發代表 gate sizing 超過 live
+warning log；row 與 `no_legal_slice` 對稱（該路徑只留 row、無 warning——warning
+是 live 拒絕路徑自己的）；§10.1 觸發代表 gate sizing 超過 live
 上限，是最需要留痕的事件。flip open-leg 的每-tick 重試路徑不插 row（已有
 `flip_open_pending` 事件逐 tick 可見，避免 row 洪水）。
 
@@ -693,7 +694,11 @@ within-cycle 三段 retry ladder——retryable 失敗當場記 `api_failed` fai
 下一個 4h cycle 再試。process 於 cycle 途中中斷時，重啟由 loop 啟動先領養
 stranded 的 `in_progress` attempt：已存有 raw response → 從 gate 續跑（絕不重問
 AI）；AI 從未回應 → 記 `api_failed` 收場並 re-anchor 到下一個 cycle。plan 已
-註冊後的 audit persist 失敗只重試 persist、絕不重跑 gate。
+註冊後的 audit persist 失敗只重試 persist、絕不重跑 gate。決策已被 poll 收下、
+但 §3.1 raw-response store 失敗時同樣只重試 store（2026-07-23）：poll 是
+one-shot，此刻 fail-closed 會把已付費的決策作廢——store 落地前不得 gate，下一
+pump 只補寫入，例外上拋 tick guard（recoverable safe mode）；shutdown salvage
+對這個形狀同樣補一次 store。
 
 ### 10.3 Daily Loss Cap（v3 新增行為定義）
 
@@ -1057,6 +1062,14 @@ daily-loss 過午夜、`live_tick_error` 等所有 recoverable latch 在 v1 全�
 只能手動解除。故 v1 loop 傳 `ws_restored=not ws.is_stale()`（從未連線的
 stream 恆為未 stale ⇒ 實務上恆 `True`），接受 clean pass 自動解除各 recoverable
 latch；PR 6 接上真 WS 後改回真實 stream 狀態，屆時上段的嚴格立場恢復適用。
+
+「kill switch active」的 attestation 同樣必須**掙來**（2026-07-23）：live loop 的
+reconcile pass 在 sticky latch up 時走 `release_safe_mode()`（§18.2 的唯一解鎖門，
+帶 proving refresh；已觸發的 switch 會在該 refresh 內重新上鎖）並把其裁決傳給
+`kill_switch_active`——裸讀 latch 沒有任何解除路徑，一次暫時性 refresh 失敗就會
+讓 run 永久卡死（切片停、SL/TP 也掛不上：§4.1 kill-switch 線不在 protective 豁免
+內），只能重啟 process。release 只在 reconcile cadence 嘗試、緊鄰結算 rows 的
+pass，非 retry loop。
 
 §19.3 stale-order sweep 的撤單失敗是 **verdict 輸入**（2026-07-17）：撤不掉的單
 仍在交易所掛著，該 pass 不得讀成 clean。失敗以 `ReconciliationReport.sweep_failures`
@@ -1478,9 +1491,10 @@ kill_switch:
   emergency_close_on_shutdown: false
 ```
 
-（`emergency_close_on_shutdown` 的行為（reduce-only emergency close，§8.1/§17）
-隨 PR 5 的 protection manager 進場；在那之前 config 建構期拒絕 `true`——
-未實作的行為不得被 config 靜默接受，v4 註記。）
+（`emergency_close_on_shutdown` 的行為（shutdown 時 reduce-only emergency
+close）至今未實作——PR 5 的 protection manager 進場後改採 §18.2 rule 8 的
+keep-protective shutdown，close-out 延後 PR 6；config 建構期拒絕 `true`——
+未實作的行為不得被 config 靜默接受，v4 註記、2026-07-23 修訂。）
 
 （`schedule_cancel_seconds` 建構期要求 > 5：Hyperliquid 拒絕觸發時間距今不足
 5 秒的 scheduleCancel，≤ 5 的值永遠 arm 不起來，而 §18.2 rule 1 把 arm 失敗

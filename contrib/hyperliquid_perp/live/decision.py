@@ -156,6 +156,23 @@ class _PlanRegisteredPersistError(RuntimeError):
     """
 
 
+class _PendingResponsePersistError(RuntimeError):
+    """The decision WAS collected but its §3.1 store failed (2026-07-23).
+
+    ``poll()`` is one-shot: by the time ``_store_pending_response`` runs, the
+    paid-for decision lives only on ``_inflight``. Failing the cycle closed
+    here (the generic pump guard) would discard it over a transient DB miss —
+    an operator's export/validate holding the SQLite lock — and idle the run
+    up to 4h. The third retry-only-the-persist lane, mirroring
+    :class:`_PlanRegisteredPersistError` and ``pending_fail``: the driver keeps
+    ``_inflight`` (``parsed`` set, ``raw_stored`` False) and retries ONLY the
+    store on subsequent pumps — never re-polling the worker, never gating an
+    unstored decision (a crash before the store lands must fail closed on
+    restart, §3.1, not resume a cycle whose raw response was never durable).
+    The exception propagates to the loop's tick guard (recoverable safe mode).
+    """
+
+
 @dataclass
 class _InFlight:
     attempt_id: str
@@ -163,6 +180,11 @@ class _InFlight:
     output_id: str
     scheduled_at: datetime
     parsed: ParsedDecision | None = None  # set once the worker returns, gate pending
+    # Whether ``pending_raw_response`` landed durably. ``parsed`` is set the
+    # moment poll() hands over the one-shot result — BEFORE the fallible §3.1
+    # store — so "collected but not yet stored" is a real state, and gating is
+    # forbidden in it (see _PendingResponsePersistError).
+    raw_stored: bool = False
     # The engine's start_plan outcome, cached the moment it returns: a persist
     # failure after registration must retry the PERSIST, never re-gate (a
     # second start_plan would re-run the RiskGate and could register a second
@@ -256,14 +278,20 @@ class LiveDecisionDriver:
             if self._inflight.pending_fail is not None:
                 return self._flush_pending_fail()
             try:
-                if self._inflight.parsed is None:
-                    return self._collect(now)
+                if self._inflight.parsed is None and not self._collect():
+                    return None  # worker still settling
+                if not self._inflight.raw_stored:
+                    # Fresh-collected, or a prior store missed: ensure the §3.1
+                    # raw response is durable (the worker slot is spent — never
+                    # re-poll) before gating.
+                    self._persist_pending_response(now)
                 return self._gate(now)
-            except _PlanRegisteredPersistError:
-                # A plan is REGISTERED and running — failing the cycle closed here
-                # would falsify the audit trail (api_failed while slices go out).
-                # Keep _inflight (registration cached) so the next pump retries
-                # only the persist; propagate so the tick guard alarms (safe mode).
+            except (_PlanRegisteredPersistError, _PendingResponsePersistError):
+                # A durable fact (registered plan / collected decision) exists
+                # that failing the cycle closed would falsify or discard. Keep
+                # _inflight (registration / parsed cached) so the next pump
+                # retries only the persist; propagate so the tick guard alarms
+                # (safe mode).
                 raise
             except RetryableDecisionError as exc:
                 return self._fail_closed(exc.error_type, exc.message)
@@ -318,6 +346,7 @@ class LiveDecisionDriver:
                 f"{attempt_id}#out1",
                 scheduled_at,
                 parsed=parse_target_decision(raw, self._decision_cfg),
+                raw_stored=True,  # the parse SOURCE is the store — durable by definition
             )
             logger.info("resuming in-progress decision %s from its stored response", attempt_id)
             return "resumed"
@@ -337,11 +366,12 @@ class LiveDecisionDriver:
         return "api_failed"
 
     def salvage_shutdown(self) -> bool:
-        """Persist a completed-but-unpolled decision at shutdown (best-effort).
+        """Persist a completed-but-undurable decision at shutdown (best-effort).
 
         Ctrl-C lands whenever it likes; a worker that finished DURING the
         shutdown window holds a paid-for decision that only ``_collect`` would
-        have persisted. Storing its raw response here lets ``resume_startup``
+        have persisted (and a collected decision whose §3.1 store missed is in
+        the same boat). Storing its raw response here lets ``resume_startup``
         resume the cycle from stored text after restart (§3.1 — never a second
         AI call) instead of failing it closed and idling up to 4h. Every
         failure is contained: shutdown proceeds regardless, and the un-salvaged
@@ -349,20 +379,30 @@ class LiveDecisionDriver:
         ``worker.join`` and never on the live tick path.
         """
         inflight = self._inflight
-        if inflight is None or inflight.parsed is not None or inflight.pending_fail is not None:
+        if inflight is None or inflight.pending_fail is not None:
             return False
-        try:
-            parsed = self._worker.poll()
-        except Exception:  # noqa: BLE001 — the worker failed; restart fails the cycle closed anyway
-            logger.exception("shutdown salvage: worker raised — the cycle fails closed on restart")
-            return False
+        parsed = inflight.parsed
+        if inflight.raw_stored:
+            return False  # already durable — restart resumes from the store as-is
         if parsed is None:
-            return False  # still computing (join timed out) — nothing to store
+            try:
+                parsed = self._worker.poll()
+            except Exception:  # noqa: BLE001 — the worker failed; restart fails the cycle closed anyway
+                logger.exception(
+                    "shutdown salvage: worker raised — the cycle fails closed on restart"
+                )
+                return False
+            if parsed is None:
+                return False  # still computing (join timed out) — nothing to store
+        # Two ways to get here: the worker finished during the shutdown window
+        # (never polled), or _collect polled it and the §3.1 store missed
+        # (parsed set, raw_stored False) — one last try either way.
         try:
             self._store_pending_response(inflight, parsed, self._clock.now())
         except Exception:  # noqa: BLE001 — a store miss must not block shutdown
             logger.exception("shutdown salvage: persist failed — the cycle fails closed on restart")
             return False
+        inflight.raw_stored = True
         logger.info(
             "shutdown salvage: stored the completed decision for %s — restart resumes it",
             inflight.attempt_id,
@@ -466,20 +506,35 @@ class LiveDecisionDriver:
         self._inflight.submitted_at = now
         return "cycle_started"
 
-    def _collect(self, now: datetime) -> str | None:
-        # Failure handling lives in pump()'s in-flight guard: poll() re-raising a
-        # retryable (§6.2) or a non-retryable worker error both land there, so this
-        # step is pure happy-path.
+    def _collect(self) -> bool:
+        """Poll the one-shot worker; True once the decision is in hand.
+
+        Failure handling lives in pump()'s in-flight guard: poll() re-raising a
+        retryable (§6.2) or a non-retryable worker error both land there. On a
+        ready result the parsed decision is cached on ``_inflight`` BEFORE the
+        fallible §3.1 store (see :class:`_PendingResponsePersistError`); pump
+        then makes it durable and gates — so the persist→gate tail lives in one
+        place and ``_gate`` is reached only from pump.
+        """
         inflight = self._inflight
         assert inflight is not None
         parsed = self._worker.poll()
         if parsed is None:
-            return None  # not ready (worker still settling)
-        # Persist the response before gating (§3.1: a crash resumes from stored
-        # text, never a second AI call).
-        self._store_pending_response(inflight, parsed, now)
+            return False  # not ready (worker still settling)
         inflight.parsed = parsed
-        return self._gate(now)
+        return True
+
+    def _persist_pending_response(self, now: datetime) -> None:
+        """Land the §3.1 store for the collected decision; retryable on failure."""
+        inflight = self._inflight
+        assert inflight is not None and inflight.parsed is not None
+        try:
+            self._store_pending_response(inflight, inflight.parsed, now)
+        except Exception as exc:
+            raise _PendingResponsePersistError(
+                f"decision {inflight.attempt_id} collected but its store failed: {exc!r}"
+            ) from exc
+        inflight.raw_stored = True
 
     def _store_pending_response(
         self, inflight: _InFlight, parsed: ParsedDecision, now: datetime

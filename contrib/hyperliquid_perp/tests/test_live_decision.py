@@ -362,8 +362,8 @@ def test_fail_cycle_past_its_own_boundary_reanchors_from_now(tmp_path):
 
 def test_driver_gate_nonretryable_error_fails_closed_and_recovers(tmp_path):
     """A non-retryable error in the GATE step (start_plan / persist) must also fail
-    the cycle closed via pump's guard, not wedge the driver — _gate is reachable both
-    from pump directly and from _collect's tail, outside _collect's own body."""
+    the cycle closed via pump's guard, not wedge the driver — _gate is reached from
+    pump (after _collect polls the worker), inside pump's try guard."""
     db, clock, driver, engine, worker, provider = _driver(
         tmp_path, start_error=RuntimeError("gate boom")
     )
@@ -483,6 +483,48 @@ def test_registered_plan_persist_failure_retries_persist_only(tmp_path, monkeypa
     assert row["status"] == "in_progress"  # the failed transaction rolled back
     # The next pump retries the persist alone — never a second start_plan.
     assert driver.pump() == "completed"
+    assert len(engine.plans) == 1
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "completed"
+
+
+# -- 2026-07-23: collected-decision store failure retries the persist only ----
+
+
+def test_collected_decision_store_failure_retries_persist_only(tmp_path, monkeypatch):
+    """poll() is one-shot: the §3.1 store failing AFTER the worker slot was
+    consumed must not discard the paid-for decision as api_failed. pump raises
+    _PendingResponsePersistError (tick guard -> recoverable safe mode), the
+    parsed decision survives on _inflight, and the next pump retries ONLY the
+    store — never re-polling the worker, never re-asking the AI, and never
+    gating an unstored decision (§3.1: resumability before action)."""
+    import sqlite3
+
+    from contrib.hyperliquid_perp.live.decision import _PendingResponsePersistError
+
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    assert driver.pump() == "cycle_started"
+    _await(worker)
+    real = repo.update_decision_attempt
+    boom = {"left": 1}
+
+    def flaky(conn, attempt_id, **kw):
+        if boom["left"] and "pending_raw_response" in kw:
+            boom["left"] -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return real(conn, attempt_id, **kw)
+
+    monkeypatch.setattr(repo, "update_decision_attempt", flaky)
+    with pytest.raises(_PendingResponsePersistError):
+        driver.pump()  # collected, but the store missed
+    inflight = driver._inflight
+    assert inflight is not None and inflight.parsed is not None  # decision survived
+    assert inflight.raw_stored is False
+    assert engine.plans == []  # an unstored decision never gates
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "in_progress"  # never falsified to api_failed
+    assert driver.pump() == "completed"  # the store retried alone, then gated
+    assert provider.requests == 1  # one paid AI call, total
     assert len(engine.plans) == 1
     row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
     assert row["status"] == "completed"
@@ -643,6 +685,37 @@ def test_salvage_shutdown_persists_completed_unpolled_decision(tmp_path):
     )
     assert driver2.resume_startup() == "resumed"
     assert provider.requests == 1  # salvage + resume never re-asked the AI
+
+
+def test_salvage_shutdown_stores_a_collected_but_unstored_decision(tmp_path, monkeypatch):
+    """Salvage covers the OTHER undurable shape too: _collect polled the worker
+    but the §3.1 store missed (parsed set, raw_stored False). Shutdown gets one
+    last store attempt so restart resumes instead of re-asking the AI."""
+    import sqlite3
+
+    from contrib.hyperliquid_perp.live.decision import _PendingResponsePersistError
+
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    assert driver.pump() == "cycle_started"
+    _await(worker)
+    real = repo.update_decision_attempt
+    boom = {"left": 1}
+
+    def flaky(conn, attempt_id, **kw):
+        if boom["left"] and "pending_raw_response" in kw:
+            boom["left"] -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return real(conn, attempt_id, **kw)
+
+    monkeypatch.setattr(repo, "update_decision_attempt", flaky)
+    with pytest.raises(_PendingResponsePersistError):
+        driver.pump()  # collected, store missed — the retry lane is armed
+    assert driver.salvage_shutdown() is True  # the DB healed: one last try lands
+    assert driver._inflight is not None and driver._inflight.raw_stored is True
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "in_progress"
+    assert row["pending_raw_response"]  # restart resumes from the store
+    assert provider.requests == 1  # the AI was never re-asked
 
 
 def test_salvage_shutdown_noops_when_nothing_is_pending(tmp_path):

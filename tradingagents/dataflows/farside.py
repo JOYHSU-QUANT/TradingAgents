@@ -31,6 +31,7 @@ import requests
 from parsel import Selector
 
 from .config import get_config
+from .symbol_utils import normalize_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +319,17 @@ def _read_cache(path: str) -> dict | None:
     if not isinstance(rows, list) or not rows:
         logger.warning("Ignoring structurally-invalid Farside cache %s", path)
         return None
+    # Each row must be a full record. A non-empty list of non-dicts (a poisoned
+    # file like ``"rows": [1, 2, 3]``) or a row missing a field would pass the
+    # list check above but crash later on ``r["date"]`` / ``r["total"]`` /
+    # ``latest["issuers"]`` — e.g. a future record-schema change reading back an
+    # old same-UTC-day cache. Treat as a miss so a poisoned file is never served.
+    if not all(
+        isinstance(r, dict) and "date" in r and "total" in r and isinstance(r.get("issuers"), dict)
+        for r in rows
+    ):
+        logger.warning("Ignoring Farside cache %s with malformed rows", path)
+        return None
     return payload
 
 
@@ -373,12 +385,28 @@ def _load_flows(asset: str) -> tuple[list[dict], str, bool]:
                     f"Farside {asset} fetch failed and the newest cache {stale_desc} "
                     f"(> {MAX_STALE_DAYS}-day cap): {e}"
                 ) from e
-            logger.warning(
-                "Farside %s fetch failed (%s); using stale cache (%s days old)",
-                asset,
-                e,
-                age if age is not None else "unknown",
-            )
+            # A structural FarsideError means the scraper itself is broken (a real
+            # code fix needed), not a transient outage — log it at ERROR with a
+            # traceback so it is escalated immediately instead of hiding among
+            # network-blip warnings for up to the stale cap. A RequestException is
+            # an ordinary outage and stays at warning. (age is non-None here: the
+            # None/over-cap cases already raised above.)
+            if isinstance(e, FarsideError):
+                logger.error(
+                    "Farside %s parse failed structurally (%s); serving stale cache "
+                    "(%s days old) — the scraper likely needs a fix",
+                    asset,
+                    e,
+                    age,
+                    exc_info=True,
+                )
+            else:
+                logger.warning(
+                    "Farside %s fetch failed (%s); using stale cache (%s days old)",
+                    asset,
+                    e,
+                    age,
+                )
             return stale_payload["rows"], fetched_at, True
         raise FarsideError(f"Farside {asset} unavailable and no cache exists: {e}") from e
 
@@ -395,12 +423,18 @@ def _load_flows(asset: str) -> tuple[list[dict], str, bool]:
 
 
 def _normalize_asset(asset: str) -> str | None:
-    """Map a caller symbol to a Farside asset key (BTC/ETH), or None if unsupported."""
-    key = (asset or "").strip().upper()
-    for known in ASSET_PATHS:
-        if key == known or key.startswith(f"{known}-") or key.startswith(f"{known}/"):
-            return known
-    return None
+    """Map a caller symbol to a Farside asset key (BTC/ETH), or None if unsupported.
+
+    Delegates to the shared ``normalize_symbol`` so quote-suffix stripping
+    (USD/USDT/USDC) and crypto-base recognition match the rest of the system:
+    ``BTC``, ``ETH-USD``, ``ETHUSD``, ``ETHUSDT``, ``BTC/USD`` all resolve to
+    their base, while look-alikes (``ETHW``, ``WETH``, ``BTCB``) and non-BTC/ETH
+    coins return None so the caller serves the BTC market-wide proxy. Slash pair
+    forms are converted to the dash form first (``normalize_symbol`` only strips
+    dashes).
+    """
+    base = normalize_symbol((asset or "").replace("/", "-")).split("-")[0]
+    return base if base in ASSET_PATHS else None
 
 
 def _sign(value: float) -> int:

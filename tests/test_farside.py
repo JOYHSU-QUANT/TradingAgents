@@ -8,6 +8,7 @@ so these run without a network connection.
 
 import json
 import os
+from datetime import datetime, timedelta
 from unittest import mock
 
 import pytest
@@ -141,11 +142,11 @@ class TestParseTable:
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
 class TestRender:
-    def _render(self, curr_date, look_back_days=30):
+    def _render(self, curr_date, look_back_days=30, asset="BTC"):
         with mock.patch.object(
             farside, "_load_flows", return_value=(RECORDS, "2026-07-09T00:00:00Z", False)
         ):
-            return farside.get_etf_flow_data("BTC", curr_date, look_back_days)
+            return farside.get_etf_flow_data(asset, curr_date, look_back_days)
 
     def test_lookahead_drops_future_rows(self):
         out = self._render("2026-07-08")
@@ -164,10 +165,7 @@ class TestRender:
     def test_unsupported_asset_falls_back_to_btc_market_proxy(self):
         # A crypto asset with no spot ETF of its own is served BTC flows as a
         # market-wide proxy, flagged as such (not an asset-specific signal).
-        with mock.patch.object(
-            farside, "_load_flows", return_value=(RECORDS, "2026-07-09T00:00:00Z", False)
-        ):
-            out = farside.get_etf_flow_data("SOL", "2026-07-08", 30)
+        out = self._render("2026-07-08", asset="SOL")
         assert "## Spot ETF Flows — BTC" in out
         assert "market-wide" in out
         assert "SOL" in out
@@ -197,6 +195,63 @@ class TestRender:
         assert "No ETF flow rows on or before 2020-01-01" in out
         assert "do not fabricate values" in out
 
+    def test_eth_pair_is_native_not_proxy(self):
+        # A real ETH symbol renders the ETH header/source (its own spot ETF),
+        # not the BTC market-wide proxy — the second entry of ASSET_PATHS.
+        out = self._render("2026-07-08", asset="ETH-USD")
+        assert "## Spot ETF Flows — ETH" in out
+        assert "farside.co.uk/eth/" in out
+        assert "market-wide" not in out
+
+    def test_no_separator_ethusd_resolves_to_eth(self):
+        # A no-separator pair form (ETHUSD/ETHUSDT) must resolve to ETH via the
+        # shared symbol normalizer, not fall through to the BTC proxy.
+        out = self._render("2026-07-08", asset="ETHUSDT")
+        assert "## Spot ETF Flows — ETH" in out
+        assert "market-wide" not in out
+
+    def test_lookalike_symbol_uses_btc_proxy(self):
+        # A BTC/ETH look-alike (ETHW is not ETH) is not an ETF asset, so it gets
+        # the BTC market-wide proxy, flagged as such — normalizer must not treat
+        # it as ETH.
+        out = self._render("2026-07-08", asset="ETHW")
+        assert "## Spot ETF Flows — BTC" in out
+        assert "market-wide" in out
+        assert "ETHW" in out
+
+    def test_table_truncates_to_max_rows(self):
+        # A window longer than MAX_ROWS days is truncated to the most recent
+        # MAX_ROWS rows, with a note stating how many days the window held.
+        start = datetime(2026, 5, 1)
+        n = farside.MAX_ROWS + 10  # 50 consecutive daily rows
+        recs = [
+            {
+                "date": (start + timedelta(days=i)).strftime("%Y-%m-%d"),
+                "issuers": {"IBIT": 1.0},
+                "total": 1.0,
+            }
+            for i in range(n)
+        ]
+        curr_date = recs[-1]["date"]
+        with mock.patch.object(farside, "_load_flows", return_value=(recs, "x", False)):
+            out = farside.get_etf_flow_data("BTC", curr_date, look_back_days=n + 5)
+        assert f"most recent {farside.MAX_ROWS} of {n} days" in out
+        assert f"| {recs[0]['date']} |" not in out  # oldest row dropped
+        assert f"| {recs[-1]['date']} |" in out  # newest row kept
+        assert out.count("| +1.0 |") == farside.MAX_ROWS  # exactly MAX_ROWS table rows
+
+    def test_all_zero_totals_report_flat_streak(self):
+        # Every day is a 0.0-total day: no flow sessions and a "0-day flat"
+        # streak (streak_sign defaults to 0, the loop never runs).
+        recs = [
+            {"date": "2026-07-01", "issuers": {"IBIT": 0.0}, "total": 0.0},
+            {"date": "2026-07-02", "issuers": {"IBIT": 0.0}, "total": 0.0},
+        ]
+        with mock.patch.object(farside, "_load_flows", return_value=(recs, "x", False)):
+            out = farside.get_etf_flow_data("BTC", "2026-07-02", 30)
+        assert "0-day flat" in out
+        assert "0 flow sessions" in out
+
 
 # --------------------------------------------------------------------------- #
 # Caching (per UTC day, with stale fallback)
@@ -220,6 +275,25 @@ class TestCache:
         self._use_tmp_cache(tmp_path)
         path = tmp_path / "farside_btc_2026-07-23.json"
         path.write_text('{"asset": "BTC", "rows": "oops"}', encoding="utf-8")
+        assert farside._read_cache(str(path)) is None
+
+    def test_list_of_non_dict_rows_cache_is_ignored(self, tmp_path):
+        # "rows" is a non-empty list but its elements are not records: still a
+        # miss, else the served payload crashes later on r["date"].
+        self._use_tmp_cache(tmp_path)
+        path = tmp_path / "farside_btc_2026-07-23.json"
+        path.write_text('{"asset": "BTC", "rows": [1, 2, 3]}', encoding="utf-8")
+        assert farside._read_cache(str(path)) is None
+
+    def test_row_missing_field_cache_is_ignored(self, tmp_path):
+        # A row dict missing a required field ("total") is malformed: a miss, so
+        # a future record-schema change reading an old cache degrades cleanly.
+        self._use_tmp_cache(tmp_path)
+        path = tmp_path / "farside_btc_2026-07-23.json"
+        path.write_text(
+            '{"asset": "BTC", "rows": [{"date": "2026-07-01", "issuers": {}}]}',
+            encoding="utf-8",
+        )
         assert farside._read_cache(str(path)) is None
 
     def test_unparseable_fetched_at_degrades(self, tmp_path, monkeypatch):

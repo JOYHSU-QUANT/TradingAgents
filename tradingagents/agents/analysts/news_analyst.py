@@ -35,7 +35,10 @@ def create_news_analyst(llm):
                 " Since this is a crypto asset, also use get_etf_flows(asset, curr_date, "
                 "look_back_days) for BTC/ETH US spot-ETF daily net flows (a demand-side "
                 "signal) and get_fear_greed(curr_date, look_back_days) for the Crypto "
-                "Fear & Greed Index (0-100 crowd-sentiment gauge)."
+                "Fear & Greed Index (0-100 crowd-sentiment gauge). Only BTC and ETH have "
+                "US spot ETFs; for any other crypto asset get_etf_flows returns BTC flows "
+                "as a market-wide proxy, so treat those as a market signal, not that "
+                "asset's own flows."
             )
 
         system_message = (

@@ -6,7 +6,7 @@ All API access is mocked, so these run without a network connection.
 """
 
 import calendar
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest import mock
 
 import pytest
@@ -75,6 +75,35 @@ class TestWindow:
         assert "| 2026-06-23 |" not in out  # outside the 7-day window: not tabled
         assert "vs 30d:** +20 (from 20 on 2026-06-23)" in out  # but drives the delta
         assert "| 2026-07-20 |" in out  # in-window reading is shown
+
+    def test_table_truncates_to_max_rows(self):
+        # A window longer than MAX_ROWS readings is truncated to the most recent
+        # MAX_ROWS, with a note stating how many the window held.
+        start = datetime(2026, 5, 1)
+        n = fear_greed.MAX_ROWS + 10  # 50 consecutive daily readings
+        data = [
+            _row((start + timedelta(days=i)).strftime("%Y-%m-%d"), 30 + (i % 5), "Fear")
+            for i in range(n)
+        ]
+        curr_date = (start + timedelta(days=n - 1)).strftime("%Y-%m-%d")
+        with mock.patch.object(fear_greed, "_request", return_value={"data": data}):
+            out = fear_greed.get_fear_greed_data(curr_date, n + 5)
+        assert f"most recent {fear_greed.MAX_ROWS} of {n} readings" in out
+
+    def test_no_readings_within_window_shows_latest(self):
+        # Every reading predates the trailing window: window_points is empty, so
+        # the latest available reading is still shown with a caveat note (the
+        # table stays consistent with the summary above it).
+        payload = {
+            "data": [
+                _row("2026-05-01", 30, "Fear"),
+                _row("2026-04-01", 25, "Extreme Fear"),
+            ]
+        }
+        with mock.patch.object(fear_greed, "_request", return_value=payload):
+            out = fear_greed.get_fear_greed_data("2026-07-23", 7)
+        assert "no readings within the 7-day window" in out
+        assert "| 2026-05-01 |" in out  # the latest available reading is still shown
 
 
 @pytest.mark.unit

@@ -17,6 +17,8 @@ from .errors import (
     VendorNotConfiguredError,
     VendorRateLimitError,
 )
+from .farside import get_etf_flow_data as get_farside_etf_flows
+from .fear_greed import get_fear_greed_data as get_alternative_me_fear_greed
 from .fred import get_macro_data as get_fred_macro_data
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
 from .y_finance import (
@@ -74,6 +76,18 @@ TOOLS_CATEGORIES = {
         "tools": [
             "get_prediction_markets",
         ]
+    },
+    "etf_flows": {
+        "description": "BTC/ETH US spot-ETF daily net flows (crypto)",
+        "tools": [
+            "get_etf_flows",
+        ]
+    },
+    "crypto_sentiment": {
+        "description": "Crypto Fear & Greed Index sentiment gauge",
+        "tools": [
+            "get_fear_greed",
+        ]
     }
 }
 
@@ -82,6 +96,8 @@ VENDOR_LIST = [
     "fred",
     "polymarket",
     "alpha_vantage",
+    "farside",
+    "alternative_me",
 ]
 
 # Optional enrichment categories. These add macro/event context to the news
@@ -89,7 +105,12 @@ VENDOR_LIST = [
 # sentinel instead of aborting the run (a bad LLM-supplied indicator, a missing
 # key, or a network blip should not crash an analysis over flavour data). Core
 # categories (prices, fundamentals, news) still raise so a broken primary is loud.
-OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets"}
+OPTIONAL_CATEGORIES = {
+    "macro_data",
+    "prediction_markets",
+    "etf_flows",
+    "crypto_sentiment",
+}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
@@ -140,6 +161,14 @@ VENDOR_METHODS = {
     # prediction_markets
     "get_prediction_markets": {
         "polymarket": get_polymarket_prediction_markets,
+    },
+    # etf_flows
+    "get_etf_flows": {
+        "farside": get_farside_etf_flows,
+    },
+    # crypto_sentiment
+    "get_fear_greed": {
+        "alternative_me": get_alternative_me_fear_greed,
     },
 }
 
@@ -215,7 +244,9 @@ def route_to_vendor(method: str, *args, **kwargs):
             # Don't let one vendor's failure crash the call when another can
             # serve it, but never swallow silently: a broken primary must be
             # visible in the logs (#989), not hidden behind a fallback's verdict.
-            logger.warning("Vendor %r failed for %s: %s", vendor, method, e)
+            # exc_info so a real bug (e.g. in an HTML-scraping vendor) leaves a
+            # traceback instead of looking identical to a network outage.
+            logger.warning("Vendor %r failed for %s: %s", vendor, method, e, exc_info=True)
             if first_error is None:
                 first_error = e
             continue

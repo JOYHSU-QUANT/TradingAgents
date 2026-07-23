@@ -15,6 +15,8 @@ from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     get_balance_sheet,
     get_cashflow,
+    get_etf_flows,
+    get_fear_greed,
     get_fundamentals,
     get_global_news,
     get_income_statement,
@@ -187,6 +189,11 @@ class TradingAgentsGraph:
                     get_insider_transactions,
                     get_macro_indicators,
                     get_prediction_markets,
+                    # Crypto-only flows/sentiment tools; bound to the analyst LLM
+                    # only for crypto assets, but always registered here so the
+                    # bound call is executable (a stock run never binds them).
+                    get_etf_flows,
+                    get_fear_greed,
                 ]
             ),
             "fundamentals": ToolNode(

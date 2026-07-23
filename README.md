@@ -240,6 +240,11 @@ print(decision)
 
 See `tradingagents/default_config.py` for all configuration options.
 
+Crypto assets (e.g. `BTC-USD`) additionally surface two keyless news-analyst data
+sources — BTC/ETH spot-ETF daily flows (Farside, `etf_flows`) and the Crypto Fear
+& Greed Index (alternative.me, `crypto_sentiment`). Both need no API key and
+degrade to a no-data sentinel if unreachable; the stock path is unchanged.
+
 ## Persistence and Recovery
 
 TradingAgents persists two kinds of state across runs.

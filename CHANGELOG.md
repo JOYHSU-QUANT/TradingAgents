@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [Unreleased]
+
+### Added
+
+- **Crypto spot-ETF flows and Fear & Greed vendors.** Two keyless news-analyst
+  data sources, bound only for crypto assets: BTC/ETH US spot-ETF daily net
+  flows scraped from Farside (`etf_flows` / `get_etf_flows`, cached per UTC day
+  with a stale-snapshot fallback capped at 14 days) and the alternative.me Crypto Fear & Greed
+  Index (`crypto_sentiment` / `get_fear_greed`). Both are lookahead-safe,
+  degrade to a no-data sentinel when unreachable, and leave the stock path
+  unchanged.
+
 ## [0.3.0] — 2026-06-22
 
 Stabilization and extensibility release: a CI gate, a unified verified

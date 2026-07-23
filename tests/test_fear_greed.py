@@ -59,6 +59,25 @@ class TestFormatting:
 
 
 @pytest.mark.unit
+class TestWindow:
+    def test_short_window_trims_table_but_keeps_deltas(self):
+        # look_back_days bounds the displayed table, but the 7d/30d deltas keep
+        # their fixed horizons and may reference a reading outside the window.
+        payload = {
+            "data": [
+                _row("2026-07-23", 40, "Fear"),
+                _row("2026-07-20", 35, "Fear"),
+                _row("2026-06-23", 20, "Extreme Fear"),  # 30d ago, outside a 7d window
+            ]
+        }
+        with mock.patch.object(fear_greed, "_request", return_value=payload):
+            out = fear_greed.get_fear_greed_data("2026-07-23", 7)
+        assert "| 2026-06-23 |" not in out  # outside the 7-day window: not tabled
+        assert "vs 30d:** +20 (from 20 on 2026-06-23)" in out  # but drives the delta
+        assert "| 2026-07-20 |" in out  # in-window reading is shown
+
+
+@pytest.mark.unit
 class TestLookahead:
     def test_future_readings_are_dropped(self):
         payload = {

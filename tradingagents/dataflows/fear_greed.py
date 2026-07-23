@@ -90,9 +90,12 @@ def get_fear_greed_data(
             # int(float(...)) tolerates a decimal-formatted timestamp string.
             ts = int(float(row["timestamp"]))
             value = int(row["value"])
-        except (KeyError, ValueError, TypeError) as e:
+            # Inside the try so an out-of-range timestamp raises the uniform typed
+            # error, not a raw exception (on Windows fromtimestamp raises OSError
+            # for a bad/negative ts, elsewhere OverflowError/ValueError).
+            day = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+        except (KeyError, ValueError, TypeError, OSError, OverflowError) as e:
             raise FearGreedError(f"Malformed Fear & Greed row {row!r}") from e
-        day = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
         points.append({"date": day, "value": value, "label": row.get("value_classification", "")})
 
     # Lookahead-safe: keep only readings on or before curr_date, ascending.
@@ -106,10 +109,20 @@ def get_fear_greed_data(
     )
 
     if not points:
-        return header + f"\nNo index readings on or before {curr_date}."
+        return (
+            header + f"\nNo index readings on or before {curr_date}. "
+            "Report this as no sentiment reading for the date; do not fabricate values."
+        )
 
     latest = points[-1]
     latest_dt = datetime.strptime(latest["date"], "%Y-%m-%d")
+
+    # look_back_days bounds the displayed table; the 7d/30d deltas keep their fixed
+    # horizons and read from the full `points` above (which reaches past the window).
+    window_start = (
+        datetime.strptime(curr_date, "%Y-%m-%d") - timedelta(days=look_back_days)
+    ).strftime("%Y-%m-%d")
+    window_points = [p for p in points if p["date"] >= window_start]
 
     def _value_at_or_before(target: str):
         prior = [p for p in points if p["date"] <= target]
@@ -128,11 +141,15 @@ def get_fear_greed_data(
         f"**vs 30d:** {_delta_line(30)}\n"
     )
 
-    shown = points
+    # The window bounds the table; if the latest reading itself predates the window
+    # (unusually stale data), still show it so the table matches the summary above.
+    shown = window_points or points[-1:]
     note = ""
-    if len(points) > MAX_ROWS:
-        shown = points[-MAX_ROWS:]
-        note = f"\n_(showing the most recent {MAX_ROWS} of {len(points)} readings)_\n"
+    if len(shown) > MAX_ROWS:
+        shown = shown[-MAX_ROWS:]
+        note = f"\n_(showing the most recent {MAX_ROWS} of {len(window_points)} readings in the window)_\n"
+    elif not window_points:
+        note = f"\n_(no readings within the {look_back_days}-day window; showing the latest available)_\n"
     table = (
         "\n| Date | Value | Classification |\n| --- | --- | --- |\n"
         + "\n".join(f"| {p['date']} | {p['value']} | {p['label']} |" for p in shown)

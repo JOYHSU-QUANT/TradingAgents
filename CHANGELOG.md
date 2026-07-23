@@ -12,11 +12,12 @@ Breaking changes within the 0.x line are called out explicitly.
 
 - **Crypto spot-ETF flows and Fear & Greed vendors.** Two keyless news-analyst
   data sources, bound only for crypto assets: BTC/ETH US spot-ETF daily net
-  flows scraped from Farside (`etf_flows` / `get_etf_flows`, cached per UTC day
-  with a stale-snapshot fallback capped at 14 days) and the alternative.me Crypto Fear & Greed
-  Index (`crypto_sentiment` / `get_fear_greed`). Both are lookahead-safe,
-  degrade to a no-data sentinel when unreachable, and leave the stock path
-  unchanged.
+  flows scraped from Farside (`crypto_etf_flows` / `get_etf_flows`, cached per UTC
+  day with a stale-snapshot fallback capped at 14 days) and the alternative.me
+  Crypto Fear & Greed Index (`crypto_sentiment` / `get_fear_greed`). Both are
+  lookahead-safe, honour a trailing `look_back_days` window, and degrade to a
+  no-data sentinel when unreachable. A crypto asset without its own spot ETF gets
+  BTC flows as a market-wide proxy; the stock path is unchanged.
 
 ## [0.3.0] — 2026-06-22
 

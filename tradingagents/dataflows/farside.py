@@ -12,7 +12,13 @@ cache, and a fetch failure falls back to the most recent cached snapshot
 (marked stale in the report) rather than losing the signal. A failed fetch is
 never written to cache, and any structural mismatch raises rather than
 returning a half-parsed table — the routing layer degrades the optional
-etf_flows category to a sentinel.
+crypto_etf_flows category to a sentinel.
+
+Backtest reach: each call re-fetches the live farside.co.uk table (keyed to the
+current UTC day, not curr_date) and then filters to rows on or before curr_date.
+So a historical curr_date returns real rows only as deep as the live table
+still lists — unlike a date-ranged API. The inflow/outflow streak is likewise
+bounded by how much history that live table carries.
 """
 
 import json
@@ -59,6 +65,16 @@ TOP_ISSUERS = 5
 # the router sentinel rather than presenting weeks-old flows as merely "STALE".
 MAX_STALE_DAYS = 14
 
+# The parser assumes "last column = daily Total". To catch a trailing-column
+# layout change (e.g. Farside appending a Cumulative column, which would silently
+# shift Total into an issuer slot) we verify each row's last cell equals the sum
+# of the issuer cells within rounding noise. Farside rounds every cell to 0.1, so
+# a handful of issuers drifts ~1 at most; a wrong column is off by orders of
+# magnitude. The relative slice keys off the trusted issuer sum, not the (possibly
+# wrong) Total, so a huge bad Total can't widen its own tolerance.
+_TOTAL_ABS_TOL = 2.0
+_TOTAL_REL_TOL = 0.02
+
 # Locale-independent English month lookup. Farside always renders English month
 # abbreviations; parsing them by hand avoids strptime's %b, which resolves against
 # the process-wide LC_TIME locale and would break every row if any other component
@@ -86,7 +102,7 @@ class FarsideError(RuntimeError):
     """Farside was unreachable, blocked, or its table structure changed.
 
     A plain exception (caught by the router's generic handler) so the optional
-    etf_flows category degrades to a sentinel instead of aborting the run.
+    crypto_etf_flows category degrades to a sentinel instead of aborting the run.
     """
 
 
@@ -235,6 +251,16 @@ def _parse_flow_table(html: str, asset: str) -> list[dict]:
             for name, j in zip(issuer_names, issuer_cols, strict=True)
         }
         total = _parse_flow_value(cells[num_cols - 1])
+        # Confirm the last column really is the daily Total (sum of the issuer
+        # columns); a mismatch means the assumed column layout has changed, so
+        # degrade rather than reporting a wrong "net flow" as authoritative.
+        issuer_sum = sum(issuers.values())
+        if abs(total - issuer_sum) > max(_TOTAL_ABS_TOL, _TOTAL_REL_TOL * abs(issuer_sum)):
+            raise FarsideError(
+                f"{asset} row {cells[0]!r}: last column {total:+.1f} is not the daily "
+                f"Total (issuer columns sum to {issuer_sum:+.1f}; Farside may have "
+                f"added a trailing column)"
+            )
         records.append({"date": day, "issuers": issuers, "total": total})
 
     records.sort(key=lambda rec: rec["date"])
@@ -284,9 +310,13 @@ def _read_cache(path: str) -> dict | None:
         # logged so a disk/writer fault is distinguishable from "no cache yet".
         logger.warning("Ignoring unreadable Farside cache %s: %s", path, e)
         return None
-    # Guard against a non-dict payload (external tampering) and treat a rows-less
-    # cache as a miss so a poisoned file is never served.
-    if not isinstance(payload, dict) or not payload.get("rows"):
+    # Treat a payload that is not a dict, or whose "rows" is missing / not a list /
+    # empty, as a miss so a poisoned file is never served. Logged (like the
+    # corruption branch above) so a silently-disabled cache — e.g. a future rename
+    # of the "rows" key — is diagnosable instead of an unexplained permanent miss.
+    rows = payload.get("rows") if isinstance(payload, dict) else None
+    if not isinstance(rows, list) or not rows:
+        logger.warning("Ignoring structurally-invalid Farside cache %s", path)
         return None
     return payload
 
@@ -332,12 +362,16 @@ def _load_flows(asset: str) -> tuple[list[dict], str, bool]:
             age = _days_stale(fetched_at)
             # Refuse to serve a snapshot older than the cap: weeks-old flows
             # presented as the "latest day" are misleading, so degrade to the
-            # router sentinel instead. An unknown age (age is None) is served,
-            # flagged STALE, rather than discarded.
-            if age is not None and age > MAX_STALE_DAYS:
+            # router sentinel instead. An unknown age (unparseable fetched_at) is
+            # treated as beyond the cap — the case where an unbounded-age serve is
+            # most likely — rather than served with an "age unknown" caveat.
+            if age is None or age > MAX_STALE_DAYS:
+                stale_desc = (
+                    "has an unparseable fetch date" if age is None else f"is {age} days stale"
+                )
                 raise FarsideError(
-                    f"Farside {asset} fetch failed and the newest cache is {age} days "
-                    f"stale (> {MAX_STALE_DAYS}-day cap): {e}"
+                    f"Farside {asset} fetch failed and the newest cache {stale_desc} "
+                    f"(> {MAX_STALE_DAYS}-day cap): {e}"
                 ) from e
             logger.warning(
                 "Farside %s fetch failed (%s); using stale cache (%s days old)",
@@ -381,15 +415,21 @@ def get_etf_flow_data(
     """Fetch US spot-ETF daily net flows for a crypto asset as a markdown report.
 
     Args:
-        asset: "BTC" or "ETH" (also accepts pair forms like "BTC-USD").
+        asset: "BTC" or "ETH" (also accepts pair forms like "BTC-USD"). A crypto
+            asset with no spot ETF of its own (e.g. SOL) has no asset-specific
+            flow signal, so BTC flows are served instead as a market-wide proxy.
         curr_date: End of the window (yyyy-mm-dd); rows dated after it are
             dropped so a past date never leaks future flows.
         look_back_days: Trailing window length; ``None`` uses DEFAULT_LOOKBACK_DAYS.
+            Bounds the cumulative figure and the rendered table. The inflow/outflow
+            streak is reported over all available history (labelled as such), not
+            just the window.
 
     Returns:
         A markdown report: the latest day's net flow, the window's cumulative net
         flow, the consecutive inflow/outflow streak, the latest day's issuer
-        breakdown, and a recent daily-flow table (US$m).
+        breakdown, and a recent daily-flow table (US$m). Zero/blank-total days
+        neither break the streak nor count as flow sessions.
     """
     # A None or nonsensical negative window (e.g. a hallucinated tool argument)
     # falls back to the default rather than producing a self-contradictory report.
@@ -397,18 +437,22 @@ def get_etf_flow_data(
         look_back_days = DEFAULT_LOOKBACK_DAYS
 
     asset_key = _normalize_asset(asset)
-    if asset_key is None:
-        # Not raised: an unsupported asset is a clear "no signal", more useful to
-        # the analyst than a generic degraded-category sentinel.
-        return (
-            f"Farside ETF flow data covers only {' and '.join(ASSET_PATHS)}; "
-            f"there is no spot-ETF flow signal for '{asset}'."
-        )
+    # A crypto asset with no spot ETF of its own has no asset-specific signal;
+    # BTC spot-ETF flows are the market's risk-on/off proxy, so serve those
+    # (flagged as market-wide, not asset-specific) rather than nothing.
+    market_proxy = asset_key is None
+    if market_proxy:
+        asset_key = "BTC"
 
     records, fetched_at, stale = _load_flows(asset_key)
     visible = [r for r in records if r["date"] <= curr_date]
 
     header_lines = [f"## Spot ETF Flows — {asset_key} (Farside, net US$m)"]
+    if market_proxy:
+        header_lines.append(
+            f"_No spot ETF exists for '{asset}'; showing {asset_key} spot-ETF flows as a "
+            f"market-wide crypto risk-on/off proxy, not an '{asset}'-specific signal._"
+        )
     if stale:
         age = _days_stale(fetched_at)
         age_str = f"STALE by {age} days" if age is not None else "STALE (age unknown)"
@@ -422,7 +466,10 @@ def get_etf_flow_data(
     header = "\n".join(header_lines) + "\n"
 
     if not visible:
-        return header + f"\nNo ETF flow rows on or before {curr_date}."
+        return (
+            header + f"\nNo ETF flow rows on or before {curr_date}. "
+            "Report this as no ETF-flow data for the date; do not fabricate values."
+        )
 
     latest = visible[-1]
     window_start = (
@@ -430,17 +477,21 @@ def get_etf_flow_data(
     ).strftime("%Y-%m-%d")
     window = [r for r in visible if r["date"] >= window_start]
     cumulative = sum(r["total"] for r in window)
+    # A zero/blank-total day (a genuine $0 net day or a not-yet-posted row) is not
+    # a flow session.
+    flow_sessions = sum(1 for r in window if r["total"] != 0)
 
-    # Consecutive inflow/outflow streak ending at the latest day (a zero-flow day
-    # breaks the streak).
-    streak_sign = _sign(latest["total"])
+    # Consecutive inflow/outflow streak over all available history, ending at the
+    # most recent non-zero-flow day. Zero/blank-total days are transparent: they
+    # neither break the streak nor count toward it.
+    flow_days = [r for r in visible if r["total"] != 0]
+    streak_sign = _sign(flow_days[-1]["total"]) if flow_days else 0
     streak = 0
-    if streak_sign != 0:
-        for r in reversed(visible):
-            if _sign(r["total"]) == streak_sign:
-                streak += 1
-            else:
-                break
+    for r in reversed(flow_days):
+        if _sign(r["total"]) == streak_sign:
+            streak += 1
+        else:
+            break
     streak_word = {1: "inflow", -1: "outflow", 0: "flat"}[streak_sign]
 
     breakdown = sorted(
@@ -455,16 +506,16 @@ def get_etf_flow_data(
     summary = (
         f"\n**Latest ({latest['date']}):** {latest['total']:+.1f} net\n"
         f"**{look_back_days}d cumulative net flow:** {cumulative:+.1f} "
-        f"({len(window)} flow sessions in the window)\n"
-        f"**Streak:** {streak}-day {streak_word}\n"
+        f"({flow_sessions} flow sessions in the window)\n"
+        f"**Streak:** {streak}-day {streak_word} (over all available history)\n"
         f"**Latest-day leaders:** {breakdown_str}\n"
     )
 
-    shown = visible
+    shown = window
     note = ""
-    if len(visible) > MAX_ROWS:
-        shown = visible[-MAX_ROWS:]
-        note = f"\n_(showing the most recent {MAX_ROWS} of {len(visible)} days)_\n"
+    if len(window) > MAX_ROWS:
+        shown = window[-MAX_ROWS:]
+        note = f"\n_(showing the most recent {MAX_ROWS} of {len(window)} days in the window)_\n"
     table = (
         "\n| Date | Net Flow |\n| --- | --- |\n"
         + "\n".join(f"| {r['date']} | {r['total']:+.1f} |" for r in shown)

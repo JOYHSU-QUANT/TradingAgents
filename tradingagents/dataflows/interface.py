@@ -77,7 +77,7 @@ TOOLS_CATEGORIES = {
             "get_prediction_markets",
         ]
     },
-    "etf_flows": {
+    "crypto_etf_flows": {
         "description": "BTC/ETH US spot-ETF daily net flows (crypto)",
         "tools": [
             "get_etf_flows",
@@ -108,7 +108,7 @@ VENDOR_LIST = [
 OPTIONAL_CATEGORIES = {
     "macro_data",
     "prediction_markets",
-    "etf_flows",
+    "crypto_etf_flows",
     "crypto_sentiment",
 }
 
@@ -162,7 +162,7 @@ VENDOR_METHODS = {
     "get_prediction_markets": {
         "polymarket": get_polymarket_prediction_markets,
     },
-    # etf_flows
+    # crypto_etf_flows
     "get_etf_flows": {
         "farside": get_farside_etf_flows,
     },

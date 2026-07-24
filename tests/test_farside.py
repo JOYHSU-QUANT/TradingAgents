@@ -357,6 +357,29 @@ class TestRender:
         assert "Data lag" in out
         assert "11 days before 2026-07-20" in out
 
+    def test_stale_serve_does_not_also_claim_the_fetch_succeeded(self, monkeypatch):
+        # MAX_STALE_DAYS (14) > MAX_DATA_LAG_DAYS (4), so any ordinary multi-day
+        # outage serves a stale cache whose newest row is ALSO lag-flagged. The
+        # two caveats must not contradict each other: the STALE line says the
+        # live fetch failed, so the lag line must not assert it succeeded.
+        # STALE age is fetch age (fetched_at vs today); lag is data age (newest
+        # row vs curr_date) — two different clocks, so pin today's.
+        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-20")
+        out = self._render(
+            "2026-07-20", snapshot=_snapshot(RECORDS, fetched_at="2026-07-14", stale=True)
+        )
+        assert "STALE by 6 days" in out  # fetched 07-14, today 07-20
+        assert "Data lag" in out  # newest row 07-09, curr_date 07-20
+        assert "the fetch succeeded" not in out
+        assert "the cached snapshot above is itself that old" in out
+
+    def test_fresh_serve_attributes_lag_to_the_source(self):
+        # The counterpart: with a successful fetch the lag really is the source
+        # not publishing, and the report should say so.
+        out = self._render("2026-07-20")
+        assert "STALE" not in out
+        assert "the fetch succeeded" in out
+
     def test_no_data_lag_caveat_within_tolerance(self):
         # A weekend/holiday publishing gap is normal and must not be flagged.
         out = self._render("2026-07-11")  # 2 days behind, under MAX_DATA_LAG_DAYS

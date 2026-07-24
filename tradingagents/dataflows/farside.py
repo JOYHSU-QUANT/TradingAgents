@@ -610,11 +610,20 @@ def get_etf_flow_data(
         # without this the report would present week-old flows as current.
         lag_days = (curr_dt - datetime.strptime(latest["date"], "%Y-%m-%d")).days
         if lag_days > MAX_DATA_LAG_DAYS:
+            # Why the data is behind depends on whether *this* call reached the
+            # site. A stale serve already said "live fetch failed" above, so
+            # asserting "the fetch succeeded" here would make the report
+            # contradict itself — and MAX_STALE_DAYS > MAX_DATA_LAG_DAYS means
+            # both caveats co-occur for any ordinary multi-day outage.
+            cause = (
+                "the cached snapshot above is itself that old"
+                if snapshot.stale
+                else "the fetch succeeded — farside.co.uk itself has posted nothing since"
+            )
             header_lines.append(
                 f"_Data lag: the newest published row is {latest['date']}, {lag_days} "
-                f"{_plural_days(lag_days)} before {curr_date}. The fetch succeeded — "
-                f"farside.co.uk itself has posted nothing since, so treat the figures "
-                f"below as {lag_days} {_plural_days(lag_days)} old._"
+                f"{_plural_days(lag_days)} before {curr_date} ({cause}), so treat the "
+                f"figures below as {lag_days} {_plural_days(lag_days)} old._"
             )
     header_lines.append(
         f"- Source: farside.co.uk{ASSET_PATHS[asset_key]} | Window ending {curr_date}"

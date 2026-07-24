@@ -130,10 +130,13 @@ def get_fear_greed_data(
         * more than ~``max(look_back_days, 30) + 15`` days back, the fetch no
           longer reaches a 30-days-earlier reference point, so **vs 30d** alone
           reports "insufficient history" while Latest and vs 7d stay valid;
+        * more than ~``max(look_back_days, 30) + 38`` days back, the 7-days-earlier
+          reference point drops out as well, so **both** deltas read "insufficient
+          history" while Latest is still populated;
         * more than ~``max(look_back_days, 30) + _FETCH_BUFFER_DAYS`` days back,
           every reading is filtered out and the report says "no readings".
 
-        At the default 30-day window those thresholds are ~45 and ~75 days. The
+        At the default 30-day window those thresholds are ~45, ~68 and ~75 days. The
         fetch is deliberately not widened to cover historical ``curr_date``s: this
         is a recent-window signal and live use has ``curr_date`` ≈ today.
     """

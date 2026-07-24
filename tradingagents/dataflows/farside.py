@@ -31,6 +31,7 @@ bounded by how much history that live table carries.
 
 import json
 import logging
+import math
 import os
 import re
 from datetime import datetime, timedelta, timezone
@@ -41,7 +42,7 @@ from parsel import Selector
 
 from .config import get_config
 from .errors import VendorError
-from .symbol_utils import normalize_symbol
+from .symbol_utils import CRYPTO_BASES, normalize_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +208,14 @@ def _parse_flow_value(text: str) -> float:
         raise FarsideError(
             f"Unparseable flow cell {text!r} (Farside table structure may have changed)"
         ) from e
+    # float() also accepts "nan"/"inf"/"infinity". A NaN would silently defeat the
+    # Total cross-check below (every comparison with NaN is False) and both NaN and
+    # Infinity would render as a literal "nan"/"inf" figure and poison the
+    # cumulative/streak, so a non-finite cell is treated as a structure change.
+    if not math.isfinite(value):
+        raise FarsideError(
+            f"Non-finite flow cell {text!r} (Farside table structure may have changed)"
+        )
     return -value if negative else value
 
 
@@ -344,6 +353,19 @@ def _parse_flow_table(html: str, asset: str) -> _ParsedTable:
             unnamed_cols,
         )
 
+    # Two issuer columns resolving to the same ticker would silently collapse in
+    # the per-row {name: flow} dict below — one column overwrites the other,
+    # dropping its flow with no trace — and the Total cross-check can miss it when
+    # the dropped value happens to be ~0. A repeated ticker is itself a structural
+    # anomaly, so degrade rather than serve a lossy breakdown. (The 'unnamed col N'
+    # placeholders are unique by column index, so only real repeated tickers here.)
+    if len(set(issuer_names)) != len(issuer_names):
+        dupes = sorted({n for n in issuer_names if issuer_names.count(n) > 1})
+        raise FarsideError(
+            f"{asset} issuer header has duplicate ticker label(s) {dupes} "
+            f"(Farside table structure may have changed)"
+        )
+
     records = []
     for i in data_row_idxs:
         cells = rows[i]
@@ -477,6 +499,18 @@ def _cache_path(asset: str) -> str:
     return os.path.join(_cache_dir(), f"farside_{asset.lower()}.json")
 
 
+def _is_finite_number(x: object) -> bool:
+    """True only for a real, finite number (not a bool, NaN, or Infinity).
+
+    bool is an int subclass, so a JSON ``true``/``false`` must not pass as a flow
+    figure. ``json.load`` parses ``NaN``/``Infinity`` to non-finite floats by
+    default, which would defeat the Total cross-check (every comparison with NaN
+    is False) and render as a literal "nan"/"inf" figure, so those are rejected
+    at the cache boundary too.
+    """
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
 def _read_cache(path: str) -> dict | None:
     """Return a fully-validated cached payload, or None if it cannot be trusted.
 
@@ -506,16 +540,17 @@ def _read_cache(path: str) -> dict | None:
     if not isinstance(rows, list) or not rows:
         return _reject("'rows' is missing, not a list, or empty")
     # Each row must be a full record. A non-empty list of non-dicts (a poisoned
-    # file like ``"rows": [1, 2, 3]``) or a row missing a field would pass the
-    # list check above but crash later on ``r["date"]`` / ``r["total"]`` /
-    # ``latest["issuers"]``. Treat as a miss so a poisoned file is never served.
-    # bool is excluded explicitly because it is an int subclass.
+    # file like ``"rows": [1, 2, 3]``) or a row missing/mistyping a field would
+    # pass the list check above but crash later on ``r["date"]`` / ``r["total"]``
+    # or render a "nan"/"inf" figure via ``latest["issuers"]``. Treat as a miss so
+    # a poisoned file is never served. Both ``total`` and every ``issuers`` value
+    # must be a finite number (see _is_finite_number: no bool, NaN, or Infinity).
     if not all(
         isinstance(r, dict)
         and isinstance(r.get("date"), str)
-        and isinstance(r.get("total"), (int, float))
-        and not isinstance(r.get("total"), bool)
+        and _is_finite_number(r.get("total"))
         and isinstance(r.get("issuers"), dict)
+        and all(_is_finite_number(v) for v in r["issuers"].values())
         for r in rows
     ):
         return _reject("'rows' contains a malformed record")
@@ -634,19 +669,30 @@ def _load_flows(asset: str) -> _FlowSnapshot:
     )
 
 
-def _normalize_asset(asset: str) -> str | None:
-    """Map a caller symbol to a Farside asset key (BTC/ETH), or None if unsupported.
+def _classify_asset(asset: str) -> tuple[str | None, bool]:
+    """Classify a caller symbol for ETF-flow reporting: ``(asset_key, is_proxy)``.
+
+    * ``(BTC|ETH, False)`` — the symbol has its own US spot ETF; serve its flows.
+    * ``("BTC", True)`` — a recognized crypto *risk* asset with no spot ETF of its
+      own (SOL, XRP, ...): BTC spot-ETF flows are the market's risk-on/off proxy,
+      so serve those, flagged as market-wide.
+    * ``(None, False)`` — not a recognized crypto risk asset: a stablecoin
+      (USDT/USDC/DAI), a quote-only, or an unrecognized symbol. A stablecoin has
+      no risk-on/off flow character to proxy, so there is no signal to serve.
 
     Delegates to the shared ``normalize_symbol`` so quote-suffix stripping
     (USD/USDT/USDC) and crypto-base recognition match the rest of the system:
-    ``BTC``, ``ETH-USD``, ``ETHUSD``, ``ETHUSDT``, ``BTC/USD`` all resolve to
-    their base, while look-alikes (``ETHW``, ``WETH``, ``BTCB``) and non-BTC/ETH
-    coins return None so the caller serves the BTC market-wide proxy. Slash pair
-    forms are converted to the dash form first (``normalize_symbol`` only strips
-    dashes).
+    ``BTC``, ``ETH-USD``, ``ETHUSD``, ``ETHUSDT``, ``BTC/USD`` resolve to their
+    base; ``SOL``/``XRP`` map to the BTC proxy; look-alikes (``ETHW``, ``WETH``,
+    ``BTCB``) and stablecoins fall through to no-signal. Slash pair forms are
+    converted to the dash form first (``normalize_symbol`` only strips dashes).
     """
     base = normalize_symbol((asset or "").replace("/", "-")).split("-")[0]
-    return base if base in ASSET_PATHS else None
+    if base in ASSET_PATHS:
+        return base, False
+    if base in CRYPTO_BASES:
+        return "BTC", True
+    return None, False
 
 
 def _sign(value: float) -> int:
@@ -665,9 +711,12 @@ def get_etf_flow_data(
     """Fetch US spot-ETF daily net flows for a crypto asset as a markdown report.
 
     Args:
-        asset: "BTC" or "ETH" (also accepts pair forms like "BTC-USD"). A crypto
-            asset with no spot ETF of its own (e.g. SOL) has no asset-specific
-            flow signal, so BTC flows are served instead as a market-wide proxy.
+        asset: "BTC" or "ETH" (also accepts pair forms like "BTC-USD"). A
+            recognized crypto risk asset with no spot ETF of its own (e.g. SOL,
+            XRP) has no asset-specific flow signal, so BTC flows are served
+            instead as a market-wide risk-on/off proxy. A stablecoin or an
+            unrecognized symbol gets a no-signal message (BTC flows are not a
+            meaningful proxy for it).
         curr_date: End of the window (yyyy-mm-dd); rows dated after it are
             dropped so a past date never leaks future flows.
         look_back_days: Trailing window length; ``None`` uses DEFAULT_LOOKBACK_DAYS.
@@ -695,13 +744,20 @@ def get_etf_flow_data(
     curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     curr_date = curr_dt.strftime("%Y-%m-%d")
 
-    asset_key = _normalize_asset(asset)
-    # A crypto asset with no spot ETF of its own has no asset-specific signal;
-    # BTC spot-ETF flows are the market's risk-on/off proxy, so serve those
-    # (flagged as market-wide, not asset-specific) rather than nothing.
-    market_proxy = asset_key is None
-    if market_proxy:
-        asset_key = "BTC"
+    asset_key, market_proxy = _classify_asset(asset)
+    if asset_key is None:
+        # Not a recognized crypto risk asset (a stablecoin like USDT/USDC, a
+        # quote-only, or an unrecognized symbol). A stablecoin has no risk-on/off
+        # flow character, so serving BTC flows as its "proxy" would be a misleading
+        # signal. Like the earlier unsupported-asset path this is a "no signal"
+        # statement, not an error, so it is returned (more useful to the analyst
+        # than a generic degraded-category sentinel) rather than raised.
+        return (
+            f"There is no spot-ETF flow signal for '{asset}': it has no US spot ETF of "
+            f"its own and is not a recognized crypto risk asset for which BTC flows serve "
+            f"as a market-wide proxy (e.g. a stablecoin or an unrecognized symbol). Do "
+            f"not substitute BTC or ETH flows."
+        )
 
     snapshot = _load_flows(asset_key)
     visible = [r for r in snapshot.records if r["date"] <= curr_date]

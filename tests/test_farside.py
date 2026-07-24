@@ -71,6 +71,15 @@ class TestParseFlowValue:
         with pytest.raises(farside.FarsideError):
             farside._parse_flow_value("abc")
 
+    def test_nan_and_inf_raise(self):
+        # float() also accepts "nan"/"inf"/"infinity". A NaN would defeat the Total
+        # cross-check (every comparison with NaN is False) and both NaN and Infinity
+        # would render as a literal figure, so a non-finite cell is a structure
+        # change like any other garbage, not a value to serve.
+        for text in ("nan", "NaN", "inf", "-inf", "infinity"):
+            with pytest.raises(farside.FarsideError):
+                farside._parse_flow_value(text)
+
 
 # --------------------------------------------------------------------------- #
 # Table parsing
@@ -230,6 +239,21 @@ class TestParseTable:
         with pytest.raises(farside.FarsideError, match="Total"):
             farside._parse_flow_table(html, "BTC")
 
+    def test_duplicate_issuer_header_raises(self):
+        # Two issuer columns with the same ticker would silently collapse in the
+        # per-row {name: flow} dict (one overwrites the other), dropping a column's
+        # flow. A repeated ticker is a structural anomaly, so it must raise rather
+        # than serve a lossy breakdown whose Total cross-check can miss a dropped
+        # ~0 column.
+        html = (
+            '<table class="etf">'
+            "<tr><th></th><th>IBIT</th><th>IBIT</th><th>Total</th></tr>"
+            "<tr><td>06 Jul 2026</td><td>1.0</td><td>2.0</td><td>3.0</td></tr>"
+            "</table>"
+        )
+        with pytest.raises(farside.FarsideError, match="duplicate ticker"):
+            farside._parse_flow_table(html, "BTC")
+
 
 # --------------------------------------------------------------------------- #
 # Rendering + lookahead
@@ -267,12 +291,30 @@ class TestRender:
         assert "IBIT +1119.9" in out
         assert "| 2026-07-08 | +1214.9 |" in out
 
-    def test_unsupported_asset_falls_back_to_btc_market_proxy(self):
-        # A crypto asset with no spot ETF of its own is served BTC flows as a
-        # market-wide proxy, flagged as such (not an asset-specific signal).
+    def test_recognized_risk_asset_falls_back_to_btc_market_proxy(self):
+        # A recognized crypto risk asset with no spot ETF of its own (SOL) is
+        # served BTC flows as a market-wide proxy, flagged as such (not an
+        # asset-specific signal).
         out = self._render("2026-07-08", asset="SOL")
         assert "market-wide" in out
         assert "SOL" in out
+
+    def test_stablecoin_returns_no_signal(self):
+        # A stablecoin has no risk-on/off flow character, so BTC flows are not a
+        # meaningful proxy: it returns a no-signal note, never the BTC report.
+        for sym in ("USDT", "USDC", "DAI"):
+            out = self._render("2026-07-08", asset=sym)
+            assert f"no spot-ETF flow signal for '{sym}'" in out
+            # No flow report is rendered at all (native and proxy reports both
+            # carry a "## Spot ETF Flows" heading; the no-signal note does not).
+            assert "## Spot ETF Flows" not in out
+
+    def test_unrecognized_symbol_returns_no_signal(self):
+        # An unrecognized symbol (not BTC/ETH, not a known crypto base) returns a
+        # no-signal note rather than a silently-substituted BTC report.
+        out = self._render("2026-07-08", asset="WOOF")
+        assert "no spot-ETF flow signal for 'WOOF'" in out
+        assert "## Spot ETF Flows" not in out
 
     def test_proxy_marker_is_in_the_heading(self):
         # The caveat line alone is not enough: this report gets re-summarised by
@@ -326,13 +368,15 @@ class TestRender:
         assert "## Spot ETF Flows — ETH" in out
         assert "market-wide" not in out
 
-    def test_lookalike_symbol_uses_btc_proxy(self):
-        # A BTC/ETH look-alike (ETHW is not ETH) is not an ETF asset, so it gets
-        # the BTC market-wide proxy, flagged as such — normalizer must not treat
-        # it as ETH.
+    def test_lookalike_symbol_returns_no_signal(self):
+        # A BTC/ETH look-alike (ETHW is not ETH, and not in the recognized
+        # crypto-base set) is neither an ETF asset nor a proxy-eligible risk asset,
+        # so it returns a no-signal note — the normalizer must not treat it as ETH
+        # nor silently substitute BTC flows.
         out = self._render("2026-07-08", asset="ETHW")
-        assert "market-wide" in out
-        assert "ETHW" in out
+        assert "no spot-ETF flow signal for 'ETHW'" in out
+        # No flow report rendered (would carry a "## Spot ETF Flows" heading).
+        assert "## Spot ETF Flows" not in out
 
     def test_table_truncates_to_max_rows(self):
         # A window longer than MAX_ROWS days is truncated to the most recent
@@ -521,6 +565,28 @@ class TestCache:
         self._use_tmp_cache(tmp_path)
         path = self._write_cache(
             tmp_path, rows=[{"date": "2026-07-01", "issuers": {}, "total": "N/A"}]
+        )
+        assert farside._read_cache(str(path)) is None
+
+    def test_row_with_nonfinite_total_is_ignored(self, tmp_path):
+        # json.load parses NaN/Infinity to non-finite floats, which pass a plain
+        # isinstance(float) check but would defeat the Total cross-check and render
+        # as a literal "nan"/"inf" figure. Reject them at the cache boundary.
+        self._use_tmp_cache(tmp_path)
+        for bad in (float("nan"), float("inf")):
+            path = self._write_cache(
+                tmp_path, rows=[{"date": "2026-07-01", "issuers": {}, "total": bad}]
+            )
+            assert farside._read_cache(str(path)) is None
+
+    def test_row_with_non_numeric_issuer_value_is_ignored(self, tmp_path):
+        # issuers values must be finite numbers too: a non-numeric or non-finite
+        # one passes the dict check and then raises a raw TypeError in abs()/renders
+        # a "nan" figure downstream, so it is a miss.
+        self._use_tmp_cache(tmp_path)
+        path = self._write_cache(
+            tmp_path,
+            rows=[{"date": "2026-07-01", "issuers": {"IBIT": "N/A"}, "total": 0.0}],
         )
         assert farside._read_cache(str(path)) is None
 

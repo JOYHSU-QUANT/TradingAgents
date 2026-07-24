@@ -48,9 +48,10 @@ def create_news_analyst(llm):
                 crypto_hints.append(
                     "get_etf_flows(asset, curr_date, look_back_days) for BTC/ETH US "
                     "spot-ETF daily net flows (a demand-side signal) — only BTC and ETH "
-                    "have US spot ETFs, so for any other crypto asset it returns BTC "
-                    "flows as a market-wide proxy, which you should treat as a market "
-                    "signal rather than that asset's own flows"
+                    "have US spot ETFs, so for another recognized crypto risk asset "
+                    "(SOL, XRP, ...) it returns BTC flows as a market-wide proxy, which "
+                    "you should treat as a market signal rather than that asset's own "
+                    "flows; a stablecoin or unrecognized symbol returns a no-signal note"
                 )
             if not is_category_disabled("crypto_sentiment", "get_fear_greed"):
                 crypto_tools.append(get_fear_greed)

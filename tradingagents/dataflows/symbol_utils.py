@@ -41,8 +41,10 @@ _FOREX_CURRENCIES = frozenset(
     }
 )
 
-# Crypto bases that brokers quote against USD without a separator.
-_CRYPTO_BASES = frozenset(
+# Crypto bases that brokers quote against USD without a separator. Public so
+# other vendors can share the same "is this a recognized crypto?" vocabulary
+# (e.g. farside scopes its BTC market-wide proxy to these risk assets).
+CRYPTO_BASES = frozenset(
     {"BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "BCH", "DOT", "AVAX", "LINK"}
 )
 
@@ -90,7 +92,7 @@ def _normalize_crypto(s: str) -> str | None:
     for quote in _CRYPTO_QUOTES:
         if compact.endswith(quote):
             base = compact[: -len(quote)]
-            if base in _CRYPTO_BASES:
+            if base in CRYPTO_BASES:
                 return f"{base}-USD"
             break
     return None

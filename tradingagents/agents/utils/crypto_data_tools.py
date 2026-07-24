@@ -21,8 +21,10 @@ def get_etf_flows(
     asset: Annotated[
         str,
         "Crypto asset whose US spot-ETF flows to fetch: 'BTC' or 'ETH' "
-        "(pair forms like 'BTC-USD' are accepted). Any other crypto symbol has no "
-        "spot ETF of its own, so BTC flows are returned as a market-wide proxy.",
+        "(pair forms like 'BTC-USD' are accepted). Another recognized crypto risk "
+        "asset (SOL, XRP, ...) has no spot ETF of its own, so BTC flows are returned "
+        "as a market-wide proxy; a stablecoin or unrecognized symbol returns a "
+        "no-signal note.",
     ],
     curr_date: Annotated[str, "Current date in yyyy-mm-dd format; the end of the window"],
     look_back_days: Annotated[
@@ -34,12 +36,13 @@ def get_etf_flows(
     Returns the latest day's net flow, the window's cumulative net flow, the
     consecutive inflow/outflow streak, the latest day's issuer breakdown, and a
     recent daily-flow table. Persistent inflows/outflows are a demand-side
-    signal that complements price and news. Any crypto asset without its own spot
-    ETF returns BTC flows as a market-wide proxy. Uses the configured
+    signal that complements price and news. A recognized crypto risk asset without
+    its own spot ETF (SOL, XRP, ...) returns BTC flows as a market-wide proxy; a
+    stablecoin or unrecognized symbol returns a no-signal note. Uses the configured
     crypto_etf_flows vendor.
 
     Args:
-        asset (str): 'BTC' or 'ETH' (other crypto symbols get BTC as a proxy)
+        asset (str): 'BTC' or 'ETH' (recognized risk coins get BTC as a proxy)
         curr_date (str): Current date in yyyy-mm-dd format
         look_back_days (int): Trailing window length; omit for a 30-day window
 

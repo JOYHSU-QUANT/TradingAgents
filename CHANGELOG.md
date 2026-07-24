@@ -17,9 +17,10 @@ Breaking changes within the 0.x line are called out explicitly.
   fallback capped at 14 days) and the alternative.me Crypto Fear & Greed Index
   (`crypto_sentiment` / `get_fear_greed`, uncached, one retry on a transient
   failure). Both are lookahead-safe, honour a trailing `look_back_days` window,
-  and degrade to a no-data sentinel when unreachable. A crypto asset without its
-  own spot ETF gets BTC flows as a market-wide proxy, marked as such in the
-  report heading; the stock path is unchanged.
+  and degrade to a no-data sentinel when unreachable. A recognized crypto risk
+  asset without its own spot ETF (SOL, XRP, ...) gets BTC flows as a market-wide
+  proxy, marked as such in the report heading; a stablecoin or unrecognized symbol
+  gets a no-signal note; the stock path is unchanged.
 - Both reports disclose data staleness separately from fetch failure: a vendor
   that is reachable but has stopped publishing gets a data-lag caveat instead of
   being presented as current.

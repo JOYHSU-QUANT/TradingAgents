@@ -243,8 +243,9 @@ See `tradingagents/default_config.py` for all configuration options.
 Crypto assets (e.g. `BTC-USD`) additionally surface two keyless news-analyst data
 sources — BTC/ETH spot-ETF daily flows (Farside, `crypto_etf_flows`) and the Crypto
 Fear & Greed Index (alternative.me, `crypto_sentiment`). Both need no API key and
-degrade to a no-data sentinel if unreachable; the stock path is unchanged. A crypto
-asset without its own spot ETF (e.g. SOL) gets BTC flows as a market-wide proxy.
+degrade to a no-data sentinel if unreachable; the stock path is unchanged. A
+recognized crypto risk asset without its own spot ETF (e.g. SOL) gets BTC flows as
+a market-wide proxy; a stablecoin or unrecognized symbol gets a no-signal note.
 
 Any data category can be switched off by setting its vendor to `"none"`:
 

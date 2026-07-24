@@ -12,12 +12,23 @@ Breaking changes within the 0.x line are called out explicitly.
 
 - **Crypto spot-ETF flows and Fear & Greed vendors.** Two keyless news-analyst
   data sources, bound only for crypto assets: BTC/ETH US spot-ETF daily net
-  flows scraped from Farside (`crypto_etf_flows` / `get_etf_flows`, cached per UTC
-  day with a stale-snapshot fallback capped at 14 days) and the alternative.me
-  Crypto Fear & Greed Index (`crypto_sentiment` / `get_fear_greed`). Both are
-  lookahead-safe, honour a trailing `look_back_days` window, and degrade to a
-  no-data sentinel when unreachable. A crypto asset without its own spot ETF gets
-  BTC flows as a market-wide proxy; the stock path is unchanged.
+  flows scraped from Farside (`crypto_etf_flows` / `get_etf_flows`, one rolling
+  cache file per asset refreshed at most once per UTC day, with a stale-snapshot
+  fallback capped at 14 days) and the alternative.me Crypto Fear & Greed Index
+  (`crypto_sentiment` / `get_fear_greed`, uncached, one retry on a transient
+  failure). Both are lookahead-safe, honour a trailing `look_back_days` window,
+  and degrade to a no-data sentinel when unreachable. A crypto asset without its
+  own spot ETF gets BTC flows as a market-wide proxy, marked as such in the
+  report heading; the stock path is unchanged.
+- Both reports disclose data staleness separately from fetch failure: a vendor
+  that is reachable but has stopped publishing gets a data-lag caveat instead of
+  being presented as current.
+- **`"none"` disables a data category.** Setting a `data_vendors` (or
+  `tool_vendors`) entry to `"none"` switches that category off: an optional
+  category returns the no-data sentinel without opening a connection, and the
+  analyst stops binding the tool entirely. Core categories reject it loudly.
+  Previously a keyless vendor could only be stopped by editing code, having no
+  API key to unset.
 
 ## [0.3.0] — 2026-06-22
 

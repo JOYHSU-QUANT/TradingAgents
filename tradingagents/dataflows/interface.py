@@ -91,6 +91,12 @@ TOOLS_CATEGORIES = {
     }
 }
 
+# Configuring a category (or tool) to this sentinel switches it off entirely.
+# Keyless vendors have no equivalent of FRED's "unset the API key" escape hatch,
+# so without it the only way to stop calling a misbehaving vendor on a
+# long-running box is a code change and a redeploy.
+DISABLED_VENDOR = "none"
+
 VENDOR_LIST = [
     "yfinance",
     "fred",
@@ -194,6 +200,16 @@ def get_vendor(category: str, method: str = None) -> str:
     # Fall back to category-level configuration
     return config.get("data_vendors", {}).get(category, "default")
 
+def is_category_disabled(category: str, method: str = None) -> bool:
+    """True when a category (or tool) is configured to the "none" sentinel.
+
+    Lets a caller skip binding a tool altogether rather than binding one that
+    could only ever return the disabled sentinel.
+    """
+    return any(
+        v.strip().lower() == DISABLED_VENDOR for v in get_vendor(category, method).split(",")
+    )
+
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
     category = get_category_for_method(method)
@@ -211,6 +227,23 @@ def route_to_vendor(method: str, *args, **kwargs):
     # fallback, list them in order, e.g. data_vendors="yfinance,alpha_vantage".
     # The "default" sentinel (no explicit config) uses all available vendors.
     explicit = [v for v in primary_vendors if v and v != "default"]
+    # An explicit "none" switches the category off. Checked before the vendor
+    # chain is resolved so a disabled category never opens a connection, and
+    # handled here rather than via the loop's error paths so "deliberately off"
+    # is never logged as a vendor failure.
+    if any(v.lower() == DISABLED_VENDOR for v in explicit):
+        if category in OPTIONAL_CATEGORIES:
+            logger.info(
+                "Optional %s is disabled by configuration; skipping %s", category, method
+            )
+            return (
+                f"DATA_UNAVAILABLE: optional {category} is disabled by configuration. "
+                f"Proceed without it; do not fabricate values."
+            )
+        raise ValueError(
+            f"Category '{category}' supplies core data for '{method}' and cannot be "
+            f"disabled with '{DISABLED_VENDOR}'."
+        )
     if explicit:
         vendor_chain = [v for v in explicit if v in VENDOR_METHODS[method]]
         if not vendor_chain:

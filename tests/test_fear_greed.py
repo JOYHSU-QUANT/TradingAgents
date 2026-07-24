@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from unittest import mock
 
 import pytest
+import requests
 
 from tradingagents.dataflows import fear_greed, interface
 from tradingagents.dataflows.config import set_config
@@ -120,6 +121,108 @@ class TestLookahead:
             out = fear_greed.get_fear_greed_data("2026-07-23", 30)
         assert "2026-07-24" not in out
         assert "**Latest (2026-07-23):** 31" in out
+
+
+@pytest.mark.unit
+class TestDeltaAnchoring:
+    def test_deltas_anchor_on_curr_date_not_the_latest_reading(self):
+        # Anchoring on the latest reading lets the "7d" window float backwards
+        # whenever the series lags: with the newest reading 4 days behind
+        # curr_date, "vs 7d" would silently span curr_date-11 -> curr_date-4.
+        # Anchored on curr_date, the reference is the reading at or before
+        # curr_date-7 (2026-07-16), not latest-7 (2026-07-12).
+        payload = {
+            "data": [
+                _row("2026-07-19", 40, "Fear"),  # latest, 4 days behind curr_date
+                _row("2026-07-16", 30, "Fear"),  # curr_date - 7
+                _row("2026-07-12", 10, "Extreme Fear"),  # latest - 7
+            ]
+        }
+        with mock.patch.object(fear_greed, "_request", return_value=payload):
+            out = fear_greed.get_fear_greed_data("2026-07-23", 30)
+        assert "**vs 7d:** +10 (from 30 on 2026-07-16)" in out
+
+    def test_data_lag_is_flagged(self):
+        # A successful fetch says nothing about whether alternative.me published;
+        # this vendor is uncached, so there is no fetched_at staleness check.
+        payload = {"data": [_row("2026-07-19", 40, "Fear")]}
+        with mock.patch.object(fear_greed, "_request", return_value=payload):
+            out = fear_greed.get_fear_greed_data("2026-07-23", 30)
+        assert "Data lag" in out
+        assert "4 days before 2026-07-23" in out
+
+    def test_no_lag_caveat_when_current(self):
+        with mock.patch.object(fear_greed, "_request", return_value=_PAYLOAD):
+            out = fear_greed.get_fear_greed_data("2026-07-23", 30)
+        assert "Data lag" not in out
+
+
+@pytest.mark.unit
+class TestRequestWiring:
+    """Exercise _request itself — every other test mocks it away, so without
+    these the limit sizing, query params and retry could all be wrong silently."""
+
+    def test_sends_limit_and_format_and_returns_payload(self):
+        response = mock.Mock()
+        response.json.return_value = _PAYLOAD
+        response.raise_for_status.return_value = None
+        with mock.patch.object(fear_greed.requests, "get", return_value=response) as get:
+            assert fear_greed._request(75) == _PAYLOAD
+        _, kwargs = get.call_args
+        assert kwargs["params"] == {"limit": 75, "format": "json"}
+        assert kwargs["timeout"] == fear_greed.REQUEST_TIMEOUT
+
+    def test_limit_covers_window_plus_comparison_buffer(self):
+        # Guards _FETCH_BUFFER_DAYS: a 0 buffer would leave no 30-days-ago
+        # reference point and every test above would still pass.
+        seen = {}
+
+        def _capture(limit):
+            seen["limit"] = limit
+            return _PAYLOAD
+
+        with mock.patch.object(fear_greed, "_request", side_effect=_capture):
+            fear_greed.get_fear_greed_data("2026-07-23", 7)
+        assert seen["limit"] == 30 + fear_greed._FETCH_BUFFER_DAYS
+
+    def test_retries_once_then_succeeds(self):
+        response = mock.Mock()
+        response.json.return_value = _PAYLOAD
+        response.raise_for_status.return_value = None
+        with (
+            mock.patch.object(fear_greed.time, "sleep") as sleep,
+            mock.patch.object(
+                fear_greed.requests,
+                "get",
+                side_effect=[requests.RequestException("blip"), response],
+            ) as get,
+        ):
+            assert fear_greed._request(75) == _PAYLOAD
+        assert get.call_count == 2
+        sleep.assert_called_once_with(fear_greed._RETRY_DELAY_SECONDS)
+
+    def test_gives_up_after_retry_with_typed_error(self):
+        with (
+            mock.patch.object(fear_greed.time, "sleep"),
+            mock.patch.object(
+                fear_greed.requests, "get", side_effect=requests.RequestException("down")
+            ) as get,
+            pytest.raises(fear_greed.FearGreedError, match="unreachable"),
+        ):
+            fear_greed._request(75)
+        assert get.call_count == fear_greed._RETRY_ATTEMPTS
+
+    def test_non_object_payload_raises_typed_error(self):
+        # A CDN/WAF error page can decode as valid JSON that is not an object;
+        # without the guard this surfaced as a bare AttributeError.
+        response = mock.Mock()
+        response.json.return_value = [1, 2, 3]
+        response.raise_for_status.return_value = None
+        with (
+            mock.patch.object(fear_greed.requests, "get", return_value=response),
+            pytest.raises(fear_greed.FearGreedError, match="expected an object"),
+        ):
+            fear_greed._request(75)
 
 
 @pytest.mark.unit

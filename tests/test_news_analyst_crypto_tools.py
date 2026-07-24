@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
 
 from tradingagents.agents.analysts.news_analyst import create_news_analyst
+from tradingagents.dataflows.config import set_config
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 _CRYPTO_TOOLS = {"get_etf_flows", "get_fear_greed"}
@@ -54,6 +55,20 @@ def test_stock_does_not_bind_crypto_tools():
     bound = _run("stock", "AAPL")
     assert not (_CRYPTO_TOOLS & bound)
     assert bound >= {"get_news", "get_global_news"}
+
+
+@pytest.mark.unit
+def test_disabled_category_is_not_bound():
+    # A category switched off with the "none" vendor must not be bound at all:
+    # binding it would spend a tool call only to receive the disabled sentinel.
+    # The other crypto category must be unaffected.
+    set_config({"data_vendors": {"crypto_etf_flows": "none"}})
+    try:
+        bound = _run("crypto", "BTC-USD")
+        assert "get_etf_flows" not in bound
+        assert "get_fear_greed" in bound
+    finally:
+        set_config({"data_vendors": {"crypto_etf_flows": "farside"}})
 
 
 @pytest.mark.unit

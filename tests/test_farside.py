@@ -1,5 +1,5 @@
 """Farside spot-ETF flow vendor: table parsing (negatives, thousands, blanks,
-structure mismatch), per-UTC-day caching with stale fallback, lookahead-safe
+structure mismatch), rolling per-asset caching with stale fallback, lookahead-safe
 windowing, report formatting, and router integration.
 
 All network access is mocked and the parser runs against a trimmed local fixture,
@@ -7,6 +7,7 @@ so these run without a network connection.
 """
 
 import json
+import logging
 import os
 from datetime import datetime, timedelta
 from unittest import mock
@@ -19,6 +20,8 @@ from tradingagents.dataflows.config import set_config
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
+FARSIDE_LOGGER = "tradingagents.dataflows.farside"
+
 
 def _fixture(name: str) -> str:
     with open(os.path.join(FIXTURE_DIR, name), encoding="utf-8") as f:
@@ -28,7 +31,12 @@ def _fixture(name: str) -> str:
 BTC_HTML = _fixture("farside_btc.html")
 # Parsed once for the render tests (the fixture is the source of truth for the
 # expected numbers below).
-RECORDS = farside._parse_flow_table(BTC_HTML, "BTC")
+PARSED = farside._parse_flow_table(BTC_HTML, "BTC")
+RECORDS = PARSED.records
+
+
+def _snapshot(records, fetched_at="2026-07-09", stale=False, issuers_named=True):
+    return farside._FlowSnapshot(records, fetched_at, stale, issuers_named)
 
 
 # --------------------------------------------------------------------------- #
@@ -78,15 +86,61 @@ class TestParseTable:
 
     def test_issuer_names_from_header(self):
         assert set(RECORDS[0]["issuers"]) == {"IBIT", "FBTC", "GBTC", "BTC"}
+        assert PARSED.issuers_named is True
+
+    def test_dash_forms_parse_as_zero_end_to_end(self):
+        # _BLANK_CELLS covers hyphen/en-dash/em-dash, but the fixture only uses an
+        # empty cell. Exercise the dash forms through the real table parser so a
+        # regression in _BLANK_CELLS is caught end-to-end, not only in the unit
+        # test for _parse_flow_value.
+        html = (
+            '<table class="etf">'
+            "<tr><th></th><th>IBIT</th><th>FBTC</th><th>GBTC</th><th>Total</th></tr>"
+            "<tr><td>06 Jul 2026</td><td>-</td><td>–</td><td>—</td><td>0.0</td></tr>"
+            "</table>"
+        )
+        parsed = farside._parse_flow_table(html, "BTC")
+        assert parsed.records[0]["issuers"] == {"IBIT": 0.0, "FBTC": 0.0, "GBTC": 0.0}
+        assert parsed.records[0]["total"] == 0.0
 
     def test_missing_table_raises(self):
         with pytest.raises(farside.FarsideError, match="No ETF flow table"):
             farside._parse_flow_table("<html><body><p>nope</p></body></html>", "BTC")
 
-    def test_no_data_rows_raises(self):
+    def test_header_only_table_is_not_selected(self):
+        # A table with no dated rows is never selected as the flow table, so this
+        # reports "no table found" rather than reaching the (defensive) "no dated
+        # flow rows" guard. Asserted by message so the test cannot silently start
+        # passing via a different branch.
         html = '<table class="etf"><tr><th></th><th>IBIT</th><th>FBTC</th><th></th></tr></table>'
-        with pytest.raises(farside.FarsideError):
+        with pytest.raises(farside.FarsideError, match="No ETF flow table"):
             farside._parse_flow_table(html, "BTC")
+
+    def test_too_few_columns_raises(self):
+        # Fewer than 3 columns leaves no room for date + issuer + Total.
+        html = (
+            '<table class="etf">'
+            "<tr><th></th><th>Total</th></tr>"
+            "<tr><td>06 Jul 2026</td><td>1.0</td></tr>"
+            "</table>"
+        )
+        with pytest.raises(farside.FarsideError, match="column count"):
+            farside._parse_flow_table(html, "BTC")
+
+    def test_missing_issuer_header_degrades_loudly(self, caplog):
+        # An unreadable header must NOT discard the flow signal (the figures are
+        # still Total-cross-checked), but it must be loud: placeholder ETF{j}
+        # labels otherwise read to the agent as real tickers.
+        html = (
+            '<table class="etf">'
+            "<tr><td>06 Jul 2026</td><td>1.0</td><td>2.0</td><td>3.0</td></tr>"
+            "</table>"
+        )
+        with caplog.at_level(logging.WARNING, logger=FARSIDE_LOGGER):
+            parsed = farside._parse_flow_table(html, "BTC")
+        assert parsed.issuers_named is False
+        assert set(parsed.records[0]["issuers"]) == {"ETF1", "ETF2"}
+        assert "issuer-ticker header" in caplog.text
 
     def test_ragged_row_raises(self):
         # First data row sets 4 columns; the second has 3 -> structural mismatch.
@@ -142,10 +196,8 @@ class TestParseTable:
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
 class TestRender:
-    def _render(self, curr_date, look_back_days=30, asset="BTC"):
-        with mock.patch.object(
-            farside, "_load_flows", return_value=(RECORDS, "2026-07-09T00:00:00Z", False)
-        ):
+    def _render(self, curr_date, look_back_days=30, asset="BTC", snapshot=None):
+        with mock.patch.object(farside, "_load_flows", return_value=snapshot or _snapshot(RECORDS)):
             return farside.get_etf_flow_data(asset, curr_date, look_back_days)
 
     def test_lookahead_drops_future_rows(self):
@@ -157,7 +209,11 @@ class TestRender:
         out = self._render("2026-07-08")
         # 216.9 + 29.9 + 1214.9 = 1461.7
         assert "+1461.7" in out
-        assert "3-day inflow" in out
+        # "session", not "day": the streak skips zero rows, so a day count would
+        # overstate how many consecutive calendar days actually had flow.
+        assert "3-session inflow" in out
+        assert "(2026-07-06 → 2026-07-08)" in out
+        assert "not calendar days" in out
         # latest-day leaders ranked by |flow|
         assert "IBIT +1119.9" in out
         assert "| 2026-07-08 | +1214.9 |" in out
@@ -166,9 +222,18 @@ class TestRender:
         # A crypto asset with no spot ETF of its own is served BTC flows as a
         # market-wide proxy, flagged as such (not an asset-specific signal).
         out = self._render("2026-07-08", asset="SOL")
-        assert "## Spot ETF Flows — BTC" in out
         assert "market-wide" in out
         assert "SOL" in out
+
+    def test_proxy_marker_is_in_the_heading(self):
+        # The caveat line alone is not enough: this report gets re-summarised by
+        # downstream agents, and a heading identical to a real BTC report is what
+        # survives that hop with the proxy framing stripped.
+        out = self._render("2026-07-08", asset="SOL")
+        heading = out.splitlines()[0]
+        assert "market-wide proxy for 'SOL'" in heading
+        # A genuine BTC report must not carry the marker.
+        assert "market-wide proxy" not in self._render("2026-07-08").splitlines()[0]
 
     def test_zero_total_day_does_not_break_streak(self):
         # A 0.0-total day is transparent: it neither breaks the inflow streak nor
@@ -178,9 +243,11 @@ class TestRender:
             {"date": "2026-07-02", "issuers": {"IBIT": 0.0}, "total": 0.0},
             {"date": "2026-07-03", "issuers": {"IBIT": 7.0}, "total": 7.0},
         ]
-        with mock.patch.object(farside, "_load_flows", return_value=(recs, "x", False)):
-            out = farside.get_etf_flow_data("BTC", "2026-07-03", 30)
-        assert "2-day inflow" in out  # 07-01 and 07-03; the 0.0 day is skipped
+        out = self._render("2026-07-03", snapshot=_snapshot(recs))
+        # 07-01 and 07-03; the 0.0 day is skipped, and the span shows the streak
+        # actually reaches back further than 2 calendar days.
+        assert "2-session inflow" in out
+        assert "(2026-07-01 → 2026-07-03)" in out
         assert "2 flow sessions" in out
 
     def test_short_window_trims_table(self):
@@ -215,7 +282,6 @@ class TestRender:
         # the BTC market-wide proxy, flagged as such — normalizer must not treat
         # it as ETH.
         out = self._render("2026-07-08", asset="ETHW")
-        assert "## Spot ETF Flows — BTC" in out
         assert "market-wide" in out
         assert "ETHW" in out
 
@@ -233,8 +299,7 @@ class TestRender:
             for i in range(n)
         ]
         curr_date = recs[-1]["date"]
-        with mock.patch.object(farside, "_load_flows", return_value=(recs, "x", False)):
-            out = farside.get_etf_flow_data("BTC", curr_date, look_back_days=n + 5)
+        out = self._render(curr_date, look_back_days=n + 5, snapshot=_snapshot(recs))
         assert f"most recent {farside.MAX_ROWS} of {n} days" in out
         assert f"| {recs[0]['date']} |" not in out  # oldest row dropped
         assert f"| {recs[-1]['date']} |" in out  # newest row kept
@@ -251,32 +316,104 @@ class TestRender:
         assert "| 2026-07-09 |" in out  # latest available row still tabled
         assert "flow sessions in the window" not in out  # not the flat rendering
 
-    def test_all_zero_totals_report_flat_streak(self):
-        # Every day is a 0.0-total day: no flow sessions and a "0-day flat"
-        # streak (streak_sign defaults to 0, the loop never runs).
+    def test_empty_window_caveat_is_not_duplicated(self):
+        # The cumulative line already names the empty window and the latest date;
+        # the table note must not repeat the same sentence.
+        out = self._render("2026-07-11", look_back_days=1)
+        assert out.count("no flow rows within the 1-day window") == 1
+
+    def test_all_zero_totals_report_no_sessions(self):
+        # Every day is a 0.0-total day: no flow sessions at all, so there is no
+        # streak to report.
         recs = [
             {"date": "2026-07-01", "issuers": {"IBIT": 0.0}, "total": 0.0},
             {"date": "2026-07-02", "issuers": {"IBIT": 0.0}, "total": 0.0},
         ]
-        with mock.patch.object(farside, "_load_flows", return_value=(recs, "x", False)):
-            out = farside.get_etf_flow_data("BTC", "2026-07-02", 30)
-        assert "0-day flat" in out
+        out = self._render("2026-07-02", snapshot=_snapshot(recs))
+        assert "no reported flow sessions on record" in out
         assert "0 flow sessions" in out
+
+    def test_unpopulated_latest_row_is_not_rendered_as_zero_flow(self):
+        # Farside posts the day's row before filling it; every cell blank parses
+        # to 0.0. Rendering that as "+0.0 net" next to a live inflow streak reads
+        # as "demand stopped", and which version the analyst sees would depend
+        # only on what time of day the cycle fired.
+        recs = [
+            {"date": "2026-07-01", "issuers": {"IBIT": 5.0}, "total": 5.0},
+            {"date": "2026-07-02", "issuers": {"IBIT": 7.0}, "total": 7.0},
+            {"date": "2026-07-03", "issuers": {"IBIT": 0.0}, "total": 0.0},
+        ]
+        out = self._render("2026-07-03", snapshot=_snapshot(recs))
+        assert "**Latest (2026-07-03):** no flow reported" in out
+        assert "+0.0 net" not in out
+        # The streak still reports the real flow history behind the blank row.
+        assert "2-session inflow" in out
+
+    def test_data_lag_is_flagged_even_when_the_fetch_succeeded(self):
+        # farside.co.uk can serve a parseable page that simply has not been
+        # updated. The stale-cache machinery never sees this, so without the lag
+        # caveat the report presents week-old flows as current.
+        out = self._render("2026-07-20")  # freshest fixture row is 2026-07-09
+        assert "Data lag" in out
+        assert "11 days before 2026-07-20" in out
+
+    def test_no_data_lag_caveat_within_tolerance(self):
+        # A weekend/holiday publishing gap is normal and must not be flagged.
+        out = self._render("2026-07-11")  # 2 days behind, under MAX_DATA_LAG_DAYS
+        assert "Data lag" not in out
+
+    def test_unnamed_issuers_are_disclosed(self):
+        # When the header could not be read the figures are still served, but the
+        # report must say the ETF1/ETF2 labels carry no meaning.
+        recs = [{"date": "2026-07-01", "issuers": {"ETF1": 5.0}, "total": 5.0}]
+        out = self._render("2026-07-01", snapshot=_snapshot(recs, issuers_named=False))
+        assert "Issuer names unavailable" in out
+
+    def test_caveats_render_as_separate_paragraphs(self):
+        # Consecutive italic caveats joined by a single newline collapse into one
+        # rendered markdown paragraph, running distinct warnings together.
+        recs = [{"date": "2026-07-01", "issuers": {"ETF1": 5.0}, "total": 5.0}]
+        out = self._render("2026-07-01", asset="SOL", snapshot=_snapshot(recs, issuers_named=False))
+        assert "_\n\n_" in out
 
 
 # --------------------------------------------------------------------------- #
-# Caching (per UTC day, with stale fallback)
+# Caching (one rolling file per asset, with stale fallback)
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
 class TestCache:
     def _use_tmp_cache(self, tmp_path):
         set_config({"data_cache_dir": str(tmp_path)})
 
+    def _write_cache(self, tmp_path, **overrides):
+        payload = {
+            "asset": "BTC",
+            "fetched_at": "2026-07-20",
+            "issuers_named": True,
+            "rows": RECORDS,
+        }
+        payload.update(overrides)
+        path = tmp_path / "farside_btc.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_cache_is_one_rolling_file_per_asset(self, tmp_path, monkeypatch):
+        # A file-per-day scheme accumulates snapshots that can never be served
+        # (anything past MAX_STALE_DAYS is refused), so successive days must
+        # overwrite one file rather than pile up.
+        self._use_tmp_cache(tmp_path)
+        monkeypatch.setattr(farside, "_request_html", lambda asset: BTC_HTML)
+        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-23")
+        farside.get_etf_flow_data("BTC", "2026-07-09")
+        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-24")
+        farside.get_etf_flow_data("BTC", "2026-07-09")
+        assert [f for f in os.listdir(tmp_path) if f.startswith("farside_")] == ["farside_btc.json"]
+
     def test_non_dict_cache_is_ignored(self, tmp_path):
         # A tampered/corrupt cache whose top-level JSON is not an object must be
         # treated as a miss, not crash on .get().
         self._use_tmp_cache(tmp_path)
-        path = tmp_path / "farside_btc_2026-07-23.json"
+        path = tmp_path / "farside_btc.json"
         path.write_text("[1, 2, 3]", encoding="utf-8")
         assert farside._read_cache(str(path)) is None
 
@@ -284,25 +421,48 @@ class TestCache:
         # "rows" present but not a list (truthy) must still be a miss, not served
         # and then blow up downstream on r["date"].
         self._use_tmp_cache(tmp_path)
-        path = tmp_path / "farside_btc_2026-07-23.json"
-        path.write_text('{"asset": "BTC", "rows": "oops"}', encoding="utf-8")
+        path = self._write_cache(tmp_path, rows="oops")
         assert farside._read_cache(str(path)) is None
 
     def test_list_of_non_dict_rows_cache_is_ignored(self, tmp_path):
         # "rows" is a non-empty list but its elements are not records: still a
         # miss, else the served payload crashes later on r["date"].
         self._use_tmp_cache(tmp_path)
-        path = tmp_path / "farside_btc_2026-07-23.json"
-        path.write_text('{"asset": "BTC", "rows": [1, 2, 3]}', encoding="utf-8")
+        path = self._write_cache(tmp_path, rows=[1, 2, 3])
         assert farside._read_cache(str(path)) is None
 
     def test_row_missing_field_cache_is_ignored(self, tmp_path):
         # A row dict missing a required field ("total") is malformed: a miss, so
         # a future record-schema change reading an old cache degrades cleanly.
         self._use_tmp_cache(tmp_path)
-        path = tmp_path / "farside_btc_2026-07-23.json"
+        path = self._write_cache(tmp_path, rows=[{"date": "2026-07-01", "issuers": {}}])
+        assert farside._read_cache(str(path)) is None
+
+    def test_row_with_wrong_value_type_is_ignored(self, tmp_path):
+        # Key presence is not enough: a non-numeric "total" would pass a
+        # presence-only guard and then raise a raw TypeError inside sum().
+        self._use_tmp_cache(tmp_path)
+        path = self._write_cache(
+            tmp_path, rows=[{"date": "2026-07-01", "issuers": {}, "total": "N/A"}]
+        )
+        assert farside._read_cache(str(path)) is None
+
+    def test_cache_without_fetched_at_is_ignored(self, tmp_path):
+        # fetched_at now drives both the same-day hit and the staleness cap, so a
+        # payload without it must be refetched rather than read as "age unknown".
+        self._use_tmp_cache(tmp_path)
+        path = tmp_path / "farside_btc.json"
         path.write_text(
-            '{"asset": "BTC", "rows": [{"date": "2026-07-01", "issuers": {}}]}',
+            json.dumps({"asset": "BTC", "issuers_named": True, "rows": RECORDS}),
+            encoding="utf-8",
+        )
+        assert farside._read_cache(str(path)) is None
+
+    def test_cache_without_issuers_named_is_ignored(self, tmp_path):
+        self._use_tmp_cache(tmp_path)
+        path = tmp_path / "farside_btc.json"
+        path.write_text(
+            json.dumps({"asset": "BTC", "fetched_at": "2026-07-20", "rows": RECORDS}),
             encoding="utf-8",
         )
         assert farside._read_cache(str(path)) is None
@@ -313,10 +473,7 @@ class TestCache:
         # rather than being served with an "age unknown" caveat.
         self._use_tmp_cache(tmp_path)
         monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-23")
-        (tmp_path / "farside_btc_2026-07-20.json").write_text(
-            json.dumps({"asset": "BTC", "fetched_at": "not-a-date", "rows": RECORDS}),
-            encoding="utf-8",
-        )
+        self._write_cache(tmp_path, fetched_at="not-a-date")
         monkeypatch.setattr(
             farside, "_request_html", mock.Mock(side_effect=requests.RequestException("boom"))
         )
@@ -378,25 +535,58 @@ class TestCache:
             mock.Mock(side_effect=requests.RequestException("boom")),
         )
         out = farside.get_etf_flow_data("BTC", "2026-07-09")
-        assert "STALE by 1 days" in out  # 2026-07-24 minus fetched 2026-07-23
+        assert "STALE by 1 day:" in out  # singular; 2026-07-24 minus fetched 2026-07-23
         assert "+1214.9" in out  # still shows the cached data
 
-    def test_stale_cache_beyond_cap_degrades(self, tmp_path, monkeypatch):
+    def test_stale_cache_at_cap_is_still_served(self, tmp_path, monkeypatch):
+        # Boundary: exactly MAX_STALE_DAYS old is within the cap.
         self._use_tmp_cache(tmp_path)
-        # Day 1: successful fetch stamps the snapshot at 2026-07-01.
-        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-01")
-        monkeypatch.setattr(farside, "_request_html", lambda asset: BTC_HTML)
-        farside.get_etf_flow_data("BTC", "2026-07-09")
-        # A month later fetch keeps failing -> the only cache is 31 days stale,
-        # past the 14-day cap -> refuse to serve it, raise so the router degrades.
-        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-08-01")
+        self._write_cache(tmp_path, fetched_at="2026-07-01")
+        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-15")  # 14 days
         monkeypatch.setattr(
-            farside,
-            "_request_html",
-            mock.Mock(side_effect=requests.RequestException("boom")),
+            farside, "_request_html", mock.Mock(side_effect=requests.RequestException("boom"))
+        )
+        out = farside.get_etf_flow_data("BTC", "2026-07-09")
+        assert f"STALE by {farside.MAX_STALE_DAYS} days" in out
+
+    def test_stale_cache_one_day_past_cap_degrades(self, tmp_path, monkeypatch):
+        # Boundary: one day beyond the cap must refuse to serve.
+        self._use_tmp_cache(tmp_path)
+        self._write_cache(tmp_path, fetched_at="2026-07-01")
+        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-16")  # 15 days
+        monkeypatch.setattr(
+            farside, "_request_html", mock.Mock(side_effect=requests.RequestException("boom"))
         )
         with pytest.raises(farside.FarsideError, match="cap"):
             farside.get_etf_flow_data("BTC", "2026-07-09")
+
+    def test_structural_failure_on_stale_serve_is_logged_at_error(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        # A parse break means the scraper needs a code fix, not that the network
+        # blipped; it must not hide among warnings for up to the stale cap.
+        self._use_tmp_cache(tmp_path)
+        self._write_cache(tmp_path, fetched_at="2026-07-20")
+        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-22")
+        monkeypatch.setattr(farside, "_request_html", lambda asset: "<html>nope</html>")
+        with caplog.at_level(logging.DEBUG, logger=FARSIDE_LOGGER):
+            farside.get_etf_flow_data("BTC", "2026-07-09")
+        assert any(r.levelno >= logging.ERROR for r in caplog.records if r.name == FARSIDE_LOGGER)
+
+    def test_network_failure_on_stale_serve_stays_a_warning(self, tmp_path, monkeypatch, caplog):
+        # The counterpart: an ordinary outage must not be escalated to ERROR, or
+        # the escalation above stops meaning anything.
+        self._use_tmp_cache(tmp_path)
+        self._write_cache(tmp_path, fetched_at="2026-07-20")
+        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-22")
+        monkeypatch.setattr(
+            farside, "_request_html", mock.Mock(side_effect=requests.RequestException("boom"))
+        )
+        with caplog.at_level(logging.DEBUG, logger=FARSIDE_LOGGER):
+            farside.get_etf_flow_data("BTC", "2026-07-09")
+        assert not any(
+            r.levelno >= logging.ERROR for r in caplog.records if r.name == FARSIDE_LOGGER
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -430,3 +620,37 @@ class TestRouting:
         ):
             out = interface.route_to_vendor("get_etf_flows", "BTC", "2026-07-08", 30)
         assert "DATA_UNAVAILABLE" in out
+
+    def test_none_vendor_disables_without_calling_out(self):
+        # Keyless vendors have no "unset the API key" escape hatch, so "none" is
+        # the only way to stop calling one without a redeploy. It must short out
+        # before the vendor is invoked.
+        set_config({"data_vendors": {"crypto_etf_flows": "none"}})
+        called = {"n": 0}
+
+        def _impl(*a, **k):
+            called["n"] += 1
+            return "should not happen"
+
+        with mock.patch.dict(
+            interface.VENDOR_METHODS,
+            {"get_etf_flows": {"farside": _impl}},
+            clear=False,
+        ):
+            out = interface.route_to_vendor("get_etf_flows", "BTC", "2026-07-08", 30)
+        assert "DATA_UNAVAILABLE" in out
+        assert "disabled by configuration" in out
+        assert called["n"] == 0
+
+    def test_none_vendor_on_core_category_is_rejected(self):
+        # Disabling a core data category would silently gut the analysis; it must
+        # fail loudly instead of degrading.
+        set_config({"data_vendors": {"core_stock_apis": "none"}})
+        with pytest.raises(ValueError, match="cannot be disabled"):
+            interface.route_to_vendor("get_stock_data", "AAPL", "2026-07-01", "2026-07-08")
+
+    def test_is_category_disabled_reflects_config(self):
+        set_config({"data_vendors": {"crypto_sentiment": "none"}})
+        assert interface.is_category_disabled("crypto_sentiment") is True
+        set_config({"data_vendors": {"crypto_sentiment": "alternative_me"}})
+        assert interface.is_category_disabled("crypto_sentiment") is False

@@ -246,6 +246,20 @@ Fear & Greed Index (alternative.me, `crypto_sentiment`). Both need no API key an
 degrade to a no-data sentinel if unreachable; the stock path is unchanged. A crypto
 asset without its own spot ETF (e.g. SOL) gets BTC flows as a market-wide proxy.
 
+Any data category can be switched off by setting its vendor to `"none"`:
+
+```python
+config["data_vendors"]["crypto_etf_flows"] = "none"  # stop calling Farside
+```
+
+An optional category then returns the no-data sentinel without opening a
+connection, and the analyst stops binding that tool at all. This is the only way
+to disable a keyless vendor, which has no API key to unset. Core data categories
+reject `"none"` rather than silently running without prices or fundamentals.
+
+Farside's once-per-day fetch throttle relies on `data_cache_dir` persisting
+between runs; pointing it at a temporary filesystem makes every call re-fetch.
+
 ## Persistence and Recovery
 
 TradingAgents persists two kinds of state across runs.

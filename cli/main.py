@@ -740,7 +740,10 @@ def get_analysis_date():
             if analysis_date.date() > datetime.datetime.now().date():
                 console.print("[red]Error: Analysis date cannot be in the future[/red]")
                 continue
-            return date_str
+            # Return the CANONICAL form, not the raw input: strptime accepts a
+            # non-zero-padded date ("2026-6-5") that then compares wrong lexically
+            # against ISO dates downstream (e.g. the vendor look-ahead filters).
+            return analysis_date.strftime("%Y-%m-%d")
         except ValueError:
             console.print(
                 "[red]Error: Invalid date format. Please use YYYY-MM-DD[/red]"

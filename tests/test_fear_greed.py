@@ -122,6 +122,22 @@ class TestLookahead:
         assert "2026-07-24" not in out
         assert "**Latest (2026-07-23):** 31" in out
 
+    def test_non_zero_padded_curr_date_does_not_leak_future_readings(self):
+        # A non-zero-padded curr_date ("2026-7-8") must be normalized BEFORE the
+        # lookahead filter: a raw lexical compare would admit 2026-07-09 because
+        # '2026-07-09' <= '2026-7-8' is True, leaking a future reading.
+        payload = {
+            "data": [
+                _row("2026-07-09", 99, "Extreme Greed"),  # after the intended date
+                _row("2026-07-08", 31, "Fear"),
+            ]
+        }
+        with mock.patch.object(fear_greed, "_request", return_value=payload):
+            out = fear_greed.get_fear_greed_data("2026-7-8", 30)  # intended 2026-07-08
+        assert "2026-07-09" not in out  # future reading still dropped
+        assert "**Latest (2026-07-08):** 31" in out
+        assert "Window ending 2026-07-08" in out  # header shows the canonical date
+
 
 @pytest.mark.unit
 class TestDeltaAnchoring:
@@ -141,6 +157,21 @@ class TestDeltaAnchoring:
         with mock.patch.object(fear_greed, "_request", return_value=payload):
             out = fear_greed.get_fear_greed_data("2026-07-23", 30)
         assert "**vs 7d:** +10 (from 30 on 2026-07-16)" in out
+
+    def test_frozen_series_is_distinguished_from_missing_history(self):
+        # The newest reading IS the 7d reference point: the series has not
+        # advanced past curr_date-7. That is a frozen series (a live-data
+        # warning), NOT a fetch-reach artifact ("insufficient history"), and the
+        # two must not collapse to one string.
+        payload = {"data": [_row("2026-07-16", 28, "Fear")]}
+        with mock.patch.object(fear_greed, "_request", return_value=payload):
+            out = fear_greed.get_fear_greed_data("2026-07-23", 30)
+        assert (
+            "**vs 7d:** n/a (no reading between then and 2026-07-16; series has not updated)"
+            in out
+        )
+        # vs 30d has no reading reaching that far back at all -> the other string.
+        assert "**vs 30d:** n/a (insufficient history)" in out
 
     def test_data_lag_is_flagged(self):
         # A successful fetch says nothing about whether alternative.me published;

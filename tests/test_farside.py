@@ -9,7 +9,7 @@ so these run without a network connection.
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import pytest
@@ -37,6 +37,15 @@ RECORDS = PARSED.records
 
 def _snapshot(records, fetched_at="2026-07-09", stale=False, issuers_named=True):
     return farside._FlowSnapshot(records, fetched_at, stale, issuers_named)
+
+
+def _at(stamp: str):
+    """Aware-UTC datetime for patching farside._utc_now in the cache/TTL tests.
+
+    Accepts a full ``YYYY-MM-DDTHH:MM:SSZ`` stamp or a bare ``YYYY-MM-DD`` (midnight).
+    """
+    fmt = "%Y-%m-%dT%H:%M:%SZ" if "T" in stamp else "%Y-%m-%d"
+    return datetime.strptime(stamp, fmt).replace(tzinfo=timezone.utc)
 
 
 # --------------------------------------------------------------------------- #
@@ -129,8 +138,8 @@ class TestParseTable:
 
     def test_missing_issuer_header_degrades_loudly(self, caplog):
         # An unreadable header must NOT discard the flow signal (the figures are
-        # still Total-cross-checked), but it must be loud: placeholder ETF{j}
-        # labels otherwise read to the agent as real tickers.
+        # still Total-cross-checked), but it must be loud: placeholder labels
+        # otherwise read to the agent as real tickers.
         html = (
             '<table class="etf">'
             "<tr><td>06 Jul 2026</td><td>1.0</td><td>2.0</td><td>3.0</td></tr>"
@@ -139,8 +148,25 @@ class TestParseTable:
         with caplog.at_level(logging.WARNING, logger=FARSIDE_LOGGER):
             parsed = farside._parse_flow_table(html, "BTC")
         assert parsed.issuers_named is False
-        assert set(parsed.records[0]["issuers"]) == {"ETF1", "ETF2"}
+        # Self-describing placeholders, not fake ``ETF{j}`` tickers.
+        assert set(parsed.records[0]["issuers"]) == {"unnamed col 1", "unnamed col 2"}
         assert "issuer-ticker header" in caplog.text
+
+    def test_partial_issuer_header_is_disclosed(self, caplog):
+        # Header found but one ticker cell is blank: that column must fall back to
+        # a placeholder AND issuers_named must go False so the report still warns —
+        # otherwise a fabricated label reads to the agent as a real fund ticker.
+        html = (
+            '<table class="etf">'
+            "<tr><th></th><th>IBIT</th><th></th><th>GBTC</th><th>Total</th></tr>"
+            "<tr><td>06 Jul 2026</td><td>1.0</td><td>2.0</td><td>3.0</td><td>6.0</td></tr>"
+            "</table>"
+        )
+        with caplog.at_level(logging.WARNING, logger=FARSIDE_LOGGER):
+            parsed = farside._parse_flow_table(html, "BTC")
+        assert parsed.issuers_named is False
+        assert set(parsed.records[0]["issuers"]) == {"IBIT", "unnamed col 2", "GBTC"}
+        assert "columns [2]" in caplog.text  # names which column fell back
 
     def test_ragged_row_raises(self):
         # First data row sets 4 columns; the second has 3 -> structural mismatch.
@@ -176,6 +202,20 @@ class TestParseTable:
         with pytest.raises(farside.FarsideError):
             farside._parse_flow_table(html, "BTC")
 
+    def test_duplicate_date_rows_raise(self):
+        # Two rows for one date would double-count that day's flow in the
+        # cumulative and inflate the streak, so it must fail loud like every other
+        # structural anomaly rather than serve inflated figures.
+        html = (
+            '<table class="etf">'
+            "<tr><th></th><th>IBIT</th><th>FBTC</th><th>Total</th></tr>"
+            "<tr><td>06 Jul 2026</td><td>1.0</td><td>2.0</td><td>3.0</td></tr>"
+            "<tr><td>06 Jul 2026</td><td>1.0</td><td>2.0</td><td>3.0</td></tr>"
+            "</table>"
+        )
+        with pytest.raises(farside.FarsideError, match="multiple rows for 2026-07-06"):
+            farside._parse_flow_table(html, "BTC")
+
     def test_total_not_sum_of_issuers_raises(self):
         # The last column must be the daily Total (sum of issuer columns). A
         # trailing column that is numeric but not the sum (e.g. a cumulative
@@ -204,6 +244,15 @@ class TestRender:
         out = self._render("2026-07-08")
         assert "2026-07-09" not in out  # future row filtered
         assert "**Latest (2026-07-08):** +1214.9 net" in out
+
+    def test_non_zero_padded_curr_date_does_not_leak_future_rows(self):
+        # A non-zero-padded curr_date ("2026-7-8") must be normalized BEFORE the
+        # lookahead filter: a raw lexical compare would admit 2026-07-09 because
+        # '2026-07-09' <= '2026-7-8' is True, leaking a future row.
+        out = self._render("2026-7-8")  # intended 2026-07-08
+        assert "2026-07-09" not in out  # future row still filtered
+        assert "**Latest (2026-07-08):** +1214.9 net" in out
+        assert "Window ending 2026-07-08" in out  # header shows the canonical date
 
     def test_cumulative_streak_and_breakdown(self):
         out = self._render("2026-07-08")
@@ -346,6 +395,10 @@ class TestRender:
         out = self._render("2026-07-03", snapshot=_snapshot(recs))
         assert "**Latest (2026-07-03):** no flow reported" in out
         assert "+0.0 net" not in out
+        # The table must match the Latest line: the unpopulated row is "not yet
+        # posted", not a confident +0.0 in the row agents most often re-quote.
+        assert "| 2026-07-03 | not yet posted |" in out
+        assert "| 2026-07-03 | +0.0 |" not in out
         # The streak still reports the real flow history behind the blank row.
         assert "2-session inflow" in out
 
@@ -361,7 +414,7 @@ class TestRender:
         # MAX_STALE_DAYS (14) > MAX_DATA_LAG_DAYS (4), so any ordinary multi-day
         # outage serves a stale cache whose newest row is ALSO lag-flagged. The
         # two caveats must not contradict each other: the STALE line says the
-        # live fetch failed, so the lag line must not assert it succeeded.
+        # live refresh failed, so the lag line must not assert it succeeded.
         # STALE age is fetch age (fetched_at vs today); lag is data age (newest
         # row vs curr_date) — two different clocks, so pin today's.
         monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-20")
@@ -386,11 +439,11 @@ class TestRender:
         assert "Data lag" not in out
 
     def test_unnamed_issuers_are_disclosed(self):
-        # When the header could not be read the figures are still served, but the
-        # report must say the ETF1/ETF2 labels carry no meaning.
-        recs = [{"date": "2026-07-01", "issuers": {"ETF1": 5.0}, "total": 5.0}]
+        # When a label could not be read the figures are still served, but the
+        # report must say the placeholder labels carry no meaning.
+        recs = [{"date": "2026-07-01", "issuers": {"unnamed col 1": 5.0}, "total": 5.0}]
         out = self._render("2026-07-01", snapshot=_snapshot(recs, issuers_named=False))
-        assert "Issuer names unavailable" in out
+        assert "Issuer names incomplete" in out
 
     def test_caveats_render_as_separate_paragraphs(self):
         # Consecutive italic caveats joined by a single newline collapse into one
@@ -422,13 +475,14 @@ class TestCache:
 
     def test_cache_is_one_rolling_file_per_asset(self, tmp_path, monkeypatch):
         # A file-per-day scheme accumulates snapshots that can never be served
-        # (anything past MAX_STALE_DAYS is refused), so successive days must
-        # overwrite one file rather than pile up.
+        # (anything past MAX_STALE_DAYS is refused), so a later refetch must
+        # overwrite the one file rather than pile up.
         self._use_tmp_cache(tmp_path)
         monkeypatch.setattr(farside, "_request_html", lambda asset: BTC_HTML)
-        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-23")
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-23T00:00:00Z"))
         farside.get_etf_flow_data("BTC", "2026-07-09")
-        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-24")
+        # A day later, past the TTL: the second call refetches and overwrites.
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-24T00:00:00Z"))
         farside.get_etf_flow_data("BTC", "2026-07-09")
         assert [f for f in os.listdir(tmp_path) if f.startswith("farside_")] == ["farside_btc.json"]
 
@@ -495,7 +549,7 @@ class TestCache:
         # fetch failure it is treated as beyond the staleness cap and degrades,
         # rather than being served with an "age unknown" caveat.
         self._use_tmp_cache(tmp_path)
-        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-23")
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-23"))
         self._write_cache(tmp_path, fetched_at="not-a-date")
         monkeypatch.setattr(
             farside, "_request_html", mock.Mock(side_effect=requests.RequestException("boom"))
@@ -503,9 +557,11 @@ class TestCache:
         with pytest.raises(farside.FarsideError, match="cap"):
             farside.get_etf_flow_data("BTC", "2026-07-09")
 
-    def test_same_utc_day_reuses_cache(self, tmp_path, monkeypatch):
+    def test_within_ttl_reuses_cache(self, tmp_path, monkeypatch):
+        # A repeat call inside the CACHE_TTL_HOURS window is served from cache
+        # without a second fetch (the fetch throttle).
         self._use_tmp_cache(tmp_path)
-        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-23")
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-23T00:00:00Z"))
         calls = {"n": 0}
 
         def _fetch(asset):
@@ -515,9 +571,11 @@ class TestCache:
         monkeypatch.setattr(farside, "_request_html", _fetch)
         farside.get_etf_flow_data("BTC", "2026-07-09")
         farside.get_etf_flow_data("BTC", "2026-07-09")
-        assert calls["n"] == 1  # second call served from the same-day cache
+        assert calls["n"] == 1  # second call served from the within-TTL cache
 
-    def test_cross_utc_day_refetches(self, tmp_path, monkeypatch):
+    def test_past_ttl_refetches(self, tmp_path, monkeypatch):
+        # Once the cached snapshot is older than CACHE_TTL_HOURS, the next call
+        # refetches — so the intraday publication is not pinned for a whole day.
         self._use_tmp_cache(tmp_path)
         calls = {"n": 0}
 
@@ -526,15 +584,17 @@ class TestCache:
             return BTC_HTML
 
         monkeypatch.setattr(farside, "_request_html", _fetch)
-        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-23")
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-23T00:00:00Z"))
         farside.get_etf_flow_data("BTC", "2026-07-09")
-        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-24")
+        # CACHE_TTL_HOURS + 1 later: past the TTL, so this call refetches.
+        later = _at("2026-07-23T00:00:00Z") + timedelta(hours=farside.CACHE_TTL_HOURS + 1)
+        monkeypatch.setattr(farside, "_utc_now", lambda: later)
         farside.get_etf_flow_data("BTC", "2026-07-09")
         assert calls["n"] == 2
 
     def test_failure_without_cache_raises_and_writes_nothing(self, tmp_path, monkeypatch):
         self._use_tmp_cache(tmp_path)
-        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-23")
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-23"))
         monkeypatch.setattr(
             farside,
             "_request_html",
@@ -547,11 +607,11 @@ class TestCache:
     def test_failure_falls_back_to_stale_cache(self, tmp_path, monkeypatch):
         self._use_tmp_cache(tmp_path)
         # Day 1: successful fetch populates the cache.
-        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-23")
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-23T00:00:00Z"))
         monkeypatch.setattr(farside, "_request_html", lambda asset: BTC_HTML)
         farside.get_etf_flow_data("BTC", "2026-07-09")
         # Day 2: fetch fails -> stale fallback to day 1's snapshot.
-        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-24")
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-24T00:00:00Z"))
         monkeypatch.setattr(
             farside,
             "_request_html",
@@ -565,7 +625,7 @@ class TestCache:
         # Boundary: exactly MAX_STALE_DAYS old is within the cap.
         self._use_tmp_cache(tmp_path)
         self._write_cache(tmp_path, fetched_at="2026-07-01")
-        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-15")  # 14 days
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-15"))  # 14 days
         monkeypatch.setattr(
             farside, "_request_html", mock.Mock(side_effect=requests.RequestException("boom"))
         )
@@ -576,7 +636,7 @@ class TestCache:
         # Boundary: one day beyond the cap must refuse to serve.
         self._use_tmp_cache(tmp_path)
         self._write_cache(tmp_path, fetched_at="2026-07-01")
-        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-16")  # 15 days
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-16"))  # 15 days
         monkeypatch.setattr(
             farside, "_request_html", mock.Mock(side_effect=requests.RequestException("boom"))
         )
@@ -590,7 +650,7 @@ class TestCache:
         # blipped; it must not hide among warnings for up to the stale cap.
         self._use_tmp_cache(tmp_path)
         self._write_cache(tmp_path, fetched_at="2026-07-20")
-        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-22")
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-22"))
         monkeypatch.setattr(farside, "_request_html", lambda asset: "<html>nope</html>")
         with caplog.at_level(logging.DEBUG, logger=FARSIDE_LOGGER):
             farside.get_etf_flow_data("BTC", "2026-07-09")
@@ -601,7 +661,7 @@ class TestCache:
         # the escalation above stops meaning anything.
         self._use_tmp_cache(tmp_path)
         self._write_cache(tmp_path, fetched_at="2026-07-20")
-        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-22")
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-22"))
         monkeypatch.setattr(
             farside, "_request_html", mock.Mock(side_effect=requests.RequestException("boom"))
         )

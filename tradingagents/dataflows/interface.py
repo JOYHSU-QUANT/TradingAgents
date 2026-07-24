@@ -93,8 +93,16 @@ TOOLS_CATEGORIES = {
 
 # Configuring a category (or tool) to this sentinel switches it off entirely.
 # Keyless vendors have no equivalent of FRED's "unset the API key" escape hatch,
-# so without it the only way to stop calling a misbehaving vendor on a
-# long-running box is a code change and a redeploy.
+# so "none" is the mechanism for stopping a misbehaving vendor without deleting
+# its wiring.
+#
+# Reachability caveat: today this is settable only through the Python config
+# (DEFAULT_CONFIG / set_config). The Hyperliquid perp deployment builds its
+# engine config from a fixed key list and does not yet pipe ``data_vendors`` /
+# ``tool_vendors`` through (nor is there an env override), so on that long-running
+# box flipping a vendor to "none" still needs a code change + redeploy. Wiring
+# data_vendors into the perp engine config (or an env override) is a follow-up;
+# see the vendor-hygiene notes.
 DISABLED_VENDOR = "none"
 
 VENDOR_LIST = [

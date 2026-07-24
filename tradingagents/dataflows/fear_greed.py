@@ -145,6 +145,14 @@ def get_fear_greed_data(
     if look_back_days is None or look_back_days < 0:
         look_back_days = DEFAULT_LOOKBACK_DAYS
 
+    # Normalise curr_date BEFORE the lookahead filter below. strptime accepts
+    # non-zero-padded input ("2026-6-5"), which then compares wrong against the
+    # canonical ISO reading dates — '2026-12-31' <= '2026-6-5' is True — silently
+    # admitting future readings. Parse (rejecting garbage) and re-derive the
+    # canonical form. (farside.get_etf_flow_data carries the same guard.)
+    curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    curr_date = curr_dt.strftime("%Y-%m-%d")
+
     # Fetch enough to cover the window plus a 30-day-ago comparison point.
     limit = max(look_back_days, 30) + _FETCH_BUFFER_DAYS
     payload = _request(limit)
@@ -184,7 +192,6 @@ def get_fear_greed_data(
 
     latest = points[-1]
     latest_dt = datetime.strptime(latest["date"], "%Y-%m-%d")
-    curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
 
     # Data-recency caveat. A successful fetch says nothing about whether
     # alternative.me actually published a new reading: the API can be up and
@@ -217,8 +224,16 @@ def get_fear_greed_data(
         # span the number actually covers stays visible.
         target = (curr_dt - timedelta(days=days)).strftime("%Y-%m-%d")
         ref = _value_at_or_before(target)
-        if not ref or ref["date"] == latest["date"]:
+        if not ref:
+            # No reading reaches back to the target: a fetch-reach artifact (a
+            # backtest curr_date older than the fetch covers), harmless in live use.
             return "n/a (insufficient history)"
+        if ref["date"] == latest["date"]:
+            # The most recent reading IS the reference point — the series has not
+            # advanced past curr_date - N. That is a *frozen series*, not missing
+            # history, and (unlike the reach artifact) a live-data warning. Say so
+            # rather than collapsing both cases into one ambiguous string.
+            return f"n/a (no reading between then and {latest['date']}; series has not updated)"
         return f"{latest['value'] - ref['value']:+d} (from {ref['value']} on {ref['date']})"
 
     summary = (

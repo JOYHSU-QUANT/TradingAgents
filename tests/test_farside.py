@@ -415,13 +415,13 @@ class TestRender:
         # outage serves a stale cache whose newest row is ALSO lag-flagged. The
         # two caveats must not contradict each other: the STALE line says the
         # live refresh failed, so the lag line must not assert it succeeded.
-        # STALE age is fetch age (fetched_at vs today); lag is data age (newest
-        # row vs curr_date) — two different clocks, so pin today's.
-        monkeypatch.setattr(farside, "_utc_today", lambda: "2026-07-20")
+        # STALE age is fetch age (fetched_at vs now); lag is data age (newest
+        # row vs curr_date) — two different clocks, so pin now.
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-20"))
         out = self._render(
             "2026-07-20", snapshot=_snapshot(RECORDS, fetched_at="2026-07-14", stale=True)
         )
-        assert "STALE by 6 days" in out  # fetched 07-14, today 07-20
+        assert "STALE by 6 days" in out  # fetched 07-14, now 07-20
         assert "Data lag" in out  # newest row 07-09, curr_date 07-20
         assert "the fetch succeeded" not in out
         assert "the cached snapshot above is itself that old" in out
@@ -620,6 +620,22 @@ class TestCache:
         out = farside.get_etf_flow_data("BTC", "2026-07-09")
         assert "STALE by 1 day:" in out  # singular; 2026-07-24 minus fetched 2026-07-23
         assert "+1214.9" in out  # still shows the cached data
+
+    def test_same_day_stale_serve_shows_hours_not_zero_days(self, tmp_path, monkeypatch):
+        # The hourly TTL can serve a stale cache after a same-UTC-day refresh
+        # failure; the caveat must show hours, not a misleading "STALE by 0 days".
+        self._use_tmp_cache(tmp_path)
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-23T00:30:00Z"))
+        monkeypatch.setattr(farside, "_request_html", lambda asset: BTC_HTML)
+        farside.get_etf_flow_data("BTC", "2026-07-09")
+        # 7.5h later, still the same UTC day: past the TTL, refetch fails.
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-23T08:00:00Z"))
+        monkeypatch.setattr(
+            farside, "_request_html", mock.Mock(side_effect=requests.RequestException("boom"))
+        )
+        out = farside.get_etf_flow_data("BTC", "2026-07-09")
+        assert "STALE by 7.5 hours" in out
+        assert "STALE by 0 days" not in out
 
     def test_stale_cache_at_cap_is_still_served(self, tmp_path, monkeypatch):
         # Boundary: exactly MAX_STALE_DAYS old is within the cap.

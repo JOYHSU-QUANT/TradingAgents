@@ -440,6 +440,24 @@ def _days_stale(fetched_at: str) -> int | None:
     return (today - fetched_day).days
 
 
+def _humanize_age(fetched_at: str) -> str:
+    """Human-readable snapshot age for the STALE caveat and stale-serve logs.
+
+    Hour-granular under a day, day-granular beyond. The hourly TTL means a
+    stale-then-failed-refresh serve can now happen within the same UTC day, where
+    a plain day count would round to a misleading "0 days" — reading as nearly
+    current when the snapshot can be up to ~24h old. Reads the same ``_utc_now``
+    clock as the TTL so the displayed age tracks the freshness check.
+    """
+    hours = _cache_age_hours(fetched_at)
+    if hours is None:
+        return "an unknown age"
+    if hours < 24:
+        return f"{hours:.1f} hours"
+    days = int(hours // 24)
+    return f"{days} {_plural_days(days)}"
+
+
 def _cache_dir() -> str:
     cache_dir = get_config()["data_cache_dir"]
     os.makedirs(cache_dir, exist_ok=True)
@@ -559,21 +577,22 @@ def _load_flows(asset: str) -> _FlowSnapshot:
             # network-blip warnings for up to the stale cap. A RequestException is
             # an ordinary outage and stays at warning. (age is non-None here: the
             # None/over-cap cases already raised above.)
+            age_str = _humanize_age(fetched_at)
             if isinstance(e, FarsideError):
                 logger.error(
                     "Farside %s parse failed structurally (%s); serving stale cache "
-                    "(%s days old) — the scraper likely needs a fix",
+                    "(%s old) — the scraper likely needs a fix",
                     asset,
                     e,
-                    age,
+                    age_str,
                     exc_info=True,
                 )
             else:
                 logger.warning(
-                    "Farside %s fetch failed (%s); using stale cache (%s days old)",
+                    "Farside %s fetch failed (%s); using stale cache (%s old)",
                     asset,
                     e,
-                    age,
+                    age_str,
                 )
             return _FlowSnapshot(
                 records=cached["rows"],
@@ -701,17 +720,18 @@ def get_etf_flow_data(
     else:
         header_lines = [f"## Spot ETF Flows — {asset_key} (Farside, net US$m)"]
     if snapshot.stale:
-        # age is non-None here: _load_flows raises rather than returning
-        # stale=True when the age is unknown or beyond the cap.
-        age = _days_stale(snapshot.fetched_at)
+        # Hour-granular under a day: the hourly TTL can serve a stale cache after
+        # a same-UTC-day refresh failure, where a plain day count would render a
+        # misleading "STALE by 0 days" for a snapshot up to ~24h old.
+        age_str = _humanize_age(snapshot.fetched_at)
         # "refresh failed", not "fetch failed": stale=True is reached on BOTH a
         # network error (fetch really failed) and a structural parse break (the
         # fetch SUCCEEDED but the page could not be parsed). Asserting the fetch
         # failed would be false in the parse case — the mirror of the data-lag
         # honesty fix below.
         header_lines.append(
-            f"_STALE by {age} {_plural_days(age)}: live refresh failed (network error or a "
-            f"parser break); showing the last cached snapshot (fetched {snapshot.fetched_at}). "
+            f"_STALE by {age_str}: live refresh failed (network error or a parser break); "
+            f"showing the last cached snapshot (fetched {snapshot.fetched_at}). "
             f"Treat with caution._"
         )
     if not snapshot.issuers_named:

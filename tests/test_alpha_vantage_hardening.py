@@ -92,7 +92,17 @@ def test_lookahead_filter_drops_undated_reports():
 @pytest.mark.unit
 def test_lookahead_filter_leaves_data_untouched_on_unparseable_curr_date():
     # An unparseable curr_date cannot bound anything; the filter leaves the data
-    # untouched (matching the no-curr_date path) rather than dropping everything.
-    result = {"quarterlyReports": [{"fiscalDateEnding": "2026-03-31"}]}
-    out = _filter_reports_by_date(result, "not-a-date")
-    assert out["quarterlyReports"] == [{"fiscalDateEnding": "2026-03-31"}]
+    # untouched (matching the no-curr_date path) rather than filtering on it.
+    # The future row makes this discriminating: a digit-leading-but-invalid
+    # curr_date ("2026-13-45") would, under the OLD raw lexical compare, drop the
+    # 2099 row ("2099-01-01" <= "2026-13-45" is False) while keeping 2025 — so a
+    # kept 2099 row proves filtering was skipped entirely, not applied by luck.
+    result = {
+        "quarterlyReports": [
+            {"fiscalDateEnding": "2025-01-01"},
+            {"fiscalDateEnding": "2099-01-01"},
+        ]
+    }
+    out = _filter_reports_by_date(result, "2026-13-45")  # valid shape, impossible date
+    kept = [r["fiscalDateEnding"] for r in out["quarterlyReports"]]
+    assert kept == ["2025-01-01", "2099-01-01"]

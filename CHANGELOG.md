@@ -13,7 +13,7 @@ Breaking changes within the 0.x line are called out explicitly.
 - **Crypto spot-ETF flows and Fear & Greed vendors.** Two keyless news-analyst
   data sources, bound only for crypto assets: BTC/ETH US spot-ETF daily net
   flows scraped from Farside (`crypto_etf_flows` / `get_etf_flows`, one rolling
-  cache file per asset refreshed at most once per UTC day, with a stale-snapshot
+  cache file per asset refreshed at most once every 6 hours, with a stale-snapshot
   fallback capped at 14 days) and the alternative.me Crypto Fear & Greed Index
   (`crypto_sentiment` / `get_fear_greed`, uncached, one retry on a transient
   failure). Both are lookahead-safe, honour a trailing `look_back_days` window,

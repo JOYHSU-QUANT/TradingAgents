@@ -392,10 +392,6 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _utc_today() -> str:
-    return _utc_now().strftime("%Y-%m-%d")
-
-
 def _iso_now() -> str:
     """Current UTC instant as ``YYYY-MM-DDTHH:MM:SSZ`` for the cache fetched_at.
 
@@ -425,19 +421,20 @@ def _cache_age_hours(fetched_at: str) -> float | None:
 
 
 def _days_stale(fetched_at: str) -> int | None:
-    """Calendar days between a snapshot's fetched_at and the current UTC day.
+    """Whole elapsed days since a snapshot's fetched_at, or None if unknown.
 
-    Returns None when fetched_at is missing or unparseable, so an unknown age is
-    handled explicitly rather than assumed fresh or ancient.
+    Derived from ``_cache_age_hours`` (not an independent re-parse) so the
+    stale-cap decision, the TTL freshness check, and the displayed age all agree
+    on one parse and one clock: a stamp is readable by all three or by none.
+    Returns None when the stamp is missing/unparseable OR dated in the future
+    (a negative age from clock skew / a tampered file), so the cap treats such a
+    snapshot as beyond-cap rather than serving it forever or as "N days stale"
+    with a nonsense count.
     """
-    if not fetched_at:
+    hours = _cache_age_hours(fetched_at)
+    if hours is None or hours < 0:
         return None
-    try:
-        fetched_day = datetime.strptime(fetched_at[:10], "%Y-%m-%d")
-    except ValueError:
-        return None
-    today = datetime.strptime(_utc_today(), "%Y-%m-%d")
-    return (today - fetched_day).days
+    return int(hours // 24)
 
 
 def _humanize_age(fetched_at: str) -> str:
@@ -450,7 +447,10 @@ def _humanize_age(fetched_at: str) -> str:
     clock as the TTL so the displayed age tracks the freshness check.
     """
     hours = _cache_age_hours(fetched_at)
-    if hours is None:
+    if hours is None or hours < 0:
+        # Negative (future-dated stamp) is defensive: _load_flows degrades before
+        # serving such a snapshot, so this is not normally reached — but a "-12.0
+        # hours" label would be worse than admitting the age is unknown.
         return "an unknown age"
     if hours < 24:
         return f"{hours:.1f} hours"
@@ -560,9 +560,10 @@ def _load_flows(asset: str) -> _FlowSnapshot:
             age = _days_stale(fetched_at)
             # Refuse to serve a snapshot older than the cap: weeks-old flows
             # presented as the "latest day" are misleading, so degrade to the
-            # router sentinel instead. An unknown age (unparseable fetched_at) is
-            # treated as beyond the cap — the case where an unbounded-age serve is
-            # most likely — rather than served with an "age unknown" caveat.
+            # router sentinel instead. An unknown age (unparseable OR future-dated
+            # fetched_at — _days_stale returns None for both) is treated as beyond
+            # the cap, the case where an unbounded-age serve is most likely, rather
+            # than served with an "age unknown" / negative-age caveat.
             if age is None or age > MAX_STALE_DAYS:
                 stale_desc = (
                     "has an unparseable fetch date" if age is None else f"is {age} days stale"

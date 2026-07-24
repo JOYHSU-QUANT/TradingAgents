@@ -257,8 +257,9 @@ connection, and the analyst stops binding that tool at all. This is the only way
 to disable a keyless vendor, which has no API key to unset. Core data categories
 reject `"none"` rather than silently running without prices or fundamentals.
 
-Farside's once-per-day fetch throttle relies on `data_cache_dir` persisting
-between runs; pointing it at a temporary filesystem makes every call re-fetch.
+Farside's fetch throttle (a 6-hour cache TTL) relies on `data_cache_dir`
+persisting between runs; pointing it at a temporary filesystem makes every call
+re-fetch.
 
 ## Persistence and Recovery
 

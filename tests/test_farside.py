@@ -525,7 +525,7 @@ class TestCache:
         assert farside._read_cache(str(path)) is None
 
     def test_cache_without_fetched_at_is_ignored(self, tmp_path):
-        # fetched_at now drives both the same-day hit and the staleness cap, so a
+        # fetched_at now drives both the within-TTL hit and the staleness cap, so a
         # payload without it must be refetched rather than read as "age unknown".
         self._use_tmp_cache(tmp_path)
         path = tmp_path / "farside_btc.json"
@@ -551,6 +551,34 @@ class TestCache:
         self._use_tmp_cache(tmp_path)
         monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-23"))
         self._write_cache(tmp_path, fetched_at="not-a-date")
+        monkeypatch.setattr(
+            farside, "_request_html", mock.Mock(side_effect=requests.RequestException("boom"))
+        )
+        with pytest.raises(farside.FarsideError, match="cap"):
+            farside.get_etf_flow_data("BTC", "2026-07-09")
+
+    def test_malformed_timestamp_fetched_at_degrades(self, tmp_path, monkeypatch):
+        # A fetched_at whose date PREFIX is valid but whose suffix is malformed
+        # (e.g. missing the trailing Z) must be unknown-age to BOTH the cap and
+        # the display: they share one parse (_cache_age_hours), so it degrades
+        # rather than being served with an "STALE by an unknown age" caveat.
+        self._use_tmp_cache(tmp_path)
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-23"))
+        self._write_cache(tmp_path, fetched_at="2026-07-20T14:30:00")  # no trailing Z
+        monkeypatch.setattr(
+            farside, "_request_html", mock.Mock(side_effect=requests.RequestException("boom"))
+        )
+        with pytest.raises(farside.FarsideError, match="cap"):
+            farside.get_etf_flow_data("BTC", "2026-07-09")
+
+    def test_future_dated_fetched_at_degrades(self, tmp_path, monkeypatch):
+        # A future-dated stamp (clock skew / a tampered file) has a negative age.
+        # The TTL check already refuses to treat it as fresh; on a refetch failure
+        # the cap must also refuse it (negative age -> unknown -> beyond cap),
+        # never serving a self-contradictory "STALE by -N hours".
+        self._use_tmp_cache(tmp_path)
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-15T00:00:00Z"))
+        self._write_cache(tmp_path, fetched_at="2026-07-20T00:00:00Z")  # 5 days ahead
         monkeypatch.setattr(
             farside, "_request_html", mock.Mock(side_effect=requests.RequestException("boom"))
         )

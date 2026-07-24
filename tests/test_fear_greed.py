@@ -106,6 +106,19 @@ class TestWindow:
         assert "no readings within the 7-day window" in out
         assert "| 2026-05-01 |" in out  # the latest available reading is still shown
 
+    def test_zero_look_back_clamps_to_default_window(self):
+        # A hallucinated look_back_days=0 must fall back to the default window, not
+        # collapse to a 0-day window (which, unless a reading lands exactly on
+        # curr_date, degrades to the single-latest fallback). Symmetric with the
+        # None/negative clamp: the report is identical to the default render.
+        with mock.patch.object(fear_greed, "_request", return_value=_PAYLOAD):
+            zero = fear_greed.get_fear_greed_data("2026-07-23", 0)
+            default = fear_greed.get_fear_greed_data(
+                "2026-07-23", fear_greed.DEFAULT_LOOKBACK_DAYS
+            )
+        assert zero == default
+        assert "no readings within" not in zero
+
 
 @pytest.mark.unit
 class TestLookahead:

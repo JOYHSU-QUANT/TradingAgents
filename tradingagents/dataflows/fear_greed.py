@@ -140,9 +140,11 @@ def get_fear_greed_data(
         fetch is deliberately not widened to cover historical ``curr_date``s: this
         is a recent-window signal and live use has ``curr_date`` ≈ today.
     """
-    # A None or negative window falls back to the default rather than sizing a
-    # nonsensical fetch limit.
-    if look_back_days is None or look_back_days < 0:
+    # A None, zero, or negative window falls back to the default rather than
+    # sizing a nonsensical fetch limit. A 0-day window is especially degenerate
+    # here: unless a reading is dated exactly curr_date it collapses to the
+    # single-latest fallback. Symmetric with farside.get_etf_flow_data.
+    if look_back_days is None or look_back_days <= 0:
         look_back_days = DEFAULT_LOOKBACK_DAYS
 
     # Normalise curr_date BEFORE the lookahead filter below. strptime accepts

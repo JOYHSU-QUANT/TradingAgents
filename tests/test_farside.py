@@ -348,6 +348,17 @@ class TestRender:
         assert "| 2026-07-06 |" not in out  # outside the 2-day window
         assert "| 2026-07-08 |" in out  # inside the window
 
+    def test_zero_look_back_clamps_to_default_window(self):
+        # A hallucinated look_back_days=0 must fall back to the default window, not
+        # collapse to just curr_date's single row (dropping the cumulative signal
+        # to one day). Symmetric with the None/negative clamp: the report is
+        # byte-identical to the default render.
+        zero = self._render("2026-07-08", look_back_days=0)
+        default = self._render("2026-07-08", look_back_days=farside.DEFAULT_LOOKBACK_DAYS)
+        assert zero == default
+        assert f"**{farside.DEFAULT_LOOKBACK_DAYS}d cumulative net flow:**" in zero
+        assert "**0d cumulative net flow:**" not in zero
+
     def test_empty_window(self):
         out = self._render("2020-01-01")
         assert "No ETF flow rows on or before 2020-01-01" in out
@@ -587,6 +598,31 @@ class TestCache:
         path = self._write_cache(
             tmp_path,
             rows=[{"date": "2026-07-01", "issuers": {"IBIT": "N/A"}, "total": 0.0}],
+        )
+        assert farside._read_cache(str(path)) is None
+
+    def test_row_with_non_iso_date_is_ignored(self, tmp_path):
+        # The date is validated for canonical-ISO parseability, not just str: a
+        # corrupt "2026-07-19zzz" would pass an isinstance(str) check, become
+        # ``latest``, then crash the data-lag strptime(latest["date"]) deep in the
+        # report (degrading to a sentinel, losing the signal). A miss + refetch is
+        # the module's contract, so it is rejected at the cache boundary.
+        self._use_tmp_cache(tmp_path)
+        path = self._write_cache(
+            tmp_path,
+            rows=[{"date": "2026-07-19zzz", "issuers": {"IBIT": 1.0}, "total": 1.0}],
+        )
+        assert farside._read_cache(str(path)) is None
+
+    def test_row_with_non_zero_padded_date_is_ignored(self, tmp_path):
+        # A non-zero-padded "2026-7-1" parses but is NOT canonical: it sorts after
+        # "2026-07-20" in the lexical ``r["date"] <= curr_date`` window filter,
+        # silently mis-ordering the window. The parser only ever writes canonical
+        # dates, so a non-canonical one is a tampered file: reject it.
+        self._use_tmp_cache(tmp_path)
+        path = self._write_cache(
+            tmp_path,
+            rows=[{"date": "2026-7-1", "issuers": {"IBIT": 1.0}, "total": 1.0}],
         )
         assert farside._read_cache(str(path)) is None
 

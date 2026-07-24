@@ -511,6 +511,25 @@ def _is_finite_number(x: object) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
 
 
+def _is_iso_date(x: object) -> bool:
+    """True only for a canonical zero-padded ``YYYY-MM-DD`` date string.
+
+    The parser (`_parse_flow_date`) only ever writes canonical ISO dates, so a
+    cached row whose ``date`` does not round-trip through ``strptime`` is a
+    corrupt/tampered file, not something this module produced. Rejecting it at
+    the cache boundary — like the finite-number checks — keeps a bad date from
+    (a) mis-ordering the lexical ``r["date"] <= curr_date`` window filter (e.g. a
+    non-zero-padded "2026-6-5" sorts after "2026-07-20") and (b) crashing the
+    data-lag ``strptime(latest["date"])`` deep inside the report render.
+    """
+    if not isinstance(x, str):
+        return False
+    try:
+        return datetime.strptime(x, "%Y-%m-%d").strftime("%Y-%m-%d") == x
+    except ValueError:
+        return False
+
+
 def _read_cache(path: str) -> dict | None:
     """Return a fully-validated cached payload, or None if it cannot be trusted.
 
@@ -543,11 +562,12 @@ def _read_cache(path: str) -> dict | None:
     # file like ``"rows": [1, 2, 3]``) or a row missing/mistyping a field would
     # pass the list check above but crash later on ``r["date"]`` / ``r["total"]``
     # or render a "nan"/"inf" figure via ``latest["issuers"]``. Treat as a miss so
-    # a poisoned file is never served. Both ``total`` and every ``issuers`` value
-    # must be a finite number (see _is_finite_number: no bool, NaN, or Infinity).
+    # a poisoned file is never served. ``date`` must be a canonical ISO string
+    # (see _is_iso_date), and both ``total`` and every ``issuers`` value must be a
+    # finite number (see _is_finite_number: no bool, NaN, or Infinity).
     if not all(
         isinstance(r, dict)
-        and isinstance(r.get("date"), str)
+        and _is_iso_date(r.get("date"))
         and _is_finite_number(r.get("total"))
         and isinstance(r.get("issuers"), dict)
         and all(_is_finite_number(v) for v in r["issuers"].values())
@@ -730,9 +750,11 @@ def get_etf_flow_data(
         breakdown, and a recent daily-flow table (US$m). Zero/blank-total days
         neither break the streak nor count as flow sessions.
     """
-    # A None or nonsensical negative window (e.g. a hallucinated tool argument)
-    # falls back to the default rather than producing a self-contradictory report.
-    if look_back_days is None or look_back_days < 0:
+    # A None, zero, or nonsensical negative window (e.g. a hallucinated tool
+    # argument) falls back to the default rather than producing a degenerate
+    # report: a 0-day window would collapse to just curr_date's single row, whose
+    # figure the "Latest" line already carries. Symmetric with fear_greed.
+    if look_back_days is None or look_back_days <= 0:
         look_back_days = DEFAULT_LOOKBACK_DAYS
 
     # Normalise curr_date BEFORE any lexical date comparison below. strptime

@@ -29,6 +29,13 @@ REQUEST_TIMEOUT = 30
 # Default trailing window when the caller does not specify one.
 DEFAULT_LOOKBACK_DAYS = 30
 
+# Upper bound on the caller-supplied window. Unlike Farside (where look_back_days
+# only filters an already-scraped page), here it sizes the outbound ``limit``, so
+# a hallucinated tool argument like 100000 would issue a ~100045-row request,
+# doubled by the retry. Clamp it: this is a recent-window sentiment signal, so a
+# year is already far beyond any real use and no legitimate call is affected.
+MAX_LOOKBACK_DAYS = 365
+
 # Row cap for the rendered table, mirroring fred.MAX_ROWS.
 MAX_ROWS = 40
 
@@ -114,7 +121,9 @@ def get_fear_greed_data(
     Args:
         curr_date: End of the window (yyyy-mm-dd); readings dated after it are
             dropped so a past date never leaks a future sentiment reading.
-        look_back_days: Trailing window length; ``None`` uses DEFAULT_LOOKBACK_DAYS.
+        look_back_days: Trailing window length; ``None``/non-positive uses
+            DEFAULT_LOOKBACK_DAYS, and a value above MAX_LOOKBACK_DAYS is clamped
+            (it sizes the outbound fetch, so an untrusted argument stays bounded).
 
     Returns:
         A markdown report: the latest value and classification, the change vs 7
@@ -146,6 +155,10 @@ def get_fear_greed_data(
     # single-latest fallback. Symmetric with farside.get_etf_flow_data.
     if look_back_days is None or look_back_days <= 0:
         look_back_days = DEFAULT_LOOKBACK_DAYS
+    elif look_back_days > MAX_LOOKBACK_DAYS:
+        # An untrusted window must not size an unbounded outbound fetch (the
+        # `limit` below scales with it); clamp to a year, far beyond any real use.
+        look_back_days = MAX_LOOKBACK_DAYS
 
     # Normalise curr_date BEFORE the lookahead filter below. strptime accepts
     # non-zero-padded input ("2026-6-5"), which then compares wrong against the
@@ -159,6 +172,14 @@ def get_fear_greed_data(
     limit = max(look_back_days, 30) + _FETCH_BUFFER_DAYS
     payload = _request(limit)
     data = payload.get("data")
+    if not isinstance(data, list):
+        # A truthy non-list (e.g. {"data": true} / {"data": 42} from a CDN/WAF
+        # interception) would otherwise reach ``for row in data`` and raise a bare
+        # TypeError — outside this module's documented FearGreedError contract.
+        # Mirror the isinstance(payload, dict) shape guard in _request.
+        raise FearGreedError(
+            f"alternative.me returned a {type(data).__name__} for 'data', expected a list"
+        )
     if not data:
         raise FearGreedError("alternative.me returned no Fear & Greed data")
 
@@ -214,7 +235,7 @@ def get_fear_greed_data(
     window_start = (curr_dt - timedelta(days=look_back_days)).strftime("%Y-%m-%d")
     window_points = [p for p in points if p["date"] >= window_start]
 
-    def _value_at_or_before(target: str):
+    def _value_at_or_before(target: str) -> dict | None:
         prior = [p for p in points if p["date"] <= target]
         return prior[-1] if prior else None
 

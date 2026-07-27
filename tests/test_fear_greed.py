@@ -229,6 +229,20 @@ class TestRequestWiring:
             fear_greed.get_fear_greed_data("2026-07-23", 7)
         assert seen["limit"] == 30 + fear_greed._FETCH_BUFFER_DAYS
 
+    def test_look_back_days_clamped_before_sizing_the_fetch(self):
+        # An untrusted look_back_days must not size an unbounded outbound fetch
+        # (unlike Farside, where it only filters an already-scraped page): it is
+        # clamped to MAX_LOOKBACK_DAYS before the limit is computed.
+        seen = {}
+
+        def _capture(limit):
+            seen["limit"] = limit
+            return _PAYLOAD
+
+        with mock.patch.object(fear_greed, "_request", side_effect=_capture):
+            fear_greed.get_fear_greed_data("2026-07-23", 100000)
+        assert seen["limit"] == fear_greed.MAX_LOOKBACK_DAYS + fear_greed._FETCH_BUFFER_DAYS
+
     def test_retries_once_then_succeeds(self):
         response = mock.Mock()
         response.json.return_value = _PAYLOAD
@@ -283,6 +297,16 @@ class TestResilience:
         with (
             mock.patch.object(fear_greed, "_request", return_value=bad),
             pytest.raises(fear_greed.FearGreedError),
+        ):
+            fear_greed.get_fear_greed_data("2026-07-23", 30)
+
+    def test_non_list_data_raises_typed_error(self):
+        # A truthy non-list ({"data": true}, e.g. a CDN/WAF interception) would
+        # reach `for row in data` and raise a bare TypeError outside the module's
+        # FearGreedError contract; it must surface as the typed error instead.
+        with (
+            mock.patch.object(fear_greed, "_request", return_value={"data": True}),
+            pytest.raises(fear_greed.FearGreedError, match="expected a list"),
         ):
             fear_greed.get_fear_greed_data("2026-07-23", 30)
 

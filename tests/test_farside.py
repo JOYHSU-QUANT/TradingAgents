@@ -457,6 +457,22 @@ class TestRender:
         # The streak still reports the real flow history behind the blank row.
         assert "2-session inflow" in out
 
+    def test_older_unposted_row_in_window_is_not_rendered_as_zero_flow(self):
+        # The unposted-row honesty applies to every row, not just the latest: an
+        # older all-blank/all-zero row inside the window (a mid-history publishing
+        # gap) must also render "not yet posted", never a confident "+0.0" that
+        # reads as a genuine zero-flow day.
+        recs = [
+            {"date": "2026-07-01", "issuers": {"IBIT": 5.0}, "total": 5.0},
+            {"date": "2026-07-02", "issuers": {"IBIT": 0.0}, "total": 0.0},  # unposted, mid-window
+            {"date": "2026-07-03", "issuers": {"IBIT": 7.0}, "total": 7.0},  # latest, populated
+        ]
+        out = self._render("2026-07-03", snapshot=_snapshot(recs))
+        assert "| 2026-07-02 | not yet posted |" in out
+        assert "| 2026-07-02 | +0.0 |" not in out
+        # The latest, populated row still renders its real net figure.
+        assert "**Latest (2026-07-03):** +7.0 net" in out
+
     def test_data_lag_is_flagged_even_when_the_fetch_succeeded(self):
         # farside.co.uk can serve a parseable page that simply has not been
         # updated. The stale-cache machinery never sees this, so without the lag

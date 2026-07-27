@@ -723,6 +723,17 @@ def _plural_days(count: int) -> str:
     return "day" if count == 1 else "days"
 
 
+def _is_unposted_row(record: dict) -> bool:
+    """True for a row Farside created but has not populated (vs a genuine $0 day).
+
+    An unpopulated row parses to ``total == 0`` with every issuer cell blank/zero;
+    a genuine zero-NET day instead has non-zero issuer flows that offset to ~0, so
+    ``any(issuers)`` separates the two. Rendering an unposted row as a confident
+    "+0.0" reads as "demand stopped", so callers disclose it as "not yet posted".
+    """
+    return record["total"] == 0 and not any(record["issuers"].values())
+
+
 def get_etf_flow_data(
     asset: str,
     curr_date: str,
@@ -916,7 +927,7 @@ def get_etf_flow_data(
     # directly above a multi-session inflow streak reads as "flows just stopped",
     # and which of the two versions the analyst sees would depend only on what
     # time of day the cycle happened to fire.
-    latest_unposted = latest["total"] == 0 and not any(latest["issuers"].values())
+    latest_unposted = _is_unposted_row(latest)
     if latest_unposted:
         # Blank and genuine-zero cells are indistinguishable in Farside's HTML, so
         # state the ambiguity instead of picking one. What matters is not printing
@@ -947,10 +958,12 @@ def get_etf_flow_data(
         # sentence twice. Keep only what the table itself needs to explain.
         note = "\n_(table shows the latest available row)_\n"
     # Keep the table's Net Flow cell consistent with the Latest line above: an
-    # unpopulated latest row must not reappear as a confident "+0.0" in the densest
-    # part of the report (the row downstream agents most often re-quote).
+    # unpopulated row must not appear as a confident "+0.0" in the densest part of
+    # the report (the rows downstream agents most often re-quote). Applied to every
+    # row, not just the latest — an older unposted row (a mid-history publishing
+    # gap) carries the same blank-vs-genuine-$0 ambiguity as the latest one.
     def _net_cell(r: dict) -> str:
-        if latest_unposted and r["date"] == latest["date"]:
+        if _is_unposted_row(r):
             return "not yet posted"
         return f"{r['total']:+.1f}"
 

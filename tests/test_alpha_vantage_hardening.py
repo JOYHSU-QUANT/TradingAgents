@@ -4,9 +4,12 @@ Regressions for #990 (no request timeout -> can hang) and #991 (invalid-key
 responses mislabeled as rate limits and silently treated as transient), plus the
 fundamentals look-ahead filter (curr_date normalization + undated-row handling).
 """
+import json
+
 import pytest
 
 import tradingagents.dataflows.alpha_vantage_common as av
+import tradingagents.dataflows.alpha_vantage_fundamentals as avf
 from tradingagents.dataflows.alpha_vantage_fundamentals import _filter_reports_by_date
 
 
@@ -90,19 +93,57 @@ def test_lookahead_filter_drops_undated_reports():
 
 
 @pytest.mark.unit
-def test_lookahead_filter_leaves_data_untouched_on_unparseable_curr_date():
-    # An unparseable curr_date cannot bound anything; the filter leaves the data
-    # untouched (matching the no-curr_date path) rather than filtering on it.
-    # The future row makes this discriminating: a digit-leading-but-invalid
-    # curr_date ("2026-13-45") would, under the OLD raw lexical compare, drop the
-    # 2099 row ("2099-01-01" <= "2026-13-45" is False) while keeping 2025 — so a
-    # kept 2099 row proves filtering was skipped entirely, not applied by luck.
+def test_lookahead_filter_raises_on_unparseable_curr_date():
+    # A present-but-unparseable curr_date must fail CLOSED (raise), not silently
+    # return unfiltered reports: this backs a core fundamentals tool, so a broken
+    # point-in-time bound leaking future data must be loud, matching farside /
+    # fear_greed. ("2026-13-45" is a valid shape but an impossible date.)
     result = {
         "quarterlyReports": [
             {"fiscalDateEnding": "2025-01-01"},
             {"fiscalDateEnding": "2099-01-01"},
         ]
     }
-    out = _filter_reports_by_date(result, "2026-13-45")  # valid shape, impossible date
-    kept = [r["fiscalDateEnding"] for r in out["quarterlyReports"]]
-    assert kept == ["2025-01-01", "2099-01-01"]
+    with pytest.raises(ValueError, match="look-ahead guard"):
+        _filter_reports_by_date(result, "2026-13-45")
+
+
+@pytest.mark.unit
+def test_get_balance_sheet_filters_future_reports_through_the_real_path(monkeypatch):
+    # Regression: the look-ahead filter must run on the REAL _make_api_request
+    # return (a JSON *string*), not only when handed a dict. An earlier version
+    # type-checked isinstance(result, dict) on this always-str value, so the guard
+    # silently never fired in production while its dict-level unit tests passed.
+    body = json.dumps(
+        {
+            "symbol": "AAPL",
+            "quarterlyReports": [
+                {"fiscalDateEnding": "2026-03-31", "totalAssets": "1"},  # past -> kept
+                {"fiscalDateEnding": "2026-12-31", "totalAssets": "2"},  # future -> dropped
+            ],
+        }
+    )
+    monkeypatch.setattr(avf, "_make_api_request", lambda function_name, params: body)
+    out = avf.get_balance_sheet("AAPL", curr_date="2026-06-05")
+    parsed = json.loads(out)
+    kept = [r["fiscalDateEnding"] for r in parsed["quarterlyReports"]]
+    assert kept == ["2026-03-31"]
+
+
+@pytest.mark.unit
+def test_get_balance_sheet_without_curr_date_is_unfiltered(monkeypatch):
+    # No point-in-time bound: the raw response text is returned untouched (not even
+    # re-serialized), preserving the pre-filter behaviour for date-less callers.
+    body = '{"symbol": "AAPL", "quarterlyReports": [{"fiscalDateEnding": "2099-01-01"}]}'
+    monkeypatch.setattr(avf, "_make_api_request", lambda function_name, params: body)
+    assert avf.get_balance_sheet("AAPL") == body
+
+
+@pytest.mark.unit
+def test_get_balance_sheet_raises_on_unparseable_curr_date(monkeypatch):
+    # Fail-closed end to end: a bad curr_date through the getter raises rather than
+    # serving unfiltered reports.
+    body = '{"symbol": "AAPL", "quarterlyReports": [{"fiscalDateEnding": "2025-01-01"}]}'
+    monkeypatch.setattr(avf, "_make_api_request", lambda function_name, params: body)
+    with pytest.raises(ValueError, match="look-ahead guard"):
+        avf.get_balance_sheet("AAPL", curr_date="not-a-date")

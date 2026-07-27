@@ -20,7 +20,12 @@ four §20.3 ``*_test_passed`` booleans.
 
 Design: each test is a thin orchestration over the injected
 :class:`SmokeContext` — the signed client for the wire actions, a ``mark_price``
-seam for sizing, and a ``run_recovery`` seam for the restart tests (15–17). The
+seam for sizing, and a ``run_recovery`` seam for the restart tests (15–17) and
+the pre-flight. A real run whose selection places probe orders first runs ONE
+passing §19.1 recovery through that seam (the signed client's own order gate
+fail-closes on flags only a recovery raises), books every IOC probe as an
+``orders`` row so its fill reconciles like any other money, and disarms the
+kill switch on exit whenever the pre-flight or a switch-touching test armed it. The
 CLI wires those to the real components; the unit tests wire fakes, so the
 harness (sequencing, recording, gate, dry-run, cleanup, error containment) is
 verifiable offline while the real testnet exercise stays the operator's step
@@ -51,6 +56,7 @@ __all__ = [
     "SMOKE_TESTS",
     "SMOKE_TEST_KEYS",
     "SmokeContext",
+    "SmokePreflightError",
     "SmokeStepResult",
     "SmokeTest",
     "SmokeTestRunner",
@@ -107,15 +113,41 @@ assert len(_BY_KEY) == len(SMOKE_TESTS), "SMOKE_TESTS keys must be unique"
 # The tests whose execution touches the account-wide dead man's switch: the
 # three restart tests (their §19.1 recovery ARMS the scheduleCancel and never
 # clears it) and the kill-switch test itself (arms/refreshes before clearing).
-# Only a run that executed one of these needs a disarm on exit — a run that ran
-# none never armed anything, so it must NOT fire an account-wide clear that could
-# wipe a concurrently-running ``live --loop``'s own arm on the same wallet.
+# A run arms the switch either through one of these OR through the pre-flight
+# recovery an order-placing selection triggers (see :data:`_ORDER_PLACING_TESTS`);
+# only such a run disarms on exit — one that armed nothing must NOT fire an
+# account-wide clear that could wipe a concurrently-running ``live --loop``'s
+# own arm on the same wallet.
 _KILL_SWITCH_TESTS: frozenset[str] = frozenset(
     {
         "kill_switch_arm_refresh",
         "restart_reconciliation",
         "startup_with_existing_position",
         "startup_with_stale_open_order",
+    }
+)
+
+# The tests that place a probe order on the wire. The signed client's own
+# §4.1 order gate fail-closes on ``startup_reconciliation_passed`` /
+# ``kill_switch_active`` — flags only a real §19.1 recovery raises — so a real
+# run that selects any of these must run the pre-flight recovery first (see
+# :meth:`SmokeTestRunner._preflight_recovery`); a selection without them (e.g.
+# ``--only`` the restart tests, which run recovery themselves) skips it.
+# ``slice_order_status`` only queries; tests 1/2/14 ride the base
+# exchange-action gate, which needs neither runtime flag.
+_ORDER_PLACING_TESTS: frozenset[str] = frozenset(
+    {
+        "slice_order_submit",
+        "slice_plan_cancel",
+        "multi_slice_fill",
+        "reduce_only_close",
+        "stop_loss_create",
+        "stop_loss_modify",
+        "stop_loss_cancel",
+        "take_profit_create",
+        "take_profit_modify",
+        "take_profit_cancel",
+        "emergency_close",
     }
 )
 
@@ -171,6 +203,16 @@ class _SmokeAbort(Exception):
     """
 
 
+class SmokePreflightError(Exception):
+    """The pre-flight §19.1 recovery failed — the suite never started.
+
+    Raised out of :meth:`SmokeTestRunner.run` BEFORE any test executes (so no
+    verdict is recorded): probe orders may not go on the wire until one real
+    recovery has passed on the run. The CLI reports it as a gate-not-satisfied
+    outcome; the operator fixes the run state and re-runs.
+    """
+
+
 class SmokeTestRunner:
     """Runs the §20.2 checklist against one run, recording each verdict.
 
@@ -183,6 +225,11 @@ class SmokeTestRunner:
         self.ctx = ctx
         # Cross-test handles within one run() (test 3 → 4 share a cloid).
         self._last_submit: dict[str, str] | None = None
+        # Monotonic per-runner counter folded into every tag: cloid uniqueness
+        # must not depend on the clock advancing between two probes (a frozen
+        # test clock — or two real sends in one microsecond — would collide on
+        # the orders.cloid_hex UNIQUE index).
+        self._tag_seq = 0
         # Set True if the end-of-suite kill-switch disarm was attempted and
         # FAILED — the CLI surfaces it as a prominent operator warning (the
         # wallet may still hold an armed scheduleCancel).
@@ -200,15 +247,25 @@ class SmokeTestRunner:
         leaves every completed verdict durable.
         """
         selected = self._select(only)
-        # Only a run that executed a switch-touching test armed anything, so only
-        # then does it disarm on exit — a run that ran none must NOT fire an
-        # account-wide clear that could wipe a concurrent ``live --loop``'s own
-        # arm (Q2 + exit-check finding, 2026-07-27). Keyed off ``selected`` (not
-        # ``executed``) so a mid-suite crash still disarms what a restart test's
-        # recovery may already have armed.
-        arms_kill_switch = any(t.key in _KILL_SWITCH_TESTS for t in selected)
+        # A real run whose selection places probe orders must run one passing
+        # §19.1 recovery first: the signed client's own order gate fail-closes on
+        # the two runtime flags only a recovery (plus the kill-switch arm inside
+        # it) raises, so without this every order-placing test is rejected by the
+        # run's own gate (review round 2026-07-27).
+        needs_preflight = not self.ctx.dry_run and any(
+            t.key in _ORDER_PLACING_TESTS for t in selected
+        )
+        # Only a run that armed the switch disarms on exit — via the pre-flight
+        # recovery or a switch-touching test; a run that armed nothing must NOT
+        # fire an account-wide clear that could wipe a concurrent ``live
+        # --loop``'s own arm (Q2 + exit-check finding, 2026-07-27). Keyed off
+        # ``selected`` (not ``executed``) so a mid-suite crash still disarms what
+        # the pre-flight or a restart test's recovery may already have armed.
+        arms_kill_switch = needs_preflight or any(t.key in _KILL_SWITCH_TESTS for t in selected)
         executed: list[SmokeTest] = []
         try:
+            if needs_preflight:
+                self._preflight_recovery()
             for test in selected:
                 result = self._execute(test)
                 self._record(test, result)
@@ -266,14 +323,40 @@ class SmokeTestRunner:
                 executed_at=self.ctx.now(),
             )
 
-    def _disarm_kill_switch(self) -> None:
-        """Clear the dead man's switch a switch-touching test armed (§18).
+    def _preflight_recovery(self) -> None:
+        """One passing §19.1 recovery before any probe order (decision 2026-07-27).
 
-        Called only when the run executed a switch-touching test (see
-        :data:`_KILL_SWITCH_TESTS`): the restart tests' §19.1 recovery ARMS the
-        account-wide scheduleCancel and never clears it, so without this the suite
-        would exit leaving the wallet with an armed scheduleCancel that fires
-        ~``kill_switch_deadline`` later and cancels every resting order. Real runs
+        Run only when the selection contains an order-placing test (see
+        :data:`_ORDER_PLACING_TESTS`): the recovery raises the gate's
+        ``startup_reconciliation_passed`` / ``kill_switch_active`` flags (arming
+        the switch — the exit disarm covers it) and, as a side effect, proves the
+        true startup ordering — recovery before any order — once per invocation.
+        A failure aborts the whole suite with :class:`SmokePreflightError` and
+        records no verdict: the run is not in a state where probe orders belong
+        on the wire.
+        """
+        if self.ctx.run_recovery is None:
+            raise SmokePreflightError(
+                "no run_recovery seam wired — the order-placing tests need the "
+                "pre-flight §19.1 recovery (the CLI supplies it; a bare context cannot)"
+            )
+        result = self.ctx.run_recovery()
+        if not getattr(result, "passed", False):
+            raise SmokePreflightError(
+                "pre-flight §19.1 recovery did not pass — the run is not in a clean "
+                "state to place probe orders (inspect the recovery log / safe-mode "
+                "status, fix the run, and re-run the suite)"
+            )
+        logger.info("smoke pre-flight: §19.1 recovery passed — order gate flags are up")
+
+    def _disarm_kill_switch(self) -> None:
+        """Clear the dead man's switch the pre-flight or a switch test armed (§18).
+
+        Called only when the run armed the switch (pre-flight recovery, or a
+        switch-touching test per :data:`_KILL_SWITCH_TESTS`): a §19.1 recovery
+        ARMS the account-wide scheduleCancel and never clears it, so without this
+        the suite would exit leaving the wallet with an armed scheduleCancel that
+        fires ~``kill_switch_deadline`` later and cancels every resting order. Real runs
         only (a dry run placed no wire actions and carries no signed client);
         best-effort — a failed disarm is logged and recorded on
         :attr:`kill_switch_disarm_failed` (never raised: the verdicts are already
@@ -294,14 +377,15 @@ class SmokeTestRunner:
 
     # -- shared helpers ---------------------------------------------------
 
-    def _register_cloid(self, *, role: str, tag: str, slice_index: int = 0) -> str:
-        """Derive a unique, attributable cloid for a smoke order and register it.
+    def _register_cloid(self, *, role: str, tag: str, slice_index: int = 0) -> tuple[str, str]:
+        """Derive a unique, attributable cloid pair for a smoke order and register it.
 
         ``tag`` (a per-execution marker, e.g. the wall-clock stamp) keeps a
         re-run's cloid distinct from a prior run's so the exchange never sees a
         reused cloid_hex, while the §19.3 reverse lookup still resolves every
         smoke order to this run (bot-owned). Registered before the send, exactly
-        as the live submit path does (§8.3 rule 1).
+        as the live submit path does (§8.3 rule 1). Returns
+        ``(cloid_logical, cloid_hex)`` — the §8.2 two-layer id travels together.
         """
         logical = cloid_logical(
             prefix=self.ctx.owner_prefix,
@@ -324,12 +408,73 @@ class SmokeTestRunner:
                 order_role=role,
                 created_at=self.ctx.now(),
             )
-        return hex_
+        return logical, hex_
+
+    def _record_probe_order(
+        self,
+        ack: Any,
+        *,
+        cloid_logical: str,
+        cloid_hex_value: str,
+        role: str,
+        side: str,
+        qty: Decimal,
+        price: Decimal,
+        reduce_only: bool = False,
+    ) -> None:
+        """Book an IOC probe locally so its fill (if any) can be applied (§14).
+
+        A probe fill is real exchange money on this run: without an ``orders``
+        row the fill backfill can never attach it (the §14 oid→order mapping),
+        filing a permanent, unstampable ``fill_unmapped`` case that turns every
+        later §19.1 recovery unclean (decision 2026-07-27). Only IOC probes are
+        booked — an IOC is terminal at the ack (filled or canceled, never
+        resting), so the row can never trip the §12.3 open-order lane. Trigger
+        probes are NOT booked: they rest far from the mark and are cancelled
+        in-test, and a stranded one is backfilled bot-owned by the reconciler's
+        own orphan lane — a local "open" row whose cancel succeeded would
+        instead file ``order_missing_on_exchange``. An error ack booked nothing
+        on the exchange (no oid) — nothing to book here either.
+        """
+        if ack.exchange_order_id is None:
+            return
+        filled = ack.filled_size or Decimal(0)
+        status = "filled" if filled > 0 else "canceled"
+        with self.ctx.db.transaction() as conn:
+            repo.insert_order(
+                conn,
+                # Deterministic and collision-free, mirroring the reconciler's
+                # orphan lane: one probe row per cloid.
+                order_id=f"smoke|{cloid_hex_value}",
+                mode="live",
+                run_id=self.ctx.run_id,
+                symbol=self.ctx.coin,
+                order_role=role,
+                side=side,
+                order_type="ioc_limit",
+                qty=qty,
+                filled_qty=filled,
+                remaining_qty=qty - filled,
+                status=status,
+                status_reason="smoke_probe",
+                price=price,
+                reduce_only=reduce_only,
+                cloid_logical=cloid_logical,
+                cloid_hex=cloid_hex_value,
+                exchange_order_id=ack.exchange_order_id,
+                exchange_status=status,
+                exchange_raw_status=ack.status,
+                is_bot_owned=True,
+                timestamp=self.ctx.now(),
+            )
 
     def _tag(self) -> str:
-        # A whitespace-free, per-execution marker for cloid uniqueness. The
-        # cloid segment guard rejects spaces, so use the compact ISO basic form.
-        return self.ctx.now().strftime("%Y%m%dT%H%M%S%f")
+        # A whitespace-free, per-execution marker for cloid uniqueness: wall
+        # clock (compact ISO basic form — the cloid segment guard rejects
+        # spaces) plus the runner-scoped sequence number, so two probes in the
+        # same instant still derive distinct cloids.
+        self._tag_seq += 1
+        return f"{self.ctx.now().strftime('%Y%m%dT%H%M%S%f')}-{self._tag_seq}"
 
     def _round_price(self, raw: Decimal) -> Decimal:
         step = self.ctx.tick_size
@@ -376,15 +521,25 @@ class SmokeTestRunner:
     def _test_slice_order_submit(self) -> SmokeStepResult:
         # A far-below-mark IOC buy: the wire action round-trips but never fills
         # (so nothing is left to clean up) — a pure "can we submit a slice" test.
-        cloid = self._register_cloid(role="entry", tag=f"submit-{self._tag()}")
+        logical, cloid = self._register_cloid(role="entry", tag=f"submit-{self._tag()}")
+        size = self._probe_size()
         mark = self.ctx.mark_price()
         price = self._round_price(mark * Decimal("0.5"))
         ack = self.ctx.signed.place_ioc_limit(
             coin=self.ctx.coin,
             is_buy=True,
-            size=self._probe_size(),
+            size=size,
             limit_price=price,
             cloid_hex=cloid,
+        )
+        self._record_probe_order(
+            ack,
+            cloid_logical=logical,
+            cloid_hex_value=cloid,
+            role="entry",
+            side="buy",
+            qty=size,
+            price=price,
         )
         # A far IOC that does not cross returns 'error'/'not filled' from some
         # venues; what the test proves is that the ACTION reached the matching
@@ -408,10 +563,10 @@ class SmokeTestRunner:
         # trigger order, so a far reduce-only SL is placed then cancelled — the
         # same cancel-by-cloid wire action the engine uses to abort a plan's
         # resting orders.
-        cloid = self._register_cloid(role="cleanup_cancel", tag=f"cancel-{self._tag()}")
-        mark = self.ctx.mark_price()
-        trigger = self._round_price(mark * Decimal("0.5"))
-        limit = self._round_price(mark * Decimal("0.49"))
+        _, cloid = self._register_cloid(role="cleanup_cancel", tag=f"cancel-{self._tag()}")
+        # The same "so far below mark it never fires" rule every SL probe uses —
+        # one encoding, so a retune of the margin cannot drift between tests.
+        trigger, limit = self._trigger_prices("sl")
         ack = self.ctx.signed.place_trigger_order(
             coin=self.ctx.coin,
             is_buy=True,
@@ -437,13 +592,24 @@ class SmokeTestRunner:
         marketable = self._round_price(mark * Decimal("1.01"))
         filled = Decimal(0)
         for i in range(2):
-            cloid = self._register_cloid(role="entry", tag=f"fill-{self._tag()}", slice_index=i)
+            logical, cloid = self._register_cloid(
+                role="entry", tag=f"fill-{self._tag()}", slice_index=i
+            )
             ack = self.ctx.signed.place_ioc_limit(
                 coin=self.ctx.coin,
                 is_buy=True,
                 size=size,
                 limit_price=marketable,
                 cloid_hex=cloid,
+            )
+            self._record_probe_order(
+                ack,
+                cloid_logical=logical,
+                cloid_hex_value=cloid,
+                role="entry",
+                side="buy",
+                qty=size,
+                price=marketable,
             )
             self._require_accepted(ack, f"slice {i}")
             if ack.filled_size is not None:
@@ -459,35 +625,71 @@ class SmokeTestRunner:
     def _test_reduce_only_close(self) -> SmokeStepResult:
         # Open a small long, then close it with a single aggressive reduce-only
         # IOC (§9.4 close shape). Verifies the reduce-only close fills.
-        size = self._probe_size()
-        mark = self.ctx.mark_price()
-        open_cloid = self._register_cloid(role="entry", tag=f"close-open-{self._tag()}")
-        open_ack = self.ctx.signed.place_ioc_limit(
-            coin=self.ctx.coin,
-            is_buy=True,
-            size=size,
-            limit_price=self._round_price(mark * Decimal("1.01")),
-            cloid_hex=open_cloid,
+        opened = self._open_probe_long(
+            tag=f"close-open-{self._tag()}",
+            what="close-test entry",
+            no_fill="entry did not fill — nothing to reduce-only close",
         )
-        self._require_accepted(open_ack, "close-test entry")
-        opened = open_ack.filled_size or Decimal(0)
-        if opened <= 0:
-            raise _SmokeAbort("entry did not fill — nothing to reduce-only close")
         close_ack = self._reduce_only_close(opened)
         self._require_accepted(close_ack, "reduce-only close")
         return SmokeStepResult("passed", detail=f"opened {opened} and reduce-only closed it")
 
-    def _reduce_only_close(self, size: Decimal) -> Any:
-        cloid = self._register_cloid(role="close", tag=f"reduce-{self._tag()}")
+    def _open_probe_long(self, *, tag: str, what: str, no_fill: str) -> Decimal:
+        """Open the small probe long the close-shaped tests (7 / 18) start from.
+
+        One encoding of the open leg — marketable price offset, fill detection,
+        booking — so the two tests that share this precondition can never drift
+        apart. Returns the filled size (> 0), or raises.
+        """
+        size = self._probe_size()
         mark = self.ctx.mark_price()
-        return self.ctx.signed.place_ioc_limit(
+        price = self._round_price(mark * Decimal("1.01"))
+        logical, cloid = self._register_cloid(role="entry", tag=tag)
+        ack = self.ctx.signed.place_ioc_limit(
+            coin=self.ctx.coin,
+            is_buy=True,
+            size=size,
+            limit_price=price,
+            cloid_hex=cloid,
+        )
+        self._record_probe_order(
+            ack,
+            cloid_logical=logical,
+            cloid_hex_value=cloid,
+            role="entry",
+            side="buy",
+            qty=size,
+            price=price,
+        )
+        self._require_accepted(ack, what)
+        opened = ack.filled_size or Decimal(0)
+        if opened <= 0:
+            raise _SmokeAbort(no_fill)
+        return opened
+
+    def _reduce_only_close(self, size: Decimal) -> Any:
+        logical, cloid = self._register_cloid(role="close", tag=f"reduce-{self._tag()}")
+        mark = self.ctx.mark_price()
+        price = self._round_price(mark * Decimal("0.99"))
+        ack = self.ctx.signed.place_ioc_limit(
             coin=self.ctx.coin,
             is_buy=False,
             size=size,
-            limit_price=self._round_price(mark * Decimal("0.99")),
+            limit_price=price,
             cloid_hex=cloid,
             reduce_only=True,
         )
+        self._record_probe_order(
+            ack,
+            cloid_logical=logical,
+            cloid_hex_value=cloid,
+            role="close",
+            side="sell",
+            qty=size,
+            price=price,
+            reduce_only=True,
+        )
+        return ack
 
     def _best_effort_close(self, size: Decimal) -> str | None:
         """Flatten a probe position; return a note if the close did NOT succeed.
@@ -548,7 +750,7 @@ class SmokeTestRunner:
         return trigger, limit
 
     def _trigger_create(self, tpsl: str, role: str, label: str) -> SmokeStepResult:
-        cloid = self._register_cloid(role=role, tag=f"{tpsl}-create-{self._tag()}")
+        _, cloid = self._register_cloid(role=role, tag=f"{tpsl}-create-{self._tag()}")
         trigger, limit = self._trigger_prices(tpsl)
         ack = self.ctx.signed.place_trigger_order(
             coin=self.ctx.coin,
@@ -568,7 +770,7 @@ class SmokeTestRunner:
         return SmokeStepResult("passed", detail=detail)
 
     def _trigger_modify(self, tpsl: str, role: str, label: str) -> SmokeStepResult:
-        create_cloid = self._register_cloid(role=role, tag=f"{tpsl}-mod-a-{self._tag()}")
+        _, create_cloid = self._register_cloid(role=role, tag=f"{tpsl}-mod-a-{self._tag()}")
         trigger, limit = self._trigger_prices(tpsl)
         created = self.ctx.signed.place_trigger_order(
             coin=self.ctx.coin,
@@ -580,7 +782,7 @@ class SmokeTestRunner:
             cloid_hex=create_cloid,
         )
         self._require_accepted(created, f"{label} modify (initial place)")
-        modify_cloid = self._register_cloid(role=role, tag=f"{tpsl}-mod-b-{self._tag()}")
+        _, modify_cloid = self._register_cloid(role=role, tag=f"{tpsl}-mod-b-{self._tag()}")
         # Nudge the trigger one tick — §17.4 modify-before-cancel updates in place.
         if tpsl == "tp":
             new_trigger, new_limit = trigger + self.ctx.tick_size, limit + self.ctx.tick_size
@@ -605,7 +807,7 @@ class SmokeTestRunner:
 
     def _trigger_cancel(self, role: str, label: str) -> SmokeStepResult:
         tpsl = "sl" if role == "stop_loss" else "tp"
-        cloid = self._register_cloid(role=role, tag=f"{tpsl}-cancel-{self._tag()}")
+        _, cloid = self._register_cloid(role=role, tag=f"{tpsl}-cancel-{self._tag()}")
         trigger, limit = self._trigger_prices(tpsl)
         placed = self.ctx.signed.place_trigger_order(
             coin=self.ctx.coin,
@@ -686,29 +888,34 @@ class SmokeTestRunner:
         # position. Open a small long, then close it with the emergency-close
         # wire shape (protective, reduce-only) so the escalation path's terminal
         # action is proven end-to-end.
-        size = self._probe_size()
-        mark = self.ctx.mark_price()
-        open_cloid = self._register_cloid(role="entry", tag=f"emrg-open-{self._tag()}")
-        open_ack = self.ctx.signed.place_ioc_limit(
-            coin=self.ctx.coin,
-            is_buy=True,
-            size=size,
-            limit_price=self._round_price(mark * Decimal("1.01")),
-            cloid_hex=open_cloid,
+        opened = self._open_probe_long(
+            tag=f"emrg-open-{self._tag()}",
+            what="emergency-close entry",
+            no_fill="entry did not fill — nothing to emergency-close",
         )
-        self._require_accepted(open_ack, "emergency-close entry")
-        opened = open_ack.filled_size or Decimal(0)
-        if opened <= 0:
-            raise _SmokeAbort("entry did not fill — nothing to emergency-close")
-        close_cloid = self._register_cloid(role="emergency_close", tag=f"emrg-{self._tag()}")
+        mark = self.ctx.mark_price()
+        close_price = self._round_price(mark * Decimal("0.97"))
+        close_logical, close_cloid = self._register_cloid(
+            role="emergency_close", tag=f"emrg-{self._tag()}"
+        )
         close_ack = self.ctx.signed.place_ioc_limit(
             coin=self.ctx.coin,
             is_buy=False,
             size=opened,
-            limit_price=self._round_price(mark * Decimal("0.97")),
+            limit_price=close_price,
             cloid_hex=close_cloid,
             reduce_only=True,
             protective=True,
+        )
+        self._record_probe_order(
+            close_ack,
+            cloid_logical=close_logical,
+            cloid_hex_value=close_cloid,
+            role="emergency_close",
+            side="sell",
+            qty=opened,
+            price=close_price,
+            reduce_only=True,
         )
         self._require_accepted(close_ack, "emergency close")
         return SmokeStepResult(

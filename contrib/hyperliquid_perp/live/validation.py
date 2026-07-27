@@ -38,13 +38,16 @@ duplicate applies, a position or replay mismatch) AND a safety-invariant breach
 that is not itself store corruption (an unprotected window — including one opened
 by a deliberate ``stop_loss_repair_blocked`` gate pause, which still leaves the
 position unprotected, §20.3: unprotected seconds must be 0 — a refresh rate below
-99%, a smoke test that ran and FAILED, or — mainnet_tiny — an unresolved
-reconciliation case or a breached daily-loss cap). A run that is merely short of
-the gate (< 30 cycles / orders, smoke tests not yet run) lands in ``shortfalls``
+99% on EITHER profile, a smoke test that ran and FAILED, or — mainnet_tiny — an
+unresolved reconciliation case or a breached daily-loss cap). A run that is
+merely short of the gate (< 30 cycles / orders, smoke tests or kill-switch
+refreshes not yet run) lands in ``shortfalls``
 → exit 4 ("keep running / run the smoke suite"). All conditions met → ``live_ready`` → exit 0. Non-gating
 completeness signals — emergency closes during cycles (§21.4's "no emergency
-close caused by bot bug" is not machine-decidable), daily-loss episodes on
-testnet — surface as ``warnings``, never gating.
+close caused by bot bug" is not machine-decidable), daily-loss episodes and open
+manual reconciliation cases on testnet, and the mainnet reminder that §21.4's
+manual shutdown/restart item is operator-confirmed only — surface as
+``warnings``, never gating.
 """
 
 from __future__ import annotations
@@ -59,7 +62,7 @@ from ..paper import accounting
 from ..paper.scheduler import parse_instant
 from ..persistence import repository as repo
 from ..persistence.db import Database
-from .smoke import smoke_gate_report
+from .smoke import SMOKE_TEST_KEYS, smoke_gate_report
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +94,13 @@ _RESTART_KEY = "restart_reconciliation"
 _EMERGENCY_KEY = "emergency_close"
 _EXISTING_POSITION_KEY = "startup_with_existing_position"
 _STALE_ORDER_KEY = "startup_with_stale_open_order"
+# These literals are validation's own copy of smoke-registry identities, and
+# ``_passed()`` reads "absent from every non-passed bucket" as True — so a key
+# renamed in SMOKE_TESTS without this file would silently report its acceptance
+# boolean as passed forever. Fail at import, not in a mainnet-facing report.
+assert {_RESTART_KEY, _EMERGENCY_KEY, _EXISTING_POSITION_KEY, _STALE_ORDER_KEY} <= set(
+    SMOKE_TEST_KEYS
+), "validation's §20.3 smoke-test keys drifted from smoke.SMOKE_TESTS"
 
 # §12.3 case types that ARE a reconciliation mismatch for the §21.4 gate. A
 # fill_unmapped sighting resolves by booking the fill (its own lane), so it is
@@ -520,9 +530,12 @@ def validate_live_run(
     else:
         _apply_mainnet_gate(
             failures,
+            shortfalls,
             unresolved_mismatch_count=unresolved_mismatch_count,
             daily_loss_breached=daily_loss_breached,
             execution_mode=execution_mode,
+            refresh_rate=refresh_rate,
+            refresh_total=refresh_total,
         )
 
     # -- non-gating warnings ----------------------------------------------
@@ -536,6 +549,22 @@ def validate_live_run(
         warnings.append(
             "a daily-loss safe-mode episode is on record (informational on testnet; "
             "a mainnet_tiny gate condition per §21.4)"
+        )
+    if is_testnet and unresolved_mismatch_count:
+        warnings.append(
+            f"{unresolved_mismatch_count} unresolved reconciliation case(s) open "
+            "(§12.3 manual lane) — informational on testnet; a mainnet_tiny gate "
+            "condition per §21.4. Resolve them before preparing the mainnet run."
+        )
+    if not is_testnet:
+        # §21.4's "manual shutdown/restart tested" entry criterion is not
+        # machine-decidable (a deliberate operator exercise leaves no
+        # distinguishable store signature) — surface it on every mainnet report
+        # so an operator reading exit 0 as the §21.4 checklist cannot silently
+        # skip a listed item.
+        warnings.append(
+            "§21.4 'manual shutdown/restart tested' is operator-confirmed only — "
+            "not machine-verifiable from the store; confirm it before go-live"
         )
 
     return LiveValidationReport(
@@ -568,6 +597,31 @@ def validate_live_run(
     )
 
 
+def _apply_refresh_gate(
+    failures: list[str],
+    shortfalls: list[str],
+    *,
+    refresh_rate: Decimal | None,
+    refresh_total: int,
+) -> None:
+    """The kill-switch refresh-rate condition, shared by BOTH profiles.
+
+    §20.3 names the >= 99% rate explicitly; §21.4 does not, but "the mechanism
+    was proven on testnet" is not "the mechanism kept working on mainnet" — a
+    real-money run whose dead man's switch quietly failed to refresh must not
+    read ``live_ready`` (decision 2026-07-27). One encoding so the two gates
+    cannot drift.
+    """
+    if refresh_total == 0:
+        # No refresh evidence yet — a shortfall (keep running), not a 0% failure.
+        shortfalls.append("no kill-switch refresh events yet (need a rate >= 99%)")
+    elif refresh_rate is not None and refresh_rate < MIN_KILL_SWITCH_REFRESH_RATE:
+        failures.append(
+            f"kill_switch_refresh_success_rate = {refresh_rate * 100:.2f}% "
+            f"(need >= {MIN_KILL_SWITCH_REFRESH_RATE * 100:.0f}%)"
+        )
+
+
 def _apply_testnet_gate(
     failures: list[str],
     shortfalls: list[str],
@@ -579,24 +633,27 @@ def _apply_testnet_gate(
     """The §20.3 testnet_live conditions beyond the shared integrity set."""
     if live_order_count < MIN_LIVE_ORDERS:
         shortfalls.append(f"live_order_count = {live_order_count} (need >= {MIN_LIVE_ORDERS})")
-    if refresh_total == 0:
-        # No refresh evidence yet — a shortfall (keep running), not a 0% failure.
-        shortfalls.append("no kill-switch refresh events yet (need a rate >= 99%)")
-    elif refresh_rate is not None and refresh_rate < MIN_KILL_SWITCH_REFRESH_RATE:
-        failures.append(
-            f"kill_switch_refresh_success_rate = {refresh_rate * 100:.2f}% "
-            f"(need >= {MIN_KILL_SWITCH_REFRESH_RATE * 100:.0f}%)"
-        )
+    _apply_refresh_gate(
+        failures, shortfalls, refresh_rate=refresh_rate, refresh_total=refresh_total
+    )
 
 
 def _apply_mainnet_gate(
     failures: list[str],
+    shortfalls: list[str],
     *,
     unresolved_mismatch_count: int,
     daily_loss_breached: bool,
     execution_mode: str,
+    refresh_rate: Decimal | None,
+    refresh_total: int,
 ) -> None:
-    """The §21.4 mainnet_tiny conditions beyond the shared integrity set."""
+    """The §21.4 mainnet_tiny conditions beyond the shared integrity set.
+
+    Deliberately stricter than §21.4's letter on one point: the kill-switch
+    refresh rate gates here too (see :func:`_apply_refresh_gate`). The order
+    count does NOT — §21.4 omits it and the user kept that (2026-07-27).
+    """
     if execution_mode not in ("mainnet_tiny", "testnet_live"):
         # An unreadable genesis mode is validated under this stricter gate, and
         # named so the operator fixes the record rather than trusting a verdict
@@ -611,3 +668,6 @@ def _apply_mainnet_gate(
         )
     if daily_loss_breached:
         failures.append("daily loss cap was breached (§21.4: must not be breached)")
+    _apply_refresh_gate(
+        failures, shortfalls, refresh_rate=refresh_rate, refresh_total=refresh_total
+    )

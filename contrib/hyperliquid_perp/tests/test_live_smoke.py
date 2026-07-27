@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -191,19 +192,48 @@ def test_exception_in_action_is_an_error_verdict(live_db):
     assert "boom" in row["error_message"]
 
 
-def test_missing_recovery_seam_fails_restart_tests(live_db):
+def test_missing_recovery_seam_aborts_a_full_suite_before_any_test(live_db):
+    # A full-suite real run places probe orders, so the pre-flight recovery is
+    # mandatory: no seam → the suite aborts with NOTHING recorded (an abort is
+    # not a verdict).
     with live_db:
-        smoke.SmokeTestRunner(_ctx(live_db, _FakeSigned(), run_recovery=None)).run()
+        with pytest.raises(smoke.SmokePreflightError, match="no run_recovery seam"):
+            smoke.SmokeTestRunner(_ctx(live_db, _FakeSigned(), run_recovery=None)).run()
+        rows = repo.iter_smoke_test_results(live_db.conn, "live-BTC")
+    assert len(rows) == 0
+
+
+def test_missing_recovery_seam_fails_restart_tests(live_db):
+    # A restart-only selection places no probe orders → no pre-flight → the
+    # missing seam surfaces per-test as a failed verdict, not a suite abort.
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, _FakeSigned(), run_recovery=None)).run(
+            only=["restart_reconciliation"]
+        )
         latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
     assert latest["restart_reconciliation"]["status"] == "failed"
     assert "no run_recovery seam" in latest["restart_reconciliation"]["error_message"]
+
+
+def test_unclean_preflight_aborts_and_still_disarms(live_db):
+    # The pre-flight recovery may already have armed the switch before its
+    # verdict came back unclean — the exit disarm must still fire.
+    signed = _FakeSigned()
+    with live_db:
+        with pytest.raises(smoke.SmokePreflightError, match="did not pass"):
+            smoke.SmokeTestRunner(
+                _ctx(live_db, signed, run_recovery=lambda: _Recovery(passed=False))
+            ).run()
+        rows = repo.iter_smoke_test_results(live_db.conn, "live-BTC")
+    assert len(rows) == 0
+    assert "clear_scheduled_cancel" in signed.calls
 
 
 def test_unclean_recovery_fails_restart_tests(live_db):
     with live_db:
         smoke.SmokeTestRunner(
             _ctx(live_db, _FakeSigned(), run_recovery=lambda: _Recovery(passed=False))
-        ).run()
+        ).run(only=["restart_reconciliation"])
         latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
     assert latest["restart_reconciliation"]["status"] == "failed"
 
@@ -320,7 +350,7 @@ def test_failed_then_fixed_rerun_passes_the_key(live_db):
 def test_status_test_queries_the_submitted_cloid(live_db):
     signed = _FakeSigned()
     with live_db:
-        smoke.SmokeTestRunner(_ctx(live_db, signed)).run(
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
             only=["slice_order_submit", "slice_order_status"]
         )
     # The status test must query the exact cloid the submit test registered.
@@ -348,7 +378,9 @@ def test_cleanup_failure_is_surfaced_in_step_detail(live_db):
             return self._place_ack
 
     with live_db:
-        smoke.SmokeTestRunner(_ctx(live_db, _CloseFails())).run(only=["multi_slice_fill"])
+        smoke.SmokeTestRunner(_ctx(live_db, _CloseFails(), run_recovery=lambda: _Recovery())).run(
+            only=["multi_slice_fill"]
+        )
         latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
     row = latest["multi_slice_fill"]
     assert row["status"] == "passed"  # the fill itself still passed
@@ -374,7 +406,9 @@ def test_cleanup_refused_ack_is_surfaced_in_step_detail(live_db):
             return self._place_ack
 
     with live_db:
-        smoke.SmokeTestRunner(_ctx(live_db, _CloseRefused())).run(only=["multi_slice_fill"])
+        smoke.SmokeTestRunner(_ctx(live_db, _CloseRefused(), run_recovery=lambda: _Recovery())).run(
+            only=["multi_slice_fill"]
+        )
         latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
     row = latest["multi_slice_fill"]
     assert row["status"] == "passed"  # the fill itself still passed
@@ -445,3 +479,194 @@ def test_insert_rejects_dry_run_row_that_is_not_skipped(live_db):
             dry_run=True,
             executed_at=_T0,
         )
+
+
+# -- pre-flight recovery + probe booking (review round 2026-07-27) ---------
+
+
+class _CountingRecovery:
+    """A recovery seam that counts invocations (pre-flight vs restart tests)."""
+
+    def __init__(self, passed: bool = True):
+        self.calls = 0
+        self._passed = passed
+
+    def __call__(self):
+        self.calls += 1
+        return _Recovery(passed=self._passed)
+
+
+def test_preflight_runs_one_recovery_ahead_of_the_restart_tests(live_db):
+    recovery = _CountingRecovery()
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, _FakeSigned(), run_recovery=recovery)).run()
+    # 1 pre-flight (before any probe order) + one per restart test (15/16/17).
+    assert recovery.calls == 4
+
+
+def test_non_order_selection_skips_the_preflight(live_db):
+    recovery = _CountingRecovery()
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, _FakeSigned(), run_recovery=recovery)).run(
+            only=["signed_client_init", "update_leverage", "kill_switch_arm_refresh"]
+        )
+    assert recovery.calls == 0
+
+
+def test_dry_run_skips_the_preflight(live_db):
+    # A dry run places nothing, so it needs no recovery seam even for a full
+    # suite (signed=None would make a pre-flight impossible anyway).
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, None, dry_run=True)).run()
+        rows = repo.iter_smoke_test_results(live_db.conn, "live-BTC")
+    assert {r["status"] for r in rows} == {"skipped"}
+
+
+def test_probe_orders_are_booked_with_the_ack_oid(live_db):
+    # The wedge fix: every IOC probe books an orders row carrying the ack's
+    # exchange oid, so its fill resolves through the §14 oid→order mapping
+    # instead of filing a permanent, unstampable fill_unmapped case.
+    class _DistinctOids(_FakeSigned):
+        # Real exchange oids are unique per order; the shared "oid-1" default
+        # would (correctly) trip the mapping's ambiguity guard.
+        def __init__(self):
+            super().__init__()
+            self._oid = 0
+
+        def place_ioc_limit(self, **k):
+            self._log("place_ioc_limit")
+            self.last_place_cloid = k.get("cloid_hex")
+            self._oid += 1
+            return _Ack("filled", exchange_order_id=f"oid-{self._oid}")
+
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, _DistinctOids(), run_recovery=lambda: _Recovery())).run(
+            only=["reduce_only_close"]
+        )
+        resolved = repo.get_order_by_exchange_order_id(live_db.conn, "oid-1")
+        probe_rows = live_db.conn.execute(
+            "SELECT * FROM orders WHERE run_id = ? AND status_reason = 'smoke_probe'"
+            " ORDER BY exchange_order_id",
+            ("live-BTC",),
+        ).fetchall()
+    assert resolved is not None
+    assert resolved["run_id"] == "live-BTC" and resolved["symbol"] == "BTC"
+    # Test 7 = one entry + one reduce-only close, both filled acks.
+    assert len(probe_rows) == 2
+    assert {r["order_role"] for r in probe_rows} == {"entry", "close"}
+    assert all(r["status"] == "filled" for r in probe_rows)
+    assert all(r["is_bot_owned"] == 1 for r in probe_rows)
+    assert [r["exchange_order_id"] for r in probe_rows] == ["oid-1", "oid-2"]
+
+
+def test_zero_fill_probe_books_as_canceled_never_open(live_db):
+    # An accepted-but-unfilled IOC is terminal at the ack — booked "canceled",
+    # never "open" (an open local row whose exchange order is gone would file
+    # order_missing_on_exchange at the next recovery).
+    signed = _FakeSigned(place_ack=_Ack("filled", filled_size=_D(0)))
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["slice_order_submit"]
+        )
+        probe_rows = live_db.conn.execute(
+            "SELECT * FROM orders WHERE run_id = ? AND status_reason = 'smoke_probe'",
+            ("live-BTC",),
+        ).fetchall()
+    assert len(probe_rows) == 1
+    assert probe_rows[0]["status"] == "canceled"
+
+
+def test_error_ack_probe_books_nothing(live_db):
+    # An error ack has no exchange oid — nothing existed on the exchange, so
+    # nothing is booked locally either (test 3 tolerates the refused far IOC).
+    signed = _FakeSigned(
+        place_ack=_Ack(
+            "error", exchange_order_id=None, filled_size=None, average_price=None, error="nope"
+        )
+    )
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["slice_order_submit"]
+        )
+        probe_rows = live_db.conn.execute(
+            "SELECT * FROM orders WHERE run_id = ? AND status_reason = 'smoke_probe'",
+            ("live-BTC",),
+        ).fetchall()
+    assert probe_rows == []
+
+
+def test_mid_suite_record_crash_still_disarms(live_db, monkeypatch):
+    # The disarm lives in run()'s finally: a store failure BETWEEN tests (the
+    # one seam that can raise out of the loop) must still clear the switch the
+    # pre-flight armed.
+    signed = _FakeSigned()
+    real_insert = repo.insert_smoke_test_result
+    seen = {"n": 0}
+
+    def _boom(*args, **kwargs):
+        seen["n"] += 1
+        if seen["n"] >= 2:
+            raise sqlite3.OperationalError("store gone mid-suite")
+        return real_insert(*args, **kwargs)
+
+    monkeypatch.setattr(smoke.repo, "insert_smoke_test_result", _boom)
+    with live_db, pytest.raises(sqlite3.OperationalError):
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run()
+    assert "clear_scheduled_cancel" in signed.calls
+
+
+# -- SL/TP cleanup + refusal paths (review round 2026-07-27) ----------------
+
+
+def test_trigger_cleanup_cancel_exception_is_surfaced(live_db):
+    # _best_effort_cancel mirrors _best_effort_close: a cleanup cancel that
+    # RAISES must leave a durable note (a resting SL left live on the exchange
+    # cannot vanish from the audit trail), while the create still passes.
+    class _CancelBoom(_FakeSigned):
+        def cancel_by_cloid(self, **k):
+            self._log("cancel_by_cloid")
+            raise RuntimeError("cancel boom")
+
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, _CancelBoom(), run_recovery=lambda: _Recovery())).run(
+            only=["stop_loss_create"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["stop_loss_create"]
+    assert row["status"] == "passed"
+    assert "cleanup" in (row["detail"] or "") and "FAILED" in row["detail"]
+
+
+def test_trigger_cleanup_cancel_refused_is_surfaced(live_db):
+    # A cleanup cancel the exchange refuses (unsuccessful ack, no exception)
+    # must leave the same durable note.
+    with live_db:
+        smoke.SmokeTestRunner(
+            _ctx(
+                live_db,
+                _FakeSigned(cancel=_Cancel(False, "order not found")),
+                run_recovery=lambda: _Recovery(),
+            )
+        ).run(only=["take_profit_modify"])
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["take_profit_modify"]
+    assert row["status"] == "passed"
+    assert "cleanup" in (row["detail"] or "") and "refused" in row["detail"]
+
+
+def test_trigger_create_refusal_is_a_failed_verdict(live_db):
+    # place_trigger_order returning an unaccepted ack must fail the test (an
+    # exchange refusal, not a harness error) — the _require_accepted guard.
+    signed = _FakeSigned(
+        trigger_ack=_Ack(
+            "error", exchange_order_id=None, filled_size=None, average_price=None, error="margin"
+        )
+    )
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["stop_loss_create"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["stop_loss_create"]
+    assert row["status"] == "failed"
+    assert "refused by the exchange" in row["error_message"]

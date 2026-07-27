@@ -1,6 +1,6 @@
 """Subcommand CLI for the Hyperliquid perp module.
 
-Four subcommands plus full Phase 1/2 backward compatibility:
+The subcommands (plus full Phase 1/2 backward compatibility):
 
 - ``python -m contrib.hyperliquid_perp paper --coin BTC`` — the long-running
   paper run: restart reconciliation (execution §1.2), then the 30-second
@@ -139,6 +139,21 @@ def _open_existing_db(path: str) -> Database | None:
     return Database(path)
 
 
+def _existing_run_row(conn, run_id: str, db_label: str):
+    """The run's row, or ``None`` after printing the standard missing-run error.
+
+    The one encoding of the "does this run exist" refusal, shared by every
+    read-style command (``validate``, ``live-smoke --gate-status``) so a wording
+    tweak cannot land in one surface and not the other.
+    """
+    from .persistence import repository as repo
+
+    row = repo.get_run(conn, run_id)
+    if row is None:
+        print(f"error: run {run_id!r} does not exist in {db_label}.", file=sys.stderr)
+    return row
+
+
 def _cmd_export(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m contrib.hyperliquid_perp export",
@@ -184,16 +199,13 @@ def _cmd_validate(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
-    from .persistence import repository as repo
-
     try:
         db = _open_existing_db(args.db)
         if db is None:
             return 1
         with db:
-            run_row = repo.get_run(db.conn, args.run_id)
+            run_row = _existing_run_row(db.conn, args.run_id, args.db)
             if run_row is None:
-                print(f"error: run {args.run_id!r} does not exist in {args.db}.", file=sys.stderr)
                 return 1
             if run_row["mode"] == "live":
                 return _validate_live(db, args.run_id)
@@ -1176,13 +1188,13 @@ def _live_startup_recovery(
                         file=sys.stderr,
                     )
                 else:
-                    parts = []
-                    if gate_missing:
-                        parts.append(f"not yet run: {', '.join(gate_missing)}")
-                    if gate_failed:
-                        parts.append(f"failed: {', '.join(gate_failed)}")
-                    if gate_errored:
-                        parts.append(f"errored: {', '.join(gate_errored)}")
+                    parts = [
+                        f"{label.replace('_', ' ')}: {', '.join(keys)}"
+                        for label, keys in _smoke_gate_buckets(
+                            gate_missing, gate_failed, gate_errored
+                        )
+                        if keys
+                    ]
                     print(
                         "error: testnet_live cycles are gated on the §20.2 smoke suite "
                         f"(all must pass) — {'; '.join(parts)}. Run "
@@ -1190,6 +1202,19 @@ def _live_startup_recovery(
                         file=sys.stderr,
                     )
                 return 1
+            # Gate open: say how stale the proof is. Passes never expire (a hard
+            # max-age is a policy call deliberately not made here, 2026-07-27),
+            # so an operator returning after weeks should at least SEE the age
+            # and re-run live-smoke after significant code/config changes.
+            latest_smoke = repo.latest_smoke_test_results(db.conn, run_id)
+            if latest_smoke:
+                oldest_iso = min(row["executed_at"] for row in latest_smoke.values())
+                print(
+                    f"§20.2 smoke gate open — oldest passing result recorded {oldest_iso}; "
+                    "passes never expire, so re-run live-smoke after significant "
+                    "code/config changes.",
+                    file=sys.stderr,
+                )
 
         try:
             acquire_run_lock(db, run_id, pid=os.getpid(), now=now)
@@ -1810,6 +1835,20 @@ def _run_live_loop(
 # --------------------------------------------------------------------------
 
 
+def _smoke_gate_buckets(
+    missing: tuple[str, ...],
+    failed: tuple[str, ...],
+    errored: tuple[str, ...],
+) -> list[tuple[str, tuple[str, ...]]]:
+    """``(label, keys)`` pairs for the §20.2 gate's non-passed buckets.
+
+    The one list BOTH renderings draw from (``live-smoke``'s per-line report and
+    the ``--loop`` refusal's one-liner), so a future bucket cannot appear on one
+    operator surface and not the other.
+    """
+    return [("not_yet_run", missing), ("failed", failed), ("errored", errored)]
+
+
 def _print_smoke_gate(
     passed: bool,
     missing: tuple[str, ...],
@@ -1823,12 +1862,9 @@ def _print_smoke_gate(
     or the harness itself broke — without querying live_smoke_tests.
     """
     print(f"smoke_gate_passed: {'yes' if passed else 'no'}")
-    if missing:
-        print(f"not_yet_run: {', '.join(missing)}")
-    if failed:
-        print(f"failed: {', '.join(failed)}")
-    if errored:
-        print(f"errored: {', '.join(errored)}")
+    for label, keys in _smoke_gate_buckets(missing, failed, errored):
+        if keys:
+            print(f"{label}: {', '.join(keys)}")
 
 
 def _cmd_live_smoke(argv: list[str]) -> int:
@@ -1839,11 +1875,16 @@ def _cmd_live_smoke(argv: list[str]) -> int:
     lets ``live --loop`` start the testnet_live cycles. ``--gate-status`` reports
     the stored gate without touching the network; ``--dry-run`` validates the
     config and wiring and records every selected test ``skipped`` (places no
-    orders — the offline check the unit tests exercise). Exit: 0 = the FULL §20.2
-    gate is open (every one of the 18 tests' latest real result is ``passed``) —
-    so ``--only`` on a subset still exits 4 until the whole suite has passed; 4 =
-    ran (or read) but the gate is not satisfied; 1 = a named config / env /
-    network error.
+    orders — the offline check the unit tests exercise). A real run takes the
+    run's lease first (refused with exit 1 while ``live``/``paper`` holds it) and,
+    when the selection places probe orders, runs one passing §19.1 pre-flight
+    recovery before the first test. Exit: 0 = the FULL §20.2 gate is open (every
+    one of the 18 tests' latest real result is ``passed``) — so ``--only`` on a
+    subset still exits 4 until the whole suite has passed — EXCEPT ``--dry-run``,
+    which exits 0 once the wiring check completes (its gate is never open); 4 =
+    ran (or read) but the gate is not satisfied, including a pre-flight recovery
+    failure that aborted the suite before any test; 1 = a named config / env /
+    network / lease error.
 
     The restart tests (15–17) drive one real §19.1 startup recovery over the run;
     the operator stages their preconditions (an existing position / a stale
@@ -1881,11 +1922,11 @@ def _cmd_live_smoke(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     from .live.smoke import (
+        SmokePreflightError,
         SmokeTestRunner,
         smoke_gate_report,
         validate_only_keys,
     )
-    from .persistence import repository as repo
 
     only: list[str] | None = None
     if args.only is not None:
@@ -1913,9 +1954,8 @@ def _cmd_live_smoke(argv: list[str]) -> int:
         if db is None:
             return 1
         with db:
-            run_row = repo.get_run(db.conn, args.run_id)
+            run_row = _existing_run_row(db.conn, args.run_id, args.db)
             if run_row is None:
-                print(f"error: run {args.run_id!r} does not exist in {args.db}.", file=sys.stderr)
                 return 1
             if run_row["mode"] != "live":
                 print(
@@ -1936,14 +1976,44 @@ def _cmd_live_smoke(argv: list[str]) -> int:
     if db is None:
         return 1
     disarm_failed = False
+    preflight_error: str | None = None
     try:
         session = _build_smoke_session(args, db)
         if isinstance(session, int):
             return session
-        runner = SmokeTestRunner(session)
-        runner.run(only=only)
-        disarm_failed = runner.kill_switch_disarm_failed
-        passed, missing, failed, errored = smoke_gate_report(db.conn, args.run_id)
+        lock_pid: int | None = None
+        if not args.dry_run:
+            # The suite places real orders and runs §19.1 recoveries — the same
+            # actions the run lease exists to keep single-owner. A concurrent
+            # `live --loop` on this run would race the probe orders, the
+            # recovery's stale-order sweep, and the account-wide kill switch;
+            # refuse instead (a dry run touches only this store, no lease needed).
+            from .paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
+
+            try:
+                acquire_run_lock(db, args.run_id, pid=os.getpid(), now=datetime.now(timezone.utc))
+            except RunLockError as exc:
+                print(
+                    f"error: {exc} — the smoke suite places real orders and runs "
+                    "recoveries on this run; stop that process (or wait for its "
+                    "lease to expire) first.",
+                    file=sys.stderr,
+                )
+                return 1
+            lock_pid = os.getpid()
+        try:
+            runner = SmokeTestRunner(session)
+            try:
+                runner.run(only=only)
+            except SmokePreflightError as exc:
+                # No test executed, no verdict recorded; the exit disarm has
+                # already run inside runner.run()'s finally.
+                preflight_error = str(exc)
+            disarm_failed = runner.kill_switch_disarm_failed
+            passed, missing, failed, errored = smoke_gate_report(db.conn, args.run_id)
+        finally:
+            if lock_pid is not None:
+                release_run_lock(db, args.run_id, pid=lock_pid, now=datetime.now(timezone.utc))
     finally:
         db.close()
     if disarm_failed:
@@ -1958,6 +2028,9 @@ def _cmd_live_smoke(argv: list[str]) -> int:
             file=sys.stderr,
         )
     _print_smoke_gate(passed, missing, failed, errored)
+    if preflight_error is not None:
+        print(f"error: {preflight_error}", file=sys.stderr)
+        return 4
     if args.dry_run:
         # A dry run places nothing, so the gate can never pass — that is the
         # point (a wiring check, not a cycle-entry proof). Exit 0 to signal the
@@ -1973,8 +2046,8 @@ def _build_smoke_session(args, db):
 
     ``db`` is the caller-owned, already-open store (the caller closes it), so
     every failure path here just returns an ``int`` exit code. A dry run stops
-    after config validation (it needs no network): the context carries a stub
-    signed client and lazy market seams that the runner never calls, so
+    after config validation (it needs no network): the context carries no signed
+    client (``signed=None``) and market seams the runner never calls, so
     ``--dry-run`` works fully offline.
     """
     from decimal import Decimal
@@ -2052,7 +2125,7 @@ def _build_smoke_session(args, db):
         return 1
 
     if args.dry_run:
-        # No network: a stub signed client and lazy seams the runner never calls.
+        # No network: signed stays None and the seams below are never called.
         def _unavailable() -> Decimal:
             raise RuntimeError("dry-run places no orders; mark_price is not fetched")
 

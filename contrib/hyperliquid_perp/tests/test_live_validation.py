@@ -624,3 +624,111 @@ def test_post_init_rejects_open_window_without_count():
 def test_post_init_rejects_negative_seconds():
     with pytest.raises(ValueError, match="must be >= 0"):
         _make_report(unprotected_position_seconds=Decimal(-1))
+
+
+# -- §21.4 refresh-rate gate + stamped cases + warnings (2026-07-27) --------
+
+
+def test_mainnet_low_refresh_rate_is_a_failure(tmp_path):
+    # The dead man's switch matters MOST on real money: a mainnet_tiny run whose
+    # refresh success rate is below 99% must exit 5, exactly as testnet does.
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db, mode="mainnet_tiny")
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_refreshes(db, 85, 15)  # 85%
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert not report.live_ready
+    assert any("kill_switch_refresh_success_rate" in f for f in report.failures)
+
+
+def test_mainnet_no_refresh_events_is_a_shortfall(tmp_path):
+    # Zero refresh evidence on mainnet = "keep running", not a 0% failure —
+    # mirroring the testnet reading of the same condition.
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db, mode="mainnet_tiny")
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.failures == ()
+    assert any("no kill-switch refresh events" in s for s in report.shortfalls)
+
+
+def test_stamped_reconciliation_case_does_not_fail_the_mainnet_gate(tmp_path):
+    # A mismatch case a human already stamped (action_taken set) is RESOLVED:
+    # it must drop out of unresolved_reconciliation_mismatch_count and not fail
+    # §21.4 — otherwise every historically-resolved case re-fails the gate
+    # forever. (equity_mismatch is unresolved-gated only, not a counted
+    # integrity failure, so the stamped run stays live_ready.)
+    db = _healthy(tmp_path, mode="mainnet_tiny")
+    with db.transaction() as conn:
+        repo.insert_exchange_reconciliation_event(
+            conn,
+            run_id="r",
+            trigger="heartbeat",
+            case_type="equity_mismatch",
+            symbol="BTC",
+            exchange_value="200.01",
+            action_taken="reviewed: exchange settlement lag, values reconverged",
+            timestamp=_T0,
+        )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.unresolved_reconciliation_mismatch_count == 0
+    assert report.live_ready
+
+
+def test_unstamped_equity_mismatch_still_fails_the_mainnet_gate(tmp_path):
+    # The companion boundary: the SAME case without action_taken stays open.
+    db = _healthy(tmp_path, mode="mainnet_tiny")
+    with db.transaction() as conn:
+        repo.insert_exchange_reconciliation_event(
+            conn,
+            run_id="r",
+            trigger="heartbeat",
+            case_type="equity_mismatch",
+            symbol="BTC",
+            exchange_value="200.01",
+            timestamp=_T0,
+        )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.unresolved_reconciliation_mismatch_count == 1
+    assert any("unresolved_reconciliation_mismatch_count" in f for f in report.failures)
+
+
+def test_testnet_unresolved_mismatch_warns_but_does_not_gate(tmp_path):
+    # On testnet an open manual case is informational (a mainnet gate condition
+    # per §21.4) — the report must warn so the operator resolves it before
+    # preparing mainnet, without flipping the testnet verdict.
+    db = _healthy(tmp_path)
+    with db.transaction() as conn:
+        repo.insert_exchange_reconciliation_event(
+            conn,
+            run_id="r",
+            trigger="heartbeat",
+            case_type="equity_mismatch",
+            symbol="BTC",
+            exchange_value="200.01",
+            timestamp=_T0,
+        )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.live_ready
+    assert any("unresolved reconciliation case" in w for w in report.warnings)
+
+
+def test_mainnet_report_always_reminds_manual_shutdown_item(tmp_path):
+    # §21.4's "manual shutdown/restart tested" is operator-confirmed only; the
+    # mainnet report carries a fixed warning so exit 0 cannot be read as that
+    # checklist item passing. Testnet reports carry no such line.
+    mainnet = _healthy(tmp_path, mode="mainnet_tiny")
+    with mainnet:
+        mainnet_report = validate_live_run(mainnet, run_id="r", now=_T0)
+    assert any("manual shutdown/restart" in w for w in mainnet_report.warnings)
+
+    (tmp_path / "t").mkdir()
+    testnet = _healthy(tmp_path / "t")
+    with testnet:
+        testnet_report = validate_live_run(testnet, run_id="r", now=_T0)
+    assert not any("manual shutdown/restart" in w for w in testnet_report.warnings)

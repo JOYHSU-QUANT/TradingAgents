@@ -92,6 +92,11 @@ python -m contrib.hyperliquid_perp live --config configs/hyperliquid.local.yaml
 
 ## 2. 建 live run 並跑 §19.1 startup recovery
 
+> **建 run 前先想好 test 16 的前置**：若要做 smoke test 16（startup with existing
+> position），那個小倉要在 **`--create` 之前**先開好，建 run 時用
+> `--adopt-positions` 收編進 genesis（見 §3.2）。run 建立之後就**不能**再對這個錢包
+> 手動下單。
+
 ```bash
 # 首次：--create 建 run（genesis＝交易所快照）並跑一次 §19.1 recovery（arm kill switch、
 # reconcile、掃 stale bot-owned 單），印判定後退出（不進迴圈）。帳戶非空要 --adopt-positions。
@@ -102,6 +107,13 @@ python -m contrib.hyperliquid_perp live \
 
 exit 0＝recovery 判定通過（可進 cycles）；exit 4＝執行了但判定 unclean（run 進了
 safe mode，見 §6）；exit 1＝硬失敗（config／arming／建立）。
+
+> **genesis 之後，錢包只屬於 bot（§11／§12.3）**：live 帳本以交易所帳單為唯一基準，
+> run 建立後任何**手動**成交（UI 下單、轉倉）都會變成本地無單可掛的
+> `fill_unmapped`／`exchange_position_mismatch` case——`fill_unmapped` 無法用
+> `--stamp-case` 了結（只能靠補記 fill，而手動單永遠沒有本地 order row），且驗收的
+> integrity 計數是**累積制**：case 一旦記錄，該 run 的 `validate` 從此永遠 exit 5，
+> 只能換新 run-id 重跑驗收。要動錢包，先把 run 收掉。
 
 ---
 
@@ -125,14 +137,26 @@ python -m contrib.hyperliquid_perp live-smoke \
 三項 restart/startup 測試**各會**對 run 跑一次真正的 §19.1 recovery（arm kill
 switch ＋ reconcile ＋ 掃 stale bot-owned 單）：
 
-- **test 16（startup with existing position）**：先在 testnet 用主錢包開一個小倉，
-  再跑 smoke——recovery 須乾淨 reconcile 這個既有倉。
+- **test 16（startup with existing position）**：那個小倉必須在 **`live --create`
+  之前**就開好、並以 `--adopt-positions` 收編進 genesis（§2）。**不要**在 run 建立
+  之後才手動開倉——post-genesis 的手動成交沒有本地 order row，會直接變成
+  `fill_unmapped`＋`exchange_position_mismatch` case，recovery 從此永遠 unclean、
+  該 run 的驗收永久 exit 5（見 §2 的警告框）。
 - **test 17（startup with stale bot-owned order）**：先讓 run 留一張 bot-owned 掛單
   （例如上一輪 smoke 的殘留），再跑 smoke——recovery 須把它掃掉。
 - **test 15（restart reconciliation）**：乾淨重跑 recovery 即可。
 
 不方便一次備齊時，用 `--only` 分項跑（見下）。
 
+> **pre-flight recovery（先讀這段再排順序）**：真跑且選到會下 probe 單的測試
+> （3、5–13、18）時，suite 會在第一項測試前**先跑一次** §19.1 recovery——signed
+> client 自己的 order gate 要求 recovery 通過＋kill switch armed 才放行任何單。
+> 副作用：全套 18 項一次跑時，這個 pre-flight 會先把你為 test 17 備好的 stale 單
+> 掃掉（test 17 之後照樣記 passed，但證明的只是「乾淨狀態下 recovery 乾淨」）。
+> **要讓 test 16/17 真的驗到前置**，用 `--only` 單獨跑 restart 系列（不含下單測試
+> 的選擇不觸發 pre-flight）：
+> `--only restart_reconciliation startup_with_existing_position startup_with_stale_open_order`。
+>
 > **這兩項證明的是什麼**：test 16/17 只斷言 recovery 判定 `passed`，**不會**獨立驗證
 > 前置情境真的存在——若沒照上面備妥（或前一次 recovery 已把狀態清乾淨），recovery 仍
 > 會判乾淨、這兩項照樣記 passed。因此 §20.3 的
@@ -140,9 +164,9 @@ switch ＋ reconcile ＋ 掃 stale bot-owned 單）：
 > `startup_with_stale_open_order_test_passed` 證明的是「**在你備妥的前置下** recovery
 > 乾淨」，而非「情境已被自動偵測」——請確實照上面備置後再跑。
 >
-> **kill switch**：跑過 restart／kill-switch 系列（測 14–17）的 run，其 recovery 會
+> **kill switch**：pre-flight 或 restart／kill-switch 系列（測 14–17）的 recovery 會
 > arm dead man's switch；suite 收尾會**自動 disarm**（清掉 scheduleCancel），不在錢包
-> 上留 armed 狀態（沒跑到這些測試的 run 不會去動它，以免誤清掉同錢包上其他 `live
+> 上留 armed 狀態（完全沒 arm 過的 run 不會去動它，以免誤清掉同錢包上其他 `live
 > --loop` 的 arm）。萬一 disarm 失敗，會印一行醒目 `WARNING`——照它指示手動清掉，或
 > 直接跑 `live --loop`（會重新 arm 並持續 refresh）。
 
@@ -164,6 +188,17 @@ python -m contrib.hyperliquid_perp live-smoke \
 每項結果落 `live_smoke_tests`（append-only：修好再跑會覆蓋判定、保留歷史）。
 失敗的項修好後重跑該項即可。
 
+三個真跑才有的行為：
+
+- **run lock**：真跑（非 `--dry-run`／`--gate-status`）會先取 run 的 lease——同一
+  run 正被 `live --loop` 跑著時會具名拒絕（exit 1）。先停掉 daemon 再跑 smoke。
+- **pre-flight recovery**：見 §3.2。pre-flight 沒過＝suite 直接中止（exit 4、
+  不記任何判定）；先查 `safe-mode --status`／log、修好 run 狀態再重跑。
+- **probe 成交入帳**：會成交的 probe（測 6/7/18 的開倉／平倉 IOC）以
+  `smoke|<cloid>` 的 order row 記入 `orders`，其成交照一般 §14 流程入帳——它們是
+  這個 run 的真實資金流，會出現在 fills／export／replay 裡（開平相抵、只留手續費
+  與滑價）。
+
 ### 3.4 確認 gate（不下單、純讀 DB）
 
 ```bash
@@ -176,8 +211,8 @@ python -m contrib.hyperliquid_perp live-smoke \
 | `live-smoke` exit | 意義 | 下一步 |
 |---|---|---|
 | `0` | **全 18 項** gate 開（每項最新真跑結果都 passed） | 可進 testnet_live cycles |
-| `4` | 跑了（或讀了）但 gate 未滿足 | 看 not_yet_run／failed，補跑或修 |
-| `1` | config／env／網路具名錯誤 | 依訊息修 |
+| `4` | 跑了（或讀了）但 gate 未滿足；含 pre-flight recovery 沒過、suite 中止 | 看 not_yet_run／failed（或 pre-flight 錯誤訊息），補跑或修 |
+| `1` | config／env／網路／run-lock 具名錯誤 | 依訊息修 |
 
 > `--only` 只跑子集時，即使選到的項全過，其餘未跑的項仍讓 gate 未開——所以 exit 仍是
 > `4`（`not_yet_run` 會列出剩下的項）。exit `0` 一律代表整個 §20.2 gate 開，不是「選到的
@@ -196,7 +231,8 @@ python -m contrib.hyperliquid_perp live \
 ```
 
 - 若 smoke gate 未過，`--loop` 會具名 exit 1（`testnet_live cycles are gated on the
-  §20.2 smoke suite ...`）——先回 §3。
+  §20.2 smoke suite ...`）——先回 §3。gate 開著時會印最舊一筆通過結果的時間戳——
+  smoke 通過**沒有時效**，程式或 config 大改後請自行重跑 `live-smoke`。
 - 迴圈每 ~10s tick（在 30s kill-switch 預算內）：排空 WS queue → 刷 kill switch →
   reconciliation → SL/TP protection → 到期切片；4h AI decision 在背景 thread。
 - Ctrl-C／SIGTERM 安全停止並跑 §18.2 shutdown sweep。
@@ -229,9 +265,16 @@ account_replay_mismatch_count / unprotected_position_seconds` 全為 0、
 `kill_switch_refresh_success_rate ≥ 99%`、四項 `*_test_passed`（restart / emergency
 close / existing position / stale order，來自 smoke 15/16/17/18）皆 true。
 
-報告中的 `warning:` 行（例如 run 中發生過 emergency close——§21.4「不得因 bot bug
-emergency close」無法機器判定，需人工看 stop_loss_repair 證據）不影響 exit，但寫
-結論前要看過。
+報告中的 `warning:` 行不影響 exit，但寫結論前要看過。testnet 報告會警告：run 中
+發生過 emergency close（§21.4「不得因 bot bug emergency close」無法機器判定，需
+人工看 stop_loss_repair 證據）、daily-loss 破線紀錄、還開著的人工 §12.3 case
+（mainnet 是硬 gate，testnet 先提醒你在準備 mainnet 前解掉）。
+
+> **integrity 計數是累積制**：dedupe error／orphan／position mismatch 等 failure
+> 計數算的是「這個 run 歷史上記錄過的 case 數」，`--stamp-case` 只了結 §21.4 的
+> unresolved gate，**不會**把計數歸零——一旦記錄過，該 run 的 `validate` 永遠
+> exit 5。這是刻意的政策（帳本潔癖：驗收 run 必須全程乾淨）；中途出過 case 就換
+> 新 run-id 重新累積 30 cycles。
 
 ---
 
@@ -318,8 +361,11 @@ python -m contrib.hyperliquid_perp validate --run-id mainnet-BTC --db live_tradi
 
 §21.4 驗收（mainnet_tiny）：`mainnet_tiny_cycles ≥ 30`、無 unprotected 部位、
 無 orphan bot-owned 單、無 duplicate fill、無未解 reconciliation mismatch、
-daily loss cap 未破、（人工確認）無因 bot bug 的 emergency close、手動 shutdown/restart
-測過。
+daily loss cap 未破、`kill_switch_refresh_success_rate ≥ 99%`（比 §21.4 條文嚴——
+真錢 run 的 dead man's switch 必須持續在動，2026-07-27 拍板）、（人工確認）無因
+bot bug 的 emergency close、手動 shutdown/restart 測過。最後兩項機器判不了：
+報告對 mainnet run 固定印 `warning:` 提醒「manual shutdown/restart 為人工確認
+項」，exit 0 不代表它自動成立——go-live 前自己打勾。
 
 ### 7.4 之後
 
@@ -336,6 +382,8 @@ mode 切換都手動改 config（§22／§26）。
 | `agent authorization failed` / 過期 | 重新核准 agent wallet（§1.2）。 |
 | `effective_notional_cap ... below the exchange minimum`（exit 1） | 入金不足；見 §1.3（mainnet ≥ ~167 USDC）。 |
 | `--loop` 報 §20.2 smoke gate 未過 | 先跑 `live-smoke`（§3），`--gate-status` 確認 yes 再 `--loop`。 |
+| `live-smoke` 報 run lock 被持有（exit 1） | 同一 run 的 `live --loop`／`paper` 還在跑；先停掉（或等 lease 過期）再跑 smoke。 |
+| `live-smoke` 報 pre-flight recovery 沒過（exit 4） | run 狀態不乾淨；`safe-mode --status` 查 open case、照 §6 處置後重跑。 |
 | `live.allow_real_orders is false` | live-smoke／--loop 要真下單；設 `allow_real_orders: true` 並備妥 agent key，或 live-smoke 用 `--dry-run`。 |
 | `validate` exit 5、replay unverifiable | store 帳本對不上；先查（別盲目重啟），必要時 `safe-mode --status`。 |
 | run 反覆進 manual safe mode | 查 `safe-mode --status` 的 open cases；換 coin／改 run 定義是硬錯誤，用新 run-id。 |

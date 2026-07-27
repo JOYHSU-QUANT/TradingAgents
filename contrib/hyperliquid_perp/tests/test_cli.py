@@ -2893,3 +2893,136 @@ def test_live_smoke_refuses_mainnet_even_with_dry_run(tmp_path, capsys):
     )
     assert rc == 1
     assert "only against a testnet_live run" in capsys.readouterr().err
+
+
+# -- live --loop §20.2 gate consumer + live-smoke lease (2026-07-27) --------
+
+
+def _seed_live_run_with_genesis_subset(
+    tmp_path, cfg_path, *, run_id="r1", db_name="live_trading.db"
+):
+    """A live run whose genesis config_json matches what --create would record,
+    so a later ``live --run-id`` restart passes the drift check offline."""
+    from contrib.hyperliquid_perp.config import load_config
+    from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
+
+    conf = load_config(str(cfg_path))
+    subset = _run_config_subset(conf, "BTC")
+    subset["live"] = conf["live"]
+    dbp = tmp_path / db_name
+    db = Database(dbp)
+    accounting.initialize_run(
+        db,
+        run_id=run_id,
+        mode="live",
+        initial_balance_usdc=Decimal(200),
+        schema_version=SCHEMA_VERSION,
+        config_json=json.dumps(subset, ensure_ascii=False, default=str),
+    )
+    db.close()
+    return dbp
+
+
+def test_live_loop_refuses_testnet_run_until_smoke_passes(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # The gate CONSUMER itself (review 2026-07-27): a testnet_live restart with
+    # no passing smoke rows must be refused --loop by name, before the run lock
+    # or the kill switch is touched.
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp), "--loop"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "§20.2 smoke suite" in err
+    assert "not yet run" in err
+
+
+def test_live_loop_open_smoke_gate_proceeds_past_the_gate(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # With all 18 smoke rows passed the gate opens: --loop prints the
+    # oldest-pass age line and moves on to the run lock (pre-held here, so the
+    # command stops at the lease refusal — proof it got PAST the gate).
+    from contrib.hyperliquid_perp.live import smoke as smoke_mod
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
+    db = Database(dbp)
+    with db.transaction() as conn:
+        for test in smoke_mod.SMOKE_TESTS:
+            repo.insert_smoke_test_result(
+                conn,
+                run_id="r1",
+                test_number=test.number,
+                test_key=test.key,
+                test_name=test.name,
+                status="passed",
+                network="testnet",
+                executed_at=datetime(2026, 7, 20, tzinfo=timezone.utc),
+            )
+    acquire_run_lock(db, "r1", pid=999999, now=datetime.now(timezone.utc))
+    db.close()
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp), "--loop"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "smoke gate open" in err  # the age line printed
+    assert "§20.2 smoke suite" not in err  # NOT the gate refusal
+    assert "2026-07-20" in err  # names the oldest pass
+
+
+def test_live_smoke_real_run_requires_the_run_lease(tmp_path, capsys, monkeypatch):
+    # live-smoke places real orders and runs recoveries — the same actions the
+    # run lease keeps single-owner. A held lease must refuse the suite.
+    from contrib.hyperliquid_perp import cli as cli_mod
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+
+    dbp = _make_live_run(tmp_path)
+    db = Database(dbp)
+    acquire_run_lock(db, "live-BTC", pid=999999, now=datetime.now(timezone.utc))
+    db.close()
+    monkeypatch.setattr(
+        cli_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+    )
+    rc = cli_main(
+        ["live-smoke", "--config", "unused.yaml", "--run-id", "live-BTC", "--db", str(dbp)]
+    )
+    assert rc == 1
+    assert "places real orders" in capsys.readouterr().err
+
+
+def test_live_smoke_preflight_failure_exits_4_and_releases_the_lease(tmp_path, capsys, monkeypatch):
+    # A pre-flight recovery failure aborts the suite: exit 4, the error named on
+    # stderr, and the lease released so the operator can immediately retry.
+    from contrib.hyperliquid_perp import cli as cli_mod
+    from contrib.hyperliquid_perp.live import smoke as smoke_mod
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+
+    dbp = _make_live_run(tmp_path)
+    monkeypatch.setattr(
+        cli_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+    )
+
+    def _fail_preflight(self, *, only=None):
+        raise smoke_mod.SmokePreflightError("pre-flight §19.1 recovery did not pass — offline test")
+
+    monkeypatch.setattr(smoke_mod.SmokeTestRunner, "run", _fail_preflight)
+    rc = cli_main(
+        ["live-smoke", "--config", "unused.yaml", "--run-id", "live-BTC", "--db", str(dbp)]
+    )
+    captured = capsys.readouterr()
+    assert rc == 4
+    assert "pre-flight" in captured.err
+    # The lease must be free again: a fresh acquire under a different pid works.
+    db = Database(dbp)
+    acquire_run_lock(db, "live-BTC", pid=424242, now=datetime.now(timezone.utc))
+    db.close()

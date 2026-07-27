@@ -6,7 +6,7 @@ testnet connection. This module turns that checklist into a per-item,
 re-runnable, DB-recorded CLI (`live-smoke`): every test drives the actual PR 1–5
 signed client / recovery components, its verdict lands in ``live_smoke_tests``
 (append-only — a re-run after a fix supersedes without erasing the record), and
-the cycle-entry gate (:func:`smoke_gate_passed`) reads the latest non-dry-run
+the cycle-entry gate (:func:`smoke_gate_report`) reads the latest non-dry-run
 result per test.
 
 The checklist is §20.2's seventeen items verbatim (:data:`SMOKE_TESTS` 1–17)
@@ -46,6 +46,7 @@ from decimal import ROUND_CEILING, ROUND_HALF_EVEN, Decimal
 from pathlib import Path
 from typing import Any, Literal
 
+from ..paper.run_lock import RunLockError
 from ..persistence import repository as repo
 from ..persistence.cloid import cloid_hex, cloid_logical
 from ..persistence.db import Database
@@ -60,7 +61,6 @@ __all__ = [
     "SmokeStepResult",
     "SmokeTest",
     "SmokeTestRunner",
-    "smoke_gate_passed",
     "smoke_gate_report",
     "validate_only_keys",
 ]
@@ -183,6 +183,12 @@ class SmokeContext:
     dry_run: bool = False
     kill_switch_deadline: timedelta = timedelta(seconds=120)
     run_recovery: Callable[[], Any] | None = None
+    # Refreshes the run lease (the CLI wires paper.run_lock.heartbeat_run_lock).
+    # A full suite runs up to 4 real recoveries + ~14 wire actions — past
+    # LOCK_STALE_SECONDS an un-refreshed lease reads as abandoned and a
+    # concurrent ``live --loop`` could silently take the run over mid-suite.
+    # Raising RunLockError from it means a successor owns the run: abort.
+    heartbeat: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -234,6 +240,11 @@ class SmokeTestRunner:
         # FAILED — the CLI surfaces it as a prominent operator warning (the
         # wallet may still hold an armed scheduleCancel).
         self.kill_switch_disarm_failed: bool = False
+        # Set True when the lease heartbeat reported this process superseded:
+        # a successor now owns the run (and the wallet's kill switch), so the
+        # exit disarm is SUPPRESSED — an account-wide clear here would strip
+        # the successor's dead-man cover until its next refresh.
+        self._lease_superseded: bool = False
 
     # -- orchestration ----------------------------------------------------
 
@@ -267,6 +278,10 @@ class SmokeTestRunner:
             if needs_preflight:
                 self._preflight_recovery()
             for test in selected:
+                # Outside _execute on purpose: a RunLockError (superseded — a
+                # successor owns the run) must ABORT the suite, not degrade
+                # into one test's error verdict while orders keep going out.
+                self._heartbeat()
                 result = self._execute(test)
                 self._record(test, result)
                 executed.append(test)
@@ -278,10 +293,32 @@ class SmokeTestRunner:
                     "" if result.detail is None else f" — {result.detail}",
                 )
         finally:
-            # In the ``finally`` so a mid-suite crash disarms too.
-            if arms_kill_switch:
+            # In the ``finally`` so a mid-suite crash disarms too — EXCEPT when
+            # the lease was superseded: the successor owns the wallet's switch
+            # now, and an account-wide clear would strip its dead-man cover.
+            if arms_kill_switch and not self._lease_superseded:
                 self._disarm_kill_switch()
         return executed
+
+    def _heartbeat(self) -> None:
+        """Refresh the run lease between tests (real runs; no-op un-wired).
+
+        ``RunLockError`` means this process was superseded (its lease went
+        stale past LOCK_STALE_SECONDS and another ``live``/``live-smoke``
+        legitimately took the run over): mark the lease lost — which also
+        suppresses the exit disarm — and re-raise so the suite stops before
+        the next wire action. Any OTHER failure (a transient store error)
+        propagates unchanged: the suite still aborts (fail-closed — orders
+        must not continue under an uncertain lease) but the normal exit
+        disarm still runs, because no successor exists to own the switch.
+        """
+        if self.ctx.heartbeat is None:
+            return
+        try:
+            self.ctx.heartbeat()
+        except RunLockError:
+            self._lease_superseded = True
+            raise
 
     def _select(self, only: Sequence[str] | None) -> list[SmokeTest]:
         if only is None:
@@ -967,12 +1004,6 @@ def smoke_gate_report(
             failed.append(key)
     passed = not missing and not failed and not errored
     return passed, tuple(missing), tuple(failed), tuple(errored)
-
-
-def smoke_gate_passed(conn: Any, run_id: str) -> bool:
-    """True iff every §20.2 smoke test's latest non-dry-run result is ``passed``."""
-    passed, *_rest = smoke_gate_report(conn, run_id)
-    return passed
 
 
 def validate_only_keys(keys: Iterable[str]) -> tuple[str, ...]:

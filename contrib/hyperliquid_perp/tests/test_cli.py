@@ -3026,3 +3026,27 @@ def test_live_smoke_preflight_failure_exits_4_and_releases_the_lease(tmp_path, c
     db = Database(dbp)
     acquire_run_lock(db, "live-BTC", pid=424242, now=datetime.now(timezone.utc))
     db.close()
+
+
+def test_live_smoke_superseded_lease_exits_1_by_name(tmp_path, capsys, monkeypatch):
+    # A mid-suite lease takeover surfaces as the named lock outcome (exit 1),
+    # not main()'s generic exit 2.
+    from contrib.hyperliquid_perp import cli as cli_mod
+    from contrib.hyperliquid_perp.live import smoke as smoke_mod
+    from contrib.hyperliquid_perp.paper.run_lock import RunLockError
+
+    dbp = _make_live_run(tmp_path)
+    monkeypatch.setattr(
+        cli_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+    )
+
+    def _superseded(self, *, only=None):
+        raise RunLockError("run 'live-BTC' lease superseded by pid 4242")
+
+    monkeypatch.setattr(smoke_mod.SmokeTestRunner, "run", _superseded)
+    rc = cli_main(
+        ["live-smoke", "--config", "unused.yaml", "--run-id", "live-BTC", "--db", str(dbp)]
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "superseded mid-suite" in err

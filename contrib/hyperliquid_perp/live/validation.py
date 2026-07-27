@@ -53,7 +53,6 @@ manual shutdown/restart item is operator-confirmed only — surface as
 from __future__ import annotations
 
 import json
-import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -63,8 +62,6 @@ from ..paper.scheduler import parse_instant
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from .smoke import SMOKE_TEST_KEYS, smoke_gate_report
-
-logger = logging.getLogger(__name__)
 
 __all__ = [
     "MIN_KILL_SWITCH_REFRESH_RATE",

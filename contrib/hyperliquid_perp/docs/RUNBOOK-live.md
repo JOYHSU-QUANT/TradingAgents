@@ -192,6 +192,9 @@ python -m contrib.hyperliquid_perp live-smoke \
 
 - **run lock**：真跑（非 `--dry-run`／`--gate-status`）會先取 run 的 lease——同一
   run 正被 `live --loop` 跑著時會具名拒絕（exit 1）。先停掉 daemon 再跑 smoke。
+  套件跑動中**每項測試前會 heartbeat** 這個 lease；萬一 lease 已被接管（本進程
+  卡死超過 stale 門檻後被另一個 live 進程合法接手），套件立刻具名中止（exit 1）
+  且**不做**收尾 disarm——kill switch 此時屬於接管者，已記錄的判定不受影響。
 - **pre-flight recovery**：見 §3.2。pre-flight 沒過＝suite 直接中止（exit 4、
   不記任何判定）；先查 `safe-mode --status`／log、修好 run 狀態再重跑。
 - **probe 成交入帳**：會成交的 probe（測 6/7/18 的開倉／平倉 IOC）以

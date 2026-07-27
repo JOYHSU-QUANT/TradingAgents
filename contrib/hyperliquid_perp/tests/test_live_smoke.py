@@ -689,3 +689,60 @@ def test_preflight_recovery_exception_is_a_preflight_abort(live_db):
         rows = repo.iter_smoke_test_results(live_db.conn, "live-BTC")
     assert len(rows) == 0
     assert "clear_scheduled_cancel" in signed.calls
+
+
+# -- run-lease heartbeat (exit check 2026-07-27) ----------------------------
+
+
+def test_heartbeat_fires_once_per_test(live_db):
+    beats = {"n": 0}
+
+    def _beat():
+        beats["n"] += 1
+
+    ctx = _ctx(live_db, _FakeSigned(), run_recovery=lambda: _Recovery())
+    ctx.heartbeat = _beat
+    with live_db:
+        smoke.SmokeTestRunner(ctx).run()
+    assert beats["n"] == len(smoke.SMOKE_TESTS)
+
+
+def test_superseded_lease_aborts_and_suppresses_disarm(live_db):
+    # RunLockError from the heartbeat = a successor legitimately owns the run
+    # (and the wallet's kill switch): the suite must stop before the next wire
+    # action and must NOT fire the account-wide clear (it would strip the
+    # successor's dead-man cover). Completed verdicts stay durable.
+    from contrib.hyperliquid_perp.paper.run_lock import RunLockError
+
+    signed = _FakeSigned()
+    beats = {"n": 0}
+
+    def _beat():
+        beats["n"] += 1
+        if beats["n"] >= 3:
+            raise RunLockError("superseded by pid 4242")
+
+    ctx = _ctx(live_db, signed, run_recovery=lambda: _Recovery())
+    ctx.heartbeat = _beat
+    with live_db:
+        with pytest.raises(RunLockError):
+            smoke.SmokeTestRunner(ctx).run()
+        rows = repo.iter_smoke_test_results(live_db.conn, "live-BTC")
+    assert len(rows) == 2  # tests 1 and 2 recorded before the third beat
+    assert "clear_scheduled_cancel" not in signed.calls
+
+
+def test_transient_heartbeat_failure_aborts_but_still_disarms(live_db):
+    # A non-RunLockError heartbeat failure (transient store error) also stops
+    # the suite (orders must not continue under an uncertain lease), but no
+    # successor exists — the normal exit disarm still runs.
+    signed = _FakeSigned()
+
+    def _beat():
+        raise sqlite3.OperationalError("store busy")
+
+    ctx = _ctx(live_db, signed, run_recovery=lambda: _Recovery())
+    ctx.heartbeat = _beat
+    with live_db, pytest.raises(sqlite3.OperationalError):
+        smoke.SmokeTestRunner(ctx).run()
+    assert "clear_scheduled_cancel" in signed.calls

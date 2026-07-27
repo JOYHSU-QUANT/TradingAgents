@@ -21,6 +21,9 @@ The subcommands (plus full Phase 1/2 backward compatibility):
   exchange action against testnet, record the verdicts, and report the §20.2
   cycle-entry gate. ``--gate-status`` reads the stored gate (no network);
   ``--dry-run`` validates config + wiring and places no orders.
+- ``python -m contrib.hyperliquid_perp safe-mode --run-id <id> --status`` —
+  live-run safe-mode inspection and the manual lane (``--release``,
+  ``--stamp-case``) for §12.3/§13.5 operator actions.
 
 Empty argv and flag-style invocations (first argument starting with ``-``) —
 including the Phase 1 ``--context-only`` smoke run and the single-shot engine
@@ -33,8 +36,10 @@ operator/config/environment errors — including a protection-only ``paper`` run
 that self-terminates after its position closes (final export written; the
 books never re-verified, the API key was never supplied, or the engine
 failed to import — stderr says which), ``2`` unexpected error, ``4``
-(``validate`` only) the run is internally consistent but has not accumulated
-the 30-cycle gate yet ("keep running cycles"), ``5`` (``validate`` only) the
+not-yet-at-the-gate outcomes (``validate``: short of the 30-cycle gate;
+``live-smoke``: the §20.2 gate is not satisfied, incl. a pre-flight abort;
+``live`` without ``--loop``: recovery ran but judged unclean; ``safe-mode
+--status``: a manual safe mode is latched), ``5`` (``validate`` only) the
 run has integrity failures — orphans, snapshot or replay mismatches, or a
 store so corrupt the checks themselves cannot run ("the store is broken;
 investigate before trusting results"), ``130`` interrupted before a graceful
@@ -1977,6 +1982,8 @@ def _cmd_live_smoke(argv: list[str]) -> int:
         return 1
     disarm_failed = False
     preflight_error: str | None = None
+    from .paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
+
     try:
         session = _build_smoke_session(args, db)
         if isinstance(session, int):
@@ -1988,8 +1995,6 @@ def _cmd_live_smoke(argv: list[str]) -> int:
             # `live --loop` on this run would race the probe orders, the
             # recovery's stale-order sweep, and the account-wide kill switch;
             # refuse instead (a dry run touches only this store, no lease needed).
-            from .paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
-
             try:
                 acquire_run_lock(db, args.run_id, pid=os.getpid(), now=datetime.now(timezone.utc))
             except RunLockError as exc:
@@ -2009,6 +2014,19 @@ def _cmd_live_smoke(argv: list[str]) -> int:
                 # No test executed, no verdict recorded; the exit disarm has
                 # already run inside runner.run()'s finally.
                 preflight_error = str(exc)
+            except RunLockError as exc:
+                # The per-test heartbeat found this process superseded: a
+                # successor legitimately took over the stale lease and now owns
+                # the run AND the wallet's kill switch (the runner suppressed
+                # its exit disarm for exactly that reason). Completed verdicts
+                # are durable; stop by name.
+                print(
+                    f"error: {exc} — the run lease was superseded mid-suite; the "
+                    "suite stopped and left the account-wide kill switch to the "
+                    "new owner. Re-run live-smoke once this run has a single owner.",
+                    file=sys.stderr,
+                )
+                return 1
             disarm_failed = runner.kill_switch_disarm_failed
             passed, missing, failed, errored = smoke_gate_report(db.conn, args.run_id)
         finally:
@@ -2237,6 +2255,13 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
             payload_dir=payload_dir,
         )
 
+    def _heartbeat() -> None:
+        # Keeps the lease _cmd_live_smoke acquired fresh across the suite;
+        # raises RunLockError once superseded (the runner aborts on it).
+        from .paper.run_lock import heartbeat_run_lock
+
+        heartbeat_run_lock(db, args.run_id, pid=os.getpid(), now=datetime.now(timezone.utc))
+
     return SmokeContext(
         signed=signed,
         db=db,
@@ -2251,6 +2276,7 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
         now=clock.now,
         dry_run=False,
         run_recovery=_run_recovery,
+        heartbeat=_heartbeat,
     )
 
 

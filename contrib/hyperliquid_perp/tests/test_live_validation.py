@@ -125,6 +125,32 @@ def test_mainnet_tiny_healthy_run_is_ready(tmp_path):
     assert report.live_ready
 
 
+def test_mainnet_smoke_booleans_render_na_in_summary(tmp_path):
+    # A mainnet_tiny run's live_smoke_tests is empty by design (§21.3 proves smoke
+    # on the sibling testnet run); the four *_test_passed lines must render n/a —
+    # not "no" — so the report can't be misread as a mainnet smoke failure.
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db, mode="mainnet_tiny")
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    joined = "\n".join(report.summary_lines())
+    assert "emergency_close_test_passed: n/a" in joined
+    assert "restart_reconciliation_passed: n/a" in joined
+    assert "startup_with_existing_position_test_passed: n/a" in joined
+    assert "startup_with_stale_open_order_test_passed: n/a" in joined
+    # The underlying field is unchanged — still a plain bool (False with no rows).
+    assert report.emergency_close_test_passed is False
+
+
+def test_testnet_smoke_booleans_render_verdict_in_summary(tmp_path):
+    # On a testnet_live run the same lines render the real yes/no verdict.
+    db = _healthy(tmp_path)  # testnet, all smoke passed
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    joined = "\n".join(report.summary_lines())
+    assert "emergency_close_test_passed: yes" in joined
+
+
 # -- shortfalls (exit 4) ---------------------------------------------------
 
 

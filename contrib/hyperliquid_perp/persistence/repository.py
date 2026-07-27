@@ -2886,6 +2886,15 @@ def insert_smoke_test_result(
     placed no orders; such rows never satisfy the cycle-entry gate.
     """
     check_enum(status, LIVE_SMOKE_TEST_STATUSES, name="status")
+    # A dry-run row placed no orders (it is a wiring check), so its only honest
+    # verdict is "skipped". The gate (latest_smoke_test_results) already excludes
+    # dry-run rows regardless of status, but a dry_run=1/status='passed' row could
+    # still mislead a future direct reader — reject the contradiction at the write
+    # boundary rather than relying on every reader to filter it out.
+    if dry_run and status != "skipped":
+        raise ValueError(
+            f"a dry-run smoke row placed no orders and must be 'skipped', got {status!r}"
+        )
     _insert(
         conn,
         "live_smoke_tests",

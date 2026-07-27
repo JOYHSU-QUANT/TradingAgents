@@ -31,14 +31,17 @@ Where the metrics come from (all from persisted PR 2–5 event logs):
 - the four ``*_test_passed`` booleans — the §20.2 smoke suite's latest verdicts
   (tests 15/16/17/18), read through :mod:`.smoke`.
 
-Exit-code contract (mirrors ``paper.validation`` / the ``validate`` CLI): a
-store-integrity failure (dedupe errors, orphans, duplicate applies, position or
-replay mismatch, an unprotected window, a refresh rate below 99%, a smoke test
-that ran and FAILED, or — mainnet_tiny — an unresolved reconciliation case or a
-breached daily-loss cap) lands in ``failures`` → exit 5 ("investigate the
-store"). A run that is merely short of the gate (< 30 cycles / orders, smoke
-tests not yet run) lands in ``shortfalls`` → exit 4 ("keep running / run the
-smoke suite"). All conditions met → ``live_ready`` → exit 0. Non-gating
+Exit-code contract (mirrors ``paper.validation`` / the ``validate`` CLI): a hard
+acceptance failure lands in ``failures`` → exit 5 ("investigate before going
+live") — this covers both a store-integrity breach (dedupe errors, orphans,
+duplicate applies, a position or replay mismatch) AND a safety-invariant breach
+that is not itself store corruption (an unprotected window — including one opened
+by a deliberate ``stop_loss_repair_blocked`` gate pause, which still leaves the
+position unprotected, §20.3: unprotected seconds must be 0 — a refresh rate below
+99%, a smoke test that ran and FAILED, or — mainnet_tiny — an unresolved
+reconciliation case or a breached daily-loss cap). A run that is merely short of
+the gate (< 30 cycles / orders, smoke tests not yet run) lands in ``shortfalls``
+→ exit 4 ("keep running / run the smoke suite"). All conditions met → ``live_ready`` → exit 0. Non-gating
 completeness signals — emergency closes during cycles (§21.4's "no emergency
 close caused by bot bug" is not machine-decidable), daily-loss episodes on
 testnet — surface as ``warnings``, never gating.
@@ -189,6 +192,16 @@ class LiveValidationReport:
         def _rate(value: Decimal | None) -> str:
             return "n/a (no refresh yet)" if value is None else f"{value * 100:.2f}%"
 
+        def _smoke(value: bool) -> str:
+            # The four smoke-derived booleans are a TESTNET_LIVE acceptance
+            # signal; a mainnet_tiny run's live_smoke_tests is empty by design
+            # (§21.3 proves smoke on the sibling testnet run), so a False here
+            # means "not tracked for this profile", not "failed" — render it n/a
+            # so the report can't be misread as a mainnet smoke failure.
+            if self.execution_mode != "testnet_live":
+                return "n/a (proven on testnet run, §21.3)"
+            return _yn(value)
+
         lines = [
             f"run_id: {self.run_id}",
             f"execution_mode: {self.execution_mode}",
@@ -205,12 +218,12 @@ class LiveValidationReport:
             f"unprotected_window_count: {self.unprotected_window_count}",
             f"kill_switch_refresh_success_rate: {_rate(self.kill_switch_refresh_success_rate)}",
             f"kill_switch_refresh_total: {self.kill_switch_refresh_total}",
-            f"restart_reconciliation_passed: {_yn(self.restart_reconciliation_passed)}",
-            f"emergency_close_test_passed: {_yn(self.emergency_close_test_passed)}",
+            f"restart_reconciliation_passed: {_smoke(self.restart_reconciliation_passed)}",
+            f"emergency_close_test_passed: {_smoke(self.emergency_close_test_passed)}",
             "startup_with_existing_position_test_passed: "
-            f"{_yn(self.startup_with_existing_position_test_passed)}",
+            f"{_smoke(self.startup_with_existing_position_test_passed)}",
             "startup_with_stale_open_order_test_passed: "
-            f"{_yn(self.startup_with_stale_open_order_test_passed)}",
+            f"{_smoke(self.startup_with_stale_open_order_test_passed)}",
             f"unresolved_reconciliation_mismatch_count: {self.unresolved_reconciliation_mismatch_count}",
             f"daily_loss_breached: {_yn(self.daily_loss_breached)}",
             f"emergency_close_event_count: {self.emergency_close_event_count}",

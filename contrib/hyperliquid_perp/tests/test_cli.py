@@ -2868,3 +2868,28 @@ def test_live_smoke_dry_run_records_skipped(tmp_path, capsys):
     assert rc == 0
     assert "dry-run complete" in out
     assert "smoke_gate_passed: no" in out  # dry-run rows never satisfy the gate
+
+
+def test_live_smoke_refuses_mainnet_mode(tmp_path, capsys):
+    # The §20.2 smoke suite is a TESTNET pre-flight; a mainnet_tiny config must be
+    # refused before any real order can reach mainnet (mainnet relies on the
+    # separately-run testnet smoke, §21.3).
+    cfg = _live_yaml(tmp_path, live_lines="  mode: mainnet_tiny\n  network: mainnet\n")
+    dbp = _make_live_run(tmp_path, mode="mainnet_tiny")
+    rc = cli_main(["live-smoke", "--config", str(cfg), "--run-id", "live-BTC", "--db", str(dbp)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "only against a testnet_live run" in err
+    assert "mainnet_tiny" in err
+
+
+def test_live_smoke_refuses_mainnet_even_with_dry_run(tmp_path, capsys):
+    # The guard sits before the dry-run branch: a mainnet config is refused even
+    # for the offline wiring check, so a green dry-run can never lull an operator.
+    cfg = _live_yaml(tmp_path, live_lines="  mode: mainnet_tiny\n  network: mainnet\n")
+    dbp = _make_live_run(tmp_path, mode="mainnet_tiny")
+    rc = cli_main(
+        ["live-smoke", "--config", str(cfg), "--run-id", "live-BTC", "--db", str(dbp), "--dry-run"]
+    )
+    assert rc == 1
+    assert "only against a testnet_live run" in capsys.readouterr().err

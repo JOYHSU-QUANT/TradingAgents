@@ -353,3 +353,74 @@ def test_cleanup_failure_is_surfaced_in_step_detail(live_db):
     row = latest["multi_slice_fill"]
     assert row["status"] == "passed"  # the fill itself still passed
     assert "cleanup" in (row["detail"] or "") and "FAILED" in row["detail"]
+
+
+def test_cleanup_refused_ack_is_surfaced_in_step_detail(live_db):
+    # A best-effort close the exchange REJECTS at the per-order level returns an
+    # unaccepted OrderAck (not an exception), so the ack must be checked — a
+    # stray funded position must still leave a durable note, not vanish.
+    class _CloseRefused(_FakeSigned):
+        def place_ioc_limit(self, **k):
+            self._log("place_ioc_limit")
+            self.last_place_cloid = k.get("cloid_hex")
+            if k.get("reduce_only"):  # the cleanup close
+                return _Ack(
+                    "error",
+                    exchange_order_id=None,
+                    filled_size=None,
+                    average_price=None,
+                    error="reduce-only rejected",
+                )
+            return self._place_ack
+
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, _CloseRefused())).run(only=["multi_slice_fill"])
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["multi_slice_fill"]
+    assert row["status"] == "passed"  # the fill itself still passed
+    assert "cleanup" in (row["detail"] or "") and "refused" in row["detail"]
+
+
+# -- kill-switch disarm on suite exit (Q2) --------------------------------
+
+
+def test_suite_disarms_kill_switch_on_exit(live_db):
+    # A restart test's recovery arms the dead man's switch; the suite must clear
+    # it on exit so no armed scheduleCancel is left behind. Run a restart test
+    # WITHOUT test 14 (which clears its own arm) so the only disarm is the
+    # runner's finally — the fake recovery makes no wire calls of its own.
+    signed = _FakeSigned()
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["restart_reconciliation"]
+        )
+    assert signed.calls == ["clear_scheduled_cancel"]
+
+
+def test_dry_run_does_not_touch_kill_switch(live_db):
+    # signed=None on a dry run: the disarm guard must skip (no crash, no wire call).
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, None, dry_run=True)).run(
+            only=["restart_reconciliation"]
+        )
+        rows = repo.iter_smoke_test_results(live_db.conn, "live-BTC")
+    assert [r["status"] for r in rows] == ["skipped"]
+
+
+def test_insert_rejects_dry_run_row_that_is_not_skipped(live_db):
+    # A dry-run row placed no orders, so its only honest verdict is "skipped" —
+    # a dry_run=1/status='passed' write is rejected at the boundary.
+    with (
+        live_db.transaction() as conn,
+        pytest.raises(ValueError, match="must be 'skipped'"),
+    ):
+        repo.insert_smoke_test_result(
+            conn,
+            run_id="live-BTC",
+            test_number=1,
+            test_key="signed_client_init",
+            test_name="x",
+            status="passed",
+            dry_run=True,
+            executed_at=_T0,
+        )

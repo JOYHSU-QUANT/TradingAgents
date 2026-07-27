@@ -122,7 +122,8 @@ python -m contrib.hyperliquid_perp live-smoke \
 
 ### 3.2 為 restart 系列（測 15/16/17）備妥前置
 
-三項 restart/startup 測試會對 run 跑一次真正的 §19.1 recovery：
+三項 restart/startup 測試**各會**對 run 跑一次真正的 §19.1 recovery（arm kill
+switch ＋ reconcile ＋ 掃 stale bot-owned 單）：
 
 - **test 16（startup with existing position）**：先在 testnet 用主錢包開一個小倉，
   再跑 smoke——recovery 須乾淨 reconcile 這個既有倉。
@@ -131,6 +132,17 @@ python -m contrib.hyperliquid_perp live-smoke \
 - **test 15（restart reconciliation）**：乾淨重跑 recovery 即可。
 
 不方便一次備齊時，用 `--only` 分項跑（見下）。
+
+> **這兩項證明的是什麼**：test 16/17 只斷言 recovery 判定 `passed`，**不會**獨立驗證
+> 前置情境真的存在——若沒照上面備妥（或前一次 recovery 已把狀態清乾淨），recovery 仍
+> 會判乾淨、這兩項照樣記 passed。因此 §20.3 的
+> `startup_with_existing_position_test_passed` /
+> `startup_with_stale_open_order_test_passed` 證明的是「**在你備妥的前置下** recovery
+> 乾淨」，而非「情境已被自動偵測」——請確實照上面備置後再跑。
+>
+> **kill switch**：restart 系列的 recovery 會 arm dead man's switch；整套 suite 跑完
+> 會**自動 disarm**（清掉 scheduleCancel），不會在錢包上留 armed 狀態。下次 `live
+> --loop` 會重新 arm 並持續 refresh。
 
 ### 3.3 跑 smoke（真連線）
 
@@ -161,9 +173,13 @@ python -m contrib.hyperliquid_perp live-smoke \
 
 | `live-smoke` exit | 意義 | 下一步 |
 |---|---|---|
-| `0` | 選定的 suite／gate 全過 | 可進 testnet_live cycles |
+| `0` | **全 18 項** gate 開（每項最新真跑結果都 passed） | 可進 testnet_live cycles |
 | `4` | 跑了（或讀了）但 gate 未滿足 | 看 not_yet_run／failed，補跑或修 |
 | `1` | config／env／網路具名錯誤 | 依訊息修 |
+
+> `--only` 只跑子集時，即使選到的項全過，其餘未跑的項仍讓 gate 未開——所以 exit 仍是
+> `4`（`not_yet_run` 會列出剩下的項）。exit `0` 一律代表整個 §20.2 gate 開，不是「選到的
+> 那幾項過了」。
 
 ---
 

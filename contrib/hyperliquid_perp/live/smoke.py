@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_HALF_EVEN, Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ..persistence import repository as repo
 from ..persistence.cloid import cloid_hex, cloid_logical
@@ -99,6 +99,10 @@ SMOKE_TESTS: tuple[SmokeTest, ...] = (
 # maps §20.3 booleans through a subset of them, and --only validates against them.
 SMOKE_TEST_KEYS: tuple[str, ...] = tuple(t.key for t in SMOKE_TESTS)
 _BY_KEY: dict[str, SmokeTest] = {t.key: t for t in SMOKE_TESTS}
+# ``key`` is the identity the gate, the validator, and ``--only`` all key off of;
+# a silent collision (a future item copy-pasted from an existing one) would drop
+# a test from the suite via the dict fold. Turn that into a loud import-time error.
+assert len(_BY_KEY) == len(SMOKE_TESTS), "SMOKE_TESTS keys must be unique"
 
 # Just over Hyperliquid's ~$10 minimum order value, so a probe order the suite
 # means to REST or FILL is not refused for being dust.
@@ -138,7 +142,7 @@ class SmokeContext:
 class SmokeStepResult:
     """One test's verdict, before it is stamped into ``live_smoke_tests``."""
 
-    status: str  # passed / failed / error / skipped (repo.LIVE_SMOKE_TEST_STATUSES)
+    status: Literal["passed", "failed", "error", "skipped"]  # repo.LIVE_SMOKE_TEST_STATUSES
     detail: str | None = None
     error_message: str | None = None
 
@@ -178,17 +182,23 @@ class SmokeTestRunner:
         """
         selected = self._select(only)
         executed: list[SmokeTest] = []
-        for test in selected:
-            result = self._execute(test)
-            self._record(test, result)
-            executed.append(test)
-            logger.info(
-                "smoke %02d %s: %s%s",
-                test.number,
-                test.key,
-                result.status,
-                "" if result.detail is None else f" — {result.detail}",
-            )
+        try:
+            for test in selected:
+                result = self._execute(test)
+                self._record(test, result)
+                executed.append(test)
+                logger.info(
+                    "smoke %02d %s: %s%s",
+                    test.number,
+                    test.key,
+                    result.status,
+                    "" if result.detail is None else f" — {result.detail}",
+                )
+        finally:
+            # A restart test's recovery arms the dead man's switch; clear it so a
+            # completed suite never leaves an armed scheduleCancel behind (Q2,
+            # 2026-07-27). In the ``finally`` so a mid-suite crash disarms too.
+            self._disarm_kill_switch()
         return executed
 
     def _select(self, only: Sequence[str] | None) -> list[SmokeTest]:
@@ -229,6 +239,29 @@ class SmokeTestRunner:
                 detail=result.detail,
                 error_message=result.error_message,
                 executed_at=self.ctx.now(),
+            )
+
+    def _disarm_kill_switch(self) -> None:
+        """Clear any dead man's switch a restart test's recovery armed (§18).
+
+        The restart tests (15–17) each drive a real §19.1 startup recovery whose
+        first step ARMS the scheduleCancel. Test 14 clears its own arm, but runs
+        before 15–17, so without this a full suite would exit leaving the wallet
+        with an armed scheduleCancel that fires ~``kill_switch_deadline`` later and
+        cancels every resting order. Real runs only (a dry run placed no wire
+        actions and carries no signed client); best-effort — a failed disarm is
+        logged, never raised: the verdicts are already durable and the next
+        ``live --loop`` re-arms and refreshes the switch anyway.
+        """
+        if self.ctx.dry_run or self.ctx.signed is None:
+            return
+        try:
+            self.ctx.signed.clear_scheduled_cancel()
+        except Exception as exc:  # noqa: BLE001 — cleanup must not mask the suite's verdicts
+            logger.warning(
+                "smoke: best-effort kill-switch disarm FAILED — %s: %s",
+                type(exc).__name__,
+                exc,
             )
 
     # -- shared helpers ---------------------------------------------------
@@ -429,22 +462,28 @@ class SmokeTestRunner:
         )
 
     def _best_effort_close(self, size: Decimal) -> str | None:
-        """Flatten a probe position; return a note if the close FAILED.
+        """Flatten a probe position; return a note if the close did NOT succeed.
 
         The core test (a fill happened) already passed, so a cleanup failure
         does not turn it red — but a stray funded position must not vanish from
-        the audit trail: the note is folded into the step's ``detail`` (durable
-        in ``live_smoke_tests``) and the exception is logged with its type/message
-        so the operator can act on the residual position.
+        the audit trail. The note (from an exception OR a reduce-only close the
+        exchange rejected at the per-order level — ``place_ioc_limit`` returns an
+        unaccepted ``OrderAck`` rather than raising, so the ack must be checked,
+        mirroring :meth:`_best_effort_cancel`) is folded into the step's
+        ``detail`` (durable in ``live_smoke_tests``) and logged, so the operator
+        can act on the residual position.
         """
         try:
-            self._reduce_only_close(size)
-            return None
+            ack = self._reduce_only_close(size)
         except Exception as exc:  # noqa: BLE001 — cleanup must not turn a passing test red
             logger.warning(
                 "smoke: best-effort close of %s FAILED — %s: %s", size, type(exc).__name__, exc
             )
             return f"cleanup: reduce-only close of {size} FAILED ({type(exc).__name__}: {exc})"
+        if not ack.accepted:
+            logger.warning("smoke: best-effort close of %s refused: %s", size, ack.error)
+            return f"cleanup: reduce-only close of {size} refused ({ack.error})"
+        return None
 
     def _test_stop_loss_create(self) -> SmokeStepResult:
         return self._trigger_create("sl", "stop_loss", "SL")

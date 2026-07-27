@@ -1839,9 +1839,11 @@ def _cmd_live_smoke(argv: list[str]) -> int:
     lets ``live --loop`` start the testnet_live cycles. ``--gate-status`` reports
     the stored gate without touching the network; ``--dry-run`` validates the
     config and wiring and records every selected test ``skipped`` (places no
-    orders — the offline check the unit tests exercise). Exit: 0 = the selected
-    suite / gate passed; 4 = ran (or read) but the gate is not satisfied; 1 = a
-    named config / env / network error.
+    orders — the offline check the unit tests exercise). Exit: 0 = the FULL §20.2
+    gate is open (every one of the 18 tests' latest real result is ``passed``) —
+    so ``--only`` on a subset still exits 4 until the whole suite has passed; 4 =
+    ran (or read) but the gate is not satisfied; 1 = a named config / env /
+    network error.
 
     The restart tests (15–17) drive one real §19.1 startup recovery over the run;
     the operator stages their preconditions (an existing position / a stale
@@ -1989,6 +1991,19 @@ def _build_smoke_session(args, db):
         return 1
     if live_cfg.mode is ExecutionMode.PAPER:
         print("error: live.mode is 'paper' — the smoke suite is a live-mode tool.", file=sys.stderr)
+        return 1
+    if live_cfg.mode is not ExecutionMode.TESTNET_LIVE:
+        # The §20.2 smoke suite is a TESTNET pre-flight: it opens/closes real
+        # positions and rests/cancels real SL/TP triggers. mainnet_tiny relies on
+        # the smoke proven on the SEPARATE testnet run (§21.3) and is never
+        # smoke-tested on mainnet — refuse here (both --dry-run and real) so a
+        # mis-pointed config can never drive a real order onto mainnet.
+        print(
+            f"error: live-smoke runs only against a testnet_live run — live.mode is "
+            f"'{live_cfg.mode.value}'. mainnet_tiny relies on the smoke suite proven on "
+            "the separate testnet run (§21.3); it is never smoke-tested on mainnet.",
+            file=sys.stderr,
+        )
         return 1
     raw_risk = config.get("risk")
     if raw_risk is None:

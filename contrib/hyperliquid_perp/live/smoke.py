@@ -340,7 +340,15 @@ class SmokeTestRunner:
                 "no run_recovery seam wired — the order-placing tests need the "
                 "pre-flight §19.1 recovery (the CLI supplies it; a bare context cannot)"
             )
-        result = self.ctx.run_recovery()
+        try:
+            result = self.ctx.run_recovery()
+        except Exception as exc:  # noqa: BLE001 — a raised recovery (e.g. §18 arming
+            # failure, which propagates by contract) is the same abort outcome as an
+            # unclean verdict: nothing ran, exit 4 — not main()'s generic exit 2.
+            raise SmokePreflightError(
+                f"pre-flight §19.1 recovery raised — {type(exc).__name__}: {exc} "
+                "(no test ran; fix the run/exchange state and re-run the suite)"
+            ) from exc
         if not getattr(result, "passed", False):
             raise SmokePreflightError(
                 "pre-flight §19.1 recovery did not pass — the run is not in a clean "

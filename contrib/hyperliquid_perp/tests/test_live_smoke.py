@@ -670,3 +670,22 @@ def test_trigger_create_refusal_is_a_failed_verdict(live_db):
     row = latest["stop_loss_create"]
     assert row["status"] == "failed"
     assert "refused by the exchange" in row["error_message"]
+
+
+def test_preflight_recovery_exception_is_a_preflight_abort(live_db):
+    # The seam's third failure mode: run_recovery RAISES (e.g. §18 arming API
+    # failure, which propagates by contract) instead of returning an unclean
+    # result. It must become the same SmokePreflightError abort — exit 4 at the
+    # CLI — not an uncaught crash into main()'s generic exit 2; the original
+    # cause stays in the message, nothing is recorded, and the disarm fires.
+    signed = _FakeSigned()
+
+    def _boom():
+        raise RuntimeError("scheduleCancel API down")
+
+    with live_db:
+        with pytest.raises(smoke.SmokePreflightError, match="scheduleCancel API down"):
+            smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=_boom)).run()
+        rows = repo.iter_smoke_test_results(live_db.conn, "live-BTC")
+    assert len(rows) == 0
+    assert "clear_scheduled_cancel" in signed.calls

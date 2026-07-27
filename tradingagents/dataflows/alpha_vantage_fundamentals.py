@@ -60,8 +60,15 @@ def _filter_response_json(result, curr_date):
     earlier version type-checked ``isinstance(result, dict)`` on this always-str
     value, so the guard silently never fired in production. A ``None`` curr_date
     (no point-in-time bound) or a non-JSON body (an error/notice page) is returned
-    untouched; a present-but-unparseable curr_date raises via
-    ``_filter_reports_by_date``.
+    untouched.
+
+    A present-but-unparseable curr_date makes ``_filter_reports_by_date`` raise;
+    that is caught here and turned into a tool-friendly ``INVALID_CURR_DATE``
+    string rather than propagated. fundamental_data is a NON-optional category, so
+    a raised ValueError would escape ``route_to_vendor`` (``raise first_error``)
+    and crash the ToolNode-wrapped graph run — unlike the optional farside/F&G
+    vendors, whose raise degrades to a sentinel. The string is loud to the LLM (it
+    can retry with a valid date), leaks no future data, and never aborts the run.
     """
     if not curr_date or not isinstance(result, str):
         return result
@@ -71,7 +78,15 @@ def _filter_response_json(result, curr_date):
         return result  # not JSON (an error/plain-text body) — nothing to filter
     if not isinstance(parsed, dict):
         return result
-    return json.dumps(_filter_reports_by_date(parsed, curr_date), indent=2)
+    try:
+        filtered = _filter_reports_by_date(parsed, curr_date)
+    except ValueError:
+        return (
+            f"INVALID_CURR_DATE: curr_date {curr_date!r} is not a valid yyyy-mm-dd "
+            f"date, so fundamentals cannot be bounded to a point in time. No data "
+            f"returned; retry with a valid yyyy-mm-dd date. Do not fabricate values."
+        )
+    return json.dumps(filtered, indent=2)
 
 
 def get_fundamentals(ticker: str, curr_date: str = None) -> str:

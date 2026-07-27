@@ -140,10 +140,13 @@ def test_get_balance_sheet_without_curr_date_is_unfiltered(monkeypatch):
 
 
 @pytest.mark.unit
-def test_get_balance_sheet_raises_on_unparseable_curr_date(monkeypatch):
-    # Fail-closed end to end: a bad curr_date through the getter raises rather than
-    # serving unfiltered reports.
-    body = '{"symbol": "AAPL", "quarterlyReports": [{"fiscalDateEnding": "2025-01-01"}]}'
+def test_get_balance_sheet_returns_error_string_on_unparseable_curr_date(monkeypatch):
+    # Fail-closed but graceful: fundamentals is a NON-optional category, so a
+    # raised ValueError would escape route_to_vendor (raise first_error) and crash
+    # the ToolNode-wrapped run. The getter instead returns a loud INVALID_CURR_DATE
+    # sentinel (no data served, no future leak, LLM can retry), never raising.
+    body = '{"symbol": "AAPL", "quarterlyReports": [{"fiscalDateEnding": "2099-01-01"}]}'
     monkeypatch.setattr(avf, "_make_api_request", lambda function_name, params: body)
-    with pytest.raises(ValueError, match="look-ahead guard"):
-        avf.get_balance_sheet("AAPL", curr_date="not-a-date")
+    out = avf.get_balance_sheet("AAPL", curr_date="not-a-date")
+    assert out.startswith("INVALID_CURR_DATE")
+    assert "2099-01-01" not in out  # no future/unfiltered data leaked

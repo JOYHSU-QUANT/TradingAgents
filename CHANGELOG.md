@@ -31,6 +31,15 @@ Breaking changes within the 0.x line are called out explicitly.
   Previously a keyless vendor could only be stopped by editing code, having no
   API key to unset.
 
+### Fixed
+
+- **Alpha Vantage fundamentals look-ahead guard now takes effect.**
+  `get_balance_sheet` / `get_cashflow` / `get_income_statement` drop fiscal
+  reports dated after `curr_date`; the filter previously ran against the API's
+  raw JSON *string* return (never a dict) and silently no-op'd, so future-dated
+  reports leaked into point-in-time runs. A malformed `curr_date` now returns an
+  `INVALID_CURR_DATE` sentinel instead of silently serving unfiltered data.
+
 ## [0.3.0] — 2026-06-22
 
 Stabilization and extensibility release: a CI gate, a unified verified

@@ -32,6 +32,7 @@ __all__ = [
     "EXCHANGE_KNOWN_ATTEMPT_STATUSES",
     "KILL_SWITCH_EVENT_TYPES",
     "LIVE_LIQUIDITY_ROLES",
+    "LIVE_SMOKE_TEST_STATUSES",
     "PROTECTION_ORDER_EVENT_TYPES",
     "RECONCILIATION_CASE_TYPES",
     "RECONCILIATION_TRIGGERS",
@@ -84,6 +85,7 @@ __all__ = [
     "insert_run",
     "insert_run_seed_position",
     "insert_safe_mode_event",
+    "insert_smoke_test_result",
     "iter_accounting_adjustment_events",
     "iter_exchange_reconciliation_events",
     "iter_execution_plans",
@@ -95,8 +97,10 @@ __all__ = [
     "iter_orders",
     "iter_protection_order_events",
     "iter_safe_mode_events",
+    "iter_smoke_test_results",
     "iter_unresolved_fill_sightings",
     "last_live_fill_time",
+    "latest_smoke_test_results",
     "max_engine_seq",
     "newest_live_fill_order_key",
     "next_live_attempt_index",
@@ -2845,3 +2849,86 @@ def has_safe_mode_reason_event(
         ).fetchone()
         is not None
     )
+
+
+# --------------------------------------------------------------------------
+# live_smoke_tests (phase3-spec §20.2) — PR 6 testnet smoke-test result log
+# --------------------------------------------------------------------------
+
+# The four §20.2 outcomes a smoke step can land on. "skipped" is the dry-run /
+# not-selected verdict (never satisfies the §20.2 cycle-entry gate); "error" is
+# the harness failing to even run the step (distinct from a step that ran and
+# "failed" its assertion) — the acceptance gate treats both non-"passed" the
+# same, but the operator triages them differently.
+LIVE_SMOKE_TEST_STATUSES = frozenset({"passed", "failed", "skipped", "error"})
+
+
+def insert_smoke_test_result(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    test_number: int,
+    test_key: str,
+    test_name: str,
+    status: str,
+    network: str | None = None,
+    dry_run: bool = False,
+    detail: str | None = None,
+    error_message: str | None = None,
+    executed_at: datetime | None = None,
+) -> None:
+    """Append one §20.2 smoke-test result row (append-only audit).
+
+    A re-run after a fix writes a NEW row rather than overwriting the earlier
+    failure — the gate (:func:`latest_smoke_test_results`) reads the latest
+    ``result_id`` per ``test_key``, so the history stays intact while the
+    verdict follows the freshest attempt. ``dry_run`` marks a wiring check that
+    placed no orders; such rows never satisfy the cycle-entry gate.
+    """
+    check_enum(status, LIVE_SMOKE_TEST_STATUSES, name="status")
+    _insert(
+        conn,
+        "live_smoke_tests",
+        {
+            "run_id": run_id,
+            "test_number": test_number,
+            "test_key": test_key,
+            "test_name": test_name,
+            "status": status,
+            "network": network,
+            "dry_run": dry_run,
+            "detail": detail,
+            "error_message": error_message,
+            "executed_at": executed_at or datetime.now(timezone.utc),
+        },
+    )
+
+
+def iter_smoke_test_results(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    """A run's full smoke-test history in execution (insertion) order."""
+    return conn.execute(
+        "SELECT * FROM live_smoke_tests WHERE run_id = ? ORDER BY result_id",
+        (run_id,),
+    ).fetchall()
+
+
+def latest_smoke_test_results(
+    conn: sqlite3.Connection, run_id: str, *, include_dry_run: bool = False
+) -> dict[str, sqlite3.Row]:
+    """``{test_key: latest row}`` — the freshest result per key.
+
+    ``include_dry_run=False`` (the default, the gate's view) considers only
+    real-connection rows: a dry-run wiring check must never stand in for a
+    passing test in the §20.2 cycle-entry gate. The "latest" is the row with the
+    greatest ``result_id`` (append-only, monotonic), so a re-run supersedes its
+    predecessor without deleting the audit trail.
+    """
+    latest: dict[str, sqlite3.Row] = {}
+    sql = "SELECT * FROM live_smoke_tests WHERE run_id = ?"
+    if not include_dry_run:
+        sql += " AND dry_run = 0"
+    sql += " ORDER BY result_id"
+    for row in conn.execute(sql, (run_id,)):
+        # Ascending result_id: the last write for a key wins.
+        latest[row["test_key"]] = row
+    return latest

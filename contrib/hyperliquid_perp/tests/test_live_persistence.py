@@ -17,7 +17,7 @@ import pytest
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database, apply_migrations, connect
 from contrib.hyperliquid_perp.persistence.ids import live_order_attempt_id
-from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS
+from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS, SCHEMA_VERSION
 
 _NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
 _HEX = "0x" + "ab" * 16
@@ -41,8 +41,9 @@ def _columns(conn, table: str) -> set[str]:
 
 def test_v5_store_upgrades_to_latest_in_place(monkeypatch):
     # Build a store that stops at v5 (an existing paper DB), then re-open with
-    # the full migration list: the later migrations (v6, and v7's additive
-    # ADD COLUMN) apply, and the paper rows survive.
+    # the full migration list: the later migrations (v6, v7's additive ADD
+    # COLUMN, and v8's new live_smoke_tests table) apply, and the paper rows
+    # survive.
     conn = connect(":memory:")
     v5_only = {version: MIGRATIONS[version] for version in sorted(MIGRATIONS) if version <= 5}
     import contrib.hyperliquid_perp.persistence.db as db_module
@@ -86,7 +87,7 @@ def test_v5_store_upgrades_to_latest_in_place(monkeypatch):
     conn.execute(f"INSERT INTO scheduler_state (run_id, updated_at) VALUES ('r', '{stamp}')")
 
     monkeypatch.setattr(db_module, "MIGRATIONS", MIGRATIONS)
-    assert apply_migrations(conn) == 7
+    assert apply_migrations(conn) == SCHEMA_VERSION
 
     row = conn.execute("SELECT * FROM orders").fetchone()
     assert row["order_id"] == "o1"

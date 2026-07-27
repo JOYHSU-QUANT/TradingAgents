@@ -129,6 +129,8 @@ class _FakeExchange:
         self.modify_calls: list[tuple] = []
         self.schedule_calls: list[int] = []
         self.schedule_result = {"status": "ok", "response": {"type": "default"}}
+        self.leverage_calls: list[tuple] = []
+        self.leverage_result = {"status": "ok", "response": {"type": "default"}}
 
     def order(self, name, is_buy, sz, limit_px, order_type, reduce_only=False, cloid=None):
         self.order_calls.append((name, is_buy, sz, limit_px, order_type, reduce_only, cloid))
@@ -151,6 +153,10 @@ class _FakeExchange:
     def schedule_cancel(self, time):
         self.schedule_calls.append(time)
         return self.schedule_result
+
+    def update_leverage(self, leverage, name, is_cross=True):
+        self.leverage_calls.append((leverage, name, is_cross))
+        return self.leverage_result
 
 
 @pytest.fixture
@@ -679,3 +685,35 @@ def test_exchange_time_is_silent_when_the_field_is_simply_absent(fake_exchange, 
     with caplog.at_level("WARNING"):
         assert client.exchange_time() is None
     assert not any("present but unparseable" in r.getMessage() for r in caplog.records)
+
+
+# -- update_leverage (§7 / PR 6) ------------------------------------------
+
+
+def test_update_leverage_wire_shape(fake_exchange):
+    client = _client()
+    client.update_leverage(coin="BTC", leverage=1, is_cross=True)
+    # SDK arg order is (leverage, name, is_cross).
+    assert client._exchange.leverage_calls == [(1, "BTC", True)]
+
+
+def test_update_leverage_rejects_below_one(fake_exchange):
+    client = _client()
+    with pytest.raises(ValueError, match="leverage must be >= 1"):
+        client.update_leverage(coin="BTC", leverage=0)
+    assert client._exchange.leverage_calls == []  # never reached the wire
+
+
+def test_update_leverage_rides_the_exchange_action_gate(fake_exchange):
+    # A closed gate (allow_real_orders=False) must refuse before any wire call.
+    client = _client(gate=_closed_gate())
+    with pytest.raises(LiveOrderGateRejected):
+        client.update_leverage(coin="BTC", leverage=1)
+    assert client._exchange.leverage_calls == []
+
+
+def test_update_leverage_raises_on_error_envelope(fake_exchange):
+    client = _client()
+    client._exchange.leverage_result = {"status": "err", "response": "leverage change rejected"}
+    with pytest.raises(ExchangeRequestError, match="leverage change rejected"):
+        client.update_leverage(coin="BTC", leverage=1)

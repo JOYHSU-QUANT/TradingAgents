@@ -332,6 +332,26 @@ class HyperliquidSignedClient:
 
     # ---- §7 exchange actions (PR 2) -------------------------------------
 
+    def update_leverage(self, *, coin: str, leverage: int, is_cross: bool = True) -> None:
+        """Set the account's leverage for ``coin`` (§7 ``updateLeverage``, PR 6).
+
+        The one signed exchange action the PR 1–5 order path never needed
+        (testnet_live / mainnet_tiny both pin ``leverage: 1`` and the exchange
+        default already sits there), but the §20.2 smoke suite must prove the
+        action reaches the exchange before the first real cycle — so PR 6 wraps
+        it. Rides ``require_exchange_action`` (the same wire gate as
+        ``schedule_cancel``: a signed account-config change, not an order that
+        opens exposure). ``updateLeverage`` is statusless — the envelope is the
+        whole verdict, and ``_response_payload`` raises ``ExchangeRequestError``
+        on a top-level ``err`` (a rejected leverage change never half-hides
+        behind a return code).
+        """
+        if leverage < 1:
+            raise ValueError(f"leverage must be >= 1 (§20.1 pins 1), got {leverage!r}")
+        self._gate.require_exchange_action()
+        response = call_sdk(self._exchange.update_leverage, leverage, coin, is_cross)
+        _response_payload(response, action="updateLeverage")
+
     def place_ioc_limit(
         self,
         *,

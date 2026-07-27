@@ -8,13 +8,19 @@ Four subcommands plus full Phase 1/2 backward compatibility:
   funding), with CSV export after every completed cycle and on shutdown.
 - ``python -m contrib.hyperliquid_perp export --run-id <id> --output-dir <dir>``
   — manual full-dataset CSV export (phase2-data §1.1).
-- ``python -m contrib.hyperliquid_perp validate --run-id <id>`` — the spec §5
-  acceptance report and Phase-3 verdict.
+- ``python -m contrib.hyperliquid_perp validate --run-id <id>`` — the acceptance
+  report and verdict. A PAPER run gets the phase2-spec §5 report; a LIVE run gets
+  the phase3-spec §20.3 / §21.4 report (the run's stored mode selects which).
 - ``python -m contrib.hyperliquid_perp live --config <yaml>`` — the Phase 3
   startup skeleton (phase3-spec PR 1): load the ``live:`` config gates, verify
   the agent-wallet authorization, print the effective notional caps, and exit
   without entering any trading loop (that is ``live --run-id --loop``, PR 5).
   Places no orders.
+- ``python -m contrib.hyperliquid_perp live-smoke --run-id <id> --config <yaml>``
+  — the phase3-spec §20.2 testnet smoke checklist (PR 6): drive each signed
+  exchange action against testnet, record the verdicts, and report the §20.2
+  cycle-entry gate. ``--gate-status`` reads the stored gate (no network);
+  ``--dry-run`` validates config + wiring and places no orders.
 
 Empty argv and flag-style invocations (first argument starting with ``-``) —
 including the Phase 1 ``--context-only`` smoke run and the single-shot engine
@@ -57,7 +63,7 @@ from .persistence.db import Database
 
 logger = logging.getLogger(__name__)
 
-_SUBCOMMANDS = ("paper", "export", "validate", "live", "safe-mode")
+_SUBCOMMANDS = ("paper", "export", "validate", "live", "live-smoke", "safe-mode")
 
 # Version stamp for the ai_inputs.prompt_version column: bump when the injected
 # context/format contract changes shape (the payload hash tracks content).
@@ -102,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_validate(rest)
         if command == "live":
             return _cmd_live(rest)
+        if command == "live-smoke":
+            return _cmd_live_smoke(rest)
         if command == "safe-mode":
             return _cmd_safe_mode(rest)
         return _cmd_paper(rest)
@@ -160,19 +168,37 @@ def _cmd_export(argv: list[str]) -> int:
 def _cmd_validate(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m contrib.hyperliquid_perp validate",
-        description="Spec §5 acceptance report: summary metrics + Phase-3 verdict.",
+        description=(
+            "Acceptance report + verdict. A PAPER run gets the phase2-spec §5 "
+            "report (Phase-3 verdict); a LIVE run gets the phase3-spec §20.3 / "
+            "§21.4 acceptance report (the profile follows the run's live.mode). "
+            "The run's stored mode selects the report — point --db at the right "
+            "store (live runs default to live_trading.db)."
+        ),
     )
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--db", default="paper_trading.db", help="SQLite store path.")
+    parser.add_argument(
+        "--db",
+        default="paper_trading.db",
+        help="SQLite store path (a live run's store is usually live_trading.db).",
+    )
     args = parser.parse_args(argv)
 
-    from .paper.validation import validate_run
+    from .persistence import repository as repo
 
     try:
         db = _open_existing_db(args.db)
         if db is None:
             return 1
         with db:
+            run_row = repo.get_run(db.conn, args.run_id)
+            if run_row is None:
+                print(f"error: run {args.run_id!r} does not exist in {args.db}.", file=sys.stderr)
+                return 1
+            if run_row["mode"] == "live":
+                return _validate_live(db, args.run_id)
+            from .paper.validation import validate_run
+
             report = validate_run(db, run_id=args.run_id)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -189,6 +215,26 @@ def _cmd_validate(argv: list[str]) -> int:
         return 0
     # Integrity failures and a merely-short run are different operator actions
     # (investigate vs keep running) — give them distinct codes.
+    return 5 if report.failures else 4
+
+
+def _validate_live(db: Database, run_id: str) -> int:
+    """The live branch of ``validate`` (§20.3 / §21.4), reusing the 0/4/5 codes.
+
+    Same exit contract as the paper report: 0 = acceptance passed; 5 = an
+    integrity failure (dedupe error, orphan, position/replay mismatch, an
+    unprotected window, a low kill-switch refresh rate, a FAILED smoke test, or —
+    mainnet_tiny — an unresolved reconciliation case / breached daily-loss cap);
+    4 = internally consistent but short of the gate (< 30 cycles / orders, smoke
+    tests not yet run). Called inside the caller's ``with db:`` block.
+    """
+    from .live.validation import validate_live_run
+
+    report = validate_live_run(db, run_id=run_id)
+    for line in report.summary_lines():
+        print(line)
+    if report.live_ready:
+        return 0
     return 5 if report.failures else 4
 
 
@@ -1111,6 +1157,40 @@ def _live_startup_recovery(
             )
             print(f"created live run {run_id!r} in {db_path}", file=sys.stderr)
 
+        # §20.2 gate: testnet_live cycles may not start until the smoke suite has
+        # passed on THIS run. (mainnet_tiny relies on the testnet smoke pass per
+        # §21.3 — a different run/network — so this same-run gate is testnet-only;
+        # the one-shot recovery check, without --loop, never trades and so is not
+        # gated.) Checked here, before arming: a fresh --create run has no smoke
+        # results, so --loop on it is refused with the create → smoke → loop path.
+        if args.loop and live_cfg.mode.value == "testnet_live":
+            from .live.smoke import smoke_gate_report
+
+            gate_ok, gate_missing, gate_failed, gate_errored = smoke_gate_report(db.conn, run_id)
+            if not gate_ok:
+                if not is_restart:
+                    print(
+                        "error: --loop on a freshly-created testnet_live run needs the "
+                        "§20.2 smoke suite first. Create the run, run "
+                        f"`live-smoke --run-id {run_id}`, then re-run with --loop.",
+                        file=sys.stderr,
+                    )
+                else:
+                    parts = []
+                    if gate_missing:
+                        parts.append(f"not yet run: {', '.join(gate_missing)}")
+                    if gate_failed:
+                        parts.append(f"failed: {', '.join(gate_failed)}")
+                    if gate_errored:
+                        parts.append(f"errored: {', '.join(gate_errored)}")
+                    print(
+                        "error: testnet_live cycles are gated on the §20.2 smoke suite "
+                        f"(all must pass) — {'; '.join(parts)}. Run "
+                        f"`live-smoke --run-id {run_id}` and re-run with --loop.",
+                        file=sys.stderr,
+                    )
+                return 1
+
         try:
             acquire_run_lock(db, run_id, pid=os.getpid(), now=now)
         except RunLockError as exc:
@@ -1723,6 +1803,411 @@ def _run_live_loop(
         # of failing the cycle closed and idling up to 4h. Fully contained:
         # shutdown proceeds on any failure.
         driver.salvage_shutdown()
+
+
+# --------------------------------------------------------------------------
+# live-smoke — the §20.2 testnet smoke checklist (PR 6)
+# --------------------------------------------------------------------------
+
+
+def _print_smoke_gate(
+    passed: bool,
+    missing: tuple[str, ...],
+    failed: tuple[str, ...],
+    errored: tuple[str, ...],
+) -> None:
+    """Print the §20.2 cycle-entry gate verdict (stdout: the machine contract).
+
+    The three non-passed buckets are printed separately so an operator triaging
+    a real-money go/no-go sees whether a test never ran, the exchange refused it,
+    or the harness itself broke — without querying live_smoke_tests.
+    """
+    print(f"smoke_gate_passed: {'yes' if passed else 'no'}")
+    if missing:
+        print(f"not_yet_run: {', '.join(missing)}")
+    if failed:
+        print(f"failed: {', '.join(failed)}")
+    if errored:
+        print(f"errored: {', '.join(errored)}")
+
+
+def _cmd_live_smoke(argv: list[str]) -> int:
+    """Run the §20.2 testnet smoke checklist and report the cycle-entry gate.
+
+    Each of the 18 tests drives a real signed exchange action against testnet and
+    records its verdict in ``live_smoke_tests``; the gate (§20.2: all pass) then
+    lets ``live --loop`` start the testnet_live cycles. ``--gate-status`` reports
+    the stored gate without touching the network; ``--dry-run`` validates the
+    config and wiring and records every selected test ``skipped`` (places no
+    orders — the offline check the unit tests exercise). Exit: 0 = the selected
+    suite / gate passed; 4 = ran (or read) but the gate is not satisfied; 1 = a
+    named config / env / network error.
+
+    The restart tests (15–17) drive one real §19.1 startup recovery over the run;
+    the operator stages their preconditions (an existing position / a stale
+    bot-owned order) on testnet before running the suite (docs/RUNBOOK-live.md).
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m contrib.hyperliquid_perp live-smoke",
+        description=(
+            "Run the phase3-spec §20.2 testnet smoke checklist against a live run, "
+            "record each verdict, and report the cycle-entry gate."
+        ),
+    )
+    parser.add_argument("--config", default=None, help="Config YAML path.")
+    parser.add_argument("--db", default="live_trading.db", help="SQLite store path for the run.")
+    parser.add_argument(
+        "--run-id", required=True, help="The live run to record smoke results under."
+    )
+    parser.add_argument(
+        "--only",
+        nargs="+",
+        default=None,
+        metavar="TEST_KEY",
+        help="Run only these smoke-test keys (default: all 18, in canonical order).",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate config + wiring and record every selected test skipped; place NO orders.",
+    )
+    parser.add_argument(
+        "--gate-status",
+        action="store_true",
+        help="Print the §20.2 gate for the run from the store and exit (no network, no orders).",
+    )
+    args = parser.parse_args(argv)
+
+    from .live.smoke import (
+        SmokeTestRunner,
+        smoke_gate_report,
+        validate_only_keys,
+    )
+    from .persistence import repository as repo
+
+    only: list[str] | None = None
+    if args.only is not None:
+        try:
+            only = list(validate_only_keys(args.only))
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    if args.gate_status and (args.dry_run or args.only is not None):
+        print(
+            "error: --gate-status only reads the stored gate — drop --dry-run/--only.",
+            file=sys.stderr,
+        )
+        return 1
+
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    # --gate-status: a pure store read — no config, no network, no orders.
+    if args.gate_status:
+        db = _open_existing_db(args.db)
+        if db is None:
+            return 1
+        with db:
+            run_row = repo.get_run(db.conn, args.run_id)
+            if run_row is None:
+                print(f"error: run {args.run_id!r} does not exist in {args.db}.", file=sys.stderr)
+                return 1
+            if run_row["mode"] != "live":
+                print(
+                    f"error: run {args.run_id!r} in {args.db} is a {run_row['mode']} run — "
+                    "smoke results are live-run state. Fix --run-id / --db.",
+                    file=sys.stderr,
+                )
+                return 1
+            passed, missing, failed, errored = smoke_gate_report(db.conn, args.run_id)
+            _print_smoke_gate(passed, missing, failed, errored)
+            return 0 if passed else 4
+
+    # This command OWNS the db handle: opened here, closed in the finally no
+    # matter how the build or the run fails (a raise, not just an int return) —
+    # the try/finally makes the cleanup structural, not dependent on every
+    # _build_* failure path returning an int (silent-failure review, 2026-07-27).
+    db = _open_existing_db(args.db)
+    if db is None:
+        return 1
+    try:
+        session = _build_smoke_session(args, db)
+        if isinstance(session, int):
+            return session
+        runner = SmokeTestRunner(session)
+        runner.run(only=only)
+        passed, missing, failed, errored = smoke_gate_report(db.conn, args.run_id)
+    finally:
+        db.close()
+    _print_smoke_gate(passed, missing, failed, errored)
+    if args.dry_run:
+        # A dry run places nothing, so the gate can never pass — that is the
+        # point (a wiring check, not a cycle-entry proof). Exit 0 to signal the
+        # wiring check itself completed; the operator reads "smoke_gate_passed:
+        # no" and knows a real run is still required.
+        print("dry-run complete — no orders placed; run without --dry-run for the real gate.")
+        return 0
+    return 0 if passed else 4
+
+
+def _build_smoke_session(args, db):
+    """Build the :class:`~.live.smoke.SmokeContext` for a real or dry run.
+
+    ``db`` is the caller-owned, already-open store (the caller closes it), so
+    every failure path here just returns an ``int`` exit code. A dry run stops
+    after config validation (it needs no network): the context carries a stub
+    signed client and lazy market seams that the runner never calls, so
+    ``--dry-run`` works fully offline.
+    """
+    from decimal import Decimal
+
+    from .domains.perp.risk_gate import RiskConfig
+    from .live.config import ExecutionMode, LiveConfig, validate_live_risk_consistency
+    from .live.smoke import SmokeContext
+    from .paper.clock import WallClock
+    from .persistence import repository as repo
+
+    try:
+        config = load_config(args.config)
+    except CONFIG_LOAD_ERRORS as exc:
+        print(f"error: invalid config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
+        return 1
+    raw_live = config.get("live")
+    if raw_live is None:
+        print(
+            "error: config has no live: block — live-smoke needs one (phase3-spec §4).",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        live_cfg = LiveConfig.from_dict(raw_live)
+    except ValueError as exc:
+        print(f"error: invalid live: config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
+        return 1
+    if live_cfg.mode is ExecutionMode.PAPER:
+        print("error: live.mode is 'paper' — the smoke suite is a live-mode tool.", file=sys.stderr)
+        return 1
+    raw_risk = config.get("risk")
+    if raw_risk is None:
+        print(
+            "error: config has no risk: block — required for the live gate (§24).", file=sys.stderr
+        )
+        return 1
+    try:
+        risk_cfg = RiskConfig.from_dict(raw_risk)
+        validate_live_risk_consistency(live_cfg, risk_cfg, raw_risk)
+    except ValueError as exc:
+        print(f"error: invalid risk:/live: config — {exc}.", file=sys.stderr)
+        return 1
+
+    coin = live_cfg.safety.allowed_symbols[0]
+    clock = WallClock()
+    # The db is owned and closed by the caller (_cmd_live_smoke's try/finally),
+    # so every error path here just returns an int — no close needed.
+    run_row = repo.get_run(db.conn, args.run_id)
+    if run_row is None:
+        print(
+            f"error: run {args.run_id!r} does not exist in {args.db} — create it first "
+            f"with `live --run-id {args.run_id} --create`.",
+            file=sys.stderr,
+        )
+        return 1
+    if run_row["mode"] != "live":
+        print(
+            f"error: run {args.run_id!r} in {args.db} is a {run_row['mode']} run. "
+            "Fix --run-id / --db.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.dry_run:
+        # No network: a stub signed client and lazy seams the runner never calls.
+        def _unavailable() -> Decimal:
+            raise RuntimeError("dry-run places no orders; mark_price is not fetched")
+
+        return SmokeContext(
+            signed=None,
+            db=db,
+            run_id=args.run_id,
+            coin=coin,
+            network=live_cfg.network,
+            payload_dir=Path(args.db).resolve().parent / "payloads" / args.run_id,
+            owner_prefix=live_cfg.order_owner_prefix,
+            mark_price=_unavailable,
+            qty_step=Decimal(1),
+            tick_size=Decimal(1),
+            now=clock.now,
+            dry_run=True,
+            run_recovery=None,
+        )
+
+    return _build_real_smoke_session(
+        args, config=config, live_cfg=live_cfg, coin=coin, clock=clock, db=db
+    )
+
+
+def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
+    """The network half of :func:`_build_smoke_session` (real, order-placing).
+
+    Verifies the §6.1 agent authorization, builds the runtime-armed signed
+    client, reads the asset meta and mark, and wires the ``run_recovery`` seam
+    to one real §19.1 startup recovery over the run. Returns the context or an
+    ``int`` exit code.
+    """
+    from decimal import Decimal
+
+    from .config import wallet_address
+    from .exchanges.hyperliquid.errors import ExchangeError
+    from .exchanges.hyperliquid.market_data import HyperliquidMarketData
+    from .exchanges.hyperliquid.sdk_client import HyperliquidClient
+    from .exchanges.hyperliquid.signed_client import HyperliquidSignedClient
+    from .live.authorization import AgentAuthorizationError, verify_agent_authorization
+    from .live.order_gate import RealOrderGate
+    from .live.secrets import agent_key_env_var, load_agent_key
+    from .live.smoke import SmokeContext
+    from .paper.engine import AssetSpec
+
+    if not live_cfg.allow_real_orders:
+        print(
+            "error: live.allow_real_orders is false — the smoke suite places real "
+            "signed orders on testnet. Enable it (with the agent key), or use "
+            "--dry-run for an offline wiring check.",
+            file=sys.stderr,
+        )
+        return 1
+    addr = wallet_address(config)
+    if not addr:
+        print(
+            "error: wallet_address is not configured (needed for the smoke suite).", file=sys.stderr
+        )
+        return 1
+    agent_key = load_agent_key(live_cfg.network)
+    if agent_key is None:
+        env_var = agent_key_env_var(live_cfg.network)
+        print(
+            f"error: {env_var} is not set — the smoke suite signs real testnet orders. "
+            f"Export the {live_cfg.network} agent key, or use --dry-run.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        client = HyperliquidClient.from_config(config, network=live_cfg.network)
+    except ExchangeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        verify_agent_authorization(client.info, wallet_address=addr, agent_key=agent_key)
+    except (AgentAuthorizationError, ExchangeError) as exc:
+        print(f"error: agent authorization failed — {exc}", file=sys.stderr)
+        return 1
+
+    gate = RealOrderGate.from_config(live_cfg)
+    gate.agent_authorized = True
+    signed = HyperliquidSignedClient(
+        live_cfg.network, agent_key, wallet_address=addr, gate=gate, timeout=client.timeout
+    )
+    try:
+        signed.health_check()
+        market = HyperliquidMarketData(client)
+        sz_decimals, schedule = market.get_asset_meta(coin)
+    except ExchangeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    asset = AssetSpec(coin=coin, sz_decimals=sz_decimals, margin_schedule=schedule)
+
+    def _mark() -> Decimal:
+        return market.get_market_snapshot(coin).mark_price
+
+    payload_dir = Path(args.db).resolve().parent / "payloads" / args.run_id
+
+    def _run_recovery():
+        return _smoke_startup_recovery(
+            db=db,
+            run_id=args.run_id,
+            coin=coin,
+            live_cfg=live_cfg,
+            signed=signed,
+            gate=gate,
+            client=client,
+            wallet=addr,
+            payload_dir=payload_dir,
+        )
+
+    return SmokeContext(
+        signed=signed,
+        db=db,
+        run_id=args.run_id,
+        coin=coin,
+        network=live_cfg.network,
+        payload_dir=payload_dir,
+        owner_prefix=live_cfg.order_owner_prefix,
+        mark_price=_mark,
+        qty_step=asset.qty_step,
+        tick_size=asset.tick_size,
+        now=clock.now,
+        dry_run=False,
+        run_recovery=_run_recovery,
+    )
+
+
+def _smoke_startup_recovery(
+    *, db, run_id, coin, live_cfg, signed, gate, client, wallet, payload_dir
+):
+    """One real §19.1 startup recovery for the restart smoke tests (15–17).
+
+    Builds the same recovery components ``live --run-id`` does and returns the
+    :class:`~.live.startup.StartupResult`. It arms the kill switch and reconciles
+    the run against the exchange — exactly the restart-reconciliation the smoke
+    tests assert is clean given the operator-staged preconditions.
+    """
+    from .exchanges.hyperliquid.sdk_client import call_sdk
+    from .live.fill_backfill import FillBackfiller
+    from .live.fills import LiveFillProcessor
+    from .live.kill_switch import KillSwitchManager
+    from .live.reconcile import LiveReconciler
+    from .live.safe_mode import SafeModeManager
+    from .live.startup import run_startup_recovery
+
+    def fetch_clearinghouse():
+        return call_sdk(client.info.user_state, wallet)
+
+    kill_switch = KillSwitchManager(
+        client=signed,
+        gate=gate,
+        db=db,
+        run_id=run_id,
+        config=live_cfg.kill_switch,
+        max_tick_gap_seconds=_RECOVERY_MAX_TICK_GAP_SECONDS,
+        payload_dir=payload_dir,
+    )
+    safe_mode = SafeModeManager(db=db, run_id=run_id, gate=gate)
+    processor = LiveFillProcessor(db=db, run_id=run_id, payload_dir=payload_dir)
+    backfiller = FillBackfiller(fetch=signed.user_fills_by_time, processor=processor)
+    reconciler = LiveReconciler(
+        db=db,
+        run_id=run_id,
+        coin=coin,
+        fetch_open_orders=signed.open_orders,
+        fetch_clearinghouse=fetch_clearinghouse,
+        query_order_by_cloid=signed.query_order_by_cloid,
+        fetch_fills=signed.user_fills_by_time,
+        backfiller=backfiller,
+        payload_dir=payload_dir,
+    )
+    return run_startup_recovery(
+        db=db,
+        run_id=run_id,
+        client=signed,
+        fetch_clearinghouse=fetch_clearinghouse,
+        gate=gate,
+        kill_switch=kill_switch,
+        reconciler=reconciler,
+        safe_mode=safe_mode,
+        payload_dir=payload_dir,
+    )
 
 
 # --------------------------------------------------------------------------

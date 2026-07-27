@@ -2795,3 +2795,76 @@ def test_live_matching_top_level_network_does_not_warn(tmp_path, capsys, live_se
     rc = cli_main(["live", "--config", str(path)])
     assert rc == 0
     assert "ignores the top-level network" not in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# live-smoke + validate (live) — PR 6
+# --------------------------------------------------------------------------
+
+
+def _make_live_run(tmp_path, *, mode="testnet_live", run_id="live-BTC", db_name="live_trading.db"):
+    from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
+
+    db = Database(tmp_path / db_name)
+    accounting.initialize_run(
+        db,
+        run_id=run_id,
+        mode="live",
+        initial_balance_usdc=Decimal(200),
+        schema_version=SCHEMA_VERSION,
+        config_json=json.dumps({"live": {"mode": mode}}),
+    )
+    db.close()
+    return tmp_path / db_name
+
+
+def test_validate_dispatches_live_run(tmp_path, capsys):
+    dbp = _make_live_run(tmp_path)
+    rc = cli_main(["validate", "--run-id", "live-BTC", "--db", str(dbp)])
+    out = capsys.readouterr().out
+    assert "execution_mode: testnet_live" in out
+    # A freshly-initialized live run is internally consistent (clean replay) but
+    # short of the gate (0 cycles, no smoke) → exit 4 "keep running", not 5.
+    assert rc == 4
+    assert "shortfall:" in out
+
+
+def test_validate_live_missing_run_exits_1(tmp_path, capsys):
+    dbp = _make_live_run(tmp_path)
+    rc = cli_main(["validate", "--run-id", "nope", "--db", str(dbp)])
+    assert rc == 1
+    assert "does not exist" in capsys.readouterr().err
+
+
+def test_live_smoke_gate_status_reports_not_passed(tmp_path, capsys):
+    dbp = _make_live_run(tmp_path)
+    rc = cli_main(["live-smoke", "--run-id", "live-BTC", "--db", str(dbp), "--gate-status"])
+    out = capsys.readouterr().out
+    assert "smoke_gate_passed: no" in out
+    assert rc == 4
+
+
+def test_live_smoke_gate_status_nonexistent_run_exits_1(tmp_path, capsys):
+    dbp = _make_live_run(tmp_path)
+    rc = cli_main(["live-smoke", "--run-id", "nope", "--db", str(dbp), "--gate-status"])
+    assert rc == 1
+
+
+def test_live_smoke_bad_only_key_exits_1(tmp_path, capsys):
+    dbp = _make_live_run(tmp_path)
+    rc = cli_main(["live-smoke", "--run-id", "live-BTC", "--db", str(dbp), "--only", "bogus"])
+    assert rc == 1
+    assert "unknown smoke test key" in capsys.readouterr().err
+
+
+def test_live_smoke_dry_run_records_skipped(tmp_path, capsys):
+    # Dry-run needs a valid live config + the run to exist; it touches no network.
+    cfg = _live_yaml(tmp_path)
+    dbp = _make_live_run(tmp_path)
+    rc = cli_main(
+        ["live-smoke", "--config", str(cfg), "--run-id", "live-BTC", "--db", str(dbp), "--dry-run"]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "dry-run complete" in out
+    assert "smoke_gate_passed: no" in out  # dry-run rows never satisfy the gate

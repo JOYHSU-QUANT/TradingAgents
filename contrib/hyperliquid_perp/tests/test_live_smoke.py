@@ -391,10 +391,31 @@ def test_suite_disarms_kill_switch_on_exit(live_db):
     # runner's finally — the fake recovery makes no wire calls of its own.
     signed = _FakeSigned()
     with live_db:
-        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
-            only=["restart_reconciliation"]
-        )
+        runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+        runner.run(only=["restart_reconciliation"])
     assert signed.calls == ["clear_scheduled_cancel"]
+    assert runner.kill_switch_disarm_failed is False
+
+
+def test_non_arming_run_does_not_disarm(live_db):
+    # A run that executed no switch-touching test never armed anything, so it must
+    # NOT fire an account-wide clear (it could wipe a concurrent live --loop's own
+    # arm on the same wallet).
+    signed = _FakeSigned()
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed)).run(only=["signed_client_init"])
+    assert "clear_scheduled_cancel" not in signed.calls
+
+
+def test_disarm_failure_sets_flag_without_raising(live_db):
+    # A failed disarm must not raise (verdicts are already durable) but must record
+    # kill_switch_disarm_failed so the CLI can warn the wallet may still be armed.
+    signed = _FakeSigned(raise_on={"clear_scheduled_cancel"})
+    with live_db:
+        runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+        runner.run(only=["restart_reconciliation"])  # does not raise
+    assert "clear_scheduled_cancel" in signed.calls  # the disarm was attempted
+    assert runner.kill_switch_disarm_failed is True
 
 
 def test_dry_run_does_not_touch_kill_switch(live_db):

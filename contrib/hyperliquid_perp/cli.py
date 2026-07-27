@@ -1935,15 +1935,28 @@ def _cmd_live_smoke(argv: list[str]) -> int:
     db = _open_existing_db(args.db)
     if db is None:
         return 1
+    disarm_failed = False
     try:
         session = _build_smoke_session(args, db)
         if isinstance(session, int):
             return session
         runner = SmokeTestRunner(session)
         runner.run(only=only)
+        disarm_failed = runner.kill_switch_disarm_failed
         passed, missing, failed, errored = smoke_gate_report(db.conn, args.run_id)
     finally:
         db.close()
+    if disarm_failed:
+        # The end-of-suite disarm failed, so the wallet may still hold an armed
+        # scheduleCancel — surface it loudly (best-effort disarm is otherwise
+        # log-only, which an operator can miss). Exit code stays the gate's.
+        print(
+            "WARNING: the end-of-suite kill-switch disarm FAILED — the wallet may "
+            "still hold an armed scheduleCancel that will cancel every resting order "
+            "(including any SL/TP) at its deadline. Verify and clear it manually, or "
+            "start `live --loop` (it re-arms and refreshes the switch).",
+            file=sys.stderr,
+        )
     _print_smoke_gate(passed, missing, failed, errored)
     if args.dry_run:
         # A dry run places nothing, so the gate can never pass — that is the

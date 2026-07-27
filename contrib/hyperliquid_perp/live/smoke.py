@@ -104,6 +104,21 @@ _BY_KEY: dict[str, SmokeTest] = {t.key: t for t in SMOKE_TESTS}
 # a test from the suite via the dict fold. Turn that into a loud import-time error.
 assert len(_BY_KEY) == len(SMOKE_TESTS), "SMOKE_TESTS keys must be unique"
 
+# The tests whose execution touches the account-wide dead man's switch: the
+# three restart tests (their §19.1 recovery ARMS the scheduleCancel and never
+# clears it) and the kill-switch test itself (arms/refreshes before clearing).
+# Only a run that executed one of these needs a disarm on exit — a run that ran
+# none never armed anything, so it must NOT fire an account-wide clear that could
+# wipe a concurrently-running ``live --loop``'s own arm on the same wallet.
+_KILL_SWITCH_TESTS: frozenset[str] = frozenset(
+    {
+        "kill_switch_arm_refresh",
+        "restart_reconciliation",
+        "startup_with_existing_position",
+        "startup_with_stale_open_order",
+    }
+)
+
 # Just over Hyperliquid's ~$10 minimum order value, so a probe order the suite
 # means to REST or FILL is not refused for being dust.
 _PROBE_NOTIONAL_USDC = Decimal("11")
@@ -168,6 +183,10 @@ class SmokeTestRunner:
         self.ctx = ctx
         # Cross-test handles within one run() (test 3 → 4 share a cloid).
         self._last_submit: dict[str, str] | None = None
+        # Set True if the end-of-suite kill-switch disarm was attempted and
+        # FAILED — the CLI surfaces it as a prominent operator warning (the
+        # wallet may still hold an armed scheduleCancel).
+        self.kill_switch_disarm_failed: bool = False
 
     # -- orchestration ----------------------------------------------------
 
@@ -181,6 +200,13 @@ class SmokeTestRunner:
         leaves every completed verdict durable.
         """
         selected = self._select(only)
+        # Only a run that executed a switch-touching test armed anything, so only
+        # then does it disarm on exit — a run that ran none must NOT fire an
+        # account-wide clear that could wipe a concurrent ``live --loop``'s own
+        # arm (Q2 + exit-check finding, 2026-07-27). Keyed off ``selected`` (not
+        # ``executed``) so a mid-suite crash still disarms what a restart test's
+        # recovery may already have armed.
+        arms_kill_switch = any(t.key in _KILL_SWITCH_TESTS for t in selected)
         executed: list[SmokeTest] = []
         try:
             for test in selected:
@@ -195,10 +221,9 @@ class SmokeTestRunner:
                     "" if result.detail is None else f" — {result.detail}",
                 )
         finally:
-            # A restart test's recovery arms the dead man's switch; clear it so a
-            # completed suite never leaves an armed scheduleCancel behind (Q2,
-            # 2026-07-27). In the ``finally`` so a mid-suite crash disarms too.
-            self._disarm_kill_switch()
+            # In the ``finally`` so a mid-suite crash disarms too.
+            if arms_kill_switch:
+                self._disarm_kill_switch()
         return executed
 
     def _select(self, only: Sequence[str] | None) -> list[SmokeTest]:
@@ -242,22 +267,25 @@ class SmokeTestRunner:
             )
 
     def _disarm_kill_switch(self) -> None:
-        """Clear any dead man's switch a restart test's recovery armed (§18).
+        """Clear the dead man's switch a switch-touching test armed (§18).
 
-        The restart tests (15–17) each drive a real §19.1 startup recovery whose
-        first step ARMS the scheduleCancel. Test 14 clears its own arm, but runs
-        before 15–17, so without this a full suite would exit leaving the wallet
-        with an armed scheduleCancel that fires ~``kill_switch_deadline`` later and
-        cancels every resting order. Real runs only (a dry run placed no wire
-        actions and carries no signed client); best-effort — a failed disarm is
-        logged, never raised: the verdicts are already durable and the next
-        ``live --loop`` re-arms and refreshes the switch anyway.
+        Called only when the run executed a switch-touching test (see
+        :data:`_KILL_SWITCH_TESTS`): the restart tests' §19.1 recovery ARMS the
+        account-wide scheduleCancel and never clears it, so without this the suite
+        would exit leaving the wallet with an armed scheduleCancel that fires
+        ~``kill_switch_deadline`` later and cancels every resting order. Real runs
+        only (a dry run placed no wire actions and carries no signed client);
+        best-effort — a failed disarm is logged and recorded on
+        :attr:`kill_switch_disarm_failed` (never raised: the verdicts are already
+        durable), so the CLI can warn the operator that the wallet may still be
+        armed. The next ``live --loop`` also re-arms and refreshes the switch.
         """
         if self.ctx.dry_run or self.ctx.signed is None:
             return
         try:
             self.ctx.signed.clear_scheduled_cancel()
         except Exception as exc:  # noqa: BLE001 — cleanup must not mask the suite's verdicts
+            self.kill_switch_disarm_failed = True
             logger.warning(
                 "smoke: best-effort kill-switch disarm FAILED — %s: %s",
                 type(exc).__name__,

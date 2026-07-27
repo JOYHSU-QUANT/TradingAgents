@@ -17,6 +17,8 @@ from .errors import (
     VendorNotConfiguredError,
     VendorRateLimitError,
 )
+from .farside import get_etf_flow_data as get_farside_etf_flows
+from .fear_greed import get_fear_greed_data as get_alternative_me_fear_greed
 from .fred import get_macro_data as get_fred_macro_data
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
 from .y_finance import (
@@ -74,14 +76,42 @@ TOOLS_CATEGORIES = {
         "tools": [
             "get_prediction_markets",
         ]
+    },
+    "crypto_etf_flows": {
+        "description": "BTC/ETH US spot-ETF daily net flows (crypto)",
+        "tools": [
+            "get_etf_flows",
+        ]
+    },
+    "crypto_sentiment": {
+        "description": "Crypto Fear & Greed Index sentiment gauge",
+        "tools": [
+            "get_fear_greed",
+        ]
     }
 }
+
+# Configuring a category (or tool) to this sentinel switches it off entirely.
+# Keyless vendors have no equivalent of FRED's "unset the API key" escape hatch,
+# so "none" is the mechanism for stopping a misbehaving vendor without deleting
+# its wiring.
+#
+# Reachability caveat: today this is settable only through the Python config
+# (DEFAULT_CONFIG / set_config). The Hyperliquid perp deployment builds its
+# engine config from a fixed key list and does not yet pipe ``data_vendors`` /
+# ``tool_vendors`` through (nor is there an env override), so on that long-running
+# box flipping a vendor to "none" still needs a code change + redeploy. Wiring
+# data_vendors into the perp engine config (or an env override) is a follow-up;
+# see the vendor-hygiene notes.
+DISABLED_VENDOR = "none"
 
 VENDOR_LIST = [
     "yfinance",
     "fred",
     "polymarket",
     "alpha_vantage",
+    "farside",
+    "alternative_me",
 ]
 
 # Optional enrichment categories. These add macro/event context to the news
@@ -89,7 +119,12 @@ VENDOR_LIST = [
 # sentinel instead of aborting the run (a bad LLM-supplied indicator, a missing
 # key, or a network blip should not crash an analysis over flavour data). Core
 # categories (prices, fundamentals, news) still raise so a broken primary is loud.
-OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets"}
+OPTIONAL_CATEGORIES = {
+    "macro_data",
+    "prediction_markets",
+    "crypto_etf_flows",
+    "crypto_sentiment",
+}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
@@ -141,6 +176,14 @@ VENDOR_METHODS = {
     "get_prediction_markets": {
         "polymarket": get_polymarket_prediction_markets,
     },
+    # crypto_etf_flows
+    "get_etf_flows": {
+        "farside": get_farside_etf_flows,
+    },
+    # crypto_sentiment
+    "get_fear_greed": {
+        "alternative_me": get_alternative_me_fear_greed,
+    },
 }
 
 def get_category_for_method(method: str) -> str:
@@ -165,6 +208,16 @@ def get_vendor(category: str, method: str = None) -> str:
     # Fall back to category-level configuration
     return config.get("data_vendors", {}).get(category, "default")
 
+def is_category_disabled(category: str, method: str = None) -> bool:
+    """True when a category (or tool) is configured to the "none" sentinel.
+
+    Lets a caller skip binding a tool altogether rather than binding one that
+    could only ever return the disabled sentinel.
+    """
+    return any(
+        v.strip().lower() == DISABLED_VENDOR for v in get_vendor(category, method).split(",")
+    )
+
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
     category = get_category_for_method(method)
@@ -182,6 +235,23 @@ def route_to_vendor(method: str, *args, **kwargs):
     # fallback, list them in order, e.g. data_vendors="yfinance,alpha_vantage".
     # The "default" sentinel (no explicit config) uses all available vendors.
     explicit = [v for v in primary_vendors if v and v != "default"]
+    # An explicit "none" switches the category off. Checked before the vendor
+    # chain is resolved so a disabled category never opens a connection, and
+    # handled here rather than via the loop's error paths so "deliberately off"
+    # is never logged as a vendor failure.
+    if any(v.lower() == DISABLED_VENDOR for v in explicit):
+        if category in OPTIONAL_CATEGORIES:
+            logger.info(
+                "Optional %s is disabled by configuration; skipping %s", category, method
+            )
+            return (
+                f"DATA_UNAVAILABLE: optional {category} is disabled by configuration. "
+                f"Proceed without it; do not fabricate values."
+            )
+        raise ValueError(
+            f"Category '{category}' supplies core data for '{method}' and cannot be "
+            f"disabled with '{DISABLED_VENDOR}'."
+        )
     if explicit:
         vendor_chain = [v for v in explicit if v in VENDOR_METHODS[method]]
         if not vendor_chain:
@@ -215,7 +285,9 @@ def route_to_vendor(method: str, *args, **kwargs):
             # Don't let one vendor's failure crash the call when another can
             # serve it, but never swallow silently: a broken primary must be
             # visible in the logs (#989), not hidden behind a fallback's verdict.
-            logger.warning("Vendor %r failed for %s: %s", vendor, method, e)
+            # exc_info so a real bug (e.g. in an HTML-scraping vendor) leaves a
+            # traceback instead of looking identical to a network outage.
+            logger.warning("Vendor %r failed for %s: %s", vendor, method, e, exc_info=True)
             if first_error is None:
                 first_error = e
             continue

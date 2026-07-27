@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head><title>Bitcoin ETF Flow - All Data</title></head>
+<body>
+<!--
+  Trimmed Farside BTC flow page for offline parser tests. Structurally faithful
+  to the real https://farside.co.uk/btc/ table (class="etf"): a spanner "Total"
+  header row, an issuer-ticker header row, a "Fee" row, dated data rows with
+  redFont parenthesised negatives / thousands separators / a blank cell, a
+  future-dated row (for the lookahead filter), and an "Average" summary row
+  (must be excluded because its first cell is not a date). Issuer set reduced to
+  four columns; flow figures are illustrative, not real market data.
+-->
+<table class="etf">
+<tr bgcolor="#eaeffa">
+<th><span class="tabletext">&#9993;</span></th>
+<th><div align="center"><img alt="Blackrock" src="/images/etf/blackrock.jpg"/></div></th>
+<th><div align="center"><img alt="Fidelity" src="/images/etf/fidelity.jpg"/></div></th>
+<th><div align="center"><img alt="Grayscale" src="/images/etf/grayscale.jpg"/></div></th>
+<th><div align="center"><img alt="Grayscale Mini" src="/images/etf/grayscale.jpg"/></div></th>
+<th><span class="tabletext">Total</span></th>
+</tr>
+<tr bgcolor="#eaeffa">
+<th><span class="tabletext"></span></th>
+<th><div align="right"><span class="tabletext">IBIT</span></div></th>
+<th><div align="right"><span class="tabletext">FBTC</span></div></th>
+<th><div align="right"><span class="tabletext">GBTC</span></div></th>
+<th><div align="right"><span class="tabletext">BTC</span></div></th>
+<th><div align="right"><span class="tabletext"></span></div></th>
+</tr>
+<tr bgcolor="#eaeffa">
+<th><span class="tabletext">Fee</span></th>
+<th><div align="right"><span class="tabletext">0.25%</span></div></th>
+<th><div align="right"><span class="tabletext">0.25%</span></div></th>
+<th><div align="right"><span class="tabletext">1.50%</span></div></th>
+<th><div align="right"><span class="tabletext">0.15%</span></div></th>
+<th><div align="right"><span class="tabletext"></span></div></th>
+</tr>
+<tr>
+<td><span class="tabletext">06 Jul 2026</span></td>
+<td><div align="right"><span class="tabletext">209.4</span></div></td>
+<td><div align="right"><span class="tabletext">9.7</span></div></td>
+<td><div align="right"><span class="tabletext"><span class="redFont">(44.5)</span></span></div></td>
+<td><div align="right"><span class="tabletext">42.3</span></div></td>
+<td><div align="right"><span class="tabletext">216.9</span></div></td>
+</tr>
+<tr>
+<td><span class="tabletext">07 Jul 2026</span></td>
+<td><div align="right"><span class="tabletext">54.8</span></div></td>
+<td><div align="right"><span class="tabletext"><span class="redFont">(24.9)</span></span></div></td>
+<td class="zero-flow"><div align="right"><span class="tabletext">0.0</span></div></td>
+<td><div align="right"><span class="tabletext"></span></div></td>
+<td><div align="right"><span class="tabletext">29.9</span></div></td>
+</tr>
+<tr>
+<td><span class="tabletext">08 Jul 2026</span></td>
+<td><div align="right"><span class="tabletext">1,119.9</span></div></td>
+<td><div align="right"><span class="tabletext">100.0</span></div></td>
+<td><div align="right"><span class="tabletext"><span class="redFont">(10.0)</span></span></div></td>
+<td><div align="right"><span class="tabletext">5.0</span></div></td>
+<td><div align="right"><span class="tabletext">1,214.9</span></div></td>
+</tr>
+<tr>
+<td><span class="tabletext">09 Jul 2026</span></td>
+<td><div align="right"><span class="tabletext">10.0</span></div></td>
+<td><div align="right"><span class="tabletext">10.0</span></div></td>
+<td class="zero-flow"><div align="right"><span class="tabletext">0.0</span></div></td>
+<td class="zero-flow"><div align="right"><span class="tabletext">0.0</span></div></td>
+<td><div align="right"><span class="tabletext">20.0</span></div></td>
+</tr>
+<tr>
+<td><span class="tabletext">Average</span></td>
+<td><div align="right"><span class="tabletext">348.5</span></div></td>
+<td><div align="right"><span class="tabletext">23.7</span></div></td>
+<td><div align="right"><span class="tabletext"><span class="redFont">(18.5)</span></span></div></td>
+<td><div align="right"><span class="tabletext">15.8</span></div></td>
+<td><div align="right"><span class="tabletext">369.5</span></div></td>
+</tr>
+</table>
+</body>
+</html>

@@ -8,6 +8,7 @@ from langchain_core.messages import HumanMessage, RemoveMessage
 
 # Import tools from separate utility files
 from tradingagents.agents.utils.core_stock_tools import get_stock_data
+from tradingagents.agents.utils.crypto_data_tools import get_etf_flows, get_fear_greed
 from tradingagents.agents.utils.fundamental_data_tools import (
     get_balance_sheet,
     get_cashflow,
@@ -38,6 +39,8 @@ __all__ = [
     "get_insider_transactions",
     "get_macro_indicators",
     "get_prediction_markets",
+    "get_etf_flows",
+    "get_fear_greed",
     "get_verified_market_snapshot",
     "build_instrument_context",
     "resolve_instrument_identity",
@@ -59,6 +62,7 @@ def get_language_instruction() -> str:
     report rather than a mix of languages.
     """
     from tradingagents.dataflows.config import get_config
+
     lang = get_config().get("output_language", "English")
     if lang.strip().lower() == "english":
         return ""
@@ -212,6 +216,3 @@ def create_msg_delete():
         return {"messages": removal_operations + [placeholder]}
 
     return delete_messages
-
-
-

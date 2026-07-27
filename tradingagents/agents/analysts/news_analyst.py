@@ -1,6 +1,8 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from tradingagents.agents.utils.agent_utils import (
+    get_etf_flows,
+    get_fear_greed,
     get_global_news,
     get_instrument_context_from_state,
     get_language_instruction,
@@ -8,6 +10,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_news,
     get_prediction_markets,
 )
+from tradingagents.dataflows.interface import is_category_disabled
 
 
 def create_news_analyst(llm):
@@ -20,12 +23,51 @@ def create_news_analyst(llm):
         tools = [
             get_news,
             get_global_news,
+            # macro_data and prediction_markets are also OPTIONAL_CATEGORIES, so
+            # setting either to the "none" vendor would leave a bound tool that can
+            # only return the disabled sentinel. They stay unguarded here because
+            # their descriptions are welded into the single system_message string
+            # below; un-advertising them means restructuring that prompt, which is
+            # out of scope for this change. Folding all four into one table-driven
+            # registration is the follow-up — worth doing before further optional
+            # crypto tools are added to this block.
             get_macro_indicators,
             get_prediction_markets,
         ]
 
+        # Crypto-only flows/sentiment tools. Bound only for crypto assets so the
+        # stock path's tools and prompt are unchanged, and only when the category
+        # is actually enabled — binding a tool whose category is switched off
+        # would just spend a tool call to receive the disabled sentinel.
+        crypto_tools_message = ""
+        if asset_type == "crypto":
+            crypto_tools = []
+            crypto_hints = []
+            if not is_category_disabled("crypto_etf_flows", "get_etf_flows"):
+                crypto_tools.append(get_etf_flows)
+                crypto_hints.append(
+                    "get_etf_flows(asset, curr_date, look_back_days) for BTC/ETH US "
+                    "spot-ETF daily net flows (a demand-side signal) — only BTC and ETH "
+                    "have US spot ETFs, so for another recognized crypto risk asset "
+                    "(SOL, XRP, ...) it returns BTC flows as a market-wide proxy, which "
+                    "you should treat as a market signal rather than that asset's own "
+                    "flows; a stablecoin or unrecognized symbol returns a no-signal note"
+                )
+            if not is_category_disabled("crypto_sentiment", "get_fear_greed"):
+                crypto_tools.append(get_fear_greed)
+                crypto_hints.append(
+                    "get_fear_greed(curr_date, look_back_days) for the Crypto Fear & "
+                    "Greed Index (a 0-100 crowd-sentiment gauge)"
+                )
+            if crypto_tools:
+                tools = tools + crypto_tools
+                crypto_tools_message = (
+                    " Since this is a crypto asset, also use " + ", and ".join(crypto_hints) + "."
+                )
+
         system_message = (
             f"You are a news researcher tasked with analyzing recent news and trends over the past week. Please write a comprehensive report of the current state of the world that is relevant for trading and macroeconomics. Use the available tools: get_news(query, start_date, end_date) for {asset_label}-specific or targeted news searches, get_global_news(curr_date, look_back_days, limit) for broader macroeconomic news, get_macro_indicators(indicator, curr_date, look_back_days) to ground macro commentary in actual data from FRED (e.g. 'cpi', 'core_pce', 'unemployment', 'fed_funds_rate', '10y_treasury', 'yield_curve'), and get_prediction_markets(topic, limit) for live market-implied probabilities of forward-looking events (e.g. 'Fed rate cut', 'recession 2026', geopolitical or sector events). Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
+            + crypto_tools_message
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
             + get_language_instruction()
         )

@@ -13,6 +13,8 @@ from typing import Any
 
 import yaml
 
+from .domains.perp.config_coercion import bool_from_yaml
+
 _CONFIG_DIR = Path(__file__).parent / "configs"
 _LOCAL = _CONFIG_DIR / "hyperliquid.local.yaml"
 _EXAMPLE = _CONFIG_DIR / "hyperliquid.example.yaml"
@@ -208,9 +210,13 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         val = config.get(key)
         if val is not None and not isinstance(val, dict):
             raise ValueError(f"{key!r} must be a mapping, got {val!r}")
-    coins = config.get("coins")
-    if coins is not None and not isinstance(coins, list):
-        raise ValueError(f"'coins' must be a list, got {coins!r}")
+    # A scalar here would silently resolve to per-character values downstream
+    # (``coins: BTC`` → "B"; ``indicators: rsi_14`` → six unknown names, which
+    # zeroes the warm-up threshold and empties the all-dead-indicator guard).
+    for key in ("coins", "indicators"):
+        val = config.get(key)
+        if val is not None and not isinstance(val, list):
+            raise ValueError(f"{key!r} must be a list, got {val!r}")
     # These three values are consumed by the Phase-1 client deep inside the run
     # (sdk_client from_config/__init__, wallet_address()); a bad value there
     # surfaces as an exit-2 traceback instead of a named config error. Validate
@@ -234,6 +240,17 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     addr = config.get("wallet_address")
     if addr is not None and not isinstance(addr, str):
         raise ValueError(f"'wallet_address' must be a string, got {addr!r}")
+    # The engine: block's string keys stay lenient (``or`` fallbacks in
+    # main._build_engine_config), but structured_output is the block's first
+    # *bool*: a quoted "false" would read truthy and silently re-enable
+    # structured output (RUNBOOK §7) — fail loud in the CONFIG_LOAD_ERRORS
+    # lane instead. bool_from_yaml validates only, so no write-back is needed.
+    eng = config.get("engine")
+    if eng is not None and eng.get("structured_output") is not None:
+        try:
+            bool_from_yaml(eng["structured_output"])
+        except ValueError as exc:
+            raise ValueError(f"config key 'engine.structured_output': {exc}") from None
     # A present live: block is deep-validated on EVERY load, not just by the
     # live subcommand: a staged-but-broken block (deploy workflow: edit config,
     # restart under systemd) would otherwise ride along with paper for days and

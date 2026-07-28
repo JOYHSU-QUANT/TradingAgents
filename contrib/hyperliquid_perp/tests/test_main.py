@@ -74,14 +74,11 @@ def test_build_engine_config_defaults():
 
 
 def test_build_engine_config_structured_output_escape_hatch():
-    engine_config, _ = main_mod._build_engine_config(
-        {"engine": {"structured_output": True}}
-    )
+    engine_config, _ = main_mod._build_engine_config({"engine": {"structured_output": True}})
     assert engine_config["structured_output"] is True
-    # An explicit false also rides the pass-through branch (not the default).
-    engine_config, _ = main_mod._build_engine_config(
-        {"engine": {"structured_output": False}}
-    )
+    # An explicit false is preserved (same value as the perp default; this
+    # pins the passthrough accepting False).
+    engine_config, _ = main_mod._build_engine_config({"engine": {"structured_output": False}})
     assert engine_config["structured_output"] is False
 
 

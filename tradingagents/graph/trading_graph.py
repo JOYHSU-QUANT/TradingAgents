@@ -115,8 +115,13 @@ class TradingAgentsGraph:
             self.conditional_logic,
         )
 
+        # None means "unset" (the temperature pattern below): ``.get(..., 100)``
+        # passes a stored None through, langchain's ensure_config drops it, and
+        # LangGraph silently falls back to its own default (25). Omitting the
+        # kwarg keeps Propagator's declared default the single source of truth.
+        recur_limit = self.config.get("max_recur_limit")
         self.propagator = Propagator(
-            max_recur_limit=self.config.get("max_recur_limit", 100),
+            **({} if recur_limit is None else {"max_recur_limit": recur_limit})
         )
         self.reflector = Reflector(self.quick_thinking_llm)
         self.signal_processor = SignalProcessor(self.quick_thinking_llm)

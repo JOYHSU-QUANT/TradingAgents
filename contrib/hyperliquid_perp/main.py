@@ -341,11 +341,10 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     # the contract and fail-closing every cycle as invalid_output (this is how
     # the 2026-07-27 model swap broke paper-BTC). ``engine.structured_output:
     # true`` stays available as an explicit escape hatch, e.g. once the
-    # contract is carried by the structured schema itself.
+    # contract is carried by the structured schema itself. The raw passthrough
+    # is type-safe: load_config already rejected any non-bool value.
     raw_structured = eng_cfg.get("structured_output")
-    engine_config["structured_output"] = (
-        raw_structured if raw_structured is not None else False
-    )
+    engine_config["structured_output"] = raw_structured if raw_structured is not None else False
     # ``is not None`` (not ``or``) so an explicit empty list is preserved as a
     # deliberate "no analysts" choice rather than silently replaced by the default
     # — matches the _indicator_names pattern above. A blank YAML value (None) still

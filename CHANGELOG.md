@@ -42,7 +42,20 @@ Breaking changes within the 0.x line are called out explicitly.
   path for the deep-think agents when `False` (Portfolio Manager, Research
   Manager, Trader; the Sentiment Analyst is exempt), and
   `contrib/hyperliquid_perp` defaults it to `False`, keeping
-  `engine.structured_output: true` as an explicit escape hatch.
+  `engine.structured_output: true` as an explicit escape hatch. The perp
+  config loader rejects non-bool values for the key at load time (a quoted
+  `"false"` would otherwise read truthy and silently re-enable structured
+  output), and a `structured_output` stored as `None` counts as unset
+  (default on) rather than a falsy "off".
+- **Perp config loader rejects a scalar `indicators:` value.** Same hazard
+  class as `coins: BTC`: `indicators: rsi_14` would `list()`-explode into
+  per-character names, collapsing the warm-up threshold to 0 and emptying the
+  all-dead-indicator guard, so the daemon would reason over an all-`None`
+  indicator block forever.
+- **`max_recur_limit: None` no longer silently shrinks the recursion budget.**
+  A stored `None` survived `.get("max_recur_limit", 100)`, was dropped by
+  langchain's `ensure_config`, and left LangGraph running at its own default
+  (25) instead of the documented 100; `None` now means "unset, use 100".
 - **Alpha Vantage fundamentals look-ahead guard now takes effect.**
   `get_balance_sheet` / `get_cashflow` / `get_income_statement` drop fiscal
   reports dated after `curr_date`; the filter previously ran against the API's

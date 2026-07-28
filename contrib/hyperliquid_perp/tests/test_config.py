@@ -142,12 +142,41 @@ def test_load_config_accepts_phase1_value_spellings_the_client_accepts(tmp_path)
     assert load_config(good)["network"] == "TestNet"
 
 
-def test_load_config_rejects_non_list_coins(tmp_path):
-    # `coins: BTC` (scalar, not a list) would otherwise silently resolve to the
-    # first character "B" — reject it as a config error instead.
-    bad = tmp_path / "coins.yaml"
-    bad.write_text("coins: BTC\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="'coins' must be a list"):
+@pytest.mark.parametrize(
+    "text",
+    [
+        'engine:\n  structured_output: "false"\n',  # quoted string — truthy!
+        "engine:\n  structured_output: 1\n",
+        "engine:\n  structured_output: [true]\n",
+    ],
+)
+def test_load_config_rejects_non_bool_structured_output(tmp_path, text):
+    # A quoted "false" parses as a truthy string: it would ride through
+    # _build_engine_config untouched and silently re-enable structured output —
+    # the exact all-cycles-invalid_output incident the key exists to prevent.
+    bad = tmp_path / "structured.yaml"
+    bad.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="engine.structured_output"):
+        load_config(bad)
+
+
+def test_load_config_accepts_bool_structured_output(tmp_path):
+    good = tmp_path / "structured-ok.yaml"
+    good.write_text("engine:\n  structured_output: true\n", encoding="utf-8")
+    assert load_config(good)["engine"]["structured_output"] is True
+
+
+@pytest.mark.parametrize(
+    ("text", "key"),
+    [("coins: BTC\n", "coins"), ("indicators: rsi_14\n", "indicators")],
+)
+def test_load_config_rejects_non_list_container(tmp_path, text, key):
+    # A scalar would silently resolve to per-character values downstream
+    # (`"BTC"[0]`; per-character indicator names that zero the warm-up gate) —
+    # reject it as a config error instead.
+    bad = tmp_path / f"{key}.yaml"
+    bad.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match=f"'{key}' must be a list"):
         load_config(bad)
 
 

@@ -47,14 +47,31 @@ class _FakeSigned:
 
     agent_address = "0x" + "cc" * 20
 
-    def __init__(self, *, place_ack=None, trigger_ack=None, cancel=None, raise_on=None):
+    def __init__(
+        self,
+        *,
+        place_ack=None,
+        place_acks=None,
+        trigger_ack=None,
+        modify_ack=None,
+        cancel=None,
+        raise_on=None,
+    ):
         self._place_ack = place_ack or _Ack("filled")
+        # Optional per-call sequence, consumed first (then _place_ack repeats):
+        # lets a test make slice 0 fill and slice 1 fail.
+        self._place_acks = list(place_acks or [])
         self._trigger_ack = trigger_ack or _Ack("resting", filled_size=None, average_price=None)
+        self._modify_ack = modify_ack  # None → same ack as a fresh trigger place
         self._cancel = cancel or _Cancel(True)
         self._raise_on = raise_on or set()
         self.calls: list[str] = []
         self.last_place_cloid: str | None = None
         self.queried_cloid: str | None = None
+        self.place_calls: list[dict] = []
+        self.trigger_calls: list[dict] = []
+        self.modify_calls: list[dict] = []
+        self.cancelled_cloids: list[str] = []
 
     def _log(self, name: str) -> None:
         self.calls.append(name)
@@ -70,18 +87,24 @@ class _FakeSigned:
     def place_ioc_limit(self, **k):
         self._log("place_ioc_limit")
         self.last_place_cloid = k.get("cloid_hex")
+        self.place_calls.append(k)
+        if self._place_acks:
+            return self._place_acks.pop(0)
         return self._place_ack
 
     def place_trigger_order(self, **k):
         self._log("place_trigger_order")
+        self.trigger_calls.append(k)
         return self._trigger_ack
 
     def modify_trigger_order(self, **k):
         self._log("modify_trigger_order")
-        return self._trigger_ack
+        self.modify_calls.append(k)
+        return self._modify_ack if self._modify_ack is not None else self._trigger_ack
 
     def cancel_by_cloid(self, **k):
         self._log("cancel_by_cloid")
+        self.cancelled_cloids.append(k.get("cloid_hex"))
         return self._cancel
 
     def cancel_by_oid(self, **k):
@@ -593,6 +616,217 @@ def test_error_ack_probe_books_nothing(live_db):
             ("live-BTC",),
         ).fetchall()
     assert probe_rows == []
+
+
+# -- round-1 review-loop fixes (2026-07-28) ---------------------------------
+
+
+def test_trigger_probes_are_sell_side(live_db):
+    # A BUY-SL below the mark (short protection) is already in its fired region
+    # at placement — the exchange rejects it or instant-triggers it. Every
+    # trigger probe is the long-protection SELL shape, both pairs.
+    signed = _FakeSigned()
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=[
+                "slice_plan_cancel",
+                "stop_loss_create",
+                "stop_loss_modify",
+                "take_profit_create",
+                "take_profit_modify",
+            ]
+        )
+    assert signed.trigger_calls and all(c["is_buy"] is False for c in signed.trigger_calls)
+    assert signed.modify_calls and all(c["is_buy"] is False for c in signed.modify_calls)
+
+
+def test_multi_slice_refusal_after_partial_fill_closes_the_filled_leg(live_db):
+    # Slice 0 fills, slice 1 is refused → the verdict is failed AND the slice-0
+    # fill is best-effort closed (test 6 must not strand a position on the
+    # failure path either), with the cleanup noted durably.
+    refused = _Ack(
+        "error", exchange_order_id=None, filled_size=None, average_price=None, error="margin blip"
+    )
+    signed = _FakeSigned(place_acks=[_Ack("filled"), refused])
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["multi_slice_fill"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["multi_slice_fill"]
+    assert row["status"] == "failed"
+    assert "slice 1 was refused" in row["error_message"]
+    assert "cleanup" in row["error_message"]
+    closes = [c for c in signed.place_calls if c.get("reduce_only")]
+    assert len(closes) == 1 and closes[0]["size"] == _D("0.001")
+
+
+def test_multi_slice_exception_after_partial_fill_still_closes(live_db):
+    # The harness-error lane (→ ``error`` verdict) must flatten the slice-0
+    # fill too, not just the refusal lane.
+    class _SecondSliceBoom(_FakeSigned):
+        def place_ioc_limit(self, **k):
+            entries = [c for c in self.place_calls if not c.get("reduce_only")]
+            if not k.get("reduce_only") and len(entries) == 1:
+                self.place_calls.append(k)
+                raise RuntimeError("wire boom")
+            return super().place_ioc_limit(**k)
+
+    signed = _SecondSliceBoom()
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["multi_slice_fill"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["multi_slice_fill"]
+    assert row["status"] == "error"
+    assert "wire boom" in row["error_message"]
+    closes = [c for c in signed.place_calls if c.get("reduce_only")]
+    assert len(closes) == 1 and closes[0]["size"] == _D("0.001")
+
+
+def test_trigger_modify_refusal_cancels_the_original_order(live_db):
+    # A refused modify leaves the ORIGINAL order resting under create_cloid
+    # (§17.4) — the cleanup must cancel THAT cloid, not the never-bound
+    # modify_cloid, and say so in the failure detail.
+    refused = _Ack(
+        "error", exchange_order_id=None, filled_size=None, average_price=None, error="bad modify"
+    )
+    signed = _FakeSigned(modify_ack=refused)
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["stop_loss_modify"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["stop_loss_modify"]
+    assert row["status"] == "failed"
+    assert "SL modify was refused" in row["error_message"]
+    assert "cancelled the original" in row["error_message"]
+    assert signed.cancelled_cloids == [signed.trigger_calls[0]["cloid_hex"]]
+
+
+def test_resting_ioc_probe_is_cancelled_and_fails_the_test(live_db):
+    # The OrderAck contract admits "resting" even for an IOC. Booking it as
+    # "canceled" would lie to the audit trail while the order sits live —
+    # fail-safe: cancel it, book the TRUE state, fail the test.
+    resting = _Ack("resting", exchange_order_id="oid-9", filled_size=None, average_price=None)
+    signed = _FakeSigned(place_acks=[resting])
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["slice_order_submit"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+        probe_rows = live_db.conn.execute(
+            "SELECT * FROM orders WHERE run_id = ? AND status_reason = 'smoke_probe'",
+            ("live-BTC",),
+        ).fetchall()
+    row = latest["slice_order_submit"]
+    assert row["status"] == "failed"
+    assert "came back 'resting'" in row["error_message"]
+    assert "cancel_by_cloid" in signed.calls
+    assert len(probe_rows) == 1
+    assert probe_rows[0]["status"] == "canceled"  # the cancel succeeded → true state
+
+
+def test_resting_ioc_probe_with_refused_cancel_books_open(live_db):
+    # If the fail-safe cancel is itself refused, the order is STILL resting —
+    # an "open" row is the honest state (the §12.3 lane then tracks it), never
+    # a false "canceled".
+    resting = _Ack("resting", exchange_order_id="oid-9", filled_size=None, average_price=None)
+    signed = _FakeSigned(place_acks=[resting], cancel=_Cancel(False, "not found"))
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["slice_order_submit"]
+        )
+        probe_rows = live_db.conn.execute(
+            "SELECT * FROM orders WHERE run_id = ? AND status_reason = 'smoke_probe'",
+            ("live-BTC",),
+        ).fetchall()
+    assert len(probe_rows) == 1
+    assert probe_rows[0]["status"] == "open"
+
+
+def test_reduce_only_close_partial_fill_fails_and_closes_residual(live_db):
+    # Q4 2026-07-28: accepted-but-partial must not record passed on partial
+    # evidence — the verdict fails, the residual is best-effort closed, and
+    # both facts land in the message.
+    partial = _Ack("filled", filled_size=_D("0.0004"))
+    signed = _FakeSigned(place_acks=[_Ack("filled"), partial])
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["reduce_only_close"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["reduce_only_close"]
+    assert row["status"] == "failed"
+    assert "filled 0.0004 of 0.001" in row["error_message"]
+    assert "cleanup" in row["error_message"]
+    closes = [c for c in signed.place_calls if c.get("reduce_only")]
+    assert closes[-1]["size"] == _D("0.0006")  # the residual
+
+
+def test_emergency_close_partial_fill_fails_and_closes_residual(live_db):
+    partial = _Ack("filled", filled_size=_D("0.0004"))
+    signed = _FakeSigned(place_acks=[_Ack("filled"), partial])
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["emergency_close"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["emergency_close"]
+    assert row["status"] == "failed"
+    assert "emergency close filled 0.0004 of 0.001" in row["error_message"]
+    closes = [c for c in signed.place_calls if c.get("reduce_only")]
+    assert closes[-1]["size"] == _D("0.0006")
+
+
+def test_zero_filled_accepted_entry_aborts_the_close_tests(live_db):
+    # An IOC the exchange accepts but fills 0 of must abort — the close tests
+    # would otherwise "pass" with nothing opened to close.
+    signed = _FakeSigned(place_ack=_Ack("filled", filled_size=_D(0)))
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["multi_slice_fill", "reduce_only_close", "emergency_close"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    assert latest["multi_slice_fill"]["status"] == "failed"
+    assert "neither slice filled" in latest["multi_slice_fill"]["error_message"]
+    assert latest["reduce_only_close"]["status"] == "failed"
+    assert "did not fill" in latest["reduce_only_close"]["error_message"]
+    assert latest["emergency_close"]["status"] == "failed"
+    assert "did not fill" in latest["emergency_close"]["error_message"]
+
+
+def test_trigger_probes_book_no_orders_rows(live_db):
+    # Pins D2 (2026-07-27): trigger create/modify/cancel probes write NO orders
+    # rows — only IOC probes are booked.
+    signed = _FakeSigned()
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=[
+                "slice_plan_cancel",
+                "stop_loss_create",
+                "stop_loss_modify",
+                "stop_loss_cancel",
+                "take_profit_create",
+                "take_profit_modify",
+                "take_profit_cancel",
+            ]
+        )
+        probe_rows = live_db.conn.execute(
+            "SELECT * FROM orders WHERE run_id = ? AND status_reason = 'smoke_probe'",
+            ("live-BTC",),
+        ).fetchall()
+    assert probe_rows == []
+
+
+def test_only_status_without_submit_is_refused():
+    # Q3 2026-07-28: a selection that can never pass is refused up front, so
+    # the append-only audit never records the slip as "exchange refused".
+    with pytest.raises(ValueError, match="select both"):
+        smoke.validate_only_keys(["slice_order_status"])
+    both = smoke.validate_only_keys(("slice_order_submit", "slice_order_status"))
+    assert both == ("slice_order_submit", "slice_order_status")
 
 
 def test_mid_suite_record_crash_still_disarms(live_db, monkeypatch):

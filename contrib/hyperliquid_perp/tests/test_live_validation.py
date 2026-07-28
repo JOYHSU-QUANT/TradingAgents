@@ -11,6 +11,7 @@ import pytest
 from contrib.hyperliquid_perp.live import smoke
 from contrib.hyperliquid_perp.live.validation import (
     MIN_LIVE_CYCLES,
+    MIN_LIVE_ORDERS,
     LiveValidationReport,
     validate_live_run,
 )
@@ -115,6 +116,22 @@ def test_healthy_testnet_run_is_ready(tmp_path):
     assert report.restart_reconciliation_passed
     assert report.emergency_close_test_passed
     assert report.kill_switch_refresh_success_rate == Decimal(1)
+
+
+def test_order_count_one_short_is_a_shortfall(tmp_path):
+    # §20.3 gate boundary at exactly MIN_LIVE_ORDERS − 1: the failing side of
+    # the >= comparison (every other test seeds 30) — a flipped comparison or
+    # wrong constant would otherwise ship undetected.
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, MIN_LIVE_ORDERS - 1)
+    _add_refreshes(db, 100, 0)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert not report.live_ready
+    assert any("live_order_count" in s for s in report.shortfalls)
 
 
 def test_mainnet_tiny_healthy_run_is_ready(tmp_path):

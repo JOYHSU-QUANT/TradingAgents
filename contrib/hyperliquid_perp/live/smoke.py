@@ -42,11 +42,12 @@ import logging
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import ROUND_CEILING, ROUND_HALF_EVEN, Decimal
+from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 from typing import Any, Literal
 
 from ..paper.run_lock import RunLockError
+from ..paper.stops import round_to_tick
 from ..persistence import repository as repo
 from ..persistence.cloid import cloid_hex, cloid_logical
 from ..persistence.db import Database
@@ -154,6 +155,15 @@ _ORDER_PLACING_TESTS: frozenset[str] = frozenset(
 # Just over Hyperliquid's ~$10 minimum order value, so a probe order the suite
 # means to REST or FILL is not refused for being dust.
 _PROBE_NOTIONAL_USDC = Decimal("11")
+
+# Every trigger probe is LONG-protection shaped: a SELL that would shrink a
+# hypothetical long — SL far below the mark (fires only if price halves), TP far
+# above (fires only if price 1.5×es). The side is what makes the far distance
+# "never fires": a BUY-SL below the mark (short protection) is already in its
+# fired region at placement, so the exchange rejects it as wrong-side or
+# instant-triggers it — either way the probe cannot rest (§20.2 tests 5/8–13
+# need a RESTING order to modify/cancel).
+_TRIGGER_PROBE_IS_BUY = False
 
 
 @dataclass
@@ -473,8 +483,11 @@ class SmokeTestRunner:
         row the fill backfill can never attach it (the §14 oid→order mapping),
         filing a permanent, unstampable ``fill_unmapped`` case that turns every
         later §19.1 recovery unclean (decision 2026-07-27). Only IOC probes are
-        booked — an IOC is terminal at the ack (filled or canceled, never
-        resting), so the row can never trip the §12.3 open-order lane. Trigger
+        booked — an IOC is terminal at the ack (filled or canceled) BY EXCHANGE
+        SEMANTICS, so a terminal row can never trip the §12.3 open-order lane;
+        the ack contract itself still admits ``resting``, and that anomaly is
+        handled fail-safe below (cancel, book the true state, fail the test)
+        rather than mis-booked as ``canceled``. Trigger
         probes are NOT booked: they rest far from the mark and are cancelled
         in-test, and a stranded one is backfilled bot-owned by the reconciler's
         own orphan lane — a local "open" row whose cancel succeeded would
@@ -483,8 +496,62 @@ class SmokeTestRunner:
         """
         if ack.exchange_order_id is None:
             return
+        if ack.status == "resting":
+            # The premise above ("an IOC is terminal at the ack") failed: the
+            # ack contract itself admits "resting" (accepted, on the book,
+            # nothing filled — see OrderAck), and booking a LIVE order as
+            # "canceled" would both lie to the audit trail and leave the §12.3
+            # reconciler to find it as an orphan later. Fail-safe: cancel it,
+            # book the true final state, and fail the test loudly — an IOC
+            # that rests is an exchange-semantics anomaly worth stopping on.
+            note = self._best_effort_cancel(cloid_hex_value)
+            cancelled = note is None
+            self._insert_probe_row(
+                status="canceled" if cancelled else "open",
+                filled=Decimal(0),
+                ack=ack,
+                cloid_logical=cloid_logical,
+                cloid_hex_value=cloid_hex_value,
+                role=role,
+                side=side,
+                qty=qty,
+                price=price,
+                reduce_only=reduce_only,
+            )
+            raise _SmokeAbort(
+                f"IOC probe {cloid_hex_value} came back 'resting' — an IOC must be "
+                "terminal at the ack; "
+                + ("cancelled it and booked the row as canceled" if cancelled else note)
+            )
         filled = ack.filled_size or Decimal(0)
         status = "filled" if filled > 0 else "canceled"
+        self._insert_probe_row(
+            status=status,
+            filled=filled,
+            ack=ack,
+            cloid_logical=cloid_logical,
+            cloid_hex_value=cloid_hex_value,
+            role=role,
+            side=side,
+            qty=qty,
+            price=price,
+            reduce_only=reduce_only,
+        )
+
+    def _insert_probe_row(
+        self,
+        *,
+        status: str,
+        filled: Decimal,
+        ack: Any,
+        cloid_logical: str,
+        cloid_hex_value: str,
+        role: str,
+        side: str,
+        qty: Decimal,
+        price: Decimal,
+        reduce_only: bool,
+    ) -> None:
         with self.ctx.db.transaction() as conn:
             repo.insert_order(
                 conn,
@@ -521,9 +588,16 @@ class SmokeTestRunner:
         self._tag_seq += 1
         return f"{self.ctx.now().strftime('%Y%m%dT%H%M%S%f')}-{self._tag_seq}"
 
-    def _round_price(self, raw: Decimal) -> Decimal:
-        step = self.ctx.tick_size
-        return (raw / step).to_integral_value(rounding=ROUND_HALF_EVEN) * step
+    def _round_price(self, raw: Decimal, *, up: bool) -> Decimal:
+        """Exchange-legal probe price (tick grid + the 5-sig-fig px rule).
+
+        Delegates to the same :func:`~..paper.stops.round_to_tick` the live
+        engine and protection use, so a probe can never carry a price shape
+        the real order paths would not. ``up`` picks the safe side per probe:
+        toward-marketable for the fill-intent IOCs, away-from-mark for the
+        never-fires prices.
+        """
+        return round_to_tick(raw, self.ctx.tick_size, up=up)
 
     def _probe_size(self) -> Decimal:
         """The smallest qty whose notional clears the exchange minimum."""
@@ -569,7 +643,7 @@ class SmokeTestRunner:
         logical, cloid = self._register_cloid(role="entry", tag=f"submit-{self._tag()}")
         size = self._probe_size()
         mark = self.ctx.mark_price()
-        price = self._round_price(mark * Decimal("0.5"))
+        price = self._round_price(mark * Decimal("0.5"), up=False)
         ack = self.ctx.signed.place_ioc_limit(
             coin=self.ctx.coin,
             is_buy=True,
@@ -614,7 +688,7 @@ class SmokeTestRunner:
         trigger, limit = self._trigger_prices("sl")
         ack = self.ctx.signed.place_trigger_order(
             coin=self.ctx.coin,
-            is_buy=True,
+            is_buy=_TRIGGER_PROBE_IS_BUY,
             size=self._probe_size(),
             limit_price=limit,
             trigger_price=trigger,
@@ -622,9 +696,7 @@ class SmokeTestRunner:
             cloid_hex=cloid,
         )
         self._require_accepted(ack, "resting probe order")
-        cancel = self.ctx.signed.cancel_by_cloid(coin=self.ctx.coin, cloid_hex=cloid)
-        if not cancel.success:
-            raise _SmokeAbort(f"cancel-by-cloid refused: {cancel.error}")
+        self._cancel_tested_probe(cloid, "cancel-by-cloid")
         return SmokeStepResult("passed", detail="placed a resting order and cancelled it by cloid")
 
     def _test_multi_slice_fill(self) -> SmokeStepResult:
@@ -634,31 +706,47 @@ class SmokeTestRunner:
         # 7 is deselected).
         size = self._probe_size()
         mark = self.ctx.mark_price()
-        marketable = self._round_price(mark * Decimal("1.01"))
+        marketable = self._round_price(mark * Decimal("1.01"), up=True)
         filled = Decimal(0)
-        for i in range(2):
-            logical, cloid = self._register_cloid(
-                role="entry", tag=f"fill-{self._tag()}", slice_index=i
-            )
-            ack = self.ctx.signed.place_ioc_limit(
-                coin=self.ctx.coin,
-                is_buy=True,
-                size=size,
-                limit_price=marketable,
-                cloid_hex=cloid,
-            )
-            self._record_probe_order(
-                ack,
-                cloid_logical=logical,
-                cloid_hex_value=cloid,
-                role="entry",
-                side="buy",
-                qty=size,
-                price=marketable,
-            )
-            self._require_accepted(ack, f"slice {i}")
-            if ack.filled_size is not None:
-                filled += ack.filled_size
+        try:
+            for i in range(2):
+                logical, cloid = self._register_cloid(
+                    role="entry", tag=f"fill-{self._tag()}", slice_index=i
+                )
+                ack = self.ctx.signed.place_ioc_limit(
+                    coin=self.ctx.coin,
+                    is_buy=True,
+                    size=size,
+                    limit_price=marketable,
+                    cloid_hex=cloid,
+                )
+                self._record_probe_order(
+                    ack,
+                    cloid_logical=logical,
+                    cloid_hex_value=cloid,
+                    role="entry",
+                    side="buy",
+                    qty=size,
+                    price=marketable,
+                )
+                self._require_accepted(ack, f"slice {i}")
+                if ack.filled_size is not None:
+                    filled += ack.filled_size
+        except _SmokeAbort as exc:
+            # Slice 1 failing after slice 0 filled must NOT strand the fill:
+            # the happy-path close below never runs once an abort propagates,
+            # and the suite's own docstring promise ("6 must not strand a
+            # position") holds on the failure path too.
+            if filled > 0:
+                note = self._best_effort_close(filled)
+                note = note or f"cleanup: closed the {filled} already filled"
+                raise _SmokeAbort(f"{exc}; {note}") from None
+            raise
+        except Exception:
+            # Harness error (→ ``error`` verdict): same flatten, note in the log.
+            if filled > 0:
+                self._best_effort_close(filled)
+            raise
         if filled <= 0:
             raise _SmokeAbort("neither slice filled — cannot confirm the multi-slice fill path")
         cleanup = self._best_effort_close(filled)
@@ -676,8 +764,10 @@ class SmokeTestRunner:
             no_fill="entry did not fill — nothing to reduce-only close",
         )
         close_ack = self._reduce_only_close(opened)
-        self._require_accepted(close_ack, "reduce-only close")
-        return SmokeStepResult("passed", detail=f"opened {opened} and reduce-only closed it")
+        self._require_full_close(close_ack, opened, "reduce-only close")
+        return SmokeStepResult(
+            "passed", detail=f"opened {opened} and reduce-only closed it in full"
+        )
 
     def _open_probe_long(self, *, tag: str, what: str, no_fill: str) -> Decimal:
         """Open the small probe long the close-shaped tests (7 / 18) start from.
@@ -688,7 +778,7 @@ class SmokeTestRunner:
         """
         size = self._probe_size()
         mark = self.ctx.mark_price()
-        price = self._round_price(mark * Decimal("1.01"))
+        price = self._round_price(mark * Decimal("1.01"), up=True)
         logical, cloid = self._register_cloid(role="entry", tag=tag)
         ack = self.ctx.signed.place_ioc_limit(
             coin=self.ctx.coin,
@@ -715,7 +805,7 @@ class SmokeTestRunner:
     def _reduce_only_close(self, size: Decimal) -> Any:
         logical, cloid = self._register_cloid(role="close", tag=f"reduce-{self._tag()}")
         mark = self.ctx.mark_price()
-        price = self._round_price(mark * Decimal("0.99"))
+        price = self._round_price(mark * Decimal("0.99"), up=False)
         ack = self.ctx.signed.place_ioc_limit(
             coin=self.ctx.coin,
             is_buy=False,
@@ -760,6 +850,27 @@ class SmokeTestRunner:
             return f"cleanup: reduce-only close of {size} refused ({ack.error})"
         return None
 
+    def _require_full_close(self, close_ack: Any, opened: Decimal, what: str) -> None:
+        """Fail unless the close leg filled the whole ``opened`` size (Q4 2026-07-28).
+
+        ``accepted`` alone would let a thin testnet book record ``passed`` — and
+        flip a §20.3 ``*_test_passed`` boolean — on partial evidence, while a
+        residual position silently survives a suite the RUNBOOK advertises as
+        self-cleaning. Any shortfall (refusal or partial fill) best-effort
+        closes the residual and carries both facts in the failure detail.
+        """
+        closed = (close_ack.filled_size or Decimal(0)) if close_ack.accepted else Decimal(0)
+        if close_ack.accepted and closed >= opened:
+            return
+        residual = opened - closed
+        note = self._best_effort_close(residual) or f"cleanup: closed the residual {residual}"
+        reason = (
+            f"{what} was refused by the exchange: {close_ack.error}"
+            if not close_ack.accepted
+            else f"{what} filled {closed} of {opened} — the close must fill in full"
+        )
+        raise _SmokeAbort(f"{reason}; {note}")
+
     def _test_stop_loss_create(self) -> SmokeStepResult:
         return self._trigger_create("sl", "stop_loss", "SL")
 
@@ -786,12 +897,15 @@ class SmokeTestRunner:
         modify / cancel wire actions, not a trigger execution.
         """
         mark = self.ctx.mark_price()
+        # Rounded AWAY from the mark (down for the SL pair, up for the TP pair)
+        # so legalization can only widen the never-fires margin, and the limit
+        # keeps its side of the trigger.
         if tpsl == "sl":
-            trigger = self._round_price(mark * Decimal("0.5"))
-            limit = self._round_price(mark * Decimal("0.49"))
+            trigger = self._round_price(mark * Decimal("0.5"), up=False)
+            limit = self._round_price(mark * Decimal("0.49"), up=False)
         else:
-            trigger = self._round_price(mark * Decimal("1.5"))
-            limit = self._round_price(mark * Decimal("1.51"))
+            trigger = self._round_price(mark * Decimal("1.5"), up=True)
+            limit = self._round_price(mark * Decimal("1.51"), up=True)
         return trigger, limit
 
     def _trigger_create(self, tpsl: str, role: str, label: str) -> SmokeStepResult:
@@ -799,7 +913,7 @@ class SmokeTestRunner:
         trigger, limit = self._trigger_prices(tpsl)
         ack = self.ctx.signed.place_trigger_order(
             coin=self.ctx.coin,
-            is_buy=(tpsl == "sl"),
+            is_buy=_TRIGGER_PROBE_IS_BUY,
             size=self._probe_size(),
             limit_price=limit,
             trigger_price=trigger,
@@ -819,7 +933,7 @@ class SmokeTestRunner:
         trigger, limit = self._trigger_prices(tpsl)
         created = self.ctx.signed.place_trigger_order(
             coin=self.ctx.coin,
-            is_buy=(tpsl == "sl"),
+            is_buy=_TRIGGER_PROBE_IS_BUY,
             size=self._probe_size(),
             limit_price=limit,
             trigger_price=trigger,
@@ -828,22 +942,42 @@ class SmokeTestRunner:
         )
         self._require_accepted(created, f"{label} modify (initial place)")
         _, modify_cloid = self._register_cloid(role=role, tag=f"{tpsl}-mod-b-{self._tag()}")
-        # Nudge the trigger one tick — §17.4 modify-before-cancel updates in place.
-        if tpsl == "tp":
+        # Nudge the trigger one tick — §17.4 modify-before-cancel updates in
+        # place. Rounded in the nudge's own direction so legalization can never
+        # collapse the new price back onto the (already-legal) original.
+        nudge_up = tpsl == "tp"
+        if nudge_up:
             new_trigger, new_limit = trigger + self.ctx.tick_size, limit + self.ctx.tick_size
         else:
             new_trigger, new_limit = trigger - self.ctx.tick_size, limit - self.ctx.tick_size
-        modified = self.ctx.signed.modify_trigger_order(
-            target=created.exchange_order_id,
-            coin=self.ctx.coin,
-            is_buy=(tpsl == "sl"),
-            size=self._probe_size(),
-            limit_price=self._round_price(new_limit),
-            trigger_price=self._round_price(new_trigger),
-            tpsl=tpsl,
-            cloid_hex=modify_cloid,
-        )
-        self._require_accepted(modified, f"{label} modify")
+        try:
+            modified = self.ctx.signed.modify_trigger_order(
+                target=created.exchange_order_id,
+                coin=self.ctx.coin,
+                is_buy=_TRIGGER_PROBE_IS_BUY,
+                size=self._probe_size(),
+                limit_price=self._round_price(new_limit, up=nudge_up),
+                trigger_price=self._round_price(new_trigger, up=nudge_up),
+                tpsl=tpsl,
+                cloid_hex=modify_cloid,
+            )
+            self._require_accepted(modified, f"{label} modify")
+        except _SmokeAbort as exc:
+            # A refused modify leaves the ORIGINAL order untouched and still
+            # resting under create_cloid (§17.4 contract) — the success-path
+            # cleanup below would cancel modify_cloid, a cloid the exchange
+            # never bound. Cancel the order that actually rests, and carry the
+            # outcome in the failure detail.
+            note = self._best_effort_cancel(create_cloid)
+            note = note or f"cleanup: cancelled the original {label} probe ({create_cloid})"
+            raise _SmokeAbort(f"{exc}; {note}") from None
+        except Exception:
+            # Unknown outcome (the modify may or may not have re-labeled the
+            # order) — sweep both cloids best-effort; exactly one exists, the
+            # other cancel refuses and lands in the log only.
+            self._best_effort_cancel(modify_cloid)
+            self._best_effort_cancel(create_cloid)
+            raise
         cleanup = self._best_effort_cancel(modify_cloid)
         detail = f"{label} modified in place (§17.4)"
         if cleanup:
@@ -856,7 +990,7 @@ class SmokeTestRunner:
         trigger, limit = self._trigger_prices(tpsl)
         placed = self.ctx.signed.place_trigger_order(
             coin=self.ctx.coin,
-            is_buy=(tpsl == "sl"),
+            is_buy=_TRIGGER_PROBE_IS_BUY,
             size=self._probe_size(),
             limit_price=limit,
             trigger_price=trigger,
@@ -864,10 +998,22 @@ class SmokeTestRunner:
             cloid_hex=cloid,
         )
         self._require_accepted(placed, f"{label} cancel (initial place)")
+        self._cancel_tested_probe(cloid, f"{label} cancel")
+        return SmokeStepResult("passed", detail=f"{label} placed and cancelled")
+
+    def _cancel_tested_probe(self, cloid: str, what: str) -> None:
+        """Cancel a probe where the cancel itself IS the tested action.
+
+        A refusal fails the test — no second attempt would prove anything —
+        but the probe is still resting on the exchange, and that must be said
+        (one wording, shared by tests 5/10/13).
+        """
         cancel = self.ctx.signed.cancel_by_cloid(coin=self.ctx.coin, cloid_hex=cloid)
         if not cancel.success:
-            raise _SmokeAbort(f"{label} cancel refused: {cancel.error}")
-        return SmokeStepResult("passed", detail=f"{label} placed and cancelled")
+            raise _SmokeAbort(
+                f"{what} refused: {cancel.error} — the probe trigger "
+                f"order is still resting on the exchange (cloid {cloid})"
+            )
 
     def _best_effort_cancel(self, cloid_hex_value: str) -> str | None:
         """Cancel a probe's resting order; return a note if it did NOT cancel.
@@ -939,7 +1085,7 @@ class SmokeTestRunner:
             no_fill="entry did not fill — nothing to emergency-close",
         )
         mark = self.ctx.mark_price()
-        close_price = self._round_price(mark * Decimal("0.97"))
+        close_price = self._round_price(mark * Decimal("0.97"), up=False)
         close_logical, close_cloid = self._register_cloid(
             role="emergency_close", tag=f"emrg-{self._tag()}"
         )
@@ -962,9 +1108,9 @@ class SmokeTestRunner:
             price=close_price,
             reduce_only=True,
         )
-        self._require_accepted(close_ack, "emergency close")
+        self._require_full_close(close_ack, opened, "emergency close")
         return SmokeStepResult(
-            "passed", detail=f"emergency-closed {opened} (aggressive reduce-only IOC)"
+            "passed", detail=f"emergency-closed {opened} in full (aggressive reduce-only IOC)"
         )
 
 
@@ -1007,10 +1153,16 @@ def smoke_gate_report(
 
 
 def validate_only_keys(keys: Iterable[str]) -> tuple[str, ...]:
-    """Return the given keys if all are real test keys, else raise ValueError.
+    """Return the given keys if the selection is runnable, else raise ValueError.
 
     The CLI's ``--only`` guard: a typo'd key must name itself, not silently run
-    an empty suite (which would then read as "all selected tests passed").
+    an empty suite (which would then read as "all selected tests passed"). A
+    selection that CANNOT pass is refused too: ``slice_order_status`` (test 4)
+    queries the order test 3 submits in the same process, so selecting it
+    without ``slice_order_submit`` would place nothing and still write a real
+    FAILED row into the append-only audit — which ``validate`` then reports as
+    "exchange refused", dressing an operator selection slip up as an exchange
+    problem (decision 2026-07-28).
     """
     keys = tuple(keys)
     unknown = [k for k in keys if k not in _BY_KEY]
@@ -1018,5 +1170,11 @@ def validate_only_keys(keys: Iterable[str]) -> tuple[str, ...]:
         raise ValueError(
             f"unknown smoke test key(s): {', '.join(unknown)}. "
             f"Valid keys: {', '.join(SMOKE_TEST_KEYS)}"
+        )
+    if "slice_order_status" in keys and "slice_order_submit" not in keys:
+        raise ValueError(
+            "slice_order_status (test 4) queries the order slice_order_submit "
+            "(test 3) places in the same process — select both, e.g. "
+            "--only slice_order_submit,slice_order_status"
         )
     return keys

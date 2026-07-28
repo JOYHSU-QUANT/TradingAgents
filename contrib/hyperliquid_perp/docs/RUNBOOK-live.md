@@ -185,11 +185,19 @@ python -m contrib.hyperliquid_perp live-smoke \
   --only stop_loss_create stop_loss_modify stop_loss_cancel
 ```
 
+> `--only` 有一條配對規則：test 4（`slice_order_status`）查的是同一次執行裡
+> test 3 送出的單，單選 test 4 會被入口直接拒絕（exit 1）——兩個一起選：
+> `--only slice_order_submit slice_order_status`。
+
 每項結果落 `live_smoke_tests`（append-only：修好再跑會覆蓋判定、保留歷史）。
 失敗的項修好後重跑該項即可。
 
-三個真跑才有的行為：
+四個真跑才有的行為：
 
+- **run 身分檢查**：套件會先比對 run 的 genesis 記錄（coin／`live.network`）與
+  今天的 config，不符就具名拒絕（exit 1）——打錯 `--run-id` 指到同一個 db 裡的
+  mainnet 驗收 run 時，pre-flight recovery 會拿 testnet 交易所去對那個 run 的帳、
+  記下依 §5 累積制**永久**的 integrity case，這道檢查就是擋這個的。
 - **run lock**：真跑（非 `--dry-run`／`--gate-status`）會先取 run 的 lease——同一
   run 正被 `live --loop` 跑著時會具名拒絕（exit 1）。先停掉 daemon 再跑 smoke。
   套件跑動中**每項測試前會 heartbeat** 這個 lease；萬一 lease 已被接管（本進程
@@ -210,6 +218,10 @@ python -m contrib.hyperliquid_perp live-smoke \
 # smoke_gate_passed: yes  → 可進 cycles（exit 0）
 # smoke_gate_passed: no   → 印出 not_yet_run / failed 清單（exit 4）
 ```
+
+> `--gate-status` 只適用 **testnet_live** run：指到 mainnet（或 genesis 沒記
+> mode 的）run 會具名拒絕（exit 1）——mainnet run 的 smoke 依 §21.3 在獨立的
+> testnet run 上證明，空的 smoke 表是設計、不是待辦。
 
 | `live-smoke` exit | 意義 | 下一步 |
 |---|---|---|

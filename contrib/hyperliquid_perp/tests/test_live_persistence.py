@@ -101,6 +101,34 @@ def test_v5_store_upgrades_to_latest_in_place(monkeypatch):
     ):
         surviving = conn.execute(f"SELECT * FROM {table}").fetchall()
         assert [r[key] for r in surviving] == [value], table
+    # v8's new table actually landed on the upgraded (populated) connection —
+    # the real Lightsail scenario — with the columns the repository writes, and
+    # a result row round-trips through the repo layer.
+    assert {
+        "result_id",
+        "run_id",
+        "test_key",
+        "test_number",
+        "test_name",
+        "status",
+        "network",
+        "dry_run",
+        "detail",
+        "error_message",
+        "executed_at",
+    } <= _columns(conn, "live_smoke_tests")
+    repo.insert_smoke_test_result(
+        conn,
+        run_id="r",
+        test_number=1,
+        test_key="signed_client_init",
+        test_name="signed client initialization",
+        status="passed",
+        network="testnet",
+        executed_at=_NOW,
+    )
+    latest = repo.latest_smoke_test_results(conn, "r")
+    assert latest["signed_client_init"]["status"] == "passed"
     assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 

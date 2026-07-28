@@ -2802,9 +2802,29 @@ def test_live_matching_top_level_network_does_not_warn(tmp_path, capsys, live_se
 # --------------------------------------------------------------------------
 
 
-def _make_live_run(tmp_path, *, mode="testnet_live", run_id="live-BTC", db_name="live_trading.db"):
+def _make_live_run(
+    tmp_path,
+    *,
+    mode="testnet_live",
+    run_id="live-BTC",
+    db_name="live_trading.db",
+    coin="BTC",
+    config_json=None,
+):
     from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 
+    if config_json is None:
+        # The identity fields a real `live --create` genesis always records —
+        # the live-smoke drift check (2026-07-28) reads coin + live.network.
+        config_json = json.dumps(
+            {
+                "coin": coin,
+                "live": {
+                    "mode": mode,
+                    "network": "testnet" if mode == "testnet_live" else "mainnet",
+                },
+            }
+        )
     db = Database(tmp_path / db_name)
     accounting.initialize_run(
         db,
@@ -2812,7 +2832,7 @@ def _make_live_run(tmp_path, *, mode="testnet_live", run_id="live-BTC", db_name=
         mode="live",
         initial_balance_usdc=Decimal(200),
         schema_version=SCHEMA_VERSION,
-        config_json=json.dumps({"live": {"mode": mode}}),
+        config_json=config_json,
     )
     db.close()
     return tmp_path / db_name
@@ -2859,8 +2879,10 @@ def test_live_smoke_bad_only_key_exits_1(tmp_path, capsys):
 
 def test_live_smoke_dry_run_records_skipped(tmp_path, capsys):
     # Dry-run needs a valid live config + the run to exist; it touches no network.
+    # Genesis matches the config (the drift identity check runs before the
+    # dry-run fork, 2026-07-28).
     cfg = _live_yaml(tmp_path)
-    dbp = _make_live_run(tmp_path)
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg, run_id="live-BTC")
     rc = cli_main(
         ["live-smoke", "--config", str(cfg), "--run-id", "live-BTC", "--db", str(dbp), "--dry-run"]
     )
@@ -2893,6 +2915,69 @@ def test_live_smoke_refuses_mainnet_even_with_dry_run(tmp_path, capsys):
     )
     assert rc == 1
     assert "only against a testnet_live run" in capsys.readouterr().err
+
+
+def test_live_smoke_refuses_run_created_for_another_network(tmp_path, capsys):
+    # Q1 2026-07-28: run-identity discipline. A valid testnet config with a
+    # typo'd --run-id pointing at the mainnet acceptance run (same default db)
+    # must be refused BEFORE the pre-flight recovery can reconcile the testnet
+    # exchange against that ledger and file integrity cases the §5 cumulative
+    # policy makes permanent. The genesis live.network mismatch is the trip.
+    cfg = _live_yaml(tmp_path)  # testnet_live / testnet
+    dbp = _make_live_run(tmp_path, mode="mainnet_tiny")  # genesis network=mainnet
+    rc = cli_main(
+        ["live-smoke", "--config", str(cfg), "--run-id", "live-BTC", "--db", str(dbp), "--dry-run"]
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "live.network" in err
+    assert "new --run-id" in err
+
+
+def test_live_smoke_refuses_run_created_for_another_coin(tmp_path, capsys):
+    cfg = _live_yaml(tmp_path)  # allowed_symbols → BTC
+    dbp = _make_live_run(tmp_path, coin="ETH")
+    rc = cli_main(
+        ["live-smoke", "--config", str(cfg), "--run-id", "live-BTC", "--db", str(dbp), "--dry-run"]
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "created for coin 'ETH'" in err
+    assert "'BTC'" in err
+
+
+def test_live_smoke_gate_status_refuses_non_testnet_run(tmp_path, capsys):
+    # Q2 2026-07-28: a mainnet_tiny run's live_smoke_tests is empty BY DESIGN
+    # (§21.3) — raw buckets would print "not_yet_run: <all 18>" + exit 4 and
+    # read as "go smoke-test mainnet", contradicting validate's "n/a (§21.3)".
+    dbp = _make_live_run(tmp_path, mode="mainnet_tiny")
+    rc = cli_main(["live-smoke", "--run-id", "live-BTC", "--db", str(dbp), "--gate-status"])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "§21.3" in captured.err
+    assert "smoke_gate_passed" not in captured.out
+
+
+def test_live_smoke_gate_status_refuses_unknown_genesis_mode(tmp_path, capsys):
+    # A hand-built run whose genesis names no live.mode reads as "unknown" —
+    # fail-safe refusal, same as any non-testnet mode.
+    dbp = _make_live_run(tmp_path, config_json="{}")
+    rc = cli_main(["live-smoke", "--run-id", "live-BTC", "--db", str(dbp), "--gate-status"])
+    assert rc == 1
+    assert "'unknown'" in capsys.readouterr().err
+
+
+def test_live_smoke_only_status_without_submit_exits_1(tmp_path, capsys):
+    # Q3 2026-07-28: test 4 queries the order test 3 places in the same
+    # process, so this selection can never pass — refuse it at the entrance
+    # instead of writing a real FAILED row that validate would present as
+    # "exchange refused".
+    dbp = _make_live_run(tmp_path)
+    rc = cli_main(
+        ["live-smoke", "--run-id", "live-BTC", "--db", str(dbp), "--only", "slice_order_status"]
+    )
+    assert rc == 1
+    assert "select both" in capsys.readouterr().err
 
 
 # -- live --loop §20.2 gate consumer + live-smoke lease (2026-07-27) --------

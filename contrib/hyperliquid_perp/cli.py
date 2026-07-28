@@ -1096,7 +1096,7 @@ def _live_startup_recovery(
             drift = _config_drift_report(existing_run["config_json"], config, coin)
             if drift is not None:
                 kind, message = drift
-                if kind in ("coin", "network"):
+                if kind in _HARD_DRIFT_KINDS:
                     print(f"error: {message}", file=sys.stderr)
                     return 1
                 logger.warning("config drift on live resume for %s: %s", run_id, message)
@@ -1969,6 +1969,26 @@ def _cmd_live_smoke(argv: list[str]) -> int:
                     file=sys.stderr,
                 )
                 return 1
+            # The §20.2 gate is testnet-only state: a mainnet_tiny run's
+            # live_smoke_tests is empty BY DESIGN (§21.3 — smoke is proven on
+            # the separate testnet run), so reporting its raw buckets would
+            # print "not_yet_run: <all 18>" + exit 4 and read as "go smoke-test
+            # mainnet" — the exact misreading `validate` renders as "n/a
+            # (§21.3)". Refuse, mirroring the real-run testnet-only guard
+            # (decision 2026-07-28).
+            from .live.validation import _execution_mode
+
+            genesis_mode = _execution_mode(run_row["config_json"])
+            if genesis_mode != "testnet_live":
+                print(
+                    f"error: run {args.run_id!r} has genesis live.mode "
+                    f"{genesis_mode!r} — the §20.2 smoke gate applies only to "
+                    "testnet_live runs (a mainnet run relies on the smoke "
+                    "proven on the separate testnet run, §21.3); there is no "
+                    "smoke gate to report here.",
+                    file=sys.stderr,
+                )
+                return 1
             passed, missing, failed, errored = smoke_gate_report(db.conn, args.run_id)
             _print_smoke_gate(passed, missing, failed, errored)
             return 0 if passed else 4
@@ -2141,6 +2161,21 @@ def _build_smoke_session(args, db):
             file=sys.stderr,
         )
         return 1
+    # Same identity discipline as `live` resume (decision 2026-07-28): the suite
+    # runs a real §19.1 recovery and books probe orders ON this run, so a typo'd
+    # --run-id pointing at another live run in the same store — the §21.4
+    # mainnet acceptance run lives in the same default db — would reconcile the
+    # TESTNET exchange against that run's ledger and file integrity cases that
+    # the §5 cumulative policy makes permanent. coin / live.network drift is a
+    # hard refusal (the mainnet run trips the network check); parameter drift
+    # warns, as on resume.
+    drift = _config_drift_report(run_row["config_json"], config, coin)
+    if drift is not None:
+        kind, message = drift
+        if kind in _HARD_DRIFT_KINDS:
+            print(f"error: {message}", file=sys.stderr)
+            return 1
+        print(f"WARNING: {message}", file=sys.stderr)
 
     if args.dry_run:
         # No network: signed stays None and the seams below are never called.
@@ -2386,6 +2421,14 @@ def _norm_network(live_block: dict) -> object:
     """``live.network`` normalised the way LiveConfig reads it (case-insensitive)."""
     net = live_block.get("network")
     return net.strip().lower() if isinstance(net, str) else net
+
+
+# The drift kinds that are run IDENTITY (a different instrument or a different
+# exchange). Every entry point that resumes/targets an existing run refuses
+# these with exit 1; any other kind is parameter drift and only warns. One
+# shared datum so the three call sites (paper resume, live resume, live-smoke)
+# can never diverge on what counts as hard.
+_HARD_DRIFT_KINDS = frozenset({"coin", "network"})
 
 
 def _config_drift_report(
@@ -2740,7 +2783,7 @@ def _cmd_paper(argv: list[str]) -> int:
                     _stamp_breadcrumb(db, run_id, "config_drift", "ok", None)
                 else:
                     kind, message = drift
-                    if kind in ("coin", "network"):
+                    if kind in _HARD_DRIFT_KINDS:
                         print(f"error: {message}", file=sys.stderr)
                         return 1
                     logger.warning("config drift on resume for %s: %s", run_id, message)

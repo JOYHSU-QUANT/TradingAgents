@@ -73,13 +73,17 @@ def test_build_engine_config_defaults():
     assert engine_config["structured_output"] is False
 
 
-def test_build_engine_config_structured_output_escape_hatch():
+def test_build_engine_config_structured_output_escape_hatch(capsys):
+    # Arming the escape hatch must be loud (dual-channel warning): with the
+    # prompt-injected contract it fail-closes every cycle as invalid_output.
     engine_config, _ = main_mod._build_engine_config({"engine": {"structured_output": True}})
     assert engine_config["structured_output"] is True
+    assert "engine.structured_output: true" in capsys.readouterr().err
     # An explicit false is preserved (same value as the perp default; this
-    # pins the passthrough accepting False).
+    # pins the passthrough accepting False) — and stays signal-free.
     engine_config, _ = main_mod._build_engine_config({"engine": {"structured_output": False}})
     assert engine_config["structured_output"] is False
+    assert capsys.readouterr().err == ""
 
 
 def test_build_engine_config_overrides():

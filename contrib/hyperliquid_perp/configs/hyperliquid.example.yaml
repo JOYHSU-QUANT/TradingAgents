@@ -24,7 +24,8 @@ engine:
   # Deep-think structured output is OFF by default for perp runs — the Phase 2
   # target JSON must survive in final_trade_decision free text; a schema render
   # drops it and every cycle fail-closes as invalid_output (RUNBOOK §7). Only
-  # set true once the contract is carried by the structured schema itself.
+  # set true once the contract is carried by the structured schema itself
+  # (true is loud: the engine-config build warns on log + stderr).
   # The value must be a bare YAML bool (true/false, no quotes) — a quoted
   # "false" is not a bool and is rejected at config load.
   # structured_output: false

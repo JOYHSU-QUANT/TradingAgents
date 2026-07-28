@@ -2776,25 +2776,26 @@ class _EngineDecisionProvider:
         from .domains.perp.target_decision import decision_format_instructions
         from .exchanges.hyperliquid.errors import ExchangeError
         from .exchanges.hyperliquid.market_data import interval_to_ms
-        from .main import _build_context, _warmup_threshold
+        from .main import _build_context, _context_refusal_error
         from .paper.scheduler import DecisionInput, RetryableDecisionError
 
         try:
             ctx, _client = _build_context(self._config, coin)
         except ExchangeError as exc:
             raise RetryableDecisionError("connection", str(exc)) from exc
-        needed = _warmup_threshold(self._config)
-        if ctx.candle_count < needed:
-            # Not enough closed candles for real signal. Deliberate (reviewed):
-            # this rides the §3.1 ladder as "server_error" → api_failed — the
-            # closed §6.2 vocabulary has no data-availability label. A gappy
-            # feed heals by the next try/cycle; a too-young listing produces a
-            # recurring api_failed cycle every 4h until it warms up (no AI
-            # spend — the failure precedes the call).
-            raise RetryableDecisionError(
-                "server_error",
-                f"under-warmed market data: {ctx.candle_count} candles, need {needed}",
-            )
+        # All three pre-LLM context guards (under-warm data, fully-dead
+        # indicator set, missing/dead atr_14), shared with the one-shot path
+        # (see main._context_refusal_error) — a dead or absent atr_14 would
+        # otherwise let every cycle trade on a fabricated-calm RANGING regime.
+        # Deliberate (reviewed): they ride the §3.1 ladder as "server_error" →
+        # api_failed — the closed §6.2 vocabulary has no data-availability
+        # label, and the failure precedes the AI call so nothing is spent. A
+        # gappy feed heals by the next try/cycle; a too-young listing or a
+        # broken indicator engine produces a recurring api_failed cycle every
+        # 4h until it warms up / is fixed.
+        refusal = _context_refusal_error(ctx, coin, self._config)
+        if refusal is not None:
+            raise RetryableDecisionError("server_error", refusal)
         context_text = render_market_context(ctx)
         format_text = decision_format_instructions(
             self._decision,

@@ -60,6 +60,10 @@ def _perp_ctx(as_of: datetime, coin: str = "BTC") -> PerpMarketContext:
         funding_zscore_30d=None,
         funding_window_days=30,
         funding_sample_count=0,
+        # A healthy indicator set: build_input now applies the shared
+        # _context_refusal_error guards, and a context without a usable atr_14
+        # is (correctly) refused before it reaches the code under test.
+        indicators={"rsi_14": 55.0, "ema_20": 50000.0, "ema_50": 49000.0, "atr_14": 1200.0},
     )
 
 
@@ -143,6 +147,49 @@ def test_build_input_payload_write_failure_rides_retry_ladder(tmp_path, monkeypa
         provider.build_input(coin="BTC", as_of=as_of)
     assert exc_info.value.error_type == "server_error"
     assert "payload write failed" in exc_info.value.message
+
+
+@pytest.mark.parametrize(
+    ("indicators", "expected_msg"),
+    [
+        # Fully-dead known-indicator set (stockstats broken): must become an
+        # api_failed cycle (no AI spend), not a prompt asserting a
+        # fabricated-calm RANGING regime every 4h.
+        (
+            {"rsi_14": None, "ema_20": None, "ema_50": None, "atr_14": None},
+            "every technical indicator failed",
+        ),
+        # atr_14 absent (dropped from `indicators:`): classify_regime would
+        # silently default to RANGING, hiding a volatile market.
+        (
+            {"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0},
+            "atr_14 is unavailable",
+        ),
+    ],
+)
+def test_build_input_refuses_untradeable_indicators(monkeypatch, indicators, expected_msg):
+    # The daemon shares the one-shot path's pre-LLM context guards (see
+    # main._context_refusal_error) and rides them down the retry ladder.
+    from types import SimpleNamespace
+
+    import contrib.hyperliquid_perp.main as main_mod
+    from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
+    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
+
+    # candle_count 200 with threshold 1: past the warm-up gate -> not under-warm.
+    ctx = SimpleNamespace(candle_count=200, indicators=indicators)
+    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, None))
+    monkeypatch.setattr(main_mod, "_warmup_threshold", lambda config: 1)
+
+    # Only _config is needed: the guard fires before the risk/decision/payload
+    # attributes are ever read.
+    provider = object.__new__(_EngineDecisionProvider)
+    provider._config = {}
+
+    with pytest.raises(RetryableDecisionError) as exc_info:
+        provider.build_input(coin="BTC", as_of=datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc))
+    assert exc_info.value.error_type == "server_error"
+    assert expected_msg in exc_info.value.message
 
 
 def test_validate_exit_codes(tmp_path, capsys):

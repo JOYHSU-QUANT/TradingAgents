@@ -46,12 +46,24 @@ Breaking changes within the 0.x line are called out explicitly.
   config loader rejects non-bool values for the key at load time (a quoted
   `"false"` would otherwise read truthy and silently re-enable structured
   output), and a `structured_output` stored as `None` counts as unset
-  (default on) rather than a falsy "off".
+  (default on) rather than a falsy "off". Arming the escape hatch is loud:
+  the perp engine-config build warns on both channels (log + stderr) when the
+  effective value is `true`, since every cycle would otherwise fail-close with
+  only the *absence* of the gate-off INFO lines as a trace.
 - **Perp config loader rejects a scalar `indicators:` value.** Same hazard
   class as `coins: BTC`: `indicators: rsi_14` would `list()`-explode into
   per-character names, collapsing the warm-up threshold to 0 and emptying the
   all-dead-indicator guard, so the daemon would reason over an all-`None`
   indicator block forever.
+- **The paper/live daemon now applies the one-shot path's indicator guards.**
+  A fully-dead known-indicator set (broken stockstats) or a missing/dead
+  `atr_14` made `classify_regime` silently report a fabricated-calm RANGING
+  regime; the one-shot path refused loudly (exit 1) but the daemon's
+  `build_input` traded on it. All three pre-LLM context guards (warm-up,
+  dead set, missing ATR) now live in one ordered shared helper
+  (`main._context_refusal_error`) and the daemon rides them down the reviewed
+  retry ladder as recurring `api_failed` cycles — no AI spend — until the
+  indicator engine or `indicators:` config is fixed.
 - **`max_recur_limit: None` no longer silently shrinks the recursion budget.**
   A stored `None` survived `.get("max_recur_limit", 100)`, was dropped by
   langchain's `ensure_config`, and left LangGraph running at its own default

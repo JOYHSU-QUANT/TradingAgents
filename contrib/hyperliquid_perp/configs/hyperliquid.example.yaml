@@ -25,6 +25,8 @@ engine:
   # target JSON must survive in final_trade_decision free text; a schema render
   # drops it and every cycle fail-closes as invalid_output (RUNBOOK §7). Only
   # set true once the contract is carried by the structured schema itself.
+  # The value must be a bare YAML bool (true/false, no quotes) — a quoted
+  # "false" is not a bool and is rejected at config load.
   # structured_output: false
 
 # Phase 2 structured target contract (phase2-spec.md §2). The Phase 1 rating

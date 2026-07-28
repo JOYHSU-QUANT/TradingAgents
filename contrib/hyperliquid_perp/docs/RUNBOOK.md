@@ -205,7 +205,7 @@ python -m contrib.hyperliquid_perp validate --run-id paper-BTC
 | `config not found` / `invalid config` | 對照 example 修 `hyperliquid.local.yaml`；strict 解析會擋未知 key。 |
 | `--context-only` 不印倉位行／完整輪報 no usable account equity（exit 1） | `wallet_address` 還是佔位符；填真實唯讀地址。 |
 | 太年輕的標的每 4h 一筆 `api_failed` | 市場資料 warmup 不足，暖機完成前屬預期行為。 |
-| 每 4h 一筆 `api_failed`，error_message 是 `every technical indicator failed` 或 `atr_14 is unavailable` | indicator 引擎（stockstats）壞掉或 `atr_14` 算不出來——regime 會被捏造成 RANGING，daemon 與 one-shot 同樣拒跑（不燒 LLM）。（`indicators:` 漏配 `atr_14` 現在直接在 config load 擋下，不會走到這裡。）修 stockstats 相容性後，`--context-only` 走同一套 guard：照樣渲染但印同一句 refusal 警告，可拿來免 key 驗證修好了沒。 |
+| 每 4h 一筆 `api_failed`，error_message 是 `every technical indicator failed` 或 `atr_14 is unavailable` | indicator 引擎（stockstats）壞掉或 `atr_14` 算不出來——regime 會被捏造成 RANGING，daemon 與 one-shot 同樣拒跑（不燒 LLM）。（非空的 `indicators:` 清單漏配 `atr_14` 現在直接在 config load 擋下；會走到這裡的 config 成因只剩刻意的 `indicators: []`。）修 stockstats 相容性後，`--context-only` 走同一套 guard：照樣渲染但印同一句 refusal 警告，可拿來免 key 驗證修好了沒。 |
 | **每一個** cycle 都 `invalid_output`（fail-closed、零下單），且 log 裡不再出現 `structured-output invocation failed` fallback 警告 | deep-think 模型的 structured output 成功了，渲染輸出天生不含 Phase 2 target JSON → 解析必失敗。確認 `engine.structured_output` 沒被設成 `true`（perp 預設 false、強制 free-text 路徑）；若真的被設成 `true`，engine config 建構（provider 啟動）時會印 `warning: engine.structured_output: true …`（log＋stderr 雙通道），直接搜這行即可確認。gate 生效的正向訊號是 paper/live log 每個 AI cycle 三行 `structured output disabled by config; using free-text generation` INFO（Portfolio/Research Manager、Trader 各一），看到它們就代表 free-text 路徑在跑。2026-07-27 paper-BTC 換模事故即此成因。 |
 
 更多症狀見 [SETUP §7](./SETUP.md#7-troubleshooting)。

@@ -51,6 +51,7 @@ from ..paper.stops import round_to_tick
 from ..persistence import repository as repo
 from ..persistence.cloid import cloid_hex, cloid_logical
 from ..persistence.db import Database
+from .orders import parse_order_status
 
 logger = logging.getLogger(__name__)
 
@@ -292,6 +293,8 @@ class SmokeTestRunner:
                 # successor owns the run) must ABORT the suite, not degrade
                 # into one test's error verdict while orders keep going out.
                 self._heartbeat()
+                if needs_preflight:
+                    self._refresh_kill_switch()
                 result = self._execute(test)
                 self._record(test, result)
                 executed.append(test)
@@ -329,6 +332,26 @@ class SmokeTestRunner:
         except RunLockError:
             self._lease_superseded = True
             raise
+
+    def _refresh_kill_switch(self) -> None:
+        """Re-arm the pre-flight's dead-man switch before each test (§18).
+
+        The pre-flight recovery arms the account-wide scheduleCancel at
+        now + ``kill_switch_deadline`` (120s) and nothing else refreshes it
+        until a restart test's own recovery — a full suite runs longer than
+        that, so the switch would FIRE mid-suite: the exchange cancels the
+        resting trigger probe under tests 5/8–13 (a spurious ``failed`` in the
+        "exchange refused" triage bucket) and the wallet then sits uncovered
+        until test 15 re-arms (exit-check 2026-07-28). Clearing the arm after
+        the pre-flight instead would defeat the dead-man cover §18 wants over
+        a crashed suite's resting probes — refreshing keeps both properties.
+        Called only on real runs whose selection triggered the pre-flight (the
+        only un-refreshed arm; restart tests re-arm inside each recovery). A
+        refresh failure propagates: probes must not go out under an uncertain
+        switch (the same fail-closed stance as the lease heartbeat), and the
+        exit disarm still runs.
+        """
+        self.ctx.signed.schedule_cancel(cancel_at=self.ctx.now() + self.ctx.kill_switch_deadline)
 
     def _select(self, only: Sequence[str] | None) -> list[SmokeTest]:
         if only is None:
@@ -670,12 +693,39 @@ class SmokeTestRunner:
         )
 
     def _test_slice_order_status(self) -> SmokeStepResult:
+        # Interpreted with the SAME vocabulary as live/orders.py
+        # (parse_order_status): a truthy payload is NOT proof — the venue's
+        # miss shape is {"status": "unknownOid"}, so an any-payload check
+        # would vacuously pass forever (exit-check 2026-07-28). Both legs are
+        # meaningful: a booked cloid must resolve to its order (§8.3 rule 10),
+        # and a never-booked cloid (test 3's far IOC refused per-order) must
+        # answer unknownOid — the §19.2 confirmed-absent leg the duplicate
+        # protocol relies on. A malformed payload raises out of the parser →
+        # an ``error`` verdict, matching its fail-loud contract.
         if self._last_submit is None:
             raise _SmokeAbort("no prior submit to query (run test 3 first, or select both)")
-        status = self.ctx.signed.query_order_by_cloid(self._last_submit["cloid_hex"])
-        if status is None:
-            raise _SmokeAbort("orderStatus returned nothing for the submitted cloid")
-        return SmokeStepResult("passed", detail="orderStatus resolved the submitted cloid")
+        payload = self.ctx.signed.query_order_by_cloid(self._last_submit["cloid_hex"])
+        resolved = parse_order_status(payload)
+        booked_oid = self._last_submit["oid"]
+        if booked_oid:
+            if resolved is None:
+                raise _SmokeAbort(
+                    f"orderStatus answered unknownOid for a cloid the exchange "
+                    f"booked (oid {booked_oid})"
+                )
+            oid, status = resolved
+            return SmokeStepResult(
+                "passed", detail=f"orderStatus resolved the cloid to oid {oid} ({status})"
+            )
+        if resolved is not None:
+            raise _SmokeAbort(
+                f"orderStatus resolved a cloid the venue refused to book "
+                f"(oid {resolved[0]}) — the submit ack and orderStatus disagree"
+            )
+        return SmokeStepResult(
+            "passed",
+            detail="orderStatus answered unknownOid for the never-booked cloid (§19.2 negative leg)",
+        )
 
     def _test_slice_plan_cancel(self) -> SmokeStepResult:
         # A resting order to cancel: the only resting-order primitive is a

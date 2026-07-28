@@ -198,7 +198,9 @@ def smoke_seams(monkeypatch):
             return CancelAck(success=True)
 
         def query_order_by_cloid(self, cloid_hex):
-            return {"status": "unknownOid"}
+            # The fake books every IOC (full-fill echo), so test 4's cloid
+            # resolves — the real Info hit shape from live/orders.py.
+            return {"status": "order", "order": {"order": {"oid": 1}, "status": "filled"}}
 
         def user_fills_by_time(self, start_time_ms, end_time_ms=None):
             return []

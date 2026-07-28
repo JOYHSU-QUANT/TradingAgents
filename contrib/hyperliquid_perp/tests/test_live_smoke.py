@@ -56,7 +56,14 @@ class _FakeSigned:
         modify_ack=None,
         cancel=None,
         raise_on=None,
+        query_payload=None,
     ):
+        # The REAL Info vocabulary (live/orders.py parse_order_status): a hit
+        # is {"status": "order", ...}; the miss shape is {"status": "unknownOid"}.
+        self._query_payload = query_payload or {
+            "status": "order",
+            "order": {"order": {"oid": 1}, "status": "filled"},
+        }
         self._place_ack = place_ack or _Ack("filled")
         # Optional per-call sequence, consumed first (then _place_ack repeats):
         # lets a test make slice 0 fill and slice 1 fail.
@@ -114,7 +121,7 @@ class _FakeSigned:
     def query_order_by_cloid(self, h):
         self._log("query_order_by_cloid")
         self.queried_cloid = h
-        return {"status": "open"}
+        return self._query_payload
 
     def schedule_cancel(self, *, cancel_at):
         self._log("schedule_cancel")
@@ -818,6 +825,67 @@ def test_trigger_probes_book_no_orders_rows(live_db):
             ("live-BTC",),
         ).fetchall()
     assert probe_rows == []
+
+
+def test_status_test_fails_when_a_booked_cloid_reads_unknown(live_db):
+    # A truthy payload is not proof: unknownOid for a cloid the exchange
+    # booked must FAIL, not pass as "resolved" (exit-check 2026-07-28).
+    signed = _FakeSigned(query_payload={"status": "unknownOid"})
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["slice_order_submit", "slice_order_status"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["slice_order_status"]
+    assert row["status"] == "failed"
+    assert "unknownOid for a cloid the exchange" in row["error_message"]
+
+
+def test_status_test_negative_leg_passes_when_submit_was_never_booked(live_db):
+    # Test 3's far IOC refused per-order (no oid): the CORRECT orderStatus
+    # answer is unknownOid — the §19.2 confirmed-absent leg. A venue that
+    # RESOLVES a never-booked cloid must fail instead.
+    refused = _Ack(
+        "error", exchange_order_id=None, filled_size=None, average_price=None, error="not filled"
+    )
+    with live_db:
+        signed = _FakeSigned(place_acks=[refused], query_payload={"status": "unknownOid"})
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["slice_order_submit", "slice_order_status"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+        assert latest["slice_order_status"]["status"] == "passed"
+        assert "never-booked" in latest["slice_order_status"]["detail"]
+
+        signed2 = _FakeSigned(place_acks=[refused])  # resolves despite no booking
+        smoke.SmokeTestRunner(_ctx(live_db, signed2, run_recovery=lambda: _Recovery())).run(
+            only=["slice_order_submit", "slice_order_status"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["slice_order_status"]
+    assert row["status"] == "failed"
+    assert "refused to book" in row["error_message"]
+
+
+def test_preflight_arm_is_refreshed_before_every_test(live_db):
+    # The pre-flight's scheduleCancel (120s) must not fire mid-suite: each
+    # order-placing-selection test re-arms it before running (exit-check
+    # 2026-07-28). Two tests → two refreshes (the fake recovery arms nothing).
+    signed = _FakeSigned()
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["slice_order_submit", "slice_plan_cancel"]
+        )
+    assert signed.calls.count("schedule_cancel") == 2
+
+
+def test_no_preflight_selection_never_touches_the_switch_between_tests(live_db):
+    # A selection without order-placing tests (no pre-flight arm) must not
+    # re-arm the wallet-wide switch — same scoping rule as the exit disarm.
+    signed = _FakeSigned()
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed)).run(only=["signed_client_init"])
+    assert signed.calls.count("schedule_cancel") == 0
 
 
 def test_only_status_without_submit_is_refused():

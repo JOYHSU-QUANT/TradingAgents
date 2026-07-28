@@ -165,7 +165,9 @@ switch ＋ reconcile ＋ 掃 stale bot-owned 單）：
 > 乾淨」，而非「情境已被自動偵測」——請確實照上面備置後再跑。
 >
 > **kill switch**：pre-flight 或 restart／kill-switch 系列（測 14–17）的 recovery 會
-> arm dead man's switch；suite 收尾會**自動 disarm**（清掉 scheduleCancel），不在錢包
+> arm dead man's switch；觸發過 pre-flight 的真跑在**每項測試前會 refresh** 這個 arm
+> （不然 120s 的 scheduleCancel 會在套件跑到一半時觸發、把正在測的 resting probe 撤掉）；
+> suite 收尾會**自動 disarm**（清掉 scheduleCancel），不在錢包
 > 上留 armed 狀態（完全沒 arm 過的 run 不會去動它，以免誤清掉同錢包上其他 `live
 > --loop` 的 arm）。萬一 disarm 失敗，會印一行醒目 `WARNING`——照它指示手動清掉，或
 > 直接跑 `live --loop`（會重新 arm 並持續 refresh）。

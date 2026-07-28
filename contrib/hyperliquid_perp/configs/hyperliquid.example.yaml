@@ -14,7 +14,7 @@ market_data:
   candle_lookback: 200             # candles for indicator warm-up
   funding_zscore_window_days: 30
 
-indicators: [rsi_14, ema_20, ema_50, atr_14, macd]   # computed by context_builder; unknown names rejected at config load; atr_14 required (regime needs a usable ATR)
+indicators: [rsi_14, ema_20, ema_50, atr_14, macd]   # computed by context_builder; unknown names rejected at config load; atr_14 required in a non-empty list (regime needs a usable ATR)
 
 engine:
   llm_provider: openrouter

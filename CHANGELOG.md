@@ -35,18 +35,19 @@ Breaking changes within the 0.x line are called out explicitly.
 
 - **Perp runs no longer lose the target-JSON contract to structured output.**
   The Hyperliquid Phase 2 target contract is injected as prompt text and only
-  survives in the deep-think agents' free-text answers; with a model whose
+  survives in the decision agents' free-text answers; with a model whose
   `with_structured_output` succeeds, the Portfolio Manager's rendered markdown
   carried no JSON and every paper cycle fail-closed as `invalid_output`. A new
   `structured_output` engine config key (default `True`) forces the free-text
-  path for the deep-think agents when `False` (Portfolio Manager, Research
+  path for the gated agents when `False` (Portfolio Manager, Research
   Manager, Trader; the Sentiment Analyst is exempt), and
   `contrib/hyperliquid_perp` defaults it to `False`, keeping
   `engine.structured_output: true` as an explicit escape hatch. The perp
   config loader rejects non-bool values for the key at load time (a quoted
   `"false"` would otherwise read truthy and silently re-enable structured
-  output), and a `structured_output` stored as `None` counts as unset
-  (default on) rather than a falsy "off". Arming the escape hatch is loud:
+  output). On the library side a `structured_output` stored as `None` counts
+  as unset (default on) rather than a falsy "off"; the perp overlay maps
+  unset to `False`. Arming the escape hatch is loud:
   the perp engine-config build warns on both channels (log + stderr) when the
   effective value is `true`, since every cycle would otherwise fail-close with
   only the *absence* of the gate-off INFO lines as a trace.
@@ -56,7 +57,8 @@ Breaking changes within the 0.x line are called out explicitly.
   go through the perp loader would silently keep structured output enabled —
   the exact inversion the loader check exists to prevent. `bind_structured`
   now raises `ValueError` for non-bool non-`None` values, mirroring the
-  loader's `bool_from_yaml` contract at the one place every caller passes.
+  loader's `bool_from_yaml` contract at the gate every config-gated caller
+  passes (exempt agents never read the key).
 - **Perp config loader rejects a scalar `indicators:` value.** Same hazard
   class as `coins: BTC`: `indicators: rsi_14` would `list()`-explode into
   per-character names, collapsing the warm-up threshold to 0 and emptying the

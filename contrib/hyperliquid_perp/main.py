@@ -387,7 +387,7 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     engine_config["backend_url"] = None
     # Perp runs default structured output OFF (the engine default is on): the
     # Phase 2 target JSON contract is injected as prompt text and can only
-    # survive in the deep-think agents' free-text answers — a *successful*
+    # survive in the gated agents' free-text answers — a *successful*
     # structured call renders only the schema's own fields, silently dropping
     # the contract and fail-closing every cycle as invalid_output (this is how
     # the 2026-07-27 model swap broke paper-BTC). ``engine.structured_output:

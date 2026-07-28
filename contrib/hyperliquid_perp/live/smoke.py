@@ -848,6 +848,12 @@ class SmokeTestRunner:
         if not ack.accepted:
             logger.warning("smoke: best-effort close of %s refused: %s", size, ack.error)
             return f"cleanup: reduce-only close of {size} refused ({ack.error})"
+        closed = ack.filled_size or Decimal(0)
+        if closed < size:
+            # Same evidence standard as _require_full_close: an accepted close
+            # is not a FULL close — a partial cleanup must not read as flat.
+            logger.warning("smoke: best-effort close filled only %s of %s", closed, size)
+            return f"cleanup: reduce-only close filled only {closed} of {size} — residual remains"
         return None
 
     def _require_full_close(self, close_ack: Any, opened: Decimal, what: str) -> None:

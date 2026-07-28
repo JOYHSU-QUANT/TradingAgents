@@ -50,11 +50,34 @@ Breaking changes within the 0.x line are called out explicitly.
   the perp engine-config build warns on both channels (log + stderr) when the
   effective value is `true`, since every cycle would otherwise fail-close with
   only the *absence* of the gate-off INFO lines as a trace.
+- **A non-bool `structured_output` also fails loud at agent construction.**
+  The library-side gate previously folded any non-`None` value through
+  truthiness: a quoted `"false"` injected by an embedding caller that does not
+  go through the perp loader would silently keep structured output enabled —
+  the exact inversion the loader check exists to prevent. `bind_structured`
+  now raises `ValueError` for non-bool non-`None` values, mirroring the
+  loader's `bool_from_yaml` contract at the one place every caller passes.
 - **Perp config loader rejects a scalar `indicators:` value.** Same hazard
   class as `coins: BTC`: `indicators: rsi_14` would `list()`-explode into
   per-character names, collapsing the warm-up threshold to 0 and emptying the
   all-dead-indicator guard, so the daemon would reason over an all-`None`
   indicator block forever.
+- **Perp config loader validates `indicators:` element names.** List shape
+  alone still let a typo'd name (`rsi14`) load as a permanently-`None`
+  indicator: an unknown name contributes 0 to the warm-up threshold and the
+  all-dead guard's known-names filter excludes it, so every guard passed and
+  the LLM context carried a dead row forever. Unknown names are now rejected
+  at load, naming the offender and the supported set.
+- **Perp config loader rejects a scalar `engine.selected_analysts`.** A bare
+  string (`selected_analysts: market`) would `list()`-explode per-character
+  into bogus analyst keys that only detonate deep inside `build_graph` — in
+  the daemon, an endless retry ladder on a pure config typo, never a named
+  config error.
+- **A non-empty `indicators:` list must include `atr_14`.** Such a config can
+  never trade — the regime classifier fabricates a calm RANGING without a
+  usable ATR, so the atr guard refuses every cycle — and now fails at load
+  instead of leaving the daemon in an endless 4-hourly `api_failed` ladder.
+  An explicit empty list keeps its documented "no indicators" meaning.
 - **The paper/live daemon now applies the one-shot path's indicator guards.**
   A fully-dead known-indicator set (broken stockstats) or a missing/dead
   `atr_14` made `classify_regime` silently report a fabricated-calm RANGING
@@ -64,6 +87,12 @@ Breaking changes within the 0.x line are called out explicitly.
   (`main._context_refusal_error`) and the daemon rides them down the reviewed
   retry ladder as recurring `api_failed` cycles — no AI spend — until the
   indicator engine or `indicators:` config is fixed.
+- **`--context-only` renders the full refusal diagnosis.** The diagnostic loop
+  warned on under-warm only; a fully-dead indicator set or a dead/missing
+  `atr_14` rendered as a clean-looking context (fabricated-calm RANGING) —
+  precisely where an operator investigating a RUNBOOK refusal would look. It
+  now runs the same shared guard as the trading paths and warns on both
+  channels while still rendering.
 - **`max_recur_limit: None` no longer silently shrinks the recursion budget.**
   A stored `None` survived `.get("max_recur_limit", 100)`, was dropped by
   langchain's `ensure_config`, and left LangGraph running at its own default

@@ -451,11 +451,27 @@ class TestStructuredOutputConfigGate:
         bound = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
         assert bound is llm.with_structured_output.return_value
 
-    def test_ungated_call_ignores_switch(self):
-        set_config({"structured_output": False})
+    @pytest.mark.parametrize("value", [False, "false"])
+    def test_ungated_call_ignores_key(self, value):
+        # The gate — and its strictness — lives behind config_gated: an exempt
+        # agent (the Sentiment Analyst) never reads the key, so neither False
+        # nor junk may affect it.
+        set_config({"structured_output": value})
         llm = MagicMock()
         bound = bind_structured(llm, SentimentReport, "Sentiment Analyst", config_gated=False)
         assert bound is llm.with_structured_output.return_value
+
+    @pytest.mark.parametrize("junk", ["false", 0, [True]])
+    def test_non_bool_value_raises_at_construction(self, junk):
+        # The gate picks between two silently-diverging output paths, so a
+        # non-bool value (a quoted "false" is the classic) must fail loud at
+        # agent construction instead of being folded through truthiness —
+        # mirrors the perp loader's bool_from_yaml contract.
+        set_config({"structured_output": junk})
+        llm = MagicMock()
+        with pytest.raises(ValueError, match="'structured_output' must be a bool"):
+            bind_structured(llm, PortfolioDecision, "Portfolio Manager")
+        llm.with_structured_output.assert_not_called()
 
     def test_deep_think_factories_honor_gate(self):
         set_config({"structured_output": False})

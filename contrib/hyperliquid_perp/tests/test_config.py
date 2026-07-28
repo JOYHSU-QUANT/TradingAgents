@@ -166,9 +166,67 @@ def test_load_config_accepts_bool_structured_output(tmp_path):
     assert load_config(good)["engine"]["structured_output"] is True
 
 
+def test_load_config_accepts_list_selected_analysts(tmp_path):
+    good = tmp_path / "analysts-ok.yaml"
+    good.write_text("engine:\n  selected_analysts: [market, news]\n", encoding="utf-8")
+    assert load_config(good)["engine"]["selected_analysts"] == ["market", "news"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "indicators: [rsi14]\n",  # typo'd name — the classic
+        "indicators: [rsi_14, atr14]\n",  # one good, one typo'd
+        "indicators: [5]\n",  # non-string junk
+        "indicators: [[rsi_14]]\n",  # unhashable junk must not TypeError
+    ],
+)
+def test_load_config_rejects_unknown_indicator_names(tmp_path, text):
+    # List shape alone lets a typo'd element load as a permanently-None
+    # indicator that every context guard skips (unknown names zero the warm-up
+    # threshold and are filtered out of the all-dead guard) — reject unknown
+    # names at load instead, naming the offender and the supported set.
+    bad = tmp_path / "inds.yaml"
+    bad.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="unknown indicator name"):
+        load_config(bad)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("indicators: [rsi_14, ema_20, atr_14]\n", ["rsi_14", "ema_20", "atr_14"]),
+        # An explicit empty list is a deliberate "no indicators" choice
+        # (_indicator_names honours it); element validation must not reject it.
+        ("indicators: []\n", []),
+    ],
+)
+def test_load_config_accepts_valid_indicators(tmp_path, text, expected):
+    good = tmp_path / "inds.yaml"
+    good.write_text(text, encoding="utf-8")
+    assert load_config(good)["indicators"] == expected
+
+
+def test_load_config_rejects_indicators_without_atr(tmp_path):
+    # A non-empty list without atr_14 can never trade: the atr guard refuses
+    # every cycle (the regime would fabricate a calm RANGING) — fail at load,
+    # not as an endless daemon retry ladder.
+    bad = tmp_path / "no-atr.yaml"
+    bad.write_text("indicators: [rsi_14, ema_20]\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="must include 'atr_14'"):
+        load_config(bad)
+
+
 @pytest.mark.parametrize(
     ("text", "key"),
-    [("coins: BTC\n", "coins"), ("indicators: rsi_14\n", "indicators")],
+    [
+        ("coins: BTC\n", "coins"),
+        ("indicators: rsi_14\n", "indicators"),
+        # Nested twin: list() in _build_engine_config would explode a bare
+        # string into per-character bogus analyst keys that only detonate
+        # deep inside build_graph (in the daemon: an endless retry ladder).
+        ("engine:\n  selected_analysts: market\n", "engine.selected_analysts"),
+    ],
 )
 def test_load_config_rejects_non_list_container(tmp_path, text, key):
     # A scalar would silently resolve to per-character values downstream

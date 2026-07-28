@@ -44,16 +44,29 @@ def bind_structured(
     final text (e.g. the Hyperliquid perp target JSON): a schema render emits
     only the schema's own fields, so a *successful* structured call would
     silently drop the contract. Pass ``config_gated=False`` for agents whose
-    rendered output carries no such contract (the Sentiment Analyst). A
-    ``structured_output`` stored as ``None`` (like an absent key) counts as
-    *unset* and keeps the default (enabled), matching the None-means-default
-    convention of nullable config keys such as ``temperature``.
+    rendered output carries no such contract (the Sentiment Analyst).
+
+    The key is tri-state: ``None`` (like an absent key) counts as *unset* and
+    keeps the default (enabled), matching the None-means-default convention of
+    nullable config keys such as ``temperature``; ``False`` disables the
+    binding. Any other non-bool value raises ``ValueError`` here, at agent
+    construction: the gate picks between two silently-diverging output paths,
+    so junk (e.g. a quoted ``"false"`` that reads as a truthy string) must not
+    pick a side — the same contract the Hyperliquid config loader enforces
+    with ``bool_from_yaml``.
     """
     if config_gated:
         from tradingagents.dataflows.config import get_config
 
         enabled = get_config().get("structured_output")
-        if enabled is not None and not enabled:
+        if enabled is not None and not isinstance(enabled, bool):
+            raise ValueError(
+                f"config key 'structured_output' must be a bool or None, got "
+                f"{enabled!r} — a truthy non-bool (e.g. the string 'false') "
+                "would silently keep structured output enabled and drop a "
+                "prompt-injected output contract"
+            )
+        if enabled is False:
             logger.info(
                 "%s: structured output disabled by config; using free-text generation",
                 agent_name,

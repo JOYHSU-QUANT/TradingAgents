@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -490,19 +491,42 @@ def test_run_engine_aborts_on_insufficient_candles(monkeypatch, capsys):
     assert "under-warmed" in capsys.readouterr().err
 
 
-def test_run_context_only_warns_on_under_warmed_candles(monkeypatch, capsys):
-    # --context-only renders rather than aborts, but an under-warmed context (every
-    # indicator None, default "ranging" regime) must be flagged so it is not mistaken
-    # for live signal — the symmetric warning to run_engine's hard abort.
-    class _ThinCtx:
-        candle_count = 5  # below the 50 that ema_50 needs
-
-    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (_ThinCtx(), object()))
-    monkeypatch.setattr(main_mod, "render_market_context", lambda ctx: "ctx text")
+@pytest.mark.parametrize(
+    ("candle_count", "indicators", "expected"),
+    [
+        # Under-warmed: below the 50 candles that ema_50 needs.
+        (5, {}, "under-warmed"),
+        # Fully-dead known-indicator set past the warm-up gate.
+        (
+            200,
+            {"rsi_14": None, "ema_20": None, "ema_50": None, "atr_14": None},
+            "every technical indicator failed",
+        ),
+        # Only the load-bearing atr_14 dead past the warm-up gate.
+        (
+            200,
+            {"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0, "atr_14": None},
+            "atr_14 is unavailable",
+        ),
+    ],
+)
+def test_run_context_only_warns_on_degraded_context(
+    monkeypatch, capsys, candle_count, indicators, expected
+):
+    # --context-only renders rather than aborts, but shares run_engine's *full*
+    # refusal guard (warm-up, fully-dead set, dead/missing atr_14): a context
+    # the engine would refuse must not render as a clean-looking live signal —
+    # the diagnostic loop is exactly where an operator investigating a RUNBOOK
+    # refusal will look.
+    ctx = SimpleNamespace(candle_count=candle_count, indicators=indicators)
+    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, object()))
+    monkeypatch.setattr(main_mod, "render_market_context", lambda c: "ctx text")
     monkeypatch.setattr(main_mod, "wallet_address", lambda config: "")  # skip position block
     rc = main_mod.run_context_only({}, "BTC")
     assert rc == 0  # diagnostic tool renders, does not abort
-    assert "under-warmed" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert expected in err
+    assert "do not read it as live signal" in err
 
 
 def test_run_context_only_rejects_bad_risk_decision_config(monkeypatch, capsys):

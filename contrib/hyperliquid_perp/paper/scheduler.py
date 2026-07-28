@@ -162,6 +162,9 @@ class DecisionProvider(Protocol):
     Two phases so the ``ai_inputs`` row can be recorded *between* them (§5.1:
     每次呼叫 AI 前記錄一次 — the record must exist before the paid call).
     Both raise :class:`RetryableDecisionError` for §3.1-retryable failures.
+    ``build_input`` must return a context that already passed the pre-LLM
+    guards (``main._context_refusal_error``); drivers do not re-check before
+    spending the paid call.
     """
 
     def build_input(self, *, coin: str, as_of: datetime) -> DecisionInput: ...

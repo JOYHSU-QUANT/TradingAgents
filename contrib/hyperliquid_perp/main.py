@@ -35,7 +35,7 @@ from .config import (
 )
 from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context
-from .domains.perp.indicators import required_candles, supported_indicators
+from .domains.perp.indicator_vocab import required_candles, supported_indicators
 from .domains.perp.prompt_context import render_market_context
 from .domains.perp.schema import PerpMarketContext, PerpPosition
 from .domains.perp.target_decision import (
@@ -52,7 +52,10 @@ from .paper.config import PaperTradingConfig
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_INDICATORS = ["rsi_14", "ema_20", "ema_50", "atr_14", "macd"]
+# The default set is "everything the engine supports" by construction — a
+# hand-kept literal here would drift silently past the loader's vocabulary
+# check (which only sees operator-written lists, never this default).
+_DEFAULT_INDICATORS = supported_indicators()
 _DEFAULT_ANALYSTS = ["market", "social", "news"]
 
 
@@ -121,11 +124,7 @@ def _indicator_names(config: dict) -> list[str]:
 
 
 def _warmup_threshold(config: dict) -> int:
-    """Candles the configured indicators need before they read as real signal.
-
-    Single source of truth for the under-warmed-data check, shared by the engine
-    path (hard abort) and ``--context-only`` (warn) so a future caller can't drift.
-    """
+    """Candles the configured indicators need before they read as real signal."""
     return required_candles(_indicator_names(config))
 
 
@@ -136,10 +135,11 @@ def _context_refusal_error(ctx: PerpMarketContext, coin: str, config: dict) -> s
     fully-dead indicator set, missing/dead atr_14, in that order: an
     under-warmed context legitimately has all-None indicators, so the dead-set
     diagnosis only means "the indicator engine broke" once the warm-up bar is
-    cleared. Shared by the one-shot path (print + exit 1) and the daemon
-    provider (retry-ladder ``server_error`` -> api_failed cycle) so the entry
-    points can't drift apart — the daemon missing guards the one-shot had is
-    exactly the drift this helper exists to prevent.
+    cleared. Shared by the one-shot path (print + exit 1), the daemon
+    provider (retry-ladder ``server_error`` -> api_failed cycle), and
+    ``--context-only`` (render + warn) so the entry points can't drift apart —
+    the daemon missing guards the one-shot had is exactly the drift this
+    helper exists to prevent.
     """
     # Refuse to reason over under-warmed data: if fewer candles came back than
     # the configured indicators need, every indicator is None and the regime is
@@ -301,21 +301,17 @@ def run_context_only(config: dict, coin: str) -> int:
     print(render_market_context(ctx))
     print("=" * 64)
 
-    # --context-only is a keyless diagnostic loop, so we render rather than abort —
-    # but an under-warmed context has every indicator at None and a default-"ranging"
-    # regime that *looks* like real data. Warn loudly so the degraded block above is
-    # not mistaken for a live signal (run_engine hard-aborts on the same condition).
-    needed = _warmup_threshold(config)
-    if ctx.candle_count < needed:
+    # Keyless diagnostic loop: render rather than abort, but warn with the same
+    # shared guard the trading paths refuse on — a refused context *looks* like
+    # real data (plausible default-"ranging" regime).
+    refusal = _context_refusal_error(ctx, coin, config)
+    if refusal is not None:
         _warn_dual(
-            "under-warmed context for %s: %d candles available, indicators need %d",
-            coin,
-            ctx.candle_count,
-            needed,
+            "degraded context: %s",
+            refusal,
             stderr=(
-                f"warning: only {ctx.candle_count} candles available for {coin}, but the "
-                f"configured indicators need {needed}. The indicators and regime above are "
-                "under-warmed (degraded) — do not read them as live signal."
+                f"warning: {refusal} The context above is rendered for "
+                "diagnosis only — do not read it as live signal."
             ),
         )
 
@@ -348,7 +344,8 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     """Overlay the perp ``engine`` block onto the engine's DEFAULT_CONFIG.
 
     ``backend_url`` stays ``None`` so the OpenRouter client uses its own default
-    endpoint (``https://openrouter.ai/api/v1``).
+    endpoint (``https://openrouter.ai/api/v1``). ``structured_output`` defaults
+    to ``False`` here (the engine default is on) — see RUNBOOK §7.
     """
     try:
         from tradingagents.default_config import DEFAULT_CONFIG

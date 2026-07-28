@@ -29,12 +29,32 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 
-def bind_structured(llm: Any, schema: type[T], agent_name: str) -> Any | None:
+def bind_structured(
+    llm: Any, schema: type[T], agent_name: str, *, config_gated: bool = True
+) -> Any | None:
     """Return ``llm.with_structured_output(schema)`` or ``None`` if unsupported.
 
     Logs a warning when the binding fails so the user understands the agent
     will use free-text generation for every call instead of one-shot fallback.
+
+    ``config_gated`` agents additionally honor the ``structured_output`` config
+    key: when the config sets it to ``False``, the binding is skipped so every
+    call takes the free-text path. That switch exists for callers that inject
+    an output contract into the prompt and need it to survive in the agent's
+    final text (e.g. the Hyperliquid perp target JSON): a schema render emits
+    only the schema's own fields, so a *successful* structured call would
+    silently drop the contract. Pass ``config_gated=False`` for agents whose
+    rendered output carries no such contract (the Sentiment Analyst).
     """
+    if config_gated:
+        from tradingagents.dataflows.config import get_config
+
+        if not get_config().get("structured_output", True):
+            logger.info(
+                "%s: structured output disabled by config; using free-text generation",
+                agent_name,
+            )
+            return None
     try:
         return llm.with_structured_output(schema)
     except (NotImplementedError, AttributeError) as exc:

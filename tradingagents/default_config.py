@@ -80,6 +80,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "llm_provider": "openai",
     "deep_think_llm": "gpt-5.5",
     "quick_think_llm": "gpt-5.4-mini",
+    # When False, the deep-think agents (Portfolio Manager, Research Manager,
+    # Trader) always generate free text instead of structured output — see
+    # bind_structured()'s docstring for why. The Sentiment Analyst is not gated.
+    "structured_output": True,
     # When None, each provider's client falls back to its own default endpoint
     # (api.openai.com for OpenAI, generativelanguage.googleapis.com for Gemini, ...).
     # The CLI overrides this per provider when the user picks one. Keeping a

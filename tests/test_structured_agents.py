@@ -13,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 from tradingagents.agents.analysts.sentiment_analyst import create_sentiment_analyst
+from tradingagents.agents.managers.portfolio_manager import create_portfolio_manager
 from tradingagents.agents.managers.research_manager import create_research_manager
 from tradingagents.agents.schemas import (
     PortfolioDecision,
@@ -27,6 +28,8 @@ from tradingagents.agents.schemas import (
     render_trader_proposal,
 )
 from tradingagents.agents.trader.trader import create_trader
+from tradingagents.agents.utils.structured import bind_structured
+from tradingagents.dataflows.config import set_config
 
 # ---------------------------------------------------------------------------
 # Render functions
@@ -406,3 +409,51 @@ class TestSentimentAnalystAgent:
         llm.with_structured_output.return_value = structured
         llm.invoke.return_value = MagicMock(content=plain)
         assert create_sentiment_analyst(llm)(_make_sentiment_state())["sentiment_report"] == plain
+
+
+# ---------------------------------------------------------------------------
+# structured_output config gate
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestStructuredOutputConfigGate:
+    """``structured_output: False`` must force the free-text path for the
+    deep-think agents.
+
+    An injected output contract (the Hyperliquid perp target JSON) can only
+    survive in the agent's final *text*: a successful structured call renders
+    only the schema's own fields, silently dropping the contract. The switch
+    skips binding entirely so every call generates free text. Config resets
+    between tests come from conftest's autouse ``_isolate_config``.
+    """
+
+    def test_gate_off_skips_binding(self):
+        set_config({"structured_output": False})
+        llm = MagicMock()
+        assert bind_structured(llm, PortfolioDecision, "Portfolio Manager") is None
+        llm.with_structured_output.assert_not_called()
+
+    def test_gate_on_by_default(self):
+        llm = MagicMock()
+        bound = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
+        assert bound is llm.with_structured_output.return_value
+
+    def test_ungated_call_ignores_switch(self):
+        set_config({"structured_output": False})
+        llm = MagicMock()
+        bound = bind_structured(llm, SentimentReport, "Sentiment Analyst", config_gated=False)
+        assert bound is llm.with_structured_output.return_value
+
+    def test_deep_think_factories_honor_gate(self):
+        set_config({"structured_output": False})
+        for factory in (create_portfolio_manager, create_research_manager, create_trader):
+            llm = MagicMock()
+            factory(llm)
+            llm.with_structured_output.assert_not_called()
+
+    def test_sentiment_analyst_still_binds_with_gate_off(self):
+        set_config({"structured_output": False})
+        llm = MagicMock()
+        create_sentiment_analyst(llm)
+        llm.with_structured_output.assert_called_once()

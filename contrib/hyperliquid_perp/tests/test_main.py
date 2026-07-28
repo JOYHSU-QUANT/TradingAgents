@@ -68,6 +68,21 @@ def test_build_engine_config_defaults():
     assert engine_config["deep_think_llm"] == DEFAULT_CONFIG["deep_think_llm"]
     assert engine_config["quick_think_llm"] == DEFAULT_CONFIG["quick_think_llm"]
     assert selected == ["market", "social", "news"]
+    # Perp runs force the free-text path by default (engine default is True):
+    # the Phase 2 target JSON only survives in free text.
+    assert engine_config["structured_output"] is False
+
+
+def test_build_engine_config_structured_output_escape_hatch():
+    engine_config, _ = main_mod._build_engine_config(
+        {"engine": {"structured_output": True}}
+    )
+    assert engine_config["structured_output"] is True
+    # An explicit false also rides the pass-through branch (not the default).
+    engine_config, _ = main_mod._build_engine_config(
+        {"engine": {"structured_output": False}}
+    )
+    assert engine_config["structured_output"] is False
 
 
 def test_build_engine_config_overrides():
@@ -107,9 +122,11 @@ def test_build_engine_config_null_values_fall_back_to_defaults():
             "deep_think_llm": None,
             "quick_think_llm": None,
             "selected_analysts": None,
+            "structured_output": None,
         }
     }
     engine_config, selected = main_mod._build_engine_config(config)
+    assert engine_config["structured_output"] is False  # blank -> perp default
     assert engine_config["llm_provider"] == "openrouter"
     assert engine_config["deep_think_llm"] == DEFAULT_CONFIG["deep_think_llm"]
     assert engine_config["quick_think_llm"] == DEFAULT_CONFIG["quick_think_llm"]

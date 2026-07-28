@@ -21,6 +21,11 @@ engine:
   deep_think_llm: "anthropic/claude-sonnet-4-6"
   quick_think_llm: "deepseek/deepseek-chat"
   selected_analysts: [market, social, news]
+  # Deep-think structured output is OFF by default for perp runs — the Phase 2
+  # target JSON must survive in final_trade_decision free text; a schema render
+  # drops it and every cycle fail-closes as invalid_output (RUNBOOK §7). Only
+  # set true once the contract is carried by the structured schema itself.
+  # structured_output: false
 
 # Phase 2 structured target contract (phase2-spec.md §2). The Phase 1 rating
 # adapter block is retired — the engine now outputs the structured JSON target

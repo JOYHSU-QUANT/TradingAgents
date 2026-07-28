@@ -33,6 +33,16 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **Perp runs no longer lose the target-JSON contract to structured output.**
+  The Hyperliquid Phase 2 target contract is injected as prompt text and only
+  survives in the deep-think agents' free-text answers; with a model whose
+  `with_structured_output` succeeds, the Portfolio Manager's rendered markdown
+  carried no JSON and every paper cycle fail-closed as `invalid_output`. A new
+  `structured_output` engine config key (default `True`) forces the free-text
+  path for the deep-think agents when `False` (Portfolio Manager, Research
+  Manager, Trader; the Sentiment Analyst is exempt), and
+  `contrib/hyperliquid_perp` defaults it to `False`, keeping
+  `engine.structured_output: true` as an explicit escape hatch.
 - **Alpha Vantage fundamentals look-ahead guard now takes effect.**
   `get_balance_sheet` / `get_cashflow` / `get_income_statement` drop fiscal
   reports dated after `curr_date`; the filter previously ran against the API's

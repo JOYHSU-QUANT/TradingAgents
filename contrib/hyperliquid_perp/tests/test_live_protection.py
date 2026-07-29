@@ -703,6 +703,55 @@ def test_all_gate_rejected_sl_ladder_is_blocked_not_emergency_close(env):
     assert events.count("stop_loss_repair_failed") == 3  # each attempt still audited
     assert events.count("stop_loss_repair_blocked") == 1
     assert "stop_loss_repair_exhausted" not in events
+    # No SL was ever established here, so nothing is resting: the blocked event
+    # carries no order_id, which is what the §20.3 validator reads as a genuine
+    # unprotected window.
+    blocked = [
+        e
+        for e in repo.iter_protection_order_events(db.conn, "r")
+        if e["event_type"] == "stop_loss_repair_blocked"
+    ][0]
+    assert blocked["order_id"] is None
+    assert "NO stop-loss is resting" in blocked["detail"]
+
+
+def test_a_gate_blocked_modify_records_the_still_resting_sl(env):
+    # §17.4 is modify-before-cancel, so a gate-refused MODIFY leaves the
+    # previous SL on the book at a stale trigger — protected, just not at the
+    # band we now want. The event must say so (order_id present), or the §20.3
+    # validator counts those seconds as unprotected and fails an otherwise
+    # healthy 30-cycle acceptance run on one kill-switch refresh blip.
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    mgr = _manager(db, client, gate)
+    mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    resting = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
+    assert resting is not None  # an SL is established and on the book
+    # The position grows, so the SL must be re-armed at the larger size — and
+    # the gate refuses every attempt pre-send. §17.4 modifies before it
+    # cancels, so the refused calls are on the MODIFY path.
+    client.modify_script = ["gate", "gate", "gate"]
+    client.place_script = ["gate", "gate", "gate"]
+    outcome = mgr.sync(
+        position=_long_position(size=Decimal("0.2")),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert outcome is ProtectionOutcome.BLOCKED
+    blocked = [
+        e
+        for e in repo.iter_protection_order_events(db.conn, "r")
+        if e["event_type"] == "stop_loss_repair_blocked"
+    ][0]
+    assert blocked["order_id"] == resting["order_id"]
+    assert "still resting" in blocked["detail"]
 
 
 def test_mixed_gate_and_real_failures_still_exhaust_to_emergency_close(env):

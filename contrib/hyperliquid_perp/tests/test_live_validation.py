@@ -399,6 +399,49 @@ def test_open_unprotected_window_flagged(tmp_path):
     assert report.unprotected_position_seconds == Decimal(30)
 
 
+def test_a_blocked_event_with_a_resting_sl_opens_no_window(tmp_path):
+    """§17.4 is modify-before-cancel, so a gate-refused MODIFY leaves the
+    previous SL on the book at a stale trigger — not unprotected. protection.py
+    records that order's id on the event; counting those seconds would fail an
+    otherwise healthy 30-cycle run on one kill-switch refresh blip, and §20.3's
+    unprotected-seconds verdict is exit 5, non-curable."""
+    db = _healthy(tmp_path)
+    with db.transaction() as conn:
+        repo.insert_protection_order_event(
+            conn,
+            run_id="r",
+            event_type="stop_loss_repair_blocked",
+            symbol="BTC",
+            order_id="r:stop_loss:p0",  # the previous SL, still resting
+            timestamp=_T0,
+        )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=30))
+    assert report.unprotected_position_seconds == Decimal(0)
+    assert report.unprotected_window_count == 0
+    assert not report.unresolved_unprotected_window
+    assert report.live_ready  # a healthy run is not failed by a stale-band pause
+
+
+def test_a_blocked_event_without_a_resting_sl_still_opens_a_window(tmp_path):
+    """The control for the test above: the SAME event type with no order_id
+    means nothing is on the book, which is a genuine unprotected window."""
+    db = _healthy(tmp_path)
+    with db.transaction() as conn:
+        repo.insert_protection_order_event(
+            conn,
+            run_id="r",
+            event_type="stop_loss_repair_blocked",
+            symbol="BTC",
+            timestamp=_T0,
+        )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=30))
+    assert report.unprotected_position_seconds == Decimal(30)
+    assert report.unresolved_unprotected_window
+    assert any("unprotected_position_seconds" in f for f in report.failures)
+
+
 def test_emergency_close_event_warns_but_does_not_gate_testnet(tmp_path):
     db = _healthy(tmp_path)
     with db.transaction() as conn:

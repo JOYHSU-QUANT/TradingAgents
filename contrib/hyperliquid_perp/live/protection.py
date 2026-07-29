@@ -267,9 +267,29 @@ class ProtectionManager:
             # retry next sync once the gate reopens; §12.3's SL-missing check
             # remains the standing net for the unprotected window.
             self._gate.unresolved_protection_failure = True
+            # §17.4 is modify-before-cancel, so a gate-refused MODIFY leaves the
+            # previous SL resting on the exchange at a stale trigger — protected,
+            # just not at the band we now want. A gate-refused CREATE leaves
+            # nothing. Both reach here, and the acceptance validator has to tell
+            # them apart: counting the first as unprotected seconds fails an
+            # otherwise-healthy 30-cycle run on one kill-switch refresh blip.
+            # The still-resting order's id IS the distinction, so record it —
+            # ``order_id`` present ⇒ an SL is still on the book.
+            resting = repo.active_protection_order(
+                self._db.conn, self._run_id, self._coin, "stop_loss"
+            )
             self._record_event(
                 "stop_loss_repair_blocked",
-                detail="wire gate refused every SL attempt pre-send (kill switch); retrying next sync",
+                order_id=None if resting is None else resting["order_id"],
+                cloid_hex=None if resting is None else resting["cloid_hex"],
+                detail=(
+                    "wire gate refused every SL attempt pre-send (kill switch); retrying "
+                    + (
+                        "next sync — the previous SL is still resting at a stale trigger"
+                        if resting is not None
+                        else "next sync — NO stop-loss is resting"
+                    )
+                ),
                 now=now,
             )
             return ProtectionOutcome.BLOCKED

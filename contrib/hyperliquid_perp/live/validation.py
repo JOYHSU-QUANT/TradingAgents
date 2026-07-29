@@ -38,9 +38,10 @@ Exit-code contract (mirrors ``paper.validation`` / the ``validate`` CLI): a hard
 acceptance failure lands in ``failures`` → exit 5 ("investigate before going
 live") — this covers both a store-integrity breach (dedupe errors, orphans,
 duplicate applies, a position or replay mismatch) AND a safety-invariant breach
-that is not itself store corruption (an unprotected window — including one opened
-by a deliberate ``stop_loss_repair_blocked`` gate pause, which still leaves the
-position unprotected, §20.3: unprotected seconds must be 0 — a refresh rate below
+that is not itself store corruption (an unprotected window — §20.3: unprotected
+seconds must be 0; a ``stop_loss_repair_blocked`` gate pause opens one only when
+it left NO stop-loss resting, since §17.4's modify-before-cancel means a refused
+MODIFY keeps the previous SL on the book — a refresh rate below
 99% on EITHER profile, or — mainnet_tiny — an unresolved reconciliation case or a
 breached daily-loss cap). A run that is merely short of the gate (< 30 cycles /
 orders, smoke tests or kill-switch refreshes not yet run, or a smoke test that
@@ -162,7 +163,8 @@ if _MISMATCH_CASE_TYPES | {"fill_unmapped"} != repo.RECONCILIATION_CASE_TYPES:
 # a run with REAL unprotected windows passes a mainnet-facing exit-5 gate
 # vacuously. Same for the close set — an unmatched close leaves every window
 # open to "now" and fails a healthy run instead.
-_UNPROTECTED_ONSET_EVENTS = frozenset({"stop_loss_repair_exhausted", "stop_loss_repair_blocked"})
+_SL_REPAIR_BLOCKED = "stop_loss_repair_blocked"
+_UNPROTECTED_ONSET_EVENTS = frozenset({"stop_loss_repair_exhausted", _SL_REPAIR_BLOCKED})
 _UNPROTECTED_CLOSE_EVENTS = frozenset(
     {
         "stop_loss_placed",
@@ -355,13 +357,22 @@ def execution_mode(config_json: str | None) -> str:
 def _unprotected_windows(conn, run_id: str, now: datetime) -> tuple[Decimal, int, bool]:
     """``(total_seconds, window_count, has_open_window)`` from protection events.
 
-    Per symbol, an unprotected window opens on ``stop_loss_repair_exhausted`` /
-    ``stop_loss_repair_blocked`` (no SL rests after either) and closes on the
-    next SL restoration (``stop_loss_placed`` / ``stop_loss_modified``) or the
-    position leaving exposure (``protection_cleared`` / ``emergency_close_triggered``).
-    A window still open at the end of the log is measured to ``now`` and flagged
-    — the position was last seen unprotected, which is worse than a closed one,
-    not better.
+    Per symbol, an unprotected window opens on ``stop_loss_repair_exhausted`` or
+    on a ``stop_loss_repair_blocked`` that left NO stop-loss resting, and closes
+    on the next SL restoration (``stop_loss_placed`` / ``stop_loss_modified``) or
+    the position leaving exposure (``protection_cleared`` /
+    ``emergency_close_triggered``). A window still open at the end of the log is
+    measured to ``now`` and flagged — the position was last seen unprotected,
+    which is worse than a closed one, not better.
+
+    The ``blocked`` qualifier matters. §17.4 is modify-before-cancel, so the wire
+    gate refusing a MODIFY leaves the previous SL resting at a stale trigger:
+    not the band the manager wants, but not unprotected either. Counting those
+    seconds would fail an otherwise-healthy 30-cycle acceptance run on a single
+    kill-switch refresh blip that happened to coincide with an SL adjustment —
+    and §20.3's ``unprotected_position_seconds = 0`` is an exit-5, non-curable
+    verdict. protection.py records the still-resting order's id on the event
+    precisely so this can tell the two apart; ``order_id`` present ⇒ protected.
     """
     onset = _UNPROTECTED_ONSET_EVENTS
     close = _UNPROTECTED_CLOSE_EVENTS
@@ -382,6 +393,10 @@ def _unprotected_windows(conn, run_id: str, now: datetime) -> tuple[Decimal, int
         event = row["event_type"]
         when = parse_instant(row["timestamp"])
         if event in onset:
+            if event == _SL_REPAIR_BLOCKED and row["order_id"]:
+                # A gate-refused MODIFY: the previous SL is still on the book
+                # (see the docstring). Stale trigger, not an unprotected window.
+                continue
             # A fresh onset while already open keeps the earliest onset (the
             # window never closed), so only record if not already open.
             open_at.setdefault(symbol, when)

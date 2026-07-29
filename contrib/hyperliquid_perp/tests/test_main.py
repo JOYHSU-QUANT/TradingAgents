@@ -482,6 +482,12 @@ def test_run_engine_aborts_on_insufficient_candles(monkeypatch, capsys):
 
     class _ThinCtx:
         candle_count = 5  # below the 50 that ema_50 needs
+        # Realistic under-warm shape: compute_indicators seeds every configured
+        # name via dict.fromkeys, so the keys exist with all-None values. That
+        # shape also satisfies the dead-set/regime guards' preconditions, so
+        # this pins the warm-up guard's precedence (guard order is the
+        # operator-facing diagnosis: "wait for warm-up" vs "engine broken").
+        indicators = {"rsi_14": None, "ema_20": None, "ema_50": None, "atr_14": None}
 
     monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (_ThinCtx(), object()))
     calls = []
@@ -495,8 +501,15 @@ def test_run_engine_aborts_on_insufficient_candles(monkeypatch, capsys):
 @pytest.mark.parametrize(
     ("candle_count", "indicators", "expected"),
     [
-        # Under-warmed: below the 50 candles that ema_50 needs.
-        (5, {}, "under-warmed"),
+        # Under-warmed: below the 50 candles that ema_50 needs. Keys present
+        # with all-None values (compute_indicators' real under-warm output) —
+        # the shape also satisfies the dead-set/regime guards, so a guard-order
+        # swap would surface their messages instead and fail this case.
+        (
+            5,
+            {"rsi_14": None, "ema_20": None, "ema_50": None, "atr_14": None},
+            "under-warmed",
+        ),
         # Fully-dead known-indicator set past the warm-up gate.
         (
             200,

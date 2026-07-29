@@ -157,8 +157,15 @@ def test_build_input_payload_write_failure_rides_retry_ladder(tmp_path, monkeypa
         # daemon's build_input must both ride the one-shot path's warm-up
         # guard and actually consult _warmup_threshold(config) — a guard
         # falling back to a hardcoded/default threshold clears 100 and
-        # reports a different refusal.
-        (100, {}, "under-warmed"),
+        # reports a different refusal. Keys present with all-None values
+        # (compute_indicators' real under-warm output): the shape also
+        # satisfies the dead-set/regime guards, so a guard-order swap would
+        # surface their messages instead and fail this case.
+        (
+            100,
+            {"rsi_14": None, "ema_20": None, "ema_50": None, "atr_14": None},
+            "under-warmed",
+        ),
         # Fully-dead known-indicator set (stockstats broken): must become an
         # api_failed cycle (no AI spend), not a prompt asserting a
         # fabricated-calm RANGING regime every 4h.

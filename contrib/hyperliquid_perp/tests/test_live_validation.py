@@ -185,6 +185,35 @@ def test_short_cycles_is_a_shortfall_not_failure(tmp_path):
     assert any("cycle_count" in s for s in report.shortfalls)
 
 
+def test_invalid_output_cycles_do_not_count_toward_the_gate(tmp_path):
+    """Live counts a cycle STRICTLY (only ``completed``), unlike paper. On
+    testnet live_order_count backstops the ≥30 gate, but §21.4 carries no order
+    count — so under paper's vocabulary 30 consecutive unparseable cycles that
+    placed nothing would report live_ready. paper-BTC produced exactly that
+    shape (6/6 invalid_output) after a model swap."""
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    insert_decision_attempts(
+        db,
+        ["completed"] * 20 + ["invalid_output"] * 10,
+        run_id="r",
+        start=_T0,
+        mode="live",
+    )
+    _add_orders(db, 30)
+    _add_refreshes(db, 100)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.cycle_count == 20  # the 10 unparseable ones are NOT cycles
+    assert report.invalid_output_count == 10  # but they are reported
+    assert not report.live_ready
+    assert report.failures == ()
+    assert any("cycle_count" in s for s in report.shortfalls)
+    # Non-gating, but the operator is told why the count is short.
+    assert any("unparseable model output" in w for w in report.warnings)
+
+
 def test_missing_smoke_is_a_shortfall(tmp_path):
     db = Database(tmp_path / "live.db")
     _init_live_run(db)
@@ -618,6 +647,7 @@ def _make_report(**overrides) -> LiveValidationReport:
         "execution_mode": "testnet_live",
         "cycle_count": 30,
         "api_failed_count": 0,
+        "invalid_output_count": 0,
         "live_order_count": 30,
         "fill_count": 0,
         "exchange_fill_dedupe_error_count": 0,

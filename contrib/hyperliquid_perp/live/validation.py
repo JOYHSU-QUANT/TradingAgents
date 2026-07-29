@@ -8,8 +8,11 @@ a mainnet_tiny run is held to §21.4, a testnet_live run to §20.3.
 
 Where the metrics come from (all from persisted PR 2–5 event logs):
 
-- ``cycle_count`` — completed ``decision_attempts`` (the same ≥30 gate the paper
-  validator applies; ``api_failed`` never counts).
+- ``cycle_count`` — ``decision_attempts`` that reached ``completed``. STRICTER
+  than the paper validator, which also counts ``invalid_output``: a live
+  acceptance gate is asserting the bot can trade, and §21.4 has no order count
+  to backstop it (``invalid_output_count`` is reported as a non-gating warning
+  instead). ``api_failed`` never counts on either side.
 - ``live_order_count`` — distinct acknowledged live ``place`` attempts
   (``live_order_attempts`` status in acknowledged/duplicate: exchange-confirmed).
 - ``exchange_fill_dedupe_error_count`` — ``exchange_reconciliation_events``
@@ -86,12 +89,25 @@ MIN_KILL_SWITCH_REFRESH_RATE = Decimal("0.99")
 # sentinel survives a future switch to parsed-datetime comparison.
 _SINCE_BEGINNING = "0001-01-01T00:00:00+00:00"
 
-# Reuse the paper validator's completed-cycle vocabulary so live and paper count
-# a "cycle" identically (api_failed excluded from the ≥30 gate). Same guard as
-# the paper side (paper/validation.py): a new terminal attempt status must fail
-# HERE at import, not silently under-count cycle_count in a mainnet-facing gate.
-_COMPLETED_CYCLE_STATUSES = ("completed", "invalid_output")
-if set(repo.TERMINAL_ATTEMPT_STATUSES) - set(_COMPLETED_CYCLE_STATUSES) != {"api_failed"}:
+# Live counts a "cycle" STRICTLY: only ``completed``. This deliberately diverges
+# from the paper validator (paper/validation.py), which also admits
+# ``invalid_output`` — a cycle where the scheduler ran but the model's output
+# could not be parsed. "The pipeline executed" is a fair measure for a paper
+# baseline; it is the wrong bar for a live acceptance gate, which is asserting
+# the bot can trade. On testnet the ≥30 cycle gate is backstopped by
+# live_order_count, but §21.4 (mainnet_tiny) deliberately carries NO order count
+# (2026-07-27) — so under the paper vocabulary 30 consecutive unparseable cycles
+# that placed nothing would report live_ready / exit 0. That shape is not
+# hypothetical: paper-BTC produced 6/6 invalid_output after a model swap.
+# invalid_output cycles are still surfaced, as a non-gating warning below.
+_COMPLETED_CYCLE_STATUSES = ("completed",)
+# The registry stays partitioned into exactly what this file classifies: a NEW
+# terminal attempt status must be counted or explicitly excluded HERE, at
+# import, not silently dropped from a mainnet-facing gate.
+if set(repo.TERMINAL_ATTEMPT_STATUSES) - set(_COMPLETED_CYCLE_STATUSES) != {
+    "api_failed",
+    "invalid_output",
+}:
     raise AssertionError(
         "live cycle-count vocabulary drifted from repository.TERMINAL_ATTEMPT_STATUSES"
     )
@@ -181,6 +197,11 @@ class LiveValidationReport:
     execution_mode: str  # testnet_live / mainnet_tiny (from runs.config_json)
     cycle_count: int
     api_failed_count: int
+    # Non-gating: cycles the scheduler ran whose model output could not be
+    # parsed. Excluded from cycle_count on purpose (see _COMPLETED_CYCLE_STATUSES)
+    # and reported so a run that is "advancing" but producing nothing usable is
+    # visible rather than merely absent from the count.
+    invalid_output_count: int
     live_order_count: int
     fill_count: int
     exchange_fill_dedupe_error_count: int
@@ -267,6 +288,7 @@ class LiveValidationReport:
             f"execution_mode: {self.execution_mode}",
             f"cycle_count: {self.cycle_count}",
             f"api_failed_count: {self.api_failed_count}",
+            f"invalid_output_count: {self.invalid_output_count}",
             f"live_order_count: {self.live_order_count}",
             f"fill_count: {self.fill_count}",
             f"exchange_fill_dedupe_error_count: {self.exchange_fill_dedupe_error_count}",
@@ -440,6 +462,11 @@ def validate_live_run(
             "SELECT COUNT(*) FROM decision_attempts WHERE run_id = ? AND status = 'api_failed'",
             (run_id,),
         )
+        invalid_output_count = _count(
+            conn,
+            "SELECT COUNT(*) FROM decision_attempts WHERE run_id = ? AND status = 'invalid_output'",
+            (run_id,),
+        )
         fill_count = _count(conn, "SELECT COUNT(*) FROM fills WHERE run_id = ?", (run_id,))
         # Distinct acknowledged live orders: the exchange confirmed it holds
         # (or already held — a 'duplicate' ack) each cloid.
@@ -604,6 +631,12 @@ def validate_live_run(
         )
 
     # -- non-gating warnings ----------------------------------------------
+    if invalid_output_count:
+        warnings.append(
+            f"{invalid_output_count} cycle(s) produced unparseable model output and do "
+            "NOT count toward the ≥30 gate — the scheduler advanced but the run "
+            "produced no usable decision; check the model/prompt contract"
+        )
     if emergency_close_event_count:
         warnings.append(
             f"{emergency_close_event_count} emergency close(s) occurred during the run — "
@@ -637,6 +670,7 @@ def validate_live_run(
         execution_mode=run_execution_mode,
         cycle_count=cycle_count,
         api_failed_count=api_failed_count,
+        invalid_output_count=invalid_output_count,
         live_order_count=live_order_count,
         fill_count=fill_count,
         exchange_fill_dedupe_error_count=dedupe_error_count,

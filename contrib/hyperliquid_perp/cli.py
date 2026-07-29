@@ -2077,6 +2077,18 @@ def _cmd_live_smoke(argv: list[str]) -> int:
                         "--loop` (it re-arms and refreshes the switch).",
                         file=sys.stderr,
                     )
+                if runner.staged_long_residual is not None:
+                    # The trigger block's staged long closes BETWEEN tests, so a
+                    # failed close has no step row to land in. Say it here or a
+                    # real funded position is left on the wire with only a log
+                    # line to show for it (review round 2026-07-29).
+                    print(
+                        "WARNING: the trigger-block staging position may still be "
+                        f"OPEN — {runner.staged_long_residual}. Close it manually "
+                        "(or re-run the suite, which flattens on exit) before "
+                        "leaving the account unattended.",
+                        file=sys.stderr,
+                    )
         finally:
             if lock_pid is not None:
                 release_run_lock(db, args.run_id, pid=lock_pid, now=datetime.now(timezone.utc))

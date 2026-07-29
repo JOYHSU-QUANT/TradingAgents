@@ -311,6 +311,13 @@ class SmokeTestRunner:
         # it, reset to 0 once flattened. Non-zero across an exit path means the
         # close is still owed (run()'s finally is the backstop).
         self._staged_long: Decimal = Decimal(0)
+        # The cleanup note when the staged long could NOT be flattened (None
+        # once flat). Public for the same reason as
+        # :attr:`kill_switch_disarm_failed`: the close happens BETWEEN tests,
+        # so it has no step row to land in, and a real funded position left on
+        # the wire must not be visible only in a log line the operator may not
+        # be capturing. The CLI prints it as a prominent warning.
+        self.staged_long_residual: str | None = None
 
     # -- orchestration ----------------------------------------------------
 
@@ -986,11 +993,28 @@ class SmokeTestRunner:
         """
         if self._staged_long > 0:
             return
-        self._staged_long = self._open_probe_long(
-            tag=f"stage-{self._tag()}",
-            what="trigger-block staging entry",
-            no_fill="staging entry did not fill — no position for the trigger probes to protect",
-        )
+        try:
+            self._staged_long = self._open_probe_long(
+                tag=f"stage-{self._tag()}",
+                what="trigger-block staging entry",
+                no_fill=(
+                    "staging entry did not fill — no position for the trigger probes to protect"
+                ),
+            )
+        except _SmokeAbort:
+            # A controlled abort means nothing is on the wire: the ack was
+            # refused, the IOC rested (booked at filled=0), or it did not fill.
+            raise
+        except Exception:
+            # Anything else — a store error between the exchange's fill and the
+            # local book — may leave a REAL funded long that this runner never
+            # learned the size of, so it can neither close nor size a retry.
+            # Say so on the operator surface rather than exit silently clean.
+            self.staged_long_residual = (
+                "the trigger-block staging entry may have FILLED but could not be booked "
+                "locally — verify the position on the exchange and close it manually"
+            )
+            raise
         logger.info("smoke: staged %s long for the trigger-probe block", self._staged_long)
 
     def _close_staged_long(self) -> None:
@@ -998,18 +1022,26 @@ class SmokeTestRunner:
 
         Called from the run loop as soon as no later selected test needs the
         position, and from run()'s ``finally`` as the crash/stop backstop. On a
-        failed close the size is kept so the backstop retries; a residual that
-        survives both attempts is in the log and in the run's books (the probe
-        rows reconcile like any other money).
+        failed close the size is kept so the backstop retries, and the note
+        lands on :attr:`staged_long_residual` for the CLI to surface — a real
+        funded position must never be left on the wire with only a log line to
+        say so. A later successful close clears the flag again.
         """
         if self._staged_long <= 0:
             return
-        note = self._best_effort_close(self._staged_long)
+        # Decrement by what ACTUALLY closed, not by what was requested: a
+        # partial fill leaves a smaller residual, and a retry that re-sends the
+        # original size would be reduce-only-oversized — refused outright by
+        # some venues, and never converging on the true remainder.
+        staged = self._staged_long
+        closed, note = self._attempt_close(staged)
+        self._staged_long -= closed
         if note is None:
-            logger.info("smoke: staged trigger-block long (%s) flattened", self._staged_long)
-            self._staged_long = Decimal(0)
+            logger.info("smoke: staged trigger-block long (%s) flattened", staged)
+            self.staged_long_residual = None
         else:
             logger.warning("smoke: staged trigger-block long NOT flat — %s", note)
+            self.staged_long_residual = note
 
     def _reduce_only_close(self, size: Decimal) -> Any:
         logical, cloid = self._register_cloid(role="close", tag=f"reduce-{self._tag()}")
@@ -1045,7 +1077,19 @@ class SmokeTestRunner:
         unaccepted ``OrderAck`` rather than raising, so the ack must be checked,
         mirroring :meth:`_best_effort_cancel`) is folded into the step's
         ``detail`` (durable in ``live_smoke_tests``) and logged, so the operator
-        can act on the residual position.
+        can act on the residual position. Callers that must RETRY want
+        :meth:`_attempt_close`, which also reports how much actually closed.
+        """
+        return self._attempt_close(size)[1]
+
+    def _attempt_close(self, size: Decimal) -> tuple[Decimal, str | None]:
+        """``(closed, note)`` — the close's real outcome, note ``None`` if full.
+
+        The amount matters to a caller that retries (the staged trigger-block
+        long): a partial fill leaves a SMALLER residual, and re-sending the
+        original size would be an oversized reduce-only — refused by some
+        venues, and never converging. :meth:`_best_effort_close` is the
+        note-only view for callers that fold the outcome into a step detail.
         """
         try:
             ack = self._reduce_only_close(size)
@@ -1053,17 +1097,21 @@ class SmokeTestRunner:
             logger.warning(
                 "smoke: best-effort close of %s FAILED — %s: %s", size, type(exc).__name__, exc
             )
-            return f"cleanup: reduce-only close of {size} FAILED ({type(exc).__name__}: {exc})"
+            return Decimal(0), (
+                f"cleanup: reduce-only close of {size} FAILED ({type(exc).__name__}: {exc})"
+            )
         if not ack.accepted:
             logger.warning("smoke: best-effort close of %s refused: %s", size, ack.error)
-            return f"cleanup: reduce-only close of {size} refused ({ack.error})"
+            return Decimal(0), f"cleanup: reduce-only close of {size} refused ({ack.error})"
         closed = ack.filled_size or Decimal(0)
         if closed < size:
             # Same evidence standard as _require_full_close: an accepted close
             # is not a FULL close — a partial cleanup must not read as flat.
             logger.warning("smoke: best-effort close filled only %s of %s", closed, size)
-            return f"cleanup: reduce-only close filled only {closed} of {size} — residual remains"
-        return None
+            return closed, (
+                f"cleanup: reduce-only close filled only {closed} of {size} — residual remains"
+            )
+        return closed, None
 
     def _require_full_close(self, close_ack: Any, opened: Decimal, what: str) -> None:
         """Fail unless the close leg filled the whole ``opened`` size (Q4 2026-07-28).

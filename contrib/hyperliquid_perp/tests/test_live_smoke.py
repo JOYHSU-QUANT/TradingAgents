@@ -1288,3 +1288,115 @@ def test_preflight_recovery_wrong_object_raises_loudly(live_db):
         rows = repo.iter_smoke_test_results(live_db.conn, "live-BTC")
     assert len(rows) == 0
     assert "clear_scheduled_cancel" in signed.calls
+
+
+# -- staged-long cleanup: convergence + the operator-facing residual flag ----
+
+# The trigger block's staged long is closed BETWEEN tests, so its cleanup has
+# no step row to land in: the runner carries the outcome on the public
+# ``staged_long_residual`` (None = flat) and the CLI prints it. These four
+# fakes drive the three shapes that attribute exists for.
+_REFUSED_CLOSE = _Ack(
+    "error", exchange_order_id=None, filled_size=None, average_price=None, error="no liquidity"
+)
+
+# The trigger block's own tests, in canonical order — enough of it that the
+# in-loop close fires after the LAST one (nothing later needs the position).
+_TRIGGER_BLOCK = ["stop_loss_create", "stop_loss_modify", "stop_loss_cancel"]
+
+
+class _PartialClose(_FakeSigned):
+    """Fills reduce-only closes against a REAL position, the first one by half.
+
+    Modelling the position is the point: a retry that re-sent the ORIGINAL
+    (oversized) size shows up verbatim in :attr:`close_requests`, and the
+    venue could only fill what is actually left — so the residual would never
+    converge.
+    """
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.position = _D(0)
+        self.close_requests: list[Decimal] = []
+        self._halve_next_close = True
+
+    def place_ioc_limit(self, **k):
+        ack = super().place_ioc_limit(**k)
+        if not k.get("reduce_only"):
+            self.position += ack.filled_size or _D(0)
+            return ack
+        self.close_requests.append(k["size"])
+        fillable = min(k["size"], self.position)
+        filled = fillable / 2 if self._halve_next_close else fillable
+        self._halve_next_close = False
+        self.position -= filled
+        return _Ack("filled", filled_size=filled)
+
+
+class _RefusesCloses(_FakeSigned):
+    """Every reduce-only close is refused at the per-order level (no raise)."""
+
+    def place_ioc_limit(self, **k):
+        ack = super().place_ioc_limit(**k)
+        return _REFUSED_CLOSE if k.get("reduce_only") else ack
+
+
+class _RefusesFirstClose(_RefusesCloses):
+    """Refuses only the in-loop close; the finally backstop's retry fills."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._refuse_next_close = True
+
+    def place_ioc_limit(self, **k):
+        ack = _FakeSigned.place_ioc_limit(self, **k)
+        if not k.get("reduce_only") or not self._refuse_next_close:
+            return ack
+        self._refuse_next_close = False
+        return _REFUSED_CLOSE
+
+
+def test_partially_closed_staged_long_retries_the_true_residual(live_db):
+    # A partial close leaves a SMALLER position: the retry must target that
+    # residual, never re-send the original size (an oversized reduce-only some
+    # venues refuse outright — and which never converges on the remainder).
+    signed = _PartialClose()
+    with live_db:
+        runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+        runner.run(only=_TRIGGER_BLOCK)
+    # 0.001 staged; the in-loop close fills half, the finally backstop asks for
+    # exactly what is left. The second entry is the whole guard.
+    assert signed.close_requests == [_D("0.001"), _D("0.0005")]
+    assert signed.position == _D(0)  # genuinely flat, not "flat because we asked twice"
+    assert runner.staged_long_residual is None
+
+
+def test_refused_staged_close_flags_a_residual_without_reddening_the_tests(live_db):
+    # A cleanup that never flattened must reach the operator — but it is not a
+    # test verdict: the trigger tests themselves already round-tripped the wire
+    # actions they exist to prove, and stay green.
+    signed = _RefusesCloses()
+    with live_db:
+        runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+        runner.run(only=_TRIGGER_BLOCK)
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    assert runner.staged_long_residual is not None
+    assert "refused (no liquidity)" in runner.staged_long_residual
+    assert {latest[key]["status"] for key in _TRIGGER_BLOCK} == {"passed"}
+    # A refused close closed NOTHING, so the residual must not shrink either:
+    # both attempts ask for the whole staged size.
+    closes = [c["size"] for c in signed.place_calls if c.get("reduce_only")]
+    assert closes == [_D("0.001"), _D("0.001")]
+
+
+def test_backstop_close_clears_the_staged_long_residual(live_db):
+    # The flag is a live state, not a scar: the in-loop close is refused (flag
+    # set), the finally backstop's retry flattens, and the CLI must NOT then
+    # warn about a position that no longer exists.
+    signed = _RefusesFirstClose()
+    with live_db:
+        runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+        runner.run(only=_TRIGGER_BLOCK)
+    closes = [c for c in signed.place_calls if c.get("reduce_only")]
+    assert len(closes) == 2  # the refusal happened, so the flag WAS set
+    assert runner.staged_long_residual is None

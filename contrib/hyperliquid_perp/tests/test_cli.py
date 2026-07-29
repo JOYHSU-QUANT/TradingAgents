@@ -3191,3 +3191,51 @@ def test_live_smoke_disarm_warning_survives_an_unexpected_crash(tmp_path, capsys
     captured = capsys.readouterr()
     assert rc == 2  # main()'s generic unexpected-error exit
     assert "kill-switch disarm FAILED" in captured.err
+
+
+def test_live_smoke_staged_long_residual_warns_on_stderr(tmp_path, capsys, monkeypatch):
+    # The trigger block's staged long is closed BETWEEN tests, so a close that
+    # never flattened has no step row to land in: without this warning a real
+    # funded position is left on the wire with only a log line — which the
+    # operator may not be capturing — to show for it (review round 2026-07-29).
+    from contrib.hyperliquid_perp import cli as cli_mod
+    from contrib.hyperliquid_perp.live import smoke as smoke_mod
+
+    dbp = _make_live_run(tmp_path)
+    monkeypatch.setattr(
+        cli_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+    )
+    note = "cleanup: reduce-only close of 0.001 refused (no liquidity)"
+
+    def _leaves_a_residual(self, *, only=None):
+        self.staged_long_residual = note
+        return []
+
+    monkeypatch.setattr(smoke_mod.SmokeTestRunner, "run", _leaves_a_residual)
+    rc = cli_main(
+        ["live-smoke", "--config", "unused.yaml", "--run-id", "live-BTC", "--db", str(dbp)]
+    )
+    err = capsys.readouterr().err
+    assert rc == 4  # no verdicts recorded → the gate stays shut, as before
+    assert "trigger-block staging position may still be OPEN" in err
+    assert note in err  # the runner's own note, verbatim — the operator acts on it
+
+
+def test_live_smoke_flat_staged_long_prints_no_residual_warning(tmp_path, capsys, monkeypatch):
+    # The mirror: a suite that flattened its staged long must not cry wolf. An
+    # unconditional warning trains the operator to ignore the one run where a
+    # real position IS still open.
+    from contrib.hyperliquid_perp import cli as cli_mod
+    from contrib.hyperliquid_perp.live import smoke as smoke_mod
+
+    dbp = _make_live_run(tmp_path)
+    monkeypatch.setattr(
+        cli_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+    )
+    monkeypatch.setattr(smoke_mod.SmokeTestRunner, "run", lambda self, *, only=None: [])
+    rc = cli_main(
+        ["live-smoke", "--config", "unused.yaml", "--run-id", "live-BTC", "--db", str(dbp)]
+    )
+    err = capsys.readouterr().err
+    assert rc == 4
+    assert "staging position may still be OPEN" not in err

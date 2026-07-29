@@ -1147,6 +1147,38 @@ def _insert_plan(db, plan_id, *, flip_plan_id=None, flip_leg=None):
         )
 
 
+def test_restart_abandons_every_non_terminal_plan_status(tmp_path):
+    """The abandon sweep reads repo.LIVE_PLAN_STATUSES, not a literal "active".
+    The registry's non-terminal set also holds ``paused_market_data``; a
+    hand-copied subset would leave such a plan un-abandoned across a restart
+    while the sweep still clears gate.active_slice_plan — §9.3's "no active
+    plan" invariant broken, with decision.py's own query still seeing it."""
+    db, clock, engine, gate, sub = _build(tmp_path)
+    for plan_id, status in (("p-active", "active"), ("p-paused", "paused_market_data")):
+        with db.transaction() as conn:
+            repo.insert_execution_plan(
+                conn,
+                plan_id=plan_id,
+                run_id="r",
+                symbol="BTC",
+                status=status,
+                created_at=_T0,
+                planned_slices=1,
+                total_qty=D("0.004"),
+                remaining_qty=D("0.004"),
+                residual_qty=D(0),
+                rounding_residual_qty=D(0),
+            )
+    engine._abandon_dangling_plans()
+    rows = {p["plan_id"]: (p["status"], p["status_reason"]) for p in _plans(db)}
+    assert rows["p-active"] == ("expired", "restart_abandoned")
+    assert rows["p-paused"] == ("expired", "restart_abandoned")  # not left behind
+
+
+def _plans(db):
+    return repo.iter_execution_plans(db.conn, "r")
+
+
 def test_orphan_flip_close_leg_warns_at_startup(tmp_path, caplog):
     """v1 gap (fix in PR 6): a restart between a flip's two legs drops the
     pending open leg — the drop must be VISIBLE, not silent."""

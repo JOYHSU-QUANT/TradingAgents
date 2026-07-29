@@ -964,6 +964,28 @@ def test_adjustment_ledger_delta_rejects_unknown_type():
         accounting.adjustment_ledger_delta("yolo", Decimal("0"), Decimal("1"))
 
 
+def test_a_registry_type_with_no_fold_arm_fails_loud(monkeypatch):
+    # check_enum validates MEMBERSHIP, so a type ADDED to the registry sails
+    # past it. It used to land in the trailing realized_pnl arm — wrong wallet
+    # direction, wrong realized, wrong fees. And because this one definition
+    # feeds both the live wallet posting and replay's fold, the books would
+    # move wrong and replay would agree with itself, so
+    # account_replay_mismatch_count reads 0 and nothing ever surfaces it.
+    monkeypatch.setattr(
+        repo, "ACCOUNTING_ADJUSTMENT_TYPES", repo.ACCOUNTING_ADJUSTMENT_TYPES | {"rebate"}
+    )
+    with pytest.raises(AssertionError, match="no fold arm"):
+        accounting.adjustment_ledger_delta("rebate", Decimal("0"), Decimal("1"))
+    # Control: the three real types still fold, so this pins the fallthrough
+    # rather than the enum check in front of it.
+    assert accounting.adjustment_ledger_delta("fee", Decimal("0"), Decimal("1")) == (
+        Decimal("-1"),
+        Decimal("0"),
+        Decimal("1"),
+        Decimal("0"),
+    )
+
+
 @pytest.mark.parametrize(
     ("adj_type", "wallet", "realized", "fees", "funding"),
     [

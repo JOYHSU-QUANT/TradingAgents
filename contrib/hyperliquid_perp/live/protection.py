@@ -75,10 +75,18 @@ _ROLE_TPSL = {"stop_loss": "sl", "take_profit": "tp"}
 # Literal copies of LIVE_ORDER_ROLES members: a role renamed there without this
 # file would silently drop it from the clear/residual sweeps. Fail at import
 # (same guard family as startup.py's partition check).
-assert set(_SLTP_ROLES) <= LIVE_ORDER_ROLES, "_SLTP_ROLES drifted from LIVE_ORDER_ROLES"
-assert set(_ROLE_ORDER_TYPE) == set(_ROLE_TPSL) == set(_SLTP_ROLES), (
-    "protection role tables must cover exactly _SLTP_ROLES"
-)
+if not set(_SLTP_ROLES) <= LIVE_ORDER_ROLES:
+    raise AssertionError("_SLTP_ROLES drifted from LIVE_ORDER_ROLES")
+if set(_ROLE_ORDER_TYPE) != set(_ROLE_TPSL) or set(_ROLE_TPSL) != set(_SLTP_ROLES):
+    raise AssertionError("protection role tables must cover exactly _SLTP_ROLES")
+# Keys are not enough: _ROLE_ORDER_TYPE is a literal copy of the repository's
+# role→order_type mapping, and only its VALUES decide how an audit row is
+# labelled. Left key-checked, a changed order_type spelling would have this
+# file writing the old label while reconcile.py's orphan backfill writes the
+# new one — the same logical SL carrying two order_types depending on which
+# path recorded it. Compare the whole mapping (strictly stronger).
+if {r: repo.ROLE_TO_ORDER_TYPE[r] for r in _SLTP_ROLES} != _ROLE_ORDER_TYPE:
+    raise AssertionError("_ROLE_ORDER_TYPE drifted from repository.ROLE_TO_ORDER_TYPE")
 
 # §9.4 aggressive family (decided 2026-07-22): a stop-loss trigger only FIRES in
 # the violent move it protects against, so its fire-time limit needs the same

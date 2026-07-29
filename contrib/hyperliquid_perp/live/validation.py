@@ -63,6 +63,7 @@ from ..paper import accounting
 from ..paper.scheduler import parse_instant
 from ..persistence import repository as repo
 from ..persistence.db import Database
+from .safe_mode import REASON_DAILY_LOSS
 from .smoke import SMOKE_TEST_KEYS, smoke_gate_report
 
 __all__ = [
@@ -90,9 +91,10 @@ _SINCE_BEGINNING = "0001-01-01T00:00:00+00:00"
 # the paper side (paper/validation.py): a new terminal attempt status must fail
 # HERE at import, not silently under-count cycle_count in a mainnet-facing gate.
 _COMPLETED_CYCLE_STATUSES = ("completed", "invalid_output")
-assert set(repo.TERMINAL_ATTEMPT_STATUSES) - set(_COMPLETED_CYCLE_STATUSES) == {"api_failed"}, (
-    "live cycle-count vocabulary drifted from repository.TERMINAL_ATTEMPT_STATUSES"
-)
+if set(repo.TERMINAL_ATTEMPT_STATUSES) - set(_COMPLETED_CYCLE_STATUSES) != {"api_failed"}:
+    raise AssertionError(
+        "live cycle-count vocabulary drifted from repository.TERMINAL_ATTEMPT_STATUSES"
+    )
 
 # The four §20.3 ``*_test_passed`` acceptance booleans → their smoke test keys.
 _RESTART_KEY = "restart_reconciliation"
@@ -103,9 +105,10 @@ _STALE_ORDER_KEY = "startup_with_stale_open_order"
 # ``_passed()`` reads "absent from every non-passed bucket" as True — so a key
 # renamed in SMOKE_TESTS without this file would silently report its acceptance
 # boolean as passed forever. Fail at import, not in a mainnet-facing report.
-assert {_RESTART_KEY, _EMERGENCY_KEY, _EXISTING_POSITION_KEY, _STALE_ORDER_KEY} <= set(
+if not {_RESTART_KEY, _EMERGENCY_KEY, _EXISTING_POSITION_KEY, _STALE_ORDER_KEY} <= set(
     SMOKE_TEST_KEYS
-), "validation's §20.3 smoke-test keys drifted from smoke.SMOKE_TESTS"
+):
+    raise AssertionError("validation's §20.3 smoke-test keys drifted from smoke.SMOKE_TESTS")
 
 # §12.3 case types that ARE a reconciliation mismatch for the §21.4 gate. A
 # fill_unmapped sighting resolves by booking the fill (its own lane), so it is
@@ -131,9 +134,43 @@ _MISMATCH_CASE_TYPES = frozenset(
 # this file would silently fall out of the §21.4 mismatch count — a run with a
 # real open case could still report live_ready. Fail at import, exactly like
 # the smoke-key assert above (same failure class, same guard).
-assert _MISMATCH_CASE_TYPES | {"fill_unmapped"} == repo.RECONCILIATION_CASE_TYPES, (
-    "validation's mismatch case types drifted from repository.RECONCILIATION_CASE_TYPES"
+if _MISMATCH_CASE_TYPES | {"fill_unmapped"} != repo.RECONCILIATION_CASE_TYPES:
+    raise AssertionError(
+        "validation's mismatch case types drifted from repository.RECONCILIATION_CASE_TYPES"
+    )
+
+# The §17 protection-event vocabulary this file rebuilds unprotected windows
+# from (see _unprotected_windows). Module-level and registry-bound for the same
+# reason as the two guards above, and the failure is worse than theirs: an
+# onset name that no longer matches yields unprotected_position_seconds = 0, so
+# a run with REAL unprotected windows passes a mainnet-facing exit-5 gate
+# vacuously. Same for the close set — an unmatched close leaves every window
+# open to "now" and fails a healthy run instead.
+_UNPROTECTED_ONSET_EVENTS = frozenset({"stop_loss_repair_exhausted", "stop_loss_repair_blocked"})
+_UNPROTECTED_CLOSE_EVENTS = frozenset(
+    {
+        "stop_loss_placed",
+        "stop_loss_modified",
+        "protection_cleared",
+        "emergency_close_triggered",
+    }
 )
+if not (_UNPROTECTED_ONSET_EVENTS | _UNPROTECTED_CLOSE_EVENTS) <= repo.PROTECTION_ORDER_EVENT_TYPES:
+    raise AssertionError(
+        "validation's unprotected-window event types drifted from "
+        "repository.PROTECTION_ORDER_EVENT_TYPES"
+    )
+
+# Likewise for the §19.4 refresh-rate metric: an unmatched name makes total == 0,
+# which _apply_refresh_gate reads as a shortfall rather than a failure — a
+# quieter wrong answer than a crash, on a gate both profiles depend on.
+_KILL_SWITCH_REFRESH_OK = "kill_switch_refreshed"
+_KILL_SWITCH_REFRESH_FAILED = "kill_switch_refresh_failed"
+if not {_KILL_SWITCH_REFRESH_OK, _KILL_SWITCH_REFRESH_FAILED} <= repo.KILL_SWITCH_EVENT_TYPES:
+    raise AssertionError(
+        "validation's kill-switch refresh event types drifted from "
+        "repository.KILL_SWITCH_EVENT_TYPES"
+    )
 
 
 @dataclass(frozen=True)
@@ -304,13 +341,8 @@ def _unprotected_windows(conn, run_id: str, now: datetime) -> tuple[Decimal, int
     — the position was last seen unprotected, which is worse than a closed one,
     not better.
     """
-    onset = {"stop_loss_repair_exhausted", "stop_loss_repair_blocked"}
-    close = {
-        "stop_loss_placed",
-        "stop_loss_modified",
-        "protection_cleared",
-        "emergency_close_triggered",
-    }
+    onset = _UNPROTECTED_ONSET_EVENTS
+    close = _UNPROTECTED_CLOSE_EVENTS
     total = Decimal(0)
     windows = 0
     has_open = False
@@ -347,9 +379,9 @@ def _kill_switch_refresh_rate(conn, run_id: str) -> tuple[Decimal | None, int]:
     refreshed = 0
     failed = 0
     for row in repo.iter_kill_switch_events(conn, run_id):
-        if row["event_type"] == "kill_switch_refreshed":
+        if row["event_type"] == _KILL_SWITCH_REFRESH_OK:
             refreshed += 1
-        elif row["event_type"] == "kill_switch_refresh_failed":
+        elif row["event_type"] == _KILL_SWITCH_REFRESH_FAILED:
             failed += 1
     total = refreshed + failed
     if total == 0:
@@ -411,11 +443,13 @@ def validate_live_run(
         fill_count = _count(conn, "SELECT COUNT(*) FROM fills WHERE run_id = ?", (run_id,))
         # Distinct acknowledged live orders: the exchange confirmed it holds
         # (or already held — a 'duplicate' ack) each cloid.
+        known = repo.EXCHANGE_KNOWN_ATTEMPT_STATUSES
+        known_placeholders = ", ".join("?" for _ in known)
         live_order_count = _count(
             conn,
             "SELECT COUNT(DISTINCT cloid_hex) FROM live_order_attempts WHERE run_id = ?"
-            " AND action = 'place' AND status IN ('acknowledged', 'duplicate')",
-            (run_id,),
+            f" AND action = 'place' AND status IN ({known_placeholders})",
+            (run_id, *known),
         )
         # Structural dedupe assertion: the UNIQUE index makes this 0 unless the
         # store is corrupt. Filter to live fills (paper fills carry NULL keys).
@@ -448,8 +482,11 @@ def validate_live_run(
         # §10.3 daily-loss cap breach = a safe-mode episode entered for that
         # reason (the loss guard's only durable record of a breach). The
         # since-instant is the store minimum, so it matches any episode.
+        # REASON_DAILY_LOSS, not the literal: has_safe_mode_reason_event takes a
+        # free string, so a renamed constant would match zero rows forever and a
+        # mainnet run that actually blew its §10.3 cap would report live_ready.
         daily_loss_breached = repo.has_safe_mode_reason_event(
-            conn, run_id, reason="daily_loss", since_iso=_SINCE_BEGINNING
+            conn, run_id, reason=REASON_DAILY_LOSS, since_iso=_SINCE_BEGINNING
         )
         emergency_close_event_count = sum(
             1

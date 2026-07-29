@@ -289,16 +289,22 @@ class LiveExecutionEngine:
     # -- construction helpers -------------------------------------------------
 
     def _abandon_dangling_plans(self) -> None:
-        for plan in repo.iter_execution_plans(self._db.conn, self._run_id):
-            if plan["status"] == "active":
-                with self._db.transaction() as conn:
-                    repo.update_execution_plan(
-                        conn,
-                        plan["plan_id"],
-                        status="expired",
-                        status_reason="restart_abandoned",
-                        updated_at=self._clock.now(),
-                    )
+        # LIVE_PLAN_STATUSES, not a literal "active": the registry's non-terminal
+        # set also holds ``paused_market_data``, and a hand-copied subset would
+        # leave a paused plan un-abandoned across a restart while this method
+        # still clears gate.active_slice_plan — §9.3's "no active plan"
+        # invariant broken, with decision.py's own query still seeing the plan.
+        for plan in repo.iter_execution_plans(
+            self._db.conn, self._run_id, statuses=repo.LIVE_PLAN_STATUSES
+        ):
+            with self._db.transaction() as conn:
+                repo.update_execution_plan(
+                    conn,
+                    plan["plan_id"],
+                    status="expired",
+                    status_reason="restart_abandoned",
+                    updated_at=self._clock.now(),
+                )
 
     def _warn_orphan_flip_close_leg(self) -> None:
         """Make the v1 pending-flip restart drop VISIBLE (fix lands in PR 6).

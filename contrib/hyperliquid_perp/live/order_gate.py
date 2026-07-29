@@ -66,9 +66,8 @@ PROTECTIVE_ORDER_ROLES = frozenset({"stop_loss", "take_profit", "emergency_close
 # Literal copy of LIVE_ORDER_ROLES members: a role renamed there without this
 # file would silently drop it from the safe-mode exemption — the one order most
 # needed under safe mode would be gated. Fail at import.
-assert PROTECTIVE_ORDER_ROLES <= LIVE_ORDER_ROLES, (
-    "PROTECTIVE_ORDER_ROLES drifted from LIVE_ORDER_ROLES"
-)
+if not PROTECTIVE_ORDER_ROLES <= LIVE_ORDER_ROLES:
+    raise AssertionError("PROTECTIVE_ORDER_ROLES drifted from LIVE_ORDER_ROLES")
 
 # The §3 modes in which real orders can exist at all. mainnet_live is included
 # because §4.1 lists it — config load already rejects it (§22), so its presence

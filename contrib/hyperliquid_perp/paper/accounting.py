@@ -952,8 +952,19 @@ def adjustment_ledger_delta(
             return LedgerDeltas(wallet=-delta, realized=zero, fees=delta, funding=zero)
         if adjustment_type == "funding":
             return LedgerDeltas(wallet=delta, realized=zero, fees=zero, funding=delta)
-        # realized_pnl
-        return LedgerDeltas(wallet=delta, realized=delta, fees=zero, funding=zero)
+        if adjustment_type == "realized_pnl":
+            return LedgerDeltas(wallet=delta, realized=delta, fees=zero, funding=zero)
+        # Not a bare `else`. check_enum above validates MEMBERSHIP, so a new
+        # adjustment type added to the registry passes it and would land in the
+        # realized_pnl arm — wrong wallet direction, wrong realized, wrong fees.
+        # And because this one definition feeds BOTH the live wallet posting and
+        # replay's fold, the books would move wrong and replay would agree with
+        # itself: validate's account_replay_mismatch_count reads 0 and the
+        # corruption never surfaces. Fail loud instead.
+        raise AssertionError(
+            f"adjustment type {adjustment_type!r} is in "
+            "repository.ACCOUNTING_ADJUSTMENT_TYPES but has no fold arm here"
+        )
 
 
 def _fold_posted_funding(

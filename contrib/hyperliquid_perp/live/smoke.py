@@ -124,7 +124,8 @@ _BY_KEY: dict[str, SmokeTest] = {t.key: t for t in SMOKE_TESTS}
 # ``key`` is the identity the gate, the validator, and ``--only`` all key off of;
 # a silent collision (a future item copy-pasted from an existing one) would drop
 # a test from the suite via the dict fold. Turn that into a loud import-time error.
-assert len(_BY_KEY) == len(SMOKE_TESTS), "SMOKE_TESTS keys must be unique"
+if len(_BY_KEY) != len(SMOKE_TESTS):
+    raise AssertionError("SMOKE_TESTS keys must be unique")
 
 # The tests whose execution touches the account-wide dead man's switch: the
 # three restart tests (their §19.1 recovery ARMS the scheduleCancel and never
@@ -191,9 +192,10 @@ _TRIGGER_PROBE_TESTS: frozenset[str] = frozenset(
 # skip the pre-flight, a trigger test would probe flat. Fail at import (the
 # same guard validation.py carries for its §20.3 key literals).
 for _copied in (_KILL_SWITCH_TESTS, _ORDER_PLACING_TESTS, _TRIGGER_PROBE_TESTS):
-    assert _copied <= set(SMOKE_TEST_KEYS), (
-        f"smoke policy set drifted from SMOKE_TESTS: {sorted(_copied - set(SMOKE_TEST_KEYS))}"
-    )
+    if not _copied <= set(SMOKE_TEST_KEYS):
+        raise AssertionError(
+            f"smoke policy set drifted from SMOKE_TESTS: {sorted(_copied - set(SMOKE_TEST_KEYS))}"
+        )
 
 # Just over Hyperliquid's ~$10 minimum order value, so a probe order the suite
 # means to REST or FILL is not refused for being dust.
@@ -256,9 +258,19 @@ class SmokeContext:
 class SmokeStepResult:
     """One test's verdict, before it is stamped into ``live_smoke_tests``."""
 
-    status: Literal["passed", "failed", "error", "skipped"]  # repo.LIVE_SMOKE_TEST_STATUSES
+    status: Literal["passed", "failed", "error", "skipped"]  # == _SMOKE_STATUSES, checked below
     detail: str | None = None
     error_message: str | None = None
+
+
+# The Literal above is a copy of the repository's status registry, and a comment
+# is not a guard. Drift here does not fail quietly: insert_smoke_test_result's
+# check_enum raises from inside _record(), which run() calls OUTSIDE any
+# try/except — so it escapes the per-test loop as a bare traceback, mid-suite,
+# on a run that may hold a staged real long and an armed kill switch. Bind it.
+_SMOKE_STATUSES = frozenset({"passed", "failed", "error", "skipped"})
+if _SMOKE_STATUSES != repo.LIVE_SMOKE_TEST_STATUSES:
+    raise AssertionError("SmokeStepResult.status drifted from repository.LIVE_SMOKE_TEST_STATUSES")
 
 
 class _SmokeAbort(Exception):

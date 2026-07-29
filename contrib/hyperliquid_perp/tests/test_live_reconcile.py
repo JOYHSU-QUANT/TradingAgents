@@ -447,6 +447,57 @@ def test_the_exchange_liquidation_estimate_is_mirrored_onto_the_local_row(env):
     assert pos is not None and pos.liquidation_price == Decimal("43210.5")
 
 
+def test_a_direction_disagreement_withholds_the_liquidation_mirror(env):
+    # The flip fill landed between this pass's clearinghouse read and its fill
+    # backfill, so the exchange still shows the PRE-flip side. Mirroring that
+    # estimate onto the freshly flipped row hands the SL band a liquidation
+    # price on the wrong side of entry, which stops.py answers CLOSE_NOW to —
+    # a §17.2 emergency close of a healthy position. Withhold instead.
+    db, seams, reconciler = env
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("-0.001"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+    seams.clearinghouse = _clearinghouse(
+        account_value="101",
+        # The exchange still reports the LONG the local books already flipped.
+        positions=[_btc_position(szi="0.001", liquidation_px="43210.5")],
+        maintenance="1",
+    )
+    reconciler.run("heartbeat")
+    pos = repo.get_current_position(db.conn, "r", "BTC")
+    assert pos is not None and pos.liquidation_price is None
+    # The size disagreement is still reported through its own lane — withholding
+    # the estimate must not also swallow the mismatch.
+    assert {r["exchange_value"] for r in _cases(db, "exchange_position_mismatch")} == {
+        "BTC:-0.001->0.001"
+    }
+
+
+def test_an_agreeing_direction_still_mirrors_after_a_flip(env):
+    # Negative control for the test above: once both views agree on the short,
+    # the short's own estimate (ABOVE entry) is mirrored normally.
+    db, seams, reconciler = env
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("-0.001"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+    seams.clearinghouse = _clearinghouse(
+        account_value="101",
+        positions=[_btc_position(szi="-0.001", liquidation_px="56789.5")],
+        maintenance="1",
+    )
+    reconciler.run("heartbeat")
+    pos = repo.get_current_position(db.conn, "r", "BTC")
+    assert pos is not None and pos.liquidation_price == Decimal("56789.5")
+
+
 def test_a_failed_liquidation_mirror_does_not_fail_the_position_leg(env, monkeypatch):
     """The mirror is a cache for the SL band, not this leg's evidence.
 

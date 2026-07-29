@@ -576,6 +576,41 @@ def test_tp_suspended_during_plan_cancels_resting(env):
     assert tp_order["cloid_hex"] in client.canceled
     assert repo.active_protection_order(db.conn, "r", "BTC", "take_profit") is None
     assert repo.active_protection_order(db.conn, "r", "BTC", "stop_loss") is not None
+    # The RECORDED price goes too, not just the order. Only the flat path used
+    # to null these columns, so every position_snapshots / ai_inputs row and
+    # both CSV exports written during the plan window asserted a take-profit
+    # that was no longer on the book — for as long as the plan ran.
+    sl, tp = repo.get_position_protection(db.conn, "r", "BTC")
+    assert tp is None
+    assert sl is not None  # and the SL, which §17.1 rule 5 keeps, is untouched
+
+
+def test_an_unsuspendable_tp_keeps_its_recorded_price(env):
+    # Negative control for the clear above: when the cancel cannot land, a stale
+    # reduce-only TP really IS still resting, so the column must keep saying so.
+    # Truthfulness runs both ways.
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    mgr = _manager(db, client, gate)
+    mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    _, tp_before = repo.get_position_protection(db.conn, "r", "BTC")
+    assert tp_before is not None
+    client.cancel_script = ["refused"]  # the suspension cannot land
+    outcome = mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+    assert outcome is ProtectionOutcome.DEGRADED
+    _, tp_after = repo.get_position_protection(db.conn, "r", "BTC")
+    assert tp_after == tp_before  # still resting, still recorded
 
 
 def test_tp_failure_is_degraded_not_close(env):

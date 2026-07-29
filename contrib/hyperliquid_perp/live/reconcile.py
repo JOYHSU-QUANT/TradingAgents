@@ -1156,6 +1156,16 @@ class LiveReconciler:
         # without a local row: the writer is UPDATE-only, so it would be a
         # guaranteed no-op, and the size-mismatch lane below owns that case.
         #
+        # Also ``None`` when the two views DISAGREE on direction — the flip fill
+        # landed between this pass's clearinghouse read and its fill backfill,
+        # so ``exch`` still describes the pre-flip side. A liquidation price is
+        # only meaningful for the side it was computed on; stamping the old
+        # side's estimate onto the freshly flipped row is precisely what makes
+        # the SL band answer CLOSE_NOW on a healthy position (§3.6
+        # ``liquidation_too_close`` → §17.2 emergency close → §13.5 manual
+        # latch). Withholding costs nothing: the band falls back to the
+        # entry-based one until a pass sees both views agree.
+        #
         # ADVISORY, unlike every other write in this reconciler (decision
         # 2026-07-29): this leg's verdict answers "do the local and exchange
         # positions agree?", and the successful read above already answered it.
@@ -1167,6 +1177,9 @@ class LiveReconciler:
         # leaves is the entry-based band the engine used for every run before
         # this mirror existed.
         liq = None if exch is None else exch.liquidation_price
+        same_direction = exch_size != 0 and local_size != 0 and (exch_size > 0) == (local_size > 0)
+        if not same_direction:
+            liq = None
         if local is not None and liq != local.liquidation_price:
             try:
                 with self._db.transaction() as tx:

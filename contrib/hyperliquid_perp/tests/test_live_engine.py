@@ -1280,13 +1280,13 @@ def test_settlement_escalation_write_failure_never_rescores_the_segment(tmp_path
 
     monkeypatch.setattr(engine._safe_mode, "enter", _flaky_enter)
     with pytest.raises(_Boom):
-        engine._detect_settlement(clock.now())
+        engine._detect_settlement(clock.now(), [])
     state = repo.get_scheduler_state(db.conn, "r")
     assert state["consecutive_loss_count"] == 1  # the -100 loss was scored ONCE
     assert engine._was_flat is True  # the cursor advanced with the commit
     assert engine._emergency_close_pending is True  # the escalation is still owed
     # Next tick: no duplicate settlement (the streak survives), escalation lands.
-    engine._detect_settlement(clock.now())
+    engine._detect_settlement(clock.now(), [])
     state = repo.get_scheduler_state(db.conn, "r")
     assert state["consecutive_loss_count"] == 1  # NOT reset by a wallet==anchor re-score
     assert engine._emergency_close_pending is False
@@ -1444,6 +1444,69 @@ def test_flip_under_single_slot_config_still_budgets_both_legs(tmp_path):
     engine.tick()
     assert engine._flip is None  # the open leg registered (flip consumed)
     assert engine._leg is not None and engine._leg.flip_leg == "open"
+
+
+def test_a_stop_out_mid_plan_abandons_the_leg_instead_of_re_entering(tmp_path):
+    """A plan is sized ONCE, against the position that existed when the cycle
+    approved it, and ``_submit_due_slices`` re-reads nothing about the position.
+    So a stop-loss firing mid-plan used to leave the remaining slices to
+    re-open — as NON-reduce-only entry orders, at the crashed price — the very
+    position the stop had just closed. The flat transition must kill the leg."""
+    db, clock, engine, gate, sub = _build(tmp_path)
+    _script(engine, [_snap()])
+    reg = engine.start_plan(_decision("long", 10), output_id="o1")
+    assert reg.plan_id is not None and reg.reason is None
+    leg = engine._leg
+    assert leg is not None
+    assert leg.reduce_only is False and leg.order_role == "entry"  # the hazard
+    assert len(leg.slice_sizes) > 1  # slices remain after the first
+    # Slice 0 fills: the long opens...
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.004"), entry_price=_MARK),
+            updated_at=_T0,
+        )
+    engine._was_flat = False
+    # ...then the price crashes, the SL fires, and the position is flat again.
+    with db.transaction() as conn:
+        repo.upsert_current_position(conn, "r", PositionState.flat("BTC"), updated_at=_T0)
+    _script(engine, [_snap(mark=20000, mid=20000)])
+    res = engine.tick()
+    assert engine._leg is None  # the stale target died with the position
+    assert sub.calls == []  # and nothing re-opened it on the crash tick
+    assert any(e == f"plan_terminal:{reg.plan_id}:canceled" for e in res.events)
+    row = db.conn.execute(
+        "SELECT status, status_reason FROM execution_plans WHERE plan_id = ?",
+        (reg.plan_id,),
+    ).fetchone()
+    # A distinct reason: this cancel is not the same event as any other.
+    assert (row["status"], row["status_reason"]) == ("canceled", "position_flattened")
+
+
+def test_a_wrong_side_liquidation_mirror_is_discarded_by_the_sl_band(tmp_path):
+    """Reader-side half of the mirror invariant. A long's liquidation price sits
+    BELOW its entry; a value above it belongs to a position that no longer
+    exists, and stops.py answers a too-close liq with CLOSE_NOW — a §17.2
+    emergency close of a healthy position. Withhold it, don't band off it."""
+    db, clock, engine, gate, sub = _build(tmp_path)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.004"), entry_price=_MARK),
+            updated_at=_T0,
+        )
+        # A short's estimate, left behind on a row that is now long.
+        repo.set_position_liquidation_price(conn, "r", "BTC", D(100000))
+    position = engine._read_position()
+    assert engine._liquidation_price(position) is None  # withheld, not banded off
+    # Control: the same reader USES a correctly-sided estimate, so the test
+    # discriminates the guard rather than the plumbing.
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", D(25000))
+    assert engine._liquidation_price(position) == D(25000)
 
 
 # -- loss guards wired through the engine (§10.3 / §10.4) --------------------

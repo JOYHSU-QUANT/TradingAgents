@@ -297,6 +297,20 @@ class ProtectionManager:
                     now=now,
                 )
                 return ProtectionOutcome.DEGRADED
+            # The TP is provably off the book (the still-resting check above
+            # returned), so drop the recorded price too. Previously only
+            # ``_clear`` (the flat path) nulled these columns, which left the
+            # row — and therefore every position_snapshots / ai_inputs row and
+            # both CSV exports written during the plan window — asserting a
+            # take-profit that no longer existed, for as long as the plan ran.
+            # Written AFTER the still-resting check on purpose: in the DEGRADED
+            # case a stale TP really IS still on the exchange and the column
+            # should keep saying so. Rule 6 re-establishment restores the value
+            # through _persist_placed.
+            recorded = repo.get_position_protection(self._db.conn, self._run_id, self._coin)
+            if recorded is not None and recorded[1] is not None:
+                with self._db.transaction() as conn:
+                    self._write_protection_price(conn, "take_profit", None, now)
             if was_failed:
                 self._record_event(
                     "degraded_protection_cleared",
@@ -768,7 +782,10 @@ class ProtectionManager:
         # of the trigger's own tick (up for a buy, down for a sell).
         return round_to_tick(limit, self._tick, up=is_buy)
 
-    def _write_protection_price(self, conn, role: str, price: Decimal, now: datetime) -> None:
+    def _write_protection_price(
+        self, conn, role: str, price: Decimal | None, now: datetime
+    ) -> None:
+        """Set one role's recorded price, preserving the other's. ``None`` clears."""
         current = repo.get_position_protection(self._db.conn, self._run_id, self._coin)
         sl, tp = (None, None) if current is None else current
         if role == "stop_loss":

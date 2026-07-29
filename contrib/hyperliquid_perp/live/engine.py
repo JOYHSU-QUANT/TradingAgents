@@ -353,7 +353,32 @@ class LiveExecutionEngine:
         # the SL band then falls back to the entry-based band (stops.py handles
         # ``liquidation_price=None``).
         pos = repo.get_current_position(self._db.conn, self._run_id, self._coin)
-        return pos.liquidation_price if pos is not None else None
+        liq = None if pos is None else pos.liquidation_price
+        if liq is None:
+            return None
+        # Last line of defence for the SL band (the writer-side halves are the
+        # reconciler's direction check and upsert_current_position's flip
+        # clear). A liquidation price sits BELOW entry for a long and ABOVE it
+        # for a short — a value on the wrong side describes a position that no
+        # longer exists, and handing it to stops.stop_loss_decision reads as
+        # ``liquidation_too_close`` → CLOSE_NOW → a §17.2 emergency close of a
+        # healthy position plus the §13.5 manual latch. Withhold instead; the
+        # entry-based band is the honest fallback. Not silent: a wrong-side
+        # value means a writer-side invariant broke, and that must be visible.
+        entry = position.entry_price
+        if position.size == 0 or entry is None:
+            return None
+        if (position.size > 0 and liq >= entry) or (position.size < 0 and liq <= entry):
+            logger.warning(
+                "discarding wrong-side liquidation mirror for %s (size %s, entry %s, liq %s) "
+                "— falling back to the entry-based SL band",
+                self._coin,
+                position.size,
+                entry,
+                liq,
+            )
+            return None
+        return liq
 
     def has_active_work(self) -> bool:
         """Whether anything is live: a position, an active leg, or a pending flip.
@@ -424,8 +449,9 @@ class LiveExecutionEngine:
         if self._last_reconcile_at is None or now - self._last_reconcile_at >= _HEARTBEAT:
             reconciled = self._reconcile("heartbeat") or reconciled
 
-        # §10.4: a position that reached flat this tick settles one segment.
-        self._detect_settlement(now)
+        # §10.4: a position that reached flat this tick settles one segment
+        # (and abandons any in-flight leg — its target died with the position).
+        self._detect_settlement(now, events)
 
         snap_result = self._provider.fetch(
             self._coin, requested_at=now, timeout_seconds=self._timeout
@@ -536,10 +562,31 @@ class LiveExecutionEngine:
         )
         return report.clean
 
-    def _detect_settlement(self, now: datetime) -> None:
-        """§10.4: record a settlement when the position transitions to flat."""
+    def _detect_settlement(self, now: datetime, events: list[str]) -> None:
+        """§10.4: record a settlement when the position transitions to flat.
+
+        Also the one place an in-flight leg learns its target died. A plan is
+        sized ONCE, against the position that existed when the cycle approved
+        it (``_start_rebalance`` freezes ``slice_sizes``/``reduce_only``/
+        ``order_role``), and ``_submit_due_slices`` re-reads nothing about the
+        position before putting the next slice on the wire. So a stop-loss
+        firing mid-plan used to leave the remaining slices to re-open — as
+        NON-reduce-only entry orders, at the crashed price, on a target the AI
+        set before the crash — the very position the stop had just closed. That
+        turns a bounded stop into a re-entry loop for the rest of the plan
+        envelope (default 60 min), and v1 has no WS socket, so the re-opened
+        position can sit unprotected until the next §12.2 backfill.
+        A flat transition invalidates the target: abandon the leg.
+        """
         is_flat = self._read_position().is_flat
         if is_flat and not self._was_flat:
+            if self._leg is not None:
+                # BEFORE record_settlement, and before this tick's
+                # _submit_due_slices (tick() runs settlement first). Retry-safe
+                # either way: if this raises, _was_flat has not advanced and the
+                # next tick redoes both; if record_settlement raises after it,
+                # the leg is already None and the retry just re-scores.
+                self._terminate_leg(self._leg, now, "canceled", events, reason="position_flattened")
             self._loss_guards.record_settlement(wallet_balance=self._wallet_balance(), now=now)
             # Advance the flat cursor the moment the settlement COMMITS: if the
             # §13.5 escalation below raises after it, a re-run next tick must
@@ -998,7 +1045,15 @@ class LiveExecutionEngine:
 
     # -- plan lifecycle -------------------------------------------------------
 
-    def _terminate_leg(self, leg: _Leg, now: datetime, status: str, events: list[str]) -> None:
+    def _terminate_leg(
+        self,
+        leg: _Leg,
+        now: datetime,
+        status: str,
+        events: list[str],
+        *,
+        reason: str | None = None,
+    ) -> None:
         if self._leg is not leg:
             return
         with self._db.transaction() as conn:
@@ -1006,7 +1061,10 @@ class LiveExecutionEngine:
                 conn,
                 leg.plan_id,
                 status=status,  # completed / expired / canceled — all terminal
-                status_reason=status,
+                # Defaults to the status itself; callers that share a status
+                # pass the distinguishing reason (a leg canceled because the
+                # position went flat is not the same event as any other cancel).
+                status_reason=reason or status,
                 # v1 does NOT attribute live fills to their plan: fills.py ingests
                 # without a plan_id (the orders table carries none), so nothing ever
                 # decrements execution_plans.remaining_qty and the true unfilled

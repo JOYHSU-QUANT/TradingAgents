@@ -735,3 +735,41 @@ def test_upsert_current_position_preserves_the_mirrored_liquidation_price(db):
     assert pos is not None
     assert pos.size == Decimal("0.02")  # the fill landed
     assert pos.liquidation_price == Decimal("43210.5")  # and the mirror survived it
+
+
+def test_a_flip_clears_the_mirrored_liquidation_price(db):
+    # The other half of that invariant, and the reason it is not "always
+    # preserve": the estimate describes a DIRECTION. Carried across a flip it
+    # sits on the wrong side of the new entry, and stops.stop_loss_decision
+    # reads a wrong-side liq as `liquidation_too_close` → CLOSE_NOW → a §17.2
+    # emergency close of a position that was never in danger, plus the §13.5
+    # manual latch a human has to clear.
+    _seed_position(db)
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", Decimal("43210.5"))
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("-0.01"), entry_price=Decimal("51000")),
+            updated_at=_NOW,
+        )
+    pos = repo.get_current_position(db.conn, "r", "BTC")
+    assert pos is not None
+    assert pos.size == Decimal("-0.01")  # the flip landed
+    assert pos.liquidation_price is None  # and took the long's estimate with it
+
+
+def test_a_flatten_clears_the_mirrored_liquidation_price(db):
+    # Close-and-reopen is the same hazard as a flip: an estimate from before the
+    # flat describes a position that no longer exists. The reconciler also
+    # clears on a flat exchange, but only on its next pass — this closes the
+    # ticks in between, where the closing fill is booked and no pass has run.
+    _seed_position(db)
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", Decimal("43210.5"))
+    with db.transaction() as conn:
+        repo.upsert_current_position(conn, "r", PositionState.flat("BTC"), updated_at=_NOW)
+    pos = repo.get_current_position(db.conn, "r", "BTC")
+    assert pos is not None and pos.size == 0
+    assert pos.liquidation_price is None

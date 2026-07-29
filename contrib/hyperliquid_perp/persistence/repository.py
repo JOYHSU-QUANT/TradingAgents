@@ -453,14 +453,33 @@ def upsert_current_position(
 ) -> None:
     """Upsert a symbol's materialized position (size / entry / realized PnL).
 
-    Deliberately does **not** touch ``stop_loss_price`` / ``take_profit_price``
-    or ``exchange_liquidation_price``: they default NULL on first insert and are
-    left untouched on conflict, so a position-changing fill preserves any active
-    protection (and the reconciler's mirrored liquidation estimate) rather than
-    wiping it. The SL/TP lifecycle (write *and* read) lands together in PR 3,
-    which owns protection management (execution §2–§4); the liquidation mirror's
-    one writer is :func:`set_position_liquidation_price`.
+    Deliberately does **not** touch ``stop_loss_price`` / ``take_profit_price``:
+    they default NULL on first insert and are left untouched on conflict, so a
+    position-changing fill preserves any active protection rather than wiping
+    it. The SL/TP lifecycle (write *and* read) lands together in PR 3, which
+    owns protection management (execution §2–§4).
+
+    ``exchange_liquidation_price`` is treated differently, and the difference is
+    load-bearing: it describes a position's DIRECTION, not merely its symbol.
+    Carried across a flip (or across a flat and back), it hands the live SL band
+    an estimate on the wrong side of the new entry — which
+    ``stops.stop_loss_decision`` reads as ``liquidation_too_close`` and answers
+    CLOSE_NOW, i.e. a §17.2 emergency close of a position that was never in
+    danger, followed by the §13.5 MANUAL safe-mode latch a human must clear. So
+    the column survives only a SAME-DIRECTION update; a sign change or a
+    flatten clears it and the reconciler's mirror (its one writer,
+    :func:`set_position_liquidation_price`) re-establishes it next pass.
     """
+    prior = conn.execute(
+        "SELECT size FROM current_positions WHERE run_id = ? AND symbol = ?",
+        (run_id, position.coin),
+    ).fetchone()
+    # Decided in Python rather than SQL: ``size`` is stored as TEXT (Decimal
+    # round-trip), so a SQLite-side sign test would compare strings.
+    prior_size = Decimal(0) if prior is None else Decimal(prior["size"])
+    keeps_liquidation = (
+        position.size != 0 and prior_size != 0 and (position.size > 0) == (prior_size > 0)
+    )
     conn.execute(
         """
         INSERT INTO current_positions
@@ -470,7 +489,9 @@ def upsert_current_position(
             size = excluded.size,
             entry_price = excluded.entry_price,
             realized_pnl = excluded.realized_pnl,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            exchange_liquidation_price = CASE
+                WHEN ? THEN exchange_liquidation_price ELSE NULL END
         """,
         (
             run_id,
@@ -479,6 +500,7 @@ def upsert_current_position(
             None if position.entry_price is None else str(position.entry_price),
             str(position.realized_pnl),
             _iso_utc(updated_at or datetime.now(timezone.utc)),
+            1 if keeps_liquidation else 0,
         ),
     )
 
@@ -1858,9 +1880,11 @@ def set_position_liquidation_price(
 
     The live reconciler is the one writer: each pass it copies the clearinghouse
     ``liquidationPx`` for the run's coin onto the position row (``None`` when the
-    exchange reports flat, so a stale estimate never survives a flat).
-    ``upsert_current_position`` deliberately leaves the column alone, same as the
-    SL/TP pair. Unlike :func:`set_position_protection`, a missing row is a
+    exchange reports flat, or when the two views disagree on direction, so an
+    estimate is only ever attributed to the position it actually describes).
+    ``upsert_current_position`` clears the column on a direction change or a
+    flatten — the second half of that same invariant, for the ticks between
+    reconciler passes. Unlike :func:`set_position_protection`, a missing row is a
     NO-OP, not an error: the exchange can report a position the local books do
     not have yet — that mismatch is the reconciler's own §12.3 case lane, not
     this writer's job.

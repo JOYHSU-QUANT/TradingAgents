@@ -2784,9 +2784,10 @@ class _EngineDecisionProvider:
         except ExchangeError as exc:
             raise RetryableDecisionError("connection", str(exc)) from exc
         # All three pre-LLM context guards (under-warm data, fully-dead
-        # indicator set, missing/dead atr_14), shared with the one-shot path
-        # (see main._context_refusal_error) — a dead or absent atr_14 would
-        # otherwise let every cycle trade on a fabricated-calm RANGING regime.
+        # indicator set, missing/dead regime indicators atr_14/ema_20/ema_50),
+        # shared with the one-shot path (see main._context_refusal_error) — a
+        # dead or absent regime indicator would otherwise let every cycle
+        # trade on a fabricated-calm RANGING regime.
         # Deliberate (reviewed): they ride the §3.1 ladder as "server_error" →
         # api_failed — the closed §6.2 vocabulary has no data-availability
         # label, and the failure precedes the AI call so nothing is spent. A

@@ -77,7 +77,10 @@ def classify_regime(indicators: dict[str, float | None], reference_price: Decima
     ``reference_price`` should come from the same series the EMAs are built on
     (the latest candle close), not the live mark — otherwise the mark/close basis
     can flip the label near an EMA boundary. Defaults to ``RANGING`` when
-    indicators are missing (insufficient candles).
+    indicators are missing (insufficient candles). The names read here are
+    mirrored in ``indicator_vocab.REGIME_INDICATORS`` — the config loader and
+    the pre-LLM guard enforce their presence, so keep the two in sync (the
+    drift-lock test in test_context_builder pins the membership).
     """
     price = float(reference_price)
     atr = indicators.get("atr_14")

@@ -142,12 +142,121 @@ def test_load_config_accepts_phase1_value_spellings_the_client_accepts(tmp_path)
     assert load_config(good)["network"] == "TestNet"
 
 
-def test_load_config_rejects_non_list_coins(tmp_path):
-    # `coins: BTC` (scalar, not a list) would otherwise silently resolve to the
-    # first character "B" — reject it as a config error instead.
-    bad = tmp_path / "coins.yaml"
-    bad.write_text("coins: BTC\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="'coins' must be a list"):
+@pytest.mark.parametrize(
+    "text",
+    [
+        'engine:\n  structured_output: "false"\n',  # quoted string — truthy!
+        "engine:\n  structured_output: 1\n",
+        "engine:\n  structured_output: [true]\n",
+    ],
+)
+def test_load_config_rejects_non_bool_structured_output(tmp_path, text):
+    # A quoted "false" parses as a truthy string: it would ride through
+    # _build_engine_config untouched and silently re-enable structured output —
+    # the exact all-cycles-invalid_output incident the key exists to prevent.
+    bad = tmp_path / "structured.yaml"
+    bad.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="engine.structured_output"):
+        load_config(bad)
+
+
+def test_load_config_accepts_bool_structured_output(tmp_path):
+    good = tmp_path / "structured-ok.yaml"
+    good.write_text("engine:\n  structured_output: true\n", encoding="utf-8")
+    assert load_config(good)["engine"]["structured_output"] is True
+
+
+def test_load_config_accepts_list_selected_analysts(tmp_path):
+    good = tmp_path / "analysts-ok.yaml"
+    good.write_text("engine:\n  selected_analysts: [market, news]\n", encoding="utf-8")
+    assert load_config(good)["engine"]["selected_analysts"] == ["market", "news"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "indicators: [rsi14]\n",  # typo'd name — the classic
+        "indicators: [rsi_14, atr14]\n",  # one good, one typo'd
+        "indicators: [5]\n",  # non-string junk
+        "indicators: [[rsi_14]]\n",  # unhashable junk must not TypeError
+        # Typo on an otherwise-legal config (regime trio complete): the
+        # unknown-name check must fire on its own, not only on configs the
+        # regime-trio check would also reject.
+        "indicators: [atr_14, ema_20, ema_50, macd2]\n",
+    ],
+)
+def test_load_config_rejects_unknown_indicator_names(tmp_path, text):
+    # List shape alone lets a typo'd element load as a permanently-None
+    # indicator that every context guard skips (unknown names zero the warm-up
+    # threshold and are filtered out of the all-dead guard) — reject unknown
+    # names at load instead, naming the offender and the supported set.
+    bad = tmp_path / "inds.yaml"
+    bad.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="unknown indicator name"):
+        load_config(bad)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "indicators: [rsi_14, ema_20, ema_50, atr_14]\n",
+            ["rsi_14", "ema_20", "ema_50", "atr_14"],
+        ),
+        # The three regime names alone are a legal minimal set.
+        ("indicators: [atr_14, ema_20, ema_50]\n", ["atr_14", "ema_20", "ema_50"]),
+        # An explicit empty list is a deliberate "no indicators" choice
+        # (_indicator_names honours it); element validation must not reject it.
+        ("indicators: []\n", []),
+    ],
+)
+def test_load_config_accepts_valid_indicators(tmp_path, text, expected):
+    good = tmp_path / "inds.yaml"
+    good.write_text(text, encoding="utf-8")
+    assert load_config(good)["indicators"] == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "missing"),
+    [
+        # Each regime name individually absent — the error names the offender.
+        ("indicators: [rsi_14, ema_20, ema_50]\n", "'atr_14'"),
+        ("indicators: [rsi_14, ema_50, atr_14]\n", "'ema_20'"),
+        ("indicators: [rsi_14, ema_20, atr_14]\n", "'ema_50'"),
+        # Multiple absent: every missing name lands in one message.
+        ("indicators: [rsi_14, atr_14]\n", "'ema_20', 'ema_50'"),
+        ("indicators: [macd]\n", "'atr_14', 'ema_20', 'ema_50'"),
+    ],
+)
+def test_load_config_rejects_indicators_missing_regime_names(tmp_path, text, missing):
+    # A non-empty list missing ANY of atr_14/ema_20/ema_50 can never trade:
+    # classify_regime silently defaults to RANGING without all three, so the
+    # regime guard refuses every cycle — fail at load, not as an endless
+    # daemon retry ladder.
+    bad = tmp_path / "no-regime.yaml"
+    bad.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match=f"'indicators' must include {missing}"):
+        load_config(bad)
+
+
+@pytest.mark.parametrize(
+    ("text", "key"),
+    [
+        ("coins: BTC\n", "coins"),
+        ("indicators: rsi_14\n", "indicators"),
+        # Nested twin: list() in _build_engine_config would explode a bare
+        # string into per-character bogus analyst keys that only detonate
+        # deep inside build_graph (in the daemon: an endless retry ladder).
+        ("engine:\n  selected_analysts: market\n", "engine.selected_analysts"),
+    ],
+)
+def test_load_config_rejects_non_list_container(tmp_path, text, key):
+    # A scalar would silently resolve to per-character values downstream
+    # (`"BTC"[0]`; per-character indicator names that zero the warm-up gate) —
+    # reject it as a config error instead.
+    bad = tmp_path / f"{key}.yaml"
+    bad.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match=f"'{key}' must be a list"):
         load_config(bad)
 
 

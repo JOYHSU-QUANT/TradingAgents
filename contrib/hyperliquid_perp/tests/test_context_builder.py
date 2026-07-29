@@ -14,6 +14,7 @@ from contrib.hyperliquid_perp.domains.perp.context_builder import (
     classify_regime,
     funding_zscore,
 )
+from contrib.hyperliquid_perp.domains.perp.indicator_vocab import REGIME_INDICATORS
 from contrib.hyperliquid_perp.domains.perp.schema import FundingPoint
 from contrib.hyperliquid_perp.exchanges.hyperliquid import mapper
 
@@ -130,6 +131,23 @@ def test_classify_regime_trending_up():
 def test_classify_regime_defaults_ranging_when_missing():
     out = classify_regime({"atr_14": None, "ema_20": None, "ema_50": None}, Decimal("60000"))
     assert out == "ranging"
+
+
+@pytest.mark.parametrize("dead", REGIME_INDICATORS)
+def test_classify_regime_forces_ranging_when_any_regime_indicator_dead(dead):
+    # Drift lock for REGIME_INDICATORS (the loader/pre-LLM-guard tuple): None-ing
+    # any single member forces RANGING no matter how volatile the others look.
+    # If classify_regime ever reads a different indicator set, this and the
+    # non-member test below fail — update the tuple with it.
+    ind = {"atr_14": 3000.0, "ema_20": 60000.0, "ema_50": 60000.0, dead: None}
+    assert classify_regime(ind, Decimal("60000")) == "ranging"
+
+
+def test_classify_regime_ignores_non_regime_indicators():
+    # The complement of the drift lock: a dead non-member must not affect the
+    # classification — the same volatile-shaped trio still reads VOLATILE.
+    ind = {"atr_14": 3000.0, "ema_20": 60000.0, "ema_50": 60000.0, "rsi_14": None}
+    assert classify_regime(ind, Decimal("60000")) == "volatile"
 
 
 def test_classify_regime_trending_down():

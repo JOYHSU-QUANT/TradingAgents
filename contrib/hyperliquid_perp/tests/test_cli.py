@@ -60,6 +60,10 @@ def _perp_ctx(as_of: datetime, coin: str = "BTC") -> PerpMarketContext:
         funding_zscore_30d=None,
         funding_window_days=30,
         funding_sample_count=0,
+        # A healthy indicator set: build_input now applies the shared
+        # _context_refusal_error guards, and a context without a usable atr_14
+        # is (correctly) refused before it reaches the code under test.
+        indicators={"rsi_14": 55.0, "ema_20": 50000.0, "ema_50": 49000.0, "atr_14": 1200.0},
     )
 
 
@@ -143,6 +147,77 @@ def test_build_input_payload_write_failure_rides_retry_ladder(tmp_path, monkeypa
         provider.build_input(coin="BTC", as_of=as_of)
     assert exc_info.value.error_type == "server_error"
     assert "payload write failed" in exc_info.value.message
+
+
+@pytest.mark.parametrize(
+    ("candle_count", "indicators", "expected_msg"),
+    [
+        # Under-warmed feed: candle_count 100 sits below the monkeypatched
+        # threshold (150) but above the default indicator set's 50, so the
+        # daemon's build_input must both ride the one-shot path's warm-up
+        # guard and actually consult _warmup_threshold(config) — a guard
+        # falling back to a hardcoded/default threshold clears 100 and
+        # reports a different refusal. Keys present with all-None values
+        # (compute_indicators' real under-warm output): the shape also
+        # satisfies the dead-set/regime guards, so a guard-order swap would
+        # surface their messages instead and fail this case.
+        (
+            100,
+            {"rsi_14": None, "ema_20": None, "ema_50": None, "atr_14": None},
+            "under-warmed",
+        ),
+        # Fully-dead known-indicator set (stockstats broken): must become an
+        # api_failed cycle (no AI spend), not a prompt asserting a
+        # fabricated-calm RANGING regime every 4h.
+        (
+            200,
+            {"rsi_14": None, "ema_20": None, "ema_50": None, "atr_14": None},
+            "every technical indicator failed",
+        ),
+        # atr_14 absent (dropped from `indicators:` on a pre-upgrade config):
+        # classify_regime would silently default to RANGING, hiding a volatile
+        # market.
+        (
+            200,
+            {"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0},
+            "atr_14 is unavailable",
+        ),
+        # A dead EMA is just as regime-critical: RANGING would also hide a
+        # trending market.
+        (
+            200,
+            {"rsi_14": 55.0, "ema_20": None, "ema_50": 59000.0, "atr_14": 250.0},
+            "ema_20 is unavailable",
+        ),
+    ],
+)
+def test_build_input_refuses_untradeable_indicators(
+    monkeypatch, candle_count, indicators, expected_msg
+):
+    # The daemon shares the one-shot path's pre-LLM context guards (see
+    # main._context_refusal_error) and rides them down the retry ladder.
+    from types import SimpleNamespace
+
+    import contrib.hyperliquid_perp.main as main_mod
+    from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
+    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
+
+    # Threshold monkeypatched to 150 — a value the default indicator set's 50
+    # can't mimic: candle_count 200 clears the warm-up gate, 100 exercises it
+    # only if the guard really reads _warmup_threshold(config).
+    ctx = SimpleNamespace(candle_count=candle_count, indicators=indicators)
+    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, None))
+    monkeypatch.setattr(main_mod, "_warmup_threshold", lambda config: 150)
+
+    # Only _config is needed: the guard fires before the risk/decision/payload
+    # attributes are ever read.
+    provider = object.__new__(_EngineDecisionProvider)
+    provider._config = {}
+
+    with pytest.raises(RetryableDecisionError) as exc_info:
+        provider.build_input(coin="BTC", as_of=datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc))
+    assert exc_info.value.error_type == "server_error"
+    assert expected_msg in exc_info.value.message
 
 
 def test_validate_exit_codes(tmp_path, capsys):

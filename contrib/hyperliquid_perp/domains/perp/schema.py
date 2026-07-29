@@ -82,6 +82,15 @@ class Candle:
                 f"Candle OHLC ordering violated: low={self.low} open={self.open} "
                 f"high={self.high} close={self.close} (need low <= open,close <= high)"
             )
+        # Strictly positive, like MarketSnapshot's prices: a zero/negative close is
+        # classify_regime's silent price <= 0 -> RANGING branch, and a zero bar
+        # anywhere poisons the EMA/ATR series feeding it. The ordering check above
+        # makes ``low`` the minimum, so one comparison covers all four prices.
+        if self.low <= 0:
+            raise ValueError(
+                f"Candle prices must be > 0, got low={self.low} (open={self.open} "
+                f"high={self.high} close={self.close})"
+            )
         if self.volume < 0:
             raise ValueError(f"Candle volume must be >= 0, got {self.volume}")
 

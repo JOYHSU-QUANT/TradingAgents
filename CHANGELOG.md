@@ -33,6 +33,86 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **Perp runs no longer lose the target-JSON contract to structured output.**
+  The Hyperliquid Phase 2 target contract is injected as prompt text and only
+  survives in the decision agents' free-text answers; with a model whose
+  `with_structured_output` succeeds, the Portfolio Manager's rendered markdown
+  carried no JSON and every paper cycle fail-closed as `invalid_output`. A new
+  `structured_output` engine config key (default `True`) forces the free-text
+  path for the gated agents when `False` (Portfolio Manager, Research
+  Manager, Trader; the Sentiment Analyst is exempt), and
+  `contrib/hyperliquid_perp` defaults it to `False`, keeping
+  `engine.structured_output: true` as an explicit escape hatch. The perp
+  config loader rejects non-bool values for the key at load time (a quoted
+  `"false"` would otherwise read truthy and silently re-enable structured
+  output). On the library side a `structured_output` stored as `None` counts
+  as unset (default on) rather than a falsy "off"; the perp overlay maps
+  unset to `False`. Arming the escape hatch is loud:
+  the perp engine-config build warns on both channels (log + stderr) when the
+  effective value is `true`, since every cycle would otherwise fail-close with
+  only the *absence* of the gate-off INFO lines as a trace.
+- **A non-bool `structured_output` also fails loud at agent construction.**
+  The library-side gate previously folded any non-`None` value through
+  truthiness: a quoted `"false"` injected by an embedding caller that does not
+  go through the perp loader would silently keep structured output enabled —
+  the exact inversion the loader check exists to prevent. `bind_structured`
+  now raises `ValueError` for non-bool non-`None` values, mirroring the
+  loader's `bool_from_yaml` contract at the gate every config-gated caller
+  passes (exempt agents never read the key).
+- **Perp config loader rejects a scalar `indicators:` value.** Same hazard
+  class as `coins: BTC`: `indicators: rsi_14` would `list()`-explode into
+  per-character names, collapsing the warm-up threshold to 0 and emptying the
+  all-dead-indicator guard, so the daemon would reason over an all-`None`
+  indicator block forever.
+- **Perp config loader validates `indicators:` element names.** List shape
+  alone still let a typo'd name (`rsi14`) load as a permanently-`None`
+  indicator: an unknown name contributes 0 to the warm-up threshold and the
+  all-dead guard's known-names filter excludes it, so every guard passed and
+  the LLM context carried a dead row forever. Unknown names are now rejected
+  at load, naming the offender and the supported set.
+- **Perp config loader rejects a scalar `engine.selected_analysts`.** A bare
+  string (`selected_analysts: market`) would `list()`-explode per-character
+  into bogus analyst keys that only detonate deep inside `build_graph` — in
+  the daemon, an endless retry ladder on a pure config typo, never a named
+  config error.
+- **A non-empty `indicators:` list must include `atr_14`, `ema_20` and
+  `ema_50`.** Such a config can never trade — `classify_regime` fabricates a
+  calm RANGING when *any* of the three is missing (a live ATR with dead EMAs
+  hid a trending market just as silently as a dead ATR hid a volatile one) —
+  and now fails at load instead of leaving the daemon in an endless 4-hourly
+  `api_failed` ladder. The trio lives in one `REGIME_INDICATORS` tuple shared
+  by the loader and the runtime guard so the two rules cannot drift. An
+  explicit empty list keeps its documented "no indicators" meaning.
+- **The paper/live daemon now applies the one-shot path's indicator guards.**
+  A fully-dead known-indicator set (broken stockstats) or missing/dead regime
+  indicators made `classify_regime` silently report a fabricated-calm RANGING
+  regime; the one-shot path refused loudly (exit 1) but the daemon's
+  `build_input` traded on it. All three pre-LLM context guards (warm-up,
+  dead set, missing/dead `atr_14`/`ema_20`/`ema_50`) now live in one ordered
+  shared helper (`main._context_refusal_error`) and the daemon rides them down
+  the reviewed retry ladder as recurring `api_failed` cycles — no AI spend —
+  until the indicator engine or `indicators:` config is fixed.
+- **`--context-only` renders the full refusal diagnosis and exits 4 on a
+  degraded context.** The diagnostic loop warned on under-warm only; a
+  fully-dead indicator set or dead/missing regime indicators rendered as a
+  clean-looking context (fabricated-calm RANGING) — precisely where an
+  operator investigating a RUNBOOK refusal would look. It now runs the same
+  shared guard as the trading paths, warns on both channels while still
+  rendering, and exits 4 (the repo's probe convention: command succeeded,
+  state degraded) instead of 0, so a keyless deploy preflight can gate on the
+  exit code rather than parsing stderr.
+- **A zero-price candle can no longer silently force the RANGING regime.**
+  `Candle` accepted a `0/0/0/0` bar (OHLC ordering holds vacuously), and a
+  zero close flowed into `classify_regime`'s `price <= 0` branch — the same
+  silent-RANGING failure mode as a dead indicator, with no guard covering it.
+  `Candle` now requires strictly positive prices (parity with
+  `MarketSnapshot`), so a broken-feed zero bar is dropped per-bar by
+  `map_candles` like any other malformed bar instead of poisoning the
+  EMA/ATR series and the regime.
+- **`max_recur_limit: None` no longer silently shrinks the recursion budget.**
+  A stored `None` survived `.get("max_recur_limit", 100)`, was dropped by
+  langchain's `ensure_config`, and left LangGraph running at its own default
+  (25) instead of the documented 100; `None` now means "unset, use 100".
 - **Alpha Vantage fundamentals look-ahead guard now takes effect.**
   `get_balance_sheet` / `get_cashflow` / `get_income_statement` drop fiscal
   reports dated after `curr_date`; the filter previously ran against the API's

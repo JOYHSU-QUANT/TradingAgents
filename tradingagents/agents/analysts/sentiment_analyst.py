@@ -55,7 +55,9 @@ def create_sentiment_analyst(llm):
     report via structured output (with a free-text fallback for providers
     that do not support it).
     """
-    structured_llm = bind_structured(llm, SentimentReport, "Sentiment Analyst")
+    # Ungated: no injected output contract to preserve here — see
+    # bind_structured()'s docstring.
+    structured_llm = bind_structured(llm, SentimentReport, "Sentiment Analyst", config_gated=False)
 
     def sentiment_analyst_node(state):
         ticker = state["company_of_interest"]
@@ -196,6 +198,7 @@ def create_social_media_analyst(llm):
         Import :func:`create_sentiment_analyst` directly instead.
     """
     import warnings
+
     warnings.warn(
         "create_social_media_analyst is deprecated and will be removed in a "
         "future version. Use create_sentiment_analyst instead.",

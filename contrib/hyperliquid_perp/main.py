@@ -35,7 +35,11 @@ from .config import (
 )
 from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context
-from .domains.perp.indicators import required_candles, supported_indicators
+from .domains.perp.indicator_vocab import (
+    REGIME_INDICATORS,
+    required_candles,
+    supported_indicators,
+)
 from .domains.perp.prompt_context import render_market_context
 from .domains.perp.schema import PerpMarketContext, PerpPosition
 from .domains.perp.target_decision import (
@@ -52,7 +56,10 @@ from .paper.config import PaperTradingConfig
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_INDICATORS = ["rsi_14", "ema_20", "ema_50", "atr_14", "macd"]
+# The default set is "everything the engine supports" by construction — a
+# hand-kept literal here would drift silently past the loader's vocabulary
+# check (which only sees operator-written lists, never this default).
+_DEFAULT_INDICATORS = supported_indicators()
 _DEFAULT_ANALYSTS = ["market", "social", "news"]
 
 
@@ -75,7 +82,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--context-only",
         action="store_true",
-        help="Build & print PerpMarketContext only; skip the engine (no API key needed).",
+        help=(
+            "Build & print PerpMarketContext only; skip the engine (no API key "
+            "needed). Exits 4 when the rendered context is one the engine "
+            "would refuse (degraded state), so a preflight can gate on it."
+        ),
     )
     parser.add_argument(
         "--coin",
@@ -121,12 +132,65 @@ def _indicator_names(config: dict) -> list[str]:
 
 
 def _warmup_threshold(config: dict) -> int:
-    """Candles the configured indicators need before they read as real signal.
-
-    Single source of truth for the under-warmed-data check, shared by the engine
-    path (hard abort) and ``--context-only`` (warn) so a future caller can't drift.
-    """
+    """Candles the configured indicators need before they read as real signal."""
     return required_candles(_indicator_names(config))
+
+
+def _context_refusal_error(ctx: PerpMarketContext, coin: str, config: dict) -> str | None:
+    """Why this context must not be traded on, or ``None`` if usable.
+
+    Single source of truth for the three pre-LLM context guards — warm-up,
+    fully-dead indicator set, missing/dead regime indicators
+    (atr_14/ema_20/ema_50), in that order: an
+    under-warmed context legitimately has all-None indicators, so the dead-set
+    diagnosis only means "the indicator engine broke" once the warm-up bar is
+    cleared. Shared by the one-shot path (print + exit 1), the daemon
+    provider (retry-ladder ``server_error`` -> api_failed cycle), and
+    ``--context-only`` (render + warn) so the entry points can't drift apart —
+    the daemon missing guards the one-shot had is exactly the drift this
+    helper exists to prevent.
+    """
+    # Refuse to reason over under-warmed data: if fewer candles came back than
+    # the configured indicators need, every indicator is None and the regime is
+    # a guess — refuse before spending an LLM call on a hollow context.
+    needed = _warmup_threshold(config)
+    if ctx.candle_count < needed:
+        return (
+            f"only {ctx.candle_count} candles available for {coin}, but the "
+            f"configured indicators need {needed}. Refusing to run the engine on "
+            "under-warmed market data."
+        )
+    # Past the warm-up gate every configured indicator has enough candles, so a
+    # fully-None known-indicator set is not under-warm — it means the indicator
+    # engine (stockstats) failed on every column (version drift, bad frame). That
+    # set is indistinguishable from a warm-up dict downstream: the regime silently
+    # defaults to RANGING. Refuse it before spending an LLM call on signals that
+    # are all dead.
+    known = set(supported_indicators())
+    computed = [v for k, v in ctx.indicators.items() if k in known]
+    if computed and all(v is None for v in computed):
+        return (
+            f"every technical indicator failed to compute for {coin} despite "
+            f"{ctx.candle_count} candles — the indicator engine (stockstats) is likely "
+            "broken or incompatible. Refusing to run the engine on a fully-dead "
+            "indicator set."
+        )
+    # The regime trio (see REGIME_INDICATORS for why they are load-bearing):
+    # refuse whether a name was dropped from the configured indicator set
+    # entirely or computed to None (stockstats failing on that column past the
+    # warm-up gate — dead columns slipping past the all-dead guard above);
+    # either way, do not trade on a fabricated-calm regime.
+    dead = [name for name in REGIME_INDICATORS if ctx.indicators.get(name) is None]
+    if dead:
+        verb = "is" if len(dead) == 1 else "are"
+        return (
+            f"{', '.join(dead)} {verb} unavailable for {coin} (not in the "
+            f"configured indicator set, or failed to compute despite "
+            f"{ctx.candle_count} candles) — the regime would silently default "
+            "to RANGING, hiding a volatile or trending market. Refusing to run "
+            "the engine without usable regime indicators."
+        )
+    return None
 
 
 def _load_risk_decision(config: dict) -> tuple[risk_gate.RiskConfig, DecisionConfig] | None:
@@ -233,7 +297,14 @@ def _load_position(
 
 
 def run_context_only(config: dict, coin: str) -> int:
-    """Build and print the market context for ``coin``."""
+    """Build and print the market context for ``coin``.
+
+    Exit codes follow the repo's probe convention (validate 0/1/4,
+    ``safe-mode --status`` 0/4): 0 = healthy context, 1 = config error,
+    4 = the command succeeded but the rendered context is one the engine
+    would refuse — so a keyless deploy preflight can gate on the code
+    instead of parsing stderr.
+    """
     # The parsed configs aren't consumed here — the validation runs purely for
     # its named exit-1 side effect, before any network fetch (see the docstring
     # for why the smoke run validates at all).
@@ -247,21 +318,17 @@ def run_context_only(config: dict, coin: str) -> int:
     print(render_market_context(ctx))
     print("=" * 64)
 
-    # --context-only is a keyless diagnostic loop, so we render rather than abort —
-    # but an under-warmed context has every indicator at None and a default-"ranging"
-    # regime that *looks* like real data. Warn loudly so the degraded block above is
-    # not mistaken for a live signal (run_engine hard-aborts on the same condition).
-    needed = _warmup_threshold(config)
-    if ctx.candle_count < needed:
+    # Keyless diagnostic loop: render rather than abort, but warn with the same
+    # shared guard the trading paths refuse on — a refused context *looks* like
+    # real data (plausible default-"ranging" regime).
+    refusal = _context_refusal_error(ctx, coin, config)
+    if refusal is not None:
         _warn_dual(
-            "under-warmed context for %s: %d candles available, indicators need %d",
-            coin,
-            ctx.candle_count,
-            needed,
+            "degraded context: %s",
+            refusal,
             stderr=(
-                f"warning: only {ctx.candle_count} candles available for {coin}, but the "
-                f"configured indicators need {needed}. The indicators and regime above are "
-                "under-warmed (degraded) — do not read them as live signal."
+                f"warning: {refusal} The context above is rendered for "
+                "diagnosis only — do not read it as live signal."
             ),
         )
 
@@ -278,7 +345,9 @@ def run_context_only(config: dict, coin: str) -> int:
                 f"\nCurrent position: {side} {abs(position.size)} {coin} "
                 f"@ {position.entry_price} (uPnL {position.unrealized_pnl})"
             )
-    return 0
+    # After the full render + optional position block, so the diagnostic output
+    # is never truncated by the degraded verdict.
+    return 4 if refusal is not None else 0
 
 
 class EngineImportError(RuntimeError):
@@ -294,7 +363,8 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     """Overlay the perp ``engine`` block onto the engine's DEFAULT_CONFIG.
 
     ``backend_url`` stays ``None`` so the OpenRouter client uses its own default
-    endpoint (``https://openrouter.ai/api/v1``).
+    endpoint (``https://openrouter.ai/api/v1``). ``structured_output`` defaults
+    to ``False`` here (the engine default is on) — see RUNBOOK §7.
     """
     try:
         from tradingagents.default_config import DEFAULT_CONFIG
@@ -334,6 +404,29 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
         eng_cfg.get("quick_think_llm") or engine_config["quick_think_llm"]
     )
     engine_config["backend_url"] = None
+    # Perp runs default structured output OFF (the engine default is on): the
+    # Phase 2 target JSON contract is injected as prompt text and can only
+    # survive in the gated agents' free-text answers — a *successful*
+    # structured call renders only the schema's own fields, silently dropping
+    # the contract and fail-closing every cycle as invalid_output (this is how
+    # the 2026-07-27 model swap broke paper-BTC). ``engine.structured_output:
+    # true`` stays available as an explicit escape hatch, e.g. once the
+    # contract is carried by the structured schema itself. The raw passthrough
+    # is type-safe: load_config already rejected any non-bool value.
+    raw_structured = eng_cfg.get("structured_output")
+    engine_config["structured_output"] = raw_structured if raw_structured is not None else False
+    if engine_config["structured_output"]:
+        # The armed escape hatch must be loud: until the structured schema
+        # carries the contract, this setting fail-closes every cycle, and the
+        # only other trace is the *absence* of the gate-off INFO lines. One
+        # sentence drives both channels so they (and the RUNBOOK §7 search
+        # anchor) can't drift apart.
+        msg = (
+            "engine.structured_output: true — the Phase 2 target JSON does "
+            "not survive the structured render; expect invalid_output every "
+            "cycle unless the schema carries the contract"
+        )
+        _warn_dual(msg, stderr=f"warning: {msg}")
     # ``is not None`` (not ``or``) so an explicit empty list is preserved as a
     # deliberate "no analysts" choice rather than silently replaced by the default
     # — matches the _indicator_names pattern above. A blank YAML value (None) still
@@ -353,50 +446,12 @@ def run_engine(config: dict, coin: str) -> int:
         )
 
     ctx, client = _build_context(config, coin)
-    # Refuse to reason over under-warmed data: if fewer candles came back than the
-    # configured indicators need, every indicator is None and the regime is a guess
-    # — abort here, before spending an LLM call on a hollow context.
-    needed = _warmup_threshold(config)
-    if ctx.candle_count < needed:
-        print(
-            f"error: only {ctx.candle_count} candles available for {coin}, but the "
-            f"configured indicators need {needed}. Refusing to run the engine on "
-            "under-warmed market data.",
-            file=sys.stderr,
-        )
-        return 1
-    # Past the warm-up gate every configured indicator has enough candles, so a
-    # fully-None known-indicator set is not under-warm — it means the indicator
-    # engine (stockstats) failed on every column (version drift, bad frame). That
-    # set is indistinguishable from a warm-up dict downstream: the regime silently
-    # defaults to RANGING. Refuse it the same way, before spending an LLM call on
-    # signals that are all dead.
-    _known = set(supported_indicators())
-    _computed = [v for k, v in ctx.indicators.items() if k in _known]
-    if _computed and all(v is None for v in _computed):
-        print(
-            f"error: every technical indicator failed to compute for {coin} despite "
-            f"{ctx.candle_count} candles — the indicator engine (stockstats) is likely "
-            "broken or incompatible. Refusing to run the engine on a fully-dead "
-            "indicator set.",
-            file=sys.stderr,
-        )
-        return 1
-    # atr_14 is load-bearing beyond being "one missing number": classify_regime
-    # falls back to RANGING (hiding a volatile market) when it is absent, so the
-    # regime this engine trades on is only trustworthy with a usable ATR. Refuse
-    # whether atr_14 was dropped from the configured indicator set entirely or
-    # computed to None (stockstats failing on that column past the warm-up gate —
-    # a single dead indicator slipping past the all-dead guard above); either way,
-    # do not trade on a fabricated-calm regime.
-    if ctx.indicators.get("atr_14") is None:
-        print(
-            f"error: atr_14 is unavailable for {coin} (not in the configured "
-            f"indicator set, or it failed to compute despite {ctx.candle_count} "
-            "candles) — the regime would silently default to RANGING, hiding a "
-            "volatile market. Refusing to run the engine without a usable ATR.",
-            file=sys.stderr,
-        )
+    # All three pre-LLM context guards (warm-up, fully-dead indicator set,
+    # missing/dead regime indicators) live in _context_refusal_error, shared
+    # with the daemon provider.
+    refusal = _context_refusal_error(ctx, coin, config)
+    if refusal is not None:
+        print(f"error: {refusal}", file=sys.stderr)
         return 1
     ctx_text = render_market_context(ctx)
     # A configured-wallet lookup that fails leaves the real exposure unknown. Refuse

@@ -34,7 +34,7 @@ extension points 負責把 perp 資料送*進去*、把引擎的決策讀*出來
 | `.resolve_instrument_context(ticker, asset_type) -> str` | 建立注入每個 agent 的 per-instrument context 字串。 | **Override 點**——附加 perp snapshot。 |
 | `._create_tool_nodes() -> dict[str, ToolNode]` | 註冊每個 analyst 可呼叫的 tools。 | **可選 override**——加即時 HL tool（不在 Phase 3 第一版範圍，見 phase3-spec §25）。 |
 | `.propagate(company_name, trade_date, asset_type) -> (final_state, signal)` | 跑整個 graph。 | 以 `asset_type="crypto"` 呼叫。 |
-| `final_state["final_trade_decision"]` | 渲染後的 `PortfolioDecision` markdown（`**Rating**: …`）；注入 output-format 契約後結尾帶 structured target JSON。 | `parse_target_decision` 的輸入。 |
+| `final_state["final_trade_decision"]` | PM 的自由文字決策（注入 output-format 契約後結尾帶 structured target JSON）。**契約只在 free-text 路徑存活**：structured output 成功時輸出是 `render_pm_decision` 的固定欄位 markdown、天生不含 JSON，故 perp 端 `_build_engine_config` 預設 `structured_output: false` 強制 free-text。 | `parse_target_decision` 的輸入。 |
 | `final_state["trader_investment_plan"]` | 渲染後的 `TraderProposal`（`action`、`entry_price`、`stop_loss`、`position_sizing`）。 | Phase 2 不再讀取（Phase 1 adapter 的價格水位輸入，已退役）。 |
 | `PortfolioDecision` | `rating`（Buy/Overweight/Hold/Underweight/Sell）、`executive_summary`、`investment_thesis`、`price_target`、`time_horizon`。 | Phase 2 不再直接消費（Phase 1 `intent`/`rationale` 來源，已退役）；rationale 現由 target JSON 自帶。 |
 | `signal`（第二個回傳值） | `parse_rating(...)` → 5 tiers 之一。 | Phase 2 不再使用（Phase 1 便利用途，已退役）。 |

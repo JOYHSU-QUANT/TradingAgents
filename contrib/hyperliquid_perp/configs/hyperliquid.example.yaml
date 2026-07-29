@@ -14,13 +14,21 @@ market_data:
   candle_lookback: 200             # candles for indicator warm-up
   funding_zscore_window_days: 30
 
-indicators: [rsi_14, ema_20, ema_50, atr_14, macd]   # computed by context_builder
+indicators: [rsi_14, ema_20, ema_50, atr_14, macd]   # computed by context_builder; unknown names rejected at config load; a non-empty list must include atr_14, ema_20 and ema_50 (the regime classifier needs all three)
 
 engine:
   llm_provider: openrouter
   deep_think_llm: "anthropic/claude-sonnet-4-6"
   quick_think_llm: "deepseek/deepseek-chat"
   selected_analysts: [market, social, news]
+  # Deep-think structured output is OFF by default for perp runs — the Phase 2
+  # target JSON must survive in final_trade_decision free text; a schema render
+  # drops it and every cycle fail-closes as invalid_output (RUNBOOK §7). Only
+  # set true once the contract is carried by the structured schema itself
+  # (true is loud: the engine-config build warns on log + stderr).
+  # The value must be a bare YAML bool (true/false, no quotes) — a quoted
+  # "false" is not a bool and is rejected at config load.
+  # structured_output: false
 
 # Phase 2 structured target contract (phase2-spec.md §2). The Phase 1 rating
 # adapter block is retired — the engine now outputs the structured JSON target

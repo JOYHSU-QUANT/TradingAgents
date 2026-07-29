@@ -13,6 +13,9 @@ from typing import Any
 
 import yaml
 
+from .domains.perp.config_coercion import bool_from_yaml
+from .domains.perp.indicator_vocab import REGIME_INDICATORS, supported_indicators
+
 _CONFIG_DIR = Path(__file__).parent / "configs"
 _LOCAL = _CONFIG_DIR / "hyperliquid.local.yaml"
 _EXAMPLE = _CONFIG_DIR / "hyperliquid.example.yaml"
@@ -208,9 +211,44 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         val = config.get(key)
         if val is not None and not isinstance(val, dict):
             raise ValueError(f"{key!r} must be a mapping, got {val!r}")
-    coins = config.get("coins")
-    if coins is not None and not isinstance(coins, list):
-        raise ValueError(f"'coins' must be a list, got {coins!r}")
+    # A scalar here would silently resolve to per-character values downstream
+    # (``coins: BTC`` → "B"; ``indicators: rsi_14`` → six unknown names, which
+    # zeroes the warm-up threshold and empties the all-dead-indicator guard).
+    for key in ("coins", "indicators"):
+        val = config.get(key)
+        if val is not None and not isinstance(val, list):
+            raise ValueError(f"{key!r} must be a list, got {val!r}")
+    # List shape alone still lets a typo'd element through (``rsi14``): an
+    # unknown name computes to a permanent None that every context guard skips
+    # (it zeroes its share of the warm-up threshold, and the all-dead guard's
+    # known-names filter excludes it). The vocabulary is closed, so reject
+    # unknown names here; ``coins`` has no local vocabulary — a bogus symbol
+    # fails loud at the first exchange call instead. List membership (not a
+    # set) on purpose: unhashable junk (``indicators: [[rsi_14]]``) must land
+    # in the error message, not raise a bare TypeError.
+    inds = config.get("indicators")
+    if inds:
+        known = supported_indicators()
+        unknown_inds = [name for name in inds if name not in known]
+        if unknown_inds:
+            raise ValueError(
+                f"'indicators' contains unknown indicator name(s): "
+                f"{', '.join(map(repr, unknown_inds))}. "
+                f"Supported: {', '.join(known)}"
+            )
+        # A non-empty list missing any of the regime trio (see REGIME_INDICATORS
+        # for why they are load-bearing) can never trade — the runtime guard
+        # refuses every cycle — so fail here, not as an endless daemon retry
+        # ladder. An explicit empty list keeps its documented "no indicators"
+        # meaning (the ``if inds:`` above skips it).
+        missing = [name for name in REGIME_INDICATORS if name not in inds]
+        if missing:
+            raise ValueError(
+                f"'indicators' must include {', '.join(map(repr, missing))} — "
+                f"the regime classifier needs a usable "
+                f"{', '.join(REGIME_INDICATORS)}, and every engine cycle is "
+                "refused without them"
+            )
     # These three values are consumed by the Phase-1 client deep inside the run
     # (sdk_client from_config/__init__, wallet_address()); a bad value there
     # surfaces as an exit-2 traceback instead of a named config error. Validate
@@ -234,6 +272,27 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     addr = config.get("wallet_address")
     if addr is not None and not isinstance(addr, str):
         raise ValueError(f"'wallet_address' must be a string, got {addr!r}")
+    # The engine: block's string keys stay lenient (``or`` fallbacks in
+    # main._build_engine_config); these are its two deliberate exceptions.
+    eng = config.get("engine")
+    if eng is not None:
+        # Its one *bool* key: a quoted "false" would read truthy and silently
+        # re-enable structured output (RUNBOOK §7). Validates only — no
+        # write-back needed.
+        if eng.get("structured_output") is not None:
+            try:
+                bool_from_yaml(eng["structured_output"])
+            except ValueError as exc:
+                raise ValueError(f"config key 'engine.structured_output': {exc}") from None
+        # Its one *list* key: a bare string would be ``list()``-exploded
+        # per-character by _build_engine_config into bogus analyst keys that
+        # only detonate deep inside build_graph (in the daemon: an endless
+        # retry ladder on a pure typo). Elements are not vocabulary-checked —
+        # the analyst name set lives in the tradingagents package, which a
+        # bare config load must not import.
+        analysts = eng.get("selected_analysts")
+        if analysts is not None and not isinstance(analysts, list):
+            raise ValueError(f"'engine.selected_analysts' must be a list, got {analysts!r}")
     # A present live: block is deep-validated on EVERY load, not just by the
     # live subcommand: a staged-but-broken block (deploy workflow: edit config,
     # restart under systemd) would otherwise ride along with paper for days and

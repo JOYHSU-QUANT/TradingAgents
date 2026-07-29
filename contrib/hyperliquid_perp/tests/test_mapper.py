@@ -258,6 +258,54 @@ def test_candles_negative_volume_dropped(caplog):
     assert len(candles) == 1
 
 
+def test_candle_invariant_rejects_zero_price():
+    # Prices must be strictly positive (parity with MarketSnapshot): a zero close
+    # is classify_regime's silent price <= 0 -> RANGING branch, and a zero bar
+    # anywhere poisons the EMA/ATR series feeding it.
+    with pytest.raises(ValueError, match="prices must be > 0"):
+        Candle(
+            open_time=1000,
+            close_time=1999,
+            open=Decimal("0"),
+            high=Decimal("0"),
+            low=Decimal("0"),
+            close=Decimal("0"),
+            volume=Decimal("1"),
+        )
+
+
+def test_candle_invariant_rejects_low_only_zero_price():
+    # Ordering-legal candle where only ``low`` is non-positive: the all-zero
+    # fixture above fires no matter which price field the check reads, so only
+    # this case pins the check to ``low`` (the minimum under OHLC ordering,
+    # which is what lets one comparison cover all four prices).
+    with pytest.raises(ValueError, match="prices must be > 0"):
+        Candle(
+            open_time=1000,
+            close_time=1999,
+            open=Decimal("1"),
+            high=Decimal("2"),
+            low=Decimal("0"),
+            close=Decimal("1.5"),
+            volume=Decimal("1"),
+        )
+
+
+def test_candles_zero_price_bar_dropped(caplog):
+    # A zero-price bar from a broken feed is dropped like any other malformed
+    # bar — before this guard it sailed through OHLC ordering (0 <= 0 <= 0) and
+    # silently forced the regime to RANGING via classify_regime's price check.
+    raw = [
+        _ok_candle(1000),
+        {"t": 2000, "T": 2999, "o": "0", "h": "0", "l": "0", "c": "0", "v": "1"},
+    ]
+    # max_drop_fraction=1.0: isolate the per-bar drop mechanism from the aggregate guard.
+    with caplog.at_level(logging.WARNING):
+        candles = mapper.map_candles(raw, max_drop_fraction=1.0)
+    assert [c.open_time for c in candles] == [1000]
+    assert "dropping malformed candleSnapshot[1]" in caplog.text
+
+
 def test_funding_history_non_dict_element_raises_malformed():
     raw = [{"time": 1000, "fundingRate": "0.00001", "premium": "0"}, "garbage"]
     with pytest.raises(MalformedResponseError, match=r"fundingHistory\[1\]"):

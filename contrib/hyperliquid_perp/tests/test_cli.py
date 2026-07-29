@@ -2967,6 +2967,33 @@ def test_live_smoke_gate_status_refuses_unknown_genesis_mode(tmp_path, capsys):
     assert "'unknown'" in capsys.readouterr().err
 
 
+def test_live_smoke_gate_status_refuses_only_and_dry_run(tmp_path, capsys):
+    # --gate-status is a pure store read: combining it with an action flag is
+    # ambiguous operator intent (read the gate, or run/skip tests?) — refused
+    # by name before anything touches the store.
+    dbp = _make_live_run(tmp_path)
+    rc = cli_main(
+        [
+            "live-smoke",
+            "--run-id",
+            "live-BTC",
+            "--db",
+            str(dbp),
+            "--gate-status",
+            "--only",
+            "signed_client_init",
+        ]
+    )
+    assert rc == 1
+    assert "drop --dry-run/--only" in capsys.readouterr().err
+
+    rc2 = cli_main(
+        ["live-smoke", "--run-id", "live-BTC", "--db", str(dbp), "--gate-status", "--dry-run"]
+    )
+    assert rc2 == 1
+    assert "drop --dry-run/--only" in capsys.readouterr().err
+
+
 def test_live_smoke_only_status_without_submit_exits_1(tmp_path, capsys):
     # Q3 2026-07-28: test 4 queries the order test 3 places in the same
     # process, so this selection can never pass — refuse it at the entrance
@@ -3021,7 +3048,10 @@ def test_live_loop_refuses_testnet_run_until_smoke_passes(
     )
     dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
     rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp), "--loop"])
-    assert rc == 1
+    # Exit 4, not 1 (decision 2026-07-29): "the gate is not open" is the same
+    # not-yet-at-the-gate fact live-smoke itself reports as 4 — a supervisor
+    # must be able to tell it from a config/auth failure's exit 1.
+    assert rc == 4
     err = capsys.readouterr().err
     assert "§20.2 smoke suite" in err
     assert "not yet run" in err
@@ -3135,3 +3165,29 @@ def test_live_smoke_superseded_lease_exits_1_by_name(tmp_path, capsys, monkeypat
     assert rc == 1
     err = capsys.readouterr().err
     assert "superseded mid-suite" in err
+
+
+def test_live_smoke_disarm_warning_survives_an_unexpected_crash(tmp_path, capsys, monkeypatch):
+    # The disarm-failed WARNING prints from a finally (silent-failure review,
+    # 2026-07-29): a mid-suite exception escaping to main()'s generic handler
+    # is exactly when a failed disarm is most likely, and the warning must not
+    # be lost under that stack trace.
+    from contrib.hyperliquid_perp import cli as cli_mod
+    from contrib.hyperliquid_perp.live import smoke as smoke_mod
+
+    dbp = _make_live_run(tmp_path)
+    monkeypatch.setattr(
+        cli_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+    )
+
+    def _crash(self, *, only=None):
+        self.kill_switch_disarm_failed = True
+        raise RuntimeError("wire gone mid-suite")
+
+    monkeypatch.setattr(smoke_mod.SmokeTestRunner, "run", _crash)
+    rc = cli_main(
+        ["live-smoke", "--config", "unused.yaml", "--run-id", "live-BTC", "--db", str(dbp)]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2  # main()'s generic unexpected-error exit
+    assert "kill-switch disarm FAILED" in captured.err

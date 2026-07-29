@@ -1146,6 +1146,40 @@ class LiveReconciler:
         local = repo.get_current_position(conn, self._run_id, self._coin)
         local_size = Decimal(0) if local is None else local.size
 
+        # Mirror the exchange-reported liquidation estimate onto the local row
+        # (§12.1: the exchange is the truth source). The engine's SL band and
+        # the ai_inputs ``estimated_liquidation_price`` column read it back via
+        # ``get_current_position``. An explicit ``None`` when the exchange is
+        # flat — or reports no liquidationPx — so a stale estimate never
+        # survives a flat; only reached with a SUCCESSFUL clearinghouse read
+        # (a failed read returns above and proves nothing either way). Skipped
+        # without a local row: the writer is UPDATE-only, so it would be a
+        # guaranteed no-op, and the size-mismatch lane below owns that case.
+        #
+        # ADVISORY, unlike every other write in this reconciler (decision
+        # 2026-07-29): this leg's verdict answers "do the local and exchange
+        # positions agree?", and the successful read above already answered it.
+        # The write is a cache for the SL band, not the evidence this leg
+        # produces — letting a transient store error retroactively mark the
+        # position unreconciled AND unprotected would drive safe mode (halted
+        # cycles, manual §13.6 release) off a metadata failure. A failure costs
+        # one tick of staleness: the next pass rewrites it, and the fallback it
+        # leaves is the entry-based band the engine used for every run before
+        # this mirror existed.
+        liq = None if exch is None else exch.liquidation_price
+        if local is not None and liq != local.liquidation_price:
+            try:
+                with self._db.transaction() as tx:
+                    repo.set_position_liquidation_price(tx, self._run_id, self._coin, liq)
+            except Exception as exc:  # noqa: BLE001 — advisory cache, see above
+                logger.warning(
+                    "liquidation mirror for %s failed (%s: %s) — the row keeps its "
+                    "previous estimate this tick; the next pass rewrites it",
+                    self._coin,
+                    type(exc).__name__,
+                    exc,
+                )
+
         if exch_size != local_size:
             ok = False
             if exch_size == 0 and local_size != 0:

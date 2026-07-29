@@ -55,7 +55,7 @@ from ..paper.stops import (
 )
 from ..paper.twap import floor_to_step
 from ..persistence import repository as repo
-from ..persistence.cloid import cloid_hex as derive_cloid_hex, cloid_logical
+from ..persistence.cloid import LIVE_ORDER_ROLES, cloid_hex as derive_cloid_hex, cloid_logical
 from ..persistence.db import Database
 from ..persistence.models import PositionState, Side
 from .config import LiveProtectionConfig
@@ -72,6 +72,13 @@ logger = logging.getLogger(__name__)
 _SLTP_ROLES = ("stop_loss", "take_profit")
 _ROLE_ORDER_TYPE = {"stop_loss": "stop_market", "take_profit": "take_market"}
 _ROLE_TPSL = {"stop_loss": "sl", "take_profit": "tp"}
+# Literal copies of LIVE_ORDER_ROLES members: a role renamed there without this
+# file would silently drop it from the clear/residual sweeps. Fail at import
+# (same guard family as startup.py's partition check).
+assert set(_SLTP_ROLES) <= LIVE_ORDER_ROLES, "_SLTP_ROLES drifted from LIVE_ORDER_ROLES"
+assert set(_ROLE_ORDER_TYPE) == set(_ROLE_TPSL) == set(_SLTP_ROLES), (
+    "protection role tables must cover exactly _SLTP_ROLES"
+)
 
 # §9.4 aggressive family (decided 2026-07-22): a stop-loss trigger only FIRES in
 # the violent move it protects against, so its fire-time limit needs the same

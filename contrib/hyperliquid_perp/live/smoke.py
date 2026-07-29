@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from ..paper.run_lock import RunLockError
 from ..paper.stops import round_to_tick
@@ -58,6 +58,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "SMOKE_TESTS",
     "SMOKE_TEST_KEYS",
+    "RecoveryResult",
     "SmokeContext",
     "SmokePreflightError",
     "SmokeStepResult",
@@ -66,6 +67,19 @@ __all__ = [
     "smoke_gate_report",
     "validate_only_keys",
 ]
+
+
+class RecoveryResult(Protocol):
+    """What the ``run_recovery`` seam must return: a §19.1 verdict.
+
+    A typed contract instead of ``Any`` + ``getattr(..., "passed", False)``:
+    a seam wired to return the wrong object (or a renamed ``StartupResult``
+    field) must surface as an ``error`` verdict / a loud AttributeError — a
+    harness bug — not be silently absorbed into a ``failed`` verdict that
+    sends the operator down the "exchange refused" triage path.
+    """
+
+    passed: bool
 
 
 @dataclass(frozen=True)
@@ -153,6 +167,34 @@ _ORDER_PLACING_TESTS: frozenset[str] = frozenset(
     }
 )
 
+# The tests whose probe is a resting reduce-only trigger. Hyperliquid's
+# reduce-only semantics make a flat-account trigger a bet on venue leniency
+# (nothing to reduce), so the runner stages one small real long under the whole
+# block — every probe is then the exact §17 protection shape live emits, a SELL
+# trigger shrinking a real long (decision 2026-07-29). Opened lazily by the
+# first of these tests, closed as soon as no later selected test is in the set.
+_TRIGGER_PROBE_TESTS: frozenset[str] = frozenset(
+    {
+        "slice_plan_cancel",
+        "stop_loss_create",
+        "stop_loss_modify",
+        "stop_loss_cancel",
+        "take_profit_create",
+        "take_profit_modify",
+        "take_profit_cancel",
+    }
+)
+
+# These three sets are literal copies of SMOKE_TESTS keys: a key renamed there
+# without them would silently drop a test from its policy bucket — a suite that
+# armed the kill switch would skip the exit disarm, an order-placing test would
+# skip the pre-flight, a trigger test would probe flat. Fail at import (the
+# same guard validation.py carries for its §20.3 key literals).
+for _copied in (_KILL_SWITCH_TESTS, _ORDER_PLACING_TESTS, _TRIGGER_PROBE_TESTS):
+    assert _copied <= set(SMOKE_TEST_KEYS), (
+        f"smoke policy set drifted from SMOKE_TESTS: {sorted(_copied - set(SMOKE_TEST_KEYS))}"
+    )
+
 # Just over Hyperliquid's ~$10 minimum order value, so a probe order the suite
 # means to REST or FILL is not refused for being dust.
 _PROBE_NOTIONAL_USDC = Decimal("11")
@@ -193,7 +235,15 @@ class SmokeContext:
     now: Callable[[], datetime]
     dry_run: bool = False
     kill_switch_deadline: timedelta = timedelta(seconds=120)
-    run_recovery: Callable[[], Any] | None = None
+    # The exchange-side sizing regime smoke test 2 WRITES to the account (the
+    # suite is the only writer in the system). Wired from the run's own
+    # ``live.safety`` so the suite can never leave the account in a regime the
+    # config did not ask for (decision 2026-07-29); the defaults are the §20.1
+    # values, which are also the only ones Phase 3 v1 config validation admits
+    # for leverage.
+    leverage: int = 1
+    is_cross: bool = True
+    run_recovery: Callable[[], RecoveryResult] | None = None
     # Refreshes the run lease (the CLI wires paper.run_lock.heartbeat_run_lock).
     # A full suite runs up to 4 real recoveries + ~14 wire actions — past
     # LOCK_STALE_SECONDS an un-refreshed lease reads as abandoned and a
@@ -256,6 +306,11 @@ class SmokeTestRunner:
         # exit disarm is SUPPRESSED — an account-wide clear here would strip
         # the successor's dead-man cover until its next refresh.
         self._lease_superseded: bool = False
+        # The staged long the trigger-probe tests protect (see
+        # :data:`_TRIGGER_PROBE_TESTS`): 0 until the first trigger test opens
+        # it, reset to 0 once flattened. Non-zero across an exit path means the
+        # close is still owed (run()'s finally is the backstop).
+        self._staged_long: Decimal = Decimal(0)
 
     # -- orchestration ----------------------------------------------------
 
@@ -267,6 +322,17 @@ class SmokeTestRunner:
         executed (in order) — the caller reports them and computes the gate from
         the store, never from this return value, so a crash mid-suite still
         leaves every completed verdict durable.
+
+        An ``error`` verdict (the harness itself broke — as opposed to
+        ``failed``, the exchange refusing a well-formed action) STOPS the suite
+        (decision 2026-07-29): after a harness error the account state is
+        unknown, and the remaining tests would put more real orders on the wire
+        against it. The remaining tests are simply not executed — no rows are
+        written for them (a written ``skipped`` row would supersede a previously
+        ``passed`` latest-per-key result and poison the gate's buckets); the
+        gate reads the store and reports them as before. A ``failed`` verdict
+        continues: the refusal is itself the evidence, and the account state is
+        known.
         """
         selected = self._select(only)
         # A real run whose selection places probe orders must run one passing
@@ -288,7 +354,7 @@ class SmokeTestRunner:
         try:
             if needs_preflight:
                 self._preflight_recovery()
-            for test in selected:
+            for index, test in enumerate(selected):
                 # Outside _execute on purpose: a RunLockError (superseded — a
                 # successor owns the run) must ABORT the suite, not degrade
                 # into one test's error verdict while orders keep going out.
@@ -305,10 +371,31 @@ class SmokeTestRunner:
                     result.status,
                     "" if result.detail is None else f" — {result.detail}",
                 )
+                # Flatten the staged trigger-block long as soon as no later
+                # selected test needs it — BEFORE the restart tests, whose
+                # clean-restart recovery (test 15) must not find an unexpected
+                # position the operator never staged.
+                if self._staged_long > 0 and not any(
+                    t.key in _TRIGGER_PROBE_TESTS for t in selected[index + 1 :]
+                ):
+                    self._close_staged_long()
+                if result.status == "error":
+                    logger.error(
+                        "smoke %02d %s errored — stopping the suite: the harness "
+                        "broke, so the account state is unknown and the remaining "
+                        "tests must not put more orders on the wire (their stored "
+                        "verdicts are untouched)",
+                        test.number,
+                        test.key,
+                    )
+                    break
         finally:
             # In the ``finally`` so a mid-suite crash disarms too — EXCEPT when
             # the lease was superseded: the successor owns the wallet's switch
             # now, and an account-wide clear would strip its dead-man cover.
+            # The staged long is flattened FIRST: it is real exposure, and the
+            # close is an IOC the disarm does not depend on.
+            self._close_staged_long()
             if arms_kill_switch and not self._lease_superseded:
                 self._disarm_kill_switch()
         return executed
@@ -419,7 +506,10 @@ class SmokeTestRunner:
                 f"pre-flight §19.1 recovery raised — {type(exc).__name__}: {exc} "
                 "(no test ran; fix the run/exchange state and re-run the suite)"
             ) from exc
-        if not getattr(result, "passed", False):
+        # Direct attribute access on purpose (RecoveryResult contract): a seam
+        # returning the wrong object must raise loudly (a harness bug), not be
+        # absorbed by a getattr default into "recovery did not pass".
+        if not result.passed:
             raise SmokePreflightError(
                 "pre-flight §19.1 recovery did not pass — the run is not in a clean "
                 "state to place probe orders (inspect the recovery log / safe-mode "
@@ -544,7 +634,7 @@ class SmokeTestRunner:
             raise _SmokeAbort(
                 f"IOC probe {cloid_hex_value} came back 'resting' — an IOC must be "
                 "terminal at the ack; "
-                + ("cancelled it and booked the row as canceled" if cancelled else note)
+                + (note if note is not None else "cancelled it and booked the row as canceled")
             )
         filled = ack.filled_size or Decimal(0)
         status = "filled" if filled > 0 else "canceled"
@@ -636,7 +726,7 @@ class SmokeTestRunner:
         if not ack.accepted:
             raise _SmokeAbort(f"{what} was refused by the exchange: {ack.error}")
 
-    def _require_recovery(self) -> Any:
+    def _require_recovery(self) -> RecoveryResult:
         if self.ctx.run_recovery is None:
             raise _SmokeAbort(
                 "no run_recovery seam wired — the restart tests need the §19.1 "
@@ -657,8 +747,15 @@ class SmokeTestRunner:
         return SmokeStepResult("passed", detail=f"agent {agent} on {self.ctx.network}")
 
     def _test_update_leverage(self) -> SmokeStepResult:
-        self.ctx.signed.update_leverage(coin=self.ctx.coin, leverage=1, is_cross=True)
-        return SmokeStepResult("passed", detail=f"{self.ctx.coin} leverage set to 1x cross")
+        # Writes the RUN'S OWN configured regime, not a spec literal: this is
+        # the only place in the system that sets the exchange-side regime, and
+        # it must never flip an account to a leverage/margin mode the config
+        # did not declare (decision 2026-07-29).
+        self.ctx.signed.update_leverage(
+            coin=self.ctx.coin, leverage=self.ctx.leverage, is_cross=self.ctx.is_cross
+        )
+        regime = f"{self.ctx.leverage}x {'cross' if self.ctx.is_cross else 'isolated'}"
+        return SmokeStepResult("passed", detail=f"{self.ctx.coin} leverage set to {regime}")
 
     def _test_slice_order_submit(self) -> SmokeStepResult:
         # A far-below-mark IOC buy: the wire action round-trips but never fills
@@ -687,10 +784,19 @@ class SmokeTestRunner:
         # venues; what the test proves is that the ACTION reached the matching
         # engine without a top-level envelope error (that would have raised).
         self._last_submit = {"cloid_hex": cloid, "oid": ack.exchange_order_id or ""}
-        return SmokeStepResult(
-            "passed",
-            detail=f"submitted IOC (status={ack.status}, oid={ack.exchange_order_id})",
-        )
+        detail = f"submitted IOC (status={ack.status}, oid={ack.exchange_order_id})"
+        filled = ack.filled_size or Decimal(0)
+        if filled > 0:
+            # The far price is an assumption, not a guarantee: a thin/volatile
+            # testnet book CAN cross 50% of mark, and a filled probe is a real
+            # funded long this suite promises not to strand. Flatten it and
+            # carry the anomaly in the durable detail; the verdict stays with
+            # the wire round-trip the test exists to prove (decision 2026-07-29).
+            note = self._best_effort_close(filled)
+            detail += f"; unexpectedly FILLED {filled} at the far price — " + (
+                note or f"cleanup: reduce-only closed {filled}"
+            )
+        return SmokeStepResult("passed", detail=detail)
 
     def _test_slice_order_status(self) -> SmokeStepResult:
         # Interpreted with the SAME vocabulary as live/orders.py
@@ -703,7 +809,21 @@ class SmokeTestRunner:
         # protocol relies on. A malformed payload raises out of the parser →
         # an ``error`` verdict, matching its fail-loud contract.
         if self._last_submit is None:
-            raise _SmokeAbort("no prior submit to query (run test 3 first, or select both)")
+            # NOT a _SmokeAbort: the missing precondition means test 3 (selected
+            # per the --only guard) failed before leaving its handle — a
+            # dependency cascade, not an exchange refusal. ``failed`` would file
+            # it in the "exchange refused" triage bucket and point the operator
+            # at the venue; ``error`` files it with the harness/selection issues
+            # where the root cause (test 3's own verdict) lives, and stops the
+            # suite per the error policy (decision 2026-07-29).
+            return SmokeStepResult(
+                "error",
+                error_message=(
+                    "no prior submit to query — slice_order_submit (test 3) did not "
+                    "complete in this process, so its cascade lands here; fix test 3 "
+                    "first (this is not an exchange refusal)"
+                ),
+            )
         payload = self.ctx.signed.query_order_by_cloid(self._last_submit["cloid_hex"])
         resolved = parse_order_status(payload)
         booked_oid = self._last_submit["oid"]
@@ -732,6 +852,7 @@ class SmokeTestRunner:
         # trigger order, so a far reduce-only SL is placed then cancelled — the
         # same cancel-by-cloid wire action the engine uses to abort a plan's
         # resting orders.
+        self._ensure_staged_long()
         _, cloid = self._register_cloid(role="cleanup_cancel", tag=f"cancel-{self._tag()}")
         # The same "so far below mark it never fires" rule every SL probe uses —
         # one encoding, so a retune of the margin cannot drift between tests.
@@ -852,6 +973,44 @@ class SmokeTestRunner:
             raise _SmokeAbort(no_fill)
         return opened
 
+    def _ensure_staged_long(self) -> None:
+        """Open the small long the resting-trigger probes protect (2026-07-29).
+
+        With a flat account a reduce-only trigger has nothing to reduce, and
+        whether the venue rests it anyway is leniency the suite must not bet
+        on: a refusal would fail tests 5/8–13 as "exchange refused" with no
+        code fix possible. One staged long under the whole trigger block makes
+        every probe the exact §17 protection shape live emits. Opened lazily by
+        the first trigger test in the selection (so a selection without them
+        never opens it); a failure to open fails THAT test via _SmokeAbort.
+        """
+        if self._staged_long > 0:
+            return
+        self._staged_long = self._open_probe_long(
+            tag=f"stage-{self._tag()}",
+            what="trigger-block staging entry",
+            no_fill="staging entry did not fill — no position for the trigger probes to protect",
+        )
+        logger.info("smoke: staged %s long for the trigger-probe block", self._staged_long)
+
+    def _close_staged_long(self) -> None:
+        """Flatten the staged trigger-block long (best-effort, loudly logged).
+
+        Called from the run loop as soon as no later selected test needs the
+        position, and from run()'s ``finally`` as the crash/stop backstop. On a
+        failed close the size is kept so the backstop retries; a residual that
+        survives both attempts is in the log and in the run's books (the probe
+        rows reconcile like any other money).
+        """
+        if self._staged_long <= 0:
+            return
+        note = self._best_effort_close(self._staged_long)
+        if note is None:
+            logger.info("smoke: staged trigger-block long (%s) flattened", self._staged_long)
+            self._staged_long = Decimal(0)
+        else:
+            logger.warning("smoke: staged trigger-block long NOT flat — %s", note)
+
     def _reduce_only_close(self, size: Decimal) -> Any:
         logical, cloid = self._register_cloid(role="close", tag=f"reduce-{self._tag()}")
         mark = self.ctx.mark_price()
@@ -965,6 +1124,7 @@ class SmokeTestRunner:
         return trigger, limit
 
     def _trigger_create(self, tpsl: str, role: str, label: str) -> SmokeStepResult:
+        self._ensure_staged_long()
         _, cloid = self._register_cloid(role=role, tag=f"{tpsl}-create-{self._tag()}")
         trigger, limit = self._trigger_prices(tpsl)
         ack = self.ctx.signed.place_trigger_order(
@@ -985,6 +1145,7 @@ class SmokeTestRunner:
         return SmokeStepResult("passed", detail=detail)
 
     def _trigger_modify(self, tpsl: str, role: str, label: str) -> SmokeStepResult:
+        self._ensure_staged_long()
         _, create_cloid = self._register_cloid(role=role, tag=f"{tpsl}-mod-a-{self._tag()}")
         trigger, limit = self._trigger_prices(tpsl)
         created = self.ctx.signed.place_trigger_order(
@@ -1041,6 +1202,7 @@ class SmokeTestRunner:
         return SmokeStepResult("passed", detail=detail)
 
     def _trigger_cancel(self, role: str, label: str) -> SmokeStepResult:
+        self._ensure_staged_long()
         tpsl = "sl" if role == "stop_loss" else "tp"
         _, cloid = self._register_cloid(role=role, tag=f"{tpsl}-cancel-{self._tag()}")
         trigger, limit = self._trigger_prices(tpsl)
@@ -1108,7 +1270,7 @@ class SmokeTestRunner:
 
     def _test_restart_reconciliation(self) -> SmokeStepResult:
         result = self._require_recovery()
-        if not getattr(result, "passed", False):
+        if not result.passed:
             raise _SmokeAbort("startup recovery verdict did not pass on a clean restart")
         return SmokeStepResult("passed", detail="restart recovery verdict passed")
 
@@ -1118,7 +1280,7 @@ class SmokeTestRunner:
         # operator's setup on testnet; the seam runs recovery and reports the
         # verdict, which is unclean if the position was not reconciled.
         result = self._require_recovery()
-        if not getattr(result, "passed", False):
+        if not result.passed:
             raise _SmokeAbort("recovery did not cleanly reconcile the existing position")
         return SmokeStepResult("passed", detail="existing position reconciled at startup")
 
@@ -1126,7 +1288,7 @@ class SmokeTestRunner:
         # Recovery must cancel a stale bot-owned resting order (§19.3) and reach
         # a clean verdict.
         result = self._require_recovery()
-        if not getattr(result, "passed", False):
+        if not result.passed:
             raise _SmokeAbort("recovery did not clear the stale bot-owned order")
         return SmokeStepResult("passed", detail="stale bot-owned order swept at startup")
 

@@ -47,6 +47,7 @@ from pathlib import Path
 from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
+from ..persistence.cloid import LIVE_ORDER_ROLES
 from ..persistence.db import Database
 from .cancel import cancel_bot_order_with_evidence
 from .config import KillSwitchConfig
@@ -189,6 +190,12 @@ def sl_repair_delay_warning(delay_seconds: float, max_tick_gap_seconds: float) -
 # for the same reason as protection._SLTP_ROLES: emergency_close is a one-shot
 # IOC, never a resting order for a sweep to keep.
 _KEEP_PROTECTIVE_ROLES = frozenset({"stop_loss", "take_profit"})
+# Literal copy of LIVE_ORDER_ROLES members: a role renamed there without this
+# file would silently drop it from the shutdown keep-set — the sweep would
+# cancel a live position's resting SL/TP. Fail at import.
+assert _KEEP_PROTECTIVE_ROLES <= LIVE_ORDER_ROLES, (
+    "_KEEP_PROTECTIVE_ROLES drifted from LIVE_ORDER_ROLES"
+)
 
 
 class KillSwitchManager:

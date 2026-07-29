@@ -337,3 +337,31 @@ def test_validate_live_integrity_failure_exits_5(tmp_path, capsys):
     assert rc == 5
     assert "live_ready: no" in out
     assert any("orphan" in line for line in out.splitlines() if line.startswith("failure:"))
+
+
+def test_validate_failed_smoke_row_exits_4_not_5(tmp_path, capsys):
+    # Decision 2026-07-29: a FAILED/errored smoke row is curable by one
+    # `live-smoke --only <key>` re-run, so validate maps it to exit 4 ("keep
+    # running / re-run smoke"), keeping exit 5 for the integrity conditions
+    # (the test above pins that side of the split).
+    db = _healthy(tmp_path)
+    with db.transaction() as conn:
+        repo.insert_smoke_test_result(
+            conn,
+            run_id="r",
+            test_number=8,
+            test_key="stop_loss_create",
+            test_name="SL create",
+            status="failed",
+            executed_at=_T0,
+        )
+    db.close()
+    rc = cli_main(["validate", "--run-id", "r", "--db", str(tmp_path / "live.db")])
+    out = capsys.readouterr().out
+    assert rc == 4
+    assert "live_ready: no" in out
+    assert any(
+        "FAILED (exchange refused)" in line
+        for line in out.splitlines()
+        if line.startswith("shortfall:")
+    )

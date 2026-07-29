@@ -38,11 +38,13 @@ duplicate applies, a position or replay mismatch) AND a safety-invariant breach
 that is not itself store corruption (an unprotected window — including one opened
 by a deliberate ``stop_loss_repair_blocked`` gate pause, which still leaves the
 position unprotected, §20.3: unprotected seconds must be 0 — a refresh rate below
-99% on EITHER profile, a smoke test that ran and FAILED, or — mainnet_tiny — an
-unresolved reconciliation case or a breached daily-loss cap). A run that is
-merely short of the gate (< 30 cycles / orders, smoke tests or kill-switch
-refreshes not yet run) lands in ``shortfalls``
-→ exit 4 ("keep running / run the smoke suite"). All conditions met → ``live_ready`` → exit 0. Non-gating
+99% on EITHER profile, or — mainnet_tiny — an unresolved reconciliation case or a
+breached daily-loss cap). A run that is merely short of the gate (< 30 cycles /
+orders, smoke tests or kill-switch refreshes not yet run, or a smoke test that
+ran but FAILED/ERRORED — curable by a ``live-smoke --only`` re-run, so a
+shortfall, not an integrity verdict; decision 2026-07-29) lands in
+``shortfalls`` → exit 4 ("keep running / run the smoke suite"). All conditions
+met → ``live_ready`` → exit 0. Non-gating
 completeness signals — emergency closes during cycles (§21.4's "no emergency
 close caused by bot bug" is not machine-decidable), daily-loss episodes and open
 manual reconciliation cases on testnet, and the mainnet reminder that §21.4's
@@ -67,6 +69,7 @@ __all__ = [
     "MIN_KILL_SWITCH_REFRESH_RATE",
     "MIN_LIVE_CYCLES",
     "MIN_LIVE_ORDERS",
+    "execution_mode",
     "LiveValidationReport",
     "validate_live_run",
 ]
@@ -83,8 +86,13 @@ MIN_KILL_SWITCH_REFRESH_RATE = Decimal("0.99")
 _SINCE_BEGINNING = "0001-01-01T00:00:00+00:00"
 
 # Reuse the paper validator's completed-cycle vocabulary so live and paper count
-# a "cycle" identically (api_failed excluded from the ≥30 gate).
+# a "cycle" identically (api_failed excluded from the ≥30 gate). Same guard as
+# the paper side (paper/validation.py): a new terminal attempt status must fail
+# HERE at import, not silently under-count cycle_count in a mainnet-facing gate.
 _COMPLETED_CYCLE_STATUSES = ("completed", "invalid_output")
+assert set(repo.TERMINAL_ATTEMPT_STATUSES) - set(_COMPLETED_CYCLE_STATUSES) == {"api_failed"}, (
+    "live cycle-count vocabulary drifted from repository.TERMINAL_ATTEMPT_STATUSES"
+)
 
 # The four §20.3 ``*_test_passed`` acceptance booleans → their smoke test keys.
 _RESTART_KEY = "restart_reconciliation"
@@ -117,6 +125,14 @@ _MISMATCH_CASE_TYPES = frozenset(
         "equity_mismatch",
         "position_sl_missing",
     }
+)
+# This set is validation's literal copy of the §12.3 case-type registry minus
+# the one type with its own lane. A case type added to the registry without
+# this file would silently fall out of the §21.4 mismatch count — a run with a
+# real open case could still report live_ready. Fail at import, exactly like
+# the smoke-key assert above (same failure class, same guard).
+assert _MISMATCH_CASE_TYPES | {"fill_unmapped"} == repo.RECONCILIATION_CASE_TYPES, (
+    "validation's mismatch case types drifted from repository.RECONCILIATION_CASE_TYPES"
 )
 
 
@@ -250,8 +266,12 @@ def _count(conn, sql: str, params: tuple) -> int:
     return conn.execute(sql, params).fetchone()[0]
 
 
-def _execution_mode(config_json: str | None) -> str:
+def execution_mode(config_json: str | None) -> str:
     """Read ``live.mode`` from the run's genesis config; ``unknown`` if absent.
+
+    Public on purpose: the CLI's ``--gate-status`` guard depends on it, so the
+    cross-module contract is declared here (``__all__``), not smuggled through
+    an underscore name a refactor would feel free to break.
 
     The verdict must never silently apply the wrong acceptance profile: a live
     run whose genesis config does not name its execution mode is reported as
@@ -374,7 +394,7 @@ def validate_live_run(
                 f"run {run_id!r} is a {run_row['mode']} run — use the paper "
                 "acceptance validator (validate reads live metrics only for live runs)"
             )
-        execution_mode = _execution_mode(run_row["config_json"])
+        run_execution_mode = execution_mode(run_row["config_json"])
 
         placeholders = ", ".join("?" for _ in _COMPLETED_CYCLE_STATUSES)
         cycle_count = _count(
@@ -464,7 +484,7 @@ def validate_live_run(
 
     # testnet_live is §20.3; everything else (mainnet_tiny, or an unreadable
     # mode) is held to the stricter §21.4 gate.
-    is_testnet = execution_mode == "testnet_live"
+    is_testnet = run_execution_mode == "testnet_live"
 
     failures: list[str] = []
     shortfalls: list[str] = []
@@ -505,13 +525,24 @@ def validate_live_run(
     # its own live_smoke_tests table is empty by design. Gating mainnet on it
     # would make §21.4 unreachable (decided 2026-07-27).
     if is_testnet:
+        # All three smoke buckets are SHORTFALLS (exit 4), not integrity
+        # failures (exit 5): a red smoke item is curable by one
+        # `live-smoke --only <key>` re-run (latest-per-key supersedes), so it
+        # belongs in "not yet at the gate" — exit 5 stays reserved for the
+        # permanent conditions whose RUNBOOK remedy is "investigate before
+        # trusting results / consider a fresh run-id" (decision 2026-07-29).
+        # The errored/failed triage split is preserved in the wording.
         if smoke_errored:
-            failures.append(
+            shortfalls.append(
                 f"smoke test(s) ERRORED (harness/code bug — not an exchange refusal): "
-                f"{', '.join(smoke_errored)}"
+                f"{', '.join(smoke_errored)} (fix the harness, then re-run "
+                "`live-smoke --only <key>`)"
             )
         if smoke_failed:
-            failures.append(f"smoke test(s) FAILED (exchange refused): {', '.join(smoke_failed)}")
+            shortfalls.append(
+                f"smoke test(s) FAILED (exchange refused): {', '.join(smoke_failed)} "
+                "(fix config/market state, then re-run `live-smoke --only <key>`)"
+            )
         if smoke_missing:
             shortfalls.append(
                 f"smoke test(s) not yet run for real: {', '.join(smoke_missing)} "
@@ -530,7 +561,7 @@ def validate_live_run(
             shortfalls,
             unresolved_mismatch_count=unresolved_mismatch_count,
             daily_loss_breached=daily_loss_breached,
-            execution_mode=execution_mode,
+            execution_mode=run_execution_mode,
             refresh_rate=refresh_rate,
             refresh_total=refresh_total,
         )
@@ -566,7 +597,7 @@ def validate_live_run(
 
     return LiveValidationReport(
         run_id=run_id,
-        execution_mode=execution_mode,
+        execution_mode=run_execution_mode,
         cycle_count=cycle_count,
         api_failed_count=api_failed_count,
         live_order_count=live_order_count,

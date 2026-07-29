@@ -73,6 +73,7 @@ class _FakeSigned:
         self._cancel = cancel or _Cancel(True)
         self._raise_on = raise_on or set()
         self.calls: list[str] = []
+        self.leverage_calls: list[dict] = []
         self.last_place_cloid: str | None = None
         self.queried_cloid: str | None = None
         self.place_calls: list[dict] = []
@@ -90,6 +91,7 @@ class _FakeSigned:
 
     def update_leverage(self, *, coin, leverage, is_cross=True):
         self._log("update_leverage")
+        self.leverage_calls.append({"coin": coin, "leverage": leverage, "is_cross": is_cross})
 
     def place_ioc_limit(self, **k):
         self._log("place_ioc_limit")
@@ -383,17 +385,24 @@ def test_status_test_queries_the_submitted_cloid(live_db):
         smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
             only=["slice_order_submit", "slice_order_status"]
         )
-    # The status test must query the exact cloid the submit test registered.
+    # The status test must query the exact cloid the submit test registered —
+    # place_calls[0] is the submit (the default filled ack makes test 3 place a
+    # cleanup close afterwards, so last_place_cloid is the CLOSE's cloid).
     assert signed.queried_cloid is not None
-    assert signed.queried_cloid == signed.last_place_cloid
+    assert signed.queried_cloid == signed.place_calls[0]["cloid_hex"]
 
 
-def test_status_without_prior_submit_aborts(live_db):
+def test_status_without_prior_submit_is_an_error_verdict(live_db):
+    # Test 3 never left its handle in this process: a dependency cascade, not an
+    # exchange refusal — the verdict is "error" (harness/selection bucket), so
+    # the operator is pointed at test 3, never at the venue (decision 2026-07-29).
     with live_db:
         smoke.SmokeTestRunner(_ctx(live_db, _FakeSigned())).run(only=["slice_order_status"])
         latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
-    assert latest["slice_order_status"]["status"] == "failed"
-    assert "no prior submit" in latest["slice_order_status"]["error_message"]
+    row = latest["slice_order_status"]
+    assert row["status"] == "error"
+    assert "no prior submit" in row["error_message"]
+    assert "not an exchange refusal" in row["error_message"]
 
 
 def test_cleanup_failure_is_surfaced_in_step_detail(live_db):
@@ -806,7 +815,9 @@ def test_zero_filled_accepted_entry_aborts_the_close_tests(live_db):
 
 def test_trigger_probes_book_no_orders_rows(live_db):
     # Pins D2 (2026-07-27): trigger create/modify/cancel probes write NO orders
-    # rows — only IOC probes are booked.
+    # rows — only IOC probes are booked. Since the staged long (2026-07-29) the
+    # block's two IOC legs (staging open + reduce-only close) ARE booked — real
+    # money that must reconcile — but no row ever carries a trigger role.
     signed = _FakeSigned()
     with live_db:
         smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
@@ -824,7 +835,9 @@ def test_trigger_probes_book_no_orders_rows(live_db):
             "SELECT * FROM orders WHERE run_id = ? AND status_reason = 'smoke_probe'",
             ("live-BTC",),
         ).fetchall()
-    assert probe_rows == []
+    assert len(probe_rows) == 2
+    assert {r["order_role"] for r in probe_rows} == {"entry", "close"}
+    assert all(r["type"] == "ioc_limit" for r in probe_rows)
 
 
 def test_status_test_fails_when_a_booked_cloid_reads_unknown(live_db):
@@ -1047,4 +1060,231 @@ def test_transient_heartbeat_failure_aborts_but_still_disarms(live_db):
     ctx.heartbeat = _beat
     with live_db, pytest.raises(sqlite3.OperationalError):
         smoke.SmokeTestRunner(ctx).run()
+    assert "clear_scheduled_cancel" in signed.calls
+
+
+# -- round-4 review-loop sync (2026-07-29): staged long, stop-on-error, regime --
+
+
+def test_missing_agent_address_fails_client_init(live_db):
+    # Test 1's own assertion: a signed client with no bound agent address after
+    # init is an exchange-side refusal shape → "failed", by name.
+    class _NoAgent(_FakeSigned):
+        agent_address = ""
+
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, _NoAgent())).run(only=["signed_client_init"])
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["signed_client_init"]
+    assert row["status"] == "failed"
+    assert "no agent_address" in row["error_message"]
+
+
+def test_update_leverage_writes_the_configured_regime(live_db):
+    # Test 2 writes the RUN'S OWN regime (decision 2026-07-29): a probe context
+    # (3x isolated ≠ the 1x-cross defaults) must land verbatim in the wire call
+    # AND the durable detail — a hardcoded spec literal would fail both legs.
+    signed = _FakeSigned()
+    ctx = _ctx(live_db, signed)
+    ctx.leverage = 3
+    ctx.is_cross = False
+    with live_db:
+        smoke.SmokeTestRunner(ctx).run(only=["update_leverage"])
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    assert signed.leverage_calls == [{"coin": "BTC", "leverage": 3, "is_cross": False}]
+    row = latest["update_leverage"]
+    assert row["status"] == "passed"
+    assert "leverage set to 3x isolated" in row["detail"]
+
+
+def test_submit_unexpected_fill_is_flattened_and_noted(live_db):
+    # Test 3's far price is an assumption, not a guarantee: a filled far IOC is
+    # a real funded long the suite must not strand — flattened best-effort, the
+    # anomaly carried in the durable detail, verdict stays with the wire
+    # round-trip (decision 2026-07-29).
+    signed = _FakeSigned()  # the default ack fills 0.001
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["slice_order_submit"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["slice_order_submit"]
+    assert row["status"] == "passed"
+    assert "unexpectedly FILLED 0.001" in row["detail"]
+    closes = [c for c in signed.place_calls if c.get("reduce_only")]
+    assert len(closes) == 1
+    assert closes[0]["is_buy"] is False and closes[0]["size"] == _D("0.001")
+
+
+def test_submit_unfilled_far_ioc_places_no_cleanup(live_db):
+    # The mirror: a far IOC that (correctly) fills nothing must neither close
+    # anything nor carry the FILLED note — the cleanup lane is fill-gated.
+    signed = _FakeSigned(place_ack=_Ack("filled", filled_size=_D(0)))
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["slice_order_submit"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["slice_order_submit"]
+    assert row["status"] == "passed"
+    assert "unexpectedly FILLED" not in (row["detail"] or "")
+    assert not [c for c in signed.place_calls if c.get("reduce_only")]
+
+
+def test_refused_cancel_says_probe_still_resting(live_db):
+    # Tests 5/10/13: the cancel IS the tested action — a refusal fails the test
+    # AND must say the probe trigger is still resting on the exchange (the one
+    # shared wording), never retry silently.
+    signed = _FakeSigned(cancel=_Cancel(False, "cancel rejected"))
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["slice_plan_cancel", "stop_loss_cancel", "take_profit_cancel"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    for key in ("slice_plan_cancel", "stop_loss_cancel", "take_profit_cancel"):
+        assert latest[key]["status"] == "failed"
+        assert "still resting on the exchange" in latest[key]["error_message"]
+
+
+def test_kill_switch_refresh_failure_propagates_and_still_disarms(live_db):
+    # The per-test re-arm is fail-closed: a refresh failure must abort the
+    # suite RAW (no probe goes out under an uncertain switch — not one test's
+    # error verdict), while the finally still runs the exit disarm.
+    signed = _FakeSigned(raise_on={"schedule_cancel"})
+    with live_db:
+        with pytest.raises(RuntimeError, match="boom in schedule_cancel"):
+            smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+                only=["slice_order_submit"]
+            )
+        rows = repo.iter_smoke_test_results(live_db.conn, "live-BTC")
+    assert len(rows) == 0  # the refresh sits before the test body — no verdict
+    assert "clear_scheduled_cancel" in signed.calls
+
+
+def test_trigger_modify_exception_sweeps_both_cloids(live_db):
+    # An unknown modify outcome (raise) must sweep BOTH cloids best-effort —
+    # exactly one rests on the exchange, the other cancel refuses harmlessly —
+    # and land as an "error" verdict (harness lane), not a "failed".
+    signed = _FakeSigned(raise_on={"modify_trigger_order"})
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["stop_loss_modify"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["stop_loss_modify"]
+    assert row["status"] == "error"
+    assert "boom in modify_trigger_order" in row["error_message"]
+    create_cloid = signed.trigger_calls[0]["cloid_hex"]
+    assert len(signed.cancelled_cloids) == 2
+    assert create_cloid in signed.cancelled_cloids
+    # The other swept cloid is the modify cloid (registered before the raise).
+    assert any(c != create_cloid for c in signed.cancelled_cloids)
+
+
+def test_error_verdict_stops_the_suite_and_flattens_the_staged_long(live_db):
+    # Stop-on-error (decision 2026-07-29): after a harness error the account
+    # state is unknown — the remaining selected tests must NOT execute and get
+    # NO rows (a written row would supersede a prior pass), while the finally
+    # backstop still flattens the staged long and the exit disarm still runs.
+    signed = _FakeSigned(raise_on={"modify_trigger_order"})
+    with live_db:
+        runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+        executed = runner.run(
+            only=[
+                "stop_loss_create",
+                "stop_loss_modify",
+                "take_profit_create",
+                "kill_switch_arm_refresh",
+            ]
+        )
+        rows = repo.iter_smoke_test_results(live_db.conn, "live-BTC")
+    assert [t.key for t in executed] == ["stop_loss_create", "stop_loss_modify"]
+    assert {r["test_key"] for r in rows} == {"stop_loss_create", "stop_loss_modify"}
+    # take_profit_create was still selected when the suite stopped, so the
+    # in-loop close was skipped — the finally backstop flattened the long.
+    closes = [c for c in signed.place_calls if c.get("reduce_only")]
+    assert len(closes) == 1 and closes[0]["size"] == _D("0.001")
+    assert "clear_scheduled_cancel" in signed.calls
+
+
+def test_failed_submit_cascades_test_4_to_error_and_stops(live_db):
+    # Test 3 aborts before leaving its handle (resting-IOC anomaly): test 4 is
+    # a dependency cascade — "error" (fix test 3 first, suite stops), never a
+    # "failed" that files the slip in the exchange-refused triage bucket.
+    resting = _Ack("resting", exchange_order_id="oid-9", filled_size=None, average_price=None)
+    signed = _FakeSigned(place_acks=[resting])
+    with live_db:
+        executed = smoke.SmokeTestRunner(
+            _ctx(live_db, signed, run_recovery=lambda: _Recovery())
+        ).run(only=["slice_order_submit", "slice_order_status", "slice_plan_cancel"])
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    assert latest["slice_order_submit"]["status"] == "failed"
+    row = latest["slice_order_status"]
+    assert row["status"] == "error"
+    assert "did not complete in this process" in row["error_message"]
+    assert [t.key for t in executed] == ["slice_order_submit", "slice_order_status"]
+    assert "slice_plan_cancel" not in latest  # stopped before test 5 — no row
+
+
+def test_staged_long_opens_once_and_closes_before_the_restart_tests(live_db):
+    # One staged long under the whole trigger block (decision 2026-07-29):
+    # opened lazily by the FIRST trigger test, reduce-only closed after the
+    # LAST — before a restart test's clean-restart recovery could find a
+    # position nobody staged.
+    timeline: list[str] = []
+
+    class _Timeline(_FakeSigned):
+        def place_ioc_limit(self, **k):
+            timeline.append("close" if k.get("reduce_only") else "open")
+            return super().place_ioc_limit(**k)
+
+    def _recovery():
+        timeline.append("recovery")
+        return _Recovery()
+
+    signed = _Timeline()
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=_recovery)).run(
+            only=[
+                "slice_plan_cancel",
+                "stop_loss_create",
+                "stop_loss_modify",
+                "stop_loss_cancel",
+                "take_profit_create",
+                "take_profit_modify",
+                "take_profit_cancel",
+                "restart_reconciliation",
+            ]
+        )
+    # Pre-flight recovery, ONE staging open, its close, THEN the restart test.
+    assert timeline == ["recovery", "open", "close", "recovery"]
+    closes = [c for c in signed.place_calls if c.get("reduce_only")]
+    assert len(closes) == 1
+    assert closes[0]["is_buy"] is False and closes[0]["size"] == _D("0.001")
+
+
+def test_recovery_seam_without_passed_attr_is_an_error_verdict(live_db):
+    # RecoveryResult contract: a seam wired to the wrong object must surface as
+    # a loud AttributeError → "error" (a harness bug), never be absorbed by a
+    # getattr default into a "failed" that reads as an exchange refusal.
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, _FakeSigned(), run_recovery=lambda: object())).run(
+            only=["restart_reconciliation"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["restart_reconciliation"]
+    assert row["status"] == "error"
+    assert "AttributeError" in row["error_message"]
+
+
+def test_preflight_recovery_wrong_object_raises_loudly(live_db):
+    # The pre-flight reads .passed OUTSIDE its exception net on purpose: a
+    # wrong seam object is a harness bug that must crash raw — not be dressed
+    # as "recovery did not pass" — while the finally still disarms.
+    signed = _FakeSigned()
+    with live_db:
+        with pytest.raises(AttributeError):
+            smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: object())).run()
+        rows = repo.iter_smoke_test_results(live_db.conn, "live-BTC")
+    assert len(rows) == 0
     assert "clear_scheduled_cancel" in signed.calls

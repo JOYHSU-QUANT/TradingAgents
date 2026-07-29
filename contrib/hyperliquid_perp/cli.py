@@ -36,8 +36,10 @@ operator/config/environment errors — including a protection-only ``paper`` run
 that self-terminates after its position closes (final export written; the
 books never re-verified, the API key was never supplied, or the engine
 failed to import — stderr says which), ``2`` unexpected error, ``4``
-not-yet-at-the-gate outcomes (``validate``: short of the 30-cycle gate;
+not-yet-at-the-gate outcomes (``validate``: short of the 30-cycle gate or a
+red/missing smoke test — curable by a ``live-smoke`` re-run;
 ``live-smoke``: the §20.2 gate is not satisfied, incl. a pre-flight abort;
+``live --loop``: the §20.2 smoke gate is not open on this run;
 ``live`` without ``--loop``: recovery ran but judged unclean; ``safe-mode
 --status``: a manual safe mode is latched), ``5`` (``validate`` only) the
 run has integrity failures — orphans, snapshot or replay mismatches, or a
@@ -240,10 +242,12 @@ def _validate_live(db: Database, run_id: str) -> int:
 
     Same exit contract as the paper report: 0 = acceptance passed; 5 = an
     integrity failure (dedupe error, orphan, position/replay mismatch, an
-    unprotected window, a low kill-switch refresh rate, a FAILED smoke test, or —
-    mainnet_tiny — an unresolved reconciliation case / breached daily-loss cap);
-    4 = internally consistent but short of the gate (< 30 cycles / orders, smoke
-    tests not yet run). Called inside the caller's ``with db:`` block.
+    unprotected window, a low kill-switch refresh rate, or — mainnet_tiny — an
+    unresolved reconciliation case / breached daily-loss cap); 4 = internally
+    consistent but short of the gate (< 30 cycles / orders, smoke tests not yet
+    run, or a failed/errored smoke test — curable by a ``live-smoke --only``
+    re-run, so it is a shortfall, not an integrity verdict; decision
+    2026-07-29). Called inside the caller's ``with db:`` block.
     """
     from .live.validation import validate_live_run
 
@@ -1180,7 +1184,9 @@ def _live_startup_recovery(
         # the one-shot recovery check, without --loop, never trades and so is not
         # gated.) Checked here, before arming: a fresh --create run has no smoke
         # results, so --loop on it is refused with the create → smoke → loop path.
-        if args.loop and live_cfg.mode.value == "testnet_live":
+        from .live.config import ExecutionMode
+
+        if args.loop and live_cfg.mode is ExecutionMode.TESTNET_LIVE:
             from .live.smoke import smoke_gate_report
 
             gate_ok, gate_missing, gate_failed, gate_errored = smoke_gate_report(db.conn, run_id)
@@ -1206,7 +1212,12 @@ def _live_startup_recovery(
                         f"`live-smoke --run-id {run_id}` and re-run with --loop.",
                         file=sys.stderr,
                     )
-                return 1
+                # Exit 4, not 1: "the gate is not open" is the same
+                # not-yet-at-the-gate fact `live-smoke` itself reports as 4 (the
+                # module exit contract lists it there), and a supervisor must be
+                # able to tell "gate closed — human action needed" from a
+                # config/auth failure's exit 1 (decision 2026-07-29).
+                return 4
             # Gate open: say how stale the proof is. Passes never expire (a hard
             # max-age is a policy call deliberately not made here, 2026-07-27),
             # so an operator returning after weeks should at least SEE the age
@@ -1976,9 +1987,9 @@ def _cmd_live_smoke(argv: list[str]) -> int:
             # mainnet" — the exact misreading `validate` renders as "n/a
             # (§21.3)". Refuse, mirroring the real-run testnet-only guard
             # (decision 2026-07-28).
-            from .live.validation import _execution_mode
+            from .live.validation import execution_mode
 
-            genesis_mode = _execution_mode(run_row["config_json"])
+            genesis_mode = execution_mode(run_row["config_json"])
             if genesis_mode != "testnet_live":
                 print(
                     f"error: run {args.run_id!r} has genesis live.mode "
@@ -2000,7 +2011,6 @@ def _cmd_live_smoke(argv: list[str]) -> int:
     db = _open_existing_db(args.db)
     if db is None:
         return 1
-    disarm_failed = False
     preflight_error: str | None = None
     from .paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
 
@@ -2029,42 +2039,49 @@ def _cmd_live_smoke(argv: list[str]) -> int:
         try:
             runner = SmokeTestRunner(session)
             try:
-                runner.run(only=only)
-            except SmokePreflightError as exc:
-                # No test executed, no verdict recorded; the exit disarm has
-                # already run inside runner.run()'s finally.
-                preflight_error = str(exc)
-            except RunLockError as exc:
-                # The per-test heartbeat found this process superseded: a
-                # successor legitimately took over the stale lease and now owns
-                # the run AND the wallet's kill switch (the runner suppressed
-                # its exit disarm for exactly that reason). Completed verdicts
-                # are durable; stop by name.
-                print(
-                    f"error: {exc} — the run lease was superseded mid-suite; the "
-                    "suite stopped and left the account-wide kill switch to the "
-                    "new owner. Re-run live-smoke once this run has a single owner.",
-                    file=sys.stderr,
-                )
-                return 1
-            disarm_failed = runner.kill_switch_disarm_failed
-            passed, missing, failed, errored = smoke_gate_report(db.conn, args.run_id)
+                try:
+                    runner.run(only=only)
+                except SmokePreflightError as exc:
+                    # No test executed, no verdict recorded; the exit disarm has
+                    # already run inside runner.run()'s finally.
+                    preflight_error = str(exc)
+                except RunLockError as exc:
+                    # The per-test heartbeat found this process superseded: a
+                    # successor legitimately took over the stale lease and now owns
+                    # the run AND the wallet's kill switch (the runner suppressed
+                    # its exit disarm for exactly that reason). Completed verdicts
+                    # are durable; stop by name.
+                    print(
+                        f"error: {exc} — the run lease was superseded mid-suite; the "
+                        "suite stopped and left the account-wide kill switch to the "
+                        "new owner. Re-run live-smoke once this run has a single owner.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                passed, missing, failed, errored = smoke_gate_report(db.conn, args.run_id)
+            finally:
+                # In a ``finally`` on purpose: the disarm runs inside
+                # runner.run()'s own finally on EVERY exit path, so its failure
+                # flag must be surfaced on every path too — an unexpected
+                # mid-suite exception (a wire/store error escaping to main()'s
+                # generic handler) is exactly the situation most likely to
+                # co-occur with a failed disarm, and the operator must not lose
+                # this warning under that stack trace (silent-failure review,
+                # 2026-07-29).
+                if runner.kill_switch_disarm_failed:
+                    print(
+                        "WARNING: the end-of-suite kill-switch disarm FAILED — the "
+                        "wallet may still hold an armed scheduleCancel that will "
+                        "cancel every resting order (including any SL/TP) at its "
+                        "deadline. Verify and clear it manually, or start `live "
+                        "--loop` (it re-arms and refreshes the switch).",
+                        file=sys.stderr,
+                    )
         finally:
             if lock_pid is not None:
                 release_run_lock(db, args.run_id, pid=lock_pid, now=datetime.now(timezone.utc))
     finally:
         db.close()
-    if disarm_failed:
-        # The end-of-suite disarm failed, so the wallet may still hold an armed
-        # scheduleCancel — surface it loudly (best-effort disarm is otherwise
-        # log-only, which an operator can miss). Exit code stays the gate's.
-        print(
-            "WARNING: the end-of-suite kill-switch disarm FAILED — the wallet may "
-            "still hold an armed scheduleCancel that will cancel every resting order "
-            "(including any SL/TP) at its deadline. Verify and clear it manually, or "
-            "start `live --loop` (it re-arms and refreshes the switch).",
-            file=sys.stderr,
-        )
     _print_smoke_gate(passed, missing, failed, errored)
     if preflight_error is not None:
         print(f"error: {preflight_error}", file=sys.stderr)
@@ -2310,6 +2327,11 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
         tick_size=asset.tick_size,
         now=clock.now,
         dry_run=False,
+        # The regime smoke test 2 writes is the RUN'S OWN (§4 live.safety) —
+        # the suite must never leave the account in a leverage/margin mode the
+        # config did not declare (decision 2026-07-29).
+        leverage=int(live_cfg.safety.leverage),
+        is_cross=live_cfg.safety.margin_mode.value == "cross",
         run_recovery=_run_recovery,
         heartbeat=_heartbeat,
     )

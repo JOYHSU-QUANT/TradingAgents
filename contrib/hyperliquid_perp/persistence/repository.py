@@ -109,6 +109,7 @@ __all__ = [
     "require_live_fill_basis",
     "set_funding_status",
     "set_reconciliation_action",
+    "set_position_liquidation_price",
     "set_position_protection",
     "update_decision_attempt",
     "update_execution_plan",
@@ -452,11 +453,13 @@ def upsert_current_position(
 ) -> None:
     """Upsert a symbol's materialized position (size / entry / realized PnL).
 
-    Deliberately does **not** touch ``stop_loss_price`` / ``take_profit_price``:
-    they default NULL on first insert and are left untouched on conflict, so a
-    position-changing fill preserves any active protection rather than wiping it.
-    The SL/TP lifecycle (write *and* read) lands together in PR 3, which owns
-    protection management (execution §2–§4).
+    Deliberately does **not** touch ``stop_loss_price`` / ``take_profit_price``
+    or ``exchange_liquidation_price``: they default NULL on first insert and are
+    left untouched on conflict, so a position-changing fill preserves any active
+    protection (and the reconciler's mirrored liquidation estimate) rather than
+    wiping it. The SL/TP lifecycle (write *and* read) lands together in PR 3,
+    which owns protection management (execution §2–§4); the liquidation mirror's
+    one writer is :func:`set_position_liquidation_price`.
     """
     conn.execute(
         """
@@ -486,6 +489,7 @@ def _row_to_position(row: sqlite3.Row) -> PositionState:
         size=Decimal(row["size"]),
         entry_price=_dec(row["entry_price"]),
         realized_pnl=Decimal(row["realized_pnl"]),
+        liquidation_price=_dec(row["exchange_liquidation_price"]),
     )
 
 
@@ -1840,6 +1844,40 @@ def set_position_protection(
         raise ValueError(
             f"no current_positions row for run {run_id!r} symbol {symbol!r} to protect"
         )
+
+
+def set_position_liquidation_price(
+    conn: sqlite3.Connection,
+    run_id: str,
+    symbol: str,
+    value: Decimal | None,
+    *,
+    updated_at: datetime | None = None,
+) -> None:
+    """Mirror (or clear, with ``None``) the exchange-reported liquidation price.
+
+    The live reconciler is the one writer: each pass it copies the clearinghouse
+    ``liquidationPx`` for the run's coin onto the position row (``None`` when the
+    exchange reports flat, so a stale estimate never survives a flat).
+    ``upsert_current_position`` deliberately leaves the column alone, same as the
+    SL/TP pair. Unlike :func:`set_position_protection`, a missing row is a
+    NO-OP, not an error: the exchange can report a position the local books do
+    not have yet — that mismatch is the reconciler's own §12.3 case lane, not
+    this writer's job.
+    """
+    conn.execute(
+        """
+        UPDATE current_positions
+        SET exchange_liquidation_price = ?, updated_at = ?
+        WHERE run_id = ? AND symbol = ?
+        """,
+        (
+            _encode(value),
+            _iso_utc(updated_at or datetime.now(timezone.utc)),
+            run_id,
+            symbol,
+        ),
+    )
 
 
 def upsert_scheduler_state(

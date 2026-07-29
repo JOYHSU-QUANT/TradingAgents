@@ -345,12 +345,15 @@ class LiveExecutionEngine:
             return self._wallet_balance() + unrealized
 
     def _liquidation_price(self, position: PositionState) -> Decimal | None:
-        # The exchange-reported liq price is the live truth source; the reconciler
-        # mirrors clearinghouse into current_positions. When absent (a fresh
-        # position not yet snapshotted) the SL band falls back to the entry-based
-        # band (stops.py handles ``liquidation_price=None``).
+        # The exchange-reported liq price is the live truth source: each
+        # reconcile pass mirrors the clearinghouse ``liquidationPx`` onto the
+        # current_positions row (LiveReconciler._reconcile_positions →
+        # set_position_liquidation_price), and this reads it back. None until
+        # the first mirror after an open (and after any flat, which clears it);
+        # the SL band then falls back to the entry-based band (stops.py handles
+        # ``liquidation_price=None``).
         pos = repo.get_current_position(self._db.conn, self._run_id, self._coin)
-        return getattr(pos, "liquidation_price", None) if pos is not None else None
+        return pos.liquidation_price if pos is not None else None
 
     def has_active_work(self) -> bool:
         """Whether anything is live: a position, an active leg, or a pending flip.

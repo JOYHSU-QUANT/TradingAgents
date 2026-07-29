@@ -3,7 +3,7 @@
 Covers the PR 2 persistence contract (phase3-spec §16): the v5→v6 upgrade
 path, the fills dedupe UNIQUE, the cloid registry's idempotent/conflict
 semantics, the live_order_attempts evidence trail, and the §18.5 kill switch
-event log.
+event log — plus the v9 exchange-liquidation mirror and its one writer.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import pytest
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database, apply_migrations, connect
 from contrib.hyperliquid_perp.persistence.ids import live_order_attempt_id
+from contrib.hyperliquid_perp.persistence.models import PositionState
 from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS, SCHEMA_VERSION
 
 _NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
@@ -633,3 +634,104 @@ def test_iter_open_live_orders_sees_only_non_terminal_live_rows(db):
     _seed_order(db, order_id="live1", status="open", cloid_hex=_HEX)
     _seed_order(db, order_id="done1", status="filled", cloid_hex=_HEX2)
     assert [r["order_id"] for r in repo.iter_open_live_orders(db.conn)] == ["live1"]
+
+
+# ---------------------------------------------------------------------------
+# migration v9 + the exchange liquidation mirror
+# ---------------------------------------------------------------------------
+
+
+def test_v8_store_upgrades_to_v9_in_place(monkeypatch):
+    # Same shape as the v5 upgrade above, one version narrower: the paper run
+    # live on the server is already at v8, so v9's additive ADD COLUMN is what
+    # its next restart actually runs. Its existing position row must survive
+    # and read NULL — a paper run has no exchange estimate to mirror, and a
+    # NOT NULL column would have made the upgrade unrunnable.
+    conn = connect(":memory:")
+    v8_only = {version: MIGRATIONS[version] for version in sorted(MIGRATIONS) if version <= 8}
+    import contrib.hyperliquid_perp.persistence.db as db_module
+
+    monkeypatch.setattr(db_module, "MIGRATIONS", v8_only)
+    assert apply_migrations(conn) == 8
+    assert "exchange_liquidation_price" not in _columns(conn, "current_positions")
+    stamp = "2026-07-12T00:00:00+00:00"
+    conn.execute(
+        "INSERT INTO current_positions (run_id, symbol, size, entry_price, realized_pnl,"
+        f" updated_at) VALUES ('r', 'BTC', '0.01', '50000', '3', '{stamp}')"
+    )
+
+    monkeypatch.setattr(db_module, "MIGRATIONS", MIGRATIONS)
+    assert apply_migrations(conn) == SCHEMA_VERSION
+
+    assert "exchange_liquidation_price" in _columns(conn, "current_positions")
+    row = conn.execute("SELECT * FROM current_positions").fetchone()
+    assert (row["symbol"], row["size"], row["realized_pnl"]) == ("BTC", "0.01", "3")
+    assert row["exchange_liquidation_price"] is None
+    # And the reader hands that NULL back as None rather than tripping on it.
+    upgraded = repo.get_current_position(conn, "r", "BTC")
+    assert upgraded is not None and upgraded.liquidation_price is None
+    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def test_a_freshly_created_store_has_the_liquidation_column(db):
+    # The ADD COLUMN path and the CREATE path must agree: a brand-new live run
+    # never replays v9's ALTER against a v8 table, it runs the whole list.
+    assert "exchange_liquidation_price" in _columns(db.conn, "current_positions")
+
+
+def _seed_position(db, *, size="0.01", entry="50000"):
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal(size), entry_price=Decimal(entry)),
+            updated_at=_NOW,
+        )
+
+
+def test_liquidation_mirror_round_trips_and_a_none_clears_it(db):
+    _seed_position(db)
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", Decimal("43210.5"))
+    stored = repo.get_current_position(db.conn, "r", "BTC")
+    assert stored is not None and stored.liquidation_price == Decimal("43210.5")
+    # The reconciler writes an explicit None when the exchange reports flat (or
+    # no liquidationPx at all); a stale estimate surviving that would band the
+    # next position's SL off a dead number.
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", None)
+    cleared = repo.get_current_position(db.conn, "r", "BTC")
+    assert cleared is not None and cleared.liquidation_price is None
+
+
+def test_liquidation_mirror_on_a_missing_row_is_a_silent_no_op(db):
+    # Unlike set_position_protection, a missing row is NOT an error here: the
+    # exchange can report a position the local books have not booked yet, and
+    # that mismatch is the reconciler's own §12.3 lane, not this writer's. It
+    # must also not FABRICATE the row — a current_positions row nobody's fills
+    # created would read as a position the run opened.
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", Decimal("43210.5"))
+    assert repo.get_current_position(db.conn, "r", "BTC") is None
+    assert db.conn.execute("SELECT COUNT(*) FROM current_positions").fetchone()[0] == 0
+
+
+def test_upsert_current_position_preserves_the_mirrored_liquidation_price(db):
+    # The invariant upsert_current_position's docstring promises, same posture
+    # as the SL/TP pair: a position-changing fill lands between two reconcile
+    # passes and must not wipe the mirror, or the live SL band silently falls
+    # back to the entry-based one until the next heartbeat.
+    _seed_position(db)
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", Decimal("43210.5"))
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("0.02"), entry_price=Decimal("51000")),
+            updated_at=_NOW,
+        )
+    pos = repo.get_current_position(db.conn, "r", "BTC")
+    assert pos is not None
+    assert pos.size == Decimal("0.02")  # the fill landed
+    assert pos.liquidation_price == Decimal("43210.5")  # and the mirror survived it

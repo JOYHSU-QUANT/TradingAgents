@@ -120,9 +120,13 @@ class _FakeProtection:
         # Mirrors ProtectionManager.orders_changed_last_sync (§12.2 rule 6):
         # tests flip it to assert the engine reconciles a protection-change tick.
         self.orders_changed_last_sync = False
+        # What the engine handed the SL band each sync (§3.6): the reconciler's
+        # mirrored exchange estimate, or None before the first mirror.
+        self.liquidation_prices: list[Decimal | None] = []
 
     def sync(self, *, position, liquidation_price, mark, plan_active):
         self.calls += 1
+        self.liquidation_prices.append(liquidation_price)
         if position.is_flat:
             return ProtectionOutcome.FLAT
         return self.outcome
@@ -354,6 +358,37 @@ def test_emergency_close_on_needs_close(tmp_path):
     assert close[0]["side"] == "sell"  # closing a long
     assert close[0]["reduce_only"] is True
     assert close[0]["size"] == D("0.05")
+
+
+# -- protection sync inputs -------------------------------------------------
+
+
+def test_protection_sync_is_fed_the_mirrored_liquidation_price(tmp_path):
+    prot = _FakeProtection()
+    db, clock, engine, gate, sub = _build(tmp_path, protection=prot)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.05"), entry_price=D(50000)),
+            updated_at=_T0,
+        )
+    engine._was_flat = False
+    _script(engine, [_snap(), _snap()])
+    engine.tick()
+    # Nothing mirrored yet (a fresh position before its first reconcile pass):
+    # None must reach sync so the SL band falls back to the entry-based one.
+    assert prot.liquidation_prices == [None]
+
+    # The reconciler's mirror lands on the row...
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", D("43210.5"))
+    clock.advance(30)
+    engine.tick()
+    # ...and the very next sync bands the SL off it. The probe sits far from the
+    # mark and from any entry-derived fallback, so an engine that dropped the
+    # exchange value could not reproduce it by accident.
+    assert prot.liquidation_prices == [None, D("43210.5")]
 
 
 # -- settlement detection ---------------------------------------------------

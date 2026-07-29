@@ -48,7 +48,12 @@ def _clearinghouse(
     }
 
 
-def _btc_position(szi: str = "0.001", upnl: str = "1", value: str = "51") -> dict:
+def _btc_position(
+    szi: str = "0.001",
+    upnl: str = "1",
+    value: str = "51",
+    liquidation_px: str | None = None,
+) -> dict:
     return {
         "coin": "BTC",
         "szi": szi,
@@ -56,6 +61,9 @@ def _btc_position(szi: str = "0.001", upnl: str = "1", value: str = "51") -> dic
         "unrealizedPnl": upnl,
         "positionValue": value,
         "marginUsed": value,
+        # Absent by default (the mapper treats a None liquidationPx as absent),
+        # so the mirror tests are the only ones that carry an estimate.
+        "liquidationPx": liquidation_px,
     }
 
 
@@ -415,6 +423,97 @@ def test_an_sl_covering_only_part_of_the_position_does_not_protect(env):
     ]
     report = reconciler.run("heartbeat")
     assert not report.position_protected
+
+
+def test_the_exchange_liquidation_estimate_is_mirrored_onto_the_local_row(env):
+    db, seams, reconciler = env
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("0.001"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+    seams.clearinghouse = _clearinghouse(
+        account_value="101",
+        positions=[_btc_position(liquidation_px="43210.5")],
+        maintenance="1",
+    )
+    reconciler.run("heartbeat")
+    # §12.1: the exchange is the truth source for the liq estimate, and this row
+    # is how it reaches the engine's SL band (§3.6/§17.2) — nothing else in the
+    # live path reads the clearinghouse for it.
+    pos = repo.get_current_position(db.conn, "r", "BTC")
+    assert pos is not None and pos.liquidation_price == Decimal("43210.5")
+
+
+def test_a_failed_liquidation_mirror_does_not_fail_the_position_leg(env, monkeypatch):
+    """The mirror is a cache for the SL band, not this leg's evidence.
+
+    The leg's verdict answers "do the local and exchange positions agree?", and
+    the read already answered it. A transient store error on the metadata write
+    must not retroactively mark the position unreconciled AND unprotected —
+    that drives safe mode (halted cycles, a manual §13.6 release) off a cache
+    failure (decision 2026-07-29).
+    """
+    db, seams, reconciler = env
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("0.001"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+    _insert_local_order(db, order_id="o-sl", hex_id=_HEX_SL, logical="log-sl", role="stop_loss")
+    seams.clearinghouse = _clearinghouse(
+        account_value="101",
+        positions=[_btc_position(liquidation_px="43210.5")],
+        maintenance="1",
+    )
+    seams.open_orders = [
+        {
+            "oid": 5,
+            "coin": "BTC",
+            "cloid": _HEX_SL,
+            "side": "A",
+            "sz": "0.001",
+            "reduceOnly": True,
+        }
+    ]
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(repo, "set_position_liquidation_price", _boom)
+    report = reconciler.run("heartbeat")
+
+    assert report.position_reconciled
+    assert report.position_protected
+    assert report.clean
+    # Unmirrored this tick: the engine falls back to the entry-based band, the
+    # same band it used before the mirror existed. The next pass rewrites it.
+    pos = repo.get_current_position(db.conn, "r", "BTC")
+    assert pos is not None and pos.liquidation_price is None
+
+
+def test_a_flat_exchange_clears_a_stale_mirrored_liquidation_estimate(env):
+    db, seams, reconciler = env
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("0.001"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+        repo.set_position_liquidation_price(conn, "r", "BTC", Decimal("43210.5"))
+    # The default clearinghouse holds no position at all.
+    report = reconciler.run("heartbeat")
+    # The clear does NOT wait for a clean pass: the local books still claim a
+    # position (a phantom), and that is exactly when a surviving estimate would
+    # be most misleading.
+    assert not report.position_reconciled
+    pos = repo.get_current_position(db.conn, "r", "BTC")
+    assert pos is not None and pos.liquidation_price is None
 
 
 # -- §12.3: equity tolerance -----------------------------------------------------

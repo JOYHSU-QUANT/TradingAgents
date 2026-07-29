@@ -198,6 +198,50 @@ def test_missing_smoke_is_a_shortfall(tmp_path):
     assert not report.restart_reconciliation_passed
 
 
+def _supersede_smoke(db, status: str, *, key: str = "stop_loss_create") -> None:
+    """Supersede one smoke test with a non-passed result (a later result_id wins)."""
+    with db.transaction() as conn:
+        repo.insert_smoke_test_result(
+            conn,
+            run_id="r",
+            test_number=8,
+            test_key=key,
+            test_name="SL create",
+            status=status,
+            executed_at=_T0,
+        )
+
+
+def test_failed_smoke_is_a_shortfall_not_a_failure(tmp_path):
+    # Decision 2026-07-29: a red smoke item is curable by one
+    # `live-smoke --only <key>` re-run, so it is "not yet at the gate" (exit 4)
+    # — exit 5 stays reserved for the investigate-before-trusting conditions.
+    # The triage split survives in the wording: failed = the exchange refused.
+    db = _healthy(tmp_path)
+    _supersede_smoke(db, "failed")
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.failures == ()
+    assert any(
+        "FAILED (exchange refused)" in s and "stop_loss_create" in s for s in report.shortfalls
+    )
+    assert not report.live_ready
+
+
+def test_errored_smoke_is_a_shortfall_with_harness_wording(tmp_path):
+    # The errored bucket lands in shortfalls too, but names the harness — not
+    # the exchange — so the operator fixes code, not config/market state.
+    db = _healthy(tmp_path)
+    _supersede_smoke(db, "error")
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.failures == ()
+    assert any(
+        "ERRORED (harness/code bug" in s and "stop_loss_create" in s for s in report.shortfalls
+    )
+    assert not report.live_ready
+
+
 # -- integrity failures (exit 5) ------------------------------------------
 
 
@@ -281,25 +325,6 @@ def test_no_refresh_events_is_a_shortfall(tmp_path):
     assert report.kill_switch_refresh_success_rate is None
     assert report.failures == ()
     assert any("refresh events" in s for s in report.shortfalls)
-
-
-def test_failed_smoke_is_a_failure(tmp_path):
-    db = _healthy(tmp_path)
-    # Supersede one smoke test with a FAILED result (a later result_id wins).
-    with db.transaction() as conn:
-        repo.insert_smoke_test_result(
-            conn,
-            run_id="r",
-            test_number=8,
-            test_key="stop_loss_create",
-            test_name="SL create",
-            status="failed",
-            executed_at=_T0,
-        )
-    with db:
-        report = validate_live_run(db, run_id="r", now=_T0)
-    assert any("FAILED" in f for f in report.failures)
-    assert not report.live_ready
 
 
 def test_unprotected_window_from_protection_events(tmp_path):

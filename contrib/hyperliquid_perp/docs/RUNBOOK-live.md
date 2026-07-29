@@ -120,8 +120,8 @@ safe mode，見 §6）；exit 1＝硬失敗（config／arming／建立）。
 ## 3. Smoke tests（§20.2）——進 cycles 的硬 gate
 
 testnet_live **必須先全過 18 項 smoke test 才允許 `--loop` 進 cycles**（同一個
-run-id）。smoke 對 testnet 真連線、真下小單（每筆約 11 USDC 名目、far-from-market
-或 reduce-only，跑完自清）。
+run-id）。smoke 對 testnet 真連線、真下小單（每筆約 11 USDC 名目、far-from-market、
+reduce-only 或小額真倉，跑完自清）。
 
 ### 3.1 先離線驗一次 wiring（不下單）
 
@@ -189,10 +189,20 @@ python -m contrib.hyperliquid_perp live-smoke \
 
 > `--only` 有一條配對規則：test 4（`slice_order_status`）查的是同一次執行裡
 > test 3 送出的單，單選 test 4 會被入口直接拒絕（exit 1）——兩個一起選：
-> `--only slice_order_submit slice_order_status`。
+> `--only slice_order_submit slice_order_status`。兩個都選了、但 test 3 在同一次
+> 執行沒跑完（自己出 `error`，或 suite 在它之前就因 `error` 停下）時，test 4 會記
+> **`error`**（harness／選測連鎖，不是交易所拒絕的 `failed`）——先修 test 3 的根因，
+> 再兩項一起重跑。
 
 每項結果落 `live_smoke_tests`（append-only：修好再跑會覆蓋判定、保留歷史）。
-失敗的項修好後重跑該項即可。
+紅的判定分兩型，triage 方式不同：
+
+- **`failed`＝交易所拒絕**（config／市場狀態問題）——suite 記下後**繼續跑**下一項。
+- **`error`＝harness bug**（程式自己炸了、帳戶狀態未知）——suite **停在這一項**，
+  其後的測試不執行、它們既有的判定不動。先修 code 再回來。
+
+無論哪型，修好原因後 `live-smoke --only <key>` 重跑該項即可（gate 以 latest-per-key
+的真跑結果為準）。
 
 四個真跑才有的行為：
 
@@ -207,10 +217,14 @@ python -m contrib.hyperliquid_perp live-smoke \
   且**不做**收尾 disarm——kill switch 此時屬於接管者，已記錄的判定不受影響。
 - **pre-flight recovery**：見 §3.2。pre-flight 沒過＝suite 直接中止（exit 4、
   不記任何判定）；先查 `safe-mode --status`／log、修好 run 狀態再重跑。
-- **probe 成交入帳**：會成交的 probe（測 6/7/18 的開倉／平倉 IOC）以
-  `smoke|<cloid>` 的 order row 記入 `orders`，其成交照一般 §14 流程入帳——它們是
-  這個 run 的真實資金流，會出現在 fills／export／replay 裡（開平相抵、只留手續費
-  與滑價）。
+- **probe 成交入帳**：會成交的 probe——測 6/7/18 的開倉／平倉 IOC，**加上**
+  trigger-probe 區塊（測 5、8–13）staged 的小多倉（第一個 trigger 測試前才 lazily
+  開、最後一個之後 reduce-only 平掉、suite 收尾再 backstop 一次；每張 SL/TP probe
+  因此都是真實護倉形狀，不是 flat 帳戶上的空掛單）——以 `smoke|<cloid>` 的 order
+  row 記入 `orders`，其成交照一般 §14 流程入帳——它們是這個 run 的真實資金流，會
+  出現在 fills／export／replay 裡（開平相抵、只留手續費與滑價）。另外 test 3 的
+  far-price IOC 在薄的 testnet book 上偶爾會**意外成交**——suite 會自動把那筆平掉、
+  並把異常記進該項的 detail（自清；判定照樣 passed），一樣算真實資金流。
 
 ### 3.4 確認 gate（不下單、純讀 DB）
 
@@ -228,7 +242,7 @@ python -m contrib.hyperliquid_perp live-smoke \
 | `live-smoke` exit | 意義 | 下一步 |
 |---|---|---|
 | `0` | **全 18 項** gate 開（每項最新真跑結果都 passed） | 可進 testnet_live cycles |
-| `4` | 跑了（或讀了）但 gate 未滿足；含 pre-flight recovery 沒過、suite 中止 | 看 not_yet_run／failed（或 pre-flight 錯誤訊息），補跑或修 |
+| `4` | 跑了（或讀了）但 gate 未滿足；含 pre-flight recovery 沒過、或跑到一半出 `error` 判定，suite 提前中止 | 看 not_yet_run／failed／errored（或 pre-flight 錯誤訊息），補跑或修 |
 | `1` | config／env／網路／run-lock 具名錯誤 | 依訊息修 |
 
 > `--only` 只跑子集時，即使選到的項全過，其餘未跑的項仍讓 gate 未開——所以 exit 仍是
@@ -247,15 +261,18 @@ python -m contrib.hyperliquid_perp live \
   --run-id live-BTC --db live_trading.db --loop
 ```
 
-- 若 smoke gate 未過，`--loop` 會具名 exit 1（`testnet_live cycles are gated on the
-  §20.2 smoke suite ...`）——先回 §3。gate 開著時會印最舊一筆通過結果的時間戳——
+- 若 smoke gate 未過，`--loop` 會具名 **exit 4**（`testnet_live cycles are gated on
+  the §20.2 smoke suite ...`）——「還沒到 gate」，與 config／授權／環境類的 exit 1
+  區分——先回 §3。gate 開著時會印最舊一筆通過結果的時間戳——
   smoke 通過**沒有時效**，程式或 config 大改後請自行重跑 `live-smoke`。
 - 迴圈每 ~10s tick（在 30s kill-switch 預算內）：排空 WS queue → 刷 kill switch →
   reconciliation → SL/TP protection → 到期切片；4h AI decision 在背景 thread。
 - Ctrl-C／SIGTERM 安全停止並跑 §18.2 shutdown sweep。
 - **長駐建議**同 paper（[RUNBOOK §3](./RUNBOOK.md)）：掛在會自動重啟的監管下，
-  working directory 設 repo 根目錄。注意 live 的無人看管空窗風險比 paper 高——真錢／
-  真倉。
+  working directory 設 repo 根目錄。監管（systemd 等）的重啟策略可依 exit code
+  分流：**4**＝smoke gate 未開（重啟不會自己好，先去跑 `live-smoke`）、**1**＝
+  config／憑證／環境錯誤——兩者都不該無腦無限重啟。注意 live 的無人看管空窗風險比
+  paper 高——真錢／真倉。
 
 跑滿 **≥ 30 cycles**（§20.3）。
 
@@ -272,8 +289,12 @@ live run 會自動走 §20.3／§21.4 報告（依 `live.mode`）。指標與 ex
 | `validate` exit | 意義 | 下一步 |
 |---|---|---|
 | `0` | `live_ready` — 全部驗收指標達標 | testnet_live 通過；可準備 mainnet_tiny |
-| `4` | 一致但未到 gate（cycles/orders 未滿、smoke 未跑） | 繼續跑／補 smoke |
-| `5` | integrity failure（dedupe error、orphan、position/replay mismatch、unprotected 秒數 > 0、refresh rate < 99%、smoke 失敗；mainnet_tiny 另含未解 reconciliation／daily-loss 破線） | 先調查再相信結果 |
+| `4` | 一致但未到 gate（cycles/orders 未滿、smoke 未跑**或 failed/errored**） | 繼續跑；smoke 紅的修好後 `live-smoke --only <key>` 重跑（latest-per-key 覆蓋） |
+| `5` | integrity failure（dedupe error、orphan、position/replay mismatch、unprotected 秒數 > 0、refresh rate < 99%；mainnet_tiny 另含未解 reconciliation／daily-loss 破線） | 先調查再相信結果 |
+
+> smoke 的 failed／errored **不算** exit 5——它可補救（修好原因、`live-smoke --only
+> <key>` 重跑，latest-per-key 覆蓋），歸 exit 4 的「未到 gate」。exit 5 保留給不可
+> 補救的 integrity 條件（見下方累積制警告框）。
 
 §20.3 驗收門檻（testnet_live）：`cycle_count ≥ 30`、`live_order_count ≥ 30`、
 `exchange_fill_dedupe_error_count / orphan_exchange_order_count /
@@ -398,7 +419,7 @@ mode 切換都手動改 config（§22／§26）。
 | `HYPERLIQUID_AGENT_KEY_TESTNET/_MAINNET is not set` | 依 §1.2 export 對應網路的 agent key。 |
 | `agent authorization failed` / 過期 | 重新核准 agent wallet（§1.2）。 |
 | `effective_notional_cap ... below the exchange minimum`（exit 1） | 入金不足；見 §1.3（mainnet ≥ ~167 USDC）。 |
-| `--loop` 報 §20.2 smoke gate 未過 | 先跑 `live-smoke`（§3），`--gate-status` 確認 yes 再 `--loop`。 |
+| `--loop` 報 §20.2 smoke gate 未過（exit 4） | 先跑 `live-smoke`（§3），`--gate-status` 確認 yes 再 `--loop`。 |
 | `live-smoke` 報 run lock 被持有（exit 1） | 同一 run 的 `live --loop`／`paper` 還在跑；先停掉（或等 lease 過期）再跑 smoke。 |
 | `live-smoke` 報 pre-flight recovery 沒過（exit 4） | run 狀態不乾淨；`safe-mode --status` 查 open case、照 §6 處置後重跑。 |
 | `live.allow_real_orders is false` | live-smoke／--loop 要真下單；設 `allow_real_orders: true` 並備妥 agent key，或 live-smoke 用 `--dry-run`。 |

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 __all__ = ["MIGRATIONS", "SCHEMA_MIGRATIONS_DDL", "SCHEMA_VERSION"]
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # --------------------------------------------------------------------------
 # Export logical tables (phase2-data §5–§12) — one-to-one with CSV exports.
@@ -652,4 +652,12 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     # the acceptance validator reads its latest-per-key non-dry-run rows for the
     # §20.3 gate and ``*_test_passed`` metrics. No existing table is touched.
     8: (_LIVE_SMOKE_TESTS,),
+    # v9: the exchange-reported liquidation estimate, mirrored onto the run's
+    # current_positions row by the live reconciler each pass (clearinghouse
+    # ``liquidationPx``; cleared when the exchange reports flat). The live SL
+    # band (§3.6/§17.2) and the ai_inputs ``estimated_liquidation_price``
+    # column read it via the engine — before v9 those always saw NULL because
+    # PositionState carried no such field. Nullable so every existing paper row
+    # (and any live row before its first reconcile pass) stays valid.
+    9: ("ALTER TABLE current_positions ADD COLUMN exchange_liquidation_price TEXT",),
 }

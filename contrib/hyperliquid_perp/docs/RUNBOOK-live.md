@@ -225,6 +225,11 @@ python -m contrib.hyperliquid_perp live-smoke \
   出現在 fills／export／replay 裡（開平相抵、只留手續費與滑價）。另外 test 3 的
   far-price IOC 在薄的 testnet book 上偶爾會**意外成交**——suite 會自動把那筆平掉、
   並把異常記進該項的 detail（自清；判定照樣 passed），一樣算真實資金流。
+  staged 小多倉萬一**平不掉**（交易所拒絕、只成交一部分、或成交了卻沒能記帳），
+  收尾會印一行醒目 `WARNING: the trigger-block staging position may still be OPEN`
+  ——它平在測試之間、沒有哪一項的 detail 承接得了，所以這行 stderr 就是唯一的操作
+  面訊號：**照它指示到交易所確認並手動平掉**（或重跑一次 suite，收尾會再試一次）。
+  部分成交時重試只補送真正的剩餘量，不會重送原始尺寸。
 
 ### 3.4 確認 gate（不下單、純讀 DB）
 

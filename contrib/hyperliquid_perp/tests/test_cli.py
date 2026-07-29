@@ -152,10 +152,13 @@ def test_build_input_payload_write_failure_rides_retry_ladder(tmp_path, monkeypa
 @pytest.mark.parametrize(
     ("candle_count", "indicators", "expected_msg"),
     [
-        # Under-warmed feed (below the monkeypatched threshold of 1): the
-        # daemon's build_input must ride the same warm-up guard as the
-        # one-shot path, not just the two indicator-death guards below.
-        (0, {}, "under-warmed"),
+        # Under-warmed feed: candle_count 100 sits below the monkeypatched
+        # threshold (150) but above the default indicator set's 50, so the
+        # daemon's build_input must both ride the one-shot path's warm-up
+        # guard and actually consult _warmup_threshold(config) — a guard
+        # falling back to a hardcoded/default threshold clears 100 and
+        # reports a different refusal.
+        (100, {}, "under-warmed"),
         # Fully-dead known-indicator set (stockstats broken): must become an
         # api_failed cycle (no AI spend), not a prompt asserting a
         # fabricated-calm RANGING regime every 4h.
@@ -192,11 +195,12 @@ def test_build_input_refuses_untradeable_indicators(
     from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
     from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
 
-    # Threshold monkeypatched to 1: candle_count 200 clears the warm-up gate,
-    # candle_count 0 exercises it.
+    # Threshold monkeypatched to 150 — a value the default indicator set's 50
+    # can't mimic: candle_count 200 clears the warm-up gate, 100 exercises it
+    # only if the guard really reads _warmup_threshold(config).
     ctx = SimpleNamespace(candle_count=candle_count, indicators=indicators)
     monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, None))
-    monkeypatch.setattr(main_mod, "_warmup_threshold", lambda config: 1)
+    monkeypatch.setattr(main_mod, "_warmup_threshold", lambda config: 150)
 
     # Only _config is needed: the guard fires before the risk/decision/payload
     # attributes are ever read.

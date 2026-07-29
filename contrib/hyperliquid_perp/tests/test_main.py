@@ -668,7 +668,7 @@ def test_run_engine_aborts_when_atr_not_configured(monkeypatch, capsys):
 
 
 @pytest.mark.parametrize(
-    ("config", "ctx_indicators", "expected_msg"),
+    ("config", "candle_count", "ctx_indicators", "expected_msg"),
     [
         # A dead EMA is as regime-critical as a dead ATR: classify_regime
         # silently defaults to RANGING when ema_20 or ema_50 is None (hiding a
@@ -676,6 +676,7 @@ def test_run_engine_aborts_when_atr_not_configured(monkeypatch, capsys):
         # the guard.
         (
             {},
+            200,
             {"rsi_14": 55.0, "ema_20": None, "ema_50": 59000.0, "atr_14": 250.0},
             "ema_20 is unavailable",
         ),
@@ -684,15 +685,18 @@ def test_run_engine_aborts_when_atr_not_configured(monkeypatch, capsys):
         # deliberate choice, warm-up threshold 0) but every engine cycle is
         # refused at the regime guard — all three regime names are absent. If
         # someone later special-cases empty lists in _context_refusal_error,
-        # this fails.
-        ({"indicators": []}, {}, "atr_14, ema_20, ema_50 are unavailable"),
+        # this fails. candle_count 5 sits below the default indicator set's
+        # threshold (50): the regime message only appears if the empty list
+        # really zeroes the warm-up threshold — a fallback to the default set
+        # reports "under-warmed" instead.
+        ({"indicators": []}, 5, {}, "atr_14, ema_20, ema_50 are unavailable"),
     ],
 )
 def test_run_engine_refuses_untradeable_regime_indicators(
-    monkeypatch, capsys, config, ctx_indicators, expected_msg
+    monkeypatch, capsys, config, candle_count, ctx_indicators, expected_msg
 ):
     _stub_engine(monkeypatch)
-    ctx = SimpleNamespace(candle_count=200, indicators=ctx_indicators)
+    ctx = SimpleNamespace(candle_count=candle_count, indicators=ctx_indicators)
     monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, object()))
     calls = []
     monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())

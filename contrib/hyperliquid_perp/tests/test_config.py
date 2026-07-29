@@ -179,6 +179,10 @@ def test_load_config_accepts_list_selected_analysts(tmp_path):
         "indicators: [rsi_14, atr14]\n",  # one good, one typo'd
         "indicators: [5]\n",  # non-string junk
         "indicators: [[rsi_14]]\n",  # unhashable junk must not TypeError
+        # Typo on an otherwise-legal config (regime trio complete): the
+        # unknown-name check must fire on its own, not only on configs the
+        # regime-trio check would also reject.
+        "indicators: [atr_14, ema_20, ema_50, macd2]\n",
     ],
 )
 def test_load_config_rejects_unknown_indicator_names(tmp_path, text):

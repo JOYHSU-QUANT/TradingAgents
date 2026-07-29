@@ -274,6 +274,23 @@ def test_candle_invariant_rejects_zero_price():
         )
 
 
+def test_candle_invariant_rejects_low_only_zero_price():
+    # Ordering-legal candle where only ``low`` is non-positive: the all-zero
+    # fixture above fires no matter which price field the check reads, so only
+    # this case pins the check to ``low`` (the minimum under OHLC ordering,
+    # which is what lets one comparison cover all four prices).
+    with pytest.raises(ValueError, match="prices must be > 0"):
+        Candle(
+            open_time=1000,
+            close_time=1999,
+            open=Decimal("1"),
+            high=Decimal("2"),
+            low=Decimal("0"),
+            close=Decimal("1.5"),
+            volume=Decimal("1"),
+        )
+
+
 def test_candles_zero_price_bar_dropped(caplog):
     # A zero-price bar from a broken feed is dropped like any other malformed
     # bar — before this guard it sailed through OHLC ordering (0 <= 0 <= 0) and

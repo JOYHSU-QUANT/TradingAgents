@@ -545,3 +545,10 @@ class TestStructuredOutputGraphSeam:
         # None that langchain would drop (see trading_graph.py).
         graph, _, _ = self._build_graph(tmp_path, monkeypatch, max_recur_limit=None)
         assert graph.propagator.max_recur_limit == 100
+
+    def test_configured_max_recur_limit_reaches_propagator(self, tmp_path, monkeypatch):
+        # Probe with a value distinct from Propagator's declared default (100):
+        # the None test above cannot tell the real wiring from an always-omit
+        # mutant, because dropping the kwarg also yields 100.
+        graph, _, _ = self._build_graph(tmp_path, monkeypatch, max_recur_limit=50)
+        assert graph.propagator.max_recur_limit == 50

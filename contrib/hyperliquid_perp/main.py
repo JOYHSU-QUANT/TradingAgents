@@ -35,7 +35,11 @@ from .config import (
 )
 from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context
-from .domains.perp.indicator_vocab import required_candles, supported_indicators
+from .domains.perp.indicator_vocab import (
+    REGIME_INDICATORS,
+    required_candles,
+    supported_indicators,
+)
 from .domains.perp.prompt_context import render_market_context
 from .domains.perp.schema import PerpMarketContext, PerpPosition
 from .domains.perp.target_decision import (
@@ -78,7 +82,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--context-only",
         action="store_true",
-        help="Build & print PerpMarketContext only; skip the engine (no API key needed).",
+        help=(
+            "Build & print PerpMarketContext only; skip the engine (no API key "
+            "needed). Exits 4 when the rendered context is one the engine "
+            "would refuse (degraded state), so a preflight can gate on it."
+        ),
     )
     parser.add_argument(
         "--coin",
@@ -132,7 +140,8 @@ def _context_refusal_error(ctx: PerpMarketContext, coin: str, config: dict) -> s
     """Why this context must not be traded on, or ``None`` if usable.
 
     Single source of truth for the three pre-LLM context guards — warm-up,
-    fully-dead indicator set, missing/dead atr_14, in that order: an
+    fully-dead indicator set, missing/dead regime indicators
+    (atr_14/ema_20/ema_50), in that order: an
     under-warmed context legitimately has all-None indicators, so the dead-set
     diagnosis only means "the indicator engine broke" once the warm-up bar is
     cleared. Shared by the one-shot path (print + exit 1), the daemon
@@ -166,19 +175,20 @@ def _context_refusal_error(ctx: PerpMarketContext, coin: str, config: dict) -> s
             "broken or incompatible. Refusing to run the engine on a fully-dead "
             "indicator set."
         )
-    # atr_14 is load-bearing beyond being "one missing number": classify_regime
-    # falls back to RANGING (hiding a volatile market) when it is absent, so the
-    # regime this engine trades on is only trustworthy with a usable ATR. Refuse
-    # whether atr_14 was dropped from the configured indicator set entirely or
-    # computed to None (stockstats failing on that column past the warm-up gate —
-    # a single dead indicator slipping past the all-dead guard above); either way,
-    # do not trade on a fabricated-calm regime.
-    if ctx.indicators.get("atr_14") is None:
+    # The regime trio (see REGIME_INDICATORS for why they are load-bearing):
+    # refuse whether a name was dropped from the configured indicator set
+    # entirely or computed to None (stockstats failing on that column past the
+    # warm-up gate — dead columns slipping past the all-dead guard above);
+    # either way, do not trade on a fabricated-calm regime.
+    dead = [name for name in REGIME_INDICATORS if ctx.indicators.get(name) is None]
+    if dead:
+        verb = "is" if len(dead) == 1 else "are"
         return (
-            f"atr_14 is unavailable for {coin} (not in the configured "
-            f"indicator set, or it failed to compute despite {ctx.candle_count} "
-            "candles) — the regime would silently default to RANGING, hiding a "
-            "volatile market. Refusing to run the engine without a usable ATR."
+            f"{', '.join(dead)} {verb} unavailable for {coin} (not in the "
+            f"configured indicator set, or failed to compute despite "
+            f"{ctx.candle_count} candles) — the regime would silently default "
+            "to RANGING, hiding a volatile or trending market. Refusing to run "
+            "the engine without usable regime indicators."
         )
     return None
 
@@ -287,7 +297,14 @@ def _load_position(
 
 
 def run_context_only(config: dict, coin: str) -> int:
-    """Build and print the market context for ``coin``."""
+    """Build and print the market context for ``coin``.
+
+    Exit codes follow the repo's probe convention (validate 0/1/4,
+    ``safe-mode --status`` 0/4): 0 = healthy context, 1 = config error,
+    4 = the command succeeded but the rendered context is one the engine
+    would refuse — so a keyless deploy preflight can gate on the code
+    instead of parsing stderr.
+    """
     # The parsed configs aren't consumed here — the validation runs purely for
     # its named exit-1 side effect, before any network fetch (see the docstring
     # for why the smoke run validates at all).
@@ -328,7 +345,9 @@ def run_context_only(config: dict, coin: str) -> int:
                 f"\nCurrent position: {side} {abs(position.size)} {coin} "
                 f"@ {position.entry_price} (uPnL {position.unrealized_pnl})"
             )
-    return 0
+    # After the full render + optional position block, so the diagnostic output
+    # is never truncated by the degraded verdict.
+    return 4 if refusal is not None else 0
 
 
 class EngineImportError(RuntimeError):
@@ -428,8 +447,8 @@ def run_engine(config: dict, coin: str) -> int:
 
     ctx, client = _build_context(config, coin)
     # All three pre-LLM context guards (warm-up, fully-dead indicator set,
-    # missing/dead atr_14) live in _context_refusal_error, shared with the
-    # daemon provider.
+    # missing/dead regime indicators) live in _context_refusal_error, shared
+    # with the daemon provider.
     refusal = _context_refusal_error(ctx, coin, config)
     if refusal is not None:
         print(f"error: {refusal}", file=sys.stderr)

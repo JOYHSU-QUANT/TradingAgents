@@ -370,10 +370,11 @@ def _stub_engine(
 
     class _Ctx:
         candle_count = 200  # comfortably above any indicator warm-up need
-        # Live signals including the regime-critical ATR: run_engine now requires a
-        # usable atr_14 (else the regime silently defaults to RANGING), so a normal
-        # healthy context carries it.
-        indicators = {"rsi_14": 55.0, "ema_20": 100.0, "atr_14": 250.0}
+        # Live signals including the regime-critical trio (atr_14/ema_20/ema_50):
+        # run_engine refuses a context where any of them is unusable (else the
+        # regime silently defaults to RANGING), so a normal healthy context
+        # carries all three.
+        indicators = {"rsi_14": 55.0, "ema_20": 100.0, "ema_50": 95.0, "atr_14": 250.0}
         mark_price = Decimal("60000")  # current_position_state values at mark
 
     monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (_Ctx(), object()))
@@ -508,25 +509,49 @@ def test_run_engine_aborts_on_insufficient_candles(monkeypatch, capsys):
             {"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0, "atr_14": None},
             "atr_14 is unavailable",
         ),
+        # A dead EMA is just as regime-critical as a dead ATR: classify_regime
+        # silently defaults to RANGING when any of the trio is None.
+        (
+            200,
+            {"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": None, "atr_14": 250.0},
+            "ema_50 is unavailable",
+        ),
     ],
 )
-def test_run_context_only_warns_on_degraded_context(
+def test_run_context_only_warns_and_exits_4_on_degraded_context(
     monkeypatch, capsys, candle_count, indicators, expected
 ):
     # --context-only renders rather than aborts, but shares run_engine's *full*
-    # refusal guard (warm-up, fully-dead set, dead/missing atr_14): a context
-    # the engine would refuse must not render as a clean-looking live signal —
-    # the diagnostic loop is exactly where an operator investigating a RUNBOOK
-    # refusal will look.
+    # refusal guard (warm-up, fully-dead set, dead/missing regime indicators):
+    # a context the engine would refuse must not render as a clean-looking live
+    # signal — the diagnostic loop is exactly where an operator investigating a
+    # RUNBOOK refusal will look. The degraded verdict also exits 4 (the repo's
+    # probe convention) so a preflight can gate on the code, not stderr text.
     ctx = SimpleNamespace(candle_count=candle_count, indicators=indicators)
     monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, object()))
     monkeypatch.setattr(main_mod, "render_market_context", lambda c: "ctx text")
     monkeypatch.setattr(main_mod, "wallet_address", lambda config: "")  # skip position block
     rc = main_mod.run_context_only({}, "BTC")
-    assert rc == 0  # diagnostic tool renders, does not abort
-    err = capsys.readouterr().err
-    assert expected in err
-    assert "do not read it as live signal" in err
+    assert rc == 4  # rendered for diagnosis, but automation must see "degraded"
+    captured = capsys.readouterr()
+    assert "PerpMarketContext - BTC" in captured.out  # render not truncated by the verdict
+    assert expected in captured.err
+    assert "do not read it as live signal" in captured.err
+
+
+def test_run_context_only_exits_0_on_healthy_context(monkeypatch, capsys):
+    # The healthy-path witness for the 0/4 probe contract: a context passing
+    # every refusal guard renders with no degraded warning and exits 0.
+    ctx = SimpleNamespace(
+        candle_count=200,
+        indicators={"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0, "atr_14": 250.0},
+    )
+    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, object()))
+    monkeypatch.setattr(main_mod, "render_market_context", lambda c: "ctx text")
+    monkeypatch.setattr(main_mod, "wallet_address", lambda config: "")  # skip position block
+    rc = main_mod.run_context_only({}, "BTC")
+    assert rc == 0
+    assert "do not read it as live signal" not in capsys.readouterr().err
 
 
 def test_run_context_only_rejects_bad_risk_decision_config(monkeypatch, capsys):
@@ -640,6 +665,41 @@ def test_run_engine_aborts_when_atr_not_configured(monkeypatch, capsys):
     assert rc == 1
     assert calls == []  # engine never built — no LLM spend
     assert "atr_14 is unavailable" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("config", "ctx_indicators", "expected_msg"),
+    [
+        # A dead EMA is as regime-critical as a dead ATR: classify_regime
+        # silently defaults to RANGING when ema_20 or ema_50 is None (hiding a
+        # trending or volatile market), so a live atr_14 alone must not clear
+        # the guard.
+        (
+            {},
+            {"rsi_14": 55.0, "ema_20": None, "ema_50": 59000.0, "atr_14": 250.0},
+            "ema_20 is unavailable",
+        ),
+        # Regression lock for the documented `indicators: []` semantics
+        # (RUNBOOK): the empty list loads cleanly ("no indicators" is a
+        # deliberate choice, warm-up threshold 0) but every engine cycle is
+        # refused at the regime guard — all three regime names are absent. If
+        # someone later special-cases empty lists in _context_refusal_error,
+        # this fails.
+        ({"indicators": []}, {}, "atr_14, ema_20, ema_50 are unavailable"),
+    ],
+)
+def test_run_engine_refuses_untradeable_regime_indicators(
+    monkeypatch, capsys, config, ctx_indicators, expected_msg
+):
+    _stub_engine(monkeypatch)
+    ctx = SimpleNamespace(candle_count=200, indicators=ctx_indicators)
+    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, object()))
+    calls = []
+    monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
+    rc = main_mod.run_engine(config, "BTC")
+    assert rc == 1
+    assert calls == []  # engine never built — no LLM spend
+    assert expected_msg in capsys.readouterr().err
 
 
 def test_run_engine_aborts_on_malformed_propagate_shape(monkeypatch, capsys):

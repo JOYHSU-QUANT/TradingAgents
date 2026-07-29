@@ -75,26 +75,40 @@ Breaking changes within the 0.x line are called out explicitly.
   into bogus analyst keys that only detonate deep inside `build_graph` — in
   the daemon, an endless retry ladder on a pure config typo, never a named
   config error.
-- **A non-empty `indicators:` list must include `atr_14`.** Such a config can
-  never trade — the regime classifier fabricates a calm RANGING without a
-  usable ATR, so the atr guard refuses every cycle — and now fails at load
-  instead of leaving the daemon in an endless 4-hourly `api_failed` ladder.
-  An explicit empty list keeps its documented "no indicators" meaning.
+- **A non-empty `indicators:` list must include `atr_14`, `ema_20` and
+  `ema_50`.** Such a config can never trade — `classify_regime` fabricates a
+  calm RANGING when *any* of the three is missing (a live ATR with dead EMAs
+  hid a trending market just as silently as a dead ATR hid a volatile one) —
+  and now fails at load instead of leaving the daemon in an endless 4-hourly
+  `api_failed` ladder. The trio lives in one `REGIME_INDICATORS` tuple shared
+  by the loader and the runtime guard so the two rules cannot drift. An
+  explicit empty list keeps its documented "no indicators" meaning.
 - **The paper/live daemon now applies the one-shot path's indicator guards.**
-  A fully-dead known-indicator set (broken stockstats) or a missing/dead
-  `atr_14` made `classify_regime` silently report a fabricated-calm RANGING
+  A fully-dead known-indicator set (broken stockstats) or missing/dead regime
+  indicators made `classify_regime` silently report a fabricated-calm RANGING
   regime; the one-shot path refused loudly (exit 1) but the daemon's
   `build_input` traded on it. All three pre-LLM context guards (warm-up,
-  dead set, missing ATR) now live in one ordered shared helper
-  (`main._context_refusal_error`) and the daemon rides them down the reviewed
-  retry ladder as recurring `api_failed` cycles — no AI spend — until the
-  indicator engine or `indicators:` config is fixed.
-- **`--context-only` renders the full refusal diagnosis.** The diagnostic loop
-  warned on under-warm only; a fully-dead indicator set or a dead/missing
-  `atr_14` rendered as a clean-looking context (fabricated-calm RANGING) —
-  precisely where an operator investigating a RUNBOOK refusal would look. It
-  now runs the same shared guard as the trading paths and warns on both
-  channels while still rendering.
+  dead set, missing/dead `atr_14`/`ema_20`/`ema_50`) now live in one ordered
+  shared helper (`main._context_refusal_error`) and the daemon rides them down
+  the reviewed retry ladder as recurring `api_failed` cycles — no AI spend —
+  until the indicator engine or `indicators:` config is fixed.
+- **`--context-only` renders the full refusal diagnosis and exits 4 on a
+  degraded context.** The diagnostic loop warned on under-warm only; a
+  fully-dead indicator set or dead/missing regime indicators rendered as a
+  clean-looking context (fabricated-calm RANGING) — precisely where an
+  operator investigating a RUNBOOK refusal would look. It now runs the same
+  shared guard as the trading paths, warns on both channels while still
+  rendering, and exits 4 (the repo's probe convention: command succeeded,
+  state degraded) instead of 0, so a keyless deploy preflight can gate on the
+  exit code rather than parsing stderr.
+- **A zero-price candle can no longer silently force the RANGING regime.**
+  `Candle` accepted a `0/0/0/0` bar (OHLC ordering holds vacuously), and a
+  zero close flowed into `classify_regime`'s `price <= 0` branch — the same
+  silent-RANGING failure mode as a dead indicator, with no guard covering it.
+  `Candle` now requires strictly positive prices (parity with
+  `MarketSnapshot`), so a broken-feed zero bar is dropped per-bar by
+  `map_candles` like any other malformed bar instead of poisoning the
+  EMA/ATR series and the regime.
 - **`max_recur_limit: None` no longer silently shrinks the recursion budget.**
   A stored `None` survived `.get("max_recur_limit", 100)`, was dropped by
   langchain's `ensure_config`, and left LangGraph running at its own default

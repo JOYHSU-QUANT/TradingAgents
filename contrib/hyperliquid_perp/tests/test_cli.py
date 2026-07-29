@@ -150,24 +150,40 @@ def test_build_input_payload_write_failure_rides_retry_ladder(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize(
-    ("indicators", "expected_msg"),
+    ("candle_count", "indicators", "expected_msg"),
     [
+        # Under-warmed feed (below the monkeypatched threshold of 1): the
+        # daemon's build_input must ride the same warm-up guard as the
+        # one-shot path, not just the two indicator-death guards below.
+        (0, {}, "under-warmed"),
         # Fully-dead known-indicator set (stockstats broken): must become an
         # api_failed cycle (no AI spend), not a prompt asserting a
         # fabricated-calm RANGING regime every 4h.
         (
+            200,
             {"rsi_14": None, "ema_20": None, "ema_50": None, "atr_14": None},
             "every technical indicator failed",
         ),
-        # atr_14 absent (dropped from `indicators:`): classify_regime would
-        # silently default to RANGING, hiding a volatile market.
+        # atr_14 absent (dropped from `indicators:` on a pre-upgrade config):
+        # classify_regime would silently default to RANGING, hiding a volatile
+        # market.
         (
+            200,
             {"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0},
             "atr_14 is unavailable",
         ),
+        # A dead EMA is just as regime-critical: RANGING would also hide a
+        # trending market.
+        (
+            200,
+            {"rsi_14": 55.0, "ema_20": None, "ema_50": 59000.0, "atr_14": 250.0},
+            "ema_20 is unavailable",
+        ),
     ],
 )
-def test_build_input_refuses_untradeable_indicators(monkeypatch, indicators, expected_msg):
+def test_build_input_refuses_untradeable_indicators(
+    monkeypatch, candle_count, indicators, expected_msg
+):
     # The daemon shares the one-shot path's pre-LLM context guards (see
     # main._context_refusal_error) and rides them down the retry ladder.
     from types import SimpleNamespace
@@ -176,8 +192,9 @@ def test_build_input_refuses_untradeable_indicators(monkeypatch, indicators, exp
     from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
     from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
 
-    # candle_count 200 with threshold 1: past the warm-up gate -> not under-warm.
-    ctx = SimpleNamespace(candle_count=200, indicators=indicators)
+    # Threshold monkeypatched to 1: candle_count 200 clears the warm-up gate,
+    # candle_count 0 exercises it.
+    ctx = SimpleNamespace(candle_count=candle_count, indicators=indicators)
     monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, None))
     monkeypatch.setattr(main_mod, "_warmup_threshold", lambda config: 1)
 

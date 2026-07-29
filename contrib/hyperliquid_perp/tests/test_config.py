@@ -195,7 +195,12 @@ def test_load_config_rejects_unknown_indicator_names(tmp_path, text):
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("indicators: [rsi_14, ema_20, atr_14]\n", ["rsi_14", "ema_20", "atr_14"]),
+        (
+            "indicators: [rsi_14, ema_20, ema_50, atr_14]\n",
+            ["rsi_14", "ema_20", "ema_50", "atr_14"],
+        ),
+        # The three regime names alone are a legal minimal set.
+        ("indicators: [atr_14, ema_20, ema_50]\n", ["atr_14", "ema_20", "ema_50"]),
         # An explicit empty list is a deliberate "no indicators" choice
         # (_indicator_names honours it); element validation must not reject it.
         ("indicators: []\n", []),
@@ -207,13 +212,26 @@ def test_load_config_accepts_valid_indicators(tmp_path, text, expected):
     assert load_config(good)["indicators"] == expected
 
 
-def test_load_config_rejects_indicators_without_atr(tmp_path):
-    # A non-empty list without atr_14 can never trade: the atr guard refuses
-    # every cycle (the regime would fabricate a calm RANGING) — fail at load,
-    # not as an endless daemon retry ladder.
-    bad = tmp_path / "no-atr.yaml"
-    bad.write_text("indicators: [rsi_14, ema_20]\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="must include 'atr_14'"):
+@pytest.mark.parametrize(
+    ("text", "missing"),
+    [
+        # Each regime name individually absent — the error names the offender.
+        ("indicators: [rsi_14, ema_20, ema_50]\n", "'atr_14'"),
+        ("indicators: [rsi_14, ema_50, atr_14]\n", "'ema_20'"),
+        ("indicators: [rsi_14, ema_20, atr_14]\n", "'ema_50'"),
+        # Multiple absent: every missing name lands in one message.
+        ("indicators: [rsi_14, atr_14]\n", "'ema_20', 'ema_50'"),
+        ("indicators: [macd]\n", "'atr_14', 'ema_20', 'ema_50'"),
+    ],
+)
+def test_load_config_rejects_indicators_missing_regime_names(tmp_path, text, missing):
+    # A non-empty list missing ANY of atr_14/ema_20/ema_50 can never trade:
+    # classify_regime silently defaults to RANGING without all three, so the
+    # regime guard refuses every cycle — fail at load, not as an endless
+    # daemon retry ladder.
+    bad = tmp_path / "no-regime.yaml"
+    bad.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match=f"'indicators' must include {missing}"):
         load_config(bad)
 
 

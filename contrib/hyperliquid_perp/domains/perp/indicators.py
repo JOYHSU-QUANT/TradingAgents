@@ -21,7 +21,7 @@ from collections.abc import Sequence
 import pandas as pd
 from stockstats import wrap
 
-from .indicator_vocab import _MIN_CANDLES, _STOCKSTATS_COLUMN
+from .indicator_vocab import _MIN_CANDLES, _STOCKSTATS_COLUMN, REGIME_INDICATORS
 from .schema import Candle
 
 logger = logging.getLogger(__name__)
@@ -84,13 +84,14 @@ def compute_indicators(candles: Sequence[Candle], names: Sequence[str]) -> dict[
         try:
             series = stats[column]
         except Exception as exc:  # noqa: BLE001 — a bad column shouldn't crash the build
-            # Leave a trace: a silently-missing indicator is otherwise invisible. Call
-            # out atr_14 specifically — its absence is not just "one missing number":
-            # classify_regime falls back to RANGING (hiding a volatile market), so a
-            # bare "failed" would understate the blast radius.
+            # Leave a trace: a silently-missing indicator is otherwise invisible.
+            # Call out the regime trio specifically — their absence is not just
+            # "one missing number": classify_regime falls back to RANGING (hiding
+            # a volatile or trending market), so a bare "failed" would understate
+            # the blast radius.
             consequence = (
-                " — regime will default to RANGING, hiding a volatile market"
-                if name == "atr_14"
+                " — regime will default to RANGING, hiding a volatile or trending market"
+                if name in REGIME_INDICATORS
                 else ""
             )
             logger.warning(

@@ -14,7 +14,7 @@ from typing import Any
 import yaml
 
 from .domains.perp.config_coercion import bool_from_yaml
-from .domains.perp.indicator_vocab import supported_indicators
+from .domains.perp.indicator_vocab import REGIME_INDICATORS, supported_indicators
 
 _CONFIG_DIR = Path(__file__).parent / "configs"
 _LOCAL = _CONFIG_DIR / "hyperliquid.local.yaml"
@@ -236,15 +236,18 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
                 f"{', '.join(map(repr, unknown_inds))}. "
                 f"Supported: {', '.join(known)}"
             )
-        # atr_14 is load-bearing: without it classify_regime silently defaults
-        # to RANGING and the atr guard refuses every engine cycle — a config
-        # that can never trade should fail here, not as an endless daemon
-        # retry ladder. An explicit empty list keeps its documented
-        # "no indicators" meaning (the ``if inds:`` above skips it).
-        if "atr_14" not in inds:
+        # A non-empty list missing any of the regime trio (see REGIME_INDICATORS
+        # for why they are load-bearing) can never trade — the runtime guard
+        # refuses every cycle — so fail here, not as an endless daemon retry
+        # ladder. An explicit empty list keeps its documented "no indicators"
+        # meaning (the ``if inds:`` above skips it).
+        missing = [name for name in REGIME_INDICATORS if name not in inds]
+        if missing:
             raise ValueError(
-                "'indicators' must include 'atr_14' — the regime classifier "
-                "needs a usable ATR, and every engine cycle is refused without one"
+                f"'indicators' must include {', '.join(map(repr, missing))} — "
+                f"the regime classifier needs a usable "
+                f"{', '.join(REGIME_INDICATORS)}, and every engine cycle is "
+                "refused without them"
             )
     # These three values are consumed by the Phase-1 client deep inside the run
     # (sdk_client from_config/__init__, wallet_address()); a bad value there

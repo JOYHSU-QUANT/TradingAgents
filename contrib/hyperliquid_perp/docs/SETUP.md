@@ -52,7 +52,7 @@ cp contrib/hyperliquid_perp/configs/hyperliquid.example.yaml \
 | `wallet_address` | 唯讀 mainnet address，只用來讀倉位／margin。**留著 `0xYOUR...` 佔位符 = 視為未設定**——完整引擎輪會在花費 LLM 前具名 exit 1（零淨值無從 sizing）；`--context-only` 照常可跑，只是不顯示倉位。 |
 | `coins` | Phase 1 單一標的，預設 `[BTC]`。 |
 | `market_data` | `candle_interval`（4h；必須是 `1m`/`5m`/`15m`/`1h`/`4h`/`1d` 之一）／`candle_lookback`（200）／`funding_zscore_window_days`（30）。 |
-| `indicators` | `rsi_14, ema_20, ema_50, atr_14, macd`，由 `context_builder` 計算。名稱是封閉字彙：未知名稱、scalar 值、或非空清單漏掉 `atr_14`（regime 需要可用的 ATR）都在 config load 時具名 exit 1；明確的 `[]` 是刻意的「無指標」選擇，照常載入。 |
+| `indicators` | `rsi_14, ema_20, ema_50, atr_14, macd`，由 `context_builder` 計算。名稱是封閉字彙：未知名稱、scalar 值、或非空清單漏掉 `atr_14`／`ema_20`／`ema_50` 任一（regime 分類器三者都需要）都在 config load 時具名 exit 1；明確的 `[]` 是刻意的「無指標」選擇，照常載入。 |
 | `engine` | `llm_provider: openrouter`、`deep_think_llm`、`quick_think_llm`、`selected_analysts: [market, social, news]`（必須是 list，scalar 在 config load 擋下）、`structured_output`（perp 預設 `false`——Phase 2 target JSON 只能活在 free-text 輸出；設 `true` 是大聲的 escape hatch，見 RUNBOOK §7）。 |
 | `risk` | Phase 2 RiskGate：`leverage`（Phase 2 = 1x）、`margin_mode`（cross-only）、`max_target_margin_pct`（clamp 上限，requested 61–100 → approved 60）。cap 低於 decision grid 上限（也就是會實際生效）時必須落在 grid 上，否則有效上限會被靜默收緊 → config load 時具名 exit 1；cap 等於或高於 grid 上限則一律合法——它永遠不生效（有效上限 = min(grid 上限, cap) 由 grid 綁住），只是後備上限，不要求 grid 對齊。若 cap snap 到 grid 後 ≤ 0（低於 grid 最小值，或 grid 由 0 起算但 cap 小於一個 step）→ 每個方向性 target 都會 clamp 成 0 被風控拒絕（REJECTED），同樣 load 時 exit 1，不靜默上線。 |
 | `decision` | 決策契約 grid：`ai_target_margin_min_pct`／`ai_target_margin_max_pct`／`target_margin_step_pct`（合法 `requested_target_margin_pct` = {min, min+step, …, max}；off-grid 直接 fail closed，不四捨五入；`(max − min)` 必須為 `step` 的整數倍，否則廣告的 `max` 落在 grid 外、config load 時 exit 1）、`rebalance_deadband_pct`（同向 \|approved − current\| 小於此值 → 不下單；flip/flat 例外）、`min_confidence`（低於此值的 set_target 被風控拒絕 REJECTED——包含 flat 請求；confidence 永不縮放 sizing）、`resize_min_confidence`（同向且會實際下單的 resize 需 ≥ 此門檻，否則 REJECTED（`low_confidence_resize`）；加倉減倉皆適用，flat→建倉／flip／flat 平倉走 `min_confidence`；必須 ≥ `min_confidence`，否則 config load 時具名 exit 1；設成等於 `min_confidence` 即等效停用這道較高門檻）。 |
@@ -104,9 +104,11 @@ python -m contrib.hyperliquid_perp.main --context-only --coin BTC
 若 `wallet_address` 是真實地址，也會印出目前倉位（或 `flat`）。
 `--context-only` 也會用與完整輪相同的檢查先驗證 `risk:`／`decision:`／`paper_trading:`
 區塊——壞掉的 config 在這個免費 smoke 階段就具名 exit 1，不會等到付費輪才爆。
-它也跑與交易路徑相同的三道 context guard（暖身不足、指標全滅、`atr_14` 不可用）：
-不中止、照樣渲染，但會在 log＋stderr 印同一句 refusal 警告——拿來免 key 驗證
-indicator 問題修好了沒（RUNBOOK §7 的對應列有寫怎麼用）。
+它也跑與交易路徑相同的三道 context guard（暖身不足、指標全滅、regime 指標
+`atr_14`／`ema_20`／`ema_50` 不可用）：不中止、照樣渲染，但會在 log＋stderr 印同一句
+refusal 警告，並以 **exit 4** 結束（探針慣例：指令成功、狀態劣化；健康 context 是
+exit 0）——自動化 preflight 可直接 gate exit code，免 key 驗證 indicator 問題修好了沒
+（RUNBOOK §7 的對應列有寫怎麼用）。
 
 ### B. 完整一輪（需要 key）
 
@@ -126,9 +128,10 @@ python -m contrib.hyperliquid_perp.main --coin BTC
 - 沒有設定 funded wallet／`account_value` 讀到 0——RiskGate 無法對零淨值 sizing，
   每個方向性 target 都會被風控拒絕（`no_account_equity`），所以直接擋下、不白花
   LLM 成本（要純診斷就用 `--context-only`）。
-- context 暖身不足、指標全滅、或 `atr_14` 不可用（刻意設 `indicators: []`、或算不出來——
-  兩種情況都會讓 regime 退化成假的 RANGING，掩蓋波動市況，所以一律擋下；非空清單
-  漏掉 `atr_14` 更早、在 config load 時就擋）。
+- context 暖身不足、指標全滅、或 regime 指標（`atr_14`／`ema_20`／`ema_50`）任一
+  不可用（刻意設 `indicators: []`、或算不出來——都會讓 regime 退化成假的 RANGING，
+  掩蓋波動或趨勢市況，所以一律擋下；非空清單漏掉三者任一更早、在 config load
+  時就擋）。
 - `risk:`／`decision:`／`paper_trading:` config 區塊格式錯誤——含未知／打錯的 key、
   打錯的頂層區塊名、或非 mapping 的區塊（`paper_trading:` 另含無效值，如非正的
   `initial_balance_usdc`、負的 `taker_fee_rate`／`slippage_bps`、非正的 monitor
@@ -223,9 +226,9 @@ sha256。
 corrupt funding row／快照寫失敗等診斷才有時間軸可查）；嵌入端已自行安裝 handler
 時不覆蓋（`basicConfig` no-op），`export`／`validate`／legacy 單發路徑刻意不配置。
 市場資料 warmup 不足（closed candle 數 < 門檻）、指標全滅（stockstats 壞掉）、或
-`atr_14` 不可用，都會走 §3.1 retry ladder 後記 `api_failed`（error_type=
-server_error、無 AI 花費）——太年輕的標的在暖機完成前每 4h 產生一筆屬預期行為，
-後兩者見 RUNBOOK §7 的對應列。
+regime 指標（`atr_14`／`ema_20`／`ema_50`）任一不可用，都會走 §3.1 retry ladder 後記
+`api_failed`（error_type=server_error、無 AI 花費）——太年輕的標的在暖機完成前每
+4h 產生一筆屬預期行為，後兩者見 RUNBOOK §7 的對應列。
 
 `validate` 的 exit code：`0` = 可進 Phase 3（`cycle_count >= 30` 且 orphan／
 snapshot／replay mismatch 全為 0）；`4` = 資料一致但尚未達標（繼續累積 cycles）；
@@ -328,5 +331,5 @@ python -m ruff check contrib/hyperliquid_perp/
 | `--context-only` 不印倉位行／完整輪報 `no usable account equity`（exit 1） | `wallet_address` 還是 `0xYOUR...` 佔位符；填一個真實的唯讀地址。 |
 | `config not found …` | 把 `hyperliquid.example.yaml` 複製成 `hyperliquid.local.yaml`。 |
 | `invalid config — unknown … key` / `unknown top-level config key` | config 有打錯的 key（如 `max_target_margin_pt`）或頂層區塊名（如 `riks:`）；strict 解析會擋下不讓它靜默退回預設值。對照 `hyperliquid.example.yaml` 的 key 名修正。 |
-| `'indicators' contains unknown indicator name(s) …` / `'indicators' must include 'atr_14' …` / `'engine.selected_analysts' must be a list …` | 指標名打錯（封閉字彙，錯誤訊息列出支援名單）、非空 `indicators:` 漏了 `atr_14`、或 `selected_analysts` 寫成 scalar——三者都在 config load 具名 exit 1。修好後可用 `--context-only` 免 key 驗證（會渲染 context 並在指標異常時印 refusal 警告）。 |
+| `'indicators' contains unknown indicator name(s) …` / `'indicators' must include …` / `'engine.selected_analysts' must be a list …` | 指標名打錯（封閉字彙，錯誤訊息列出支援名單）、非空 `indicators:` 漏了 `atr_14`／`ema_20`／`ema_50` 任一（錯誤訊息點名缺哪些）、或 `selected_analysts` 寫成 scalar——三者都在 config load 具名 exit 1。修好後可用 `--context-only` 免 key 驗證（會渲染 context，指標異常時印 refusal 警告並 exit 4，健康 exit 0）。 |
 | 想先便宜地跑一次驗收 | 暫時把 `engine.deep_think_llm` / `quick_think_llm` 指到便宜／免費的 OpenRouter 模型，確認 pipeline 會 parse target → 跑 RiskGate → 寫 log（schema v3），再切回來。 |

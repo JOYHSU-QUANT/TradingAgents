@@ -19,6 +19,17 @@ _STOCKSTATS_COLUMN = {
     "macd": "macd",
 }
 
+# The indicators classify_regime reads. Any of them being None (or absent) makes
+# the regime silently default to RANGING — hiding a volatile or trending market —
+# so the config loader requires all three in a non-empty ``indicators:`` list and
+# main._context_refusal_error refuses a context where any of them is unusable.
+# One tuple feeds both so the load-time rule and the runtime guard cannot drift.
+REGIME_INDICATORS = ("atr_14", "ema_20", "ema_50")
+
+# A vocabulary rename above must rename the regime tuple too — otherwise the
+# loader demands a name its own unknown-name check simultaneously rejects.
+assert all(name in _STOCKSTATS_COLUMN for name in REGIME_INDICATORS)
+
 # The *minimum usable* candle count per indicator — below this we report ``None``
 # rather than an obvious warm-up artifact. NOTE: these are minimums, not full
 # convergence. An EMA/MACD computed at exactly its period still carries meaningful

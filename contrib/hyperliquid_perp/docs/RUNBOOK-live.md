@@ -142,14 +142,18 @@ switch ＋ reconcile ＋ 掃 stale bot-owned 單）：
   之後才手動開倉——post-genesis 的手動成交沒有本地 order row，會直接變成
   `fill_unmapped`＋`exchange_position_mismatch` case，recovery 從此永遠 unclean、
   該 run 的驗收永久 exit 5（見 §2 的警告框）。
-- **test 17（startup with stale bot-owned order）**：先讓 run 留一張 bot-owned 掛單，
-  再跑 smoke——recovery 須把它掃掉。**這張單必須有本地 order row**：跑一次短的
-  `live --run-id <id>`（有倉位時它會掛 SL）留下未成交的單即可。**不要**拿「上一輪
-  smoke 的殘留」充數——smoke 的 trigger 探針**刻意不寫本地 orders row**（§12.3 的
-  orphan lane 負責收編），殘留的探針會在 recovery 第一趟就記一筆
-  `orphan_exchange_order`，依 §2 的累積制，該 run 的 `validate` 從此永遠 exit 5。
-  這筆 case 不會讓 run 停下來（reconciliation 判定仍 clean、也不進 safe mode），
-  要跑到 `validate` 才看得見，所以更要事前避開。
+- **test 17（startup with stale bot-owned order）**：這一項在 v1 **沒有可支援的
+  前置備置方式**，預設會是 vacuous pass（沒有單可掃，recovery 自然「掃乾淨」）。
+  §19.3 只撤 `entry`／`rebalance` 角色的殘單，而 v1 的每一片切片都是 IOC、永遠即時
+  終態，不會留下掛單；`stop_loss`／`take_profit` **刻意永不被 §19.3 撤**（PR 4 沒有
+  補掛路徑，撤掉不完美的 SL 等於拿保護換整潔），所以拿一張 SL 來充數不會觸發
+  sweep。真要驗這一項，得在 smoke 之外用主錢包手動掛一張 bot 命名前綴的單——但
+  那會踩到 §2 的 genesis 後手動成交禁令，需自行斟酌。
+  無論如何 **不要**拿「上一輪 smoke 的殘留」充數——smoke 的 trigger 探針**刻意不寫
+  本地 orders row**（§12.3 的 orphan lane 負責收編），殘留的探針會在 recovery 第一趟
+  就記一筆 `orphan_exchange_order`，依 §2 的累積制，該 run 的 `validate` 從此永遠
+  exit 5。這筆 case 不會讓 run 停下來（reconciliation 判定仍 clean、也不進 safe
+  mode），要跑到 `validate` 才看得見，所以更要事前避開。
 - **test 15（restart reconciliation）**：乾淨重跑 recovery 即可。
 
 不方便一次備齊時，用 `--only` 分項跑（見下）。

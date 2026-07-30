@@ -712,7 +712,7 @@ def test_all_gate_rejected_sl_ladder_is_blocked_not_emergency_close(env):
         if e["event_type"] == "stop_loss_repair_blocked"
     ][0]
     assert blocked["order_id"] is None
-    assert "NO stop-loss is resting" in blocked["detail"]
+    assert "NO covering stop-loss" in blocked["detail"]
 
 
 def test_a_gate_blocked_modify_records_the_still_resting_sl(env):
@@ -733,9 +733,47 @@ def test_a_gate_blocked_modify_records_the_still_resting_sl(env):
     )
     resting = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
     assert resting is not None  # an SL is established and on the book
-    # The position grows, so the SL must be re-armed at the larger size — and
-    # the gate refuses every attempt pre-send. §17.4 modifies before it
+    # The position SHRINKS (a partial close), so the SL is re-armed smaller —
+    # but the one still resting is larger, so it keeps covering throughout.
+    # The gate refuses every attempt pre-send; §17.4 modifies before it
     # cancels, so the refused calls are on the MODIFY path.
+    client.modify_script = ["gate", "gate", "gate"]
+    client.place_script = ["gate", "gate", "gate"]
+    outcome = mgr.sync(
+        position=_long_position(size=Decimal("0.05")),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert outcome is ProtectionOutcome.BLOCKED
+    blocked = [
+        e
+        for e in repo.iter_protection_order_events(db.conn, "r")
+        if e["event_type"] == "stop_loss_repair_blocked"
+    ][0]
+    assert blocked["order_id"] == resting["order_id"]
+    assert "covers the position" in blocked["detail"]
+
+
+def test_a_gate_blocked_resize_does_not_claim_the_undersized_sl_covers(env):
+    # The marker must be COVERAGE, not existence. The commonest blocked MODIFY
+    # is a RESIZE: a later slice filled and the resting SL now covers only part
+    # of the position — exactly what the reconciler files as position_sl_missing.
+    # Stamping the order_id there would tell the §20.3 validator "protected"
+    # while part of the position carries no stop at all, and the unprotected
+    # seconds (an exit-5 metric) would read 0 over a genuinely exposed run.
+    db = env
+    _seed_long(db, size=Decimal("0.1"))
+    client, gate = _FakeClient(), _gate()
+    mgr = _manager(db, client, gate)
+    mgr.sync(
+        position=_long_position(size=Decimal("0.1")),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert repo.active_protection_order(db.conn, "r", "BTC", "stop_loss") is not None
+    # The position doubles; the resize is refused pre-send.
     client.modify_script = ["gate", "gate", "gate"]
     client.place_script = ["gate", "gate", "gate"]
     outcome = mgr.sync(
@@ -750,8 +788,9 @@ def test_a_gate_blocked_modify_records_the_still_resting_sl(env):
         for e in repo.iter_protection_order_events(db.conn, "r")
         if e["event_type"] == "stop_loss_repair_blocked"
     ][0]
-    assert blocked["order_id"] == resting["order_id"]
-    assert "still resting" in blocked["detail"]
+    assert blocked["order_id"] is None  # an under-covering SL is NOT protection
+    assert "NO covering stop-loss" in blocked["detail"]
+    assert "0.1" in blocked["detail"] and "0.2" in blocked["detail"]  # names the shortfall
 
 
 def test_mixed_gate_and_real_failures_still_exhaust_to_emergency_close(env):

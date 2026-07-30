@@ -1010,10 +1010,13 @@ def test_an_accepted_ack_without_an_oid_never_reaches_the_modify_wire(live_db):
     # SmokeContext.signed concretely is what surfaced this; under `Any` the
     # str|None never had to line up with modify_trigger_order's `str`.)
     runner = smoke.SmokeTestRunner(_ctx(live_db, _FakeSigned()))
-    with pytest.raises(smoke._SmokeAbort, match="without an exchange order id"):
+    # AssertionError, not _SmokeAbort: a contract violation is a harness bug, so
+    # it must record `error` and stop the suite, not `failed` (= "the exchange
+    # refused"), which lets the suite keep placing wire actions.
+    with pytest.raises(AssertionError, match="without an exchange order id"):
         runner._require_oid(_Ack(status="resting", exchange_order_id=None), "probe")
-    # Controls: a refused ack still reports the refusal, and a well-formed one
-    # returns its id.
+    # Controls: a refused ack still reports the refusal as an abort (failed),
+    # and a well-formed one returns its id.
     with pytest.raises(smoke._SmokeAbort, match="refused"):
         runner._require_oid(_Ack(status="error", exchange_order_id=None, error="nope"), "probe")
     assert runner._require_oid(_Ack(exchange_order_id="oid-9"), "probe") == "oid-9"

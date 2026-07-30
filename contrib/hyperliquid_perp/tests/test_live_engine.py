@@ -1532,13 +1532,15 @@ def test_a_wrong_side_liquidation_mirror_is_discarded_by_the_sl_band(tmp_path):
         )
         # A short's estimate, left behind on a row that is now long.
         repo.set_position_liquidation_price(conn, "r", "BTC", D(100000))
-    position = engine._read_position()
-    assert engine._liquidation_price(position) is None  # withheld, not banded off
+    assert engine._liquidation_price(engine._read_position()) is None  # withheld
     # Control: the same reader USES a correctly-sided estimate, so the test
-    # discriminates the guard rather than the plumbing.
+    # discriminates the guard rather than the plumbing. Re-read the position —
+    # the reader deliberately judges the estimate against the side on the
+    # SNAPSHOT it is handed, so that one read cannot pair a fresh liq with a
+    # stale entry.
     with db.transaction() as conn:
         repo.set_position_liquidation_price(conn, "r", "BTC", D(25000))
-    assert engine._liquidation_price(position) == D(25000)
+    assert engine._liquidation_price(engine._read_position()) == D(25000)
 
 
 # -- loss guards wired through the engine (§10.3 / §10.4) --------------------

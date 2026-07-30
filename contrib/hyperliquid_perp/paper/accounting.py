@@ -907,6 +907,18 @@ def record_funding(
 # --------------------------------------------------------------------------
 
 
+# The §15 fold below has one arm per adjustment type, and the registry decides
+# what types exist. Bound at import, like the live-side vocabulary guards: the
+# runtime raise in the fold is the belt, but it only fires mid-posting (inside a
+# live wallet write) or mid-replay — after the type is already in the store.
+# This fires before any of that, when the registry itself gains a member.
+_FOLDED_ADJUSTMENT_TYPES = frozenset({"fee", "funding", "realized_pnl"})
+if _FOLDED_ADJUSTMENT_TYPES != repo.ACCOUNTING_ADJUSTMENT_TYPES:
+    raise AssertionError(
+        "adjustment_ledger_delta's arms drifted from repository.ACCOUNTING_ADJUSTMENT_TYPES"
+    )
+
+
 class LedgerDeltas(NamedTuple):
     """One §15 correction's ledger movement, slot by NAME.
 
@@ -954,7 +966,8 @@ def adjustment_ledger_delta(
             return LedgerDeltas(wallet=delta, realized=zero, fees=zero, funding=delta)
         if adjustment_type == "realized_pnl":
             return LedgerDeltas(wallet=delta, realized=delta, fees=zero, funding=zero)
-        # Not a bare `else`. check_enum above validates MEMBERSHIP, so a new
+        # The belt to that import-time brace. Not a bare `else`: check_enum
+        # above validates MEMBERSHIP, so a new
         # adjustment type added to the registry passes it and would land in the
         # realized_pnl arm — wrong wallet direction, wrong realized, wrong fees.
         # And because this one definition feeds BOTH the live wallet posting and

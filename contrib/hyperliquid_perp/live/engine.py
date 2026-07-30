@@ -262,6 +262,10 @@ class LiveExecutionEngine:
         self._flip: _PendingFlip | None = None
         self._last_reconcile_at: datetime | None = None
         self._was_flat = self._read_position().is_flat
+        # Latch for the wrong-side liquidation-mirror warning: (size, entry, liq)
+        # of the value last warned about, so a persistent one does not re-log
+        # every tick. Cleared whenever a usable estimate comes back.
+        self._warned_wrong_side_liq: tuple[Decimal, Decimal, Decimal] | None = None
         # Set when a §17.2 emergency close is fired, cleared once the position
         # reaches flat — at which point the run escalates to MANUAL safe mode
         # (§13.5). Deferred to post-flat so the gate never blocks the close itself.
@@ -291,8 +295,8 @@ class LiveExecutionEngine:
     def _abandon_dangling_plans(self) -> None:
         # LIVE_PLAN_STATUSES, not a literal "active": the registry's non-terminal
         # set also holds ``paused_market_data``, and a hand-copied subset would
-        # leave a paused plan un-abandoned across a restart while this method
-        # still clears gate.active_slice_plan — §9.3's "no active plan"
+        # leave such a plan un-abandoned across a restart while the fresh gate
+        # starts with active_slice_plan False — §9.3's "no active plan"
         # invariant broken, with decision.py's own query still seeing the plan.
         for plan in repo.iter_execution_plans(
             self._db.conn, self._run_id, statuses=repo.LIVE_PLAN_STATUSES
@@ -358,8 +362,13 @@ class LiveExecutionEngine:
         # the first mirror after an open (and after any flat, which clears it);
         # the SL band then falls back to the entry-based band (stops.py handles
         # ``liquidation_price=None``).
-        pos = repo.get_current_position(self._db.conn, self._run_id, self._coin)
-        liq = None if pos is None else pos.liquidation_price
+        # Read off the caller's own snapshot rather than re-reading the row: the
+        # guard below judges the estimate against the position's SIDE, and two
+        # reads could pair a fresh liq with a stale entry (or the reverse), then
+        # either withhold a valid estimate or admit an invalid one. One
+        # snapshot, one verdict — and `_read_position` already carries the
+        # mirrored column, so the re-read bought nothing.
+        liq = position.liquidation_price
         if liq is None:
             return None
         # Last line of defence for the SL band (the writer-side halves are the
@@ -375,15 +384,21 @@ class LiveExecutionEngine:
         if position.size == 0 or entry is None:
             return None
         if (position.size > 0 and liq >= entry) or (position.size < 0 and liq <= entry):
-            logger.warning(
-                "discarding wrong-side liquidation mirror for %s (size %s, entry %s, liq %s) "
-                "— falling back to the entry-based SL band",
-                self._coin,
-                position.size,
-                entry,
-                liq,
-            )
+            # Latched per distinct value: this runs on every ~10s tick, so an
+            # unlatched warning would repeat forever and bury the rest of the
+            # tick log — the opposite of making it visible.
+            if self._warned_wrong_side_liq != (position.size, entry, liq):
+                self._warned_wrong_side_liq = (position.size, entry, liq)
+                logger.warning(
+                    "discarding wrong-side liquidation mirror for %s (size %s, entry %s, "
+                    "liq %s) — falling back to the entry-based SL band",
+                    self._coin,
+                    position.size,
+                    entry,
+                    liq,
+                )
             return None
+        self._warned_wrong_side_liq = None
         return liq
 
     def has_active_work(self) -> bool:
@@ -583,6 +598,18 @@ class LiveExecutionEngine:
         envelope (default 60 min), and v1 has no WS socket, so the re-opened
         position can sit unprotected until the next §12.2 backfill.
         A flat transition invalidates the target: abandon the leg.
+
+        A pending FLIP is deliberately NOT abandoned with it (decision
+        2026-07-30). The rule above is "the target died with the position", and
+        for a flip's second leg that premise does not hold: the open leg is the
+        OPPOSITE direction, so the old side being stopped out does not
+        invalidate the decision to flip — if anything it argues for it. The leg
+        still re-gates through ``start_plan`` against post-crash state before
+        anything reaches the wire. One consequence worth naming: terminating
+        the close leg here lets ``_maybe_advance_flip`` register the open leg on
+        this same tick, sooner than before, when it had to wait for the close
+        leg's slice cursor to drain or its deadline to pass. The end state is
+        the same one the old path reached; only the timing moved.
         """
         is_flat = self._read_position().is_flat
         if is_flat and not self._was_flat:
@@ -1093,7 +1120,14 @@ class LiveExecutionEngine:
     def _maybe_advance_flip(self, snap, now: datetime, events: list[str]) -> None:
         """§9.1 rule 5: once the close leg is terminal and the position is flat,
         re-gate and open the flip's second leg — or abandon the flip at its
-        envelope deadline if the close leg could not bring the position to flat."""
+        envelope deadline if the close leg could not bring the position to flat.
+
+        "Terminal" now includes a close leg that ``_detect_settlement``
+        abandoned because a stop-loss reached flat first, so the open leg can
+        register a tick or two earlier than it used to. That is intended: a flip
+        is exempt from the flat-invalidates-the-target rule because its second
+        leg points the other way (see ``_detect_settlement``).
+        """
         if self._flip is None or self._leg is not None:
             return
         if not self._read_position().is_flat:

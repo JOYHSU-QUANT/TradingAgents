@@ -802,8 +802,13 @@ class SmokeTestRunner:
         wire against a real resting order rather than failing here.
         """
         self._require_accepted(ack, what)
-        if ack.exchange_order_id is None:  # unreachable under the OrderAck contract
-            raise _SmokeAbort(f"{what} was accepted without an exchange order id")
+        if ack.exchange_order_id is None:
+            # NOT a _SmokeAbort: that bucket means "the exchange refused", and
+            # the suite continues placing wire actions after one. An accepted
+            # ack with no id is an OrderAck-contract violation — a harness or
+            # client bug, which the 2026-07-29 decision says must record
+            # ``error`` and stop the suite (account state is no longer known).
+            raise AssertionError(f"{what} was accepted without an exchange order id")
         return str(ack.exchange_order_id)
 
     def _require_recovery(self) -> RecoveryResult:

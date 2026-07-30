@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -654,6 +654,54 @@ def test_trigger_probes_are_sell_side(live_db):
         )
     assert signed.trigger_calls and all(c["is_buy"] is False for c in signed.trigger_calls)
     assert signed.modify_calls and all(c["is_buy"] is False for c in signed.modify_calls)
+
+
+def test_trigger_probes_are_sized_to_the_staged_position(live_db):
+    """A reduce-only probe must carry the STAGED size, not a re-derived one.
+
+    Live sizes an SL to floor_to_step(abs(position.size)), and staging a real long
+    exists so each probe is that exact §17 shape. Re-deriving from _probe_size()
+    (ceil(11 USDC / mark)) made the probe an unrelated quantity — here 0.00019
+    against a staged 0.001 — and in the oversized direction the venue refuses the
+    reduce-only order outright, the failure staging was introduced to prevent.
+    """
+    signed = _FakeSigned()
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=[
+                "slice_plan_cancel",
+                "stop_loss_create",
+                "stop_loss_modify",
+                "stop_loss_cancel",
+                "take_profit_create",
+                "take_profit_modify",
+                "take_profit_cancel",
+            ]
+        )
+    staged = _Ack().filled_size  # what the staging entry actually filled
+    assert signed.trigger_calls and all(c["size"] == staged for c in signed.trigger_calls)
+    assert signed.modify_calls and all(c["size"] == staged for c in signed.modify_calls)
+    # The control: the old re-derived size at this mark is a DIFFERENT number, so
+    # this assertion cannot pass by coincidence.
+    assert staged != _D("0.00019")
+
+
+def test_a_moving_mark_cannot_resize_the_modified_trigger(live_db):
+    """§17.4 is modify IN PLACE — the modify must not change the order's size.
+
+    _trigger_modify used to call _probe_size() separately for the place and the
+    modify, each re-reading the mark, so a mark move between them silently
+    resized the order and the test proved something other than an in-place update.
+    """
+    marks = iter([_D(60000)] * 3 + [_D(30000)] * 40)  # the mark halves mid-test
+    signed = _FakeSigned()
+    ctx = _ctx(live_db, signed, run_recovery=lambda: _Recovery())
+    with live_db:
+        smoke.SmokeTestRunner(replace(ctx, mark_price=lambda: next(marks))).run(
+            only=["stop_loss_modify"]
+        )
+    assert signed.trigger_calls and signed.modify_calls
+    assert signed.trigger_calls[0]["size"] == signed.modify_calls[0]["size"]
 
 
 def test_multi_slice_refusal_after_partial_fill_closes_the_filled_leg(live_db):

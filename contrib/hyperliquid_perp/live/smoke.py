@@ -42,12 +42,14 @@ import logging
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import ROUND_CEILING, Decimal
+from decimal import ROUND_CEILING, Decimal, localcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+from ..domains.perp.margin import DECIMAL_CONTEXT
 from ..paper.run_lock import RunLockError
 from ..paper.stops import round_to_tick
+from ..paper.twap import floor_to_step
 from ..persistence import repository as repo
 from ..persistence.cloid import cloid_hex, cloid_logical
 from ..persistence.db import Database
@@ -787,6 +789,29 @@ class SmokeTestRunner:
         steps = (raw / step).to_integral_value(rounding=ROUND_CEILING)
         return max(step, steps * step)
 
+    def _staged_probe_size(self) -> Decimal:
+        """The qty a reduce-only trigger probe must carry: the staged long itself.
+
+        Live sizes an SL to ``floor_to_step(abs(position.size))``
+        (protection._establish), and the whole point of staging a real long is
+        that every probe carries the exact §17 wire shape. Re-deriving the size
+        from :meth:`_probe_size` re-read the mark on every call, so a mark move
+        between the staging fill and a later probe — or a partial staging fill,
+        which ``_open_probe_long`` accepts as long as something filled — sized the
+        reduce-only order LARGER than the position it reduces. That refusal is
+        exactly what staging exists to prevent, and it would land in the "exchange
+        refused" bucket with no code fix available. Callers must have run
+        :meth:`_ensure_staged_long` first.
+        """
+        with localcontext(DECIMAL_CONTEXT):
+            size = floor_to_step(self._staged_long, self.ctx.qty_step)
+        if size <= 0:
+            raise _SmokeAbort(
+                f"staged long {self._staged_long} floors to zero at qty step "
+                f"{self.ctx.qty_step} — no reduce-only probe can be sized against it"
+            )
+        return size
+
     def _require_accepted(self, ack: Any, what: str) -> None:
         if not ack.accepted:
             raise _SmokeAbort(f"{what} was refused by the exchange: {ack.error}")
@@ -945,7 +970,7 @@ class SmokeTestRunner:
         ack = self._wire.place_trigger_order(
             coin=self.ctx.coin,
             is_buy=_TRIGGER_PROBE_IS_BUY,
-            size=self._probe_size(),
+            size=self._staged_probe_size(),
             limit_price=limit,
             trigger_price=trigger,
             tpsl="sl",
@@ -1263,7 +1288,7 @@ class SmokeTestRunner:
         ack = self._wire.place_trigger_order(
             coin=self.ctx.coin,
             is_buy=_TRIGGER_PROBE_IS_BUY,
-            size=self._probe_size(),
+            size=self._staged_probe_size(),
             limit_price=limit,
             trigger_price=trigger,
             tpsl=tpsl,
@@ -1281,10 +1306,15 @@ class SmokeTestRunner:
         self._ensure_staged_long()
         _, create_cloid = self._register_cloid(role=role, tag=f"{tpsl}-mod-a-{self._tag()}")
         trigger, limit = self._trigger_prices(tpsl)
+        # ONE size for both the place and the modify. Sizing each call separately
+        # meant the "modify in place" silently RESIZED the order whenever the mark
+        # moved between the two calls — so what §17.4 is supposed to prove here
+        # (an update in place) was not what the wire actually saw.
+        probe_size = self._staged_probe_size()
         created = self._wire.place_trigger_order(
             coin=self.ctx.coin,
             is_buy=_TRIGGER_PROBE_IS_BUY,
-            size=self._probe_size(),
+            size=probe_size,
             limit_price=limit,
             trigger_price=trigger,
             tpsl=tpsl,
@@ -1305,7 +1335,7 @@ class SmokeTestRunner:
                 target=created_oid,
                 coin=self.ctx.coin,
                 is_buy=_TRIGGER_PROBE_IS_BUY,
-                size=self._probe_size(),
+                size=probe_size,
                 limit_price=self._round_price(new_limit, up=nudge_up),
                 trigger_price=self._round_price(new_trigger, up=nudge_up),
                 tpsl=tpsl,
@@ -1342,7 +1372,7 @@ class SmokeTestRunner:
         placed = self._wire.place_trigger_order(
             coin=self.ctx.coin,
             is_buy=_TRIGGER_PROBE_IS_BUY,
-            size=self._probe_size(),
+            size=self._staged_probe_size(),
             limit_price=limit,
             trigger_price=trigger,
             tpsl=tpsl,

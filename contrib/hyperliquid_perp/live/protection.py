@@ -119,9 +119,11 @@ class ProtectionOutcome(str, Enum):
     PROTECTED = "protected"  # SL (and TP when no plan runs) are on the book
     DEGRADED = "degraded"  # §17.3: SL up but TP could not be (re)established
     NEEDS_EMERGENCY_CLOSE = "needs_emergency_close"  # §17.2: no safe SL — engine must close
-    # The wire gate refused every SL attempt PRE-SEND (kill switch): no SL rests,
-    # but escalating is futile (the same gate blocks the close) — the gate line
-    # stays up, the sync retries next tick, §12.3 SL-missing is the standing net.
+    # The wire gate refused every SL attempt PRE-SEND (kill switch). The SL the
+    # sync WANTED is not on the book — a previous one may still be, covering or
+    # not (the event records which) — but escalating is futile (the same gate
+    # blocks the close), so the gate line stays up, the sync retries next tick,
+    # and §12.3 SL-missing is the standing net.
     BLOCKED = "blocked"
 
 

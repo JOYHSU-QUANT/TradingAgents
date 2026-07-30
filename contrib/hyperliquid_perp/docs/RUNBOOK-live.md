@@ -329,7 +329,8 @@ close / existing position / stale order，來自 smoke 15/16/17/18）皆 true。
 
 > **unprotected 秒數只算「沒有一張足以覆蓋的 SL」的時段**：§17.4 是
 > modify-before-cancel，所以 wire gate 擋掉一次 **modify** 時舊的那張 SL 可能還掛在
-> 交易所。判準是**覆蓋**不是存在（與 §12.3 的 `_has_valid_sl` 同一條）：平倉方向
+> 交易所。判準是**覆蓋**不是存在（與 §12.3 `_has_valid_sl` 判準一致，且更嚴——它
+> 會把交易所側多張單的覆蓋量加總，這裡只看本地那一張）：平倉方向
 > 正確、且 `qty ≥ 目前倉位`，才算還有保護、才**不開窗**（事件上會帶那張單的
 > order_id）。最常見的 blocked 其實是 **resize**——後面的切片成交了、舊 SL 只蓋得住
 > 一部分——那**照樣開窗**，因為有一部分倉位真的沒有停損。真的一張都沒有的 blocked、

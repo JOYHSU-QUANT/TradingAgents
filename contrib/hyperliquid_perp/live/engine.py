@@ -667,8 +667,9 @@ class LiveExecutionEngine:
             # off it can miss the book entirely and the IOC cancels unfilled.
             self._emergency_close(position, snap.mid_price, now, events)
         elif outcome is ProtectionOutcome.BLOCKED:
-            # No SL is resting and nothing can be sent (wire gate closed) — the
-            # single most operator-urgent state must never be console-invisible.
+            # The SL the sync wanted could not be sent at all (wire gate closed)
+            # — the single most operator-urgent state must never be
+            # console-invisible.
             # The CLI's per-tick log only fires when a tick DID something; this
             # event makes a blocked tick count as something, every tick, until
             # the gate reopens (protection.py already writes the DB audit row).
@@ -682,8 +683,9 @@ class LiveExecutionEngine:
             # reached flat — that episode is over, and a LATER flat is a normal
             # exit, not the close landing. Without this, the latch would misfire
             # hours after a transient repair failure and halt a healthy run on
-            # manual mode. BLOCKED does NOT clear: no SL rests there, the episode
-            # is merely suspended behind the wire gate.
+            # manual mode. BLOCKED does NOT clear: the repair the sync wanted
+            # never reached the wire there (whatever may still be resting), so
+            # the episode is merely suspended behind the gate, not recovered.
             self._emergency_close_pending = False
             events.append("emergency_close_pending_cleared")
         return outcome

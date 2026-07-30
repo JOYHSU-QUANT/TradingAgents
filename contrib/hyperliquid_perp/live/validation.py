@@ -374,8 +374,11 @@ def _unprotected_windows(conn, run_id: str, now: datetime) -> tuple[Decimal, int
     ``unprotected_position_seconds = 0`` is an exit-5, non-curable verdict.
 
     But the test protection.py applies before stamping the event is COVERAGE,
-    not existence — closing side and ``qty >= position``, the same rule
-    ``reconcile._has_valid_sl`` uses. So the commonest blocked MODIFY, a RESIZE
+    not existence — closing side and ``qty >= position``, agreeing with
+    ``reconcile._has_valid_sl`` on the two rules that decide the answer (that
+    one also sums coverage across the exchange's open orders and requires
+    reduce-only; protection.py reads its single local row, so it is the stricter
+    of the two). So the commonest blocked MODIFY, a RESIZE
     whose old SL now covers only part of the position, still opens a window:
     part of that position genuinely has no stop. ``order_id`` present ⇒ a
     covering SL was resting.

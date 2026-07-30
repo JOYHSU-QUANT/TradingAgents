@@ -69,6 +69,7 @@ __all__ = [
     "SmokeStepResult",
     "SmokeTest",
     "SmokeTestRunner",
+    "rerun_keys_for",
     "smoke_gate_report",
     "validate_only_keys",
 ]
@@ -1115,7 +1116,7 @@ class SmokeTestRunner:
             # Say so on the operator surface rather than exit silently clean.
             self.staged_long_residual = (
                 "the trigger-block staging entry may have FILLED but could not be booked "
-                "locally — verify the position on the exchange and close it manually"
+                "locally — verify the position on the exchange and close it manually, then use a NEW run-id for acceptance (a post-genesis manual fill books fill_unmapped, which pins this run's validate at exit 5)"
             )
             raise
         logger.info("smoke: staged %s long for the trigger-probe block", self._staged_long)
@@ -1559,6 +1560,21 @@ def validate_only_keys(keys: Iterable[str]) -> tuple[str, ...]:
             "--only slice_order_submit slice_order_status"
         )
     return keys
+
+
+def rerun_keys_for(keys: Iterable[str]) -> tuple[str, ...]:
+    """The ``--only`` selection that will actually RUN the given keys.
+
+    The same pairing rule :func:`validate_only_keys` enforces, read backwards. A
+    remedy line that echoes the red keys verbatim prints a command the CLI
+    REFUSES (exit 1) whenever ``slice_order_status`` is among them — and that is
+    the commonest errored key of all, because test 4 errors precisely when test 3
+    did not complete. Emitted in registry order so the printed command is stable.
+    """
+    selection = set(keys)
+    if "slice_order_status" in selection:
+        selection.add("slice_order_submit")
+    return tuple(k for k in SMOKE_TEST_KEYS if k in selection)
 
 
 # The dispatch table is reflective (``getattr(self, f"_test_{key}")``), so it is

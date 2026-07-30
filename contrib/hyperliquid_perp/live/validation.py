@@ -71,7 +71,7 @@ from ..paper.scheduler import parse_instant
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from .safe_mode import REASON_DAILY_LOSS
-from .smoke import SMOKE_TEST_KEYS, smoke_gate_report
+from .smoke import SMOKE_TEST_KEYS, rerun_keys_for, smoke_gate_report
 
 __all__ = [
     "MIN_KILL_SWITCH_REFRESH_RATE",
@@ -702,12 +702,13 @@ def validate_live_run(
             shortfalls.append(
                 f"smoke test(s) ERRORED (harness/code bug — not an exchange refusal): "
                 f"{', '.join(smoke_errored)} (fix the harness, then re-run "
-                "`live-smoke --only <key>`)"
+                f"`live-smoke --only {' '.join(rerun_keys_for(smoke_errored))}`)"
             )
         if smoke_failed:
             shortfalls.append(
                 f"smoke test(s) FAILED (exchange refused): {', '.join(smoke_failed)} "
-                "(fix config/market state, then re-run `live-smoke --only <key>`)"
+                f"(fix config/market state, then re-run `live-smoke --only "
+                f"{' '.join(rerun_keys_for(smoke_failed))}`)"
             )
         if smoke_missing:
             shortfalls.append(

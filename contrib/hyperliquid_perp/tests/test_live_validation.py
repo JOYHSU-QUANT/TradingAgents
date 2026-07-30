@@ -271,6 +271,37 @@ def test_errored_smoke_is_a_shortfall_with_harness_wording(tmp_path):
     assert not report.live_ready
 
 
+def test_the_rerun_command_obeys_the_only_pairing_rule(tmp_path):
+    """The printed remedy must be a command the CLI will actually accept.
+
+    `slice_order_status` alone is REFUSED by validate_only_keys (exit 1), and it is
+    the commonest errored key of all — test 4 errors precisely when test 3 did not
+    complete. Echoing the red keys verbatim handed the operator a rejected command
+    at exactly the moment they needed a working one.
+    """
+    db = _healthy(tmp_path)
+    _supersede_smoke(db, "error", key="slice_order_status")
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    remedy = next(s for s in report.shortfalls if "ERRORED" in s)
+    assert "--only slice_order_submit slice_order_status" in remedy
+    # And the command really is accepted by the guard that used to reject it.
+    from contrib.hyperliquid_perp.live.smoke import validate_only_keys
+
+    validate_only_keys(["slice_order_submit", "slice_order_status"])
+
+
+def test_an_unpaired_red_key_is_printed_as_itself(tmp_path):
+    """Control for the pairing test: no unrelated key gets dragged in."""
+    db = _healthy(tmp_path)
+    _supersede_smoke(db, "failed", key="stop_loss_modify")
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    remedy = next(s for s in report.shortfalls if "FAILED" in s or "refused" in s)
+    assert "--only stop_loss_modify" in remedy
+    assert "slice_order_submit" not in remedy
+
+
 # -- integrity failures (exit 5) ------------------------------------------
 
 

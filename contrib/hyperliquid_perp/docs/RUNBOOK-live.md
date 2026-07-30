@@ -37,10 +37,13 @@ live 下單用的是**主錢包授權的 agent key**，不是主錢包私鑰。
 
 - **testnet**：到 Hyperliquid testnet faucet 給主錢包領測試 USDC。smoke 與
   testnet_live 都在 testnet 花測試幣。
-- **mainnet_tiny**：主錢包入金**至少約 167 USDC**。理由：名目上限
+- **mainnet_tiny**：主錢包**建議**入金約 167 USDC 以上。理由：名目上限
   `max_notional_usdc = 100`，而 `max_target_margin_pct = 60%`、`leverage = 1`，
-  要讓 pct cap 觸及 100 USDC 名目需要 equity ≥ 100 / 0.6 ≈ 167 USDC；低於這個數，
-  `live` 啟動會因 `effective_notional_cap` 低於交易所最小單而具名 exit 1（§5 規則 4）。
+  要讓 pct cap 觸及 100 USDC 名目需要 equity ≥ 100 / 0.6 ≈ 167 USDC。
+  這是**建議值、不是機器門檻**：低於它 run 照樣啟動，只是
+  `effective_notional_cap = min(equity × 0.6, 100)` 跟著變小（equity 50 → 上限 30）。
+  真正會擋啟動的是 §5 規則 4——`effective_notional_cap` 低於交易所最小單
+  （10 USDC）才具名 exit 1，換算約 equity < 16.7 USDC。
 
 ### 1.4 `OPENROUTER_API_KEY`
 
@@ -49,7 +52,7 @@ live 下單用的是**主錢包授權的 agent key**，不是主錢包私鑰。
 
 ### 1.5 建 local config 的 `live:` 區塊
 
-在 `configs/hyperliquid.local.yaml` 補上 `live:` 與明寫的 `risk:` 區塊（§4／§24）。
+在 `contrib/hyperliquid_perp/configs/hyperliquid.local.yaml` 補上 `live:` 與明寫的 `risk:` 區塊（§4／§24）。
 testnet_live 最小範例：
 
 ```yaml
@@ -74,7 +77,7 @@ live:
     margin_mode: cross
     leverage: 1
   execution:
-    execution_style: sliced_twap
+    default_style: sliced_twap
     plan_duration_minutes: 60
     max_slippage_pct: 0.005
   # kill_switch / protection / websocket 子區塊照 §4 預設即可
@@ -83,7 +86,7 @@ live:
 先跑一次 config-only gate 檢查（不下單）——授權、caps、signed client 健檢一次跑完：
 
 ```bash
-python -m contrib.hyperliquid_perp live --config configs/hyperliquid.local.yaml
+python -m contrib.hyperliquid_perp live --config contrib/hyperliquid_perp/configs/hyperliquid.local.yaml
 # stdout 印 mode/network/agent_address/authorization_valid_until/account_equity/
 # pct_cap_notional/effective_notional_cap；有任何 gate 失敗會一次列出所有原因後 exit 1
 ```
@@ -101,7 +104,7 @@ python -m contrib.hyperliquid_perp live --config configs/hyperliquid.local.yaml
 # 首次：--create 建 run（genesis＝交易所快照）並跑一次 §19.1 recovery（arm kill switch、
 # reconcile、掃 stale bot-owned 單），印判定後退出（不進迴圈）。帳戶非空要 --adopt-positions。
 python -m contrib.hyperliquid_perp live \
-  --config configs/hyperliquid.local.yaml \
+  --config contrib/hyperliquid_perp/configs/hyperliquid.local.yaml \
   --run-id live-BTC --db live_trading.db --create
 ```
 
@@ -127,7 +130,7 @@ reduce-only 或小額真倉，跑完自清）。
 
 ```bash
 python -m contrib.hyperliquid_perp live-smoke \
-  --config configs/hyperliquid.local.yaml \
+  --config contrib/hyperliquid_perp/configs/hyperliquid.local.yaml \
   --run-id live-BTC --db live_trading.db --dry-run
 # 每項記 skipped、不下任何單；驗 config 與接線。exit 0＝wiring 檢查完成。
 ```
@@ -150,7 +153,8 @@ switch ＋ reconcile ＋ 掃 stale bot-owned 單）：
   sweep。**也不要手動掛一張「看起來像 bot」的單**：bot-ownership 認的是本地
   `cloid_registry` 有沒有這一筆，不是命名前綴——手掛的單會被 sweep 直接跳過
   （測 17 一樣 vacuous），而且會被 reconciler 記成 `non_bot_owned_order`、
-  讓 recovery 判定 unclean，於是測 17 記 **failed**（§20.2 gate 關起來）、
+  讓 recovery 判定 unclean，於是**測 15/16/17 全部**記 **failed**（三項都讀同一次
+  recovery 判定，§20.2 gate 關起來）、
   run 還會進 **manual safe mode**，要人工 `safe-mode --release` 才出得來。
   無論如何 **不要**拿「上一輪 smoke 的殘留」充數——smoke 的 trigger 探針**刻意不寫
   本地 orders row**（§12.3 的 orphan lane 負責收編），殘留的探針會在 recovery 第一趟
@@ -183,29 +187,32 @@ switch ＋ reconcile ＋ 掃 stale bot-owned 單）：
 > suite 收尾會**自動 disarm**（清掉 scheduleCancel），不在錢包
 > 上留 armed 狀態（完全沒 arm 過的 run 不會去動它，以免誤清掉同錢包上其他 `live
 > --loop` 的 arm）。萬一 disarm 失敗，會印一行醒目 `WARNING`——照它指示手動清掉，或
-> 直接跑 `live --loop`（會重新 arm 並持續 refresh）。
+> 跑一次 `live --run-id ...`（不加 `--loop`）重新 arm＋sweep 後退出。**不要指望
+> `live --loop`**：disarm 失敗通常伴隨 wire 失敗，那些測試會是 `failed`／`errored`、
+> §20.2 gate 因此關著，`--loop` 會在 arm 之前就 exit 4。
 
 ### 3.3 跑 smoke（真連線）
 
 ```bash
 # 全部 18 項：
 python -m contrib.hyperliquid_perp live-smoke \
-  --config configs/hyperliquid.local.yaml \
+  --config contrib/hyperliquid_perp/configs/hyperliquid.local.yaml \
   --run-id live-BTC --db live_trading.db
 
 # 只跑某幾項（key 見 --gate-status 或錯誤訊息列出的清單）：
 python -m contrib.hyperliquid_perp live-smoke \
-  --config configs/hyperliquid.local.yaml \
+  --config contrib/hyperliquid_perp/configs/hyperliquid.local.yaml \
   --run-id live-BTC --db live_trading.db \
   --only stop_loss_create stop_loss_modify stop_loss_cancel
 ```
 
 > `--only` 有一條配對規則：test 4（`slice_order_status`）查的是同一次執行裡
 > test 3 送出的單，單選 test 4 會被入口直接拒絕（exit 1）——兩個一起選：
-> `--only slice_order_submit slice_order_status`。兩個都選了、但 test 3 在同一次
-> 執行沒跑完（自己出 `error`，或 suite 在它之前就因 `error` 停下）時，test 4 會記
-> **`error`**（harness／選測連鎖，不是交易所拒絕的 `failed`）——先修 test 3 的根因，
-> 再兩項一起重跑。
+> `--only slice_order_submit slice_order_status`。兩個都選了、但 test 3 記了 **`failed`**（交易所拒絕，suite 繼續跑）時，
+> test 4 沒有可查的單，會記 **`error`**（harness／選測連鎖，不是交易所拒絕的
+> `failed`）。若 test 3 自己出的是 **`error`**，suite 就停在 test 3，test 4 **根本不會
+> 執行、也不寫 row**（維持 `not_yet_run`）——別去找一筆不存在的 test 4 `error`。
+> 兩種情形都一樣：先修 test 3 的根因，再兩項一起重跑。
 
 每項結果落 `live_smoke_tests`（append-only：修好再跑會覆蓋判定、保留歷史）。
 紅的判定分兩型，triage 方式不同：
@@ -215,7 +222,8 @@ python -m contrib.hyperliquid_perp live-smoke \
   其後的測試不執行、它們既有的判定不動。先修 code 再回來。
 
 無論哪型，修好原因後 `live-smoke --only <key>` 重跑該項即可（gate 以 latest-per-key
-的真跑結果為準）。
+的真跑結果為準）。**唯一例外是 `slice_order_status`**：依上面的配對規則，它必須和
+`slice_order_submit` 一起選，單獨重跑會被入口拒絕（exit 1）。
 
 四個真跑才有的行為：
 
@@ -241,8 +249,11 @@ python -m contrib.hyperliquid_perp live-smoke \
   staged 小多倉萬一**平不掉**（交易所拒絕、只成交一部分、或成交了卻沒能記帳），
   收尾會印一行醒目 `WARNING: the trigger-block staging position may still be OPEN`
   ——它平在測試之間、沒有哪一項的 detail 承接得了，所以這行 stderr 就是唯一的操作
-  面訊號：**照它指示到交易所確認並手動平掉**（或重跑一次 suite，收尾會再試一次）。
-  部分成交時重試只補送真正的剩餘量，不會重送原始尺寸。
+  面訊號。同一次執行內收尾會再試一次（部分成交時只補送真正的剩餘量，不會重送原始
+  尺寸），但**重跑 suite 救不了**——`_staged_long` 是每個 runner 實例自己的，新的一次
+  執行只會再開一口新的、平掉新的那口，原殘倉留著。所以：**到交易所確認並手動平掉，
+  然後換一個新的 run-id 重跑驗收**——依 §2 的累積制，手動成交會記
+  `fill_unmapped`，該 run 的 `validate` 從此永遠 exit 5。
 
 ### 3.4 確認 gate（不下單、純讀 DB）
 
@@ -264,18 +275,19 @@ python -m contrib.hyperliquid_perp live-smoke \
 | `1` | config／env／網路／run-lock 具名錯誤 | 依訊息修 |
 
 > `--only` 只跑子集時，即使選到的項全過，其餘未跑的項仍讓 gate 未開——所以 exit 仍是
-> `4`（`not_yet_run` 會列出剩下的項）。exit `0` 一律代表整個 §20.2 gate 開，不是「選到的
-> 那幾項過了」。
+> `4`（`not_yet_run` 會列出剩下的項）。真跑的 exit `0` 代表整個 §20.2 gate 開，不是「選到的那幾項過了」。
+> （`--dry-run` 是另一回事：它不下單、每項記 skipped，照樣 exit 0 而 gate 仍關著——
+> stdout 的 `smoke_gate_passed: no` 與 dry-run 橫幅是分辨依據。）
 
 ---
 
 ## 4. testnet_live cycles（§20.1）
 
-smoke 全過後，同一 run 加 `--loop` 進 4h AI cycle ＋ 30s tick 的 live 迴圈：
+smoke 全過後，同一 run 加 `--loop` 進 4h AI cycle ＋ ~10s tick 的 live 迴圈：
 
 ```bash
 python -m contrib.hyperliquid_perp live \
-  --config configs/hyperliquid.local.yaml \
+  --config contrib/hyperliquid_perp/configs/hyperliquid.local.yaml \
   --run-id live-BTC --db live_trading.db --loop
 ```
 
@@ -318,8 +330,10 @@ live run 會自動走 §20.3／§21.4 報告（依 `live.mode`）。指標與 ex
 `exchange_fill_dedupe_error_count / orphan_exchange_order_count /
 duplicate_fill_apply_count / local_exchange_position_mismatch_count /
 account_replay_mismatch_count / unprotected_position_seconds` 全為 0、
-`kill_switch_refresh_success_rate ≥ 99%`、四項 `*_test_passed`（restart / emergency
-close / existing position / stale order，來自 smoke 15/16/17/18）皆 true。
+`kill_switch_refresh_success_rate ≥ 99%`、四項 smoke 布林（`restart_reconciliation_passed`
+——注意這一項**沒有** `_test_` 中綴——以及 `emergency_close_test_passed`／
+`startup_with_existing_position_test_passed`／`startup_with_stale_open_order_test_passed`，
+來自 smoke 15/16/17/18）皆 true。
 
 > **`cycle_count` 只認 `completed`**：模型輸出解不開的 cycle（`invalid_output`）
 > **不計入** ≥30，另以 `invalid_output_count` 與一則 warning 呈現。paper 驗收器計
@@ -334,7 +348,10 @@ close / existing position / stale order，來自 smoke 15/16/17/18）皆 true。
 > 正確、且 `qty ≥ 目前倉位`，才算還有保護、才**不開窗**（事件上會帶那張單的
 > order_id）。最常見的 blocked 其實是 **resize**——後面的切片成交了、舊 SL 只蓋得住
 > 一部分——那**照樣開窗**，因為有一部分倉位真的沒有停損。真的一張都沒有的 blocked、
-> 以及 `stop_loss_repair_exhausted`，同樣開窗、同樣是 exit 5。
+> 以及 `stop_loss_repair_exhausted`，同樣開窗、同樣是 exit 5。窗**只在真的結束時**
+關（SL 回到書上、倉位平掉、或 protection 的失敗線降下）——§17.2 的 emergency close
+只是「送出平倉單」，不算結束。另外**窗數本身也是 gate**：量到 0 秒但有窗（onset 與
+close 落在同一個時鐘刻度）照樣 exit 5，不會讀成「從來沒有無護倉」。
 
 報告中的 `warning:` 行不影響 exit，但寫結論前要看過。testnet 報告會警告：run 中
 發生過 emergency close（§21.4「不得因 bot bug emergency close」無法機器判定，需
@@ -418,10 +435,10 @@ mainnet_tiny 有 **config-load 硬 gate**（§24）：`max_notional_usdc <= 100`
 
 ```bash
 export HYPERLIQUID_AGENT_KEY_MAINNET=0x...
-python -m contrib.hyperliquid_perp live --config configs/hyperliquid.local.yaml \
+python -m contrib.hyperliquid_perp live --config contrib/hyperliquid_perp/configs/hyperliquid.local.yaml \
   --run-id mainnet-BTC --db live_trading.db --create        # 建 + recovery
 # mainnet_tiny 依賴 testnet 已過的 smoke（§21.3），--loop 不再擋同一 run 的 smoke gate
-python -m contrib.hyperliquid_perp live --config configs/hyperliquid.local.yaml \
+python -m contrib.hyperliquid_perp live --config contrib/hyperliquid_perp/configs/hyperliquid.local.yaml \
   --run-id mainnet-BTC --db live_trading.db --loop           # 跑 cycles
 ```
 
@@ -452,10 +469,11 @@ mode 切換都手動改 config（§22／§26）。
 |---|---|
 | `HYPERLIQUID_AGENT_KEY_TESTNET/_MAINNET is not set` | 依 §1.2 export 對應網路的 agent key。 |
 | `agent authorization failed` / 過期 | 重新核准 agent wallet（§1.2）。 |
-| `effective_notional_cap ... below the exchange minimum`（exit 1） | 入金不足；見 §1.3（mainnet ≥ ~167 USDC）。 |
+| `effective_notional_cap ... below the exchange minimum`（exit 1） | 入金遠低於交易所最小單（約 equity < 16.7 USDC）；見 §1.3。想吃滿 100 USDC 名目上限另需 ≥ ~167 USDC。 |
 | `--loop` 報 §20.2 smoke gate 未過（exit 4） | 先跑 `live-smoke`（§3），`--gate-status` 確認 yes 再 `--loop`。 |
 | `live-smoke` 報 run lock 被持有（exit 1） | 同一 run 的 `live --loop`／`paper` 還在跑；先停掉（或等 lease 過期）再跑 smoke。 |
 | `live-smoke` 報 pre-flight recovery 沒過（exit 4） | run 狀態不乾淨；`safe-mode --status` 查 open case、照 §6 處置後重跑。 |
+| `OPENROUTER_API_KEY is not set`（exit 1，只有 `--loop`） | `--loop` 要跑 4h AI cycle；依 §1.4 設好 key。不加 `--loop` 的 `live` 不需要 key。 |
 | `live.allow_real_orders is false` | live-smoke／--loop 要真下單；設 `allow_real_orders: true` 並備妥 agent key，或 live-smoke 用 `--dry-run`。 |
 | `validate` exit 5、replay unverifiable | store 帳本對不上；先查（別盲目重啟），必要時 `safe-mode --status`。 |
 | run 反覆進 manual safe mode | 查 `safe-mode --status` 的 open cases；換 coin／改 run 定義是硬錯誤，用新 run-id。 |

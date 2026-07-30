@@ -41,7 +41,8 @@ red/missing smoke test — curable by a ``live-smoke`` re-run;
 ``live-smoke``: the §20.2 gate is not satisfied, incl. a pre-flight abort;
 ``live --loop``: the §20.2 smoke gate is not open on this run;
 ``live`` without ``--loop``: recovery ran but judged unclean; ``safe-mode
---status``: a manual safe mode is latched), ``5`` (``validate`` only) the
+--status``: a safe mode is latched, recoverable OR manual — 4 means "latched",
+not "human action required"), ``5`` (``validate`` only) the
 run has integrity failures — orphans, snapshot or replay mismatches, or a
 store so corrupt the checks themselves cannot run ("the store is broken;
 investigate before trusting results"), ``130`` interrupted before a graceful
@@ -1466,7 +1467,7 @@ def _live_startup_recovery(
                                 f"(unknown ≠ flat) and {unclean_note} "
                                 "— the §18.2 shutdown sweep leaves the bot's resting "
                                 "SL/TP STANDING (reduce-only) and cancels other bot "
-                                "orders. Re-run with --loop, or intervene manually.",
+                                "orders. Re-run `live --run-id ...` (--loop only once the §20.2 smoke gate is open), or intervene manually.",
                                 file=sys.stderr,
                             )
                         else:
@@ -1488,7 +1489,7 @@ def _live_startup_recovery(
                                 f"and {unclean_note} — the §18.2 "
                                 "shutdown sweep leaves the bot's resting SL/TP "
                                 "STANDING (reduce-only) and cancels other bot orders. "
-                                "Re-run with --loop, or intervene manually.",
+                                "Re-run `live --run-id ...` (--loop only once the §20.2 smoke gate is open), or intervene manually.",
                                 file=sys.stderr,
                             )
                         else:
@@ -1554,9 +1555,11 @@ def _live_startup_recovery(
                                     "NOTE: the SL/TP described above as kept "
                                     "STANDING are NOT safe while the wallet-wide "
                                     "scheduleCancel stays armed — it cancels them "
-                                    "too at its deadline. Re-adopt with --loop "
-                                    "(a clean recovery disarms it) or clear the "
-                                    "trigger manually.",
+                                    "too at its deadline. Re-run `live --run-id ...`: its "
+                                    "clean shutdown sweep disarms the switch on "
+                                    "exit. The recovery itself ARMS the switch, and "
+                                    "a --loop run is refused while the §20.2 gate is "
+                                    "shut — or clear the trigger manually.",
                                     file=sys.stderr,
                                 )
 
@@ -1948,7 +1951,8 @@ def _cmd_live_smoke(argv: list[str]) -> int:
     failure that aborted the suite before any test; 1 = a named config / env /
     network / lease error.
 
-    The restart tests (15–17) drive one real §19.1 startup recovery over the run;
+    The restart tests (15–17) EACH drive a real §19.1 startup recovery (three
+    arms and three reconcile passes over the run, not one);
     the operator stages their preconditions (an existing position / a stale
     bot-owned order) on testnet before running the suite (docs/RUNBOOK-live.md).
     """
@@ -2123,8 +2127,11 @@ def _cmd_live_smoke(argv: list[str]) -> int:
                         "WARNING: the end-of-suite kill-switch disarm FAILED — the "
                         "wallet may still hold an armed scheduleCancel that will "
                         "cancel every resting order (including any SL/TP) at its "
-                        "deadline. Verify and clear it manually, or start `live "
-                        "--loop` (it re-arms and refreshes the switch).",
+                        "deadline. Verify and clear it manually, or run `live "
+                        "--run-id ...` without --loop (it re-arms, sweeps, then "
+                        "disarms on a clean exit). --loop is NOT the remedy here: a "
+                        "suite whose disarm failed usually has red tests, so the "
+                        "§20.2 gate is shut and --loop exits 4 before arming.",
                         file=sys.stderr,
                     )
                 if runner.staged_long_residual is not None:
@@ -2134,9 +2141,12 @@ def _cmd_live_smoke(argv: list[str]) -> int:
                     # line to show for it (review round 2026-07-29).
                     print(
                         "WARNING: the trigger-block staging position may still be "
-                        f"OPEN — {runner.staged_long_residual}. Close it manually "
-                        "(or re-run the suite, which flattens on exit) before "
-                        "leaving the account unattended.",
+                        f"OPEN — {runner.staged_long_residual}. Close it manually, then use a "
+                        "NEW run-id for acceptance: a post-genesis manual fill has "
+                        "no local order row, so it books fill_unmapped and pins "
+                        "this run's validate at exit 5. Re-running the suite does "
+                        "NOT flatten this residual — a fresh runner only closes the "
+                        "staging long it opened itself.",
                         file=sys.stderr,
                     )
         finally:

@@ -969,6 +969,69 @@ def test_trigger_cleanup_cancel_refused_is_surfaced(live_db):
     assert "cleanup" in (row["detail"] or "") and "refused" in row["detail"]
 
 
+def test_both_trigger_probes_put_the_limit_on_the_marketable_side(live_db):
+    # Every probe is a SELL, and live derives a sell's limit BELOW its trigger
+    # (protection._protected_limit: trigger * (1 - slip)) so it is marketable
+    # when it fires. The SL pair got that for free — further from the mark is
+    # also lower — but the TP pair was mirrored instead, putting the limit
+    # ABOVE the trigger: the one shape live never emits, on a §20.2 gate item
+    # whose whole purpose is to exercise the real §17 wire shape.
+    runner = smoke.SmokeTestRunner(_ctx(live_db, _FakeSigned()))
+    for tpsl in ("sl", "tp"):
+        trigger, limit = runner._trigger_prices(tpsl)
+        assert limit < trigger, f"{tpsl}: a SELL's limit must sit below its trigger"
+    # And each pair still sits far enough from the mark never to fire: the SL
+    # well below it, the TP well above.
+    sl_trigger, _ = runner._trigger_prices("sl")
+    tp_trigger, tp_limit = runner._trigger_prices("tp")
+    assert sl_trigger < _D(60000) < tp_limit < tp_trigger
+
+
+def test_a_context_must_pair_dry_run_with_the_absence_of_a_signed_client(live_db):
+    # _execute gates the test bodies on dry_run alone while _disarm_kill_switch
+    # separately defends with `signed is None` — the pairing was assumed
+    # everywhere and enforced nowhere, so a real run with no signed client
+    # walked into a test body and died on an opaque NoneType attribute error
+    # that the broad except relabelled as a harness `error`.
+    with pytest.raises(ValueError, match="dry run"):
+        _ctx(live_db, None, dry_run=False)
+    with pytest.raises(ValueError, match="dry run"):
+        _ctx(live_db, _FakeSigned(), dry_run=True)
+    # Control: both valid pairings construct.
+    assert _ctx(live_db, None, dry_run=True) is not None
+    assert _ctx(live_db, _FakeSigned(), dry_run=False) is not None
+
+
+def test_an_accepted_ack_without_an_oid_never_reaches_the_modify_wire(live_db):
+    # The OrderAck contract gives every resting/filled ack an exchange_order_id,
+    # so this is unreachable in production — but the modify's `target` was fed
+    # straight from it, so a None slipping through would put a malformed modify
+    # on the wire against a REAL resting order instead of failing here. (Typing
+    # SmokeContext.signed concretely is what surfaced this; under `Any` the
+    # str|None never had to line up with modify_trigger_order's `str`.)
+    runner = smoke.SmokeTestRunner(_ctx(live_db, _FakeSigned()))
+    with pytest.raises(smoke._SmokeAbort, match="without an exchange order id"):
+        runner._require_oid(_Ack(status="resting", exchange_order_id=None), "probe")
+    # Controls: a refused ack still reports the refusal, and a well-formed one
+    # returns its id.
+    with pytest.raises(smoke._SmokeAbort, match="refused"):
+        runner._require_oid(_Ack(status="error", exchange_order_id=None, error="nope"), "probe")
+    assert runner._require_oid(_Ack(exchange_order_id="oid-9"), "probe") == "oid-9"
+
+
+def test_an_unresolvable_test_key_is_contained_as_an_error_verdict(live_db):
+    # The dispatch is reflective, so it is the one mapping with no compile-time
+    # link to the registry. Resolved outside the try it raised AttributeError
+    # before any containment, escaping run()'s loop past _record() — no
+    # live_smoke_tests row for the attempted test, breaking the append-only
+    # audit promise, mid-suite. (The import-time guard makes this unreachable
+    # in practice; this pins the containment behind it.)
+    runner = smoke.SmokeTestRunner(_ctx(live_db, _FakeSigned()))
+    result = runner._execute(smoke.SmokeTest(99, "no_such_probe", "fabricated"))
+    assert result.status == "error"
+    assert "AttributeError" in (result.error_message or "")
+
+
 def test_trigger_create_refusal_is_a_failed_verdict(live_db):
     # place_trigger_order returning an unaccepted ack must fail the test (an
     # exchange refusal, not a harness error) — the _require_accepted guard.

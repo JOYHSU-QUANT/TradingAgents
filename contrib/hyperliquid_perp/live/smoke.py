@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from ..paper.run_lock import RunLockError
 from ..paper.stops import round_to_tick
@@ -52,6 +52,9 @@ from ..persistence import repository as repo
 from ..persistence.cloid import cloid_hex, cloid_logical
 from ..persistence.db import Database
 from .orders import parse_order_status
+
+if TYPE_CHECKING:  # import cost only under type checking; runtime stays lazy
+    from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +227,12 @@ class SmokeContext:
     tests) for cloid uniqueness and result timestamps.
     """
 
-    signed: Any
+    # The SIGNED client, never the read-only one — cli builds both in the same
+    # scope a dozen lines apart, and typing this ``Any`` made passing the wrong
+    # one type-check cleanly while every ack field (``accepted``,
+    # ``filled_size``, ``status``, ``error``) went unchecked at ~20 wire call
+    # sites too. ``None`` exactly when dry_run (enforced in __post_init__).
+    signed: HyperliquidSignedClient | None
     db: Database
     run_id: str
     coin: str
@@ -252,6 +260,20 @@ class SmokeContext:
     # concurrent ``live --loop`` could silently take the run over mid-suite.
     # Raising RunLockError from it means a successor owns the run: abort.
     heartbeat: Callable[[], None] | None = None
+
+    def __post_init__(self) -> None:
+        # The pairing the runner already half-trusts: _execute gates the test
+        # bodies on dry_run alone, while _disarm_kill_switch separately defends
+        # with ``signed is None``. Left unenforced, a context with dry_run=False
+        # and signed=None walks into a real test body and dies on an opaque
+        # "NoneType has no attribute health_check", which _execute's broad
+        # except relabels as a harness ``error`` — a wiring mistake wearing a
+        # harness-bug costume. Name it at construction instead.
+        if self.dry_run != (self.signed is None):
+            raise ValueError(
+                "SmokeContext: signed must be None for a dry run and present for a real "
+                f"one (dry_run={self.dry_run}, signed={'set' if self.signed else 'None'})"
+            )
 
 
 @dataclass(frozen=True)
@@ -457,7 +479,23 @@ class SmokeTestRunner:
         switch (the same fail-closed stance as the lease heartbeat), and the
         exit disarm still runs.
         """
-        self.ctx.signed.schedule_cancel(cancel_at=self.ctx.now() + self.ctx.kill_switch_deadline)
+        self._wire.schedule_cancel(cancel_at=self.ctx.now() + self.ctx.kill_switch_deadline)
+
+    @property
+    def _wire(self) -> HyperliquidSignedClient:
+        """The signed client, proven present, for the paths that must have one.
+
+        Every caller runs only on a non-dry-run context, where
+        ``SmokeContext.__post_init__`` already pairs ``dry_run`` with
+        ``signed``. Stating that once here beats ``assert`` noise at ~20 wire
+        call sites, and leaves the two places that genuinely tolerate ``None``
+        — the dry-run fork and the exit disarm — reading as the deliberate
+        exceptions they are.
+        """
+        signed = self.ctx.signed
+        if signed is None:  # unreachable while __post_init__ holds
+            raise AssertionError("a smoke wire action was reached with no signed client")
+        return signed
 
     def _select(self, only: Sequence[str] | None) -> list[SmokeTest]:
         if only is None:
@@ -474,8 +512,15 @@ class SmokeTestRunner:
                 "skipped",
                 detail="dry-run: preconditions only, placed no orders",
             )
-        method = getattr(self, f"_test_{test.key}")
         try:
+            # Resolved INSIDE the try: a key with no matching method would
+            # otherwise raise AttributeError before any containment, escaping
+            # run()'s loop past _record() — so, uniquely, no live_smoke_tests
+            # row for the attempted test, breaking the append-only audit
+            # promise — while a staged real long and an armed kill switch may
+            # still be outstanding. The import-time guard at the bottom of this
+            # module makes it unreachable; this keeps it contained regardless.
+            method = getattr(self, f"_test_{test.key}")
             return method()
         except _SmokeAbort as exc:
             return SmokeStepResult("failed", error_message=str(exc))
@@ -553,7 +598,7 @@ class SmokeTestRunner:
         if self.ctx.dry_run or self.ctx.signed is None:
             return
         try:
-            self.ctx.signed.clear_scheduled_cancel()
+            self._wire.clear_scheduled_cancel()
         except Exception as exc:  # noqa: BLE001 — cleanup must not mask the suite's verdicts
             self.kill_switch_disarm_failed = True
             logger.warning(
@@ -745,6 +790,21 @@ class SmokeTestRunner:
         if not ack.accepted:
             raise _SmokeAbort(f"{what} was refused by the exchange: {ack.error}")
 
+    def _require_oid(self, ack: Any, what: str) -> str:
+        """The accepted ack's exchange order id — required, not merely hoped for.
+
+        ``OrderAck.__post_init__`` gives every ``resting``/``filled`` ack an
+        ``exchange_order_id``, so this cannot be None once
+        :meth:`_require_accepted` has passed. Stating it matters anyway,
+        because the one caller feeds it straight to ``modify_trigger_order``'s
+        ``target``: a None slipping through would put a malformed modify on the
+        wire against a real resting order rather than failing here.
+        """
+        self._require_accepted(ack, what)
+        if ack.exchange_order_id is None:  # unreachable under the OrderAck contract
+            raise _SmokeAbort(f"{what} was accepted without an exchange order id")
+        return str(ack.exchange_order_id)
+
     def _require_recovery(self) -> RecoveryResult:
         if self.ctx.run_recovery is None:
             raise _SmokeAbort(
@@ -759,8 +819,8 @@ class SmokeTestRunner:
         # §6.1 authorization was proven by the `live` gate before the suite
         # started; this re-affirms the signed transport reaches testnet and the
         # agent address is bound.
-        self.ctx.signed.health_check()
-        agent = self.ctx.signed.agent_address
+        self._wire.health_check()
+        agent = self._wire.agent_address
         if not agent:
             raise _SmokeAbort("signed client has no agent_address after init")
         return SmokeStepResult("passed", detail=f"agent {agent} on {self.ctx.network}")
@@ -770,7 +830,7 @@ class SmokeTestRunner:
         # the only place in the system that sets the exchange-side regime, and
         # it must never flip an account to a leverage/margin mode the config
         # did not declare (decision 2026-07-29).
-        self.ctx.signed.update_leverage(
+        self._wire.update_leverage(
             coin=self.ctx.coin, leverage=self.ctx.leverage, is_cross=self.ctx.is_cross
         )
         regime = f"{self.ctx.leverage}x {'cross' if self.ctx.is_cross else 'isolated'}"
@@ -783,7 +843,7 @@ class SmokeTestRunner:
         size = self._probe_size()
         mark = self.ctx.mark_price()
         price = self._round_price(mark * Decimal("0.5"), up=False)
-        ack = self.ctx.signed.place_ioc_limit(
+        ack = self._wire.place_ioc_limit(
             coin=self.ctx.coin,
             is_buy=True,
             size=size,
@@ -843,7 +903,7 @@ class SmokeTestRunner:
                     "first (this is not an exchange refusal)"
                 ),
             )
-        payload = self.ctx.signed.query_order_by_cloid(self._last_submit["cloid_hex"])
+        payload = self._wire.query_order_by_cloid(self._last_submit["cloid_hex"])
         resolved = parse_order_status(payload)
         booked_oid = self._last_submit["oid"]
         if booked_oid:
@@ -876,7 +936,7 @@ class SmokeTestRunner:
         # The same "so far below mark it never fires" rule every SL probe uses —
         # one encoding, so a retune of the margin cannot drift between tests.
         trigger, limit = self._trigger_prices("sl")
-        ack = self.ctx.signed.place_trigger_order(
+        ack = self._wire.place_trigger_order(
             coin=self.ctx.coin,
             is_buy=_TRIGGER_PROBE_IS_BUY,
             size=self._probe_size(),
@@ -903,7 +963,7 @@ class SmokeTestRunner:
                 logical, cloid = self._register_cloid(
                     role="entry", tag=f"fill-{self._tag()}", slice_index=i
                 )
-                ack = self.ctx.signed.place_ioc_limit(
+                ack = self._wire.place_ioc_limit(
                     coin=self.ctx.coin,
                     is_buy=True,
                     size=size,
@@ -970,7 +1030,7 @@ class SmokeTestRunner:
         mark = self.ctx.mark_price()
         price = self._round_price(mark * Decimal("1.01"), up=True)
         logical, cloid = self._register_cloid(role="entry", tag=tag)
-        ack = self.ctx.signed.place_ioc_limit(
+        ack = self._wire.place_ioc_limit(
             coin=self.ctx.coin,
             is_buy=True,
             size=size,
@@ -1059,7 +1119,7 @@ class SmokeTestRunner:
         logical, cloid = self._register_cloid(role="close", tag=f"reduce-{self._tag()}")
         mark = self.ctx.mark_price()
         price = self._round_price(mark * Decimal("0.99"), up=False)
-        ack = self.ctx.signed.place_ioc_limit(
+        ack = self._wire.place_ioc_limit(
             coin=self.ctx.coin,
             is_buy=False,
             size=size,
@@ -1172,22 +1232,29 @@ class SmokeTestRunner:
         modify / cancel wire actions, not a trigger execution.
         """
         mark = self.ctx.mark_price()
-        # Rounded AWAY from the mark (down for the SL pair, up for the TP pair)
-        # so legalization can only widen the never-fires margin, and the limit
-        # keeps its side of the trigger.
+        # Triggers are rounded AWAY from the mark so legalization can only widen
+        # the never-fires margin. The LIMIT is not a mirror of that: every probe
+        # is a SELL (_TRIGGER_PROBE_IS_BUY), and live derives a sell's limit as
+        # ``trigger * (1 - slip)`` — BELOW the trigger, marketable when it fires
+        # (protection._protected_limit). The SL pair got that for free, since
+        # further-from-mark is also lower; the TP pair did not, and a limit
+        # ABOVE a sell trigger is the one shape live never emits. Since the
+        # point of staging a real long is that each probe carries the exact §17
+        # wire shape, put both limits on the marketable side and round them the
+        # way live does (down for a sell).
         if tpsl == "sl":
             trigger = self._round_price(mark * Decimal("0.5"), up=False)
             limit = self._round_price(mark * Decimal("0.49"), up=False)
         else:
             trigger = self._round_price(mark * Decimal("1.5"), up=True)
-            limit = self._round_price(mark * Decimal("1.51"), up=True)
+            limit = self._round_price(mark * Decimal("1.49"), up=False)
         return trigger, limit
 
     def _trigger_create(self, tpsl: str, role: str, label: str) -> SmokeStepResult:
         self._ensure_staged_long()
         _, cloid = self._register_cloid(role=role, tag=f"{tpsl}-create-{self._tag()}")
         trigger, limit = self._trigger_prices(tpsl)
-        ack = self.ctx.signed.place_trigger_order(
+        ack = self._wire.place_trigger_order(
             coin=self.ctx.coin,
             is_buy=_TRIGGER_PROBE_IS_BUY,
             size=self._probe_size(),
@@ -1208,7 +1275,7 @@ class SmokeTestRunner:
         self._ensure_staged_long()
         _, create_cloid = self._register_cloid(role=role, tag=f"{tpsl}-mod-a-{self._tag()}")
         trigger, limit = self._trigger_prices(tpsl)
-        created = self.ctx.signed.place_trigger_order(
+        created = self._wire.place_trigger_order(
             coin=self.ctx.coin,
             is_buy=_TRIGGER_PROBE_IS_BUY,
             size=self._probe_size(),
@@ -1217,7 +1284,7 @@ class SmokeTestRunner:
             tpsl=tpsl,
             cloid_hex=create_cloid,
         )
-        self._require_accepted(created, f"{label} modify (initial place)")
+        created_oid = self._require_oid(created, f"{label} modify (initial place)")
         _, modify_cloid = self._register_cloid(role=role, tag=f"{tpsl}-mod-b-{self._tag()}")
         # Nudge the trigger one tick — §17.4 modify-before-cancel updates in
         # place. Rounded in the nudge's own direction so legalization can never
@@ -1228,8 +1295,8 @@ class SmokeTestRunner:
         else:
             new_trigger, new_limit = trigger - self.ctx.tick_size, limit - self.ctx.tick_size
         try:
-            modified = self.ctx.signed.modify_trigger_order(
-                target=created.exchange_order_id,
+            modified = self._wire.modify_trigger_order(
+                target=created_oid,
                 coin=self.ctx.coin,
                 is_buy=_TRIGGER_PROBE_IS_BUY,
                 size=self._probe_size(),
@@ -1266,7 +1333,7 @@ class SmokeTestRunner:
         tpsl = "sl" if role == "stop_loss" else "tp"
         _, cloid = self._register_cloid(role=role, tag=f"{tpsl}-cancel-{self._tag()}")
         trigger, limit = self._trigger_prices(tpsl)
-        placed = self.ctx.signed.place_trigger_order(
+        placed = self._wire.place_trigger_order(
             coin=self.ctx.coin,
             is_buy=_TRIGGER_PROBE_IS_BUY,
             size=self._probe_size(),
@@ -1286,7 +1353,7 @@ class SmokeTestRunner:
         but the probe is still resting on the exchange, and that must be said
         (one wording, shared by tests 5/10/13).
         """
-        cancel = self.ctx.signed.cancel_by_cloid(coin=self.ctx.coin, cloid_hex=cloid)
+        cancel = self._wire.cancel_by_cloid(coin=self.ctx.coin, cloid_hex=cloid)
         if not cancel.success:
             raise _SmokeAbort(
                 f"{what} refused: {cancel.error} — the probe trigger "
@@ -1302,7 +1369,7 @@ class SmokeTestRunner:
         unsuccessful ack) is folded into the step ``detail`` and logged.
         """
         try:
-            ack = self.ctx.signed.cancel_by_cloid(coin=self.ctx.coin, cloid_hex=cloid_hex_value)
+            ack = self._wire.cancel_by_cloid(coin=self.ctx.coin, cloid_hex=cloid_hex_value)
         except Exception as exc:  # noqa: BLE001 — cleanup only; the create/modify already passed
             logger.warning(
                 "smoke: best-effort cancel of %s FAILED — %s: %s",
@@ -1322,10 +1389,10 @@ class SmokeTestRunner:
         # §18: arm the dead man's switch, refresh it (a second scheduleCancel),
         # then disarm — proving the wire action round-trips both ways.
         deadline = self.ctx.now() + self.ctx.kill_switch_deadline
-        self.ctx.signed.schedule_cancel(cancel_at=deadline)
+        self._wire.schedule_cancel(cancel_at=deadline)
         refreshed = self.ctx.now() + self.ctx.kill_switch_deadline
-        self.ctx.signed.schedule_cancel(cancel_at=refreshed)
-        self.ctx.signed.clear_scheduled_cancel()
+        self._wire.schedule_cancel(cancel_at=refreshed)
+        self._wire.clear_scheduled_cancel()
         return SmokeStepResult("passed", detail="scheduleCancel armed, refreshed, and cleared")
 
     def _test_restart_reconciliation(self) -> SmokeStepResult:
@@ -1367,7 +1434,7 @@ class SmokeTestRunner:
         close_logical, close_cloid = self._register_cloid(
             role="emergency_close", tag=f"emrg-{self._tag()}"
         )
-        close_ack = self.ctx.signed.place_ioc_limit(
+        close_ack = self._wire.place_ioc_limit(
             coin=self.ctx.coin,
             is_buy=False,
             size=opened,
@@ -1453,6 +1520,21 @@ def validate_only_keys(keys: Iterable[str]) -> tuple[str, ...]:
         raise ValueError(
             "slice_order_status (test 4) queries the order slice_order_submit "
             "(test 3) places in the same process — select both, e.g. "
-            "--only slice_order_submit,slice_order_status"
+            "--only slice_order_submit slice_order_status"
         )
     return keys
+
+
+# The dispatch table is reflective (``getattr(self, f"_test_{key}")``), so it is
+# the one mapping in this module with no compile-time link between the registry
+# and the code. It is also the most consequential: a new SMOKE_TESTS entry whose
+# method is missing (or either side typo'd) passes the uniqueness guard above
+# and only breaks when that key is SELECTED — mid-suite, on a real run. Bind it
+# here, the same way the three policy sets are bound to SMOKE_TEST_KEYS.
+_MISSING_TEST_METHODS = [
+    t.key for t in SMOKE_TESTS if not hasattr(SmokeTestRunner, f"_test_{t.key}")
+]
+if _MISSING_TEST_METHODS:
+    raise AssertionError(
+        f"SMOKE_TESTS keys with no SmokeTestRunner._test_<key> method: {_MISSING_TEST_METHODS}"
+    )

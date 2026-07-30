@@ -1133,7 +1133,11 @@ def test_heartbeat_fires_once_per_test(live_db):
     ctx.heartbeat = _beat
     with live_db:
         smoke.SmokeTestRunner(ctx).run()
-    assert beats["n"] == len(smoke.SMOKE_TESTS)
+    # One per test, PLUS one final re-check in the exit path: the cleanup there
+    # places a real reduce-only IOC and can clear the account-wide switch, so it
+    # positively re-verifies ownership rather than trusting that some earlier
+    # heartbeat happened to raise (2026-07-30 concurrency review).
+    assert beats["n"] == len(smoke.SMOKE_TESTS) + 1
 
 
 def test_superseded_lease_aborts_and_suppresses_disarm(live_db):
@@ -1175,6 +1179,110 @@ def test_transient_heartbeat_failure_aborts_but_still_disarms(live_db):
     with live_db, pytest.raises(sqlite3.OperationalError):
         smoke.SmokeTestRunner(ctx).run()
     assert "clear_scheduled_cancel" in signed.calls
+
+
+# -- ownership re-check before the exit cleanup (2026-07-30 concurrency review) --
+#
+# The exit path's two actions are both externally visible on a SHARED wallet — a
+# real reduce-only IOC and an account-wide scheduleCancel clear — so both are
+# gated on still owning the run. The pair below fixes the lease's state at the
+# exit re-check itself (not at some earlier in-loop beat), which is the case
+# `_lease_superseded` alone could never see: it is only ever set when a heartbeat
+# happens to RAISE, so a suite that stops for any other reason reaches the
+# cleanup with the flag still False even though the lease may be long gone.
+# `raise_on={"modify_trigger_order"}` stops the suite on an error verdict with a
+# later trigger test still selected, which is what leaves the staged long open
+# across the finally (same staging as
+# test_error_verdict_stops_the_suite_and_flattens_the_staged_long, whose healthy
+# heartbeat is the "cleanup happens" baseline these two vary from).
+_TAKEOVER_SELECTION = [
+    "stop_loss_create",
+    "stop_loss_modify",
+    "take_profit_create",
+    "kill_switch_arm_refresh",
+]
+
+
+def test_a_takeover_at_the_exit_recheck_hands_the_staged_long_over_unclosed(live_db):
+    # C1: the successor took the run over WITHOUT this process ever noticing —
+    # its §19.1 recovery has already adopted this wallet's position and armed its
+    # own dead-man cover. Closing "our" staged long here would flatten ITS
+    # position, and clearing the switch would strip ITS cover. So: no close, no
+    # disarm, and the real exposure is handed over loudly on the operator surface
+    # rather than dropped silently.
+    from contrib.hyperliquid_perp.paper.run_lock import RunLockError
+
+    signed = _FakeSigned(raise_on={"modify_trigger_order"})
+    beats = {"n": 0}
+
+    def _beat():
+        beats["n"] += 1
+        # Beats 1-2 are the two tests that run; beat 3 is the exit re-check.
+        if beats["n"] >= 3:
+            raise RunLockError("superseded by pid 4242")
+
+    ctx = _ctx(live_db, signed, run_recovery=lambda: _Recovery())
+    ctx.heartbeat = _beat
+    with live_db:
+        runner = smoke.SmokeTestRunner(ctx)
+        runner.run(only=_TAKEOVER_SELECTION)
+    assert beats["n"] == 3  # the supersession really landed on the exit re-check
+    # NO reduce-only close reached the wire: every place_ioc_limit on record is
+    # the staging entry, none is a close leg.
+    assert [c for c in signed.place_calls if c.get("reduce_only")] == []
+    assert "clear_scheduled_cancel" not in signed.calls
+    # ...and the position is not silently abandoned: the operator is told the
+    # size, that it was NOT closed, and who owns it now.
+    residual = runner.staged_long_residual
+    assert residual is not None
+    assert "was NOT closed" in residual and "taken over" in residual
+    assert str(_D("0.001")) in residual
+
+
+def test_a_transient_failure_at_the_exit_recheck_still_cleans_up(live_db):
+    # The paired control, and the reason the re-check is not simply "any error
+    # means stop": a transient store failure is NOT evidence of supersession. The
+    # lease is most likely still ours and the cleanup still matters — a real
+    # funded long and an armed account-wide scheduleCancel are the two things
+    # that must never be left behind on a hunch. Fail-open on ambiguity is
+    # deliberate; only a real RunLockError gives the run away.
+    signed = _FakeSigned(raise_on={"modify_trigger_order"})
+    beats = {"n": 0}
+
+    def _beat():
+        beats["n"] += 1
+        if beats["n"] >= 3:
+            raise sqlite3.OperationalError("store busy")
+
+    ctx = _ctx(live_db, signed, run_recovery=lambda: _Recovery())
+    ctx.heartbeat = _beat
+    with live_db:
+        runner = smoke.SmokeTestRunner(ctx)
+        runner.run(only=_TAKEOVER_SELECTION)  # the re-check absorbs it: no raise
+    assert beats["n"] == 3
+    closes = [c for c in signed.place_calls if c.get("reduce_only")]
+    assert len(closes) == 1 and closes[0]["size"] == _D("0.001")
+    assert "clear_scheduled_cancel" in signed.calls
+    assert runner.staged_long_residual is None  # closed cleanly, nothing to hand over
+
+
+def test_a_preflight_that_dies_before_arming_never_clears_the_switch(live_db):
+    # M5: the exit disarm used to be PREDICTED from the selection ("this run
+    # would have armed"), which over-claims. A pre-flight that dies on the way in
+    # — no run_recovery seam wired, or any raise before the arming call — armed
+    # nothing, yet still fired an account-wide scheduleCancel clear that can wipe
+    # a concurrent `live --loop`'s own dead-man cover on the same wallet. The flag
+    # is now EVIDENCE, set at the arming paths, so this run disarms nothing.
+    signed = _FakeSigned()
+    with live_db:
+        runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=None))
+        with pytest.raises(smoke.SmokePreflightError, match="no run_recovery seam"):
+            runner.run(only=["multi_slice_fill"])  # order-placing → pre-flight required
+    assert "clear_scheduled_cancel" not in signed.calls
+    # Nothing at all reached the wire, which is the point: there was no arm to
+    # clear. (The counterpart is test_unclean_preflight_aborts_and_still_disarms:
+    # a pre-flight that DID arm and then failed its verdict still disarms.)
+    assert signed.calls == []
 
 
 # -- round-4 review-loop sync (2026-07-29): staged long, stop-on-error, regime --

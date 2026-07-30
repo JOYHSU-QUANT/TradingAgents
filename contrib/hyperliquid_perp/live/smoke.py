@@ -357,6 +357,12 @@ class SmokeTestRunner:
         # exit disarm is SUPPRESSED — an account-wide clear here would strip
         # the successor's dead-man cover until its next refresh.
         self._lease_superseded: bool = False
+        # Evidence that THIS process may have armed the account-wide switch, as
+        # opposed to the intent read off the selection: set the moment an arming
+        # path is entered, so a pre-flight that dies before reaching the arm
+        # (no seam wired, a raise on the way in) does not fire an account-wide
+        # clear for something nobody armed (2026-07-30 concurrency review).
+        self._kill_switch_may_be_armed: bool = False
         # The staged long the trigger-probe tests protect (see
         # :data:`_TRIGGER_PROBE_TESTS`): 0 until the first trigger test opens
         # it, reset to 0 once flattened. Non-zero across an exit path means the
@@ -401,13 +407,16 @@ class SmokeTestRunner:
         needs_preflight = not self.ctx.dry_run and any(
             t.key in _ORDER_PLACING_TESTS for t in selected
         )
-        # Only a run that armed the switch disarms on exit — via the pre-flight
-        # recovery or a switch-touching test; a run that armed nothing must NOT
-        # fire an account-wide clear that could wipe a concurrent ``live
-        # --loop``'s own arm (Q2 + exit-check finding, 2026-07-27). Keyed off
-        # ``selected`` (not ``executed``) so a mid-suite crash still disarms what
-        # the pre-flight or a restart test's recovery may already have armed.
-        arms_kill_switch = needs_preflight or any(t.key in _KILL_SWITCH_TESTS for t in selected)
+        # Only a run that armed the switch disarms on exit — a run that armed
+        # nothing must NOT fire an account-wide clear that could wipe a
+        # concurrent ``live --loop``'s own arm (Q2 + exit-check finding,
+        # 2026-07-27). That used to be predicted from ``selected``, which
+        # over-claims: a pre-flight that dies on the way in (no seam wired, a
+        # raise before the arm) armed nothing yet still cleared. It is now
+        # EVIDENCE — ``_kill_switch_may_be_armed``, set at each of the three
+        # paths that can arm (pre-flight, a restart test's recovery, test 14)
+        # BEFORE the arming call, so a crash after arming still disarms
+        # (2026-07-30 concurrency review).
         executed: list[SmokeTest] = []
         try:
             if needs_preflight:
@@ -448,13 +457,30 @@ class SmokeTestRunner:
                     )
                     break
         finally:
-            # In the ``finally`` so a mid-suite crash disarms too — EXCEPT when
-            # the lease was superseded: the successor owns the wallet's switch
-            # now, and an account-wide clear would strip its dead-man cover.
-            # The staged long is flattened FIRST: it is real exposure, and the
-            # close is an IOC the disarm does not depend on.
-            self._close_staged_long()
-            if arms_kill_switch and not self._lease_superseded:
+            # In the ``finally`` so a mid-suite crash cleans up too — but EVERY
+            # action here is externally visible (a real reduce-only IOC, an
+            # account-wide scheduleCancel clear), so both are gated on still
+            # owning the run. A superseded process must touch neither: the
+            # successor has already adopted this wallet's position through its
+            # own §19.1 recovery and armed its own dead-man cover, so closing
+            # "our" staged long would flatten ITS position and clearing the
+            # switch would strip ITS cover — the same rule the daemon's own
+            # shutdown lane states (2026-07-30 concurrency review).
+            still_ours = self._still_owns_run()
+            if still_ours:
+                self._close_staged_long()
+            elif self._staged_long > 0:
+                # Real exposure we are no longer entitled to close. Hand it over
+                # loudly rather than silently: the successor's recovery adopts
+                # the position, and the operator gets told which run owns it.
+                self.staged_long_residual = (
+                    f"the staged trigger-block long ({self._staged_long}) was NOT closed: "
+                    "this run's lease was taken over by another process mid-suite, which "
+                    "now owns the position. Verify on the exchange that the successor "
+                    "adopted it (its §19.1 recovery reconciles open positions)"
+                )
+                logger.warning("smoke: %s", self.staged_long_residual)
+            if self._kill_switch_may_be_armed and still_ours:
                 self._disarm_kill_switch()
         return executed
 
@@ -477,6 +503,39 @@ class SmokeTestRunner:
         except RunLockError:
             self._lease_superseded = True
             raise
+
+    def _still_owns_run(self) -> bool:
+        """Positively re-verify the lease before an externally-visible cleanup action.
+
+        ``_lease_superseded`` alone is absence-of-evidence: it is only set when
+        a heartbeat happens to RAISE, so a suite that aborts on the way in (a
+        :class:`SmokePreflightError`, a harness exception between tests) leaves
+        it False even though the lease may have gone stale — and the cleanup
+        then acts on a run a successor already owns. Re-checking here turns the
+        exit path's question from "did we happen to notice?" into "do we still
+        hold it?" (2026-07-30 concurrency review).
+
+        A transient store failure is NOT proof of supersession: the lease is
+        most likely still ours and the cleanup still matters, so it is logged
+        and treated as owned. Only a real ``RunLockError`` gives the run away.
+        """
+        if self._lease_superseded:
+            return False
+        if self.ctx.heartbeat is None:
+            return True
+        try:
+            self.ctx.heartbeat()
+        except RunLockError:
+            self._lease_superseded = True
+            return False
+        except Exception as exc:  # noqa: BLE001 — see docstring: not proof of supersession
+            logger.warning(
+                "smoke: could not re-verify the run lease before cleanup (%s: %s) — "
+                "proceeding as the owner",
+                type(exc).__name__,
+                exc,
+            )
+        return True
 
     def _refresh_kill_switch(self) -> None:
         """Re-arm the pre-flight's dead-man switch before each test (§18).
@@ -578,6 +637,11 @@ class SmokeTestRunner:
                 "no run_recovery seam wired — the order-placing tests need the "
                 "pre-flight §19.1 recovery (the CLI supplies it; a bare context cannot)"
             )
+        # Set BEFORE the call, not after: recovery arms the account-wide switch
+        # as a side effect partway through, so a recovery that raises AFTER
+        # arming must still disarm. Everything that fails before this line
+        # (no seam wired) armed nothing and now correctly skips the disarm.
+        self._kill_switch_may_be_armed = True
         try:
             result = self.ctx.run_recovery()
         except Exception as exc:  # noqa: BLE001 — a raised recovery (e.g. §18 arming
@@ -899,6 +963,10 @@ class SmokeTestRunner:
                 "no run_recovery seam wired — the restart tests need the §19.1 "
                 "recovery components (the CLI supplies them; a bare context cannot)"
             )
+        # A §19.1 recovery ARMS the account-wide switch as a side effect, so the
+        # restart tests are an arming path too — flag before the call for the
+        # same reason the pre-flight does (arm may happen, then it may raise).
+        self._kill_switch_may_be_armed = True
         return self.ctx.run_recovery()
 
     # -- the §20.2 tests --------------------------------------------------
@@ -1435,6 +1503,9 @@ class SmokeTestRunner:
     def _test_kill_switch_arm_refresh(self) -> SmokeStepResult:
         # §18: arm the dead man's switch, refresh it (a second scheduleCancel),
         # then disarm — proving the wire action round-trips both ways.
+        # Flagged before the first arm: if this test dies between arming and its
+        # own clear, the exit disarm is what covers the wallet.
+        self._kill_switch_may_be_armed = True
         deadline = self.ctx.now() + self.ctx.kill_switch_deadline
         self._wire.schedule_cancel(cancel_at=deadline)
         refreshed = self.ctx.now() + self.ctx.kill_switch_deadline

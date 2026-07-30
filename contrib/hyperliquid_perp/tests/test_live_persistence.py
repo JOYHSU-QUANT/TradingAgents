@@ -15,7 +15,13 @@ from decimal import Decimal
 import pytest
 
 from contrib.hyperliquid_perp.persistence import repository as repo
-from contrib.hyperliquid_perp.persistence.db import Database, apply_migrations, connect
+from contrib.hyperliquid_perp.persistence.db import (
+    Database,
+    SchemaVersionError,
+    apply_migrations,
+    connect,
+    stored_schema_version,
+)
 from contrib.hyperliquid_perp.persistence.ids import live_order_attempt_id
 from contrib.hyperliquid_perp.persistence.models import PositionState
 from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS, SCHEMA_VERSION
@@ -773,3 +779,186 @@ def test_a_flatten_clears_the_mirrored_liquidation_price(db):
     pos = repo.get_current_position(db.conn, "r", "BTC")
     assert pos is not None and pos.size == 0
     assert pos.liquidation_price is None
+
+
+# ---------------------------------------------------------------------------
+# schema-version safety (2026-07-30 migration review)
+# ---------------------------------------------------------------------------
+
+
+def test_stored_schema_version_reads_the_store_without_applying_anything():
+    # The whole point of this reader: a caller must be able to ask "what version
+    # is this store?" BEFORE deciding whether opening it is safe. If it migrated
+    # as a side effect (or needed the schema to already exist) the read-only
+    # commands could not use it as their gate.
+    conn = connect(":memory:")
+    assert stored_schema_version(conn) == 0  # brand-new store: nothing applied
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert tables == {"schema_migrations"}  # its own bookkeeping table and NOTHING else
+    assert apply_migrations(conn) == SCHEMA_VERSION
+    assert stored_schema_version(conn) == SCHEMA_VERSION  # now the max recorded version
+    conn.close()
+
+
+def test_a_store_migrated_by_a_newer_build_is_refused_not_written_through():
+    # The rollback hazard this exists for: an OLDER binary opening a store a
+    # NEWER one already migrated used to migrate-nothing and carry on writing
+    # through it, because nothing but apply_migrations reads schema_migrations.
+    # Its SQL does not know the newer columns (a pre-v9 upsert_current_position
+    # has no exchange_liquidation_price clause), so a stale mirrored liquidation
+    # survives a flip/flatten the current build clears — §17 then bands off a
+    # liquidation belonging to a position that no longer exists.
+    conn = connect(":memory:")
+    assert apply_migrations(conn) == SCHEMA_VERSION
+    future = max(MIGRATIONS) + 1
+    conn.execute(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+        (future, "2026-07-30T00:00:00+00:00"),
+    )
+    with pytest.raises(SchemaVersionError, match=f"v{future}"):
+        apply_migrations(conn)
+    # Negative control: with that row gone the very same call is a clean no-op —
+    # the refusal is keyed on the recorded version, not on re-opening at all.
+    conn.execute("DELETE FROM schema_migrations WHERE version = ?", (future,))
+    assert apply_migrations(conn) == SCHEMA_VERSION
+    conn.close()
+
+
+def test_a_read_only_open_of_an_up_to_date_store_applies_nothing(tmp_path):
+    # migrate=False must still be a perfectly ordinary open for the normal case
+    # (validate / export / live-smoke --gate-status against a current store):
+    # it opens, and it writes NO migration bookkeeping of its own.
+    path = tmp_path / "live.db"
+    with Database(path) as built:
+        before = [
+            tuple(row)
+            for row in built.conn.execute(
+                "SELECT version, applied_at FROM schema_migrations ORDER BY version"
+            )
+        ]
+    with Database(path, migrate=False) as reopened:
+        assert stored_schema_version(reopened.conn) == SCHEMA_VERSION
+        after = [
+            tuple(row)
+            for row in reopened.conn.execute(
+                "SELECT version, applied_at FROM schema_migrations ORDER BY version"
+            )
+        ]
+    assert after == before  # same versions AND same applied_at stamps: nothing re-ran
+
+
+def test_a_read_only_open_refuses_a_behind_store_instead_of_upgrading_it(tmp_path, monkeypatch):
+    # The other direction, and the one that bites on the deploy box: a read-style
+    # command takes NO run lease, so migrating here would silently upgrade a
+    # store a RUNNING daemon owns and leave that daemon writing through a schema
+    # it does not know. Refuse and tell the operator instead.
+    import contrib.hyperliquid_perp.persistence.db as db_module
+
+    path = tmp_path / "behind.db"
+    behind = sorted(MIGRATIONS)[-2]
+    older = {version: MIGRATIONS[version] for version in sorted(MIGRATIONS) if version <= behind}
+    monkeypatch.setattr(db_module, "MIGRATIONS", older)
+    with Database(path) as built:
+        assert stored_schema_version(built.conn) == behind
+        assert "exchange_liquidation_price" not in _columns(built.conn, "current_positions")
+
+    monkeypatch.setattr(db_module, "MIGRATIONS", MIGRATIONS)
+    with pytest.raises(SchemaVersionError, match="will not migrate"):
+        Database(path, migrate=False)
+
+    # The refusal is not just an exception AFTER the fact: the store on disk is
+    # byte-for-byte the version it was, so the daemon that owns it is unharmed.
+    conn = connect(path)
+    assert stored_schema_version(conn) == behind
+    assert "exchange_liquidation_price" not in _columns(conn, "current_positions")
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version > ?", (behind,)
+        ).fetchone()[0]
+        == 0
+    )
+    conn.close()
+
+    # Negative control: the migrating open — the lane an operator reaches through
+    # a command that DOES own the run — upgrades it exactly as before.
+    with Database(path) as upgraded:
+        assert stored_schema_version(upgraded.conn) == SCHEMA_VERSION
+        assert "exchange_liquidation_price" in _columns(upgraded.conn, "current_positions")
+
+
+# ---------------------------------------------------------------------------
+# atomic §12.3 case stamping (2026-07-30 concurrency review)
+# ---------------------------------------------------------------------------
+
+
+def _open_case(db, *, exchange_value="unparsed-deadbeef") -> int:
+    """One un-actioned §12.3 case — the shape `safe-mode --stamp-case` targets."""
+    with db.transaction() as conn:
+        repo.insert_exchange_reconciliation_event(
+            conn,
+            run_id="r",
+            trigger="live_fill_ingest",
+            case_type="fill_malformed",
+            exchange_value=exchange_value,
+            timestamp=_NOW,
+        )
+    return db.conn.execute("SELECT MAX(event_id) FROM exchange_reconciliation_events").fetchone()[0]
+
+
+def _action_of(db, event_id: int):
+    return db.conn.execute(
+        "SELECT action_taken FROM exchange_reconciliation_events WHERE event_id = ?", (event_id,)
+    ).fetchone()["action_taken"]
+
+
+def test_stamping_an_open_case_stamps_it_and_says_so(db):
+    event_id = _open_case(db)
+    with db.transaction() as conn:
+        assert repo.stamp_reconciliation_action_if_unset(
+            conn, event_id, "human: payload was garbage"
+        )
+    assert _action_of(db, event_id) == "human: payload was garbage"
+
+
+def test_stamping_a_case_another_writer_already_disposed_of_preserves_the_original(db):
+    # THE race: the operator's `--stamp-case` holds no run lease, so between its
+    # "is this still open?" read and its write the daemon's own reconciliation
+    # pass can stamp the MACHINE disposition — what the system actually DID about
+    # the sighting. A plain UPDATE would erase that with no error and no audit
+    # row. Putting the NULL test in the UPDATE's WHERE makes the loser of the
+    # race get told instead of silently winning.
+    event_id = _open_case(db)
+    with db.transaction() as conn:
+        repo.set_reconciliation_action(conn, event_id, "resolved_fill_booked")
+    with db.transaction() as conn:
+        assert (
+            repo.stamp_reconciliation_action_if_unset(conn, event_id, "human: looked at it")
+            is False
+        )
+    assert _action_of(db, event_id) == "resolved_fill_booked"  # the daemon's record survived
+
+    # Negative control — the two writers differ on purpose: the daemon keeps the
+    # overwriting writer, because revising its own disposition is legitimate
+    # there and it already does read/test/write inside one transaction.
+    with db.transaction() as conn:
+        repo.set_reconciliation_action(conn, event_id, "resolved_manual")
+    assert _action_of(db, event_id) == "resolved_manual"
+
+
+def test_stamping_a_nonexistent_case_raises_rather_than_reporting_a_lost_race(db):
+    # False means "someone else disposed of it"; a bad event_id is a different
+    # fact entirely (a typo'd id, a wrong store) and must not be dressed as a
+    # lost race — the CLI prints a completely different remedy for each.
+    with db.transaction() as conn, pytest.raises(ValueError, match="does not exist"):
+        repo.stamp_reconciliation_action_if_unset(conn, 4242, "human: looked at it")
+
+
+def test_stamping_with_a_blank_action_is_refused(db):
+    # The audit row's whole value is what the human attested; a blank (or
+    # whitespace) disposition would clear the verdict block while recording
+    # nothing — the same guard set_reconciliation_action carries.
+    event_id = _open_case(db)
+    for blank in ("", "   "):
+        with db.transaction() as conn, pytest.raises(ValueError, match="non-empty"):
+            repo.stamp_reconciliation_action_if_unset(conn, event_id, blank)
+    assert _action_of(db, event_id) is None  # and the case stays open, not half-stamped

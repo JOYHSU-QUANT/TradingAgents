@@ -33,8 +33,9 @@ from contrib.hyperliquid_perp.live.config import ExecutionMode
 from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.paper.scheduler import DecisionInput
 from contrib.hyperliquid_perp.persistence import repository as repo
-from contrib.hyperliquid_perp.persistence.db import Database
+from contrib.hyperliquid_perp.persistence.db import Database, connect
 from contrib.hyperliquid_perp.persistence.models import PositionState
+from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 
 from .conftest import insert_decision_attempts
 
@@ -215,6 +216,47 @@ def test_validate_operator_errors_exit_1(tmp_path, capsys):
     assert cli_main(["validate", "--run-id", "r", "--db", str(tmp_path / "nope.db")]) == 1
     err = capsys.readouterr().err
     assert "does not exist" in err
+
+
+def test_read_only_commands_refuse_a_store_that_needs_migrating(tmp_path, capsys):
+    # The offline commands take NO run lease, so the old behaviour — open, and
+    # migrate on the way in — meant "just preview the numbers" on the deploy box
+    # silently upgraded the store the running daemon owns, leaving that daemon
+    # writing through a schema it does not know. Both must refuse (exit 1, the
+    # operator-error lane) and leave the store exactly as they found it.
+    path, db = _seed_db(tmp_path)
+    with db.transaction() as conn:
+        conn.execute("DELETE FROM schema_migrations WHERE version = ?", (SCHEMA_VERSION,))
+    db.close()
+
+    assert cli_main(["validate", "--run-id", "r", "--db", str(path)]) == 1
+    err = capsys.readouterr().err
+    assert "store schema is v" in err and "will not migrate" in err
+
+    out_dir = tmp_path / "exp"
+    assert (
+        cli_main(["export", "--run-id", "r", "--output-dir", str(out_dir), "--db", str(path)]) == 1
+    )
+    assert "store schema is v" in capsys.readouterr().err
+
+    # Neither command wrote the missing migration back: the store is still the
+    # version the daemon is running against.
+    probe = connect(path)
+    recorded = probe.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+    probe.close()
+    assert recorded == SCHEMA_VERSION - 1
+
+    # Negative control: with the bookkeeping restored the very same command runs —
+    # the refusal is the version check, not a broken store path. (Written raw,
+    # not via a migrating open: this store's TABLES are already current, only its
+    # schema_migrations row was removed to stage the "needs upgrading" read.)
+    restore = connect(path)
+    restore.execute(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+        (SCHEMA_VERSION, "2026-07-30T00:00:00+00:00"),
+    )
+    restore.close()
+    assert cli_main(["validate", "--run-id", "r", "--db", str(path)]) == 4
 
 
 def test_export_subcommand_writes_eight_csvs(tmp_path, capsys):

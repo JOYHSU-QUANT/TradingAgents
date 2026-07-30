@@ -2784,6 +2784,42 @@ def set_reconciliation_action(conn: sqlite3.Connection, event_id: int, action_ta
         raise ValueError(f"exchange_reconciliation_events row {event_id!r} does not exist")
 
 
+def stamp_reconciliation_action_if_unset(
+    conn: sqlite3.Connection, event_id: int, action_taken: str
+) -> bool:
+    """Stamp a case's disposition ONLY while it has none; True if this call stamped it.
+
+    The append-only-in-spirit variant of :func:`set_reconciliation_action`, for
+    the operator surface. ``safe-mode --stamp-case`` takes no run lease, so its
+    "is it already disposed of?" check and its write would otherwise straddle a
+    window in which the daemon's own reconciliation pass stamps the machine
+    disposition (what the system actually DID about the sighting) — and the
+    operator's UPDATE would erase it with no error and no audit row. Putting the
+    NULL test in the UPDATE's own WHERE makes check and write one atomic step,
+    so the loser of the race is told instead of silently winning
+    (2026-07-30 concurrency review).
+
+    The daemon keeps :func:`set_reconciliation_action`: revising a disposition
+    is legitimate there, and it already does its read, its test, and its write
+    inside one transaction.
+    """
+    if not action_taken or not action_taken.strip():
+        raise ValueError("action_taken must be a non-empty string")
+    cur = conn.execute(
+        "UPDATE exchange_reconciliation_events SET action_taken = ? "
+        "WHERE event_id = ? AND action_taken IS NULL",
+        (action_taken, event_id),
+    )
+    if cur.rowcount == 1:
+        return True
+    exists = conn.execute(
+        "SELECT 1 FROM exchange_reconciliation_events WHERE event_id = ?", (event_id,)
+    ).fetchone()
+    if exists is None:
+        raise ValueError(f"exchange_reconciliation_events row {event_id!r} does not exist")
+    return False
+
+
 def iter_unresolved_fill_sightings(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
     """``fill_unmapped`` sightings whose §14.2 key STILL has no fills row.
 

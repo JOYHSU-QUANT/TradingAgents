@@ -67,7 +67,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .config import CONFIG_LOAD_ERRORS, dotenv_diagnosis, load_config, load_dotenv_files
-from .persistence.db import Database
+from .persistence.db import Database, SchemaVersionError
 
 logger = logging.getLogger(__name__)
 
@@ -136,15 +136,26 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _open_existing_db(path: str) -> Database | None:
-    """Open an existing store, or report why not (never create one implicitly).
+    """Open an existing store read-only, or report why not (never create, never migrate).
 
     ``Database(path)`` would happily create an empty schema — and an offline
     command against a typo'd path would then "succeed" with zero rows.
+
+    ``migrate=False`` because every caller here (``validate`` / ``export`` /
+    ``live-smoke --gate-status``) is a read-style command that takes NO run
+    lease: migrating would silently upgrade a store a running daemon owns,
+    leaving that daemon writing through a schema it does not know. A store
+    that needs upgrading is refused with instructions instead
+    (2026-07-30 migration review).
     """
     if not Path(path).exists():
         print(f"error: database {path!r} does not exist.", file=sys.stderr)
         return None
-    return Database(path)
+    try:
+        return Database(path, migrate=False)
+    except SchemaVersionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return None
 
 
 def _existing_run_row(conn, run_id: str, db_label: str, *, not_found_hint: str = ""):
@@ -610,7 +621,21 @@ def _stamp_reconciliation_case(db, repo, args) -> int:
         )
         return 1
     with db.transaction() as conn:
-        repo.set_reconciliation_action(conn, args.stamp_case, args.action)
+        # Re-tested INSIDE the write, not just above: this command takes no run
+        # lease, so between that read and here the daemon's own reconciliation
+        # pass can stamp the machine disposition — and a plain UPDATE would
+        # erase what the system recorded it DID, with no error and no audit row
+        # (2026-07-30 concurrency review).
+        stamped = repo.stamp_reconciliation_action_if_unset(conn, args.stamp_case, args.action)
+    if not stamped:
+        print(
+            f"error: case {args.stamp_case} was disposed of by another writer "
+            "while this command was running (the live daemon stamps cases its "
+            "reconciliation pass resolves) — nothing was overwritten. Re-check "
+            "`safe-mode --status` and stamp again only if it is still open.",
+            file=sys.stderr,
+        )
+        return 1
     print(f"case {args.stamp_case} ({row['case_type']}) stamped: {args.action}")
     print(
         "NOTE: trading does not resume yet — the run must pass its next full "

@@ -370,6 +370,13 @@ class LiveExecutionEngine:
         # mirrored column, so the re-read bought nothing.
         liq = position.liquidation_price
         if liq is None:
+            # Clear the latch here too, not only on the success path below. The
+            # reconciler WITHHOLDS a wrong-side estimate by writing None, so this
+            # branch is exactly what follows a warned value — leaving the latch set
+            # meant a re-mirrored wrong-side value on an unchanged position compared
+            # equal and logged nothing, silencing the second and every later episode
+            # of the very writer-side invariant break this warning exists to expose.
+            self._warned_wrong_side_liq = None
             return None
         # Last line of defence for the SL band (the writer-side halves are the
         # reconciler's direction check and upsert_current_position's flip

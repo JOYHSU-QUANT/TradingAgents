@@ -1543,6 +1543,43 @@ def test_a_wrong_side_liquidation_mirror_is_discarded_by_the_sl_band(tmp_path):
     assert engine._liquidation_price(engine._read_position()) == D(25000)
 
 
+def test_the_wrong_side_warning_is_not_silenced_by_a_withheld_estimate(tmp_path, caplog):
+    """The latch must clear when the reconciler WITHHOLDS (writes None), not only
+    on a correctly-sided value. The reconciler discards a wrong-side estimate by
+    writing None — so ``liq is None`` is exactly the state that follows a warned
+    episode. Leaving the latch set there meant a SECOND wrong-side mirror on an
+    unchanged position compared equal to the first and logged nothing, silencing
+    every episode after the first of the very invariant break this warning exists
+    to expose."""
+    import logging
+
+    db, clock, engine, gate, sub = _build(tmp_path)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.004"), entry_price=_MARK),
+            updated_at=_T0,
+        )
+        repo.set_position_liquidation_price(conn, "r", "BTC", D(100000))
+    with caplog.at_level(logging.WARNING):
+        assert engine._liquidation_price(engine._read_position()) is None
+    assert "discarding wrong-side liquidation mirror" in caplog.text
+    caplog.clear()
+
+    # The reconciler's real response to a wrong-side sighting: withhold (None).
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", None)
+    assert engine._liquidation_price(engine._read_position()) is None
+
+    # A SECOND wrong-side episode on the same position must warn again.
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", D(100000))
+    with caplog.at_level(logging.WARNING):
+        assert engine._liquidation_price(engine._read_position()) is None
+    assert "discarding wrong-side liquidation mirror" in caplog.text
+
+
 # -- loss guards wired through the engine (§10.3 / §10.4) --------------------
 #
 # The guards and the engine are unit-tested apart on their own fixtures; these

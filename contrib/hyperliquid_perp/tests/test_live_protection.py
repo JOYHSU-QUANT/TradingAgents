@@ -246,6 +246,40 @@ def test_sl_noop_when_unchanged(env):
     assert len(client.modified) == 0
 
 
+def test_sl_side_mismatch_is_not_treated_as_a_noop(env):
+    """A resting order matching trigger price and qty by coincidence, on the WRONG
+    side, must not short-circuit to ESTABLISHED — that would report PROTECTED while
+    nothing on the book actually closes the current position. Models the shape a
+    same-size flip leaves behind: the row's trigger/qty happen to match what the new
+    side needs, but the side itself is stale."""
+    db = env
+    short = PositionState(coin="BTC", size=Decimal("-0.1"), entry_price=Decimal(50000))
+    with db.transaction() as conn:
+        repo.upsert_current_position(conn, "r", short, updated_at=_NOW)
+    client, gate = _FakeClient(), _gate()
+    mgr = _manager(db, client, gate)
+    mgr.sync(
+        position=short, liquidation_price=Decimal(60000), mark=Decimal(50000), plan_active=True
+    )
+    assert len(client.placed) == 1
+    assert client.placed[0]["is_buy"] is True  # a short's SL is a BUY
+
+    # Corrupt the resting row's side to the opposite value while trigger/qty stay
+    # exactly what the next sync will compute — the coincidence the guard must not
+    # trust on its own.
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE orders SET side = 'sell' WHERE run_id = 'r' AND order_role = 'stop_loss'"
+        )
+    mgr.sync(
+        position=short, liquidation_price=Decimal(60000), mark=Decimal(50000), plan_active=True
+    )
+    # Must NOT no-op: a modify (existing_oid is still set) re-establishes the
+    # correct side rather than silently trusting the stale row.
+    assert len(client.modified) == 1
+    assert client.modified[0]["is_buy"] is True
+
+
 # -- SL repair / emergency close --------------------------------------------
 
 

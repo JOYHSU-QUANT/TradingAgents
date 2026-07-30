@@ -436,10 +436,17 @@ class ProtectionManager:
 
         existing = repo.active_protection_order(self._db.conn, self._run_id, self._coin, role)
         existing_oid = existing["exchange_order_id"] if existing is not None else None
-        # A no-op: the resting order already covers this size at this trigger.
+        # A no-op: the resting order already covers this size at this trigger, on
+        # the closing side. SIDE is part of the test for the same reason it is part
+        # of the ``covering`` computation in sync's GATE_BLOCKED branch below:
+        # trigger and qty alone can match an order left over from the OPPOSITE
+        # direction (a same-size flip whose old SL was never confirmed cancelled),
+        # and returning ESTABLISHED over it would report PROTECTED while nothing on
+        # the book actually closes the current position.
         if (
             existing is not None
             and existing_oid is not None
+            and existing["side"] == (Side.BUY if is_buy else Side.SELL).value
             and existing["trigger_price"] is not None
             and Decimal(existing["trigger_price"]) == trigger_price
             and existing["qty"] is not None

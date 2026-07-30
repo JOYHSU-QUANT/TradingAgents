@@ -9,6 +9,7 @@ from decimal import Decimal
 import pytest
 
 from contrib.hyperliquid_perp.live import smoke
+from contrib.hyperliquid_perp.live.fills import ExchangeFill, post_live_fill
 from contrib.hyperliquid_perp.live.validation import (
     MIN_LIVE_CYCLES,
     MIN_LIVE_ORDERS,
@@ -360,6 +361,97 @@ def test_position_mismatch_is_a_failure(tmp_path):
     assert not report.live_ready
 
 
+def _post_live_fill(db: Database, *, run_id: str = "r") -> None:
+    """A real, consistent live fill: opens 1 BTC long @ 100 (exchange-basis).
+
+    The replay-mismatch/-raise tests below need a run whose books actually
+    moved before they corrupt something — corrupting an untouched, all-zero
+    ledger would exercise nothing about the replay arithmetic itself. Mirrors
+    ``tests/test_live_fills.py``'s own fill-construction pattern (an
+    ``ExchangeFill`` posted through :func:`post_live_fill`), which is also what
+    makes ``accounting.replay_within`` take the ``live=True`` fold (§15) this
+    file's ``account_replay_mismatch_count`` derivation is documented against.
+    """
+    with db.transaction() as conn:
+        repo.insert_order(
+            conn,
+            order_id="o1",
+            mode="live",
+            run_id=run_id,
+            symbol="BTC",
+            order_role="entry",
+            side="buy",
+            order_type="ioc_limit",
+            qty=_D("1"),
+            status="filled",
+            price=_D("100"),
+            timestamp=_T0,
+        )
+    fill = ExchangeFill.parse(
+        {
+            "coin": "BTC",
+            "side": "B",
+            "px": "100",
+            "sz": "1",
+            "closedPnl": "0",
+            "crossed": True,
+            "oid": 777,
+            "time": int(_T0.timestamp() * 1000),
+            "tid": 1,
+            "fee": "0.05",
+            "feeToken": "USDC",
+        }
+    )
+    post_live_fill(db, run_id=run_id, fill=fill, order_id="o1")
+
+
+def test_corrupted_live_account_state_is_a_counted_replay_mismatch_failure(tmp_path):
+    """Mirrors the paper-side ``test_corrupted_account_state_reports_replay_mismatch``:
+    corrupt the materialized ledger after a real live fill so replay disagrees
+    with it (``account_matches`` goes False, no raise) and confirm the exact
+    source arithmetic — ``len(position_mismatches) + (0 if account_matches else 1)``
+    — lands as 1, and as a gating failure, never a shortfall or warning. A
+    regression that dropped or miscounted this would let corrupted books slip
+    a real-money go/no-go gate silently.
+    """
+    db = _healthy(tmp_path)
+    _post_live_fill(db)
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE current_account_state SET wallet_balance = '123456' WHERE run_id = 'r'"
+        )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    # No position mismatch (only the ledger was touched) plus the account
+    # disagreement: 0 + 1 == 1, exactly the source's derivation.
+    assert report.account_replay_mismatch_count == 1
+    assert not report.live_ready
+    assert any("account_replay_mismatch_count = 1" in f for f in report.failures)
+    assert not any("account_replay_mismatch_count" in s for s in report.shortfalls)
+    assert not any("account_replay_mismatch_count" in w for w in report.warnings)
+
+
+def test_replay_raise_on_a_live_run_is_counted_as_one_failure(tmp_path):
+    """Mirrors the paper-side ``test_replay_raise_contained_as_counted_integrity_failure``:
+    corrupt a fill cell so ``Decimal()`` cannot read it inside
+    ``accounting.replay_within``'s live fold. ``validate_live_run`` must contain
+    the raise in its try/except and count it as
+    ``account_replay_mismatch_count == 1`` (the ``replayed is None`` branch) —
+    never let the exception escape uncaught, and never silently report 0.
+    """
+    db = _healthy(tmp_path)
+    _post_live_fill(db)
+    with db.transaction() as conn:
+        conn.execute("UPDATE fills SET fill_price = 'garbage' WHERE run_id = 'r'")
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.account_replay_mismatch_count == 1
+    assert not report.live_ready
+    assert any(f.startswith("accounting replay raised:") for f in report.failures)
+    assert not any("accounting replay raised" in s for s in report.shortfalls)
+    assert not any("accounting replay raised" in w for w in report.warnings)
+
+
 def test_low_refresh_rate_is_a_failure(tmp_path):
     db = Database(tmp_path / "live.db")
     _init_live_run(db)
@@ -681,14 +773,21 @@ def test_testnet_without_smoke_is_a_shortfall(tmp_path):
 
 
 def _protect(db, events, *, run_id="r"):
-    """events: list of (event_type, symbol, offset_seconds_from_T0)."""
+    """events: list of (event_type, symbol, offset_seconds_from_T0[, order_id]).
+
+    The optional 4th element is the protection order the event is about;
+    ``stop_loss_repair_blocked`` is the one event whose meaning turns on it
+    (present ⇒ a COVERING stop-loss was still resting), so the covering/
+    non-covering pairs below need to set it per event.
+    """
     with db.transaction() as conn:
-        for event_type, symbol, off in events:
+        for event_type, symbol, off, *rest in events:
             repo.insert_protection_order_event(
                 conn,
                 run_id=run_id,
                 event_type=event_type,
                 symbol=symbol,
+                order_id=rest[0] if rest else None,
                 timestamp=_T0 + timedelta(seconds=off),
             )
 
@@ -868,6 +967,87 @@ def test_a_run_with_no_onset_at_all_is_the_only_clean_zero(tmp_path):
     assert r.unprotected_position_seconds == 0
     assert r.unprotected_window_count == 0
     assert r.live_ready
+
+
+def test_a_covering_blocked_event_closes_an_open_unprotected_window(tmp_path):
+    """A covering ``stop_loss_repair_blocked`` ENDS an open window, not just suppresses.
+
+    protection.py stamps an ``order_id`` on this event only when the resting SL
+    still COVERS the position (right closing side AND ``qty >= position``), so
+    the event means "covered again" even though the gate flag itself has not
+    resolved. Both onset flavours are shown, keyed only on the order_id: BTC's
+    is the same event type with NO id (an SL that covered nothing), ETH's is
+    ``stop_loss_repair_exhausted``. Before 2026-07-30 the covering event only
+    suppressed a NEW onset and left the open one running to the next unrelated
+    close event — here, to ``now`` 9 hours later — turning ~30s of genuinely
+    unprotected time into a 9-hour, exit-5, non-curable verdict on a healthy run.
+    """
+    db = _healthy(tmp_path)
+    _protect(
+        db,
+        [
+            ("stop_loss_repair_blocked", "BTC", 0),  # no order_id ⇒ genuine onset
+            ("stop_loss_repair_exhausted", "ETH", 0),
+            ("stop_loss_repair_blocked", "BTC", 20, "r:stop_loss:BTC"),  # covering → closes
+            ("stop_loss_repair_blocked", "ETH", 30, "r:stop_loss:ETH"),  # covering → closes
+        ],
+    )
+    with db:
+        r = validate_live_run(db, run_id="r", now=_T0 + timedelta(hours=9))
+    # Measured to the covering events (20 + 30), NOT to `now`.
+    assert r.unprotected_position_seconds == Decimal(50)
+    assert r.unprotected_window_count == 2
+    assert not r.unresolved_unprotected_window
+
+
+def test_a_covering_blocked_event_with_no_open_window_opens_or_closes_nothing(tmp_path):
+    """Negative control: the close side must never invent a window of its own.
+
+    Two covering events bracket a genuine window — one BEFORE any onset (must
+    not pre-close anything, and must leave the later onset free to open) and
+    one AFTER the window already closed (must not be counted a second time).
+    Only the real 20s / 1 window survives; a close arm written without the
+    "is one actually open" guard would either double-count or crash here.
+    """
+    db = _healthy(tmp_path)
+    _protect(
+        db,
+        [
+            ("stop_loss_repair_blocked", "BTC", 0, "r:stop_loss:BTC"),  # nothing open yet
+            ("stop_loss_repair_exhausted", "BTC", 10),  # the genuine onset
+            ("stop_loss_placed", "BTC", 30),  # the genuine close → 20s
+            ("stop_loss_repair_blocked", "BTC", 40, "r:stop_loss:BTC"),  # already closed
+        ],
+    )
+    with db:
+        r = validate_live_run(db, run_id="r", now=_T0 + timedelta(hours=9))
+    assert r.unprotected_position_seconds == Decimal(20)
+    assert r.unprotected_window_count == 1
+    assert not r.unresolved_unprotected_window
+
+
+def test_a_covering_blocked_event_closes_only_its_own_symbols_window(tmp_path):
+    """Per-symbol isolation: BTC becoming covered again says nothing about ETH.
+
+    The close arm pops out of the same per-symbol ``open_at`` map the onset
+    side fills, so a symbol-blind close would end ETH's window at BTC's event
+    and under-report the very metric §20.3 gates real money on.
+    """
+    db = _healthy(tmp_path)
+    _protect(
+        db,
+        [
+            ("stop_loss_repair_exhausted", "BTC", 0),
+            ("stop_loss_repair_exhausted", "ETH", 0),
+            ("stop_loss_repair_blocked", "BTC", 20, "r:stop_loss:BTC"),  # BTC only
+            ("stop_loss_placed", "ETH", 50),  # ETH runs its own full length
+        ],
+    )
+    with db:
+        r = validate_live_run(db, run_id="r", now=_T0 + timedelta(hours=9))
+    assert r.unprotected_position_seconds == Decimal(70)  # 20 + 50, not 20 + 20
+    assert r.unprotected_window_count == 2
+    assert not r.unresolved_unprotected_window
 
 
 # -- kill-switch refresh-rate boundary ------------------------------------

@@ -147,19 +147,43 @@ def _open_existing_db(path: str) -> Database | None:
     return Database(path)
 
 
-def _existing_run_row(conn, run_id: str, db_label: str):
+def _existing_run_row(conn, run_id: str, db_label: str, *, not_found_hint: str = ""):
     """The run's row, or ``None`` after printing the standard missing-run error.
 
     The one encoding of the "does this run exist" refusal, shared by every
-    read-style command (``validate``, ``live-smoke --gate-status``) so a wording
-    tweak cannot land in one surface and not the other.
+    read-style command (``validate``, ``live-smoke --gate-status``, and
+    ``live-smoke``'s real-run build) so a wording tweak cannot land on one
+    surface and not the other. ``not_found_hint`` lets a caller that can offer
+    a concrete remedy (e.g. "create it first with ...") append one without
+    forking the base message (2026-07-30 simplify pass).
     """
     from .persistence import repository as repo
 
     row = repo.get_run(conn, run_id)
     if row is None:
-        print(f"error: run {run_id!r} does not exist in {db_label}.", file=sys.stderr)
+        suffix = not_found_hint or "."
+        print(f"error: run {run_id!r} does not exist in {db_label}{suffix}", file=sys.stderr)
     return row
+
+
+def _require_live_run_mode(run_row, run_id: str, db_label: str, *, extra: str = "") -> bool:
+    """True if ``run_row`` is a ``live``-mode run, else prints the refusal.
+
+    Shared by every command that only makes sense against a live run
+    (``live-smoke --gate-status``, ``live-smoke``'s real-run build) so the
+    "wrong run mode" wording can't drift between them (2026-07-30 simplify
+    pass). ``extra`` lets a caller insert a clause before the closing
+    "Fix --run-id / --db." sentence.
+    """
+    if run_row["mode"] != "live":
+        detail = f" — {extra}" if extra else ""
+        print(
+            f"error: run {run_id!r} in {db_label} is a {run_row['mode']} run{detail}. "
+            "Fix --run-id / --db.",
+            file=sys.stderr,
+        )
+        return False
+    return True
 
 
 def _cmd_export(argv: list[str]) -> int:
@@ -2027,12 +2051,9 @@ def _cmd_live_smoke(argv: list[str]) -> int:
             run_row = _existing_run_row(db.conn, args.run_id, args.db)
             if run_row is None:
                 return 1
-            if run_row["mode"] != "live":
-                print(
-                    f"error: run {args.run_id!r} in {args.db} is a {run_row['mode']} run — "
-                    "smoke results are live-run state. Fix --run-id / --db.",
-                    file=sys.stderr,
-                )
+            if not _require_live_run_mode(
+                run_row, args.run_id, args.db, extra="smoke results are live-run state"
+            ):
                 return 1
             # The §20.2 gate is testnet-only state: a mainnet_tiny run's
             # live_smoke_tests is empty BY DESIGN (§21.3 — smoke is proven on
@@ -2183,7 +2204,6 @@ def _build_smoke_session(args, db):
     from .live.config import ExecutionMode, LiveConfig, validate_live_risk_consistency
     from .live.smoke import SmokeContext
     from .paper.clock import WallClock
-    from .persistence import repository as repo
 
     try:
         config = load_config(args.config)
@@ -2235,20 +2255,11 @@ def _build_smoke_session(args, db):
     clock = WallClock()
     # The db is owned and closed by the caller (_cmd_live_smoke's try/finally),
     # so every error path here just returns an int — no close needed.
-    run_row = repo.get_run(db.conn, args.run_id)
+    not_found_hint = f" — create it first with `live --run-id {args.run_id} --create`."
+    run_row = _existing_run_row(db.conn, args.run_id, args.db, not_found_hint=not_found_hint)
     if run_row is None:
-        print(
-            f"error: run {args.run_id!r} does not exist in {args.db} — create it first "
-            f"with `live --run-id {args.run_id} --create`.",
-            file=sys.stderr,
-        )
         return 1
-    if run_row["mode"] != "live":
-        print(
-            f"error: run {args.run_id!r} in {args.db} is a {run_row['mode']} run. "
-            "Fix --run-id / --db.",
-            file=sys.stderr,
-        )
+    if not _require_live_run_mode(run_row, args.run_id, args.db):
         return 1
     # Same identity discipline as `live` resume (decision 2026-07-28): the suite
     # runs a real §19.1 recovery and books probe orders ON this run, so a typo'd

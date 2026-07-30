@@ -1514,3 +1514,167 @@ def test_backstop_close_clears_the_staged_long_residual(live_db):
     closes = [c for c in signed.place_calls if c.get("reduce_only")]
     assert len(closes) == 2  # the refusal happened, so the flag WAS set
     assert runner.staged_long_residual is None
+
+
+# -- probe sizing: wire fidelity, zero-floor abort, non-positive mark guard --
+# (test-coverage pass 2026-07-30: no test asserted _probe_size()'s computed
+# size actually reaches the wire call, drove _staged_probe_size()'s
+# zero-floor abort, or exercised _probe_size()'s own non-positive mark guard.)
+
+
+def test_probe_size_reaches_the_wire(live_db):
+    """_probe_size()'s ceil-to-step notional must be the SIZE the wire call carries.
+
+    Hand-computed independently of calling _probe_size() itself — ceil(11 USDC
+    / 60000 mark / 0.00001 step) is 19 steps, i.e. 0.00019 (the same value the
+    "old re-derived size" control in test_trigger_probes_are_sized_to_the_staged_position
+    already pins for this exact mark/step pair) — so a regression in the
+    rounding mode or a dropped max(step, ...) floor would under-size the wire
+    call and this test would catch it even though the same bug would also
+    corrupt a `_probe_size()`-derived expectation.
+    """
+    signed = _FakeSigned()
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["slice_order_submit"]
+        )
+    entries = [c for c in signed.place_calls if not c.get("reduce_only")]
+    assert len(entries) == 1
+    assert entries[0]["size"] == _D("0.00019")
+
+
+def test_staged_long_that_floors_to_zero_aborts_the_trigger_probe(live_db):
+    """A staging fill too small for a coarse qty_step must abort, not size a zero probe.
+
+    _staged_probe_size() floors the staged long to the exchange's qty step; a
+    very small partial staging fill against a coarse step floors to exactly
+    0 — no reduce-only probe can be sized against a zero-size position, so the
+    guard must fail the test loudly instead of sending a zero (or negative)
+    order.
+    """
+    signed = _FakeSigned(place_ack=_Ack("filled", filled_size=_D("0.0001")))
+    ctx = replace(_ctx(live_db, signed, run_recovery=lambda: _Recovery()), qty_step=_D("0.01"))
+    with live_db:
+        smoke.SmokeTestRunner(ctx).run(only=["stop_loss_create"])
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["stop_loss_create"]
+    assert row["status"] == "failed"
+    assert "floors to zero" in row["error_message"]
+
+
+def test_non_positive_mark_price_aborts_the_probe_size_guard(live_db):
+    """_probe_size()'s own `mark <= 0` guard must be a failed verdict, not a crash.
+
+    A stale/misbehaving mark_price seam returning zero or negative must never
+    reach the ceil-to-step division — the guard turns it into the same
+    controlled _SmokeAbort every other exchange-refusal path uses, for both a
+    zero and a negative mark.
+    """
+    with live_db:
+        for bad_mark in (_D(0), _D(-100)):
+            signed = _FakeSigned()
+            ctx = replace(
+                _ctx(live_db, signed, run_recovery=lambda: _Recovery()),
+                mark_price=lambda m=bad_mark: m,
+            )
+            smoke.SmokeTestRunner(ctx).run(only=["slice_order_submit"])
+            latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+            row = latest["slice_order_submit"]
+            assert row["status"] == "failed"
+            assert "non-positive" in row["error_message"]
+
+
+# -- SmokeStepResult's status/error_message invariant ----------------------
+
+
+def test_a_red_verdict_without_an_error_message_is_rejected():
+    """A ``failed``/``error`` verdict MUST carry the reason it is red.
+
+    ``live_smoke_tests`` is the append-only record an operator triages a
+    real-money go/no-go from; a red row with a NULL error_message is a dead
+    end there, and the constructor is the only place that can still refuse it
+    before it becomes durable.
+    """
+    for status in ("failed", "error"):
+        with pytest.raises(ValueError, match="must carry error_message"):
+            smoke.SmokeStepResult(status)
+        # A detail is not a substitute — the triage surface reads error_message.
+        with pytest.raises(ValueError, match="must carry error_message"):
+            smoke.SmokeStepResult(status, detail="something happened")
+
+
+def test_a_green_verdict_carrying_an_error_message_is_rejected():
+    """The other half: a ``passed``/``skipped`` verdict must NOT carry one.
+
+    An error_message on a green row is a leftover from whatever failed before
+    it, misleadingly attached to a passing test — the operator would triage a
+    failure that did not happen.
+    """
+    for status in ("passed", "skipped"):
+        with pytest.raises(ValueError, match="must not carry error_message"):
+            smoke.SmokeStepResult(status, error_message="stale reason")
+        with pytest.raises(ValueError, match="must not carry error_message"):
+            smoke.SmokeStepResult(status, detail="ok", error_message="stale reason")
+
+
+def test_the_four_legal_verdict_shapes_still_construct():
+    """Positive control: the invariant must not reject what the runner emits.
+
+    All four shapes the runner actually returns — green with a detail, red
+    with a reason — construct unchanged, so the guard cannot be over-tight.
+    """
+    assert smoke.SmokeStepResult("passed", detail="d").error_message is None
+    assert smoke.SmokeStepResult("skipped", detail="dry run").error_message is None
+    assert smoke.SmokeStepResult("failed", error_message="exchange refused").detail is None
+    assert smoke.SmokeStepResult("error", error_message="boom").detail is None
+    # A red verdict may carry BOTH (the reason plus context), which is legal.
+    assert smoke.SmokeStepResult("failed", detail="d", error_message="e").detail == "d"
+
+
+# -- test 3's durable detail carries the exchange's own rejection text ------
+
+
+def test_submit_folds_the_exchange_rejection_text_into_the_detail(live_db):
+    """A per-order refusal's TEXT must survive into the persisted row.
+
+    Test 3's verdict stays green either way (the action reached the matching
+    engine, which is all it proves), so the durable ``detail`` is the ONLY
+    place a real bug — bad size, off-tick price, insufficient margin — can
+    still be seen. Carrying only the coarse ``status=error`` dropped the
+    exchange's own explanation and left the operator with nothing to diagnose.
+    """
+    signed = _FakeSigned(
+        place_ack=_Ack(
+            "error",
+            exchange_order_id=None,
+            filled_size=None,
+            average_price=None,
+            error="Order price cannot be more than 80% away from the reference price",
+        )
+    )
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["slice_order_submit"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["slice_order_submit"]
+    assert row["status"] == "passed"  # the wire round-trip is what test 3 proves
+    assert "80% away from the reference price" in row["detail"]
+
+
+def test_a_clean_submit_detail_carries_no_error_clause(live_db):
+    """Control for the test above: no rejection ⇒ no `error=` clause at all.
+
+    A detail that appended ``error=None`` unconditionally would read as a
+    refusal on every healthy run and make the clause worthless as a signal.
+    """
+    signed = _FakeSigned(place_ack=_Ack("filled", filled_size=_D(0)))  # clean, unfilled
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["slice_order_submit"]
+        )
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest["slice_order_submit"]
+    assert row["status"] == "passed"
+    assert "error=" not in row["detail"]
+    assert row["detail"].endswith(")")  # the envelope still closes properly

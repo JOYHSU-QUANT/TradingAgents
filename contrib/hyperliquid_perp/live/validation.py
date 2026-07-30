@@ -70,6 +70,7 @@ from ..paper import accounting
 from ..paper.scheduler import parse_instant
 from ..persistence import repository as repo
 from ..persistence.db import Database
+from .config import ExecutionMode
 from .safe_mode import REASON_DAILY_LOSS
 from .smoke import SMOKE_TEST_KEYS, rerun_keys_for, smoke_gate_report
 
@@ -214,6 +215,14 @@ if not {_KILL_SWITCH_REFRESH_OK, _KILL_SWITCH_REFRESH_FAILED} <= repo.KILL_SWITC
         "repository.KILL_SWITCH_EVENT_TYPES"
     )
 
+# execution_mode() returns "unknown" for an unreadable genesis record, else
+# whatever live.mode the genesis config named — one of ExecutionMode's members.
+# Derived directly from the enum, not re-typed as a literal, so the profile
+# split below can never drift the way the file's other hand-typed vocabulary
+# guards defend against (2026-07-30 type-design pass).
+_TESTNET_LIVE_MODE = ExecutionMode.TESTNET_LIVE.value
+_MAINNET_TINY_MODE = ExecutionMode.MAINNET_TINY.value
+
 
 @dataclass(frozen=True)
 class LiveValidationReport:
@@ -311,7 +320,7 @@ class LiveValidationReport:
             # (§21.3 proves smoke on the sibling testnet run), so a False here
             # means "not tracked for this profile", not "failed" — render it n/a
             # so the report can't be misread as a mainnet smoke failure.
-            if self.execution_mode != "testnet_live":
+            if self.execution_mode != _TESTNET_LIVE_MODE:
                 return "n/a (proven on testnet run, §21.3)"
             return _yn(value)
 
@@ -441,7 +450,13 @@ def _unprotected_windows(conn, run_id: str, now: datetime) -> tuple[Decimal, int
     of the two). So the commonest blocked MODIFY, a RESIZE
     whose old SL now covers only part of the position, still opens a window:
     part of that position genuinely has no stop. ``order_id`` present ⇒ a
-    covering SL was resting.
+    covering SL was resting — and if a window was ALREADY open for that symbol
+    (a prior non-covering onset), the position just became covered again
+    without the gate flag itself resolving, so this closes it: the same
+    coverage-not-existence principle applied to the close side, not just the
+    onset side (2026-07-30 — a covering blocked event used to only suppress a
+    new onset, leaving an open window running until an unrelated later close
+    event, over-counting real protected time as unprotected).
     """
     onset = _UNPROTECTED_ONSET_EVENTS
     close = _UNPROTECTED_CLOSE_EVENTS
@@ -457,6 +472,11 @@ def _unprotected_windows(conn, run_id: str, now: datetime) -> tuple[Decimal, int
         secs = Decimal(str((end - start).total_seconds()))
         return secs if secs > 0 else Decimal(0)
 
+    def _close_open_window(symbol: str, when: datetime) -> None:
+        nonlocal total, windows
+        total += _window_seconds(open_at.pop(symbol), when)
+        windows += 1
+
     for row in repo.iter_protection_order_events(conn, run_id):
         symbol = row["symbol"]
         event = row["event_type"]
@@ -465,14 +485,16 @@ def _unprotected_windows(conn, run_id: str, now: datetime) -> tuple[Decimal, int
             if event == _SL_REPAIR_BLOCKED and row["order_id"]:
                 # A gate-refused MODIFY over a still-COVERING SL (protection.py
                 # stamps the id only then; see the docstring). Stale trigger,
-                # not an unprotected window.
+                # not an unprotected window — and if one was already open for
+                # this symbol, it just resolved: close it (2026-07-30).
+                if symbol in open_at:
+                    _close_open_window(symbol, when)
                 continue
             # A fresh onset while already open keeps the earliest onset (the
             # window never closed), so only record if not already open.
             open_at.setdefault(symbol, when)
         elif event in close and symbol in open_at:
-            total += _window_seconds(open_at.pop(symbol), when)
-            windows += 1
+            _close_open_window(symbol, when)
     # Any window still open: measure to ``now`` and flag it.
     for started in open_at.values():
         total += _window_seconds(started, now)
@@ -641,7 +663,7 @@ def validate_live_run(
 
     # testnet_live is §20.3; everything else (mainnet_tiny, or an unreadable
     # mode) is held to the stricter §21.4 gate.
-    is_testnet = run_execution_mode == "testnet_live"
+    is_testnet = run_execution_mode == _TESTNET_LIVE_MODE
 
     failures: list[str] = []
     shortfalls: list[str] = []
@@ -872,7 +894,7 @@ def _apply_mainnet_gate(
     # "testnet_live" is unreachable from the one caller (this helper runs only in
     # the else of `is_testnet`); it stays as defence-in-depth so a future second
     # caller cannot turn a legitimate mode into the "unreadable genesis" failure.
-    if run_execution_mode not in ("mainnet_tiny", "testnet_live"):
+    if run_execution_mode not in (_MAINNET_TINY_MODE, _TESTNET_LIVE_MODE):
         # An unreadable genesis mode is validated under this stricter gate, and
         # named so the operator fixes the record rather than trusting a verdict
         # computed under a guessed profile.

@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, Decimal, localcontext
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol
 
 from ..domains.perp.margin import DECIMAL_CONTEXT
 from ..paper.run_lock import RunLockError
@@ -65,6 +65,7 @@ __all__ = [
     "SMOKE_TEST_KEYS",
     "RecoveryResult",
     "SmokeContext",
+    "SmokeGateReport",
     "SmokePreflightError",
     "SmokeStepResult",
     "SmokeTest",
@@ -287,6 +288,18 @@ class SmokeStepResult:
     status: Literal["passed", "failed", "error", "skipped"]  # == _SMOKE_STATUSES, checked below
     detail: str | None = None
     error_message: str | None = None
+
+    def __post_init__(self) -> None:
+        # A red verdict with no error_message would persist a live_smoke_tests
+        # row an operator can never diagnose — the exact silent-audit-gap this
+        # append-only table exists to prevent. A green/skipped verdict carrying
+        # one would be a leftover from whatever failed before it, misleadingly
+        # attached to a passing row (2026-07-30 type-design pass).
+        carries_error = self.status in ("failed", "error")
+        if carries_error and self.error_message is None:
+            raise ValueError(f"SmokeStepResult({self.status!r}) must carry error_message")
+        if not carries_error and self.error_message is not None:
+            raise ValueError(f"SmokeStepResult({self.status!r}) must not carry error_message")
 
 
 # The Literal above is a copy of the repository's status registry, and a comment
@@ -719,6 +732,49 @@ class SmokeTestRunner:
             reduce_only=reduce_only,
         )
 
+    def _place_and_record_ioc(
+        self,
+        *,
+        role: str,
+        tag: str,
+        is_buy: bool,
+        qty: Decimal,
+        price: Decimal,
+        reduce_only: bool = False,
+        protective: bool = False,
+        slice_index: int = 0,
+    ) -> tuple[str, str, Any]:
+        """Register a cloid, place the IOC, and book the probe row — one shot.
+
+        The register -> place -> record sequence every order-placing smoke
+        test shares, collapsed so the five call sites cannot drift apart the
+        way :func:`_open_probe_long` already prevents for the open-leg shape
+        (2026-07-30 simplify pass). Returns ``(cloid_logical, cloid_hex, ack)``
+        for callers that need the cloid for later bookkeeping or the ack for a
+        fill/acceptance check.
+        """
+        logical, cloid = self._register_cloid(role=role, tag=tag, slice_index=slice_index)
+        ack = self._wire.place_ioc_limit(
+            coin=self.ctx.coin,
+            is_buy=is_buy,
+            size=qty,
+            limit_price=price,
+            cloid_hex=cloid,
+            reduce_only=reduce_only,
+            protective=protective,
+        )
+        self._record_probe_order(
+            ack,
+            cloid_logical=logical,
+            cloid_hex_value=cloid,
+            role=role,
+            side="buy" if is_buy else "sell",
+            qty=qty,
+            price=price,
+            reduce_only=reduce_only,
+        )
+        return logical, cloid, ack
+
     def _insert_probe_row(
         self,
         *,
@@ -871,31 +927,21 @@ class SmokeTestRunner:
     def _test_slice_order_submit(self) -> SmokeStepResult:
         # A far-below-mark IOC buy: the wire action round-trips but never fills
         # (so nothing is left to clean up) — a pure "can we submit a slice" test.
-        logical, cloid = self._register_cloid(role="entry", tag=f"submit-{self._tag()}")
         size = self._probe_size()
         mark = self.ctx.mark_price()
         price = self._round_price(mark * Decimal("0.5"), up=False)
-        ack = self._wire.place_ioc_limit(
-            coin=self.ctx.coin,
-            is_buy=True,
-            size=size,
-            limit_price=price,
-            cloid_hex=cloid,
-        )
-        self._record_probe_order(
-            ack,
-            cloid_logical=logical,
-            cloid_hex_value=cloid,
-            role="entry",
-            side="buy",
-            qty=size,
-            price=price,
+        _logical, cloid, ack = self._place_and_record_ioc(
+            role="entry", tag=f"submit-{self._tag()}", is_buy=True, qty=size, price=price
         )
         # A far IOC that does not cross returns 'error'/'not filled' from some
         # venues; what the test proves is that the ACTION reached the matching
         # engine without a top-level envelope error (that would have raised).
+        # The exchange's own rejection TEXT (not just the coarse status) is
+        # folded in so a real bug (bad size/tick/margin) is still visible in
+        # the durable row even though the verdict stays green (2026-07-30).
         self._last_submit = {"cloid_hex": cloid, "oid": ack.exchange_order_id or ""}
-        detail = f"submitted IOC (status={ack.status}, oid={ack.exchange_order_id})"
+        detail = f"submitted IOC (status={ack.status}, oid={ack.exchange_order_id}"
+        detail += f", error={ack.error})" if ack.error else ")"
         filled = ack.filled_size or Decimal(0)
         if filled > 0:
             # The far price is an assumption, not a guarantee: a thin/volatile
@@ -992,24 +1038,13 @@ class SmokeTestRunner:
         filled = Decimal(0)
         try:
             for i in range(2):
-                logical, cloid = self._register_cloid(
-                    role="entry", tag=f"fill-{self._tag()}", slice_index=i
-                )
-                ack = self._wire.place_ioc_limit(
-                    coin=self.ctx.coin,
-                    is_buy=True,
-                    size=size,
-                    limit_price=marketable,
-                    cloid_hex=cloid,
-                )
-                self._record_probe_order(
-                    ack,
-                    cloid_logical=logical,
-                    cloid_hex_value=cloid,
+                _logical, _cloid, ack = self._place_and_record_ioc(
                     role="entry",
-                    side="buy",
+                    tag=f"fill-{self._tag()}",
+                    is_buy=True,
                     qty=size,
                     price=marketable,
+                    slice_index=i,
                 )
                 self._require_accepted(ack, f"slice {i}")
                 if ack.filled_size is not None:
@@ -1061,22 +1096,8 @@ class SmokeTestRunner:
         size = self._probe_size()
         mark = self.ctx.mark_price()
         price = self._round_price(mark * Decimal("1.01"), up=True)
-        logical, cloid = self._register_cloid(role="entry", tag=tag)
-        ack = self._wire.place_ioc_limit(
-            coin=self.ctx.coin,
-            is_buy=True,
-            size=size,
-            limit_price=price,
-            cloid_hex=cloid,
-        )
-        self._record_probe_order(
-            ack,
-            cloid_logical=logical,
-            cloid_hex_value=cloid,
-            role="entry",
-            side="buy",
-            qty=size,
-            price=price,
+        _logical, _cloid, ack = self._place_and_record_ioc(
+            role="entry", tag=tag, is_buy=True, qty=size, price=price
         )
         self._require_accepted(ack, what)
         opened = ack.filled_size or Decimal(0)
@@ -1148,23 +1169,12 @@ class SmokeTestRunner:
             self.staged_long_residual = note
 
     def _reduce_only_close(self, size: Decimal) -> Any:
-        logical, cloid = self._register_cloid(role="close", tag=f"reduce-{self._tag()}")
         mark = self.ctx.mark_price()
         price = self._round_price(mark * Decimal("0.99"), up=False)
-        ack = self._wire.place_ioc_limit(
-            coin=self.ctx.coin,
-            is_buy=False,
-            size=size,
-            limit_price=price,
-            cloid_hex=cloid,
-            reduce_only=True,
-        )
-        self._record_probe_order(
-            ack,
-            cloid_logical=logical,
-            cloid_hex_value=cloid,
+        _logical, _cloid, ack = self._place_and_record_ioc(
             role="close",
-            side="sell",
+            tag=f"reduce-{self._tag()}",
+            is_buy=False,
             qty=size,
             price=price,
             reduce_only=True,
@@ -1468,27 +1478,14 @@ class SmokeTestRunner:
         )
         mark = self.ctx.mark_price()
         close_price = self._round_price(mark * Decimal("0.97"), up=False)
-        close_logical, close_cloid = self._register_cloid(
-            role="emergency_close", tag=f"emrg-{self._tag()}"
-        )
-        close_ack = self._wire.place_ioc_limit(
-            coin=self.ctx.coin,
-            is_buy=False,
-            size=opened,
-            limit_price=close_price,
-            cloid_hex=close_cloid,
-            reduce_only=True,
-            protective=True,
-        )
-        self._record_probe_order(
-            close_ack,
-            cloid_logical=close_logical,
-            cloid_hex_value=close_cloid,
+        _logical, _cloid, close_ack = self._place_and_record_ioc(
             role="emergency_close",
-            side="sell",
+            tag=f"emrg-{self._tag()}",
+            is_buy=False,
             qty=opened,
             price=close_price,
             reduce_only=True,
+            protective=True,
         )
         self._require_full_close(close_ack, opened, "emergency close")
         return SmokeStepResult(
@@ -1501,9 +1498,25 @@ class SmokeTestRunner:
 # --------------------------------------------------------------------------
 
 
-def smoke_gate_report(
-    conn: Any, run_id: str
-) -> tuple[bool, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+class SmokeGateReport(NamedTuple):
+    """The §20.2 gate verdict, slot by NAME.
+
+    Three of the four slots share the same ``tuple[str, ...]`` type — a bare
+    tuple would let a transposed return (or a mis-ordered destructuring at a
+    new call site) swap ``missing``/``failed``/``errored`` silently past the
+    type checker, mislabeling why a smoke test is red in an operator-facing
+    real-money go/no-go report. Still positionally unpackable (a plain
+    ``NamedTuple``), so existing ``passed, missing, failed, errored = ...``
+    call sites are unaffected (2026-07-30 type-design pass).
+    """
+
+    passed: bool
+    missing: tuple[str, ...]
+    failed: tuple[str, ...]
+    errored: tuple[str, ...]
+
+
+def smoke_gate_report(conn: Any, run_id: str) -> SmokeGateReport:
     """``(passed, missing_keys, failed_keys, errored_keys)`` for the §20.2 gate.
 
     ``passed`` is True only when every :data:`SMOKE_TESTS` key has a latest
@@ -1531,7 +1544,7 @@ def smoke_gate_report(
         else:
             failed.append(key)
     passed = not missing and not failed and not errored
-    return passed, tuple(missing), tuple(failed), tuple(errored)
+    return SmokeGateReport(passed, tuple(missing), tuple(failed), tuple(errored))
 
 
 def validate_only_keys(keys: Iterable[str]) -> tuple[str, ...]:

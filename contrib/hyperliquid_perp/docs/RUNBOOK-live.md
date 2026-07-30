@@ -208,11 +208,15 @@ python -m contrib.hyperliquid_perp live-smoke \
 
 > `--only` 有一條配對規則：test 4（`slice_order_status`）查的是同一次執行裡
 > test 3 送出的單，單選 test 4 會被入口直接拒絕（exit 1）——兩個一起選：
-> `--only slice_order_submit slice_order_status`。兩個都選了、但 test 3 記了 **`failed`**（交易所拒絕，suite 繼續跑）時，
-> test 4 沒有可查的單，會記 **`error`**（harness／選測連鎖，不是交易所拒絕的
-> `failed`）。若 test 3 自己出的是 **`error`**，suite 就停在 test 3，test 4 **根本不會
-> 執行、也不寫 row**（維持 `not_yet_run`）——別去找一筆不存在的 test 4 `error`。
-> 兩種情形都一樣：先修 test 3 的根因，再兩項一起重跑。
+> `--only slice_order_submit slice_order_status`。**test 3 的判定幾乎總是
+> `passed`**：無論成交、被交易所拒絕、還是根本沒成交，只要動作本身送到了撮合
+> 引擎、沒有頂層例外，就算過（拒絕原因會夾在 `detail` 裡供診斷，不影響判定）。
+> test 3 唯一會記 **`failed`** 的情形是 IOC 異常以 `resting` 狀態回來（交易所
+> 語意違反，harness 自動撤單並判定失敗）——這種情形下 test 3 沒能設好 test 4
+> 要查的 handle，test 4 會記 **`error`**（harness／選測連鎖，不是它自己查到的
+> 拒絕）。若 test 3 自己出的是 **`error`**（其他 harness 例外），suite 就停在
+> test 3，test 4 **根本不會執行、也不寫 row**（維持 `not_yet_run`）——別去找一筆
+> 不存在的 test 4 `error`。兩種情形都一樣：先修 test 3 的根因，再兩項一起重跑。
 
 每項結果落 `live_smoke_tests`（append-only：修好再跑會覆蓋判定、保留歷史）。
 紅的判定分兩型，triage 方式不同：

@@ -211,10 +211,11 @@ python -m contrib.hyperliquid_perp live-smoke \
 > `--only slice_order_submit slice_order_status`。**test 3 的判定幾乎總是
 > `passed`**：無論成交、被交易所拒絕、還是根本沒成交，只要動作本身送到了撮合
 > 引擎、沒有頂層例外，就算過（拒絕原因會夾在 `detail` 裡供診斷，不影響判定）。
-> test 3 唯一會記 **`failed`** 的情形是 IOC 異常以 `resting` 狀態回來（交易所
-> 語意違反，harness 自動撤單並判定失敗）——這種情形下 test 3 沒能設好 test 4
-> 要查的 handle，test 4 會記 **`error`**（harness／選測連鎖，不是它自己查到的
-> 拒絕）。若 test 3 自己出的是 **`error`**（其他 harness 例外），suite 就停在
+> test 3 會記 **`failed`** 的是「動作根本沒能好好送出去」那一類：IOC 異常以
+> `resting` 狀態回來（交易所語意違反，harness 自動撤單並判定失敗），或下單前
+> 就過不了自身守門（例如 mark price 讀回非正值，無法算出探針尺寸）。這些情形
+> 下 test 3 都沒能設好 test 4 要查的 handle，test 4 會記 **`error`**（harness／
+> 選測連鎖，不是它自己查到的拒絕）。若 test 3 自己出的是 **`error`**（其他 harness 例外），suite 就停在
 > test 3，test 4 **根本不會執行、也不寫 row**（維持 `not_yet_run`）——別去找一筆
 > 不存在的 test 4 `error`。兩種情形都一樣：先修 test 3 的根因，再兩項一起重跑。
 

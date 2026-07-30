@@ -770,6 +770,16 @@ def _cmd_live(argv: list[str]) -> int:
         loop_cfgs = _load_risk_decision(config)
         if loop_cfgs is None:
             return 1
+        # The AI key, checked here for the same reason the config blocks above
+        # are: the loop drives a 4h AI cycle, and without a key EVERY cycle
+        # records api_failed — which never counts toward the §20.3 >=30-cycle
+        # gate. A real-money run could otherwise burn days producing nothing
+        # gateable, with no named error anywhere. _cmd_paper has always checked
+        # this; the live path did not (added 2026-07-30). After the config
+        # validation, so a typo in risk:/decision: still reports as the config
+        # error it is rather than being masked by a missing key.
+        if not _require_api_key():
+            return 1
 
     # A top-level ``network:`` that disagrees with ``live.network`` is legal —
     # the same file can drive paper reads on mainnet while live drills on
@@ -1062,6 +1072,19 @@ def _live_startup_recovery(
     def fetch_clearinghouse():
         return call_sdk(client.info.user_state, wallet)
 
+    # Same guard the paper daemon applies, and it matters more here: Database()
+    # creates AND migrates a store, so a wrong CWD or typo'd --db would leave an
+    # empty live store behind before failing on "run does not exist" — and with
+    # --create it would silently open a SECOND live ledger over the same real
+    # wallet, each blind to the other's orders and books.
+    if not Path(db_path).exists() and not args.create:
+        print(
+            f"error: database {str(db_path)!r} does not exist. Pass --create to "
+            "start a new store, or point --db at the existing one.",
+            file=sys.stderr,
+        )
+        return 1
+
     with Database(db_path) as db:
         existing_run = repo.get_run(db.conn, run_id)
         is_restart = existing_run is not None
@@ -1105,6 +1128,29 @@ def _live_startup_recovery(
                     return 1
                 logger.warning("config drift on live resume for %s: %s", run_id, message)
                 print(f"WARNING: {message}", file=sys.stderr)
+            # The STORE's own off-coin exposure, mirroring the paper daemon's
+            # resume guard. The --create branch below checks the same thing from
+            # the exchange snapshot, but resume never did: a live store carrying a
+            # non-flat off-coin current_positions row (an older build, a
+            # hand-seeded genesis, a coin edit that passed as soft "params" drift)
+            # would resume and trade with that exposure invisible to every equity
+            # and SL/TP computation — exactly the harm the paper message names.
+            store_off_coin = sorted(
+                p.coin
+                for p in repo.get_all_current_positions(db.conn, run_id)
+                if p.coin != coin and not p.is_flat
+            )
+            if store_off_coin:
+                print(
+                    f"error: run {run_id!r} holds open position(s) in "
+                    f"{', '.join(map(repr, store_off_coin))} but this run trades "
+                    f"only {coin!r} — they would be excluded from equity and "
+                    "SL/TP protection, and the reconciler flags them as unknown "
+                    "exchange positions (manual safe mode) on every pass. "
+                    "Resolve them before resuming (export/validate still work).",
+                    file=sys.stderr,
+                )
+                return 1
             if args.adopt_positions:
                 # Named rejection, not silence: the flag seeds a NEW run's
                 # genesis and has no meaning on resume — an operator who
@@ -2564,20 +2610,23 @@ def _config_drift_report(
 def _require_api_key() -> bool:
     """True when OPENROUTER_API_KEY is set; else print the abort message.
 
-    Checked only on paths that will actually drive the AI engine — a fresh run
-    (always, before the run row is written) and a healthy restart with nothing
-    live to protect. A restart into protection-only mode never polls the AI,
+    Checked only on paths that will actually drive the AI engine — a fresh paper
+    run (always, before the run row is written), a healthy paper restart with
+    nothing live to protect, and ``live --loop`` (up front, alongside its config
+    validation). A paper restart into protection-only mode never polls the AI,
     so it runs keyless — and a keyless healthy restart holding live work falls
     back to that same mode rather than exiting (the caller owns that fork:
     reconcile has already canceled the plans, so exiting would leave the
-    position with nobody watching its SL/TP).
+    position with nobody watching its SL/TP). ``live`` WITHOUT ``--loop`` is the
+    same keyless case: it arms, sweeps and exits without ever polling the AI.
     """
     if os.environ.get("OPENROUTER_API_KEY"):
         return True
     print(
-        "error: OPENROUTER_API_KEY is not set — the paper run drives the AI engine "
-        "every 4h. Use --context-only (legacy CLI) for a keyless dev loop. "
-        f"({dotenv_diagnosis('OPENROUTER_API_KEY')}.)",
+        "error: OPENROUTER_API_KEY is not set — the run drives the AI engine every "
+        "4h, and without a key every cycle records api_failed (which never counts "
+        "toward the §20.3 cycle gate). Use --context-only (legacy CLI) for a "
+        f"keyless dev loop. ({dotenv_diagnosis('OPENROUTER_API_KEY')}.)",
         file=sys.stderr,
     )
     return False

@@ -3042,6 +3042,7 @@ def test_live_loop_refuses_testnet_run_until_smoke_passes(
     # no passing smoke rows must be refused --loop by name, before the run lock
     # or the kill switch is touched.
     monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     cfg = _live_yaml(
         tmp_path,
         live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
@@ -3067,6 +3068,7 @@ def test_live_loop_open_smoke_gate_proceeds_past_the_gate(
     from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
 
     monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     cfg = _live_yaml(
         tmp_path,
         live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
@@ -3093,6 +3095,100 @@ def test_live_loop_open_smoke_gate_proceeds_past_the_gate(
     assert "smoke gate open" in err  # the age line printed
     assert "§20.2 smoke suite" not in err  # NOT the gate refusal
     assert "2026-07-20" in err  # names the oldest pass
+
+
+def test_live_loop_smoke_gate_does_not_apply_to_a_mainnet_run(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    """The gate's testnet_live SCOPING, which had no test (review 2026-07-30).
+
+    §21.3 proves smoke on the separate testnet run, so a mainnet_tiny run's
+    live_smoke_tests table is empty BY DESIGN. Drop the `mode is TESTNET_LIVE`
+    clause from the gate and this run would find all 18 missing and exit 4
+    forever — permanently unstartable, which is exactly why the scoping exists.
+    The negative control is the testnet test above: same empty table, exit 4.
+    """
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: mainnet_tiny\n  network: mainnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
+    db = Database(dbp)
+    # Lease pre-held so the command stops at the lease refusal — proof it got
+    # PAST the gate rather than being refused by it.
+    acquire_run_lock(db, "r1", pid=999999, now=datetime.now(timezone.utc))
+    db.close()
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp), "--loop"])
+    assert rc == 1  # the lease, not the gate's exit 4
+    err = capsys.readouterr().err
+    assert "§20.2 smoke suite" not in err
+    assert "not yet run" not in err
+
+
+def test_live_loop_without_an_api_key_is_refused_up_front(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    """Without a key every 4h cycle records api_failed, which never counts toward
+    the §20.3 >=30-cycle gate — a real-money run could burn days producing nothing
+    gateable. _cmd_paper always checked this; the live path did not (2026-07-30).
+    """
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp), "--loop"])
+    assert rc == 1
+    assert "OPENROUTER_API_KEY" in capsys.readouterr().err
+
+
+def test_live_without_loop_still_runs_keyless(tmp_path, capsys, live_seams, monkeypatch):
+    """Control for the guard above: `live` without --loop never polls the AI.
+
+    It arms, sweeps and exits, so it must stay keyless — the guard belongs to
+    --loop alone. Stopped at the pre-held lease, well past the key check.
+    """
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
+    db = Database(dbp)
+    acquire_run_lock(db, "r1", pid=999999, now=datetime.now(timezone.utc))
+    db.close()
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    assert rc == 1  # the lease
+    assert "OPENROUTER_API_KEY" not in capsys.readouterr().err
+
+
+def test_live_refuses_a_nonexistent_db_without_create(tmp_path, capsys, live_seams, monkeypatch):
+    """Database() creates AND migrates, so a typo'd --db must not be opened.
+
+    Without this guard the command left an empty migrated live store behind
+    before failing on "run does not exist" — and with --create it would silently
+    open a SECOND live ledger over the same real wallet (review 2026-07-30).
+    """
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    missing = tmp_path / "typo.db"
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(missing)])
+    assert rc == 1
+    assert "does not exist" in capsys.readouterr().err
+    assert not missing.exists()  # nothing was created
 
 
 def test_live_smoke_real_run_requires_the_run_lease(tmp_path, capsys, monkeypatch):

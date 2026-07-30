@@ -4,3 +4,15 @@
 
 # Environment files with secrets
 .env
+
+# Trading stores. The RUNBOOK runs the CLI from the repo root with a relative
+# --db, so live_trading.db / paper_trading.db land in the working tree. They
+# hold the full order/fill/position history, account equity and the genesis
+# config snapshot — no secrets (the agent key never reaches the store), but
+# real trading activity that must never be one `git add -A` from being
+# published. Only Django's db.sqlite3 was covered by the root .gitignore
+# (2026-07-30 security review). `payloads/` is already ignored at the root.
+*.db
+*.db-wal
+*.db-shm
+*.db-journal

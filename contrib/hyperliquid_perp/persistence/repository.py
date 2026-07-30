@@ -2047,6 +2047,23 @@ def get_scheduler_state(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row | 
     return conn.execute("SELECT * FROM scheduler_state WHERE run_id = ?", (run_id,)).fetchone()
 
 
+def iter_other_run_leases(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    """Lease rows for every OTHER run in this store that records a holder.
+
+    The run lease is keyed on ``run_id``, but the actions it protects are not:
+    the kill switch, ``updateLeverage`` and the §19.3 stale-order sweep are all
+    per-WALLET, and two runs in one store share a wallet. Callers use this to
+    refuse before doing wallet-wide work while a sibling run is live. Freshness
+    is left to the caller (it owns the clock and ``LOCK_STALE_SECONDS``)
+    (2026-07-30 concurrency review).
+    """
+    return conn.execute(
+        "SELECT run_id, lock_pid, lock_heartbeat_at FROM scheduler_state "
+        "WHERE run_id != ? AND lock_pid IS NOT NULL AND lock_heartbeat_at IS NOT NULL",
+        (run_id,),
+    ).fetchall()
+
+
 # --------------------------------------------------------------------------
 # cloid_registry (phase3-spec §8.2 / §19.3) — the bot-owned lookup table
 # --------------------------------------------------------------------------

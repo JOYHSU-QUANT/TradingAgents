@@ -817,6 +817,36 @@ def test_scheduler_state_patch_semantics_for_v3_columns(tmp_path):
     db.close()
 
 
+def test_iter_other_run_leases_excludes_self_and_holderless_rows(tmp_path):
+    # The run lease is keyed on run_id; the kill switch, updateLeverage and the
+    # §19.3 sweep it protects are per-WALLET, and two runs in one store share a
+    # wallet. This is the read that lets a caller see the SIBLING it would
+    # trample. Three ways it could lie, all pinned here: reporting the caller's
+    # own lease (every ordinary invocation would then refuse itself), reporting
+    # a released lease (lock_pid NULL — the row survives release_run_lock, it is
+    # only blanked), or reporting a row that records a pid with no heartbeat to
+    # judge freshness by (the caller's staleness maths would crash on NULL).
+    db = Database(tmp_path / "p.db")
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(conn, "self", lock_pid=1111, lock_heartbeat_at=_TS)
+        repo.upsert_scheduler_state(conn, "sibling", lock_pid=2222, lock_heartbeat_at=_TS)
+        repo.upsert_scheduler_state(conn, "released", lock_pid=None, lock_heartbeat_at=None)
+        repo.upsert_scheduler_state(conn, "pid-no-beat", lock_pid=3333, next_decision_at=_TS)
+    rows = repo.iter_other_run_leases(db.conn, "self")
+    assert [(r["run_id"], r["lock_pid"]) for r in rows] == [("sibling", 2222)]
+    assert rows[0]["lock_heartbeat_at"] == _TS.isoformat()  # freshness is the caller's call
+    # Negative control on the exclusion itself: asked from the sibling's side,
+    # "self" IS the other run — the filter is the run_id, not the row.
+    assert [r["run_id"] for r in repo.iter_other_run_leases(db.conn, "sibling")] == ["self"]
+    # And a store whose only lease is the caller's own reports nothing.
+    solo = Database(tmp_path / "solo.db")
+    with solo.transaction() as conn:
+        repo.upsert_scheduler_state(conn, "only", lock_pid=1111, lock_heartbeat_at=_TS)
+    assert repo.iter_other_run_leases(solo.conn, "only") == []
+    solo.close()
+    db.close()
+
+
 def test_upsert_scheduler_state_rejects_bad_export_status(tmp_path):
     db = Database(tmp_path / "p.db")
     with pytest.raises(ValueError, match="last_export_status"), db.transaction() as conn:

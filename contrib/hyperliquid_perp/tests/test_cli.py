@@ -10,6 +10,7 @@ import csv
 import json
 import os
 import signal
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from contrib.hyperliquid_perp.cli import (
     _post_cycle_export,
     _raise_keyboard_interrupt,
     _run_config_subset,
+    _still_owns_run,
     main as cli_main,
 )
 from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, RiskConfig
@@ -1151,6 +1153,66 @@ def test_live_heartbeat_contains_a_failing_safe_mode_write(monkeypatch):
     safe_mode = _RecordingSafeMode(raises=True)
     _live_heartbeat(object(), "r", pid=123, now=_T0, safe_mode=safe_mode)  # still no raise
     assert len(safe_mode.entered) == 1
+
+
+# --------------------------------------------------------------------------
+# _still_owns_run: the positive re-check guarding the §18.2 shutdown sweep
+# --------------------------------------------------------------------------
+
+
+def test_still_owns_run_false_once_a_successor_holds_the_lease(tmp_path):
+    # The shutdown sweep's ``superseded`` flag is absence-of-evidence: it is set
+    # only when the loop's heartbeat actually RAISED, and the Ctrl-C / SIGTERM
+    # lane leaves the loop with no heartbeat at all. So after a tick that blocked
+    # past LOCK_STALE_SECONDS a successor can already own the run while this
+    # process still reads ``superseded is False`` — and the §18.2 sweep would
+    # then cancel the SUCCESSOR's SL/TP and clear the wallet's dead-man switch.
+    # This is the re-ASK that catches it.
+    from contrib.hyperliquid_perp.paper.run_lock import LOCK_STALE_SECONDS, acquire_run_lock
+
+    db = Database(tmp_path / "own.db")
+    acquire_run_lock(db, "r", pid=101, now=_T0)
+    takeover_at = _T0 + timedelta(seconds=LOCK_STALE_SECONDS)
+    acquire_run_lock(db, "r", pid=202, now=takeover_at)  # legitimate takeover
+    assert _still_owns_run(db, "r", pid=101, now=takeover_at + timedelta(seconds=30)) is False
+    row = repo.get_scheduler_state(db.conn, "r")
+    assert row["lock_pid"] == 202  # and the loser must not stamp itself back on
+    assert row["lock_heartbeat_at"] == takeover_at.isoformat()
+    db.close()
+
+
+def test_still_owns_run_true_for_the_holder_and_refreshes_the_lease(tmp_path):
+    # The ordinary shutdown: the lease is ours, the sweep must run. The refresh
+    # is not incidental — the check goes through heartbeat_run_lock, so the
+    # lease stays warm for however long the sweep's cancels take on the wire.
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+
+    db = Database(tmp_path / "own.db")
+    acquire_run_lock(db, "r", pid=101, now=_T0)
+    beat = _T0 + timedelta(seconds=60)
+    assert _still_owns_run(db, "r", pid=101, now=beat) is True
+    assert repo.get_scheduler_state(db.conn, "r")["lock_heartbeat_at"] == beat.isoformat()
+    db.close()
+
+
+def test_still_owns_run_fails_open_when_the_store_blips(tmp_path, caplog, monkeypatch):
+    # Deliberately fail-OPEN, the opposite of _live_heartbeat's containment: a
+    # busy/locked SQLite store is not evidence of supersession, and treating it
+    # as one would skip the §18.2 sweep and strand this run's own resting orders
+    # on the wallet with nothing left to cancel them. Only RunLockError — a
+    # positive answer that someone else holds the lease — gives the run away.
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+
+    def busy(db_, run_id, *, pid, now):
+        raise sqlite3.OperationalError("database is locked")
+
+    db = Database(tmp_path / "own.db")
+    run_lock_mod.acquire_run_lock(db, "r", pid=101, now=_T0)
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", busy)
+    with caplog.at_level("WARNING"):
+        assert _still_owns_run(db, "r", pid=101, now=_T0 + timedelta(seconds=60)) is True
+    assert "could not re-verify the run lease" in caplog.text  # never silent
+    db.close()
 
 
 # --------------------------------------------------------------------------

@@ -19,6 +19,7 @@ store builder.
 from __future__ import annotations
 
 import itertools
+import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -50,7 +51,13 @@ _SMOKE_ENV = "HYPERLIQUID_AGENT_KEY_TESTNET"
 _AGENT_ADDR = "0x" + "cc" * 20
 
 
-def _smoke_yaml(tmp_path, *, wallet: str | None = _SMOKE_WALLET, allow_real_orders: bool = True):
+def _smoke_yaml(
+    tmp_path,
+    *,
+    wallet: str | None = _SMOKE_WALLET,
+    allow_real_orders: bool = True,
+    schedule_cancel_seconds: int | None = None,
+):
     """A minimal live config that passes every live-smoke config gate."""
     path = tmp_path / "smoke-cfg.yaml"
     text = ""
@@ -60,6 +67,8 @@ def _smoke_yaml(tmp_path, *, wallet: str | None = _SMOKE_WALLET, allow_real_orde
     text += "live:\n  mode: testnet_live\n  network: testnet\n"
     if allow_real_orders:
         text += "  allow_real_orders: true\n"
+    if schedule_cancel_seconds is not None:
+        text += f"  kill_switch:\n    schedule_cancel_seconds: {schedule_cancel_seconds}\n"
     path.write_text(text, encoding="utf-8")
     return path
 
@@ -305,6 +314,127 @@ def test_live_smoke_disarm_failure_warns_but_exit_stays_the_gates(tmp_path, caps
     assert rc == 0
     assert "smoke_gate_passed: yes" in captured.out
     assert "kill-switch disarm FAILED" in captured.err
+
+
+# -- the sibling-run refusal: the lease is per-run, the damage is per-wallet ---
+
+
+def _write_lease(db_path, run_id: str, *, pid: int, heartbeat_at: datetime) -> None:
+    """Plant a run lease directly, the way a live/paper process would hold one."""
+    with Database(db_path) as db, db.transaction() as conn:
+        repo.upsert_scheduler_state(conn, run_id, lock_pid=pid, lock_heartbeat_at=heartbeat_at)
+
+
+def test_conflicting_run_lease_reports_a_fresh_sibling(tmp_path):
+    # acquire_run_lock would let this suite straight through: it only asks about
+    # THIS run_id. But the kill-switch arm/clear, updateLeverage and the §19.3
+    # sweep are per-WALLET, and a sibling run in the same store shares the
+    # wallet — so the sibling has to be found by a separate read.
+    from contrib.hyperliquid_perp.cli import _conflicting_run_lease
+
+    now = datetime.now(timezone.utc)
+    dbp = tmp_path / "sib.db"
+    _write_lease(dbp, "sibling-run", pid=4321, heartbeat_at=now - timedelta(seconds=5))
+    with Database(dbp) as db:
+        assert _conflicting_run_lease(db, "r1") == ("sibling-run", 4321)
+
+
+def test_conflicting_run_lease_ignores_a_stale_sibling_at_the_boundary(tmp_path):
+    # The boundary is the whole point of the freshness test: a lease exactly
+    # LOCK_STALE_SECONDS old is the one acquire_run_lock itself treats as
+    # takeable (the holder is presumed dead), so refusing on it would ground the
+    # smoke suite on the corpse of a crashed run forever.
+    from contrib.hyperliquid_perp.cli import _conflicting_run_lease
+    from contrib.hyperliquid_perp.paper.run_lock import LOCK_STALE_SECONDS
+
+    now = datetime.now(timezone.utc)
+    dbp = tmp_path / "sib.db"
+    _write_lease(
+        dbp, "sibling-run", pid=4321, heartbeat_at=now - timedelta(seconds=LOCK_STALE_SECONDS)
+    )
+    with Database(dbp) as db:
+        assert _conflicting_run_lease(db, "r1") is None
+
+
+def test_conflicting_run_lease_never_reports_the_runs_own_lease(tmp_path):
+    # Negative control, and the one that matters most: an ordinary `live-smoke`
+    # re-run against a store where this run's own lease row is still populated
+    # must not refuse itself — that would break every invocation.
+    from contrib.hyperliquid_perp.cli import _conflicting_run_lease
+
+    now = datetime.now(timezone.utc)
+    dbp = tmp_path / "sib.db"
+    _write_lease(dbp, "r1", pid=4321, heartbeat_at=now)
+    with Database(dbp) as db:
+        assert _conflicting_run_lease(db, "r1") is None
+
+
+def test_live_smoke_real_run_refuses_while_a_sibling_run_is_live(tmp_path, capsys, smoke_seams):
+    # End to end through the CLI: the suite must stop BEFORE it arms the
+    # account-wide kill switch or sweeps the wallet's resting orders, and the
+    # message has to name the run the operator must go and stop.
+    cfg = _smoke_yaml(tmp_path)
+    dbp = _seed_genesis_run(tmp_path, cfg)
+    _write_lease(dbp, "sibling-run", pid=4321, heartbeat_at=datetime.now(timezone.utc))
+    rc = cli_main(["live-smoke", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "'sibling-run'" in err
+    assert "4321" in err
+    assert "ACCOUNT-wide" in err
+    # Nothing on the wire: no leverage write, no kill-switch arm, no sweep.
+    assert smoke_seams.schedule_calls == []
+    assert smoke_seams.clear_calls == 0
+    with Database(dbp) as db:
+        assert repo.latest_smoke_test_results(db.conn, "r1") == {}
+
+
+def test_live_smoke_real_run_not_refused_by_own_lease_or_a_stale_sibling(
+    tmp_path, capsys, smoke_seams
+):
+    # The negative control for the guard above. Two rows that MUST NOT refuse:
+    # this run's own lease (a resume re-taking a lease it already holds — every
+    # ordinary invocation looks like this once the row exists) and a sibling
+    # whose holder is long dead. Refusing on either would make the guard a
+    # permanent outage instead of a concurrency check.
+    from contrib.hyperliquid_perp.paper.run_lock import LOCK_STALE_SECONDS
+
+    now = datetime.now(timezone.utc)
+    cfg = _smoke_yaml(tmp_path)
+    dbp = _seed_genesis_run(tmp_path, cfg)
+    _write_lease(dbp, "r1", pid=os.getpid(), heartbeat_at=now)
+    _write_lease(
+        dbp, "dead-sibling", pid=4321, heartbeat_at=now - timedelta(seconds=LOCK_STALE_SECONDS)
+    )
+    rc = cli_main(["live-smoke", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    assert rc == 0
+    assert "smoke_gate_passed: yes" in capsys.readouterr().out
+
+
+# -- the §18 kill-switch deadline comes from the run's own config -------------
+
+
+def test_real_smoke_session_takes_the_kill_switch_deadline_from_config(tmp_path, smoke_seams):
+    # The suite refreshes the switch before each test to ctx.now() +
+    # kill_switch_deadline. Inheriting SmokeContext's 120s dataclass default
+    # silently NARROWED a longer configured cover to 120s for the whole suite,
+    # so a test making a few round-trips on a slow network could let the switch
+    # fire and cancel the resting probe — the exact failure the refresh exists
+    # to prevent. 600 is deliberately off-default: a probe asserting 120 would
+    # have passed against the bug.
+    from contrib.hyperliquid_perp.cli import _build_smoke_session
+    from contrib.hyperliquid_perp.live.smoke import SmokeContext
+
+    assert SmokeContext.__dataclass_fields__["kill_switch_deadline"].default == timedelta(
+        seconds=120
+    )
+    cfg = _smoke_yaml(tmp_path, schedule_cancel_seconds=600)
+    dbp = _seed_genesis_run(tmp_path, cfg)
+    args = SimpleNamespace(config=str(cfg), db=str(dbp), run_id="r1", dry_run=False)
+    with Database(dbp) as db:
+        session = _build_smoke_session(args, db)
+        assert not isinstance(session, int)  # not an exit code: the build succeeded
+        assert session.kill_switch_deadline == timedelta(seconds=600)
 
 
 # -- validate (live): the CLI's 0 / 5 exit mapping -----------------------------

@@ -1431,7 +1431,12 @@ def _live_startup_recovery(
                 print(f"error: startup recovery failed — {exc}", file=sys.stderr)
                 return 1
             finally:
-                if superseded:
+                # Re-ASKED, not merely remembered: ``superseded`` is only True
+                # when a heartbeat raised, and the Ctrl-C / SIGTERM lane reaches
+                # here without one (see _still_owns_run).
+                if superseded or not _still_owns_run(
+                    db, run_id, pid=os.getpid(), now=datetime.now(timezone.utc)
+                ):
                     # Lease lost: the successor owns every resting order and
                     # the dead-man's switch — skip the position re-read and the
                     # §18.2 sweep ENTIRELY; only the caller's pid-guarded lock
@@ -1739,6 +1744,60 @@ def _live_heartbeat(db, run_id: str, *, pid: int, now, safe_mode) -> None:
             ),
             detail="run-lock heartbeat write failed (see log)",
         )
+
+
+def _conflicting_run_lease(db, run_id: str) -> tuple[str, int] | None:
+    """``(run_id, pid)`` of another run in this store holding a FRESH lease, else None.
+
+    The run lease is per-``run_id``; the kill switch, ``updateLeverage`` and the
+    §19.3 sweep are per-WALLET, and two runs in one store share a wallet. So
+    "my run's lease is free" does not mean "no one else is on this wallet"
+    (2026-07-30 concurrency review).
+    """
+    from .paper.run_lock import LOCK_STALE_SECONDS
+    from .paper.scheduler import parse_instant
+    from .persistence import repository as repo
+
+    now = datetime.now(timezone.utc)
+    for row in repo.iter_other_run_leases(db.conn, run_id):
+        age = (now - parse_instant(row["lock_heartbeat_at"])).total_seconds()
+        if age < LOCK_STALE_SECONDS:
+            return str(row["run_id"]), int(row["lock_pid"])
+    return None
+
+
+def _still_owns_run(db, run_id: str, *, pid: int, now) -> bool:
+    """Positively re-verify the lease before the §18.2 shutdown sweep.
+
+    The ``superseded`` flag is absence-of-evidence: it is set only when the
+    loop's heartbeat actually RAISED. A Ctrl-C / SIGTERM exits the loop through
+    ``except KeyboardInterrupt`` with no heartbeat at all, so after a tick that
+    blocked past ``LOCK_STALE_SECONDS`` a successor can already own the run
+    while this process still reads ``superseded is False`` — and the sweep then
+    cancels the successor's live SL/TP and clears the wallet's dead-man switch.
+    Stopping a hung process with SIGTERM is precisely how an operator reaches
+    that lane, so this asks the store instead of trusting the flag
+    (2026-07-30 concurrency review).
+
+    A transient store failure is not proof of supersession: the lease is most
+    likely still ours and skipping the sweep would leave resting orders behind,
+    so it is logged and treated as owned. Only ``RunLockError`` gives the run
+    away.
+    """
+    from .paper import run_lock
+
+    try:
+        run_lock.heartbeat_run_lock(db, run_id, pid=pid, now=now)
+    except run_lock.RunLockError:
+        return False
+    except Exception as exc:  # noqa: BLE001 — see docstring: not proof of supersession
+        logger.warning(
+            "could not re-verify the run lease before the §18.2 sweep (%s: %s) — "
+            "proceeding as the owner",
+            type(exc).__name__,
+            exc,
+        )
+    return True
 
 
 def _run_live_loop(
@@ -2125,6 +2184,26 @@ def _cmd_live_smoke(argv: list[str]) -> int:
             # `live --loop` on this run would race the probe orders, the
             # recovery's stale-order sweep, and the account-wide kill switch;
             # refuse instead (a dry run touches only this store, no lease needed).
+            # The lease is per-run_id; the damage this suite can do is per-WALLET.
+            # A sibling run in the same store shares the wallet, so its lease
+            # would be acquired happily while this suite arms/clears the
+            # ACCOUNT-WIDE kill switch, writes the account's leverage, and runs a
+            # §19.3 sweep whose bot-ownership lookup is not run-scoped — i.e. it
+            # cancels the sibling's resting orders. Refuse before any of that
+            # (2026-07-30 concurrency review).
+            conflict = _conflicting_run_lease(db, args.run_id)
+            if conflict is not None:
+                other_run, other_pid = conflict
+                print(
+                    f"error: run {other_run!r} in {args.db} is being driven by pid "
+                    f"{other_pid} right now. The smoke suite's kill-switch arm/clear, "
+                    "updateLeverage and §19.3 stale-order sweep are ACCOUNT-wide, not "
+                    "run-scoped, so running it now would strip that run's dead-man "
+                    "cover and cancel its resting orders. Stop that process first "
+                    "(the wallet is bot-exclusive — see RUNBOOK-live §2).",
+                    file=sys.stderr,
+                )
+                return 1
             try:
                 acquire_run_lock(db, args.run_id, pid=os.getpid(), now=datetime.now(timezone.utc))
             except RunLockError as exc:
@@ -2440,6 +2519,14 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
         # config did not declare (decision 2026-07-29).
         leverage=int(live_cfg.safety.leverage),
         is_cross=live_cfg.safety.margin_mode.value == "cross",
+        # The run's OWN §18 deadline, not the dataclass default: the pre-flight
+        # recovery arms the switch from live.kill_switch.schedule_cancel_seconds,
+        # and the suite's per-test refresh then overwrites that deadline. Leaving
+        # it at 120s silently NARROWED a longer configured cover to 120s for the
+        # whole suite — so a test making a few round-trips on a slow network
+        # could let the switch fire and cancel the resting probe, exactly the
+        # failure the refresh exists to prevent (2026-07-30 concurrency review).
+        kill_switch_deadline=timedelta(seconds=live_cfg.kill_switch.schedule_cancel_seconds),
         run_recovery=_run_recovery,
         heartbeat=_heartbeat,
     )

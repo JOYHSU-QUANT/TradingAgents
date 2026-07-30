@@ -142,8 +142,14 @@ switch ＋ reconcile ＋ 掃 stale bot-owned 單）：
   之後才手動開倉——post-genesis 的手動成交沒有本地 order row，會直接變成
   `fill_unmapped`＋`exchange_position_mismatch` case，recovery 從此永遠 unclean、
   該 run 的驗收永久 exit 5（見 §2 的警告框）。
-- **test 17（startup with stale bot-owned order）**：先讓 run 留一張 bot-owned 掛單
-  （例如上一輪 smoke 的殘留），再跑 smoke——recovery 須把它掃掉。
+- **test 17（startup with stale bot-owned order）**：先讓 run 留一張 bot-owned 掛單，
+  再跑 smoke——recovery 須把它掃掉。**這張單必須有本地 order row**：跑一次短的
+  `live --run-id <id>`（有倉位時它會掛 SL）留下未成交的單即可。**不要**拿「上一輪
+  smoke 的殘留」充數——smoke 的 trigger 探針**刻意不寫本地 orders row**（§12.3 的
+  orphan lane 負責收編），殘留的探針會在 recovery 第一趟就記一筆
+  `orphan_exchange_order`，依 §2 的累積制，該 run 的 `validate` 從此永遠 exit 5。
+  這筆 case 不會讓 run 停下來（reconciliation 判定仍 clean、也不進 safe mode），
+  要跑到 `validate` 才看得見，所以更要事前避開。
 - **test 15（restart reconciliation）**：乾淨重跑 recovery 即可。
 
 不方便一次備齊時，用 `--only` 分項跑（見下）。
@@ -237,7 +243,7 @@ python -m contrib.hyperliquid_perp live-smoke \
 python -m contrib.hyperliquid_perp live-smoke \
   --run-id live-BTC --db live_trading.db --gate-status
 # smoke_gate_passed: yes  → 可進 cycles（exit 0）
-# smoke_gate_passed: no   → 印出 not_yet_run / failed 清單（exit 4）
+# smoke_gate_passed: no   → 印出 not_yet_run / failed / errored 三桶清單（exit 4）
 ```
 
 > `--gate-status` 只適用 **testnet_live** run：指到 mainnet（或 genesis 沒記
@@ -308,10 +314,23 @@ account_replay_mismatch_count / unprotected_position_seconds` 全為 0、
 `kill_switch_refresh_success_rate ≥ 99%`、四項 `*_test_passed`（restart / emergency
 close / existing position / stale order，來自 smoke 15/16/17/18）皆 true。
 
+> **`cycle_count` 只認 `completed`**：模型輸出解不開的 cycle（`invalid_output`）
+> **不計入** ≥30，另以 `invalid_output_count` 與一則 warning 呈現。paper 驗收器計
+> 它（那裡量的是「排程有沒有在跑」），live 驗收器不計——這裡問的是「bot 能不能
+> 交易」，而 §21.4 沒有 order count 可以背書；不然 30 個連續解不開、一單沒下的
+> cycle 也會報 `live_ready`（paper-BTC 換模後就出現過 6/6 `invalid_output`）。
+
+> **unprotected 秒數只算「真的沒有 SL」的時段**：§17.4 是 modify-before-cancel，
+> 所以 wire gate 擋掉一次 **modify** 時，舊的那張 SL 還掛在交易所（觸價過期而已），
+> 這種 `stop_loss_repair_blocked` **不開窗**（事件上帶著那張單的 order_id）。
+> 真的一張 SL 都沒有的 blocked、以及 `stop_loss_repair_exhausted`，照舊開窗、照舊
+> 是 exit 5。
+
 報告中的 `warning:` 行不影響 exit，但寫結論前要看過。testnet 報告會警告：run 中
 發生過 emergency close（§21.4「不得因 bot bug emergency close」無法機器判定，需
 人工看 stop_loss_repair 證據）、daily-loss 破線紀錄、還開著的人工 §12.3 case
-（mainnet 是硬 gate，testnet 先提醒你在準備 mainnet 前解掉）。
+（mainnet 是硬 gate，testnet 先提醒你在準備 mainnet 前解掉）、以及上面說的
+`invalid_output` cycle 數。
 
 > **integrity 計數是累積制**：dedupe error／orphan／position mismatch 等 failure
 > 計數算的是「這個 run 歷史上記錄過的 case 數」，`--stamp-case` 只了結 §21.4 的

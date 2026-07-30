@@ -640,7 +640,7 @@ def validate_live_run(
             shortfalls,
             unresolved_mismatch_count=unresolved_mismatch_count,
             daily_loss_breached=daily_loss_breached,
-            execution_mode=run_execution_mode,
+            run_execution_mode=run_execution_mode,
             refresh_rate=refresh_rate,
             refresh_total=refresh_total,
         )
@@ -758,7 +758,10 @@ def _apply_mainnet_gate(
     *,
     unresolved_mismatch_count: int,
     daily_loss_breached: bool,
-    execution_mode: str,
+    # Not ``execution_mode``: that is this module's own public function, and
+    # shadowing it inside a helper is exactly what the matching rename in
+    # validate_live_run already avoided.
+    run_execution_mode: str,
     refresh_rate: Decimal | None,
     refresh_total: int,
 ) -> None:
@@ -768,12 +771,15 @@ def _apply_mainnet_gate(
     refresh rate gates here too (see :func:`_apply_refresh_gate`). The order
     count does NOT — §21.4 omits it and the user kept that (2026-07-27).
     """
-    if execution_mode not in ("mainnet_tiny", "testnet_live"):
+    # "testnet_live" is unreachable from the one caller (this helper runs only in
+    # the else of `is_testnet`); it stays as defence-in-depth so a future second
+    # caller cannot turn a legitimate mode into the "unreadable genesis" failure.
+    if run_execution_mode not in ("mainnet_tiny", "testnet_live"):
         # An unreadable genesis mode is validated under this stricter gate, and
         # named so the operator fixes the record rather than trusting a verdict
         # computed under a guessed profile.
         failures.append(
-            f"execution_mode is {execution_mode!r} — genesis config does not name a "
+            f"execution_mode is {run_execution_mode!r} — genesis config does not name a "
             "live.mode; validated under the stricter §21.4 gate (fix the run record)"
         )
     if unresolved_mismatch_count:

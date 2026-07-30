@@ -1944,6 +1944,16 @@ def _cmd_live_smoke(argv: list[str]) -> int:
         validate_only_keys,
     )
 
+    # Mutual exclusion BEFORE key validation: under --gate-status the --only
+    # keys are never going to be used, so answering a typo in them names the
+    # wrong mistake and sends the operator off correcting a key instead of
+    # dropping the flag.
+    if args.gate_status and (args.dry_run or args.only is not None):
+        print(
+            "error: --gate-status only reads the stored gate — drop --dry-run/--only.",
+            file=sys.stderr,
+        )
+        return 1
     only: list[str] | None = None
     if args.only is not None:
         try:
@@ -1951,12 +1961,6 @@ def _cmd_live_smoke(argv: list[str]) -> int:
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
-    if args.gate_status and (args.dry_run or args.only is not None):
-        print(
-            "error: --gate-status only reads the stored gate — drop --dry-run/--only.",
-            file=sys.stderr,
-        )
-        return 1
 
     logging.basicConfig(
         level=logging.INFO,

@@ -267,32 +267,32 @@ class ProtectionManager:
             # retry next sync once the gate reopens; §12.3's SL-missing check
             # remains the standing net for the unprotected window.
             self._gate.unresolved_protection_failure = True
-            # §17.4 is modify-before-cancel, so a gate-refused MODIFY leaves the
-            # previous SL resting on the exchange at a stale trigger — protected,
-            # just not at the band we now want. A gate-refused CREATE leaves
-            # nothing. Both reach here, and the acceptance validator has to tell
-            # them apart: counting the first as unprotected seconds fails an
-            # otherwise-healthy 30-cycle run on one kill-switch refresh blip.
-            # The still-resting order's id IS the distinction, so record it —
-            # ``order_id`` present ⇒ an SL is still on the book.
+            # §17.4 is modify-before-cancel, so a gate-refused MODIFY can leave
+            # the previous SL resting while a gate-refused CREATE leaves
+            # nothing. Both reach here, and the §20.3 validator has to tell them
+            # apart: counting a still-protected position as unprotected seconds
+            # would fail an otherwise-healthy 30-cycle run on one kill-switch
+            # refresh blip. The distinction is recorded as this event's
+            # ``order_id`` — but the test is COVERAGE, not existence. §17.1
+            # rule 1 is a coverage rule and reconcile._has_valid_sl agrees
+            # (closing side + qty >= position), and the commonest blocked MODIFY
+            # is a RESIZE: a later slice filled and the resting SL now
+            # under-covers. Stamping it on the strength of "a row exists" would
+            # report "protected" while part of the position carries no stop at
+            # all. Compare on the same floored basis _establish uses, or step
+            # rounding alone re-opens the window.
             resting = repo.active_protection_order(
                 self._db.conn, self._run_id, self._coin, "stop_loss"
             )
-            # COVERAGE, not mere existence. §17.1 rule 1 is a coverage rule, and
-            # the reconciler's own predicate (_has_valid_sl) demands reduce-only
-            # + closing side + qty >= position. A refused MODIFY is most often a
-            # RESIZE — a later slice filled and the resting SL now under-covers
-            # — so stamping the order_id on the strength of "a row exists" would
-            # tell the §20.3 validator "protected" while part of the position
-            # carries no stop at all. Compare on the same floored basis
-            # _establish uses, or step rounding re-opens the window spuriously.
             with localcontext(DECIMAL_CONTEXT):
                 needed = floor_to_step(abs(position.size), self._qty_step)
             closing_side = (Side.BUY if position.size < 0 else Side.SELL).value
-            covers = (
-                resting is not None
+            covering = (
+                resting
+                if resting is not None
                 and resting["side"] == closing_side
                 and Decimal(resting["qty"]) >= needed
+                else None
             )
             shortfall = (
                 ""
@@ -302,13 +302,13 @@ class ProtectionManager:
             self._record_event(
                 "stop_loss_repair_blocked",
                 # Only a COVERING order suppresses the unprotected window.
-                order_id=resting["order_id"] if covers else None,
-                cloid_hex=resting["cloid_hex"] if covers else None,
+                order_id=None if covering is None else covering["order_id"],
+                cloid_hex=None if covering is None else covering["cloid_hex"],
                 detail=(
                     "wire gate refused every SL attempt pre-send (kill switch); retrying "
                     + (
                         "next sync — the previous SL still rests and covers the position"
-                        if covers
+                        if covering is not None
                         else f"next sync — NO covering stop-loss rests{shortfall}"
                     )
                 ),

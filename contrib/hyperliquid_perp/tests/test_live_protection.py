@@ -793,6 +793,46 @@ def test_a_gate_blocked_resize_does_not_claim_the_undersized_sl_covers(env):
     assert "0.1" in blocked["detail"] and "0.2" in blocked["detail"]  # names the shortfall
 
 
+def test_a_wrong_side_resting_sl_does_not_count_as_coverage(env):
+    # The other half of the predicate. After a flip the previous side's SL can
+    # still be resting — big enough, but pointing the wrong way, so it protects
+    # nothing. `_has_valid_sl` calls this case out too. Without the side clause
+    # the qty test alone would pass here and suppress the window.
+    db = env
+    _seed_long(db, size=Decimal("0.1"))
+    client, gate = _FakeClient(), _gate()
+    mgr = _manager(db, client, gate)
+    mgr.sync(
+        position=_long_position(size=Decimal("0.1")),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    resting = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
+    assert resting["side"] == "sell"  # a long's SL sells
+    # The position flips short; the SL for the new side is refused pre-send.
+    short = PositionState(coin="BTC", size=Decimal("-0.05"), entry_price=Decimal(50000))
+    with db.transaction() as conn:
+        repo.upsert_current_position(conn, "r", short, updated_at=_NOW)
+    client.modify_script = ["gate", "gate", "gate"]
+    client.place_script = ["gate", "gate", "gate"]
+    outcome = mgr.sync(
+        position=short,
+        liquidation_price=Decimal(60000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert outcome is ProtectionOutcome.BLOCKED
+    blocked = [
+        e
+        for e in repo.iter_protection_order_events(db.conn, "r")
+        if e["event_type"] == "stop_loss_repair_blocked"
+    ][0]
+    # qty 0.1 >= 0.05, so only the SIDE clause can reject this one.
+    assert blocked["order_id"] is None
+    assert "NO covering stop-loss" in blocked["detail"]
+
+
 def test_mixed_gate_and_real_failures_still_exhaust_to_emergency_close(env):
     # Regression guard on the GATE_BLOCKED carve-out: ONE real wire failure in
     # the ladder (an ExchangeError, a rejected ack) means an attempt reached —

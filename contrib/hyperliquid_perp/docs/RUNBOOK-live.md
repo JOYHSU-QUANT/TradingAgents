@@ -147,8 +147,11 @@ switch ＋ reconcile ＋ 掃 stale bot-owned 單）：
   §19.3 只撤 `entry`／`rebalance` 角色的殘單，而 v1 的每一片切片都是 IOC、永遠即時
   終態，不會留下掛單；`stop_loss`／`take_profit` **刻意永不被 §19.3 撤**（PR 4 沒有
   補掛路徑，撤掉不完美的 SL 等於拿保護換整潔），所以拿一張 SL 來充數不會觸發
-  sweep。真要驗這一項，得在 smoke 之外用主錢包手動掛一張 bot 命名前綴的單——但
-  那會踩到 §2 的 genesis 後手動成交禁令，需自行斟酌。
+  sweep。**也不要手動掛一張「看起來像 bot」的單**：bot-ownership 認的是本地
+  `cloid_registry` 有沒有這一筆，不是命名前綴——手掛的單會被 sweep 直接跳過
+  （測 17 一樣 vacuous），而且會被 reconciler 記成 `non_bot_owned_order`、
+  讓 recovery 判定 unclean，於是測 17 記 **failed**（§20.2 gate 關起來）、
+  run 還會進 **manual safe mode**，要人工 `safe-mode --release` 才出得來。
   無論如何 **不要**拿「上一輪 smoke 的殘留」充數——smoke 的 trigger 探針**刻意不寫
   本地 orders row**（§12.3 的 orphan lane 負責收編），殘留的探針會在 recovery 第一趟
   就記一筆 `orphan_exchange_order`，依 §2 的累積制，該 run 的 `validate` 從此永遠
@@ -324,11 +327,13 @@ close / existing position / stale order，來自 smoke 15/16/17/18）皆 true。
 > 交易」，而 §21.4 沒有 order count 可以背書；不然 30 個連續解不開、一單沒下的
 > cycle 也會報 `live_ready`（paper-BTC 換模後就出現過 6/6 `invalid_output`）。
 
-> **unprotected 秒數只算「真的沒有 SL」的時段**：§17.4 是 modify-before-cancel，
-> 所以 wire gate 擋掉一次 **modify** 時，舊的那張 SL 還掛在交易所（觸價過期而已），
-> 這種 `stop_loss_repair_blocked` **不開窗**（事件上帶著那張單的 order_id）。
-> 真的一張 SL 都沒有的 blocked、以及 `stop_loss_repair_exhausted`，照舊開窗、照舊
-> 是 exit 5。
+> **unprotected 秒數只算「沒有一張足以覆蓋的 SL」的時段**：§17.4 是
+> modify-before-cancel，所以 wire gate 擋掉一次 **modify** 時舊的那張 SL 可能還掛在
+> 交易所。判準是**覆蓋**不是存在（與 §12.3 的 `_has_valid_sl` 同一條）：平倉方向
+> 正確、且 `qty ≥ 目前倉位`，才算還有保護、才**不開窗**（事件上會帶那張單的
+> order_id）。最常見的 blocked 其實是 **resize**——後面的切片成交了、舊 SL 只蓋得住
+> 一部分——那**照樣開窗**，因為有一部分倉位真的沒有停損。真的一張都沒有的 blocked、
+> 以及 `stop_loss_repair_exhausted`，同樣開窗、同樣是 exit 5。
 
 報告中的 `warning:` 行不影響 exit，但寫結論前要看過。testnet 報告會警告：run 中
 發生過 emergency close（§21.4「不得因 bot bug emergency close」無法機器判定，需

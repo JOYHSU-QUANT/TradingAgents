@@ -25,7 +25,8 @@ Where the metrics come from (all from persisted PR 2–5 event logs):
   verbatim from the paper layer; a raise is an unverifiable-books outcome).
 - ``unprotected_position_seconds`` — reconstructed from ``protection_order_events``:
   an unprotected window opens on ``stop_loss_repair_exhausted`` /
-  ``stop_loss_repair_blocked`` (no SL rests) and closes on the next
+  ``stop_loss_repair_blocked`` (no SL rests that COVERS the position) and closes
+  on the next
   ``stop_loss_placed`` / ``stop_loss_modified`` / ``protection_cleared`` /
   ``emergency_close_triggered`` for that symbol. Zero onsets → zero seconds (the
   healthy case).
@@ -39,9 +40,9 @@ acceptance failure lands in ``failures`` → exit 5 ("investigate before going
 live") — this covers both a store-integrity breach (dedupe errors, orphans,
 duplicate applies, a position or replay mismatch) AND a safety-invariant breach
 that is not itself store corruption (an unprotected window — §20.3: unprotected
-seconds must be 0; a ``stop_loss_repair_blocked`` gate pause opens one only when
-it left NO stop-loss resting, since §17.4's modify-before-cancel means a refused
-MODIFY keeps the previous SL on the book — a refresh rate below
+seconds must be 0; a ``stop_loss_repair_blocked`` gate pause opens one unless a
+COVERING stop-loss was still resting, since §17.4's modify-before-cancel can
+leave the previous SL on the book — a refresh rate below
 99% on EITHER profile, or — mainnet_tiny — an unresolved reconciliation case or a
 breached daily-loss cap). A run that is merely short of the gate (< 30 cycles /
 orders, smoke tests or kill-switch refreshes not yet run, or a smoke test that
@@ -358,21 +359,26 @@ def _unprotected_windows(conn, run_id: str, now: datetime) -> tuple[Decimal, int
     """``(total_seconds, window_count, has_open_window)`` from protection events.
 
     Per symbol, an unprotected window opens on ``stop_loss_repair_exhausted`` or
-    on a ``stop_loss_repair_blocked`` that left NO stop-loss resting, and closes
-    on the next SL restoration (``stop_loss_placed`` / ``stop_loss_modified``) or
-    the position leaving exposure (``protection_cleared`` /
-    ``emergency_close_triggered``). A window still open at the end of the log is
-    measured to ``now`` and flagged — the position was last seen unprotected,
-    which is worse than a closed one, not better.
+    on a ``stop_loss_repair_blocked`` that left no COVERING stop-loss resting,
+    and closes on the next SL restoration (``stop_loss_placed`` /
+    ``stop_loss_modified``) or the position leaving exposure
+    (``protection_cleared`` / ``emergency_close_triggered``). A window still open
+    at the end of the log is measured to ``now`` and flagged — the position was
+    last seen unprotected, which is worse than a closed one, not better.
 
     The ``blocked`` qualifier matters. §17.4 is modify-before-cancel, so the wire
-    gate refusing a MODIFY leaves the previous SL resting at a stale trigger:
+    gate refusing a MODIFY can leave the previous SL resting at a stale trigger:
     not the band the manager wants, but not unprotected either. Counting those
     seconds would fail an otherwise-healthy 30-cycle acceptance run on a single
-    kill-switch refresh blip that happened to coincide with an SL adjustment —
-    and §20.3's ``unprotected_position_seconds = 0`` is an exit-5, non-curable
-    verdict. protection.py records the still-resting order's id on the event
-    precisely so this can tell the two apart; ``order_id`` present ⇒ protected.
+    kill-switch refresh blip that coincided with an SL adjustment — and §20.3's
+    ``unprotected_position_seconds = 0`` is an exit-5, non-curable verdict.
+
+    But the test protection.py applies before stamping the event is COVERAGE,
+    not existence — closing side and ``qty >= position``, the same rule
+    ``reconcile._has_valid_sl`` uses. So the commonest blocked MODIFY, a RESIZE
+    whose old SL now covers only part of the position, still opens a window:
+    part of that position genuinely has no stop. ``order_id`` present ⇒ a
+    covering SL was resting.
     """
     onset = _UNPROTECTED_ONSET_EVENTS
     close = _UNPROTECTED_CLOSE_EVENTS
@@ -394,8 +400,9 @@ def _unprotected_windows(conn, run_id: str, now: datetime) -> tuple[Decimal, int
         when = parse_instant(row["timestamp"])
         if event in onset:
             if event == _SL_REPAIR_BLOCKED and row["order_id"]:
-                # A gate-refused MODIFY: the previous SL is still on the book
-                # (see the docstring). Stale trigger, not an unprotected window.
+                # A gate-refused MODIFY over a still-COVERING SL (protection.py
+                # stamps the id only then; see the docstring). Stale trigger,
+                # not an unprotected window.
                 continue
             # A fresh onset while already open keeps the earliest onset (the
             # window never closed), so only record if not already open.

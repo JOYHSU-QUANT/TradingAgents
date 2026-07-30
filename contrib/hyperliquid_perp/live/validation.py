@@ -23,13 +23,15 @@ Where the metrics come from (all from persisted PR 2–5 event logs):
   (structurally impossible under the UNIQUE index — a store-integrity assertion).
 - ``account_replay_mismatch_count`` — the §14/§15 accounting replay (reused
   verbatim from the paper layer; a raise is an unverifiable-books outcome).
-- ``unprotected_position_seconds`` — reconstructed from ``protection_order_events``:
-  an unprotected window opens on ``stop_loss_repair_exhausted`` /
-  ``stop_loss_repair_blocked`` (no SL rests that COVERS the position) and closes
-  on the next
+- ``unprotected_position_seconds`` / ``unprotected_window_count`` — reconstructed
+  from ``protection_order_events``: an unprotected window opens on
+  ``stop_loss_repair_exhausted`` / ``stop_loss_repair_blocked`` (no SL rests that
+  COVERS the position) and closes on the next
   ``stop_loss_placed`` / ``stop_loss_modified`` / ``protection_cleared`` /
-  ``emergency_close_triggered`` for that symbol. Zero onsets → zero seconds (the
-  healthy case).
+  ``degraded_protection_cleared`` for that symbol — events that mean the episode
+  ENDED. A §17.2 emergency close is a submission, not an end, and is excluded.
+  Zero onsets → zero windows and zero seconds (the healthy case), and the gate
+  reads the COUNT too so a window measured as 0 cannot impersonate that case.
 - ``kill_switch_refresh_success_rate`` — ``kill_switch_refreshed`` over
   (refreshed + ``kill_switch_refresh_failed``).
 - the four ``*_test_passed`` booleans — the §20.2 smoke suite's latest verdicts
@@ -166,12 +168,33 @@ if _MISMATCH_CASE_TYPES | {"fill_unmapped"} != repo.RECONCILIATION_CASE_TYPES:
 # open to "now" and fails a healthy run instead.
 _SL_REPAIR_BLOCKED = "stop_loss_repair_blocked"
 _UNPROTECTED_ONSET_EVENTS = frozenset({"stop_loss_repair_exhausted", _SL_REPAIR_BLOCKED})
+# A close event must mean "the episode ENDED", never "we tried to end it".
+# ``emergency_close_triggered`` is deliberately NOT here. Two independent reasons,
+# either one fatal: (1) protection.sync stamps the onset from its OWN clock read
+# while engine.tick hands _emergency_close the earlier tick-start instant, so the
+# pair is non-monotone and _window_seconds clamped every §17.2 escalation to a
+# 0-second window — the severe lane, the one carrying an exit-5 gate, read exactly
+# like a run that was never unprotected; (2) it records an IOC *submission*. sync
+# re-fires that close every tick until it lands, so the position is still
+# unprotected after it — the window has not ended.
+# GENERAL WARNING for any future reader of ``protection_order_events``: rows written
+# within one tick are NOT reliably orderable by ``timestamp``, because the engine and
+# the protection manager each take their own clock read. Order by ``event_id``
+# (insertion) and never compute a duration between an engine-stamped and a
+# protection-stamped event type.
+# ``degraded_protection_cleared`` is the canonical end instead: protection emits it
+# at exactly the three sites where unresolved_protection_failure goes True->False
+# (flat, plan-active protected, fully protected), always from its own clock in a
+# LATER tick, so an onset/close pair is monotone by construction. It also closes
+# the two windows the other names structurally miss — a flat whose _clear found no
+# resting order to cancel (so no ``protection_cleared`` row), and an _establish
+# no-op that returns ESTABLISHED without any placed/modified row.
 _UNPROTECTED_CLOSE_EVENTS = frozenset(
     {
         "stop_loss_placed",
         "stop_loss_modified",
         "protection_cleared",
-        "emergency_close_triggered",
+        "degraded_protection_cleared",
     }
 )
 if not (_UNPROTECTED_ONSET_EVENTS | _UNPROTECTED_CLOSE_EVENTS) <= repo.PROTECTION_ORDER_EVENT_TYPES:
@@ -224,7 +247,12 @@ class LiveValidationReport:
     startup_with_existing_position_test_passed: bool
     startup_with_stale_open_order_test_passed: bool
     unresolved_reconciliation_mismatch_count: int
+    # ``breached`` is "ever, anywhere in this run" (informational — §10.3 recovers at
+    # the next UTC midnight); ``active`` is "still unresolved now", and is the one
+    # §21.4 gates on. Reported separately so the operator can tell a released
+    # episode from a live one instead of reading one bool for both.
     daily_loss_breached: bool
+    daily_loss_active: bool
     emergency_close_event_count: int
     # Store-integrity failures → exit 5.
     failures: tuple[str, ...]
@@ -253,7 +281,8 @@ class LiveValidationReport:
         # two must agree. Its measured seconds is normally > 0 (now is strictly
         # after a stored past onset) but can clamp to 0 on a corrupt store (a
         # future-timestamped onset), so no seconds guarantee is asserted here —
-        # the gate keys off ``unresolved_unprotected_window`` OR seconds > 0.
+        # the gate keys off ``unprotected_window_count`` as well as the seconds and
+        # the open flag, precisely so a clamped-to-zero window still fails.
         if self.unresolved_unprotected_window and self.unprotected_window_count < 1:
             raise ValueError(
                 "unresolved_unprotected_window is set but unprotected_window_count is "
@@ -311,6 +340,7 @@ class LiveValidationReport:
             f"{_smoke(self.startup_with_stale_open_order_test_passed)}",
             f"unresolved_reconciliation_mismatch_count: {self.unresolved_reconciliation_mismatch_count}",
             f"daily_loss_breached: {_yn(self.daily_loss_breached)}",
+            f"daily_loss_active: {_yn(self.daily_loss_active)}",
             f"emergency_close_event_count: {self.emergency_close_event_count}",
             f"live_ready: {'yes' if self.live_ready else 'no'}",
         ]
@@ -355,16 +385,46 @@ def execution_mode(config_json: str | None) -> str:
     return "unknown"
 
 
+def _daily_loss_still_active(conn, run_id: str) -> bool:
+    """Whether the run is CURRENTLY in a safe-mode episode naming the §10.3 cap.
+
+    Episode-scoped, the same shape ``safe_mode.enter`` uses for its own
+    idempotence: the current-state trio keeps only the FIRST reason, so a
+    daily-loss trigger absorbed into an episode entered for something else lives
+    only in the history rows — hence the ``since_iso=entered_at`` read rather than
+    a plain ``safe_mode_reason`` comparison.
+    """
+    row = repo.get_scheduler_state(conn, run_id)
+    if row is None or row["safe_mode_type"] is None:
+        return False
+    if row["safe_mode_reason"] == REASON_DAILY_LOSS:
+        return True
+    entered_at = row["safe_mode_entered_at"]
+    if entered_at is None:
+        return False
+    return repo.has_safe_mode_reason_event(
+        conn, run_id, reason=REASON_DAILY_LOSS, since_iso=entered_at
+    )
+
+
 def _unprotected_windows(conn, run_id: str, now: datetime) -> tuple[Decimal, int, bool]:
     """``(total_seconds, window_count, has_open_window)`` from protection events.
 
     Per symbol, an unprotected window opens on ``stop_loss_repair_exhausted`` or
     on a ``stop_loss_repair_blocked`` that left no COVERING stop-loss resting,
-    and closes on the next SL restoration (``stop_loss_placed`` /
-    ``stop_loss_modified``) or the position leaving exposure
-    (``protection_cleared`` / ``emergency_close_triggered``). A window still open
-    at the end of the log is measured to ``now`` and flagged — the position was
-    last seen unprotected, which is worse than a closed one, not better.
+    and closes only when the episode genuinely ENDED: an SL back on the book
+    (``stop_loss_placed`` / ``stop_loss_modified``), the position leaving exposure
+    (``protection_cleared``), or protection's own "failure line came down" event
+    (``degraded_protection_cleared``, which covers both recovery-to-protected and
+    flat). A §17.2 emergency close is NOT a close — see the vocabulary comment
+    above for why counting the submission zeroed this whole metric. A window still
+    open at the end of the log is measured to ``now`` and flagged — the position
+    was last seen unprotected, which is worse than a closed one, not better.
+
+    The window COUNT is returned alongside the seconds because the caller gates on
+    both: a clamped-to-zero window (out-of-order stamps on a corrupt store, or an
+    onset and close inside the same clock tick) must never be indistinguishable
+    from a run that was never unprotected at all.
 
     The ``blocked`` qualifier matters. §17.4 is modify-before-cancel, so the wire
     gate refusing a MODIFY can leave the previous SL resting at a stale trigger:
@@ -532,14 +592,22 @@ def validate_live_run(
         unresolved_mismatch_count = _unresolved_reconciliation_mismatches(conn, run_id)
 
         # §10.3 daily-loss cap breach = a safe-mode episode entered for that
-        # reason (the loss guard's only durable record of a breach). The
-        # since-instant is the store minimum, so it matches any episode.
+        # reason (the loss guard's only durable record of a breach). Two readings,
+        # and §21.4 needs both (decided 2026-07-30):
+        #   - EVER (store minimum as the since-instant, so it matches any episode):
+        #     informational. §10.3's cap is a RECOVERABLE guard that auto-releases at
+        #     the next UTC midnight, so gating on "ever" made one ordinary risk event
+        #     on day 2 pin a real-money run at exit 5 permanently — 30 more real
+        #     cycles under a fresh run-id, with no --stamp-case escape.
+        #   - CURRENTLY unresolved: the gating condition, matching the sibling
+        #     _unresolved_reconciliation_mismatches line it sits beside.
         # REASON_DAILY_LOSS, not the literal: has_safe_mode_reason_event takes a
         # free string, so a renamed constant would match zero rows forever and a
         # mainnet run that actually blew its §10.3 cap would report live_ready.
         daily_loss_breached = repo.has_safe_mode_reason_event(
             conn, run_id, reason=REASON_DAILY_LOSS, since_iso=_SINCE_BEGINNING
         )
+        daily_loss_active = _daily_loss_still_active(conn, run_id)
         emergency_close_event_count = sum(
             1
             for row in repo.iter_protection_order_events(conn, run_id)
@@ -598,12 +666,21 @@ def validate_live_run(
             failures.append(f"accounting replay raised: {replay_raised} — books unverifiable")
         else:
             failures.append(f"account_replay_mismatch_count = {replay_mismatch_count} (want 0)")
-    if unprotected_seconds > 0 or unprotected_open:
+    # The window COUNT gates too, not just the seconds. A window that measured 0 —
+    # out-of-order stamps on a corrupt store, or an onset and its close inside one
+    # clock tick — is still a position that had no stop loss, and keying on seconds
+    # alone made that case read byte-identical to a run that was never unprotected.
+    if unprotected_seconds > 0 or unprotected_open or unprotected_windows:
         suffix = " (still open at end of log)" if unprotected_open else ""
-        failures.append(
-            f"unprotected_position_seconds = {unprotected_seconds} across "
-            f"{unprotected_windows} window(s){suffix} (want 0)"
+        # Say WHY a zero-second window still fails, or the line reads as a
+        # self-contradiction ("= 0 ... (want 0)") to the operator who has to act.
+        measured = (
+            f"unprotected_position_seconds = {unprotected_seconds}"
+            if unprotected_seconds > 0
+            else "unprotected_position_seconds measured 0 (onset and close within one "
+            "clock tick, or out-of-order stamps) but the window is real"
         )
+        failures.append(f"{measured} across {unprotected_windows} window(s){suffix} (want 0)")
     # -- shortfalls (exit 4): not yet at the gate --------------------------
     if cycle_count < MIN_LIVE_CYCLES:
         shortfalls.append(f"cycle_count = {cycle_count} (need >= {MIN_LIVE_CYCLES})")
@@ -649,7 +726,7 @@ def validate_live_run(
             failures,
             shortfalls,
             unresolved_mismatch_count=unresolved_mismatch_count,
-            daily_loss_breached=daily_loss_breached,
+            daily_loss_active=daily_loss_active,
             run_execution_mode=run_execution_mode,
             refresh_rate=refresh_rate,
             refresh_total=refresh_total,
@@ -672,6 +749,15 @@ def validate_live_run(
         warnings.append(
             "a daily-loss safe-mode episode is on record (informational on testnet; "
             "a mainnet_tiny gate condition per §21.4)"
+        )
+    elif daily_loss_breached and not daily_loss_active:
+        # Mainnet, breached earlier, already released. Not gating (§10.3 recovers at
+        # the next UTC midnight) but never silent: the operator has to know the 30
+        # cycles were not homogeneous before reading the acceptance verdict.
+        warnings.append(
+            "a daily-loss safe-mode episode occurred earlier in this run and has since "
+            "released (§10.3 recovers at the next UTC midnight) — not a §21.4 gate "
+            "condition once resolved, but review why the cap was hit before going live"
         )
     if is_testnet and unresolved_mismatch_count:
         warnings.append(
@@ -714,6 +800,7 @@ def validate_live_run(
         startup_with_stale_open_order_test_passed=stale_passed,
         unresolved_reconciliation_mismatch_count=unresolved_mismatch_count,
         daily_loss_breached=daily_loss_breached,
+        daily_loss_active=daily_loss_active,
         emergency_close_event_count=emergency_close_event_count,
         failures=tuple(failures),
         shortfalls=tuple(shortfalls),
@@ -767,7 +854,7 @@ def _apply_mainnet_gate(
     shortfalls: list[str],
     *,
     unresolved_mismatch_count: int,
-    daily_loss_breached: bool,
+    daily_loss_active: bool,
     # Not ``execution_mode``: that is this module's own public function, and
     # shadowing it inside a helper is exactly what the matching rename in
     # validate_live_run already avoided.
@@ -796,8 +883,16 @@ def _apply_mainnet_gate(
         failures.append(
             f"unresolved_reconciliation_mismatch_count = {unresolved_mismatch_count} (want 0)"
         )
-    if daily_loss_breached:
-        failures.append("daily loss cap was breached (§21.4: must not be breached)")
+    # CURRENTLY unresolved gates; a breach the run already recovered from does not
+    # (it is carried as a warning instead). §10.3's cap auto-releases at the next
+    # UTC midnight, so "ever" would make one ordinary risk event terminal for a
+    # real-money run — while the line right above it, unresolved_mismatch_count,
+    # is already current-state and human-clearable. Decided 2026-07-30.
+    if daily_loss_active:
+        failures.append(
+            "the run is still in a daily-loss safe-mode episode "
+            "(§21.4: the cap must not be breached)"
+        )
     _apply_refresh_gate(
         failures, shortfalls, refresh_rate=refresh_rate, refresh_total=refresh_total
     )

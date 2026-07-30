@@ -465,7 +465,64 @@ def test_emergency_close_event_warns_but_does_not_gate_testnet(tmp_path):
 # -- mainnet_tiny-specific gate -------------------------------------------
 
 
-def test_mainnet_daily_loss_breach_is_a_failure(tmp_path):
+def _breach_daily_loss(db, *, still_active: bool, run_id: str = "r") -> None:
+    """Record a §10.3 daily-loss episode; ``still_active`` keeps it unresolved."""
+    with db.transaction() as conn:
+        repo.insert_safe_mode_event(
+            conn,
+            run_id=run_id,
+            event_type="safe_mode_entered",
+            safe_mode_type="recoverable",
+            reason="daily_loss",
+            timestamp=_T0,
+        )
+        if still_active:
+            repo.upsert_scheduler_state(
+                conn,
+                run_id,
+                safe_mode_type="recoverable",
+                safe_mode_reason="daily_loss",
+                safe_mode_entered_at=_T0,
+            )
+
+
+def test_mainnet_unresolved_daily_loss_is_a_failure(tmp_path):
+    db = _healthy(tmp_path, mode="mainnet_tiny")
+    _breach_daily_loss(db, still_active=True)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.daily_loss_breached
+    assert report.daily_loss_active
+    assert any("daily-loss safe-mode episode" in f for f in report.failures)
+
+
+def test_mainnet_released_daily_loss_warns_but_does_not_gate(tmp_path):
+    """§10.3 is a RECOVERABLE guard that auto-releases at the next UTC midnight.
+
+    Gating on "ever breached" made one ordinary risk event on day 2 pin a real-money
+    run at exit 5 permanently — 30 more real cycles under a fresh run-id, with no
+    --stamp-case escape — while the sibling reconciliation line beside it was already
+    current-state and human-clearable. Decided 2026-07-30: gate on unresolved, warn
+    on released. Negative control for the test above.
+    """
+    db = _healthy(tmp_path, mode="mainnet_tiny")
+    _breach_daily_loss(db, still_active=False)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.daily_loss_breached  # still on the record
+    assert not report.daily_loss_active
+    assert not any("daily-loss" in f for f in report.failures)
+    assert any("has since released" in w for w in report.warnings)
+    assert report.live_ready
+
+
+def test_a_daily_loss_absorbed_into_another_episode_still_gates(tmp_path):
+    """The current-state trio keeps only the FIRST reason of an episode.
+
+    A daily-loss trigger absorbed into a recoverable episode entered for something
+    else lives only in the history rows, so a plain ``safe_mode_reason`` comparison
+    would miss it and the mainnet gate would pass over a live cap breach.
+    """
     db = _healthy(tmp_path, mode="mainnet_tiny")
     with db.transaction() as conn:
         repo.insert_safe_mode_event(
@@ -473,13 +530,28 @@ def test_mainnet_daily_loss_breach_is_a_failure(tmp_path):
             run_id="r",
             event_type="safe_mode_entered",
             safe_mode_type="recoverable",
-            reason="daily_loss",
+            reason="no_market_data",
             timestamp=_T0,
+        )
+        repo.insert_safe_mode_event(
+            conn,
+            run_id="r",
+            event_type="safe_mode_reason_added",
+            safe_mode_type="recoverable",
+            reason="daily_loss",
+            timestamp=_T0 + timedelta(seconds=30),
+        )
+        repo.upsert_scheduler_state(
+            conn,
+            "r",
+            safe_mode_type="recoverable",
+            safe_mode_reason="no_market_data",  # the FIRST reason, not daily_loss
+            safe_mode_entered_at=_T0,
         )
     with db:
         report = validate_live_run(db, run_id="r", now=_T0)
-    assert report.daily_loss_breached
-    assert any("daily loss" in f for f in report.failures)
+    assert report.daily_loss_active
+    assert any("daily-loss safe-mode episode" in f for f in report.failures)
 
 
 def test_mainnet_unresolved_reconciliation_is_a_failure(tmp_path):
@@ -650,6 +722,121 @@ def test_out_of_order_timestamps_clamp_per_window(tmp_path):
         r = validate_live_run(db, run_id="r", now=_T0)
     assert r.unprotected_position_seconds == Decimal(15)
     assert r.unprotected_window_count == 2
+    # The clamped BTC window is STILL a real unprotected window: the count gates
+    # even when the seconds clamp away, so this run cannot read as healthy.
+    assert not r.live_ready
+    assert any("2 window(s)" in f for f in r.failures)
+
+
+def test_the_production_emergency_close_shape_measures_the_real_seconds(tmp_path):
+    """The §17.2 escalation shape the engine actually emits, end to end.
+
+    protection.sync stamps ``stop_loss_repair_exhausted`` from its OWN clock read;
+    engine.tick then hands ``_emergency_close`` the EARLIER tick-start instant, so
+    the ``emergency_close_triggered`` row precedes its own onset. sync re-fires the
+    close every tick until it lands, so the position stays unprotected the whole
+    time. Counting the submission as a close measured this — the severe lane — as 0
+    seconds and let a run with no stop loss for 10 minutes report live_ready.
+    """
+    db = _healthy(tmp_path)
+    events = []
+    # 10 ticks, 60s apart: exhausted at tick+0.5s, the close stamped at tick+0s.
+    for tick in range(10):
+        events.append(("stop_loss_repair_exhausted", "BTC", tick * 60 + 0.5))
+        events.append(("emergency_close_triggered", "BTC", tick * 60))
+    # The close finally lands and the position goes flat 10 minutes in.
+    events.append(("degraded_protection_cleared", "BTC", 600))
+    _protect(db, events)
+    with db:
+        r = validate_live_run(db, run_id="r", now=_T0)
+    # One window: opened by the FIRST onset (re-onsets while open keep the
+    # earliest), closed only when protection's failure line came down.
+    assert r.unprotected_position_seconds == Decimal("599.5")
+    assert r.unprotected_window_count == 1
+    assert not r.unresolved_unprotected_window
+    assert not r.live_ready
+    assert any("unprotected_position_seconds = 599.5" in f for f in r.failures)
+
+
+def test_an_emergency_close_alone_does_not_close_an_unprotected_window(tmp_path):
+    """Negative control for removing ``emergency_close_triggered`` from the close set.
+
+    An IOC submission is not an end: sync re-fires it until it lands. With nothing
+    else in the log the window must stay OPEN and be measured to ``now``.
+    """
+    db = _healthy(tmp_path)
+    _protect(
+        db,
+        [
+            ("stop_loss_repair_exhausted", "BTC", 0),
+            ("emergency_close_triggered", "BTC", 10),
+        ],
+    )
+    with db:
+        r = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=45))
+    assert r.unprotected_position_seconds == Decimal(45)
+    assert r.unresolved_unprotected_window
+    assert not r.live_ready
+
+
+def test_degraded_protection_cleared_closes_a_flat_window_with_nothing_to_cancel(tmp_path):
+    """The opposite defect: a window that ended must not fail the run forever.
+
+    ``protection._clear`` emits ``protection_cleared`` only ``if cleared_any`` — so a
+    blocked window whose SL FIRED (the order is filled, not active) and flattened
+    the position produces no ``protection_cleared`` row. Keying the close set on that
+    name alone left the window open to ``now``, i.e. a permanent, uncurable exit 5 on
+    a run that is flat and healthy. ``degraded_protection_cleared`` is emitted on that
+    same flat tick (``was_failed`` is true, the onset set the failure line), so it
+    closes the window.
+    """
+    db = _healthy(tmp_path)
+    _protect(
+        db,
+        [
+            ("stop_loss_repair_blocked", "BTC", 0),  # no order_id ⇒ no covering SL
+            ("degraded_protection_cleared", "BTC", 30),  # flat, nothing left to cancel
+        ],
+    )
+    with db:
+        r = validate_live_run(db, run_id="r", now=_T0 + timedelta(hours=9))
+    assert r.unprotected_position_seconds == Decimal(30)
+    assert not r.unresolved_unprotected_window  # NOT measured to `now`, 9h later
+    assert r.unprotected_window_count == 1
+
+
+def test_a_zero_second_window_still_fails_the_gate(tmp_path):
+    """A window whose onset and close share one instant is still a real window.
+
+    Keying the gate on seconds alone made this byte-identical to a run that was
+    never unprotected. Paired with the control below, which has no onset at all.
+    """
+    db = _healthy(tmp_path)
+    _protect(
+        db,
+        [
+            ("stop_loss_repair_exhausted", "BTC", 0),
+            ("stop_loss_placed", "BTC", 0),  # same instant → 0s
+        ],
+    )
+    with db:
+        r = validate_live_run(db, run_id="r", now=_T0)
+    assert r.unprotected_position_seconds == 0
+    assert r.unprotected_window_count == 1
+    assert not r.live_ready
+    # The line must not read as the self-contradictory "= 0 ... (want 0)".
+    assert any("measured 0" in f and "the window is real" in f for f in r.failures)
+
+
+def test_a_run_with_no_onset_at_all_is_the_only_clean_zero(tmp_path):
+    """Control for the test above: zero WINDOWS, not merely zero seconds."""
+    db = _healthy(tmp_path)
+    _protect(db, [("stop_loss_placed", "BTC", 0), ("take_profit_placed", "BTC", 1)])
+    with db:
+        r = validate_live_run(db, run_id="r", now=_T0)
+    assert r.unprotected_position_seconds == 0
+    assert r.unprotected_window_count == 0
+    assert r.live_ready
 
 
 # -- kill-switch refresh-rate boundary ------------------------------------
@@ -709,6 +896,7 @@ def _make_report(**overrides) -> LiveValidationReport:
         "startup_with_stale_open_order_test_passed": True,
         "unresolved_reconciliation_mismatch_count": 0,
         "daily_loss_breached": False,
+        "daily_loss_active": False,
         "emergency_close_event_count": 0,
         "failures": (),
         "shortfalls": (),

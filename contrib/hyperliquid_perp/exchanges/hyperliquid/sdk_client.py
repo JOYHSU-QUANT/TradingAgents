@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
-from .errors import ExchangeError, ExchangeRequestError
+from .errors import ExchangeError, ExchangeRequestError, ExchangeThrottledError
 
 if TYPE_CHECKING:
     from eth_account.signers.local import LocalAccount
@@ -97,9 +97,34 @@ def call_sdk(fn: Callable[..., Any], *args: Any) -> Any:
         # Some SDK/network exceptions (e.g. a bare ConnectionError) stringify to "",
         # which would leave the top-level message — the one main.py prints — hollow.
         # Prefix the type name so the error is always diagnostic even when str(exc) is empty.
-        raise ExchangeRequestError(
-            f"Hyperliquid request failed: {type(exc).__name__}: {exc}"
-        ) from exc
+        message = f"Hyperliquid request failed: {type(exc).__name__}: {exc}"
+        if _looks_throttled(exc):
+            raise ExchangeThrottledError(message) from exc
+        raise ExchangeRequestError(message) from exc
+
+
+# Substrings marking a request the venue declined to SERVE, as opposed to one it
+# served and rejected. Deliberately a short, specific list matched against the
+# lowercased text: over-matching would let a real rejection be retried as though
+# it were transient, which is the more expensive mistake of the two.
+_THROTTLE_MARKERS = ("429", "too many requests", "rate limit", "ratelimit", "slow down")
+
+
+def _looks_throttled(exc: BaseException) -> bool:
+    """Whether ``exc`` reads as a rate-limit / overload refusal.
+
+    Prefers a status code when the exception carries one — several HTTP client
+    libraries expose ``status_code`` directly or via ``response``, and a number
+    beats a substring. Falls back to the message, because the SDK surfaces the
+    status only inside the text for most transports.
+    """
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int) and status in (429, 503):
+        return True
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(marker in text for marker in _THROTTLE_MARKERS)
 
 
 class HyperliquidClient:

@@ -827,6 +827,70 @@ def test_a_gate_blocked_resize_does_not_claim_the_undersized_sl_covers(env):
     assert "0.1" in blocked["detail"] and "0.2" in blocked["detail"]  # names the shortfall
 
 
+def test_a_rate_limited_ladder_holds_instead_of_emergency_closing(env):
+    # The repair ladder could not tell "the venue would not serve us" from "the
+    # venue rejected this order". Three fixed-delay attempts fit inside one
+    # 15-second rate-limit window, so a throttle exhausted the ladder → §17.2
+    # market-closes a HEALTHY position and latches the run for a human. And a
+    # venue throttles hardest in exactly the violent move a stop exists for.
+    from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeThrottledError
+
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+
+    def _throttle(**_kw):
+        raise ExchangeThrottledError("429 Too Many Requests")
+
+    client.place_trigger_order = _throttle
+    client.modify_trigger_order = _throttle
+    outcome = _manager(db, client, gate).sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert outcome is ProtectionOutcome.BLOCKED  # NOT NEEDS_EMERGENCY_CLOSE
+    assert gate.unresolved_protection_failure is True  # still blocks new risk
+    blocked = [
+        e
+        for e in repo.iter_protection_order_events(db.conn, "r")
+        if e["event_type"] == "stop_loss_repair_blocked"
+    ][0]
+    assert "rate-limited" in blocked["detail"]
+    # The window still opens: nothing was placed, so the position may be naked.
+    assert blocked["order_id"] is None
+
+
+def test_one_real_rejection_among_throttles_still_exhausts(env):
+    # The carve-out must be narrow. An ack that says "no" is the exchange
+    # REJECTING the order — precisely the evidence a throttle is not — so a
+    # ladder containing one is an ordinary exhaustion and must still escalate.
+    from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeThrottledError
+
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    calls = {"n": 0}
+    real_place = client.place_trigger_order
+
+    def _mixed(**kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ExchangeThrottledError("429 Too Many Requests")
+        return real_place(**kw)
+
+    client.place_trigger_order = _mixed
+    client.place_script = ["error", "error", "error"]
+    outcome = _manager(db, client, gate).sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert outcome is ProtectionOutcome.NEEDS_EMERGENCY_CLOSE
+
+
 def _resting_status_payload(oid: str = "1001") -> dict:
     """An orderStatus answer that CONFIRMS the order is still on the book."""
     return {"status": "order", "order": {"order": {"oid": oid}, "status": "open"}}

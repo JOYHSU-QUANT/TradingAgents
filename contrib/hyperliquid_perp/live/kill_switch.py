@@ -470,6 +470,21 @@ class KillSwitchManager:
         if self._last_scheduled_at is None:
             return True
         elapsed = (self._clock.now() - self._last_scheduled_at).total_seconds()
+        if elapsed < 0:
+            # The clock moved BACKWARDS (an NTP step, a VM resume, a manual
+            # correction). The exchange's deadline was computed from the wall
+            # clock at schedule time and is ticking on ITS clock regardless, so
+            # "no time has passed" is the one reading that is certainly wrong.
+            # Refresh immediately — the fail-safe direction — rather than let a
+            # negative elapsed park the switch until the local clock catches
+            # back up, which for an hour-sized step means an hour of no
+            # refreshes while the deadline fires (2026-07-31 clock review).
+            logger.warning(
+                "kill switch: clock moved backwards (%.1fs since the last schedule) — "
+                "refreshing now rather than trusting the negative interval",
+                elapsed,
+            )
+            return True
         return elapsed >= self._config.refresh_interval_seconds - _REFRESH_DUE_SLACK_S
 
     def _detect_expired_deadline(self) -> None:
@@ -602,6 +617,14 @@ class KillSwitchManager:
         """
         if self._shutdown_started:
             raise RuntimeError("KillSwitchManager.tick() after shutdown()")
+        # Fire detection runs UNCONDITIONALLY, not only when a refresh is due.
+        # It used to be reachable solely from inside refresh(), which tick()
+        # calls only when refresh_due() says so — so the one condition that
+        # suppresses refresh_due() (a backwards clock making elapsed negative)
+        # silently disabled the detector too, in the exact scenario where the
+        # exchange-side deadline is measured on a clock nobody moved
+        # (2026-07-31 clock review).
+        self._detect_expired_deadline()
         if self.refresh_due():
             self.refresh()
 

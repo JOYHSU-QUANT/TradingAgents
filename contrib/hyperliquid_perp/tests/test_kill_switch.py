@@ -155,6 +155,42 @@ def test_disabled_config_cannot_build_a_manager(tmp_path):
         )
 
 
+def test_a_backwards_clock_refreshes_instead_of_parking_the_switch(env):
+    # refresh_due() measured elapsed on the wall clock, so an NTP step back (or
+    # a VM resume, or a manual correction) made elapsed NEGATIVE — which read as
+    # "no time has passed" and suppressed the refresh. The exchange's deadline
+    # was computed from the wall clock at schedule time and keeps ticking on ITS
+    # clock regardless, so an hour-sized step meant an hour of no refreshes
+    # while that deadline ran down.
+    #
+    # ManualClock deliberately refuses to move backwards (it exists to keep
+    # OTHER tests from fabricating impossible orderings), so the step back is
+    # applied to the manager's own last-schedule instant instead — the same
+    # arithmetic from the other side, and the only input refresh_due() reads.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    before = len(client.schedule_calls)
+    manager._last_scheduled_at = clock.now() + timedelta(hours=1)
+    assert manager.refresh_due() is True
+    manager.tick()
+    assert len(client.schedule_calls) > before
+
+
+def test_fire_detection_no_longer_depends_on_a_refresh_being_due(env):
+    # The compounding half. _detect_expired_deadline was reachable ONLY from
+    # inside refresh(), which tick() calls only when refresh_due() says so — so
+    # anything that suppressed refresh_due() silently disabled the detector too,
+    # and the local gate kept reporting active while the exchange had already
+    # cancelled every order on the wallet. tick() now calls it unconditionally.
+    db, client, gate, clock, manager = env
+    manager.arm()
+    clock.advance(KillSwitchConfig().schedule_cancel_seconds + 30)
+    manager.refresh_due = lambda: False  # the suppression, whatever its cause
+    manager.tick()
+    assert "kill_switch_cancel_triggered" in _event_types(db)
+    assert gate.kill_switch_active is False
+
+
 def _manager_with(config: KillSwitchConfig, *, max_tick_gap_seconds: float):
     gate = _gate()
     return KillSwitchManager(

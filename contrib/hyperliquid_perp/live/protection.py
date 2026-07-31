@@ -43,7 +43,7 @@ from decimal import Decimal, localcontext
 from enum import Enum
 
 from ..domains.perp.margin import DECIMAL_CONTEXT
-from ..exchanges.hyperliquid.errors import ExchangeError
+from ..exchanges.hyperliquid.errors import ExchangeError, ExchangeThrottledError
 from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
 from ..paper.clock import Clock, WallClock
 from ..paper.stops import (
@@ -115,6 +115,15 @@ class _EstablishResult(Enum):
     # practice this means the kill switch: escalating to an emergency close is
     # futile (the same gate blocks it) — hold and retry next sync instead.
     GATE_BLOCKED = "gate_blocked"
+    # Every failure that reached the wire was the venue REFUSING TO SERVE the
+    # request (429 / overload), never a rejection of the order itself. Same
+    # disposition as GATE_BLOCKED — hold, retry next sync — for the same reason:
+    # escalating is wrong when nothing said this order cannot exist. §17.2's
+    # emergency close would market-out a healthy position and latch the run for
+    # a human, and a venue throttles hardest in exactly the violent move a stop
+    # exists for, so "rate limited" read as "this stop can never be placed" is
+    # the worst possible time to be wrong (2026-07-31 partial-failure review).
+    THROTTLED = "throttled"
 
 
 class ProtectionOutcome(str, Enum):
@@ -320,14 +329,24 @@ class ProtectionManager:
 
         assert sl_decision.price is not None
         sl_result = self._establish("stop_loss", position, sl_decision.price, now)
-        if sl_result is _EstablishResult.GATE_BLOCKED:
-            # Every attempt was refused PRE-SEND by the §4.1 wire gate (in
-            # practice: the kill switch — the protective entrypoint exempts the
-            # safe-mode lines). Nothing failed ON the exchange, and the same
-            # gate would refuse the emergency close too, so escalating would be
-            # a futile close storm. Keep the failure line up (blocks new risk),
-            # retry next sync once the gate reopens; §12.3's SL-missing check
-            # remains the standing net for the unprotected window.
+        if sl_result in (_EstablishResult.GATE_BLOCKED, _EstablishResult.THROTTLED):
+            # Two ways to arrive, one disposition — hold, do not escalate.
+            #
+            # GATE_BLOCKED: every attempt was refused PRE-SEND by the §4.1 wire
+            # gate (in practice: the kill switch — the protective entrypoint
+            # exempts the safe-mode lines). Nothing failed ON the exchange, and
+            # the same gate would refuse the emergency close too, so escalating
+            # would be a futile close storm.
+            #
+            # THROTTLED: every attempt that reached the wire was the venue
+            # declining to SERVE it. Nothing said this order cannot exist, so
+            # §17.2's market-out-and-latch would be a response to a rate limit —
+            # taken during the violent move a stop exists for, which is when a
+            # venue throttles hardest.
+            #
+            # Either way: keep the failure line up (blocks new risk), retry next
+            # sync; §12.3's SL-missing check remains the standing net for the
+            # unprotected window.
             self._gate.unresolved_protection_failure = True
             # §17.4 is modify-before-cancel, so a gate-refused MODIFY can leave
             # the previous SL resting while a gate-refused CREATE leaves
@@ -377,7 +396,12 @@ class ProtectionManager:
                 order_id=None if covering is None else covering["order_id"],
                 cloid_hex=None if covering is None else covering["cloid_hex"],
                 detail=(
-                    "wire gate refused every SL attempt pre-send (kill switch); retrying "
+                    (
+                        "wire gate refused every SL attempt pre-send (kill switch); retrying "
+                        if sl_result is _EstablishResult.GATE_BLOCKED
+                        else "the exchange rate-limited every SL attempt (nothing was "
+                        "rejected, only unserved); retrying "
+                    )
                     + (
                         "next sync — the previous SL still rests and covers the position"
                         if covering is not None
@@ -549,6 +573,12 @@ class ProtectionManager:
         # Flipped the moment any attempt reaches (or may have reached) the wire;
         # a ladder that ends with this still True never transmitted anything.
         all_gate_blocked = True
+        # Throttle bookkeeping: a ladder whose only wire-reaching failures were
+        # the venue declining to SERVE us must not escalate (see
+        # _EstablishResult.THROTTLED). One rejection of the ORDER anywhere in the
+        # ladder is enough to make this an ordinary exhaustion again.
+        saw_throttle = False
+        saw_other_wire_failure = False
         for attempt in range(1, attempts + 1):
             order_id, logical, hexid = self._mint_ids(role, seq)
             try:
@@ -588,8 +618,20 @@ class ProtectionManager:
                 self._log_attempt_failed(role, attempt, attempts, existing_oid, exc, now)
                 self._maybe_delay(attempt, attempts)
                 continue
+            except ExchangeThrottledError as exc:
+                all_gate_blocked = False
+                saw_throttle = True
+                # No orderStatus recovery probe here: it would ride the SAME
+                # rate limiter that just refused us, so it fails too and buys
+                # nothing but another request against the budget. The next sync
+                # re-establishes from scratch, and a landed-but-ack-lost order
+                # is picked up then (or by §12.3 reconciliation).
+                self._log_attempt_failed(role, attempt, attempts, existing_oid, exc, now)
+                self._maybe_delay(attempt, attempts, backoff=attempt)
+                continue
             except ExchangeError as exc:
                 all_gate_blocked = False
+                saw_other_wire_failure = True
                 # Unknown outcome (§8.3 rule 11): a lost ack / timeout may have left
                 # the order LIVE on the exchange. Ask orderStatus BEFORE counting a
                 # failure — a landed-but-ack-lost SL/TP must not be blind-resent
@@ -647,9 +689,16 @@ class ProtectionManager:
                 # rules 2–4) → recovered, no resend.
                 return _EstablishResult.ESTABLISHED
 
+            # An ack that says "no" is the exchange REJECTING the order, which is
+            # exactly the evidence a throttle is not.
+            saw_other_wire_failure = True
             self._log_attempt_failed(role, attempt, attempts, existing_oid, ack.error, now)
             self._maybe_delay(attempt, attempts)
-        return _EstablishResult.GATE_BLOCKED if all_gate_blocked else _EstablishResult.EXHAUSTED
+        if all_gate_blocked:
+            return _EstablishResult.GATE_BLOCKED
+        if saw_throttle and not saw_other_wire_failure:
+            return _EstablishResult.THROTTLED
+        return _EstablishResult.EXHAUSTED
 
     def _log_attempt_failed(
         self,
@@ -739,10 +788,18 @@ class ProtectionManager:
         )
         return True
 
-    def _maybe_delay(self, attempt: int, attempts: int) -> None:
+    def _maybe_delay(self, attempt: int, attempts: int, *, backoff: int = 1) -> None:
+        """Sleep between ladder attempts, refreshing the switch across the pause.
+
+        ``backoff`` multiplies the configured delay. Retrying a rate limiter on
+        a flat cadence mostly spends the budget re-triggering it; the multiplier
+        is linear rather than exponential because the whole ladder still has to
+        fit inside the tick's timing envelope (§18.2), which the fixed delay was
+        chosen against.
+        """
         if attempt >= attempts:
             return
-        self._sleep(float(self._config.sl_repair_retry_delay_seconds))
+        self._sleep(float(self._config.sl_repair_retry_delay_seconds) * backoff)
         # §18.2: this delay blocked the single-threaded tick — refresh the dead
         # man's switch across it (as the startup sweep does) so a repair episode
         # never stretches the kill-switch refresh cadence toward ``max_tick_gap``

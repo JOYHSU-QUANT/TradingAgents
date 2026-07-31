@@ -19,6 +19,23 @@ class ExchangeRequestError(ExchangeError):
     """
 
 
+class ExchangeThrottledError(ExchangeRequestError):
+    """The exchange refused to SERVE the request: rate limited or overloaded.
+
+    A subclass of :class:`ExchangeRequestError` so every existing
+    ``except ExchangeRequestError`` keeps working unchanged. The distinction is
+    for the callers that must tell "temporarily could not send" from "sent, and
+    the exchange said no".
+
+    §17.2's stop-loss repair ladder is why this exists. It counts attempts and,
+    on exhaustion, market-closes a healthy position and latches the run for a
+    human. Three fixed-delay attempts inside one 15-second rate-limit window all
+    fail, so a throttle read exactly like "this stop can never be placed" — in
+    the violent move the stop exists for, which is precisely when a venue
+    throttles (2026-07-31 partial-failure review).
+    """
+
+
 class UnknownCoinError(ExchangeError):
     """The requested coin is not present in the exchange's perp universe."""
 

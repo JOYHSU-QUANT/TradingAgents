@@ -1026,6 +1026,12 @@ def _cmd_live(argv: list[str]) -> int:
 # KillSwitchManager construction below, so the number the preflight proves is
 # the number the constructor enforces.
 _RECOVERY_MAX_TICK_GAP_SECONDS = 30.0
+# The narrowest dead-man cover the smoke suite will run under, whatever the
+# config says. The suite refreshes once per TEST rather than on a fixed tick,
+# and a test is an unbounded place/poll/cancel round-trip, so the config's
+# daemon-shaped invariant does not bound it. 120s is what the suite guaranteed
+# before the value was wired from config at all (2026-07-31).
+_SMOKE_MIN_KILL_SWITCH_DEADLINE = timedelta(seconds=120)
 
 
 def _live_startup_recovery(
@@ -1062,12 +1068,7 @@ def _live_startup_recovery(
     from .exchanges.hyperliquid.signed_client import HyperliquidSignedClient
     from .live.fill_backfill import FillBackfiller
     from .live.fills import LiveFillProcessor
-    from .live.kill_switch import (
-        KillSwitchManager,
-        kill_switch_timing_violation,
-        network_timeout_warning,
-        sl_repair_delay_warning,
-    )
+    from .live.kill_switch import KillSwitchManager
     from .live.order_gate import RealOrderGate
     from .live.reconcile import LiveReconciler
     from .live.safe_mode import SafeModeManager
@@ -1096,30 +1097,8 @@ def _live_startup_recovery(
         )
         return 1
 
-    # Refuse a violating kill-switch timing BEFORE any side effect (run row,
-    # run lock) with a named exit 1 — kill_switch_timing_violation's docstring
-    # owns the invariant and the why-a-preflight story.
-    violation = kill_switch_timing_violation(live_cfg.kill_switch, _RECOVERY_MAX_TICK_GAP_SECONDS)
-    if violation is not None:
-        print(
-            f"error: {violation}. Raise live.kill_switch.schedule_cancel_seconds "
-            "or lower live.kill_switch.refresh_interval_seconds.",
-            file=sys.stderr,
-        )
+    if _timing_preflight(live_cfg, client) != 0:
         return 1
-    # Its advisory sister (decided 2026-07-22 "soft mitigation"): warn — do
-    # not refuse — when the per-request REST timeout cannot keep the same
-    # max_tick_gap promise. Beside the enforced check so the two halves of
-    # the §18.2 timing story stay in one place for PR 6's hard invariant.
-    for advisory in (
-        network_timeout_warning(client.timeout, _RECOVERY_MAX_TICK_GAP_SECONDS),
-        sl_repair_delay_warning(
-            float(live_cfg.protection.sl_repair_retry_delay_seconds),
-            _RECOVERY_MAX_TICK_GAP_SECONDS,
-        ),
-    ):
-        if advisory is not None:
-            print(f"WARNING: {advisory}", file=sys.stderr)
 
     run_id: str = args.run_id
     coin = live_cfg.safety.allowed_symbols[0]
@@ -1787,6 +1766,52 @@ def _live_heartbeat(db, run_id: str, *, pid: int, now, safe_mode) -> None:
             ),
             detail="run-lock heartbeat write failed (see log)",
         )
+
+
+def _timing_preflight(live_cfg, client) -> int:
+    """The §18.2 refresh-timing preflight: ``0`` to proceed, ``1`` to refuse.
+
+    Shared by EVERY entry point that arms the dead man's switch, which is the
+    whole point. `live` refused a violating config here with a named exit 1 that
+    says which two knobs to move; `live-smoke` had no such check, so the same
+    bad config reached ``KillSwitchManager.__init__``, raised, was contained as
+    a ``SmokePreflightError`` and surfaced as exit 4. RUNBOOK §5 answers exit 4
+    with "the run state is unclean — check `safe-mode --status`", which is the
+    wrong investigation entirely, and §8 tells a supervisor to branch its
+    restart policy on 1-vs-4, so a script mis-routes it too (2026-07-31).
+
+    Refusing BEFORE any side effect (run row, run lock, wire action) is the
+    point of a preflight; ``kill_switch_timing_violation``'s docstring owns the
+    invariant itself.
+    """
+    from .live.kill_switch import (
+        kill_switch_timing_violation,
+        network_timeout_warning,
+        sl_repair_delay_warning,
+    )
+
+    violation = kill_switch_timing_violation(live_cfg.kill_switch, _RECOVERY_MAX_TICK_GAP_SECONDS)
+    if violation is not None:
+        print(
+            f"error: {violation}. Raise live.kill_switch.schedule_cancel_seconds "
+            "or lower live.kill_switch.refresh_interval_seconds.",
+            file=sys.stderr,
+        )
+        return 1
+    # Its advisory sister (decided 2026-07-22 "soft mitigation"): warn — do
+    # not refuse — when the per-request REST timeout cannot keep the same
+    # max_tick_gap promise. Beside the enforced check so the two halves of
+    # the §18.2 timing story stay in one place.
+    for advisory in (
+        network_timeout_warning(client.timeout, _RECOVERY_MAX_TICK_GAP_SECONDS),
+        sl_repair_delay_warning(
+            float(live_cfg.protection.sl_repair_retry_delay_seconds),
+            _RECOVERY_MAX_TICK_GAP_SECONDS,
+        ),
+    ):
+        if advisory is not None:
+            print(f"WARNING: {advisory}", file=sys.stderr)
+    return 0
 
 
 def _run_genesis_network(config_json: str | None) -> object | None:
@@ -2626,6 +2651,15 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
         print(f"error: agent authorization failed — {exc}", file=sys.stderr)
         return 1
 
+    # The SAME preflight `live` runs, so one bad config gets one exit code and
+    # one remedy. Without it the violation surfaced from KillSwitchManager's
+    # constructor as a contained SmokePreflightError → exit 4, which RUNBOOK §5
+    # answers with "check the run state" — the wrong investigation, and a
+    # supervisor branching on 1-vs-4 mis-routes it too. Needs `client` for the
+    # timeout advisory, so it sits here rather than with the config checks.
+    if _timing_preflight(live_cfg, client) != 0:
+        return 1
+
     gate = RealOrderGate.from_config(live_cfg)
     gate.agent_authorized = True
     signed = HyperliquidSignedClient(
@@ -2690,7 +2724,21 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
         # whole suite — so a test making a few round-trips on a slow network
         # could let the switch fire and cancel the resting probe, exactly the
         # failure the refresh exists to prevent (2026-07-30 concurrency review).
-        kill_switch_deadline=timedelta(seconds=live_cfg.kill_switch.schedule_cancel_seconds),
+        # ...but a FLOOR, not a plain hand-over. The config invariant only
+        # requires schedule_cancel > 5s and >= 2x refresh_interval, both judged
+        # against `live`'s 30s tick model — while the suite refreshes once per
+        # TEST, and a test is a place/poll/cancel round-trip with no upper bound.
+        # So a config that is perfectly legal for the daemon (say 40s/5s) would
+        # hand the suite a 40s cover, narrower than the 120s it had before the
+        # value was wired through at all, and the switch could fire mid-test and
+        # cancel the resting probe — recorded as "the exchange refused", which
+        # sends the operator to check config and market state rather than the
+        # clock. max() keeps 3ae0087's intent (a LONGER cover is honoured) while
+        # never going below what the suite used to guarantee (2026-07-31).
+        kill_switch_deadline=max(
+            timedelta(seconds=live_cfg.kill_switch.schedule_cancel_seconds),
+            _SMOKE_MIN_KILL_SWITCH_DEADLINE,
+        ),
         run_recovery=_run_recovery,
         heartbeat=_heartbeat,
     )

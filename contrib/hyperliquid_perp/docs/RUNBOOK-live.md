@@ -497,7 +497,7 @@ mode 切換都手動改 config（§22／§26）。
 | `live-smoke`／`live` 報同 db 另一個 run 正在跑（exit 1） | 同網路的姊妹 run 還持著新鮮 lease；kill switch／`updateLeverage`／§19.3 掃單是整帳戶層級，會扒掉它的護欄。**停掉它，或等 lease 過期**。不同網路的 run、以及 paper run，都不會觸發這條。⚠️ 換 `--db` 不是解法——危害綁錢包不綁 store，換 store 只會讓檢查瞎掉。 |
 | `store schema is vN; this build needs vM`（exit 1） | code 升級後帶了新 migration，而 `validate`／`export`／`--gate-status` 是純報表指令、**刻意不自動 migrate**（免得升級一個 daemon 正在用的 store）。先停掉 daemon，再跑擁有這個 store 的指令（paper store 用 `paper --run-id ...`，live store 用 `live --run-id ...`）讓它 migrate，然後重跑。`safe-mode` 與真跑的 `live-smoke` 會自己 migrate，不受這條影響。 |
 | `store schema is vN but this build only knows vM`（拒絕開啟） | 這個 store 被**更新版**的 code migrate 過，現在用舊 binary 開它會用不認得的欄位寫穿它。跑回新版 code，或還原升級前的備份。 |
-| `live-smoke` 報 pre-flight recovery 沒過（exit 4） | run 狀態不乾淨；`safe-mode --status` 查 open case、照 §6 處置後重跑。 |
+| `live-smoke` 報 pre-flight recovery 沒過（exit 4） | run 狀態不乾淨；`safe-mode --status` 查 open case、照 §6 處置後重跑。**注意 config 錯誤不會走這條**：kill-switch timing 違規在 `live-smoke` 與 `live` 一樣是啟動前的具名 **exit 1**（訊息直接指名 `schedule_cancel_seconds`／`refresh_interval_seconds` 兩個 knob），所以 supervisor 依 1／4 分流仍然正確。 |
 | `OPENROUTER_API_KEY is not set`（exit 1，只有 `--loop`） | `--loop` 要跑 4h AI cycle；依 §1.4 設好 key。不加 `--loop` 的 `live` 不需要 key。 |
 | `live.allow_real_orders is false` | live-smoke／--loop 要真下單；設 `allow_real_orders: true` 並備妥 agent key，或 live-smoke 用 `--dry-run`。 |
 | `validate` exit 5、replay unverifiable | store 帳本對不上；先查（別盲目重啟），必要時 `safe-mode --status`。 |

@@ -57,6 +57,7 @@ def _smoke_yaml(
     wallet: str | None = _SMOKE_WALLET,
     allow_real_orders: bool = True,
     schedule_cancel_seconds: int | None = None,
+    refresh_interval_seconds: int | None = None,
 ):
     """A minimal live config that passes every live-smoke config gate."""
     path = tmp_path / "smoke-cfg.yaml"
@@ -67,8 +68,12 @@ def _smoke_yaml(
     text += "live:\n  mode: testnet_live\n  network: testnet\n"
     if allow_real_orders:
         text += "  allow_real_orders: true\n"
-    if schedule_cancel_seconds is not None:
-        text += f"  kill_switch:\n    schedule_cancel_seconds: {schedule_cancel_seconds}\n"
+    if schedule_cancel_seconds is not None or refresh_interval_seconds is not None:
+        text += "  kill_switch:\n"
+        if schedule_cancel_seconds is not None:
+            text += f"    schedule_cancel_seconds: {schedule_cancel_seconds}\n"
+        if refresh_interval_seconds is not None:
+            text += f"    refresh_interval_seconds: {refresh_interval_seconds}\n"
     path.write_text(text, encoding="utf-8")
     return path
 
@@ -532,6 +537,46 @@ def test_real_smoke_session_takes_the_kill_switch_deadline_from_config(tmp_path,
         session = _build_smoke_session(args, db)
         assert not isinstance(session, int)  # not an exit code: the build succeeded
         assert session.kill_switch_deadline == timedelta(seconds=600)
+
+
+def test_a_short_configured_cover_is_floored_not_inherited(tmp_path, smoke_seams):
+    # The other direction of the same wiring. The config invariant only demands
+    # schedule_cancel > 5s and >= 2x refresh_interval, both judged against
+    # `live`'s 30s tick model — but the suite refreshes once per TEST, and a
+    # test is an unbounded place/poll/cancel round-trip. So 40s/5s is legal for
+    # the daemon while handing the suite a cover NARROWER than the 120s it had
+    # before the value was wired from config at all: the switch fires mid-test
+    # and cancels the resting probe, recorded as "the exchange refused" — which
+    # sends the operator to check config and market state, not the clock.
+    from contrib.hyperliquid_perp.cli import _build_smoke_session
+
+    cfg = _smoke_yaml(tmp_path, schedule_cancel_seconds=40, refresh_interval_seconds=5)
+    dbp = _seed_genesis_run(tmp_path, cfg)
+    args = SimpleNamespace(config=str(cfg), db=str(dbp), run_id="r1", dry_run=False)
+    with Database(dbp) as db:
+        session = _build_smoke_session(args, db)
+        assert not isinstance(session, int)
+        assert session.kill_switch_deadline == timedelta(seconds=120)
+
+
+def test_smoke_refuses_a_violating_kill_switch_timing_with_exit_1(tmp_path, capsys, smoke_seams):
+    # Exit-code parity with `live`. The same bad config used to reach
+    # KillSwitchManager's constructor, raise, be contained as a
+    # SmokePreflightError and surface as exit 4 — which RUNBOOK §5 answers with
+    # "the run state is unclean, check safe-mode --status" (the wrong
+    # investigation) and §8 tells a supervisor to branch its restart policy on.
+    # Legal to LiveConfig (60 >= 2x30) but violating once the caller's 30s
+    # worst-case tick gap is added: 30 + 30 is not strictly inside 60. This is
+    # exactly the band only the preflight catches — a config-level violation
+    # would already exit 1 from load_config and prove nothing.
+    cfg = _smoke_yaml(tmp_path, schedule_cancel_seconds=60, refresh_interval_seconds=30)
+    dbp = _seed_genesis_run(tmp_path, cfg)
+    rc = cli_main(["live-smoke", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    # And it names the two knobs, exactly as `live` does.
+    assert "schedule_cancel_seconds" in err
+    assert "refresh_interval_seconds" in err
 
 
 # -- validate (live): the CLI's 0 / 5 exit mapping -----------------------------

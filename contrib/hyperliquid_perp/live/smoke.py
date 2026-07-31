@@ -584,7 +584,8 @@ class SmokeTestRunner:
         """Re-arm the pre-flight's dead-man switch before each test (§18).
 
         The pre-flight recovery arms the account-wide scheduleCancel at
-        now + ``kill_switch_deadline`` (120s) and nothing else refreshes it
+        now + ``kill_switch_deadline`` (the run's configured cover, floored at
+        120s by the CLI) and nothing else refreshes it
         until a restart test's own recovery — a full suite runs longer than
         that, so the switch would FIRE mid-suite: the exchange cancels the
         resting trigger probe under tests 5/8–13 (a spurious ``failed`` in the

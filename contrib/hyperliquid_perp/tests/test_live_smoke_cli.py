@@ -393,6 +393,50 @@ def test_a_sibling_on_the_other_network_is_not_a_conflict(tmp_path):
         assert _conflicting_run_lease(db, "r1") == ("mainnet-BTC", 4321)
 
 
+def test_a_sibling_whose_network_differs_only_in_case_is_still_a_conflict(tmp_path):
+    # LiveConfig reads network case-insensitively, so "Testnet" and "testnet"
+    # are the same exchange and the same wallet. Comparing the raw genesis
+    # strings made them look like different networks and sent this guard
+    # fail-OPEN — the one direction its docstring forbids, since the cost of a
+    # false pass is a stripped dead-man switch on a live wallet.
+    from contrib.hyperliquid_perp.cli import _conflicting_run_lease
+
+    cfg = _smoke_yaml(tmp_path)
+    dbp = _seed_genesis_run(tmp_path, cfg)  # r1, "testnet"
+    _seed_genesis_run(tmp_path, cfg, run_id="sibling-run")
+    _set_genesis_network(dbp, "sibling-run", "  TestNet  ")
+    _write_lease(dbp, "sibling-run", pid=4321, heartbeat_at=datetime.now(timezone.utc))
+    with Database(dbp) as db:
+        assert _conflicting_run_lease(db, "r1") == ("sibling-run", 4321)
+
+
+def test_a_paper_sibling_is_not_a_conflict(tmp_path):
+    # A paper run signs nothing and holds no wallet: it can neither be harmed by
+    # an account-wide action nor take one. It also has no live: block at all, so
+    # before this it read as an unreadable network and was refused fail-closed —
+    # telling the operator to stop a run to protect a dead-man cover it never had.
+    import json
+
+    from contrib.hyperliquid_perp.cli import _conflicting_run_lease
+    from contrib.hyperliquid_perp.paper import accounting
+    from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
+
+    cfg = _smoke_yaml(tmp_path)
+    dbp = _seed_genesis_run(tmp_path, cfg)
+    with Database(dbp) as db:
+        accounting.initialize_run(
+            db,
+            run_id="paper-BTC",
+            mode="paper",
+            initial_balance_usdc=Decimal(1000),
+            schema_version=SCHEMA_VERSION,
+            config_json=json.dumps({"coin": "BTC"}),
+        )
+    _write_lease(dbp, "paper-BTC", pid=4321, heartbeat_at=datetime.now(timezone.utc))
+    with Database(dbp) as db:
+        assert _conflicting_run_lease(db, "r1") is None
+
+
 def test_a_sibling_whose_genesis_network_is_unreadable_is_treated_as_a_conflict(tmp_path):
     # Fail-closed on a corrupt genesis: an unreadable network is not evidence of
     # safety, and the cost of a false refusal is one operator message against a

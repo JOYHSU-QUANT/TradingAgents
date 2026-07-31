@@ -165,13 +165,39 @@ class Database:
     single thread); this class deliberately does not pick one yet.
     """
 
-    def __init__(self, path: str | Path, *, migrate: bool = True) -> None:
+    def __init__(
+        self, path: str | Path, *, migrate: bool = True, defer_migration: bool = False
+    ) -> None:
+        """Open the store under one of three schema policies.
+
+        ``migrate=True`` (default) — this command owns the store and upgrades it
+        on open. ``migrate=False`` — a reporting command: refuse either mismatch
+        rather than touch a store a daemon may own. ``defer_migration=True`` —
+        open as-is, check nothing, and leave the upgrade to the caller once it
+        HOLDS THE LEASE.
+
+        The third policy exists because ``migrate=True`` necessarily runs before
+        the lease can be taken (the lease lives in the store being opened), so an
+        owning command upgraded the schema underneath a running sibling daemon
+        and only THEN discovered it had to refuse — doing the damage on the way
+        to declining to do it. The lease table predates every migration this can
+        apply, so taking the lease against an unmigrated store is safe.
+
+        A caller that defers MUST call :func:`apply_migrations` once it owns the
+        run; that is the point of deferring, so the timing is deliberately the
+        caller's to choose and is not enforced here (2026-07-31 review).
+        """
+        if defer_migration and migrate:
+            raise ValueError(
+                "defer_migration requires migrate=False — it IS the deferral, and "
+                "migrate=True would already have upgraded the store on open"
+            )
         self._conn = connect(path)
         self._in_transaction = False
         try:
             if migrate:
                 apply_migrations(self._conn)
-            else:
+            elif not defer_migration:
                 # Read-style commands (validate / export / live-smoke
                 # --gate-status) pass migrate=False. They take no run lease, so
                 # migrating here would silently upgrade a store a RUNNING

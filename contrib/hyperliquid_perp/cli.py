@@ -67,7 +67,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .config import CONFIG_LOAD_ERRORS, dotenv_diagnosis, load_config, load_dotenv_files
-from .persistence.db import Database, SchemaVersionError
+from .persistence.db import Database, SchemaVersionError, apply_migrations
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +135,9 @@ def main(argv: list[str] | None = None) -> int:
 # --------------------------------------------------------------------------
 
 
-def _open_existing_db(path: str, *, migrate: bool = False) -> Database | None:
+def _open_existing_db(
+    path: str, *, migrate: bool = False, defer_migration: bool = False
+) -> Database | None:
     """Open an existing store, or report why not (never CREATE one implicitly).
 
     ``Database(path)`` would happily create an empty schema — and an offline
@@ -148,19 +150,21 @@ def _open_existing_db(path: str, *, migrate: bool = False) -> Database | None:
       migrating would silently upgrade a store a running daemon owns, leaving
       that daemon writing through a schema it does not know. They refuse with
       instructions instead (2026-07-30 migration review).
-    * ``True`` for the commands that legitimately CHANGE the run — ``safe-mode``
+    * ``True`` for ``safe-mode``, which legitimately CHANGES the run
       (``--release`` / ``--stamp-case`` write, and ``--status`` is how an
-      operator diagnoses a latched run) and the real ``live-smoke`` run (it
-      takes the lease moments later and places real orders). Refusing these
-      would disable exactly the diagnostic tools an upgrade is most likely to
-      need: the exit check found ``safe-mode`` blocked by the very condition it
-      exists to investigate (2026-07-31).
+      operator diagnoses a latched run). Refusing it would disable exactly the
+      diagnostic tool an upgrade is most likely to need: the exit check found
+      ``safe-mode`` blocked by the very condition it exists to investigate
+      (2026-07-31). It takes no lease, so this remains a deliberate exception.
+    * ``defer_migration=True`` for the real ``live-smoke`` run, which owns the
+      store but cannot prove it until it holds the lease — it migrates itself
+      once it does. See :class:`Database` for why that ordering matters.
     """
     if not Path(path).exists():
         print(f"error: database {path!r} does not exist.", file=sys.stderr)
         return None
     try:
-        return Database(path, migrate=migrate)
+        return Database(path, migrate=migrate, defer_migration=defer_migration)
     except SchemaVersionError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return None
@@ -1340,6 +1344,30 @@ def _live_startup_recovery(
                     file=sys.stderr,
                 )
 
+        # The same per-WALLET hazard `live-smoke` refuses, on the path that runs
+        # with REAL money. This command arms and clears the account-wide
+        # scheduleCancel and runs the §19.3 stale-order sweep, whose bot-ownership
+        # lookup (get_cloid_by_hex) carries no run_id — so a sibling live run on
+        # this wallet has its resting orders cancelled by our sweep, and whichever
+        # of us shuts down cleanly first strips the other's dead-man cover. The
+        # run lease cannot see this: it is per-run_id, and both runs hold their
+        # own quite happily. Guarding only the testnet suite and not this was the
+        # most asymmetric gap of the 2026-07-31 review.
+        conflict = _conflicting_run_lease(db, run_id)
+        if conflict is not None:
+            other_run, other_pid = conflict
+            print(
+                f"error: run {other_run!r} in {args.db} is being driven by pid "
+                f"{other_pid} right now, on this same network — the same wallet. "
+                "This command's kill-switch arm/clear and §19.3 stale-order sweep are "
+                "ACCOUNT-wide, not run-scoped, so the two runs would cancel each "
+                "other's resting orders and strip each other's dead-man cover. Stop "
+                "that process, or wait for its lease to go stale. Moving either run "
+                "to a different --db does NOT help: the hazard is per-WALLET, so a "
+                "separate store only hides them from this check.",
+                file=sys.stderr,
+            )
+            return 1
         try:
             acquire_run_lock(db, run_id, pid=os.getpid(), now=now)
         except RunLockError as exc:
@@ -1758,11 +1786,18 @@ def _live_heartbeat(db, run_id: str, *, pid: int, now, safe_mode) -> None:
         )
 
 
-def _run_genesis_network(config_json: str | None) -> str | None:
+def _run_genesis_network(config_json: str | None) -> object | None:
     """``live.network`` from a run's genesis config, or None if unreadable.
 
     Same defensive shape as :func:`live.validation.execution_mode`: a corrupt or
     non-object ``config_json`` degrades to None rather than crashing a guard.
+
+    NORMALISED through the same helper the drift report uses, because LiveConfig
+    reads network case-insensitively: two runs whose genesis says "Testnet" and
+    "testnet" are the same exchange and the same wallet. Comparing the raw
+    strings made them look like different networks, sending the guard below
+    fail-OPEN in the one direction its own docstring forbids — "the cost of a
+    false pass is a stripped dead-man switch on a live wallet" (2026-07-31).
     """
     if not config_json:
         return None
@@ -1772,7 +1807,7 @@ def _run_genesis_network(config_json: str | None) -> str | None:
         return None
     live = parsed.get("live") if isinstance(parsed, dict) else None
     if isinstance(live, dict) and isinstance(live.get("network"), str):
-        return live["network"]
+        return _norm_network(live)
     return None
 
 
@@ -1812,6 +1847,14 @@ def _conflicting_run_lease(db, run_id: str) -> tuple[str, int] | None:
         if age >= LOCK_STALE_SECONDS:
             continue
         sibling = repo.get_run(db.conn, str(row["run_id"]))
+        if sibling is not None and sibling["mode"] != "live":
+            # A PAPER run. It signs nothing and holds no wallet, so it cannot be
+            # harmed by an account-wide action and cannot take one. Checked
+            # before the network comparison because a paper genesis has no
+            # ``live`` block at all: it would read as an unreadable network and
+            # be refused fail-closed, with a message about stripping a dead-man
+            # cover it never had (2026-07-31).
+            continue
         sibling_network = None if sibling is None else _run_genesis_network(sibling["config_json"])
         if (
             own_network is not None
@@ -2226,10 +2269,19 @@ def _cmd_live_smoke(argv: list[str]) -> int:
     # matter how the build or the run fails (a raise, not just an int return) —
     # the try/finally makes the cleanup structural, not dependent on every
     # _build_* failure path returning an int (silent-failure review, 2026-07-27).
-    # migrate=True: unlike --gate-status above, the real run takes the lease a
-    # few lines down and places real orders, so it is an owning command, not a
-    # reporting one (2026-07-31).
-    db = _open_existing_db(args.db, migrate=True)
+    # Schema policy splits on --dry-run, not on the command:
+    #
+    # * a dry run takes NO lease (see below) and touches only this store to check
+    #   wiring, which makes it a reporting command by the same test `validate` and
+    #   `--gate-status` are judged by. Migrating there was the sharpest remaining
+    #   version of the hazard the reporting/owning split exists to close: the one
+    #   command advertised as the safe offline check was the one that silently
+    #   upgraded a store a running daemon owned.
+    # * a real run does own the store — but it cannot take the lease until the
+    #   store is open, so migrating AT open still upgraded the schema underneath a
+    #   sibling daemon and only then reached the conflict check that refuses. It
+    #   defers instead and migrates below, once it actually owns the run.
+    db = _open_existing_db(args.db, defer_migration=not args.dry_run)
     if db is None:
         return 1
     preflight_error: str | None = None
@@ -2262,9 +2314,11 @@ def _cmd_live_smoke(argv: list[str]) -> int:
                     "The smoke suite's kill-switch arm/clear, updateLeverage and §19.3 "
                     "stale-order sweep are ACCOUNT-wide, not run-scoped, so running it "
                     "now would strip that run's dead-man cover and cancel its resting "
-                    "orders. Either stop that process, wait for its lease to go stale, "
-                    "or keep the two runs in separate stores (--db). A run on the OTHER "
-                    "network is a different exchange and does not conflict.",
+                    "orders. Stop that process, or wait for its lease to go stale. "
+                    "Moving either run to a different --db does NOT help: the hazard "
+                    "is per-WALLET and same-network runs share the wallet, so a "
+                    "separate store only hides them from this check. A run on the "
+                    "OTHER network is a different exchange and does not conflict.",
                     file=sys.stderr,
                 )
                 return 1
@@ -2279,6 +2333,11 @@ def _cmd_live_smoke(argv: list[str]) -> int:
                 )
                 return 1
             lock_pid = os.getpid()
+            # The lease is ours: NOW the schema upgrade is safe, because no
+            # sibling can be mid-write against the old one. Deferred from open
+            # (see _open_existing_db) so a refusal above cannot leave a migrated
+            # store behind as its only lasting effect.
+            apply_migrations(db.conn)
         try:
             runner = SmokeTestRunner(session)
             try:

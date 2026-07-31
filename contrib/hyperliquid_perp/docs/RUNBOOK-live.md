@@ -249,7 +249,12 @@ python -m contrib.hyperliquid_perp live-smoke \
   另一個 run 正被跑著（lease 還新鮮），smoke 會具名拒絕（exit 1）——否則它會扒掉
   那個 run 的 dead-man cover、撤掉它的掛單。**不同網路**的 run（§7.3 把 mainnet
   驗收 run 放在同一個 `live_trading.db`）是不同交易所、不同帳戶，**不算衝突**、
-  不會被擋。要並行又想完全隔離，就用不同的 `--db`。
+  不會被擋；同一個 db 裡的 **paper** run 也不算（它一張真單都不簽）。
+  `live --loop` 從 2026-07-31 起套用**同一道檢查**——它 arm/clear 的也是整帳戶的
+  scheduleCancel，§19.3 掃單認 bot-owned 時也不帶 `run_id`。
+  ⚠️ **不要用「換一個 `--db`」繞過這條**：危害是**每個錢包**的，同網路的兩個 run
+  共用同一個錢包，換 store 只是讓這道檢查看不見對方，危害原封不動。真正要隔離就得
+  換錢包（換 `HYPERLIQUID_*_AGENT_KEY` 指向的帳戶）。
 - **pre-flight recovery**：見 §3.2。pre-flight 沒過＝suite 直接中止（exit 4、
   不記任何判定）；先查 `safe-mode --status`／log、修好 run 狀態再重跑。
 - **probe 成交入帳**：會成交的 probe——測 6/7/18 的開倉／平倉 IOC，**加上**
@@ -489,7 +494,7 @@ mode 切換都手動改 config（§22／§26）。
 | `effective_notional_cap ... below the exchange minimum`（exit 1） | 入金遠低於交易所最小單（約 equity < 16.7 USDC）；見 §1.3。想吃滿 100 USDC 名目上限另需 ≥ ~167 USDC。 |
 | `--loop` 報 §20.2 smoke gate 未過（exit 4） | 先跑 `live-smoke`（§3），`--gate-status` 確認 yes 再 `--loop`。 |
 | `live-smoke` 報 run lock 被持有（exit 1） | 同一 run 的 `live --loop`／`paper` 還在跑；先停掉（或等 lease 過期）再跑 smoke。 |
-| `live-smoke` 報同 db 另一個 run 正在跑（exit 1） | 同網路的姊妹 run 還持著新鮮 lease；smoke 的 kill switch／`updateLeverage`／§19.3 掃單是整帳戶層級，會扒掉它的護欄。停掉它、等 lease 過期，或把兩個 run 放到不同 `--db`。不同網路的 run 不會觸發這條。 |
+| `live-smoke`／`live` 報同 db 另一個 run 正在跑（exit 1） | 同網路的姊妹 run 還持著新鮮 lease；kill switch／`updateLeverage`／§19.3 掃單是整帳戶層級，會扒掉它的護欄。**停掉它，或等 lease 過期**。不同網路的 run、以及 paper run，都不會觸發這條。⚠️ 換 `--db` 不是解法——危害綁錢包不綁 store，換 store 只會讓檢查瞎掉。 |
 | `store schema is vN; this build needs vM`（exit 1） | code 升級後帶了新 migration，而 `validate`／`export`／`--gate-status` 是純報表指令、**刻意不自動 migrate**（免得升級一個 daemon 正在用的 store）。先停掉 daemon，再跑擁有這個 store 的指令（paper store 用 `paper --run-id ...`，live store 用 `live --run-id ...`）讓它 migrate，然後重跑。`safe-mode` 與真跑的 `live-smoke` 會自己 migrate，不受這條影響。 |
 | `store schema is vN but this build only knows vM`（拒絕開啟） | 這個 store 被**更新版**的 code migrate 過，現在用舊 binary 開它會用不認得的欄位寫穿它。跑回新版 code，或還原升級前的備份。 |
 | `live-smoke` 報 pre-flight recovery 沒過（exit 4） | run 狀態不乾淨；`safe-mode --status` 查 open case、照 §6 處置後重跑。 |

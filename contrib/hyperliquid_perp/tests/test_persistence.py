@@ -53,6 +53,62 @@ def test_migrations_record_version(tmp_path):
     db.close()
 
 
+def test_defer_migration_opens_an_out_of_date_store_without_touching_it(tmp_path):
+    # migrate=True necessarily runs at OPEN, which is before the lease can be
+    # taken (the lease lives in the store being opened) — so an owning command
+    # upgraded the schema underneath a running sibling daemon and only then
+    # reached the conflict check that refuses: it did the damage on its way to
+    # declining to do it. Deferring lets the caller migrate once it owns the run.
+    from contrib.hyperliquid_perp.persistence.db import (
+        MIGRATIONS,
+        SchemaVersionError,
+        apply_migrations,
+        connect,
+        stored_schema_version,
+    )
+
+    # A GENUINELY old store: every migration up to the last one, and its
+    # bookkeeping row. (Deleting the top version row from a current store is not
+    # the same thing — the DDL has already run, so re-applying it collides.)
+    from contrib.hyperliquid_perp.persistence.schema import SCHEMA_MIGRATIONS_DDL
+
+    dbp = tmp_path / "old.db"
+    conn = connect(dbp)
+    try:
+        conn.execute(SCHEMA_MIGRATIONS_DDL)
+        for version in sorted(MIGRATIONS)[:-1]:
+            for statement in MIGRATIONS[version]:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (version, "2026-07-31T00:00:00+00:00"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # migrate=False refuses it outright (the reporting-command policy)...
+    with pytest.raises(SchemaVersionError):
+        Database(dbp, migrate=False)
+
+    # ...while deferring opens it as-is and leaves the upgrade to the caller.
+    db = Database(dbp, migrate=False, defer_migration=True)
+    try:
+        assert stored_schema_version(db.conn) < SCHEMA_VERSION  # untouched on open
+        apply_migrations(db.conn)
+        assert stored_schema_version(db.conn) == SCHEMA_VERSION
+    finally:
+        db.close()
+
+
+def test_defer_migration_with_migrate_true_is_rejected_by_name(tmp_path):
+    # Meaningless combination: migrate=True would already have upgraded the
+    # store on open, so there is nothing left to defer. Fail loudly rather than
+    # let a caller believe it deferred when it did not.
+    with pytest.raises(ValueError, match="requires migrate=False"):
+        Database(tmp_path / "x.db", migrate=True, defer_migration=True)
+
+
 def test_migrations_idempotent_on_reopen(tmp_path):
     path = tmp_path / "p.db"
     Database(path).close()

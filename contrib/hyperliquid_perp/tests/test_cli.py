@@ -3201,6 +3201,56 @@ def test_live_loop_open_smoke_gate_proceeds_past_the_gate(
     assert "2026-07-20" in err  # names the oldest pass
 
 
+def _open_smoke_gate(dbp, run_id="r1") -> None:
+    from contrib.hyperliquid_perp.live import smoke as smoke_mod
+
+    db = Database(dbp)
+    with db.transaction() as conn:
+        for test in smoke_mod.SMOKE_TESTS:
+            repo.insert_smoke_test_result(
+                conn,
+                run_id=run_id,
+                test_number=test.number,
+                test_key=test.key,
+                test_name=test.name,
+                status="passed",
+                network="testnet",
+                executed_at=datetime(2026, 7, 20, tzinfo=timezone.utc),
+            )
+    db.close()
+
+
+def test_live_loop_refuses_a_same_wallet_sibling_run(tmp_path, capsys, live_seams, monkeypatch):
+    # The guard `live-smoke` has had since 2026-07-30, now on the path that runs
+    # with REAL money. The run lease is per-run_id and both runs hold their own
+    # quite happily, but this command arms and clears the ACCOUNT-wide
+    # scheduleCancel and runs the §19.3 sweep, whose bot-ownership lookup carries
+    # no run_id — so the two runs cancel each other's resting orders and
+    # whichever shuts down first strips the other's dead-man cover.
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
+    _seed_live_run_with_genesis_subset(tmp_path, cfg, run_id="sibling")
+    _open_smoke_gate(dbp)
+    db = Database(dbp)
+    acquire_run_lock(db, "sibling", pid=999999, now=datetime.now(timezone.utc))
+    db.close()
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp), "--loop"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "ACCOUNT-wide" in err
+    assert "sibling" in err
+    # And it must not offer the remedy that does not work: the hazard is
+    # per-wallet, so a separate store only hides the two runs from this check.
+    assert "does NOT help" in err
+
+
 def test_live_loop_smoke_gate_does_not_apply_to_a_mainnet_run(
     tmp_path, capsys, live_seams, monkeypatch
 ):

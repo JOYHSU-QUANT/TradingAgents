@@ -1150,6 +1150,37 @@ def _live_startup_recovery(
                 file=sys.stderr,
             )
             return 1
+        # BEFORE --create writes the run row and before any wire action: a
+        # refusal taken later left a half-created run behind, and the operator's
+        # corrected re-run was then rejected as "already exists" (2026-07-31
+        # exit check). own_network comes from this session's config because a
+        # not-yet-created run has no genesis to read; the SIBLING's network is
+        # still read from the store.
+        #
+        # The same per-WALLET hazard `live-smoke` refuses, on the path that runs
+        # with REAL money. This command arms and clears the account-wide
+        # scheduleCancel and runs the §19.3 stale-order sweep, whose bot-ownership
+        # lookup (get_cloid_by_hex) carries no run_id — so a sibling live run on
+        # this wallet has its resting orders cancelled by our sweep, and whichever
+        # of us shuts down cleanly first strips the other's dead-man cover. The
+        # run lease cannot see this: it is per-run_id, and both runs hold their
+        # own quite happily. Guarding only the testnet suite and not this was the
+        # most asymmetric gap of the 2026-07-31 review.
+        conflict = _conflicting_run_lease(db, run_id, own_network=_norm_network(raw_live))
+        if conflict is not None:
+            other_run, other_pid = conflict
+            print(
+                f"error: run {other_run!r} in {args.db} is being driven by pid "
+                f"{other_pid} right now, on this same network — the same wallet. "
+                "This command's kill-switch arm/clear and §19.3 stale-order sweep are "
+                "ACCOUNT-wide, not run-scoped, so the two runs would cancel each "
+                "other's resting orders and strip each other's dead-man cover. Stop "
+                "that process, or wait for its lease to go stale. Moving either run "
+                "to a different --db does NOT help: the hazard is per-WALLET, so a "
+                "separate store only hides them from this check.",
+                file=sys.stderr,
+            )
+            return 1
         if existing_run is not None:
             # Resume validates the run's IDENTITY before any side effect (the
             # lock, arming the wallet-wide kill switch, reconciliation writes)
@@ -1326,30 +1357,6 @@ def _live_startup_recovery(
                     file=sys.stderr,
                 )
 
-        # The same per-WALLET hazard `live-smoke` refuses, on the path that runs
-        # with REAL money. This command arms and clears the account-wide
-        # scheduleCancel and runs the §19.3 stale-order sweep, whose bot-ownership
-        # lookup (get_cloid_by_hex) carries no run_id — so a sibling live run on
-        # this wallet has its resting orders cancelled by our sweep, and whichever
-        # of us shuts down cleanly first strips the other's dead-man cover. The
-        # run lease cannot see this: it is per-run_id, and both runs hold their
-        # own quite happily. Guarding only the testnet suite and not this was the
-        # most asymmetric gap of the 2026-07-31 review.
-        conflict = _conflicting_run_lease(db, run_id)
-        if conflict is not None:
-            other_run, other_pid = conflict
-            print(
-                f"error: run {other_run!r} in {args.db} is being driven by pid "
-                f"{other_pid} right now, on this same network — the same wallet. "
-                "This command's kill-switch arm/clear and §19.3 stale-order sweep are "
-                "ACCOUNT-wide, not run-scoped, so the two runs would cancel each "
-                "other's resting orders and strip each other's dead-man cover. Stop "
-                "that process, or wait for its lease to go stale. Moving either run "
-                "to a different --db does NOT help: the hazard is per-WALLET, so a "
-                "separate store only hides them from this check.",
-                file=sys.stderr,
-            )
-            return 1
         try:
             acquire_run_lock(db, run_id, pid=os.getpid(), now=now)
         except RunLockError as exc:
@@ -1839,7 +1846,9 @@ def _run_genesis_network(config_json: str | None) -> object | None:
     return None
 
 
-def _conflicting_run_lease(db, run_id: str) -> tuple[str, int] | None:
+def _conflicting_run_lease(
+    db, run_id: str, *, own_network: object | None = None
+) -> tuple[str, int] | None:
     """``(run_id, pid)`` of a SAME-NETWORK sibling holding a FRESH lease, else None.
 
     The run lease is per-``run_id``; the kill switch, ``updateLeverage`` and the
@@ -1858,6 +1867,13 @@ def _conflicting_run_lease(db, run_id: str) -> tuple[str, int] | None:
     caller's session, so the guard is self-contained and cannot disagree with
     what the runs were actually created as.
 
+    ``own_network`` overrides that read for the one caller that has no genesis to
+    read yet: `live --create` must refuse BEFORE it writes the run row, or a
+    refusal leaves a half-created run whose re-run is then rejected as "already
+    exists" (2026-07-31 exit check). The sibling's network still comes from the
+    store, so the comparison is never made against the caller's own idea of what
+    the OTHER run is.
+
     Either side being UNREADABLE is treated as a conflict: a corrupt genesis is
     not evidence of safety, and the cost of a false refusal is one operator
     message, while the cost of a false pass is a stripped dead-man switch on a
@@ -1867,8 +1883,9 @@ def _conflicting_run_lease(db, run_id: str) -> tuple[str, int] | None:
     from .paper.scheduler import parse_instant
     from .persistence import repository as repo
 
-    own = repo.get_run(db.conn, run_id)
-    own_network = None if own is None else _run_genesis_network(own["config_json"])
+    if own_network is None:
+        own = repo.get_run(db.conn, run_id)
+        own_network = None if own is None else _run_genesis_network(own["config_json"])
     now = datetime.now(timezone.utc)
     for row in repo.iter_other_run_leases(db.conn, run_id):
         age = (now - parse_instant(row["lock_heartbeat_at"])).total_seconds()
@@ -2374,23 +2391,29 @@ def _cmd_live_smoke(argv: list[str]) -> int:
             # next tick and the §18.2 shutdown sweep behind them, while this
             # finally is the only cleanup that exists (2026-07-31).
             signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
-            # The lease is ours: NOW the schema upgrade is safe, because no
-            # sibling can be mid-write against the old one. Deferred from open
-            # (see _open_existing_db) so a refusal above cannot leave a migrated
-            # store behind as its only lasting effect.
-            #
-            # Deferring also moved the "this store was migrated by a NEWER build"
-            # refusal here, so it has to be caught: uncaught it reached main()'s
-            # last-resort handler as exit 2 ("fatal: unexpected error"), losing
-            # the named exit 1 the RUNBOOK documents and that a supervisor
-            # branches on — the very failure the sibling commit was fixing
-            # (2026-07-31 exit check).
-            try:
-                apply_migrations(db.conn)
-            except SchemaVersionError as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                return 1
         try:
+            if lock_pid is not None:
+                # The lease is ours: NOW the schema upgrade is safe, because no
+                # sibling can be mid-write against the old one. Deferred from
+                # open (see _open_existing_db) so a refusal above cannot leave a
+                # migrated store behind as its only lasting effect.
+                #
+                # Deferring also moved the "migrated by a NEWER build" refusal
+                # here, so it has to be caught: uncaught it reached main()'s
+                # last-resort handler as exit 2 ("fatal: unexpected error"),
+                # losing the named exit 1 the RUNBOOK documents and a supervisor
+                # branches on — the very failure the sibling commit was fixing.
+                # Inside the lease-releasing try, not before it. A `return 1`
+                # taken above the block that owns `finally: release_run_lock`
+                # left the lease stamped with this now-dead pid for the full
+                # LOCK_STALE_SECONDS, so the operator's corrected re-run was
+                # refused for 15 minutes by a message naming a process that no
+                # longer exists (2026-07-31 exit check).
+                try:
+                    apply_migrations(db.conn)
+                except SchemaVersionError as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 1
             runner = SmokeTestRunner(session)
             try:
                 try:

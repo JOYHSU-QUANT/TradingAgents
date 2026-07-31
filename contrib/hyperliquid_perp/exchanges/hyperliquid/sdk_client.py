@@ -116,6 +116,10 @@ def call_sdk(fn: Callable[..., Any], *args: Any) -> Any:
 # would classify a genuinely rejected stop-loss as THROTTLED, suppressing the
 # §17.2 escalation the position needed (2026-07-31 exit check).
 _THROTTLE_MARKERS = ("too many requests", "rate limit", "ratelimit", "slow down")
+# HTTP statuses that mean "not served, try later". 503 is included and 502/504
+# are not: a gateway that never reached the backend is a plain transport failure,
+# while 503 is the venue itself shedding load.
+_THROTTLE_STATUS_CODES = frozenset({429, 503})
 
 
 def _looks_throttled(exc: BaseException) -> bool:
@@ -129,8 +133,17 @@ def _looks_throttled(exc: BaseException) -> bool:
     status = getattr(exc, "status_code", None)
     if status is None:
         status = getattr(getattr(exc, "response", None), "status_code", None)
-    if isinstance(status, int) and status in (429, 503):
-        return True
+    if isinstance(status, int):
+        # A status code is AUTHORITATIVE — never fall through to the text.
+        # hyperliquid's ClientError does not call super().__init__(), so every
+        # constructor argument lands in ``args``, and api.py passes the response
+        # HEADERS as one of them. str(exc) therefore renders the whole tuple,
+        # headers included — and a 4xx from a Cloudflare-fronted endpoint
+        # routinely carries ``x-ratelimit-remaining``. Matching text after
+        # seeing the code turned "422 Order has invalid price" into a throttle,
+        # so a permanently rejected stop-loss would hold forever instead of
+        # escalating to §17.2 (2026-07-31 exit check).
+        return status in _THROTTLE_STATUS_CODES
     text = f"{type(exc).__name__}: {exc}".lower()
     return any(marker in text for marker in _THROTTLE_MARKERS)
 

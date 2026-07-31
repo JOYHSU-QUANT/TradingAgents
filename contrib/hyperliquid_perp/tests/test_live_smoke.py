@@ -795,7 +795,10 @@ def test_a_probe_the_exchange_refused_is_not_reported_as_a_residual(live_db):
     refused = _Ack(
         "error", exchange_order_id=None, filled_size=None, average_price=None, error="nope"
     )
-    signed = _FakeSigned(trigger_ack=refused)
+    # The cancel must ALSO fail here, or the exit sweep quietly cancels the
+    # retained phantom handle and the assertion below passes even when the
+    # retirement is missing — the sweep's success would mask it (2026-07-31).
+    signed = _FakeSigned(trigger_ack=refused, cancel=_Cancel(False, error="already filled"))
     runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
     with live_db:
         runner.run(only=["stop_loss_create"])
@@ -806,13 +809,29 @@ def test_a_probe_the_exchange_refused_is_not_reported_as_a_residual(live_db):
 
 def test_a_clean_suite_leaves_no_residual_of_either_kind(live_db):
     # Negative control: the happy path must not warn, or the warning stops
-    # meaning anything.
+    # meaning anything. Paired with the refused-cancel test above, which is what
+    # gives this one its meaning — alone it only asserts a default.
     signed = _FakeSigned()
     runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
     with live_db:
         runner.run(only=["stop_loss_create"])
     assert runner.probe_residual is None
     assert runner.position_residuals == []
+    # And the tracking really was exercised: the probe was registered and then
+    # retired by a confirmed cancel, rather than never tracked at all.
+    assert signed.cancelled_cloids
+
+
+def test_one_probes_residual_is_not_erased_by_another_probes_clean_close(live_db):
+    # position_residuals is runner-level and each caller cleans up a DIFFERENT
+    # probe, so clearing it on a successful close dropped an earlier, still-open
+    # position — the CLI then printed nothing and the operator never learned a
+    # funded position was live. Append-only is the correct shape.
+    signed = _FakeSigned()
+    runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+    runner.position_residuals.append("0.0005 left after cleanup — earlier probe")
+    runner._best_effort_close(_D("0.001"))  # a LATER probe closing cleanly
+    assert runner.position_residuals == ["0.0005 left after cleanup — earlier probe"]
 
 
 def test_a_lost_ioc_ack_is_recovered_by_cloid_and_booked(live_db):

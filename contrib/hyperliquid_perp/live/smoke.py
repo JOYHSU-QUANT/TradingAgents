@@ -473,6 +473,14 @@ class SmokeTestRunner:
                 if self._staged_long > 0 and not any(
                     t.key in _TRIGGER_PROBE_TESTS for t in selected[index + 1 :]
                 ):
+                    # Sweep BEFORE flattening, for the reason the exit block
+                    # states: probes are reduce-only triggers on this long, so
+                    # closing first makes the exchange auto-cancel them and every
+                    # later cancel comes back refused — reporting a permanent
+                    # exit 5 over orders that are already gone. This is the
+                    # in-loop close; the exit block's ordering alone did not
+                    # cover it (2026-07-31 exit check).
+                    self._sweep_resting_probes()
                     self._close_staged_long()
                 if result.status == "error":
                     logger.error(
@@ -1441,15 +1449,16 @@ class SmokeTestRunner:
         funded position on the wire, reported by a green row.
         """
         closed, note = self._attempt_close(size)
-        if note is None:
-            # Fully closed. Clear any earlier partial note for the same probe
-            # sequence: staged_long_residual is a clearable single value for
-            # exactly this reason, and an append-only list would keep warning
-            # "a position may still be OPEN" about one that has since been shut
-            # (2026-07-31 exit check).
-            self.position_residuals.clear()
-        else:
+        if note is not None:
             self.position_residuals.append(f"{size - closed} left after cleanup — {note}")
+        # Deliberately APPEND-ONLY. The first draft cleared the list on a fully
+        # successful close, reasoning that a later close supersedes an earlier
+        # partial one — but the list is runner-level and every caller is cleaning
+        # up a DIFFERENT probe, so a clean close in test 7 silently dropped test
+        # 3's still-open position and the CLI printed nothing at all. Nor is
+        # there a retry path for the situation the clearing was meant to serve:
+        # _attempt_close does its own retrying internally, so no caller ever
+        # re-closes the same residual (2026-07-31 exit check).
         return note
 
     def _attempt_close(self, size: Decimal) -> tuple[Decimal, str | None]:

@@ -237,7 +237,7 @@ python -m contrib.hyperliquid_perp live-smoke \
 的真跑結果為準）。**唯一例外是 `slice_order_status`**：依上面的配對規則，它必須和
 `slice_order_submit` 一起選，單獨重跑會被入口拒絕（exit 1）。
 
-四個真跑才有的行為：
+真跑才有的行為：
 
 - **run 身分檢查**：套件會先比對 run 的 genesis 記錄（coin／`live.network`）與
   今天的 config，不符就具名拒絕（exit 1）——打錯 `--run-id` 指到同一個 db 裡的
@@ -284,6 +284,18 @@ python -m contrib.hyperliquid_perp live-smoke \
   （**唯一例外**：若殘倉的成因是 lease 被接管，收尾**刻意不平**，因為那口倉已經
   屬於接管者、由它的 §19.1 recovery 收編——此時不要手動平，先確認接管的那個
   進程是不是你要的，見上面的 run lock 條目。）
+- **另外兩族收尾 `WARNING`**（與 staging 殘倉同一個 stderr 區塊，同樣是唯一的操作面
+  訊號）：
+  - `a probe position may still be OPEN` — 意外成交的探針倉沒能完全平掉（test 3 的
+    far IOC、測 6/7 的切片）。處置同 staging 殘倉：手動平掉、換新 run-id。
+  - `trigger probe(s) may still REST on the exchange` — 探針掛單撤不掉。**這族最重**：
+    trigger 探針刻意不寫本地 orders row，而 §19.3 掃單對 `stop_loss`／`take_profit`
+    是「驗證但不撤」，所以下一次 `live` 啟動會把它記成 `orphan_exchange_order`，依 §2
+    的累積制，**該 run-id 的 `validate` 從此永遠 exit 5**。進 cycles 前務必到交易所
+    確認並手動撤掉。
+- **SIGTERM**：`live-smoke` 與 `live`／`paper` 一樣安裝了 SIGTERM handler（取得 lease
+  之後），所以 `kill <pid>`／`systemctl stop`／`timeout` 包裝都會走與 Ctrl-C 相同的
+  收尾（掃探針、平 staging 倉、disarm、印上面這些 WARNING、放掉 lease），exit 130。
 
 ### 3.4 確認 gate（不下單、純讀 DB）
 
@@ -331,7 +343,10 @@ python -m contrib.hyperliquid_perp live \
 - **長駐建議**同 paper（[RUNBOOK §3](./RUNBOOK.md)）：掛在會自動重啟的監管下，
   working directory 設 repo 根目錄。監管（systemd 等）的重啟策略可依 exit code
   分流：**4**＝smoke gate 未開（重啟不會自己好，先去跑 `live-smoke`）、**1**＝
-  config／憑證／環境錯誤——兩者都不該無腦無限重啟。注意 live 的無人看管空窗風險比
+  config／憑證／環境錯誤——兩者都不該無腦無限重啟。**exit 1 有一個例外是暫時性的**：
+  同錢包姊妹 run 還持著新鮮 lease 時的具名拒絕（訊息含 `ACCOUNT-wide`），等對方
+  收工或 lease 過期後重跑就會好——但那代表有兩個 run 同時被啟動，該查的是啟動來源。
+  另外 `live`／`live-smoke` 收到 SIGTERM 會走與 Ctrl-C 相同的收尾（exit 130）。注意 live 的無人看管空窗風險比
   paper 高——真錢／真倉。
 
 跑滿 **≥ 30 cycles**（§20.3）。
@@ -349,7 +364,7 @@ live run 會自動走 §20.3／§21.4 報告（依 `live.mode`）。指標與 ex
 | `validate` exit | 意義 | 下一步 |
 |---|---|---|
 | `0` | `live_ready` — 全部驗收指標達標 | testnet_live 通過；可準備 mainnet_tiny |
-| `4` | 一致但未到 gate（cycles/orders 未滿、smoke 未跑**或 failed/errored**） | 繼續跑；smoke 紅的修好後 `live-smoke --only <key>` 重跑（latest-per-key 覆蓋） |
+| `4` | 一致但未到 gate（cycles/orders 未滿、smoke 未跑**或 failed/errored**、**kill-switch refresh 事件數 < 100**） | 繼續跑；smoke 紅的修好後 `live-smoke --only <key>` 重跑（latest-per-key 覆蓋） |
 | `5` | integrity failure（dedupe error、orphan、position/replay mismatch、unprotected 秒數 > 0、refresh rate < 99%、**`kill_switch_fired_count` > 0**、**run 仍在 MANUAL safe mode**；mainnet_tiny 另含未解 reconciliation／daily-loss 破線） | 先調查再相信結果 |
 
 > smoke 的 failed／errored **不算** exit 5——它可補救（修好原因、`live-smoke --only
@@ -372,7 +387,11 @@ live run 會自動走 §20.3／§21.4 報告（依 `live.mode`）。指標與 ex
 `exchange_fill_dedupe_error_count / orphan_exchange_order_count /
 duplicate_fill_apply_count / local_exchange_position_mismatch_count /
 account_replay_mismatch_count / unprotected_position_seconds` 全為 0、
-`kill_switch_refresh_success_rate ≥ 99%`、四項 smoke 布林（`restart_reconciliation_passed`
+`kill_switch_refresh_success_rate ≥ 99%`（**樣本數 < 100 時不判定**，改記 exit 4 的
+shortfall——30s 一次的節奏下約 50 分鐘就滿，遠早於 30 cycles，所以正常驗收 run 不會
+卡在這裡；設這道下限是因為十筆樣本裡的一次網路抖動就是 90%，會把健康 run 判死）、
+`kill_switch_fired_count = 0`（dead man's switch 從未真的燒過）、run **不在 MANUAL
+safe mode**、四項 smoke 布林（`restart_reconciliation_passed`
 ——注意這一項**沒有** `_test_` 中綴——以及 `emergency_close_test_passed`／
 `startup_with_existing_position_test_passed`／`startup_with_stale_open_order_test_passed`，
 來自 smoke 15/16/17/18）皆 true。
@@ -397,7 +416,9 @@ close 落在同一個時鐘刻度）照樣 exit 5，不會讀成「從來沒有�
 
 報告中的 `warning:` 行不影響 exit，但寫結論前要看過。testnet 報告會警告：run 中
 發生過 emergency close（§21.4「不得因 bot bug emergency close」無法機器判定，需
-人工看 stop_loss_repair 證據）、daily-loss 破線紀錄、還開著的人工 §12.3 case
+人工看 stop_loss_repair 證據）、**kill-switch disarm 失敗**（`kill_switch_disarm_failed_count`
+——收工沒能清掉錢包層級的 scheduleCancel，兩個 profile 都會報）、daily-loss 破線紀錄、
+還開著的人工 §12.3 case
 （mainnet 是硬 gate，testnet 先提醒你在準備 mainnet 前解掉）、以及上面說的
 `invalid_output` cycle 數。
 
@@ -493,7 +514,12 @@ python -m contrib.hyperliquid_perp validate --run-id mainnet-BTC --db live_tradi
 §21.4 驗收（mainnet_tiny）：`mainnet_tiny_cycles ≥ 30`、無 unprotected 部位、
 無 orphan bot-owned 單、無 duplicate fill、無未解 reconciliation mismatch、
 daily loss cap 未破、`kill_switch_refresh_success_rate ≥ 99%`（比 §21.4 條文嚴——
-真錢 run 的 dead man's switch 必須持續在動，2026-07-27 拍板）、（人工確認）無因
+真錢 run 的 dead man's switch 必須持續在動，2026-07-27 拍板；同 §20.3，樣本數 < 100
+時不判定而記 exit 4 的 shortfall）、`kill_switch_fired_count = 0`、run **不在 MANUAL
+safe mode**（後兩項兩個 profile 共用同一條 gate——「機制在 testnet 證明過」不等於
+「這個 run 上沒失效」，而一個等人工確認才能下單的 run 更不可能是 live-ready；前者
+不可補救要換 run-id，後者 `safe-mode --release` 後重驗即可，見上方 exit 表）、
+（人工確認）無因
 bot bug 的 emergency close、手動 shutdown/restart 測過。最後兩項機器判不了：
 報告對 mainnet run 固定印 `warning:` 提醒「manual shutdown/restart 為人工確認
 項」，exit 0 不代表它自動成立——go-live 前自己打勾。

@@ -1554,11 +1554,15 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    沒斷）時，單 tick 牆鐘時間可以拖過 `max_tick_gap` 的建構期承諾，讓交易所端
    scheduleCancel 在程序還活著時觸發、掃掉含 SL/TP 的全錢包掛單（protection 於
    下個健康 tick 重建，中間是裸倉窗口）。v1 緩解：live loop 的 sleep 扣除本次
-   tick 實耗（消除疊加放大），且啟動時若 `network_timeout_s >=
+   tick 實耗（消除疊加放大），且啟動時若 `network_timeout_s × 3 >=
    max_tick_gap_seconds` **或未設（unbounded）**即印 stderr 警告
    （`network_timeout_warning`，與硬檢查 `kill_switch_timing_violation`
-   併排、純函式可單測）。硬性建構期不變量（把每筆呼叫逾時納入
-   承諾檢查）與 live 專屬逾時延後 PR 6 網路層重做時一併處理。
+   併排、純函式可單測）。乘以 3 是因為一次下單最多連打 3 筆 REST 而中間不
+   refresh（`_MAX_UNREFRESHED_REST_CALLS`：§8.3 前置查詢→下單→重複 ack 查詢）；
+   原本只編列 1 筆，於是 10s 逾時對 30s gap 被判為安全，實際上那條鏈剛好吃滿整個
+   gap（2026-07-31 deadline review）。其餘阻塞路徑（protection 修復梯、reconcile
+   兩條 leg 與 per-order 迴圈、兩條分頁 ladder）已改為跨阻塞工作 refresh，故不再
+   進入這筆預算。硬性建構期不變量與 live 專屬逾時延後網路層重做時一併處理。
    同族的 `sl_repair_retry_delay_seconds`（修復梯每次 sleep 完才 tick）也有
    姊妹 advisory（`sl_repair_delay_warning`，2026-07-22）。
 

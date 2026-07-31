@@ -151,11 +151,20 @@ def kill_switch_timing_violation(
 #
 # It is the SUBMIT chain that sets this bound, not the longer walls of REST
 # traffic elsewhere: protection's repair ladder, the reconcile legs and their
-# per-order orderStatus loops, and the fill backfill's page ladder all refresh
-# ACROSS their blocking work now (2026-07-31 deadline review), so a stretch
-# there is one call long however many calls the loop makes in total.
+# per-order orderStatus loops, and BOTH page ladders — the fill backfill's and
+# the reconcile fill cross-check's own inline one — all refresh ACROSS their
+# blocking work now, so a stretch there is one call long however many calls the
+# loop makes in total.
+#
+# "Both" is load-bearing and was learned the hard way: the first pass wired only
+# the backfiller's ladder and left the cross-check's identical one untouched,
+# which quietly made the real maximum 20 (DEFAULT_MAX_PAGES) while this constant
+# still said 3 — an advisory promising ~6.7× the headroom it could deliver. Any
+# new REST loop MUST refresh per iteration or this number is a lie
+# (2026-07-31 deadline review).
+#
 # Deliberately NOT counted: the market-data snapshot, which carries its own
-# separate and much smaller timeout.
+# separate and much smaller timeout and cannot chain into a multi-call run.
 _MAX_UNREFRESHED_REST_CALLS = 3
 
 

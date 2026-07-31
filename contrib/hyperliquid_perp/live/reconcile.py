@@ -759,6 +759,15 @@ class LiveReconciler:
                 logger.exception("fill cross-check fetch failed")
                 errors.append(f"fill cross-check fetch failed: {exc}")
                 return None
+            # §18.2: the SECOND page ladder on this tick, and the one that is easy
+            # to miss — the backfiller's is in another module, this one is inline.
+            # Same shape, same budget (DEFAULT_MAX_PAGES), same hazard: without a
+            # refresh per page a fills-heavy window (>2000 fills, so the response
+            # comes back capped and it pages again) holds the single-threaded tick
+            # for up to 20 × network_timeout_s and the dead man's switch cancels
+            # every resting SL/TP while the process is alive
+            # (2026-07-31 deadline review, second pass).
+            self._refresh_deadline()
             newest_ms: int | None = None
             for f in raw:
                 tid = f.get("tid") if isinstance(f, dict) else None

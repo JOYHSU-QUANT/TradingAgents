@@ -738,22 +738,30 @@ class ProtectionManager:
                 )
                 return _EstablishResult.ESTABLISHED
 
-            if ack.is_duplicate and self._recover_placed_order(
-                role=role,
-                order_id=order_id,
-                logical=logical,
-                hexid=hexid,
-                size=size,
-                side=side,
-                trigger_price=trigger_price,
-                limit_price=limit_price,
-                replaced=existing,
-                now=now,
-            ):
-                # The exchange already knows this cloid from a prior attempt whose
-                # ack we never observed; orderStatus confirms it is resting (§8.3
-                # rules 2–4) → recovered, no resend.
-                return _EstablishResult.ESTABLISHED
+            if ack.is_duplicate:
+                recovered = self._recover_placed_order(
+                    role=role,
+                    order_id=order_id,
+                    logical=logical,
+                    hexid=hexid,
+                    size=size,
+                    side=side,
+                    trigger_price=trigger_price,
+                    limit_price=limit_price,
+                    replaced=existing,
+                    now=now,
+                )
+                # §18.2: that probe was a REST call, and the branch below RETURNS
+                # without passing _maybe_delay — the one exit from this ladder
+                # that reaches the wire and then leaves without a refresh. Left
+                # uncovered, an SL recovered this way and the TP ``_establish``
+                # that sync() runs next share a single gap.
+                refresh_across_blocking_work(self._kill_switch, what="SL/TP repair")
+                if recovered:
+                    # The exchange already knows this cloid from a prior attempt
+                    # whose ack we never observed; orderStatus confirms it is
+                    # resting (§8.3 rules 2–4) → recovered, no resend.
+                    return _EstablishResult.ESTABLISHED
 
             # An ack that says "no" is the exchange REJECTING the order, which is
             # exactly the evidence a throttle is not.

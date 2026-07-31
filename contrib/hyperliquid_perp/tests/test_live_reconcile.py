@@ -132,8 +132,8 @@ def test_the_sweep_refreshes_the_kill_switch_across_its_exchange_reads(env, tmp_
     decide, not config. The tick's own refresh is already spent by the time any
     of it runs (2026-07-31 deadline review).
 
-    Two refreshes with an empty book: one between the account reads, one after —
-    so the pair can never count as a single gap.
+    Three refreshes with an empty book: one between the account reads, one
+    after, and one for the fill cross-check's single (uncapped) page.
     """
     db, seams, _ = env
     refreshes: list[int] = []
@@ -150,7 +150,7 @@ def test_the_sweep_refreshes_the_kill_switch_across_its_exchange_reads(env, tmp_
         refresh_kill_switch=lambda: refreshes.append(1),
     )
     reconciler.run("heartbeat")
-    assert len(refreshes) == 2
+    assert len(refreshes) == 3
 
 
 def test_the_sweep_refreshes_once_per_open_order_not_once_per_leg(env, tmp_path):
@@ -160,7 +160,8 @@ def test_the_sweep_refreshes_once_per_open_order_not_once_per_leg(env, tmp_path)
 
     Uses malformed entries deliberately — the refresh sits at the top of the
     loop body, so this isolates "one refresh per entry" from any registry or
-    order-row setup. Two entries → the two account-read refreshes plus two more.
+    order-row setup. Two entries → the three baseline refreshes of the test
+    above plus two more.
     """
     db, seams, _ = env
     seams.open_orders = ["junk", "junk"]
@@ -178,7 +179,48 @@ def test_the_sweep_refreshes_once_per_open_order_not_once_per_leg(env, tmp_path)
         refresh_kill_switch=lambda: refreshes.append(1),
     )
     reconciler.run("heartbeat")
-    assert len(refreshes) == 4
+    assert len(refreshes) == 5
+
+
+def test_the_fill_cross_check_ladder_refreshes_between_pages(env, tmp_path, monkeypatch):
+    """§18.2: the reconciler has its OWN page ladder for the fill cross-check,
+    separate from the backfiller's and easy to miss because it is inline.
+
+    The first pass of the deadline review wired only the backfiller's and left
+    this one untouched, which made the real worst case DEFAULT_MAX_PAGES deep
+    while ``_MAX_UNREFRESHED_REST_CALLS`` still claimed 3 — an advisory
+    promising headroom it could not deliver. One refresh per page.
+    """
+    from contrib.hyperliquid_perp.live import reconcile as reconcile_mod
+
+    db, seams, _ = env
+    monkeypatch.setattr(reconcile_mod, "RESPONSE_FILL_CAP", 1)  # every page "capped"
+    monkeypatch.setattr(reconcile_mod, "DEFAULT_MAX_PAGES", 3)
+    refreshes: list[int] = []
+    reconciler = LiveReconciler(
+        db=db,
+        run_id="r",
+        coin="BTC",
+        fetch_open_orders=seams.fetch_open_orders,
+        fetch_clearinghouse=seams.fetch_clearinghouse,
+        query_order_by_cloid=seams.query_order_by_cloid,
+        fetch_fills=seams.fetch_fills,
+        payload_dir=tmp_path / "payloads",
+        clock=ManualClock(_NOW),
+        refresh_kill_switch=lambda: refreshes.append(1),
+    )
+    window_start = _NOW - timedelta(hours=1)
+    base = int(window_start.timestamp() * 1000)
+    stamps = iter([base + 1, base + 2, base + 3])
+
+    def fetch_fills(start_ms, end_ms):
+        t = next(stamps)
+        return [{"tid": t, "time": t}]
+
+    errors: list[str] = []
+    keys = reconciler._fetch_window_fill_keys(fetch_fills, window_start, _NOW, errors)
+    assert keys is None  # budget exhausted, window unproven — the paging really ran
+    assert len(refreshes) == 3  # one per page, not one per leg
 
 
 def _gate() -> RealOrderGate:

@@ -46,10 +46,13 @@ not "human action required"), ``5`` (``validate`` only) the
 run has integrity failures — orphans, snapshot or replay mismatches, or a
 store so corrupt the checks themselves cannot run ("the store is broken;
 investigate before trusting results"), ``130`` interrupted before a graceful
-lane could take over (Ctrl-C in ``export``/``validate``/``live`` or during
-``paper`` startup/reconciliation — SIGTERM likewise once ``paper`` has
-installed its handler; once the loop runs, both signals take the
-shutdown-export lane instead of ``130``). Legacy delegated invocations keep
+lane could take over (Ctrl-C in ``export``/``validate``/``live``/``live-smoke``
+or during ``paper`` startup/reconciliation — SIGTERM likewise once ``paper``,
+``live`` or ``live-smoke`` has installed its handler; once the ``paper`` loop
+runs, both signals take the shutdown-export lane instead of ``130``). For
+``live-smoke`` the handler is installed with the run lease, so an interrupt
+after that point still runs the suite's cleanup (close the staged long, sweep
+resting probes, disarm the switch) rather than stranding it. Legacy delegated invocations keep
 :mod:`.main`'s own exit contract.
 """
 
@@ -2285,6 +2288,8 @@ def _cmd_live_smoke(argv: list[str]) -> int:
     if db is None:
         return 1
     preflight_error: str | None = None
+    import signal
+
     from .paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
 
     try:
@@ -2333,6 +2338,17 @@ def _cmd_live_smoke(argv: list[str]) -> int:
                 )
                 return 1
             lock_pid = os.getpid()
+            # The same handler `live` (cli.py) and `paper` install right after
+            # their own lock. Without it, `kill <pid>` — systemd's and docker's
+            # default, and what a `timeout` wrapper sends — kills this process
+            # outright: runner.run()'s finally never runs, so the staged long is
+            # left open, the probes are left resting, the account-wide kill
+            # switch is left armed, the two operator WARNINGs below are never
+            # printed, and the lease is left held for LOCK_STALE_SECONDS. This
+            # command needs it MORE than its two siblings, not less: they have a
+            # next tick and the §18.2 shutdown sweep behind them, while this
+            # finally is the only cleanup that exists (2026-07-31).
+            signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
             # The lease is ours: NOW the schema upgrade is safe, because no
             # sibling can be mid-write against the old one. Deferred from open
             # (see _open_existing_db) so a refusal above cannot leave a migrated
@@ -2395,6 +2411,31 @@ def _cmd_live_smoke(argv: list[str]) -> int:
                         "this run's validate at exit 5. Re-running the suite does "
                         "NOT flatten this residual — a fresh runner only closes the "
                         "staging long it opened itself.",
+                        file=sys.stderr,
+                    )
+                if runner.position_residuals:
+                    # Accidental fills (a far IOC the book crossed anyway, a
+                    # slice that filled before its sibling aborted) whose
+                    # cleanup did not fully succeed. The staging long has had a
+                    # warning since 2026-07-29; these are the same thing —
+                    # a real funded position — and used to be visible only in
+                    # the detail column of a PASSED row.
+                    for note in runner.position_residuals:
+                        print(
+                            f"WARNING: a probe position may still be OPEN — {note}. "
+                            "Close it manually, then use a NEW run-id for acceptance: "
+                            "a manual fill has no local order row, so it books "
+                            "fill_unmapped and pins this run's validate at exit 5.",
+                            file=sys.stderr,
+                        )
+                if runner.probe_residual is not None:
+                    # Same reasoning as the staging long, different artefact: a
+                    # trigger probe books no orders row, so the ONLY signal that
+                    # one was stranded used to be the detail column of a GREEN
+                    # row. It is not cosmetic — see the runner's note for why it
+                    # ends in a permanent exit 5 (2026-07-31 lifecycle review).
+                    print(
+                        f"WARNING: {runner.probe_residual}.",
                         file=sys.stderr,
                     )
         finally:

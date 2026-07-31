@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, Decimal, localcontext
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol
 
 from ..domains.perp.margin import DECIMAL_CONTEXT
@@ -53,7 +54,7 @@ from ..paper.twap import floor_to_step
 from ..persistence import repository as repo
 from ..persistence.cloid import cloid_hex, cloid_logical
 from ..persistence.db import Database
-from .orders import parse_order_status
+from .orders import local_status_for_exchange_status, parse_order_status
 
 if TYPE_CHECKING:  # import cost only under type checking; runtime stays lazy
     from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
@@ -375,6 +376,33 @@ class SmokeTestRunner:
         # the wire must not be visible only in a log line the operator may not
         # be capturing. The CLI prints it as a prominent warning.
         self.staged_long_residual: str | None = None
+        # Cloids of trigger probes that may still be RESTING on the exchange.
+        # Added BEFORE the wire call (so a lost ack leaves a handle rather than a
+        # mystery) and discarded only on a confirmed cancel.
+        #
+        # Trigger probes deliberately book no ``orders`` row, so without this the
+        # runner kept no handle on them at all: each probe was cancelled inline
+        # and nothing survived the call frame, leaving run()'s finally nothing to
+        # sweep — while _disarm_kill_switch removed the one backstop (the
+        # wallet's scheduleCancel) that would have swept them at its deadline. A
+        # stranded probe is not cosmetic: §19.3's sweep validates-never-cancels
+        # protective roles, so the next `live` startup files it as
+        # orphan_exchange_order, which validate counts cumulatively — pinning
+        # that run-id at exit 5 for good (2026-07-31 lifecycle review).
+        self._resting_probes: set[str] = set()
+        # The note when probes could NOT be swept (None when all are clear).
+        # Public for the same reason as :attr:`staged_long_residual`.
+        self.probe_residual: str | None = None
+        # Notes from every best-effort close that did NOT fully succeed —
+        # accidental fills (a far IOC the book crossed anyway, a slice that
+        # filled before its sibling aborted) as opposed to the staging long the
+        # runner opens deliberately. Those go through _ensure_staged_long, which
+        # has had an operator-visible flag since 2026-07-29; these went to a
+        # step ``detail`` on a PASSED row, so a real funded position could be
+        # left on the wire with nothing but a green row to show for it — the
+        # same file treating its own position better than an unintended one
+        # (2026-07-31 lifecycle review).
+        self.position_residuals: list[str] = []
 
     # -- orchestration ----------------------------------------------------
 
@@ -469,6 +497,21 @@ class SmokeTestRunner:
             still_ours = self._still_owns_run()
             if still_ours:
                 self._close_staged_long()
+                # BEFORE the disarm below: the wallet's scheduleCancel is the
+                # only backstop left for a probe we cannot cancel ourselves, so
+                # clearing it first turns "swept in ~30s by the dead man" into
+                # "rests until an operator notices".
+                self._sweep_resting_probes()
+            elif self._resting_probes:
+                # Not ours to cancel — the successor owns this wallet — but the
+                # probes are still on its book, so name them.
+                self.probe_residual = (
+                    f"{len(self._resting_probes)} trigger probe(s) were left resting "
+                    f"(cloids: {', '.join(sorted(self._resting_probes))}): this run's "
+                    "lease was taken over mid-suite, so cancelling them now would act "
+                    "on a wallet this process no longer owns. Cancel them manually"
+                )
+                logger.warning("smoke: %s", self.probe_residual)
             elif self._staged_long > 0:
                 # Real exposure we are no longer entitled to close. Hand it over
                 # loudly rather than silently: the successor's recovery adopts
@@ -818,15 +861,39 @@ class SmokeTestRunner:
         fill/acceptance check.
         """
         logical, cloid = self._register_cloid(role=role, tag=tag, slice_index=slice_index)
-        ack = self._wire.place_ioc_limit(
-            coin=self.ctx.coin,
-            is_buy=is_buy,
-            size=qty,
-            limit_price=price,
-            cloid_hex=cloid,
-            reduce_only=reduce_only,
-            protective=protective,
-        )
+        try:
+            ack = self._wire.place_ioc_limit(
+                coin=self.ctx.coin,
+                is_buy=is_buy,
+                size=qty,
+                limit_price=price,
+                cloid_hex=cloid,
+                reduce_only=reduce_only,
+                protective=protective,
+            )
+        except Exception as exc:  # noqa: BLE001 — re-raised below; this only ASKS
+            # Unknown outcome (§8.3 rule 11): a lost ack or a timeout may have
+            # left this IOC filled on the exchange. The suite bypasses
+            # LiveOrderSubmitter — no intent row is written before the wire
+            # call — so without asking, a fill that landed here leaves NO local
+            # trace at all: the backfill later maps it by exchange_order_id,
+            # finds no orders row, and books fill_unmapped plus a position
+            # mismatch, which pins this run-id's validate at exit 5.
+            #
+            # The cloid is in hand and orderStatus is an ungated read, so ask
+            # once and book what it says. Failing that, the exposure is at least
+            # NAMED rather than silent.
+            recovered = self._recover_lost_ioc(
+                exc,
+                cloid_logical=logical,
+                cloid_hex_value=cloid,
+                role=role,
+                side="buy" if is_buy else "sell",
+                qty=qty,
+                price=price,
+                reduce_only=reduce_only,
+            )
+            raise recovered from exc
         self._record_probe_order(
             ack,
             cloid_logical=logical,
@@ -838,6 +905,73 @@ class SmokeTestRunner:
             reduce_only=reduce_only,
         )
         return logical, cloid, ack
+
+    def _recover_lost_ioc(
+        self,
+        exc: Exception,
+        *,
+        cloid_logical: str,
+        cloid_hex_value: str,
+        role: str,
+        side: str,
+        qty: Decimal,
+        price: Decimal,
+        reduce_only: bool,
+    ) -> Exception:
+        """Ask orderStatus what became of an IOC whose ack was lost.
+
+        Returns the exception to raise: the original when nothing more can be
+        said, or one carrying the recovered outcome. Never raises on its own —
+        a failed recovery must not replace the transport error that caused it.
+
+        Booking the row is the whole point: it is what lets §14's backfill
+        attach the fill by ``exchange_order_id`` instead of filing an unmappable
+        ``fill_unmapped`` case against this run forever.
+        """
+        try:
+            resolved = parse_order_status(self._wire.query_order_by_cloid(cloid_hex_value))
+        except Exception:  # noqa: BLE001 — recovery is best-effort by definition
+            logger.warning(
+                "smoke: orderStatus recovery for lost IOC %s could not resolve",
+                cloid_hex_value,
+                exc_info=True,
+            )
+            return RuntimeError(
+                f"{type(exc).__name__}: {exc}; the outcome of probe {cloid_hex_value} is "
+                "UNKNOWN (orderStatus could not be read) — it may have filled on the "
+                "exchange with no local order row. Check the wallet before starting "
+                "cycles; an unmapped fill pins this run's validate at exit 5"
+            )
+        if resolved is None:
+            # The documented unknownOid marker: the exchange never saw it, so
+            # nothing landed and there is nothing to book.
+            return exc
+        exchange_order_id, status_word = resolved
+        self._insert_probe_row(
+            status=local_status_for_exchange_status(status_word),
+            filled=Decimal(0),
+            # The row's ack-derived fields, from what orderStatus actually said:
+            # exchange_raw_status carries the venue's own word, so the audit
+            # trail shows this row was reconstructed from a status read rather
+            # than from an ack we never received.
+            ack=SimpleNamespace(
+                exchange_order_id=exchange_order_id,
+                average_price=None,
+                status=status_word,
+            ),
+            cloid_logical=cloid_logical,
+            cloid_hex_value=cloid_hex_value,
+            role=role,
+            side=side,
+            qty=qty,
+            price=price,
+            reduce_only=reduce_only,
+        )
+        return RuntimeError(
+            f"{type(exc).__name__}: {exc}; probe {cloid_hex_value} DID reach the "
+            f"exchange (oid={exchange_order_id}, status={status_word}) — its order row "
+            "has been booked so §14's backfill can attach any fill"
+        )
 
     def _insert_probe_row(
         self,
@@ -1079,6 +1213,7 @@ class SmokeTestRunner:
         # resting orders.
         self._ensure_staged_long()
         _, cloid = self._register_cloid(role="cleanup_cancel", tag=f"cancel-{self._tag()}")
+        self._track_probe(cloid)
         # The same "so far below mark it never fires" rule every SL probe uses —
         # one encoding, so a retune of the margin cannot drift between tests.
         trigger, limit = self._trigger_prices("sl")
@@ -1091,7 +1226,7 @@ class SmokeTestRunner:
             tpsl="sl",
             cloid_hex=cloid,
         )
-        self._require_accepted(ack, "resting probe order")
+        self._require_probe_accepted(ack, "resting probe order", cloid)
         self._cancel_tested_probe(cloid, "cancel-by-cloid")
         return SmokeStepResult("passed", detail="placed a resting order and cancelled it by cloid")
 
@@ -1127,10 +1262,17 @@ class SmokeTestRunner:
                 note = note or f"cleanup: closed the {filled} already filled"
                 raise _SmokeAbort(f"{exc}; {note}") from None
             raise
-        except Exception:
-            # Harness error (→ ``error`` verdict): same flatten, note in the log.
+        except Exception as exc:
+            # Harness error (→ ``error`` verdict, which STOPS the suite with the
+            # account state declared unknown). Same flatten — and chain the note
+            # the way the _SmokeAbort sibling above does: this is the path where
+            # "is a funded position still open?" matters most, and dropping the
+            # return value left the answer only in a log line while the durable
+            # error_message said nothing (2026-07-31 asymmetry review).
             if filled > 0:
-                self._best_effort_close(filled)
+                note = self._best_effort_close(filled)
+                if note:
+                    raise RuntimeError(f"{type(exc).__name__}: {exc}; {note}") from exc
             raise
         if filled <= 0:
             raise _SmokeAbort("neither slice filled — cannot confirm the multi-slice fill path")
@@ -1261,8 +1403,16 @@ class SmokeTestRunner:
         ``detail`` (durable in ``live_smoke_tests``) and logged, so the operator
         can act on the residual position. Callers that must RETRY want
         :meth:`_attempt_close`, which also reports how much actually closed.
+
+        A note is ALSO recorded on :attr:`position_residuals` so the CLI can
+        warn about it. Every caller here is cleaning up an ACCIDENTAL fill, and
+        folding the note into a passed step's detail was the only signal: a real
+        funded position on the wire, reported by a green row.
         """
-        return self._attempt_close(size)[1]
+        note = self._attempt_close(size)[1]
+        if note is not None:
+            self.position_residuals.append(f"{size} left after cleanup — {note}")
+        return note
 
     def _attempt_close(self, size: Decimal) -> tuple[Decimal, str | None]:
         """``(closed, note)`` — the close's real outcome, note ``None`` if full.
@@ -1363,6 +1513,7 @@ class SmokeTestRunner:
     def _trigger_create(self, tpsl: str, role: str, label: str) -> SmokeStepResult:
         self._ensure_staged_long()
         _, cloid = self._register_cloid(role=role, tag=f"{tpsl}-create-{self._tag()}")
+        self._track_probe(cloid)
         trigger, limit = self._trigger_prices(tpsl)
         ack = self._wire.place_trigger_order(
             coin=self.ctx.coin,
@@ -1373,7 +1524,7 @@ class SmokeTestRunner:
             tpsl=tpsl,
             cloid_hex=cloid,
         )
-        self._require_accepted(ack, f"{label} create")
+        self._require_probe_accepted(ack, f"{label} create", cloid)
         # Leave it cancelled so a create test never strands a resting order.
         cleanup = self._best_effort_cancel(cloid)
         detail = f"{label} placed (oid={ack.exchange_order_id})"
@@ -1384,6 +1535,7 @@ class SmokeTestRunner:
     def _trigger_modify(self, tpsl: str, role: str, label: str) -> SmokeStepResult:
         self._ensure_staged_long()
         _, create_cloid = self._register_cloid(role=role, tag=f"{tpsl}-mod-a-{self._tag()}")
+        self._track_probe(create_cloid)
         trigger, limit = self._trigger_prices(tpsl)
         # ONE size for both the place and the modify. Sizing each call separately
         # meant the "modify in place" silently RESIZED the order whenever the mark
@@ -1399,8 +1551,10 @@ class SmokeTestRunner:
             tpsl=tpsl,
             cloid_hex=create_cloid,
         )
+        self._require_probe_accepted(created, f"{label} modify (initial place)", create_cloid)
         created_oid = self._require_oid(created, f"{label} modify (initial place)")
         _, modify_cloid = self._register_cloid(role=role, tag=f"{tpsl}-mod-b-{self._tag()}")
+        self._track_probe(modify_cloid)
         # Nudge the trigger one tick — §17.4 modify-before-cancel updates in
         # place. Rounded in the nudge's own direction so legalization can never
         # collapse the new price back onto the (already-legal) original.
@@ -1427,17 +1581,40 @@ class SmokeTestRunner:
             # cleanup below would cancel modify_cloid, a cloid the exchange
             # never bound. Cancel the order that actually rests, and carry the
             # outcome in the failure detail.
+            # The exchange ANSWERED and refused, so modify_cloid was never
+            # bound to anything — retire it, or the exit sweep chases a cloid
+            # that does not exist and reports a phantom residual.
+            self._resting_probes.discard(modify_cloid)
             note = self._best_effort_cancel(create_cloid)
             note = note or f"cleanup: cancelled the original {label} probe ({create_cloid})"
             raise _SmokeAbort(f"{exc}; {note}") from None
-        except Exception:
+        except Exception as exc:
             # Unknown outcome (the modify may or may not have re-labeled the
             # order) — sweep both cloids best-effort; exactly one exists, the
-            # other cancel refuses and lands in the log only.
-            self._best_effort_cancel(modify_cloid)
-            self._best_effort_cancel(create_cloid)
+            # other cancel refuses. Chain whatever the sweep says into the
+            # raised message, the way the _SmokeAbort sibling above already
+            # does: this branch ends the whole suite with the account state
+            # declared unknown, so "which of the two is still resting" is
+            # precisely the fact the operator needs, and dropping it left it
+            # only in a log line (2026-07-31 asymmetry review).
+            notes = [
+                note
+                for note in (
+                    self._best_effort_cancel(modify_cloid),
+                    self._best_effort_cancel(create_cloid),
+                )
+                if note
+            ]
+            if notes:
+                raise RuntimeError(f"{type(exc).__name__}: {exc}; {'; '.join(notes)}") from exc
             raise
         cleanup = self._best_effort_cancel(modify_cloid)
+        if cleanup is None:
+            # §17.4 re-labels in place, so cancelling modify_cloid retired the
+            # ONE order these two cloids ever named. Retire create_cloid with it,
+            # or the exit sweep chases a cloid the exchange no longer binds and
+            # reports a residual that does not exist.
+            self._resting_probes.discard(create_cloid)
         detail = f"{label} modified in place (§17.4)"
         if cleanup:
             detail += f"; {cleanup}"
@@ -1447,6 +1624,7 @@ class SmokeTestRunner:
         self._ensure_staged_long()
         tpsl = "sl" if role == "stop_loss" else "tp"
         _, cloid = self._register_cloid(role=role, tag=f"{tpsl}-cancel-{self._tag()}")
+        self._track_probe(cloid)
         trigger, limit = self._trigger_prices(tpsl)
         placed = self._wire.place_trigger_order(
             coin=self.ctx.coin,
@@ -1457,7 +1635,7 @@ class SmokeTestRunner:
             tpsl=tpsl,
             cloid_hex=cloid,
         )
-        self._require_accepted(placed, f"{label} cancel (initial place)")
+        self._require_probe_accepted(placed, f"{label} cancel (initial place)", cloid)
         self._cancel_tested_probe(cloid, f"{label} cancel")
         return SmokeStepResult("passed", detail=f"{label} placed and cancelled")
 
@@ -1474,6 +1652,57 @@ class SmokeTestRunner:
                 f"{what} refused: {cancel.error} — the probe trigger "
                 f"order is still resting on the exchange (cloid {cloid})"
             )
+        self._resting_probes.discard(cloid)
+
+    def _track_probe(self, cloid_hex_value: str) -> str:
+        """Record a probe cloid as possibly-resting; returns it for chaining.
+
+        Called BEFORE the place goes on the wire: if the ack is lost the order
+        may well be live, and the whole point is to hold a handle for the exit
+        sweep rather than discover the gap later as an orphan case.
+        """
+        self._resting_probes.add(cloid_hex_value)
+        return cloid_hex_value
+
+    def _require_probe_accepted(self, ack, what: str, cloid_hex_value: str) -> None:
+        """:meth:`_require_accepted` for a TRACKED probe: a refusal retires it.
+
+        The exchange answering "no" is positive evidence that no order exists
+        under this cloid, so keeping the handle would have the exit sweep chase
+        a phantom and report a residual that was never placed.
+
+        A transport EXCEPTION never reaches here — it raises before there is an
+        ack to inspect — which is exactly right: that is the unknown-outcome
+        case, and the handle must survive it.
+        """
+        try:
+            self._require_accepted(ack, what)
+        except _SmokeAbort:
+            self._resting_probes.discard(cloid_hex_value)
+            raise
+
+    def _sweep_resting_probes(self) -> None:
+        """Cancel any probe still believed to rest, and report what would not go.
+
+        Runs BEFORE the kill-switch disarm: the wallet's scheduleCancel is the
+        only remaining backstop for a probe we cannot cancel, so clearing it
+        first would turn "swept in ~30s by the dead man" into "rests until an
+        operator notices".
+        """
+        for cloid_hex_value in sorted(self._resting_probes):
+            self._best_effort_cancel(cloid_hex_value)
+        if not self._resting_probes:
+            self.probe_residual = None
+            return
+        self.probe_residual = (
+            f"{len(self._resting_probes)} trigger probe(s) may still REST on the "
+            f"exchange (cloids: {', '.join(sorted(self._resting_probes))}). They carry "
+            "no local orders row, and §19.3's startup sweep validates rather than "
+            "cancels protective roles — so the next `live` start files each as an "
+            "orphan_exchange_order, which pins this run-id's `validate` at exit 5 "
+            "permanently. Cancel them on the exchange before starting cycles"
+        )
+        logger.warning("smoke: %s", self.probe_residual)
 
     def _best_effort_cancel(self, cloid_hex_value: str) -> str | None:
         """Cancel a probe's resting order; return a note if it did NOT cancel.
@@ -1482,6 +1711,10 @@ class SmokeTestRunner:
         test red — but a resting SL/TP trigger left live on the exchange must not
         vanish from the audit trail: the note (from an exception OR an
         unsuccessful ack) is folded into the step ``detail`` and logged.
+
+        A CONFIRMED cancel also retires the cloid from :attr:`_resting_probes`;
+        anything else leaves it there for the exit sweep to retry and, failing
+        that, to report.
         """
         try:
             ack = self._wire.cancel_by_cloid(coin=self.ctx.coin, cloid_hex=cloid_hex_value)
@@ -1498,6 +1731,7 @@ class SmokeTestRunner:
                 "smoke: best-effort cancel of %s refused: %s", cloid_hex_value, ack.error
             )
             return f"cleanup: cancel of {cloid_hex_value} refused ({ack.error})"
+        self._resting_probes.discard(cloid_hex_value)
         return None
 
     def _test_kill_switch_arm_refresh(self) -> SmokeStepResult:

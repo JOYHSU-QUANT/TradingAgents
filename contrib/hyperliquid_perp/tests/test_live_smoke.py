@@ -769,6 +769,88 @@ def test_trigger_modify_refusal_cancels_the_original_order(live_db):
     assert signed.cancelled_cloids == [signed.trigger_calls[0]["cloid_hex"]]
 
 
+def test_a_probe_whose_cancel_is_refused_is_swept_and_reported(live_db):
+    # Trigger probes book no orders row, so before this the runner held no
+    # handle on them at all — each was cancelled inline and nothing survived the
+    # call frame. A refused cancel left the probe resting while the verdict
+    # stayed PASSED, the gate opened, and the only trace was the detail column
+    # of a green row. Not cosmetic: §19.3's sweep validates rather than cancels
+    # protective roles, so the next `live` start files it as an
+    # orphan_exchange_order and pins this run-id's validate at exit 5.
+    signed = _FakeSigned(cancel=_Cancel(False, error="already filled"))
+    runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+    with live_db:
+        runner.run(only=["stop_loss_create"])
+    assert runner.probe_residual is not None
+    assert "orphan_exchange_order" in runner.probe_residual
+    # The exit sweep RETRIED before giving up: one cancel in-test, one on exit.
+    assert len(signed.cancelled_cloids) >= 2
+
+
+def test_a_probe_the_exchange_refused_is_not_reported_as_a_residual(live_db):
+    # The other direction, and the one a naive handle-tracking design gets
+    # wrong: an exchange that ANSWERS "rejected" is positive evidence that no
+    # order exists under that cloid. Keeping the handle would have the sweep
+    # chase a phantom and warn about a probe that was never placed.
+    refused = _Ack(
+        "error", exchange_order_id=None, filled_size=None, average_price=None, error="nope"
+    )
+    signed = _FakeSigned(trigger_ack=refused)
+    runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+    with live_db:
+        runner.run(only=["stop_loss_create"])
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    assert latest["stop_loss_create"]["status"] == "failed"
+    assert runner.probe_residual is None
+
+
+def test_a_clean_suite_leaves_no_residual_of_either_kind(live_db):
+    # Negative control: the happy path must not warn, or the warning stops
+    # meaning anything.
+    signed = _FakeSigned()
+    runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+    with live_db:
+        runner.run(only=["stop_loss_create"])
+    assert runner.probe_residual is None
+    assert runner.position_residuals == []
+
+
+def test_a_lost_ioc_ack_is_recovered_by_cloid_and_booked(live_db):
+    # The suite bypasses LiveOrderSubmitter, so no intent row is written before
+    # the wire call. A transport failure whose order actually landed therefore
+    # left NO local trace: the backfill maps by exchange_order_id, finds no
+    # orders row, books fill_unmapped, and pins this run's validate at exit 5.
+    # The cloid is in hand and orderStatus is an ungated read — ask.
+    signed = _FakeSigned(raise_on={"place_ioc_limit"})
+    runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+    with live_db:
+        runner.run(only=["multi_slice_fill"])
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+        booked = live_db.conn.execute(
+            "SELECT cloid_hex, exchange_order_id FROM orders WHERE run_id = ?", ("live-BTC",)
+        ).fetchall()
+    row = latest["multi_slice_fill"]
+    assert row["status"] == "error"
+    assert "DID reach the exchange" in row["error_message"]
+    assert signed.queried_cloid is not None  # it asked rather than assuming
+    assert any(b["exchange_order_id"] == "1" for b in booked)  # and booked what it learned
+
+
+def test_a_lost_ioc_ack_the_exchange_never_saw_books_nothing(live_db):
+    # unknownOid is the documented "we never saw it" marker: nothing landed, so
+    # there is nothing to book and the original transport error stands unchanged.
+    signed = _FakeSigned(raise_on={"place_ioc_limit"}, query_payload={"status": "unknownOid"})
+    runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+    with live_db:
+        runner.run(only=["multi_slice_fill"])
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+        booked = live_db.conn.execute(
+            "SELECT COUNT(*) FROM orders WHERE run_id = ?", ("live-BTC",)
+        ).fetchone()[0]
+    assert "DID reach the exchange" not in (latest["multi_slice_fill"]["error_message"] or "")
+    assert booked == 0
+
+
 def test_resting_ioc_probe_is_cancelled_and_fails_the_test(live_db):
     # The OrderAck contract admits "resting" even for an IOC. Booking it as
     # "canceled" would lie to the audit trail while the order sits live —

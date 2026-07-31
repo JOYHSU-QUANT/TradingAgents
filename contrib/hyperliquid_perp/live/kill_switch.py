@@ -58,6 +58,7 @@ __all__ = [
     "KillSwitchManager",
     "kill_switch_timing_violation",
     "network_timeout_warning",
+    "refresh_across_blocking_work",
     "sl_repair_delay_warning",
 ]
 
@@ -141,29 +142,56 @@ def kill_switch_timing_violation(
     return None
 
 
+# The longest run of BACK-TO-BACK REST calls a tick can make with no
+# :func:`refresh_across_blocking_work` between them — the order-submission chain
+# in ``orders.submit_ioc_limit``: the §8.3 pre-check recovery probe (which falls
+# THROUGH when it cannot resolve the cloid, rather than returning), the place
+# itself, and the duplicate-ack recovery probe. Each rides the full
+# ``network_timeout_s``.
+#
+# It is the SUBMIT chain that sets this bound, not the longer walls of REST
+# traffic elsewhere: protection's repair ladder, the reconcile legs and their
+# per-order orderStatus loops, and the fill backfill's page ladder all refresh
+# ACROSS their blocking work now (2026-07-31 deadline review), so a stretch
+# there is one call long however many calls the loop makes in total.
+# Deliberately NOT counted: the market-data snapshot, which carries its own
+# separate and much smaller timeout.
+_MAX_UNREFRESHED_REST_CALLS = 3
+
+
 def network_timeout_warning(timeout: float | None, max_tick_gap_seconds: float) -> str | None:
     """The §18.2 residual-risk advisory as a checkable message (PR 5, decided
     2026-07-22 "soft mitigation").
 
     Sister of :func:`kill_switch_timing_violation`, advisory rather than
     enforced: nothing ties the per-request REST timeout to the caller's
-    ``max_tick_gap_seconds`` promise, a tick makes several sequential REST
-    calls, and one call riding its full timeout on a degraded (slow, not
-    dead) network can stretch the wall gap past the promise — the dead man's
-    switch then cancels the resting SL/TP while the process is still alive
-    (protection re-covers on the next healthy tick, an unprotected window).
+    ``max_tick_gap_seconds`` promise, and REST calls riding their full timeout
+    on a degraded (slow, not dead) network can stretch the wall gap past the
+    promise — the dead man's switch then cancels the resting SL/TP while the
+    process is still alive (protection re-covers on the next healthy tick, an
+    unprotected window).
+
+    Budgets ``_MAX_UNREFRESHED_REST_CALLS``, not one. The single-call form
+    called a 10s timeout sound against a 30s gap while the submit chain could
+    spend 30s inside it — the arithmetic contradicted the very sentence this
+    docstring opened with ("a tick makes several sequential REST calls") and
+    under-reported the one number the operator can actually turn (2026-07-31
+    deadline review).
+
     Returns the warning text when the timeout cannot keep the promise (or is
     unbounded), None when it fits. The hard construction-time invariant is
-    deferred to PR 6's network-layer rework.
+    deferred to the network-layer rework.
     """
-    if timeout is not None and timeout < max_tick_gap_seconds:
+    budget = max_tick_gap_seconds / _MAX_UNREFRESHED_REST_CALLS
+    if timeout is not None and timeout * _MAX_UNREFRESHED_REST_CALLS < max_tick_gap_seconds:
         return None
     return (
-        f"network_timeout_s ({timeout}) is not below the kill switch's max "
-        f"tick gap ({max_tick_gap_seconds:g}s) — one slow REST call on a "
-        "degraded network can push the §18.2 refresh past the exchange-side "
-        "deadline and cancel the resting SL/TP. Set network_timeout_s below "
-        f"{max_tick_gap_seconds:g} in the config for headroom."
+        f"network_timeout_s ({timeout}) leaves no room under the kill switch's "
+        f"max tick gap ({max_tick_gap_seconds:g}s): an order submission can make "
+        f"{_MAX_UNREFRESHED_REST_CALLS} back-to-back REST calls with no refresh "
+        "between them, so on a degraded network that chain alone can push the "
+        "§18.2 refresh past the exchange-side deadline and cancel the resting "
+        f"SL/TP. Set network_timeout_s below {budget:g} in the config for headroom."
     )
 
 
@@ -190,6 +218,38 @@ def sl_repair_delay_warning(delay_seconds: float, max_tick_gap_seconds: float) -
         "exchange-side deadline, cancelling every resting order mid-repair. "
         f"Set it below {max_tick_gap_seconds:g} for headroom."
     )
+
+
+def refresh_across_blocking_work(kill_switch: KillSwitchManager | None, *, what: str) -> None:
+    """Refresh the dead man's switch across a long blocking operation.
+
+    THE helper for :meth:`KillSwitchManager.tick`'s stated contract — "the owner
+    must call this at least once per ``max_tick_gap_seconds``, INCLUDING from
+    inside a long decision cycle". The switch does not refresh itself, and the
+    live loop is single-threaded, so every site that blocks it for anything
+    approaching a network timeout has to call this or the exchange-side deadline
+    lapses and cancels every resting order on the wallet while the process is
+    alive and healthy — the §20.3 unprotected window opening at exactly the
+    moment the network is least able to close it.
+
+    CHEAP when a refresh is not due: :meth:`tick` reaches the wire only when
+    ``refresh_due()`` says so, so calling this once per loop iteration costs a
+    clock read plus the unconditional expired-deadline detection — and that
+    detection is half the point, since a lapse discovered mid-sweep is a lapse
+    the caller's own row-trust logic needs to know about.
+
+    Guarded, and deliberately never re-raising: a refresh miss must not abort
+    the work it was protecting. The caller is typically mid-repair or mid-sweep,
+    where dying is strictly worse than a stale switch the next tick retries.
+    Mirrors ``protection._maybe_delay``'s long-standing treatment, which this
+    replaced.
+    """
+    if kill_switch is None:
+        return
+    try:
+        kill_switch.tick()
+    except Exception:  # noqa: BLE001 — a refresh miss must not abort its caller
+        logger.warning("kill-switch refresh during %s failed", what, exc_info=True)
 
 
 # The resting protective roles ``shutdown(keep_protective=True)`` leaves

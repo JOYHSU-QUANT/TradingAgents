@@ -148,6 +148,7 @@ class FillBackfiller:
         lookback_seconds: float = DEFAULT_LOOKBACK_SECONDS,
         max_pages: int = DEFAULT_MAX_PAGES,
         response_fill_cap: int = RESPONSE_FILL_CAP,
+        refresh_kill_switch: Callable[[], None] | None = None,
     ) -> None:
         if lookback_seconds <= 0:
             raise ValueError(f"lookback_seconds must be > 0, got {lookback_seconds}")
@@ -161,6 +162,19 @@ class FillBackfiller:
         self._lookback = lookback_seconds
         self._max_pages = max_pages
         self._response_cap = response_fill_cap
+        # §18.2: called after every page. A backfill runs on the single-threaded
+        # live tick and pages up to ``max_pages`` times, so the ladder alone can
+        # hold the thread for ``max_pages × network_timeout_s`` with the last
+        # kill-switch refresh being the one at the top of the tick — the dead
+        # man's switch then cancels every resting order on the wallet while the
+        # process is alive, mid-backfill.
+        #
+        # Optional for TESTS, not for production: BOTH real construction sites
+        # (the live loop and the smoke restart recovery) arm a switch and pass
+        # this. An earlier draft of this comment claimed the smoke path had no
+        # switch to refresh and left it unwired on that basis — it does have one
+        # (2026-07-31 deadline review).
+        self._refresh_kill_switch = refresh_kill_switch
 
     def _window_start(self, stamp: datetime, since: datetime | None) -> datetime:
         """Where this pass must start reading: the trailing window, or the gap's start.
@@ -223,6 +237,13 @@ class FillBackfiller:
         complete = True
         for page in range(self._max_pages):
             raw = self._fetch(start_ms, end_ms)
+            # §18.2: that page rode the network alone; refresh before deciding
+            # whether to ask for another. Placed on the RETURN path rather than
+            # in a finally because a raising fetch ends the ladder here, and the
+            # caller's own leg-level refresh covers that one call — whereas the
+            # case this exists for is the ladder that keeps succeeding, slowly.
+            if self._refresh_kill_switch is not None:
+                self._refresh_kill_switch()
             if not isinstance(raw, list):
                 # Anything that is not a list — INCLUDING ``None`` — is a malformed or
                 # error payload the SDK let through, not "no fills". Fail loud rather

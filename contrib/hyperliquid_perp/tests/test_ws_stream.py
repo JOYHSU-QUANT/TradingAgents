@@ -396,6 +396,30 @@ def test_backfill_dedupes_against_ws_applied_fill(db, tmp_path):
     assert db.conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 2
 
 
+def test_backfill_refreshes_the_kill_switch_between_pages(db, tmp_path):
+    """§18.2: the page ladder runs on the single-threaded live tick and can hold
+    it for ``max_pages × network_timeout_s`` with the tick's own refresh already
+    spent — so every page refreshes the dead man's switch, not just the ladder
+    as a whole (2026-07-31 deadline review).
+    """
+    _live_run_with_order(db)
+    clock = ManualClock(_NOW)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    refreshes: list[int] = []
+    tids = iter([1, 2, 3, 4])
+    bf = FillBackfiller(
+        fetch=lambda s, e: [_rest_fill(next(tids))],
+        processor=proc,
+        clock=clock,
+        max_pages=3,
+        response_fill_cap=1,  # every page comes back "capped", so it keeps paging
+        refresh_kill_switch=lambda: refreshes.append(1),
+    )
+    summary = bf.backfill()
+    assert not summary.complete  # the page budget really did run out
+    assert len(refreshes) == 3  # one per page
+
+
 def test_backfill_records_malformed_and_counts_it(db, tmp_path):
     _live_run_with_order(db)
     clock = ManualClock(_NOW)

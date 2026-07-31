@@ -486,11 +486,18 @@ def test_degraded_protection_cleared_event_on_recovery(env):
 
 
 def test_kill_switch_refreshed_across_repair_delays(env):
-    """§18.2: each blocking repair delay refreshes the dead man's switch, so a
-    repair episode cannot stretch the refresh cadence toward max_tick_gap."""
+    """§18.2: each blocking repair rung refreshes the dead man's switch, so a
+    repair episode cannot stretch the refresh cadence toward max_tick_gap.
+
+    The ladder's invariant is "every wire call is followed by a refresh": each
+    attempt refreshes once on the returned ack and once when the rung closes, so
+    three attempts refresh SIX times. It used to be two — one per retry delay —
+    which left both the final rung and every ack-bearing call uncovered
+    (2026-07-31 deadline review).
+    """
     db = env
     _seed_long(db)
-    client, gate = _all_fail_client()  # 3 attempts → 2 delays
+    client, gate = _all_fail_client()  # 3 attempts, each: ack + rung close
     ks = _FakeKillSwitch()
     mgr = _manager(db, client, gate, kill_switch=ks)
     mgr.sync(
@@ -499,7 +506,72 @@ def test_kill_switch_refreshed_across_repair_delays(env):
         mark=Decimal(50000),
         plan_active=True,
     )
-    assert ks.ticks == 2  # one refresh per retry delay
+    assert ks.ticks == 6
+
+
+def test_the_only_repair_rung_refreshes_although_it_never_sleeps(env):
+    """Regression control isolating the final-rung fix from the delay-driven
+    refreshes: a ONE-attempt ladder sleeps never, and must still refresh across
+    the wire call it just made.
+
+    Two refreshes, both from a ladder that never slept: one on the returned ack,
+    one closing the only rung. Under the old ``attempt >= attempts`` early
+    return the rung-close refresh did not happen at all, so reverting that half
+    alone drops this to 1.
+    """
+    db = env
+    _seed_long(db)
+    client, gate = _all_fail_client()
+    sleeps: list[float] = []
+    ks = _FakeKillSwitch()
+    mgr = _manager(
+        db,
+        client,
+        gate,
+        sleeps=sleeps,
+        kill_switch=ks,
+        protection=LiveProtectionConfig(sl_repair_max_attempts=1),
+    )
+    mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+    assert sleeps == []  # nothing slept: the refresh is not the sleep's rider
+    assert ks.ticks == 2
+
+
+def test_the_orderstatus_confirmation_read_refreshes_across_itself(env):
+    """§18.2: ``_row_still_rests`` blocks the single-threaded tick for a full
+    network timeout, and one sync can reach it three times (SL no-op guard, SL
+    covering check, TP no-op guard) because the latch clears only on a POSITIVE
+    confirmation — so the repeats are exactly the degraded-network case.
+
+    Both paths refresh. The failing read matters most: it is the one that spends
+    the whole timeout getting nowhere, which is why the refresh sits in a
+    ``finally`` (2026-07-31 deadline review).
+    """
+    db = env
+    _seed_long(db)
+    row = {"cloid_hex": "0x" + "a" * 32}
+
+    # Failure path: the read rode its timeout and resolved nothing.
+    client, gate = _FakeClient(), _gate()
+    client.status_script = [ExchangeRequestError("status endpoint down")]
+    ks = _FakeKillSwitch(fired_total=1)  # latched: rows are suspect
+    mgr = _manager(db, client, gate, kill_switch=ks)
+    assert mgr._row_still_rests(row, role="stop_loss") is False
+    assert ks.ticks == 1
+
+    # Success path: a confirmed-resting row refreshes too — it cost the same
+    # round-trip, and returning early past the refresh is what caused the bug.
+    client2, gate2 = _FakeClient(), _gate()
+    client2.status_script = [_resting_status_payload("777")]
+    ks2 = _FakeKillSwitch(fired_total=1)
+    mgr2 = _manager(db, client2, gate2, kill_switch=ks2)
+    assert mgr2._row_still_rests(row, role="stop_loss") is True
+    assert ks2.ticks == 1
 
 
 def test_tp_cancel_failure_during_plan_degrades(env):
@@ -702,6 +774,35 @@ def test_flat_cancels_resting_protection(env):
     assert tp["cloid_hex"] in client.canceled
     assert repo.get_position_protection(db.conn, "r", "BTC") == (None, None)
     assert gate.unresolved_protection_failure is False
+
+
+def test_clearing_a_flat_position_refreshes_across_each_cancel(env):
+    """§18.2: ``_clear`` cancels once per §17.1-rule-4 role, so a flat position
+    pays two back-to-back cancel round-trips every tick — each gets a refresh
+    (2026-07-31 deadline review).
+    """
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    ks = _FakeKillSwitch()
+    mgr = _manager(db, client, gate, kill_switch=ks)
+    mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    with db.transaction() as conn:
+        repo.upsert_current_position(conn, "r", PositionState.flat("BTC"), updated_at=_NOW)
+    ks.ticks = 0  # count only the clearing sync
+    outcome = mgr.sync(
+        position=PositionState.flat("BTC"),
+        liquidation_price=None,
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert outcome is ProtectionOutcome.FLAT
+    assert ks.ticks == 2  # one per cancelled role, not one for the whole clear
 
 
 def test_short_position_sl_is_a_buy(env):

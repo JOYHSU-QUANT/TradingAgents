@@ -275,6 +275,7 @@ class LiveReconciler:
         stream: LiveWsStream | None = None,
         payload_dir: Path | None = None,
         clock: Clock | None = None,
+        refresh_kill_switch: Callable[[], None] | None = None,
     ) -> None:
         self._db = db
         self._run_id = run_id
@@ -287,6 +288,22 @@ class LiveReconciler:
         self._stream = stream
         self._payload_dir = payload_dir
         self._clock = clock or WallClock()
+        # §18.2: a full sweep is the longest wall of REST traffic on the
+        # single-threaded live tick — two account reads, a paged fill backfill,
+        # and an orderStatus round-trip PER order in two separate loops whose
+        # length is bounded by the book, not by config (one of them deliberately
+        # spans runs). The only refresh otherwise is the one at the top of the
+        # tick, so a slow sweep lets the dead man's switch cancel every resting
+        # order on the wallet while the process is alive and mid-reconcile.
+        # Optional for TESTS, not for production: both real construction sites
+        # (the live loop and the smoke restart recovery) arm a switch and pass
+        # this (2026-07-31 deadline review).
+        self._refresh_kill_switch = refresh_kill_switch
+
+    def _refresh_deadline(self) -> None:
+        """Refresh the dead man's switch across this sweep's blocking work (§18.2)."""
+        if self._refresh_kill_switch is not None:
+            self._refresh_kill_switch()
 
     # ------------------------------------------------------------------ run
 
@@ -326,6 +343,10 @@ class LiveReconciler:
             # not need the CLI's aggregated stderr to diagnose the origin.
             logger.exception("reconciliation open_orders read failed")
             errors.append(f"open_orders failed: {exc}")
+        # §18.2: the two account reads are sequential and each can ride a full
+        # network timeout; refresh between them and after them so the pair never
+        # counts as one gap.
+        self._refresh_deadline()
 
         snapshot: AccountSnapshot | None = None
         raw_clearinghouse: Any = None
@@ -335,6 +356,7 @@ class LiveReconciler:
         except Exception as exc:  # noqa: BLE001
             logger.exception("reconciliation clearinghouse state read failed")
             errors.append(f"clearinghouse state read failed: {exc}")
+        self._refresh_deadline()
 
         # -- legs -----------------------------------------------------------
         # Each leg is individually guarded: the docstring's "raises nothing"
@@ -791,6 +813,18 @@ class LiveReconciler:
         exchange_open_cloids: set[str] = set()
 
         for order in open_orders:
+            # §18.2: this loop's reopen check asks orderStatus per order, and the
+            # exchange decides how many orders there are — refresh every
+            # iteration so the wall of round-trips is never one unbroken gap.
+            #
+            # At the TOP, unlike the absent-order loop below, which refreshes
+            # only for rows it is about to probe. Several branches here can reach
+            # the wire and they do not share one guard, so tracking them
+            # individually would be the kind of bookkeeping that silently misses
+            # the branch added next year. A refresh on an iteration that turns
+            # out to do no I/O costs a clock read (tick() reaches the wire only
+            # when a refresh is due), which is the cheaper mistake.
+            self._refresh_deadline()
             if not isinstance(order, dict):
                 errors.append(f"malformed open_orders entry ({type(order).__name__})")
                 ok = False
@@ -862,6 +896,10 @@ class LiveReconciler:
             cloid = row["cloid_hex"]
             if cloid in exchange_open_cloids:
                 continue
+            # §18.2: one orderStatus round-trip per absent row, and this cursor
+            # deliberately spans runs — so the count is bounded by the store's
+            # history, not by anything this run configured. Refresh before each.
+            self._refresh_deadline()
             settled, case = self._settle_absent_order(row, now)
             if case is not None:
                 cases.append(case)

@@ -59,6 +59,7 @@ from ..persistence.cloid import LIVE_ORDER_ROLES, cloid_hex as derive_cloid_hex,
 from ..persistence.db import Database
 from ..persistence.models import PositionState, Side
 from .config import LiveProtectionConfig
+from .kill_switch import refresh_across_blocking_work
 from .order_gate import LiveOrderGateRejected, RealOrderGate
 from .orders import local_status_for_exchange_status, parse_order_status
 
@@ -266,6 +267,16 @@ class ProtectionManager:
                 exc_info=True,
             )
             return False
+        finally:
+            # §18.2: that read just blocked the single-threaded tick for up to a
+            # full network timeout, and ONE sync can reach here three times (the
+            # SL no-op guard, the SL covering check on a gate-blocked repair, the
+            # TP no-op guard) because the latch clears only on a POSITIVE
+            # confirmation — so the repeats are exactly the degraded-network case.
+            # In ``finally`` for the same reason: the timing-out read is the one
+            # that costs the most and the one that returns early
+            # (2026-07-31 deadline review).
+            refresh_across_blocking_work(self._kill_switch, what="orderStatus confirmation")
         if parsed is None:
             # The documented unknownOid marker: the exchange has never seen it,
             # or no longer carries it. Either way nothing of ours rests.
@@ -674,6 +685,14 @@ class ProtectionManager:
                 # failure — a landed-but-ack-lost SL/TP must not be blind-resent
                 # (the resend hits a duplicate-cloid rejection) and must NOT drive a
                 # spurious emergency close of an already-protected position.
+                #
+                # §18.2: refresh BETWEEN the two. The lane is reached by a wire
+                # call that failed — commonly by timing out, i.e. having ridden
+                # the full network timeout — and the recovery probe below is a
+                # second one. Back to back they are the longest blocking stretch
+                # in the ladder, and the rung's own refresh only comes after
+                # (2026-07-31 deadline review).
+                refresh_across_blocking_work(self._kill_switch, what="SL/TP repair")
                 if self._recover_placed_order(
                     role=role,
                     order_id=order_id,
@@ -692,6 +711,16 @@ class ProtectionManager:
                 continue
 
             all_gate_blocked = False  # an ack came back — this attempt reached the wire
+            # §18.2: an ack means that call was ON the network. Refresh here and
+            # the invariant over this whole ladder becomes "every wire call is
+            # followed by a refresh", which the exception lanes and _maybe_delay
+            # cover on their own — but the two ESTABLISHED returns below do NOT
+            # reach _maybe_delay, so without this a successful SL place followed
+            # by a successful TP place is two round-trips inside one gap, and the
+            # duplicate lane below is a place plus an orderStatus probe. Cheap to
+            # repeat: tick() reaches the wire only when a refresh is actually due
+            # (2026-07-31 deadline review).
+            refresh_across_blocking_work(self._kill_switch, what="SL/TP repair")
             if ack.accepted:
                 self._persist_placed(
                     role=role,
@@ -826,7 +855,7 @@ class ProtectionManager:
         return True
 
     def _maybe_delay(self, attempt: int, attempts: int, *, backoff: int = 1) -> None:
-        """Sleep between ladder attempts, refreshing the switch across the pause.
+        """Close out one ladder rung: sleep if another follows, always refresh.
 
         ``backoff`` multiplies the configured delay. Retrying a rate limiter on
         a flat cadence mostly spends the budget re-triggering it; the multiplier
@@ -840,21 +869,19 @@ class ProtectionManager:
         attempt count — so ``delay=20, attempts=8`` would sleep 140s on the last
         rung, past a 120s schedule_cancel, and the dead man's switch fires
         DURING the stop-loss repair (2026-07-31 exit check).
+
+        The refresh is NOT conditional on having slept. It used to be — the
+        early return on the final rung skipped it — but the sleep was never the
+        only blocking thing here: every rung reaches this after a wire call, and
+        the ExchangeError lane after a wire call AND its orderStatus recovery
+        probe, two full timeouts back to back. Skipping the last rung left that
+        traffic uncovered and then handed control back to ``sync()``, which can
+        block again before the tick ends (2026-07-31 deadline review).
         """
-        if attempt >= attempts:
-            return
-        delay = float(self._config.sl_repair_retry_delay_seconds)
-        self._sleep(min(delay * backoff, max(delay, _MAX_REPAIR_SLEEP_S)))
-        # §18.2: this delay blocked the single-threaded tick — refresh the dead
-        # man's switch across it (as the startup sweep does) so a repair episode
-        # never stretches the kill-switch refresh cadence toward ``max_tick_gap``
-        # and self-trips the switch when the system is least healthy. Guarded so a
-        # refresh miss never aborts the repair out from under the position.
-        if self._kill_switch is not None:
-            try:
-                self._kill_switch.tick()
-            except Exception:  # noqa: BLE001 — a refresh miss must not abort the repair
-                logger.warning("kill-switch refresh during SL/TP repair failed", exc_info=True)
+        if attempt < attempts:
+            delay = float(self._config.sl_repair_retry_delay_seconds)
+            self._sleep(min(delay * backoff, max(delay, _MAX_REPAIR_SLEEP_S)))
+        refresh_across_blocking_work(self._kill_switch, what="SL/TP repair")
 
     def _persist_placed(
         self,
@@ -979,6 +1006,12 @@ class ProtectionManager:
             # reason to crash the protection pass. Leave the row; log loud.
             logger.warning("cancel of resting %s (%s) failed: %s", role, existing["order_id"], exc)
             return False
+        finally:
+            # §18.2: ``_clear`` calls this once per §17.1-rule-4 role, so a flat
+            # position pays two of these cancels back to back every tick — and a
+            # cancel that fails by timing out is precisely the one that spent the
+            # whole timeout getting there (2026-07-31 deadline review).
+            refresh_across_blocking_work(self._kill_switch, what="protection cancel")
         if not ack.success:
             # A NON-exceptional refusal (cancel_by_cloid returns CancelAck(success=
             # False) without raising — e.g. "already filled" / "unknown oid"): the

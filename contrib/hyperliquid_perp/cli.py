@@ -1070,7 +1070,7 @@ def _live_startup_recovery(
     from .exchanges.hyperliquid.signed_client import HyperliquidSignedClient
     from .live.fill_backfill import FillBackfiller
     from .live.fills import LiveFillProcessor
-    from .live.kill_switch import KillSwitchManager
+    from .live.kill_switch import KillSwitchManager, refresh_across_blocking_work
     from .live.order_gate import RealOrderGate
     from .live.reconcile import LiveReconciler
     from .live.safe_mode import SafeModeManager
@@ -1379,7 +1379,19 @@ def _live_startup_recovery(
             )
             safe_mode = SafeModeManager(db=db, run_id=run_id, gate=gate)
             processor = LiveFillProcessor(db=db, run_id=run_id, payload_dir=payload_dir)
-            backfiller = FillBackfiller(fetch=signed.user_fills_by_time, processor=processor)
+
+            # §18.2: both of these block the single-threaded tick for far longer
+            # than one round-trip (a paged backfill, a per-order orderStatus
+            # sweep), and the tick's own refresh happens before either runs — so
+            # they refresh across their own work (2026-07-31 deadline review).
+            def _refresh_across_sweep() -> None:
+                refresh_across_blocking_work(kill_switch, what="reconciliation")
+
+            backfiller = FillBackfiller(
+                fetch=signed.user_fills_by_time,
+                processor=processor,
+                refresh_kill_switch=_refresh_across_sweep,
+            )
             reconciler = LiveReconciler(
                 db=db,
                 run_id=run_id,
@@ -1390,6 +1402,7 @@ def _live_startup_recovery(
                 fetch_fills=signed.user_fills_by_time,
                 backfiller=backfiller,
                 payload_dir=payload_dir,
+                refresh_kill_switch=_refresh_across_sweep,
             )
             shutdown_problem: str | None = None
             superseded = False
@@ -2793,7 +2806,7 @@ def _smoke_startup_recovery(
     from .exchanges.hyperliquid.sdk_client import call_sdk
     from .live.fill_backfill import FillBackfiller
     from .live.fills import LiveFillProcessor
-    from .live.kill_switch import KillSwitchManager
+    from .live.kill_switch import KillSwitchManager, refresh_across_blocking_work
     from .live.reconcile import LiveReconciler
     from .live.safe_mode import SafeModeManager
     from .live.startup import run_startup_recovery
@@ -2812,7 +2825,22 @@ def _smoke_startup_recovery(
     )
     safe_mode = SafeModeManager(db=db, run_id=run_id, gate=gate)
     processor = LiveFillProcessor(db=db, run_id=run_id, payload_dir=payload_dir)
-    backfiller = FillBackfiller(fetch=signed.user_fills_by_time, processor=processor)
+
+    # §18.2: the same wiring as the live loop's, and for the same reason — this
+    # path ARMS the switch (it is handed to run_startup_recovery below) under the
+    # same _RECOVERY_MAX_TICK_GAP_SECONDS, so its sweep can lapse the deadline
+    # and cancel the wallet mid-recovery exactly as the live one can. Wiring only
+    # the live lane would have left the smoke restart tests (15–17) running the
+    # unrefreshed version of the very sweep they exist to exercise
+    # (2026-07-31 deadline review).
+    def _refresh_across_sweep() -> None:
+        refresh_across_blocking_work(kill_switch, what="reconciliation")
+
+    backfiller = FillBackfiller(
+        fetch=signed.user_fills_by_time,
+        processor=processor,
+        refresh_kill_switch=_refresh_across_sweep,
+    )
     reconciler = LiveReconciler(
         db=db,
         run_id=run_id,
@@ -2823,6 +2851,7 @@ def _smoke_startup_recovery(
         fetch_fills=signed.user_fills_by_time,
         backfiller=backfiller,
         payload_dir=payload_dir,
+        refresh_kill_switch=_refresh_across_sweep,
     )
     return run_startup_recovery(
         db=db,

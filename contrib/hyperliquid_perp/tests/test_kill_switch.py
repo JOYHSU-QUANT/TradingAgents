@@ -1429,13 +1429,61 @@ def test_the_network_timeout_advisory_is_checkable():
     # it at startup when the per-request REST timeout cannot keep the
     # max_tick_gap promise. The defaults (30s timeout, 30s gap) deliberately
     # warn — the operator earns silence by configuring headroom.
-    from contrib.hyperliquid_perp.live.kill_switch import network_timeout_warning
+    #
+    # The budget is _MAX_UNREFRESHED_REST_CALLS deep, not one call deep: an
+    # order submission can make three back-to-back REST calls with no refresh
+    # between them, so the timeout has to fit the CHAIN inside the gap
+    # (2026-07-31 deadline review). 10s against a 30s gap used to be the
+    # canonical "quiet" case and is now exactly the boundary that must warn —
+    # three 10s calls spend the whole gap.
+    from contrib.hyperliquid_perp.live.kill_switch import (
+        _MAX_UNREFRESHED_REST_CALLS,
+        network_timeout_warning,
+    )
 
-    assert network_timeout_warning(10.0, 30.0) is None  # headroom: quiet
+    assert _MAX_UNREFRESHED_REST_CALLS == 3
+    assert network_timeout_warning(9.0, 30.0) is None  # 27s of chain: quiet
+    boundary = network_timeout_warning(10.0, 30.0)  # 30s of chain: warn
+    assert boundary is not None and "back-to-back" in boundary
     msg = network_timeout_warning(30.0, 30.0)  # the defaults: warn
     assert msg is not None and "network_timeout_s" in msg
+    # The remedy names the per-call budget (gap / chain length), not the gap.
+    assert "below 10" in msg
     assert network_timeout_warning(45.0, 30.0) is not None  # over: warn
     assert network_timeout_warning(None, 30.0) is not None  # unbounded: warn
+
+
+def test_refreshing_across_blocking_work_never_takes_down_its_caller(caplog):
+    """§18.2 helper: every site that blocks the single-threaded tick calls this,
+    and the caller is typically mid-repair or mid-sweep — so a refresh miss must
+    be logged and swallowed, never raised. Dying there is strictly worse than a
+    stale switch the next tick retries (2026-07-31 deadline review).
+    """
+    from contrib.hyperliquid_perp.live.kill_switch import refresh_across_blocking_work
+
+    class _Ticker:
+        def __init__(self, boom=False):
+            self.ticks = 0
+            self.boom = boom
+
+        def tick(self):
+            self.ticks += 1
+            if self.boom:
+                raise RuntimeError("scheduleCancel unreachable")
+
+    healthy = _Ticker()
+    refresh_across_blocking_work(healthy, what="a sweep")
+    assert healthy.ticks == 1
+
+    # No switch to refresh (startup / smoke build collaborators before one
+    # exists): a silent no-op, not an AttributeError.
+    refresh_across_blocking_work(None, what="a sweep")
+
+    failing = _Ticker(boom=True)
+    with caplog.at_level(logging.WARNING):
+        refresh_across_blocking_work(failing, what="a sweep")  # must not raise
+    assert failing.ticks == 1
+    assert "a sweep" in caplog.text  # the miss is loud, not swallowed silently
 
 
 def test_the_sl_repair_delay_advisory_is_checkable():

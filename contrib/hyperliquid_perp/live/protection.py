@@ -87,6 +87,11 @@ if set(_ROLE_ORDER_TYPE) != set(_ROLE_TPSL) or set(_ROLE_TPSL) != set(_SLTP_ROLE
 # path recorded it. Compare the whole mapping (strictly stronger).
 if {r: repo.ROLE_TO_ORDER_TYPE[r] for r in _SLTP_ROLES} != _ROLE_ORDER_TYPE:
     raise AssertionError("_ROLE_ORDER_TYPE drifted from repository.ROLE_TO_ORDER_TYPE")
+# Bound, not re-typed: _row_still_rests asks the EXCHANGE the same "is it still on
+# the book" question active_protection_order asks SQLite, and the two answering
+# from different status vocabularies is precisely the drift this file's other
+# import-time guards exist to prevent.
+_RESTING_ORDER_STATUSES = frozenset(repo.RESTING_ORDER_STATUSES)
 
 # §9.4 aggressive family (decided 2026-07-22): a stop-loss trigger only FIRES in
 # the violent move it protects against, so its fire-time limit needs the same
@@ -170,11 +175,66 @@ class ProtectionManager:
         # §12.2 rule 6 signal: whether the LAST sync() placed / modified /
         # cancelled any exchange order — the engine reconciles that tick.
         self._orders_changed = False
+        # Latched the moment the §4.1 gate reports the kill switch down, cleared
+        # only by a POSITIVE orderStatus confirmation. While it is up, an
+        # ``orders`` row is not evidence that anything rests on the exchange:
+        # a fired scheduleCancel wipes the wallet's book without touching SQLite.
+        # A latch rather than a live read of ``gate.kill_switch_active`` because
+        # §13.4 reopens the gate while the rows are still stale — the staleness
+        # outlives the outage that caused it (2026-07-31 stale-evidence review).
+        self._rows_unconfirmed = False
 
     @property
     def orders_changed_last_sync(self) -> bool:
         """Whether the last :meth:`sync` changed any exchange order (§12.2 rule 6)."""
         return self._orders_changed
+
+    def _row_still_rests(self, row, *, role: str) -> bool:
+        """Whether ``row``'s order is CONFIRMED still resting on the exchange.
+
+        Fast path: while the kill switch has never been seen down, nothing can
+        have mass-cancelled the book behind our back, so the local row stands on
+        its own and this costs nothing. Once the switch has been down even once,
+        the rows are suspect until orderStatus says otherwise (§4.1 gates
+        MUTATIONS, not reads, so this question is always askable).
+
+        Fail-CLOSED on every uncertainty — unreadable payload, transport error,
+        a status word that is not a resting one — matching
+        ``reconcile._has_valid_sl``, which answers the same question from
+        ``open_orders`` and reads ``None`` as False. A false "still rests" leaves
+        a position naked while the audit trail calls it protected; a false "gone"
+        costs one redundant re-place of an order we want resting anyway.
+        """
+        if not self._gate.kill_switch_active:
+            self._rows_unconfirmed = True
+        if not self._rows_unconfirmed:
+            return True
+        hexid = row["cloid_hex"]
+        if not hexid:
+            # No cloid to ask about (a pre-cloid or hand-repaired row). Cannot be
+            # confirmed, so it does not count as evidence.
+            return False
+        try:
+            parsed = parse_order_status(self._client.query_order_by_cloid(str(hexid)))
+        except Exception:  # noqa: BLE001 — an unresolvable read must not crash the tick
+            logger.warning(
+                "orderStatus check for the resting %s (cloid %s) could not resolve — "
+                "treating it as NOT resting (fail-closed)",
+                role,
+                hexid,
+                exc_info=True,
+            )
+            return False
+        if parsed is None:
+            # The documented unknownOid marker: the exchange has never seen it,
+            # or no longer carries it. Either way nothing of ours rests.
+            return False
+        if local_status_for_exchange_status(parsed[1]) not in _RESTING_ORDER_STATUSES:
+            return False
+        # Positively confirmed live. The book agrees with the rows again, so the
+        # suspicion is spent — the next sync goes back to the free fast path.
+        self._rows_unconfirmed = False
+        return True
 
     # -- public entry ---------------------------------------------------------
 
@@ -289,11 +349,21 @@ class ProtectionManager:
             with localcontext(DECIMAL_CONTEXT):
                 needed = floor_to_step(abs(position.size), self._qty_step)
             closing_side = (Side.BUY if position.size < 0 else Side.SELL).value
+            # EXISTENCE of the row is not evidence here, and this branch is the
+            # one place where that is guaranteed: the only §4.1 line that refuses
+            # a PROTECTIVE order is the kill switch, so reaching this code means
+            # the switch is down — and a switch that went down by LAPSING its
+            # deadline has already had the exchange cancel every order on the
+            # wallet, leaving these rows untouched and wrong. Confirm against
+            # orderStatus before letting the row suppress a §20.3 window; a read
+            # that cannot confirm leaves ``covering`` None, so the window opens
+            # (fail-closed, matching reconcile._has_valid_sl).
             covering = (
                 resting
                 if resting is not None
                 and resting["side"] == closing_side
                 and Decimal(resting["qty"]) >= needed
+                and self._row_still_rests(resting, role="stop_loss")
                 else None
             )
             shortfall = (
@@ -443,6 +513,20 @@ class ProtectionManager:
         # direction (a same-size flip whose old SL was never confirmed cancelled),
         # and returning ESTABLISHED over it would report PROTECTED while nothing on
         # the book actually closes the current position.
+        #
+        # But the row is only evidence while the dead man's switch is healthy.
+        # ``scheduleCancel`` firing cancels EVERY order on the wallet and touches
+        # no SQLite: kill_switch.py's own ERROR says "local order rows are stale
+        # until then". Every field this test reads — side, trigger, qty — survives
+        # that untouched, so the match is 100% reliable and 100% wrong. That is
+        # WORSE than the GATE_BLOCKED branch's stale read below: this returns
+        # ESTABLISHED before any wire call, so no protection event is written at
+        # all (the §20.3 unprotected window never opens) and the outcome is
+        # PROTECTED, which LOWERS gate.unresolved_protection_failure. The part
+        # that actually costs money: once §13.4 reopens the gate this same stale
+        # row keeps matching, so the SL the exchange cancelled is never re-placed
+        # until reconciliation settles the row a heartbeat later — the no-op
+        # actively fights the recovery (2026-07-31 stale-evidence review).
         if (
             existing is not None
             and existing_oid is not None
@@ -451,6 +535,7 @@ class ProtectionManager:
             and Decimal(existing["trigger_price"]) == trigger_price
             and existing["qty"] is not None
             and Decimal(existing["qty"]) == size
+            and self._row_still_rests(existing, role=role)
         ):
             return _EstablishResult.ESTABLISHED
 

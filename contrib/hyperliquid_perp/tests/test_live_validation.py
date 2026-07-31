@@ -92,6 +92,27 @@ def _add_refreshes(db: Database, refreshed: int, failed: int = 0, *, run_id: str
             )
 
 
+def _kill_switch_event(db, event_type: str, *, off: int = 0, run_id: str = "r") -> None:
+    with db.transaction() as conn:
+        repo.insert_kill_switch_event(
+            conn,
+            run_id=run_id,
+            event_type=event_type,
+            timestamp=_T0 + timedelta(seconds=off),
+        )
+
+
+def _latch_safe_mode(db, *, mode_type: str, reason: str, run_id: str = "r") -> None:
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(
+            conn,
+            run_id,
+            safe_mode_type=mode_type,
+            safe_mode_reason=reason,
+            safe_mode_entered_at=_T0,
+        )
+
+
 def _healthy(tmp_path, *, mode: str = "testnet_live") -> Database:
     """A live run that meets every §20.3 acceptance condition."""
     db = Database(tmp_path / "live.db")
@@ -1082,6 +1103,185 @@ def test_refresh_rate_just_under_99_percent_fails(tmp_path):
 # -- LiveValidationReport.__post_init__ invariants ------------------------
 
 
+# -- the switch actually FIRED ---------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["testnet_live", "mainnet_tiny"])
+def test_a_fired_kill_switch_fails_the_run_in_both_profiles(tmp_path, mode):
+    # The hole this closes: a firing means the exchange cancelled every order on
+    # the wallet, SL/TP included, and the engine kept placing against a book it
+    # believed was still there. The refresh RATE cannot express it — the outage
+    # that lets a deadline lapse contributes a handful of failures that a
+    # multi-day run dilutes to well inside the 99% bar. Before this gate a run
+    # that demonstrably fired its dead man's switch reported live_ready / exit 0.
+    db = _healthy(tmp_path, mode=mode)
+    _add_refreshes(db, 0, 4)  # the outage that spanned the deadline
+    _kill_switch_event(db, "kill_switch_cancel_triggered")
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.kill_switch_fired_count == 1
+    # The rate alone would still sail through: 100 good + 4 bad = 96.2%... which
+    # on a real multi-day run is 99.97%. Prove the fired count is what gates.
+    assert any("kill_switch_fired_count = 1" in f for f in report.failures)
+    assert not report.live_ready
+
+
+def test_a_healthy_run_reports_a_zero_fired_count(tmp_path):
+    db = _healthy(tmp_path)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.kill_switch_fired_count == 0
+    assert report.live_ready
+
+
+def test_a_disarm_failure_warns_without_gating(tmp_path):
+    # The run is over by then, so it is not a verdict — but §18.2's
+    # keep_protective shutdown leaves SL/TP resting and an armed trigger cancels
+    # exactly those at its deadline, so it can never be silent either.
+    db = _healthy(tmp_path)
+    _kill_switch_event(db, "kill_switch_disarm_failed")
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.kill_switch_disarm_failed_count == 1
+    assert any("disarm failure" in w for w in report.warnings)
+    assert report.live_ready  # non-gating
+
+
+# -- a run latched out of trading ------------------------------------------
+
+
+def test_a_manually_latched_run_is_not_live_ready(tmp_path):
+    # §10.4's three-consecutive-loss guard latches MANUAL safe mode ("a human
+    # must confirm") leaving no reconciliation case and no protection event —
+    # this scheduler_state row is its only durable trace. Meanwhile §13.1 keeps
+    # decision cycles running, so cycle_count and live_order_count climb right
+    # past their gates on a run that cannot place a new order.
+    db = _healthy(tmp_path)
+    _latch_safe_mode(db, mode_type="manual", reason="consecutive_loss")
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.safe_mode_active_type == "manual"
+    assert report.safe_mode_active_reason == "consecutive_loss"
+    assert any("MANUAL safe mode" in f and "consecutive_loss" in f for f in report.failures)
+    assert not report.live_ready
+
+
+def test_a_recoverable_episode_is_not_the_manual_gate(tmp_path):
+    # Recoverable episodes release themselves via §13.4; only the manual latch
+    # (which needs a human) is a verdict. The daily-loss lane keeps its own,
+    # separately-decided treatment.
+    db = _healthy(tmp_path)
+    _latch_safe_mode(db, mode_type="recoverable", reason="ws_disconnect")
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.safe_mode_active_type == "recoverable"
+    assert not any("MANUAL safe mode" in f for f in report.failures)
+
+
+# -- refresh-rate sample floor ---------------------------------------------
+
+
+def test_one_blip_in_a_young_run_is_a_shortfall_not_a_failure(tmp_path):
+    # At the default 30s cadence a five-minute-old run has ten samples, so one
+    # network hiccup read as 9/10 = 90% and pinned a healthy run at exit 5 —
+    # which RUNBOOK §5 answers with "stop and investigate" and §7 with "start a
+    # fresh run-id". Below the sample floor the rate is quantisation noise.
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    _add_refreshes(db, 9, 1)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.kill_switch_refresh_success_rate == Decimal("0.9")
+    assert not any("refresh_success_rate" in f for f in report.failures)
+    assert any("too few to judge a rate" in s for s in report.shortfalls)
+
+
+def test_a_single_refresh_is_not_proof_the_switch_worked(tmp_path):
+    # The mirror image: 1/1 = 100% used to satisfy "the dead man's switch was
+    # refreshing all run" on one sample.
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    _add_refreshes(db, 1, 0)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.kill_switch_refresh_success_rate == Decimal(1)
+    assert not report.live_ready
+    assert any("too few to judge a rate" in s for s in report.shortfalls)
+
+
+def test_a_real_rate_failure_prints_counts_not_only_a_rounded_percent(tmp_path):
+    # 989/1000 = 98.9% renders as "98.90%", but a genuine 0.98998 renders as
+    # "99.00% (need >= 99%)" — a go/no-go line that reads as a self-contradiction
+    # to the operator who has to act on it. The raw counts disambiguate.
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    _add_refreshes(db, 989, 11)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    failure = next(f for f in report.failures if "refresh_success_rate" in f)
+    assert "11 failed of 1000" in failure
+
+
+# -- stale covering stamps after a firing ----------------------------------
+
+
+def test_a_covering_stamp_after_a_firing_does_not_suppress_the_window(tmp_path):
+    # Defence in depth behind protection.py's orderStatus confirmation, and the
+    # lane that matters for rows written by a build predating it — a 30-cycle
+    # acceptance run can span a deploy. Once the switch has fired, an order_id on
+    # a blocked event is not evidence: the exchange emptied the book and left
+    # every local row saying "open".
+    db = _healthy(tmp_path)
+    _kill_switch_event(db, "kill_switch_cancel_triggered", off=10)
+    _protect(db, [("stop_loss_repair_blocked", "BTC", 20, "sl-1")])
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=60))
+    assert report.unprotected_window_count == 1
+    assert report.unresolved_unprotected_window
+
+
+def test_a_covering_stamp_after_the_sl_is_back_on_the_book_suppresses_again(tmp_path):
+    # And it must not latch forever: a confirmed stop_loss_placed means the rows
+    # agree with the exchange again, so the next blocked-over-covering event is
+    # ordinary evidence once more.
+    db = _healthy(tmp_path)
+    _kill_switch_event(db, "kill_switch_cancel_triggered", off=10)
+    _protect(
+        db,
+        [
+            ("stop_loss_placed", "BTC", 20),
+            ("stop_loss_repair_blocked", "BTC", 30, "sl-2"),
+        ],
+    )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=60))
+    assert report.unprotected_window_count == 0
+    # The run still fails — on the firing itself, which is its own gate — but not
+    # on a phantom unprotected window.
+    assert not any("unprotected" in f for f in report.failures)
+
+
+def test_a_covering_stamp_with_no_firing_at_all_still_suppresses(tmp_path):
+    # The already-decided behaviour, pinned: an ordinary refresh blip that never
+    # lapsed a deadline leaves the book intact, and failing a healthy 30-cycle
+    # run on it is exactly what the covering carve-out exists to prevent.
+    db = _healthy(tmp_path)
+    _protect(db, [("stop_loss_repair_blocked", "BTC", 20, "sl-1")])
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=60))
+    assert report.unprotected_window_count == 0
+    assert report.live_ready
+
+
 def _make_report(**overrides) -> LiveValidationReport:
     base = {
         "run_id": "r",
@@ -1101,6 +1301,10 @@ def _make_report(**overrides) -> LiveValidationReport:
         "unresolved_unprotected_window": False,
         "kill_switch_refresh_success_rate": Decimal(1),
         "kill_switch_refresh_total": 100,
+        "kill_switch_fired_count": 0,
+        "kill_switch_disarm_failed_count": 0,
+        "safe_mode_active_type": None,
+        "safe_mode_active_reason": None,
         "restart_reconciliation_passed": True,
         "emergency_close_test_passed": True,
         "startup_with_existing_position_test_passed": True,

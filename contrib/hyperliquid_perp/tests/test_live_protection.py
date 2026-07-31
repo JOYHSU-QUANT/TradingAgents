@@ -827,6 +827,205 @@ def test_a_gate_blocked_resize_does_not_claim_the_undersized_sl_covers(env):
     assert "0.1" in blocked["detail"] and "0.2" in blocked["detail"]  # names the shortfall
 
 
+def _resting_status_payload(oid: str = "1001") -> dict:
+    """An orderStatus answer that CONFIRMS the order is still on the book."""
+    return {"status": "order", "order": {"order": {"oid": oid}, "status": "open"}}
+
+
+def test_a_blocked_sl_does_not_claim_coverage_from_a_row_the_switch_invalidated(env):
+    # The §20.3 hole: reaching GATE_BLOCKED over a PROTECTIVE order means the
+    # kill switch is down, and a switch that went down by lapsing its deadline
+    # has had the exchange cancel every order on the wallet — without touching
+    # SQLite. Side, trigger and qty all still match, so the local row matches
+    # perfectly and is completely wrong. Stamping order_id off it would suppress
+    # the unprotected window (and CLOSE an already-open one), reporting
+    # unprotected_position_seconds = 0 over a genuinely naked position — an
+    # exit-0 live_ready verdict on a run that traded unprotected.
+    #
+    # NB the two tests above refuse at the fake CLIENT while the gate object
+    # still says the switch is healthy, so they exercise the covering predicate
+    # without the staleness. Here kill_switch_active False is both why the wire
+    # refuses and why the exchange has already emptied the book — the real shape.
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    mgr = _manager(db, client, gate)
+    mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert repo.active_protection_order(db.conn, "r", "BTC", "stop_loss") is not None
+    # The switch fires: the wallet's book is emptied, the rows are untouched.
+    gate.kill_switch_active = False
+    client.modify_script = ["gate", "gate", "gate"]
+    client.place_script = ["gate", "gate", "gate"]
+    outcome = mgr.sync(
+        position=_long_position(size=Decimal("0.05")),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert outcome is ProtectionOutcome.BLOCKED
+    blocked = [
+        e
+        for e in repo.iter_protection_order_events(db.conn, "r")
+        if e["event_type"] == "stop_loss_repair_blocked"
+    ][0]
+    # unknownOid (the default scripted answer): the exchange does not carry it.
+    assert client.status_queries  # it actually asked, rather than trusting the row
+    assert blocked["order_id"] is None
+    assert "NO covering stop-loss" in blocked["detail"]
+
+
+def test_a_blocked_sl_still_stamps_a_row_orderstatus_confirms_is_resting(env):
+    # The other direction: a refresh blip that did NOT lapse the deadline leaves
+    # the book intact. Confirmed live ⇒ the row is real evidence and the window
+    # must stay suppressed, or one blip fails a healthy 30-cycle acceptance run.
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    mgr = _manager(db, client, gate)
+    mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    resting = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
+    gate.kill_switch_active = False
+    client.status_script = [_resting_status_payload(str(resting["exchange_order_id"]))]
+    client.modify_script = ["gate", "gate", "gate"]
+    client.place_script = ["gate", "gate", "gate"]
+    outcome = mgr.sync(
+        position=_long_position(size=Decimal("0.05")),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert outcome is ProtectionOutcome.BLOCKED
+    blocked = [
+        e
+        for e in repo.iter_protection_order_events(db.conn, "r")
+        if e["event_type"] == "stop_loss_repair_blocked"
+    ][0]
+    assert blocked["order_id"] == resting["order_id"]
+    assert "covers the position" in blocked["detail"]
+
+
+def test_an_unreadable_orderstatus_does_not_let_a_stale_row_claim_coverage(env):
+    # Fail-closed on uncertainty, matching reconcile._has_valid_sl reading a
+    # None open_orders as False. A transport error is not evidence of coverage.
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    mgr = _manager(db, client, gate)
+    mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    gate.kill_switch_active = False
+    client.status_script = [ExchangeRequestError("status endpoint down")]
+    client.modify_script = ["gate", "gate", "gate"]
+    client.place_script = ["gate", "gate", "gate"]
+    mgr.sync(
+        position=_long_position(size=Decimal("0.05")),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    blocked = [
+        e
+        for e in repo.iter_protection_order_events(db.conn, "r")
+        if e["event_type"] == "stop_loss_repair_blocked"
+    ][0]
+    assert blocked["order_id"] is None
+
+
+def test_a_fired_switch_makes_the_no_op_guard_re_place_the_cancelled_sl(env):
+    # The severe sibling of the covering bug, and the one that costs money.
+    # _establish's no-op shortcut compares side/trigger/qty against the local
+    # row — every field a fired scheduleCancel leaves untouched. Trusting it
+    # returns ESTABLISHED before any wire call: no protection event is written
+    # (so no window ever OPENS, not merely fails to close), the outcome is
+    # PROTECTED (which LOWERS the gate's unresolved_protection_failure line),
+    # and — the part that costs money — once §13.4 reopens the gate the same
+    # stale row keeps matching, so the SL the exchange cancelled is NEVER
+    # re-placed. The no-op actively fights its own recovery.
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    mgr = _manager(db, client, gate)
+    position = _long_position()
+    mgr.sync(
+        position=position,
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert repo.active_protection_order(db.conn, "r", "BTC", "stop_loss") is not None
+    # The switch fires. The position is UNCHANGED, so every field the no-op
+    # guard compares still matches the row the exchange just cancelled.
+    gate.kill_switch_active = False
+    client.modify_script = ["gate", "gate", "gate"]
+    client.place_script = ["gate", "gate", "gate"]
+    outcome = mgr.sync(
+        position=position,
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    # Not a silent PROTECTED no-op: the exposure is on the record and the gate
+    # line stays up.
+    assert outcome is ProtectionOutcome.BLOCKED
+    assert gate.unresolved_protection_failure is True
+    events = [e["event_type"] for e in repo.iter_protection_order_events(db.conn, "r")]
+    assert "stop_loss_repair_blocked" in events
+    # §13.4 releases and the gate reopens. The row is STILL stale, so the SL has
+    # to actually go back on the book rather than be assumed present.
+    gate.kill_switch_active = True
+    client.modify_script = []
+    client.place_script = []
+    before = len(client.modified) + len(client.placed)
+    mgr.sync(
+        position=position,
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert len(client.modified) + len(client.placed) > before  # re-armed, not assumed
+
+
+def test_a_healthy_run_never_pays_for_an_orderstatus_confirmation(env):
+    # The confirmation is latched on the switch having been seen down, not asked
+    # every sync: while nothing can have mass-cancelled the book behind us, the
+    # local row stands on its own and the no-op shortcut must stay free.
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    mgr = _manager(db, client, gate)
+    position = _long_position()
+    mgr.sync(
+        position=position,
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    after_first = len(client.placed) + len(client.modified)  # the SL and the TP
+    for _ in range(2):
+        mgr.sync(
+            position=position,
+            liquidation_price=Decimal(40000),
+            mark=Decimal(50000),
+            plan_active=False,
+        )
+    assert len(client.placed) + len(client.modified) == after_first  # both no-ops
+    assert client.status_queries == []
+
+
 def test_a_wrong_side_resting_sl_does_not_count_as_coverage(env):
     # The other half of the predicate. After a flip the previous side's SL can
     # still be resting — big enough, but pointing the wrong way, so it protects

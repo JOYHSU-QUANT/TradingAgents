@@ -33,7 +33,18 @@ Where the metrics come from (all from persisted PR 2–5 event logs):
   Zero onsets → zero windows and zero seconds (the healthy case), and the gate
   reads the COUNT too so a window measured as 0 cannot impersonate that case.
 - ``kill_switch_refresh_success_rate`` — ``kill_switch_refreshed`` over
-  (refreshed + ``kill_switch_refresh_failed``).
+  (refreshed + ``kill_switch_refresh_failed``). An AVAILABILITY measure, and
+  below ``MIN_KILL_SWITCH_REFRESH_SAMPLES`` events it is not allowed to decide
+  anything: one blip in a ten-sample run is 90%, and 1/1 is 100%.
+- ``kill_switch_fired_count`` — ``kill_switch_cancel_triggered``: deadlines the
+  exchange demonstrably acted on, cancelling every order on the wallet (SL/TP
+  included). A separate question from the rate, and not answerable by it — the
+  outage that lets a deadline lapse contributes a few failed refreshes that a
+  multi-day run dilutes to inside the 99% bar.
+- ``safe_mode_active_type`` / ``safe_mode_active_reason`` — the run's current
+  episode from ``scheduler_state``. A MANUAL one is §10.4's "a human must
+  confirm" latch, which leaves no other durable trace while §13.1 lets the
+  cycle counts keep climbing.
 - the four ``*_test_passed`` booleans — the §20.2 smoke suite's latest verdicts
   (tests 15/16/17/18), read through :mod:`.smoke`.
 
@@ -45,7 +56,9 @@ that is not itself store corruption (an unprotected window — §20.3: unprotect
 seconds must be 0; a ``stop_loss_repair_blocked`` gate pause opens one unless a
 COVERING stop-loss was still resting, since §17.4's modify-before-cancel can
 leave the previous SL on the book — a refresh rate below
-99% on EITHER profile, or — mainnet_tiny — an unresolved reconciliation case or a
+99% on EITHER profile, a dead man's switch that FIRED on either profile, a run
+still latched in MANUAL safe mode on either profile, or — mainnet_tiny — an
+unresolved reconciliation case or a
 breached daily-loss cap). A run that is merely short of the gate (< 30 cycles /
 orders, smoke tests or kill-switch refreshes not yet run, or a smoke test that
 ran but FAILED/ERRORED — curable by a ``live-smoke --only`` re-run, so a
@@ -64,14 +77,16 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
+from typing import NamedTuple
 
+from ..domains.perp.margin import DECIMAL_CONTEXT
 from ..paper import accounting
 from ..paper.scheduler import parse_instant
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from .config import ExecutionMode
-from .safe_mode import REASON_DAILY_LOSS
+from .safe_mode import REASON_DAILY_LOSS, SAFE_MODE_MANUAL
 from .smoke import SMOKE_TEST_KEYS, rerun_keys_for, smoke_gate_report
 
 __all__ = [
@@ -87,6 +102,14 @@ MIN_LIVE_CYCLES = 30
 MIN_LIVE_ORDERS = 30
 # §20.3: kill_switch_refresh_success_rate >= 99%.
 MIN_KILL_SWITCH_REFRESH_RATE = Decimal("0.99")
+# Below this many refresh events the RATE carries no information and is not
+# allowed to fail the run — it is reported as a shortfall (keep running) instead.
+# Set at the point where one blip can no longer cross the bar: with a 99% bar,
+# 99/100 passes but 9/10 does not, so any total under 100 makes a single network
+# hiccup a verdict. At the default 30s cadence this is ~50 minutes of running,
+# far inside the ≥30-cycle (~5 day) gate, so it never becomes the binding
+# constraint on a real acceptance run.
+MIN_KILL_SWITCH_REFRESH_SAMPLES = 100
 
 # A real minimum-valid ISO-8601 instant for the "since beginning of time" query
 # (has_safe_mode_reason_event does a lexicographic string compare): a real
@@ -190,10 +213,12 @@ _UNPROTECTED_ONSET_EVENTS = frozenset({"stop_loss_repair_exhausted", _SL_REPAIR_
 # the two windows the other names structurally miss — a flat whose _clear found no
 # resting order to cancel (so no ``protection_cleared`` row), and an _establish
 # no-op that returns ESTABLISHED without any placed/modified row.
+_SL_PLACED = "stop_loss_placed"
+_SL_MODIFIED = "stop_loss_modified"
 _UNPROTECTED_CLOSE_EVENTS = frozenset(
     {
-        "stop_loss_placed",
-        "stop_loss_modified",
+        _SL_PLACED,
+        _SL_MODIFIED,
         "protection_cleared",
         "degraded_protection_cleared",
     }
@@ -209,11 +234,38 @@ if not (_UNPROTECTED_ONSET_EVENTS | _UNPROTECTED_CLOSE_EVENTS) <= repo.PROTECTIO
 # quieter wrong answer than a crash, on a gate both profiles depend on.
 _KILL_SWITCH_REFRESH_OK = "kill_switch_refreshed"
 _KILL_SWITCH_REFRESH_FAILED = "kill_switch_refresh_failed"
-if not {_KILL_SWITCH_REFRESH_OK, _KILL_SWITCH_REFRESH_FAILED} <= repo.KILL_SWITCH_EVENT_TYPES:
+# The switch DEMONSTRABLY FIRED: kill_switch._detect_expired_deadline writes this
+# when more than schedule_cancel_seconds passed since the last successful
+# schedule, meaning the exchange has already cancelled every order on the wallet
+# — SL and TP included. Until 2026-07-31 the acceptance validator read only the
+# two refresh names above, so a firing was invisible to every gate: an API outage
+# spanning the deadline contributes a handful of refresh_failed rows, which over
+# a multi-day run dilute to well inside the >= 99% bar (4 failures in 14,400
+# refreshes is 99.97%), and the naked window it opened produces no protection
+# event either, because the gate refuses protective orders for the same reason.
+# A run whose dead man's switch actually fired must never read live_ready.
+_KILL_SWITCH_FIRED = "kill_switch_cancel_triggered"
+# The wallet-wide trigger could not be cleared at shutdown. §18.2's keep_protective
+# shutdown deliberately leaves SL/TP resting; a trigger left armed over them
+# cancels exactly those at its deadline. Non-gating (the run itself is over) but
+# the operator has to know the wallet was left armed.
+_KILL_SWITCH_DISARM_FAILED = "kill_switch_disarm_failed"
+if (
+    not {
+        _KILL_SWITCH_REFRESH_OK,
+        _KILL_SWITCH_REFRESH_FAILED,
+        _KILL_SWITCH_FIRED,
+        _KILL_SWITCH_DISARM_FAILED,
+    }
+    <= repo.KILL_SWITCH_EVENT_TYPES
+):
     raise AssertionError(
-        "validation's kill-switch refresh event types drifted from "
-        "repository.KILL_SWITCH_EVENT_TYPES"
+        "validation's kill-switch event types drifted from repository.KILL_SWITCH_EVENT_TYPES"
     )
+# Same discipline for the safe-mode TYPE the manual gate keys on: a renamed
+# member would make the gate match zero rows and pass every latched run.
+if SAFE_MODE_MANUAL not in repo.SAFE_MODE_TYPES:
+    raise AssertionError("safe_mode.SAFE_MODE_MANUAL drifted from repository.SAFE_MODE_TYPES")
 
 # execution_mode() returns "unknown" for an unreadable genesis record, else
 # whatever live.mode the genesis config named — one of ExecutionMode's members.
@@ -251,6 +303,19 @@ class LiveValidationReport:
     # 0% failure): a fabricated 0 would misread as "every refresh failed".
     kill_switch_refresh_success_rate: Decimal | None
     kill_switch_refresh_total: int
+    # Deadlines the exchange demonstrably acted on: it cancelled every order on
+    # the wallet, SL/TP included. Gating in BOTH profiles — the refresh RATE is
+    # an availability measure and cannot express this, because the outage that
+    # lets a deadline lapse contributes a handful of failures that a multi-day
+    # run dilutes to inside the 99% bar.
+    kill_switch_fired_count: int
+    # Non-gating: the run is over by then, but the wallet was left armed.
+    kill_switch_disarm_failed_count: int
+    # The CURRENT safe-mode episode, if any. A manual one is gating: §10.4's
+    # consecutive-loss guard latches "a human must confirm" while §13.1 keeps
+    # cycles running, so the counts climb on a run that cannot place an order.
+    safe_mode_active_type: str | None
+    safe_mode_active_reason: str | None
     restart_reconciliation_passed: bool
     emergency_close_test_passed: bool
     startup_with_existing_position_test_passed: bool
@@ -302,6 +367,17 @@ class LiveValidationReport:
                 f"unprotected_position_seconds must be >= 0, got "
                 f"{self.unprotected_position_seconds}"
             )
+        # A reason without a type is a half-read episode: the gate keys on the
+        # TYPE, so that shape would report the reason in the summary while
+        # passing the run.
+        if self.safe_mode_active_reason is not None and self.safe_mode_active_type is None:
+            raise ValueError(
+                f"safe_mode_active_reason {self.safe_mode_active_reason!r} without a "
+                "safe_mode_active_type"
+            )
+        for name in ("kill_switch_fired_count", "kill_switch_disarm_failed_count"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")
 
     @property
     def live_ready(self) -> bool:
@@ -341,6 +417,10 @@ class LiveValidationReport:
             f"unprotected_window_count: {self.unprotected_window_count}",
             f"kill_switch_refresh_success_rate: {_rate(self.kill_switch_refresh_success_rate)}",
             f"kill_switch_refresh_total: {self.kill_switch_refresh_total}",
+            f"kill_switch_fired_count: {self.kill_switch_fired_count}",
+            f"kill_switch_disarm_failed_count: {self.kill_switch_disarm_failed_count}",
+            f"safe_mode_active: {self.safe_mode_active_type or 'no'}"
+            + (f" ({self.safe_mode_active_reason})" if self.safe_mode_active_reason else ""),
             f"restart_reconciliation_passed: {_smoke(self.restart_reconciliation_passed)}",
             f"emergency_close_test_passed: {_smoke(self.emergency_close_test_passed)}",
             "startup_with_existing_position_test_passed: "
@@ -392,6 +472,31 @@ def execution_mode(config_json: str | None) -> str:
     if isinstance(live, dict) and isinstance(live.get("mode"), str):
         return live["mode"]
     return "unknown"
+
+
+class _SafeModeState(NamedTuple):
+    """The run's CURRENT safe-mode episode, if it is in one."""
+
+    mode_type: str | None  # "manual" / "recoverable" / None
+    reason: str | None
+
+
+def _current_safe_mode(conn, run_id: str) -> _SafeModeState:
+    """Whether the run is sitting in a safe-mode episode right now, and why.
+
+    Until 2026-07-31 the only safe-mode question this file asked was "was the
+    §10.3 daily-loss cap involved", so every other reason was invisible to every
+    gate. §10.4's three-consecutive-loss guard enters a MANUAL episode — one
+    safe_mode.py documents as "a human must confirm" — and leaves no
+    reconciliation case and no protection event, so its ONLY trace is this row.
+    Meanwhile §13.1 keeps decision cycles running (it blocks risk-ADDING orders,
+    not the loop), so cycle_count keeps climbing. A run that is locked out of
+    placing new orders pending human sign-off would report live_ready and exit 0.
+    """
+    row = repo.get_scheduler_state(conn, run_id)
+    if row is None or row["safe_mode_type"] is None:
+        return _SafeModeState(None, None)
+    return _SafeModeState(str(row["safe_mode_type"]), row["safe_mode_reason"])
 
 
 def _daily_loss_still_active(conn, run_id: str) -> bool:
@@ -446,8 +551,14 @@ def _unprotected_windows(conn, run_id: str, now: datetime) -> tuple[Decimal, int
     not existence — closing side and ``qty >= position``, agreeing with
     ``reconcile._has_valid_sl`` on the two rules that decide the answer (that
     one also sums coverage across the exchange's open orders and requires
-    reduce-only; protection.py reads its single local row, so it is the stricter
-    of the two). So the commonest blocked MODIFY, a RESIZE
+    reduce-only). protection.py reads its single local row and then CONFIRMS it
+    against orderStatus before stamping, because the branch that stamps only
+    runs while the kill switch is down — and a lapsed deadline has the exchange
+    cancel the whole wallet without touching those rows. (Until 2026-07-31 this
+    said the single local row made protection "the stricter of the two"; reading
+    one row instead of the book is not stricter, it is a different source, and in
+    the one state this branch runs in it is the source that has just been
+    invalidated.) So the commonest blocked MODIFY, a RESIZE
     whose old SL now covers only part of the position, still opens a window:
     part of that position genuinely has no stop. ``order_id`` present ⇒ a
     covering SL was resting — and if a window was ALREADY open for that symbol
@@ -477,12 +588,40 @@ def _unprotected_windows(conn, run_id: str, now: datetime) -> tuple[Decimal, int
         total += _window_seconds(open_at.pop(symbol), when)
         windows += 1
 
+    # Instants at which the switch DEMONSTRABLY fired. From that moment until an
+    # SL is confirmed back on the book, no ``order_id`` stamp is evidence: the
+    # exchange cancelled the wallet's whole book and left every local row saying
+    # "open". protection.py now confirms against orderStatus before stamping, so
+    # this is the second line — it also covers rows written by a build that
+    # predates that fix, which matters because a 30-cycle acceptance run can span
+    # a deploy.
+    #
+    # Cross-writer timestamps are compared here, which the module warning above
+    # says are not reliably orderable within a tick. That is tolerable in this
+    # direction only: mis-ordering marks a stamp suspect slightly EARLY, which
+    # opens a window (fail-closed). It must never be inverted into suppressing
+    # one.
+    fired_at = sorted(
+        parse_instant(row["timestamp"])
+        for row in repo.iter_kill_switch_events(conn, run_id)
+        if row["event_type"] == _KILL_SWITCH_FIRED
+    )
+    next_firing = 0
+    stamp_is_evidence = True
+
     for row in repo.iter_protection_order_events(conn, run_id):
         symbol = row["symbol"]
         event = row["event_type"]
         when = parse_instant(row["timestamp"])
+        while next_firing < len(fired_at) and fired_at[next_firing] <= when:
+            next_firing += 1
+            stamp_is_evidence = False
+        if event in (_SL_PLACED, _SL_MODIFIED):
+            # An SL positively back on the book: the rows agree with the
+            # exchange again, so stamps become evidence once more.
+            stamp_is_evidence = True
         if event in onset:
-            if event == _SL_REPAIR_BLOCKED and row["order_id"]:
+            if event == _SL_REPAIR_BLOCKED and row["order_id"] and stamp_is_evidence:
                 # A gate-refused MODIFY over a still-COVERING SL (protection.py
                 # stamps the id only then; see the docstring). Stale trigger,
                 # not an unprotected window — and if one was already open for
@@ -503,19 +642,48 @@ def _unprotected_windows(conn, run_id: str, now: datetime) -> tuple[Decimal, int
     return total, windows, has_open
 
 
-def _kill_switch_refresh_rate(conn, run_id: str) -> tuple[Decimal | None, int]:
-    """``(success_rate, total)`` over the kill-switch refresh events."""
+class _KillSwitchTally(NamedTuple):
+    """What the §18.5 event log says about this run's dead man's switch."""
+
+    refresh_rate: Decimal | None  # None iff refresh_total == 0 (no evidence yet)
+    refreshed: int
+    failed: int
+    fired_count: int  # deadlines the exchange demonstrably acted on
+    disarm_failed_count: int
+
+    @property
+    def refresh_total(self) -> int:
+        return self.refreshed + self.failed
+
+
+def _kill_switch_tally(conn, run_id: str) -> _KillSwitchTally:
+    """Refresh rate plus the two OUTCOME counts, in one pass over the events.
+
+    The rate alone is an availability metric and cannot express the thing §20.3
+    actually cares about: whether the switch ever FIRED. Those are different
+    questions with different answers — a firing is preceded by a run of refresh
+    failures whose share of a multi-day run rounds to nothing.
+    """
     refreshed = 0
     failed = 0
+    fired = 0
+    disarm_failed = 0
     for row in repo.iter_kill_switch_events(conn, run_id):
-        if row["event_type"] == _KILL_SWITCH_REFRESH_OK:
+        event = row["event_type"]
+        if event == _KILL_SWITCH_REFRESH_OK:
             refreshed += 1
-        elif row["event_type"] == _KILL_SWITCH_REFRESH_FAILED:
+        elif event == _KILL_SWITCH_REFRESH_FAILED:
             failed += 1
+        elif event == _KILL_SWITCH_FIRED:
+            fired += 1
+        elif event == _KILL_SWITCH_DISARM_FAILED:
+            disarm_failed += 1
     total = refreshed + failed
-    if total == 0:
-        return None, 0
-    return Decimal(refreshed) / Decimal(total), total
+    # Pinned to the shared context like every other layer's arithmetic: this is
+    # the acceptance report's ONLY division, and it decides an exit-5 verdict.
+    with localcontext(DECIMAL_CONTEXT):
+        rate = None if total == 0 else Decimal(refreshed) / Decimal(total)
+    return _KillSwitchTally(rate, refreshed, failed, fired, disarm_failed)
 
 
 def _unresolved_reconciliation_mismatches(conn, run_id: str) -> int:
@@ -610,7 +778,9 @@ def validate_live_run(
         unprotected_seconds, unprotected_windows, unprotected_open = _unprotected_windows(
             conn, run_id, now
         )
-        refresh_rate, refresh_total = _kill_switch_refresh_rate(conn, run_id)
+        kill_switch = _kill_switch_tally(conn, run_id)
+        refresh_rate, refresh_total = kill_switch.refresh_rate, kill_switch.refresh_total
+        safe_mode = _current_safe_mode(conn, run_id)
         unresolved_mismatch_count = _unresolved_reconciliation_mismatches(conn, run_id)
 
         # §10.3 daily-loss cap breach = a safe-mode episode entered for that
@@ -703,6 +873,29 @@ def validate_live_run(
             "clock tick, or out-of-order stamps) but the window is real"
         )
         failures.append(f"{measured} across {unprotected_windows} window(s){suffix} (want 0)")
+    # The dead man's switch actually firing is an integrity failure in BOTH
+    # profiles, for the same reason the refresh rate gates both: "the mechanism
+    # was proven on testnet" is not "the mechanism held on this run". While it
+    # was fired the exchange carried none of our orders — the SL included — and
+    # the engine went on placing against a book it believed was still there.
+    if kill_switch.fired_count:
+        failures.append(
+            f"kill_switch_fired_count = {kill_switch.fired_count} (want 0 — the "
+            "scheduled-cancel deadline lapsed and the exchange cancelled every order "
+            "on the wallet, SL/TP included; the positions held over that window had "
+            "no stop on the book)"
+        )
+    # A run sitting in MANUAL safe mode is, by §13.1, locked out of adding risk
+    # until a human confirms — it cannot be "ready to trade live" whatever its
+    # counts say, and §10.4's consecutive-loss latch reaches this state leaving
+    # no other durable trace.
+    if safe_mode.mode_type == SAFE_MODE_MANUAL:
+        because = f" ({safe_mode.reason})" if safe_mode.reason else ""
+        failures.append(
+            f"the run is in MANUAL safe mode{because} and cannot place new orders "
+            "until a human releases it (`safe-mode --release`); cycle and order "
+            "counts accumulated before the latch do not make it live-ready"
+        )
     # -- shortfalls (exit 4): not yet at the gate --------------------------
     if cycle_count < MIN_LIVE_CYCLES:
         shortfalls.append(f"cycle_count = {cycle_count} (need >= {MIN_LIVE_CYCLES})")
@@ -741,8 +934,7 @@ def validate_live_run(
             failures,
             shortfalls,
             live_order_count=live_order_count,
-            refresh_rate=refresh_rate,
-            refresh_total=refresh_total,
+            kill_switch=kill_switch,
         )
     else:
         _apply_mainnet_gate(
@@ -751,8 +943,7 @@ def validate_live_run(
             unresolved_mismatch_count=unresolved_mismatch_count,
             daily_loss_active=daily_loss_active,
             run_execution_mode=run_execution_mode,
-            refresh_rate=refresh_rate,
-            refresh_total=refresh_total,
+            kill_switch=kill_switch,
         )
 
     # -- non-gating warnings ----------------------------------------------
@@ -767,6 +958,13 @@ def validate_live_run(
             f"{emergency_close_event_count} emergency close(s) occurred during the run — "
             "§21.4 'no emergency close caused by bot bug' is not machine-decidable; "
             "review the preceding stop_loss_repair evidence to rule out a bot bug"
+        )
+    if kill_switch.disarm_failed_count:
+        warnings.append(
+            f"{kill_switch.disarm_failed_count} kill-switch disarm failure(s) — a "
+            "shutdown could not clear the wallet-wide scheduleCancel. §18.2's "
+            "keep_protective shutdown leaves SL/TP resting, and an armed trigger "
+            "cancels exactly those at its deadline; confirm the wallet is disarmed"
         )
     if is_testnet and daily_loss_breached:
         warnings.append(
@@ -817,6 +1015,10 @@ def validate_live_run(
         unresolved_unprotected_window=unprotected_open,
         kill_switch_refresh_success_rate=refresh_rate,
         kill_switch_refresh_total=refresh_total,
+        kill_switch_fired_count=kill_switch.fired_count,
+        kill_switch_disarm_failed_count=kill_switch.disarm_failed_count,
+        safe_mode_active_type=safe_mode.mode_type,
+        safe_mode_active_reason=safe_mode.reason,
         restart_reconciliation_passed=restart_passed,
         emergency_close_test_passed=emergency_passed,
         startup_with_existing_position_test_passed=existing_passed,
@@ -835,8 +1037,7 @@ def _apply_refresh_gate(
     failures: list[str],
     shortfalls: list[str],
     *,
-    refresh_rate: Decimal | None,
-    refresh_total: int,
+    kill_switch: _KillSwitchTally,
 ) -> None:
     """The kill-switch refresh-rate condition, shared by BOTH profiles.
 
@@ -846,12 +1047,30 @@ def _apply_refresh_gate(
     read ``live_ready`` (decision 2026-07-27). One encoding so the two gates
     cannot drift.
     """
+    refresh_rate, refresh_total = kill_switch.refresh_rate, kill_switch.refresh_total
     if refresh_total == 0:
         # No refresh evidence yet — a shortfall (keep running), not a 0% failure.
         shortfalls.append("no kill-switch refresh events yet (need a rate >= 99%)")
+    elif refresh_total < MIN_KILL_SWITCH_REFRESH_SAMPLES:
+        # Some evidence, but not enough for a RATE to mean anything. Zero was
+        # always handled above; 1..N-1 was not, and at a 30s cadence a run five
+        # minutes old has ten samples, so ONE network blip read as 9/10 = 90% and
+        # pinned a healthy run at exit 5 — which RUNBOOK §5 answers with "stop and
+        # investigate" and §7 with "start a fresh run-id". The cut is where a
+        # single blip can no longer cross the bar: 99/100 passes, 9/10 does not.
+        # It also closes the mirror-image false PASS, where 1/1 = 100% let a
+        # single refresh stand as proof the switch worked all run.
+        shortfalls.append(
+            f"kill_switch_refresh_total = {refresh_total} — too few to judge a rate "
+            f"(need >= {MIN_KILL_SWITCH_REFRESH_SAMPLES}; below that one blip decides it)"
+        )
     elif refresh_rate is not None and refresh_rate < MIN_KILL_SWITCH_REFRESH_RATE:
+        # Print the counts, not only the rounded percentage. At two decimals a
+        # genuine 0.98998 renders as "99.00% (need >= 99%)" — a go/no-go line that
+        # reads as a self-contradiction to the operator who has to act on it.
         failures.append(
             f"kill_switch_refresh_success_rate = {refresh_rate * 100:.2f}% "
+            f"({kill_switch.failed} failed of {refresh_total}) "
             f"(need >= {MIN_KILL_SWITCH_REFRESH_RATE * 100:.0f}%)"
         )
 
@@ -861,15 +1080,12 @@ def _apply_testnet_gate(
     shortfalls: list[str],
     *,
     live_order_count: int,
-    refresh_rate: Decimal | None,
-    refresh_total: int,
+    kill_switch: _KillSwitchTally,
 ) -> None:
     """The §20.3 testnet_live conditions beyond the shared integrity set."""
     if live_order_count < MIN_LIVE_ORDERS:
         shortfalls.append(f"live_order_count = {live_order_count} (need >= {MIN_LIVE_ORDERS})")
-    _apply_refresh_gate(
-        failures, shortfalls, refresh_rate=refresh_rate, refresh_total=refresh_total
-    )
+    _apply_refresh_gate(failures, shortfalls, kill_switch=kill_switch)
 
 
 def _apply_mainnet_gate(
@@ -882,8 +1098,7 @@ def _apply_mainnet_gate(
     # shadowing it inside a helper is exactly what the matching rename in
     # validate_live_run already avoided.
     run_execution_mode: str,
-    refresh_rate: Decimal | None,
-    refresh_total: int,
+    kill_switch: _KillSwitchTally,
 ) -> None:
     """The §21.4 mainnet_tiny conditions beyond the shared integrity set.
 
@@ -912,10 +1127,21 @@ def _apply_mainnet_gate(
     # real-money run — while the line right above it, unresolved_mismatch_count,
     # is already current-state and human-clearable. Decided 2026-07-30.
     if daily_loss_active:
+        # NAME THE REMEDY. The latch is released by safe_mode.try_auto_recover,
+        # whose only caller is the reconciler's tick — so it advances while the
+        # DAEMON runs and never while `validate` runs. The documented flow is
+        # "finish 30 cycles, stop the daemon, validate", which lands exactly on a
+        # latch nothing can now clear; and `safe-mode --release` refuses a
+        # recoverable episode by design, so the operator sees a dead end and
+        # reads the neighbouring RUNBOOK warning as "burn the run and redo 30
+        # real-money cycles". Restarting the daemon for one clean reconciliation
+        # is all it takes, once the UTC day has turned.
         failures.append(
             "the run is still in a daily-loss safe-mode episode "
-            "(§21.4: the cap must not be breached)"
+            "(§21.4: the cap must not be breached) — this is a LATCH, not a "
+            "permanent verdict: §10.3 releases it via a clean reconciliation once "
+            "the UTC day has turned, so restart `live --run-id <id> --loop` long "
+            "enough for one reconcile tick and re-run validate before abandoning "
+            "the run (`safe-mode --release` cannot clear a recoverable episode)"
         )
-    _apply_refresh_gate(
-        failures, shortfalls, refresh_rate=refresh_rate, refresh_total=refresh_total
-    )
+    _apply_refresh_gate(failures, shortfalls, kill_switch=kill_switch)

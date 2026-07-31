@@ -36,6 +36,7 @@ __all__ = [
     "PROTECTION_ORDER_EVENT_TYPES",
     "RECONCILIATION_CASE_TYPES",
     "RECONCILIATION_TRIGGERS",
+    "RESTING_ORDER_STATUSES",
     "ROLE_TO_ORDER_TYPE",
     "SAFE_MODE_EVENT_TYPES",
     "SAFE_MODE_TYPES",
@@ -1215,6 +1216,15 @@ LIVE_ORDER_STATUSES: tuple[str, ...] = (
     "open",
     "partially_filled",
 )
+# The narrower "could be ON THE BOOK right now" subset: LIVE_ORDER_STATUSES minus
+# pending_market_data, which has by definition never been sent. Derived, not
+# re-typed, so a new live status joins both sets at once. Two consumers ask the
+# same question of different sources and must agree on the vocabulary:
+# active_protection_order() asks SQLite, and protection._row_still_rests() asks
+# the exchange's orderStatus when a fired kill switch has made the rows suspect.
+RESTING_ORDER_STATUSES: tuple[str, ...] = tuple(
+    status for status in LIVE_ORDER_STATUSES if status != "pending_market_data"
+)
 # §8.3 rule 10: the live-attempt statuses that are DURABLE PROOF the exchange
 # received the order — the only local evidence that can contradict an
 # "unknownOid" answer and forbid a resend. "duplicate" is proof at least as
@@ -1551,12 +1561,17 @@ def active_protection_order(
     (``submitted`` before the ack, ``open`` / ``partially_filled`` after);
     a filled / canceled / rejected protection order is history. Returns the
     most recent match so a just-replaced order never shadows its replacement.
+
+    The status set is :data:`RESTING_ORDER_STATUSES`, not a literal, so a caller
+    that has to ask the SAME question of a non-local source (protection.py
+    checking orderStatus when the rows are suspect) cannot drift from it.
     """
-    return conn.execute(
+    placeholders = ", ".join("?" * len(RESTING_ORDER_STATUSES))
+    return conn.execute(  # noqa: S608 — placeholders are '?' * a module constant
         "SELECT * FROM orders WHERE run_id = ? AND symbol = ? AND order_role = ? "
-        "AND status IN ('submitted', 'open', 'partially_filled') "
+        f"AND status IN ({placeholders}) "
         "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
-        (run_id, symbol, order_role),
+        (run_id, symbol, order_role, *RESTING_ORDER_STATUSES),
     ).fetchone()
 
 

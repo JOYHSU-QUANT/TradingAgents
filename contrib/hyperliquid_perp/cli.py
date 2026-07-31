@@ -2378,7 +2378,18 @@ def _cmd_live_smoke(argv: list[str]) -> int:
             # sibling can be mid-write against the old one. Deferred from open
             # (see _open_existing_db) so a refusal above cannot leave a migrated
             # store behind as its only lasting effect.
-            apply_migrations(db.conn)
+            #
+            # Deferring also moved the "this store was migrated by a NEWER build"
+            # refusal here, so it has to be caught: uncaught it reached main()'s
+            # last-resort handler as exit 2 ("fatal: unexpected error"), losing
+            # the named exit 1 the RUNBOOK documents and that a supervisor
+            # branches on — the very failure the sibling commit was fixing
+            # (2026-07-31 exit check).
+            try:
+                apply_migrations(db.conn)
+            except SchemaVersionError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
         try:
             runner = SmokeTestRunner(session)
             try:

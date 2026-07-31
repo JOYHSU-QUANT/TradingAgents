@@ -496,12 +496,16 @@ class SmokeTestRunner:
             # shutdown lane states (2026-07-30 concurrency review).
             still_ours = self._still_owns_run()
             if still_ours:
-                self._close_staged_long()
-                # BEFORE the disarm below: the wallet's scheduleCancel is the
-                # only backstop left for a probe we cannot cancel ourselves, so
-                # clearing it first turns "swept in ~30s by the dead man" into
-                # "rests until an operator notices".
+                # Probes BEFORE the staged long: they are reduce-only triggers
+                # sitting on that long, so flattening first makes the exchange
+                # auto-cancel them (reduceOnlyCanceled) and every sweep cancel
+                # then comes back refused — a residual warning for orders that
+                # are already gone. And both BEFORE the disarm: the wallet's
+                # scheduleCancel is the last backstop for a probe we cannot
+                # cancel ourselves, so clearing it first turns "swept in ~30s by
+                # the dead man" into "rests until an operator notices".
                 self._sweep_resting_probes()
+                self._close_staged_long()
             elif self._resting_probes:
                 # Not ours to cancel — the successor owns this wallet — but the
                 # probes are still on its book, so name them.
@@ -512,7 +516,12 @@ class SmokeTestRunner:
                     "on a wallet this process no longer owns. Cancel them manually"
                 )
                 logger.warning("smoke: %s", self.probe_residual)
-            elif self._staged_long > 0:
+            # A SEPARATE if, not an elif chained onto the probes above: a trigger
+            # test opens the staged long and registers a probe within two lines
+            # of each other, so a takeover mid-block leaves BOTH — and chaining
+            # reported the probes while silently dropping the funded position,
+            # exactly inverting the severities (2026-07-31 exit check).
+            if not still_ours and self._staged_long > 0:
                 # Real exposure we are no longer entitled to close. Hand it over
                 # loudly rather than silently: the successor's recovery adopts
                 # the position, and the operator gets told which run owns it.
@@ -948,26 +957,47 @@ class SmokeTestRunner:
             # nothing landed and there is nothing to book.
             return exc
         exchange_order_id, status_word = resolved
-        self._insert_probe_row(
-            status=local_status_for_exchange_status(status_word),
-            filled=Decimal(0),
-            # The row's ack-derived fields, from what orderStatus actually said:
-            # exchange_raw_status carries the venue's own word, so the audit
-            # trail shows this row was reconstructed from a status read rather
-            # than from an ack we never received.
-            ack=SimpleNamespace(
-                exchange_order_id=exchange_order_id,
-                average_price=None,
-                status=status_word,
-            ),
-            cloid_logical=cloid_logical,
-            cloid_hex_value=cloid_hex_value,
-            role=role,
-            side=side,
-            qty=qty,
-            price=price,
-            reduce_only=reduce_only,
-        )
+        local_status = local_status_for_exchange_status(status_word)
+        try:
+            self._insert_probe_row(
+                status=local_status,
+                # The venue says filled/canceled/etc, not HOW MUCH: orderStatus
+                # carries no size here. Booking 0 keeps the row honest about what
+                # was observed — §14's backfill attaches the real fill by
+                # exchange_order_id, which is the entire reason for this row.
+                filled=Decimal(0),
+                # The row's ack-derived fields, from what orderStatus actually
+                # said. status_reason distinguishes it from an ack-booked row:
+                # OrderAck.status and the venue's own word overlap on "filled",
+                # so exchange_raw_status alone cannot show the difference.
+                ack=SimpleNamespace(
+                    exchange_order_id=exchange_order_id,
+                    average_price=None,
+                    status=status_word,
+                ),
+                cloid_logical=cloid_logical,
+                cloid_hex_value=cloid_hex_value,
+                role=role,
+                side=side,
+                qty=qty,
+                price=price,
+                reduce_only=reduce_only,
+            )
+        except Exception:  # noqa: BLE001 — see the "never raises" contract above
+            # A busy store (reconcile.py calls a locked DB "a routine hazard")
+            # must not replace the transport error with a sqlite one and lose
+            # the "this probe may have filled" message entirely.
+            logger.warning(
+                "smoke: could not book the recovered probe row for %s",
+                cloid_hex_value,
+                exc_info=True,
+            )
+            return RuntimeError(
+                f"{type(exc).__name__}: {exc}; probe {cloid_hex_value} DID reach the "
+                f"exchange (oid={exchange_order_id}, status={status_word}) but its order "
+                "row could NOT be booked — record it manually or use a new run-id, or "
+                "any fill lands unmapped and pins this run's validate at exit 5"
+            )
         return RuntimeError(
             f"{type(exc).__name__}: {exc}; probe {cloid_hex_value} DID reach the "
             f"exchange (oid={exchange_order_id}, status={status_word}) — its order row "
@@ -1410,9 +1440,16 @@ class SmokeTestRunner:
         folding the note into a passed step's detail was the only signal: a real
         funded position on the wire, reported by a green row.
         """
-        note = self._attempt_close(size)[1]
-        if note is not None:
-            self.position_residuals.append(f"{size} left after cleanup — {note}")
+        closed, note = self._attempt_close(size)
+        if note is None:
+            # Fully closed. Clear any earlier partial note for the same probe
+            # sequence: staged_long_residual is a clearable single value for
+            # exactly this reason, and an append-only list would keep warning
+            # "a position may still be OPEN" about one that has since been shut
+            # (2026-07-31 exit check).
+            self.position_residuals.clear()
+        else:
+            self.position_residuals.append(f"{size - closed} left after cleanup — {note}")
         return note
 
     def _attempt_close(self, size: Decimal) -> tuple[Decimal, str | None]:
@@ -1576,6 +1613,12 @@ class SmokeTestRunner:
                 cloid_hex=modify_cloid,
             )
             self._require_accepted(modified, f"{label} modify")
+            # §17.4 re-labels IN PLACE, so the moment the modify is accepted the
+            # two cloids name ONE order and create_cloid is a phantom. Retire it
+            # here rather than off the cleanup's success below: tying it to the
+            # cancel meant a refused cancel reported "2 probes may be resting"
+            # when at most 1 can be (2026-07-31 exit check).
+            self._resting_probes.discard(create_cloid)
         except _SmokeAbort as exc:
             # A refused modify leaves the ORIGINAL order untouched and still
             # resting under create_cloid (§17.4 contract) — the success-path
@@ -1606,16 +1649,16 @@ class SmokeTestRunner:
                 )
                 if note
             ]
+            if len(notes) < 2:
+                # One of the two cancels succeeded, which means it named the one
+                # order that existed — so the other cloid is a phantom and must
+                # not be carried into the exit sweep as a residual.
+                self._resting_probes.discard(modify_cloid)
+                self._resting_probes.discard(create_cloid)
             if notes:
                 raise RuntimeError(f"{type(exc).__name__}: {exc}; {'; '.join(notes)}") from exc
             raise
         cleanup = self._best_effort_cancel(modify_cloid)
-        if cleanup is None:
-            # §17.4 re-labels in place, so cancelling modify_cloid retired the
-            # ONE order these two cloids ever named. Retire create_cloid with it,
-            # or the exit sweep chases a cloid the exchange no longer binds and
-            # reports a residual that does not exist.
-            self._resting_probes.discard(create_cloid)
         detail = f"{label} modified in place (§17.4)"
         if cleanup:
             detail += f"; {cleanup}"

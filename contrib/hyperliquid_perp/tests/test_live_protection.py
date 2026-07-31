@@ -120,10 +120,17 @@ def env():
 
 
 class _FakeKillSwitch:
-    """Counts §18.2 refresh ticks (the protection repair delay refreshes it)."""
+    """Counts §18.2 refresh ticks (the protection repair delay refreshes it).
 
-    def __init__(self) -> None:
+    ``fired_total`` mirrors the real manager's monotonic firing counter, which
+    is what tells protection its local order rows were invalidated. Bumping it
+    is how a test says "the scheduleCancel actually went off" — as distinct from
+    "the switch is unhealthy", which cancels nothing.
+    """
+
+    def __init__(self, fired_total: int = 0) -> None:
         self.ticks = 0
+        self.fired_total = fired_total
 
     def tick(self) -> None:
         self.ticks += 1
@@ -913,7 +920,8 @@ def test_a_blocked_sl_does_not_claim_coverage_from_a_row_the_switch_invalidated(
     db = env
     _seed_long(db)
     client, gate = _FakeClient(), _gate()
-    mgr = _manager(db, client, gate)
+    ks = _FakeKillSwitch()
+    mgr = _manager(db, client, gate, kill_switch=ks)
     mgr.sync(
         position=_long_position(),
         liquidation_price=Decimal(40000),
@@ -921,7 +929,8 @@ def test_a_blocked_sl_does_not_claim_coverage_from_a_row_the_switch_invalidated(
         plan_active=False,
     )
     assert repo.active_protection_order(db.conn, "r", "BTC", "stop_loss") is not None
-    # The switch fires: the wallet's book is emptied, the rows are untouched.
+    # The switch FIRES: the wallet's book is emptied, the rows are untouched.
+    ks.fired_total += 1
     gate.kill_switch_active = False
     client.modify_script = ["gate", "gate", "gate"]
     client.place_script = ["gate", "gate", "gate"]
@@ -950,7 +959,8 @@ def test_a_blocked_sl_still_stamps_a_row_orderstatus_confirms_is_resting(env):
     db = env
     _seed_long(db)
     client, gate = _FakeClient(), _gate()
-    mgr = _manager(db, client, gate)
+    ks = _FakeKillSwitch()
+    mgr = _manager(db, client, gate, kill_switch=ks)
     mgr.sync(
         position=_long_position(),
         liquidation_price=Decimal(40000),
@@ -958,6 +968,7 @@ def test_a_blocked_sl_still_stamps_a_row_orderstatus_confirms_is_resting(env):
         plan_active=False,
     )
     resting = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
+    ks.fired_total += 1
     gate.kill_switch_active = False
     client.status_script = [_resting_status_payload(str(resting["exchange_order_id"]))]
     client.modify_script = ["gate", "gate", "gate"]
@@ -984,13 +995,15 @@ def test_an_unreadable_orderstatus_does_not_let_a_stale_row_claim_coverage(env):
     db = env
     _seed_long(db)
     client, gate = _FakeClient(), _gate()
-    mgr = _manager(db, client, gate)
+    ks = _FakeKillSwitch()
+    mgr = _manager(db, client, gate, kill_switch=ks)
     mgr.sync(
         position=_long_position(),
         liquidation_price=Decimal(40000),
         mark=Decimal(50000),
         plan_active=False,
     )
+    ks.fired_total += 1
     gate.kill_switch_active = False
     client.status_script = [ExchangeRequestError("status endpoint down")]
     client.modify_script = ["gate", "gate", "gate"]
@@ -1022,7 +1035,8 @@ def test_a_fired_switch_makes_the_no_op_guard_re_place_the_cancelled_sl(env):
     db = env
     _seed_long(db)
     client, gate = _FakeClient(), _gate()
-    mgr = _manager(db, client, gate)
+    ks = _FakeKillSwitch()
+    mgr = _manager(db, client, gate, kill_switch=ks)
     position = _long_position()
     mgr.sync(
         position=position,
@@ -1031,8 +1045,9 @@ def test_a_fired_switch_makes_the_no_op_guard_re_place_the_cancelled_sl(env):
         plan_active=False,
     )
     assert repo.active_protection_order(db.conn, "r", "BTC", "stop_loss") is not None
-    # The switch fires. The position is UNCHANGED, so every field the no-op
+    # The switch FIRES. The position is UNCHANGED, so every field the no-op
     # guard compares still matches the row the exchange just cancelled.
+    ks.fired_total += 1
     gate.kill_switch_active = False
     client.modify_script = ["gate", "gate", "gate"]
     client.place_script = ["gate", "gate", "gate"]
@@ -1061,6 +1076,42 @@ def test_a_fired_switch_makes_the_no_op_guard_re_place_the_cancelled_sl(env):
         plan_active=False,
     )
     assert len(client.modified) + len(client.placed) > before  # re-armed, not assumed
+
+
+def test_a_refresh_blip_does_not_invalidate_the_rows(env):
+    # The narrowing that keeps this fix from becoming the bug it replaced. The
+    # §4.1 gate also drops on a SINGLE failed refresh, which cancels nothing —
+    # keying row-suspicion on the gate meant one network blip forced a
+    # fail-closed orderStatus read that the same blip would fail, so a
+    # still-protected position recorded an unprotected window that only a
+    # stop_loss_placed can close, and the no-op path never writes one. That is
+    # "one blip fails an otherwise-healthy 30-cycle run", which §20.3's covering
+    # carve-out exists to prevent. Suspicion now keys on the FIRING count.
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    ks = _FakeKillSwitch()  # fired_total stays 0: the switch never went off
+    mgr = _manager(db, client, gate, kill_switch=ks)
+    position = _long_position()
+    mgr.sync(
+        position=position,
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    # A refresh blip: the gate shuts, the exchange cancels nothing.
+    gate.kill_switch_active = False
+    outcome = mgr.sync(
+        position=position,
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert outcome is ProtectionOutcome.PROTECTED  # the SL really is still there
+    assert client.status_queries == []  # and no fail-closed read was forced
+    assert gate.unresolved_protection_failure is False
+    events = [e["event_type"] for e in repo.iter_protection_order_events(db.conn, "r")]
+    assert "stop_loss_repair_blocked" not in events  # no phantom window
 
 
 def test_a_healthy_run_never_pays_for_an_orderstatus_confirmation(env):

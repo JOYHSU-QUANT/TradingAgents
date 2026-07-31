@@ -135,6 +135,13 @@ python -m contrib.hyperliquid_perp live-smoke \
 # 每項記 skipped、不下任何單；驗 config 與接線。exit 0＝wiring 檢查完成。
 ```
 
+> `--dry-run` 不取 lease，因此**刻意不 migrate** store（同 `validate`／`export`／
+> `--gate-status` 的唯讀政策——它不能在別的 daemon 腳底下升 schema）。所以剛拉了帶
+> 新 migration 的 code 之後，這一步會先 exit 1 說 schema 版本不符。先讓一個**擁有這個
+> store 的**指令升級它，再回來跑：`safe-mode --status --run-id <id> --db <db>` 是最輕的
+> 一個（純診斷、不碰交易所、不 arm 錢包）；真跑的 `live-smoke`（不帶 `--dry-run`）
+> 也會在取得 lease 後自行升級。
+
 ### 3.2 為 restart 系列（測 15/16/17）備妥前置
 
 三項 restart/startup 測試**各會**對 run 跑一次真正的 §19.1 recovery（arm kill
@@ -250,8 +257,9 @@ python -m contrib.hyperliquid_perp live-smoke \
   那個 run 的 dead-man cover、撤掉它的掛單。**不同網路**的 run（§7.3 把 mainnet
   驗收 run 放在同一個 `live_trading.db`）是不同交易所、不同帳戶，**不算衝突**、
   不會被擋；同一個 db 裡的 **paper** run 也不算（它一張真單都不簽）。
-  `live --loop` 從 2026-07-31 起套用**同一道檢查**——它 arm/clear 的也是整帳戶的
-  scheduleCancel，§19.3 掃單認 bot-owned 時也不帶 `run_id`。
+  **所有 `live` 呼叫**（含不帶 `--loop` 的單發 §19.1 recovery）從 2026-07-31 起
+  套用**同一道檢查**——它 arm/clear 的也是整帳戶的 scheduleCancel，§19.3 掃單
+  認 bot-owned 時也不帶 `run_id`。
   ⚠️ **不要用「換一個 `--db`」繞過這條**：危害是**每個錢包**的，同網路的兩個 run
   共用同一個錢包，換 store 只是讓這道檢查看不見對方，危害原封不動。真正要隔離就得
   換錢包（換 `HYPERLIQUID_*_AGENT_KEY` 指向的帳戶）。
@@ -342,11 +350,23 @@ live run 會自動走 §20.3／§21.4 報告（依 `live.mode`）。指標與 ex
 |---|---|---|
 | `0` | `live_ready` — 全部驗收指標達標 | testnet_live 通過；可準備 mainnet_tiny |
 | `4` | 一致但未到 gate（cycles/orders 未滿、smoke 未跑**或 failed/errored**） | 繼續跑；smoke 紅的修好後 `live-smoke --only <key>` 重跑（latest-per-key 覆蓋） |
-| `5` | integrity failure（dedupe error、orphan、position/replay mismatch、unprotected 秒數 > 0、refresh rate < 99%；mainnet_tiny 另含未解 reconciliation／daily-loss 破線） | 先調查再相信結果 |
+| `5` | integrity failure（dedupe error、orphan、position/replay mismatch、unprotected 秒數 > 0、refresh rate < 99%、**`kill_switch_fired_count` > 0**、**run 仍在 MANUAL safe mode**；mainnet_tiny 另含未解 reconciliation／daily-loss 破線） | 先調查再相信結果 |
 
 > smoke 的 failed／errored **不算** exit 5——它可補救（修好原因、`live-smoke --only
 > <key>` 重跑，latest-per-key 覆蓋），歸 exit 4 的「未到 gate」。exit 5 保留給不可
 > 補救的 integrity 條件（見下方累積制警告框）。
+>
+> **exit 5 裡有兩條是可補救的例外**，訊息本身也會這樣寫，別誤當成要換 run-id：
+> - **MANUAL safe mode**（例如 §10.4 三連虧）：查清原因後 `safe-mode --release
+>   --run-id <id>`，重跑 `validate` 即可。這是 latch，不是永久判定。
+> - **daily-loss 仍 active**：§10.3 的 cap 由**乾淨的 reconciliation** 在跨過 UTC
+>   日之後釋放，而那只在 daemon 跑的時候前進。停掉 daemon 之後才 validate 會永遠
+>   看到它——重開 `live --run-id <id> --loop` 跑到一次 reconcile tick 再驗。
+>
+> **`kill_switch_fired_count` > 0 則是真的不可補救**：deadline 過期代表交易所已把
+> 整個錢包的單（含 SL/TP）撤光，那段時間的倉位確實裸奔過，沒有任何後續狀態能讓它
+> 變成沒發生。查清原因（跨過 deadline 的 API 中斷，或主機時鐘往前跳），然後**換新
+> run-id** 重新累積驗收 cycles。
 
 §20.3 驗收門檻（testnet_live）：`cycle_count ≥ 30`、`live_order_count ≥ 30`、
 `exchange_fill_dedupe_error_count / orphan_exchange_order_count /

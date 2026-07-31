@@ -1266,8 +1266,10 @@ def test_a_covering_stamp_after_the_sl_is_back_on_the_book_suppresses_again(tmp_
         report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=60))
     assert report.unprotected_window_count == 0
     # The run still fails — on the firing itself, which is its own gate — but not
-    # on a phantom unprotected window.
-    assert not any("unprotected" in f for f in report.failures)
+    # on a phantom unprotected window. Matched on the window failure's own
+    # wording, not the bare word "unprotected", which the firing failure also
+    # uses ("the run traded unprotected").
+    assert not any("window(s)" in f for f in report.failures)
 
 
 def test_a_covering_stamp_with_no_firing_at_all_still_suppresses(tmp_path):

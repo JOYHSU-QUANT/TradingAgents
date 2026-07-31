@@ -176,19 +176,21 @@ def test_a_backwards_clock_refreshes_instead_of_parking_the_switch(env):
     assert len(client.schedule_calls) > before
 
 
-def test_fire_detection_no_longer_depends_on_a_refresh_being_due(env):
-    # The compounding half. _detect_expired_deadline was reachable ONLY from
-    # inside refresh(), which tick() calls only when refresh_due() says so — so
-    # anything that suppressed refresh_due() silently disabled the detector too,
-    # and the local gate kept reporting active while the exchange had already
-    # cancelled every order on the wallet. tick() now calls it unconditionally.
+def test_a_lapsed_deadline_is_detected_from_tick(env):
+    # tick() now calls _detect_expired_deadline() itself rather than reaching it
+    # only through refresh(). Asserted end-to-end through the ordinary path —
+    # stubbing refresh_due() to force the decoupling would assert on the stub,
+    # and the constructor invariant (refresh_interval + tick_gap <
+    # schedule_cancel) means a lapsed deadline always implies a due refresh, so
+    # the decoupled state is not otherwise reachable. It stays as defence in
+    # depth; this pins the behaviour that matters.
     db, client, gate, clock, manager = env
     manager.arm()
     clock.advance(KillSwitchConfig().schedule_cancel_seconds + 30)
-    manager.refresh_due = lambda: False  # the suppression, whatever its cause
     manager.tick()
     assert "kill_switch_cancel_triggered" in _event_types(db)
     assert gate.kill_switch_active is False
+    assert manager.fired_total == 1
 
 
 def _manager_with(config: KillSwitchConfig, *, max_tick_gap_seconds: float):

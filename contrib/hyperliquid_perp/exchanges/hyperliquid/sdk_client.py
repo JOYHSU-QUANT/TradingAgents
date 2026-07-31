@@ -107,7 +107,15 @@ def call_sdk(fn: Callable[..., Any], *args: Any) -> Any:
 # served and rejected. Deliberately a short, specific list matched against the
 # lowercased text: over-matching would let a real rejection be retried as though
 # it were transient, which is the more expensive mistake of the two.
-_THROTTLE_MARKERS = ("429", "too many requests", "rate limit", "ratelimit", "slow down")
+#
+# A bare "429" is NOT here, though it was in the first draft. The status code is
+# already checked exactly, so the substring only ever fired on non-SDK
+# exceptions — where it matched any message carrying those three digits inside a
+# larger number: an oid, an epoch-ms timestamp, a price. "order 184296 rejected:
+# insufficient margin" read as a rate limit, and three such attempts in a row
+# would classify a genuinely rejected stop-loss as THROTTLED, suppressing the
+# §17.2 escalation the position needed (2026-07-31 exit check).
+_THROTTLE_MARKERS = ("too many requests", "rate limit", "ratelimit", "slow down")
 
 
 def _looks_throttled(exc: BaseException) -> bool:

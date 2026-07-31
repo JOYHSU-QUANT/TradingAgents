@@ -75,6 +75,13 @@ logger = logging.getLogger(__name__)
 # guard cannot be one, because it cannot see the caller's tick gap at all.
 _REFRESH_DUE_SLACK_S = 0.5
 
+# Wall clocks routinely slew backwards by milliseconds under NTP discipline.
+# Treating that as "the clock moved" would log a warning and burn a schedule
+# call on every tick, so only a step LARGER than this counts. Well below any
+# real step (seconds at minimum) and far inside the smallest sane
+# schedule_cancel window.
+_CLOCK_BACKWARDS_TOLERANCE_S = 1.0
+
 # How far this host's clock may differ from the exchange's before arming is
 # refused. scheduleCancel takes an ABSOLUTE deadline that we compute from the
 # LOCAL clock, and _detect_expired_deadline measures the lapse against that same
@@ -269,6 +276,11 @@ class KillSwitchManager:
         # switch produces one event. Keyed on the schedule, not on the latch —
         # see _detect_expired_deadline.
         self._expiry_reported_for: datetime | None = None
+        # Firings this manager has OBSERVED, monotonic. Public via
+        # :attr:`fired_total` so a reader can tell "a NEW firing happened since I
+        # last looked" from "the switch is merely unhealthy" -- only the former
+        # invalidates anyone's local order rows (2026-07-31 exit check).
+        self._fired_total = 0
         # Sticky until PR 4's safe-mode release path clears it (§13.4). PRIVATE,
         # read through a property: it is the latch that blocks new orders, and a
         # bare writable attribute invites `ks.stop_new_orders = False` as a
@@ -470,7 +482,7 @@ class KillSwitchManager:
         if self._last_scheduled_at is None:
             return True
         elapsed = (self._clock.now() - self._last_scheduled_at).total_seconds()
-        if elapsed < 0:
+        if elapsed < -_CLOCK_BACKWARDS_TOLERANCE_S:
             # The clock moved BACKWARDS (an NTP step, a VM resume, a manual
             # correction). The exchange's deadline was computed from the wall
             # clock at schedule time and is ticking on ITS clock regardless, so
@@ -486,6 +498,18 @@ class KillSwitchManager:
             )
             return True
         return elapsed >= self._config.refresh_interval_seconds - _REFRESH_DUE_SLACK_S
+
+    @property
+    def fired_total(self) -> int:
+        """Firings OBSERVED by this manager, monotonic.
+
+        A firing means the exchange cancelled every order on the wallet without
+        touching SQLite, so a consumer holding local order rows must re-verify
+        them. A merely UNHEALTHY switch -- one failed refresh -- cancels
+        nothing, and conflating the two makes an ordinary network blip look like
+        a wiped book, which is how a healthy run gets failed.
+        """
+        return self._fired_total
 
     def _detect_expired_deadline(self) -> None:
         """Notice that the dead man's switch already FIRED before we got here.
@@ -544,6 +568,7 @@ class KillSwitchManager:
         # already_reported and skip both the log and the write. Worst case now is
         # a repeated ERROR line on retry; never a lost firing.
         self._expiry_reported_for = self._last_scheduled_at
+        self._fired_total += 1
 
     def refresh(self) -> bool:
         """Push the exchange-side deadline back; False (plus flags) on failure.

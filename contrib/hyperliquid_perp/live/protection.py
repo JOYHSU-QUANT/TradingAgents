@@ -104,6 +104,14 @@ _RESTING_ORDER_STATUSES = frozenset(repo.RESTING_ORDER_STATUSES)
 # with engine._EMERGENCY_SLIPPAGE_PCT (same §9.4 rationale, same 3%).
 _SL_FIRE_BAND_FLOOR_PCT = Decimal("0.03")
 
+# Ceiling on ONE backoff sleep inside the repair ladder. The ladder blocks the
+# single-threaded tick, and the §18.2 invariant every entry point preflights is
+# stated against the caller's worst-case tick gap (cli's _RECOVERY_MAX_TICK_GAP
+# _SECONDS, 30s). A backoff that grew past it would break the very promise the
+# preflight proved. Never shortens a configured delay — a delay already longer
+# than this is the operator's own choice and the advisory warns about it.
+_MAX_REPAIR_SLEEP_S = 30.0
+
 
 class _EstablishResult(Enum):
     """How one §17.4 place/modify ladder ended (internal to the manager)."""
@@ -184,28 +192,53 @@ class ProtectionManager:
         # §12.2 rule 6 signal: whether the LAST sync() placed / modified /
         # cancelled any exchange order — the engine reconciles that tick.
         self._orders_changed = False
-        # Latched the moment the §4.1 gate reports the kill switch down, cleared
-        # only by a POSITIVE orderStatus confirmation. While it is up, an
-        # ``orders`` row is not evidence that anything rests on the exchange:
-        # a fired scheduleCancel wipes the wallet's book without touching SQLite.
-        # A latch rather than a live read of ``gate.kill_switch_active`` because
-        # §13.4 reopens the gate while the rows are still stale — the staleness
-        # outlives the outage that caused it (2026-07-31 stale-evidence review).
+        # Latched when the kill switch is observed to have FIRED, cleared only by
+        # a POSITIVE orderStatus confirmation. While it is up, an ``orders`` row
+        # is not evidence that anything rests on the exchange: a fired
+        # scheduleCancel wipes the wallet's book without touching SQLite.
+        #
+        # A latch rather than a live read, because §13.4 reopens the gate while
+        # the rows are still stale — the staleness outlives the outage.
+        #
+        # Keyed on the switch's FIRING COUNT, not on ``gate.kill_switch_active``.
+        # The gate also drops on a single failed refresh, which cancels nothing:
+        # keying on it made one network blip force a fail-closed orderStatus read
+        # that the same blip would fail, so a still-protected position recorded a
+        # window that only a stop_loss_placed can close — and the no-op path never
+        # writes one. That is the "one blip fails an otherwise-healthy 30-cycle
+        # run" bug this file already fixed once, reintroduced from the other side
+        # (2026-07-31 exit check).
         self._rows_unconfirmed = False
+        self._last_seen_firings = 0
 
     @property
     def orders_changed_last_sync(self) -> bool:
         """Whether the last :meth:`sync` changed any exchange order (§12.2 rule 6)."""
         return self._orders_changed
 
+    def _note_firings(self) -> None:
+        """Latch row-suspicion if the switch has fired since we last looked.
+
+        Called from :meth:`sync`'s top as well as from :meth:`_row_still_rests`,
+        because that method sits at the tail of two ``and`` chains: an earlier
+        term (a resized qty, a drifted trigger) short-circuits it away, and the
+        firing would then go unobserved until some later sync happened to reach
+        it — by which time §13.4 has reopened the gate and the no-op path is
+        reading a stale row as proof of protection.
+        """
+        firings = getattr(self._kill_switch, "fired_total", 0)
+        if firings > self._last_seen_firings:
+            self._last_seen_firings = firings
+            self._rows_unconfirmed = True
+
     def _row_still_rests(self, row, *, role: str) -> bool:
         """Whether ``row``'s order is CONFIRMED still resting on the exchange.
 
-        Fast path: while the kill switch has never been seen down, nothing can
-        have mass-cancelled the book behind our back, so the local row stands on
-        its own and this costs nothing. Once the switch has been down even once,
-        the rows are suspect until orderStatus says otherwise (§4.1 gates
-        MUTATIONS, not reads, so this question is always askable).
+        Fast path: while the kill switch has never FIRED, nothing can have
+        mass-cancelled the book behind our back, so the local row stands on its
+        own and this costs nothing. After a firing the rows are suspect until
+        orderStatus says otherwise (§4.1 gates MUTATIONS, not reads, so this
+        question is always askable).
 
         Fail-CLOSED on every uncertainty — unreadable payload, transport error,
         a status word that is not a resting one — matching
@@ -214,8 +247,7 @@ class ProtectionManager:
         a position naked while the audit trail calls it protected; a false "gone"
         costs one redundant re-place of an order we want resting anyway.
         """
-        if not self._gate.kill_switch_active:
-            self._rows_unconfirmed = True
+        self._note_firings()
         if not self._rows_unconfirmed:
             return True
         hexid = row["cloid_hex"]
@@ -263,6 +295,11 @@ class ProtectionManager:
         """
         now = self._clock.now()
         self._orders_changed = False
+        # Sample the firing count BEFORE any short-circuiting predicate can hide
+        # it (see _note_firings): the engine can also skip _sync_protection
+        # entirely on a bad market-data snapshot, which is caused by the same
+        # outage that lapses a deadline.
+        self._note_firings()
         # Whether this sync began already carrying an unresolved protection failure
         # — so a recovery to PROTECTED can emit degraded_protection_cleared (the §17
         # audit trail should show protection RESTORED, not only degradation entered).
@@ -796,10 +833,18 @@ class ProtectionManager:
         is linear rather than exponential because the whole ladder still has to
         fit inside the tick's timing envelope (§18.2), which the fixed delay was
         chosen against.
+
+        And CLAMPED to that envelope, because the multiplier alone breaks it.
+        ``sl_repair_delay_warning`` only ever compares the raw configured delay
+        against ``max_tick_gap``, and config bounds neither the delay nor the
+        attempt count — so ``delay=20, attempts=8`` would sleep 140s on the last
+        rung, past a 120s schedule_cancel, and the dead man's switch fires
+        DURING the stop-loss repair (2026-07-31 exit check).
         """
         if attempt >= attempts:
             return
-        self._sleep(float(self._config.sl_repair_retry_delay_seconds) * backoff)
+        delay = float(self._config.sl_repair_retry_delay_seconds)
+        self._sleep(min(delay * backoff, max(delay, _MAX_REPAIR_SLEEP_S)))
         # §18.2: this delay blocked the single-threaded tick — refresh the dead
         # man's switch across it (as the startup sweep does) so a repair episode
         # never stretches the kill-switch refresh cadence toward ``max_tick_gap``

@@ -883,7 +883,10 @@ def validate_live_run(
             f"kill_switch_fired_count = {kill_switch.fired_count} (want 0 — the "
             "scheduled-cancel deadline lapsed and the exchange cancelled every order "
             "on the wallet, SL/TP included; the positions held over that window had "
-            "no stop on the book)"
+            "no stop on the book). This is CUMULATIVE and cannot be cleared: the run "
+            "traded unprotected and no later state makes that untrue. Investigate the "
+            "cause (an API outage spanning the deadline, or a host clock that jumped "
+            "forward past it), then accumulate the acceptance cycles under a NEW run-id"
         )
     # A run sitting in MANUAL safe mode is, by §13.1, locked out of adding risk
     # until a human confirms — it cannot be "ready to trade live" whatever its
@@ -893,8 +896,10 @@ def validate_live_run(
         because = f" ({safe_mode.reason})" if safe_mode.reason else ""
         failures.append(
             f"the run is in MANUAL safe mode{because} and cannot place new orders "
-            "until a human releases it (`safe-mode --release`); cycle and order "
-            "counts accumulated before the latch do not make it live-ready"
+            "until a human releases it; cycle and order counts accumulated before "
+            "the latch do not make it live-ready. This is a LATCH, not a permanent "
+            "verdict: investigate the reason, then `safe-mode --release --run-id "
+            "<id>` and re-run validate — the run does NOT have to be abandoned"
         )
     # -- shortfalls (exit 4): not yet at the gate --------------------------
     if cycle_count < MIN_LIVE_CYCLES:

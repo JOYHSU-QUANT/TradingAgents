@@ -240,7 +240,16 @@ python -m contrib.hyperliquid_perp live-smoke \
   run 正被 `live --loop` 跑著時會具名拒絕（exit 1）。先停掉 daemon 再跑 smoke。
   套件跑動中**每項測試前會 heartbeat** 這個 lease；萬一 lease 已被接管（本進程
   卡死超過 stale 門檻後被另一個 live 進程合法接手），套件立刻具名中止（exit 1）
-  且**不做**收尾 disarm——kill switch 此時屬於接管者，已記錄的判定不受影響。
+  且**收尾完全不碰交易所**——不 disarm（kill switch 此時屬於接管者），**也不平掉
+  staged 小多倉**（那口倉現在是接管者的部位，接管者的 §19.1 recovery 會收編它；
+  平掉它等於平掉別人的倉）。改印一行 `WARNING: ... lease was taken over` 交接。
+  已記錄的判定不受影響。
+- **同一個 db 裡的其他 run**：lease 是綁 `run_id` 的，但 kill switch、
+  `updateLeverage`、§19.3 掃單都是**整個帳戶**層級。所以若同一個 db 裡**同網路**的
+  另一個 run 正被跑著（lease 還新鮮），smoke 會具名拒絕（exit 1）——否則它會扒掉
+  那個 run 的 dead-man cover、撤掉它的掛單。**不同網路**的 run（§7.3 把 mainnet
+  驗收 run 放在同一個 `live_trading.db`）是不同交易所、不同帳戶，**不算衝突**、
+  不會被擋。要並行又想完全隔離，就用不同的 `--db`。
 - **pre-flight recovery**：見 §3.2。pre-flight 沒過＝suite 直接中止（exit 4、
   不記任何判定）；先查 `safe-mode --status`／log、修好 run 狀態再重跑。
 - **probe 成交入帳**：會成交的 probe——測 6/7/18 的開倉／平倉 IOC，**加上**
@@ -259,6 +268,9 @@ python -m contrib.hyperliquid_perp live-smoke \
   執行只會再開一口新的、平掉新的那口，原殘倉留著。所以：**到交易所確認並手動平掉，
   然後換一個新的 run-id 重跑驗收**——依 §2 的累積制，手動成交會記
   `fill_unmapped`，該 run 的 `validate` 從此永遠 exit 5。
+  （**唯一例外**：若殘倉的成因是 lease 被接管，收尾**刻意不平**，因為那口倉已經
+  屬於接管者、由它的 §19.1 recovery 收編——此時不要手動平，先確認接管的那個
+  進程是不是你要的，見上面的 run lock 條目。）
 
 ### 3.4 確認 gate（不下單、純讀 DB）
 
@@ -477,6 +489,9 @@ mode 切換都手動改 config（§22／§26）。
 | `effective_notional_cap ... below the exchange minimum`（exit 1） | 入金遠低於交易所最小單（約 equity < 16.7 USDC）；見 §1.3。想吃滿 100 USDC 名目上限另需 ≥ ~167 USDC。 |
 | `--loop` 報 §20.2 smoke gate 未過（exit 4） | 先跑 `live-smoke`（§3），`--gate-status` 確認 yes 再 `--loop`。 |
 | `live-smoke` 報 run lock 被持有（exit 1） | 同一 run 的 `live --loop`／`paper` 還在跑；先停掉（或等 lease 過期）再跑 smoke。 |
+| `live-smoke` 報同 db 另一個 run 正在跑（exit 1） | 同網路的姊妹 run 還持著新鮮 lease；smoke 的 kill switch／`updateLeverage`／§19.3 掃單是整帳戶層級，會扒掉它的護欄。停掉它、等 lease 過期，或把兩個 run 放到不同 `--db`。不同網路的 run 不會觸發這條。 |
+| `store schema is vN; this build needs vM`（exit 1） | code 升級後帶了新 migration，而 `validate`／`export`／`--gate-status` 是純報表指令、**刻意不自動 migrate**（免得升級一個 daemon 正在用的 store）。先停掉 daemon，再跑擁有這個 store 的指令（paper store 用 `paper --run-id ...`，live store 用 `live --run-id ...`）讓它 migrate，然後重跑。`safe-mode` 與真跑的 `live-smoke` 會自己 migrate，不受這條影響。 |
+| `store schema is vN but this build only knows vM`（拒絕開啟） | 這個 store 被**更新版**的 code migrate 過，現在用舊 binary 開它會用不認得的欄位寫穿它。跑回新版 code，或還原升級前的備份。 |
 | `live-smoke` 報 pre-flight recovery 沒過（exit 4） | run 狀態不乾淨；`safe-mode --status` 查 open case、照 §6 處置後重跑。 |
 | `OPENROUTER_API_KEY is not set`（exit 1，只有 `--loop`） | `--loop` 要跑 4h AI cycle；依 §1.4 設好 key。不加 `--loop` 的 `live` 不需要 key。 |
 | `live.allow_real_orders is false` | live-smoke／--loop 要真下單；設 `allow_real_orders: true` 並備妥 agent key，或 live-smoke 用 `--dry-run`。 |

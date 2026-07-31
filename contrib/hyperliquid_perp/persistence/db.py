@@ -191,10 +191,11 @@ class Database:
                 if found < latest_known:
                     raise SchemaVersionError(
                         f"store schema is v{found}; this build needs v{latest_known}. "
-                        "This is a read-only command and will not migrate the store — "
-                        "a live daemon may be running against it. Stop the daemon, then "
-                        "run a command that owns the run (e.g. `live --run-id <id>`) to "
-                        "migrate, and retry."
+                        "This is a reporting command and will not migrate the store — "
+                        "a daemon may be running against it. Stop that daemon, then run "
+                        "the command that OWNS this store to migrate it: `paper "
+                        "--run-id <id> --db <this db>` for a paper store, or `live "
+                        "--run-id <id> --db <this db>` for a live one. Then retry."
                     )
         except BaseException:
             # The caller never receives the instance, so nothing else can

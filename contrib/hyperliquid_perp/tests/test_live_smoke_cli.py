@@ -356,6 +356,59 @@ def test_conflicting_run_lease_ignores_a_stale_sibling_at_the_boundary(tmp_path)
         assert _conflicting_run_lease(db, "r1") is None
 
 
+def _set_genesis_network(db_path, run_id: str, network: str) -> None:
+    """Point a run's genesis ``live.network`` at a given exchange."""
+    import json
+
+    with Database(db_path) as db, db.transaction() as conn:
+        row = repo.get_run(conn, run_id)
+        genesis = json.loads(row["config_json"]) if row["config_json"] else {}
+        genesis.setdefault("live", {})["network"] = network
+        conn.execute(
+            "UPDATE runs SET config_json = ? WHERE run_id = ?",
+            (json.dumps(genesis, ensure_ascii=False), run_id),
+        )
+
+
+def test_a_sibling_on_the_other_network_is_not_a_conflict(tmp_path):
+    # RUNBOOK-live §7.3 puts the mainnet_tiny run in the SAME live_trading.db as
+    # the testnet run. Those are different exchanges with different accounts — a
+    # testnet scheduleCancel cannot reach a mainnet order. Keying the refusal on
+    # "same store" told the operator to stop a REAL-MONEY run in order to smoke
+    # a testnet one (exit check 2026-07-31), so the network decides.
+    from contrib.hyperliquid_perp.cli import _conflicting_run_lease
+
+    cfg = _smoke_yaml(tmp_path)
+    dbp = _seed_genesis_run(tmp_path, cfg)  # r1, testnet (the suite's own run)
+    _seed_genesis_run(tmp_path, cfg, run_id="mainnet-BTC")
+    _set_genesis_network(dbp, "mainnet-BTC", "mainnet")
+    _write_lease(dbp, "mainnet-BTC", pid=4321, heartbeat_at=datetime.now(timezone.utc))
+    with Database(dbp) as db:
+        assert _conflicting_run_lease(db, "r1") is None
+
+    # Negative control: the SAME sibling on this network is still refused, so
+    # the pass above is the network test doing its job, not the lookup failing.
+    _set_genesis_network(dbp, "mainnet-BTC", "testnet")
+    with Database(dbp) as db:
+        assert _conflicting_run_lease(db, "r1") == ("mainnet-BTC", 4321)
+
+
+def test_a_sibling_whose_genesis_network_is_unreadable_is_treated_as_a_conflict(tmp_path):
+    # Fail-closed on a corrupt genesis: an unreadable network is not evidence of
+    # safety, and the cost of a false refusal is one operator message against a
+    # stripped dead-man switch on a live wallet.
+    from contrib.hyperliquid_perp.cli import _conflicting_run_lease
+
+    cfg = _smoke_yaml(tmp_path)
+    dbp = _seed_genesis_run(tmp_path, cfg)
+    _seed_genesis_run(tmp_path, cfg, run_id="sibling-run")
+    with Database(dbp) as db, db.transaction() as conn:
+        conn.execute("UPDATE runs SET config_json = ? WHERE run_id = ?", ("[]", "sibling-run"))
+    _write_lease(dbp, "sibling-run", pid=4321, heartbeat_at=datetime.now(timezone.utc))
+    with Database(dbp) as db:
+        assert _conflicting_run_lease(db, "r1") == ("sibling-run", 4321)
+
+
 def test_conflicting_run_lease_never_reports_the_runs_own_lease(tmp_path):
     # Negative control, and the one that matters most: an ordinary `live-smoke`
     # re-run against a store where this run's own lease row is still populated

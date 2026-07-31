@@ -135,24 +135,32 @@ def main(argv: list[str] | None = None) -> int:
 # --------------------------------------------------------------------------
 
 
-def _open_existing_db(path: str) -> Database | None:
-    """Open an existing store read-only, or report why not (never create, never migrate).
+def _open_existing_db(path: str, *, migrate: bool = False) -> Database | None:
+    """Open an existing store, or report why not (never CREATE one implicitly).
 
     ``Database(path)`` would happily create an empty schema — and an offline
     command against a typo'd path would then "succeed" with zero rows.
 
-    ``migrate=False`` because every caller here (``validate`` / ``export`` /
-    ``live-smoke --gate-status``) is a read-style command that takes NO run
-    lease: migrating would silently upgrade a store a running daemon owns,
-    leaving that daemon writing through a schema it does not know. A store
-    that needs upgrading is refused with instructions instead
-    (2026-07-30 migration review).
+    ``migrate`` splits the callers by what they actually do:
+
+    * ``False`` (default) for the genuinely REPORT-ONLY commands — ``validate``,
+      ``export``, ``live-smoke --gate-status``. They take no run lease, so
+      migrating would silently upgrade a store a running daemon owns, leaving
+      that daemon writing through a schema it does not know. They refuse with
+      instructions instead (2026-07-30 migration review).
+    * ``True`` for the commands that legitimately CHANGE the run — ``safe-mode``
+      (``--release`` / ``--stamp-case`` write, and ``--status`` is how an
+      operator diagnoses a latched run) and the real ``live-smoke`` run (it
+      takes the lease moments later and places real orders). Refusing these
+      would disable exactly the diagnostic tools an upgrade is most likely to
+      need: the exit check found ``safe-mode`` blocked by the very condition it
+      exists to investigate (2026-07-31).
     """
     if not Path(path).exists():
         print(f"error: database {path!r} does not exist.", file=sys.stderr)
         return None
     try:
-        return Database(path, migrate=False)
+        return Database(path, migrate=migrate)
     except SchemaVersionError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return None
@@ -370,7 +378,11 @@ def _cmd_safe_mode(argv: list[str]) -> int:
     from .live.safe_mode import SafeModeManager
     from .persistence import repository as repo
 
-    db = _open_existing_db(args.db)
+    # migrate=True: safe-mode WRITES (--release / --stamp-case), and --status is
+    # how an operator diagnoses a latched run. Refusing it on a store that needs
+    # upgrading would disable the diagnostic tool at exactly the moment it is
+    # needed — an upgrade that latches safe mode (2026-07-31 exit check).
+    db = _open_existing_db(args.db, migrate=True)
     if db is None:
         return 1
     with db:
@@ -1746,23 +1758,70 @@ def _live_heartbeat(db, run_id: str, *, pid: int, now, safe_mode) -> None:
         )
 
 
+def _run_genesis_network(config_json: str | None) -> str | None:
+    """``live.network`` from a run's genesis config, or None if unreadable.
+
+    Same defensive shape as :func:`live.validation.execution_mode`: a corrupt or
+    non-object ``config_json`` degrades to None rather than crashing a guard.
+    """
+    if not config_json:
+        return None
+    try:
+        parsed = json.loads(config_json)
+    except (ValueError, TypeError):
+        return None
+    live = parsed.get("live") if isinstance(parsed, dict) else None
+    if isinstance(live, dict) and isinstance(live.get("network"), str):
+        return live["network"]
+    return None
+
+
 def _conflicting_run_lease(db, run_id: str) -> tuple[str, int] | None:
-    """``(run_id, pid)`` of another run in this store holding a FRESH lease, else None.
+    """``(run_id, pid)`` of a SAME-NETWORK sibling holding a FRESH lease, else None.
 
     The run lease is per-``run_id``; the kill switch, ``updateLeverage`` and the
-    §19.3 sweep are per-WALLET, and two runs in one store share a wallet. So
-    "my run's lease is free" does not mean "no one else is on this wallet"
-    (2026-07-30 concurrency review).
+    §19.3 sweep are per-WALLET. So "my run's lease is free" does not mean "no one
+    else is on this wallet" (2026-07-30 concurrency review).
+
+    But "same store" is NOT the same as "same wallet": RUNBOOK-live §7.3
+    deliberately creates the mainnet_tiny run in the SAME ``live_trading.db`` as
+    the testnet run, and those are different exchanges with different accounts —
+    a testnet ``scheduleCancel`` cannot reach a mainnet order. Keying the refusal
+    on the store alone told the operator to stop a real-money run in order to
+    smoke-test testnet. It is keyed on the sibling's genesis ``live.network``
+    instead (2026-07-31 exit check).
+
+    Both networks are read from the STORE (each run's own genesis), not from the
+    caller's session, so the guard is self-contained and cannot disagree with
+    what the runs were actually created as.
+
+    Either side being UNREADABLE is treated as a conflict: a corrupt genesis is
+    not evidence of safety, and the cost of a false refusal is one operator
+    message, while the cost of a false pass is a stripped dead-man switch on a
+    live wallet.
     """
     from .paper.run_lock import LOCK_STALE_SECONDS
     from .paper.scheduler import parse_instant
     from .persistence import repository as repo
 
+    own = repo.get_run(db.conn, run_id)
+    own_network = None if own is None else _run_genesis_network(own["config_json"])
     now = datetime.now(timezone.utc)
     for row in repo.iter_other_run_leases(db.conn, run_id):
         age = (now - parse_instant(row["lock_heartbeat_at"])).total_seconds()
-        if age < LOCK_STALE_SECONDS:
-            return str(row["run_id"]), int(row["lock_pid"])
+        if age >= LOCK_STALE_SECONDS:
+            continue
+        sibling = repo.get_run(db.conn, str(row["run_id"]))
+        sibling_network = None if sibling is None else _run_genesis_network(sibling["config_json"])
+        if (
+            own_network is not None
+            and sibling_network is not None
+            and sibling_network != own_network
+        ):
+            # A different exchange entirely — its wallet cannot be touched by
+            # anything this suite does.
+            continue
+        return str(row["run_id"]), int(row["lock_pid"])
     return None
 
 
@@ -2167,7 +2226,10 @@ def _cmd_live_smoke(argv: list[str]) -> int:
     # matter how the build or the run fails (a raise, not just an int return) —
     # the try/finally makes the cleanup structural, not dependent on every
     # _build_* failure path returning an int (silent-failure review, 2026-07-27).
-    db = _open_existing_db(args.db)
+    # migrate=True: unlike --gate-status above, the real run takes the lease a
+    # few lines down and places real orders, so it is an owning command, not a
+    # reporting one (2026-07-31).
+    db = _open_existing_db(args.db, migrate=True)
     if db is None:
         return 1
     preflight_error: str | None = None
@@ -2196,11 +2258,13 @@ def _cmd_live_smoke(argv: list[str]) -> int:
                 other_run, other_pid = conflict
                 print(
                     f"error: run {other_run!r} in {args.db} is being driven by pid "
-                    f"{other_pid} right now. The smoke suite's kill-switch arm/clear, "
-                    "updateLeverage and §19.3 stale-order sweep are ACCOUNT-wide, not "
-                    "run-scoped, so running it now would strip that run's dead-man "
-                    "cover and cancel its resting orders. Stop that process first "
-                    "(the wallet is bot-exclusive — see RUNBOOK-live §2).",
+                    f"{other_pid} right now, on this same network. "
+                    "The smoke suite's kill-switch arm/clear, updateLeverage and §19.3 "
+                    "stale-order sweep are ACCOUNT-wide, not run-scoped, so running it "
+                    "now would strip that run's dead-man cover and cancel its resting "
+                    "orders. Either stop that process, wait for its lease to go stale, "
+                    "or keep the two runs in separate stores (--db). A run on the OTHER "
+                    "network is a different exchange and does not conflict.",
                     file=sys.stderr,
                 )
                 return 1

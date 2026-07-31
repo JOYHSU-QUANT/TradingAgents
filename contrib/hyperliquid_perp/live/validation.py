@@ -53,8 +53,9 @@ acceptance failure lands in ``failures`` → exit 5 ("investigate before going
 live") — this covers both a store-integrity breach (dedupe errors, orphans,
 duplicate applies, a position or replay mismatch) AND a safety-invariant breach
 that is not itself store corruption (an unprotected window — §20.3: unprotected
-seconds must be 0; a ``stop_loss_repair_blocked`` gate pause opens one unless a
-COVERING stop-loss was still resting, since §17.4's modify-before-cancel can
+seconds must be 0; a ``stop_loss_repair_blocked`` pause — a §4.1 gate refusal OR
+a venue throttle, the event ``detail`` says which — opens one unless a COVERING
+stop-loss was still resting, since §17.4's modify-before-cancel can
 leave the previous SL on the book — a refresh rate below
 99% on EITHER profile, a dead man's switch that FIRED on either profile, a run
 still latched in MANUAL safe mode on either profile, or — mainnet_tiny — an
@@ -622,8 +623,9 @@ def _unprotected_windows(conn, run_id: str, now: datetime) -> tuple[Decimal, int
             stamp_is_evidence = True
         if event in onset:
             if event == _SL_REPAIR_BLOCKED and row["order_id"] and stamp_is_evidence:
-                # A gate-refused MODIFY over a still-COVERING SL (protection.py
-                # stamps the id only then; see the docstring). Stale trigger,
+                # A refused MODIFY (gate or throttle) over a still-COVERING SL
+                # (protection.py stamps the id only then; see the docstring,
+                # and it confirms against orderStatus first). Stale trigger,
                 # not an unprotected window — and if one was already open for
                 # this symbol, it just resolved: close it (2026-07-30).
                 if symbol in open_at:

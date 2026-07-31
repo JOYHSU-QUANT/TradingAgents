@@ -51,8 +51,10 @@ or during ``paper`` startup/reconciliation — SIGTERM likewise once ``paper``,
 ``live`` or ``live-smoke`` has installed its handler; once the ``paper`` loop
 runs, both signals take the shutdown-export lane instead of ``130``). For
 ``live-smoke`` the handler is installed with the run lease, so an interrupt
-after that point still runs the suite's cleanup (close the staged long, sweep
-resting probes, disarm the switch) rather than stranding it. Legacy delegated invocations keep
+after that point still runs the suite's cleanup (sweep resting probes, close the
+staged long, disarm the switch — in that order, because flattening first makes
+the exchange auto-cancel the reduce-only probes) rather than stranding it.
+Legacy delegated invocations keep
 :mod:`.main`'s own exit contract.
 """
 

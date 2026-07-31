@@ -3220,6 +3220,36 @@ def _open_smoke_gate(dbp, run_id="r1") -> None:
     db.close()
 
 
+def test_live_create_refused_by_a_sibling_leaves_no_half_created_run(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # The refusal has to land BEFORE --create writes the run row. Refusing after
+    # left a half-created run behind, and the operator's corrected re-run was
+    # then rejected with "already exists — drop --create to resume it" — a
+    # second, unrelated error for a run they never got to start.
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+    from contrib.hyperliquid_perp.persistence import repository as repo_mod
+
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg, run_id="sibling")
+    db = Database(dbp)
+    acquire_run_lock(db, "sibling", pid=999999, now=datetime.now(timezone.utc))
+    db.close()
+    rc = cli_main(
+        ["live", "--config", str(cfg), "--run-id", "brand-new", "--db", str(dbp), "--create"]
+    )
+    assert rc == 1
+    assert "ACCOUNT-wide" in capsys.readouterr().err
+    # The run was never created, so the corrected re-run is a clean --create.
+    with Database(dbp) as db:
+        assert repo_mod.get_run(db.conn, "brand-new") is None
+
+
 def test_live_loop_refuses_a_same_wallet_sibling_run(tmp_path, capsys, live_seams, monkeypatch):
     # The guard `live-smoke` has had since 2026-07-30, now on the path that runs
     # with REAL money. The run lease is per-run_id and both runs hold their own

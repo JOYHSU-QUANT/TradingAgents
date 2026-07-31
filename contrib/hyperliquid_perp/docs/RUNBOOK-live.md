@@ -404,8 +404,11 @@ safe mode**、四項 smoke 布林（`restart_reconciliation_passed`
 
 > **unprotected 秒數只算「沒有一張足以覆蓋的 SL」的時段**：§17.4 是
 > modify-before-cancel，所以 wire gate 擋掉一次 **modify** 時舊的那張 SL 可能還掛在
-> 交易所。判準是**覆蓋**不是存在（與 §12.3 `_has_valid_sl` 判準一致，且更嚴——它
-> 會把交易所側多張單的覆蓋量加總，這裡只看本地那一張）：平倉方向
+> 交易所。判準是**覆蓋**不是存在（與 §12.3 `_has_valid_sl` 判準一致；那張 covering
+> 單在記到事件上之前會**向交易所 orderStatus 正面確認**，讀不到一律不記——會走到
+> blocked 這條分支就代表 kill switch 正下著，而過期的 deadline 早已讓交易所撤光整個
+> 錢包、只留本地 row 原封不動，所以「只讀本地那一張」不是更嚴，是換了一個此刻剛好
+> 失效的來源）：平倉方向
 > 正確、且 `qty ≥ 目前倉位`，才算還有保護、才**不開窗**（事件上會帶那張單的
 > order_id）。最常見的 blocked 其實是 **resize**——後面的切片成交了、舊 SL 只蓋得住
 > 一部分——那**照樣開窗**，因為有一部分倉位真的沒有停損。真的一張都沒有的 blocked、
@@ -541,7 +544,7 @@ mode 切換都手動改 config（§22／§26）。
 | `--loop` 報 §20.2 smoke gate 未過（exit 4） | 先跑 `live-smoke`（§3），`--gate-status` 確認 yes 再 `--loop`。 |
 | `live-smoke` 報 run lock 被持有（exit 1） | 同一 run 的 `live --loop`／`paper` 還在跑；先停掉（或等 lease 過期）再跑 smoke。 |
 | `live-smoke`／`live` 報同 db 另一個 run 正在跑（exit 1） | 同網路的姊妹 run 還持著新鮮 lease；kill switch／`updateLeverage`／§19.3 掃單是整帳戶層級，會扒掉它的護欄。**停掉它，或等 lease 過期**。不同網路的 run、以及 paper run，都不會觸發這條。⚠️ 換 `--db` 不是解法——危害綁錢包不綁 store，換 store 只會讓檢查瞎掉。 |
-| `store schema is vN; this build needs vM`（exit 1） | code 升級後帶了新 migration，而 `validate`／`export`／`--gate-status` 是純報表指令、**刻意不自動 migrate**（免得升級一個 daemon 正在用的 store）。先停掉 daemon，再跑擁有這個 store 的指令（paper store 用 `paper --run-id ...`，live store 用 `live --run-id ...`）讓它 migrate，然後重跑。`safe-mode` 與真跑的 `live-smoke` 會自己 migrate，不受這條影響。 |
+| `store schema is vN; this build needs vM`（exit 1） | code 升級後帶了新 migration，而 `validate`／`export`／`--gate-status`／`live-smoke --dry-run` 是純報表指令、**刻意不自動 migrate**（免得升級一個 daemon 正在用的 store）。先停掉 daemon，再跑擁有這個 store 的指令（paper store 用 `paper --run-id ...`，live store 用 `live --run-id ...`）讓它 migrate，然後重跑。最輕的升級指令是 `safe-mode --status`（純診斷、不碰交易所、不 arm 錢包）；真跑的 `live-smoke`（不帶 `--dry-run`）也會在取得 lease 之後自己 migrate。 |
 | `store schema is vN but this build only knows vM`（拒絕開啟） | 這個 store 被**更新版**的 code migrate 過，現在用舊 binary 開它會用不認得的欄位寫穿它。跑回新版 code，或還原升級前的備份。 |
 | `live-smoke` 報 pre-flight recovery 沒過（exit 4） | run 狀態不乾淨；`safe-mode --status` 查 open case、照 §6 處置後重跑。**注意 config 錯誤不會走這條**：kill-switch timing 違規在 `live-smoke` 與 `live` 一樣是啟動前的具名 **exit 1**（訊息直接指名 `schedule_cancel_seconds`／`refresh_interval_seconds` 兩個 knob），所以 supervisor 依 1／4 分流仍然正確。 |
 | `OPENROUTER_API_KEY is not set`（exit 1，只有 `--loop`） | `--loop` 要跑 4h AI cycle；依 §1.4 設好 key。不加 `--loop` 的 `live` 不需要 key。 |

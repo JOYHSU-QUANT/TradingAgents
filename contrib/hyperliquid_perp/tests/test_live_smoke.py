@@ -210,9 +210,8 @@ def test_a_net_short_account_is_named_not_failed_seven_times(live_db):
                 PositionState(coin="BTC", size=_D("-0.05"), entry_price=_D(60000)),
                 updated_at=_T0,
             )
-        runner = smoke.SmokeTestRunner(
-            _ctx(live_db, _FakeSigned(), run_recovery=lambda: _Recovery())
-        )
+        signed = _FakeSigned()
+        runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
         runner.run()
         latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
 
@@ -221,8 +220,16 @@ def test_a_net_short_account_is_named_not_failed_seven_times(live_db):
     # ...but every one of them says WHY, instead of reading as an exchange refusal.
     for key in long_shaped:
         assert "net SHORT" in (latest[key]["error_message"] or "")
-    # And no phantom residual warning telling the operator to trade by hand.
+    # And the guard fired BEFORE anything reached the wire, so there is no staged
+    # position to warn about. Asserted on the wire, not on the residual flag: the
+    # fake accepts every close, so `staged_long_residual is None` would hold with
+    # or without the guard (2026-08-01 exit check).
     assert runner.staged_long_residual is None
+    # NARROW: only the long-shaped probes are affected. The tests that do not open
+    # a position still pass, so a net-short account does not fail the whole suite
+    # — which is what makes the named abort more useful than seven red rows.
+    assert latest["signed_client_init"]["status"] == "passed"
+    assert latest["update_leverage"]["status"] == "passed"
 
 
 def test_results_are_persisted_per_test(live_db):

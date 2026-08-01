@@ -117,6 +117,14 @@ MIN_KILL_SWITCH_REFRESH_RATE = Decimal("0.99")
 # far inside the ≥30-cycle (~5 day) gate, so it never becomes the binding
 # constraint on a real acceptance run.
 MIN_KILL_SWITCH_REFRESH_SAMPLES = 100
+# A stretch with NO kill-switch event in it that long means the process was not
+# running: a live run writes one row per refresh interval (30s by default), so ten
+# intervals of silence is not a slow tick, it is a stopped daemon. Downtime is
+# excluded from the availability measure entirely — see _kill_switch_tally. Ten
+# intervals rather than two or three because a tick can legitimately stall for a
+# few multiples on a bad network, and mislabelling THAT as downtime would hide a
+# real outage.
+MAX_KILL_SWITCH_EVENT_GAP_SECONDS = Decimal(300)
 
 # A real minimum-valid ISO-8601 instant for the "since beginning of time" query
 # (has_safe_mode_reason_event does a lexicographic string compare): a real
@@ -241,14 +249,19 @@ if not (_UNPROTECTED_ONSET_EVENTS | _UNPROTECTED_CLOSE_EVENTS) <= repo.PROTECTIO
 # quieter wrong answer than a crash, on a gate both profiles depend on.
 _KILL_SWITCH_REFRESH_OK = "kill_switch_refreshed"
 _KILL_SWITCH_REFRESH_FAILED = "kill_switch_refresh_failed"
+# ``arm()`` writes this immediately after a SUCCESSFUL schedule_cancel, so as
+# evidence that the switch is live it is identical to a refresh — and it is the
+# row a restart produces. Reading it as an outage-closer is what stops a run that
+# was stopped mid-outage from billing its entire downtime as unprotected.
+_KILL_SWITCH_ARMED = "kill_switch_armed"
 # The switch DEMONSTRABLY FIRED: kill_switch._detect_expired_deadline writes this
 # when more than schedule_cancel_seconds passed since the last successful
 # schedule, meaning the exchange has already cancelled every order on the wallet
 # — SL and TP included. Until 2026-07-31 the acceptance validator read only the
 # two refresh names above, so a firing was invisible to every gate: an API outage
-# spanning the deadline contributes a handful of refresh_failed rows, which over
-# a multi-day run dilute to well inside the >= 99% bar (4 failures in 14,400
-# refreshes is 99.97%), and the naked window it opened produces no protection
+# spanning the deadline is ONE refresh_failed row and a few minutes of outage
+# time, which over a multi-day run stays well inside the >= 99% bar, and the
+# naked window it opened produces no protection
 # event either, because the gate refuses protective orders for the same reason.
 # A run whose dead man's switch actually fired must never read live_ready.
 _KILL_SWITCH_FIRED = "kill_switch_cancel_triggered"
@@ -696,48 +709,66 @@ def _kill_switch_tally(conn, run_id: str, now: datetime) -> _KillSwitchTally:
     (2026-08-01 lifecycle review).
 
     An outage opens at a ``kill_switch_refresh_failed`` and closes at the next
-    ``kill_switch_refreshed``; one still open at ``now`` is measured to now, so a
-    run that never recovered cannot look clean by having no closing row.
+    ``kill_switch_refreshed`` (or ``kill_switch_armed``, which is emitted right
+    after a successful schedule and is therefore the same evidence). One still
+    open when measuring runs to the end of the window, so a run that never
+    recovered cannot look clean by having no closing row.
+
+    Time in which the PROCESS WAS NOT RUNNING counts as neither. A healthy switch
+    writes a row every refresh interval, so a gap of
+    ``MAX_KILL_SWITCH_EVENT_GAP_SECONDS`` with nothing in it means the process was
+    down, and that stretch leaves both numerator and denominator. Charging it
+    either way was wrong in both directions and picked between them on an
+    irrelevance — the type of the last row before the stop: a 24h run that was
+    down for 23h reported 100% available, while a run cleanly stopped mid-outage
+    had the whole downtime billed as unprotected. Excluding it also stops the
+    verdict drifting: the stretch from the last event to ``now`` is just another
+    gap, so re-running ``validate`` two days later can no longer dilute a run's
+    outages into a pass (2026-08-01 exit check).
     """
     refreshed = 0
     failed = 0
     fired = 0
     disarm_failed = 0
-    first_seen: datetime | None = None
-    last_seen: datetime | None = None
-    outage_started: datetime | None = None
     outage_total = Decimal(0)
+    covered = Decimal(0)
     episodes = 0
-    for row in repo.iter_kill_switch_events(conn, run_id):
-        event = row["event_type"]
-        when = parse_instant(row["timestamp"])
-        if first_seen is None:
-            first_seen = when
-        last_seen = when
-        if event == _KILL_SWITCH_REFRESH_OK:
-            refreshed += 1
-            if outage_started is not None:
-                outage_total += _window_seconds(outage_started, when)
-                outage_started = None
+    in_outage = False
+    previous: datetime | None = None
+    # By TIMESTAMP, not by insertion order: the rows arrive ordered by event_id,
+    # and a clock correction (or a test seeding a second batch) makes those two
+    # orders disagree — which would then collapse the window and read a healthy
+    # run as 0% available.
+    events = sorted(
+        (parse_instant(row["timestamp"]), row["event_type"])
+        for row in repo.iter_kill_switch_events(conn, run_id)
+    )
+    for when, event in [*events, (now, None)]:
+        if previous is not None:
+            gap = _window_seconds(previous, when)
+            if gap <= MAX_KILL_SWITCH_EVENT_GAP_SECONDS:
+                covered += gap
+                if in_outage:
+                    outage_total += gap
+            elif in_outage:
+                # The process went away mid-outage. The outage ended with it; what
+                # follows is downtime, which this measure does not judge.
+                in_outage = False
+        previous = when
+        if event in (_KILL_SWITCH_REFRESH_OK, _KILL_SWITCH_ARMED):
+            # Both prove the switch is scheduled; only the refresh counts toward
+            # the sample floor, which asks "has it been EXERCISED enough to judge".
+            refreshed += event == _KILL_SWITCH_REFRESH_OK
+            in_outage = False
         elif event == _KILL_SWITCH_REFRESH_FAILED:
             failed += 1
-            if outage_started is None:
-                outage_started = when
+            if not in_outage:
+                in_outage = True
                 episodes += 1
         elif event == _KILL_SWITCH_FIRED:
             fired += 1
         elif event == _KILL_SWITCH_DISARM_FAILED:
             disarm_failed += 1
-    # The window ends at ``now``, or at the last event if that is later. An event
-    # after ``now`` means the caller's clock disagrees with the log (a validate
-    # run started before the last tick landed, a clock correction); measuring to
-    # ``now`` alone would then shrink the window below the outages inside it and
-    # report an availability over 100%.
-    ends_at = now if last_seen is None or last_seen <= now else last_seen
-    if outage_started is not None:
-        # Never recovered: the outage runs to the end of the window, still open.
-        outage_total += _window_seconds(outage_started, ends_at)
-    covered = Decimal(0) if first_seen is None else _window_seconds(first_seen, ends_at)
     # Pinned to the shared context like every other layer's arithmetic: this is
     # the acceptance report's ONLY division, and it decides an exit-5 verdict.
     with localcontext(DECIMAL_CONTEXT):

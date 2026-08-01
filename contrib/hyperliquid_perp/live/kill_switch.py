@@ -6,8 +6,9 @@
    at now + ``schedule_cancel_seconds``; the exchange cancels this wallet's
    open orders at that deadline if the process dies first.
 2. :meth:`tick` / :meth:`refresh` — push the deadline back every
-   ``refresh_interval_seconds``. A refresh failure records
-   ``kill_switch_refresh_failed``, drops ``gate.kill_switch_active`` (no new
+   ``refresh_interval_seconds``. A refresh failure records ONE
+   ``kill_switch_refresh_failed`` per outage episode (retries inside the same
+   outage add no rows; the next success closes it), drops ``gate.kill_switch_active`` (no new
    §4.1 order can pass), and raises :attr:`stop_new_orders` — the flag PR 4's
    safe-mode state machine consumes (``on_refresh_failed: safe_mode``); the
    full state machine is NOT in this PR. The flag is sticky AND enforced at
@@ -32,7 +33,9 @@
    trigger is wallet-wide, so leaving it armed would cancel the very non-bot
    orders the sweep skipped. Any failure keeps it armed as the backstop.
 
-Every state change lands in ``kill_switch_events`` (§18.5). The manager only
+Every state change lands in ``kill_switch_events`` (§18.5) — once per change,
+not once per attempt: a run of failed retries is one outage, and §20.3 measures
+it by the TIME between the failure row and the next success. The manager only
 exists on runs where real orders are enabled — an unarmed (paper / gate-check)
 run has no exchange orders for a dead man's switch to protect.
 """
@@ -111,10 +114,13 @@ def kill_switch_timing_violation(
     """The constructor's refresh-timing invariant as a checkable message.
 
     THE canonical account of the invariant (other sites point here). Worst
-    case between two refreshes is ``refresh_interval + the tick gap`` — the
-    tick after the interval elapses can land a whole gap late — and that must
-    stay strictly inside ``schedule_cancel``, or the dead man's switch fires
-    during normal operation and cancels every order on the wallet. The config
+    case between two SUCCESSFUL refreshes is ``refresh_interval + the failure
+    backoff + the tick gap`` — the tick after the interval elapses can land a
+    whole gap late, and a refresh that fails after burning a full network
+    timeout suppresses the retry for up to ``_FAILURE_BACKOFF_FRACTION`` of an
+    interval — and that must stay strictly inside ``schedule_cancel``, or the
+    dead man's switch fires during normal operation and cancels every order on
+    the wallet. The config
     layer's own guard (``schedule_cancel >= 2 × refresh``) is only the
     special case of a caller ticking exactly at the interval: it cannot see
     the caller's tick gap at all.
@@ -129,17 +135,35 @@ def kill_switch_timing_violation(
     """
     if max_tick_gap_seconds <= 0:
         return f"max_tick_gap_seconds must be > 0, got {max_tick_gap_seconds}"
-    worst_case_gap = config.refresh_interval_seconds + max_tick_gap_seconds
+    # The post-failure backoff is part of the worst case, not a detail of it: a
+    # refresh that fails after burning a whole timeout suppresses the retry for up
+    # to ``refresh_interval / 2`` (see _in_failure_backoff), and a failure is
+    # exactly the situation in which the deadline is closest. Leaving it out let
+    # refresh=30 / max_tick_gap=30 / schedule_cancel=61 pass both this check and
+    # the config layer's ``schedule_cancel >= 2 × refresh`` guard while the real
+    # worst case was 75s > 61s — the switch firing during normal operation, which
+    # is the single thing this invariant exists to prevent (2026-08-01 exit check).
+    backoff_cap = config.refresh_interval_seconds * _FAILURE_BACKOFF_FRACTION
+    worst_case_gap = config.refresh_interval_seconds + backoff_cap + max_tick_gap_seconds
     if worst_case_gap >= config.schedule_cancel_seconds:
         return (
             f"the kill switch cannot be refreshed in time: a refresh may land "
             f"{worst_case_gap}s apart (refresh_interval "
-            f"{config.refresh_interval_seconds}s + max_tick_gap "
+            f"{config.refresh_interval_seconds}s + post-failure backoff "
+            f"{backoff_cap}s + max_tick_gap "
             f"{max_tick_gap_seconds}s), but the scheduled cancel fires after "
             f"{config.schedule_cancel_seconds}s — the dead man's switch would "
             "cancel every order on the wallet during normal operation"
         )
     return None
+
+
+# How much of one refresh interval a FAILED attempt may suppress the retry for
+# (see KillSwitchManager._in_failure_backoff). Named and shared because
+# kill_switch_timing_violation has to budget for it: the backoff lengthens the
+# worst-case gap between two successful refreshes, and an invariant that does not
+# know about it is checking a slack the code no longer has.
+_FAILURE_BACKOFF_FRACTION = 0.5
 
 
 # The longest run of BACK-TO-BACK REST calls a tick can make with no
@@ -605,8 +629,10 @@ class KillSwitchManager:
         Bounds the RETRY rate, never the cadence: while refreshes succeed this is
         always False and ``refresh_due`` behaves exactly as before.
 
-        The backoff is the failed attempt's OWN duration (capped at half an
-        interval), not a fixed delay, because the thing being rationed is the
+        The backoff is the failed attempt's OWN duration (capped at
+        ``_FAILURE_BACKOFF_FRACTION`` of an interval, which
+        :func:`kill_switch_timing_violation` budgets for), not a fixed delay,
+        because the thing being rationed is the
         thread — not the exchange. The pathology is an attempt that burns a whole
         ``network_timeout_s`` and then lets the caller do it again at the next
         blocking site; a fixed delay would also silence the COMMON failures,
@@ -725,7 +751,10 @@ class KillSwitchManager:
             # moved backwards mid-attempt.
             spent = max(0.0, (failed_at - attempt_started).total_seconds())
             self._retry_not_before = failed_at + timedelta(
-                seconds=min(spent, self._config.refresh_interval_seconds / 2)
+                seconds=min(
+                    spent,
+                    self._config.refresh_interval_seconds * _FAILURE_BACKOFF_FRACTION,
+                )
             )
             # Log BEFORE the durable record: if the event write itself dies
             # (broken DB at the worst moment), the root cause is already on

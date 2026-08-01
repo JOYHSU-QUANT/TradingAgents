@@ -726,6 +726,35 @@ def test_a_failed_refresh_backs_off_instead_of_retrying_on_every_call(env):
     assert manager._in_failure_backoff(clock.now()) is False
 
 
+def test_the_timing_invariant_budgets_for_the_failure_backoff():
+    """The backoff is part of the worst case, so the invariant must count it.
+
+    ``refresh=30 / max_tick_gap=30 / schedule_cancel=61`` passes the config
+    layer's own guard (``schedule_cancel >= 2 x refresh``) and used to pass this
+    one too (30 + 30 = 60 < 61) — while the real worst case, with a slow failure
+    suppressing the retry for 15s, is 75s > 61s. That is the dead man's switch
+    firing during normal operation, which is the one thing this check exists to
+    prevent (2026-08-01 exit check).
+    """
+    from contrib.hyperliquid_perp.live.config import KillSwitchConfig
+    from contrib.hyperliquid_perp.live.kill_switch import (
+        _FAILURE_BACKOFF_FRACTION,
+        kill_switch_timing_violation,
+    )
+
+    tight = KillSwitchConfig(refresh_interval_seconds=30, schedule_cancel_seconds=61)
+    violation = kill_switch_timing_violation(tight, max_tick_gap_seconds=30)
+    assert violation is not None
+    assert "backoff" in violation
+
+    # The defaults keep working: 30 + 15 + 30 = 75 < 120.
+    ok = KillSwitchConfig(refresh_interval_seconds=30, schedule_cancel_seconds=120)
+    assert kill_switch_timing_violation(ok, max_tick_gap_seconds=30) is None
+
+    # And the budgeted amount is the one the manager can actually impose.
+    assert _FAILURE_BACKOFF_FRACTION == 0.5
+
+
 def test_an_instantly_failing_refresh_is_not_penalised(env):
     """The backoff rations the THREAD, not the exchange.
 
@@ -1573,7 +1602,7 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
     import inspect
 
     from contrib.hyperliquid_perp import cli as cli_mod
-    from contrib.hyperliquid_perp.live.kill_switch import _MAX_UNREFRESHED_REST_CALLS
+    from contrib.hyperliquid_perp.live import engine as live_engine
 
     loop_src = inspect.getsource(cli_mod._run_live_loop)
 
@@ -1591,15 +1620,43 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
 
     # 2. The day-roll baseline read is a bare REST call on the same thread, so it
     #    refreshes across itself rather than joining whatever chain it lands in.
-    #    Asserted on the CALLABLE, not on the source text: the first version of
-    #    this check was `"_day_baseline_from_exchange" in loop_src`, which stayed
-    #    green while the call site passed an argument to a zero-arg closure and
-    #    the whole path was dead (2026-08-01 incremental review).
-    assert "_day_baseline_from_exchange" in loop_src
-    bound = inspect.signature(cli_mod._day_baseline_from_exchange).bind(
-        object(), object()
-    )  # raises TypeError if the wiring below stops matching the definition
-    assert len(bound.args) == 2
+    #    CALL IT, do not inspect it: the first version of this check searched the
+    #    source for the name and stayed green while the call site passed an
+    #    argument to a zero-arg closure and the whole path was dead; the second
+    #    checked the definition's arity, which the same miswiring also survives.
+    #    Only exercising it proves anything (2026-08-01 exit check).
+    from types import SimpleNamespace
+
+    from contrib.hyperliquid_perp.exchanges.hyperliquid import mapper as mapper_mod
+
+    ticks: list[str] = []
+
+    class _Switch:
+        def tick(self):
+            ticks.append("refresh")
+
+    patch = pytest.MonkeyPatch()
+    try:
+        patch.setattr(
+            mapper_mod,
+            "map_account_snapshot",
+            lambda snap: SimpleNamespace(account_value="account-value"),
+        )
+        baseline = cli_mod._day_baseline_from_exchange(lambda: object(), _Switch())
+        assert baseline == "account-value"  # it really read the exchange
+        assert ticks == ["refresh"]  # ...and refreshed across the read
+
+        # A read that RAISES still refreshes — that is the one that ate the timeout.
+        ticks.clear()
+
+        def _boom():
+            raise RuntimeError("clearinghouse down")
+
+        with pytest.raises(RuntimeError):
+            cli_mod._day_baseline_from_exchange(_boom, _Switch())
+        assert ticks == ["refresh"]
+    finally:
+        patch.undo()
 
     # 3. The decision cycle's four market-data reads must refresh BETWEEN
     #    themselves, or they — not the submit chain — become the longest run and
@@ -1646,7 +1703,21 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
     rest = [i for i, r in enumerate(reads) if r != "refresh"]
     for earlier, later in zip(rest, rest[1:], strict=False):
         assert later - earlier > 1, f"two market reads with no refresh between them: {reads}"
-    assert _MAX_UNREFRESHED_REST_CALLS == 3  # the submit chain is now the longest
+
+    # 4. The market snapshot inside engine.tick() is the other full-timeout read
+    #    that used to chain into the submit ladder. Asserted on the STATEMENTS, so
+    #    a comment mentioning the helper cannot satisfy it.
+    engine_src = inspect.getsource(live_engine.LiveExecutionEngine.tick)
+    fetch_at = engine_src.index("snap_result = self._provider.fetch(")
+    valid_at = engine_src.index("if not snap_result.is_valid:")
+    assert "refresh_across_blocking_work(" in engine_src[fetch_at:valid_at], (
+        "the market snapshot no longer refreshes across itself — it chains into "
+        "the submit ladder, making the real unrefreshed run 4, not 3"
+    )
+    # No `assert _MAX_UNREFRESHED_REST_CALLS == 3` here: this test's whole point is
+    # that the constant is checked against the CODE, and restating the literal was
+    # the tautology it replaced. The advisory boundary test above already moves
+    # with the constant.
 
 
 def test_refreshing_across_blocking_work_never_takes_down_its_caller(caplog):

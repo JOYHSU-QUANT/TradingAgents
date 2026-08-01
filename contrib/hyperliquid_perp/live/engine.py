@@ -70,6 +70,7 @@ from ..persistence.cloid import cloid_logical
 from ..persistence.db import Database
 from ..persistence.models import PositionState
 from .config import EXCHANGE_MIN_ORDER_NOTIONAL_USDC, LiveConfig
+from .kill_switch import refresh_across_blocking_work
 from .loss_guards import LossGuards
 from .order_gate import LiveOrderGateRejected, RealOrderGate
 from .orders import LiveOrderPreSubmitError, LiveOrderSubmitter
@@ -484,6 +485,16 @@ class LiveExecutionEngine:
         snap_result = self._provider.fetch(
             self._coin, requested_at=now, timeout_seconds=self._timeout
         )
+        # The snapshot is a full-timeout REST call on this thread — the SAME client
+        # and the SAME network_timeout_s as everything else (its own
+        # ``timeout_seconds`` only judges the answer's FRESHNESS once it arrives;
+        # it does not bound the socket). Without this refresh it chains straight
+        # into the submit ladder below, making the longest unrefreshed run 4 rather
+        # than the 3 ``_MAX_UNREFRESHED_REST_CALLS`` records — and at the timeout
+        # the RUNBOOK itself recommends that is 32s against a 30s gap, with the
+        # advisory silent because it budgets 3. Placed BEFORE the is_valid check so
+        # the fail-closed early return is covered too (2026-08-01 exit check).
+        refresh_across_blocking_work(self._kill_switch, what="market snapshot")
         if not snap_result.is_valid:
             # No fresh mark: hold protection and slices this tick (§10.2 fail-closed
             # posture — the books and kill switch already advanced above). Never
@@ -844,6 +855,9 @@ class LiveExecutionEngine:
         snap_result = self._provider.fetch(
             self._coin, requested_at=now, timeout_seconds=self._timeout
         )
+        # Same full-timeout REST as tick()'s snapshot, and this one runs from the
+        # decision driver's plan registration — also on the loop thread.
+        refresh_across_blocking_work(self._kill_switch, what="market snapshot")
         if not snap_result.is_valid:
             return PlanRegistration(None, None, None, "pending_market_data")
         snap = snap_result.snapshot

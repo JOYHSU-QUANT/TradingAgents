@@ -407,7 +407,7 @@ duplicate_fill_apply_count / local_exchange_position_mismatch_count /
 account_replay_mismatch_count / unprotected_position_seconds` 全為 0、
 `kill_switch_refresh_success_rate ≥ 99%`（**樣本數 < 100 時不判定**，改記 exit 4 的
 shortfall——30s 一次的節奏下約 50 分鐘就滿，遠早於 30 cycles，所以正常驗收 run 不會
-卡在這裡；設這道下限是因為十筆樣本裡的一次網路抖動就是 90%，會把健康 run 判死）、
+卡在這裡；設這道下限是因為短 run 的覆蓋時間太短，一次 30s 中斷就吃掉整段可用率）、
 `kill_switch_fired_count = 0`（dead man's switch 從未真的燒過）、run **不在 MANUAL
 safe mode**、四項 smoke 布林（`restart_reconciliation_passed`
 ——注意這一項**沒有** `_test_` 中綴——以及 `emergency_close_test_passed`／

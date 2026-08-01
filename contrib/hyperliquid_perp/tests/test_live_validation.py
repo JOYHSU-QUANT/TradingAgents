@@ -1135,18 +1135,20 @@ def test_refresh_rate_just_under_99_percent_fails(tmp_path):
 def test_a_fired_kill_switch_fails_the_run_in_both_profiles(tmp_path, mode):
     # The hole this closes: a firing means the exchange cancelled every order on
     # the wallet, SL/TP included, and the engine kept placing against a book it
-    # believed was still there. The refresh RATE cannot express it — the outage
-    # that lets a deadline lapse contributes a handful of failures that a
-    # multi-day run dilutes to well inside the 99% bar. Before this gate a run
-    # that demonstrably fired its dead man's switch reported live_ready / exit 0.
+    # believed was still there. The refresh AVAILABILITY cannot express it — the
+    # outage that lets a deadline lapse is a few minutes against a multi-day
+    # covered window, well inside the 99% bar. Before this gate a run that
+    # demonstrably fired its dead man's switch reported live_ready / exit 0.
     db = _healthy(tmp_path, mode=mode)
     _add_refreshes(db, 0, 4)  # the outage that spanned the deadline
     _kill_switch_event(db, "kill_switch_cancel_triggered")
     with db:
         report = validate_live_run(db, run_id="r", now=_T0)
     assert report.kill_switch_fired_count == 1
-    # The rate alone would still sail through: 100 good + 4 bad = 96.2%... which
-    # on a real multi-day run is 99.97%. Prove the fired count is what gates.
+    # Availability alone sails straight through here — each failure is closed by
+    # the refresh at the same instant, so the outage time is ~0 — which is the
+    # point: the fired count is what gates, not the rate.
+    assert report.kill_switch_refresh_success_rate > Decimal("0.99")
     assert any("kill_switch_fired_count = 1" in f for f in report.failures)
     assert not report.live_ready
 
@@ -1201,6 +1203,85 @@ def test_a_recoverable_episode_is_not_the_manual_gate(tmp_path):
         report = validate_live_run(db, run_id="r", now=_T0)
     assert report.safe_mode_active_type == "recoverable"
     assert not any("MANUAL safe mode" in f for f in report.failures)
+
+
+def test_an_outage_that_never_recovered_is_measured_to_now(tmp_path):
+    """The open-outage branch: no closing row must not read as no outage.
+
+    Zero coverage before this — every other test passes ``now=_T0`` while the
+    events run forward from ``_T0``, so ``now`` never bound the window and the
+    whole branch could have been deleted without a red test
+    (2026-08-01 exit check).
+    """
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    _add_refreshes(db, 100, 0)
+    # The refresh timeline ends at _T0 + 99*30s; the switch then fails and never
+    # comes back, and validate runs two minutes later.
+    last = 99 * _REFRESH_STEP_S
+    _kill_switch_event(db, "kill_switch_refresh_failed", off=last + _REFRESH_STEP_S)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=last + 150))
+    assert report.kill_switch_refresh_success_rate < Decimal("0.99")
+    assert not report.live_ready
+
+
+def test_downtime_is_charged_to_neither_side(tmp_path):
+    """A stopped process is not an outage, and not availability either.
+
+    Both readings were wrong, and which one you got depended on the type of the
+    last row before the stop: a run down for most of its life reported 100%,
+    while one stopped mid-outage had the entire downtime billed as unprotected.
+    Excluding downtime also stops the verdict drifting — re-running ``validate``
+    days later can no longer dilute real outages into a pass
+    (2026-08-01 exit check).
+    """
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    _add_refreshes(db, 100, 1)  # exactly 99%: passes
+
+    # ``now`` is the last event's instant: 100 steps of coverage, one of outage.
+    last_event = 100 * _REFRESH_STEP_S
+    with db:
+        at_stop = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=last_event))
+        # Two days later, same database, no new evidence: the same verdict.
+        later = validate_live_run(db, run_id="r", now=_T0 + timedelta(days=2))
+    assert at_stop.kill_switch_refresh_success_rate == Decimal(99) / Decimal(100)
+    assert at_stop.live_ready
+    assert later.kill_switch_refresh_success_rate == at_stop.kill_switch_refresh_success_rate
+    assert later.live_ready == at_stop.live_ready
+
+
+def test_a_restart_closes_the_outage_it_was_stopped_in(tmp_path):
+    """``kill_switch_armed`` is a successful schedule, so it ends an outage.
+
+    Without this, a clean stop during a network blip left the outage open across
+    the whole downtime, and a normal restart-and-carry-on run failed the gate.
+    """
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    _add_refreshes(db, 100, 0)
+    stopped_at = 99 * _REFRESH_STEP_S
+    _kill_switch_event(db, "kill_switch_refresh_failed", off=stopped_at + 30)
+    # ...operator stops the daemon, and restarts it six hours later.
+    six_hours = stopped_at + 30 + 6 * 3600
+    _kill_switch_event(db, "kill_switch_armed", off=six_hours)
+    _kill_switch_event(db, "kill_switch_refreshed", off=six_hours + 30)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=six_hours + 60))
+    # The six hours are neither outage nor coverage, so one 30s blip does not
+    # sink an otherwise healthy run.
+    assert report.kill_switch_refresh_success_rate > Decimal("0.98")
+    assert report.live_ready
 
 
 # -- refresh-rate sample floor ---------------------------------------------
@@ -1385,7 +1466,7 @@ def test_mainnet_low_refresh_rate_is_a_failure(tmp_path):
     db = Database(tmp_path / "live.db")
     _init_live_run(db, mode="mainnet_tiny")
     _add_cycles(db, MIN_LIVE_CYCLES)
-    _add_refreshes(db, 85, 15)  # 85%
+    _add_refreshes(db, 85, 15)  # 15 outages in a 99-step timeline
     with db:
         report = validate_live_run(db, run_id="r", now=_T0)
     assert not report.live_ready

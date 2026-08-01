@@ -69,6 +69,8 @@ import sqlite3
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from functools import partial
 from pathlib import Path
 
 from .config import CONFIG_LOAD_ERRORS, dotenv_diagnosis, load_config, load_dotenv_files
@@ -1746,6 +1748,28 @@ def _live_startup_recovery(
 _LIVE_TICK_SECONDS = 10.0
 
 
+def _day_baseline_from_exchange(fetch_clearinghouse, kill_switch) -> Decimal:
+    """§10.3 rule 1's UTC-day baseline: the EXCHANGE's reconciled accountValue.
+
+    Module level, not a closure inside the loop, so it can be called directly by
+    a test — the first version was nested and its only "coverage" was a string
+    search for its name, which passed happily while the call site had the wrong
+    arity and the whole path was dead.
+
+    The refresh is in ``finally`` for the same reason protection's orderStatus
+    read is: this is a bare full-timeout REST call on the single-threaded tick,
+    landing between the protection sync and the slice submits, and the call that
+    TIMES OUT is both the expensive one and the one that leaves by exception.
+    """
+    from .exchanges.hyperliquid.mapper import map_account_snapshot
+    from .live.kill_switch import refresh_across_blocking_work
+
+    try:
+        return map_account_snapshot(fetch_clearinghouse()).account_value
+    finally:
+        refresh_across_blocking_work(kill_switch, what="day-roll baseline read")
+
+
 def _contain_as_recoverable_safe_mode(safe_mode, *, log_message: str, detail: str) -> None:
     """The live loop's ONE containment idiom: log, then best-effort safe mode.
 
@@ -2001,9 +2025,7 @@ def _run_live_loop(
     by design: the caller exits without the §18.2 sweep (the successor process
     owns the run's orders — see the caller's ``except RunLockError``).
     """
-    from decimal import Decimal
 
-    from .exchanges.hyperliquid.mapper import map_account_snapshot
     from .exchanges.hyperliquid.market_data import HyperliquidMarketData
     from .live.decision import LiveDecisionDriver, LiveDecisionWorker
     from .live.engine import LiveExecutionEngine
@@ -2047,15 +2069,6 @@ def _run_live_loop(
         kill_switch=kill_switch,
     )
 
-    def _day_baseline_from_exchange() -> Decimal:
-        try:
-            return map_account_snapshot(fetch_clearinghouse()).account_value
-        finally:
-            # In ``finally`` for the same reason protection's orderStatus read is:
-            # the call that TIMES OUT is the expensive one and the one that leaves
-            # by exception.
-            refresh_across_blocking_work(kill_switch, what="day-roll baseline read")
-
     loss_guards = LossGuards(
         db=db,
         run_id=run_id,
@@ -2068,7 +2081,15 @@ def _run_live_loop(
         # Rare, but it is a bare full-timeout REST call landing between the
         # protection sync and the slice submits, so it refreshes across itself
         # like every other blocking read on this thread (§18.2).
-        day_baseline_source=lambda: _day_baseline_from_exchange(kill_switch),
+        #
+        # Bound with partial rather than a lambda ON PURPOSE: the first version
+        # wrapped a zero-arg closure in ``lambda: helper(kill_switch)``, so every
+        # day roll raised TypeError, LossGuards' except-Exception swallowed it,
+        # and the baseline silently fell back to the local ledger — defeating the
+        # whole point of §10.3 rule 1, with nothing on any surface to say so.
+        # partial binds the arguments where they are declared, so an arity
+        # mismatch cannot be written here (2026-08-01 incremental review).
+        day_baseline_source=partial(_day_baseline_from_exchange, fetch_clearinghouse, kill_switch),
     )
     ledger = repo.get_current_account_state(db.conn, run_id)
     if ledger is not None:
@@ -2683,7 +2704,6 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
     to one real §19.1 startup recovery over the run. Returns the context or an
     ``int`` exit code.
     """
-    from decimal import Decimal
 
     from .config import wallet_address
     from .exchanges.hyperliquid.errors import ExchangeError

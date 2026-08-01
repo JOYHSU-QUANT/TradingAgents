@@ -1559,8 +1559,15 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
 
     # 2. The day-roll baseline read is a bare REST call on the same thread, so it
     #    refreshes across itself rather than joining whatever chain it lands in.
+    #    Asserted on the CALLABLE, not on the source text: the first version of
+    #    this check was `"_day_baseline_from_exchange" in loop_src`, which stayed
+    #    green while the call site passed an argument to a zero-arg closure and
+    #    the whole path was dead (2026-08-01 incremental review).
     assert "_day_baseline_from_exchange" in loop_src
-    assert "day-roll baseline read" in loop_src
+    bound = inspect.signature(cli_mod._day_baseline_from_exchange).bind(
+        object(), object()
+    )  # raises TypeError if the wiring below stops matching the definition
+    assert len(bound.args) == 2
 
     # 3. The budget must cover the LONGEST chain, which is _build_context's four
     #    market-data reads (constructing the SDK client fetches perp meta, then

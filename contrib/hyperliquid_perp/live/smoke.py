@@ -54,6 +54,7 @@ from ..paper.twap import floor_to_step
 from ..persistence import repository as repo
 from ..persistence.cloid import cloid_hex, cloid_logical
 from ..persistence.db import Database
+from .kill_switch import deadline_detail, record_kill_switch_event
 from .orders import local_status_for_exchange_status, parse_order_status
 
 if TYPE_CHECKING:  # import cost only under type checking; runtime stays lazy
@@ -624,6 +625,19 @@ class SmokeTestRunner:
         exit disarm still runs.
         """
         self._wire.schedule_cancel(cancel_at=self.ctx.now() + self.ctx.kill_switch_deadline)
+        # Recorded, not just performed: this refresh renews the SAME wallet-wide
+        # cover the acceptance measure is scored on, and a renewal with no row is
+        # indistinguishable from silence to the validator. The row states the cover
+        # it installed because the suite's deadline is max(config, 120s) — LONGER
+        # than the armed row's number on a run configured below 120 — and a
+        # validator reading only arm() would invent outages across a phase that was
+        # in fact covered the whole time.
+        self._record_kill_switch_event(
+            "kill_switch_refreshed",
+            detail=deadline_detail(
+                int(self.ctx.kill_switch_deadline.total_seconds()), "(smoke pre-flight refresh)"
+            ),
+        )
 
     @property
     def _wire(self) -> HyperliquidSignedClient:
@@ -687,6 +701,36 @@ class SmokeTestRunner:
                 error_message=result.error_message,
                 executed_at=self.ctx.now(),
             )
+
+    def _record_kill_switch_event(
+        self, event_type: str, *, detail: str | None = None, error: str | None = None
+    ) -> None:
+        """Write a §18.5 row for a switch transition this suite made itself.
+
+        The suite drives ``scheduleCancel`` through :attr:`_wire` rather than
+        through a :class:`KillSwitchManager`, so nothing else writes these rows —
+        and the acceptance validator reads the event log as the ONLY record of
+        when the wallet was covered. A wire call with no row is therefore not a
+        missing nicety: ``validation._kill_switch_tally`` charges any silence
+        longer than the run's deadline as a full outage, so the suite's own
+        refreshes and its exit disarm were billed as exposure on the very run
+        they belong to, and the operator-paced gap before ``live --loop`` was
+        billed too. A flawless 120h acceptance run failed at exit 5 once that gap
+        passed ~73 minutes, while RUNBOOK §3 tells the operator smoke passes never
+        expire (2026-08-01 round-14 review).
+
+        Deliberately fail-loud, mirroring ``KillSwitchManager._record``. The one
+        caller that must not raise (``_disarm_kill_switch``, best-effort by
+        contract) guards its own call and says why there.
+        """
+        record_kill_switch_event(
+            self.ctx.db,
+            run_id=self.ctx.run_id,
+            event_type=event_type,
+            detail=detail,
+            error=error,
+            timestamp=self.ctx.now(),
+        )
 
     def _preflight_recovery(self) -> None:
         """One passing §19.1 recovery before any probe order (decision 2026-07-27).
@@ -752,6 +796,39 @@ class SmokeTestRunner:
             self.kill_switch_disarm_failed = True
             logger.warning(
                 "smoke: best-effort kill-switch disarm FAILED — %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            self._record_disarm_outcome(
+                "kill_switch_disarm_failed", error=f"{type(exc).__name__}: {exc}"
+            )
+        else:
+            # THE row the validator's clean-ending exemption is keyed on: it is
+            # written only once ``clear_scheduled_cancel()`` has returned, so it
+            # means "there is no longer a trigger to fire", and the silence after
+            # it is a stopped suite rather than an uncovered wallet.
+            self._record_disarm_outcome("kill_switch_disarmed", detail="smoke exit disarm")
+
+    def _record_disarm_outcome(
+        self, event_type: str, *, detail: str | None = None, error: str | None = None
+    ) -> None:
+        """Persist the exit disarm's outcome without breaking the never-raise vow.
+
+        :meth:`_disarm_kill_switch` is best-effort by contract — it runs on the
+        way out, after the verdicts are already durable, and an exception here
+        would replace a complete suite report with a traceback. So a failure to
+        write the row is logged at ERROR rather than raised, and the log names the
+        consequence, because the missing row is not cosmetic: the validator reads
+        the resulting silence as exposure and can fail an otherwise clean run at
+        exit 5. Everywhere else the recorder stays fail-loud.
+        """
+        try:
+            self._record_kill_switch_event(event_type, detail=detail, error=error)
+        except Exception as exc:  # noqa: BLE001 — see the never-raise contract above
+            logger.error(
+                "smoke: could not record %s (%s: %s) — the acceptance validator "
+                "will read the gap after this suite as a kill-switch outage",
+                event_type,
                 type(exc).__name__,
                 exc,
             )
@@ -1848,9 +1925,21 @@ class SmokeTestRunner:
         self._kill_switch_may_be_armed = True
         deadline = self.ctx.now() + self.ctx.kill_switch_deadline
         self._wire.schedule_cancel(cancel_at=deadline)
+        # Each row goes down AFTER its own wire call returns, so the log never
+        # claims a cover the exchange did not grant. The armed row also states the
+        # deadline it installed, in arm()'s format: the validator reads that number
+        # back to size this stretch's cover.
+        self._record_kill_switch_event(
+            "kill_switch_armed",
+            detail=deadline_detail(
+                int(self.ctx.kill_switch_deadline.total_seconds()), "(smoke test 14)"
+            ),
+        )
         refreshed = self.ctx.now() + self.ctx.kill_switch_deadline
         self._wire.schedule_cancel(cancel_at=refreshed)
+        self._record_kill_switch_event("kill_switch_refreshed", detail="smoke test 14")
         self._wire.clear_scheduled_cancel()
+        self._record_kill_switch_event("kill_switch_disarmed", detail="smoke test 14")
         return SmokeStepResult("passed", detail="scheduleCancel armed, refreshed, and cleared")
 
     def _test_restart_reconciliation(self) -> SmokeStepResult:

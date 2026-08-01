@@ -516,6 +516,81 @@ def test_suite_disarms_kill_switch_on_exit(live_db):
     assert runner.kill_switch_disarm_failed is False
 
 
+def _ks_rows(db, run_id="live-BTC"):
+    with db.transaction() as conn:
+        return [(r["event_type"], r["detail"]) for r in repo.iter_kill_switch_events(conn, run_id)]
+
+
+def test_the_exit_disarm_leaves_the_row_the_acceptance_measure_reads(live_db):
+    """The suite's own wire actions have to appear in the §18.5 log.
+
+    The suite drives ``scheduleCancel`` through the signed client rather than
+    through a KillSwitchManager, so nothing else writes these rows — and
+    ``validation._kill_switch_tally`` charges any silence longer than the run's
+    deadline as an outage on the SAME run_id the acceptance verdict is computed
+    over. With the suite silent, its own duration and the operator-paced gap
+    before ``live --loop`` were billed as exposure: a flawless 120h run failed at
+    exit 5 once that gap passed ~73 minutes, while RUNBOOK §3 promises smoke
+    passes never expire (2026-08-01 round-14 review).
+
+    ``kill_switch_disarmed`` specifically: it is the ONE event the validator's
+    clean-ending exemption is keyed on, and it must be LAST, because that is what
+    makes the silence after the suite a stopped process rather than a bare wallet.
+    """
+    signed = _FakeSigned()
+    with live_db:
+        runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+        runner.run(only=["restart_reconciliation"])
+        rows = _ks_rows(live_db)
+    assert runner.kill_switch_disarm_failed is False
+    assert rows[-1][0] == "kill_switch_disarmed"
+
+
+def test_a_failed_disarm_is_recorded_durably_not_only_in_a_flag(live_db):
+    # The in-memory flag dies with the process; the wallet may still be armed. The
+    # row is the only trace an operator (or the validator) can read afterwards —
+    # and it must still not raise, because the verdicts are already durable.
+    signed = _FakeSigned(raise_on={"clear_scheduled_cancel"})
+    with live_db:
+        runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+        runner.run(only=["restart_reconciliation"])
+        events = [event for event, _ in _ks_rows(live_db)]
+    assert runner.kill_switch_disarm_failed is True
+    assert events[-1] == "kill_switch_disarm_failed"
+    # NOT the clean ending: a wallet that may still be armed must not buy the
+    # exemption that says "there is nothing left to fire".
+    assert "kill_switch_disarmed" not in events
+
+
+def test_test_14_records_every_transition_it_makes(live_db):
+    """Three real wallet-state changes; three rows, each after its own wire call.
+
+    Test 14 arms, refreshes and clears the account-wide trigger. Recording none of
+    them left the run's log claiming a cover that had been released and a silence
+    that had been covered. The armed row also has to state its deadline in the
+    form the validator parses, since that number sizes the stretch that follows.
+    """
+    from contrib.hyperliquid_perp.live.validation import _stated_deadline_seconds
+
+    signed = _FakeSigned()
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed)).run(only=["kill_switch_arm_refresh"])
+        rows = _ks_rows(live_db)
+    # Four, not three: test 14 flags the wallet as possibly-armed before its first
+    # arm, so the runner's exit disarm fires too and issues a SECOND real
+    # clear_scheduled_cancel. That double-clear predates these rows — recording it
+    # only makes it visible — and it is harmless to the measure, because a stretch
+    # opening on a clean ending is exempt on both sides.
+    assert [event for event, _ in rows] == [
+        "kill_switch_armed",
+        "kill_switch_refreshed",
+        "kill_switch_disarmed",
+        "kill_switch_disarmed",
+    ]
+    # The writer/reader contract, checked end to end rather than by eye.
+    assert _stated_deadline_seconds(rows[0][1]) == _D(120)
+
+
 def test_non_arming_run_does_not_disarm(live_db):
     # A run that executed no switch-touching test never armed anything, so it must
     # NOT fire an account-wide clear (it could wipe a concurrent live --loop's own

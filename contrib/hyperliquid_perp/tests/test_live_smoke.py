@@ -13,6 +13,7 @@ import pytest
 from contrib.hyperliquid_perp.live import smoke
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
+from contrib.hyperliquid_perp.persistence.models import PositionState
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 
 _T0 = datetime(2026, 7, 27, 3, 52, tzinfo=timezone.utc)
@@ -184,6 +185,44 @@ def test_full_suite_passes_and_gate_opens(live_db):
         passed, missing, failed, errored = smoke.smoke_gate_report(live_db.conn, "live-BTC")
     assert passed
     assert missing == () and failed == ()
+
+
+def test_a_net_short_account_is_named_not_failed_seven_times(live_db):
+    """Every probe the suite opens is long-shaped and closes reduce-only SELL.
+
+    On a net-short account the opening BUY only SHRINKS the short and each
+    reduce-only SELL would grow it, so the venue refuses: tests 5, 7, 8–13 and 18
+    all go red as "the exchange refused" — which the RUNBOOK triage table reads
+    as a config/market problem — and the cleanup then reports a staged-long
+    residual that does not exist, telling the operator to close it by hand (a
+    post-genesis manual fill books fill_unmapped and pins validate at exit 5).
+
+    Reachable without any mistake: §3.2 asks for a small position before
+    ``--create`` without saying which DIRECTION, and §4 suggests re-running the
+    suite after a code change on a run that may be holding a short
+    (2026-08-01 lifecycle review).
+    """
+    with live_db:
+        with live_db.transaction() as conn:
+            repo.upsert_current_position(
+                conn,
+                "live-BTC",
+                PositionState(coin="BTC", size=_D("-0.05"), entry_price=_D(60000)),
+                updated_at=_T0,
+            )
+        runner = smoke.SmokeTestRunner(
+            _ctx(live_db, _FakeSigned(), run_recovery=lambda: _Recovery())
+        )
+        runner.run()
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+
+    long_shaped = [k for k, row in latest.items() if row["status"] == "failed"]
+    assert long_shaped, "the long-shaped probes must fail on a net-short account"
+    # ...but every one of them says WHY, instead of reading as an exchange refusal.
+    for key in long_shaped:
+        assert "net SHORT" in (latest[key]["error_message"] or "")
+    # And no phantom residual warning telling the operator to trade by hand.
+    assert runner.staged_long_residual is None
 
 
 def test_results_are_persisted_per_test(live_db):

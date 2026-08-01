@@ -103,6 +103,11 @@ python -m contrib.hyperliquid_perp live --config contrib/hyperliquid_perp/config
 > position），那個小倉要在 **`--create` 之前**先開好，建 run 時用
 > `--adopt-positions` 收編進 genesis（見 §3.2）。run 建立之後就**不能**再對這個錢包
 > 手動下單。
+>
+> **那個小倉必須是「多單」（或不開倉）**：smoke 的探針全是多單形狀，平倉與觸發單
+> 都是 reduce-only SELL；帳戶淨空倉時開倉的 BUY 只會縮小空單，之後每一張
+> reduce-only SELL 都會被交易所拒絕。suite 會在探針區塊起點就以具名理由擋下
+> （訊息含 `net SHORT`），不會讓你看到 7 筆假的「exchange refused」。
 
 ```bash
 # 首次：--create 建 run（genesis＝交易所快照）並跑一次 §19.1 recovery（arm kill switch、
@@ -152,7 +157,8 @@ python -m contrib.hyperliquid_perp live-smoke \
 switch ＋ reconcile ＋ 掃 stale bot-owned 單）：
 
 - **test 16（startup with existing position）**：那個小倉必須在 **`live --create`
-  之前**就開好、並以 `--adopt-positions` 收編進 genesis（§2）。**不要**在 run 建立
+  之前**就開好、並以 `--adopt-positions` 收編進 genesis（§2），而且**必須是多單**
+  （見 §2 的說明框：淨空倉會讓整個探針區塊以 `net SHORT` 具名中止）。**不要**在 run 建立
   之後才手動開倉——post-genesis 的手動成交沒有本地 order row，會直接變成
   `fill_unmapped`＋`exchange_position_mismatch` case，recovery 從此永遠 unclean、
   該 run 的驗收永久 exit 5（見 §2 的警告框）。
@@ -341,6 +347,10 @@ python -m contrib.hyperliquid_perp live \
   the §20.2 smoke suite ...`）——「還沒到 gate」，與 config／授權／環境類的 exit 1
   區分——先回 §3。gate 開著時會印最舊一筆通過結果的時間戳——
   smoke 通過**沒有時效**，程式或 config 大改後請自行重跑 `live-smoke`。
+  **重跑前先確認這個 run 沒有持著空倉**：探針全是多單形狀，淨空倉時整個探針區塊
+  會以 `net SHORT` 具名中止（先等它平掉或手動平倉——**平倉要在 run 停著時做，
+  且注意 post-genesis 的手動成交會記 `fill_unmapped`**，見 §2 的警告框；
+  最乾淨的做法是等 AI 自己平倉回到 flat 再重跑）。
 - 迴圈每 ~10s tick（在 30s kill-switch 預算內）：排空 WS queue → 刷 kill switch →
   reconciliation → SL/TP protection → 到期切片；4h AI decision 在背景 thread。
 - Ctrl-C／SIGTERM 安全停止並跑 §18.2 shutdown sweep。
@@ -498,6 +508,13 @@ live:
 mainnet_tiny 有 **config-load 硬 gate**（§24）：`max_notional_usdc <= 100` 且
 `max_target_margin_pct <= 60`，加全域 `leverage = 1`、`single_symbol_only = true`——
 更緊可以，更鬆或設 `mainnet_live` 一律具名拒絕啟動。
+
+> **進 mainnet 前，先到交易所把該幣的槓桿設成 `cross 1x`。** 系統裡唯一會寫入
+> 交易所端 sizing regime 的地方是 smoke test 2（`update_leverage`），而 smoke
+> **只在 testnet 跑**（§21.3）——`live --create` 與 `live --loop` 都不會設定它，
+> 啟動時也不比對。所以 mainnet 主錢包的 regime 就停在人工留下的值；若那是
+> isolated 或 >1x，本地的保證金／清算價／§17 停損帶寬全部會以 `cross 1x` 為前提
+> 計算而失準。這個錢包在 §1.3 本來就是你自己入金的，很可能也手動下過單。
 
 ### 7.3 跑法
 

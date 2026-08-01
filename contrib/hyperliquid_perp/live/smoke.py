@@ -508,10 +508,17 @@ class SmokeTestRunner:
                 # sitting on that long, so flattening first makes the exchange
                 # auto-cancel them (reduceOnlyCanceled) and every sweep cancel
                 # then comes back refused — a residual warning for orders that
-                # are already gone. And both BEFORE the disarm: the wallet's
-                # scheduleCancel is the last backstop for a probe we cannot
-                # cancel ourselves, so clearing it first turns "swept in ~30s by
-                # the dead man" into "rests until an operator notices".
+                # are already gone. Both run BEFORE the disarm so a probe we DO
+                # cancel is gone before the switch is stood down — but note the
+                # disarm below is unconditional, so a probe we could NOT cancel
+                # is never "left to the dead man" either: the armed scheduleCancel
+                # would take this run's real SL/TP with it at the deadline (and on
+                # a mid-acceptance re-run, a concurrent loop's too), which is
+                # strictly worse than a resting $11 probe. That case is handed to
+                # the operator by name via ``probe_residual`` instead — RUNBOOK
+                # §3.3 says to check the exchange before starting cycles
+                # (2026-08-01 lifecycle review corrected this note, which used to
+                # claim a backstop the next line removes).
                 self._sweep_resting_probes()
                 self._close_staged_long()
             elif self._resting_probes:
@@ -1342,6 +1349,7 @@ class SmokeTestRunner:
         booking — so the two tests that share this precondition can never drift
         apart. Returns the filled size (> 0), or raises.
         """
+        self._require_not_net_short(what)
         size = self._probe_size()
         mark = self.ctx.mark_price()
         price = self._round_price(mark * Decimal("1.01"), up=True)
@@ -1353,6 +1361,41 @@ class SmokeTestRunner:
         if opened <= 0:
             raise _SmokeAbort(no_fill)
         return opened
+
+    def _require_not_net_short(self, what: str) -> None:
+        """Abort a long-shaped probe when the account is net SHORT.
+
+        Every probe this suite opens is long-shaped, and every close/trigger it
+        then sends is a reduce-only SELL. On a net-short account the arithmetic
+        inverts end to end: the opening BUY merely SHRINKS the short (so the
+        account is still short, while ``_staged_long`` records a long that does
+        not exist), and each reduce-only SELL would INCREASE the position, so the
+        venue refuses it. Tests 5, 7, 8–13 and 18 all go red as "the exchange
+        refused", which the RUNBOOK's triage table reads as a config or market
+        problem — pointing the operator at everything except the cause. Worse,
+        the cleanup then reports a staged-long residual that does not exist and
+        tells them to close it by hand: a post-genesis manual fill books
+        ``fill_unmapped`` and pins this run's validate at exit 5 forever.
+
+        Reachable two ordinary ways, neither of them a mistake: §3.2 asks for a
+        small position before ``--create`` for test 16 without ever saying which
+        DIRECTION (and ``--adopt-positions`` does not check), and §4 suggests
+        re-running the suite after a code change — on a run whose AI may well be
+        holding a short. So name the state instead of failing seven tests
+        (2026-08-01 lifecycle review).
+        """
+        position = repo.get_current_position(self.ctx.db.conn, self.ctx.run_id, self.ctx.coin)
+        size = Decimal(0) if position is None else position.size
+        if size >= 0:
+            return
+        raise _SmokeAbort(
+            f"{what} needs a flat or LONG account, but {self.ctx.coin} is net SHORT "
+            f"({size}). Every probe here is long-shaped and closes with a reduce-only "
+            "SELL, which on a short position the exchange refuses — the whole trigger "
+            "block would fail as 'exchange refused' for a reason no config change can "
+            "fix. Flatten the position (or run the suite on a flat/long account) and "
+            "retry; do NOT open one by hand after --create, which books fill_unmapped."
+        )
 
     def _ensure_staged_long(self) -> None:
         """Open the small long the resting-trigger probes protect (2026-07-29).
@@ -1737,10 +1780,15 @@ class SmokeTestRunner:
     def _sweep_resting_probes(self) -> None:
         """Cancel any probe still believed to rest, and report what would not go.
 
-        Runs BEFORE the kill-switch disarm: the wallet's scheduleCancel is the
-        only remaining backstop for a probe we cannot cancel, so clearing it
-        first would turn "swept in ~30s by the dead man" into "rests until an
-        operator notices".
+        Runs BEFORE the kill-switch disarm so a probe we CAN cancel is gone while
+        the switch still stands. A probe we cannot cancel is not left to the dead
+        man, though — the disarm that follows is unconditional, and deliberately
+        so: an armed scheduleCancel takes the whole wallet at its deadline,
+        including this run's real SL/TP and any concurrent loop's, which is far
+        worse than one resting $11 probe. Those are surfaced by name on
+        :attr:`probe_residual` for the operator instead (RUNBOOK §3.3), which is
+        why this method reports what would not go rather than relying on a sweep
+        that never comes (2026-08-01 lifecycle review).
         """
         for cloid_hex_value in sorted(self._resting_probes):
             self._best_effort_cancel(cloid_hex_value)

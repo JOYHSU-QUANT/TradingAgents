@@ -421,13 +421,20 @@ shortfall——30s 一次的節奏下約 50 分鐘就滿，遠早於 30 cycles�
 生效的** `schedule_cancel_seconds`，就代表那段期間沒有任何東西續約排程，交易所已在中途
 把整個錢包的單（含 SL/TP）撤光——不管當時進程是卡住、被限流還是根本死了——一律以
 **全長**計入 outage。
-「當下實際生效」取自**每一列 `kill_switch_armed` 自己寫的 `deadline=...s`**；genesis
+「當下實際生效」取自**每一列「真的把排程掛上交易所」的事件自己寫的 `deadline=...s`**
+——`kill_switch_armed` 與 `kill_switch_refreshed` 兩種都算，不是只有 arm；genesis
 （`--create` 當時的 `live:` 區塊）只提供還沒 arm 之前的起始值。原因是 `config_json` 只在
 `--create` 寫一次，而 resume 時改動 `live.kill_switch` 只印 WARNING 不擋——只讀 genesis
 的話，一個 genesis 600、實際以 120 arm 的 run，會把每一段真實的 121–600s 失聯都算成
 「有保護」，於是真的裸奔過的 run 報 `live_ready`。
+**兩種都算是必要的**：`live-smoke` 以 `max(config, 120s)` 續約，所以在
+`schedule_cancel_seconds` 設得比 120 小的 run 上，它的 refresh 列是「當下真的有更長保護」
+的唯一證據；只聽 arm 會把 smoke 期間每一段 41–120s 的間隔憑空判成 outage。
 另外，`live-smoke` 自己的 scheduleCancel 動作（pre-flight refresh、test 14 的
-arm/refresh/clear、離場 disarm）**也會寫進同一份事件流**。它們走的是 signed client 而不是
+arm/refresh/clear、離場 disarm、以及失敗的 refresh）**也會寫進同一份事件流**，
+並帶 `writer=live-smoke` 標記。它們**計入 outage 秒數與當下 deadline**（是真的保護），
+但**不計入 §20.3 的 100 筆樣本下限**——樣本下限問的是「這個 run 有沒有把 switch 操練到
+足以判定可用率」，而連跑六輪 smoke 就能湊到 114 筆、100%、daemon 卻一秒都沒跑過。它們走的是 signed client 而不是
 `KillSwitchManager`，所以沒有別人會補這些列；沒有它們的話，整個 smoke 期間、以及跑完 smoke
 到啟動 `live --loop` 之間那段由操作者決定長度的空窗，都會被算成 outage——一個完全乾淨的
 120 小時 run 只要這段空窗超過約 73 分鐘就會被判 exit 5，而 §3 明明告訴你 smoke 的通過紀錄

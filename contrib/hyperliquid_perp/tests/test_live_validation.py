@@ -11,6 +11,7 @@ import pytest
 from contrib.hyperliquid_perp.live import smoke
 from contrib.hyperliquid_perp.live.fills import ExchangeFill, post_live_fill
 from contrib.hyperliquid_perp.live.validation import (
+    MIN_KILL_SWITCH_REFRESH_SAMPLES,
     MIN_LIVE_CYCLES,
     MIN_LIVE_ORDERS,
     LiveValidationReport,
@@ -1553,6 +1554,65 @@ def test_the_genesis_deadline_sizes_the_cover_until_something_arms(tmp_path):
     with other:
         strict = validate_live_run(other, run_id="r", now=_T0 + timedelta(seconds=quiet_at + 400))
     assert strict.kill_switch_outage_seconds == Decimal(300)
+
+
+def test_only_a_row_that_installs_cover_may_state_the_deadline(tmp_path):
+    """A row that changed nothing on the exchange cannot re-size the protection.
+
+    ``shutdown_cancel_orders_completed`` dumps arbitrary JSON into the same
+    ``detail`` column, so "any row that states a deadline" would let a cloid that
+    happened to carry the token decide how long the wallet was covered. Nothing
+    pinned the narrowing (2026-08-01 round-15 review).
+    """
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    _add_refreshes(db, 100, 0)
+    quiet_at = 99 * _REFRESH_STEP_S
+    # A non-installing row loudly claiming a 900s cover, then a 300s silence.
+    _kill_switch_event(
+        db, "shutdown_cancel_orders_completed", off=quiet_at, detail='{"c": "deadline=900s"}'
+    )
+    _kill_switch_event(db, "kill_switch_refreshed", off=quiet_at + 300)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=quiet_at + 400))
+    # Still judged against the 120s default: believing the claim would score 0.
+    assert report.kill_switch_outage_seconds == Decimal(300)
+
+
+def test_suite_authored_refreshes_are_cover_but_not_sample_credit(tmp_path):
+    """live-smoke's rows count for exposure and for the deadline, never for the floor.
+
+    Six back-to-back suites reach 114 refreshes at 100% with the daemon never
+    started, so counting them would let the availability figure describe the smoke
+    phase rather than the thing §20.3 certifies for real money (user decision,
+    2026-08-01 round-15).
+    """
+    from contrib.hyperliquid_perp.live.kill_switch import suite_authored_detail
+
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    for step in range(MIN_KILL_SWITCH_REFRESH_SAMPLES + 20):
+        _kill_switch_event(
+            db,
+            "kill_switch_refreshed",
+            off=step * _REFRESH_STEP_S,
+            detail=suite_authored_detail(120, "(smoke pre-flight refresh)"),
+        )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    # Plenty of rows, none of them evidence that the DAEMON exercised the switch.
+    assert report.kill_switch_refresh_total == 0
+    assert any("no kill-switch refresh events yet" in s for s in report.shortfalls)
+    assert not report.live_ready
+    # But they DID hold the cover: 30s steps under a 120s deadline, no outage.
+    assert report.kill_switch_outage_seconds == Decimal(0)
+    assert report.kill_switch_covered_seconds > Decimal(0)
 
 
 def test_the_default_deadline_tracks_the_config_layers_own_default():

@@ -521,6 +521,52 @@ def _ks_rows(db, run_id="live-BTC"):
         return [(r["event_type"], r["detail"]) for r in repo.iter_kill_switch_events(conn, run_id)]
 
 
+def test_the_preflight_refresh_records_the_cover_it_installed(live_db):
+    """The suite's HIGHEST-VOLUME writer, which had no test at all.
+
+    ``_refresh_kill_switch`` runs once per order-placing test — 18 of the ~22
+    kill-switch rows a full suite writes, and the ONLY writer of the
+    ``deadline=max(config,120)s`` token the validator parses. Both round-14 smoke
+    tests drove ``only=[...]`` selections that are not in ``_ORDER_PLACING_TESTS``,
+    so ``needs_preflight`` was False and this path never ran: restoring its
+    pre-round-14 body (wire call, no row) left the whole suite green
+    (2026-08-01 round-15 mutation probe).
+    """
+    from contrib.hyperliquid_perp.live.kill_switch import is_suite_authored
+    from contrib.hyperliquid_perp.live.validation import _stated_deadline_seconds
+
+    signed = _FakeSigned()
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["slice_order_submit"]
+        )
+        rows = _ks_rows(live_db)
+    refreshes = [detail for event, detail in rows if event == "kill_switch_refreshed"]
+    assert refreshes, f"the pre-flight refresh wrote no row; got {rows}"
+    # It states the cover it installed — max(config, 120s) — because on a run
+    # configured below 120 this row is the ONLY evidence of the longer cover.
+    assert _stated_deadline_seconds(refreshes[0]) == _D(120)
+    # ...and it is marked as the SUITE's, so it cannot buy §20.3 sample credit.
+    assert is_suite_authored(refreshes[0])
+
+
+def test_a_failed_preflight_refresh_is_recorded_before_it_propagates(live_db):
+    # Recording only the success path left an aborted suite reading as
+    # "...refreshed, disarmed" over a sub-deadline gap: zero outage seconds for a
+    # wallet whose cover had actually lapsed. The manager writes
+    # kill_switch_refresh_failed for exactly this, and the measure opens an
+    # episode on it. Still fail-closed: probes must not go out under an uncertain
+    # switch, so the raise still propagates.
+    signed = _FakeSigned(raise_on={"schedule_cancel"})
+    with live_db:
+        runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+        with pytest.raises(RuntimeError, match="boom in schedule_cancel"):
+            runner.run(only=["slice_order_submit"])
+        events = [event for event, _ in _ks_rows(live_db)]
+    # Recorded BEFORE it propagated, so the lapse survives the abort.
+    assert "kill_switch_refresh_failed" in events
+
+
 def test_the_exit_disarm_leaves_the_row_the_acceptance_measure_reads(live_db):
     """The suite's own wire actions have to appear in the §18.5 log.
 

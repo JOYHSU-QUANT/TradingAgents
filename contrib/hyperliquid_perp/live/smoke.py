@@ -54,7 +54,7 @@ from ..paper.twap import floor_to_step
 from ..persistence import repository as repo
 from ..persistence.cloid import cloid_hex, cloid_logical
 from ..persistence.db import Database
-from .kill_switch import deadline_detail, record_kill_switch_event
+from .kill_switch import record_kill_switch_event, suite_authored_detail
 from .orders import local_status_for_exchange_status, parse_order_status
 
 if TYPE_CHECKING:  # import cost only under type checking; runtime stays lazy
@@ -624,7 +624,21 @@ class SmokeTestRunner:
         switch (the same fail-closed stance as the lease heartbeat), and the
         exit disarm still runs.
         """
-        self._wire.schedule_cancel(cancel_at=self.ctx.now() + self.ctx.kill_switch_deadline)
+        try:
+            self._wire.schedule_cancel(cancel_at=self.ctx.now() + self.ctx.kill_switch_deadline)
+        except Exception as exc:
+            # BOTH outcomes are recorded, not just the happy one. The manager
+            # writes ``kill_switch_refresh_failed`` for exactly this event and the
+            # measure opens an outage episode on it; recording only the success
+            # path left an aborted suite looking like "…refreshed, disarmed" with a
+            # sub-deadline gap — zero outage seconds for a wallet whose cover had
+            # actually lapsed, in the very metric this was written to make honest
+            # (2026-08-01 round-15 review). Re-raised: probes must not go out under
+            # an uncertain switch.
+            self._record_kill_switch_event(
+                "kill_switch_refresh_failed", error=f"{type(exc).__name__}: {exc}"
+            )
+            raise
         # Recorded, not just performed: this refresh renews the SAME wallet-wide
         # cover the acceptance measure is scored on, and a renewal with no row is
         # indistinguishable from silence to the validator. The row states the cover
@@ -634,7 +648,7 @@ class SmokeTestRunner:
         # in fact covered the whole time.
         self._record_kill_switch_event(
             "kill_switch_refreshed",
-            detail=deadline_detail(
+            detail=suite_authored_detail(
                 int(self.ctx.kill_switch_deadline.total_seconds()), "(smoke pre-flight refresh)"
             ),
         )
@@ -1931,13 +1945,18 @@ class SmokeTestRunner:
         # back to size this stretch's cover.
         self._record_kill_switch_event(
             "kill_switch_armed",
-            detail=deadline_detail(
+            detail=suite_authored_detail(
                 int(self.ctx.kill_switch_deadline.total_seconds()), "(smoke test 14)"
             ),
         )
         refreshed = self.ctx.now() + self.ctx.kill_switch_deadline
         self._wire.schedule_cancel(cancel_at=refreshed)
-        self._record_kill_switch_event("kill_switch_refreshed", detail="smoke test 14")
+        self._record_kill_switch_event(
+            "kill_switch_refreshed",
+            detail=suite_authored_detail(
+                int(self.ctx.kill_switch_deadline.total_seconds()), "(smoke test 14 refresh)"
+            ),
+        )
         self._wire.clear_scheduled_cancel()
         self._record_kill_switch_event("kill_switch_disarmed", detail="smoke test 14")
         return SmokeStepResult("passed", detail="scheduleCancel armed, refreshed, and cleared")

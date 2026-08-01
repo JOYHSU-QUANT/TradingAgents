@@ -371,6 +371,33 @@ def deadline_detail(seconds: int, note: str) -> str:
     return f"deadline={seconds}s {note}"
 
 
+# Marks a row the SMOKE SUITE wrote rather than the daemon. Both are real cover
+# and both must count toward outage seconds and toward the deadline in force —
+# the suite genuinely arms and renews the wallet-wide trigger. What suite rows
+# must NOT do is satisfy the §20.3 SAMPLE FLOOR, which asks a different question:
+# "has this run exercised the switch enough for its availability number to mean
+# anything?" Six back-to-back suites on one run-id reach 114 refreshes at 100%
+# with the daemon never started, so the floor would be answered entirely by
+# evidence from a phase that cannot speak to hours of unattended running
+# (2026-08-01 round-15 review; user decision: exclude from the count only).
+#
+# A token rather than a substring sniff of free text, and read back through
+# ``is_suite_authored`` — same writer/reader discipline as ``deadline_detail``,
+# for the same reason: the one thing that must not happen is the two sides
+# drifting apart silently.
+_SUITE_AUTHORED_TOKEN = "writer=live-smoke"
+
+
+def suite_authored_detail(seconds: int, note: str) -> str:
+    """``deadline_detail`` plus the marker that says the SUITE installed it."""
+    return f"{deadline_detail(seconds, note)} {_SUITE_AUTHORED_TOKEN}"
+
+
+def is_suite_authored(detail: str | None) -> bool:
+    """Whether this row was written by ``live-smoke`` rather than the daemon."""
+    return bool(detail) and _SUITE_AUTHORED_TOKEN in detail
+
+
 def record_kill_switch_event(
     db: Database,
     *,

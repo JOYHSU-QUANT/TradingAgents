@@ -58,12 +58,20 @@ def _smoke_yaml(
     allow_real_orders: bool = True,
     schedule_cancel_seconds: int | None = None,
     refresh_interval_seconds: int | None = None,
+    # RUNBOOK §1.5's value, and the DEFAULT here on purpose: the 30s top-level
+    # default is deliberately illegal in live (30+30+30+15+30 = 135 >= 120), so a
+    # helper that omitted it produced configs no operator could actually run. It
+    # went unnoticed only while the fake client under-reported its timeout as None
+    # (2026-08-01 round-15 review).
+    network_timeout_s: float | None = 8,
 ):
     """A minimal live config that passes every live-smoke config gate."""
     path = tmp_path / "smoke-cfg.yaml"
     text = ""
     if wallet is not None:
         text += f'wallet_address: "{wallet}"\n'
+    if network_timeout_s is not None:
+        text += f"network_timeout_s: {network_timeout_s}\n"
     text += "risk:\n  leverage: 1\n  margin_mode: cross\n  max_target_margin_pct: 60\n"
     text += "live:\n  mode: testnet_live\n  network: testnet\n"
     if allow_real_orders:
@@ -122,6 +130,14 @@ def smoke_seams(monkeypatch):
 
         @classmethod
         def from_config(cls, config, *, timeout=None, network=None):
+            # Resolves the timeout the way the real client does — from the
+            # explicit kwarg, else ``network_timeout_s``, else the bounded
+            # default. Returning None here made the double claim "no timeout"
+            # for a config that states one, which is exactly the value the kill
+            # switch's timing invariant counts.
+            if timeout is None:
+                raw = config.get("network_timeout_s")
+                timeout = float(raw) if raw is not None else 30.0
             return cls(network=network or config.get("network", "mainnet"), timeout=timeout)
 
     class _FakeMarketData:
@@ -288,6 +304,39 @@ def test_live_smoke_real_run_auth_failure_exits_1(tmp_path, capsys, smoke_seams)
 
 
 # -- the full real suite through the CLI --------------------------------------
+
+
+def test_the_cli_hands_the_manager_the_clients_own_timeout(tmp_path, monkeypatch, smoke_seams):
+    """The wiring that ENDS the two-halves-disagreeing bug, pinned at the CLI.
+
+    ``network_timeout_s`` became an explicit constructor argument so the degraded
+    four-term check is a caller's stated choice rather than a getattr accident.
+    That made ``None`` a legal argument — so the regression shape is now a CALL
+    SITE passing None, and forcing every construction to ``network_timeout_s=None``
+    left 1965 of 1966 tests green, the one failure being the constructor's own
+    unit test. Neither production construction site was exercised by anything
+    (2026-08-01 round-15 mutation probe).
+    """
+    from contrib.hyperliquid_perp.live import kill_switch as ks_mod
+
+    seen: list[object] = []
+    real = ks_mod.KillSwitchManager
+
+    class _Recording(real):  # type: ignore[misc, valid-type]
+        def __init__(self, **kwargs):
+            seen.append(kwargs.get("network_timeout_s"))
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(ks_mod, "KillSwitchManager", _Recording)
+    # An explicit, RUNBOOK §1.5-shaped timeout: relying on the default would let
+    # the assertion pass against None, which is the very value being guarded.
+    cfg = _smoke_yaml(tmp_path, network_timeout_s=8)
+    dbp = _seed_genesis_run(tmp_path, cfg)
+    assert cli_main(["live-smoke", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)]) == 0
+    assert seen, "no KillSwitchManager was constructed — the pin proves nothing"
+    # The number the failed attempt would actually burn, not None: the whole point
+    # is that the constructor and the CLI preflight now read the SAME value.
+    assert all(value == 8 for value in seen), seen
 
 
 def test_live_smoke_full_real_suite_passes_gate_and_releases_lock(tmp_path, capsys, smoke_seams):
@@ -554,13 +603,15 @@ def test_a_short_configured_cover_is_floored_not_inherited(tmp_path, smoke_seams
     # sends the operator to check config and market state, not the clock.
     from contrib.hyperliquid_perp.cli import _build_smoke_session
 
-    # 70/5, not 40/5: since the timing invariant started counting the failed
+    # 80/5, not 40/5: since the timing invariant started counting the failed
     # attempt's own timeout and the retry's own tick wait, 40/5 is no longer legal
-    # for the daemon either (5 + 30 + 2.5 + 30 = 67.5 > 40) and the preflight
-    # refuses it before this floor is ever reached. 70 is the nearest cover that
-    # keeps the ORIGINAL point: legal for the daemon, still narrower than the 120s
-    # the suite guarantees itself (2026-08-01).
-    cfg = _smoke_yaml(tmp_path, schedule_cancel_seconds=70, refresh_interval_seconds=5)
+    # for the daemon (5 + 30 + 8 + 2.5 + 30 = 75.5 > 40) and the preflight refuses
+    # it before this floor is ever reached. It was briefly 70, which only passed
+    # while the fake client under-reported its timeout as None and the sum lost
+    # its 8s term. 80 is the nearest cover that keeps the ORIGINAL point: legal
+    # for the daemon, still narrower than the 120s the suite guarantees itself
+    # (2026-08-01 round-15 review).
+    cfg = _smoke_yaml(tmp_path, schedule_cancel_seconds=80, refresh_interval_seconds=5)
     dbp = _seed_genesis_run(tmp_path, cfg)
     args = SimpleNamespace(config=str(cfg), db=str(dbp), run_id="r1", dry_run=False)
     with Database(dbp) as db:

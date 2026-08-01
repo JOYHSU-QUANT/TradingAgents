@@ -103,6 +103,7 @@ from ..paper.scheduler import parse_instant
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from .config import ExecutionMode
+from .kill_switch import is_suite_authored
 from .safe_mode import REASON_DAILY_LOSS, SAFE_MODE_MANUAL
 from .smoke import SMOKE_TEST_KEYS, rerun_keys_for, smoke_gate_report
 
@@ -895,9 +896,12 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
     too lax for another. The constant it replaced was 300s against a 120s default
     deadline, which billed the whole 120–300s band — every stretch in which the
     switch demonstrably fires — as healthy covered time. Each stretch is measured
-    against the cover IN FORCE across it: every ``kill_switch_armed`` row states
-    the deadline that arming installed, and the genesis config supplies only the
-    starting value. Reading genesis alone was wrong for any run that resumed under
+    against the cover IN FORCE across it: every row that INSTALLS a schedule —
+    ``kill_switch_armed`` and ``kill_switch_refreshed`` alike — states the
+    deadline it installed, and the genesis config supplies only the starting
+    value. Both events, not just arming: the smoke suite renews at
+    ``max(config, 120s)``, so on a run configured below 120 its refresh rows are
+    the ONLY evidence of the longer cover actually in force. Reading genesis alone was wrong for any run that resumed under
     an edited ``live.kill_switch`` block — which the CLI merely warns about — so a
     run armed at 120 but created at 600 had every real lapse billed as covered.
 
@@ -922,9 +926,11 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
     in_outage = False
     previous: datetime | None = None
     previous_event: str | None = None
-    # The STARTING deadline only. Every ``kill_switch_armed`` row that names one
-    # replaces it for the stretches that follow, so a run resumed under an edited
-    # config is measured against the cover each stretch actually had.
+    # The STARTING deadline only. Every schedule-installing row that names one
+    # (``kill_switch_armed`` or ``kill_switch_refreshed``) replaces it for the
+    # stretches that follow, so a run resumed under an edited config — or covered
+    # by the smoke suite's longer deadline — is measured against the cover each
+    # stretch actually had.
     deadline = _schedule_cancel_seconds(config_json)
     # By TIMESTAMP, not by insertion order: the rows arrive ordered by event_id,
     # and a clock correction (or a test seeding a second batch) makes those two
@@ -979,23 +985,33 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
         # and "silence the exchange swept the wallet in". Rows that say nothing
         # leave the standing deadline alone.
         #
-        # Only rows that actually INSTALL cover get a vote. "Any row that states
-        # one" was too wide: ``shutdown_cancel_orders_completed`` dumps arbitrary
-        # JSON into this same column, so a cloid that happened to contain the
-        # token would have re-sized the run's protection deadline. Arming and
-        # refreshing are the two events that put a schedule on the exchange, and
-        # they are exactly the two the manager and the smoke suite both write.
+        # Only rows that actually INSTALL cover get a vote on the deadline. "Any
+        # row that states one" was too wide: ``shutdown_cancel_orders_completed``
+        # dumps arbitrary JSON into this same column, so a cloid that happened to
+        # contain the token would have re-sized the run's protection deadline.
+        # Arming and refreshing are the two events that put a schedule on the
+        # exchange, and they are exactly the two the manager and the smoke suite
+        # both write.
         if event in (_KILL_SWITCH_REFRESH_OK, _KILL_SWITCH_ARMED):
             stated_deadline = _stated_deadline_seconds(detail)
             if stated_deadline is not None:
                 deadline = stated_deadline
-        if event in (_KILL_SWITCH_REFRESH_OK, _KILL_SWITCH_ARMED):
             # Both prove the switch is scheduled; only the refresh counts toward
             # the sample floor, which asks "has it been EXERCISED enough to judge".
-            refreshed += event == _KILL_SWITCH_REFRESH_OK
+            #
+            # And only the DAEMON'S refreshes. Suite-authored rows are real cover —
+            # they count in full toward outage seconds and toward the deadline
+            # above — but the floor asks whether this run exercised the switch
+            # enough for its availability figure to mean anything, and six
+            # back-to-back smoke suites answer it at 114 refreshes and 100% with
+            # the daemon never started. That figure would describe the smoke phase,
+            # not the thing §20.3 certifies for real money (2026-08-01 round-15).
+            refreshed += event == _KILL_SWITCH_REFRESH_OK and not is_suite_authored(detail)
             in_outage = False
         elif event == _KILL_SWITCH_REFRESH_FAILED:
-            failed += 1
+            # Same split: a suite-authored failure still OPENS an outage episode
+            # (the cover really did lapse), it just does not buy sample credit.
+            failed += not is_suite_authored(detail)
             if not in_outage:
                 in_outage = True
                 episodes += 1
@@ -1334,9 +1350,12 @@ def validate_live_run(
     if kill_switch.disarm_failed_count:
         warnings.append(
             f"{kill_switch.disarm_failed_count} kill-switch disarm failure(s) — a "
-            "shutdown could not clear the wallet-wide scheduleCancel. §18.2's "
-            "keep_protective shutdown leaves SL/TP resting, and an armed trigger "
-            "cancels exactly those at its deadline; confirm the wallet is disarmed"
+            "daemon shutdown OR a live-smoke exit could not clear the wallet-wide "
+            "scheduleCancel, and the trigger cancels every resting order at its "
+            "deadline. Which orders are at risk depends on which one it was: a "
+            "§18.2 keep_protective shutdown leaves SL/TP resting, a smoke exit "
+            "leaves probe orders. Confirm the wallet is disarmed either way "
+            "(the count is cumulative for the run-id and never clears)"
         )
     if is_testnet and daily_loss_breached:
         warnings.append(

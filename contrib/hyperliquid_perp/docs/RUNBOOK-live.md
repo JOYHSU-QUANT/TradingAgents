@@ -298,6 +298,10 @@ python -m contrib.hyperliquid_perp live-smoke \
   執行只會再開一口新的、平掉新的那口，原殘倉留著。所以：**到交易所確認並手動平掉，
   然後換一個新的 run-id 重跑驗收**——依 §2 的累積制，手動成交會記
   `fill_unmapped`，該 run 的 `validate` 從此永遠 exit 5。
+  **換 run-id 也會把 §20.2 的 smoke gate 一併歸零**：`live_smoke_tests` 是 per-run-id 的，
+  新 run-id 底下 18 項全是 `not_yet_run`，`live --loop` 會直接 exit 4。所以換完 run-id
+  要**整套 live-smoke 重跑一次**（含 test 16／17 需要操作者事先備妥的前置狀態），
+  不是只把殘倉平掉就好。
   （**唯一例外**：若殘倉的成因是 lease 被接管，收尾**刻意不平**，因為那口倉已經
   屬於接管者、由它的 §19.1 recovery 收編——此時不要手動平，先確認接管的那個
   進程是不是你要的，見上面的 run lock 條目。）

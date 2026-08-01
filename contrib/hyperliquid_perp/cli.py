@@ -2551,7 +2551,10 @@ def _cmd_live_smoke(argv: list[str]) -> int:
                         "no local order row, so it books fill_unmapped and pins "
                         "this run's validate at exit 5. Re-running the suite does "
                         "NOT flatten this residual — a fresh runner only closes the "
-                        "staging long it opened itself.",
+                        "staging long it opened itself. Note the new run-id starts "
+                        "with an EMPTY §20.2 gate: re-run the full live-smoke suite "
+                        "under it (including the operator-staged preconditions for "
+                        "tests 16/17) or `live --loop` exits 4 with all 18 not_yet_run.",
                         file=sys.stderr,
                     )
                 if runner.position_residuals:
@@ -2566,7 +2569,10 @@ def _cmd_live_smoke(argv: list[str]) -> int:
                             f"WARNING: a probe position may still be OPEN — {note}. "
                             "Close it manually, then use a NEW run-id for acceptance: "
                             "a manual fill has no local order row, so it books "
-                            "fill_unmapped and pins this run's validate at exit 5.",
+                            "fill_unmapped and pins this run's validate at exit 5. "
+                            "The new run-id starts with an EMPTY §20.2 gate — re-run "
+                            "the full live-smoke suite under it, or `live --loop` "
+                            "exits 4 with all 18 tests not_yet_run.",
                             file=sys.stderr,
                         )
                 if runner.probe_residual is not None:

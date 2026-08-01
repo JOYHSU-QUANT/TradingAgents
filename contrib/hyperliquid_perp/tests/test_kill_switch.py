@@ -129,6 +129,7 @@ def env(tmp_path):
         run_id="r",
         config=KillSwitchConfig(),
         max_tick_gap_seconds=_MAX_TICK_GAP_S,
+        network_timeout_s=None,
         payload_dir=tmp_path / "payloads",
         clock=clock,
     )
@@ -162,6 +163,7 @@ def test_disabled_config_cannot_build_a_manager(tmp_path):
             run_id="r",
             config=KillSwitchConfig(enabled=False),
             max_tick_gap_seconds=_MAX_TICK_GAP_S,
+            network_timeout_s=None,
             payload_dir=tmp_path,
         )
 
@@ -204,8 +206,13 @@ def test_a_lapsed_deadline_is_detected_from_tick(env):
     assert manager.fired_total == 1
 
 
-def _manager_with(config: KillSwitchConfig, *, max_tick_gap_seconds: float):
+def _manager_with(
+    config: KillSwitchConfig, *, max_tick_gap_seconds: float, timeout: float | None = None
+):
     gate = _gate()
+    # ``timeout`` goes to the manager as an ARGUMENT, not onto the client: the
+    # constructor no longer probes the client for it, so a test that wants the
+    # degraded four-term path says ``timeout=None`` and means it.
     return KillSwitchManager(
         client=_FakeClient(gate),
         gate=gate,
@@ -213,6 +220,7 @@ def _manager_with(config: KillSwitchConfig, *, max_tick_gap_seconds: float):
         run_id="r",
         config=config,
         max_tick_gap_seconds=max_tick_gap_seconds,
+        network_timeout_s=timeout,
         payload_dir=Path("payloads"),
     )
 
@@ -264,10 +272,49 @@ def test_the_timing_invariant_counts_the_failed_attempt_and_the_second_tick_wait
 
 
 def test_the_worst_case_gap_must_be_strictly_inside_the_deadline():
-    # Landing exactly ON the deadline is a race, not a margin.
-    cfg = KillSwitchConfig(schedule_cancel_seconds=60, refresh_interval_seconds=30)
+    # Landing exactly ON the deadline is a race, not a margin. Re-anchored
+    # 2026-08-01: under the five-term sum the old 60/30/30 shape computes 105
+    # against a 60s cancel — 45s clear of the boundary, so it no longer tested the
+    # boundary at all and `>=` could be relaxed to `>` with the suite green.
+    # 30 (interval) + 30 (tick) + 0 (no timeout on the fake) + 15 (backoff cap)
+    # + 30 (the retry's own tick wait) == 105, exactly the deadline.
+    cfg = KillSwitchConfig(schedule_cancel_seconds=105, refresh_interval_seconds=30)
     with pytest.raises(ValueError, match="cannot be refreshed in time"):
-        _manager_with(cfg, max_tick_gap_seconds=30.0)  # 30 + 30 == 60
+        _manager_with(cfg, max_tick_gap_seconds=30.0)
+    # One second of daylight is enough to build: pins that this is a boundary and
+    # not a blanket refusal.
+    roomier = KillSwitchConfig(schedule_cancel_seconds=106, refresh_interval_seconds=30)
+    assert _manager_with(roomier, max_tick_gap_seconds=30.0) is not None
+
+
+def test_the_constructor_counts_the_clients_own_network_timeout():
+    """The 5th term is read off the client, so the manager must enforce it itself.
+
+    Until 2026-08-01 the signed client — the ONLY client a production manager is
+    built on — forwarded its timeout to the SDK without keeping it, so
+    ``getattr(client, "timeout", None)`` read None on every real manager and the
+    constructor silently checked four of the five terms while the CLI preflight,
+    reading the unsigned client, checked all five. One invariant, two halves,
+    disagreeing. Asserted through the CONSTRUCTOR, not the pure function, because
+    the pure function was already covered and still let the wiring rot.
+    """
+    cfg = KillSwitchConfig(schedule_cancel_seconds=120, refresh_interval_seconds=30)
+    # RUNBOOK §1.5's 8s fits: 30 + 30 + 8 + min(8, 15) + 30 = 106 < 120.
+    assert _manager_with(cfg, max_tick_gap_seconds=30.0, timeout=8.0) is not None
+    # The network_timeout_s DEFAULT does not: 30 + 30 + 30 + 15 + 30 = 135. Drop
+    # the term and this config computes 105 and builds — which is exactly what
+    # production did.
+    with pytest.raises(ValueError, match="cannot be refreshed in time"):
+        _manager_with(cfg, max_tick_gap_seconds=30.0, timeout=30.0)
+
+
+def test_with_no_timeout_to_read_the_backoff_cap_still_counts():
+    # The degraded path is four terms, not three: a client that cannot state its
+    # timeout still cannot retry instantly, so the backoff cap stands in for it.
+    # 30 + 40 + 0 + 15 (cap) + 40 = 125 >= 120 with the term, 110 without it.
+    cfg = KillSwitchConfig(schedule_cancel_seconds=120, refresh_interval_seconds=30)
+    with pytest.raises(ValueError, match="cannot be refreshed in time"):
+        _manager_with(cfg, max_tick_gap_seconds=40.0)
 
 
 def test_a_nonpositive_tick_gap_is_a_wiring_error():
@@ -1346,6 +1393,7 @@ def test_cross_run_cancel_evidence_spans_runs_without_index_collision(env, tmp_p
         run_id="r-new",
         config=KillSwitchConfig(),
         max_tick_gap_seconds=_MAX_TICK_GAP_S,
+        network_timeout_s=None,
         payload_dir=tmp_path / "payloads",
         clock=clock,
     )
@@ -1869,6 +1917,10 @@ def test_the_sl_repair_delay_advisory_is_checkable():
     # Budgeted at ONE SLOT (30/3 = 10), not the whole gap: the 10..30 band is
     # unclamped by _maybe_delay AND used to be unwarned (2026-08-01 exit check).
     assert sl_repair_delay_warning(9.0, 30.0) is None
+    # AT the slot, not merely above it: the budget moved from the whole gap to
+    # gap/3 and took its boundary case with it, so `<` could become `<=` with the
+    # suite green (2026-08-01 round-14 mutation probe).
+    assert sl_repair_delay_warning(10.0, 30.0) is not None
     assert sl_repair_delay_warning(25.0, 30.0) is not None
     msg = sl_repair_delay_warning(30.0, 30.0)  # over the promise: warn
     assert msg is not None and "sl_repair_retry_delay_seconds" in msg

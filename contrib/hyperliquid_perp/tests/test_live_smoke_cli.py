@@ -148,6 +148,10 @@ def smoke_seams(monkeypatch):
             self.network = network
             self.wallet_address = wallet_address
             self.agent_address = _AGENT_ADDR
+            # Mirrors the real signed client, which keeps its resolved timeout:
+            # the CLI hands it to KillSwitchManager as the failed-attempt term of
+            # the refresh-timing invariant.
+            self.timeout = timeout
 
         def health_check(self):
             return None

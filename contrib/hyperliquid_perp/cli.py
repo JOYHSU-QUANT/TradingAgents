@@ -1375,8 +1375,12 @@ def _live_startup_recovery(
                 run_id=run_id,
                 config=live_cfg.kill_switch,
                 # The preflight above already proved this invariant with the
-                # SAME constant, so this constructor cannot raise on timing.
+                # SAME constant and the SAME timeout, so this constructor cannot
+                # raise on timing. Both are passed explicitly: the timeout used to
+                # be probed off the client with getattr, which silently dropped
+                # the term on every production manager.
                 max_tick_gap_seconds=_RECOVERY_MAX_TICK_GAP_SECONDS,
+                network_timeout_s=signed.timeout,
                 payload_dir=payload_dir,
             )
             safe_mode = SafeModeManager(db=db, run_id=run_id, gate=gate)
@@ -2893,6 +2897,7 @@ def _smoke_startup_recovery(
         run_id=run_id,
         config=live_cfg.kill_switch,
         max_tick_gap_seconds=_RECOVERY_MAX_TICK_GAP_SECONDS,
+        network_timeout_s=signed.timeout,
         payload_dir=payload_dir,
     )
     safe_mode = SafeModeManager(db=db, run_id=run_id, gate=gate)

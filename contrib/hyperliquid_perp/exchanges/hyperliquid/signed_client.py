@@ -283,6 +283,16 @@ class HyperliquidSignedClient:
             raise ValueError(f"network must be one of {sorted(_BASE_URLS)}, got {network!r}")
         self.network = key
         self.wallet_address = wallet_address
+        # Exposed for the same reason HyperliquidClient exposes it (sdk_client),
+        # plus one this class owns alone: the kill switch's timing invariant
+        # counts the failed attempt's own wall time as a term, and this is the
+        # client every KillSwitchManager is built on. Forwarding ``timeout`` into
+        # ``Exchange`` without keeping it here left that term unreadable, so the
+        # constructor silently checked four of its five terms on EVERY production
+        # manager while the CLI preflight checked all five — the two halves of one
+        # invariant disagreeing, with only the preflight live (2026-08-01 round-14
+        # review).
+        self.timeout = timeout
         self._gate = gate
         # Leak-safe key handling lives in one shared home (§6 rule 2).
         account = account_from_agent_key(agent_key, error_cls=ExchangeError)

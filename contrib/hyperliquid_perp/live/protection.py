@@ -260,7 +260,17 @@ class ProtectionManager:
         it — by which time §13.4 has reopened the gate and the no-op path is
         reading a stale row as proof of protection.
         """
-        firings = getattr(self._kill_switch, "fired_total", 0)
+        # An explicit None check, NOT ``getattr(..., "fired_total", 0)``. The
+        # parameter is genuinely optional, but the getattr default covered a
+        # second, dishonest case: a switch object that exists and lacks the
+        # attribute silently reported "never fired", so the latch below never
+        # tripped and every stale local row kept counting as proof that an SL/TP
+        # was on the book — the exact §17.3 check this method exists to run. Same
+        # shape as the kill switch's own timeout term, which read None on every
+        # production client for the same reason (2026-08-01 round-14 concept scan).
+        if self._kill_switch is None:
+            return
+        firings = self._kill_switch.fired_total
         if firings > self._last_seen_firings:
             self._last_seen_firings = firings
             self._rows_unconfirmed = True
@@ -944,6 +954,22 @@ class ProtectionManager:
         is linear rather than exponential because the whole ladder still has to
         fit inside the tick's timing envelope (§18.2), which the fixed delay was
         chosen against.
+
+        That growth is DELIBERATELY TRUNCATED by the clamp below, and the
+        truncation is not a bug to fix later. Since ``_MAX_REPAIR_SLEEP_S`` became
+        one slot of the unrefreshed-REST budget (10s, not the whole 30s gap), the
+        default 5s delay yields rungs 5, 10, 10, 10 rather than 5, 10, 15, 20 —
+        flat from the second rung, which is the cadence the multiplier exists to
+        avoid. Both properties cannot hold at once: growing past one slot is
+        exactly the overshoot that pushes the §18.2 refresh past the exchange-side
+        deadline and cancels every resting order mid-repair. The budget wins,
+        because a rate limiter costs a retry and a fired scheduleCancel costs the
+        stop. Escaping the trade-off needs the deferred network-layer rework
+        (returning control to the tick loop between rungs so a real refresh lands
+        in between), not a larger constant. At the shipped
+        ``sl_repair_max_attempts: 3`` the product never reaches the clamp anyway,
+        so today this bites only a config with 4+ attempts (2026-08-01 round-14
+        review, user decision: keep the budget, document the truncation).
 
         And CLAMPED to that envelope, because the multiplier alone breaks it.
         ``sl_repair_delay_warning`` only ever compares the raw configured delay

@@ -356,6 +356,53 @@ if not _KEEP_PROTECTIVE_ROLES <= LIVE_ORDER_ROLES:
     raise AssertionError("_KEEP_PROTECTIVE_ROLES drifted from LIVE_ORDER_ROLES")
 
 
+def deadline_detail(seconds: int, note: str) -> str:
+    """The ONE way to write "this row installed N seconds of cover".
+
+    ``validation._stated_deadline_seconds`` parses this token back out to size
+    every stretch of silence, so the two are a cross-module contract — and a
+    contract enforced by three independent f-strings agreeing by eye is not
+    enforced at all. The drift is already demonstrable one screen away:
+    ``kill_switch_cancel_triggered`` renders the same concept as
+    ``(deadline 120s)`` — a space, not ``=`` — which the reader silently ignores.
+    Ignoring it there is correct, but nothing structural made it so. With one
+    formatter there is a single writer to pin (2026-08-01 round-14 simplify pass).
+    """
+    return f"deadline={seconds}s {note}"
+
+
+def record_kill_switch_event(
+    db: Database,
+    *,
+    run_id: str,
+    event_type: str,
+    timestamp: datetime,
+    detail: str | None = None,
+    error: str | None = None,
+) -> None:
+    """Append one §18.5 row in its own transaction.
+
+    Shared by :meth:`KillSwitchManager._record` and the smoke suite, which drives
+    ``scheduleCancel`` on the raw signed client and so has to write these rows
+    itself. Only the WRITER is shared, deliberately not the state machine: the
+    suite needs arm→refresh→clear→clear, a shape ``arm()``/``refresh()`` forbid,
+    and installs ``max(config, 120s)`` of cover rather than the configured value.
+
+    Fail-loud (an unguarded transaction): the row is the only durable evidence the
+    acceptance measure has, and a caller that must not raise says so at its own
+    call site rather than making silence the default.
+    """
+    with db.transaction() as conn:
+        repo.insert_kill_switch_event(
+            conn,
+            run_id=run_id,
+            event_type=event_type,
+            detail=detail,
+            error_message=error,
+            timestamp=timestamp,
+        )
+
+
 class KillSwitchManager:
     """One run's dead man's switch: arm, refresh on cadence, cancel on shutdown."""
 
@@ -368,6 +415,7 @@ class KillSwitchManager:
         run_id: str,
         config: KillSwitchConfig,
         max_tick_gap_seconds: float,
+        network_timeout_s: float | None,
         payload_dir: Path,
         clock: Clock | None = None,
     ) -> None:
@@ -398,13 +446,20 @@ class KillSwitchManager:
         # ``network_timeout_warning``) — pass the true worst-case gap here.
         # The invariant itself (worst-case math, config-guard blindness) is
         # kill_switch_timing_violation's docstring.
-        # ``getattr`` and not ``client.timeout``: the invariant must hold for every
-        # manager, including ones built on a stub in tests, and a client without a
-        # readable timeout degrades to the four terms that do not need it rather
-        # than failing construction on an attribute the safety math can live without.
-        violation = kill_switch_timing_violation(
-            config, max_tick_gap_seconds, getattr(client, "timeout", None)
-        )
+        # PASSED IN, never probed off the client with ``getattr``. It was a
+        # getattr until 2026-08-01, and the probe silently swallowed the term on
+        # every production manager: the signed client — the only one a real
+        # manager is built on — forwarded its timeout to the SDK without keeping
+        # it, so the constructor checked four of five terms while the CLI
+        # preflight, reading the unsigned client, checked all five. One invariant,
+        # two halves, disagreeing. Exposing the attribute fixes today's symptom; a
+        # rename or a third client class silently reopens it, because
+        # ``getattr(x, "timeout", None)`` cannot tell "stub, degrade intended"
+        # from "production client that stopped exposing it". As an argument the
+        # degrade is a CALLER'S STATED CHOICE — the same reason
+        # ``ProtectionManager._note_firings`` gave up its own getattr default in
+        # this round (2026-08-01 round-14 simplify pass).
+        violation = kill_switch_timing_violation(config, max_tick_gap_seconds, network_timeout_s)
         if violation is not None:
             raise ValueError(violation)
         self._client = client
@@ -483,15 +538,14 @@ class KillSwitchManager:
     def _record(
         self, event_type: str, *, detail: str | None = None, error: str | None = None
     ) -> None:
-        with self._db.transaction() as conn:
-            repo.insert_kill_switch_event(
-                conn,
-                run_id=self._run_id,
-                event_type=event_type,
-                detail=detail,
-                error_message=error,
-                timestamp=self._clock.now(),
-            )
+        record_kill_switch_event(
+            self._db,
+            run_id=self._run_id,
+            event_type=event_type,
+            detail=detail,
+            error=error,
+            timestamp=self._clock.now(),
+        )
 
     def _schedule(self) -> None:
         """One scheduleCancel round-trip pushing the deadline to now + window."""
@@ -589,8 +643,10 @@ class KillSwitchManager:
         )
         self._record(
             "kill_switch_armed",
-            detail=f"deadline={self._config.schedule_cancel_seconds}s "
-            f"refresh={self._config.refresh_interval_seconds}s",
+            detail=deadline_detail(
+                self._config.schedule_cancel_seconds,
+                f"refresh={self._config.refresh_interval_seconds}s",
+            ),
         )
 
     def release_safe_mode(self) -> bool:

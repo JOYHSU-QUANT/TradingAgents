@@ -184,6 +184,23 @@ def test_construction_pins_base_url_to_live_network(fake_exchange):
     assert testnet._exchange.spot_meta == {"tokens": [], "universe": []}
 
 
+def test_the_timeout_the_kill_switch_invariant_counts_is_readable(fake_exchange):
+    """The resolved timeout stays on the client, not only inside the SDK.
+
+    ``KillSwitchManager.__init__`` sizes the dead man's switch's worst-case
+    refresh gap partly from the failed attempt's own network timeout, and reads
+    it off the client it was handed — which is always THIS class. Forwarding the
+    value into ``Exchange`` without keeping it here made that term unreadable, so
+    the constructor silently checked four of its five terms on every production
+    manager while the CLI preflight checked all five (2026-08-01 round-14 review).
+    Pins the attribute itself: the plumbing is what rotted, not the arithmetic.
+    """
+    assert _client(timeout=8.0).timeout == 8.0
+    # A client built without an explicit timeout must still state a NUMBER — the
+    # bounded default. None would put the invariant back on its degraded path.
+    assert _client().timeout == 30.0
+
+
 def test_wallet_is_derived_from_the_agent_key(fake_exchange):
     client = _client()
     assert client.agent_address == derive_agent_address(_KEY)

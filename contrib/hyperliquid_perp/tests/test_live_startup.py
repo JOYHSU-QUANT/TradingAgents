@@ -136,6 +136,7 @@ class _Env:
             run_id="r",
             config=KillSwitchConfig(),
             max_tick_gap_seconds=30.0,
+            network_timeout_s=None,
             payload_dir=self.payload_dir,
             clock=self.clock,
         )

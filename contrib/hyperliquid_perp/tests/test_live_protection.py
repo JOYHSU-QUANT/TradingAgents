@@ -119,6 +119,28 @@ def env():
     db.close()
 
 
+def test_a_switch_that_cannot_report_firings_fails_loud(env):
+    """A malformed switch must not be readable as "never fired".
+
+    ``_note_firings`` used to ask ``getattr(self._kill_switch, "fired_total", 0)``.
+    The parameter IS genuinely optional, but that default silently covered a
+    second case it had no business covering: an object that exists and cannot
+    answer reported zero firings, so the suspicion latch never tripped and every
+    stale local row went on counting as proof that an SL/TP was resting on the
+    book — the exact §17.3 check this method exists to run. Absent switch: quiet.
+    Broken switch: loud (2026-08-01 round-14 concept scan).
+    """
+    client, gate = _FakeClient(), _gate()
+
+    class _Mute:  # switch-shaped, minus the one attribute that matters
+        pass
+
+    with pytest.raises(AttributeError):
+        _manager(env, client, gate, kill_switch=_Mute())._note_firings()
+    # The honest optional case is untouched: no switch, no suspicion, no error.
+    assert _manager(env, client, gate)._note_firings() is None
+
+
 class _FakeKillSwitch:
     """Counts §18.2 refresh ticks (the protection repair delay refreshes it).
 

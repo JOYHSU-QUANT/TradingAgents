@@ -48,7 +48,7 @@ cp contrib/hyperliquid_perp/configs/hyperliquid.example.yaml \
 | 欄位 | 意義 |
 |---|---|
 | `network` | `mainnet`（Phase 1/2 唯讀 mainnet；testnet 保留給 Phase 3）。 |
-| `network_timeout_s` | 每個 Hyperliquid request 的 HTTP timeout（秒），預設 `30`。卡住的讀取會大聲失敗，而不是讓整輪執行掛住。 |
+| `network_timeout_s` | 每個 Hyperliquid request 的 HTTP timeout（秒），預設 `30`。卡住的讀取會大聲失敗，而不是讓整輪執行掛住。**`live` 不接受這個預設**：它是 kill-switch 時序不變量的一項（失敗那次自己會燒掉一整個 timeout），預設 `30` 會在啟動前被具名 exit 1 拒絕；live 請照 RUNBOOK-live §1.5 設 `8`。paper 不受影響。 |
 | `wallet_address` | 唯讀 mainnet address，只用來讀倉位／margin。**留著 `0xYOUR...` 佔位符 = 視為未設定**——完整引擎輪會在花費 LLM 前具名 exit 1（零淨值無從 sizing）；`--context-only` 照常可跑，只是不顯示倉位。 |
 | `coins` | Phase 1 單一標的，預設 `[BTC]`。 |
 | `market_data` | `candle_interval`（4h；必須是 `1m`/`5m`/`15m`/`1h`/`4h`/`1d` 之一）／`candle_lookback`（200）／`funding_zscore_window_days`（30）。 |

@@ -231,7 +231,36 @@ def test_a_caller_too_slow_to_refresh_in_time_cannot_build_a_manager():
 
 def test_a_caller_fast_enough_to_beat_the_deadline_builds():
     cfg = KillSwitchConfig(schedule_cancel_seconds=120, refresh_interval_seconds=30)
-    assert _manager_with(cfg, max_tick_gap_seconds=60.0) is not None  # 30 + 60 < 120
+    # 30 (interval) + 20 (tick) + 15 (backoff cap, no timeout to read) + 20
+    # (the retry's OWN tick wait) = 85 < 120. The gap used to be 60 here, on the
+    # arithmetic "30 + 60 < 120" that counted neither the backoff nor the second
+    # tick wait; the real worst case for THAT config is 165s, and it fires the
+    # switch after a single failed refresh (2026-08-01).
+    assert _manager_with(cfg, max_tick_gap_seconds=20.0) is not None
+
+
+def test_the_timing_invariant_counts_the_failed_attempt_and_the_second_tick_wait():
+    """The two terms added 2026-08-01, pinned by the config that exposed them.
+
+    30/30/8/80 passed the old check at a computed 75s while the real worst case
+    is 106s. Asserts on the NUMBERS, not the wording, so a later edit that keeps
+    the message and drops a term still fails here.
+    """
+    from contrib.hyperliquid_perp.live.kill_switch import kill_switch_timing_violation
+
+    cfg = KillSwitchConfig(schedule_cancel_seconds=80, refresh_interval_seconds=30)
+    violation = kill_switch_timing_violation(cfg, 30.0, 8.0)
+    assert violation is not None and "106" in violation
+    # The failed attempt's own timeout is a real term, isolated by a deadline that
+    # sits BETWEEN the two sums: 106 with an 8s timeout, 90 with instant failures.
+    between = KillSwitchConfig(schedule_cancel_seconds=100, refresh_interval_seconds=30)
+    assert kill_switch_timing_violation(between, 30.0, 8.0) is not None
+    assert kill_switch_timing_violation(between, 30.0, 0.0) is None
+    # The RUNBOOK §1.5 shape still fits its 120s deadline, with slack.
+    roomy = KillSwitchConfig(schedule_cancel_seconds=120, refresh_interval_seconds=30)
+    assert kill_switch_timing_violation(roomy, 30.0, 8.0) is None
+    # ...while the 30s network_timeout_s DEFAULT does not (30+30+30+15+30 = 135).
+    assert kill_switch_timing_violation(roomy, 30.0, 30.0) is not None
 
 
 def test_the_worst_case_gap_must_be_strictly_inside_the_deadline():

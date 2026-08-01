@@ -550,7 +550,13 @@ def test_a_short_configured_cover_is_floored_not_inherited(tmp_path, smoke_seams
     # sends the operator to check config and market state, not the clock.
     from contrib.hyperliquid_perp.cli import _build_smoke_session
 
-    cfg = _smoke_yaml(tmp_path, schedule_cancel_seconds=40, refresh_interval_seconds=5)
+    # 70/5, not 40/5: since the timing invariant started counting the failed
+    # attempt's own timeout and the retry's own tick wait, 40/5 is no longer legal
+    # for the daemon either (5 + 30 + 2.5 + 30 = 67.5 > 40) and the preflight
+    # refuses it before this floor is ever reached. 70 is the nearest cover that
+    # keeps the ORIGINAL point: legal for the daemon, still narrower than the 120s
+    # the suite guarantees itself (2026-08-01).
+    cfg = _smoke_yaml(tmp_path, schedule_cancel_seconds=70, refresh_interval_seconds=5)
     dbp = _seed_genesis_run(tmp_path, cfg)
     args = SimpleNamespace(config=str(cfg), db=str(dbp), run_id="r1", dry_run=False)
     with Database(dbp) as db:

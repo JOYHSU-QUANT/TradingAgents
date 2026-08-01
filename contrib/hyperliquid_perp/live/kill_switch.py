@@ -109,21 +109,46 @@ _MAX_CLOCK_SKEW_S = 5.0
 
 
 def kill_switch_timing_violation(
-    config: KillSwitchConfig, max_tick_gap_seconds: float
+    config: KillSwitchConfig,
+    max_tick_gap_seconds: float,
+    network_timeout_s: float | None = None,
 ) -> str | None:
     """The constructor's refresh-timing invariant as a checkable message.
 
-    THE canonical account of the invariant (other sites point here). Worst
-    case between two SUCCESSFUL refreshes is ``refresh_interval + the failure
-    backoff + the tick gap`` — the tick after the interval elapses can land a
-    whole gap late, and a refresh that fails after burning a full network
-    timeout suppresses the retry for up to ``_FAILURE_BACKOFF_FRACTION`` of an
-    interval — and that must stay strictly inside ``schedule_cancel``, or the
-    dead man's switch fires during normal operation and cancels every order on
-    the wallet. The config
-    layer's own guard (``schedule_cancel >= 2 × refresh``) is only the
-    special case of a caller ticking exactly at the interval: it cannot see
+    THE canonical account of the invariant (other sites point here). The worst
+    case between two SUCCESSFUL refreshes walks the whole failure path, in the
+    order the code actually executes it::
+
+        refresh_interval          the deadline-to-due wait
+      + max_tick_gap              the tick after it comes due lands a gap late
+      + network_timeout_s         THAT attempt fails only after burning a timeout
+      + min(timeout, backoff_cap) the failure then suppresses the retry
+      + max_tick_gap              and the retry ALSO waits for a tick
+
+    and that must stay strictly inside ``schedule_cancel``, or the dead man's
+    switch fires during normal operation and cancels every order on the wallet.
+    The config layer's own guard (``schedule_cancel >= 2 × refresh``) is only
+    the special case of a caller ticking exactly at the interval: it cannot see
     the caller's tick gap at all.
+
+    Two of those five terms were missing until 2026-08-01, and both were owed by
+    the very commit that introduced the backoff: a failed attempt does not fail
+    instantly (``_retry_not_before`` is computed from ``failed_at``, i.e. AFTER
+    the request burned up to ``network_timeout_s``), and the backoff creates a
+    SECOND wait-for-a-tick stage (due→tick, then backoff-expiry→tick). Omitting
+    them let ``refresh=30 / max_tick_gap=30 / network_timeout=8 /
+    schedule_cancel=80`` pass at a computed 75s while the real worst case is
+    106s — the switch firing during normal operation, which is the single thing
+    this invariant exists to prevent (2026-08-01 rules-vs-untouched-code review).
+
+    ``network_timeout_s`` is the ONE term of the five that does not live in
+    ``KillSwitchConfig`` (it is the top-level REST timeout), so it is passed in.
+    When it is None the term is DROPPED rather than treated as unbounded: a
+    stubbed client has no timeout to read, and refusing to construct on that
+    would fail wiring this invariant is not about. The unbounded case belongs to
+    :func:`network_timeout_warning`, which already fires on None. Even with the
+    term dropped this check is strictly tighter than the version it replaces,
+    which counted only ONE ``max_tick_gap``.
 
     Returns the violation text, or None when the timing is sound. ONE
     definition, used by the constructor (which raises on it) and by the CLI's
@@ -135,23 +160,35 @@ def kill_switch_timing_violation(
     """
     if max_tick_gap_seconds <= 0:
         return f"max_tick_gap_seconds must be > 0, got {max_tick_gap_seconds}"
-    # The post-failure backoff is part of the worst case, not a detail of it: a
-    # refresh that fails after burning a whole timeout suppresses the retry for up
-    # to ``refresh_interval / 2`` (see _in_failure_backoff), and a failure is
-    # exactly the situation in which the deadline is closest. Leaving it out let
-    # refresh=30 / max_tick_gap=30 / schedule_cancel=61 pass both this check and
-    # the config layer's ``schedule_cancel >= 2 × refresh`` guard while the real
-    # worst case was 75s > 61s — the switch firing during normal operation, which
-    # is the single thing this invariant exists to prevent (2026-08-01 exit check).
+    # Every term above, summed in the same order. The failed attempt's own wall
+    # time and the second tick wait are NOT refinements — they are the two
+    # largest terms after the interval itself, and leaving them out is what made
+    # the pre-2026-08-01 check accept configs that fire the switch.
     backoff_cap = config.refresh_interval_seconds * _FAILURE_BACKOFF_FRACTION
-    worst_case_gap = config.refresh_interval_seconds + backoff_cap + max_tick_gap_seconds
+    # The backoff is min(what the attempt cost, the cap) — see _in_failure_backoff.
+    # With no timeout to read, the cap is the only bound we have.
+    failed_attempt_cost = 0.0 if network_timeout_s is None else float(network_timeout_s)
+    backoff = backoff_cap if network_timeout_s is None else min(failed_attempt_cost, backoff_cap)
+    worst_case_gap = (
+        config.refresh_interval_seconds
+        + max_tick_gap_seconds
+        + failed_attempt_cost
+        + backoff
+        + max_tick_gap_seconds
+    )
     if worst_case_gap >= config.schedule_cancel_seconds:
+        timeout_term = (
+            "network timeout unknown"
+            if network_timeout_s is None
+            else f"failed-attempt network_timeout_s {failed_attempt_cost:g}s"
+        )
         return (
             f"the kill switch cannot be refreshed in time: a refresh may land "
-            f"{worst_case_gap}s apart (refresh_interval "
-            f"{config.refresh_interval_seconds}s + post-failure backoff "
-            f"{backoff_cap}s + max_tick_gap "
-            f"{max_tick_gap_seconds}s), but the scheduled cancel fires after "
+            f"{worst_case_gap:g}s apart (refresh_interval "
+            f"{config.refresh_interval_seconds}s + max_tick_gap "
+            f"{max_tick_gap_seconds:g}s + {timeout_term} + post-failure backoff "
+            f"{backoff:g}s + a second max_tick_gap {max_tick_gap_seconds:g}s "
+            f"before the retry), but the scheduled cancel fires after "
             f"{config.schedule_cancel_seconds}s — the dead man's switch would "
             "cancel every order on the wallet during normal operation"
         )
@@ -350,7 +387,13 @@ class KillSwitchManager:
         # ``network_timeout_warning``) — pass the true worst-case gap here.
         # The invariant itself (worst-case math, config-guard blindness) is
         # kill_switch_timing_violation's docstring.
-        violation = kill_switch_timing_violation(config, max_tick_gap_seconds)
+        # ``getattr`` and not ``client.timeout``: the invariant must hold for every
+        # manager, including ones built on a stub in tests, and a client without a
+        # readable timeout degrades to the four terms that do not need it rather
+        # than failing construction on an attribute the safety math can live without.
+        violation = kill_switch_timing_violation(
+            config, max_tick_gap_seconds, getattr(client, "timeout", None)
+        )
         if violation is not None:
             raise ValueError(violation)
         self._client = client

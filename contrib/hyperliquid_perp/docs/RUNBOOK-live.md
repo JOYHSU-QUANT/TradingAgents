@@ -58,9 +58,14 @@ testnet_live 最小範例：
 ```yaml
 wallet_address: "0xYOUR_MAINNET_READONLY_ADDR"   # 授權對象＝主錢包，live/paper 共用
 network: mainnet          # 頂層：paper 讀行情用；live 用的是 live.network
-# 要 < 10：最長的一條無 refresh 鏈是一次下單的 3 筆 REST（§8.3 前置查詢→下單→
-# 重複 ack 查詢），中間不 refresh kill switch，而 max_tick_gap 是 30s。設成 10
-# 剛好把預算用完，啟動時 network_timeout_warning 會出聲（advisory，不擋啟動）。
+# 兩道界限，取較嚴的那個——都以預設 refresh 30s／max_tick_gap 30s／
+# schedule_cancel 120s 計：
+#   硬性（擋啟動，exit 1）：< 15。kill_switch_timing_violation 自 2026-08-01 起
+#     把「失敗那次自己燒掉的 timeout」與「retry 也要再等一個 tick」算進最壞情況
+#     （30 + 30 + t + min(t,15) + 30 < 120），所以 network_timeout_s 的**預設
+#     30 在 live 下並不合法**，啟動會被具名拒絕。
+#   advisory（只出聲，不擋）：< 10。最長的一條無 refresh 鏈是一次下單的 3 筆
+#     REST（§8.3 前置查詢→下單→重複 ack 查詢），中間不 refresh kill switch。
 # （決策 cycle 的 4 筆行情讀取本來更長，2026-08-01 起已改為讀取之間各 refresh
 # 一次——否則這裡要壓到 7.5 以下，而決策 cycle 沒有 within-cycle retry，
 # 一筆行情讀取逾時就是 4 小時沒有決策。）
@@ -571,7 +576,7 @@ mode 切換都手動改 config（§22／§26）。
 | `live-smoke`／`live` 報同 db 另一個 run 正在跑（exit 1） | 同網路的姊妹 run 還持著新鮮 lease；kill switch／`updateLeverage`／§19.3 掃單是整帳戶層級，會扒掉它的護欄。**停掉它，或等 lease 過期**。不同網路的 run、以及 paper run，都不會觸發這條。⚠️ 換 `--db` 不是解法——危害綁錢包不綁 store，換 store 只會讓檢查瞎掉。 |
 | `store schema is vN; this build needs vM`（exit 1） | code 升級後帶了新 migration，而 `validate`／`export`／`--gate-status`／`live-smoke --dry-run` 是純報表指令、**刻意不自動 migrate**（免得升級一個 daemon 正在用的 store）。先停掉 daemon，再跑擁有這個 store 的指令（paper store 用 `paper --run-id ...`，live store 用 `live --run-id ...`）讓它 migrate，然後重跑。最輕的升級指令是 `safe-mode --status`（純診斷、不碰交易所、不 arm 錢包）；真跑的 `live-smoke`（不帶 `--dry-run`）也會在取得 lease 之後自己 migrate。 |
 | `store schema is vN but this build only knows vM`（拒絕開啟） | 這個 store 被**更新版**的 code migrate 過，現在用舊 binary 開它會用不認得的欄位寫穿它。跑回新版 code，或還原升級前的備份。 |
-| `live-smoke` 報 pre-flight recovery 沒過（exit 4） | run 狀態不乾淨；`safe-mode --status` 查 open case、照 §6 處置後重跑。**注意 config 錯誤不會走這條**：kill-switch timing 違規在 `live-smoke` 與 `live` 一樣是啟動前的具名 **exit 1**（訊息直接指名 `schedule_cancel_seconds`／`refresh_interval_seconds` 兩個 knob），所以 supervisor 依 1／4 分流仍然正確。 |
+| `live-smoke` 報 pre-flight recovery 沒過（exit 4） | run 狀態不乾淨；`safe-mode --status` 查 open case、照 §6 處置後重跑。**注意 config 錯誤不會走這條**：kill-switch timing 違規在 `live-smoke` 與 `live` 一樣是啟動前的具名 **exit 1**（訊息直接指名 `schedule_cancel_seconds`／`refresh_interval_seconds`／`network_timeout_s` 三個 knob），所以 supervisor 依 1／4 分流仍然正確。 |
 | `OPENROUTER_API_KEY is not set`（exit 1，只有 `--loop`） | `--loop` 要跑 4h AI cycle；依 §1.4 設好 key。不加 `--loop` 的 `live` 不需要 key。 |
 | `live.allow_real_orders is false` | live-smoke／--loop 要真下單；設 `allow_real_orders: true` 並備妥 agent key，或 live-smoke 用 `--dry-run`。 |
 | `validate` exit 5、replay unverifiable | store 帳本對不上；先查（別盲目重啟），必要時 `safe-mode --status`。 |

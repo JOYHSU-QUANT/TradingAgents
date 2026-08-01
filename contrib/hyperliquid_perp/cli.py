@@ -1839,11 +1839,16 @@ def _timing_preflight(live_cfg, client) -> int:
         sl_repair_delay_warning,
     )
 
-    violation = kill_switch_timing_violation(live_cfg.kill_switch, _RECOVERY_MAX_TICK_GAP_SECONDS)
+    violation = kill_switch_timing_violation(
+        live_cfg.kill_switch, _RECOVERY_MAX_TICK_GAP_SECONDS, client.timeout
+    )
     if violation is not None:
         print(
-            f"error: {violation}. Raise live.kill_switch.schedule_cancel_seconds "
-            "or lower live.kill_switch.refresh_interval_seconds.",
+            f"error: {violation}. Raise live.kill_switch.schedule_cancel_seconds, "
+            "lower live.kill_switch.refresh_interval_seconds, or lower "
+            "network_timeout_s — the failed attempt's own timeout is part of the "
+            "budget, so the 30s default does not fit a 120s scheduled cancel "
+            "(RUNBOOK §1.5 uses 8).",
             file=sys.stderr,
         )
         return 1

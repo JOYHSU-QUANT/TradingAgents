@@ -143,29 +143,34 @@ def kill_switch_timing_violation(
 
 
 # The longest run of BACK-TO-BACK REST calls a tick can make with no
-# :func:`refresh_across_blocking_work` between them — the order-submission chain
-# in ``orders.submit_ioc_limit``: the §8.3 pre-check recovery probe (which falls
-# THROUGH when it cannot resolve the cloid, rather than returning), the place
-# itself, and the duplicate-ack recovery probe. Each rides the full
-# ``network_timeout_s``.
+# :func:`refresh_across_blocking_work` between them — the decision cycle's
+# ``_build_context``, which ``driver.pump()`` runs ON THE LOOP THREAD:
+# constructing the SDK client fetches perp meta, then the market snapshot, the
+# candle window and the funding history. Four calls, each riding the full
+# ``network_timeout_s`` (``HyperliquidClient.from_config`` resolves its timeout
+# from that very key, so these are not on some smaller budget of their own).
 #
-# It is the SUBMIT chain that sets this bound, not the longer walls of REST
-# traffic elsewhere: protection's repair ladder, the reconcile legs and their
-# per-order orderStatus loops, and BOTH page ladders — the fill backfill's and
-# the reconcile fill cross-check's own inline one — all refresh ACROSS their
-# blocking work now, so a stretch there is one call long however many calls the
-# loop makes in total.
+# The order-submission chain in ``orders.submit_ioc_limit`` is three — the §8.3
+# pre-check recovery probe (which falls THROUGH when it cannot resolve the cloid,
+# rather than returning), the place itself, and the duplicate-ack recovery probe.
+# Everything else refreshes ACROSS its blocking work: protection's repair ladder
+# and its orderStatus confirmations, the reconcile legs and their per-order
+# loops, BOTH page ladders (the fill backfill's and the reconcile fill
+# cross-check's own inline one), and the day-roll baseline read. A stretch there
+# is one call long however many calls the loop makes in total.
 #
-# "Both" is load-bearing and was learned the hard way: the first pass wired only
-# the backfiller's ladder and left the cross-check's identical one untouched,
-# which quietly made the real maximum 20 (DEFAULT_MAX_PAGES) while this constant
-# still said 3 — an advisory promising ~6.7× the headroom it could deliver. Any
-# new REST loop MUST refresh per iteration or this number is a lie
-# (2026-07-31 deadline review).
-#
-# Deliberately NOT counted: the market-data snapshot, which carries its own
-# separate and much smaller timeout and cannot chain into a multi-call run.
-_MAX_UNREFRESHED_REST_CALLS = 3
+# This number is a MAXIMUM OVER CHAINS, so every seam between two chains has to
+# refresh or the truth becomes their SUM. Twice now that was the bug:
+#   - the first pass wired only the backfiller's ladder and left the
+#     cross-check's identical one untouched, making the real maximum 20
+#     (DEFAULT_MAX_PAGES) while this said 3;
+#   - the second left ``engine.tick()`` and ``driver.pump()`` adjacent with
+#     nothing between them, so the submit chain and the build_context chain ran
+#     back to back for a real maximum of 7 (2026-08-01 lifecycle review).
+# Any new REST loop MUST refresh per iteration, and any new pair of blocking
+# calls MUST refresh between them, or this number is a lie. The test beside it
+# derives the count from a simulated iteration rather than restating it.
+_MAX_UNREFRESHED_REST_CALLS = 4
 
 
 def network_timeout_warning(timeout: float | None, max_tick_gap_seconds: float) -> str | None:
@@ -181,9 +186,9 @@ def network_timeout_warning(timeout: float | None, max_tick_gap_seconds: float) 
     unprotected window).
 
     Budgets ``_MAX_UNREFRESHED_REST_CALLS``, not one. The single-call form
-    called a 10s timeout sound against a 30s gap while the submit chain could
-    spend 30s inside it — the arithmetic contradicted the very sentence this
-    docstring opened with ("a tick makes several sequential REST calls") and
+    called a 10s timeout sound against a 30s gap while one unrefreshed chain
+    could spend 30s inside it — the arithmetic contradicted the very sentence
+    this docstring opened with ("a tick makes several sequential REST calls") and
     under-reported the one number the operator can actually turn (2026-07-31
     deadline review).
 
@@ -196,10 +201,10 @@ def network_timeout_warning(timeout: float | None, max_tick_gap_seconds: float) 
         return None
     return (
         f"network_timeout_s ({timeout}) leaves no room under the kill switch's "
-        f"max tick gap ({max_tick_gap_seconds:g}s): an order submission can make "
-        f"{_MAX_UNREFRESHED_REST_CALLS} back-to-back REST calls with no refresh "
-        "between them, so on a degraded network that chain alone can push the "
-        "§18.2 refresh past the exchange-side deadline and cancel the resting "
+        f"max tick gap ({max_tick_gap_seconds:g}s): a decision cycle's market-data "
+        f"build can make {_MAX_UNREFRESHED_REST_CALLS} back-to-back REST calls with "
+        "no refresh between them, so on a degraded network that chain alone can push "
+        "the §18.2 refresh past the exchange-side deadline and cancel the resting "
         f"SL/TP. Set network_timeout_s below {budget:g} in the config for headroom."
     )
 

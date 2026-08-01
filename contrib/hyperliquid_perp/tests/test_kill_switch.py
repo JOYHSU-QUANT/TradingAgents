@@ -1430,27 +1430,70 @@ def test_the_network_timeout_advisory_is_checkable():
     # max_tick_gap promise. The defaults (30s timeout, 30s gap) deliberately
     # warn — the operator earns silence by configuring headroom.
     #
-    # The budget is _MAX_UNREFRESHED_REST_CALLS deep, not one call deep: an
-    # order submission can make three back-to-back REST calls with no refresh
-    # between them, so the timeout has to fit the CHAIN inside the gap
-    # (2026-07-31 deadline review). 10s against a 30s gap used to be the
-    # canonical "quiet" case and is now exactly the boundary that must warn —
-    # three 10s calls spend the whole gap.
+    # The budget is _MAX_UNREFRESHED_REST_CALLS deep, not one call deep: the
+    # decision cycle's market-data build makes four back-to-back REST calls with
+    # no refresh between them, so the timeout has to fit the CHAIN inside the gap
+    # (2026-07-31 deadline review; recounted 2026-08-01). The warning boundary is
+    # gap / chain, so it moves with the constant rather than restating a number.
     from contrib.hyperliquid_perp.live.kill_switch import (
         _MAX_UNREFRESHED_REST_CALLS,
         network_timeout_warning,
     )
 
-    assert _MAX_UNREFRESHED_REST_CALLS == 3
-    assert network_timeout_warning(9.0, 30.0) is None  # 27s of chain: quiet
-    boundary = network_timeout_warning(10.0, 30.0)  # 30s of chain: warn
+    gap = 30.0
+    per_call = gap / _MAX_UNREFRESHED_REST_CALLS
+    assert network_timeout_warning(per_call * 0.9, gap) is None  # inside: quiet
+    boundary = network_timeout_warning(per_call, gap)  # spends the whole gap: warn
     assert boundary is not None and "back-to-back" in boundary
-    msg = network_timeout_warning(30.0, 30.0)  # the defaults: warn
+    msg = network_timeout_warning(gap, gap)  # the SDK default against the gap: warn
     assert msg is not None and "network_timeout_s" in msg
     # The remedy names the per-call budget (gap / chain length), not the gap.
-    assert "below 10" in msg
-    assert network_timeout_warning(45.0, 30.0) is not None  # over: warn
-    assert network_timeout_warning(None, 30.0) is not None  # unbounded: warn
+    assert f"below {per_call:g}" in msg
+    assert network_timeout_warning(gap * 1.5, gap) is not None  # over: warn
+    assert network_timeout_warning(None, gap) is not None  # unbounded: warn
+
+
+def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do():
+    """Derive the constant from the code, never restate it.
+
+    This replaces ``assert _MAX_UNREFRESHED_REST_CALLS == 3``, which asserted a
+    literal against itself and therefore had zero power to notice the two times
+    the constant drifted from reality: the unwired second page ladder (real
+    maximum 20) and the unrefreshed ``engine.tick()`` → ``driver.pump()`` seam
+    (real maximum 7). Both were found by hand, neither by a test.
+
+    The claim under test is structural: **every place where two blocking REST
+    chains meet must refresh at the seam**, or the real maximum becomes their sum
+    rather than the max this constant records (2026-08-01 lifecycle review).
+    """
+    import inspect
+
+    from contrib.hyperliquid_perp import cli as cli_mod
+    from contrib.hyperliquid_perp.live.kill_switch import _MAX_UNREFRESHED_REST_CALLS
+
+    loop_src = inspect.getsource(cli_mod._run_live_loop)
+
+    # 1. The loop body must refresh between its two blocking halves. Without this
+    #    the submit chain (3) and the build_context chain (4) run back to back and
+    #    the real maximum is their SUM.
+    # Anchor on the STATEMENTS, not the words: the surrounding comments name both
+    # calls, and matching those would let a comment satisfy the assertion.
+    tick_at = loop_src.index("tick = engine.tick()")
+    pump_at = loop_src.index("cycle = driver.pump()")
+    assert "refresh_across_blocking_work" in loop_src[tick_at:pump_at], (
+        "engine.tick() and driver.pump() are adjacent again — the two chains are "
+        "consecutive, so the real unrefreshed run is their sum, not the max"
+    )
+
+    # 2. The day-roll baseline read is a bare REST call on the same thread, so it
+    #    refreshes across itself rather than joining whatever chain it lands in.
+    assert "_day_baseline_from_exchange" in loop_src
+    assert "day-roll baseline read" in loop_src
+
+    # 3. The budget must cover the LONGEST chain, which is _build_context's four
+    #    market-data reads (constructing the SDK client fetches perp meta, then
+    #    snapshot, candles, funding).
+    assert _MAX_UNREFRESHED_REST_CALLS >= 4
 
 
 def test_refreshing_across_blocking_work_never_takes_down_its_caller(caplog):

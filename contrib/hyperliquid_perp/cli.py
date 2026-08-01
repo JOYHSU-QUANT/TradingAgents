@@ -1739,7 +1739,10 @@ def _live_startup_recovery(
 # The live loop's tick period. Kept well inside the kill-switch tick budget
 # (max_tick_gap 30s) so the §18.2 refresh never lands late even when a tick does
 # real work (reconciliation network reads, an SL repair). engine.tick() refreshes
-# the switch every call; the AI decision runs off-thread and never blocks it.
+# the switch every call and across its own blocking work; the AI's LLM call runs
+# off-thread, but the decision cycle's MARKET-DATA reads (_build_context) run on
+# this thread inside driver.pump(), which is why the loop refreshes between the
+# two (2026-08-01 lifecycle review).
 _LIVE_TICK_SECONDS = 10.0
 
 
@@ -1998,10 +2001,13 @@ def _run_live_loop(
     by design: the caller exits without the §18.2 sweep (the successor process
     owns the run's orders — see the caller's ``except RunLockError``).
     """
+    from decimal import Decimal
+
     from .exchanges.hyperliquid.mapper import map_account_snapshot
     from .exchanges.hyperliquid.market_data import HyperliquidMarketData
     from .live.decision import LiveDecisionDriver, LiveDecisionWorker
     from .live.engine import LiveExecutionEngine
+    from .live.kill_switch import refresh_across_blocking_work
     from .live.loss_guards import LossGuards
     from .live.orders import LiveOrderSubmitter
     from .live.protection import ProtectionManager
@@ -2040,6 +2046,16 @@ def _run_live_loop(
         clock=clock,
         kill_switch=kill_switch,
     )
+
+    def _day_baseline_from_exchange() -> Decimal:
+        try:
+            return map_account_snapshot(fetch_clearinghouse()).account_value
+        finally:
+            # In ``finally`` for the same reason protection's orderStatus read is:
+            # the call that TIMES OUT is the expensive one and the one that leaves
+            # by exception.
+            refresh_across_blocking_work(kill_switch, what="day-roll baseline read")
+
     loss_guards = LossGuards(
         db=db,
         run_id=run_id,
@@ -2048,7 +2064,11 @@ def _run_live_loop(
         # §10.3 rule 1: the UTC-day baseline is the EXCHANGE's reconciled
         # accountValue, fetched once at each day roll (per-tick drawdown
         # evaluation stays on the local ledger — zero extra REST per tick).
-        day_baseline_source=lambda: map_account_snapshot(fetch_clearinghouse()).account_value,
+        #
+        # Rare, but it is a bare full-timeout REST call landing between the
+        # protection sync and the slice submits, so it refreshes across itself
+        # like every other blocking read on this thread (§18.2).
+        day_baseline_source=lambda: _day_baseline_from_exchange(kill_switch),
     )
     ledger = repo.get_current_account_state(db.conn, run_id)
     if ledger is not None:
@@ -2113,6 +2133,16 @@ def _run_live_loop(
             _live_heartbeat(db, run_id, pid=pid, now=now, safe_mode=safe_mode)
             try:
                 tick = engine.tick()
+                # The seam between the two blocking halves of one iteration.
+                # engine.tick() refreshes at its top and across its own blocking
+                # work, but driver.pump() then runs _build_context ON THIS THREAD:
+                # constructing the SDK client fetches perp meta, then snapshot,
+                # candles and funding — four back-to-back REST calls on the same
+                # network_timeout_s, with no refresh of their own. Without this
+                # line the two chains are consecutive, so the run of unrefreshed
+                # calls is their SUM, not the max the budget constant assumes
+                # (2026-08-01 lifecycle review).
+                refresh_across_blocking_work(kill_switch, what="decision pump")
                 cycle = driver.pump()
                 # Per-tick operator visibility: the live loop is otherwise silent
                 # between the startup banner and whatever individual components

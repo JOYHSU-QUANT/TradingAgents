@@ -52,6 +52,10 @@ class _FakeClient:
         self.schedule_calls: list[datetime] = []
         self.schedule_attempts: int = 0
         self.schedule_error: Exception | None = None
+        # Seconds this call consumes before it answers, advanced on the manager's
+        # own clock. The backoff is charged from the attempt's real duration, so a
+        # test about it has to be able to say "this one burned the timeout".
+        self.schedule_duration_s: float = 0
         self.clear_calls: int = 0
         self.clear_error: Exception | None = None
         self.open_orders_result: list | Exception = []
@@ -62,6 +66,8 @@ class _FakeClient:
     def schedule_cancel(self, *, cancel_at):
         self._gate.require_exchange_action()
         self.schedule_attempts += 1
+        if self.schedule_duration_s and self._clock is not None:
+            self._clock.advance(self.schedule_duration_s)
         if self.schedule_error is not None:
             raise self.schedule_error
         self.schedule_calls.append(cancel_at)
@@ -693,28 +699,54 @@ def test_a_failed_refresh_backs_off_instead_of_retrying_on_every_call(env):
     db, client, gate, clock, manager = env
     manager.arm()
     clock.advance(30)
+
+    # A failure that BURNED the thread (the attempt itself took 8s, a full
+    # network timeout) earns a pause of its own length.
     client.schedule_error = ExchangeRequestError("timeout")
+    client.schedule_duration_s = 8
     assert manager.refresh_due() is True
     manager.refresh()
-    attempts_after_failure = len(client.schedule_calls)
+    attempts = client.schedule_attempts
 
-    # Immediately after the failure, and for half an interval, no retry.
     assert manager.refresh_due() is False
     manager.tick()
-    clock.advance(14)
+    clock.advance(7)
     assert manager.refresh_due() is False
     manager.tick()
-    assert len(client.schedule_calls) == attempts_after_failure  # nothing retried
+    assert client.schedule_attempts == attempts  # nothing retried inside the pause
 
-    # Past the backoff, the retry resumes — a transient still recovers well
-    # inside the deadline.
+    # Past it, the retry resumes — a transient still recovers inside the deadline.
     clock.advance(2)
     assert manager.refresh_due() is True
     client.schedule_error = None
+    client.schedule_duration_s = 0
     manager.tick()
-    assert len(client.schedule_calls) == attempts_after_failure + 1
-    # A success ends the episode: no backoff is carried into healthy operation.
+    assert client.schedule_attempts == attempts + 1
+    # A success ends the episode: no backoff carried into healthy operation.
     assert manager._in_failure_backoff(clock.now()) is False
+
+
+def test_an_instantly_failing_refresh_is_not_penalised(env):
+    """The backoff rations the THREAD, not the exchange.
+
+    The common refresh failures come back in milliseconds — a 429 from the
+    address rate limiter, a connection reset — and cost nothing to retry. A flat
+    delay would silence those too, blinding every refresh site on this thread
+    (including the tick()/pump() seam) for no saving at all
+    (2026-08-01 lifecycle review).
+    """
+    db, client, gate, clock, manager = env
+    manager.arm()
+    clock.advance(30)
+    client.schedule_error = ExchangeRequestError("429 too many requests")
+    client.schedule_duration_s = 0  # came straight back
+    manager.refresh()
+    attempts = client.schedule_attempts
+
+    # No time has passed, and the next due check still says "go".
+    assert manager.refresh_due() is True
+    manager.tick()
+    assert client.schedule_attempts == attempts + 1
 
 
 def test_one_outage_writes_one_refresh_failure_row(env):

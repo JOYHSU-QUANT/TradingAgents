@@ -1554,16 +1554,20 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    沒斷）時，單 tick 牆鐘時間可以拖過 `max_tick_gap` 的建構期承諾，讓交易所端
    scheduleCancel 在程序還活著時觸發、掃掉含 SL/TP 的全錢包掛單（protection 於
    下個健康 tick 重建，中間是裸倉窗口）。v1 緩解：live loop 的 sleep 扣除本次
-   tick 實耗（消除疊加放大），且啟動時若 `network_timeout_s × 4 >=
+   tick 實耗（消除疊加放大），且啟動時若 `network_timeout_s × 3 >=
    max_tick_gap_seconds` **或未設（unbounded）**即印 stderr 警告
    （`network_timeout_warning`，與硬檢查 `kill_switch_timing_violation`
-   併排、純函式可單測）。乘以 4 是因為**最長的一條無 refresh 鏈是決策 cycle 的
-   `_build_context`**（建 SDK client 即抓 perp meta→snapshot→candles→funding，
-   共 4 筆，全部吃同一個 `network_timeout_s`）；下單鏈是 3 筆（§8.3 前置查詢→下單
-   →重複 ack 查詢）。原本只編列 1 筆，於是 10s 逾時對 30s gap 被判為安全，實際上
-   那條鏈剛好吃滿整個 gap（2026-07-31 deadline review）。其餘阻塞路徑（protection
-   修復梯與其 orderStatus 確認、reconcile 兩條 leg 與 per-order 迴圈、兩條分頁
-   ladder、日切 baseline 讀取）已改為跨阻塞工作 refresh，故不再進入這筆預算。
+   併排、純函式可單測）。乘以 3 是因為最長的一條無 refresh 鏈是一次下單的 3 筆
+   REST（`_MAX_UNREFRESHED_REST_CALLS`：§8.3 前置查詢→下單→重複 ack 查詢）。
+   原本只編列 1 筆，於是 10s 逾時對 30s gap 被判為安全，實際上那條鏈剛好吃滿整個
+   gap（2026-07-31 deadline review）。其餘阻塞路徑（protection 修復梯與其
+   orderStatus 確認、reconcile 兩條 leg 與 per-order 迴圈、兩條分頁 ladder、
+   日切 baseline 讀取、**決策 cycle 的 4 筆行情讀取**）已改為跨阻塞工作 refresh，
+   故不再進入這筆預算。決策 cycle 那條之所以特別拆開（2026-08-01）：它本來是最長
+   的一條（4 筆），照它編列會逼 `network_timeout_s` 壓到 7.5 以下，但 live 決策
+   cycle **沒有 within-cycle retry**（「Live attempts are always try 1」），一筆行情
+   讀取逾時就 fail-closed 並 re-anchor 到下一個 4h 邊界——等於拿「4 小時沒有決策」
+   換 kill switch 餘裕，所以改成拆鏈而不是編列。
    **這個數字是「各鏈的最大值」，所以每一個接縫都必須 refresh，否則真值會變成
    各鏈的總和**——`engine.tick()` 與 `driver.pump()` 之間原本什麼都沒有，下單鏈與
    `_build_context` 鏈背靠背，真值一度是 7；接縫已補（2026-08-01 lifecycle review）。
@@ -1574,10 +1578,10 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    **兩個具名 fan-out 貢獻者的現況（PR 5 盤點，2026-07-22；2026-08-01 更新）：**
    (1) **決策 cycle 的 `build_input`**：`driver.pump()` 在 tick thread 上做
    `_build_context`——新建 SDK client（建構即抓 perp meta）＋ snapshot／candles／
-   funding 三讀，共 4 筆連續 REST、中間無 kill-switch 刷新；最壞 ≈ 4×
-   `network_timeout_s`。每 ~4h 一次（含 retry/resume）。**這條鏈現在就是
-   `_MAX_UNREFRESHED_REST_CALLS` 的來源**（見上），已納入 advisory 預算；把
-   refresh 推進這 4 筆之內留給網路層重做。
+   funding 三讀，共 4 筆連續 REST。**已解決**（2026-08-01）：`_build_context` 收一個
+   optional `on_blocking_read` callback，四筆讀取之間各 refresh 一次（live 傳
+   `refresh_across_blocking_work`，其餘一次性 CLI 路徑傳 None），所以這條鏈的無
+   refresh 連續段是 1 筆。
    (2) **reconciler 單 pass 的呼叫數乘數**：open-orders＋clearinghouse＋fill
    backfill 分頁＋每張 terminal/absent 單的 `orderStatus` 查詢——**已解決**
    （2026-07-31）：兩條頂層 leg、兩個 per-order 迴圈與兩條分頁 ladder 全部改為

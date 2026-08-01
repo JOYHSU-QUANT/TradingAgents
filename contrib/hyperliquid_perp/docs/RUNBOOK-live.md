@@ -58,11 +58,13 @@ testnet_live 最小範例：
 ```yaml
 wallet_address: "0xYOUR_MAINNET_READONLY_ADDR"   # 授權對象＝主錢包，live/paper 共用
 network: mainnet          # 頂層：paper 讀行情用；live 用的是 live.network
-# 要 < 7.5：最長的一條無 refresh 鏈是決策 cycle 的市場資料讀取（建 SDK client 抓
-# perp meta →snapshot→candles→funding，共 4 筆），中間不 refresh kill switch，
-# 而 max_tick_gap 是 30s。設成 7.5 以上剛好把預算用完，啟動時
-# network_timeout_warning 會出聲（advisory，不擋啟動）。
-network_timeout_s: 7
+# 要 < 10：最長的一條無 refresh 鏈是一次下單的 3 筆 REST（§8.3 前置查詢→下單→
+# 重複 ack 查詢），中間不 refresh kill switch，而 max_tick_gap 是 30s。設成 10
+# 剛好把預算用完，啟動時 network_timeout_warning 會出聲（advisory，不擋啟動）。
+# （決策 cycle 的 4 筆行情讀取本來更長，2026-08-01 起已改為讀取之間各 refresh
+# 一次——否則這裡要壓到 7.5 以下，而決策 cycle 沒有 within-cycle retry，
+# 一筆行情讀取逾時就是 4 小時沒有決策。）
+network_timeout_s: 8
 
 risk:                     # live 子命令要求明寫（欄位層級），與 live.safety 交叉檢查
   leverage: 1

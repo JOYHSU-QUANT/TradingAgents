@@ -2121,7 +2121,18 @@ def _run_live_loop(
     # it into the next one.
     engine.settle_offline_flat()
     decision_provider = _EngineDecisionProvider(
-        config, risk_cfg=risk_cfg, decision_cfg=decision_cfg, payload_dir=payload_dir
+        config,
+        risk_cfg=risk_cfg,
+        decision_cfg=decision_cfg,
+        payload_dir=payload_dir,
+        # build_input runs on THIS thread inside driver.pump(); its four market
+        # reads are the longest back-to-back REST chain in the system. Refreshing
+        # between them keeps the unrefreshed run at the submit chain's 3 instead
+        # of 4, which is what lets the operator advisory stay at a ~10s timeout
+        # rather than demanding 7.5s from a cycle that cannot retry.
+        on_blocking_read=partial(
+            refresh_across_blocking_work, kill_switch, what="decision market data"
+        ),
     )
     worker = LiveDecisionWorker(provider=decision_provider)
     driver = LiveDecisionDriver(
@@ -3963,13 +3974,33 @@ class _EngineDecisionProvider:
     while the audit trail records the fresh input.
     """
 
-    def __init__(self, config: dict, *, risk_cfg, decision_cfg, payload_dir: Path) -> None:
+    # Class-level default so an instance built without __init__ (the tests use
+    # object.__new__ to skip the engine import) still answers the attribute —
+    # a missing hook must degrade to "no refresh", never to AttributeError
+    # inside build_input, which the §6.2 classifier would relabel as an API
+    # failure.
+    _on_blocking_read = None
+
+    def __init__(
+        self,
+        config: dict,
+        *,
+        risk_cfg,
+        decision_cfg,
+        payload_dir: Path,
+        on_blocking_read=None,
+    ) -> None:
         from .main import _build_engine_config
 
         self._config = config
         self._risk = risk_cfg
         self._decision = decision_cfg
         self._payload_dir = payload_dir
+        # Live only: ``build_input`` runs on the single-threaded tick and makes
+        # the longest unrefreshed REST chain in the system, so the live wiring
+        # passes a kill-switch refresh here. ``None`` for paper and the one-shot
+        # CLI paths, which hold no dead man's switch (2026-08-01 lifecycle review).
+        self._on_blocking_read = on_blocking_read
         self._engine_config, self._analysts = _build_engine_config(config)
 
     def build_input(self, *, coin: str, as_of: datetime):
@@ -3982,7 +4013,9 @@ class _EngineDecisionProvider:
         from .paper.scheduler import DecisionInput, RetryableDecisionError
 
         try:
-            ctx, _client = _build_context(self._config, coin)
+            ctx, _client = _build_context(
+                self._config, coin, on_blocking_read=self._on_blocking_read
+            )
         except ExchangeError as exc:
             raise RetryableDecisionError("connection", str(exc)) from exc
         needed = _warmup_threshold(self._config)

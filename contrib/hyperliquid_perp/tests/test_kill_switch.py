@@ -1569,10 +1569,52 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
     )  # raises TypeError if the wiring below stops matching the definition
     assert len(bound.args) == 2
 
-    # 3. The budget must cover the LONGEST chain, which is _build_context's four
-    #    market-data reads (constructing the SDK client fetches perp meta, then
-    #    snapshot, candles, funding).
-    assert _MAX_UNREFRESHED_REST_CALLS >= 4
+    # 3. The decision cycle's four market-data reads must refresh BETWEEN
+    #    themselves, or they — not the submit chain — become the longest run and
+    #    this constant is understated. Asserted by counting the hook's calls
+    #    against the reads, not by reading the source.
+    from contrib.hyperliquid_perp import main as main_mod
+
+    reads: list[str] = []
+
+    class _Market:
+        def __init__(self, _client):
+            pass
+
+        def get_market_snapshot(self, coin):
+            reads.append("snapshot")
+            return object()
+
+        def get_candles(self, coin, interval, lookback):
+            reads.append("candles")
+            return []
+
+        def get_funding_history(self, coin, window_days):
+            reads.append("funding")
+            return []
+
+    class _Client:
+        network = "testnet"
+
+        @classmethod
+        def from_config(cls, config):
+            reads.append("meta")  # Info() fetches perp meta at construction
+            return cls()
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(main_mod, "HyperliquidClient", _Client)
+        monkeypatch.setattr(main_mod, "HyperliquidMarketData", _Market)
+        monkeypatch.setattr(main_mod, "build_market_context", lambda *a, **k: object())
+        main_mod._build_context({}, "BTC", on_blocking_read=lambda: reads.append("refresh"))
+    finally:
+        monkeypatch.undo()
+
+    # No two REST reads may be adjacent without a refresh between them.
+    rest = [i for i, r in enumerate(reads) if r != "refresh"]
+    for earlier, later in zip(rest, rest[1:], strict=False):
+        assert later - earlier > 1, f"two market reads with no refresh between them: {reads}"
+    assert _MAX_UNREFRESHED_REST_CALLS == 3  # the submit chain is now the longest
 
 
 def test_refreshing_across_blocking_work_never_takes_down_its_caller(caplog):

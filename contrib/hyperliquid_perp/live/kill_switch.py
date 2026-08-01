@@ -143,24 +143,31 @@ def kill_switch_timing_violation(
 
 
 # The longest run of BACK-TO-BACK REST calls a tick can make with no
-# :func:`refresh_across_blocking_work` between them — the decision cycle's
-# ``_build_context``, which ``driver.pump()`` runs ON THE LOOP THREAD:
-# constructing the SDK client fetches perp meta, then the market snapshot, the
-# candle window and the funding history. Four calls, each riding the full
-# ``network_timeout_s`` (``HyperliquidClient.from_config`` resolves its timeout
-# from that very key, so these are not on some smaller budget of their own).
+# :func:`refresh_across_blocking_work` between them — the order-submission chain
+# in ``orders.submit_ioc_limit``: the §8.3 pre-check recovery probe (which falls
+# THROUGH when it cannot resolve the cloid, rather than returning), the place
+# itself, and the duplicate-ack recovery probe. Each rides the full
+# ``network_timeout_s``.
 #
-# The order-submission chain in ``orders.submit_ioc_limit`` is three — the §8.3
-# pre-check recovery probe (which falls THROUGH when it cannot resolve the cloid,
-# rather than returning), the place itself, and the duplicate-ack recovery probe.
-# Everything else refreshes ACROSS its blocking work: protection's repair ladder
-# and its orderStatus confirmations, the reconcile legs and their per-order
-# loops, BOTH page ladders (the fill backfill's and the reconcile fill
-# cross-check's own inline one), and the day-roll baseline read. A stretch there
-# is one call long however many calls the loop makes in total.
+# Everything else refreshes ACROSS its blocking work and so contributes a run of
+# ONE however many calls it makes: protection's repair ladder and its orderStatus
+# confirmations, the reconcile legs and their per-order loops, BOTH page ladders
+# (the fill backfill's and the reconcile fill cross-check's own inline one), the
+# day-roll baseline read, and — since 2026-08-01 — the decision cycle's four
+# market-data reads in ``main._build_context``, which ``driver.pump()`` runs on
+# this same thread.
+#
+# That last one is why this is 3 rather than 4. Those reads share
+# ``network_timeout_s`` (``HyperliquidClient.from_config`` resolves from that key
+# and Info() fetches perp meta at construction), so unrefreshed they were the
+# longest chain and forced the advisory to demand <7.5s. But a live decision
+# cycle has NO within-cycle retry: one market read that times out fail-closes the
+# cycle and re-anchors to the next 4h boundary. Budgeting for that chain would
+# have bought kill-switch headroom with a possible 4-hour decision blackout, so
+# the chain was broken up instead.
 #
 # This number is a MAXIMUM OVER CHAINS, so every seam between two chains has to
-# refresh or the truth becomes their SUM. Twice now that was the bug:
+# refresh or the truth becomes their SUM. Twice that was the bug:
 #   - the first pass wired only the backfiller's ladder and left the
 #     cross-check's identical one untouched, making the real maximum 20
 #     (DEFAULT_MAX_PAGES) while this said 3;
@@ -168,9 +175,8 @@ def kill_switch_timing_violation(
 #     nothing between them, so the submit chain and the build_context chain ran
 #     back to back for a real maximum of 7 (2026-08-01 lifecycle review).
 # Any new REST loop MUST refresh per iteration, and any new pair of blocking
-# calls MUST refresh between them, or this number is a lie. The test beside it
-# derives the count from a simulated iteration rather than restating it.
-_MAX_UNREFRESHED_REST_CALLS = 4
+# calls MUST refresh between them, or this number is a lie.
+_MAX_UNREFRESHED_REST_CALLS = 3
 
 
 def network_timeout_warning(timeout: float | None, max_tick_gap_seconds: float) -> str | None:
@@ -201,10 +207,10 @@ def network_timeout_warning(timeout: float | None, max_tick_gap_seconds: float) 
         return None
     return (
         f"network_timeout_s ({timeout}) leaves no room under the kill switch's "
-        f"max tick gap ({max_tick_gap_seconds:g}s): a decision cycle's market-data "
-        f"build can make {_MAX_UNREFRESHED_REST_CALLS} back-to-back REST calls with "
-        "no refresh between them, so on a degraded network that chain alone can push "
-        "the §18.2 refresh past the exchange-side deadline and cancel the resting "
+        f"max tick gap ({max_tick_gap_seconds:g}s): an order submission can make "
+        f"{_MAX_UNREFRESHED_REST_CALLS} back-to-back REST calls with no refresh "
+        "between them, so on a degraded network that chain alone can push the "
+        "§18.2 refresh past the exchange-side deadline and cancel the resting "
         f"SL/TP. Set network_timeout_s below {budget:g} in the config for headroom."
     )
 

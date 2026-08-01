@@ -129,7 +129,9 @@ def test_build_input_payload_write_failure_rides_retry_ladder(tmp_path, monkeypa
 
     as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
     ctx = _perp_ctx(as_of)
-    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, None))
+    # **kw absorbs on_blocking_read: the live provider passes the kill-switch
+    # refresh so _build_context's market reads do not form one unrefreshed chain.
+    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin, **kw: (ctx, None))
     monkeypatch.setattr(main_mod, "_warmup_threshold", lambda config: 1)
 
     provider = object.__new__(_EngineDecisionProvider)

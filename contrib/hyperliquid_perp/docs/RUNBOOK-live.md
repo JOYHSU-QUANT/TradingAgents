@@ -132,7 +132,7 @@ safe mode，見 §6）；exit 1＝硬失敗（config／arming／建立）。
 > `fill_unmapped`／`exchange_position_mismatch` case——`fill_unmapped` 無法用
 > `--stamp-case` 了結（只能靠補記 fill，而手動單永遠沒有本地 order row），且驗收的
 > integrity 計數是**累積制**：case 一旦記錄，該 run 的 `validate` 從此永遠 exit 5，
-> 只能換新 run-id 重跑驗收。要動錢包，先把 run 收掉。
+> 只能換新 run-id 重跑驗收（**換 run-id 一併把 §20.2 smoke gate 歸零**：18 項全回 `not_yet_run`，要整套 live-smoke 重跑，含 test 16／17 的操作者前置）。要動錢包，先把 run 收掉。
 
 ---
 
@@ -408,7 +408,7 @@ live run 會自動走 §20.3／§21.4 報告（依 `live.mode`）。指標與 ex
 > **`kill_switch_fired_count` > 0 則是真的不可補救**：deadline 過期代表交易所已把
 > 整個錢包的單（含 SL/TP）撤光，那段時間的倉位確實裸奔過，沒有任何後續狀態能讓它
 > 變成沒發生。查清原因（跨過 deadline 的 API 中斷，或主機時鐘往前跳），然後**換新
-> run-id** 重新累積驗收 cycles。
+> run-id** 重新累積驗收 cycles（**換 run-id 一併把 §20.2 smoke gate 歸零**：18 項全回 `not_yet_run`，要整套 live-smoke 重跑，含 test 16／17 的操作者前置）。
 
 §20.3 驗收門檻（testnet_live）：`cycle_count ≥ 30`、`live_order_count ≥ 30`、
 `exchange_fill_dedupe_error_count / orphan_exchange_order_count /
@@ -427,10 +427,12 @@ shortfall——30s 一次的節奏下約 50 分鐘就滿，遠早於 30 cycles�
 注意**不是** `shutdown_cancel_orders_started`／`_completed`：那兩列夾住的是撤單 sweep，
 跑在清 trigger **之前**，當下 switch 仍然是 armed 的。
 **因此：被 SIGKILL／OOM 砍掉再重啟的 run，那段停機會直接反映在可用率上**，這是刻意的
-——那段時間倉位確實裸奔過。另外兩個旗標只**告知**、不擋 gate：
-`kill_switch_clean_shutdown: no`（log 停在半路——run 還活著時跑 validate 本來就沒有
-shutdown 列），以及 `kill_switch_ended_in_outage`（最後一列是失敗的 refresh，之後的
-時間無從量測，所以那個可用率是**下界**而不是判決；它會記一筆 shortfall→exit 4）。
+——那段時間倉位確實裸奔過。另外兩個旗標的分量**不同**：
+`kill_switch_clean_shutdown: no` 純粹**告知、不擋 gate**（log 停在半路——run 還活著時跑
+validate 本來就沒有 shutdown 列，分不出「被砍掉」與「還在跑」）；
+`kill_switch_ended_in_outage: yes` 則**會擋**——最後一列是失敗的 refresh，之後的時間無從
+量測，所以那個可用率是**下界**而不是判決，記一筆 shortfall，`live_ready` 為 no、**exit 4**
+（不是 exit 5 的 integrity failure：等 switch 恢復、log 有了收尾證據再驗一次即可）。
 `kill_switch_fired_count = 0`（dead man's switch 從未真的燒過）、run **不在 MANUAL
 safe mode**、四項 smoke 布林（`restart_reconciliation_passed`
 ——注意這一項**沒有** `_test_` 中綴——以及 `emergency_close_test_passed`／
@@ -470,7 +472,7 @@ close 落在同一個時鐘刻度）照樣 exit 5，不會讀成「從來沒有�
 > 計數算的是「這個 run 歷史上記錄過的 case 數」，`--stamp-case` 只了結 §21.4 的
 > unresolved gate，**不會**把計數歸零——一旦記錄過，該 run 的 `validate` 永遠
 > exit 5。這是刻意的政策（帳本潔癖：驗收 run 必須全程乾淨）；中途出過 case 就換
-> 新 run-id 重新累積 30 cycles。
+> 新 run-id 重新累積 30 cycles（**換 run-id 一併把 §20.2 smoke gate 歸零**：18 項全回 `not_yet_run`，要整套 live-smoke 重跑，含 test 16／17 的操作者前置）。
 
 ---
 

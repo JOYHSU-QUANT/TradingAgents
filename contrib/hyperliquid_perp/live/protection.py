@@ -110,7 +110,8 @@ _SL_FIRE_BAND_FLOOR_PCT = Decimal("0.03")
 # stated against the caller's worst-case tick gap (cli's _RECOVERY_MAX_TICK_GAP
 # _SECONDS, 30s). A backoff that grew past it would break the very promise the
 # preflight proved. Never shortens a configured delay — a delay already longer
-# than this is the operator's own choice and the advisory warns about it.
+# than this is the operator's own choice, and sl_repair_delay_warning warns at or
+# above the same one-third budget.
 #
 # ONE THIRD of that gap, not all of it. The sleep is not alone in the stretch
 # between two refreshes: ``_maybe_delay``'s own docstring says every rung reaches

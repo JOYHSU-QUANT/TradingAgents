@@ -1866,7 +1866,11 @@ def test_the_sl_repair_delay_advisory_is_checkable():
     from contrib.hyperliquid_perp.live.kill_switch import sl_repair_delay_warning
 
     assert sl_repair_delay_warning(5.0, 30.0) is None  # the default: quiet
-    msg = sl_repair_delay_warning(30.0, 30.0)  # at the promise: warn
+    # Budgeted at ONE SLOT (30/3 = 10), not the whole gap: the 10..30 band is
+    # unclamped by _maybe_delay AND used to be unwarned (2026-08-01 exit check).
+    assert sl_repair_delay_warning(9.0, 30.0) is None
+    assert sl_repair_delay_warning(25.0, 30.0) is not None
+    msg = sl_repair_delay_warning(30.0, 30.0)  # over the promise: warn
     assert msg is not None and "sl_repair_retry_delay_seconds" in msg
     assert sl_repair_delay_warning(45.0, 30.0) is not None  # over: warn
 

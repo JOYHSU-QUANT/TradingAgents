@@ -1688,10 +1688,19 @@ def test_a_nonsensical_deadline_value_falls_back(raw):
     assert _schedule_cancel_seconds(blob) == DEFAULT_SCHEDULE_CANCEL_SECONDS
 
 
-def test_the_genesis_deadline_reader_reads_a_real_value():
+@pytest.mark.parametrize("raw", [600, 600.0, "600"])
+def test_the_genesis_deadline_reader_reads_a_real_value(raw):
+    """Including the QUOTED form, which the config layer accepts.
+
+    ``config_json`` stores the ``live:`` block verbatim, BEFORE coercion, so a
+    legal ``schedule_cancel_seconds: "600"`` arrives here as a str. Type-testing
+    it fell back to 120 and measured the run against a deadline it never had —
+    every healthy 121-600s gap charged as a full outage, healthy run at exit 5
+    (2026-08-01 round-13 exit check).
+    """
     from contrib.hyperliquid_perp.live.validation import _schedule_cancel_seconds
 
-    blob = json.dumps({"live": {"kill_switch": {"schedule_cancel_seconds": 600}}})
+    blob = json.dumps({"live": {"kill_switch": {"schedule_cancel_seconds": raw}}})
     assert _schedule_cancel_seconds(blob) == Decimal(600)
 
 

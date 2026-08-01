@@ -94,6 +94,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 from typing import NamedTuple
 
+from ..domains.perp.config_coercion import int_from_yaml
 from ..domains.perp.margin import DECIMAL_CONTEXT
 from ..paper import accounting
 from ..paper.scheduler import parse_instant
@@ -139,6 +140,9 @@ MIN_KILL_SWITCH_REFRESH_SAMPLES = 100
 # silence — and resolving that ambiguity toward "down" meant a 301s outage scored
 # ZERO outage seconds while a 299s one scored 299: the longer outage passing at
 # 100% while the shorter correctly failed (2026-08-01 round-13 review).
+# MUST equal live.config.KillSwitchConfig.schedule_cancel_seconds's default: a run
+# that omits the key is measured against whatever THAT default armed it with, so a
+# drift here silently measures every such run against the wrong deadline.
 DEFAULT_SCHEDULE_CANCEL_SECONDS = Decimal(120)
 
 # A real minimum-valid ISO-8601 instant for the "since beginning of time" query
@@ -503,6 +507,9 @@ class LiveValidationReport:
             f" across {self.kill_switch_outage_episodes} outage(s)"
             f" of {self.kill_switch_covered_seconds:.0f}s covered",
             f"kill_switch_clean_shutdown: {_yn(not self.kill_switch_ended_without_clean_shutdown)}",
+            # Printed, not only buried in the shortfall sentence: the RUNBOOK's
+            # §20.3 table names this flag, so the summary has to show it.
+            f"kill_switch_ended_in_outage: {_yn(self.kill_switch_ended_in_outage)}",
             f"kill_switch_fired_count: {self.kill_switch_fired_count}",
             f"kill_switch_disarm_failed_count: {self.kill_switch_disarm_failed_count}",
             f"safe_mode_active: {self.safe_mode_active_type or 'no'}"
@@ -586,10 +593,21 @@ def _schedule_cancel_seconds(config_json: str | None) -> Decimal:
     live = parsed.get("live") if isinstance(parsed, dict) else None
     switch = live.get("kill_switch") if isinstance(live, dict) else None
     raw = switch.get("schedule_cancel_seconds") if isinstance(switch, dict) else None
-    # bool is an int subclass; True would otherwise become a 1-second deadline.
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+    if raw is None:
         return DEFAULT_SCHEDULE_CANCEL_SECONDS
-    seconds = Decimal(str(raw))
+    # COERCE exactly as the config layer does; never type-test. ``config_json``
+    # stores the ``live:`` block VERBATIM, before coercion (cli._run_config_subset),
+    # so a perfectly legal ``schedule_cancel_seconds: "300"`` arrives here as a
+    # str — and an ``isinstance(raw, (int, float))`` test silently fell back to
+    # 120, measuring the run against a deadline it never had. That is precisely
+    # the failure this helper exists to prevent: every healthy 121-300s gap would
+    # then be charged as a full outage and a healthy run fails at exit 5.
+    # ``int_from_yaml`` already rejects bools (True would otherwise be a 1-second
+    # deadline) and non-integral floats (2026-08-01 round-13 exit check).
+    try:
+        seconds = Decimal(int_from_yaml(raw))
+    except (ValueError, TypeError):
+        return DEFAULT_SCHEDULE_CANCEL_SECONDS
     return seconds if seconds > 0 else DEFAULT_SCHEDULE_CANCEL_SECONDS
 
 

@@ -75,8 +75,8 @@ logger = logging.getLogger(__name__)
 # the interval, so it only ever pulls a refresh slightly EARLIER — never pushes
 # one past the deadline it exists to renew, and never turns a genuinely early
 # call into a refresh. The backstop for a gap LARGER than this is the constructor
-# invariant (refresh_interval + worst-case tick gap < schedule_cancel); the config
-# guard cannot be one, because it cannot see the caller's tick gap at all.
+# invariant (five terms — see kill_switch_timing_violation, the canonical account);
+# the config guard cannot be one, because it cannot see the caller's tick gap at all.
 _REFRESH_DUE_SLACK_S = 0.5
 
 # Wall clocks routinely slew backwards by milliseconds under NTP discipline.
@@ -287,17 +287,28 @@ def sl_repair_delay_warning(delay_seconds: float, max_tick_gap_seconds: float) -
     past the scheduleCancel budget and the dead man's switch cancels every
     resting order mid-repair. Config only enforces ``> 0``; like its sister
     this is a warn-not-refuse preflight, with the hard construction-time
-    invariant deferred to PR 6. The default (5s vs 30s) never warns.
+    invariant deferred to the network-layer rework.
+
+    Budgeted against ONE SLOT of ``_MAX_UNREFRESHED_REST_CALLS``, not the whole
+    tick gap — the same three-way split ``network_timeout_warning`` uses and that
+    ``protection._MAX_REPAIR_SLEEP_S`` clamps the backoff to. Comparing against
+    the WHOLE gap left the band between one slot and the gap (10s..30s at the
+    defaults) both unclamped — ``_maybe_delay`` never shortens a CONFIGURED delay
+    — and unwarned, so a 25s delay burned two and a half slots of the very budget
+    with nothing said (2026-08-01 round-13 exit check). The default (5s against a
+    10s slot) still never warns.
     """
-    if delay_seconds < max_tick_gap_seconds:
+    budget = max_tick_gap_seconds / _MAX_UNREFRESHED_REST_CALLS
+    if delay_seconds < budget:
         return None
     return (
-        f"live.protection.sl_repair_retry_delay_seconds ({delay_seconds:g}) is "
-        f"not below the kill switch's max tick gap ({max_tick_gap_seconds:g}s) "
+        f"live.protection.sl_repair_retry_delay_seconds ({delay_seconds:g}) is not "
+        f"below its share of the kill switch's max tick gap "
+        f"({max_tick_gap_seconds:g}s / {_MAX_UNREFRESHED_REST_CALLS} = {budget:g}s) "
         "— the repair ladder sleeps that long between attempts while the "
         "position has no valid stop, and can push the §18.2 refresh past the "
         "exchange-side deadline, cancelling every resting order mid-repair. "
-        f"Set it below {max_tick_gap_seconds:g} for headroom."
+        f"Set it below {budget:g} for headroom."
     )
 
 
@@ -641,7 +652,7 @@ class KillSwitchManager:
         under the interval and SKIP the refresh, halving the real cadence to
         every other cycle. The slack keeps that from happening at all; what makes
         a skipped cycle SURVIVABLE if it happens anyway is the constructor
-        invariant (refresh_interval + worst-case tick gap < schedule_cancel).
+        invariant (five terms — see kill_switch_timing_violation).
         """
         now = self._clock.now()
         if self._last_scheduled_at is None:

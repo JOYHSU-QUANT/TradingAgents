@@ -598,9 +598,9 @@ def test_an_unclassifiable_status_word_is_not_proof_that_a_stop_still_rests(env)
     ks = _FakeKillSwitch(fired_total=1)  # latched: rows are suspect
     mgr = _manager(db, client, gate, kill_switch=ks)
     assert mgr._row_still_rests(row, role="stop_loss") is False
-    # ...and the suspicion is NOT spent: an unclassifiable answer confirmed
-    # nothing, so the next row must still be checked against the exchange.
-    assert mgr._rows_unconfirmed is True
+    # ...and nothing was cached: an unclassifiable answer confirmed no order, so
+    # the next sync must still ask the exchange about this row.
+    assert mgr._confirmed_cloid == {}
 
     # Narrowness: a KNOWN resting word still confirms, so nothing normal is
     # blocked by the stricter reading.
@@ -608,6 +608,45 @@ def test_an_unclassifiable_status_word_is_not_proof_that_a_stop_still_rests(env)
     client2.status_script = [_resting_status_payload("777")]
     mgr2 = _manager(db, client2, gate2, kill_switch=_FakeKillSwitch(fired_total=1))
     assert mgr2._row_still_rests(row, role="stop_loss") is True
+
+
+def test_confirming_the_stop_loss_does_not_vouch_for_the_take_profit(env):
+    """Row-suspicion is per ORDER, not one shared "spent" flag.
+
+    ``sync`` always establishes the SL before the TP, so a shared flag was
+    routinely cleared by the SL's confirmation before the TP guard ever ran —
+    and after a firing the SL is commonly a FRESHLY PLACED row, whose resting
+    says nothing about the stale TP beside it. The TP then took the free path and
+    was reported resting while the scheduleCancel had removed it: §17.3's
+    DEGRADED block lifts on a false premise and take_profit_price keeps asserting
+    a price that is gone (2026-08-01 malformed-response review).
+    """
+    db = env
+    _seed_long(db)
+    sl_row = {"cloid_hex": "0x" + "5" * 32}
+    tp_row = {"cloid_hex": "0x" + "7" * 32}
+
+    client, gate = _FakeClient(), _gate()
+    # First read confirms the SL; the second — for the TP — says it is gone.
+    client.status_script = [
+        _resting_status_payload("111"),
+        {"status": "order", "order": {"order": {"oid": "222"}, "status": "canceled"}},
+    ]
+    mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
+
+    assert mgr._row_still_rests(sl_row, role="stop_loss") is True
+    # The TP must still be asked about — its own evidence, not the SL's.
+    assert mgr._row_still_rests(tp_row, role="take_profit") is False
+    assert len(client.status_queries) == 2
+
+    # The confirmed SL is cached, so the repeat costs nothing more...
+    assert mgr._row_still_rests(sl_row, role="stop_loss") is True
+    assert len(client.status_queries) == 2
+    # ...but a NEW firing invalidates that confirmation too.
+    mgr._kill_switch.fired_total = 2
+    client.status_script = [_resting_status_payload("111")]
+    assert mgr._row_still_rests(sl_row, role="stop_loss") is True
+    assert len(client.status_queries) == 3
 
 
 def test_lost_ack_recovery_does_not_book_an_unclassifiable_word_as_live(env):

@@ -193,10 +193,13 @@ class ProtectionManager:
         # §12.2 rule 6 signal: whether the LAST sync() placed / modified /
         # cancelled any exchange order — the engine reconciles that tick.
         self._orders_changed = False
-        # Latched when the kill switch is observed to have FIRED, cleared only by
-        # a POSITIVE orderStatus confirmation. While it is up, an ``orders`` row
-        # is not evidence that anything rests on the exchange: a fired
-        # scheduleCancel wipes the wallet's book without touching SQLite.
+        # Latched when the kill switch is observed to have FIRED. While it is up,
+        # an ``orders`` row is not evidence in ITSELF that anything rests on the
+        # exchange: a fired scheduleCancel wipes the wallet's book without
+        # touching SQLite. What restores a row's standing is a positive
+        # orderStatus confirmation OF THAT ROW, recorded in ``_confirmed_cloid``
+        # below — the latch itself stays up, because a firing invalidates rows
+        # this manager has not looked at yet and will place later.
         #
         # A latch rather than a live read, because §13.4 reopens the gate while
         # the rows are still stale — the staleness outlives the outage.
@@ -210,6 +213,22 @@ class ProtectionManager:
         # run" bug this file already fixed once, reintroduced from the other side
         # (2026-07-31 exit check).
         self._rows_unconfirmed = False
+        # PER ROLE, because the suspicion is per ORDER. ``_rows_unconfirmed`` says
+        # "a firing invalidated the rows"; this says WHICH row has since been
+        # positively confirmed, as role -> the cloid that was confirmed. A single
+        # shared "spent" flag was wrong in one specific, routine way: sync always
+        # establishes the SL first, so the SL's confirmation cleared the latch
+        # before the TP guard ever ran, and the TP then took the free path on the
+        # strength of evidence about a DIFFERENT order. After a firing the SL is
+        # commonly a freshly placed row, so its resting says nothing at all about
+        # the stale TP beside it — and a TP reported as resting when the switch
+        # cancelled it lifts §17.3's DEGRADED block and keeps
+        # position_protection.take_profit_price asserting a price that is gone
+        # (2026-08-01 malformed-response review).
+        #
+        # Bounded at one entry per role by construction (there is one active row
+        # per role), and reset wholesale on the next firing.
+        self._confirmed_cloid: dict[str, str] = {}
         self._last_seen_firings = 0
 
     @property
@@ -231,6 +250,10 @@ class ProtectionManager:
         if firings > self._last_seen_firings:
             self._last_seen_firings = firings
             self._rows_unconfirmed = True
+            # A NEW firing invalidates every earlier confirmation: an order
+            # confirmed resting before this scheduleCancel is exactly what the
+            # scheduleCancel just cancelled.
+            self._confirmed_cloid.clear()
 
     def _row_still_rests(self, row, *, role: str) -> bool:
         """Whether ``row``'s order is CONFIRMED still resting on the exchange.
@@ -252,6 +275,10 @@ class ProtectionManager:
         if not self._rows_unconfirmed:
             return True
         hexid = row["cloid_hex"]
+        if hexid and self._confirmed_cloid.get(role) == hexid:
+            # THIS order was positively confirmed since the last firing. Confirming
+            # a sibling role buys nothing here (see _confirmed_cloid).
+            return True
         if not hexid:
             # No cloid to ask about (a pre-cloid or hand-repaired row). Cannot be
             # confirmed, so it does not count as evidence.
@@ -271,8 +298,8 @@ class ProtectionManager:
             # §18.2: that read just blocked the single-threaded tick for up to a
             # full network timeout, and ONE sync can reach here three times (the
             # SL no-op guard, the SL covering check on a gate-blocked repair, the
-            # TP no-op guard) because the latch clears only on a POSITIVE
-            # confirmation — so the repeats are exactly the degraded-network case.
+            # TP no-op guard) because only a POSITIVE confirmation of THAT order
+            # caches — so the repeats are exactly the degraded-network case.
             # In ``finally`` for the same reason: the timing-out read is the one
             # that costs the most and the one that returns early
             # (2026-07-31 deadline review).
@@ -298,9 +325,10 @@ class ProtectionManager:
             return False
         if local_status_for_exchange_status(parsed[1]) not in _RESTING_ORDER_STATUSES:
             return False
-        # Positively confirmed live. The book agrees with the rows again, so the
-        # suspicion is spent — the next sync goes back to the free fast path.
-        self._rows_unconfirmed = False
+        # Positively confirmed live — for THIS order only. The next sync takes the
+        # free path for this cloid; every other row stays suspect until it is
+        # confirmed on its own evidence.
+        self._confirmed_cloid[role] = str(hexid)
         return True
 
     # -- public entry ---------------------------------------------------------

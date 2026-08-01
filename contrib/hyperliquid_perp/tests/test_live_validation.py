@@ -27,14 +27,26 @@ _T0 = datetime(2026, 7, 27, 0, 0, tzinfo=timezone.utc)
 _D = Decimal
 
 
-def _init_live_run(db: Database, *, mode: str = "testnet_live", run_id: str = "r") -> None:
+def _init_live_run(
+    db: Database,
+    *,
+    mode: str = "testnet_live",
+    run_id: str = "r",
+    schedule_cancel_seconds: object | None = None,
+) -> None:
+    live: dict[str, object] = {"mode": mode}
+    if schedule_cancel_seconds is not None:
+        # Genesis stores the ``live:`` block VERBATIM, pre-coercion, so tests that
+        # care about the deadline have to be able to seed it the way an operator's
+        # YAML would — including the quoted form.
+        live["kill_switch"] = {"schedule_cancel_seconds": schedule_cancel_seconds}
     accounting.initialize_run(
         db,
         run_id=run_id,
         mode="live",
         initial_balance_usdc=_D(200),
         schema_version=SCHEMA_VERSION,
-        config_json=json.dumps({"live": {"mode": mode}}),
+        config_json=json.dumps({"live": live}),
         created_at=_T0,
     )
 
@@ -116,12 +128,15 @@ def _add_refreshes(db: Database, refreshed: int, failed: int = 0, *, run_id: str
             )
 
 
-def _kill_switch_event(db, event_type: str, *, off: int = 0, run_id: str = "r") -> None:
+def _kill_switch_event(
+    db, event_type: str, *, off: int = 0, run_id: str = "r", detail: str | None = None
+) -> None:
     with db.transaction() as conn:
         repo.insert_kill_switch_event(
             conn,
             run_id=run_id,
             event_type=event_type,
+            detail=detail,
             timestamp=_T0 + timedelta(seconds=off),
         )
 
@@ -170,7 +185,19 @@ def test_healthy_testnet_run_is_ready(tmp_path):
     # attempts, so `fill_count == 0` / `api_failed_count == 0` would pass against
     # a field hardcoded to 0 — the very mutation being guarded against.
     assert report.live_order_count == 30
-    assert report.kill_switch_covered_seconds > Decimal(0)
+    # The EXACT figure, not `> 0`: the fixture is deterministic (100 refreshes on
+    # the 30s cadence spans 99 steps), and `> 0` passes against a field hardcoded
+    # to 1 — the mutation this assertion exists to stop (2026-08-01 round-14).
+    assert report.kill_switch_covered_seconds == Decimal(99 * _REFRESH_STEP_S)
+    assert report.kill_switch_outage_seconds == Decimal(0)
+    assert report.kill_switch_outage_episodes == 0
+    # The three numbers reach the operator's summary, which is the whole reason
+    # they were promoted out of the failure string: a run that PASSES at 99.2% was
+    # still exposed, and the go/no-go sheet has to say so. Deleting either line
+    # left the suite green (2026-08-01 round-14 mutation probe).
+    lines = report.summary_lines()
+    assert "kill_switch_outage_seconds: 0 across 0 outage(s) of 2970s covered" in lines
+    assert "kill_switch_clean_shutdown: no" in lines
 
 
 def test_order_count_one_short_is_a_shortfall(tmp_path):
@@ -1467,6 +1494,178 @@ def test_armed_alone_closes_an_outage_inside_the_deadline(tmp_path):
     assert report.kill_switch_outage_episodes == 1
 
 
+def test_the_deadline_is_taken_from_the_arming_not_from_genesis(tmp_path):
+    """A resumed run is judged by the cover it ACTUALLY had, not the one it was born with.
+
+    ``runs.config_json`` is written once, at ``--create``, and a resume that edits
+    ``live.kill_switch`` is only a printed WARNING. Sizing every stretch from
+    genesis therefore measured a run armed at 120s against a 600s deadline: every
+    real lapse in the 121-600s band — stretches in which the exchange has already
+    swept the wallet — billed as covered, and a genuinely exposed run reporting
+    live_ready (2026-08-01 round-14 review).
+    """
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db, schedule_cancel_seconds="600")  # quoted, as the YAML allows
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    _add_refreshes(db, 100, 0)
+    resumed_at = 99 * _REFRESH_STEP_S + 30
+    # The resume arms at 120s. From here on THAT is the cover, whatever genesis says.
+    _kill_switch_event(db, "kill_switch_armed", off=resumed_at, detail="deadline=120s refresh=30s")
+    # 300s of silence: comfortably inside genesis's 600s, far outside the 120s the
+    # run was actually armed with.
+    _kill_switch_event(db, "kill_switch_refreshed", off=resumed_at + 300)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=resumed_at + 400))
+    assert report.kill_switch_outage_seconds == Decimal(300)
+    assert report.kill_switch_outage_episodes == 1
+
+
+def test_the_genesis_deadline_sizes_the_cover_until_something_arms(tmp_path):
+    """The other half: genesis is the STARTING deadline and it must really be read.
+
+    Same 300s silence, no arming row to override it — so a run created with a 600s
+    deadline is covered through it and charged nothing. Pin both directions or the
+    per-run read can be replaced by the constant with the suite green.
+    """
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db, schedule_cancel_seconds="600")
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    _add_refreshes(db, 100, 0)
+    quiet_at = 99 * _REFRESH_STEP_S
+    _kill_switch_event(db, "kill_switch_refreshed", off=quiet_at + 300)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=quiet_at + 400))
+    assert report.kill_switch_outage_seconds == Decimal(0)
+    assert report.kill_switch_outage_episodes == 0
+    # ...and the SAME timeline under the 120s default is charged in full, which is
+    # what proves the genesis value did the work rather than the gap being benign.
+    other = Database(tmp_path / "default.db")
+    _init_live_run(other)
+    _pass_all_smoke(other)
+    _add_cycles(other, MIN_LIVE_CYCLES)
+    _add_orders(other, 30)
+    _add_refreshes(other, 100, 0)
+    _kill_switch_event(other, "kill_switch_refreshed", off=quiet_at + 300)
+    with other:
+        strict = validate_live_run(other, run_id="r", now=_T0 + timedelta(seconds=quiet_at + 400))
+    assert strict.kill_switch_outage_seconds == Decimal(300)
+
+
+def test_the_default_deadline_tracks_the_config_layers_own_default():
+    """A drift here silently measures every key-omitting run against the wrong cover.
+
+    ``DEFAULT_SCHEDULE_CANCEL_SECONDS`` exists to answer "what armed a run that
+    never said?", so it is only correct while it equals what the config layer
+    actually arms with. Nothing else binds the two modules (2026-08-01 round-14).
+    """
+    from contrib.hyperliquid_perp.live.config import KillSwitchConfig
+    from contrib.hyperliquid_perp.live.validation import DEFAULT_SCHEDULE_CANCEL_SECONDS
+
+    assert Decimal(KillSwitchConfig().schedule_cancel_seconds) == DEFAULT_SCHEDULE_CANCEL_SECONDS
+
+
+def test_silence_one_second_either_side_of_the_deadline(tmp_path):
+    """The discontinuity the whole rule turns on, pinned on both sides.
+
+    A gap EQUAL to the cover is still covered; one second more is not. The only
+    data points were 60s and six hours against a 120s deadline, so `>` could be
+    relaxed to `>=` with the suite green (2026-08-01 round-14 mutation probe).
+    """
+    from contrib.hyperliquid_perp.live.validation import DEFAULT_SCHEDULE_CANCEL_SECONDS
+
+    deadline = int(DEFAULT_SCHEDULE_CANCEL_SECONDS)
+
+    def _outage(gap: int) -> Decimal:
+        db = Database(tmp_path / f"gap{gap}.db")
+        _init_live_run(db)
+        _pass_all_smoke(db)
+        _add_cycles(db, MIN_LIVE_CYCLES)
+        _add_orders(db, 30)
+        _add_refreshes(db, 100, 0)
+        quiet_at = 99 * _REFRESH_STEP_S
+        _kill_switch_event(db, "kill_switch_refreshed", off=quiet_at + gap)
+        with db:
+            return validate_live_run(
+                db, run_id="r", now=_T0 + timedelta(seconds=quiet_at + gap + 60)
+            ).kill_switch_outage_seconds
+
+    assert _outage(deadline) == Decimal(0)
+    assert _outage(deadline + 1) == Decimal(deadline + 1)
+
+
+def test_one_continuous_lapse_is_one_episode_however_it_is_punctuated(tmp_path):
+    """Two shapes of the same fact, because each had its own uncovered guard.
+
+    A wedged process that finally writes a failed refresh at the far end of a long
+    silence is ONE lapse, not two — the silence branch latches ``in_outage`` for
+    exactly that. And two consecutive failed refreshes are one lapse too, which is
+    the failed-refresh branch's own dedup guard. Both were deletable with the
+    suite green (2026-08-01 round-14 mutation probe).
+    """
+    db = Database(tmp_path / "wedged.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    _add_refreshes(db, 100, 0)
+    quiet_at = 99 * _REFRESH_STEP_S
+    # 600s of silence, then the wedged process manages to say "I failed".
+    _kill_switch_event(db, "kill_switch_refresh_failed", off=quiet_at + 600)
+    _kill_switch_event(db, "kill_switch_refreshed", off=quiet_at + 660)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=quiet_at + 700))
+    assert report.kill_switch_outage_episodes == 1
+    assert report.kill_switch_outage_seconds == Decimal(660)
+
+    twice = Database(tmp_path / "twofails.db")
+    _init_live_run(twice)
+    _pass_all_smoke(twice)
+    _add_cycles(twice, MIN_LIVE_CYCLES)
+    _add_orders(twice, 30)
+    _add_refreshes(twice, 100, 0)
+    _kill_switch_event(twice, "kill_switch_refresh_failed", off=quiet_at + 30)
+    _kill_switch_event(twice, "kill_switch_refresh_failed", off=quiet_at + 60)
+    _kill_switch_event(twice, "kill_switch_refreshed", off=quiet_at + 90)
+    with twice:
+        report2 = validate_live_run(twice, run_id="r", now=_T0 + timedelta(seconds=quiet_at + 120))
+    assert report2.kill_switch_outage_episodes == 1
+
+
+def test_rows_at_a_single_instant_cannot_demonstrate_availability(tmp_path):
+    """Enough rows to judge, no wall time to judge over: a shortfall, not a pass.
+
+    The branch is a fail-open if it goes missing — with the sample floor cleared
+    and zero covered time, nothing was appended and ``live_ready`` stayed True.
+    The sample-floor branch is ordered first and hid this one from every existing
+    test (2026-08-01 round-14 mutation probe).
+    """
+    from contrib.hyperliquid_perp.live.validation import MIN_KILL_SWITCH_REFRESH_SAMPLES
+
+    db = Database(tmp_path / "instant.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    with db.transaction() as conn:
+        for _ in range(MIN_KILL_SWITCH_REFRESH_SAMPLES):
+            repo.insert_kill_switch_event(
+                conn, run_id="r", event_type="kill_switch_refreshed", timestamp=_T0
+            )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.kill_switch_refresh_success_rate is None
+    assert any("span no elapsed time" in s for s in report.shortfalls)
+    assert not report.live_ready
+    # ...and the summary names THAT cause, not "no refresh yet" over a count of 100.
+    lines = report.summary_lines()
+    assert "kill_switch_refresh_success_rate: n/a (rows span no elapsed time)" in lines
+    assert "kill_switch_refresh_total: 100" in lines
+
+
 # -- refresh-rate sample floor ---------------------------------------------
 
 
@@ -1685,6 +1884,11 @@ def test_two_fills_sharing_an_exchange_key_fail_the_gate(tmp_path):
     with db:
         report = validate_live_run(db, run_id="r", now=_T0)
     assert report.duplicate_fill_apply_count == 1
+    # Name the failure, do not settle for ``not live_ready``: this fixture is only
+    # ``_init_live_run`` — no cycles, no orders, no smoke — so it fails a dozen
+    # other gates anyway, and the gate branch this test exists for could be
+    # deleted with the assertion still green (2026-08-01 round-14 mutation probe).
+    assert any("duplicate_fill_apply_count" in failure for failure in report.failures)
     assert not report.live_ready
 
 
@@ -1706,7 +1910,11 @@ def test_the_genesis_deadline_reader_degrades_instead_of_crashing(config_json):
     assert _schedule_cancel_seconds(config_json) == DEFAULT_SCHEDULE_CANCEL_SECONDS
 
 
-@pytest.mark.parametrize("raw", [0, -5, True, "120"])
+# NOT "120": that is a perfectly legal quoted int, which the reader RETURNS — the
+# assertion passed only because 120 is also the default, so the case asserted the
+# opposite of this test's name and contradicted its sibling below, which uses the
+# identical shape to prove quoted values ARE read (2026-08-01 round-14 review).
+@pytest.mark.parametrize("raw", [0, -5, True, "abc", 2.5, [120]])
 def test_a_nonsensical_deadline_value_falls_back(raw):
     from contrib.hyperliquid_perp.live.validation import (
         DEFAULT_SCHEDULE_CANCEL_SECONDS,

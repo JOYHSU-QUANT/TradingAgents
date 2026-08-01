@@ -89,9 +89,11 @@ manual shutdown/restart item is operator-confirmed only — surface as
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
+from operator import itemgetter
 from typing import NamedTuple
 
 from ..domains.perp.config_coercion import int_from_yaml
@@ -611,6 +613,44 @@ def _schedule_cancel_seconds(config_json: str | None) -> Decimal:
     return seconds if seconds > 0 else DEFAULT_SCHEDULE_CANCEL_SECONDS
 
 
+# The deadline ``arm()`` reports it installed, read back out of the row it wrote
+# (kill_switch.py: ``detail=f"deadline={...}s refresh={...}s"``). Taking the number
+# from the ARMING rather than from genesis is what makes the measure survive a
+# resume under an edited config: ``runs.config_json`` is written once, at
+# ``--create``, and a changed ``live.kill_switch`` block on a later resume is only
+# a printed warning (cli's params-drift lane), so genesis 600 resumed at 120 billed
+# every real 121-600s lapse as covered and reported a genuinely exposed run as
+# live_ready (2026-08-01 round-14 review).
+#
+# Read from ANY row that states one, not only ``kill_switch_armed``. The manager's
+# refresh rows carry no detail, so they simply say nothing and leave the standing
+# value alone — but ``live-smoke`` renews the cover at ``max(config, 120s)``, which
+# is LONGER than the armed row's number whenever a run is configured below 120. A
+# reader that only listened to arm() would then measure the smoke phase against a
+# cover shorter than the one actually installed and invent outages that never
+# happened. Whoever installs the cover states it; whoever states it is believed.
+#
+# This makes the detail format a CONTRACT between modules, so a test pins writer
+# against reader. Parsing is deliberately forgiving: an unreadable or absent detail
+# leaves the deadline already in force standing rather than inventing one, so a
+# format change degrades to the genesis value — the previous behaviour — instead
+# of to nonsense.
+_STATED_DEADLINE_RE = re.compile(r"\bdeadline=(\d+)s\b")
+
+
+def _stated_deadline_seconds(detail: str | None) -> Decimal | None:
+    """The cover this row says it installed, or None when it does not say."""
+    if not detail:
+        return None
+    match = _STATED_DEADLINE_RE.search(detail)
+    if match is None:
+        return None
+    seconds = Decimal(match.group(1))
+    # Same non-positive guard as the genesis reader: a zero deadline would charge
+    # every gap as unprotected and turn one garbled row into a guaranteed exit 5.
+    return seconds if seconds > 0 else None
+
+
 class _SafeModeState(NamedTuple):
     """The run's CURRENT safe-mode episode, if it is in one."""
 
@@ -850,11 +890,16 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
     299 and correctly failed — so a run merely had to stay broken a little longer
     to be certified (2026-08-01 round-13 review).
 
-    The deadline comes from the run's own genesis config, never a constant: it is
+    The deadline comes from the run itself, never a constant: it is
     operator-configurable, so a fixed threshold is both too strict for one run and
     too lax for another. The constant it replaced was 300s against a 120s default
     deadline, which billed the whole 120–300s band — every stretch in which the
-    switch demonstrably fires — as healthy covered time.
+    switch demonstrably fires — as healthy covered time. Each stretch is measured
+    against the cover IN FORCE across it: every ``kill_switch_armed`` row states
+    the deadline that arming installed, and the genesis config supplies only the
+    starting value. Reading genesis alone was wrong for any run that resumed under
+    an edited ``live.kill_switch`` block — which the CLI merely warns about — so a
+    run armed at 120 but created at 600 had every real lapse billed as covered.
 
     THE WINDOW ENDS AT THE LAST EVENT, never at ``now``. Wall time since the run
     stopped measures when the operator got round to running ``validate``, nothing
@@ -877,16 +922,25 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
     in_outage = False
     previous: datetime | None = None
     previous_event: str | None = None
+    # The STARTING deadline only. Every ``kill_switch_armed`` row that names one
+    # replaces it for the stretches that follow, so a run resumed under an edited
+    # config is measured against the cover each stretch actually had.
     deadline = _schedule_cancel_seconds(config_json)
     # By TIMESTAMP, not by insertion order: the rows arrive ordered by event_id,
     # and a clock correction (or a test seeding a second batch) makes those two
     # orders disagree — which would then collapse the window and read a healthy
     # run as 0% available.
     events = sorted(
-        (parse_instant(row["timestamp"]), row["event_type"])
-        for row in repo.iter_kill_switch_events(conn, run_id)
+        (
+            (parse_instant(row["timestamp"]), row["event_type"], row["detail"])
+            for row in repo.iter_kill_switch_events(conn, run_id)
+        ),
+        # Keyed on (time, type) and NOT on the whole tuple: ``detail`` is free text
+        # and nullable, so letting it into the sort key would order nothing
+        # meaningful and would raise str-vs-None on an exact tie.
+        key=itemgetter(0, 1),
     )
-    for when, event in events:
+    for when, event, detail in events:
         # A stretch that OPENS on a deliberate release counts on NEITHER side: the
         # trigger was cleared on purpose, so it says nothing about whether the
         # switch was available. Crediting it to ``covered`` alone would let an
@@ -920,6 +974,21 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
                 in_outage = True
         previous = when
         previous_event = event
+        # A row that names the cover it installed re-sizes every stretch after it:
+        # from here on THAT is the line between "silence we were covered through"
+        # and "silence the exchange swept the wallet in". Rows that say nothing
+        # leave the standing deadline alone.
+        #
+        # Only rows that actually INSTALL cover get a vote. "Any row that states
+        # one" was too wide: ``shutdown_cancel_orders_completed`` dumps arbitrary
+        # JSON into this same column, so a cloid that happened to contain the
+        # token would have re-sized the run's protection deadline. Arming and
+        # refreshing are the two events that put a schedule on the exchange, and
+        # they are exactly the two the manager and the smoke suite both write.
+        if event in (_KILL_SWITCH_REFRESH_OK, _KILL_SWITCH_ARMED):
+            stated_deadline = _stated_deadline_seconds(detail)
+            if stated_deadline is not None:
+                deadline = stated_deadline
         if event in (_KILL_SWITCH_REFRESH_OK, _KILL_SWITCH_ARMED):
             # Both prove the switch is scheduled; only the refresh counts toward
             # the sample floor, which asks "has it been EXERCISED enough to judge".
@@ -1396,7 +1465,7 @@ def _apply_refresh_gate(
             f"kill_switch events span no elapsed time ({refresh_total} row(s) at a "
             "single instant) — availability has no denominator to measure against"
         )
-    elif refresh_rate is not None and refresh_rate < MIN_KILL_SWITCH_REFRESH_RATE:
+    elif refresh_rate < MIN_KILL_SWITCH_REFRESH_RATE:
         # Report the TIME, not only the rounded percentage. At two decimals a
         # genuine 0.98998 renders as "99.00% (need >= 99%)" — a go/no-go line that
         # reads as a self-contradiction to the operator who has to act on it — and

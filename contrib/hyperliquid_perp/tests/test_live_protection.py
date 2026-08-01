@@ -649,6 +649,36 @@ def test_confirming_the_stop_loss_does_not_vouch_for_the_take_profit(env):
     assert len(client.status_queries) == 3
 
 
+def test_a_fresh_placement_vouches_for_itself_without_an_extra_read(env):
+    """An accepted ack IS the exchange saying this cloid rests.
+
+    Without seeding it, a process that has seen one firing keeps the suspicion
+    latch up forever and pays a full-timeout orderStatus on every re-place — and
+    a slice plan re-places the SL as the position grows, so that is per slice, on
+    the same thread whose REST budget this round is otherwise protecting
+    (2026-08-01 lifecycle review).
+    """
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
+
+    mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+    placed = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
+    assert placed is not None
+    reads_after_place = len(client.status_queries)
+
+    # The row this sync just placed is trusted on the ack; the next sync's no-op
+    # guard costs nothing.
+    assert mgr._row_still_rests(placed, role="stop_loss") is True
+    assert len(client.status_queries) == reads_after_place
+
+
 def test_lost_ack_recovery_does_not_book_an_unclassifiable_word_as_live(env):
     """The same fail-OPEN in ``_recover_placed_order`` — and this one needs no
     kill-switch firing at all, only a lost ack.

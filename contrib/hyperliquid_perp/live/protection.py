@@ -980,6 +980,19 @@ class ProtectionManager:
             else "open"
         )
         remaining = Decimal(0) if local_status == "filled" else size
+        # An accepted ack for a LIVE order is the exchange telling us this cloid
+        # rests — the same fact ``_row_still_rests`` would spend a full-timeout
+        # orderStatus round-trip to learn, only first-hand and free. Seeding it
+        # here is what keeps the per-order suspicion from costing a REST read on
+        # every re-place for the rest of a process that has seen one firing: a
+        # slice plan re-places the SL as the position grows, so without this the
+        # tick pays for it every slice — on the very thread whose REST budget
+        # this PR is otherwise busy protecting. A terminal status seeds nothing
+        # (there is no resting order to vouch for) (2026-08-01 lifecycle review).
+        if local_status in _RESTING_ORDER_STATUSES:
+            self._confirmed_cloid[role] = hexid
+        else:
+            self._confirmed_cloid.pop(role, None)
         with self._db.transaction() as conn:
             repo.insert_cloid_mapping(
                 conn,

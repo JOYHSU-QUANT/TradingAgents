@@ -455,7 +455,7 @@ close 落在同一個時鐘刻度）照樣 exit 5，不會讀成「從來沒有�
 
 | 看什麼 | 在哪裡 | 正常 | 異常時 |
 |---|---|---|---|
-| kill switch 刷新 | stderr log／`kill_switch_events` | 每 30s 一次 `kill_switch_refreshed` | 連續 `kill_switch_refresh_failed` → 進 safe mode、擋新單，查網路 |
+| kill switch 刷新 | stderr log／`kill_switch_events` | 每 30s 一次 `kill_switch_refreshed` | **一列 `kill_switch_refresh_failed` ＝一次 outage**（同一次中斷只寫一列，不論重試幾次）；長度看到下一列 `kill_switch_refreshed` 為止。進 safe mode、擋新單，查網路。`validate` 的 refresh 可用率就是用這個時間長度算的，不是用列數 |
 | reconciliation | `exchange_reconciliation_events` | 無 open case | 有 mismatch → safe mode（見下） |
 | protection | `protection_order_events` | 有部位時 SL 在書上 | `stop_loss_repair_exhausted` → unprotected，可能 emergency close |
 | 中途健檢 | `validate --run-id live-BTC --db live_trading.db` | exit 4（一致、未滿） | exit 5 → 停下來調查 |

@@ -80,15 +80,39 @@ def _add_orders(db: Database, n: int, *, run_id: str = "r") -> None:
             )
 
 
+_REFRESH_STEP_S = 30  # the configured refresh cadence
+
+
 def _add_refreshes(db: Database, refreshed: int, failed: int = 0, *, run_id: str = "r") -> None:
+    """A refresh timeline on the real cadence, with ``failed`` outages in it.
+
+    Availability is measured in TIME, not in event counts, so these events have
+    to be spaced: writing them all at one instant makes every run look perfectly
+    available (zero elapsed, therefore zero outage) and the gate untestable.
+
+    Each failure is followed by the next success one step later, so it is exactly
+    one step of outage, and the timeline spans ``(total - 1)`` steps:
+
+        availability = 1 - failed / (total - 1)
+
+    So 100 ok + 1 failed is exactly 99% — the threshold — and each further
+    failure costs another whole percent (2026-08-01 lifecycle review).
+    """
+    # Interleaved so no two failures are adjacent: an adjacent pair would be ONE
+    # outage of two steps rather than two outages — a different (also valid)
+    # shape that the arithmetic above does not describe.
+    events: list[str] = ["kill_switch_refreshed"] * max(0, refreshed - failed)
+    for _ in range(failed):
+        events.append("kill_switch_refresh_failed")
+        if refreshed >= failed:
+            events.append("kill_switch_refreshed")
     with db.transaction() as conn:
-        for _ in range(refreshed):
+        for step, event_type in enumerate(events):
             repo.insert_kill_switch_event(
-                conn, run_id=run_id, event_type="kill_switch_refreshed", timestamp=_T0
-            )
-        for _ in range(failed):
-            repo.insert_kill_switch_event(
-                conn, run_id=run_id, event_type="kill_switch_refresh_failed", timestamp=_T0
+                conn,
+                run_id=run_id,
+                event_type=event_type,
+                timestamp=_T0 + timedelta(seconds=step * _REFRESH_STEP_S),
             )
 
 
@@ -479,10 +503,10 @@ def test_low_refresh_rate_is_a_failure(tmp_path):
     _pass_all_smoke(db)
     _add_cycles(db, MIN_LIVE_CYCLES)
     _add_orders(db, 30)
-    _add_refreshes(db, 90, 10)  # 90% < 99%
+    _add_refreshes(db, 90, 10)  # ten 30s outages in a 99-step timeline
     with db:
         report = validate_live_run(db, run_id="r", now=_T0)
-    assert report.kill_switch_refresh_success_rate == Decimal(9) / Decimal(10)
+    assert report.kill_switch_refresh_success_rate < Decimal("0.99")
     assert any("refresh_success_rate" in f for f in report.failures)
 
 
@@ -1080,7 +1104,8 @@ def test_refresh_rate_exactly_99_percent_passes(tmp_path):
     _pass_all_smoke(db)
     _add_cycles(db, MIN_LIVE_CYCLES)
     _add_orders(db, 30)
-    _add_refreshes(db, 99, 1)  # 99/100 = 0.99 == threshold; >= passes
+    # One 30s outage across a 100-step timeline = exactly 99% available.
+    _add_refreshes(db, 100, 1)
     with db:
         r = validate_live_run(db, run_id="r", now=_T0)
     assert r.kill_switch_refresh_success_rate == Decimal(99) / Decimal(100)
@@ -1093,7 +1118,7 @@ def test_refresh_rate_just_under_99_percent_fails(tmp_path):
     _pass_all_smoke(db)
     _add_cycles(db, MIN_LIVE_CYCLES)
     _add_orders(db, 30)
-    _add_refreshes(db, 98, 2)  # 98/100 = 0.98 < 0.99
+    _add_refreshes(db, 100, 2)  # two outages: 1 - 2/101 < 0.99
     with db:
         r = validate_live_run(db, run_id="r", now=_T0)
     assert not r.live_ready
@@ -1194,9 +1219,11 @@ def test_one_blip_in_a_young_run_is_a_shortfall_not_a_failure(tmp_path):
     _add_refreshes(db, 9, 1)
     with db:
         report = validate_live_run(db, run_id="r", now=_T0)
-    assert report.kill_switch_refresh_success_rate == Decimal("0.9")
+    # One 30s outage in a 9-step timeline: the number is noise either way, which
+    # is the point of the floor below it.
+    assert report.kill_switch_refresh_success_rate < Decimal("0.99")
     assert not any("refresh_success_rate" in f for f in report.failures)
-    assert any("too few to judge a rate" in s for s in report.shortfalls)
+    assert any("too few to judge availability" in s for s in report.shortfalls)
 
 
 def test_a_single_refresh_is_not_proof_the_switch_worked(tmp_path):
@@ -1212,7 +1239,7 @@ def test_a_single_refresh_is_not_proof_the_switch_worked(tmp_path):
         report = validate_live_run(db, run_id="r", now=_T0)
     assert report.kill_switch_refresh_success_rate == Decimal(1)
     assert not report.live_ready
-    assert any("too few to judge a rate" in s for s in report.shortfalls)
+    assert any("too few to judge availability" in s for s in report.shortfalls)
 
 
 def test_a_real_rate_failure_prints_counts_not_only_a_rounded_percent(tmp_path):
@@ -1228,7 +1255,10 @@ def test_a_real_rate_failure_prints_counts_not_only_a_rounded_percent(tmp_path):
     with db:
         report = validate_live_run(db, run_id="r", now=_T0)
     failure = next(f for f in report.failures if "refresh_success_rate" in f)
-    assert "11 failed of 1000" in failure
+    # The duration is the fact the operator has to act on: "11 outages totalling
+    # 330s" says what happened to this run; a bare percentage does not.
+    assert "11 outage(s)" in failure
+    assert "330s unrefreshed" in failure
 
 
 # -- stale covering stamps after a firing ----------------------------------

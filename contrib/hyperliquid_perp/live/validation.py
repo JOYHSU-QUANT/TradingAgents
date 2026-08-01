@@ -32,10 +32,16 @@ Where the metrics come from (all from persisted PR 2–5 event logs):
   ENDED. A §17.2 emergency close is a submission, not an end, and is excluded.
   Zero onsets → zero windows and zero seconds (the healthy case), and the gate
   reads the COUNT too so a window measured as 0 cannot impersonate that case.
-- ``kill_switch_refresh_success_rate`` — ``kill_switch_refreshed`` over
-  (refreshed + ``kill_switch_refresh_failed``). An AVAILABILITY measure, and
-  below ``MIN_KILL_SWITCH_REFRESH_SAMPLES`` events it is not allowed to decide
-  anything: one blip in a ten-sample run is 90%, and 1/1 is 100%.
+- ``kill_switch_refresh_success_rate`` — covered TIME minus outage time, over
+  covered time. An AVAILABILITY measure, and measured in seconds rather than in
+  event counts: an outage opens at a ``kill_switch_refresh_failed`` and closes
+  at the next ``kill_switch_refreshed``. Counting rows made the verdict depend on
+  how often the manager happened to retry — a tuning parameter, not a property
+  of the run — so rate-limiting the retry loop moved a 24h run with twelve
+  90-second outages from 98.3% (correctly failing) to 99.6% (passing) with its
+  exposure unchanged. Below ``MIN_KILL_SWITCH_REFRESH_SAMPLES`` events it is
+  still not allowed to decide anything: a run needs to have exercised the switch
+  before its availability means much.
 - ``kill_switch_fired_count`` — ``kill_switch_cancel_triggered``: deadlines the
   exchange demonstrably acted on, cancelling every order on the wallet (SL/TP
   included). A separate question from the rate, and not answerable by it — the
@@ -580,10 +586,6 @@ def _unprotected_windows(conn, run_id: str, now: datetime) -> tuple[Decimal, int
     # Each window is clamped to >= 0 in ISOLATION (out-of-order timestamps make
     # one window negative), so a single drift can never subtract from another
     # window's genuine unprotected seconds before the sum.
-    def _window_seconds(start: datetime, end: datetime) -> Decimal:
-        secs = Decimal(str((end - start).total_seconds()))
-        return secs if secs > 0 else Decimal(0)
-
     def _close_open_window(symbol: str, when: datetime) -> None:
         nonlocal total, windows
         total += _window_seconds(open_at.pop(symbol), when)
@@ -644,48 +646,117 @@ def _unprotected_windows(conn, run_id: str, now: datetime) -> tuple[Decimal, int
     return total, windows, has_open
 
 
+def _window_seconds(start: datetime, end: datetime) -> Decimal:
+    """Seconds between two event instants, clamped at zero.
+
+    Module level so the unprotected-window measurement and the kill-switch
+    outage measurement cannot disagree about what a duration is. The clamp is
+    load-bearing: event pairs are not guaranteed monotone (a clock correction
+    mid-run), and a negative segment would silently CREDIT time against the
+    total, making an exposed run look better than a clean one.
+    """
+    secs = Decimal(str((end - start).total_seconds()))
+    return secs if secs > 0 else Decimal(0)
+
+
 class _KillSwitchTally(NamedTuple):
     """What the §18.5 event log says about this run's dead man's switch."""
 
-    refresh_rate: Decimal | None  # None iff refresh_total == 0 (no evidence yet)
+    refresh_rate: Decimal | None  # None iff there is no coverage window yet
     refreshed: int
     failed: int
     fired_count: int  # deadlines the exchange demonstrably acted on
     disarm_failed_count: int
+    outage_seconds: Decimal  # wall time the switch spent unrefreshed
+    outage_episodes: int  # distinct outages, however many retries each took
+    covered_seconds: Decimal  # wall time the switch was supposed to be running
 
     @property
     def refresh_total(self) -> int:
         return self.refreshed + self.failed
 
 
-def _kill_switch_tally(conn, run_id: str) -> _KillSwitchTally:
-    """Refresh rate plus the two OUTCOME counts, in one pass over the events.
+def _kill_switch_tally(conn, run_id: str, now: datetime) -> _KillSwitchTally:
+    """Availability by DURATION, plus the two OUTCOME counts, in one pass.
 
     The rate alone is an availability metric and cannot express the thing §20.3
     actually cares about: whether the switch ever FIRED. Those are different
     questions with different answers — a firing is preceded by a run of refresh
     failures whose share of a multi-day run rounds to nothing.
+
+    Measured as OUTAGE TIME over covered time, never as a ratio of event counts.
+    Counting rows made the verdict depend on how often the manager happened to
+    retry, which is a tuning parameter, not a property of the run: when the retry
+    loop was rate-limited (and one outage stopped writing one row per attempt),
+    the very same 24h run with twelve 90-second outages moved from 98.3% —
+    correctly failing — to 99.6%, passing, while nothing about its exposure
+    changed. Time is the thing the operator is actually promised: an outage is
+    the window in which a lapsed deadline would cancel the resting SL/TP, and it
+    is exactly as dangerous whether we retried into it four times or forty
+    (2026-08-01 lifecycle review).
+
+    An outage opens at a ``kill_switch_refresh_failed`` and closes at the next
+    ``kill_switch_refreshed``; one still open at ``now`` is measured to now, so a
+    run that never recovered cannot look clean by having no closing row.
     """
     refreshed = 0
     failed = 0
     fired = 0
     disarm_failed = 0
+    first_seen: datetime | None = None
+    last_seen: datetime | None = None
+    outage_started: datetime | None = None
+    outage_total = Decimal(0)
+    episodes = 0
     for row in repo.iter_kill_switch_events(conn, run_id):
         event = row["event_type"]
+        when = parse_instant(row["timestamp"])
+        if first_seen is None:
+            first_seen = when
+        last_seen = when
         if event == _KILL_SWITCH_REFRESH_OK:
             refreshed += 1
+            if outage_started is not None:
+                outage_total += _window_seconds(outage_started, when)
+                outage_started = None
         elif event == _KILL_SWITCH_REFRESH_FAILED:
             failed += 1
+            if outage_started is None:
+                outage_started = when
+                episodes += 1
         elif event == _KILL_SWITCH_FIRED:
             fired += 1
         elif event == _KILL_SWITCH_DISARM_FAILED:
             disarm_failed += 1
-    total = refreshed + failed
+    # The window ends at ``now``, or at the last event if that is later. An event
+    # after ``now`` means the caller's clock disagrees with the log (a validate
+    # run started before the last tick landed, a clock correction); measuring to
+    # ``now`` alone would then shrink the window below the outages inside it and
+    # report an availability over 100%.
+    ends_at = now if last_seen is None or last_seen <= now else last_seen
+    if outage_started is not None:
+        # Never recovered: the outage runs to the end of the window, still open.
+        outage_total += _window_seconds(outage_started, ends_at)
+    covered = Decimal(0) if first_seen is None else _window_seconds(first_seen, ends_at)
     # Pinned to the shared context like every other layer's arithmetic: this is
     # the acceptance report's ONLY division, and it decides an exit-5 verdict.
     with localcontext(DECIMAL_CONTEXT):
-        rate = None if total == 0 else Decimal(refreshed) / Decimal(total)
-    return _KillSwitchTally(rate, refreshed, failed, fired, disarm_failed)
+        if refreshed + failed == 0:
+            # The documented invariant: None iff there is no refresh evidence at
+            # all. Kept keyed on EVENTS even though the measure is now time —
+            # "no events" is the honest "cannot say", whereas zero elapsed time
+            # with events present is a real answer (see below).
+            rate = None
+        elif covered <= 0:
+            # Events exist but no wall time separates them, so no outage time can
+            # exist either: availability is trivially whole. Reachable in tests
+            # (a fixed clock) and in a run whose events all land in one instant.
+            rate = Decimal(1)
+        else:
+            rate = (covered - outage_total) / covered
+    return _KillSwitchTally(
+        rate, refreshed, failed, fired, disarm_failed, outage_total, episodes, covered
+    )
 
 
 def _unresolved_reconciliation_mismatches(conn, run_id: str) -> int:
@@ -780,7 +851,7 @@ def validate_live_run(
         unprotected_seconds, unprotected_windows, unprotected_open = _unprotected_windows(
             conn, run_id, now
         )
-        kill_switch = _kill_switch_tally(conn, run_id)
+        kill_switch = _kill_switch_tally(conn, run_id, now)
         refresh_rate, refresh_total = kill_switch.refresh_rate, kill_switch.refresh_total
         safe_mode = _current_safe_mode(conn, run_id)
         unresolved_mismatch_count = _unresolved_reconciliation_mismatches(conn, run_id)
@@ -1059,25 +1130,28 @@ def _apply_refresh_gate(
         # No refresh evidence yet — a shortfall (keep running), not a 0% failure.
         shortfalls.append("no kill-switch refresh events yet (need a rate >= 99%)")
     elif refresh_total < MIN_KILL_SWITCH_REFRESH_SAMPLES:
-        # Some evidence, but not enough for a RATE to mean anything. Zero was
-        # always handled above; 1..N-1 was not, and at a 30s cadence a run five
-        # minutes old has ten samples, so ONE network blip read as 9/10 = 90% and
-        # pinned a healthy run at exit 5 — which RUNBOOK §5 answers with "stop and
-        # investigate" and §7 with "start a fresh run-id". The cut is where a
-        # single blip can no longer cross the bar: 99/100 passes, 9/10 does not.
-        # It also closes the mirror-image false PASS, where 1/1 = 100% let a
-        # single refresh stand as proof the switch worked all run.
+        # Some evidence, but not enough to judge availability. Zero was always
+        # handled above; 1..N-1 was not, and at a 30s cadence a run five minutes
+        # old has ten samples, so ONE network blip pinned a healthy run at exit 5
+        # — which RUNBOOK §5 answers with "stop and investigate" and §7 with
+        # "start a fresh run-id". Still counted in EVENTS rather than seconds:
+        # the question here is "has the switch been exercised enough to judge",
+        # and a run can sit idle for hours without proving anything.
         shortfalls.append(
-            f"kill_switch_refresh_total = {refresh_total} — too few to judge a rate "
+            f"kill_switch_refresh_total = {refresh_total} — too few to judge availability "
             f"(need >= {MIN_KILL_SWITCH_REFRESH_SAMPLES}; below that one blip decides it)"
         )
     elif refresh_rate is not None and refresh_rate < MIN_KILL_SWITCH_REFRESH_RATE:
-        # Print the counts, not only the rounded percentage. At two decimals a
+        # Report the TIME, not only the rounded percentage. At two decimals a
         # genuine 0.98998 renders as "99.00% (need >= 99%)" — a go/no-go line that
-        # reads as a self-contradiction to the operator who has to act on it.
+        # reads as a self-contradiction to the operator who has to act on it — and
+        # "17.9 minutes across 12 outages" is the sentence that tells them what
+        # actually happened to this run.
         failures.append(
             f"kill_switch_refresh_success_rate = {refresh_rate * 100:.2f}% "
-            f"({kill_switch.failed} failed of {refresh_total}) "
+            f"({kill_switch.outage_seconds:.0f}s unrefreshed across "
+            f"{kill_switch.outage_episodes} outage(s), of "
+            f"{kill_switch.covered_seconds:.0f}s covered) "
             f"(need >= {MIN_KILL_SWITCH_REFRESH_RATE * 100:.0f}%)"
         )
 

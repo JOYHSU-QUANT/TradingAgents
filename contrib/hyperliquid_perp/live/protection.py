@@ -61,7 +61,7 @@ from ..persistence.models import PositionState, Side
 from .config import LiveProtectionConfig
 from .kill_switch import refresh_across_blocking_work
 from .order_gate import LiveOrderGateRejected, RealOrderGate
-from .orders import local_status_for_exchange_status, parse_order_status
+from .orders import is_known_exchange_status, local_status_for_exchange_status, parse_order_status
 
 __all__ = ["ProtectionManager", "ProtectionOutcome"]
 
@@ -280,6 +280,21 @@ class ProtectionManager:
         if parsed is None:
             # The documented unknownOid marker: the exchange has never seen it,
             # or no longer carries it. Either way nothing of ours rests.
+            return False
+        # KNOWN and resting, not merely "maps to a resting word": an unknown word
+        # maps to "open" by design (see is_known_exchange_status), and "open" is a
+        # resting status — so delegating the whole question would answer "yes, it
+        # rests" for a word we cannot classify, which is the exact fail-OPEN this
+        # docstring promises not to do (2026-08-01 malformed-response review).
+        if not is_known_exchange_status(parsed[1]):
+            logger.warning(
+                "orderStatus answered %r for the resting %s (cloid %s) — a word this "
+                "build cannot classify, so it is NOT evidence of a resting order "
+                "(fail-closed)",
+                parsed[1],
+                role,
+                hexid,
+            )
             return False
         if local_status_for_exchange_status(parsed[1]) not in _RESTING_ORDER_STATUSES:
             return False
@@ -832,6 +847,23 @@ class ProtectionManager:
         if parsed is None:
             return False  # the exchange does not know this cloid — nothing landed
         exchange_oid, exchange_status = parsed
+        if not is_known_exchange_status(exchange_status):
+            # A word this build cannot classify is not a POSITIVE confirmation,
+            # and this method's whole contract is that it only returns True on
+            # one. Testing "is it terminal?" reads the unknown-word fallback
+            # ("open") as proof of life and persists a possibly-dead order as
+            # live protection — the same fail-OPEN _row_still_rests carried, and
+            # reachable here with no kill-switch firing at all, off nothing but a
+            # lost ack (2026-08-01 malformed-response review).
+            logger.warning(
+                "orderStatus recovery for %s cloid %s answered %r — a word this build "
+                "cannot classify, so the placement is NOT confirmed (fail-closed: the "
+                "caller retries, and an exhausted ladder emergency-closes)",
+                role,
+                hexid,
+                exchange_status,
+            )
+            return False
         if local_status_for_exchange_status(exchange_status) in ("canceled", "rejected"):
             # Known to the exchange but no longer a live protective order: rejected
             # (never accepted) or a *Canceled — e.g. reduceOnlyCanceled — that was

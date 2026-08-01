@@ -16,7 +16,7 @@ from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.paper.stops import StopConfig, round_to_tick
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
-from contrib.hyperliquid_perp.persistence.models import PositionState
+from contrib.hyperliquid_perp.persistence.models import PositionState, Side
 
 _NOW = datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
 _TICK = Decimal("1")
@@ -572,6 +572,76 @@ def test_the_orderstatus_confirmation_read_refreshes_across_itself(env):
     mgr2 = _manager(db, client2, gate2, kill_switch=ks2)
     assert mgr2._row_still_rests(row, role="stop_loss") is True
     assert ks2.ticks == 1
+
+
+def test_an_unclassifiable_status_word_is_not_proof_that_a_stop_still_rests(env):
+    """A word the table does not carry must fail CLOSED here.
+
+    ``local_status_for_exchange_status`` maps an unknown word to "open" ON
+    PURPOSE — for RECORDING, overstating liveness is the recoverable direction.
+    But "open" is a resting status, so routing a safety verdict through it
+    answers "yes, it rests" for a word we cannot classify. The reachable damage:
+    the switch fires and the exchange wipes the wallet, §13.4 reopens the gate,
+    the no-op guard matches the untouched local row, this returns True, and
+    ``_establish`` reports ESTABLISHED before any wire call — no protection
+    event, no §20.3 window, and the cancelled SL is never re-placed
+    (2026-08-01 malformed-response review).
+    """
+    db = env
+    _seed_long(db)
+    row = {"cloid_hex": "0x" + "a" * 32}
+
+    client, gate = _FakeClient(), _gate()
+    client.status_script = [
+        {"status": "order", "order": {"order": {"oid": "1001"}, "status": "someFutureWord"}}
+    ]
+    ks = _FakeKillSwitch(fired_total=1)  # latched: rows are suspect
+    mgr = _manager(db, client, gate, kill_switch=ks)
+    assert mgr._row_still_rests(row, role="stop_loss") is False
+    # ...and the suspicion is NOT spent: an unclassifiable answer confirmed
+    # nothing, so the next row must still be checked against the exchange.
+    assert mgr._rows_unconfirmed is True
+
+    # Narrowness: a KNOWN resting word still confirms, so nothing normal is
+    # blocked by the stricter reading.
+    client2, gate2 = _FakeClient(), _gate()
+    client2.status_script = [_resting_status_payload("777")]
+    mgr2 = _manager(db, client2, gate2, kill_switch=_FakeKillSwitch(fired_total=1))
+    assert mgr2._row_still_rests(row, role="stop_loss") is True
+
+
+def test_lost_ack_recovery_does_not_book_an_unclassifiable_word_as_live(env):
+    """The same fail-OPEN in ``_recover_placed_order`` — and this one needs no
+    kill-switch firing at all, only a lost ack.
+
+    Its docstring promises "Recovery only ever returns True on a POSITIVE
+    confirmation", but testing ``in ("canceled", "rejected")`` reads the
+    unknown-word fallback as proof of life: the order gets persisted as live
+    protection, ``active_protection_order`` treats it as a resting stop, and the
+    repair ladder stops trying (2026-08-01 malformed-response review).
+    """
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    client.status_script = [
+        {"status": "order", "order": {"order": {"oid": "4242"}, "status": "someFutureWord"}}
+    ]
+    mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch())
+    recovered = mgr._recover_placed_order(
+        role="stop_loss",
+        order_id="ord-1",
+        logical="log-1",
+        hexid="0x" + "b" * 32,
+        size=Decimal("0.01"),
+        side=Side.SELL,
+        trigger_price=Decimal(45000),
+        limit_price=Decimal(44900),
+        replaced=None,
+        now=_NOW,
+    )
+    assert recovered is False
+    # Nothing was booked: no row may claim protection off an unclassified word.
+    assert repo.active_protection_order(db.conn, "r", "BTC", "stop_loss") is None
 
 
 def test_tp_cancel_failure_during_plan_degrades(env):

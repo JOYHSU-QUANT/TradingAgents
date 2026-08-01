@@ -63,6 +63,7 @@ __all__ = [
     "LiveOrderSubmitter",
     "SubmitOutcome",
     "SubmitOutcomeKind",
+    "is_known_exchange_status",
     "local_status_for_exchange_status",
     "parse_order_status",
 ]
@@ -916,6 +917,31 @@ def local_status_for_exchange_status(exchange_status: str) -> str:
         exchange_status,
     )
     return "open"
+
+
+def is_known_exchange_status(exchange_status: str) -> bool:
+    """Whether the table can classify this word at all.
+
+    Companion to :func:`local_status_for_exchange_status`, for the callers that
+    ask a SAFETY question rather than a bookkeeping one. The two need opposite
+    defaults on a word the table does not carry, and reading the "open" fallback
+    as an answer is what makes that invisible:
+
+    - RECORDING a status ("what does the local row say now?") wants the fallback
+      above — overstating liveness keeps the order watched and reconciliation
+      settles it, which is the recoverable direction.
+    - A SAFETY VERDICT ("is a stop-loss still on the book?", "did this cloid
+      land?") must not read that same "open" as evidence. There it means "the
+      exchange said a word we have never seen", and answering "yes, resting"
+      leaves a position naked while the audit trail calls it protected.
+
+    So a safety-verdict caller requires KNOWN and resting, never merely
+    not-terminal. Cost of the stricter reading is one redundant re-place of an
+    order we want resting anyway — the same trade
+    ``protection._row_still_rests`` already declares in its docstring
+    (2026-08-01 malformed-response review).
+    """
+    return exchange_status in _EXCHANGE_TO_LOCAL_STATUS
 
 
 def parse_order_status(payload: Any) -> tuple[str, str] | None:

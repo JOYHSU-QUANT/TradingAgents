@@ -220,19 +220,14 @@ def _snap(mark=_MARK, mid=_MARK):
     return (D(mark), D(mid))
 
 
-def test_the_market_snapshot_read_refreshes_the_switch_across_itself(tmp_path):
-    """``engine.tick()`` must refresh the dead man's switch across its own read.
+def _refresh_log(engine, drive) -> list[str]:
+    """Swap in recording doubles, run ``drive``, return the interleaved log.
 
-    The market snapshot rides the SAME ``network_timeout_s`` as everything else,
-    so unrefreshed it chains into the submit ladder and the real unrefreshed run
-    becomes their sum rather than ``_MAX_UNREFRESHED_REST_CALLS``.
-
-    DRIVEN, not inspected. The check this replaces searched ``tick``'s source for
-    ``refresh_across_blocking_work`` between two statements, and stayed green with
-    the switch argument mutated to ``None`` — the refresh gone entirely and 1918
-    tests still passing (mutation-verified, 2026-08-01 round-13 review).
+    Shared by the two seam tests below. The ``_RecordingSwitch`` surface is the
+    engine's kill-switch protocol; kept in ONE place so that when the engine
+    starts calling a fourth method, both tests fail on the seam assertion they
+    were written for rather than one of them failing on a stale double.
     """
-    db, clock, engine, gate, sub = _build(tmp_path)
     log: list[str] = []
     scripted = ScriptedSnapshotProvider("BTC", [_snap()])
 
@@ -252,13 +247,50 @@ def test_the_market_snapshot_read_refreshes_the_switch_across_itself(tmp_path):
 
     engine._provider = _RecordingProvider()
     engine._kill_switch = _RecordingSwitch()
-    engine.tick()
+    drive()
+    return log
+
+
+def test_the_market_snapshot_read_refreshes_the_switch_across_itself(tmp_path):
+    """``engine.tick()`` must refresh the dead man's switch across its own read.
+
+    The market snapshot rides the SAME ``network_timeout_s`` as everything else,
+    so unrefreshed it chains into the submit ladder and the real unrefreshed run
+    becomes their sum rather than ``_MAX_UNREFRESHED_REST_CALLS``.
+
+    DRIVEN, not inspected. The check this replaces searched ``tick``'s source for
+    ``refresh_across_blocking_work`` between two statements, and stayed green with
+    the switch argument mutated to ``None`` — the refresh gone entirely and 1918
+    tests still passing (mutation-verified, 2026-08-01 round-13 review).
+    """
+    db, clock, engine, gate, sub = _build(tmp_path)
+    log = _refresh_log(engine, engine.tick)
 
     assert "fetch" in log, "the tick did not read the market at all"
     # A refresh has to land AFTER the read — that is the seam being protected.
     assert "refresh" in log[log.index("fetch") :], (
         "engine.tick() read the market without refreshing the kill switch across "
         f"it — the read chains into the submit ladder. log={log}"
+    )
+
+
+def test_the_plan_registrations_market_read_refreshes_the_switch_across_itself(tmp_path):
+    """``start_plan()`` has the identical seam, and had NEITHER form of cover.
+
+    Its own production comment calls this read "same full-timeout REST as tick()'s
+    snapshot … also on the loop thread". Round 13 replaced the source-slice check
+    on the ``tick()`` copy with a drive test — because the source form stayed green
+    with the switch argument mutated to ``None`` — and left this sibling with no
+    test at all: deleting the call outright kept the suite green (2026-08-01
+    round-14 mutation probe).
+    """
+    db, clock, engine, gate, sub = _build(tmp_path)
+    log = _refresh_log(engine, lambda: engine.start_plan(_decision("long", 5), output_id="o1"))
+
+    assert "fetch" in log, "start_plan did not read the market at all"
+    assert "refresh" in log[log.index("fetch") :], (
+        "engine.start_plan() read the market without refreshing the kill switch "
+        f"across it — the read chains into the submit ladder. log={log}"
     )
 
 

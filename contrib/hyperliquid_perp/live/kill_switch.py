@@ -350,6 +350,19 @@ class KillSwitchManager:
         # switch produces one event. Keyed on the schedule, not on the latch —
         # see _detect_expired_deadline.
         self._expiry_reported_for: datetime | None = None
+        # When the last refresh ATTEMPT failed, and whether this outage episode
+        # has already been recorded. Both exist because ``refresh_due()`` reads
+        # ``_last_scheduled_at``, which only advances on SUCCESS: once a refresh
+        # fails, "due" stays true forever, so every subsequent call to this
+        # manager retried immediately. Harmless at one call per tick; not harmless
+        # now that every blocking site refreshes across itself — a reconcile sweep
+        # over 40 open orders spent a full network timeout per row FAILING to
+        # refresh before each row's own read, doubling the sweep's wall time (so
+        # making the deadline it was protecting MORE likely to lapse) and writing
+        # 40 kill_switch_refresh_failed rows for one outage into the table §20.3
+        # reads (2026-08-01 lifecycle review).
+        self._last_failed_attempt_at: datetime | None = None
+        self._failure_recorded_this_episode = False
         # Firings this manager has OBSERVED, monotonic. Public via
         # :attr:`fired_total` so a reader can tell "a NEW firing happened since I
         # last looked" from "the switch is merely unhealthy" -- only the former
@@ -402,6 +415,10 @@ class KillSwitchManager:
         deadline = now + timedelta(seconds=self._config.schedule_cancel_seconds)
         self._client.schedule_cancel(cancel_at=deadline)
         self._last_scheduled_at = now
+        # A successful round-trip ENDS the outage episode: the backoff lifts and
+        # the next failure is a new event worth recording.
+        self._last_failed_attempt_at = None
+        self._failure_recorded_this_episode = False
 
     def _check_clock_skew(self) -> None:
         """Refuse to arm against a host clock the exchange does not agree with.
@@ -553,9 +570,10 @@ class KillSwitchManager:
         a skipped cycle SURVIVABLE if it happens anyway is the constructor
         invariant (refresh_interval + worst-case tick gap < schedule_cancel).
         """
+        now = self._clock.now()
         if self._last_scheduled_at is None:
-            return True
-        elapsed = (self._clock.now() - self._last_scheduled_at).total_seconds()
+            return not self._in_failure_backoff(now)
+        elapsed = (now - self._last_scheduled_at).total_seconds()
         if elapsed < -_CLOCK_BACKWARDS_TOLERANCE_S:
             # The clock moved BACKWARDS (an NTP step, a VM resume, a manual
             # correction). The exchange's deadline was computed from the wall
@@ -571,7 +589,29 @@ class KillSwitchManager:
                 elapsed,
             )
             return True
-        return elapsed >= self._config.refresh_interval_seconds - _REFRESH_DUE_SLACK_S
+        if elapsed < self._config.refresh_interval_seconds - _REFRESH_DUE_SLACK_S:
+            return False
+        return not self._in_failure_backoff(now)
+
+    def _in_failure_backoff(self, now: datetime) -> bool:
+        """Whether a just-failed attempt should suppress an otherwise-due refresh.
+
+        Bounds the RETRY rate, never the cadence: while refreshes succeed this is
+        always False and ``refresh_due`` behaves exactly as before. It only bites
+        after a failure, and only for half an interval — so a genuine transient
+        still gets retried well inside the deadline, while a real outage stops
+        turning every blocking site on the thread into another full-timeout wait.
+
+        NOT applied to the clock-backwards branch above: that one is the fail-safe
+        reading and must never be delayed. A backwards jump also makes ``since``
+        negative, which is read as "no backoff" for the same reason.
+        """
+        if self._last_failed_attempt_at is None:
+            return False
+        since = (now - self._last_failed_attempt_at).total_seconds()
+        if since < 0:
+            return False
+        return since < self._config.refresh_interval_seconds / 2
 
     @property
     def fired_total(self) -> int:
@@ -669,6 +709,7 @@ class KillSwitchManager:
         except Exception as exc:
             self._gate.kill_switch_active = False
             self._stop_new_orders = True
+            self._last_failed_attempt_at = self._clock.now()
             # Log BEFORE the durable record: if the event write itself dies
             # (broken DB at the worst moment), the root cause is already on
             # the log. The write stays unguarded — losing the audit trail
@@ -685,7 +726,14 @@ class KillSwitchManager:
                     "kill switch entering safe mode: new orders are BLOCKED until "
                     "reconciliation releases them (§18.2 rule 3)"
                 )
-            self._record("kill_switch_refresh_failed", error=str(exc))
+            # ONE row per outage episode, keyed the same way _detect_expired_deadline
+            # keys its report: a run of failures is one fact, and the table is what
+            # §20.3 counts kill-switch trouble from. Writing a row per attempt let a
+            # single outage inside a 40-order sweep look like 40 separate incidents,
+            # and the retry rate — not the severity — decided the number.
+            if not self._failure_recorded_this_episode:
+                self._failure_recorded_this_episode = True
+                self._record("kill_switch_refresh_failed", error=str(exc))
             return False
         # The exchange-side switch is re-armed, but the §4.1 condition only
         # re-opens if no failure is outstanding: after a refresh failure,

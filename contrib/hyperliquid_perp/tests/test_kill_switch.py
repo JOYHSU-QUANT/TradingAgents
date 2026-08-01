@@ -46,7 +46,11 @@ class _FakeClient:
         # has never heard of the cloid.
         self.order_status_results: dict[str, object] = {}
         self.order_status_calls: list[str] = []
+        # schedule_calls records only calls that SUCCEEDED; schedule_attempts
+        # counts every one that reached the wire, which is what a test about
+        # retry rate needs to see.
         self.schedule_calls: list[datetime] = []
+        self.schedule_attempts: int = 0
         self.schedule_error: Exception | None = None
         self.clear_calls: int = 0
         self.clear_error: Exception | None = None
@@ -57,6 +61,7 @@ class _FakeClient:
 
     def schedule_cancel(self, *, cancel_at):
         self._gate.require_exchange_action()
+        self.schedule_attempts += 1
         if self.schedule_error is not None:
             raise self.schedule_error
         self.schedule_calls.append(cancel_at)
@@ -667,9 +672,76 @@ def test_release_safe_mode_fails_closed_when_the_switch_still_cannot_refresh(env
     assert manager.release_safe_mode() is False
     assert manager.stop_new_orders  # re-latched
     assert not gate.kill_switch_active  # gate stays shut
+    # The release genuinely RE-ATTEMPTED the wire (arm + the failed refresh + the
+    # release's own refresh) rather than reading a cached verdict — asserted on
+    # the attempts, because the event table now carries ONE row per outage
+    # episode however many attempts it took (2026-08-01 lifecycle review).
+    assert client.schedule_attempts == 3
+    assert _event_types(db) == ["kill_switch_armed", "kill_switch_refresh_failed"]
+
+
+def test_a_failed_refresh_backs_off_instead_of_retrying_on_every_call(env):
+    """``refresh_due`` reads ``_last_scheduled_at``, which only advances on
+    SUCCESS — so after one failure "due" is permanently true.
+
+    That was harmless when the loop ticked once per iteration. It is not harmless
+    now that every blocking site refreshes across itself: a reconcile sweep over
+    N open orders would spend a full network timeout per row FAILING to refresh
+    before that row's own read, doubling the wall time of the very sweep whose
+    deadline the refresh exists to protect (2026-08-01 lifecycle review).
+    """
+    db, client, gate, clock, manager = env
+    manager.arm()
+    clock.advance(30)
+    client.schedule_error = ExchangeRequestError("timeout")
+    assert manager.refresh_due() is True
+    manager.refresh()
+    attempts_after_failure = len(client.schedule_calls)
+
+    # Immediately after the failure, and for half an interval, no retry.
+    assert manager.refresh_due() is False
+    manager.tick()
+    clock.advance(14)
+    assert manager.refresh_due() is False
+    manager.tick()
+    assert len(client.schedule_calls) == attempts_after_failure  # nothing retried
+
+    # Past the backoff, the retry resumes — a transient still recovers well
+    # inside the deadline.
+    clock.advance(2)
+    assert manager.refresh_due() is True
+    client.schedule_error = None
+    manager.tick()
+    assert len(client.schedule_calls) == attempts_after_failure + 1
+    # A success ends the episode: no backoff is carried into healthy operation.
+    assert manager._in_failure_backoff(clock.now()) is False
+
+
+def test_one_outage_writes_one_refresh_failure_row(env):
+    """§20.3 counts kill-switch trouble from this table, so the row count must
+    track INCIDENTS, not how often the retry loop happened to run."""
+    db, client, gate, clock, manager = env
+    manager.arm()
+    client.schedule_error = ExchangeRequestError("timeout")
+    # Five attempts kept well inside schedule_cancel (120s), so this measures the
+    # dedupe and not a lapsed deadline.
+    for _ in range(5):
+        clock.advance(10)
+        manager.refresh()  # direct calls: the backoff gates refresh_due, not this
+    assert client.schedule_attempts == 6  # arm + five retries really happened
+    assert _event_types(db) == ["kill_switch_armed", "kill_switch_refresh_failed"]
+
+    # A recovery closes the episode, so the NEXT outage is its own event.
+    client.schedule_error = None
+    clock.advance(10)
+    manager.refresh()
+    client.schedule_error = ExchangeRequestError("timeout again")
+    clock.advance(10)
+    manager.refresh()
     assert _event_types(db) == [
         "kill_switch_armed",
         "kill_switch_refresh_failed",
+        "kill_switch_refreshed",
         "kill_switch_refresh_failed",
     ]
 

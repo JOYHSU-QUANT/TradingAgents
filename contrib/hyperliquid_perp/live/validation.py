@@ -370,7 +370,10 @@ class LiveValidationReport:
     # The log stops without a shutdown row: killed, not stopped. Non-gating, but
     # it is the only trace that the cover standing at that instant lapsed where no
     # later event could measure it.
-    kill_switch_ended_without_clean_shutdown: bool
+    # None when the run has no DAEMON kill-switch rows at all (a smoke-only
+    # run-id): the flag reports on the daemon, so with no daemon it has
+    # nothing to say and must not answer either way.
+    kill_switch_ended_without_clean_shutdown: bool | None
     # Stronger than the flag above: the last row is a FAILED refresh, so the
     # run ended inside an outage whose end nothing recorded.
     kill_switch_ended_in_outage: bool
@@ -511,7 +514,12 @@ class LiveValidationReport:
             f"kill_switch_outage_seconds: {self.kill_switch_outage_seconds:.0f}"
             f" across {self.kill_switch_outage_episodes} outage(s)"
             f" of {self.kill_switch_covered_seconds:.0f}s covered",
-            f"kill_switch_clean_shutdown: {_yn(not self.kill_switch_ended_without_clean_shutdown)}",
+            "kill_switch_clean_shutdown: "
+            + (
+                "n/a (no daemon rows)"
+                if self.kill_switch_ended_without_clean_shutdown is None
+                else _yn(not self.kill_switch_ended_without_clean_shutdown)
+            ),
             # Printed, not only buried in the shortfall sentence: the RUNBOOK's
             # §20.3 table names this flag, so the summary has to show it.
             f"kill_switch_ended_in_outage: {_yn(self.kill_switch_ended_in_outage)}",
@@ -847,11 +855,16 @@ class _KillSwitchTally(NamedTuple):
     # credit — but the operator has to be told they exist, or a run with 120 of
     # them reads "no refresh events yet" beside non-zero covered seconds.
     suite_refreshed: int
+    # Suite-authored FAILURES. Counted for the same reason as the successes:
+    # subtracted from ``failed`` and tallied nowhere, a suite whose refreshes
+    # all failed reported "no kill-switch refresh events yet" beside 600
+    # uncovered seconds (2026-08-01 round-17 review).
+    suite_failed: int
     # The run's last kill-switch event is not a completed shutdown, so the log
     # stops mid-flight: the process was killed rather than stopped. Everything
     # after that instant is unmeasurable (see _kill_switch_tally), so this is
     # the only honest trace of it.
-    ended_without_clean_shutdown: bool
+    ended_without_clean_shutdown: bool | None
     # An outage still open at the last event: the run's final word was a
     # failed refresh. Cannot be measured (no later event), so it is reported.
     ended_in_outage: bool
@@ -924,6 +937,7 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
     """
     refreshed = 0
     suite_refreshed = 0
+    suite_failed = 0
     failed = 0
     fired = 0
     disarm_failed = 0
@@ -1022,7 +1036,10 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
         elif event == _KILL_SWITCH_REFRESH_FAILED:
             # Same split: a suite-authored failure still OPENS an outage episode
             # (the cover really did lapse), it just does not buy sample credit.
-            failed += not is_suite_authored(detail)
+            if is_suite_authored(detail):
+                suite_failed += 1
+            else:
+                failed += 1
             if not in_outage:
                 in_outage = True
                 episodes += 1
@@ -1044,9 +1061,15 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
     # "clean shutdown: yes" for a run whose daemon was killed (2026-08-01 round-16).
     # The gap-level exemption above is unaffected: that trigger really was cleared,
     # whoever cleared it.
-    ended_dirty = bool(events) and not (
-        events[-1][1] in _KILL_SWITCH_CLEAN_ENDINGS and not is_suite_authored(events[-1][2])
-    )
+    # Over the DAEMON's rows, not the run's last row. Requiring the final row to
+    # be an unmarked clean ending killed the SIGKILL-laundering case but also
+    # condemned two runs whose daemon stopped cleanly: a smoke-only run-id, and —
+    # the common one — a daemon that shut down cleanly and was then followed by
+    # the live-smoke re-run the CLI itself tells the operator to do. Both reported
+    # "clean shutdown: no" with the daemon's own disarm sitting in the table
+    # (2026-08-01 round-17 review).
+    daemon_rows = [row for row in events if not is_suite_authored(row[2])]
+    ended_dirty = None if not daemon_rows else daemon_rows[-1][1] not in _KILL_SWITCH_CLEAN_ENDINGS
     # An outage still OPEN at the last event is a different, sharper fact than a
     # merely dirty ending: the last thing the run managed to say was "I failed to
     # refresh". The window cannot measure past its own end, so an outage that
@@ -1083,6 +1106,7 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
         episodes,
         covered,
         suite_refreshed,
+        suite_failed,
         ended_dirty,
         ended_in_outage,
     )
@@ -1481,11 +1505,13 @@ def _apply_refresh_gate(
     # deny (2026-08-01 round-13 exit check).
     if refresh_total == 0:
         # No refresh evidence yet — a shortfall (keep running), not a 0% failure.
-        if kill_switch.suite_refreshed:
+        suite_rows = kill_switch.suite_refreshed + kill_switch.suite_failed
+        if suite_rows:
             shortfalls.append(
-                f"no DAEMON kill-switch refresh events yet — the {kill_switch.suite_refreshed} "
-                "refresh(es) on record were written during live-smoke and do not count "
-                "toward the §20.3 sample floor (need a rate >= 99% over daemon evidence)"
+                f"no DAEMON kill-switch refresh events yet — the {suite_rows} "
+                "kill-switch row(s) on record were written during live-smoke and do not "
+                "count toward the §20.3 sample floor (need a rate >= 99% over daemon "
+                "evidence)"
             )
         else:
             shortfalls.append("no kill-switch refresh events yet (need a rate >= 99%)")

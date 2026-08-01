@@ -2412,6 +2412,9 @@ def live_seams(monkeypatch):
 
     state = SimpleNamespace(
         equity=D(1000),
+        # A flat account by default — the shape every existing live CLI test
+        # already assumed the exchange had.
+        positions=[],
         account_error=None,
         auth_error=None,
         # Relative to the wall clock because _cmd_live's near-expiry warning
@@ -2462,7 +2465,12 @@ def live_seams(monkeypatch):
             state.snapshot_requests.append(addr)
             if state.account_error is not None:
                 raise state.account_error
-            return SimpleNamespace(account_value=state.equity)
+            # ``positions`` mirrors the real snapshot: _live_startup_recovery
+            # reads it to reject off-coin holdings. Without it the daemon path
+            # died with AttributeError before ever constructing a
+            # KillSwitchManager, which is why nothing could pin what the CLI
+            # passes that constructor (2026-08-01 round-17 review).
+            return SimpleNamespace(account_value=state.equity, positions=state.positions)
 
     def _fake_verify(info, *, wallet_address, agent_key, now=None):
         state.auth_calls.append(wallet_address)
@@ -2477,6 +2485,12 @@ def live_seams(monkeypatch):
         def __init__(self, network, agent_key, *, wallet_address, gate, timeout=None):
             self.network = network
             self.wallet_address = wallet_address
+            # Mirrors the real signed client, which keeps its resolved timeout —
+            # the CLI hands it to KillSwitchManager as the failed-attempt term of
+            # the refresh-timing invariant. This is the third double in the suite
+            # to have been missing it; the two siblings were fixed in rounds 15
+            # and 16, and only a test that reaches manager construction can tell.
+            self.timeout = timeout
             # PR 2: the §4.1 gate is bound at construction; the config-only
             # command must hand over a fail-closed gate.
             state.signed_gates.append(gate)
@@ -3397,6 +3411,48 @@ def test_live_refuses_a_nonexistent_db_without_create(tmp_path, capsys, live_sea
     assert rc == 1
     assert "does not exist" in capsys.readouterr().err
     assert not missing.exists()  # nothing was created
+
+
+def test_the_daemon_writes_unmarked_rows(tmp_path, live_seams, monkeypatch):
+    """The inverse of the smoke marking, pinned where the wiring actually is.
+
+    ``suite_authored=True`` on the DAEMON's manager is one kwarg away, in the
+    sibling constructor 1500 lines from the smoke one, and it left the whole
+    suite green: a unit test on the manager's default cannot see what the CLI
+    passes. In production it would make every real refresh suite-authored, so
+    ``refreshed`` stays 0, the §20.3 floor is never reached, ``live_ready`` can
+    never be true — and the operator is told the run's refreshes "were written
+    during live-smoke" (2026-08-01 round-17 mutation probe).
+    """
+    import contextlib
+
+    from contrib.hyperliquid_perp.live import kill_switch as ks_mod
+
+    seen: list[object] = []
+    real = ks_mod.KillSwitchManager
+
+    class _Recording(real):  # type: ignore[misc, valid-type]
+        def __init__(self, **kwargs):
+            seen.append(kwargs.get("suite_authored", False))
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(ks_mod, "KillSwitchManager", _Recording)
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg, run_id="r1")
+    # The recovery is NOT driven to completion, and that is deliberate rather than
+    # papered over: ``live_seams``' signed double stops short of the fill-backfill
+    # surface a full §19.1 pass needs. The fact under test is settled before then
+    # — what the CLI hands the constructor — and ``assert seen`` fails loudly if
+    # construction ever stops being reached.
+    with contextlib.suppress(Exception):
+        cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    assert seen, "no KillSwitchManager was constructed — the pin proves nothing"
+    assert all(flag is False for flag in seen), seen
 
 
 def test_live_refuses_a_timeout_that_cannot_fit_the_kill_switch_budget(

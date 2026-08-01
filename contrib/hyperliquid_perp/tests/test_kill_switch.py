@@ -141,6 +141,11 @@ def _event_types(db):
     return [e["event_type"] for e in repo.iter_kill_switch_events(db.conn, "r")]
 
 
+def _event_rows(db):
+    """(event_type, detail) pairs — for the tests that care WHO wrote the row."""
+    return [(e["event_type"], e["detail"]) for e in repo.iter_kill_switch_events(db.conn, "r")]
+
+
 def _register_cloid(db, *, logical, hex_id, role="entry"):
     with db.transaction() as conn:
         repo.insert_cloid_mapping(
@@ -315,6 +320,63 @@ def test_with_no_timeout_to_read_the_backoff_cap_still_counts():
     cfg = KillSwitchConfig(schedule_cancel_seconds=120, refresh_interval_seconds=30)
     with pytest.raises(ValueError, match="cannot be refreshed in time"):
         _manager_with(cfg, max_tick_gap_seconds=40.0)
+
+
+def test_a_suite_managers_own_refresh_rows_are_marked(env):
+    """The row class the whole marker exists for, produced by the real manager.
+
+    ``live-smoke`` builds a real manager for its pre-flight recovery and restart
+    tests, and it is that manager's tick-driven REFRESH — not the runner's own
+    writes — that was buying §20.3 sample credit. No test produced one: an
+    offline suite runs in ~1s against a 30s interval, so the manager only ever
+    contributed ``armed`` rows and the refresh path was covered by proxy
+    (2026-08-01 round-17 review). Here the clock is advanced past the interval.
+    """
+    from contrib.hyperliquid_perp.live.kill_switch import is_suite_authored
+
+    db, client, gate, clock, _unused = env
+    manager = KillSwitchManager(
+        client=client,
+        gate=gate,
+        db=db,
+        run_id="r",
+        config=KillSwitchConfig(),
+        max_tick_gap_seconds=_MAX_TICK_GAP_S,
+        network_timeout_s=None,
+        payload_dir=Path("payloads"),
+        clock=clock,
+        suite_authored=True,
+    )
+    manager.arm()
+    clock.advance(KillSwitchConfig().refresh_interval_seconds + 1)
+    manager.tick()
+    rows = _event_rows(db)
+    assert [event for event, _ in rows] == ["kill_switch_armed", "kill_switch_refreshed"]
+    assert all(is_suite_authored(detail) for _, detail in rows), rows
+    # The marker is APPENDED: the armed row still states the deadline the
+    # validator parses, and the two are separated so the column stays readable.
+    assert rows[0][1].startswith("deadline=120s")
+
+
+def test_the_daemon_manager_is_not_marked(env):
+    """The inverse, which is one kwarg away and was worth 1978 green tests.
+
+    Marking a DAEMON manager makes every real refresh suite-authored, so
+    ``refreshed`` stays 0, ``refresh_total`` never reaches the §20.3 floor, and
+    ``live_ready`` can never be true on either profile — while the operator is
+    told 14400 refreshes "were written during live-smoke". Round 16 tested the
+    marking direction on every writer and never the not-marking one
+    (2026-08-01 round-17 mutation probe).
+    """
+    from contrib.hyperliquid_perp.live.kill_switch import is_suite_authored
+
+    db, client, gate, clock, manager = env
+    manager.arm()
+    clock.advance(KillSwitchConfig().refresh_interval_seconds + 1)
+    manager.tick()
+    rows = _event_rows(db)
+    assert [event for event, _ in rows] == ["kill_switch_armed", "kill_switch_refreshed"]
+    assert not any(is_suite_authored(detail) for _, detail in rows), rows
 
 
 def test_a_nonpositive_tick_gap_is_a_wiring_error():

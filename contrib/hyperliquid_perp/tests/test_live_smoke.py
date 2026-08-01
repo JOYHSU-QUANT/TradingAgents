@@ -649,6 +649,13 @@ def test_test_14_records_every_transition_it_makes(live_db):
     assert _stated_deadline_seconds(rows[0][1]) == _D(120)
     assert _stated_deadline_seconds(rows[1][1]) == _D(120)
     assert all(is_suite_authored(detail) for _, detail in rows), rows
+    # SEPARATED from what the row already said. `is_suite_authored` uses a
+    # substring test and the deadline regex parses the front, so both tolerate
+    # `...refresh)writer=live-smoke` — which defeats the hand-reading this
+    # column exists for (2026-08-01 round-17 probe).
+    from contrib.hyperliquid_perp.live.kill_switch import _SUITE_AUTHORED_TOKEN
+
+    assert all(detail.endswith(f" {_SUITE_AUTHORED_TOKEN}") for _, detail in rows), rows
 
 
 def test_non_arming_run_does_not_disarm(live_db):

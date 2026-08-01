@@ -372,7 +372,11 @@ def test_the_runbook_documents_the_marker_token_the_code_writes(tmp_path):
 
     from contrib.hyperliquid_perp.live.kill_switch import _SUITE_AUTHORED_TOKEN
 
-    runbook = _Path("contrib/hyperliquid_perp/docs/RUNBOOK-live.md").read_text(encoding="utf-8")
+    # Resolved from __file__, not the cwd: this is the only test in the suite
+    # that reads a doc, and a cwd-relative path fails whenever pytest is
+    # invoked from anywhere but the repo root (2026-08-01 round-17 probe).
+    docs = _Path(__file__).resolve().parents[1] / "docs" / "RUNBOOK-live.md"
+    runbook = docs.read_text(encoding="utf-8")
     assert _SUITE_AUTHORED_TOKEN in runbook
 
 

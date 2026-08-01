@@ -437,8 +437,9 @@ refresh），**也包含 suite 為 pre-flight recovery 與 test 15-17 建的那�
 的 `tick()` 會到期並寫出 refresh 列；漏掉它們的話，這個排除規則在真實 run 上等於沒有生效
 （離線測試的時鐘不前進，所以看不出來）。它們**計入 outage 秒數與當下 deadline**（是真的保護），
 但**不計入 §20.3 的 100 筆樣本下限**——樣本下限問的是「這個 run 有沒有把 switch 操練到
-足以判定可用率」，而連跑六輪 smoke 就能湊到 114 筆、100%、daemon 卻一秒都沒跑過。它們走的是 signed client 而不是
-`KillSwitchManager`，所以沒有別人會補這些列；沒有它們的話，整個 smoke 期間、以及跑完 smoke
+足以判定可用率」，而連跑六輪 smoke 就能湊到 114 筆、100%、daemon 卻一秒都沒跑過。
+（suite 自己打的那幾筆走的是 signed client 而不是 `KillSwitchManager`，所以沒有別人會
+補那些列。）沒有這些列的話，整個 smoke 期間、以及跑完 smoke
 到啟動 `live --loop` 之間那段由操作者決定長度的空窗，都會被算成 outage——一個完全乾淨的
 120 小時 run 只要這段空窗超過約 73 分鐘就會被判 exit 5，而 §3 明明告訴你 smoke 的通過紀錄
 不會過期。唯一豁免是空窗開頭為 **`kill_switch_disarmed`**：那一列寫在
@@ -448,7 +449,10 @@ refresh），**也包含 suite 為 pre-flight recovery 與 test 15-17 建的那�
 注意**不是** `shutdown_cancel_orders_started`／`_completed`：那兩列夾住的是撤單 sweep，
 跑在清 trigger **之前**，當下 switch 仍然是 armed 的。
 **因此：被 SIGKILL／OOM 砍掉再重啟的 run，那段停機會直接反映在可用率上**，這是刻意的
-——那段時間倉位確實裸奔過。另外兩個旗標都只**告知、不擋 gate**：`kill_switch_clean_shutdown: no`（log 停在半路）與
+——那段時間倉位確實裸奔過。另外兩個旗標都只**告知、不擋 gate**：`kill_switch_clean_shutdown: no`（**daemon** 的最後
+一列不是乾淨收尾＝被砍掉而不是停下來；判準只看**未帶 `writer=live-smoke` 標記**的列，
+所以乾淨停機之後再跑一次 live-smoke 不會把它翻成 no，而完全沒有 daemon 列的 run
+印 `n/a (no daemon rows)`）與
 `kill_switch_ended_in_outage: yes`（最後一列是失敗的 refresh）。兩者都**分不出「run 被砍掉」
 與「run 還在跑、validate 剛好在這一刻讀」**——in-flight 的 run 其 log 本來就結束在
 validate 讀到的位置。曾經讓後者記 shortfall 擋 gate，結果是：健康的 daemon 在 15 秒前抖了

@@ -1706,6 +1706,83 @@ def test_a_smoke_disarm_cannot_make_a_killed_daemon_look_clean(tmp_path):
     assert "kill_switch_clean_shutdown: no" in report.summary_lines()
 
 
+def test_a_smoke_rerun_after_a_clean_shutdown_stays_clean(tmp_path):
+    """The flag reports on the DAEMON, so a later suite cannot re-open its verdict.
+
+    Reading the run's LAST row rather than its last daemon row condemned two runs
+    whose daemon stopped cleanly: this one — the CLI itself tells the operator to
+    re-run live-smoke after code/config changes, on the same run-id — and a
+    smoke-only run-id (2026-08-01 round-17 review).
+    """
+    from contrib.hyperliquid_perp.live.kill_switch import _stamp_suite_authored
+
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _add_refreshes(db, 100, 0)
+    stopped_at = 99 * _REFRESH_STEP_S
+    _kill_switch_event(db, "kill_switch_disarmed", off=stopped_at + 30)  # the daemon's own
+    _kill_switch_event(
+        db, "kill_switch_armed", off=stopped_at + 3600, detail=_stamp_suite_authored(None)
+    )
+    _kill_switch_event(
+        db, "kill_switch_disarmed", off=stopped_at + 3900, detail=_stamp_suite_authored(None)
+    )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=stopped_at + 4000))
+    assert report.kill_switch_ended_without_clean_shutdown is False
+    assert "kill_switch_clean_shutdown: yes" in report.summary_lines()
+
+
+def test_a_run_with_no_daemon_rows_says_nothing_about_clean_shutdown(tmp_path):
+    # A smoke-only run-id has no daemon to report on. Answering "yes" would claim
+    # a clean stop that never happened; "no" sends the operator hunting a kill
+    # that never happened either.
+    from contrib.hyperliquid_perp.live.kill_switch import _stamp_suite_authored
+
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    for step in range(4):
+        _kill_switch_event(
+            db,
+            "kill_switch_refreshed",
+            off=step * _REFRESH_STEP_S,
+            detail=_stamp_suite_authored("deadline=120s (smoke pre-flight refresh)"),
+        )
+    _kill_switch_event(db, "kill_switch_disarmed", off=200, detail=_stamp_suite_authored(None))
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=300))
+    assert report.kill_switch_ended_without_clean_shutdown is None
+    assert "kill_switch_clean_shutdown: n/a (no daemon rows)" in report.summary_lines()
+    # The rate line must name the DAEMON too — four refreshes are in the table.
+    assert "kill_switch_refresh_success_rate: n/a (no daemon refresh yet)" in report.summary_lines()
+
+
+def test_a_suite_whose_refreshes_all_failed_is_still_reported_honestly(tmp_path):
+    # suite_refreshed alone could not describe this run: every suite row was a
+    # FAILURE, so the "suite rows exist" branch never fired and the shortfall fell
+    # back to "no kill-switch refresh events yet" beside real uncovered seconds
+    # (2026-08-01 round-17 review).
+    from contrib.hyperliquid_perp.live.kill_switch import _stamp_suite_authored
+
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _kill_switch_event(db, "kill_switch_armed", off=0, detail=_stamp_suite_authored(None))
+    for step in range(3):
+        _kill_switch_event(
+            db,
+            "kill_switch_refresh_failed",
+            off=200 * (step + 1),
+            detail=_stamp_suite_authored(None),
+        )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=700))
+    assert report.kill_switch_refresh_total == 0
+    assert report.kill_switch_outage_seconds > Decimal(0)
+    shortfall = next(s for s in report.shortfalls if "refresh" in s)
+    assert "no kill-switch refresh events yet" not in shortfall
+    assert "live-smoke" in shortfall
+
+
 def test_the_disarm_failure_warning_names_both_producers(tmp_path):
     # Round 15 rewrote this warning because the count now mixes daemon shutdowns
     # and live-smoke exits; replacing the whole text with a placeholder left the

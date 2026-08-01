@@ -39,7 +39,14 @@ Where the metrics come from (all from persisted PR 2–5 event logs):
   how often the manager happened to retry — a tuning parameter, not a property
   of the run — so rate-limiting the retry loop moved a 24h run with twelve
   90-second outages from 98.3% (correctly failing) to 99.6% (passing) with its
-  exposure unchanged. Below ``MIN_KILL_SWITCH_REFRESH_SAMPLES`` events it is
+  exposure unchanged. A stretch of SILENCE longer than the run's own
+  ``schedule_cancel_seconds`` is an outage too, whatever the process was doing:
+  nothing renewed the schedule across it, so the exchange cancelled every order
+  on the wallet partway through. That case used to be read as "the process was
+  down, judge nothing", which threw away the worst outcome available and made the
+  measure non-monotone — a 301s outage scoring 0s and passing while a 299s one
+  scored 299s and failed. Exempt only when the stretch opens on a clean shutdown,
+  which released the cover deliberately. Below ``MIN_KILL_SWITCH_REFRESH_SAMPLES`` events it is
   still not allowed to decide anything: a run needs to have exercised the switch
   before its availability means much.
 - ``kill_switch_fired_count`` — ``kill_switch_cancel_triggered``: deadlines the
@@ -117,14 +124,22 @@ MIN_KILL_SWITCH_REFRESH_RATE = Decimal("0.99")
 # far inside the ≥30-cycle (~5 day) gate, so it never becomes the binding
 # constraint on a real acceptance run.
 MIN_KILL_SWITCH_REFRESH_SAMPLES = 100
-# A stretch with NO kill-switch event in it that long means the process was not
-# running: a live run writes one row per refresh interval (30s by default), so ten
-# intervals of silence is not a slow tick, it is a stopped daemon. Downtime is
-# excluded from the availability measure entirely — see _kill_switch_tally. Ten
-# intervals rather than two or three because a tick can legitimately stall for a
-# few multiples on a bad network, and mislabelling THAT as downtime would hide a
-# real outage.
-MAX_KILL_SWITCH_EVENT_GAP_SECONDS = Decimal(300)
+# The cover one successful schedule buys, used only when the run's own genesis
+# config cannot be read. The real number comes from the run itself (see
+# _schedule_cancel_seconds), because it is a CONFIGURABLE deadline and a fixed
+# constant cannot reason about it.
+#
+# There used to be an absolute 300s "the process must have been down" threshold
+# here, and it was wrong twice over. It was 2.5x the 120s deadline it reasoned
+# about, so the whole band in which the switch demonstrably fires was billed as
+# healthy covered time; and with a legal ``refresh_interval_seconds`` above 300
+# EVERY healthy gap exceeded it, nothing was ever added to covered, and the gate
+# passed unconditionally forever. Worse, inferring "the process was down" from
+# silence is not sound at all — a dead process and a fired switch leave the SAME
+# silence — and resolving that ambiguity toward "down" meant a 301s outage scored
+# ZERO outage seconds while a 299s one scored 299: the longer outage passing at
+# 100% while the shorter correctly failed (2026-08-01 round-13 review).
+DEFAULT_SCHEDULE_CANCEL_SECONDS = Decimal(120)
 
 # A real minimum-valid ISO-8601 instant for the "since beginning of time" query
 # (has_safe_mode_reason_event does a lexicographic string compare): a real
@@ -270,6 +285,16 @@ _KILL_SWITCH_FIRED = "kill_switch_cancel_triggered"
 # cancels exactly those at its deadline. Non-gating (the run itself is over) but
 # the operator has to know the wallet was left armed.
 _KILL_SWITCH_DISARM_FAILED = "kill_switch_disarm_failed"
+# A run whose LAST kill-switch row is one of these stopped on purpose: shutdown()
+# ran and cleared the wallet-wide trigger, so nothing was left to fire and the
+# silence afterwards is just a stopped daemon. Any other final row means the log
+# stops mid-flight — SIGKILL, OOM, host reboot — and the cover that was standing
+# at that instant lapsed unwitnessed. The availability window cannot measure past
+# its own last event without making the verdict drift with the clock, so this
+# distinction is REPORTED instead of measured (see _kill_switch_tally).
+_KILL_SWITCH_CLEAN_ENDINGS = frozenset(
+    {"shutdown_cancel_orders_completed", "shutdown_cancel_orders_started"}
+)
 if (
     not {
         _KILL_SWITCH_REFRESH_OK,
@@ -323,6 +348,17 @@ class LiveValidationReport:
     # 0% failure): a fabricated 0 would misread as "every refresh failed".
     kill_switch_refresh_success_rate: Decimal | None
     kill_switch_refresh_total: int
+    # The three numbers BEHIND the rate. They existed only inside the failure
+    # string, so a run that passed at 99.2% gave the operator no way to see it had
+    # been exposed at all, and the pre-2026-08-01 message it replaced did at least
+    # print the raw counts.
+    kill_switch_outage_seconds: Decimal
+    kill_switch_outage_episodes: int
+    kill_switch_covered_seconds: Decimal
+    # The log stops without a shutdown row: killed, not stopped. Non-gating, but
+    # it is the only trace that the cover standing at that instant lapsed where no
+    # later event could measure it.
+    kill_switch_ended_without_clean_shutdown: bool
     # Deadlines the exchange demonstrably acted on: it cancelled every order on
     # the wallet, SL/TP included. Gating in BOTH profiles — the refresh RATE is
     # an availability measure and cannot express this, because the outage that
@@ -356,13 +392,16 @@ class LiveValidationReport:
     warnings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        # A None rate exists exactly when there was no refresh evidence; a
-        # present rate must be in [0, 1]. Either shape disagreeing with
-        # ``kill_switch_refresh_total`` would let a fabricated rate slip the gate.
-        if (self.kill_switch_refresh_success_rate is None) != (self.kill_switch_refresh_total == 0):
+        # A None rate means "cannot say"; a present rate must be in [0, 1]. The
+        # direction that still has to hold absolutely is that no refresh evidence
+        # CANNOT produce a number — otherwise a fabricated rate slips the gate.
+        # The converse is deliberately not an iff: a run whose rows exist but span
+        # no wall time also cannot say, and used to answer that with a PERFECT
+        # score (2026-08-01 round-13 review).
+        if self.kill_switch_refresh_success_rate is not None and self.kill_switch_refresh_total == 0:
             raise ValueError(
-                "kill_switch_refresh_success_rate is None iff there were no refreshes "
-                f"(total={self.kill_switch_refresh_total})"
+                "kill_switch_refresh_success_rate must be None when there were no "
+                f"refreshes (total={self.kill_switch_refresh_total})"
             )
         if self.kill_switch_refresh_success_rate is not None and not (
             0 <= self.kill_switch_refresh_success_rate <= 1
@@ -437,6 +476,14 @@ class LiveValidationReport:
             f"unprotected_window_count: {self.unprotected_window_count}",
             f"kill_switch_refresh_success_rate: {_rate(self.kill_switch_refresh_success_rate)}",
             f"kill_switch_refresh_total: {self.kill_switch_refresh_total}",
+            # The numbers behind the rate, on the go/no-go summary rather than only
+            # inside the failure string: a run that PASSES at 99.2% was still
+            # exposed, and the operator could not see it.
+            f"kill_switch_outage_seconds: {self.kill_switch_outage_seconds:.0f}"
+            f" across {self.kill_switch_outage_episodes} outage(s)"
+            f" of {self.kill_switch_covered_seconds:.0f}s covered",
+            f"kill_switch_clean_shutdown: "
+            f"{_yn(not self.kill_switch_ended_without_clean_shutdown)}",
             f"kill_switch_fired_count: {self.kill_switch_fired_count}",
             f"kill_switch_disarm_failed_count: {self.kill_switch_disarm_failed_count}",
             f"safe_mode_active: {self.safe_mode_active_type or 'no'}"
@@ -492,6 +539,39 @@ def execution_mode(config_json: str | None) -> str:
     if isinstance(live, dict) and isinstance(live.get("mode"), str):
         return live["mode"]
     return "unknown"
+
+
+def _schedule_cancel_seconds(config_json: str | None) -> Decimal:
+    """How long one successful schedule covered THIS run, from its own genesis.
+
+    The availability measure has to know the run's real deadline: it is the line
+    between "silence we were still covered through" and "silence in which the
+    exchange cancelled every order on the wallet". A module constant cannot know
+    it — ``schedule_cancel_seconds`` is configurable (floored at 5, unbounded
+    above), so any fixed threshold is simultaneously too strict for one run and
+    too lax for another. Reading it per-run is what stops a legal config from
+    moving the acceptance verdict.
+
+    Same degrade discipline as :func:`execution_mode` — a corrupt or partial
+    genesis record falls back to the default rather than crashing a read-only
+    reporter — with one addition: a non-positive or non-numeric value falls back
+    too, because a zero deadline would charge every gap as unprotected and turn
+    a garbled config into a guaranteed exit 5.
+    """
+    if not config_json:
+        return DEFAULT_SCHEDULE_CANCEL_SECONDS
+    try:
+        parsed = json.loads(config_json)
+    except (ValueError, TypeError):
+        return DEFAULT_SCHEDULE_CANCEL_SECONDS
+    live = parsed.get("live") if isinstance(parsed, dict) else None
+    switch = live.get("kill_switch") if isinstance(live, dict) else None
+    raw = switch.get("schedule_cancel_seconds") if isinstance(switch, dict) else None
+    # bool is an int subclass; True would otherwise become a 1-second deadline.
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return DEFAULT_SCHEDULE_CANCEL_SECONDS
+    seconds = Decimal(str(raw))
+    return seconds if seconds > 0 else DEFAULT_SCHEDULE_CANCEL_SECONDS
 
 
 class _SafeModeState(NamedTuple):
@@ -680,16 +760,21 @@ class _KillSwitchTally(NamedTuple):
     failed: int
     fired_count: int  # deadlines the exchange demonstrably acted on
     disarm_failed_count: int
-    outage_seconds: Decimal  # wall time the switch spent unrefreshed
-    outage_episodes: int  # distinct outages, however many retries each took
+    outage_seconds: Decimal  # wall time the wallet's cover had LAPSED
+    outage_episodes: int  # distinct lapses, however many retries each took
     covered_seconds: Decimal  # wall time the switch was supposed to be running
+    # The run's last kill-switch event is not a completed shutdown, so the log
+    # stops mid-flight: the process was killed rather than stopped. Everything
+    # after that instant is unmeasurable (see _kill_switch_tally), so this is
+    # the only honest trace of it.
+    ended_without_clean_shutdown: bool
 
     @property
     def refresh_total(self) -> int:
         return self.refreshed + self.failed
 
 
-def _kill_switch_tally(conn, run_id: str, now: datetime) -> _KillSwitchTally:
+def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitchTally:
     """Availability by DURATION, plus the two OUTCOME counts, in one pass.
 
     The rate alone is an availability metric and cannot express the thing §20.3
@@ -710,21 +795,37 @@ def _kill_switch_tally(conn, run_id: str, now: datetime) -> _KillSwitchTally:
 
     An outage opens at a ``kill_switch_refresh_failed`` and closes at the next
     ``kill_switch_refreshed`` (or ``kill_switch_armed``, which is emitted right
-    after a successful schedule and is therefore the same evidence). One still
-    open when measuring runs to the end of the window, so a run that never
-    recovered cannot look clean by having no closing row.
+    after a successful schedule and is therefore the same evidence), and is
+    charged for as long as it ran.
 
-    Time in which the PROCESS WAS NOT RUNNING counts as neither. A healthy switch
-    writes a row every refresh interval, so a gap of
-    ``MAX_KILL_SWITCH_EVENT_GAP_SECONDS`` with nothing in it means the process was
-    down, and that stretch leaves both numerator and denominator. Charging it
-    either way was wrong in both directions and picked between them on an
-    irrelevance — the type of the last row before the stop: a 24h run that was
-    down for 23h reported 100% available, while a run cleanly stopped mid-outage
-    had the whole downtime billed as unprotected. Excluding it also stops the
-    verdict drifting: the stretch from the last event to ``now`` is just another
-    gap, so re-running ``validate`` two days later can no longer dilute a run's
-    outages into a pass (2026-08-01 exit check).
+    SILENCE LONGER THAN THE RUN'S OWN DEADLINE IS ALSO AN OUTAGE. One successful
+    schedule buys ``schedule_cancel_seconds`` of cover; a stretch longer than that
+    with no row renewing it is a stretch in which the exchange cancelled every
+    order on the wallet, whether the process was wedged, throttled, or dead. There
+    used to be a rule here reading such a stretch as "the process was down, judge
+    nothing", and it was unsound in the most direct way available: a dead process
+    and a fired switch leave the SAME silence, so the rule threw away precisely
+    the case with the worst consequence. It also made the number NON-MONOTONE — a
+    301s outage scored 0 outage seconds and passed at 100% while a 299s one scored
+    299 and correctly failed — so a run merely had to stay broken a little longer
+    to be certified (2026-08-01 round-13 review).
+
+    The deadline comes from the run's own genesis config, never a constant: it is
+    operator-configurable, so a fixed threshold is both too strict for one run and
+    too lax for another. The constant it replaced was 300s against a 120s default
+    deadline, which billed the whole 120–300s band — every stretch in which the
+    switch demonstrably fires — as healthy covered time.
+
+    THE WINDOW ENDS AT THE LAST EVENT, never at ``now``. Wall time since the run
+    stopped measures when the operator got round to running ``validate``, nothing
+    about the run; charging it would make the verdict drift with the clock, which
+    is the defect the previous revision was written to fix and which stays fixed
+    here. The cost is that a run which crashed and never restarted has no later
+    row to measure its final lapse against, so that case is REPORTED rather than
+    measured — ``ended_without_clean_shutdown``. Reported and not gated: a run
+    being validated WHILE STILL RUNNING has no shutdown row either, and the log
+    cannot tell that apart from a killed one, so the flag informs the operator
+    without getting a vote.
     """
     refreshed = 0
     failed = 0
@@ -735,6 +836,8 @@ def _kill_switch_tally(conn, run_id: str, now: datetime) -> _KillSwitchTally:
     episodes = 0
     in_outage = False
     previous: datetime | None = None
+    previous_event: str | None = None
+    deadline = _schedule_cancel_seconds(config_json)
     # By TIMESTAMP, not by insertion order: the rows arrive ordered by event_id,
     # and a clock correction (or a test seeding a second batch) makes those two
     # orders disagree — which would then collapse the window and read a healthy
@@ -743,18 +846,33 @@ def _kill_switch_tally(conn, run_id: str, now: datetime) -> _KillSwitchTally:
         (parse_instant(row["timestamp"]), row["event_type"])
         for row in repo.iter_kill_switch_events(conn, run_id)
     )
-    for when, event in [*events, (now, None)]:
+    for when, event in events:
         if previous is not None:
             gap = _window_seconds(previous, when)
-            if gap <= MAX_KILL_SWITCH_EVENT_GAP_SECONDS:
-                covered += gap
-                if in_outage:
-                    outage_total += gap
-            elif in_outage:
-                # The process went away mid-outage. The outage ended with it; what
-                # follows is downtime, which this measure does not judge.
-                in_outage = False
+            covered += gap
+            if in_outage:
+                # A recorded outage: charged in full for as long as it ran, which
+                # is what makes the number independent of the retry cadence.
+                outage_total += gap
+            elif gap > deadline and previous_event not in _KILL_SWITCH_CLEAN_ENDINGS:
+                # SILENCE LONGER THAN THE COVER. Nothing renewed the schedule
+                # across this stretch, so the exchange cancelled every order on
+                # the wallet partway through it — SL and TP included — whatever
+                # the process was doing. Charged in full and counted as its own
+                # episode: this is the case a dead process produces, and the one
+                # the old "silence means downtime, judge nothing" rule threw away.
+                #
+                # UNLESS the stretch opens on a clean shutdown. Then the cover was
+                # released ON PURPOSE — shutdown() cleared the wallet-wide trigger,
+                # so there was nothing left to fire — and an operator who stops the
+                # daemon overnight and restarts it in the morning has not exposed
+                # anything. Without this arm the rule would fail every planned
+                # restart, which is the "correct but far too broad" shape this
+                # review loop keeps producing.
+                outage_total += gap
+                episodes += 1
         previous = when
+        previous_event = event
         if event in (_KILL_SWITCH_REFRESH_OK, _KILL_SWITCH_ARMED):
             # Both prove the switch is scheduled; only the refresh counts toward
             # the sample floor, which asks "has it been EXERCISED enough to judge".
@@ -769,24 +887,36 @@ def _kill_switch_tally(conn, run_id: str, now: datetime) -> _KillSwitchTally:
             fired += 1
         elif event == _KILL_SWITCH_DISARM_FAILED:
             disarm_failed += 1
+    ended_dirty = bool(events) and events[-1][1] not in _KILL_SWITCH_CLEAN_ENDINGS
     # Pinned to the shared context like every other layer's arithmetic: this is
     # the acceptance report's ONLY division, and it decides an exit-5 verdict.
     with localcontext(DECIMAL_CONTEXT):
-        if refreshed + failed == 0:
-            # The documented invariant: None iff there is no refresh evidence at
-            # all. Kept keyed on EVENTS even though the measure is now time —
-            # "no events" is the honest "cannot say", whereas zero elapsed time
-            # with events present is a real answer (see below).
+        if refreshed + failed == 0 or covered <= 0:
+            # None is "cannot say", and it routes to the shortfall lane (keep
+            # running) rather than to a verdict. Both arms are genuine absences of
+            # evidence: no refresh rows at all, and — the arm that used to return
+            # a PERFECT SCORE — rows that span no wall time. A zero denominator
+            # cannot demonstrate availability, and reading it as 1 meant any config
+            # whose healthy cadence never accumulated covered time (or any run
+            # whose events landed in one instant) passed §20.3 unconditionally.
             rate = None
-        elif covered <= 0:
-            # Events exist but no wall time separates them, so no outage time can
-            # exist either: availability is trivially whole. Reachable in tests
-            # (a fixed clock) and in a run whose events all land in one instant.
-            rate = Decimal(1)
         else:
             rate = (covered - outage_total) / covered
+        if rate is not None and rate < 0:
+            # Only reachable if the deadline read from genesis is shorter than the
+            # cadence that actually ran, which makes every gap a lapse. Clamp
+            # rather than emit a rate outside [0, 1] that __post_init__ rejects.
+            rate = Decimal(0)
     return _KillSwitchTally(
-        rate, refreshed, failed, fired, disarm_failed, outage_total, episodes, covered
+        rate,
+        refreshed,
+        failed,
+        fired,
+        disarm_failed,
+        outage_total,
+        episodes,
+        covered,
+        ended_dirty,
     )
 
 
@@ -882,7 +1012,7 @@ def validate_live_run(
         unprotected_seconds, unprotected_windows, unprotected_open = _unprotected_windows(
             conn, run_id, now
         )
-        kill_switch = _kill_switch_tally(conn, run_id, now)
+        kill_switch = _kill_switch_tally(conn, run_id, run_row["config_json"])
         refresh_rate, refresh_total = kill_switch.refresh_rate, kill_switch.refresh_total
         safe_mode = _current_safe_mode(conn, run_id)
         unresolved_mismatch_count = _unresolved_reconciliation_mismatches(conn, run_id)
@@ -1123,6 +1253,10 @@ def validate_live_run(
         unprotected_window_count=unprotected_windows,
         unresolved_unprotected_window=unprotected_open,
         kill_switch_refresh_success_rate=refresh_rate,
+        kill_switch_outage_seconds=kill_switch.outage_seconds,
+        kill_switch_outage_episodes=kill_switch.outage_episodes,
+        kill_switch_covered_seconds=kill_switch.covered_seconds,
+        kill_switch_ended_without_clean_shutdown=kill_switch.ended_without_clean_shutdown,
         kill_switch_refresh_total=refresh_total,
         kill_switch_fired_count=kill_switch.fired_count,
         kill_switch_disarm_failed_count=kill_switch.disarm_failed_count,
@@ -1157,6 +1291,13 @@ def _apply_refresh_gate(
     cannot drift.
     """
     refresh_rate, refresh_total = kill_switch.refresh_rate, kill_switch.refresh_total
+    # NOTE ON ``ended_without_clean_shutdown``: reported, never gated — not even
+    # as a shortfall. The normal way to run ``validate`` is against a run that is
+    # STILL GOING, and an in-flight run has no shutdown row by definition, so
+    # gating on it would refuse to certify every healthy run for the duration of
+    # its own life. The flag distinguishes a killed run from a stopped one for a
+    # human reading the summary; it cannot distinguish either from a running one,
+    # so it does not get a vote (2026-08-01 round-13 review).
     if refresh_total == 0:
         # No refresh evidence yet — a shortfall (keep running), not a 0% failure.
         shortfalls.append("no kill-switch refresh events yet (need a rate >= 99%)")
@@ -1171,6 +1312,15 @@ def _apply_refresh_gate(
         shortfalls.append(
             f"kill_switch_refresh_total = {refresh_total} — too few to judge availability "
             f"(need >= {MIN_KILL_SWITCH_REFRESH_SAMPLES}; below that one blip decides it)"
+        )
+    elif refresh_rate is None:
+        # Enough rows to judge, but they span no wall time, so availability has no
+        # denominator. Ordered AFTER the sample floor because that message is the
+        # more useful one whenever both apply. Used to answer with a perfect score
+        # (2026-08-01 round-13 review).
+        shortfalls.append(
+            f"kill_switch events span no elapsed time ({refresh_total} row(s) at a "
+            "single instant) — availability has no denominator to measure against"
         )
     elif refresh_rate is not None and refresh_rate < MIN_KILL_SWITCH_REFRESH_RATE:
         # Report the TIME, not only the rounded percentage. At two decimals a

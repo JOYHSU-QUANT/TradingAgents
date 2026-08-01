@@ -412,7 +412,15 @@ duplicate_fill_apply_count / local_exchange_position_mismatch_count /
 account_replay_mismatch_count / unprotected_position_seconds` 全為 0、
 `kill_switch_refresh_success_rate ≥ 99%`（**樣本數 < 100 時不判定**，改記 exit 4 的
 shortfall——30s 一次的節奏下約 50 分鐘就滿，遠早於 30 cycles，所以正常驗收 run 不會
-卡在這裡；設這道下限是因為短 run 的覆蓋時間太短，一次 30s 中斷就吃掉整段可用率）、
+卡在這裡；設這道下限是因為短 run 的覆蓋時間太短，一次 30s 中斷就吃掉整段可用率）。
+**這道可用率以「時間」計，而且「沉默」也算 outage**：只要事件之間的空窗超過該 run
+自己的 `schedule_cancel_seconds`，就代表那段期間沒有任何東西續約排程，交易所已在中途
+把整個錢包的單（含 SL/TP）撤光——不管當時進程是卡住、被限流還是根本死了——一律以
+**全長**計入 outage。唯一豁免是空窗開頭是一列乾淨的 shutdown（`shutdown_cancel_orders_*`）：
+那代表保護是**刻意**釋放的（shutdown 會清掉錢包層級的 trigger），所以計畫性的停機重啟
+不會被罰。**因此：被 SIGKILL／OOM 砍掉再重啟的 run，那段停機會直接反映在可用率上**，
+這是刻意的——那段時間倉位確實裸奔過。另外 `kill_switch_clean_shutdown: no` 只是
+**告知**（log 停在半路），不擋 gate，因為在 run 還活著時跑 validate 本來就沒有 shutdown 列。
 `kill_switch_fired_count = 0`（dead man's switch 從未真的燒過）、run **不在 MANUAL
 safe mode**、四項 smoke 布林（`restart_reconciliation_passed`
 ——注意這一項**沒有** `_test_` 中綴——以及 `emergency_close_test_passed`／

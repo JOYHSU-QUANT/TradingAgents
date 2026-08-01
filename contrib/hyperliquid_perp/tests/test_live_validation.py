@@ -1205,13 +1205,13 @@ def test_a_recoverable_episode_is_not_the_manual_gate(tmp_path):
     assert not any("MANUAL safe mode" in f for f in report.failures)
 
 
-def test_an_outage_that_never_recovered_is_measured_to_now(tmp_path):
-    """The open-outage branch: no closing row must not read as no outage.
+def test_a_log_that_stops_mid_outage_is_flagged_and_does_not_drift(tmp_path):
+    """No closing row: the lapse cannot be MEASURED, so it is reported instead.
 
-    Zero coverage before this — every other test passes ``now=_T0`` while the
-    events run forward from ``_T0``, so ``now`` never bound the window and the
-    whole branch could have been deleted without a red test
-    (2026-08-01 exit check).
+    The window ends at the last event, never at ``now``. Charging the stretch to
+    ``now`` would measure when the operator got round to running ``validate``, and
+    the verdict would then get worse the longer they waited — the mirror of the
+    drift-toward-pass this rule was written to kill. What is left is the flag.
     """
     db = Database(tmp_path / "live.db")
     _init_live_run(db)
@@ -1219,14 +1219,18 @@ def test_an_outage_that_never_recovered_is_measured_to_now(tmp_path):
     _add_cycles(db, MIN_LIVE_CYCLES)
     _add_orders(db, 30)
     _add_refreshes(db, 100, 0)
-    # The refresh timeline ends at _T0 + 99*30s; the switch then fails and never
-    # comes back, and validate runs two minutes later.
     last = 99 * _REFRESH_STEP_S
     _kill_switch_event(db, "kill_switch_refresh_failed", off=last + _REFRESH_STEP_S)
     with db:
-        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=last + 150))
-    assert report.kill_switch_refresh_success_rate < Decimal("0.99")
-    assert not report.live_ready
+        soon = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=last + 150))
+        two_days_later = validate_live_run(db, run_id="r", now=_T0 + timedelta(days=2))
+    assert soon.kill_switch_ended_without_clean_shutdown
+    # Identical whenever it is asked. This is the property, not an incidental.
+    assert two_days_later.kill_switch_outage_seconds == soon.kill_switch_outage_seconds
+    assert two_days_later.kill_switch_refresh_success_rate == (
+        soon.kill_switch_refresh_success_rate
+    )
+    assert two_days_later.live_ready == soon.live_ready
 
 
 def test_downtime_is_charged_to_neither_side(tmp_path):
@@ -1258,11 +1262,12 @@ def test_downtime_is_charged_to_neither_side(tmp_path):
     assert later.live_ready == at_stop.live_ready
 
 
-def test_a_restart_closes_the_outage_it_was_stopped_in(tmp_path):
-    """``kill_switch_armed`` is a successful schedule, so it ends an outage.
+def test_a_planned_stop_and_restart_is_not_charged_as_exposure(tmp_path):
+    """A clean shutdown RELEASES the cover, so the downtime after it is not a lapse.
 
-    Without this, a clean stop during a network blip left the outage open across
-    the whole downtime, and a normal restart-and-carry-on run failed the gate.
+    shutdown() clears the wallet-wide trigger, so there is nothing left to fire and
+    an operator who stops the daemon overnight has exposed nothing. Without this
+    exemption the deadline rule would fail every planned restart.
     """
     db = Database(tmp_path / "live.db")
     _init_live_run(db)
@@ -1271,17 +1276,71 @@ def test_a_restart_closes_the_outage_it_was_stopped_in(tmp_path):
     _add_orders(db, 30)
     _add_refreshes(db, 100, 0)
     stopped_at = 99 * _REFRESH_STEP_S
-    _kill_switch_event(db, "kill_switch_refresh_failed", off=stopped_at + 30)
-    # ...operator stops the daemon, and restarts it six hours later.
+    _kill_switch_event(db, "shutdown_cancel_orders_completed", off=stopped_at + 30)
     six_hours = stopped_at + 30 + 6 * 3600
     _kill_switch_event(db, "kill_switch_armed", off=six_hours)
     _kill_switch_event(db, "kill_switch_refreshed", off=six_hours + 30)
     with db:
         report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=six_hours + 60))
-    # The six hours are neither outage nor coverage, so one 30s blip does not
-    # sink an otherwise healthy run.
-    assert report.kill_switch_refresh_success_rate > Decimal("0.98")
+    assert report.kill_switch_outage_seconds == Decimal(0)
     assert report.live_ready
+
+
+def test_a_crash_that_outlived_its_deadline_is_charged_on_restart(tmp_path):
+    """The case the old silence-means-downtime rule threw away.
+
+    No shutdown row: the process was killed with a schedule standing. 120s later
+    the exchange cancelled every order on the wallet — SL and TP included — and it
+    stayed that way for six hours. The restart's own ``kill_switch_armed`` is what
+    finally bounds the window, which is why the measure has to charge a gap it did
+    not see either end of being written.
+    """
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    _add_refreshes(db, 100, 0)
+    died_at = 99 * _REFRESH_STEP_S
+    six_hours = died_at + 6 * 3600
+    _kill_switch_event(db, "kill_switch_armed", off=six_hours)
+    _kill_switch_event(db, "kill_switch_refreshed", off=six_hours + 30)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=six_hours + 60))
+    assert report.kill_switch_outage_seconds >= Decimal(6 * 3600)
+    assert report.kill_switch_outage_episodes == 1
+    assert report.kill_switch_refresh_success_rate < Decimal("0.99")
+    assert not report.live_ready
+
+
+def test_armed_alone_closes_an_outage_inside_the_deadline(tmp_path):
+    """Isolates the ``kill_switch_armed`` branch, which nothing else reaches.
+
+    The previous restart test put six hours between the failure and the restart,
+    so the downtime rule closed the outage on its own and ``_KILL_SWITCH_ARMED``
+    could be deleted from the success set with the suite still green (proved by
+    mutation, 2026-08-01). Here the restart lands INSIDE the 120s deadline, so the
+    armed row is the only evidence that can close the window.
+    """
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    _add_refreshes(db, 100, 0)
+    failed_at = 99 * _REFRESH_STEP_S + 30
+    _kill_switch_event(db, "kill_switch_refresh_failed", off=failed_at)
+    # 60s later — well inside the 120s cover, so no lapse, and the ONLY row that
+    # can end the outage is the restart's armed.
+    _kill_switch_event(db, "kill_switch_armed", off=failed_at + 60)
+    _kill_switch_event(db, "kill_switch_refreshed", off=failed_at + 90)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=failed_at + 120))
+    # Exactly the 60s between the failure and the armed row, and nothing after it.
+    # This is the whole assertion: drop _KILL_SWITCH_ARMED from the success set and
+    # the window runs on to the refreshed row at +90 instead, so the number moves.
+    assert report.kill_switch_outage_seconds == Decimal(60)
+    assert report.kill_switch_outage_episodes == 1
 
 
 # -- refresh-rate sample floor ---------------------------------------------
@@ -1318,7 +1377,10 @@ def test_a_single_refresh_is_not_proof_the_switch_worked(tmp_path):
     _add_refreshes(db, 1, 0)
     with db:
         report = validate_live_run(db, run_id="r", now=_T0)
-    assert report.kill_switch_refresh_success_rate == Decimal(1)
+    # One row spans no wall time, so availability has no denominator. This used to
+    # answer 100% — the strongest possible claim from the weakest possible
+    # evidence (2026-08-01 round-13 review).
+    assert report.kill_switch_refresh_success_rate is None
     assert not report.live_ready
     assert any("too few to judge availability" in s for s in report.shortfalls)
 
@@ -1414,6 +1476,10 @@ def _make_report(**overrides) -> LiveValidationReport:
         "unresolved_unprotected_window": False,
         "kill_switch_refresh_success_rate": Decimal(1),
         "kill_switch_refresh_total": 100,
+        "kill_switch_outage_seconds": Decimal(0),
+        "kill_switch_outage_episodes": 0,
+        "kill_switch_covered_seconds": Decimal(3000),
+        "kill_switch_ended_without_clean_shutdown": False,
         "kill_switch_fired_count": 0,
         "kill_switch_disarm_failed_count": 0,
         "safe_mode_active_type": None,
@@ -1438,8 +1504,15 @@ def test_post_init_accepts_a_consistent_report():
 
 
 def test_post_init_rejects_rate_present_with_zero_total():
-    with pytest.raises(ValueError, match="None iff"):
+    with pytest.raises(ValueError, match="must be None when there were no"):
         _make_report(kill_switch_refresh_success_rate=Decimal("0.5"), kill_switch_refresh_total=0)
+
+
+def test_post_init_allows_no_rate_even_when_refreshes_exist():
+    # The converse is deliberately NOT enforced: rows spanning no wall time are an
+    # absence of evidence, and the invariant used to force them to answer with a
+    # number — which the tally could only satisfy with a perfect score.
+    _make_report(kill_switch_refresh_success_rate=None, kill_switch_refresh_total=100)
 
 
 def test_post_init_rejects_rate_out_of_range():

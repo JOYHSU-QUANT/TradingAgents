@@ -780,8 +780,42 @@ def test_the_timing_invariant_budgets_for_the_failure_backoff():
     ok = KillSwitchConfig(refresh_interval_seconds=30, schedule_cancel_seconds=120)
     assert kill_switch_timing_violation(ok, max_tick_gap_seconds=30) is None
 
-    # And the budgeted amount is the one the manager can actually impose.
-    assert _FAILURE_BACKOFF_FRACTION == 0.5
+    # And the budgeted amount is the one the manager can actually impose — pinned
+    # by test_a_slow_failure_is_capped_at_half_an_interval, which drives the cap
+    # rather than restating it. `assert _FAILURE_BACKOFF_FRACTION == 0.5` used to
+    # sit here: a literal against itself, which let the cap be multiplied by 1000
+    # with the whole suite green (mutation-verified, 2026-08-01 round-13 review).
+    assert _FAILURE_BACKOFF_FRACTION < 1.0
+
+
+def test_a_slow_failure_is_capped_at_half_an_interval(env):
+    """The cap is the half of ``min(spent, cap)`` that nothing else reaches.
+
+    Every other backoff test uses an attempt SHORTER than the cap (8s against a
+    15s cap), so they all exercise the ``spent`` side and the cap could be raised
+    a thousandfold unnoticed. It is the cap that ``kill_switch_timing_violation``
+    budgets against, so an uncapped backoff turns that constructor invariant into
+    a false promise and the switch can fire during normal operation.
+    """
+    from contrib.hyperliquid_perp.live.kill_switch import _FAILURE_BACKOFF_FRACTION
+
+    db, client, gate, clock, manager = env
+    manager.arm()
+    clock.advance(30)
+
+    # An attempt that burned 60s — four times the 15s cap for a 30s interval.
+    client.schedule_error = ExchangeRequestError("timeout")
+    client.schedule_duration_s = 60
+    assert manager.refresh_due() is True
+    manager.refresh()
+
+    cap = 30 * _FAILURE_BACKOFF_FRACTION  # 15s
+    assert manager.refresh_due() is False
+    clock.advance(cap - 1)
+    assert manager.refresh_due() is False, "the pause ended before the cap"
+    clock.advance(2)
+    # Capped: retryable again 15s after the failure, NOT 60s after it.
+    assert manager.refresh_due() is True
 
 
 def test_an_instantly_failing_refresh_is_not_penalised(env):
@@ -1631,7 +1665,6 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
     import inspect
 
     from contrib.hyperliquid_perp import cli as cli_mod
-    from contrib.hyperliquid_perp.live import engine as live_engine
 
     loop_src = inspect.getsource(cli_mod._run_live_loop)
 
@@ -1640,12 +1673,34 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
     #    the real maximum is their SUM.
     # Anchor on the STATEMENTS, not the words: the surrounding comments name both
     # calls, and matching those would let a comment satisfy the assertion.
-    tick_at = loop_src.index("tick = engine.tick()")
-    pump_at = loop_src.index("cycle = driver.pump()")
-    assert "refresh_across_blocking_work" in loop_src[tick_at:pump_at], (
+    #    Parsed, not string-searched, and the ARGUMENT is what gets asserted: the
+    #    substring form stayed green with the call mutated to
+    #    ``refresh_across_blocking_work(None, ...)`` — text identical, refresh gone
+    #    (mutation-verified, 2026-08-01 round-13 review). ``_run_live_loop`` needs
+    #    a whole live session to drive, so this checks the wiring structurally
+    #    instead; its sibling seam in engine.tick() IS driven, in
+    #    test_live_engine.test_the_market_snapshot_read_refreshes_the_switch_across_itself.
+    import ast
+    import textwrap
+
+    loop_ast = ast.parse(textwrap.dedent(loop_src))
+    seam_args = [
+        node.args[0]
+        for node in ast.walk(loop_ast)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "refresh_across_blocking_work"
+        and node.args
+    ]
+    assert seam_args, (
         "engine.tick() and driver.pump() are adjacent again — the two chains are "
         "consecutive, so the real unrefreshed run is their sum, not the max"
     )
+    for arg in seam_args:
+        assert not isinstance(arg, ast.Constant), (
+            "_run_live_loop passes a literal (None?) as the kill switch — the "
+            "helper no-ops and the seam refreshes nothing"
+        )
 
     # 2. The day-roll baseline read is a bare REST call on the same thread, so it
     #    refreshes across itself rather than joining whatever chain it lands in.
@@ -1734,19 +1789,17 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
         assert later - earlier > 1, f"two market reads with no refresh between them: {reads}"
 
     # 4. The market snapshot inside engine.tick() is the other full-timeout read
-    #    that used to chain into the submit ladder. Asserted on the STATEMENTS, so
-    #    a comment mentioning the helper cannot satisfy it.
-    engine_src = inspect.getsource(live_engine.LiveExecutionEngine.tick)
-    fetch_at = engine_src.index("snap_result = self._provider.fetch(")
-    valid_at = engine_src.index("if not snap_result.is_valid:")
-    assert "refresh_across_blocking_work(" in engine_src[fetch_at:valid_at], (
-        "the market snapshot no longer refreshes across itself — it chains into "
-        "the submit ladder, making the real unrefreshed run 4, not 3"
-    )
-    # No `assert _MAX_UNREFRESHED_REST_CALLS == 3` here: this test's whole point is
-    # that the constant is checked against the CODE, and restating the literal was
-    # the tautology it replaced. The advisory boundary test above already moves
-    # with the constant.
+    #    that used to chain into the submit ladder. Covered by DRIVING the engine,
+    #    in test_live_engine.test_the_market_snapshot_read_refreshes_the_switch_
+    #    across_itself — the source-slice assertion that used to live here stayed
+    #    green with the switch argument mutated to None (mutation-verified,
+    #    2026-08-01 round-13 review), which is the whole failure it existed to
+    #    catch. Nothing to assert here; the drive test owns it.
+    #
+    # No `assert _MAX_UNREFRESHED_REST_CALLS == 3` here either: this test's whole
+    # point is that the constant is checked against the CODE, and restating the
+    # literal was the tautology it replaced. The advisory boundary test above
+    # already moves with the constant.
 
 
 def test_refreshing_across_blocking_work_never_takes_down_its_caller(caplog):

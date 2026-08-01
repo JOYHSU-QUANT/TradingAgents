@@ -220,6 +220,48 @@ def _snap(mark=_MARK, mid=_MARK):
     return (D(mark), D(mid))
 
 
+def test_the_market_snapshot_read_refreshes_the_switch_across_itself(tmp_path):
+    """``engine.tick()`` must refresh the dead man's switch across its own read.
+
+    The market snapshot rides the SAME ``network_timeout_s`` as everything else,
+    so unrefreshed it chains into the submit ladder and the real unrefreshed run
+    becomes their sum rather than ``_MAX_UNREFRESHED_REST_CALLS``.
+
+    DRIVEN, not inspected. The check this replaces searched ``tick``'s source for
+    ``refresh_across_blocking_work`` between two statements, and stayed green with
+    the switch argument mutated to ``None`` — the refresh gone entirely and 1918
+    tests still passing (mutation-verified, 2026-08-01 round-13 review).
+    """
+    db, clock, engine, gate, sub = _build(tmp_path)
+    log: list[str] = []
+    scripted = ScriptedSnapshotProvider("BTC", [_snap()])
+
+    class _RecordingProvider:
+        def fetch(self, coin, *, requested_at, timeout_seconds):
+            log.append("fetch")
+            return scripted.fetch(coin, requested_at=requested_at, timeout_seconds=timeout_seconds)
+
+    class _RecordingSwitch:
+        stop_new_orders = False
+
+        def tick(self) -> None:
+            log.append("refresh")
+
+        def release_safe_mode(self) -> bool:
+            return True
+
+    engine._provider = _RecordingProvider()
+    engine._kill_switch = _RecordingSwitch()
+    engine.tick()
+
+    assert "fetch" in log, "the tick did not read the market at all"
+    # A refresh has to land AFTER the read — that is the seam being protected.
+    assert "refresh" in log[log.index("fetch") :], (
+        "engine.tick() read the market without refreshing the kill switch across "
+        f"it — the read chains into the submit ladder. log={log}"
+    )
+
+
 # -- start_plan / slice scheduling ------------------------------------------
 
 

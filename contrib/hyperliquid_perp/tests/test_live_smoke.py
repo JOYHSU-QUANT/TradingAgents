@@ -1740,6 +1740,52 @@ def test_partially_closed_staged_long_retries_the_true_residual(live_db):
     assert runner.staged_long_residual is None
 
 
+class _AlwaysPartialClose(_FakeSigned):
+    """Every reduce-only close fills HALF, including the last one.
+
+    :class:`_PartialClose` halves only the FIRST close, so the finally backstop
+    flattens and the partial branch's effect is erased before anything is
+    asserted about it.
+    """
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.position = _D(0)
+        self.close_requests: list[Decimal] = []
+
+    def place_ioc_limit(self, **k):
+        ack = super().place_ioc_limit(**k)
+        if not k.get("reduce_only"):
+            self.position += ack.filled_size or _D(0)
+            return ack
+        self.close_requests.append(k["size"])
+        filled = min(k["size"], self.position) / 2
+        self.position -= filled
+        return _Ack("filled", filled_size=filled)
+
+
+def test_a_cleanup_that_only_half_filled_is_not_reported_as_flat(live_db):
+    """A partial cleanup close must not read as a flattened position.
+
+    The existing partial test asserts the residual flag only AFTER a successful
+    backstop close, so the partial branch could be deleted outright with the suite
+    still green (mutation-verified, 2026-08-01 round-13 review). With that branch
+    gone ``_attempt_close`` returns no note, ``_close_staged_long`` logs
+    "flattened", the residual flag is cleared over a still-open position and the
+    CLI prints no warning at all — a real funded position surviving a suite the
+    RUNBOOK advertises as self-cleaning.
+    """
+    signed = _AlwaysPartialClose()
+    with live_db:
+        runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+        runner.run(only=_TRIGGER_BLOCK)
+    # The position genuinely never reached zero...
+    assert signed.position > _D(0)
+    # ...so the operator has to be told, with the remainder named.
+    assert runner.staged_long_residual is not None
+    assert "filled only" in runner.staged_long_residual
+
+
 def test_refused_staged_close_flags_a_residual_without_reddening_the_tests(live_db):
     # A cleanup that never flattened must reach the operator — but it is not a
     # test verdict: the trigger tests themselves already round-tripped the wire

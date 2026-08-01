@@ -162,6 +162,15 @@ def test_healthy_testnet_run_is_ready(tmp_path):
     assert report.restart_reconciliation_passed
     assert report.emergency_close_test_passed
     assert report.kill_switch_refresh_success_rate == Decimal(1)
+    # The NUMBERS on the go/no-go summary, not only the booleans. The gates read
+    # local variables, so these three fields could each be hardcoded to 0 with the
+    # whole suite green (mutation-verified, 2026-08-01 round-13 review) — and they
+    # are what the operator actually reads before committing real money.
+    # Only the assertions with POWER: this fixture seeds no fills and no failed
+    # attempts, so `fill_count == 0` / `api_failed_count == 0` would pass against
+    # a field hardcoded to 0 — the very mutation being guarded against.
+    assert report.live_order_count == 30
+    assert report.kill_switch_covered_seconds > Decimal(0)
 
 
 def test_order_count_one_short_is_a_shortfall(tmp_path):
@@ -1497,6 +1506,115 @@ def _make_report(**overrides) -> LiveValidationReport:
     }
     base.update(overrides)
     return LiveValidationReport(**base)
+
+
+def _insert_raw_fill(db, *, fill_id: str, key: str | None) -> None:
+    """Write a fills row directly, the way a corrupt store would."""
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO fills (fill_id, timestamp, mode, run_id, order_id, symbol, side,"
+            " fill_qty, fill_price, fill_notional, fee, fee_rate, realized_pnl_delta,"
+            " liquidity_type, exchange_fill_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                fill_id,
+                _T0.isoformat(),
+                "live",
+                "r",
+                "o1",
+                "BTC",
+                "buy",
+                "0.001",
+                "100000",
+                "100",
+                "0.05",
+                "0.0005",
+                "0",
+                "taker",
+                key,
+            ),
+        )
+
+
+def test_null_keyed_fills_do_not_group_into_a_duplicate(tmp_path):
+    """The ``IS NOT NULL`` filter is load-bearing, not defensive noise.
+
+    SQLite's GROUP BY treats NULLs as EQUAL, so without the filter every
+    NULL-keyed fill collapses into one group and any run with two of them reports
+    a duplicate-apply — failing a healthy run at exit 5. Nothing covered this: the
+    count was only ever asserted as the literal 0 in a report fixture
+    (mutation-verified, 2026-08-01 round-13 review).
+    """
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _insert_raw_fill(db, fill_id="f1", key=None)
+    _insert_raw_fill(db, fill_id="f2", key=None)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.duplicate_fill_apply_count == 0
+
+
+def test_two_fills_sharing_an_exchange_key_fail_the_gate(tmp_path):
+    """The other direction: the branch itself must still be able to fire.
+
+    Structurally impossible while the UNIQUE index stands, which is exactly why
+    it is a store-integrity assertion — and why deleting the branch was invisible.
+    Dropping the index models the corrupt store it exists to catch.
+    """
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    with db.transaction() as conn:
+        conn.execute("DROP INDEX IF EXISTS idx_fills_exchange_fill_key")
+    _insert_raw_fill(db, fill_id="f1", key="0xdead:1")
+    _insert_raw_fill(db, fill_id="f2", key="0xdead:1")
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.duplicate_fill_apply_count == 1
+    assert not report.live_ready
+
+
+@pytest.mark.parametrize(
+    "config_json",
+    ["5", "[]", '{"live": 5}', '{"live": {"kill_switch": 5}}', "not json at all", None],
+)
+def test_the_genesis_deadline_reader_degrades_instead_of_crashing(config_json):
+    """A corrupt genesis must not crash a read-only reporter, or zero the deadline.
+
+    Zero matters as much as the crash: a 0-second cover would make every gap a
+    lapse and turn a garbled config into a guaranteed exit 5.
+    """
+    from contrib.hyperliquid_perp.live.validation import (
+        DEFAULT_SCHEDULE_CANCEL_SECONDS,
+        _schedule_cancel_seconds,
+    )
+
+    assert _schedule_cancel_seconds(config_json) == DEFAULT_SCHEDULE_CANCEL_SECONDS
+
+
+@pytest.mark.parametrize("raw", [0, -5, True, "120"])
+def test_a_nonsensical_deadline_value_falls_back(raw):
+    from contrib.hyperliquid_perp.live.validation import (
+        DEFAULT_SCHEDULE_CANCEL_SECONDS,
+        _schedule_cancel_seconds,
+    )
+
+    blob = json.dumps({"live": {"kill_switch": {"schedule_cancel_seconds": raw}}})
+    assert _schedule_cancel_seconds(blob) == DEFAULT_SCHEDULE_CANCEL_SECONDS
+
+
+def test_the_genesis_deadline_reader_reads_a_real_value():
+    from contrib.hyperliquid_perp.live.validation import _schedule_cancel_seconds
+
+    blob = json.dumps({"live": {"kill_switch": {"schedule_cancel_seconds": 600}}})
+    assert _schedule_cancel_seconds(blob) == Decimal(600)
+
+
+@pytest.mark.parametrize("config_json", ["5", "[]", '{"live": 5}', '{"live": {"mode": 5}}'])
+def test_execution_mode_degrades_on_a_corrupt_genesis(config_json):
+    # Valid JSON that is not an object has no ``.get``; the docstring promises
+    # "unknown, never crash" and nothing tested it.
+    from contrib.hyperliquid_perp.live.validation import execution_mode
+
+    assert execution_mode(config_json) == "unknown"
 
 
 def test_post_init_accepts_a_consistent_report():

@@ -309,6 +309,25 @@ def test_sl_repair_retries_then_succeeds(env):
     assert gate.unresolved_protection_failure is False
 
 
+def test_the_repair_backoff_is_capped_to_leave_room_for_two_timeouts(env):
+    """The clamp gets ONE of the three §18.2 slots, not all of them.
+
+    The stretch between two ``refresh_across_blocking_work`` calls holds the
+    rung's wire call and — on the ExchangeError lane — its orderStatus recovery
+    probe, two full ``network_timeout_s``, before this sleep. A clamp equal to the
+    WHOLE 30s tick-gap promise therefore allowed 8 + 8 + 30 = 46s inside it at the
+    RUNBOOK's recommended timeout, contradicting ``_maybe_delay``'s own docstring
+    three lines below the constant (2026-08-01 round-13 concept scan).
+    """
+    db = env
+    client, gate = _FakeClient(), _gate()
+    sleeps: list[float] = []
+    mgr = _manager(db, client, gate, sleeps=sleeps)
+    # delay 5 x backoff 10 = 50s of nominal backoff, clamped to the slot.
+    mgr._maybe_delay(1, 3, backoff=10)
+    assert sleeps == [10.0], "the repair backoff is not capped at one third of the tick gap"
+
+
 def test_sl_repair_exhausted_needs_emergency_close(env):
     db = env
     _seed_long(db)

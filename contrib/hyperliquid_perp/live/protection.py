@@ -111,7 +111,18 @@ _SL_FIRE_BAND_FLOOR_PCT = Decimal("0.03")
 # _SECONDS, 30s). A backoff that grew past it would break the very promise the
 # preflight proved. Never shortens a configured delay — a delay already longer
 # than this is the operator's own choice and the advisory warns about it.
-_MAX_REPAIR_SLEEP_S = 30.0
+#
+# ONE THIRD of that gap, not all of it. The sleep is not alone in the stretch
+# between two refreshes: ``_maybe_delay``'s own docstring says every rung reaches
+# it after a wire call, and the ExchangeError lane after a wire call AND its
+# orderStatus recovery probe — two full ``network_timeout_s`` back to back. A
+# clamp set to the WHOLE gap therefore permitted 8 + 8 + 30 = 46s inside a 30s
+# promise at the RUNBOOK's recommended timeout, i.e. the constant contradicted
+# the docstring three lines below it. Three slots is the budget
+# ``network_timeout_warning`` already enforces (``_MAX_UNREFRESHED_REST_CALLS``
+# = 3, which is why it demands ``timeout * 3 < max_tick_gap``): the two timeouts
+# take two slots, this sleep takes the third (2026-08-01 round-13 concept scan).
+_MAX_REPAIR_SLEEP_S = 10.0
 
 
 class _EstablishResult(Enum):

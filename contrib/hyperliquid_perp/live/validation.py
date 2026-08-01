@@ -934,6 +934,15 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
             fired += 1
         elif event == _KILL_SWITCH_DISARM_FAILED:
             disarm_failed += 1
+        elif event in _KILL_SWITCH_CLEAN_ENDINGS:
+            # A successful signed round-trip (clear_scheduled_cancel returned), so
+            # it is the same class of positive wire evidence as ``armed`` and ENDS
+            # an outage — it just is not a refresh, so it earns no sample credit.
+            # Without this a run stopped cleanly after a network blip reported
+            # "clean shutdown: yes" and "ended inside an outage: yes" at once, and
+            # the shortfall named a failed-refresh row that was not the last row
+            # (2026-08-01 round-13 exit check).
+            in_outage = False
     ended_dirty = bool(events) and events[-1][1] not in _KILL_SWITCH_CLEAN_ENDINGS
     # An outage still OPEN at the last event is a different, sharper fact than a
     # merely dirty ending: the last thing the run managed to say was "I failed to
@@ -1354,18 +1363,15 @@ def _apply_refresh_gate(
     # its own life. The flag distinguishes a killed run from a stopped one for a
     # human reading the summary; it cannot distinguish either from a running one,
     # so it does not get a vote (2026-08-01 round-13 review).
-    if kill_switch.ended_in_outage:
-        # Unlike the dirty-ending flag above, this one is unambiguous: the run's
-        # LAST kill-switch row is a failed refresh, so whatever happened next, it
-        # started from an outage. The seconds cannot be charged without measuring
-        # to `now` and drifting, so it lands here — a shortfall (keep running),
-        # never silence, because a run that failed and never recovered otherwise
-        # scored a clean 100%.
-        shortfalls.append(
-            "the kill-switch log ends INSIDE an outage (last row is a failed "
-            "refresh) — the time after it cannot be measured, so this run's "
-            "availability is a lower bound, not a verdict"
-        )
+    # ``ended_in_outage`` is REPORTED, never gated — for exactly the reason spelled
+    # out above for ``ended_without_clean_shutdown``, which it took a second
+    # mistake to see. It briefly appended a shortfall here, on the argument that
+    # an unclosed outage is unambiguous where a missing shutdown row is not. It is
+    # not: an in-flight run's log ends wherever ``validate`` happened to read it,
+    # so a HEALTHY daemon that hit a transient blip 15s ago failed at exit 4 while
+    # the SAME run 30s later — with strictly MORE measured exposure — passed. That
+    # is the verdict moving with the clock, the one property this measure exists to
+    # deny (2026-08-01 round-13 exit check).
     if refresh_total == 0:
         # No refresh evidence yet — a shortfall (keep running), not a 0% failure.
         shortfalls.append("no kill-switch refresh events yet (need a rate >= 99%)")

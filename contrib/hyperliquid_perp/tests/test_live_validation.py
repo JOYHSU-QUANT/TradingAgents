@@ -1376,9 +1376,38 @@ def test_a_run_that_ends_inside_an_outage_is_not_certified(tmp_path):
     _kill_switch_event(db, "kill_switch_refresh_failed", off=99 * _REFRESH_STEP_S + 30)
     with db:
         report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=4000))
+    # REPORTED, not gated: an in-flight run's log also ends wherever validate read
+    # it, so gating here failed a healthy daemon that blipped 15s ago while the
+    # same run 30s later — with MORE measured exposure — passed. The flag informs;
+    # it does not vote (2026-08-01 round-13 exit check).
     assert report.kill_switch_ended_in_outage
-    assert not report.live_ready
-    assert any("ends INSIDE an outage" in s for s in report.shortfalls)
+    assert not any("ends INSIDE an outage" in s for s in report.shortfalls)
+    assert "kill_switch_ended_in_outage: yes" in report.summary_lines()
+
+
+def test_a_clean_shutdown_after_a_blip_does_not_report_an_open_outage(tmp_path):
+    """``kill_switch_disarmed`` is positive wire evidence, so it closes an outage.
+
+    Otherwise a run stopped cleanly right after a network blip asserted both
+    "clean shutdown: yes" and "ended inside an outage: yes", and the operator's
+    only way to clear it was to restart the daemon so an ``armed`` row landed.
+    """
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    _add_refreshes(db, 100, 0)
+    base = 99 * _REFRESH_STEP_S
+    _kill_switch_event(db, "kill_switch_refresh_failed", off=base + 30)
+    _kill_switch_event(db, "shutdown_cancel_orders_started", off=base + 40)
+    _kill_switch_event(db, "shutdown_cancel_orders_completed", off=base + 45)
+    _kill_switch_event(db, "kill_switch_disarmed", off=base + 50)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=base + 200))
+    assert not report.kill_switch_ended_without_clean_shutdown
+    assert not report.kill_switch_ended_in_outage
+    assert report.live_ready
 
 
 def test_a_crash_that_outlived_its_deadline_is_charged_on_restart(tmp_path):

@@ -427,12 +427,13 @@ shortfall——30s 一次的節奏下約 50 分鐘就滿，遠早於 30 cycles�
 注意**不是** `shutdown_cancel_orders_started`／`_completed`：那兩列夾住的是撤單 sweep，
 跑在清 trigger **之前**，當下 switch 仍然是 armed 的。
 **因此：被 SIGKILL／OOM 砍掉再重啟的 run，那段停機會直接反映在可用率上**，這是刻意的
-——那段時間倉位確實裸奔過。另外兩個旗標的分量**不同**：
-`kill_switch_clean_shutdown: no` 純粹**告知、不擋 gate**（log 停在半路——run 還活著時跑
-validate 本來就沒有 shutdown 列，分不出「被砍掉」與「還在跑」）；
-`kill_switch_ended_in_outage: yes` 則**會擋**——最後一列是失敗的 refresh，之後的時間無從
-量測，所以那個可用率是**下界**而不是判決，記一筆 shortfall，`live_ready` 為 no、**exit 4**
-（不是 exit 5 的 integrity failure：等 switch 恢復、log 有了收尾證據再驗一次即可）。
+——那段時間倉位確實裸奔過。另外兩個旗標都只**告知、不擋 gate**：`kill_switch_clean_shutdown: no`（log 停在半路）與
+`kill_switch_ended_in_outage: yes`（最後一列是失敗的 refresh）。兩者都**分不出「run 被砍掉」
+與「run 還在跑、validate 剛好在這一刻讀」**——in-flight 的 run 其 log 本來就結束在
+validate 讀到的位置。曾經讓後者記 shortfall 擋 gate，結果是：健康的 daemon 在 15 秒前抖了
+一下就 exit 4，而**同一個 run 過 30 秒再驗**（實際曝險**更多**）反而通過——判決隨下指令的
+時機漂移，正是這個量測要否定的東西。所以它們是給人看的訊號：看到
+`ended_in_outage: yes` 就等 switch 恢復、log 有了收尾證據再驗一次；**可用率此時是下界**。
 `kill_switch_fired_count = 0`（dead man's switch 從未真的燒過）、run **不在 MANUAL
 safe mode**、四項 smoke 布林（`restart_reconciliation_passed`
 ——注意這一項**沒有** `_test_` 中綴——以及 `emergency_close_test_passed`／

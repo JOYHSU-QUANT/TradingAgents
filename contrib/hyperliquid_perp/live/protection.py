@@ -114,12 +114,14 @@ _SL_FIRE_BAND_FLOOR_PCT = Decimal("0.03")
 # above the same one-third budget.
 #
 # ONE THIRD of that gap, not all of it. The sleep is not alone in the stretch
-# between two refreshes: ``_maybe_delay``'s own docstring says every rung reaches
-# it after a wire call, and the ExchangeError lane after a wire call AND its
-# orderStatus recovery probe — two full ``network_timeout_s`` back to back. A
-# clamp set to the WHOLE gap therefore permitted 8 + 8 + 30 = 46s inside a 30s
-# promise at the RUNBOOK's recommended timeout, i.e. the constant contradicted
-# the docstring three lines below it. Three slots is the budget
+# between two refreshes: every rung reaches ``_maybe_delay`` after a wire call
+# that rode its full ``network_timeout_s``. A clamp set to the WHOLE gap
+# therefore permitted 8 + 30 = 38s inside a 30s promise at the RUNBOOK's
+# recommended timeout. (``_maybe_delay``'s docstring also names the
+# ExchangeError lane's orderStatus recovery probe as a SECOND back-to-back
+# timeout; that sentence predates the refresh 5d84d3d put BETWEEN the two, so
+# the real overshoot is 38-vs-30, not 46-vs-30 — this constant is therefore
+# conservative, not tight.) Three slots is the budget
 # ``network_timeout_warning`` already enforces (``_MAX_UNREFRESHED_REST_CALLS``
 # = 3, which is why it demands ``timeout * 3 < max_tick_gap``): the two timeouts
 # take two slots, this sleep takes the third (2026-08-01 round-13 concept scan).

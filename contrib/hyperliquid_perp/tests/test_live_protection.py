@@ -309,6 +309,24 @@ def test_sl_repair_retries_then_succeeds(env):
     assert gate.unresolved_protection_failure is False
 
 
+def test_the_repair_clamp_tracks_the_budget_it_was_derived_from():
+    """`_MAX_REPAIR_SLEEP_S` is one slot of the §18.2 tick-gap budget.
+
+    It is hand-computed (10.0 == 30.0 / 3) and nothing binds it: the tick gap
+    lives in cli, the slot count in kill_switch, so an import-time guard would be
+    circular. This test is the binding. Without it, lowering
+    ``_RECOVERY_MAX_TICK_GAP_SECONDS`` to 15 would have sl_repair_delay_warning
+    warning at >=5s while the clamp still permitted 10s — the constant
+    contradicting its own advisory, which is the defect it was introduced to fix
+    (2026-08-01 round-13 exit check).
+    """
+    from contrib.hyperliquid_perp.cli import _RECOVERY_MAX_TICK_GAP_SECONDS
+    from contrib.hyperliquid_perp.live.kill_switch import _MAX_UNREFRESHED_REST_CALLS
+    from contrib.hyperliquid_perp.live.protection import _MAX_REPAIR_SLEEP_S
+
+    assert _MAX_REPAIR_SLEEP_S == _RECOVERY_MAX_TICK_GAP_SECONDS / _MAX_UNREFRESHED_REST_CALLS
+
+
 def test_the_repair_backoff_is_capped_to_leave_room_for_two_timeouts(env):
     """The clamp gets ONE of the three §18.2 slots, not all of them.
 

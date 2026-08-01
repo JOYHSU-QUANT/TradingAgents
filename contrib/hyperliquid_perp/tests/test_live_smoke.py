@@ -562,9 +562,17 @@ def test_a_failed_preflight_refresh_is_recorded_before_it_propagates(live_db):
         runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
         with pytest.raises(RuntimeError, match="boom in schedule_cancel"):
             runner.run(only=["slice_order_submit"])
-        events = [event for event, _ in _ks_rows(live_db)]
+        rows = _ks_rows(live_db)
     # Recorded BEFORE it propagated, so the lapse survives the abort.
-    assert "kill_switch_refresh_failed" in events
+    failures = [detail for event, detail in rows if event == "kill_switch_refresh_failed"]
+    assert failures
+    # ...and MARKED. The first version passed only ``error=``, which lands in
+    # error_message while the tally reads detail — so the exclusion branch written
+    # for suite failures could never fire, and the RUNBOOK's claim that it did was
+    # false (2026-08-01 round-16 review).
+    from contrib.hyperliquid_perp.live.kill_switch import is_suite_authored
+
+    assert is_suite_authored(failures[0])
 
 
 def test_the_exit_disarm_leaves_the_row_the_acceptance_measure_reads(live_db):
@@ -616,6 +624,7 @@ def test_test_14_records_every_transition_it_makes(live_db):
     that had been covered. The armed row also has to state its deadline in the
     form the validator parses, since that number sizes the stretch that follows.
     """
+    from contrib.hyperliquid_perp.live.kill_switch import is_suite_authored
     from contrib.hyperliquid_perp.live.validation import _stated_deadline_seconds
 
     signed = _FakeSigned()
@@ -633,8 +642,13 @@ def test_test_14_records_every_transition_it_makes(live_db):
         "kill_switch_disarmed",
         "kill_switch_disarmed",
     ]
-    # The writer/reader contract, checked end to end rather than by eye.
+    # The writer/reader contract, checked end to end rather than by eye — on the
+    # armed row AND the refreshed one. Only rows[0] was inspected before, so the
+    # refresh row (which is what buys §20.3 sample credit) could lose its marker
+    # and its deadline token with the suite green (2026-08-01 round-16 probe).
     assert _stated_deadline_seconds(rows[0][1]) == _D(120)
+    assert _stated_deadline_seconds(rows[1][1]) == _D(120)
+    assert all(is_suite_authored(detail) for _, detail in rows), rows
 
 
 def test_non_arming_run_does_not_disarm(live_db):

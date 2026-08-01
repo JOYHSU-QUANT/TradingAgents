@@ -471,7 +471,9 @@ class LiveValidationReport:
             # "n/a (no refresh yet)" directly above "kill_switch_refresh_total:
             # 150". Distinguish them off the count the operator can see.
             return (
-                "n/a (no refresh yet)"
+                # "no DAEMON refresh": suite-authored rows may well exist, and
+                # they are counted nowhere near this number.
+                "n/a (no daemon refresh yet)"
                 if self.kill_switch_refresh_total == 0
                 else "n/a (rows span no elapsed time)"
             )
@@ -841,6 +843,10 @@ class _KillSwitchTally(NamedTuple):
     outage_seconds: Decimal  # wall time the wallet's cover had LAPSED
     outage_episodes: int  # distinct lapses, however many retries each took
     covered_seconds: Decimal  # wall time the switch was supposed to be running
+    # Refreshes written DURING live-smoke. Real cover, deliberately not sample
+    # credit — but the operator has to be told they exist, or a run with 120 of
+    # them reads "no refresh events yet" beside non-zero covered seconds.
+    suite_refreshed: int
     # The run's last kill-switch event is not a completed shutdown, so the log
     # stops mid-flight: the process was killed rather than stopped. Everything
     # after that instant is unmeasurable (see _kill_switch_tally), so this is
@@ -917,6 +923,7 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
     without getting a vote.
     """
     refreshed = 0
+    suite_refreshed = 0
     failed = 0
     fired = 0
     disarm_failed = 0
@@ -1006,7 +1013,11 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
             # back-to-back smoke suites answer it at 114 refreshes and 100% with
             # the daemon never started. That figure would describe the smoke phase,
             # not the thing §20.3 certifies for real money (2026-08-01 round-15).
-            refreshed += event == _KILL_SWITCH_REFRESH_OK and not is_suite_authored(detail)
+            if event == _KILL_SWITCH_REFRESH_OK:
+                if is_suite_authored(detail):
+                    suite_refreshed += 1
+                else:
+                    refreshed += 1
             in_outage = False
         elif event == _KILL_SWITCH_REFRESH_FAILED:
             # Same split: a suite-authored failure still OPENS an outage episode
@@ -1028,7 +1039,14 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
             # the shortfall named a failed-refresh row that was not the last row
             # (2026-08-01 round-13 exit check).
             in_outage = False
-    ended_dirty = bool(events) and events[-1][1] not in _KILL_SWITCH_CLEAN_ENDINGS
+    # A clean ending closes the run's story only if the DAEMON wrote it. Re-running
+    # live-smoke after a SIGKILL puts the suite's exit disarm last, which reported
+    # "clean shutdown: yes" for a run whose daemon was killed (2026-08-01 round-16).
+    # The gap-level exemption above is unaffected: that trigger really was cleared,
+    # whoever cleared it.
+    ended_dirty = bool(events) and not (
+        events[-1][1] in _KILL_SWITCH_CLEAN_ENDINGS and not is_suite_authored(events[-1][2])
+    )
     # An outage still OPEN at the last event is a different, sharper fact than a
     # merely dirty ending: the last thing the run managed to say was "I failed to
     # refresh". The window cannot measure past its own end, so an outage that
@@ -1064,6 +1082,7 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
         outage_total,
         episodes,
         covered,
+        suite_refreshed,
         ended_dirty,
         ended_in_outage,
     )
@@ -1462,7 +1481,14 @@ def _apply_refresh_gate(
     # deny (2026-08-01 round-13 exit check).
     if refresh_total == 0:
         # No refresh evidence yet — a shortfall (keep running), not a 0% failure.
-        shortfalls.append("no kill-switch refresh events yet (need a rate >= 99%)")
+        if kill_switch.suite_refreshed:
+            shortfalls.append(
+                f"no DAEMON kill-switch refresh events yet — the {kill_switch.suite_refreshed} "
+                "refresh(es) on record were written during live-smoke and do not count "
+                "toward the §20.3 sample floor (need a rate >= 99% over daemon evidence)"
+            )
+        else:
+            shortfalls.append("no kill-switch refresh events yet (need a rate >= 99%)")
     elif refresh_total < MIN_KILL_SWITCH_REFRESH_SAMPLES:
         # Some evidence, but not enough to judge availability. Zero was always
         # handled above; 1..N-1 was not, and at a 30s cadence a run five minutes

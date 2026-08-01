@@ -1590,7 +1590,10 @@ def test_suite_authored_refreshes_are_cover_but_not_sample_credit(tmp_path):
     phase rather than the thing §20.3 certifies for real money (user decision,
     2026-08-01 round-15).
     """
-    from contrib.hyperliquid_perp.live.kill_switch import suite_authored_detail
+    from contrib.hyperliquid_perp.live.kill_switch import (
+        _stamp_suite_authored,
+        deadline_detail,
+    )
 
     db = Database(tmp_path / "live.db")
     _init_live_run(db)
@@ -1602,17 +1605,120 @@ def test_suite_authored_refreshes_are_cover_but_not_sample_credit(tmp_path):
             db,
             "kill_switch_refreshed",
             off=step * _REFRESH_STEP_S,
-            detail=suite_authored_detail(120, "(smoke pre-flight refresh)"),
+            detail=_stamp_suite_authored(deadline_detail(120, "(smoke pre-flight refresh)")),
         )
     with db:
         report = validate_live_run(db, run_id="r", now=_T0)
     # Plenty of rows, none of them evidence that the DAEMON exercised the switch.
     assert report.kill_switch_refresh_total == 0
-    assert any("no kill-switch refresh events yet" in s for s in report.shortfalls)
     assert not report.live_ready
     # But they DID hold the cover: 30s steps under a 120s deadline, no outage.
     assert report.kill_switch_outage_seconds == Decimal(0)
     assert report.kill_switch_covered_seconds > Decimal(0)
+    # The shortfall must not claim there were no refreshes — there are 120 in the
+    # table. Saying "no refresh events yet" beside 120 rows and real covered
+    # seconds is a report the operator cannot reconcile (2026-08-01 round-16).
+    shortfall = next(s for s in report.shortfalls if "refresh" in s)
+    assert "no kill-switch refresh events yet" not in shortfall
+    assert "120" in shortfall and "live-smoke" in shortfall
+
+
+def test_the_marker_is_a_token_not_merely_the_presence_of_a_detail(tmp_path):
+    """A DAEMON refresh that states its deadline still earns sample credit.
+
+    Every non-suite writer of a refresh row passes ``detail=None`` today, which
+    made ``is_suite_authored`` behaviourally identical to ``detail is not None``
+    — and to a free-text sniff for ``"(smoke "``, the exact thing its own comment
+    rejects. All three passed the full suite (2026-08-01 round-16 mutation probe).
+    The distinguishing row is the one no test had: a refresh carrying a detail
+    that is NOT the suite's. ``_kill_switch_tally``'s own rule invites exactly
+    that row, since refreshed rows may state the deadline they installed.
+    """
+    from contrib.hyperliquid_perp.live.kill_switch import deadline_detail
+
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    for step in range(MIN_KILL_SWITCH_REFRESH_SAMPLES):
+        _kill_switch_event(
+            db,
+            "kill_switch_refreshed",
+            off=step * _REFRESH_STEP_S,
+            detail=deadline_detail(120, "refresh=30s"),
+        )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.kill_switch_refresh_total == MIN_KILL_SWITCH_REFRESH_SAMPLES
+
+
+def test_a_suite_authored_failure_opens_an_outage_without_buying_credit(tmp_path):
+    """The other half of the split, and the half that was unreachable dead code.
+
+    The only suite writer of ``kill_switch_refresh_failed`` passed ``error=``,
+    which lands in ``error_message``; the tally reads ``detail``. So
+    ``is_suite_authored`` was always False on failure rows and the exclusion
+    branch could never fire — while the RUNBOOK claimed it did
+    (2026-08-01 round-16 review).
+    """
+    from contrib.hyperliquid_perp.live.kill_switch import _stamp_suite_authored
+
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    _kill_switch_event(db, "kill_switch_armed", off=0, detail=_stamp_suite_authored(None))
+    _kill_switch_event(db, "kill_switch_refresh_failed", off=30, detail=_stamp_suite_authored(None))
+    # 300s later — past the 120s cover — the suite gets a refresh through.
+    _kill_switch_event(db, "kill_switch_refreshed", off=330, detail=_stamp_suite_authored(None))
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=400))
+    # No sample credit from either the failure or the recovery...
+    assert report.kill_switch_refresh_total == 0
+    # ...but the lapse is charged in full: the wallet really was uncovered.
+    assert report.kill_switch_outage_seconds == Decimal(300)
+    assert report.kill_switch_outage_episodes == 1
+
+
+def test_a_smoke_disarm_cannot_make_a_killed_daemon_look_clean(tmp_path):
+    """``clean_shutdown`` reports on the DAEMON, so a suite's disarm cannot end it.
+
+    The flag reads the last row against ``_KILL_SWITCH_CLEAN_ENDINGS``. Run the
+    daemon, SIGKILL it, then re-run ``live-smoke`` on the same run-id: the suite's
+    exit disarm becomes the last row and the report said "clean shutdown: yes" for
+    a run whose daemon was killed (2026-08-01 round-16 review).
+    """
+    from contrib.hyperliquid_perp.live.kill_switch import _stamp_suite_authored
+
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _add_refreshes(db, 100, 0)
+    killed_at = 99 * _REFRESH_STEP_S
+    # The operator re-runs live-smoke afterwards; it disarms cleanly on exit.
+    _kill_switch_event(
+        db, "kill_switch_disarmed", off=killed_at + 3600, detail=_stamp_suite_authored(None)
+    )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=killed_at + 3700))
+    assert report.kill_switch_ended_without_clean_shutdown
+    assert "kill_switch_clean_shutdown: no" in report.summary_lines()
+
+
+def test_the_disarm_failure_warning_names_both_producers(tmp_path):
+    # Round 15 rewrote this warning because the count now mixes daemon shutdowns
+    # and live-smoke exits; replacing the whole text with a placeholder left the
+    # suite green (2026-08-01 round-16 mutation probe).
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _add_refreshes(db, 100, 0)
+    _kill_switch_event(db, "kill_switch_disarm_failed", off=99 * _REFRESH_STEP_S + 30)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=3100))
+    warning = next(w for w in report.warnings if "disarm failure" in w)
+    assert "live-smoke" in warning and "shutdown" in warning
+    assert "cumulative" in warning
 
 
 def test_the_default_deadline_tracks_the_config_layers_own_default():

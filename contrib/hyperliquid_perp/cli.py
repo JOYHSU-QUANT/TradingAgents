@@ -2899,6 +2899,10 @@ def _smoke_startup_recovery(
         max_tick_gap_seconds=_RECOVERY_MAX_TICK_GAP_SECONDS,
         network_timeout_s=signed.timeout,
         payload_dir=payload_dir,
+        # This manager belongs to a live-smoke run: its arm and its tick-driven
+        # refreshes happen inside the suite, so they are cover but not evidence
+        # that the DAEMON exercised the switch (§20.3 sample floor).
+        suite_authored=True,
     )
     safe_mode = SafeModeManager(db=db, run_id=run_id, gate=gate)
     processor = LiveFillProcessor(db=db, run_id=run_id, payload_dir=payload_dir)

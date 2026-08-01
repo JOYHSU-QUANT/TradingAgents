@@ -430,9 +430,12 @@ shortfall——30s 一次的節奏下約 50 分鐘就滿，遠早於 30 cycles�
 **兩種都算是必要的**：`live-smoke` 以 `max(config, 120s)` 續約，所以在
 `schedule_cancel_seconds` 設得比 120 小的 run 上，它的 refresh 列是「當下真的有更長保護」
 的唯一證據；只聽 arm 會把 smoke 期間每一段 41–120s 的間隔憑空判成 outage。
-另外，`live-smoke` 自己的 scheduleCancel 動作（pre-flight refresh、test 14 的
-arm/refresh/clear、離場 disarm、以及失敗的 refresh）**也會寫進同一份事件流**，
-並帶 `writer=live-smoke` 標記。它們**計入 outage 秒數與當下 deadline**（是真的保護），
+另外，**`live-smoke` 期間寫進事件流的每一列都帶 `writer=live-smoke` 標記**——不只 suite
+自己打的那幾筆（pre-flight refresh、test 14 的 arm/refresh/clear、離場 disarm、失敗的
+refresh），**也包含 suite 為 pre-flight recovery 與 test 15-17 建的那個真 KillSwitchManager
+寫的列**。後者才是關鍵：真實 testnet 一個 test 是數分鐘，refresh interval 30s，那個 manager
+的 `tick()` 會到期並寫出 refresh 列；漏掉它們的話，這個排除規則在真實 run 上等於沒有生效
+（離線測試的時鐘不前進，所以看不出來）。它們**計入 outage 秒數與當下 deadline**（是真的保護），
 但**不計入 §20.3 的 100 筆樣本下限**——樣本下限問的是「這個 run 有沒有把 switch 操練到
 足以判定可用率」，而連跑六輪 smoke 就能湊到 114 筆、100%、daemon 卻一秒都沒跑過。它們走的是 signed client 而不是
 `KillSwitchManager`，所以沒有別人會補這些列；沒有它們的話，整個 smoke 期間、以及跑完 smoke

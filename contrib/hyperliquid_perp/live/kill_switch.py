@@ -384,17 +384,29 @@ def deadline_detail(seconds: int, note: str) -> str:
 # A token rather than a substring sniff of free text, and read back through
 # ``is_suite_authored`` — same writer/reader discipline as ``deadline_detail``,
 # for the same reason: the one thing that must not happen is the two sides
-# drifting apart silently.
+# drifting apart silently. RUNBOOK §20.3 shows operators this literal, and a test
+# pins the doc against this constant.
+#
+# STAMPED BY THE WRITER, never by each call site. Per-call-site lasted one round
+# and was wrong twice over. Three of the suite's six writers never got it — the
+# failed refresh among them, which made the exclusion branch that reads it
+# unreachable dead code and the RUNBOOK's claim about it false. And the one that
+# actually mattered: the suite ALSO drives a real KillSwitchManager for its
+# pre-flight recovery and restart tests 15-17, whose own ``tick()`` emits
+# refreshes across a suite that takes minutes per test. Those bought §20.3 sample
+# credit exactly as before, so the exclusion was never in force on a real run —
+# hidden only by an offline test clock that does not elapse (2026-08-01 round-16
+# review; user decision: mark at the manager).
 _SUITE_AUTHORED_TOKEN = "writer=live-smoke"
 
 
-def suite_authored_detail(seconds: int, note: str) -> str:
-    """``deadline_detail`` plus the marker that says the SUITE installed it."""
-    return f"{deadline_detail(seconds, note)} {_SUITE_AUTHORED_TOKEN}"
+def _stamp_suite_authored(detail: str | None) -> str:
+    """Append the marker, preserving whatever the row already said."""
+    return _SUITE_AUTHORED_TOKEN if not detail else f"{detail} {_SUITE_AUTHORED_TOKEN}"
 
 
 def is_suite_authored(detail: str | None) -> bool:
-    """Whether this row was written by ``live-smoke`` rather than the daemon."""
+    """Whether this row was written during ``live-smoke`` rather than by the daemon."""
     return bool(detail) and _SUITE_AUTHORED_TOKEN in detail
 
 
@@ -406,6 +418,7 @@ def record_kill_switch_event(
     timestamp: datetime,
     detail: str | None = None,
     error: str | None = None,
+    suite_authored: bool = False,
 ) -> None:
     """Append one §18.5 row in its own transaction.
 
@@ -414,6 +427,10 @@ def record_kill_switch_event(
     itself. Only the WRITER is shared, deliberately not the state machine: the
     suite needs arm→refresh→clear→clear, a shape ``arm()``/``refresh()`` forbid,
     and installs ``max(config, 120s)`` of cover rather than the configured value.
+
+    ``suite_authored`` stamps the marker here, so EVERY row a caller writes is
+    marked by the fact of who the caller is — not by remembering at each call
+    site, which is how three of the suite's six writers went unmarked.
 
     Fail-loud (an unguarded transaction): the row is the only durable evidence the
     acceptance measure has, and a caller that must not raise says so at its own
@@ -424,7 +441,7 @@ def record_kill_switch_event(
             conn,
             run_id=run_id,
             event_type=event_type,
-            detail=detail,
+            detail=_stamp_suite_authored(detail) if suite_authored else detail,
             error_message=error,
             timestamp=timestamp,
         )
@@ -445,6 +462,7 @@ class KillSwitchManager:
         network_timeout_s: float | None,
         payload_dir: Path,
         clock: Clock | None = None,
+        suite_authored: bool = False,
     ) -> None:
         if not config.enabled:
             # LiveConfig already rejects allow_real_orders without the switch;
@@ -489,6 +507,12 @@ class KillSwitchManager:
         violation = kill_switch_timing_violation(config, max_tick_gap_seconds, network_timeout_s)
         if violation is not None:
             raise ValueError(violation)
+        # Set by the CLI when this manager belongs to a live-smoke run. It is a
+        # property of the RUN PHASE, not of any one call: the suite's own
+        # pre-flight recovery and restart tests 15-17 drive a real manager whose
+        # ``tick()`` refreshes during the suite, and those refreshes must not buy
+        # §20.3 sample credit any more than the runner's own do.
+        self._suite_authored = suite_authored
         self._client = client
         self._gate = gate
         self._db = db
@@ -572,6 +596,7 @@ class KillSwitchManager:
             detail=detail,
             error=error,
             timestamp=self._clock.now(),
+            suite_authored=self._suite_authored,
         )
 
     def _schedule(self) -> None:

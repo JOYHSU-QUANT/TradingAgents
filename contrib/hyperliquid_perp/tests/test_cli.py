@@ -2369,11 +2369,19 @@ def _live_yaml(
     top_level_network: str | None = None,
     live_lines: str | None = "  mode: testnet_live\n  network: testnet\n",
     risk_lines: str | None = "  leverage: 1\n  margin_mode: cross\n  max_target_margin_pct: 60\n",
+    # RUNBOOK §1.5's value, defaulted for the same reason the live-smoke helper
+    # defaults it: the 30s top-level default is deliberately illegal in live
+    # (30+30+30+15+30 = 135 >= 120 fires the timing preflight), so a helper that
+    # omitted it produced configs no operator could actually run — masked until
+    # the fake client stopped under-reporting its timeout (2026-08-01 round-16).
+    network_timeout_s: float | None = 8,
 ):
     path = tmp_path / "live-cfg.yaml"
     text = ""
     if wallet is not None:
         text += f'wallet_address: "{wallet}"\n'
+    if network_timeout_s is not None:
+        text += f"network_timeout_s: {network_timeout_s}\n"
     if top_level_network is not None:
         text += f"network: {top_level_network}\n"
     if risk_lines is not None:
@@ -2418,6 +2426,10 @@ def live_seams(monkeypatch):
         signed_gates=[],
     )
 
+    from contrib.hyperliquid_perp.exchanges.hyperliquid.sdk_client import (
+        DEFAULT_NETWORK_TIMEOUT_S,
+    )
+
     class _FakeClient:
         def __init__(self, network="mainnet", *, timeout=None):
             if state.client_error is not None:
@@ -2429,7 +2441,17 @@ def live_seams(monkeypatch):
 
         @classmethod
         def from_config(cls, config, *, timeout=None, network=None):
-            # Mirrors the real from_config's network-override contract.
+            # Mirrors the real from_config's network-override contract AND its
+            # timeout resolution. Returning None for a config that states one made
+            # this double claim "no timeout", which silently dropped a term of the
+            # kill switch's timing invariant: `_cmd_live`'s preflight then passed
+            # configs that exit 1 in production, so the exit-4 smoke-gate contract
+            # these tests assert was never reachable there. The sibling double in
+            # test_live_smoke_cli.py was fixed one round earlier; this one was
+            # missed (2026-08-01 round-16 review).
+            if timeout is None:
+                raw = config.get("network_timeout_s")
+                timeout = float(raw) if raw is not None else DEFAULT_NETWORK_TIMEOUT_S
             return cls(network=network or config.get("network", "mainnet"), timeout=timeout)
 
     class _FakeAccount:
@@ -3375,6 +3397,34 @@ def test_live_refuses_a_nonexistent_db_without_create(tmp_path, capsys, live_sea
     assert rc == 1
     assert "does not exist" in capsys.readouterr().err
     assert not missing.exists()  # nothing was created
+
+
+def test_live_refuses_a_timeout_that_cannot_fit_the_kill_switch_budget(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    """The §18.2 timing preflight's exit-1 path, at the CLI, over a real config.
+
+    Only the pure function was tested, so nothing observed that the CLI reads the
+    timeout off the client at all — and the fake client under-reported it as
+    None, which silently dropped a term and let these tests reach assertions the
+    same config cannot reach in production. This is the end-to-end pin: the
+    top-level 30s DEFAULT is deliberately illegal in live
+    (30 + 30 + 30 + 15 + 30 = 135 >= 120) and must be refused by name before the
+    run lock is taken (2026-08-01 round-16 review).
+    """
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    cfg = _live_yaml(
+        tmp_path,
+        network_timeout_s=None,  # omitted -> the client resolves the 30s default
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(tmp_path / "l.db")])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "cannot be refreshed in time" in err
+    # The message names the knob the operator can actually change.
+    assert "network_timeout_s" in err
 
 
 def test_live_smoke_real_run_requires_the_run_lease(tmp_path, capsys, monkeypatch):

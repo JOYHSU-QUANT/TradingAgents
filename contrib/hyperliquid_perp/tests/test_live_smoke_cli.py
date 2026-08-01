@@ -339,6 +339,43 @@ def test_the_cli_hands_the_manager_the_clients_own_timeout(tmp_path, monkeypatch
     assert all(value == 8 for value in seen), seen
 
 
+def test_every_row_a_smoke_run_writes_is_marked_including_the_managers(tmp_path, smoke_seams):
+    """The finding that made round 15's exclusion a no-op on real runs.
+
+    The suite does not only write rows through its own runner: it builds a REAL
+    KillSwitchManager for the pre-flight recovery and restart tests 15-17, and on
+    a real testnet suite — minutes of wall clock per test against a 30s refresh
+    interval — that manager's ``tick()`` emits ``kill_switch_refreshed`` rows.
+    Those were unmarked, so they bought §20.3 sample credit exactly as before and
+    the user's "smoke must not satisfy the floor" decision was never in force.
+    Only an offline clock that never elapses hid it, which is why this asserts
+    over EVERY row the run produced rather than over the runner's own three
+    (2026-08-01 round-16 review).
+    """
+    from contrib.hyperliquid_perp.live.kill_switch import is_suite_authored
+
+    cfg = _smoke_yaml(tmp_path)
+    dbp = _seed_genesis_run(tmp_path, cfg)
+    assert cli_main(["live-smoke", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)]) == 0
+    with Database(dbp) as db:
+        rows = [(r["event_type"], r["detail"]) for r in repo.iter_kill_switch_events(db.conn, "r1")]
+    assert rows, "the suite wrote no kill-switch rows at all"
+    unmarked = [(event, detail) for event, detail in rows if not is_suite_authored(detail)]
+    assert not unmarked, f"rows written during live-smoke but not marked: {unmarked}"
+
+
+def test_the_runbook_documents_the_marker_token_the_code_writes(tmp_path):
+    # RUNBOOK §20.3 shows operators the literal token so they can read the event
+    # log by hand. Nothing tied the doc to the constant, so renaming the constant
+    # left the suite green and the runbook quietly wrong (round-16 probe).
+    from pathlib import Path as _Path
+
+    from contrib.hyperliquid_perp.live.kill_switch import _SUITE_AUTHORED_TOKEN
+
+    runbook = _Path("contrib/hyperliquid_perp/docs/RUNBOOK-live.md").read_text(encoding="utf-8")
+    assert _SUITE_AUTHORED_TOKEN in runbook
+
+
 def test_live_smoke_full_real_suite_passes_gate_and_releases_lock(tmp_path, capsys, smoke_seams):
     cfg = _smoke_yaml(tmp_path)
     dbp = _seed_genesis_run(tmp_path, cfg)

@@ -54,7 +54,7 @@ from ..paper.twap import floor_to_step
 from ..persistence import repository as repo
 from ..persistence.cloid import cloid_hex, cloid_logical
 from ..persistence.db import Database
-from .kill_switch import record_kill_switch_event, suite_authored_detail
+from .kill_switch import deadline_detail, record_kill_switch_event
 from .orders import local_status_for_exchange_status, parse_order_status
 
 if TYPE_CHECKING:  # import cost only under type checking; runtime stays lazy
@@ -648,7 +648,7 @@ class SmokeTestRunner:
         # in fact covered the whole time.
         self._record_kill_switch_event(
             "kill_switch_refreshed",
-            detail=suite_authored_detail(
+            detail=deadline_detail(
                 int(self.ctx.kill_switch_deadline.total_seconds()), "(smoke pre-flight refresh)"
             ),
         )
@@ -744,6 +744,10 @@ class SmokeTestRunner:
             detail=detail,
             error=error,
             timestamp=self.ctx.now(),
+            # Unconditional: every row this class writes is written DURING the
+            # suite, so marking is a property of the writer rather than something
+            # each call site has to remember. Three of six forgot.
+            suite_authored=True,
         )
 
     def _preflight_recovery(self) -> None:
@@ -1945,7 +1949,7 @@ class SmokeTestRunner:
         # back to size this stretch's cover.
         self._record_kill_switch_event(
             "kill_switch_armed",
-            detail=suite_authored_detail(
+            detail=deadline_detail(
                 int(self.ctx.kill_switch_deadline.total_seconds()), "(smoke test 14)"
             ),
         )
@@ -1953,7 +1957,7 @@ class SmokeTestRunner:
         self._wire.schedule_cancel(cancel_at=refreshed)
         self._record_kill_switch_event(
             "kill_switch_refreshed",
-            detail=suite_authored_detail(
+            detail=deadline_detail(
                 int(self.ctx.kill_switch_deadline.total_seconds()), "(smoke test 14 refresh)"
             ),
         )

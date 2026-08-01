@@ -1684,20 +1684,41 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
     import textwrap
 
     loop_ast = ast.parse(textwrap.dedent(loop_src))
-    seam_args = [
-        node.args[0]
+
+    def _method_call_line(obj: str, attr: str) -> int:
+        lines = [
+            node.lineno
+            for node in ast.walk(loop_ast)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == attr
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == obj
+        ]
+        assert len(lines) == 1, f"expected exactly one {obj}.{attr}() in the loop, got {lines}"
+        return lines[0]
+
+    tick_line = _method_call_line("engine", "tick")
+    pump_line = _method_call_line("driver", "pump")
+    seams = [
+        node
         for node in ast.walk(loop_ast)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "refresh_across_blocking_work"
         and node.args
     ]
-    assert seam_args, (
+    # POSITION and ARGUMENT both. Checking only that some seam call exists let the
+    # refresh be hoisted ABOVE engine.tick() — the two chains adjacent again, real
+    # unrefreshed max 7 — with the whole suite green; checking only position let it
+    # be passed None (both mutation-verified, 2026-08-01 round-13).
+    between = [node for node in seams if tick_line < node.lineno < pump_line]
+    assert between, (
         "engine.tick() and driver.pump() are adjacent again — the two chains are "
         "consecutive, so the real unrefreshed run is their sum, not the max"
     )
-    for arg in seam_args:
-        assert not isinstance(arg, ast.Constant), (
+    for node in between:
+        assert not isinstance(node.args[0], ast.Constant), (
             "_run_live_loop passes a literal (None?) as the kill switch — the "
             "helper no-ops and the seam refreshes nothing"
         )

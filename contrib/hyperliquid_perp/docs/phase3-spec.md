@@ -1547,8 +1547,15 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    refresh=30` 能通過 config guard，但配上 60 秒的 tick 間隔就會留下 90 秒空窗、讓
    dead man's switch 在正常運行中觸發並掃掉全錢包掛單。
 
-   **已知殘餘風險：`network_timeout_s` 沒有被掃進這張時序帳**（PR 5 註記，
-   2026-07-22 拍板「軟性緩解」）：上述不變量只綁 `refresh_interval` 與
+   **更新（2026-08-01，PR 6 round-13）：`network_timeout_s` 已是硬不變量的一項。**
+   `kill_switch_timing_violation` 現在編列五項——`refresh_interval` ＋ `max_tick_gap`
+   ＋ 失敗那次自己燒掉的 `network_timeout_s` ＋ `min(timeout, backoff_cap)` ＋
+   **第二個** `max_tick_gap`（backoff 之後的 retry 也要再等一個 tick）。實務後果：
+   `network_timeout_s` 的預設 30 在 live 下不合法（啟動具名 exit 1），live 需 < 15，
+   RUNBOOK-live §1.5 用 8。以下保留為歷史脈絡，說明它當初為何只是 advisory。
+
+   **（歷史）已知殘餘風險：`network_timeout_s` 沒有被掃進這張時序帳**（PR 5 註記，
+   2026-07-22 拍板「軟性緩解」）：當時的不變量只綁 `refresh_interval` 與
    `max_tick_gap`，但 tick 內每一筆 REST 呼叫真正的阻塞上限是頂層
    `network_timeout_s`（預設 30s），且一個 tick 會連續打多筆——網路降級（慢但
    沒斷）時，單 tick 牆鐘時間可以拖過 `max_tick_gap` 的建構期承諾，讓交易所端

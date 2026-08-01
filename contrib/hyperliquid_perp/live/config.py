@@ -413,7 +413,8 @@ class KillSwitchConfig:
         # the interval. The binding check lives in KillSwitchManager.__init__,
         # which is handed `max_tick_gap_seconds` (the caller's WORST-CASE wall time
         # between ticks — minutes, if a synchronous AI decision runs in-cycle) and
-        # enforces refresh_interval + max_tick_gap < schedule_cancel. A config that
+        # enforces refresh_interval + 2 x max_tick_gap + network_timeout + backoff <
+        # schedule_cancel (see kill_switch_timing_violation). A config that
         # passes here can still be rejected there (e.g. 60/30 under a 60s tick gap).
         if self.schedule_cancel_seconds < 2 * self.refresh_interval_seconds:
             raise ValueError(

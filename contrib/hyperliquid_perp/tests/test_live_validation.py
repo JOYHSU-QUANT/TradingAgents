@@ -1242,15 +1242,15 @@ def test_a_log_that_stops_mid_outage_is_flagged_and_does_not_drift(tmp_path):
     assert two_days_later.live_ready == soon.live_ready
 
 
-def test_downtime_is_charged_to_neither_side(tmp_path):
-    """A stopped process is not an outage, and not availability either.
+def test_the_verdict_does_not_move_with_the_clock(tmp_path):
+    """Re-running ``validate`` later must not change what the run scored.
 
-    Both readings were wrong, and which one you got depended on the type of the
-    last row before the stop: a run down for most of its life reported 100%,
-    while one stopped mid-outage had the entire downtime billed as unprotected.
-    Excluding downtime also stops the verdict drifting — re-running ``validate``
-    days later can no longer dilute real outages into a pass
-    (2026-08-01 exit check).
+    The window ends at the last EVENT, so the stretch from there to ``now``
+    measures when the operator got round to asking, not anything about the run.
+    Renamed 2026-08-01: it used to be called ...charged_to_neither_side, after a
+    silence-means-downtime rule that has since been deleted — silence longer than
+    the cover is now an outage, because a dead process and a fired switch leave
+    the same silence. What this pins is the drift-freedom, which still holds.
     """
     db = Database(tmp_path / "live.db")
     _init_live_run(db)
@@ -1285,7 +1285,12 @@ def test_a_planned_stop_and_restart_is_not_charged_as_exposure(tmp_path):
     _add_orders(db, 30)
     _add_refreshes(db, 100, 0)
     stopped_at = 99 * _REFRESH_STEP_S
-    _kill_switch_event(db, "shutdown_cancel_orders_completed", off=stopped_at + 30)
+    _kill_switch_event(db, "shutdown_cancel_orders_started", off=stopped_at + 20)
+    _kill_switch_event(db, "shutdown_cancel_orders_completed", off=stopped_at + 25)
+    # The row that actually proves the trigger is cleared — written AFTER
+    # clear_scheduled_cancel() returns. The two rows above bracket the order
+    # sweep, which runs while the switch is still armed.
+    _kill_switch_event(db, "kill_switch_disarmed", off=stopped_at + 30)
     six_hours = stopped_at + 30 + 6 * 3600
     _kill_switch_event(db, "kill_switch_armed", off=six_hours)
     _kill_switch_event(db, "kill_switch_refreshed", off=six_hours + 30)
@@ -1293,6 +1298,87 @@ def test_a_planned_stop_and_restart_is_not_charged_as_exposure(tmp_path):
         report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=six_hours + 60))
     assert report.kill_switch_outage_seconds == Decimal(0)
     assert report.live_ready
+
+
+def test_a_kill_between_the_sweep_rows_is_not_granted_the_exemption(tmp_path):
+    """``shutdown_cancel_orders_started`` does NOT mean the cover was released.
+
+    Both ``shutdown_cancel_orders_*`` rows bracket the ORDER SWEEP, which runs
+    before ``clear_scheduled_cancel()``; at both of them the wallet-wide trigger
+    is still armed. Naming them as clean endings handed the exemption to exactly
+    the case it must never cover — a process killed mid-sweep, with the switch
+    armed and about to fire (2026-08-01 round-13 incremental review).
+    """
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    _add_refreshes(db, 100, 0)
+    killed_at = 99 * _REFRESH_STEP_S + 30
+    _kill_switch_event(db, "shutdown_cancel_orders_started", off=killed_at)
+    # ...SIGKILL here. Six hours later someone restarts it.
+    back = killed_at + 6 * 3600
+    _kill_switch_event(db, "kill_switch_armed", off=back)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=back + 60))
+    assert report.kill_switch_outage_seconds >= Decimal(6 * 3600)
+    assert not report.live_ready
+
+
+def test_a_deliberate_stop_cannot_dilute_a_failing_run_into_a_pass(tmp_path):
+    """Exempt downtime leaves BOTH terms, not just the numerator.
+
+    Crediting it to ``covered`` alone made downtime a laundering device: a run
+    sitting below the bar could be stopped for an hour and restarted, and the
+    borrowed denominator carried it over 99% with its exposure unchanged.
+    """
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    _add_refreshes(db, 100, 0)
+    # Two failures -> a real outage that puts the run under the 99% bar.
+    base = 99 * _REFRESH_STEP_S
+    _kill_switch_event(db, "kill_switch_refresh_failed", off=base + 30)
+    _kill_switch_event(db, "kill_switch_refreshed", off=base + 90)
+    with db:
+        before = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=base + 120))
+        assert not before.live_ready  # genuinely failing
+        # Now stop cleanly and restart an hour later. Nothing about the exposure
+        # above changed, so nothing about the verdict may change either.
+        _kill_switch_event(db, "kill_switch_disarmed", off=base + 120)
+        _kill_switch_event(db, "kill_switch_armed", off=base + 120 + 3600)
+        after = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=base + 3800))
+    # The hour of chosen downtime is absent from the denominator. (The +30s is
+    # the real stretch between the last refresh and the shutdown row, which the
+    # switch WAS covering.) Credit the hour and covered becomes 6660s, the rate
+    # 99.10%, and this failing run certifies.
+    assert after.kill_switch_covered_seconds == before.kill_switch_covered_seconds + 30
+    assert after.kill_switch_outage_seconds == before.kill_switch_outage_seconds
+    assert not after.live_ready
+
+
+def test_a_run_that_ends_inside_an_outage_is_not_certified(tmp_path):
+    """An unclosed outage at EOF must not read as a clean 100%.
+
+    The window ends at the last event, so an outage still open contributes zero
+    seconds — which made the run that failed and NEVER recovered score better
+    than the same run recovering two minutes later.
+    """
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    _add_refreshes(db, 100, 0)
+    _kill_switch_event(db, "kill_switch_refresh_failed", off=99 * _REFRESH_STEP_S + 30)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=4000))
+    assert report.kill_switch_ended_in_outage
+    assert not report.live_ready
+    assert any("ends INSIDE an outage" in s for s in report.shortfalls)
 
 
 def test_a_crash_that_outlived_its_deadline_is_charged_on_restart(tmp_path):
@@ -1489,6 +1575,7 @@ def _make_report(**overrides) -> LiveValidationReport:
         "kill_switch_outage_episodes": 0,
         "kill_switch_covered_seconds": Decimal(3000),
         "kill_switch_ended_without_clean_shutdown": False,
+        "kill_switch_ended_in_outage": False,
         "kill_switch_fired_count": 0,
         "kill_switch_disarm_failed_count": 0,
         "safe_mode_active_type": None,

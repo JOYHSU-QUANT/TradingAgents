@@ -285,16 +285,21 @@ _KILL_SWITCH_FIRED = "kill_switch_cancel_triggered"
 # cancels exactly those at its deadline. Non-gating (the run itself is over) but
 # the operator has to know the wallet was left armed.
 _KILL_SWITCH_DISARM_FAILED = "kill_switch_disarm_failed"
-# A run whose LAST kill-switch row is one of these stopped on purpose: shutdown()
-# ran and cleared the wallet-wide trigger, so nothing was left to fire and the
-# silence afterwards is just a stopped daemon. Any other final row means the log
-# stops mid-flight — SIGKILL, OOM, host reboot — and the cover that was standing
-# at that instant lapsed unwitnessed. The availability window cannot measure past
-# its own last event without making the verdict drift with the clock, so this
-# distinction is REPORTED instead of measured (see _kill_switch_tally).
-_KILL_SWITCH_CLEAN_ENDINGS = frozenset(
-    {"shutdown_cancel_orders_completed", "shutdown_cancel_orders_started"}
-)
+# The ONE row that proves the wallet-wide trigger is no longer armed:
+# ``shutdown()`` writes it immediately after ``clear_scheduled_cancel()`` returns
+# (kill_switch.py). After it there is nothing left to fire, so the silence that
+# follows is a stopped daemon and not exposure.
+#
+# EXACTLY ONE NAME, and specifically not the two ``shutdown_cancel_orders_*``
+# rows. Those bracket the order sweep, which runs BEFORE the trigger is cleared,
+# so at both of them the switch is still armed. Naming them here got the
+# exemption backwards in both directions at once: a real stop-and-restart (whose
+# last row is ``kill_switch_disarmed``) was charged its entire downtime as
+# outage and failed a healthy run, while a SIGKILL landing between "started" and
+# "completed" — the switch still armed and about to fire — was handed the
+# exemption. Verified against the writer, not assumed (2026-08-01 round-13
+# incremental review).
+_KILL_SWITCH_CLEAN_ENDINGS = frozenset({"kill_switch_disarmed"})
 if (
     not {
         _KILL_SWITCH_REFRESH_OK,
@@ -359,6 +364,9 @@ class LiveValidationReport:
     # it is the only trace that the cover standing at that instant lapsed where no
     # later event could measure it.
     kill_switch_ended_without_clean_shutdown: bool
+    # Stronger than the flag above: the last row is a FAILED refresh, so the
+    # run ended inside an outage whose end nothing recorded.
+    kill_switch_ended_in_outage: bool
     # Deadlines the exchange demonstrably acted on: it cancelled every order on
     # the wallet, SL/TP included. Gating in BOTH profiles — the refresh RATE is
     # an availability measure and cannot express this, because the outage that
@@ -398,7 +406,10 @@ class LiveValidationReport:
         # The converse is deliberately not an iff: a run whose rows exist but span
         # no wall time also cannot say, and used to answer that with a PERFECT
         # score (2026-08-01 round-13 review).
-        if self.kill_switch_refresh_success_rate is not None and self.kill_switch_refresh_total == 0:
+        if (
+            self.kill_switch_refresh_success_rate is not None
+            and self.kill_switch_refresh_total == 0
+        ):
             raise ValueError(
                 "kill_switch_refresh_success_rate must be None when there were no "
                 f"refreshes (total={self.kill_switch_refresh_total})"
@@ -447,7 +458,16 @@ class LiveValidationReport:
         """The report as printable ``key: value`` lines (the CLI's output shape)."""
 
         def _rate(value: Decimal | None) -> str:
-            return "n/a (no refresh yet)" if value is None else f"{value * 100:.2f}%"
+            if value is not None:
+                return f"{value * 100:.2f}%"
+            # None has TWO causes now, and naming the wrong one printed
+            # "n/a (no refresh yet)" directly above "kill_switch_refresh_total:
+            # 150". Distinguish them off the count the operator can see.
+            return (
+                "n/a (no refresh yet)"
+                if self.kill_switch_refresh_total == 0
+                else "n/a (rows span no elapsed time)"
+            )
 
         def _smoke(value: bool) -> str:
             # The four smoke-derived booleans are a TESTNET_LIVE acceptance
@@ -482,8 +502,7 @@ class LiveValidationReport:
             f"kill_switch_outage_seconds: {self.kill_switch_outage_seconds:.0f}"
             f" across {self.kill_switch_outage_episodes} outage(s)"
             f" of {self.kill_switch_covered_seconds:.0f}s covered",
-            f"kill_switch_clean_shutdown: "
-            f"{_yn(not self.kill_switch_ended_without_clean_shutdown)}",
+            f"kill_switch_clean_shutdown: {_yn(not self.kill_switch_ended_without_clean_shutdown)}",
             f"kill_switch_fired_count: {self.kill_switch_fired_count}",
             f"kill_switch_disarm_failed_count: {self.kill_switch_disarm_failed_count}",
             f"safe_mode_active: {self.safe_mode_active_type or 'no'}"
@@ -755,7 +774,7 @@ def _window_seconds(start: datetime, end: datetime) -> Decimal:
 class _KillSwitchTally(NamedTuple):
     """What the §18.5 event log says about this run's dead man's switch."""
 
-    refresh_rate: Decimal | None  # None iff there is no coverage window yet
+    refresh_rate: Decimal | None  # None when there is nothing to measure
     refreshed: int
     failed: int
     fired_count: int  # deadlines the exchange demonstrably acted on
@@ -768,6 +787,9 @@ class _KillSwitchTally(NamedTuple):
     # after that instant is unmeasurable (see _kill_switch_tally), so this is
     # the only honest trace of it.
     ended_without_clean_shutdown: bool
+    # An outage still open at the last event: the run's final word was a
+    # failed refresh. Cannot be measured (no later event), so it is reported.
+    ended_in_outage: bool
 
     @property
     def refresh_total(self) -> int:
@@ -847,30 +869,37 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
         for row in repo.iter_kill_switch_events(conn, run_id)
     )
     for when, event in events:
-        if previous is not None:
+        # A stretch that OPENS on a deliberate release counts on NEITHER side: the
+        # trigger was cleared on purpose, so it says nothing about whether the
+        # switch was available. Crediting it to ``covered`` alone would let an
+        # operator sitting at 98% stop the daemon for an hour, restart, and dilute
+        # a failing run into a pass on downtime they chose
+        # (2026-08-01 round-13 incremental review).
+        if previous is not None and previous_event not in _KILL_SWITCH_CLEAN_ENDINGS:
             gap = _window_seconds(previous, when)
+            # Everything else is time the switch was supposed to be covering, so
+            # it counts toward the denominator whether or not it was an outage.
             covered += gap
             if in_outage:
                 # A recorded outage: charged in full for as long as it ran, which
                 # is what makes the number independent of the retry cadence.
                 outage_total += gap
-            elif gap > deadline and previous_event not in _KILL_SWITCH_CLEAN_ENDINGS:
+            elif gap > deadline:
                 # SILENCE LONGER THAN THE COVER. Nothing renewed the schedule
                 # across this stretch, so the exchange cancelled every order on
                 # the wallet partway through it — SL and TP included — whatever
-                # the process was doing. Charged in full and counted as its own
-                # episode: this is the case a dead process produces, and the one
-                # the old "silence means downtime, judge nothing" rule threw away.
-                #
-                # UNLESS the stretch opens on a clean shutdown. Then the cover was
-                # released ON PURPOSE — shutdown() cleared the wallet-wide trigger,
-                # so there was nothing left to fire — and an operator who stops the
-                # daemon overnight and restarts it in the morning has not exposed
-                # anything. Without this arm the rule would fail every planned
-                # restart, which is the "correct but far too broad" shape this
-                # review loop keeps producing.
+                # the process was doing. Charged in full, to BOTH sides: this is
+                # the case a dead process produces, and the one the old "silence
+                # means downtime, judge nothing" rule threw away.
                 outage_total += gap
                 episodes += 1
+                # Still exposed as far as the log knows. Without this the row at
+                # the far end — typically the ``kill_switch_refresh_failed`` that
+                # the wedged process finally managed to write — opened a SECOND
+                # episode for one continuous lapse. The event handlers below still
+                # get the final say: an ``armed``/``refreshed`` at the far end
+                # closes it immediately.
+                in_outage = True
         previous = when
         previous_event = event
         if event in (_KILL_SWITCH_REFRESH_OK, _KILL_SWITCH_ARMED):
@@ -888,6 +917,15 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
         elif event == _KILL_SWITCH_DISARM_FAILED:
             disarm_failed += 1
     ended_dirty = bool(events) and events[-1][1] not in _KILL_SWITCH_CLEAN_ENDINGS
+    # An outage still OPEN at the last event is a different, sharper fact than a
+    # merely dirty ending: the last thing the run managed to say was "I failed to
+    # refresh". The window cannot measure past its own end, so an outage that
+    # never closed contributes zero seconds and a run that failed and NEVER came
+    # back scored a clean 100% — better than the same run recovering two minutes
+    # later, which is the worse-run-scores-better shape all over again. It cannot
+    # be charged (that would drift with the clock) so it is surfaced instead
+    # (2026-08-01 round-13 incremental review).
+    ended_in_outage = in_outage
     # Pinned to the shared context like every other layer's arithmetic: this is
     # the acceptance report's ONLY division, and it decides an exit-5 verdict.
     with localcontext(DECIMAL_CONTEXT):
@@ -901,12 +939,10 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
             # whose events landed in one instant) passed §20.3 unconditionally.
             rate = None
         else:
+            # No clamp needed: every second added to ``outage_total`` is added to
+            # ``covered`` in the same branch, so the quotient is in [0, 1] by
+            # construction.
             rate = (covered - outage_total) / covered
-        if rate is not None and rate < 0:
-            # Only reachable if the deadline read from genesis is shorter than the
-            # cadence that actually ran, which makes every gap a lapse. Clamp
-            # rather than emit a rate outside [0, 1] that __post_init__ rejects.
-            rate = Decimal(0)
     return _KillSwitchTally(
         rate,
         refreshed,
@@ -917,6 +953,7 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
         episodes,
         covered,
         ended_dirty,
+        ended_in_outage,
     )
 
 
@@ -1257,6 +1294,7 @@ def validate_live_run(
         kill_switch_outage_episodes=kill_switch.outage_episodes,
         kill_switch_covered_seconds=kill_switch.covered_seconds,
         kill_switch_ended_without_clean_shutdown=kill_switch.ended_without_clean_shutdown,
+        kill_switch_ended_in_outage=kill_switch.ended_in_outage,
         kill_switch_refresh_total=refresh_total,
         kill_switch_fired_count=kill_switch.fired_count,
         kill_switch_disarm_failed_count=kill_switch.disarm_failed_count,
@@ -1298,6 +1336,18 @@ def _apply_refresh_gate(
     # its own life. The flag distinguishes a killed run from a stopped one for a
     # human reading the summary; it cannot distinguish either from a running one,
     # so it does not get a vote (2026-08-01 round-13 review).
+    if kill_switch.ended_in_outage:
+        # Unlike the dirty-ending flag above, this one is unambiguous: the run's
+        # LAST kill-switch row is a failed refresh, so whatever happened next, it
+        # started from an outage. The seconds cannot be charged without measuring
+        # to `now` and drifting, so it lands here — a shortfall (keep running),
+        # never silence, because a run that failed and never recovered otherwise
+        # scored a clean 100%.
+        shortfalls.append(
+            "the kill-switch log ends INSIDE an outage (last row is a failed "
+            "refresh) — the time after it cannot be measured, so this run's "
+            "availability is a lower bound, not a verdict"
+        )
     if refresh_total == 0:
         # No refresh evidence yet — a shortfall (keep running), not a 0% failure.
         shortfalls.append("no kill-switch refresh events yet (need a rate >= 99%)")

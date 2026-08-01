@@ -420,11 +420,17 @@ shortfall——30s 一次的節奏下約 50 分鐘就滿，遠早於 30 cycles�
 **這道可用率以「時間」計，而且「沉默」也算 outage**：只要事件之間的空窗超過該 run
 自己的 `schedule_cancel_seconds`，就代表那段期間沒有任何東西續約排程，交易所已在中途
 把整個錢包的單（含 SL/TP）撤光——不管當時進程是卡住、被限流還是根本死了——一律以
-**全長**計入 outage。唯一豁免是空窗開頭是一列乾淨的 shutdown（`shutdown_cancel_orders_*`）：
-那代表保護是**刻意**釋放的（shutdown 會清掉錢包層級的 trigger），所以計畫性的停機重啟
-不會被罰。**因此：被 SIGKILL／OOM 砍掉再重啟的 run，那段停機會直接反映在可用率上**，
-這是刻意的——那段時間倉位確實裸奔過。另外 `kill_switch_clean_shutdown: no` 只是
-**告知**（log 停在半路），不擋 gate，因為在 run 還活著時跑 validate 本來就沒有 shutdown 列。
+**全長**計入 outage。唯一豁免是空窗開頭為 **`kill_switch_disarmed`**：那一列寫在
+`clear_scheduled_cancel()` 成功之後，是唯一能證明錢包層級 trigger 已被清掉的證據，
+代表保護是**刻意**釋放的，所以計畫性的停機重啟不會被罰，而且那段時間**分子分母都不計**
+（只扣分子會讓「停機一小時再開」變成稀釋工具，把不到 99% 的 run 洗成通過）。
+注意**不是** `shutdown_cancel_orders_started`／`_completed`：那兩列夾住的是撤單 sweep，
+跑在清 trigger **之前**，當下 switch 仍然是 armed 的。
+**因此：被 SIGKILL／OOM 砍掉再重啟的 run，那段停機會直接反映在可用率上**，這是刻意的
+——那段時間倉位確實裸奔過。另外兩個旗標只**告知**、不擋 gate：
+`kill_switch_clean_shutdown: no`（log 停在半路——run 還活著時跑 validate 本來就沒有
+shutdown 列），以及 `kill_switch_ended_in_outage`（最後一列是失敗的 refresh，之後的
+時間無從量測，所以那個可用率是**下界**而不是判決；它會記一筆 shortfall→exit 4）。
 `kill_switch_fired_count = 0`（dead man's switch 從未真的燒過）、run **不在 MANUAL
 safe mode**、四項 smoke 布林（`restart_reconciliation_passed`
 ——注意這一項**沒有** `_test_` 中綴——以及 `emergency_close_test_passed`／

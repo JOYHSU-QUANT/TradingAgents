@@ -1393,8 +1393,13 @@ class SmokeTestRunner:
             f"({size}). Every probe here is long-shaped and closes with a reduce-only "
             "SELL, which on a short position the exchange refuses — the whole trigger "
             "block would fail as 'exchange refused' for a reason no config change can "
-            "fix. Flatten the position (or run the suite on a flat/long account) and "
-            "retry; do NOT open one by hand after --create, which books fill_unmapped."
+            "fix. Two ways out: let the run flatten the position itself (restart "
+            "`live --loop` and wait for the AI to close), or start the suite over "
+            "under a NEW --run-id created against a flat/long account. Do NOT close "
+            "it by hand: a manual fill has no order row of this run's, so it books "
+            "fill_unmapped and pins THIS run's validate at exit 5 permanently — and "
+            "because an unmapped fill is not applied to the local position, it would "
+            "not clear this check either."
         )
 
     def _ensure_staged_long(self) -> None:

@@ -350,9 +350,11 @@ python -m contrib.hyperliquid_perp live \
   區分——先回 §3。gate 開著時會印最舊一筆通過結果的時間戳——
   smoke 通過**沒有時效**，程式或 config 大改後請自行重跑 `live-smoke`。
   **重跑前先確認這個 run 沒有持著空倉**：探針全是多單形狀，淨空倉時整個探針區塊
-  會以 `net SHORT` 具名中止（先等它平掉或手動平倉——**平倉要在 run 停著時做，
-  且注意 post-genesis 的手動成交會記 `fill_unmapped`**，見 §2 的警告框；
-  最乾淨的做法是等 AI 自己平倉回到 flat 再重跑）。
+  會以 `net SHORT` 具名中止。出路只有兩條：**(a)** 重開 `live --loop` 等 AI 自己
+  平掉倉位，或 **(b)** 在帳戶 flat／多倉的狀態下用**新的 `--run-id`** 重跑整套。
+  **不要手動平倉**——手動成交沒有本 run 的 order row，會記 `fill_unmapped`，把
+  這個 run 的 `validate` 永久釘在 exit 5（見 §2 的警告框），而且 unmapped fill
+  不會套用到本地倉位，所以連這道守衛都解不開。
 - 迴圈每 ~10s tick（在 30s kill-switch 預算內）：排空 WS queue → 刷 kill switch →
   reconciliation → SL/TP protection → 到期切片；4h AI decision 在背景 thread。
 - Ctrl-C／SIGTERM 安全停止並跑 §18.2 shutdown sweep。

@@ -472,8 +472,9 @@ validate 讀到的位置。曾經讓後者記 shortfall 擋 gate，結果是：�
 `_disarmed` 這三種列**不管是誰寫的**（包括後來 live-smoke 寫的）都關得起來、那段秒數也會
 照實算進 outage。判準是**最後一列 `armed`／`refreshed`／`disarmed` 之後有沒有再開一段**，
 不是「這次 smoke 有沒有 arm 過」——只要選到的測試裡有會下單的項目，smoke 的 pre-flight
-recovery 就會先 arm（`--dry-run` 或只挑不下單的 `--only` 則一列都不寫），所以「有 arm」
-幾乎恆成立、分不出東西。所以：daemon 死在 outage 裡、之後跑一次乾淨的 live-smoke →
+recovery 就會先 arm；就算一項下單測試都沒挑，**test 14–17 自己也會 arm**（14 直接打、
+15–17 各跑一次真 §19.1 recovery）。真正一列都不寫的只有 `--dry-run`，以及 `--only` 同時
+避開下單測試與 14–17 的情況。所以「有 arm」幾乎恆成立、分不出東西。所以：daemon 死在 outage 裡、之後跑一次乾淨的 live-smoke →
 `clean_shutdown: no` ＋ `ended_in_outage: no`（那次 arm 把 daemon 的 outage 關掉了）；
 但同一次 smoke 若 arm 之後 refresh 失敗、離場 disarm 也失敗，那是**第二段** outage 且
 沒人關它 → `ended_in_outage: yes`、`outage_episodes: 2`。裸奔秒數不管哪種情形都在

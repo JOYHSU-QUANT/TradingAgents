@@ -2036,13 +2036,18 @@ def test_a_passing_runs_summary_still_says_live_smoke_rows_were_excluded(tmp_pat
     from contrib.hyperliquid_perp.live.kill_switch import _stamp_suite_authored
 
     db = _healthy(tmp_path)
-    for step in range(4):
-        _kill_switch_event(
-            db,
-            "kill_switch_refreshed",
-            off=-120 + step * 30,
-            detail=_stamp_suite_authored(None),
-        )
+    # One of the four is a FAILURE: an attempt is an attempt, and counting only
+    # the successes left that term of the sum free — an aborted smoke whose
+    # refreshes all failed would print the bare daemon count again
+    # (2026-08-01 round-22 mutation probe). It recovers on the next second, so
+    # this run stays comfortably above the 99% bar rather than resting on it:
+    # a fixture 0.03pp from the gate turns any later edit into a confusing
+    # ``live_ready`` failure instead of the assertion under test.
+    _kill_switch_event(
+        db, "kill_switch_refresh_failed", off=-120, detail=_stamp_suite_authored(None)
+    )
+    for off in (-119, -60, -30):
+        _kill_switch_event(db, "kill_switch_refreshed", off=off, detail=_stamp_suite_authored(None))
     with db:
         report = validate_live_run(db, run_id="r", now=_T0)
     assert report.live_ready
@@ -2555,6 +2560,14 @@ def test_post_init_rejects_open_window_without_count():
 def test_post_init_rejects_negative_seconds():
     with pytest.raises(ValueError, match="must be >= 0"):
         _make_report(unprotected_position_seconds=Decimal(-1))
+
+
+def test_post_init_rejects_a_negative_suite_attempt_count():
+    # Same guard as its two sibling counters, and it was added without one: the
+    # summary renders any truthy value, so -3 printed "(+-3 during live-smoke)"
+    # (2026-08-01 round-22 review).
+    with pytest.raises(ValueError, match="must be >= 0"):
+        _make_report(kill_switch_suite_refresh_attempts=-3)
 
 
 def test_post_init_rejects_no_daemon_rows_beside_daemon_refresh_evidence():

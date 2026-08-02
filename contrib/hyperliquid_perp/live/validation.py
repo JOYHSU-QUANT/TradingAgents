@@ -491,7 +491,11 @@ class LiveValidationReport:
                 "kill_switch_ended_without_clean_shutdown is None (no daemon rows) but "
                 f"kill_switch_refresh_total is {self.kill_switch_refresh_total}"
             )
-        for name in ("kill_switch_fired_count", "kill_switch_disarm_failed_count"):
+        for name in (
+            "kill_switch_fired_count",
+            "kill_switch_disarm_failed_count",
+            "kill_switch_suite_refresh_attempts",
+        ):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")
 

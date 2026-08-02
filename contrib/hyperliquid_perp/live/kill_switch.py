@@ -35,7 +35,11 @@
 
 Every state change lands in ``kill_switch_events`` (§18.5) — once per change,
 not once per attempt: a run of failed retries is one outage, and §20.3 measures
-it by the TIME between the failure row and the next success. The manager only
+it by the TIME from the failure row to the next row proving a schedule stands
+again — ``refreshed``, ``armed`` or ``disarmed``. That measure also opens an
+outage on SILENCE past the standing deadline, so one can exist with no failure
+row in the table at all (a killed or wedged process writes nothing). The manager
+only
 exists on runs where real orders are enabled — an unarmed (paper / gate-check)
 run has no exchange orders for a dead man's switch to protect.
 """
@@ -385,11 +389,6 @@ def deadline_detail(seconds: int, note: str) -> str:
 # one too: ``validation.py`` derives the DAEMON subsequence from it, and the
 # last row of that subsequence is the run's clean-shutdown verdict. "Sample
 # floor only" was true for exactly one round (2026-08-01 round-21 review).
-#
-# It has a SECOND consumer since round 17, and weakening the marker moves that
-# one too: ``validation.py`` derives the DAEMON subsequence from it, and the
-# last row of that subsequence is the run's clean-shutdown verdict. "Sample
-# floor only" was true for one round (2026-08-01 round-21 review).
 #
 # A token rather than a substring sniff of free text, and read back through
 # ``is_suite_authored`` — same writer/reader discipline as ``deadline_detail``,

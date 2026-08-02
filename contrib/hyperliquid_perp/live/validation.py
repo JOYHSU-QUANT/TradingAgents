@@ -1112,8 +1112,13 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
     daemon_rows = [row for row in events if not is_suite_authored(row[2])]
     ended_dirty = None if not daemon_rows else daemon_rows[-1][1] not in _KILL_SWITCH_CLEAN_ENDINGS
     # An outage still OPEN at the last event is a different, sharper fact than a
-    # merely dirty ending: the last thing the run managed to say was "I failed to
-    # refresh". The window cannot measure past its own end, so an outage that
+    # merely dirty ending. Usually the last thing the run managed to say was "I
+    # failed to refresh" — but NOT only that: silence past the standing deadline
+    # opens one too, so this can be true with no ``refresh_failed`` row in the
+    # table at all, and the two field comments say so (2026-08-01 round-20
+    # review: this third gloss, the one on the computation itself, was the one
+    # round 19's "everywhere" missed). The window cannot measure past its own
+    # end, so an outage that
     # never closed contributes zero seconds and a run that failed and NEVER came
     # back scored a clean 100% — better than the same run recovering two minutes
     # later, which is the worse-run-scores-better shape all over again. It cannot
@@ -1513,6 +1518,25 @@ def validate_live_run(
     )
 
 
+def _suite_exclusion_note(kill_switch: _KillSwitchTally) -> str:
+    """Why the count above is smaller than the row count the operator can SELECT.
+
+    Every one of these branches prints a DAEMON-only number. Round 18 fixed that
+    for the zero-evidence branch alone, and the branch one line over kept the
+    same defect: a run with 121 live-smoke rows and ten daemon refreshes said
+    "kill_switch_refresh_total = 10" beside a table holding 131 refresh rows —
+    a claim the operator checks against the table and finds false, which is the
+    exact thing round 18 set out to stop (2026-08-01 round-20 review).
+    """
+    attempts = kill_switch.suite_refreshed + kill_switch.suite_failed
+    if not attempts:
+        return ""
+    return (
+        f" — a further {attempts} refresh attempt(s) on record were written during "
+        "live-smoke and do not count toward the §20.3 sample floor"
+    )
+
+
 def _apply_refresh_gate(
     failures: list[str],
     shortfalls: list[str],
@@ -1575,6 +1599,7 @@ def _apply_refresh_gate(
         shortfalls.append(
             f"kill_switch_refresh_total = {refresh_total} — too few to judge availability "
             f"(need >= {MIN_KILL_SWITCH_REFRESH_SAMPLES}; below that one blip decides it)"
+            + _suite_exclusion_note(kill_switch)
         )
     elif refresh_rate is None:
         # Enough rows to judge, but they span no wall time, so availability has no
@@ -1584,6 +1609,7 @@ def _apply_refresh_gate(
         shortfalls.append(
             f"kill_switch events span no elapsed time ({refresh_total} row(s) at a "
             "single instant) — availability has no denominator to measure against"
+            + _suite_exclusion_note(kill_switch)
         )
     elif refresh_rate < MIN_KILL_SWITCH_REFRESH_RATE:
         # Report the TIME, not only the rounded percentage. At two decimals a

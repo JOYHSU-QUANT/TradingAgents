@@ -1869,7 +1869,9 @@ def test_the_two_end_of_run_flags_are_scoped_differently_on_purpose(tmp_path):
     from contrib.hyperliquid_perp.live.kill_switch import _stamp_suite_authored
 
     db = Database(tmp_path / "live.db")
-    _init_live_run(db)
+    # Deadline wider than the 3600s gap, so the failed refresh is provably what
+    # opens this outage rather than the silence branch (2026-08-01 round-20).
+    _init_live_run(db, schedule_cancel_seconds=7200)
     _kill_switch_event(db, "kill_switch_armed", off=0)
     _kill_switch_event(db, "kill_switch_refreshed", off=30)
     # The daemon's last word: a failed refresh, then nothing — it was killed.
@@ -1905,8 +1907,12 @@ def test_a_suite_row_closes_a_daemons_open_outage(tmp_path, closing_event):
     """
     from contrib.hyperliquid_perp.live.kill_switch import _stamp_suite_authored
 
+    # A deadline WIDER than the gap, so only the failed refresh can open this
+    # outage. Under the 120s default the `gap > deadline` silence branch charges
+    # the same 600s, and the test would pass with the branch it names deleted
+    # (2026-08-01 round-20 review).
     db = Database(tmp_path / "live.db")
-    _init_live_run(db)
+    _init_live_run(db, schedule_cancel_seconds=900)
     _kill_switch_event(db, "kill_switch_armed", off=0)
     _kill_switch_event(db, "kill_switch_refresh_failed", off=30)
     _kill_switch_event(db, closing_event, off=630, detail=_stamp_suite_authored(None))
@@ -1929,7 +1935,7 @@ def test_a_suite_disarm_closes_a_daemons_open_outage(tmp_path):
     from contrib.hyperliquid_perp.live.kill_switch import _stamp_suite_authored
 
     db = Database(tmp_path / "live.db")
-    _init_live_run(db)
+    _init_live_run(db, schedule_cancel_seconds=900)
     _kill_switch_event(db, "kill_switch_armed", off=0)
     _kill_switch_event(db, "kill_switch_refresh_failed", off=30)
     _kill_switch_event(db, "kill_switch_disarmed", off=630, detail=_stamp_suite_authored(None))
@@ -1945,21 +1951,94 @@ def test_a_suite_run_that_never_recovers_the_switch_still_ends_in_outage(tmp_pat
     The RUNBOOK said "any row closes it", which is wider than the code — a
     re-run whose pre-flight refresh AND exit disarm both fail leaves the outage
     open, and the operator must still be told (2026-08-01 round-19 review).
+
+    The suite's own ``armed`` row is in the fixture because the real suite
+    ALWAYS writes one: ``_preflight_recovery`` runs before any per-test refresh
+    and arms a real manager. Round 19 left it out, so the fixture was not the
+    scenario its own docstring named and its episode count was the synthetic
+    one — the real shape opens a SECOND episode, which is the number an
+    operator will see (2026-08-01 round-20 review).
+    """
+    from contrib.hyperliquid_perp.live.kill_switch import _stamp_suite_authored
+
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db, schedule_cancel_seconds=900)
+    _kill_switch_event(db, "kill_switch_armed", off=0)
+    _kill_switch_event(db, "kill_switch_refresh_failed", off=30)
+    # The re-run's pre-flight recovery arms: this CLOSES the daemon's outage.
+    _kill_switch_event(db, "kill_switch_armed", off=630, detail=_stamp_suite_authored(None))
+    # Then its own refresh fails and its exit disarm fails: a second outage that
+    # nothing closes.
+    _kill_switch_event(
+        db, "kill_switch_refresh_failed", off=660, detail=_stamp_suite_authored(None)
+    )
+    _kill_switch_event(db, "kill_switch_disarm_failed", off=690, detail=_stamp_suite_authored(None))
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=700))
+    assert report.kill_switch_ended_in_outage is True
+    assert report.kill_switch_outage_episodes == 2
+    # 600s for the daemon's, 30s for the suite's own — the second one is still
+    # open, and an open outage is charged only up to the last row.
+    assert report.kill_switch_outage_seconds == Decimal(630)
+
+
+def test_every_daemon_only_count_says_that_live_smoke_rows_were_excluded(tmp_path):
+    """All three low-evidence branches print a DAEMON-only number, so all three say so.
+
+    Round 18 fixed the zero-evidence branch alone and the branch one line over
+    kept the same defect: 121 live-smoke rows plus ten daemon refreshes reported
+    "kill_switch_refresh_total = 10" beside a table holding 131 refresh rows — a
+    claim the operator checks against the table and finds false, which is what
+    round 18 set out to stop (2026-08-01 round-20 review).
     """
     from contrib.hyperliquid_perp.live.kill_switch import _stamp_suite_authored
 
     db = Database(tmp_path / "live.db")
     _init_live_run(db)
-    _kill_switch_event(db, "kill_switch_armed", off=0)
-    _kill_switch_event(db, "kill_switch_refresh_failed", off=30)
-    _kill_switch_event(
-        db, "kill_switch_refresh_failed", off=630, detail=_stamp_suite_authored(None)
-    )
-    _kill_switch_event(db, "kill_switch_disarm_failed", off=660, detail=_stamp_suite_authored(None))
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    # Two successes and two FAILURES: both are attempts the operator can see in
+    # the table, and counting only the successes here left the note's
+    # ``suite_failed`` term free (2026-08-01 round-20 probe).
+    for step in range(2):
+        _kill_switch_event(
+            db, "kill_switch_refreshed", off=step * 30, detail=_stamp_suite_authored(None)
+        )
+    for step in range(2):
+        _kill_switch_event(
+            db,
+            "kill_switch_refresh_failed",
+            off=60 + step * 30,
+            detail=_stamp_suite_authored(None),
+        )
+    # Below the sample floor, so the "too few to judge" branch fires.
+    for step in range(10):
+        _kill_switch_event(db, "kill_switch_refreshed", off=200 + step * 30)
     with db:
-        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=700))
-    assert report.kill_switch_ended_in_outage is True
-    assert report.kill_switch_outage_episodes == 1
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=600))
+    shortfall = next(s for s in report.shortfalls if "too few to judge" in s)
+    assert "kill_switch_refresh_total = 10" in shortfall
+    assert "4 refresh attempt(s) on record were written during live-smoke" in shortfall
+
+
+def test_the_single_instant_branch_also_says_the_suite_rows_were_excluded(tmp_path):
+    """The third branch, whose number is just as daemon-only as the other two."""
+    from contrib.hyperliquid_perp.live.kill_switch import _stamp_suite_authored
+
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _pass_all_smoke(db)
+    _add_cycles(db, MIN_LIVE_CYCLES)
+    _add_orders(db, 30)
+    _kill_switch_event(db, "kill_switch_refreshed", off=0, detail=_stamp_suite_authored(None))
+    # Enough daemon rows to clear the floor, all at one instant: no denominator.
+    for _ in range(MIN_KILL_SWITCH_REFRESH_SAMPLES):
+        _kill_switch_event(db, "kill_switch_refreshed", off=0)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=600))
+    shortfall = next(s for s in report.shortfalls if "span no elapsed time" in s)
+    assert "1 refresh attempt(s) on record were written during live-smoke" in shortfall
 
 
 def test_the_row_that_carries_exchange_text_is_the_sweeps_and_stays_the_daemons(tmp_path):

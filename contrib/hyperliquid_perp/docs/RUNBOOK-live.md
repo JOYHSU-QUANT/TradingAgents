@@ -467,10 +467,13 @@ validate 讀到的位置。曾經讓後者記 shortfall 擋 gate，結果是：�
 是關於 daemon 的事實，後來誰再寫列都改不了；而 `ended_in_outage` 問的是「可用率是不是
 下界」，也就是尾端那段 outage 有沒有東西把它關起來，而 `kill_switch_armed`／`_refreshed`／
 `_disarmed` 這三種列**不管是誰寫的**（包括後來 live-smoke 寫的）都關得起來、那段秒數也會
-照實算進 outage。所以「daemon 死在 outage 裡、之後又跑了一次 live-smoke **而它成功
-arm 了**」會印 `clean_shutdown: no` ＋ `ended_in_outage: no`；但如果那次 smoke 的
-pre-flight refresh 就失敗、離場 disarm 也失敗（兩列都不關 outage），`ended_in_outage`
-仍然是 yes。裸奔秒數不管哪種情形都在 `kill_switch_outage_seconds` 裡。
+照實算進 outage。判準是**最後一列 `armed`／`refreshed`／`disarmed` 之後有沒有再開一段**，
+不是「這次 smoke 有沒有 arm 過」——smoke 的 pre-flight recovery 一定會先 arm，所以
+「有 arm」永遠成立。所以：daemon 死在 outage 裡、之後跑一次乾淨的 live-smoke →
+`clean_shutdown: no` ＋ `ended_in_outage: no`（那次 arm 把 daemon 的 outage 關掉了）；
+但同一次 smoke 若 arm 之後 refresh 失敗、離場 disarm 也失敗，那是**第二段** outage 且
+沒人關它 → `ended_in_outage: yes`、`outage_episodes: 2`。裸奔秒數不管哪種情形都在
+`kill_switch_outage_seconds` 裡。
 `kill_switch_fired_count = 0`（dead man's switch 從未真的燒過）、run **不在 MANUAL
 safe mode**、四項 smoke 布林（`restart_reconciliation_passed`
 ——注意這一項**沒有** `_test_` 中綴——以及 `emergency_close_test_passed`／
@@ -520,7 +523,7 @@ close 落在同一個時鐘刻度）照樣 exit 5，不會讀成「從來沒有�
 
 | 看什麼 | 在哪裡 | 正常 | 異常時 |
 |---|---|---|---|
-| kill switch 刷新 | stderr log／`kill_switch_events` | 每 30s 一次 `kill_switch_refreshed` | **一列 `kill_switch_refresh_failed` ＝一次 outage**（同一次中斷只寫一列，不論重試幾次）；長度看到下一列 `kill_switch_refreshed` 為止。進 safe mode、擋新單，查網路。`validate` 的 refresh 可用率就是用這個時間長度算的，不是用列數 |
+| kill switch 刷新 | stderr log／`kill_switch_events` | 每 30s 一次 `kill_switch_refreshed` | outage 有**兩種**開頭：一列 `kill_switch_refresh_failed`（同一次中斷只寫一列，不論重試幾次），**或是沉默超過當下 deadline**——進程被砍／卡死時它連失敗都寫不出來，所以**表裡可能一列 `refresh_failed` 都沒有卻仍記到 outage**。長度算到下一列 `kill_switch_armed`／`_refreshed`／`_disarmed` 為止（`fired`、`disarm_failed`、撤單 sweep 那幾列**不**結束 outage）。進 safe mode、擋新單，查網路。`validate` 的 refresh 可用率就是用這個時間長度算的，不是用列數 |
 | reconciliation | `exchange_reconciliation_events` | 無 open case | 有 mismatch → safe mode（見下） |
 | protection | `protection_order_events` | 有部位時 SL 在書上 | `stop_loss_repair_exhausted` → unprotected，可能 emergency close |
 | 中途健檢 | `validate --run-id live-BTC --db live_trading.db` | exit 4（一致、未滿） | exit 5 → 停下來調查 |

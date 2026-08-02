@@ -384,13 +384,12 @@ def test_a_daemon_row_that_merely_quotes_the_marker_is_still_the_daemons():
 
     ``detail`` is free text six writers share, and the shutdown row dumps a JSON
     blob carrying raw exchange and SQLite exception text into this column. Under
-    a plain ``in`` such a row left the DAEMON subsequence, and that subsequence
-    is what decides the run's clean-shutdown verdict: 100 refreshes and a clean
-    daemon disarm whose cancel-failure text quoted the token reported "clean
-    shutdown: no". It is the same free-text hazard the deadline reader on this
-    column already answers with an event-type allowlist — which this predicate
-    cannot use, because it runs over every event type
-    (2026-08-01 round-18 review).
+    a plain ``in`` such a row left the DAEMON subsequence — the subsequence that
+    decides the run's clean-shutdown verdict. It is the same free-text hazard
+    the deadline reader on this column answers with an event-type allowlist,
+    which this predicate cannot use because it runs over every event type
+    (2026-08-01 round-18 review). No writer can turn that into a wrong verdict
+    today (see the report-level test), so this is where the guard is pinned.
     """
     from contrib.hyperliquid_perp.live.kill_switch import (
         _SUITE_AUTHORED_TOKEN,
@@ -402,6 +401,12 @@ def test_a_daemon_row_that_merely_quotes_the_marker_is_still_the_daemons():
     assert not is_suite_authored(quoted)
     # Prefix and interior positions are not shapes the writer can produce either.
     assert not is_suite_authored(f"{_SUITE_AUTHORED_TOKEN} deadline=120s")
+    # A FIELD, not a suffix. Every probe above also passes under ``endswith``,
+    # under ``strip().endswith`` and under ``rsplit(" ", 1)``, so without this
+    # one the guard can be weakened back to a suffix test — which is a
+    # substring-class predicate again, one delimiter wide
+    # (2026-08-01 round-19 mutation probe).
+    assert not is_suite_authored(f"oid=1,{_SUITE_AUTHORED_TOKEN}")
     # The two shapes it DOES produce still read as the suite's, or the marker
     # stops working altogether.
     assert is_suite_authored(_stamp_suite_authored(None))

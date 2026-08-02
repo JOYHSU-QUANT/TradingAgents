@@ -1015,7 +1015,13 @@ def test_a_capped_fill_window_withholds_invalid_fill_verdicts(env):
     # still capped after N pages") is where this fixture falls through if the
     # stall detection under test is removed — so the loose predicate could not
     # tell the two apart (2026-08-01 round-18 concept scan).
-    assert any("no advanceable timestamp" in e for e in report.errors), report.errors
+    stalled = next(e for e in report.errors if "no advanceable timestamp" in e)
+    # The shared prefix operators grep for, and the consequence clause — both
+    # were left unasserted when the predicate was narrowed to the distinguishing
+    # words, so either could be deleted from the message unnoticed
+    # (2026-08-01 round-19 mutation probe).
+    assert stalled.startswith("fill cross-check window not covered")
+    assert stalled.endswith("invalid-fill verdicts withheld")
 
 
 class _StubBackfiller:

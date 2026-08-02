@@ -843,6 +843,13 @@ def test_paper_invalid_config_exits_1(tmp_path, capsys, monkeypatch):
         # And the class name alone still carries a real one, which is how the
         # SDKs actually surface it.
         (type("RateLimitError", (RuntimeError,), {})("slow down"), "rate_limit"),
+        # The spaced phrase — the other half of the argument for deleting "429",
+        # and the half nothing asserted (2026-08-01 round-19 mutation probe).
+        (RuntimeError("provider rate limit exceeded"), "rate_limit"),
+        # Order pinned in the two remaining collisions: rate_limit beats
+        # connection, and timeout beats rate_limit.
+        (RuntimeError("connection reset while rate limit backoff ran"), "rate_limit"),
+        (RuntimeError("rate limit wait timed out"), "timeout"),
         # Order pinned: when a message matches both vocabularies, timeout wins.
         (RuntimeError("connection timeout while reading"), "timeout"),
     ],

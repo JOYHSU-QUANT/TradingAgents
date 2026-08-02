@@ -582,9 +582,12 @@ def test_no_refresh_events_is_a_shortfall(tmp_path):
     # (this one, and the "rows exist but live-smoke wrote them" one), and
     # "refresh events" matches both — erasing the daemon-vs-suite distinction the
     # branch exists to draw (2026-08-01 round-18 review).
-    shortfall = _zero_evidence_shortfall(report)
-    assert "no kill-switch refresh events yet" in shortfall
-    assert "live-smoke" not in shortfall
+    # The WHOLE sentence: the tail naming the bar is what tells the operator this
+    # is a shortfall and not a 0% failure, and it could drift into nonsense with
+    # the suite green (2026-08-01 round-19 mutation probe).
+    assert (
+        _zero_evidence_shortfall(report) == "no kill-switch refresh events yet (need a rate >= 99%)"
+    )
 
 
 def test_unprotected_window_from_protection_events(tmp_path):
@@ -1881,16 +1884,99 @@ def test_the_two_end_of_run_flags_are_scoped_differently_on_purpose(tmp_path):
     # Run-scoped: the suite's arm DID close that outage, so the tail is measured
     # — and the exposure is in the seconds either way, which is the point.
     assert report.kill_switch_ended_in_outage is False
-    assert report.kill_switch_outage_seconds >= Decimal(3600)
+    # EXACT, not >=: the outage runs from the failed refresh to the suite's arm.
+    # Under >= an over-charge of the same stretch read as a pass, and the
+    # over-charge is the failure mode that moves the §20.3 verdict.
+    assert report.kill_switch_outage_seconds == Decimal(3600)
 
 
-def test_a_daemon_row_quoting_the_marker_stays_in_the_daemons_story(tmp_path):
-    """The report-level consequence of the anchored marker (see ``is_suite_authored``).
+@pytest.mark.parametrize("closing_event", ["kill_switch_armed", "kill_switch_refreshed"])
+def test_a_suite_row_closes_a_daemons_open_outage(tmp_path, closing_event):
+    """Suite rows are COVER: they end an outage and stop the meter, whoever wrote them.
 
-    A clean daemon disarm whose cancel-failure text merely QUOTED the token
-    dropped out of the daemon subsequence, leaving the run with no clean ending
-    to find: 100 refreshes, 100% availability and a summary telling the operator
-    the process was killed (2026-08-01 round-18 review).
+    Only the sample floor excludes them (§20.3, user decision round 15) — the
+    outage machinery must not. Nothing pinned that: scoping the outage-closing
+    branches to daemon rows, the same "consistency" edit that is right for the
+    floor, left all 1992 tests green while moving a measured run from 87% to
+    75% availability — and availability is what decides exit 5. The sibling
+    asymmetry test cannot see it either: it has BOTH a suite arm and a suite
+    disarm, so either one alone still closes the tail
+    (2026-08-01 round-19 mutation probe).
+    """
+    from contrib.hyperliquid_perp.live.kill_switch import _stamp_suite_authored
+
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _kill_switch_event(db, "kill_switch_armed", off=0)
+    _kill_switch_event(db, "kill_switch_refresh_failed", off=30)
+    _kill_switch_event(db, closing_event, off=630, detail=_stamp_suite_authored(None))
+    _kill_switch_event(db, "kill_switch_refreshed", off=660)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=700))
+    # 600s from the failed refresh to the suite row, and NOT the 30s after it.
+    assert report.kill_switch_outage_seconds == Decimal(600)
+    assert report.kill_switch_outage_episodes == 1
+    assert report.kill_switch_ended_in_outage is False
+
+
+def test_a_suite_disarm_closes_a_daemons_open_outage(tmp_path):
+    """The third closing row, on its own — a clean ending is positive wire evidence.
+
+    Separate from the two above because ``kill_switch_disarmed`` closes through
+    a different branch (``_KILL_SWITCH_CLEAN_ENDINGS``), and removing THAT
+    branch alone was also invisible (2026-08-01 round-19 mutation probe).
+    """
+    from contrib.hyperliquid_perp.live.kill_switch import _stamp_suite_authored
+
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _kill_switch_event(db, "kill_switch_armed", off=0)
+    _kill_switch_event(db, "kill_switch_refresh_failed", off=30)
+    _kill_switch_event(db, "kill_switch_disarmed", off=630, detail=_stamp_suite_authored(None))
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=700))
+    assert report.kill_switch_outage_seconds == Decimal(600)
+    assert report.kill_switch_ended_in_outage is False
+
+
+def test_a_suite_run_that_never_recovers_the_switch_still_ends_in_outage(tmp_path):
+    """The inverse: rows that are NOT armed/refreshed/disarmed do not close a tail.
+
+    The RUNBOOK said "any row closes it", which is wider than the code — a
+    re-run whose pre-flight refresh AND exit disarm both fail leaves the outage
+    open, and the operator must still be told (2026-08-01 round-19 review).
+    """
+    from contrib.hyperliquid_perp.live.kill_switch import _stamp_suite_authored
+
+    db = Database(tmp_path / "live.db")
+    _init_live_run(db)
+    _kill_switch_event(db, "kill_switch_armed", off=0)
+    _kill_switch_event(db, "kill_switch_refresh_failed", off=30)
+    _kill_switch_event(
+        db, "kill_switch_refresh_failed", off=630, detail=_stamp_suite_authored(None)
+    )
+    _kill_switch_event(db, "kill_switch_disarm_failed", off=660, detail=_stamp_suite_authored(None))
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=700))
+    assert report.kill_switch_ended_in_outage is True
+    assert report.kill_switch_outage_episodes == 1
+
+
+def test_the_row_that_carries_exchange_text_is_the_sweeps_and_stays_the_daemons(tmp_path):
+    """The one row that can carry arbitrary external text, in its real shape.
+
+    Round 18's version of this test hung the quoting blob on
+    ``kill_switch_disarmed`` and claimed a reachable Critical. It is not
+    reachable: that event's detail is one of two fixed literals, and the JSON
+    blob — the only place raw exchange and SQLite exception text enters this
+    column — is written on ``shutdown_cancel_orders_completed``, which is not a
+    clean ending. Walk the two shapes a real run can take and the verdict is the
+    same under both predicates, so the anchoring is PREVENTIVE hardening of a
+    column with no event-type allowlist, not a fix for a live misreading. What
+    is pinned here is the reachable half: the sweep row really does carry
+    attacker-shaped text, and it must stay in the daemon subsequence
+    (2026-08-01 round-19 review; the predicate itself is pinned in
+    test_kill_switch.py, where it discriminates).
     """
     from contrib.hyperliquid_perp.live.kill_switch import _SUITE_AUTHORED_TOKEN
 
@@ -1898,17 +1984,18 @@ def test_a_daemon_row_quoting_the_marker_stays_in_the_daemons_story(tmp_path):
     _init_live_run(db)
     _kill_switch_event(db, "kill_switch_armed", off=0)
     _kill_switch_event(db, "kill_switch_refreshed", off=30)
+    _kill_switch_event(db, "shutdown_cancel_orders_started", off=60)
     _kill_switch_event(
         db,
-        "kill_switch_disarmed",
-        off=60,
+        "shutdown_cancel_orders_completed",
+        off=70,
         detail=json.dumps({"failures": [f"cancel rejected near {_SUITE_AUTHORED_TOKEN}"]}),
     )
+    _kill_switch_event(db, "kill_switch_disarmed", off=80, detail="clean shutdown sweep")
     with db:
         report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=90))
     assert report.kill_switch_ended_without_clean_shutdown is False
     assert "kill_switch_clean_shutdown: yes" in report.summary_lines()
-    # And the refresh still counts as the daemon's, which is the same predicate.
     assert report.kill_switch_refresh_total == 1
 
 
@@ -2357,11 +2444,24 @@ def test_post_init_rejects_no_daemon_rows_beside_daemon_refresh_evidence():
     # Every refresh in the total IS a daemon row, so "no daemon rows" cannot
     # coexist with one. The pair would print "clean shutdown: n/a (no daemon
     # rows)" beside a daemon refresh rate (2026-08-01 round-18 review).
+    # ONE refresh, not 100: pinned at a single point, the threshold could move to
+    # "> 1" or be re-keyed onto the RATE (which is None whenever covered <= 0)
+    # with the suite green — and the one-refresh version of the contradiction is
+    # exactly the one a short run produces (2026-08-01 round-19 mutation probe).
+    for total in (1, 100):
+        with pytest.raises(ValueError, match="no daemon rows"):
+            _make_report(
+                kill_switch_ended_without_clean_shutdown=None,
+                kill_switch_refresh_total=total,
+                kill_switch_refresh_success_rate=Decimal(1),
+            )
+    # And with no rate at all, which is the shape the tally emits when the rows
+    # span no wall time: the invariant keys on the EVIDENCE, not on the number.
     with pytest.raises(ValueError, match="no daemon rows"):
         _make_report(
             kill_switch_ended_without_clean_shutdown=None,
-            kill_switch_refresh_total=100,
-            kill_switch_refresh_success_rate=Decimal(1),
+            kill_switch_refresh_total=1,
+            kill_switch_refresh_success_rate=None,
         )
 
 

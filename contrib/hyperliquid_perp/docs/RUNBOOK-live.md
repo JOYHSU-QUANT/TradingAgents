@@ -453,7 +453,10 @@ refresh），**也包含 suite 為 pre-flight recovery 與 test 15-17 建的那�
 一列不是乾淨收尾＝被砍掉而不是停下來；判準只看**未帶 `writer=live-smoke` 標記**的列，
 所以乾淨停機之後再跑一次 live-smoke 不會把它翻成 no，而完全沒有 daemon 列的 run
 印 `n/a (no daemon rows)`）與
-`kill_switch_ended_in_outage: yes`（**這個 run** 最後一列是失敗的 refresh）。兩者都**分不出「run 被砍掉」
+`kill_switch_ended_in_outage: yes`（**這個 run** 結束時還有一段沒關起來的 outage——通常是
+最後一列為失敗的 refresh，但**不只**：沉默超過當下 deadline 也會開一段，而 `fired`、
+`disarm_failed`、撤單 sweep 那幾列都不會把它關起來，所以**表裡可能一列
+`kill_switch_refresh_failed` 都沒有**）。兩者都**分不出「run 被砍掉」
 與「run 還在跑、validate 剛好在這一刻讀」**——in-flight 的 run 其 log 本來就結束在
 validate 讀到的位置。曾經讓後者記 shortfall 擋 gate，結果是：健康的 daemon 在 15 秒前抖了
 一下就 exit 4，而**同一個 run 過 30 秒再驗**（實際曝險**更多**）反而通過——判決隨下指令的
@@ -462,10 +465,12 @@ validate 讀到的位置。曾經讓後者記 shortfall 擋 gate，結果是：�
 另外注意這兩個旗標的**範圍刻意不同**：`clean_shutdown` 只看 daemon 的列，
 `ended_in_outage` 看整個 run 的列。它們問的不是同一件事——「daemon 是不是被砍掉的」
 是關於 daemon 的事實，後來誰再寫列都改不了；而 `ended_in_outage` 問的是「可用率是不是
-下界」，也就是尾端那段 outage 有沒有東西把它關起來，而**任何**一列（包括後來 live-smoke
-寫的）都關得起來、那段秒數也會照實算進 outage。所以「daemon 死在 outage 裡、之後又跑了
-一次 live-smoke」會印 `clean_shutdown: no` ＋ `ended_in_outage: no`，而裸奔秒數兩種
-情形都在 `kill_switch_outage_seconds` 裡。
+下界」，也就是尾端那段 outage 有沒有東西把它關起來，而 `kill_switch_armed`／`_refreshed`／
+`_disarmed` 這三種列**不管是誰寫的**（包括後來 live-smoke 寫的）都關得起來、那段秒數也會
+照實算進 outage。所以「daemon 死在 outage 裡、之後又跑了一次 live-smoke **而它成功
+arm 了**」會印 `clean_shutdown: no` ＋ `ended_in_outage: no`；但如果那次 smoke 的
+pre-flight refresh 就失敗、離場 disarm 也失敗（兩列都不關 outage），`ended_in_outage`
+仍然是 yes。裸奔秒數不管哪種情形都在 `kill_switch_outage_seconds` 裡。
 `kill_switch_fired_count = 0`（dead man's switch 從未真的燒過）、run **不在 MANUAL
 safe mode**、四項 smoke 布林（`restart_reconciliation_passed`
 ——注意這一項**沒有** `_test_` 中綴——以及 `emergency_close_test_passed`／

@@ -381,10 +381,10 @@ class LiveValidationReport:
     # nothing to say and must not answer either way.
     kill_switch_ended_without_clean_shutdown: bool | None
     # A DIFFERENT question from the flag above, not a stronger form of it: the
-    # RUN's last row is a FAILED refresh, so the availability figure is a lower
-    # bound — its tail is an outage nothing closed. Run-scoped on purpose where
-    # the flag above is daemon-scoped, so the two can disagree in both
-    # directions (see _KillSwitchTally.ended_in_outage).
+    # RUN's tail is an outage nothing closed, so the availability figure is a
+    # lower bound. Run-scoped on purpose where the flag above is daemon-scoped,
+    # so the two can disagree in both directions (see
+    # _KillSwitchTally.ended_in_outage).
     kill_switch_ended_in_outage: bool
     # Deadlines the exchange demonstrably acted on: it cancelled every order on
     # the wallet, SL/TP included. Gating in BOTH profiles — the refresh RATE is
@@ -890,18 +890,24 @@ class _KillSwitchTally(NamedTuple):
     # rows at all — with no daemon to report on, answering either way is a claim
     # rather than a reading (2026-08-01 round-17 review).
     ended_without_clean_shutdown: bool | None
-    # An outage still open at the RUN's last event: its final word was a failed
-    # refresh. Cannot be measured (no later event), so it is reported.
+    # An outage still open at the RUN's last event. Usually its final word was a
+    # failed refresh, but NOT only that: silence longer than the standing
+    # deadline opens one too, and neither ``fired``, ``disarm_failed`` nor the
+    # shutdown-sweep rows close it — so this can be true with no
+    # ``refresh_failed`` row anywhere in the table, and the summary must not
+    # send the operator looking for one. Cannot be measured (no later event),
+    # so it is reported.
     #
     # Deliberately run-scoped where the flag above is daemon-scoped, and the two
     # are not nested. They answer different questions: "was the daemon killed"
     # is a fact about the daemon that no later row can revise, while this one
     # asks whether the availability figure is a LOWER BOUND because its tail is
-    # unmeasurable — and a later row, whoever wrote it, closes that tail and
-    # gets the seconds charged in full. So a daemon that died inside an outage
-    # and was followed by a live-smoke re-run reads "clean shutdown: no,
-    # ended_in_outage: no", and the exposure is in the outage seconds either way
-    # (2026-08-01 round-18 review; user decision: keep run-scoped).
+    # unmeasurable — and a later ``armed``/``refreshed``/``disarmed`` row,
+    # whoever wrote it, closes that tail and gets the seconds charged in full.
+    # So a daemon that died inside an outage and was followed by a live-smoke
+    # re-run that ARMS reads "clean shutdown: no, ended_in_outage: no", and the
+    # exposure is in the outage seconds either way (2026-08-01 round-18 review;
+    # user decision: keep run-scoped).
     ended_in_outage: bool
 
     @property

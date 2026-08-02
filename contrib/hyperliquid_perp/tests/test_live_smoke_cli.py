@@ -364,13 +364,14 @@ def test_every_row_a_smoke_run_writes_is_marked_including_the_managers(tmp_path,
     assert not unmarked, f"rows written during live-smoke but not marked: {unmarked}"
 
 
-def test_the_runbook_documents_the_marker_token_the_code_writes(tmp_path):
+def test_the_runbook_quotes_the_literals_the_code_prints(tmp_path):
     # RUNBOOK §20.3 shows operators the literal token so they can read the event
     # log by hand. Nothing tied the doc to the constant, so renaming the constant
     # left the suite green and the runbook quietly wrong (round-16 probe).
     from pathlib import Path as _Path
 
     from contrib.hyperliquid_perp.live.kill_switch import _SUITE_AUTHORED_TOKEN
+    from contrib.hyperliquid_perp.live.validation import _NO_DAEMON_ROWS_RENDER
 
     # Resolved from __file__, not the cwd: this is the only test in the suite
     # that reads a doc, and a cwd-relative path fails whenever pytest is
@@ -378,6 +379,10 @@ def test_the_runbook_documents_the_marker_token_the_code_writes(tmp_path):
     docs = _Path(__file__).resolve().parents[1] / "docs" / "RUNBOOK-live.md"
     runbook = docs.read_text(encoding="utf-8")
     assert _SUITE_AUTHORED_TOKEN in runbook
+    # Same tie for the other literal §20.3 quotes: the summary's clean-shutdown
+    # value for a run with no daemon rows. It could drift in either place with
+    # the suite green (2026-08-01 round-18 mutation probe).
+    assert _NO_DAEMON_ROWS_RENDER in runbook
 
 
 def test_live_smoke_full_real_suite_passes_gate_and_releases_lock(tmp_path, capsys, smoke_seams):

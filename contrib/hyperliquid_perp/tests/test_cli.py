@@ -835,6 +835,14 @@ def test_paper_invalid_config_exits_1(tmp_path, capsys, monkeypatch):
         (RuntimeError("HTTP 429 Too Many Requests"), "rate_limit"),
         (RuntimeError("Connection refused by host"), "connection"),
         (RuntimeError("something exploded"), "server_error"),
+        # A bare "429" used to match here, so any larger number containing those
+        # three digits — an oid, an epoch-ms timestamp, a price — filed as a rate
+        # limit. The sibling classifier in sdk_client.py deleted the marker for
+        # this reason; this copy kept it (2026-08-01 round-18 concept scan).
+        (RuntimeError("run 1429 aborted at 14290 ms"), "server_error"),
+        # And the class name alone still carries a real one, which is how the
+        # SDKs actually surface it.
+        (type("RateLimitError", (RuntimeError,), {})("slow down"), "rate_limit"),
         # Order pinned: when a message matches both vocabularies, timeout wins.
         (RuntimeError("connection timeout while reading"), "timeout"),
     ],
@@ -2466,10 +2474,13 @@ def live_seams(monkeypatch):
             if state.account_error is not None:
                 raise state.account_error
             # ``positions`` mirrors the real snapshot: _live_startup_recovery
-            # reads it to reject off-coin holdings. Without it the daemon path
-            # died with AttributeError before ever constructing a
-            # KillSwitchManager, which is why nothing could pin what the CLI
-            # passes that constructor (2026-08-01 round-17 review).
+            # reads it to reject off-coin holdings on the ``--create`` path.
+            # Round 17 added it while pinning the daemon's KillSwitchManager
+            # kwargs and claimed the pin needed it; it does not — that test
+            # resumes an existing run and never enters the reading branch, and
+            # the suite is green without this field. Kept because the double is
+            # more faithful with it, and the daemon path really does read it
+            # under ``--create`` (2026-08-01 round-18 mutation probe).
             return SimpleNamespace(account_value=state.equity, positions=state.positions)
 
     def _fake_verify(info, *, wallet_address, agent_key, now=None):
@@ -3428,12 +3439,12 @@ def test_the_daemon_writes_unmarked_rows(tmp_path, live_seams, monkeypatch):
 
     from contrib.hyperliquid_perp.live import kill_switch as ks_mod
 
-    seen: list[object] = []
+    seen: list[dict] = []
     real = ks_mod.KillSwitchManager
 
     class _Recording(real):  # type: ignore[misc, valid-type]
         def __init__(self, **kwargs):
-            seen.append(kwargs.get("suite_authored", False))
+            seen.append(kwargs)
             super().__init__(**kwargs)
 
     monkeypatch.setattr(ks_mod, "KillSwitchManager", _Recording)
@@ -3452,7 +3463,14 @@ def test_the_daemon_writes_unmarked_rows(tmp_path, live_seams, monkeypatch):
     with contextlib.suppress(Exception):
         cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
     assert seen, "no KillSwitchManager was constructed — the pin proves nothing"
-    assert all(flag is False for flag in seen), seen
+    assert all(kwargs.get("suite_authored", False) is False for kwargs in seen), seen
+    # The other term this call site carries, and the reason round 17 had to make
+    # ``_FakeSigned.timeout`` faithful in the first place: forcing it to None
+    # here left the whole suite green, so the daemon's copy of the §18.2 timing
+    # budget could lose its failed-attempt cost undetected. The smoke sibling
+    # pins the same value; this one asserted only the marker
+    # (2026-08-01 round-18 mutation probe).
+    assert all(kwargs.get("network_timeout_s") == 8 for kwargs in seen), seen
 
 
 def test_live_refuses_a_timeout_that_cannot_fit_the_kill_switch_budget(

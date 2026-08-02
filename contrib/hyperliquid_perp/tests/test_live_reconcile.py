@@ -1010,7 +1010,12 @@ def test_a_capped_fill_window_withholds_invalid_fill_verdicts(env):
     report = reconciler.run("heartbeat")
     assert not report.fills_reconciled  # inconclusive → fail-safe unclean
     assert not any(c.case_type == "invalid_local_fill" for c in report.cases)
-    assert any("not covered" in e for e in report.errors)
+    # The stalled-timestamp branch by name, not merely "not covered": the pager
+    # emits two errors under that same prefix, and the other one ("response
+    # still capped after N pages") is where this fixture falls through if the
+    # stall detection under test is removed — so the loose predicate could not
+    # tell the two apart (2026-08-01 round-18 concept scan).
+    assert any("no advanceable timestamp" in e for e in report.errors), report.errors
 
 
 class _StubBackfiller:

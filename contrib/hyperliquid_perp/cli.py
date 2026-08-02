@@ -4135,7 +4135,19 @@ def _classify_engine_error(exc: Exception) -> str:
     text = f"{type(exc).__name__}: {exc}".lower()
     if "timeout" in text or "timed out" in text:
         return "timeout"
-    if "rate limit" in text or "ratelimit" in text or "429" in text:
+    # No bare "429": those three digits match any larger number that contains
+    # them — an oid, an epoch-ms timestamp, a price — so "run 1429 failed" filed
+    # as a rate limit. The sibling classifier in exchanges/hyperliquid/
+    # sdk_client.py deleted exactly this marker for exactly this reason and kept
+    # the phrases; this copy was missed. A real rate limit still lands here
+    # through the SDK's exception CLASS name (``RateLimitError`` → "ratelimit")
+    # or the phrase itself (2026-08-01 round-18 concept scan). The two lists are
+    # deliberately NOT identical and must not be merged: that one gates retry
+    # and §17.2 escalation on VENUE errors and carries the SDK-ism "slow down",
+    # while this one only labels an LLM-engine failure for the audit trail
+    # (``decision_attempts.error_type``, a closed vocabulary the scheduler
+    # retries identically whatever it says).
+    if "rate limit" in text or "ratelimit" in text or "too many requests" in text:
         return "rate_limit"
     if "connection" in text or "connect" in text or "network" in text:
         return "connection"

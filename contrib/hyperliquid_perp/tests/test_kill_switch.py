@@ -379,6 +379,35 @@ def test_the_daemon_manager_is_not_marked(env):
     assert not any(is_suite_authored(detail) for _, detail in rows), rows
 
 
+def test_a_daemon_row_that_merely_quotes_the_marker_is_still_the_daemons():
+    """The predicate anchors on the token's POSITION, not on its presence.
+
+    ``detail`` is free text six writers share, and the shutdown row dumps a JSON
+    blob carrying raw exchange and SQLite exception text into this column. Under
+    a plain ``in`` such a row left the DAEMON subsequence, and that subsequence
+    is what decides the run's clean-shutdown verdict: 100 refreshes and a clean
+    daemon disarm whose cancel-failure text quoted the token reported "clean
+    shutdown: no". It is the same free-text hazard the deadline reader on this
+    column already answers with an event-type allowlist — which this predicate
+    cannot use, because it runs over every event type
+    (2026-08-01 round-18 review).
+    """
+    from contrib.hyperliquid_perp.live.kill_switch import (
+        _SUITE_AUTHORED_TOKEN,
+        _stamp_suite_authored,
+        is_suite_authored,
+    )
+
+    quoted = json.dumps({"failures": [f"cancel rejected near {_SUITE_AUTHORED_TOKEN}"]})
+    assert not is_suite_authored(quoted)
+    # Prefix and interior positions are not shapes the writer can produce either.
+    assert not is_suite_authored(f"{_SUITE_AUTHORED_TOKEN} deadline=120s")
+    # The two shapes it DOES produce still read as the suite's, or the marker
+    # stops working altogether.
+    assert is_suite_authored(_stamp_suite_authored(None))
+    assert is_suite_authored(_stamp_suite_authored("deadline=120s"))
+
+
 def test_a_nonpositive_tick_gap_is_a_wiring_error():
     with pytest.raises(ValueError, match="max_tick_gap_seconds"):
         _manager_with(KillSwitchConfig(), max_tick_gap_seconds=0)

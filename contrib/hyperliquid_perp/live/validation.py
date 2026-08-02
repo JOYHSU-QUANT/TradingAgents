@@ -307,6 +307,12 @@ _KILL_SWITCH_DISARM_FAILED = "kill_switch_disarm_failed"
 # exemption. Verified against the writer, not assumed (2026-08-01 round-13
 # incremental review).
 _KILL_SWITCH_CLEAN_ENDINGS = frozenset({"kill_switch_disarmed"})
+# What the clean-shutdown line prints for a run with no daemon rows at all. A
+# named constant because RUNBOOK §20.3 quotes it verbatim for operators reading
+# the summary by hand, and nothing tied the two: the literal could drift in
+# either place with the suite green — the same gap round 16 closed for the
+# marker token (2026-08-01 round-18 mutation probe).
+_NO_DAEMON_ROWS_RENDER = "n/a (no daemon rows)"
 if (
     not {
         _KILL_SWITCH_REFRESH_OK,
@@ -367,15 +373,18 @@ class LiveValidationReport:
     kill_switch_outage_seconds: Decimal
     kill_switch_outage_episodes: int
     kill_switch_covered_seconds: Decimal
-    # The log stops without a shutdown row: killed, not stopped. Non-gating, but
-    # it is the only trace that the cover standing at that instant lapsed where no
-    # later event could measure it.
+    # The DAEMON's log stops without a shutdown row: killed, not stopped.
+    # Non-gating, but it is the only trace that the cover standing at that
+    # instant lapsed where no later event could measure it.
     # None when the run has no DAEMON kill-switch rows at all (a smoke-only
     # run-id): the flag reports on the daemon, so with no daemon it has
     # nothing to say and must not answer either way.
     kill_switch_ended_without_clean_shutdown: bool | None
-    # Stronger than the flag above: the last row is a FAILED refresh, so the
-    # run ended inside an outage whose end nothing recorded.
+    # A DIFFERENT question from the flag above, not a stronger form of it: the
+    # RUN's last row is a FAILED refresh, so the availability figure is a lower
+    # bound — its tail is an outage nothing closed. Run-scoped on purpose where
+    # the flag above is daemon-scoped, so the two can disagree in both
+    # directions (see _KillSwitchTally.ended_in_outage).
     kill_switch_ended_in_outage: bool
     # Deadlines the exchange demonstrably acted on: it cancelled every order on
     # the wallet, SL/TP included. Gating in BOTH profiles — the refresh RATE is
@@ -455,6 +464,20 @@ class LiveValidationReport:
                 f"safe_mode_active_reason {self.safe_mode_active_reason!r} without a "
                 "safe_mode_active_type"
             )
+        # "No daemon rows" and "daemon refresh evidence" cannot both hold: every
+        # refresh counted in the total IS a daemon row. The tally never emits
+        # that pair, but the report is also built by hand (tests, and any future
+        # caller), and the pair would print "clean shutdown: n/a (no daemon
+        # rows)" beside a daemon refresh rate — the same shape as the other
+        # cross-field identities asserted here (2026-08-01 round-18 review).
+        if (
+            self.kill_switch_ended_without_clean_shutdown is None
+            and self.kill_switch_refresh_total > 0
+        ):
+            raise ValueError(
+                "kill_switch_ended_without_clean_shutdown is None (no daemon rows) but "
+                f"kill_switch_refresh_total is {self.kill_switch_refresh_total}"
+            )
         for name in ("kill_switch_fired_count", "kill_switch_disarm_failed_count"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")
@@ -516,7 +539,7 @@ class LiveValidationReport:
             f" of {self.kill_switch_covered_seconds:.0f}s covered",
             "kill_switch_clean_shutdown: "
             + (
-                "n/a (no daemon rows)"
+                _NO_DAEMON_ROWS_RENDER
                 if self.kill_switch_ended_without_clean_shutdown is None
                 else _yn(not self.kill_switch_ended_without_clean_shutdown)
             ),
@@ -860,13 +883,25 @@ class _KillSwitchTally(NamedTuple):
     # all failed reported "no kill-switch refresh events yet" beside 600
     # uncovered seconds (2026-08-01 round-17 review).
     suite_failed: int
-    # The run's last kill-switch event is not a completed shutdown, so the log
-    # stops mid-flight: the process was killed rather than stopped. Everything
-    # after that instant is unmeasurable (see _kill_switch_tally), so this is
-    # the only honest trace of it.
+    # The DAEMON's last kill-switch event is not a completed shutdown, so its
+    # log stops mid-flight: the process was killed rather than stopped.
+    # Everything after that instant is unmeasurable (see _kill_switch_tally), so
+    # this is the only honest trace of it. ``None`` when the run has no daemon
+    # rows at all — with no daemon to report on, answering either way is a claim
+    # rather than a reading (2026-08-01 round-17 review).
     ended_without_clean_shutdown: bool | None
-    # An outage still open at the last event: the run's final word was a
-    # failed refresh. Cannot be measured (no later event), so it is reported.
+    # An outage still open at the RUN's last event: its final word was a failed
+    # refresh. Cannot be measured (no later event), so it is reported.
+    #
+    # Deliberately run-scoped where the flag above is daemon-scoped, and the two
+    # are not nested. They answer different questions: "was the daemon killed"
+    # is a fact about the daemon that no later row can revise, while this one
+    # asks whether the availability figure is a LOWER BOUND because its tail is
+    # unmeasurable — and a later row, whoever wrote it, closes that tail and
+    # gets the seconds charged in full. So a daemon that died inside an outage
+    # and was followed by a live-smoke re-run reads "clean shutdown: no,
+    # ended_in_outage: no", and the exposure is in the outage seconds either way
+    # (2026-08-01 round-18 review; user decision: keep run-scoped).
     ended_in_outage: bool
 
     @property
@@ -1505,13 +1540,21 @@ def _apply_refresh_gate(
     # deny (2026-08-01 round-13 exit check).
     if refresh_total == 0:
         # No refresh evidence yet — a shortfall (keep running), not a 0% failure.
-        suite_rows = kill_switch.suite_refreshed + kill_switch.suite_failed
-        if suite_rows:
+        # Counted AND named as refresh attempts. The counter only ever held
+        # refresh-class rows, while the sentence called them "kill-switch row(s)
+        # on record" — a claim the operator can check against the table, and one
+        # that was false the moment the daemon had written an ``armed`` row of
+        # its own: two rows on record, one of them the daemon's, described as
+        # "the 1 kill-switch row(s) ... written during live-smoke". Attempts are
+        # also the unit the §20.3 floor counts, which is what this sentence
+        # exists to explain the absence of (2026-08-01 round-18 review).
+        suite_attempts = kill_switch.suite_refreshed + kill_switch.suite_failed
+        if suite_attempts:
             shortfalls.append(
-                f"no DAEMON kill-switch refresh events yet — the {suite_rows} "
-                "kill-switch row(s) on record were written during live-smoke and do not "
-                "count toward the §20.3 sample floor (need a rate >= 99% over daemon "
-                "evidence)"
+                f"no DAEMON kill-switch refresh events yet — the {suite_attempts} "
+                "refresh attempt(s) on record were written during live-smoke and do "
+                "not count toward the §20.3 sample floor (need a rate >= 99% over "
+                "daemon evidence)"
             )
         else:
             shortfalls.append("no kill-switch refresh events yet (need a rate >= 99%)")

@@ -407,7 +407,16 @@ def _stamp_suite_authored(detail: str | None) -> str:
 
 def is_suite_authored(detail: str | None) -> bool:
     """Whether this row was written during ``live-smoke`` rather than by the daemon."""
-    return bool(detail) and _SUITE_AUTHORED_TOKEN in detail
+    # The token as the LAST whitespace-delimited field — the only shape
+    # ``_stamp_suite_authored`` writes — and not a substring anywhere in the
+    # column. ``detail`` is free text shared by six writers, one of which dumps
+    # a JSON blob carrying raw exchange and SQLite exception text into it, so a
+    # bare ``in`` let any row that merely QUOTED the token leave the daemon
+    # subsequence and take the run's clean-shutdown verdict with it. The reader
+    # of the same column in validation.py answers this with an event-type
+    # allowlist; this predicate runs over every event type and cannot, so it
+    # anchors instead (2026-08-01 round-18 review).
+    return bool(detail) and detail.split()[-1:] == [_SUITE_AUTHORED_TOKEN]
 
 
 def record_kill_switch_event(

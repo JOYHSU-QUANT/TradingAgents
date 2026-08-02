@@ -35,12 +35,16 @@ Where the metrics come from (all from persisted PR 2–5 event logs):
 - ``kill_switch_refresh_success_rate`` — covered TIME minus outage time, over
   covered time. An AVAILABILITY measure, and measured in seconds rather than in
   event counts: an outage opens at a ``kill_switch_refresh_failed`` and closes
-  at the next ``kill_switch_refreshed``. Counting rows made the verdict depend on
+  at the next ``kill_switch_armed``, ``kill_switch_refreshed`` OR
+  ``kill_switch_disarmed`` — the three rows that prove a schedule stands on the
+  exchange. Counting rows made the verdict depend on
   how often the manager happened to retry — a tuning parameter, not a property
   of the run — so rate-limiting the retry loop moved a 24h run with twelve
   90-second outages from 98.3% (correctly failing) to 99.6% (passing) with its
-  exposure unchanged. A stretch of SILENCE longer than the run's own
-  ``schedule_cancel_seconds`` is an outage too, whatever the process was doing:
+  exposure unchanged. A stretch of SILENCE longer than the deadline STANDING at
+  that moment — re-read from each ``armed``/``refreshed`` row's own
+  ``deadline=Ns``, with the run's ``schedule_cancel_seconds`` only as the
+  starting value — is an outage too, whatever the process was doing:
   nothing renewed the schedule across it, so the exchange cancelled every order
   on the wallet partway through. That case used to be read as "the process was
   down, judge nothing", which threw away the worst outcome available and made the
@@ -417,6 +421,15 @@ class LiveValidationReport:
     shortfalls: tuple[str, ...]
     # Non-gating completeness signals (human review), never affect the verdict.
     warnings: tuple[str, ...] = ()
+    # Refresh attempts written during live-smoke: excluded from
+    # ``kill_switch_refresh_total`` above, and carried here ONLY so the summary
+    # can say so. The three low-evidence shortfalls disclose the exclusion, but
+    # they fire only below the floor — the summary's ``kill_switch_refresh_total``
+    # line prints on EVERY run, including the ones that pass, and it was the
+    # daemon-only number with nothing to explain the gap against the table an
+    # operator can SELECT. Defaulted because it is a disclosure, never a verdict
+    # (2026-08-01 round-21 review).
+    kill_switch_suite_refresh_attempts: int = 0
 
     def __post_init__(self) -> None:
         # A None rate means "cannot say"; a present rate must be in [0, 1]. The
@@ -530,7 +543,13 @@ class LiveValidationReport:
             f"unprotected_position_seconds: {self.unprotected_position_seconds}",
             f"unprotected_window_count: {self.unprotected_window_count}",
             f"kill_switch_refresh_success_rate: {_rate(self.kill_switch_refresh_success_rate)}",
-            f"kill_switch_refresh_total: {self.kill_switch_refresh_total}",
+            f"kill_switch_refresh_total: {self.kill_switch_refresh_total}"
+            + (
+                f" (+{self.kill_switch_suite_refresh_attempts} during live-smoke, "
+                "excluded from the sample floor)"
+                if self.kill_switch_suite_refresh_attempts
+                else ""
+            ),
             # The numbers behind the rate, on the go/no-go summary rather than only
             # inside the failure string: a run that PASSES at 99.2% was still
             # exposed, and the operator could not see it.
@@ -904,10 +923,13 @@ class _KillSwitchTally(NamedTuple):
     # asks whether the availability figure is a LOWER BOUND because its tail is
     # unmeasurable — and a later ``armed``/``refreshed``/``disarmed`` row,
     # whoever wrote it, closes that tail and gets the seconds charged in full.
-    # So a daemon that died inside an outage and was followed by a live-smoke
-    # re-run that ARMS reads "clean shutdown: no, ended_in_outage: no", and the
-    # exposure is in the outage seconds either way (2026-08-01 round-18 review;
-    # user decision: keep run-scoped).
+    # The test is the LAST such row, not "did the re-run arm": smoke's pre-flight
+    # arms on any order-placing selection, so that condition is nearly always
+    # true and says nothing. A daemon that died inside an outage followed by a
+    # CLEAN live-smoke re-run reads "clean shutdown: no, ended_in_outage: no";
+    # if that re-run then fails its own refresh AND its exit disarm, that is a
+    # SECOND episode and this is yes. The exposure is in the outage seconds
+    # either way (2026-08-01 round-21 review; user decision: keep run-scoped).
     ended_in_outage: bool
 
     @property
@@ -934,10 +956,15 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
     is exactly as dangerous whether we retried into it four times or forty
     (2026-08-01 lifecycle review).
 
-    An outage opens at a ``kill_switch_refresh_failed`` and closes at the next
-    ``kill_switch_refreshed`` (or ``kill_switch_armed``, which is emitted right
-    after a successful schedule and is therefore the same evidence), and is
-    charged for as long as it ran.
+    An outage opens at a ``kill_switch_refresh_failed`` — or on silence past the
+    standing deadline, so it can open with no failure row at all — and closes at
+    the next ``kill_switch_refreshed``, ``kill_switch_armed`` (emitted right
+    after a successful schedule, and therefore the same evidence) or
+    ``kill_switch_disarmed`` (a signed round-trip that returned, so the same
+    evidence again). It is charged for as long as it ran. Nothing else closes
+    one: ``fired``, ``disarm_failed`` and the shutdown-sweep rows leave it open
+    (2026-08-01 round-21 review: three copies of this sentence named only the
+    refresh).
 
     SILENCE LONGER THAN THE RUN'S OWN DEADLINE IS ALSO AN OUTAGE. One successful
     schedule buys ``schedule_cancel_seconds`` of cover; a stretch longer than that
@@ -1500,6 +1527,7 @@ def validate_live_run(
         kill_switch_ended_without_clean_shutdown=kill_switch.ended_without_clean_shutdown,
         kill_switch_ended_in_outage=kill_switch.ended_in_outage,
         kill_switch_refresh_total=refresh_total,
+        kill_switch_suite_refresh_attempts=(kill_switch.suite_refreshed + kill_switch.suite_failed),
         kill_switch_fired_count=kill_switch.fired_count,
         kill_switch_disarm_failed_count=kill_switch.disarm_failed_count,
         safe_mode_active_type=safe_mode.mode_type,
@@ -1607,9 +1635,9 @@ def _apply_refresh_gate(
         # more useful one whenever both apply. Used to answer with a perfect score
         # (2026-08-01 round-13 review).
         shortfalls.append(
-            f"kill_switch events span no elapsed time ({refresh_total} row(s) at a "
-            "single instant) — availability has no denominator to measure against"
-            + _suite_exclusion_note(kill_switch)
+            f"kill_switch events span no elapsed time ({refresh_total} daemon refresh "
+            "row(s) at a single instant) — availability has no denominator to "
+            "measure against" + _suite_exclusion_note(kill_switch)
         )
     elif refresh_rate < MIN_KILL_SWITCH_REFRESH_RATE:
         # Report the TIME, not only the rounded percentage. At two decimals a

@@ -381,6 +381,16 @@ def deadline_detail(seconds: int, note: str) -> str:
 # evidence from a phase that cannot speak to hours of unattended running
 # (2026-08-01 round-15 review; user decision: exclude from the count only).
 #
+# It has a SECOND consumer since round 17, and weakening the marker moves that
+# one too: ``validation.py`` derives the DAEMON subsequence from it, and the
+# last row of that subsequence is the run's clean-shutdown verdict. "Sample
+# floor only" was true for exactly one round (2026-08-01 round-21 review).
+#
+# It has a SECOND consumer since round 17, and weakening the marker moves that
+# one too: ``validation.py`` derives the DAEMON subsequence from it, and the
+# last row of that subsequence is the run's clean-shutdown verdict. "Sample
+# floor only" was true for one round (2026-08-01 round-21 review).
+#
 # A token rather than a substring sniff of free text, and read back through
 # ``is_suite_authored`` — same writer/reader discipline as ``deadline_detail``,
 # for the same reason: the one thing that must not happen is the two sides

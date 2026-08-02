@@ -1952,9 +1952,11 @@ def test_a_suite_run_that_never_recovers_the_switch_still_ends_in_outage(tmp_pat
     re-run whose pre-flight refresh AND exit disarm both fail leaves the outage
     open, and the operator must still be told (2026-08-01 round-19 review).
 
-    The suite's own ``armed`` row is in the fixture because the real suite
-    ALWAYS writes one: ``_preflight_recovery`` runs before any per-test refresh
-    and arms a real manager. Round 19 left it out, so the fixture was not the
+    The suite's own ``armed`` row is in the fixture because a real re-run of the
+    suite writes one: pre-flight recovery runs whenever the selection contains
+    an order-placing test, and it arms a real manager. (Not on ``--dry-run`` or
+    an ``--only`` of non-order-placing tests, which write no rows at all.)
+    Round 19 left it out, so the fixture was not the
     scenario its own docstring named and its episode count was the synthetic
     one — the real shape opens a SECOND episode, which is the number an
     operator will see (2026-08-01 round-20 review).
@@ -2020,6 +2022,42 @@ def test_every_daemon_only_count_says_that_live_smoke_rows_were_excluded(tmp_pat
     shortfall = next(s for s in report.shortfalls if "too few to judge" in s)
     assert "kill_switch_refresh_total = 10" in shortfall
     assert "4 refresh attempt(s) on record were written during live-smoke" in shortfall
+
+
+def test_a_passing_runs_summary_still_says_live_smoke_rows_were_excluded(tmp_path):
+    """The one daemon-only count printed on EVERY run, including the ones that pass.
+
+    The three shortfall branches disclose the exclusion, but they fire only
+    below the floor. A clean run printed ``kill_switch_refresh_total: 150``
+    beside a table holding 271 refresh rows with nothing to explain the gap —
+    the same unreconcilable number, on the surface every operator reads
+    (2026-08-01 round-21 review).
+    """
+    from contrib.hyperliquid_perp.live.kill_switch import _stamp_suite_authored
+
+    db = _healthy(tmp_path)
+    for step in range(4):
+        _kill_switch_event(
+            db,
+            "kill_switch_refreshed",
+            off=-120 + step * 30,
+            detail=_stamp_suite_authored(None),
+        )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.live_ready
+    assert report.kill_switch_suite_refresh_attempts == 4
+    line = next(s for s in report.summary_lines() if s.startswith("kill_switch_refresh_total:"))
+    assert "(+4 during live-smoke, excluded from the sample floor)" in line
+
+
+def test_a_run_with_no_live_smoke_rows_says_nothing_extra(tmp_path):
+    """No suite rows, no clause — the line stays the bare count it always was."""
+    db = _healthy(tmp_path)
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    line = next(s for s in report.summary_lines() if s.startswith("kill_switch_refresh_total:"))
+    assert "live-smoke" not in line
 
 
 def test_the_single_instant_branch_also_says_the_suite_rows_were_excluded(tmp_path):

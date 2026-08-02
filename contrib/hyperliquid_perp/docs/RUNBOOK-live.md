@@ -207,7 +207,8 @@ switch ＋ reconcile ＋ 掃 stale bot-owned 單）：
 >
 > **kill switch**：pre-flight 或 restart／kill-switch 系列（測 14–17）的 recovery 會
 > arm dead man's switch；觸發過 pre-flight 的真跑在**每項測試前會 refresh** 這個 arm
-> （不然 120s 的 scheduleCancel 會在套件跑到一半時觸發、把正在測的 resting probe 撤掉）；
+> （不然 scheduleCancel 會在套件跑到一半時觸發、把正在測的 resting probe 撤掉；
+> suite 用的窗是 `max(schedule_cancel_seconds, 120s)`，不是寫死的 120s）；
 > suite 收尾會**自動 disarm**（清掉 scheduleCancel），不在錢包
 > 上留 armed 狀態（完全沒 arm 過的 run 不會去動它，以免誤清掉同錢包上其他 `live
 > --loop` 的 arm）。萬一 disarm 失敗，會印一行醒目 `WARNING`——照它指示手動清掉，或
@@ -436,7 +437,9 @@ refresh），**也包含 suite 為 pre-flight recovery 與 test 15-17 建的那�
 寫的列**。後者才是關鍵：真實 testnet 一個 test 是數分鐘，refresh interval 30s，那個 manager
 的 `tick()` 會到期並寫出 refresh 列；漏掉它們的話，這個排除規則在真實 run 上等於沒有生效
 （離線測試的時鐘不前進，所以看不出來）。它們**計入 outage 秒數與當下 deadline**（是真的保護），
-但**不計入 §20.3 的 100 筆樣本下限**——樣本下限問的是「這個 run 有沒有把 switch 操練到
+但**不計入 §20.3 的 100 筆樣本下限**（排除只作用在**樣本下限**與 `clean_shutdown` 的
+daemon 判準這兩處；`kill_switch_fired_count`／`disarm_failed_count` **不分寫入者**，
+所以 smoke 階段真的燒掉一次 dead man's switch 一樣會讓這個 run-id 報廢——見 §5 該列）——樣本下限問的是「這個 run 有沒有把 switch 操練到
 足以判定可用率」，而連跑六輪 smoke 就能湊到 114 筆、100%、daemon 卻一秒都沒跑過。
 （suite 自己打的那幾筆走的是 signed client 而不是 `KillSwitchManager`，所以沒有別人會
 補那些列。）沒有這些列的話，整個 smoke 期間、以及跑完 smoke
@@ -468,8 +471,9 @@ validate 讀到的位置。曾經讓後者記 shortfall 擋 gate，結果是：�
 下界」，也就是尾端那段 outage 有沒有東西把它關起來，而 `kill_switch_armed`／`_refreshed`／
 `_disarmed` 這三種列**不管是誰寫的**（包括後來 live-smoke 寫的）都關得起來、那段秒數也會
 照實算進 outage。判準是**最後一列 `armed`／`refreshed`／`disarmed` 之後有沒有再開一段**，
-不是「這次 smoke 有沒有 arm 過」——smoke 的 pre-flight recovery 一定會先 arm，所以
-「有 arm」永遠成立。所以：daemon 死在 outage 裡、之後跑一次乾淨的 live-smoke →
+不是「這次 smoke 有沒有 arm 過」——只要選到的測試裡有會下單的項目，smoke 的 pre-flight
+recovery 就會先 arm（`--dry-run` 或只挑不下單的 `--only` 則一列都不寫），所以「有 arm」
+幾乎恆成立、分不出東西。所以：daemon 死在 outage 裡、之後跑一次乾淨的 live-smoke →
 `clean_shutdown: no` ＋ `ended_in_outage: no`（那次 arm 把 daemon 的 outage 關掉了）；
 但同一次 smoke 若 arm 之後 refresh 失敗、離場 disarm 也失敗，那是**第二段** outage 且
 沒人關它 → `ended_in_outage: yes`、`outage_episodes: 2`。裸奔秒數不管哪種情形都在
@@ -523,7 +527,7 @@ close 落在同一個時鐘刻度）照樣 exit 5，不會讀成「從來沒有�
 
 | 看什麼 | 在哪裡 | 正常 | 異常時 |
 |---|---|---|---|
-| kill switch 刷新 | stderr log／`kill_switch_events` | 每 30s 一次 `kill_switch_refreshed` | outage 有**兩種**開頭：一列 `kill_switch_refresh_failed`（同一次中斷只寫一列，不論重試幾次），**或是沉默超過當下 deadline**——進程被砍／卡死時它連失敗都寫不出來，所以**表裡可能一列 `refresh_failed` 都沒有卻仍記到 outage**。長度算到下一列 `kill_switch_armed`／`_refreshed`／`_disarmed` 為止（`fired`、`disarm_failed`、撤單 sweep 那幾列**不**結束 outage）。進 safe mode、擋新單，查網路。`validate` 的 refresh 可用率就是用這個時間長度算的，不是用列數 |
+| kill switch 刷新 | stderr log／`kill_switch_events` | 每 30s 一次 `kill_switch_refreshed` | outage 有**兩種**開頭：一列 `kill_switch_refresh_failed`（同一次中斷只寫一列，不論重試幾次），**或是沉默超過當下 deadline**——進程被砍／卡死時它連失敗都寫不出來，所以**表裡可能一列 `refresh_failed` 都沒有卻仍記到 outage**（這種的長度從**前一列**算起，不是從 deadline 到期那一刻算起）。長度算到下一列 `kill_switch_armed`／`_refreshed`／`_disarmed` 為止（`fired`、`disarm_failed`、撤單 sweep 那幾列**不**結束 outage）。進 safe mode、擋新單，查網路。`validate` 的 refresh 可用率就是用這個時間長度算的，不是用列數 |
 | reconciliation | `exchange_reconciliation_events` | 無 open case | 有 mismatch → safe mode（見下） |
 | protection | `protection_order_events` | 有部位時 SL 在書上 | `stop_loss_repair_exhausted` → unprotected，可能 emergency close |
 | 中途健檢 | `validate --run-id live-BTC --db live_trading.db` | exit 4（一致、未滿） | exit 5 → 停下來調查 |

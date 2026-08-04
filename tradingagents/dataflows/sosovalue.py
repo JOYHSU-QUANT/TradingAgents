@@ -3,9 +3,11 @@
 Fetches BTC/ETH US spot-ETF daily net flows from SoSoValue's official OpenAPI
 (https://sosovalue.gitbook.io/soso-value-api-doc). Primary vendor for the
 ``crypto_etf_flows`` category since farside.co.uk went behind a Cloudflare JS
-challenge; the report mirrors the Farside one (same sections, same US$m units,
-same caveat wording) so the analyst sees the same shape whichever vendor served
-the call.
+challenge; the report mirrors the Farside one (same core sections, same US$m
+units, same wording for the shared caveats), with SoSoValue-only additions
+layered on top — a since-launch cumulative, a fund-breadth line, and revision
+and aggregate-vs-fund-sum reconciliation caveats — so the analyst sees the
+same shape whichever vendor served the call.
 
 A free Demo API key (sosovalue.com developer dashboard) is read from
 ``SOSOVALUE_API_KEY``; if it is unset the vendor raises
@@ -37,12 +39,15 @@ Fetched flows go into one rolling cache file per asset, refreshed once the
 snapshot is older than ``CACHE_TTL_HOURS``: a repeat call within that window
 reuses it, and a fetch failure falls back to that same snapshot (marked STALE
 in the report) up to ``MAX_STALE_DAYS``. A failed fetch is never written to
-cache.
+cache, and a cache file that fails read-side validation — per-field shape or
+the cross-field invariants ``_fetch_all`` always writes — is discarded and
+re-fetched rather than served.
 
 Daily figures are provisional while US issuers file their reports (evening US
-time): the aggregate simply omits a day until data lands, and a fund history
-carries the pending day with a ``null`` net_inflow — live-verified, and why a
-``null`` must never be read as $0. On each refresh the new summary is diffed
+time): the aggregate either omits a pending day or publishes it as a
+zero-total placeholder (both live-verified), and a fund history carries the
+pending day with a ``null`` net_inflow — why neither an aggregate zero nor a
+``null`` may be read as a confident $0. On each refresh the new summary is diffed
 against the cached one, and every changed day still visible in the requested
 report window is disclosed as a revision — the common case is yesterday's
 provisional figure firming up after a newer day has already become the
@@ -962,11 +967,11 @@ def get_etf_flow_data(
             window's edge, because the true streak may extend further back.
 
     Returns:
-        A markdown report shaped like the Farside vendor's (same sections,
-        same US$m units): latest day's net flow, window cumulative,
-        since-launch cumulative, streak, latest-day fund leaders, a breadth
-        line (how many funds moved together, and how concentrated the flow
-        was), and a recent daily-flow table.
+        A markdown report shaped like the Farside vendor's (Farside-shaped
+        core sections, same US$m units): latest day's net flow, window
+        cumulative, since-launch cumulative, streak, latest-day fund leaders,
+        a breadth line (how many funds moved together and, when any moved,
+        how concentrated the flow was), and a recent daily-flow table.
     """
     if look_back_days is None or look_back_days <= 0:
         look_back_days = DEFAULT_LOOKBACK_DAYS

@@ -19,9 +19,12 @@ Breaking changes within the 0.x line are called out explicitly.
   shape (US$m units, latest day / window cumulative / streak / leaders /
   recent-days table) and adds a since-launch cumulative, a fund breadth line
   (how many of the funds that filed moved together, how concentrated the
-  flow was), and revision caveats whenever any still-visible day's figure
+  flow was), revision caveats whenever any still-visible day's figure
   changed since the previous snapshot (issuers file over the US evening, so
-  fresh days firm up in place). The aggregate endpoint alone decides vendor
+  fresh days firm up in place), and a reconciliation caveat when a fully-filed
+  latest day's fund filings fail to sum to the aggregate — the sign that the
+  fund listing itself is missing a fund (e.g. a newly launched ETF). The
+  aggregate endpoint alone decides vendor
   success — per-fund history failures degrade to a disclosed incomplete
   breakdown, retried on a shorter 1-hour TTL — and the cache discipline
   otherwise matches Farside (rolling per-asset file, 6h TTL, stale fallback

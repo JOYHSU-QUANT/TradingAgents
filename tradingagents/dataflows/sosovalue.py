@@ -1062,7 +1062,9 @@ def _load_snapshot(asset: str) -> _FlowSnapshot:
             # likely — rather than served with a nonsense age caveat.
             if age is None or age > MAX_STALE_DAYS:
                 stale_desc = (
-                    "has an unparseable fetch date" if age is None else f"is {age} days stale"
+                    "has an unparseable or future-dated fetch date"
+                    if age is None
+                    else f"is {age} days stale"
                 )
                 raise wrap_cls(
                     f"SoSoValue {asset} fetch failed and the newest cache {stale_desc} "
@@ -1507,11 +1509,16 @@ def get_etf_flow_data(
                 f"window, not calendar days\n"
             )
 
+    # With failed histories in the mix, "no fund" would claim knowledge of
+    # filings those histories never delivered. The Latest and leaders lines
+    # share this one scope word so the two co-rendered claims cannot drift.
+    fund_scope = "no fetched fund" if snapshot.funds_failed else "no fund"
     if latest_unreported:
         latest_line = (
             f"\n**Latest ({latest['date']}):** no flow reported yet — the aggregate for "
-            f"this date is zero with no fund reporting a flow, which this API publishes "
-            f"both for a day issuers have not filed yet and for a genuine zero-flow day\n"
+            f"this date is zero with {fund_scope} reporting a flow, which this API "
+            f"publishes both for a day issuers have not filed yet and for a genuine "
+            f"zero-flow day\n"
         )
     else:
         latest_line = (
@@ -1612,11 +1619,9 @@ def get_etf_flow_data(
                 f"unposted one\n"
             )
     elif snapshot.funds:
-        # With failed histories in the mix, "no fund has filed" would claim
-        # knowledge of filings those histories never delivered.
-        scope = "no fetched fund" if snapshot.funds_failed else "no fund"
         leaders_line = (
-            f"**Latest-day leaders:** {scope} has filed a flow report for {latest['date']} yet\n"
+            f"**Latest-day leaders:** {fund_scope} has filed a flow report for "
+            f"{latest['date']} yet\n"
         )
         breadth_line = ""
     else:

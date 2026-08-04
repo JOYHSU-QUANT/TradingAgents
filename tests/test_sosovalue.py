@@ -569,6 +569,9 @@ class TestRender:
         funds = {"AAA": {"name": "A", "rows": [_frow("2026-07-01", 5.0)]}}
         out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds=funds))
         assert "**Latest (2026-07-02):** no flow reported yet" in out
+        # With every history fetched the unscoped claim is honest knowledge,
+        # not overreach — "no fetched fund" here would hedge for no reason.
+        assert "zero with no fund reporting a flow" in out
         assert "| 2026-07-02 | not yet posted |" in out
         assert "+0.0 net" not in out
         assert "no fund has filed a flow report for 2026-07-02 yet" in out
@@ -1007,6 +1010,10 @@ class TestRender:
             snapshot=_snapshot(summary=recs, funds=funds, funds_total=2, funds_failed=["BBB"]),
         )
         assert "no fetched fund has filed a flow report for 2026-07-02 yet" in out
+        # The co-rendered Latest line makes the same knowledge claim and must
+        # carry the same scope: BBB may have filed even though its history
+        # never arrived.
+        assert "zero with no fetched fund reporting a flow" in out
         assert "cover only the 1 fetched fund" in out
 
     def test_incomplete_caveat_sorts_the_failed_tickers(self):
@@ -1471,15 +1478,19 @@ class TestCacheAndLoad:
         self._setup(tmp_path, monkeypatch, now="2026-07-25T00:00:00Z")
         self._write_cache(tmp_path, fetched_at="2026-07-31T00:00:00Z")  # future stamp
         _stub_requests(monkeypatch, fail={"/etfs/summary-history"})
-        with pytest.raises(sosovalue.SoSoValueError, match="cap"):
+        with pytest.raises(sosovalue.SoSoValueError, match="cap") as excinfo:
             sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        # The stamp parses fine; the message must not send an operator hunting
+        # a parse bug when the cause is clock skew.
+        assert "unparseable or future-dated fetch date" in str(excinfo.value)
 
     def test_unparseable_fetched_at_degrades(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
         self._write_cache(tmp_path, fetched_at="2026-07-31T00:00:00")  # no trailing Z
         _stub_requests(monkeypatch, fail={"/etfs/summary-history"})
-        with pytest.raises(sosovalue.SoSoValueError, match="cap"):
+        with pytest.raises(sosovalue.SoSoValueError, match="cap") as excinfo:
             sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert "unparseable or future-dated fetch date" in str(excinfo.value)
 
     def test_fund_history_failure_is_partial_not_fatal(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)

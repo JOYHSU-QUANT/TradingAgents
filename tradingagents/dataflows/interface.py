@@ -262,6 +262,17 @@ def route_to_vendor(method: str, *args, **kwargs):
                 f"Configured vendor(s) {explicit} not available for '{method}'. "
                 f"Available: {all_available_vendors}."
             )
+        # A mis-typed name in a comma chain must not silently shrink it — the
+        # all-unknown raise above cannot fire once any sibling survives.
+        unknown = [v for v in explicit if v not in VENDOR_METHODS[method]]
+        if unknown:
+            logger.warning(
+                "Configured vendor(s) %s not available for '%s'; using %s. Available: %s.",
+                unknown,
+                method,
+                vendor_chain,
+                all_available_vendors,
+            )
     else:
         vendor_chain = all_available_vendors
 

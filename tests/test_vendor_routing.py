@@ -65,9 +65,11 @@ class VendorRoutingTests(unittest.TestCase):
         av.assert_not_called()  # the unchosen vendor was never tried
 
     def test_explicit_multi_vendor_falls_back_within_chain(self):
-        # Listing both vendors opts in to ordered fallback.
+        # Listing both vendors opts in to ordered fallback. An all-valid chain
+        # must also stay noise-free: the unknown-name warning may not fire.
         set_config({"data_vendors": {"core_stock_apis": "yfinance,alpha_vantage"}})
-        with self._route({"yfinance": _no_data, "alpha_vantage": _returns("AV_DATA")}):
+        with self._route({"yfinance": _no_data, "alpha_vantage": _returns("AV_DATA")}), \
+                self.assertNoLogs("tradingagents.dataflows.interface", level="WARNING"):
             result = interface.route_to_vendor("get_stock_data", "AAPL", "2026-01-01", "2026-01-10")
         self.assertEqual(result, "AV_DATA")
 
@@ -88,6 +90,17 @@ class VendorRoutingTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             interface.route_to_vendor("get_stock_data", "AAPL", "2026-01-01", "2026-01-10")
         self.assertIn("bogus_vendor", str(ctx.exception))
+
+    def test_unknown_vendor_in_mixed_chain_warns_and_keeps_survivors(self):
+        # A mis-typed name beside a valid one must not silently shrink the
+        # chain: the all-unknown raise above cannot fire, so the dropped name
+        # has to surface in the logs while the survivor serves the call.
+        set_config({"data_vendors": {"core_stock_apis": "bogus_vendor,yfinance"}})
+        with self._route({"yfinance": _returns("YF_DATA"), "alpha_vantage": _no_data}), \
+                self.assertLogs("tradingagents.dataflows.interface", level="WARNING") as cm:
+            result = interface.route_to_vendor("get_stock_data", "AAPL", "2026-01-01", "2026-01-10")
+        self.assertEqual(result, "YF_DATA")
+        self.assertIn("bogus_vendor", "\n".join(cm.output))
 
     def test_default_sentinel_uses_all_vendors(self):
         # No explicit choice ("default") keeps the resilient full-chain behavior.

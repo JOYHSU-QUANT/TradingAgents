@@ -740,6 +740,23 @@ class TestRender:
         assert "reconciliation gap flagged above" in out
         assert "likely still posting" not in out
 
+    def test_all_filed_within_tolerance_is_endpoint_noise_not_still_posting(self):
+        # The slice between "confirmed flat" and the disclosed gap: every
+        # listed fund filed an explicit $0 while the aggregate reports +1.5 —
+        # material at display granularity but inside the reconciliation
+        # tolerance, so no caveat fires. The gate still proved every fund has
+        # filed, so the verdict must not claim filings are still posting.
+        recs = [_srow("2026-07-02", 1.5)]
+        funds = {
+            "AAA": {"name": "A", "rows": [_frow("2026-07-02", 0.0)]},
+            "BBB": {"name": "B", "rows": [_frow("2026-07-02", 0.0)]},
+        }
+        out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds=funds))
+        assert "Reconciliation" not in out
+        assert "every listed fund has filed and the residual sits within" in out
+        assert "endpoint noise" in out
+        assert "likely still posting" not in out
+
     def test_no_reconciliation_caveat_within_absolute_tolerance(self):
         recs = [_srow("2026-07-02", 16.5)]
         funds = {
@@ -1580,6 +1597,22 @@ class TestCacheAndLoad:
         assert "**Latest (2026-07-31):** -265.4 net" in out
         assert "**Latest-day leaders:**" not in out
 
+    def test_list_429_is_absorbed_as_breakdown_failure_not_vendor_failure(
+        self, tmp_path, monkeypatch
+    ):
+        # The listing twin of the pure-429-burst rule: a throttled /etfs is
+        # non-fatal by design — the aggregate alone decides vendor success —
+        # so it degrades to the disclosed "breakdown unavailable" shape
+        # instead of forcing a stale-or-fail outcome.
+        self._setup(tmp_path, monkeypatch)
+        _stub_requests(
+            monkeypatch,
+            errors={"/etfs": sosovalue.SoSoValueRateLimitError("throttled")},
+        )
+        out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert "Issuer breakdown unavailable" in out
+        assert "**Latest (2026-07-31):** -265.4 net" in out
+
     def test_refresh_diffs_revisions_against_the_prior_snapshot(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
         _stub_requests(monkeypatch)
@@ -1754,6 +1787,19 @@ class TestCacheAndLoad:
             sosovalue.get_etf_flow_data("BTC", "2026-07-31")
         assert not [f for f in os.listdir(tmp_path) if f.startswith("sosovalue_")]
 
+    def test_list_401_propagates_not_absorbed(self, tmp_path, monkeypatch):
+        # The listing twin of the mid-batch rule: a rejected key on /etfs must
+        # not be swallowed as "fund list failed" — the summary payload already
+        # in hand was fetched with a since-revoked key and must not be cached.
+        self._setup(tmp_path, monkeypatch)
+        _stub_requests(
+            monkeypatch,
+            errors={"/etfs": sosovalue.SoSoValueNotConfiguredError("key rejected")},
+        )
+        with pytest.raises(sosovalue.SoSoValueNotConfiguredError):
+            sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert not [f for f in os.listdir(tmp_path) if f.startswith("sosovalue_")]
+
     def test_empty_listing_from_fetch_renders_the_empty_caveat(self, tmp_path, monkeypatch):
         # /etfs answering an empty list is not a fetch failure: the honest
         # "returned no usable funds" branch must fire end-to-end, not the
@@ -1835,6 +1881,18 @@ class TestCacheAndLoad:
             out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
         assert "Issuer breakdown unavailable" in out
         assert any(r.levelno >= logging.ERROR for r in caplog.records if r.name == SOSOVALUE_LOGGER)
+
+    def test_transient_list_failure_stays_a_warning(self, tmp_path, monkeypatch, caplog):
+        # The listing twin of the per-fund counterpart: an ordinary blip on
+        # /etfs must not escalate to ERROR, or the structural escalation
+        # above stops meaning anything.
+        self._setup(tmp_path, monkeypatch)
+        _stub_requests(monkeypatch, fail={"/etfs"})
+        with caplog.at_level(logging.DEBUG, logger=SOSOVALUE_LOGGER):
+            sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert not any(
+            r.levelno >= logging.ERROR for r in caplog.records if r.name == SOSOVALUE_LOGGER
+        )
 
     def test_eth_uses_its_own_rolling_cache_file(self, tmp_path, monkeypatch):
         # The cache pipeline is asset-parametrized; ETH must round-trip its

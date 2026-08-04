@@ -1428,6 +1428,7 @@ def get_etf_flow_data(
             )
 
     reconcile_gap_disclosed = False
+    reconcile_all_filed = False
     if (
         latest is not None
         and snapshot.list_fetched
@@ -1441,6 +1442,7 @@ def get_etf_flow_data(
         # listing is missing a fund and the leaders/breadth lines
         # under-describe the day — undetectable from funds_failed/unusable,
         # which are both clean here.
+        reconcile_all_filed = True
         fund_sum_m = _usd_m(sum(latest_flows.values()))
         total_m = _usd_m(latest["total_net_inflow"])
         gross_m = sum(abs(f) for f in latest_flows.values()) / _USD_PER_MILLION
@@ -1592,6 +1594,20 @@ def get_etf_flow_data(
                     f"material net flow that no fund filing reflects; every listed "
                     f"fund has filed, so this is the reconciliation gap flagged "
                     f"above, not filings still posting\n"
+                )
+            elif reconcile_all_filed:
+                # Same premise as the disclosed-gap branch — every listed
+                # fund has filed — but the aggregate-vs-sum residual stayed
+                # within the reconciliation tolerance: "still posting" is
+                # equally disproven, and a sub-tolerance residual is endpoint
+                # noise, not a pending filing.
+                breadth_line = (
+                    f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds "
+                    f"saw inflows ({reported} flat) — the aggregate above shows a "
+                    f"material net flow that no fund filing reflects; every listed "
+                    f"fund has filed and the residual sits within the reconciliation "
+                    f"tolerance, so treat it as endpoint noise, not filings still "
+                    f"posting\n"
                 )
             elif snapshot.funds_failed:
                 # With failed histories in the mix, "still posting" is not the

@@ -2,8 +2,9 @@
 sanitization, redaction, and server-text bounding), response parsing
 (live-captured fixtures), rolling
 per-asset caching with stale fallback, revision and out-of-window restatement
-diffing, partial-failure semantics (aggregate decides vendor success),
-lookahead-safe windowing, report formatting, and router integration.
+diffing, partial-failure semantics (aggregate decides vendor success, with a
+consecutive-network-failure breaker over the fund histories), lookahead-safe
+windowing, report formatting, and router integration.
 
 All network access is mocked and the parsers run against fixtures captured from
 the real API, so these run without a network connection or a key.
@@ -663,6 +664,23 @@ class TestRender:
         flat_out = self._render("2026-07-02", snapshot=_snapshot(summary=flat_recs, funds=funds))
         assert "a confirmed flat day, not an unposted one" in flat_out
         assert "still posting" not in flat_out
+
+    def test_material_aggregate_with_flat_filings_and_failed_histories_names_both_causes(self):
+        # Same asynchrony, but part of the breakdown could not be fetched (the
+        # breaker makes this state routine): "still posting" is no longer the
+        # only plausible cause — the flow may sit with the unfetched funds the
+        # header caveat discloses — so the verdict must name both instead of
+        # asserting the one it cannot know.
+        recs = [_srow("2026-07-01", 5.0), _srow("2026-07-02", 250.0)]
+        funds = {"AAA": {"name": "A", "rows": [_frow("2026-07-02", 0.0)]}}
+        out = self._render(
+            "2026-07-02",
+            snapshot=_snapshot(summary=recs, funds=funds, funds_total=2, funds_failed=["BBB"]),
+        )
+        assert "no fetched fund's filing reflects" in out
+        assert "may sit with the unfetched funds flagged above or in filings still posting" in out
+        assert "likely still posting" not in out
+        assert "cover only the 1 fetched fund" in out
 
     def test_leaders_truncation_and_top3_slice_are_pinned(self):
         # Six directional funds with distinct magnitudes: the leaders line

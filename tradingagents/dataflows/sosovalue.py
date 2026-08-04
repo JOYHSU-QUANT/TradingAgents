@@ -1586,6 +1586,18 @@ def get_etf_flow_data(
                     f"fund has filed, so this is the reconciliation gap flagged "
                     f"above, not filings still posting\n"
                 )
+            elif snapshot.funds_failed:
+                # With failed histories in the mix, "still posting" is not the
+                # only (or likeliest) explanation — the flow may simply sit
+                # with the funds the breakdown could not fetch, which the
+                # header caveat already discloses.
+                breadth_line = (
+                    f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds "
+                    f"saw inflows ({reported} flat) — the aggregate above shows a "
+                    f"material net flow that no fetched fund's filing reflects; it "
+                    f"may sit with the unfetched funds flagged above or in filings "
+                    f"still posting\n"
+                )
             else:
                 breadth_line = (
                     f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds "

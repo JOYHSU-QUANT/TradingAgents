@@ -568,6 +568,20 @@ class TestRender:
         out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds=funds))
         assert "Reconciliation" not in out
 
+    def test_no_reconciliation_check_when_listing_has_unusable_entries(self):
+        # Unusable listing entries are excluded from funds_total, so the
+        # every-fund-filed count check alone would NOT block this snapshot:
+        # the funds_unusable guard is load-bearing. The dropped entry's flow
+        # is unknown and already disclosed, so a gap against it would
+        # false-alarm.
+        recs = [_srow("2026-07-02", 100.0)]
+        funds = {"AAA": {"name": "A", "rows": [_frow("2026-07-02", 10.0)]}}
+        out = self._render(
+            "2026-07-02",
+            snapshot=_snapshot(summary=recs, funds=funds, funds_unusable=1),
+        )
+        assert "Reconciliation" not in out
+
     def test_sub_tick_negative_flow_never_renders_negative_zero(self):
         # A −$40k day rounds to -0.0 at US$m precision; _usd_m normalizes it
         # so the report shows "+0.0", never a confusing "-0.0".

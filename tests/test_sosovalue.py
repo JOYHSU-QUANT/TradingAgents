@@ -1,6 +1,7 @@
-"""SoSoValue spot-ETF flow vendor: request/error taxonomy, response parsing
-(live-captured fixtures), rolling per-asset caching with stale fallback and
-revision diffing, partial-failure semantics (aggregate decides vendor success),
+"""SoSoValue spot-ETF flow vendor: request/error taxonomy (incl. API-key
+sanitization and redaction), response parsing (live-captured fixtures), rolling
+per-asset caching with stale fallback, revision and out-of-window restatement
+diffing, partial-failure semantics (aggregate decides vendor success),
 lookahead-safe windowing, report formatting, and router integration.
 
 All network access is mocked and the parsers run against fixtures captured from

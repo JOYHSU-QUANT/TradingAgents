@@ -49,10 +49,11 @@ time): the aggregate either omits a pending day or publishes it as a
 zero-total placeholder (both live-verified), and a fund history carries the
 pending day with a ``null`` net_inflow — why neither an aggregate zero nor a
 ``null`` may be read as a confident $0. On each refresh the new summary is diffed
-against the cached one, and every changed day still visible in the requested
-report window is disclosed as a revision — the common case is yesterday's
+against the cached one, and every changed day still visible on or before
+curr_date — whether or not the report's look-back window shows the row —
+is disclosed as a revision; the common case is yesterday's
 provisional figure firming up after a newer day has already become the
-latest — so the analyst can tell reporting catch-up from a new flow event.
+latest, so the analyst can tell reporting catch-up from a new flow event.
 The since-launch cumulative gets the matching guard: when the earliest
 overlapping day's cumulative moved beyond what that day's own flow change
 explains, the API restated (or backfilled) history older than the visible
@@ -128,8 +129,9 @@ MAX_STALE_DAYS = 14
 CACHE_TTL_HOURS = 6
 
 # TTL for a snapshot whose issuer breakdown came back incomplete (failed fund
-# histories or a failed fund list — usually a transient blip or a mid-burst
-# 429). Retrying sooner heals the leaders/breadth lines on the next call past
+# histories, a failed fund list, or a listing that came back with no funds at
+# all — usually a transient blip or a mid-burst 429). Retrying sooner heals
+# the leaders/breadth lines on the next call past
 # this window instead of serving the gap for the full interval, while still
 # throttling rapid repeated calls (e.g. a backtest loop) if a fund endpoint is
 # genuinely broken. Unusable listing entries do not shorten the TTL — a
@@ -233,13 +235,13 @@ def _error_message(body: object, api_key: str) -> str:
     submitted credential back, so the key is scrubbed before the text leaves
     this module.
     """
+    text = body
     if isinstance(body, dict):
-        message = body.get("message") or body.get("msg")
-        if message:
-            return str(message).replace(api_key, "[redacted]")
-    # Redact BEFORE truncating: cutting first could slice the key across the
-    # boundary and leave its head visible.
-    return str(body).replace(api_key, "[redacted]")[:300]
+        text = body.get("message") or body.get("msg") or body
+    # Redact BEFORE truncating (cutting first could slice the key across the
+    # boundary and leave its head visible), and truncate always — a structured
+    # message is exactly as server-controlled as the raw-body fallback.
+    return str(text).replace(api_key, "[redacted]")[:300]
 
 
 def _request(path: str, params: dict) -> list:
@@ -275,10 +277,14 @@ def _request(path: str, params: dict) -> list:
     # HTTP 400 with code 1; the over-window error is HTTP 403 with code
     # 400301), so judge the body, not just the status.
     if response.status_code != 200 or not isinstance(body, dict) or body.get("code") != 0:
+        # `code` is only known to be != 0 — an arbitrary JSON value, not
+        # necessarily a small int — so it gets the same redact-then-truncate
+        # treatment as the message, at a display-width cap.
         code = body.get("code") if isinstance(body, dict) else "no-json"
         raise SoSoValueError(
             f"SoSoValue request to {path} failed (HTTP {response.status_code}, "
-            f"code {code}): {_error_message(body, api_key)}"
+            f"code {str(code).replace(api_key, '[redacted]')[:40]}): "
+            f"{_error_message(body, api_key)}"
         )
     data = body.get("data")
     if not isinstance(data, list):
@@ -452,8 +458,11 @@ def _parse_fund_rows(data: list, ticker: str) -> list[dict]:
             # Two messages for diagnosability: a bad value on a well-formed
             # row names the date; anything else shows the raw row.
             if isinstance(raw, dict) and _is_iso_date(raw.get("date")):
+                # The rejected value is by construction NOT a finite number —
+                # it can be any JSON blob — so bound it like the raw row below.
                 raise SoSoValueError(
-                    f"Non-finite {ticker} net_inflow on {raw['date']}: {raw.get('net_inflow')!r}"
+                    f"Non-finite {ticker} net_inflow on {raw['date']}: "
+                    f"{str(raw.get('net_inflow'))[:200]!r}"
                 )
             raise SoSoValueError(f"Malformed {ticker} history row {str(raw)[:200]!r}")
         rows[raw["date"]] = {"date": raw["date"], "net_inflow": raw.get("net_inflow")}
@@ -1011,7 +1020,8 @@ def _load_snapshot(asset: str) -> _FlowSnapshot:
                     age_str,
                 )
             return _snapshot_from(cached, fetched_at, stale=True)
-        raise wrap_cls(f"SoSoValue {asset} unavailable and no cache exists: {e}") from e
+        # "usable": the file may exist but have failed read-side validation.
+        raise wrap_cls(f"SoSoValue {asset} unavailable and no usable cache exists: {e}") from e
 
     fetched_at = _iso_now()
     payload["fetched_at"] = fetched_at
@@ -1222,12 +1232,44 @@ def get_etf_flow_data(
     )
     revised = sorted((d, pair) for d, pair in snapshot.revisions.items() if d in visible_dates)
     if revised:
-        changes = "; ".join(f"{d}: {old:+.1f} → {new:+.1f}" for d, (old, new) in revised)
+        rows_by_date = {r["date"]: r for r in visible}
+
+        def _is_retraction(d: str, new_m: float) -> bool:
+            # A day pulled back to the exact-zero placeholder with no fund
+            # filing left renders as "not yet posted" in the table below, so
+            # calling its revision "reporting catch-up" would contradict the
+            # cell two paragraphs down — that entry is a retraction.
+            row = rows_by_date.get(d)
+            return (
+                new_m == 0.0
+                and row is not None
+                and row["total_net_inflow"] == 0
+                and _is_unreported_day(row, _fund_flows_on(snapshot.funds, d))
+            )
+
+        retracted = {d for d, (_old, new) in revised if _is_retraction(d, new)}
+        changes = "; ".join(
+            f"{d}: {old:+.1f} → retracted (now unposted)"
+            if d in retracted
+            else f"{d}: {old:+.1f} → {new:+.1f}"
+            for d, (old, new) in revised
+        )
         noun = "day's figure has" if len(revised) == 1 else "days' figures have"
+        if len(retracted) == len(revised):
+            verdict = (
+                "The prior figure was withdrawn — the day now shows as not yet "
+                "posted below, not a new flow event."
+                if len(retracted) == 1
+                else "The prior figures were withdrawn — the days now show as "
+                "not yet posted below, not new flow events."
+            )
+        else:
+            # Any non-retracted entry keeps the decided catch-up verdict; a
+            # retracted entry in the mix is already labeled by its own arrow.
+            verdict = "This is reporting catch-up on already-published days, not new flow events."
         header_lines.append(
             f"_Revision: {len(revised)} {noun} changed since the previous snapshot "
-            f"({changes}, US$m) as issuers file their daily reports. This is reporting "
-            f"catch-up on already-published days, not new flow events.{stale_note}_"
+            f"({changes}, US$m) as issuers file their daily reports. {verdict}{stale_note}_"
         )
 
     # The revision caveat above covers visible days only, and the mirror-file
@@ -1286,6 +1328,7 @@ def get_etf_flow_data(
                 f"figures below as {lag_days} {_plural_days(lag_days)} old._"
             )
 
+    reconcile_gap_disclosed = False
     if (
         latest is not None
         and snapshot.list_fetched
@@ -1303,6 +1346,7 @@ def get_etf_flow_data(
         total_m = _usd_m(latest["total_net_inflow"])
         gross_m = sum(abs(f) for f in latest_flows.values()) / _USD_PER_MILLION
         if abs(total_m - fund_sum_m) > max(RECONCILE_ABS_TOL_USD_M, RECONCILE_REL_TOL * gross_m):
+            reconcile_gap_disclosed = True
             header_lines.append(
                 f"_Reconciliation gap: the {snapshot.funds_total} fund filings for "
                 f"{latest['date']} sum to {fund_sum_m:+.1f} US$m but the aggregate "
@@ -1434,12 +1478,24 @@ def get_etf_flow_data(
             f"($0 at the 0.1 US$m granularity shown) for {latest['date']}\n"
         )
         if _is_material(latest["total_net_inflow"]):
-            breadth_line = (
-                f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds saw "
-                f"inflows ({reported} flat) — the aggregate above shows a material "
-                f"net flow that no fund filing reflects, so issuer filings for the "
-                f"day are likely still posting\n"
-            )
+            if reconcile_gap_disclosed:
+                # Every listed fund has filed — that is the reconciliation
+                # gate's premise — so "filings still posting" cannot explain
+                # the material aggregate; the disclosed listing gap does.
+                breadth_line = (
+                    f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds "
+                    f"saw inflows ({reported} flat) — the aggregate above shows a "
+                    f"material net flow that no fund filing reflects; every listed "
+                    f"fund has filed, so this is the reconciliation gap flagged "
+                    f"above, not filings still posting\n"
+                )
+            else:
+                breadth_line = (
+                    f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds "
+                    f"saw inflows ({reported} flat) — the aggregate above shows a "
+                    f"material net flow that no fund filing reflects, so issuer "
+                    f"filings for the day are likely still posting\n"
+                )
         else:
             breadth_line = (
                 f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds saw "

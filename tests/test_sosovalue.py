@@ -239,6 +239,37 @@ class TestRequest:
             self._get(_FakeResponse(500, body))
         assert "test-k" not in str(exc_info.value)
 
+    def test_structured_message_is_truncated_after_redaction(self):
+        # The structured `message`/`msg` branch is exactly as server-controlled
+        # as the raw-body fallback: an oversized message must not flow
+        # unbounded into the raised text (and from there into logs and the
+        # router's LLM-visible sentinel). The key sits past the cap, so a
+        # cut-first implementation would also leak its head.
+        filler = "a" * 400
+        body = {"code": 400000, "message": filler + "test-key"}
+        with pytest.raises(sosovalue.SoSoValueError) as exc_info:
+            self._get(_FakeResponse(500, body))
+        msg = str(exc_info.value)
+        assert "test-k" not in msg
+        assert "a" * 301 not in msg
+
+    def test_oversized_envelope_code_is_bounded(self):
+        # `code` is only known to be != 0 — a hostile body can carry any JSON
+        # value there, and it is interpolated separately from _error_message.
+        body = {"code": "c" * 500, "message": "oops"}
+        with pytest.raises(sosovalue.SoSoValueError) as exc_info:
+            self._get(_FakeResponse(200, body))
+        assert "c" * 41 not in str(exc_info.value)
+
+    def test_key_echoed_in_the_code_field_is_redacted(self):
+        # The code interpolation is a separate path from _error_message and
+        # must scrub the credential the same way.
+        body = {"code": "bad test-key", "message": "oops"}
+        with pytest.raises(sosovalue.SoSoValueError) as exc_info:
+            self._get(_FakeResponse(200, body))
+        assert "test-key" not in str(exc_info.value)
+        assert "[redacted]" in str(exc_info.value)
+
 
 @pytest.mark.unit
 class TestGetApiKey:
@@ -395,6 +426,15 @@ class TestParseFundRows:
         bad = [{"date": "2026-07-31", "net_inflow": float("inf")}]
         with pytest.raises(sosovalue.SoSoValueError, match="Non-finite"):
             sosovalue._parse_fund_rows(bad, "IBIT")
+
+    def test_oversized_non_finite_value_is_bounded(self):
+        # The rejected value is by construction not a number — a hostile body
+        # can put any JSON blob there, and it must not flow unbounded into the
+        # raised message (and from there into logs and the router sentinel).
+        bad = [{"date": "2026-07-31", "net_inflow": "x" * 500}]
+        with pytest.raises(sosovalue.SoSoValueError, match="Non-finite") as exc_info:
+            sosovalue._parse_fund_rows(bad, "IBIT")
+        assert "x" * 201 not in str(exc_info.value)
 
     def test_duplicate_date_last_wins(self):
         rows = sosovalue._parse_fund_rows(
@@ -648,6 +688,22 @@ class TestRender:
         assert "sum to +15.0 US$m but the aggregate reports +100.0" in out
         assert "(+85.0 unaccounted)" in out
         assert "may be missing a fund" in out
+
+    def test_reconciled_flat_filings_blame_the_listing_gap_not_still_posting(self):
+        # Every listed fund filed an explicit $0 while the aggregate reports
+        # +250.0: the reconciliation gate is open, and its premise (every
+        # fund HAS filed) contradicts "filings still posting" — the breadth
+        # verdict must point at the disclosed listing gap instead of running
+        # both explanations in the same report.
+        recs = [_srow("2026-07-02", 250.0)]
+        funds = {
+            "AAA": {"name": "A", "rows": [_frow("2026-07-02", 0.0)]},
+            "BBB": {"name": "B", "rows": [_frow("2026-07-02", 0.0)]},
+        }
+        out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds=funds))
+        assert "_Reconciliation gap:" in out
+        assert "reconciliation gap flagged above" in out
+        assert "likely still posting" not in out
 
     def test_no_reconciliation_caveat_within_absolute_tolerance(self):
         recs = [_srow("2026-07-02", 16.5)]
@@ -966,6 +1022,55 @@ class TestRender:
         )
         assert out.count("_Revision:") == 1
 
+    def test_retraction_to_placeholder_is_not_called_catch_up(self):
+        # A day the server pulled back to the exact-zero placeholder (no fund
+        # filing left) renders as "not yet posted" in the table below; the
+        # revision caveat must describe a withdrawal, not "reporting catch-up"
+        # that contradicts the cell two paragraphs down.
+        recs = [_srow("2026-07-07", 29.9), _srow("2026-07-08", 0.0)]
+        funds = {"AAA": {"name": "A", "rows": [_frow("2026-07-07", 20.0)]}}
+        out = self._render(
+            "2026-07-08",
+            snapshot=_snapshot(summary=recs, funds=funds, revisions={"2026-07-08": [25.0, 0.0]}),
+        )
+        assert "2026-07-08: +25.0 → retracted (now unposted)" in out
+        assert "The prior figure was withdrawn" in out
+        assert "reporting catch-up" not in out
+        assert "| 2026-07-08 | not yet posted |" in out
+
+    def test_sub_tick_revision_to_zero_is_not_a_retraction(self):
+        # A day revised down to a sub-tick flow rounds to +0.0 at render
+        # granularity but is a real (tiny) figure, not the unposted
+        # placeholder: the plain arrow and the catch-up verdict stay.
+        recs = [_srow("2026-07-07", 29.9), _srow("2026-07-08", 0.04)]
+        funds = {"AAA": {"name": "A", "rows": [_frow("2026-07-07", 20.0)]}}
+        out = self._render(
+            "2026-07-08",
+            snapshot=_snapshot(summary=recs, funds=funds, revisions={"2026-07-08": [25.0, 0.0]}),
+        )
+        assert "2026-07-08: +25.0 → +0.0" in out
+        assert "retracted" not in out
+        assert "reporting catch-up" in out
+
+    def test_mixed_revision_and_retraction_keeps_catch_up_for_the_rest(self):
+        # One real revision plus one retraction: the retracted entry is
+        # labeled by its own arrow, and the shared verdict stays the decided
+        # catch-up wording for the entry that genuinely firmed up.
+        recs = [_srow("2026-07-07", 29.9), _srow("2026-07-08", 0.0)]
+        funds = {"AAA": {"name": "A", "rows": [_frow("2026-07-07", 20.0)]}}
+        out = self._render(
+            "2026-07-08",
+            snapshot=_snapshot(
+                summary=recs,
+                funds=funds,
+                revisions={"2026-07-07": [25.0, 29.9], "2026-07-08": [25.0, 0.0]},
+            ),
+        )
+        assert "2026-07-07: +25.0 → +29.9" in out
+        assert "2026-07-08: +25.0 → retracted (now unposted)" in out
+        assert "reporting catch-up" in out
+        assert "withdrawn" not in out
+
     def test_window_clamp_caveat_when_history_cannot_fill_the_window(self):
         out = self._render("2026-07-08", look_back_days=30)
         assert "_Window clamped: the requested 30-day window would start 2026-06-08" in out
@@ -1204,14 +1309,14 @@ class TestCacheAndLoad:
     def test_failure_without_cache_raises_and_writes_nothing(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
         _stub_requests(monkeypatch, fail={"/etfs/summary-history"})
-        with pytest.raises(sosovalue.SoSoValueError, match="no cache exists"):
+        with pytest.raises(sosovalue.SoSoValueError, match="no usable cache"):
             sosovalue.get_etf_flow_data("BTC", "2026-07-31")
         assert not [f for f in os.listdir(tmp_path) if f.startswith("sosovalue_")]
 
     def test_rate_limited_refresh_with_no_cache_keeps_the_rate_limit_type(
         self, tmp_path, monkeypatch
     ):
-        # The wrap that adds "no cache exists" context must not erase the
+        # The wrap that adds "no usable cache" context must not erase the
         # rate-limit type: the router logs VendorRateLimitError as a routine
         # quiet fall-through, not as unexpected vendor breakage with a
         # traceback that then wins the surfaced first-error slot.
@@ -1220,7 +1325,7 @@ class TestCacheAndLoad:
             monkeypatch,
             errors={"/etfs/summary-history": sosovalue.SoSoValueRateLimitError("429 slow down")},
         )
-        with pytest.raises(sosovalue.SoSoValueRateLimitError, match="no cache exists"):
+        with pytest.raises(sosovalue.SoSoValueRateLimitError, match="no usable cache"):
             sosovalue.get_etf_flow_data("BTC", "2026-07-31")
 
     def test_rate_limited_refresh_past_stale_cap_keeps_the_rate_limit_type(
@@ -1939,3 +2044,47 @@ class TestRouting:
         ):
             out = interface.route_to_vendor("get_etf_flows", "BTC", "2026-07-31", 30)
         assert out == "FARSIDE_OK"
+
+    def test_rate_limit_only_chain_degrades_to_the_sentinel(self):
+        # A chain whose only failure is an uncached 429 (here a single-vendor
+        # chain with farside disabled) must degrade like any other optional-
+        # category failure, not abort with the bare no-vendor RuntimeError.
+        set_config({"data_vendors": {"crypto_etf_flows": "sosovalue"}})
+
+        def _throttled(*a, **k):
+            raise sosovalue.SoSoValueRateLimitError("429: too many requests")
+
+        with mock.patch.dict(
+            interface.VENDOR_METHODS,
+            {
+                "get_etf_flows": {
+                    "sosovalue": _throttled,
+                    "farside": lambda *a, **k: pytest.fail("farside is not in the chain"),
+                }
+            },
+            clear=False,
+        ):
+            out = interface.route_to_vendor("get_etf_flows", "BTC", "2026-07-31", 30)
+        assert "DATA_UNAVAILABLE" in out
+        assert "429" in out
+
+    def test_a_real_error_outranks_the_rate_limit_in_the_sentinel(self):
+        # The rate-limit is recorded only as a fallback: with a real error in
+        # the chain (farside's), the sentinel surfaces that one.
+        set_config({"data_vendors": {"crypto_etf_flows": "sosovalue,farside"}})
+
+        def _throttled(*a, **k):
+            raise sosovalue.SoSoValueRateLimitError("429: too many requests")
+
+        def _farside_boom(*a, **k):
+            raise farside.FarsideError("Cloudflare challenge (403)")
+
+        with mock.patch.dict(
+            interface.VENDOR_METHODS,
+            {"get_etf_flows": {"sosovalue": _throttled, "farside": _farside_boom}},
+            clear=False,
+        ):
+            out = interface.route_to_vendor("get_etf_flows", "BTC", "2026-07-31", 30)
+        assert "DATA_UNAVAILABLE" in out
+        assert "Cloudflare" in out
+        assert "429" not in out

@@ -985,10 +985,19 @@ def get_etf_flow_data(
     if revised:
         changes = "; ".join(f"{d}: {old:+.1f} → {new:+.1f}" for d, (old, new) in revised)
         noun = "day's figure has" if len(revised) == 1 else "days' figures have"
+        # On a stale serve this disclosure is as old as the snapshot itself
+        # and would otherwise be restated verbatim on every call of an outage
+        # (up to the 14-day cap), reading as recurring catch-up activity.
+        stale_note = (
+            " This disclosure dates from when the stale snapshot above was last "
+            "refreshed, not from this call."
+            if snapshot.stale
+            else ""
+        )
         header_lines.append(
             f"_Revision: {len(revised)} {noun} changed since the previous snapshot "
             f"({changes}, US$m) as issuers file their daily reports. This is reporting "
-            f"catch-up on already-published days, not new flow events._"
+            f"catch-up on already-published days, not new flow events.{stale_note}_"
         )
 
     window_start_dt = curr_dt - timedelta(days=look_back_days)

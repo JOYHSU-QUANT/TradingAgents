@@ -586,6 +586,29 @@ class TestRender:
         )
         assert "not new flow events" in out
 
+    def test_stale_serve_time_stamps_the_revision_caveat(self, monkeypatch):
+        # A stale serve restates the cached revisions for up to the 14-day
+        # cap; the caveat must anchor the disclosure to the snapshot's own
+        # refresh, or an outage reads as recurring catch-up activity.
+        monkeypatch.setattr(sosovalue, "_utc_now", lambda: _at("2026-07-10T00:00:00Z"))
+        out = self._render(
+            "2026-07-08",
+            snapshot=_snapshot(
+                revisions={"2026-07-08": [1200.0, 1214.9]},
+                fetched_at="2026-07-09T00:00:00Z",
+                stale=True,
+            ),
+        )
+        assert "_Revision: 1 day's figure has changed" in out
+        assert "not from this call" in out
+
+    def test_fresh_serve_revision_caveat_has_no_stale_qualifier(self):
+        out = self._render(
+            "2026-07-08",
+            snapshot=_snapshot(revisions={"2026-07-08": [1200.0, 1214.9]}),
+        )
+        assert "not from this call" not in out
+
     def test_revision_for_older_visible_day_is_flagged(self):
         # The catch-up main case (user decision): yesterday's provisional
         # figure firmed up after a newer day already became the latest — a

@@ -462,6 +462,22 @@ class TestRender:
         assert "| 2026-07-02 | +0.0 |" in out
         assert "not yet posted" not in out
 
+    def test_sub_tick_negative_flow_never_renders_negative_zero(self):
+        # A −$40k day rounds to -0.0 at US$m precision; _usd_m normalizes it
+        # so the report shows "+0.0", never a confusing "-0.0".
+        recs = [
+            _srow("2026-07-01", 5.0),
+            {
+                "date": "2026-07-02",
+                "total_net_inflow": -40_000.0,
+                "cum_net_inflow": _usd(50_000.0),
+            },
+        ]
+        funds = {"AAA": {"name": "A", "rows": [_frow("2026-07-02", -0.04)]}}
+        out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds=funds))
+        assert "-0.0" not in out
+        assert "**Latest (2026-07-02):** +0.0 net" in out
+
     def test_window_includes_row_exactly_on_window_start(self):
         # The window filter is inclusive at its lower bound; an off-by-one
         # would silently drop the oldest day from the cumulative and table.
@@ -1037,6 +1053,31 @@ class TestCacheAndLoad:
         out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
         assert calls.count("/etfs/summary-history") == 2
         assert "Issuer breakdown" not in out
+
+    def test_unusable_only_snapshot_keeps_the_long_ttl(self, tmp_path, monkeypatch):
+        # Unusable listing entries cannot be healed by a re-fetch, so they do
+        # NOT shorten the TTL: a 2h-old snapshot whose only blemish is dropped
+        # listing entries is still served from cache, not re-fetched.
+        self._setup(tmp_path, monkeypatch)
+        self._write_cache(tmp_path, fetched_at="2026-07-31T22:00:00Z", funds_unusable=2)
+        calls = []
+        _stub_requests(monkeypatch, calls=calls)
+        out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert calls == []  # served from cache; no refresh attempted
+        assert "STALE" not in out
+
+    def test_structural_list_failure_is_logged_at_error(self, tmp_path, monkeypatch, caplog):
+        # The fund-list twin of the per-fund escalation: a contract break on
+        # /etfs must not hide among transient warnings either.
+        self._setup(tmp_path, monkeypatch)
+        _stub_requests(
+            monkeypatch,
+            errors={"/etfs": sosovalue.SoSoValueError("contract break")},
+        )
+        with caplog.at_level(logging.DEBUG, logger=SOSOVALUE_LOGGER):
+            out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert "Issuer breakdown unavailable" in out
+        assert any(r.levelno >= logging.ERROR for r in caplog.records if r.name == SOSOVALUE_LOGGER)
 
     def test_eth_uses_its_own_rolling_cache_file(self, tmp_path, monkeypatch):
         # The cache pipeline is asset-parametrized; ETH must round-trip its

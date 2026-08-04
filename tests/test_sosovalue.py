@@ -418,7 +418,7 @@ class TestRender:
         assert "**Latest (2026-07-02):** no flow reported yet" in out
         assert "| 2026-07-02 | not yet posted |" in out
         assert "+0.0 net" not in out
-        assert "no fund has reported a non-zero flow for 2026-07-02 yet" in out
+        assert "no fund has filed a flow report for 2026-07-02 yet" in out
 
     def test_null_fund_row_is_excluded_from_leaders_and_breadth(self):
         # FBTC's 2026-07-09 row is the null pending shape: it must not appear
@@ -461,6 +461,112 @@ class TestRender:
         assert "**Latest (2026-07-02):** +0.0 net" in out
         assert "| 2026-07-02 | +0.0 |" in out
         assert "not yet posted" not in out
+        # The leaders/breadth block must agree with the Latest line: the flat
+        # filing is a completed report, not a still-pending one.
+        assert (
+            "**Latest-day leaders:** none — all 1 reporting fund filed a flat $0 "
+            "for 2026-07-02" in out
+        )
+        assert "0 of 1 reporting funds saw inflows (1 flat)" in out
+
+    def test_all_flat_day_renders_breadth_without_pending_wording(self):
+        # Every fund filed an explicit $0: the breadth line keeps its settled
+        # denominator (flat filings count) and nothing may claim the day is
+        # still pending — the Latest line renders it as a confident +0.0.
+        recs = [_srow("2026-07-01", 5.0), _srow("2026-07-02", 0.0)]
+        funds = {
+            "AAA": {"name": "A", "rows": [_frow("2026-07-02", 0.0)]},
+            "BBB": {"name": "B", "rows": [_frow("2026-07-02", 0.0)]},
+        }
+        out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds=funds))
+        assert "**Latest (2026-07-02):** +0.0 net" in out
+        assert (
+            "**Latest-day leaders:** none — all 2 reporting funds filed a flat $0 "
+            "for 2026-07-02" in out
+        )
+        assert "**Breadth (2026-07-02):** 0 of 2 reporting funds saw inflows (2 flat)" in out
+        assert "yet" not in out
+
+    def test_leaders_truncation_and_top3_slice_are_pinned(self):
+        # Six directional funds with distinct magnitudes: the leaders line
+        # shows exactly TOP_ISSUERS of them in descending |flow| order, and
+        # the top-3 concentration is computed over the top-3 by magnitude —
+        # not over however many the leaders line happens to display.
+        recs = [_srow("2026-07-02", 46.0)]  # equals the fund sum
+        funds = {
+            "AAA": {"name": "A", "rows": [_frow("2026-07-02", 40.0)]},
+            "BBB": {"name": "B", "rows": [_frow("2026-07-02", -30.0)]},
+            "CCC": {"name": "C", "rows": [_frow("2026-07-02", 20.0)]},
+            "DDD": {"name": "D", "rows": [_frow("2026-07-02", 10.0)]},
+            "EEE": {"name": "E", "rows": [_frow("2026-07-02", 5.0)]},
+            "FFF": {"name": "F", "rows": [_frow("2026-07-02", 1.0)]},
+        }
+        out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds=funds))
+        # Exactly five leaders, FFF truncated (the trailing newline pins the cut).
+        assert (
+            "**Latest-day leaders:** AAA +40.0, BBB -30.0, CCC +20.0, DDD +10.0, EEE +5.0\n" in out
+        )
+        # gross 106; top-3 (AAA, BBB, CCC) = 90 -> 85%; AAA alone -> 38%.
+        assert "5 of 6 reporting funds saw inflows" in out
+        assert "top-3 funds = 85% of gross flow" in out
+        assert "largest single fund AAA = 38%" in out
+
+    def test_reconciliation_gap_is_disclosed(self):
+        # Every listed fund filed, yet the aggregate carries +85.0 US$m the
+        # breakdown cannot account for: the /etfs listing is likely missing a
+        # fund — the one gap funds_failed/funds_unusable cannot disclose.
+        recs = [_srow("2026-07-02", 100.0)]
+        funds = {
+            "AAA": {"name": "A", "rows": [_frow("2026-07-02", 10.0)]},
+            "BBB": {"name": "B", "rows": [_frow("2026-07-02", 5.0)]},
+        }
+        out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds=funds))
+        assert "_Reconciliation gap:" in out
+        assert "sum to +15.0 US$m but the aggregate reports +100.0" in out
+        assert "(+85.0 unaccounted)" in out
+        assert "may be missing a fund" in out
+
+    def test_no_reconciliation_caveat_within_absolute_tolerance(self):
+        recs = [_srow("2026-07-02", 16.5)]
+        funds = {
+            "AAA": {"name": "A", "rows": [_frow("2026-07-02", 10.0)]},
+            "BBB": {"name": "B", "rows": [_frow("2026-07-02", 5.0)]},
+        }
+        out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds=funds))
+        assert "Reconciliation" not in out
+
+    def test_no_reconciliation_caveat_within_relative_tolerance(self):
+        # Offsetting big flows: gross 990 -> the 2% slice is 19.8, so a 15.0
+        # gap on a huge day is endpoint noise, not a missing fund.
+        recs = [_srow("2026-07-02", 25.0)]
+        funds = {
+            "AAA": {"name": "A", "rows": [_frow("2026-07-02", 500.0)]},
+            "BBB": {"name": "B", "rows": [_frow("2026-07-02", -490.0)]},
+        }
+        out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds=funds))
+        assert "Reconciliation" not in out
+
+    def test_no_reconciliation_check_when_breakdown_is_incomplete(self):
+        # A failed fund history already explains any gap (and is disclosed);
+        # reconciling against a knowingly-short universe would false-alarm.
+        recs = [_srow("2026-07-02", 100.0)]
+        funds = {"AAA": {"name": "A", "rows": [_frow("2026-07-02", 10.0)]}}
+        out = self._render(
+            "2026-07-02",
+            snapshot=_snapshot(summary=recs, funds=funds, funds_total=2, funds_failed=["XXX"]),
+        )
+        assert "Reconciliation" not in out
+
+    def test_no_reconciliation_check_when_a_fund_is_still_pending(self):
+        # A null filing legitimately shorts the fund sum; only a day where
+        # every listed fund filed can be reconciled.
+        recs = [_srow("2026-07-02", 100.0)]
+        funds = {
+            "AAA": {"name": "A", "rows": [_frow("2026-07-02", 10.0)]},
+            "BBB": {"name": "B", "rows": [_frow("2026-07-02", None)]},
+        }
+        out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds=funds))
+        assert "Reconciliation" not in out
 
     def test_sub_tick_negative_flow_never_renders_negative_zero(self):
         # A −$40k day rounds to -0.0 at US$m precision; _usd_m normalizes it
@@ -574,6 +680,13 @@ class TestRender:
         assert "histories for ARKB could not be fetched" in out
         # Partial data still renders leaders from what was fetched.
         assert "**Latest-day leaders:** IBIT +1119.9, FBTC +95.0" in out
+
+    def test_incomplete_caveat_sorts_the_failed_tickers(self):
+        out = self._render(
+            "2026-07-08",
+            snapshot=_snapshot(funds_total=4, funds_failed=["ZZZ", "ARKB"]),
+        )
+        assert "histories for ARKB, ZZZ could not be fetched" in out
 
     def test_revision_caveat_for_latest_visible_day(self):
         out = self._render(
@@ -883,6 +996,33 @@ class TestCacheAndLoad:
             sosovalue.get_etf_flow_data("BTC", "2026-07-31")
         assert not [f for f in os.listdir(tmp_path) if f.startswith("sosovalue_")]
 
+    def test_rate_limited_refresh_with_no_cache_keeps_the_rate_limit_type(
+        self, tmp_path, monkeypatch
+    ):
+        # The wrap that adds "no cache exists" context must not erase the
+        # rate-limit type: the router logs VendorRateLimitError as a routine
+        # quiet fall-through, not as unexpected vendor breakage with a
+        # traceback that then wins the surfaced first-error slot.
+        self._setup(tmp_path, monkeypatch)
+        _stub_requests(
+            monkeypatch,
+            errors={"/etfs/summary-history": sosovalue.SoSoValueRateLimitError("429 slow down")},
+        )
+        with pytest.raises(sosovalue.SoSoValueRateLimitError, match="no cache exists"):
+            sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+
+    def test_rate_limited_refresh_past_stale_cap_keeps_the_rate_limit_type(
+        self, tmp_path, monkeypatch
+    ):
+        self._setup(tmp_path, monkeypatch, now="2026-08-15T00:00:00Z")
+        self._write_cache(tmp_path)
+        _stub_requests(
+            monkeypatch,
+            errors={"/etfs/summary-history": sosovalue.SoSoValueRateLimitError("429 slow down")},
+        )
+        with pytest.raises(sosovalue.SoSoValueRateLimitError, match="cap"):
+            sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+
     def test_failure_falls_back_to_stale_cache(self, tmp_path, monkeypatch, caplog):
         self._setup(tmp_path, monkeypatch)
         _stub_requests(monkeypatch)
@@ -1117,15 +1257,17 @@ class TestCacheAndLoad:
     def test_cache_hit_serves_the_stored_revisions(self, tmp_path, monkeypatch):
         # A within-TTL hit must carry the stored revisions forward, or the
         # caveat would only ever survive the single call after a refresh.
+        # The stored pair's "new" side matches the summary row (-265.4), as
+        # _diff_revisions always writes it.
         self._setup(tmp_path, monkeypatch)
         self._write_cache(
             tmp_path,
             fetched_at="2026-08-01T00:00:00Z",  # fresh relative to pinned now
-            revisions={"2026-07-31": [-265.4, -300.0]},
+            revisions={"2026-07-31": [-300.0, -265.4]},
         )
         _stub_requests(monkeypatch, fail={"/etfs/summary-history"})  # must not be reached
         out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
-        assert "2026-07-31: -265.4 → -300.0" in out
+        assert "2026-07-31: -300.0 → -265.4" in out
 
     def test_cache_write_failure_does_not_fail_the_call(self, tmp_path, monkeypatch, caplog):
         self._setup(tmp_path, monkeypatch)
@@ -1183,21 +1325,23 @@ class TestReadCache:
             "funds_failed": [],
             "funds_unusable": 0,
             "list_fetched": True,
-            "revisions": {"2026-07-31": [1.0, 2.0]},
+            # The pair's "new" side equals the summary row's total at report
+            # granularity (_usd_m(1.0 USD) == 0.0), as _diff_revisions writes.
+            "revisions": {"2026-07-31": [1.0, 0.0]},
         }
 
     def test_valid_payload_round_trips(self, tmp_path):
         payload = self._valid_payload()
-        assert sosovalue._read_cache(self._write(tmp_path, payload)) == payload
+        assert sosovalue._read_cache(self._write(tmp_path, payload), "BTC") == payload
 
     def test_missing_file_is_a_silent_miss(self, tmp_path):
-        assert sosovalue._read_cache(str(tmp_path / "sosovalue_btc.json")) is None
+        assert sosovalue._read_cache(str(tmp_path / "sosovalue_btc.json"), "BTC") is None
 
     def test_rejections_are_logged_with_a_reason(self, tmp_path, caplog):
         path = tmp_path / "sosovalue_btc.json"
         path.write_text("[1, 2]", encoding="utf-8")
         with caplog.at_level(logging.WARNING, logger=SOSOVALUE_LOGGER):
-            assert sosovalue._read_cache(str(path)) is None
+            assert sosovalue._read_cache(str(path), "BTC") is None
         assert "Ignoring SoSoValue cache" in caplog.text
 
     @pytest.mark.parametrize(
@@ -1243,17 +1387,48 @@ class TestReadCache:
             {"revisions": {"2026-07-31": [1.0]}},
             {"revisions": {"not-a-date": [1.0, 2.0]}},
             {"fetched_at": ""},
+            # Cross-field invariants _fetch_all always writes: each field
+            # below is individually well-shaped, so only a relationship
+            # check can reject the payload.
+            {"asset": "ETH"},  # copied/renamed cache file for another asset
+            {"funds_total": 3},  # != fetched (1) + failed (0)
+            {"funds_total": 2, "funds_failed": ["IBIT"]},  # ticker in both buckets
+            {"funds_total": 3, "funds_failed": ["FBTC", "FBTC"]},  # repeated failure
+            {"funds_total": 2, "funds_failed": ["BAD TICKER"]},  # implausible ticker
+            {"funds": {"ib!t": {"name": "x", "rows": []}}},  # implausible ticker key
+            {"list_fetched": False},  # breakdown populated despite no listing
+            {
+                "summary_rows": [
+                    {"date": "2026-07-31", "total_net_inflow": 1.0, "cum_net_inflow": 2.0},
+                    {"date": "2026-07-30", "total_net_inflow": 1.0, "cum_net_inflow": 2.0},
+                ]
+            },  # descending order
+            {
+                "summary_rows": [
+                    {"date": "2026-07-31", "total_net_inflow": 1.0, "cum_net_inflow": 2.0},
+                    {"date": "2026-07-31", "total_net_inflow": 1.0, "cum_net_inflow": 2.0},
+                ]
+            },  # duplicated date
+            {"revisions": {"2026-07-31": [1.0, float("nan")]}},  # non-finite second element
+            {"revisions": {"2026-07-30": [1.0, 0.0]}},  # date absent from summary_rows
+            {"revisions": {"2026-07-31": [5.0, 2.0]}},  # "new" disagrees with the row
+            {"revisions": {"2026-07-31": [0.0, 0.0]}},  # no-op pair
         ],
     )
     def test_malformed_field_is_a_miss(self, tmp_path, corrupt):
         payload = self._valid_payload()
         payload.update(corrupt)
-        assert sosovalue._read_cache(self._write(tmp_path, payload)) is None
+        assert sosovalue._read_cache(self._write(tmp_path, payload), "BTC") is None
 
     def test_missing_fetched_at_is_a_miss(self, tmp_path):
         payload = self._valid_payload()
         del payload["fetched_at"]
-        assert sosovalue._read_cache(self._write(tmp_path, payload)) is None
+        assert sosovalue._read_cache(self._write(tmp_path, payload), "BTC") is None
+
+    def test_missing_asset_is_a_miss(self, tmp_path):
+        payload = self._valid_payload()
+        del payload["asset"]
+        assert sosovalue._read_cache(self._write(tmp_path, payload), "BTC") is None
 
 
 # --------------------------------------------------------------------------- #

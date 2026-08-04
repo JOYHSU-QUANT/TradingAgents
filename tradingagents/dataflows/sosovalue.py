@@ -131,6 +131,16 @@ INCOMPLETE_CACHE_TTL_HOURS = 1
 # feed itself has stalled. Mirrors the Farside vendor.
 MAX_DATA_LAG_DAYS = 4
 
+# Aggregate-vs-breakdown reconciliation, checked only on a day where every
+# listed fund filed: the two figures come from separate endpoints, so a
+# material gap means the /etfs listing itself is missing a fund (e.g. a newly
+# launched ETF already counted in the aggregate) — the one universe gap
+# funds_failed/funds_unusable cannot disclose. Tolerances mirror the Farside
+# layout check; the relative slice keys off the breakdown's own gross so a
+# wrong aggregate cannot widen its own tolerance.
+RECONCILE_ABS_TOL_USD_M = 2.0
+RECONCILE_REL_TOL = 0.02
+
 # The API reports flows in USD; the report renders US$m to stay unit-identical
 # with the Farside vendor.
 _USD_PER_MILLION = 1e6
@@ -265,6 +275,17 @@ def _is_iso_date(x: object) -> bool:
         return False
 
 
+def _is_valid_ticker(x: object) -> bool:
+    """True only for a string passing the plausible-ticker filter.
+
+    The one ticker predicate shared by the live listing parser and the cache
+    validator (the ``_valid_summary_row``/``_valid_fund_row`` pairing applied
+    to the security-sensitive value), so the two trust boundaries cannot
+    drift apart on what may be interpolated into a URL path or report text.
+    """
+    return isinstance(x, str) and bool(_TICKER_RE.match(x))
+
+
 def _valid_summary_row(row: object) -> bool:
     """One aggregate row's shape: canonical date + finite flow figures.
 
@@ -350,7 +371,7 @@ def _parse_etf_list(data: list, asset: str) -> tuple[list[tuple[str, str]], int]
     unusable = 0
     for raw in data:
         ticker = raw.get("ticker") if isinstance(raw, dict) else None
-        if not isinstance(ticker, str) or not _TICKER_RE.match(ticker):
+        if not _is_valid_ticker(ticker):
             unusable += 1
             logger.warning(
                 "SoSoValue %s fund list entry %.120r has no usable ticker; skipping it",
@@ -406,12 +427,12 @@ class _FlowSnapshot(NamedTuple):
     """
 
     summary_rows: list[dict]
-    funds: dict
+    funds: dict[str, dict]
     funds_total: int
     funds_failed: list[str]
     funds_unusable: int
     list_fetched: bool
-    revisions: dict
+    revisions: dict[str, list[float]]
     fetched_at: str
     stale: bool
 
@@ -490,8 +511,11 @@ def _valid_summary_rows(rows: object) -> bool:
 
 
 def _valid_funds(funds: object) -> bool:
+    # Tickers must pass the same plausibility filter as the live listing
+    # (_parse_etf_list): the cache is a lower trust tier than the API, not a
+    # higher one, and its tickers land verbatim in the report text.
     return isinstance(funds, dict) and all(
-        isinstance(t, str)
+        _is_valid_ticker(t)
         and isinstance(f, dict)
         and isinstance(f.get("name"), str)
         and isinstance(f.get("rows"), list)
@@ -510,13 +534,18 @@ def _valid_revisions(revisions: object) -> bool:
     )
 
 
-def _read_cache(path: str) -> dict | None:
-    """Return a fully-validated cached payload, or None if it cannot be trusted.
+def _read_cache(path: str, asset: str) -> dict | None:
+    """Return a fully-validated cached payload for asset, or None if untrusted.
 
     Every rejection is logged with its own reason so a permanently-missing
     cache is diagnosable; a rejected cache costs one re-fetch and never bad
     data. Same boundary philosophy as the Farside vendor: a poisoned field
-    must fail here, not as a TypeError deep inside the report render.
+    must fail here, not as a TypeError deep inside the report render. Beyond
+    per-field shape, the cross-field relationships ``_fetch_all`` always
+    writes are re-checked too — each field of a violating payload looks
+    individually healthy, but the render would be self-contradictory (a
+    "complete" breakdown with missing leaders, a revision caveat disagreeing
+    with the table, another asset's flows under this asset's heading).
     """
 
     def _reject(reason: str) -> None:
@@ -532,25 +561,64 @@ def _read_cache(path: str) -> dict | None:
         return _reject(f"unreadable ({e})")
     if not isinstance(payload, dict):
         return _reject(f"top-level JSON is a {type(payload).__name__}, expected an object")
+    if payload.get("asset") != asset:
+        # A copied/renamed cache file would otherwise serve another asset's
+        # flows under this asset's heading with no caveat anywhere.
+        return _reject(f"'asset' is {payload.get('asset')!r}, expected {asset!r}")
     if not _valid_summary_rows(payload.get("summary_rows")):
         return _reject("'summary_rows' is missing, empty, or contains a malformed record")
+    dates = [r["date"] for r in payload["summary_rows"]]
+    if any(a >= b for a, b in zip(dates, dates[1:], strict=False)):
+        # The render trusts producer-side ordering: visible[-1] is "the
+        # latest day", the cumulative is a plain sum, and a duplicated date
+        # would double-count exactly what _parse_summary_rows refuses live.
+        return _reject("'summary_rows' dates are not strictly ascending")
     if not _valid_funds(payload.get("funds")):
         return _reject("'funds' is missing or contains a malformed fund entry")
     funds_total = payload.get("funds_total")
     if not isinstance(funds_total, int) or isinstance(funds_total, bool) or funds_total < 0:
         return _reject("'funds_total' is missing or not a non-negative integer")
     failed = payload.get("funds_failed")
-    if not isinstance(failed, list) or not all(isinstance(t, str) for t in failed):
-        return _reject("'funds_failed' is missing or not a list of tickers")
+    if not isinstance(failed, list) or not all(_is_valid_ticker(t) for t in failed):
+        return _reject("'funds_failed' is missing or not a list of plausible tickers")
     unusable = payload.get("funds_unusable")
     if not isinstance(unusable, int) or isinstance(unusable, bool) or unusable < 0:
         return _reject("'funds_unusable' is missing or not a non-negative integer")
     if not isinstance(payload.get("list_fetched"), bool):
         return _reject("'list_fetched' is missing or not a boolean")
+    # Listing bookkeeping: every listed fund lands in exactly one of
+    # funds/funds_failed exactly once, and a failed listing leaves all four
+    # breakdown fields at their empty initializers. Violations render "-1/2
+    # funds" style disclosures or leaders lines the header says were omitted.
+    if payload["list_fetched"]:
+        if funds_total != len(payload["funds"]) + len(failed):
+            return _reject(
+                f"'funds_total' ({funds_total}) does not equal fetched "
+                f"({len(payload['funds'])}) plus failed ({len(failed)}) funds"
+            )
+        failed_set = set(failed)
+        if len(failed_set) != len(failed) or failed_set & payload["funds"].keys():
+            return _reject("'funds_failed' repeats a ticker or overlaps 'funds'")
+    elif payload["funds"] or failed or funds_total or unusable:
+        return _reject("breakdown fields are populated although 'list_fetched' is false")
     if not _valid_revisions(payload.get("revisions")):
         return _reject("'revisions' is missing or malformed")
+    # A revision pair must agree with the summary it rides on: _diff_revisions
+    # only ever writes [old, new] for a date in the new summary, with "new"
+    # equal to that row's total at report granularity and "old" actually
+    # different. A disagreeing pair would render a revision caveat directly
+    # contradicting the table two paragraphs below it.
+    totals = {r["date"]: _usd_m(r["total_net_inflow"]) for r in payload["summary_rows"]}
+    for date, (old, new) in payload["revisions"].items():
+        # totals.get also covers a date absent from summary_rows: "new" is
+        # finite by _valid_revisions, so it can never equal the None default.
+        if totals.get(date) != new or old == new:
+            return _reject(f"revision for {date} does not match the summary rows")
     if not isinstance(payload.get("fetched_at"), str) or not payload["fetched_at"]:
         return _reject("'fetched_at' is missing or not a non-empty string")
+    # Deliberately unchecked: per-fund row order (the flow lookup is
+    # order-insensitive) and the fetched_at format (an unparseable stamp
+    # already fails every freshness check downstream, before any render).
     return payload
 
 
@@ -734,7 +802,7 @@ def _load_snapshot(asset: str) -> _FlowSnapshot:
     get_api_key()
 
     path = _cache_path(asset)
-    cached = _read_cache(path)
+    cached = _read_cache(path, asset)
     if cached:
         age_h = _cache_age_hours(cached["fetched_at"])
         # An incomplete breakdown (failed fund histories or a failed fund
@@ -756,6 +824,14 @@ def _load_snapshot(asset: str) -> _FlowSnapshot:
     except SoSoValueNotConfiguredError:
         raise
     except (requests.RequestException, VendorError) as e:
+        # A vendor-taxonomy error keeps its exact type through the
+        # context-adding wraps below: the router classifies by type (a
+        # VendorRateLimitError is a routine quiet fall-through; a plain
+        # SoSoValueError is unexpected breakage, logged with a traceback and
+        # surfaced as the chain's first error), so the wrap must add context
+        # without re-classifying. Only a network error
+        # (requests.RequestException) becomes the generic SoSoValueError.
+        wrap_cls = type(e) if isinstance(e, VendorError) else SoSoValueError
         if cached:
             fetched_at = cached["fetched_at"]
             age = _days_stale(fetched_at)
@@ -766,7 +842,7 @@ def _load_snapshot(asset: str) -> _FlowSnapshot:
                 stale_desc = (
                     "has an unparseable fetch date" if age is None else f"is {age} days stale"
                 )
-                raise SoSoValueError(
+                raise wrap_cls(
                     f"SoSoValue {asset} fetch failed and the newest cache {stale_desc} "
                     f"(> {MAX_STALE_DAYS}-day cap): {e}"
                 ) from e
@@ -791,7 +867,7 @@ def _load_snapshot(asset: str) -> _FlowSnapshot:
                     age_str,
                 )
             return _snapshot_from(cached, fetched_at, stale=True)
-        raise SoSoValueError(f"SoSoValue {asset} unavailable and no cache exists: {e}") from e
+        raise wrap_cls(f"SoSoValue {asset} unavailable and no cache exists: {e}") from e
 
     fetched_at = _iso_now()
     payload["fetched_at"] = fetched_at
@@ -917,6 +993,7 @@ def get_etf_flow_data(
     snapshot = _load_snapshot(asset_key)
     visible = [r for r in snapshot.summary_rows if r["date"] <= curr_date]
     latest = visible[-1] if visible else None
+    latest_flows = _fund_flows_on(snapshot.funds, latest["date"]) if latest else {}
 
     if market_proxy:
         # The proxy marker must live in the heading, not only the caveat: the
@@ -1038,6 +1115,32 @@ def get_etf_flow_data(
                 f"figures below as {lag_days} {_plural_days(lag_days)} old._"
             )
 
+    if (
+        latest is not None
+        and snapshot.list_fetched
+        and snapshot.funds_total
+        and not snapshot.funds_failed
+        and not snapshot.funds_unusable
+        and len(latest_flows) == snapshot.funds_total
+    ):
+        # Every listed fund filed for the latest day, so the fund sum should
+        # match the aggregate within noise; a material gap means the /etfs
+        # listing is missing a fund and the leaders/breadth lines
+        # under-describe the day — undetectable from funds_failed/unusable,
+        # which are both clean here.
+        fund_sum_m = _usd_m(sum(latest_flows.values()))
+        total_m = _usd_m(latest["total_net_inflow"])
+        gross_m = sum(abs(f) for f in latest_flows.values()) / _USD_PER_MILLION
+        if abs(total_m - fund_sum_m) > max(RECONCILE_ABS_TOL_USD_M, RECONCILE_REL_TOL * gross_m):
+            header_lines.append(
+                f"_Reconciliation gap: the {snapshot.funds_total} fund filings for "
+                f"{latest['date']} sum to {fund_sum_m:+.1f} US$m but the aggregate "
+                f"reports {total_m:+.1f} ({total_m - fund_sum_m:+.1f} unaccounted). "
+                f"The fund universe may be missing a fund (e.g. a newly listed "
+                f"ETF), so the leaders and breadth lines below may not cover the "
+                f"whole day's flow._"
+            )
+
     header_lines.append(f"- Source: SoSoValue OpenAPI (US spot ETFs) | Window ending {curr_date}")
     # Blank line between entries so consecutive italic caveats stay separate
     # rendered paragraphs.
@@ -1052,7 +1155,6 @@ def get_etf_flow_data(
         )
 
     window = [r for r in visible if r["date"] >= window_start]
-    latest_flows = _fund_flows_on(snapshot.funds, latest["date"])
     latest_unreported = _is_unreported_day(latest, latest_flows)
 
     # A placeholder day (aggregate published before issuers filed) is not a
@@ -1149,10 +1251,24 @@ def get_etf_flow_data(
             f"— distinguishes broad moves from single-fund totals\n"
         )
         leaders_line = f"**Latest-day leaders:** {leaders_str}\n"
+    elif reported:
+        # Every filing for the latest day is an explicit $0: a confirmed flat
+        # day. "No fund has reported ... yet" (or a missing breadth line)
+        # would contradict the Latest line, which renders this same day as a
+        # confident +0.0. Concentration is omitted — there is no directional
+        # gross to concentrate.
+        leaders_line = (
+            f"**Latest-day leaders:** none — all {reported} reporting "
+            f"{_plural(reported, 'fund', 'funds')} filed a flat $0 for {latest['date']}\n"
+        )
+        breadth_line = (
+            f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds saw "
+            f"inflows ({reported} flat) — a confirmed zero-flow day, not an "
+            f"unposted one\n"
+        )
     elif snapshot.funds:
         leaders_line = (
-            f"**Latest-day leaders:** no fund has reported a non-zero flow for "
-            f"{latest['date']} yet\n"
+            f"**Latest-day leaders:** no fund has filed a flow report for {latest['date']} yet\n"
         )
         breadth_line = ""
     else:

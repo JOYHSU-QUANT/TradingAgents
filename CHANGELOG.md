@@ -42,7 +42,14 @@ Breaking changes within the 0.x line are called out explicitly.
   through the chain with no code change; the key itself is stripped of
   surrounding whitespace (Windows env-file CRLF), rejected without being
   echoed when it cannot travel in an HTTP header, and redacted from
-  server-echoed error bodies, so it can never leak into logs or report text.
+  server-echoed error bodies — which are themselves length-bounded before
+  they reach a raised message — so it can never leak into logs or report
+  text.
+- A vendor chain exhausted by nothing but rate limits (e.g. a single-vendor
+  `crypto_etf_flows` override hitting an uncached 429) now degrades to the
+  same no-data sentinel as any other optional-category failure instead of
+  aborting the call with a bare `RuntimeError`; a real error elsewhere in
+  the chain still takes precedence in the surfaced message.
 
 - **Crypto spot-ETF flows and Fear & Greed vendors.** Two keyless news-analyst
   data sources, bound only for crypto assets: BTC/ETH US spot-ETF daily net

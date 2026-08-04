@@ -631,7 +631,7 @@ def _read_cache(path: str, asset: str) -> dict | None:
     if payload.get("asset") != asset:
         # A copied/renamed cache file would otherwise serve another asset's
         # flows under this asset's heading with no caveat anywhere.
-        return _reject(f"'asset' is {payload.get('asset')!r}, expected {asset!r}")
+        return _reject(f"'asset' is {str(payload.get('asset'))[:40]!r}, expected {asset!r}")
     if not _valid_summary_rows(payload.get("summary_rows")):
         return _reject("'summary_rows' is missing, empty, or contains a malformed record")
     dates = [r["date"] for r in payload["summary_rows"]]
@@ -1178,7 +1178,11 @@ def get_etf_flow_data(
             f"{snapshot.fetched_at}). Treat with caution._"
         )
 
-    if not snapshot.list_fetched or snapshot.funds_total == 0:
+    # Both breakdown caveats are guarded on ``latest`` like the window-clamp
+    # one: with no visible rows the report below is the no-rows message, and
+    # a caveat about "the leaders and breadth lines" or "the aggregate
+    # figures" would describe sections that do not exist.
+    if latest is not None and (not snapshot.list_fetched or snapshot.funds_total == 0):
         if not snapshot.list_fetched:
             reason = "the fund list could not be fetched"
         else:
@@ -1194,7 +1198,7 @@ def get_etf_flow_data(
             f"breadth lines are omitted. The aggregate figures come from a separate "
             f"endpoint and are unaffected._"
         )
-    elif snapshot.funds_failed or snapshot.funds_unusable:
+    elif latest is not None and (snapshot.funds_failed or snapshot.funds_unusable):
         fetched = snapshot.funds_total - len(snapshot.funds_failed)
         problems = []
         if snapshot.funds_failed:
@@ -1256,12 +1260,15 @@ def get_etf_flow_data(
         )
         noun = "day's figure has" if len(revised) == 1 else "days' figures have"
         if len(retracted) == len(revised):
+            # No "below": a revision is disclosed for any visible day, but the
+            # table renders only the look-back window — the retracted row may
+            # not be among the rows shown.
             verdict = (
                 "The prior figure was withdrawn — the day now shows as not yet "
-                "posted below, not a new flow event."
+                "posted, not a new flow event."
                 if len(retracted) == 1
                 else "The prior figures were withdrawn — the days now show as "
-                "not yet posted below, not new flow events."
+                "not yet posted, not new flow events."
             )
         else:
             # Any non-retracted entry keeps the decided catch-up verdict; a
@@ -1317,10 +1324,17 @@ def get_etf_flow_data(
         # be reachable while issuers have not filed for days.
         lag_days = (curr_dt - datetime.strptime(latest["date"], "%Y-%m-%d")).days
         if lag_days > MAX_DATA_LAG_DAYS:
+            # Neither clause claims what it cannot know (user decision;
+            # farside's mirrored wording is a known follow-up): the stale
+            # branch does not equate snapshot age with row lag (a feed stall
+            # served hours-stale would contradict the STALE line above), and
+            # the fresh branch claims visibility as of curr_date, not the
+            # feed's frontier (a backtest date in a mid-window gap has newer
+            # rows that the lookahead filter hides).
             cause = (
-                "the cached snapshot above is itself that old"
+                "the stale snapshot above may itself be missing newer filings"
                 if snapshot.stale
-                else "the fetch succeeded — SoSoValue itself has published nothing newer"
+                else f"the fetch succeeded — no newer filing is visible as of {curr_date}"
             )
             header_lines.append(
                 f"_Data lag: the newest published row is {latest['date']}, {lag_days} "

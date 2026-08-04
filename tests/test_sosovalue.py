@@ -1,5 +1,6 @@
 """SoSoValue spot-ETF flow vendor: request/error taxonomy (incl. API-key
-sanitization and redaction), response parsing (live-captured fixtures), rolling
+sanitization, redaction, and server-text bounding), response parsing
+(live-captured fixtures), rolling
 per-asset caching with stale fallback, revision and out-of-window restatement
 diffing, partial-failure semantics (aggregate decides vendor success),
 lookahead-safe windowing, report formatting, and router integration.
@@ -241,17 +242,22 @@ class TestRequest:
 
     def test_structured_message_is_truncated_after_redaction(self):
         # The structured `message`/`msg` branch is exactly as server-controlled
-        # as the raw-body fallback: an oversized message must not flow
-        # unbounded into the raised text (and from there into logs and the
-        # router's LLM-visible sentinel). The key sits past the cap, so a
-        # cut-first implementation would also leak its head.
-        filler = "a" * 400
-        body = {"code": 400000, "message": filler + "test-key"}
+        # as the raw-body fallback. Two properties, each with its own probe:
+        # the bound (a 400-char filler must be cut at the 300 cap — an
+        # unbounded mutant keeps all 400 a's) ...
+        body = {"code": 400000, "message": "a" * 400 + "test-key"}
         with pytest.raises(sosovalue.SoSoValueError) as exc_info:
             self._get(_FakeResponse(500, body))
         msg = str(exc_info.value)
         assert "test-k" not in msg
         assert "a" * 301 not in msg
+        # ... and the order: a 294-char filler places the key across the
+        # 300-char cap (chars 295-302), so a cut-first implementation leaks
+        # its head ("test-k").
+        straddle = {"code": 400000, "message": "a" * 294 + "test-key"}
+        with pytest.raises(sosovalue.SoSoValueError) as exc_info:
+            self._get(_FakeResponse(500, straddle))
+        assert "test-k" not in str(exc_info.value)
 
     def test_oversized_envelope_code_is_bounded(self):
         # `code` is only known to be != 0 — a hostile body can carry any JSON
@@ -955,6 +961,23 @@ class TestRender:
         )
         assert "histories for ARKB, ZZZ could not be fetched" in out
 
+    def test_no_rows_report_omits_the_breakdown_caveats(self):
+        # With no visible rows the body is the no-rows message; a breakdown
+        # caveat about "the leaders and breadth lines" or "the aggregate
+        # figures" would describe sections that do not exist (the same guard
+        # standard the window-clamp caveat follows).
+        out = self._render(
+            "2026-06-20",
+            snapshot=_snapshot(funds_total=4, funds_failed=["ZZZ", "ARKB"]),
+        )
+        assert "No ETF flow rows on or before 2026-06-20" in out
+        assert "Issuer breakdown" not in out
+        out2 = self._render(
+            "2026-06-20",
+            snapshot=_snapshot(funds={}, funds_total=0, list_fetched=False),
+        )
+        assert "Issuer breakdown" not in out2
+
     def test_revision_caveat_for_latest_visible_day(self):
         out = self._render(
             "2026-07-08",
@@ -1092,7 +1115,9 @@ class TestRender:
         out = self._render("2026-07-19", look_back_days=15)
         assert "Data lag" in out
         assert "10 days before 2026-07-19" in out
-        assert "the fetch succeeded — SoSoValue itself has published nothing newer" in out
+        # Claims visibility as of curr_date, not the feed's frontier: in a
+        # backtest the lookahead filter may be hiding genuinely newer rows.
+        assert "the fetch succeeded — no newer filing is visible as of 2026-07-19" in out
 
     def test_stale_serve_does_not_also_claim_the_fetch_succeeded(self, monkeypatch):
         monkeypatch.setattr(sosovalue, "_utc_now", lambda: _at("2026-07-19T00:00:00Z"))
@@ -1104,7 +1129,10 @@ class TestRender:
         assert "STALE by 6 days" in out
         assert "Data lag" in out
         assert "the fetch succeeded" not in out
-        assert "the cached snapshot above is itself that old" in out
+        # No age claim: snapshot age (STALE line) and row lag are independent
+        # quantities — a feed stall served from an hours-stale snapshot must
+        # not have the two lines contradict each other.
+        assert "the stale snapshot above may itself be missing newer filings" in out
 
     def test_no_data_lag_caveat_within_tolerance(self):
         out = self._render("2026-07-11", look_back_days=15)

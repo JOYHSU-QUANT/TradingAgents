@@ -5,9 +5,9 @@ Fetches BTC/ETH US spot-ETF daily net flows from SoSoValue's official OpenAPI
 ``crypto_etf_flows`` category since farside.co.uk went behind a Cloudflare JS
 challenge; the report mirrors the Farside one (same core sections, same US$m
 units, same wording for the shared caveats), with SoSoValue-only additions
-layered on top — a since-launch cumulative, a fund-breadth line, and revision
-and aggregate-vs-fund-sum reconciliation caveats — so the analyst sees the
-same shape whichever vendor served the call.
+layered on top — a since-launch cumulative, a fund-breadth line, and revision,
+out-of-window restatement, and aggregate-vs-fund-sum reconciliation caveats —
+so the analyst sees the same shape whichever vendor served the call.
 
 A free Demo API key (sosovalue.com developer dashboard) is read from
 ``SOSOVALUE_API_KEY``; if it is unset the vendor raises
@@ -15,7 +15,8 @@ A free Demo API key (sosovalue.com developer dashboard) is read from
 vendor in the chain. The key check runs before the cache is consulted, so
 removing the key on a deployed box stops this vendor on the very next call —
 that is the documented emergency-disable mechanism, and a cached snapshot must
-not keep it alive past the flip.
+not keep it alive past the flip. The key is whitespace-stripped and validated
+as header-safe before use — ``get_api_key`` explains why that matters.
 
 Requests are deliberately date-parameter-free: the Demo plan serves only the
 most recent ~30 days and rejects an out-of-range ``start_date`` with an HTTP
@@ -52,6 +53,11 @@ against the cached one, and every changed day still visible in the requested
 report window is disclosed as a revision — the common case is yesterday's
 provisional figure firming up after a newer day has already become the
 latest — so the analyst can tell reporting catch-up from a new flow event.
+The since-launch cumulative gets the matching guard: when the earliest
+overlapping day's cumulative moved although that day's own flow did not, the
+API restated (or backfilled) history older than the visible window, and the
+report discloses the shift instead of letting the since-launch figure drift
+silently between calls.
 
 Backtest reach: each call serves the API's current ~30-day window (reflecting
 the present, not curr_date) and then filters to rows on or before curr_date.
@@ -155,8 +161,10 @@ _USD_PER_MILLION = 1e6
 # unusable-entry count — rather than requested. The first character must be
 # alphanumeric: URL-quoting leaves "." unescaped (it sits in urllib's
 # always-safe set regardless of ``safe=``), so a dot-led token like ".." would
-# otherwise survive quoting as a path-traversal-shaped segment.
-_TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
+# otherwise survive quoting as a path-traversal-shaped segment. Anchored with
+# ``\Z``, not ``$``: ``$`` also matches before a trailing newline, so
+# "IBIT\n" would pass and land its raw newline mid-line in the report text.
+_TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}\Z")
 
 
 class SoSoValueError(VendorError):
@@ -183,8 +191,19 @@ class SoSoValueRateLimitError(VendorRateLimitError):
 
 
 def get_api_key() -> str:
-    """Retrieve the SoSoValue API key from the environment."""
-    api_key = os.getenv("SOSOVALUE_API_KEY")
+    """Retrieve and sanitize the SoSoValue API key from the environment.
+
+    Surrounding whitespace is stripped rather than rejected: a key deployed
+    through a Windows env file routinely gains a trailing CRLF, and failing
+    the deploy over line endings helps nobody. What remains must be printable
+    ASCII with no embedded whitespace — anything else can never be a valid
+    key, and letting it reach the request header makes ``requests`` raise a
+    pre-network error whose message embeds the full key verbatim (leaking it
+    into logs and the LLM-visible DATA_UNAVAILABLE text) on a path classified
+    as a network outage, which would stale-serve config breakage for up to
+    the stale cap. The rejection message deliberately never echoes the key.
+    """
+    api_key = (os.getenv("SOSOVALUE_API_KEY") or "").strip()
     if not api_key:
         raise SoSoValueNotConfiguredError(
             "SOSOVALUE_API_KEY environment variable is not set. Get a free Demo "
@@ -192,21 +211,35 @@ def get_api_key() -> str:
             "SOSOVALUE_API_KEY; without it the ETF-flow chain falls through to "
             "the next vendor."
         )
+    if not all(33 <= ord(c) <= 126 for c in api_key):
+        raise SoSoValueNotConfiguredError(
+            "SOSOVALUE_API_KEY contains characters that cannot travel in an "
+            "HTTP header (embedded whitespace, control bytes, or non-ASCII "
+            "text; the key itself is not echoed here). Re-set it with the raw "
+            "key from the sosovalue.com developer dashboard."
+        )
     return api_key
 
 
-def _error_message(body: object) -> str:
-    """Best-effort human message from an error body.
+def _error_message(body: object, api_key: str) -> str:
+    """Best-effort human message from an error body, with the key redacted.
 
     SoSoValue has two live-verified error shapes: structured
     ``{"code": 400xxx, "message": ...}`` and a gateway shape
-    ``{"code": 1, "msg": ...}`` — note ``msg``, not ``message``.
+    ``{"code": 1, "msg": ...}`` — note ``msg``, not ``message``. The body is
+    server-controlled text that ends up in raised messages (and from there in
+    logs and the router's LLM-visible DATA_UNAVAILABLE string), and an error
+    body — a 401 especially — is exactly where a server may echo the
+    submitted credential back, so the key is scrubbed before the text leaves
+    this module.
     """
     if isinstance(body, dict):
         message = body.get("message") or body.get("msg")
         if message:
-            return str(message)
-    return str(body)[:300]
+            return str(message).replace(api_key, "[redacted]")
+    # Redact BEFORE truncating: cutting first could slice the key across the
+    # boundary and leave its head visible.
+    return str(body).replace(api_key, "[redacted]")[:300]
 
 
 def _request(path: str, params: dict) -> list:
@@ -218,10 +251,11 @@ def _request(path: str, params: dict) -> list:
     propagate as ``requests.RequestException`` for the caller's stale-cache
     handling, mirroring the Farside vendor.
     """
+    api_key = get_api_key()
     response = requests.get(
         f"{SOSOVALUE_API_BASE}{path}",
         params=params,
-        headers={"x-soso-api-key": get_api_key()},
+        headers={"x-soso-api-key": api_key},
         timeout=REQUEST_TIMEOUT,
     )
     try:
@@ -230,12 +264,12 @@ def _request(path: str, params: dict) -> list:
         body = None
     if response.status_code == 401:
         raise SoSoValueNotConfiguredError(
-            f"SoSoValue rejected the API key (HTTP 401): {_error_message(body)} "
+            f"SoSoValue rejected the API key (HTTP 401): {_error_message(body, api_key)} "
             f"Verify SOSOVALUE_API_KEY; until then the chain falls to the next vendor."
         )
     if response.status_code == 429:
         raise SoSoValueRateLimitError(
-            f"SoSoValue rate limit hit (HTTP 429) on {path}: {_error_message(body)}"
+            f"SoSoValue rate limit hit (HTTP 429) on {path}: {_error_message(body, api_key)}"
         )
     # Envelope errors can ride on any HTTP status (a missing-param error is
     # HTTP 400 with code 1; the over-window error is HTTP 403 with code
@@ -244,7 +278,7 @@ def _request(path: str, params: dict) -> list:
         code = body.get("code") if isinstance(body, dict) else "no-json"
         raise SoSoValueError(
             f"SoSoValue request to {path} failed (HTTP {response.status_code}, "
-            f"code {code}): {_error_message(body)}"
+            f"code {code}): {_error_message(body, api_key)}"
         )
     data = body.get("data")
     if not isinstance(data, list):
@@ -401,8 +435,17 @@ def _parse_fund_rows(data: list, ticker: str) -> list[dict]:
     raises so the caller counts this fund as failed (per-fund failures are
     non-fatal by design); ascending sort, last-wins on a duplicated date
     (a fund duplicate cannot double-count the aggregate, which comes from a
-    separate endpoint).
+    separate endpoint). An empty ``data`` raises like the summary parser's
+    empty-window guard: treating it as a valid-but-empty history would let a
+    transient 200-with-``[]`` glitch silently wipe the fund's cached rows —
+    no ``funds_failed`` entry, no caveat, no log — and permanently disable
+    the aggregate-vs-fund-sum reconciliation check, which requires every
+    listed fund to have flows. A genuinely just-launched fund with no history
+    yet earns the incomplete-breakdown caveat until its first filing, which
+    is honest.
     """
+    if not data:
+        raise SoSoValueError(f"SoSoValue returned no history rows for {ticker}")
     rows = {}
     for raw in data:
         if not _valid_fund_row(raw):
@@ -428,7 +471,10 @@ class _FlowSnapshot(NamedTuple):
     (fetch failed) from "listing empty / all entries unusable".
     ``funds_failed`` holds the tickers whose history fetch failed, and
     ``revisions`` maps a date to its ``[old, new]`` US$m figures from the
-    refresh diff.
+    refresh diff. ``cum_restated`` is the refresh diff's out-of-window
+    restatement marker: ``None``, or ``{"date", "old", "new"}`` when the
+    earliest overlapping day's cumulative moved (US$m) although that day's
+    own flow did not — history older than the visible window changed.
     """
 
     summary_rows: list[dict]
@@ -438,6 +484,7 @@ class _FlowSnapshot(NamedTuple):
     funds_unusable: int
     list_fetched: bool
     revisions: dict[str, list[float]]
+    cum_restated: dict | None
     fetched_at: str
     stale: bool
 
@@ -518,12 +565,17 @@ def _valid_summary_rows(rows: object) -> bool:
 def _valid_funds(funds: object) -> bool:
     # Tickers must pass the same plausibility filter as the live listing
     # (_parse_etf_list): the cache is a lower trust tier than the API, not a
-    # higher one, and its tickers land verbatim in the report text.
+    # higher one, and its tickers land verbatim in the report text. Rows must
+    # be non-empty: _parse_fund_rows raises on an empty history (the fund
+    # lands in funds_failed instead), so _fetch_all never writes one, and an
+    # empty-rows fund would silently thin the leaders/breadth lines while
+    # disabling the reconciliation check's every-fund-filed gate.
     return isinstance(funds, dict) and all(
         _is_valid_ticker(t)
         and isinstance(f, dict)
         and isinstance(f.get("name"), str)
         and isinstance(f.get("rows"), list)
+        and f["rows"]
         and all(_valid_fund_row(r) for r in f["rows"])
         for t, f in funds.items()
     )
@@ -619,6 +671,32 @@ def _read_cache(path: str, asset: str) -> dict | None:
         # finite by _valid_revisions, so it can never equal the None default.
         if totals.get(date) != new or old == new:
             return _reject(f"revision for {date} does not match the summary rows")
+    # Same agreement rule for the out-of-window restatement marker: its date
+    # must exist in the summary with a matching "new" cumulative, its own
+    # daily flow must not carry a disclosed revision (that would explain the
+    # cum shift, and _diff_cum_restatement never writes an explained one),
+    # and old must actually differ — or the caveat would contradict the
+    # figures it rides on.
+    if "cum_restated" not in payload:
+        return _reject("'cum_restated' is missing")
+    cr = payload["cum_restated"]
+    if cr is not None:
+        # The marker's date must name a summary row (their dates are already
+        # canonical, so matching one implies a well-formed date too).
+        row = (
+            next((r for r in payload["summary_rows"] if r["date"] == cr.get("date")), None)
+            if isinstance(cr, dict)
+            else None
+        )
+        if not (
+            row is not None
+            and _is_finite_number(cr.get("old"))
+            and _is_finite_number(cr.get("new"))
+            and cr["old"] != cr["new"]
+            and _usd_m(row["cum_net_inflow"]) == cr["new"]
+            and cr["date"] not in payload["revisions"]
+        ):
+            return _reject("'cum_restated' is malformed or contradicts the summary rows")
     if not isinstance(payload.get("fetched_at"), str) or not payload["fetched_at"]:
         return _reject("'fetched_at' is missing or not a non-empty string")
     # Deliberately unchecked: per-fund row order (the flow lookup is
@@ -635,6 +713,20 @@ def _usd_m(value: float) -> float:
     confusing "-0.0" figure.
     """
     return round(value / _USD_PER_MILLION, 1) + 0.0
+
+
+def _is_material(value: float) -> bool:
+    """A flow visible at the report's own 0.1 US$m render granularity.
+
+    Classification (flow sessions, streaks, leaders, breadth) must judge a
+    flow at the same granularity the figures render at — the discipline
+    ``_diff_revisions`` already applies — or a sub-$50k flow would be counted
+    as a session / streak member / flow leader while the very same report
+    renders it as ``+0.0``, contradicting itself line to line. Farside's
+    source data arrives at this granularity natively, so this also keeps the
+    two vendors' session semantics aligned.
+    """
+    return _usd_m(value) != 0.0
 
 
 def _diff_revisions(cached: dict | None, summary_rows: list[dict]) -> dict:
@@ -657,6 +749,35 @@ def _diff_revisions(cached: dict | None, summary_rows: list[dict]) -> dict:
         if old_m != new_m:
             revisions[row["date"]] = [old_m, new_m]
     return revisions
+
+
+def _diff_cum_restatement(
+    cached: dict | None, summary_rows: list[dict], revisions: dict
+) -> dict | None:
+    """Out-of-window restatement marker: earliest overlapping day's cum moved.
+
+    ``_diff_revisions`` covers every visible day's flow, and the mirror-file
+    cache drops rows that fall out of the API's ~30-day window — so a
+    restatement of an *older* day is invisible to both, yet still moves every
+    ``cum_net_inflow`` and with it the report's since-launch figure. The
+    earliest overlapping day pins it down: if its cumulative changed (at the
+    report's 0.1 US$m granularity, like the revision diff) while its own
+    daily flow did not (``revisions`` would already disclose that, explaining
+    the cum shift), then something before it — outside what either snapshot
+    can display — was restated or backfilled. Returns ``None`` when there is
+    nothing to disclose.
+    """
+    if not cached:
+        return None
+    prior_cum = {r["date"]: r["cum_net_inflow"] for r in cached["summary_rows"]}
+    # summary_rows are sorted ascending, so the first match is the earliest.
+    first = next((r for r in summary_rows if r["date"] in prior_cum), None)
+    if first is None or first["date"] in revisions:
+        return None
+    old_m, new_m = _usd_m(prior_cum[first["date"]]), _usd_m(first["cum_net_inflow"])
+    if old_m == new_m:
+        return None
+    return {"date": first["date"], "old": old_m, "new": new_m}
 
 
 def _fetch_one_fund(asset: str, ticker: str, name: str) -> dict | None:
@@ -764,6 +885,7 @@ def _fetch_all(asset: str, cached: dict | None) -> dict:
                 e,
             )
 
+    revisions = _diff_revisions(cached, summary_rows)
     return {
         "asset": asset,
         "summary_rows": summary_rows,
@@ -772,7 +894,8 @@ def _fetch_all(asset: str, cached: dict | None) -> dict:
         "funds_failed": funds_failed,
         "funds_unusable": funds_unusable,
         "list_fetched": list_fetched,
-        "revisions": _diff_revisions(cached, summary_rows),
+        "revisions": revisions,
+        "cum_restated": _diff_cum_restatement(cached, summary_rows, revisions),
     }
 
 
@@ -785,6 +908,7 @@ def _snapshot_from(payload: dict, fetched_at: str, stale: bool) -> _FlowSnapshot
         funds_unusable=payload["funds_unusable"],
         list_fetched=payload["list_fetched"],
         revisions=payload["revisions"],
+        cum_restated=payload["cum_restated"],
         fetched_at=fetched_at,
         stale=stale,
     )
@@ -810,14 +934,22 @@ def _load_snapshot(asset: str) -> _FlowSnapshot:
     cached = _read_cache(path, asset)
     if cached:
         age_h = _cache_age_hours(cached["fetched_at"])
-        # An incomplete breakdown (failed fund histories or a failed fund
-        # list) re-tries on the short TTL: the gap is usually a transient
-        # blip/429, and honouring the full window would leave the
-        # leaders/breadth lines undercounting for cycles. Unusable listing
-        # entries alone do not shorten it — a re-fetch cannot heal those.
+        # An incomplete breakdown (failed fund histories, a failed fund list,
+        # or a listing that came back empty) re-tries on the short TTL: the
+        # gap is usually a transient blip/429, and honouring the full window
+        # would leave the leaders/breadth lines undercounting — or, for an
+        # empty listing that overwrote a good snapshot, absent — for cycles.
+        # Unusable listing entries alone do not shorten it — a re-fetch
+        # cannot heal those, so the empty-listing clause requires
+        # funds_unusable == 0 (an all-unusable listing is "empty" only
+        # because every entry was dropped, and stays on the full TTL).
         ttl = (
             INCOMPLETE_CACHE_TTL_HOURS
-            if cached["funds_failed"] or not cached["list_fetched"]
+            if (
+                cached["funds_failed"]
+                or not cached["list_fetched"]
+                or (not cached["funds_total"] and not cached["funds_unusable"])
+            )
             else CACHE_TTL_HOURS
         )
         # 0 <= age guards against a future-dated stamp being treated as fresh.
@@ -942,6 +1074,15 @@ def _is_unreported_day(row: dict, fund_flows: dict[str, float]) -> bool:
     are flat is a genuine zero-flow day, not an unposted one. With no fund
     data at all (breakdown failed) posted and unposted are indistinguishable,
     and the disclosure wording owns that ambiguity.
+
+    Deliberately EXACT zero, not the ``_is_material`` render granularity the
+    session/leaders classification uses: the API's placeholder is a literal
+    0, and rounding here would relabel a real (posted) sub-$50k day as "not
+    yet posted". Known consequence: a day firming up from placeholder 0 to a
+    sub-tick flow flips this predicate (table cell "not yet posted" →
+    "+0.0") with no revision caveat, since ``_diff_revisions`` sees no change
+    at 0.1 US$m — accepted, as both renders honestly describe a no-material-
+    flow day.
     """
     return row["total_net_inflow"] == 0 and not fund_flows
 
@@ -1063,23 +1204,41 @@ def get_etf_flow_data(
     # the visible dates keeps a revised not-yet-visible row from leaking
     # through the lookahead guard.
     visible_dates = {r["date"] for r in visible}
+    # On a stale serve either refresh-diff disclosure below is as old as the
+    # snapshot itself and would otherwise be restated verbatim on every call
+    # of an outage (up to the 14-day cap), reading as recurring activity.
+    stale_note = (
+        " This disclosure dates from when the stale snapshot above was last "
+        "refreshed, not from this call."
+        if snapshot.stale
+        else ""
+    )
     revised = sorted((d, pair) for d, pair in snapshot.revisions.items() if d in visible_dates)
     if revised:
         changes = "; ".join(f"{d}: {old:+.1f} → {new:+.1f}" for d, (old, new) in revised)
         noun = "day's figure has" if len(revised) == 1 else "days' figures have"
-        # On a stale serve this disclosure is as old as the snapshot itself
-        # and would otherwise be restated verbatim on every call of an outage
-        # (up to the 14-day cap), reading as recurring catch-up activity.
-        stale_note = (
-            " This disclosure dates from when the stale snapshot above was last "
-            "refreshed, not from this call."
-            if snapshot.stale
-            else ""
-        )
         header_lines.append(
             f"_Revision: {len(revised)} {noun} changed since the previous snapshot "
             f"({changes}, US$m) as issuers file their daily reports. This is reporting "
             f"catch-up on already-published days, not new flow events.{stale_note}_"
+        )
+
+    # The revision caveat above covers visible days only, and the mirror-file
+    # cache drops rows that age out of the API window — so a restated day
+    # older than the window would silently move the Since-launch figure
+    # between calls with no disclosure at all (user decision: disclose it).
+    # Filtered on visible_dates like the revision caveat, so a backtest
+    # curr_date older than the marker's day neither leaks a future date nor
+    # flags a shift its own since-launch figure does not include.
+    cr = snapshot.cum_restated
+    if cr and cr["date"] in visible_dates:
+        header_lines.append(
+            f"_Restatement: the cumulative total as of {cr['date']} moved "
+            f"{cr['old']:+.1f} → {cr['new']:+.1f} US$m since the previous snapshot "
+            f"although that day's own flow did not change — the API restated or "
+            f"backfilled history older than the ~{PLAN_WINDOW_DAYS}-day window this "
+            f"report can display, so the since-launch cumulative shifted for "
+            f"reasons the daily rows below cannot show.{stale_note}_"
         )
 
     window_start_dt = curr_dt - timedelta(days=look_back_days)
@@ -1162,18 +1321,14 @@ def get_etf_flow_data(
     window = [r for r in visible if r["date"] >= window_start]
     latest_unreported = _is_unreported_day(latest, latest_flows)
 
-    # A placeholder day (aggregate published before issuers filed) is not a
-    # flow session and must not render as a confident "+0.0".
-    def _is_session(row: dict) -> bool:
-        return row["total_net_inflow"] != 0
-
     cumulative = sum(r["total_net_inflow"] for r in window)
-    flow_sessions = sum(1 for r in window if _is_session(r))
+    flow_sessions = sum(1 for r in window if _is_material(r["total_net_inflow"]))
 
-    # Streak over every fetched session visible to curr_date. Zero-total days
-    # are transparent (placeholder vs genuine-zero ambiguity), mirroring the
-    # Farside vendor.
-    flow_days = [r for r in visible if _is_session(r)]
+    # Streak over every fetched session visible to curr_date. Days with no
+    # material flow are transparent (placeholder vs genuine-zero ambiguity,
+    # and sub-tick noise), mirroring the Farside vendor. Raw signs are safe
+    # here: a material value rounds to a nonzero tick, which keeps its sign.
+    flow_days = [r for r in visible if _is_material(r["total_net_inflow"])]
     streak_sign = _sign(flow_days[-1]["total_net_inflow"]) if flow_days else 0
     streak = 0
     for r in reversed(flow_days):
@@ -1238,7 +1393,7 @@ def get_etf_flow_data(
     # broadly-flat day. Concentration stays over the movers' gross, where a
     # flat filing contributes nothing.
     reported = len(latest_flows)
-    directional = {t: f for t, f in latest_flows.items() if f != 0}
+    directional = {t: f for t, f in latest_flows.items() if _is_material(f)}
     if directional:
         leaders = sorted(directional.items(), key=lambda kv: abs(kv[1]), reverse=True)
         leaders_str = ", ".join(f"{t} {_usd_m(f):+.1f}" for t, f in leaders[:TOP_ISSUERS])
@@ -1257,18 +1412,20 @@ def get_etf_flow_data(
         )
         leaders_line = f"**Latest-day leaders:** {leaders_str}\n"
     elif reported:
-        # Every filing for the latest day is an explicit $0: a confirmed flat
-        # day. "No fund has reported ... yet" (or a missing breadth line)
-        # would contradict the Latest line, which renders this same day as a
+        # Every filing for the latest day rounds to $0 at render granularity
+        # (an explicit flat $0 or a sub-$50k trickle): a confirmed flat day.
+        # "No fund has reported ... yet" (or a missing breadth line) would
+        # contradict the Latest line, which renders this same day as a
         # confident +0.0. Concentration is omitted — there is no directional
         # gross to concentrate.
         leaders_line = (
             f"**Latest-day leaders:** none — all {reported} reporting "
-            f"{_plural(reported, 'fund', 'funds')} filed a flat $0 for {latest['date']}\n"
+            f"{_plural(reported, 'fund', 'funds')} filed flat "
+            f"($0 at the 0.1 US$m granularity shown) for {latest['date']}\n"
         )
         breadth_line = (
             f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds saw "
-            f"inflows ({reported} flat) — a confirmed zero-flow day, not an "
+            f"inflows ({reported} flat) — a confirmed flat day, not an "
             f"unposted one\n"
         )
     elif snapshot.funds:
@@ -1302,7 +1459,9 @@ def get_etf_flow_data(
         # The same placeholder honesty as the Latest line, applied to every
         # table row: an unreported day must not read as a confident "+0.0" in
         # the rows downstream agents most often re-quote. The cheap zero test
-        # runs first so the funds scan only happens for the rare all-zero row.
+        # runs first so the funds scan only happens for the rare all-zero row
+        # — it duplicates _is_unreported_day's exact-zero clause, so loosening
+        # that predicate's granularity would be silently suppressed here.
         if r["total_net_inflow"] == 0 and _is_unreported_day(
             r, _fund_flows_on(snapshot.funds, r["date"])
         ):

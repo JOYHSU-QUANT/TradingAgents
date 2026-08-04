@@ -21,16 +21,28 @@ Breaking changes within the 0.x line are called out explicitly.
   (how many of the funds that filed moved together, how concentrated the
   flow was), revision caveats whenever any still-visible day's figure
   changed since the previous snapshot (issuers file over the US evening, so
-  fresh days firm up in place), and a reconciliation caveat when a fully-filed
+  fresh days firm up in place), a restatement caveat when the since-launch
+  cumulative shifted because a day *older* than the API's servable window was
+  restated (invisible to the daily revision diff, which only covers visible
+  days), and a reconciliation caveat when a fully-filed
   latest day's fund filings fail to sum to the aggregate — the sign that the
-  fund listing itself is missing a fund (e.g. a newly launched ETF). The
+  fund listing itself is missing a fund (e.g. a newly launched ETF).
+  Classification and rendering share one granularity: a flow below the
+  report's 0.1 US$m render tick (which would display as `+0.0`) is not
+  counted as a flow session, streak member, or leader, so the report never
+  calls a figure it displays as zero a flow event. The
   aggregate endpoint alone decides vendor
-  success — per-fund history failures degrade to a disclosed incomplete
+  success — per-fund history failures (including a 200-with-empty-history
+  response, which would otherwise silently wipe the fund's cached rows) and
+  an empty fund listing degrade to a disclosed incomplete/absent
   breakdown, retried on a shorter 1-hour TTL — and the cache discipline
   otherwise matches Farside (rolling per-asset file, 6h TTL, stale fallback
   capped at 14 days, failures never cached). Unsetting
   `SOSOVALUE_API_KEY` is the emergency-disable switch: the next call falls
-  through the chain with no code change.
+  through the chain with no code change; the key itself is stripped of
+  surrounding whitespace (Windows env-file CRLF), rejected without being
+  echoed when it cannot travel in an HTTP header, and redacted from
+  server-echoed error bodies, so it can never leak into logs or report text.
 
 - **Crypto spot-ETF flows and Fear & Greed vendors.** Two keyless news-analyst
   data sources, bound only for crypto assets: BTC/ETH US spot-ETF daily net

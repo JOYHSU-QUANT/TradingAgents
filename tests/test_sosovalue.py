@@ -87,6 +87,7 @@ def _snapshot(
     funds_unusable=0,
     list_fetched=True,
     revisions=None,
+    cum_restated=None,
     fetched_at="2026-07-09T00:00:00Z",
     stale=False,
 ):
@@ -99,6 +100,7 @@ def _snapshot(
         funds_unusable=funds_unusable,
         list_fetched=list_fetched,
         revisions=revisions or {},
+        cum_restated=cum_restated,
         fetched_at=fetched_at,
         stale=stale,
     )
@@ -199,6 +201,69 @@ class TestRequest:
         ):
             sosovalue.get_api_key()
 
+    def test_request_sends_the_stripped_key(self):
+        # A key deployed through a Windows env file gains a trailing CRLF;
+        # unstripped it never reaches the network — requests raises a
+        # pre-network InvalidHeader whose message embeds the key verbatim.
+        body = {"code": 0, "message": "success", "data": [], "details": None}
+        with (
+            mock.patch.dict(os.environ, {"SOSOVALUE_API_KEY": " test-key\r\n"}),
+            mock.patch.object(
+                sosovalue.requests, "get", return_value=_FakeResponse(200, body)
+            ) as getter,
+        ):
+            sosovalue._request("/etfs", {"symbol": "BTC"})
+        assert getter.call_args.kwargs["headers"] == {"x-soso-api-key": "test-key"}
+
+    def test_error_body_echoing_the_key_is_redacted(self):
+        # An error body is server-controlled text that lands in the raised
+        # message (and from there in logs and the router's LLM-visible
+        # DATA_UNAVAILABLE string); a 401 is where a server is most likely to
+        # echo the submitted credential back.
+        body = {"code": 400103, "message": "invalid key: test-key"}
+        with pytest.raises(sosovalue.SoSoValueNotConfiguredError) as exc_info:
+            self._get(_FakeResponse(401, body))
+        assert "test-key" not in str(exc_info.value)
+        assert "[redacted]" in str(exc_info.value)
+
+    def test_redaction_happens_before_the_300_char_truncation(self):
+        # A key straddling the truncation boundary must not survive as a
+        # partial fragment: redact first, then cut. str(body)'s prefix
+        # "{'code': 1, 'detail': '" is 23 chars, so a 270-char filler places
+        # the echoed key across the 300-char mark (chars 293-301) — cutting
+        # first would leave its head ("test-ke") visible.
+        filler = "a" * 270
+        body = {"code": 1, "detail": filler + "test-key"}
+        with pytest.raises(sosovalue.SoSoValueError) as exc_info:
+            self._get(_FakeResponse(500, body))
+        assert "test-k" not in str(exc_info.value)
+
+
+@pytest.mark.unit
+class TestGetApiKey:
+    def test_surrounding_whitespace_is_stripped(self):
+        with mock.patch.dict(os.environ, {"SOSOVALUE_API_KEY": " test-key\r\n"}):
+            assert sosovalue.get_api_key() == "test-key"
+
+    def test_whitespace_only_key_raises_as_unset(self):
+        with (
+            mock.patch.dict(os.environ, {"SOSOVALUE_API_KEY": " \r\n"}),
+            pytest.raises(sosovalue.SoSoValueNotConfiguredError, match="not set"),
+        ):
+            sosovalue.get_api_key()
+
+    @pytest.mark.parametrize("bad", ["se cret", "se\tcret", "sécret", "se\x7fcret", "se\ncret"])
+    def test_unheaderable_key_raises_without_echoing_it(self, bad):
+        # The rejection message must describe the problem without the key:
+        # it propagates into logs and the LLM-visible report text.
+        with (
+            mock.patch.dict(os.environ, {"SOSOVALUE_API_KEY": bad}),
+            pytest.raises(sosovalue.SoSoValueNotConfiguredError) as exc_info,
+        ):
+            sosovalue.get_api_key()
+        assert bad.strip() not in str(exc_info.value)
+        assert "cannot travel in an HTTP header" in str(exc_info.value)
+
 
 # --------------------------------------------------------------------------- #
 # Parsers, against the live-captured fixtures
@@ -281,10 +346,13 @@ class TestParseEtfList:
             {"ticker": "..", "name": "dot-led"},
             {"ticker": ".A", "name": "dot-led 2"},
             {"ticker": "ABCDEFGHIJK", "name": "11 chars"},
+            # "$" would match before this trailing newline (\Z does not): the
+            # raw newline would ride the ticker verbatim into report lines.
+            {"ticker": "IBIT\n", "name": "trailing newline"},
         ]
         funds, unusable = sosovalue._parse_etf_list(data, "BTC")
         assert [t for t, _ in funds] == ["BRK.B", "ABC-D"]
-        assert unusable == 3
+        assert unusable == 4
 
     def test_duplicate_ticker_keeps_first_and_is_not_counted_unusable(self):
         data = [
@@ -310,6 +378,14 @@ class TestParseFundRows:
         assert rows[-1]["net_inflow"] is None
         assert rows[-2] == {"date": "2026-07-31", "net_inflow": -122656640.0}
 
+    def test_empty_history_raises(self):
+        # Mirrors the summary parser's empty-data guard: a 200-with-[] glitch
+        # treated as a valid-but-empty history would silently wipe the fund's
+        # cached rows (no funds_failed entry, no caveat, no log) and disable
+        # the reconciliation check's every-fund-filed gate.
+        with pytest.raises(sosovalue.SoSoValueError, match="no history rows"):
+            sosovalue._parse_fund_rows([], "IBIT")
+
     def test_malformed_row_raises(self):
         with pytest.raises(sosovalue.SoSoValueError, match="Malformed"):
             sosovalue._parse_fund_rows([{"net_inflow": 1.0}], "IBIT")
@@ -328,6 +404,18 @@ class TestParseFundRows:
             "IBIT",
         )
         assert rows == [{"date": "2026-07-31", "net_inflow": 2.0}]
+
+
+@pytest.mark.unit
+class TestDiffCumRestatement:
+    def test_no_prior_snapshot_or_disjoint_windows_yield_no_marker(self):
+        # Nothing to diff against (first fetch), or windows so far apart no
+        # date overlaps (a cache resurrected after a long outage): either way
+        # there is no anchor day to compare, so nothing is disclosed.
+        rows = [_srow("2026-07-31", 1.0, cum_m=2.0)]
+        assert sosovalue._diff_cum_restatement(None, rows, {}) is None
+        cached = {"summary_rows": [_srow("2026-06-01", 1.0, cum_m=9.0)]}
+        assert sosovalue._diff_cum_restatement(cached, rows, {}) is None
 
 
 @pytest.mark.unit
@@ -464,8 +552,8 @@ class TestRender:
         # The leaders/breadth block must agree with the Latest line: the flat
         # filing is a completed report, not a still-pending one.
         assert (
-            "**Latest-day leaders:** none — all 1 reporting fund filed a flat $0 "
-            "for 2026-07-02" in out
+            "**Latest-day leaders:** none — all 1 reporting fund filed flat "
+            "($0 at the 0.1 US$m granularity shown) for 2026-07-02" in out
         )
         assert "0 of 1 reporting funds saw inflows (1 flat)" in out
 
@@ -481,8 +569,8 @@ class TestRender:
         out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds=funds))
         assert "**Latest (2026-07-02):** +0.0 net" in out
         assert (
-            "**Latest-day leaders:** none — all 2 reporting funds filed a flat $0 "
-            "for 2026-07-02" in out
+            "**Latest-day leaders:** none — all 2 reporting funds filed flat "
+            "($0 at the 0.1 US$m granularity shown) for 2026-07-02" in out
         )
         assert "**Breadth (2026-07-02):** 0 of 2 reporting funds saw inflows (2 flat)" in out
         assert "yet" not in out
@@ -597,6 +685,80 @@ class TestRender:
         out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds=funds))
         assert "-0.0" not in out
         assert "**Latest (2026-07-02):** +0.0 net" in out
+        # Classification agrees with the rendered +0.0 (materiality at the
+        # report's own granularity): the -$40k day is not a flow session, not
+        # a streak member, and AAA is not a leader — the report must not call
+        # a figure it displays as zero a "flow event" two lines later.
+        assert "(1 flow sessions in the window)" in out
+        assert "≥1-session inflow (2026-07-01 → 2026-07-01)" in out
+        assert "AAA -0.0" not in out and "AAA +0.0" not in out
+        assert "0 of 1 reporting funds saw inflows (1 flat)" in out
+
+    def test_materiality_boundary_sits_at_the_render_tick(self):
+        # $50k rounds to 0.1 (a session); $49k rounds to 0.0 (transparent,
+        # like a flat day) — the classification threshold IS the render tick.
+        recs = [
+            {"date": "2026-07-01", "total_net_inflow": 49_000.0, "cum_net_inflow": _usd(50_000)},
+            {"date": "2026-07-02", "total_net_inflow": 50_000.0, "cum_net_inflow": _usd(50_000)},
+        ]
+        out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds={}))
+        assert "(1 flow sessions in the window)" in out
+        assert "≥1-session inflow (2026-07-02 → 2026-07-02)" in out
+        assert "**Latest (2026-07-02):** +0.1 net" in out
+
+    def test_sub_tick_fund_is_flat_not_a_leader(self):
+        # A +$30k filing renders +0.0, so it must count as flat in breadth
+        # and stay off the leaders line, not read as a second inflow fund.
+        recs = [_srow("2026-07-02", 2.0)]
+        funds = {
+            "AAA": {"name": "A", "rows": [_frow("2026-07-02", 2.0)]},
+            "BBB": {"name": "B", "rows": [{"date": "2026-07-02", "net_inflow": 30_000.0}]},
+        }
+        out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds=funds))
+        assert "**Latest-day leaders:** AAA +2.0\n" in out
+        assert "BBB" not in out
+        assert "1 of 2 reporting funds saw inflows (1 flat)" in out
+        assert "largest single fund AAA = 100%" in out
+
+    def test_restatement_caveat_renders_for_a_visible_marker(self):
+        out = self._render(
+            "2026-07-09",
+            snapshot=_snapshot(
+                cum_restated={"date": "2026-07-06", "old": 49_800.0, "new": 50_000.0}
+            ),
+        )
+        assert (
+            "_Restatement: the cumulative total as of 2026-07-06 moved "
+            "+49800.0 → +50000.0 US$m since the previous snapshot" in out
+        )
+        assert "restated or backfilled history older than the ~30-day window" in out
+
+    def test_restatement_for_not_yet_visible_day_is_not_leaked(self):
+        # Same lookahead rule as the revision caveat: a marker dated after
+        # curr_date must neither leak the future date nor flag a shift the
+        # report's own since-launch figure does not include.
+        out = self._render(
+            "2026-07-07",
+            snapshot=_snapshot(
+                cum_restated={"date": "2026-07-08", "old": 51_000.0, "new": 51_244.8}
+            ),
+        )
+        assert "Restatement" not in out
+        assert "2026-07-08" not in out
+
+    def test_stale_serve_time_stamps_the_restatement_caveat(self, monkeypatch):
+        # Same anchoring as the revision caveat: on a stale serve the
+        # disclosure is as old as the snapshot and must say so.
+        monkeypatch.setattr(sosovalue, "_utc_now", lambda: _at("2026-07-10T00:00:00Z"))
+        out = self._render(
+            "2026-07-09",
+            snapshot=_snapshot(
+                cum_restated={"date": "2026-07-06", "old": 49_800.0, "new": 50_000.0},
+                stale=True,
+            ),
+        )
+        restatement = next(line for line in out.split("\n\n") if "Restatement" in line)
+        assert "not from this call" in restatement
 
     def test_window_includes_row_exactly_on_window_start(self):
         # The window filter is inclusive at its lower bound; an off-by-one
@@ -954,6 +1116,7 @@ class TestCacheAndLoad:
             "funds_unusable": 0,
             "list_fetched": True,
             "revisions": {},
+            "cum_restated": None,
         }
         payload.update(overrides)
         path = tmp_path / "sosovalue_btc.json"
@@ -1152,6 +1315,52 @@ class TestCacheAndLoad:
         payload = json.loads((tmp_path / "sosovalue_btc.json").read_text(encoding="utf-8"))
         assert payload["revisions"] == {}
 
+    def test_out_of_window_restatement_is_marked_and_disclosed(self, tmp_path, monkeypatch):
+        # The earliest overlapping day's cum moved while its own daily flow
+        # did not: history older than the servable window was restated. The
+        # daily revision diff cannot see it, so the dedicated marker must —
+        # or the Since-launch figure drifts silently between calls.
+        self._setup(tmp_path, monkeypatch)
+        _stub_requests(monkeypatch)
+        sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        self._advance(monkeypatch, hours=sosovalue.CACHE_TTL_HOURS + 1)
+        restated = [
+            dict(SUMMARY_API[0], cum_net_inflow=SUMMARY_API[0]["cum_net_inflow"] + 200e6),
+            dict(SUMMARY_API[1], cum_net_inflow=SUMMARY_API[1]["cum_net_inflow"] + 200e6),
+        ]
+        _stub_requests(monkeypatch, summary=restated)
+        out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert (
+            "_Restatement: the cumulative total as of 2026-07-30 moved "
+            "+51589.9 → +51789.9 US$m since the previous snapshot" in out
+        )
+        assert "Revision:" not in out
+        payload = json.loads((tmp_path / "sosovalue_btc.json").read_text(encoding="utf-8"))
+        assert payload["cum_restated"] == {"date": "2026-07-30", "old": 51589.9, "new": 51789.9}
+
+    def test_cum_shift_explained_by_a_daily_revision_is_not_marked(self, tmp_path, monkeypatch):
+        # When the earliest overlapping day's own flow was revised, that
+        # (disclosed) revision explains the cum shift — flagging it as an
+        # out-of-window restatement too would double-report one event.
+        self._setup(tmp_path, monkeypatch)
+        _stub_requests(monkeypatch)
+        sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        self._advance(monkeypatch, hours=sosovalue.CACHE_TTL_HOURS + 1)
+        revised = [
+            SUMMARY_API[0],
+            dict(
+                SUMMARY_API[1],
+                total_net_inflow=SUMMARY_API[1]["total_net_inflow"] + 100e6,
+                cum_net_inflow=SUMMARY_API[1]["cum_net_inflow"] + 100e6,
+            ),
+        ]
+        _stub_requests(monkeypatch, summary=revised)
+        out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert "Revision:" in out
+        assert "Restatement" not in out
+        payload = json.loads((tmp_path / "sosovalue_btc.json").read_text(encoding="utf-8"))
+        assert payload["cum_restated"] is None
+
     def test_ttl_boundary_age_exactly_at_ttl_refetches(self, tmp_path, monkeypatch):
         # The freshness comparison is strict: a snapshot aged exactly
         # CACHE_TTL_HOURS is due for refresh, not served for one more cycle.
@@ -1242,6 +1451,40 @@ class TestCacheAndLoad:
         out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
         assert calls == []  # served from cache; no refresh attempted
         assert "STALE" not in out
+
+    def test_empty_fund_history_counts_as_failed_not_success(self, tmp_path, monkeypatch):
+        # A 200-with-[] fund history is a failure with full disclosure — not
+        # a "successful" empty fund that silently vanishes from the breakdown
+        # while funds_total still counts it as fetched.
+        self._setup(tmp_path, monkeypatch)
+        _stub_requests(monkeypatch, histories={"IBIT": [], "FBTC": HISTORIES_API["FBTC"]})
+        out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert "Issuer breakdown incomplete (1/2 funds)" in out
+        assert "histories for IBIT could not be fetched" in out
+        payload = json.loads((tmp_path / "sosovalue_btc.json").read_text(encoding="utf-8"))
+        assert payload["funds_failed"] == ["IBIT"]
+        assert "IBIT" not in payload["funds"]
+
+    def test_empty_listing_snapshot_retries_on_the_short_ttl(self, tmp_path, monkeypatch):
+        # An empty listing is disclosed rather than treated as a fetch
+        # failure (settled), but it wholesale-overwrites the previous
+        # snapshot's funds — so it must re-try on the short TTL like the
+        # other incomplete shapes, not blank leaders/breadth for 6 hours.
+        # Contrast with the unusable-only long-TTL rule above: a re-fetch
+        # can heal an empty listing, not an unusable entry.
+        self._setup(tmp_path, monkeypatch)
+        calls = []
+        _stub_requests(monkeypatch, listing=[], calls=calls)
+        out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert "the fund list returned no usable funds" in out
+        self._advance(monkeypatch, minutes=30)
+        sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert calls.count("/etfs/summary-history") == 1  # still cached
+        self._advance(monkeypatch, hours=sosovalue.INCOMPLETE_CACHE_TTL_HOURS, minutes=1)
+        _stub_requests(monkeypatch, calls=calls)  # listing recovered
+        out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert calls.count("/etfs/summary-history") == 2
+        assert "Issuer breakdown" not in out
 
     def test_structural_list_failure_is_logged_at_error(self, tmp_path, monkeypatch, caplog):
         # The fund-list twin of the per-fund escalation: a contract break on
@@ -1342,11 +1585,27 @@ class TestReadCache:
             # The pair's "new" side equals the summary row's total at report
             # granularity (_usd_m(1.0 USD) == 0.0), as _diff_revisions writes.
             "revisions": {"2026-07-31": [1.0, 0.0]},
+            "cum_restated": None,
         }
 
     def test_valid_payload_round_trips(self, tmp_path):
         payload = self._valid_payload()
         assert sosovalue._read_cache(self._write(tmp_path, payload), "BTC") == payload
+
+    def test_valid_cum_restated_marker_round_trips(self, tmp_path):
+        # A well-formed marker: date in the summary, "new" equal to that
+        # row's cum at report granularity (_usd_m(2.0 USD) == 0.0), old
+        # different, and no revision on the same date (which would explain
+        # the shift and _diff_cum_restatement never writes).
+        payload = self._valid_payload()
+        payload["revisions"] = {}
+        payload["cum_restated"] = {"date": "2026-07-31", "old": 1.0, "new": 0.0}
+        assert sosovalue._read_cache(self._write(tmp_path, payload), "BTC") == payload
+
+    def test_missing_cum_restated_is_a_miss(self, tmp_path):
+        payload = self._valid_payload()
+        del payload["cum_restated"]
+        assert sosovalue._read_cache(self._write(tmp_path, payload), "BTC") is None
 
     def test_missing_file_is_a_silent_miss(self, tmp_path):
         assert sosovalue._read_cache(str(tmp_path / "sosovalue_btc.json"), "BTC") is None
@@ -1427,6 +1686,19 @@ class TestReadCache:
             {"revisions": {"2026-07-30": [1.0, 0.0]}},  # date absent from summary_rows
             {"revisions": {"2026-07-31": [5.0, 2.0]}},  # "new" disagrees with the row
             {"revisions": {"2026-07-31": [0.0, 0.0]}},  # no-op pair
+            {"cum_restated": "oops"},  # not a dict or null
+            {"cum_restated": {"date": "2026-07-31", "old": 1.0}},  # "new" missing
+            {"cum_restated": {"date": "not-a-date", "old": 1.0, "new": 0.0}},
+            {"cum_restated": {"date": "2026-07-31", "old": float("nan"), "new": 0.0}},
+            # Cross-field: date absent from the summary; no-op pair; "new"
+            # disagreeing with the row's cum at report granularity; and a
+            # marker on a date that also carries a revision (the daily change
+            # already explains the cum shift, so the producer never writes it).
+            {"cum_restated": {"date": "2026-07-30", "old": 1.0, "new": 0.0}},
+            {"cum_restated": {"date": "2026-07-31", "old": 0.0, "new": 0.0}},
+            {"cum_restated": {"date": "2026-07-31", "old": 1.0, "new": 5.0}},
+            {"cum_restated": {"date": "2026-07-31", "old": 1.0, "new": 0.0}},  # revised date
+            {"funds": {"IBIT": {"name": "iShares", "rows": []}}},  # empty history rows
         ],
     )
     def test_malformed_field_is_a_miss(self, tmp_path, corrupt):
@@ -1477,9 +1749,14 @@ class TestEndToEndFixture:
         assert "| 2026-07-06 | +265.7 |" in out
         assert "IBIT -122.7" in out
         assert "**Breadth (2026-07-31):** 0 of 13" in out
-        # Clean fetch, complete breakdown, fresh data: no caveats.
+        # Clean fetch, complete breakdown, fresh data: none of the
+        # fetch-health caveats fire. The reconciliation caveat DOES: serving
+        # the IBIT history for all 13 funds makes the fund sum 13 × -122.7 ≈
+        # -1594.5 against the aggregate's -265.4, which is exactly the
+        # listing-gap condition the check exists to disclose.
         for absent in ("STALE", "Issuer breakdown", "Window clamped", "Data lag", "Revision:"):
             assert absent not in out
+        assert "Reconciliation gap: the 13 fund filings for 2026-07-31 sum to -1594.5" in out
         # The pending 2026-08-03 null row must not surface anywhere: the
         # aggregate stops at 07-31 and null fund rows are not $0 flows.
         assert "2026-08-03" not in out

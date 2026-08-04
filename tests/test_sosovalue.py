@@ -403,6 +403,14 @@ class TestParseEtfList:
         data = [{"ticker": "IBIT", "name": None}]
         assert sosovalue._parse_etf_list(data, "BTC") == ([("IBIT", "")], 0)
 
+    def test_oversized_name_is_truncated_at_the_boundary(self):
+        # The name is stored in the cache verbatim (never rendered), so it is
+        # the one server string that could bloat the cache file unbounded.
+        data = [{"ticker": "IBIT", "name": "x" * 500}]
+        funds, unusable = sosovalue._parse_etf_list(data, "BTC")
+        assert funds == [("IBIT", "x" * sosovalue.MAX_FUND_NAME_CHARS)]
+        assert unusable == 0
+
 
 @pytest.mark.unit
 class TestParseFundRows:
@@ -951,8 +959,37 @@ class TestRender:
         )
         assert "Issuer breakdown incomplete (2/3 funds)" in out
         assert "histories for ARKB could not be fetched" in out
+        assert "cover only the 2 fetched funds" in out
         # Partial data still renders leaders from what was fetched.
         assert "**Latest-day leaders:** IBIT +1119.9, FBTC +95.0" in out
+
+    def test_all_failed_breakdown_caveat_says_omitted_not_covered(self):
+        # With zero fetched funds the body renders no leaders/breadth lines at
+        # all, so the incomplete caveat must say they are omitted — claiming
+        # they "cover" any funds would describe lines that do not exist.
+        out = self._render(
+            "2026-07-08",
+            snapshot=_snapshot(funds={}, funds_total=3, funds_failed=["ARKB", "FBTC", "IBIT"]),
+        )
+        assert "Issuer breakdown incomplete (0/3 funds)" in out
+        assert "histories for ARKB, FBTC, IBIT could not be fetched" in out
+        assert "the per-fund leaders and breadth lines are omitted" in out
+        assert "cover only" not in out
+        assert "**Latest-day leaders:**" not in out
+        assert "**Breadth" not in out
+
+    def test_unfiled_latest_day_with_failed_histories_scopes_the_leaders_claim(self):
+        # AAA was fetched but has not filed for the latest day; BBB's history
+        # failed outright. "No fund has filed" would claim knowledge of BBB's
+        # filings, which the failed history never delivered.
+        recs = [_srow("2026-07-01", 5.0), _srow("2026-07-02", 0.0)]
+        funds = {"AAA": {"name": "A", "rows": [_frow("2026-07-01", 5.0)]}}
+        out = self._render(
+            "2026-07-02",
+            snapshot=_snapshot(summary=recs, funds=funds, funds_total=2, funds_failed=["BBB"]),
+        )
+        assert "no fetched fund has filed a flow report for 2026-07-02 yet" in out
+        assert "cover only the 1 fetched fund" in out
 
     def test_incomplete_caveat_sorts_the_failed_tickers(self):
         out = self._render(
@@ -1432,11 +1469,79 @@ class TestCacheAndLoad:
         out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
         assert "Issuer breakdown incomplete (1/2 funds)" in out
         assert "histories for IBIT could not be fetched" in out
+        assert "cover only the 1 fetched fund" in out
         # The fetched fund still renders; the aggregate is untouched.
         assert "**Latest (2026-07-31):** -265.4 net" in out
         assert "FBTC -50.0" in out
         payload = json.loads((tmp_path / "sosovalue_btc.json").read_text(encoding="utf-8"))
         assert payload["funds_failed"] == ["IBIT"]
+
+    def _run_fund_breaker(self, tmp_path, monkeypatch, tickers, fail=(), errors=None):
+        """One refresh over a synthetic listing; -> (out, history_calls, payload)."""
+        self._setup(tmp_path, monkeypatch)
+        calls = []
+        _stub_requests(
+            monkeypatch,
+            listing=[{"ticker": t, "name": t} for t in tickers],
+            fail=set(fail),
+            errors=errors,
+            calls=calls,
+        )
+        out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        history_calls = [c for c in calls if c.endswith("/history")]
+        payload = json.loads((tmp_path / "sosovalue_btc.json").read_text(encoding="utf-8"))
+        return out, history_calls, payload
+
+    def test_consecutive_network_failures_trip_the_fund_breaker(self, tmp_path, monkeypatch):
+        # Five listed funds, every history failing at the transport level: the
+        # breaker trips on the third consecutive failure and the remaining two
+        # histories are never requested — they join funds_failed so disclosure
+        # and the short TTL behave like any other incomplete breakdown, and
+        # the call stops burning a full timeout per dead fund.
+        tickers = ("AAA", "BBB", "CCC", "DDD", "EEE")
+        out, history_calls, payload = self._run_fund_breaker(
+            tmp_path, monkeypatch, tickers, fail={f"/etfs/{t}/history" for t in tickers}
+        )
+        assert history_calls == [f"/etfs/{t}/history" for t in ("AAA", "BBB", "CCC")]
+        assert "Issuer breakdown incomplete (0/5 funds)" in out
+        assert "the per-fund leaders and breadth lines are omitted" in out
+        assert "**Latest-day leaders:**" not in out
+        assert payload["funds_failed"] == ["AAA", "BBB", "CCC", "DDD", "EEE"]
+        assert payload["funds_total"] == 5
+        # The skipped funds keep the bookkeeping invariant: the payload the
+        # breaker wrote passes its own reader.
+        assert sosovalue._read_cache(str(tmp_path / "sosovalue_btc.json"), "BTC") is not None
+
+    def test_a_completed_answer_resets_the_breaker(self, tmp_path, monkeypatch):
+        # AAA transport-fails, BBB 429s (the server answered -> counter
+        # resets), CCC/DDD/EEE transport-fail: the trip lands on EEE, the
+        # third *consecutive* transport failure, and only FFF is skipped. An
+        # API-level failure can neither trip nor feed the breaker.
+        _, history_calls, payload = self._run_fund_breaker(
+            tmp_path,
+            monkeypatch,
+            ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF"),
+            fail={f"/etfs/{t}/history" for t in ("AAA", "CCC", "DDD", "EEE")},
+            errors={"/etfs/BBB/history": sosovalue.SoSoValueRateLimitError("throttled")},
+        )
+        assert history_calls == [f"/etfs/{t}/history" for t in ("AAA", "BBB", "CCC", "DDD", "EEE")]
+        assert payload["funds_failed"] == ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"]
+
+    def test_a_pure_429_burst_still_tries_every_fund(self, tmp_path, monkeypatch):
+        # The decided mid-burst-429 semantics survive the breaker: rate limits
+        # are API-level answers, so every history still gets its own try.
+        tickers = ("AAA", "BBB", "CCC", "DDD", "EEE")
+        _, history_calls, payload = self._run_fund_breaker(
+            tmp_path,
+            monkeypatch,
+            tickers,
+            errors={
+                f"/etfs/{t}/history": sosovalue.SoSoValueRateLimitError("throttled")
+                for t in tickers
+            },
+        )
+        assert history_calls == [f"/etfs/{t}/history" for t in tickers]
+        assert payload["funds_failed"] == ["AAA", "BBB", "CCC", "DDD", "EEE"]
 
     def test_fund_list_failure_omits_breakdown_not_the_vendor(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
@@ -1795,6 +1900,14 @@ class TestReadCache:
         payload = self._valid_payload()
         assert sosovalue._read_cache(self._write(tmp_path, payload), "BTC") == payload
 
+    def test_name_at_the_hygiene_bound_is_accepted(self, tmp_path):
+        # The writer truncates to exactly MAX_FUND_NAME_CHARS, so the reader
+        # must accept that length — an off-by-one here would evict every
+        # freshly-written cache whose name hit the bound.
+        payload = self._valid_payload()
+        payload["funds"]["IBIT"]["name"] = "x" * sosovalue.MAX_FUND_NAME_CHARS
+        assert sosovalue._read_cache(self._write(tmp_path, payload), "BTC") == payload
+
     def test_valid_cum_restated_marker_round_trips(self, tmp_path):
         # A well-formed marker: date in the summary, "new" equal to that
         # row's cum at report granularity (_usd_m(2.0 USD) == 0.0), old
@@ -1852,7 +1965,17 @@ class TestReadCache:
                 ]
             },
             {"funds": "oops"},
-            {"funds": {"IBIT": {"rows": []}}},  # name missing
+            {
+                "funds": {"IBIT": {"rows": [{"date": "2026-07-31", "net_inflow": 1.0}]}}
+            },  # name missing
+            {
+                "funds": {
+                    "IBIT": {
+                        "name": "x" * (sosovalue.MAX_FUND_NAME_CHARS + 1),
+                        "rows": [{"date": "2026-07-31", "net_inflow": 1.0}],
+                    }
+                }
+            },  # name over the cache-hygiene bound the writer enforces
             {
                 "funds": {
                     "IBIT": {"name": "x", "rows": [{"date": "2026-07-31", "net_inflow": "N/A"}]}

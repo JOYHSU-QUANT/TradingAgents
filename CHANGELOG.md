@@ -35,7 +35,11 @@ Breaking changes within the 0.x line are called out explicitly.
   success — per-fund history failures (including a 200-with-empty-history
   response, which would otherwise silently wipe the fund's cached rows) and
   an empty fund listing degrade to a disclosed incomplete/absent
-  breakdown, retried on a shorter 1-hour TTL — and the cache discipline
+  breakdown, retried on a shorter 1-hour TTL; three consecutive
+  transport-level history failures trip a circuit breaker that skips the
+  remaining funds into the same disclosed path, so a hanging network costs
+  a bounded number of timeouts instead of one per listed fund (API-level
+  failures such as 429s still give every fund its own try) — and the cache discipline
   otherwise matches Farside (rolling per-asset file, 6h TTL, stale fallback
   capped at 14 days, failures never cached). Unsetting
   `SOSOVALUE_API_KEY` is the emergency-disable switch: the next call falls

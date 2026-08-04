@@ -31,7 +31,11 @@ limit for the trailing fund histories, which is why per-fund failures are
 non-fatal: the aggregate summary alone decides vendor success, and a partial
 (or absent) issuer breakdown is disclosed in the report rather than failing
 the call. Only an aggregate failure (or a rejected key on any request) raises,
-letting the router fall through to the next vendor. A snapshot whose breakdown
+letting the router fall through to the next vendor. A hanging network gets the
+one exception to trying every fund: after ``MAX_CONSECUTIVE_NETWORK_FAILURES``
+back-to-back transport failures the remaining histories are skipped straight
+into the same disclosed-incomplete path — the outcome is identical, and the
+call stops burning a full ``REQUEST_TIMEOUT`` per dead fund. A snapshot whose breakdown
 came back incomplete is cached under the shorter ``INCOMPLETE_CACHE_TTL_HOURS``
 so the missing funds are re-tried on the next call past that window instead of
 persisting for the full refresh interval.
@@ -96,6 +100,17 @@ COUNTRY_CODE = "US"
 
 # Network timeout (seconds), consistent with the other vendors.
 REQUEST_TIMEOUT = 30
+
+# Consecutive transport-level failures (requests.RequestException: timeouts,
+# connection errors) in the fund-history loop before the remaining histories
+# are skipped into ``funds_failed`` unattempted. Without it, a network that
+# hangs instead of failing fast turns one BTC refresh into up to 13 sequential
+# 30-second timeouts (~7 minutes) inside a single analyst tool call — and the
+# post-breaker outcome (disclosed-incomplete breakdown on the short TTL) is
+# identical to riding the brownout out. API-level failures (429s, structural
+# breaks) neither trip nor survive the counter: the server answered, so the
+# next history is still worth its own try.
+MAX_CONSECUTIVE_NETWORK_FAILURES = 3
 
 # The documented per-request row cap. The Demo plan's ~30-day window holds at
 # most ~23 trading days, so this returns the entire servable window regardless
@@ -167,6 +182,13 @@ _USD_PER_MILLION = 1e6
 # ``\Z``, not ``$``: ``$`` also matches before a trailing newline, so
 # "IBIT\n" would pass and land its raw newline mid-line in the report text.
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}\Z")
+
+# Bound on the listing's free-text fund name, the one server-controlled string
+# stored verbatim (for diagnosability — it is never rendered or interpolated).
+# Unbounded, an oversized value would ride into the per-asset cache file and
+# bloat every subsequent load until the next overwrite. Enforced at the parse
+# boundary and re-checked read-side, mirroring the ticker filter's two sites.
+MAX_FUND_NAME_CHARS = 120
 
 
 class SoSoValueError(VendorError):
@@ -428,7 +450,9 @@ def _parse_etf_list(data: list, asset: str) -> tuple[list[tuple[str, str]], int]
             continue
         seen.add(ticker)
         name = raw.get("name")
-        funds.append((ticker, name if isinstance(name, str) else ""))
+        # Bounded here at the trust boundary so an oversized server value can
+        # never ride into the cache file — MAX_FUND_NAME_CHARS explains.
+        funds.append((ticker, name[:MAX_FUND_NAME_CHARS] if isinstance(name, str) else ""))
     return funds, unusable
 
 
@@ -575,15 +599,19 @@ def _valid_summary_rows(rows: object) -> bool:
 def _valid_funds(funds: object) -> bool:
     # Tickers must pass the same plausibility filter as the live listing
     # (_parse_etf_list): the cache is a lower trust tier than the API, not a
-    # higher one, and its tickers land verbatim in the report text. Rows must
-    # be non-empty: _parse_fund_rows raises on an empty history (the fund
-    # lands in funds_failed instead), so _fetch_all never writes one, and an
-    # empty-rows fund would silently thin the leaders/breadth lines while
-    # disabling the reconciliation check's every-fund-filed gate.
+    # higher one, and its tickers land verbatim in the report text. The name
+    # bound mirrors the writer's truncation for the same reason — a bloated
+    # name in a hand-edited (or pre-bound) cache file must cost one refetch,
+    # not persist. Rows must be non-empty: _parse_fund_rows raises on an
+    # empty history (the fund lands in funds_failed instead), so _fetch_all
+    # never writes one, and an empty-rows fund would silently thin the
+    # leaders/breadth lines while disabling the reconciliation check's
+    # every-fund-filed gate.
     return isinstance(funds, dict) and all(
         _is_valid_ticker(t)
         and isinstance(f, dict)
         and isinstance(f.get("name"), str)
+        and len(f["name"]) <= MAX_FUND_NAME_CHARS
         and isinstance(f.get("rows"), list)
         and f["rows"]
         and all(_valid_fund_row(r) for r in f["rows"])
@@ -804,7 +832,9 @@ def _fetch_one_fund(asset: str, ticker: str, name: str) -> dict | None:
     type and propagates, so a mid-batch 401 can never be absorbed as a fund
     failure. A structural break is logged at ERROR with a traceback — the
     breakdown would otherwise stay silently incomplete refresh after refresh
-    — while a transient failure stays a warning.
+    — while a transient failure stays a warning. A transport-level failure is
+    logged here like any other transient, then re-raised so the caller's
+    consecutive-failure breaker can count the streak.
     """
     try:
         rows = _parse_fund_rows(
@@ -831,6 +861,8 @@ def _fetch_one_fund(asset: str, ticker: str, name: str) -> dict | None:
                 ticker,
                 e,
             )
+        if isinstance(e, requests.RequestException):
+            raise
         return None
 
 
@@ -848,7 +880,10 @@ def _fetch_all(asset: str, cached: dict | None) -> dict:
     not. A structural ``SoSoValueError`` (contract/parse break) in those
     degraded paths is logged at ERROR with a traceback — the breakdown would
     otherwise stay silently incomplete refresh after refresh on a mere
-    warning — while transient failures stay warnings.
+    warning — while transient failures stay warnings. Transport-level history
+    failures additionally feed a consecutive-failure breaker
+    (``MAX_CONSECUTIVE_NETWORK_FAILURES``) so a hanging network cannot turn
+    the fund loop into minutes of sequential timeouts.
     """
     summary_rows = _parse_summary_rows(
         _request(
@@ -863,21 +898,13 @@ def _fetch_all(asset: str, cached: dict | None) -> dict:
     funds_unusable = 0
     funds_failed: list[str] = []
     list_fetched = False
+    # The try covers only the listing request — the fund loop lives in the
+    # else — so this handler's "fund list failed" label can never absorb a
+    # failure from the loop, whose sole transport handler is the breaker.
     try:
         listing, funds_unusable = _parse_etf_list(
             _request("/etfs", {"symbol": asset, "country_code": COUNTRY_CODE}), asset
         )
-        list_fetched = True
-        funds_total = len(listing)
-        for ticker, name in listing:
-            fund = _fetch_one_fund(asset, ticker, name)
-            if fund is None:
-                # Includes a mid-burst 429: the remaining histories are likely
-                # to fail too, but each is tried so a transient blip loses one
-                # fund, not the tail of the list.
-                funds_failed.append(ticker)
-            else:
-                funds[ticker] = fund
     except (requests.RequestException, SoSoValueRateLimitError, SoSoValueError) as e:
         # Deliberately NOT the broad VendorError: a rejected key
         # (SoSoValueNotConfiguredError) matches none of these, so config
@@ -900,6 +927,48 @@ def _fetch_all(asset: str, cached: dict | None) -> dict:
                 asset,
                 e,
             )
+    else:
+        list_fetched = True
+        funds_total = len(listing)
+        consecutive_network = 0
+        remaining = iter(listing)
+        for ticker, name in remaining:
+            try:
+                fund = _fetch_one_fund(asset, ticker, name)
+            except requests.RequestException:
+                # Already logged by _fetch_one_fund, which re-raises so this
+                # loop — the only layer that can see a failure streak — can
+                # count it.
+                funds_failed.append(ticker)
+                consecutive_network += 1
+                if consecutive_network >= MAX_CONSECUTIVE_NETWORK_FAILURES:
+                    # A dead network costs a full timeout per fund; stop
+                    # burning them and disclose the rest as failed like any
+                    # other incomplete breakdown (short TTL retries soon).
+                    # The part-consumed loop iterator is exactly the
+                    # unvisited tail.
+                    skipped = [t for t, _ in remaining]
+                    if skipped:
+                        funds_failed.extend(skipped)
+                        logger.warning(
+                            "SoSoValue %s: %d consecutive network failures; "
+                            "skipping the remaining %d fund histories "
+                            "(disclosed as incomplete, retried on the short TTL)",
+                            asset,
+                            consecutive_network,
+                            len(skipped),
+                        )
+                    break
+                continue
+            # Any completed request resets the breaker — including a mid-burst
+            # 429 or a structural break (fund is None): the server answered,
+            # so each remaining history is still tried and a transient blip
+            # loses one fund, not the tail of the list.
+            consecutive_network = 0
+            if fund is None:
+                funds_failed.append(ticker)
+            else:
+                funds[ticker] = fund
 
     revisions = _diff_revisions(cached, summary_rows)
     return {
@@ -1199,7 +1268,11 @@ def get_etf_flow_data(
             f"endpoint and are unaffected._"
         )
     elif latest is not None and (snapshot.funds_failed or snapshot.funds_unusable):
-        fetched = snapshot.funds_total - len(snapshot.funds_failed)
+        # Derived from the same value the body branches on (snapshot.funds);
+        # the reader/writer bookkeeping invariant makes it equal to
+        # funds_total - len(funds_failed), and sharing the body's source keeps
+        # this caveat and the rendered lines mechanically in step.
+        fetched = len(snapshot.funds)
         problems = []
         if snapshot.funds_failed:
             problems.append(
@@ -1211,11 +1284,21 @@ def get_etf_flow_data(
                 f"{n} listing {_plural(n, 'entry', 'entries')} with no usable ticker "
                 f"{_plural(n, 'was', 'were')} skipped"
             )
+        # The consequence clause must stay true whichever body branch renders:
+        # with zero fetched funds the body omits the leaders/breadth lines
+        # entirely, and claiming they "cover only" anything would describe
+        # lines that do not exist.
+        if fetched:
+            consequence = (
+                f"so the per-fund lines below cover only the {fetched} fetched "
+                f"{_plural(fetched, 'fund', 'funds')}"
+            )
+        else:
+            consequence = "so the per-fund leaders and breadth lines are omitted"
         header_lines.append(
             f"_Issuer breakdown incomplete ({fetched}/{snapshot.funds_total} funds): "
-            f"{'; '.join(problems)}, so the leaders and breadth lines undercount those "
-            f"funds. The aggregate figures come from a separate endpoint and are "
-            f"unaffected._"
+            f"{'; '.join(problems)}, {consequence}. The aggregate figures come from "
+            f"a separate endpoint and are unaffected._"
         )
 
     # Revisions are disclosed for every changed day still visible in this
@@ -1517,8 +1600,11 @@ def get_etf_flow_data(
                 f"unposted one\n"
             )
     elif snapshot.funds:
+        # With failed histories in the mix, "no fund has filed" would claim
+        # knowledge of filings those histories never delivered.
+        scope = "no fetched fund" if snapshot.funds_failed else "no fund"
         leaders_line = (
-            f"**Latest-day leaders:** no fund has filed a flow report for {latest['date']} yet\n"
+            f"**Latest-day leaders:** {scope} has filed a flow report for {latest['date']} yet\n"
         )
         breadth_line = ""
     else:

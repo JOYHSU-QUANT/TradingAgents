@@ -10,9 +10,8 @@ non-browser clients with a Cloudflare JS challenge (HTTP 403, "Just a
 moment..."), which the browser-style User-Agent below does not get past; the
 vendor has had zero successful fetches since. It stays registered as the
 tail of the crypto_etf_flows chain behind the SoSoValue API vendor: it costs
-at most one failed request per refresh attempt (its own cache TTL can skip
-even that), and if Farside ever unblocks API-style clients the fallback
-starts working again without a deploy. A WAF
+at most one failed request per refresh attempt, and if Farside ever unblocks
+API-style clients the fallback starts working again without a deploy. A WAF
 block (403) or any network error is treated like unavailable data. Parsed
 flows go into one rolling cache file per asset, refreshed once the
 cached snapshot is older than ``CACHE_TTL_HOURS``: a repeat call within that

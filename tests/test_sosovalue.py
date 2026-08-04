@@ -186,8 +186,10 @@ class TestRequest:
             self._get(_FakeResponse(200, {"code": 500, "message": "oops"}))
 
     def test_non_json_body_is_an_error(self):
-        with pytest.raises(sosovalue.SoSoValueError, match="no-json"):
+        with pytest.raises(sosovalue.SoSoValueError, match="no-json") as excinfo:
             self._get(_FakeResponse(200, None))
+        assert "(non-JSON response body)" in str(excinfo.value)
+        assert "None" not in str(excinfo.value)
 
     def test_missing_data_list_is_an_error(self):
         with pytest.raises(sosovalue.SoSoValueError, match="'data' list"):

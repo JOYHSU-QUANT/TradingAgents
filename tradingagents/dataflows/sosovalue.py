@@ -4,10 +4,11 @@ Fetches BTC/ETH US spot-ETF daily net flows from SoSoValue's official OpenAPI
 (https://sosovalue.gitbook.io/soso-value-api-doc). Primary vendor for the
 ``crypto_etf_flows`` category since farside.co.uk went behind a Cloudflare JS
 challenge; the report mirrors the Farside one (same core sections, same US$m
-units, same wording for the shared caveats), with SoSoValue-only additions
-layered on top — a since-launch cumulative, a fund-breadth line, and revision,
-out-of-window restatement, and aggregate-vs-fund-sum reconciliation caveats —
-so the analyst sees the same shape whichever vendor served the call.
+units, same-shaped shared caveats whose cause clauses name each vendor's own
+failure modes), with SoSoValue-only additions layered on top — a since-launch
+cumulative, a fund-breadth line, and revision, out-of-window restatement, and
+aggregate-vs-fund-sum reconciliation caveats — so the analyst sees the same
+shape whichever vendor served the call.
 
 A free Demo API key (sosovalue.com developer dashboard) is read from
 ``SOSOVALUE_API_KEY``; if it is unset the vendor raises
@@ -203,8 +204,9 @@ class SoSoValueError(VendorError):
 class SoSoValueNotConfiguredError(VendorNotConfiguredError):
     """Raised when SoSoValue is selected but no usable API key is configured.
 
-    Covers both an unset ``SOSOVALUE_API_KEY`` and a key the server rejects
-    (HTTP 401): both are configuration breakage, not an outage, so neither is
+    Covers an unset ``SOSOVALUE_API_KEY``, a set key that fails the
+    header-safety check in ``get_api_key``, and a key the server rejects
+    (HTTP 401): all are configuration breakage, not an outage, so none is
     papered over with a stale cache — the router falls to the next vendor at
     once, which is what makes unsetting the key an emergency-disable switch.
     """
@@ -250,14 +252,16 @@ def _error_message(body: object, api_key: str) -> str:
 
     SoSoValue has two live-verified error shapes: structured
     ``{"code": 400xxx, "message": ...}`` and a gateway shape
-    ``{"code": 1, "msg": ...}`` — note ``msg``, not ``message``. The body is
+    ``{"code": 1, "msg": ...}`` — note ``msg``, not ``message``. A body that
+    failed JSON parsing arrives here as ``None`` and renders a fixed
+    placeholder instead of the literal string "None". The body is
     server-controlled text that ends up in raised messages (and from there in
     logs and the router's LLM-visible DATA_UNAVAILABLE string), and an error
     body — a 401 especially — is exactly where a server may echo the
     submitted credential back, so the key is scrubbed before the text leaves
     this module.
     """
-    text = body
+    text = "(non-JSON response body)" if body is None else body
     if isinstance(body, dict):
         text = body.get("message") or body.get("msg") or body
     # Redact BEFORE truncating (cutting first could slice the key across the
@@ -1191,9 +1195,10 @@ def get_etf_flow_data(
             dropped so a past date never leaks future flows.
         look_back_days: Trailing window length; ``None`` uses
             DEFAULT_LOOKBACK_DAYS. Bounds the cumulative figure and the
-            rendered table; the streak spans every fetched session (the API's
-            ~30-day window) and is labelled "≥N" when it reaches that
-            window's edge, because the true streak may extend further back.
+            rendered table; the streak spans every session visible to
+            ``curr_date`` within the API's ~30-day window and is labelled
+            "≥N" when it reaches that window's edge, because the true streak
+            may extend further back.
 
     Returns:
         A markdown report shaped like the Farside vendor's (Farside-shaped

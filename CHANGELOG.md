@@ -10,6 +10,55 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **SoSoValue is now the primary crypto spot-ETF flow vendor.** farside.co.uk
+  has served a Cloudflare JS challenge to non-browser clients since 2026-07-27
+  (zero successful fetches since), so `crypto_etf_flows` now routes
+  `"sosovalue,farside"`: BTC/ETH US spot-ETF daily net flows come from the
+  SoSoValue OpenAPI (free Demo key, `SOSOVALUE_API_KEY`), with Farside kept as
+  a keyless fallback in case it ever unblocks. The report mirrors the Farside
+  shape (US$m units, latest day / window cumulative / streak / leaders /
+  recent-days table) and adds a since-launch cumulative, a fund breadth line
+  (how many of the funds that filed moved together, how concentrated the
+  flow was), revision caveats whenever any still-visible day's figure
+  changed since the previous snapshot (issuers file over the US evening, so
+  fresh days firm up in place), a restatement caveat when the since-launch
+  cumulative shifted because a day *older* than the API's servable window was
+  restated (invisible to the daily revision diff, which only covers visible
+  days), and a reconciliation caveat when a fully-filed
+  latest day's fund filings fail to sum to the aggregate — the sign that the
+  fund listing itself is missing a fund (e.g. a newly launched ETF).
+  Classification and rendering share one granularity: a flow below the
+  report's 0.1 US$m render tick (which would display as `+0.0`) is not
+  counted as a flow session, streak member, or leader, so the report never
+  calls a figure it displays as zero a flow event. The
+  aggregate endpoint alone decides vendor
+  success — per-fund history failures (including a 200-with-empty-history
+  response, which would otherwise silently wipe the fund's cached rows) and
+  an empty fund listing degrade to a disclosed incomplete/absent
+  breakdown, retried on a shorter 1-hour TTL; three consecutive
+  transport-level history failures trip a circuit breaker that skips the
+  remaining funds into the same disclosed path, so a hanging network costs
+  a bounded number of timeouts instead of one per listed fund (API-level
+  failures such as 429s still give every fund its own try) — and the cache discipline
+  otherwise matches Farside (rolling per-asset file, 6h TTL, stale fallback
+  capped at 14 days, failures never cached). Unsetting
+  `SOSOVALUE_API_KEY` is the emergency-disable switch: the next call falls
+  through the chain with no code change; the key itself is stripped of
+  surrounding whitespace (Windows env-file CRLF), rejected without being
+  echoed when it cannot travel in an HTTP header, and redacted from
+  server-echoed error bodies — which are themselves length-bounded before
+  they reach a raised message — so it can never leak into logs or report
+  text.
+- A vendor chain exhausted by nothing but rate limits (e.g. a single-vendor
+  `crypto_etf_flows` override hitting an uncached 429) now degrades to the
+  same no-data sentinel as any other optional-category failure instead of
+  aborting the call with a bare `RuntimeError`; a real error elsewhere in
+  the chain still takes precedence in the surfaced message.
+- A mis-typed vendor name in an explicit comma chain is no longer dropped
+  silently when a sibling name is valid: the router logs a warning naming
+  the dropped vendor(s) while the survivors serve the call (an all-unknown
+  chain still raises).
+
 - **Crypto spot-ETF flows and Fear & Greed vendors.** Two keyless news-analyst
   data sources, bound only for crypto assets: BTC/ETH US spot-ETF daily net
   flows scraped from Farside (`crypto_etf_flows` / `get_etf_flows`, one rolling

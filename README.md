@@ -240,17 +240,23 @@ print(decision)
 
 See `tradingagents/default_config.py` for all configuration options.
 
-Crypto assets (e.g. `BTC-USD`) additionally surface two keyless news-analyst data
-sources — BTC/ETH spot-ETF daily flows (Farside, `crypto_etf_flows`) and the Crypto
-Fear & Greed Index (alternative.me, `crypto_sentiment`). Both need no API key and
-degrade to a no-data sentinel if unreachable; the stock path is unchanged. A
-recognized crypto risk asset without its own spot ETF (e.g. SOL) gets BTC flows as
-a market-wide proxy; a stablecoin or unrecognized symbol gets a no-signal note.
+Crypto assets (e.g. `BTC-USD`) additionally surface two news-analyst data
+sources — BTC/ETH US spot-ETF daily flows (`crypto_etf_flows`, vendor chain
+`"sosovalue,farside"`) and the Crypto Fear & Greed Index (alternative.me,
+`crypto_sentiment`, keyless). ETF flows come from the SoSoValue OpenAPI (free
+Demo key from the sosovalue.com developer dashboard; set `SOSOVALUE_API_KEY`).
+Farside stays registered as a keyless fallback, but farside.co.uk has been
+behind a Cloudflare JS challenge since 2026-07-27, so with the key unset the
+category currently degrades to a stale cached Farside snapshot (up to 14 days
+old) if one exists, and otherwise to the no-data sentinel. Both categories degrade to
+that sentinel rather than aborting; the stock path is unchanged. A recognized
+crypto risk asset without its own spot ETF (e.g. SOL) gets BTC flows as a
+market-wide proxy; a stablecoin or unrecognized symbol gets a no-signal note.
 
 Any data category can be switched off by setting its vendor to `"none"`:
 
 ```python
-config["data_vendors"]["crypto_etf_flows"] = "none"  # stop calling Farside
+config["data_vendors"]["crypto_etf_flows"] = "none"  # stop calling the ETF-flow vendors
 ```
 
 An optional category then returns the no-data sentinel without opening a
@@ -258,9 +264,9 @@ connection, and the analyst stops binding that tool at all. This is the only way
 to disable a keyless vendor, which has no API key to unset. Core data categories
 reject `"none"` rather than silently running without prices or fundamentals.
 
-Farside's fetch throttle (a 6-hour cache TTL) relies on `data_cache_dir`
-persisting between runs; pointing it at a temporary filesystem makes every call
-re-fetch.
+The ETF-flow vendors' fetch throttle (a 6-hour cache TTL) relies on
+`data_cache_dir` persisting between runs; pointing it at a temporary filesystem
+makes every call re-fetch.
 
 ## Persistence and Recovery
 

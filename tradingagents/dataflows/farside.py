@@ -5,9 +5,15 @@ Scrapes BTC/ETH US spot-ETF daily net flows from farside.co.uk's HTML tables
 positioning signal: persistent ETF inflows or outflows are a flows narrative
 that complements price, macro, and news.
 
-Keyless. The site sits behind Cloudflare, so requests carry a browser-style
-User-Agent; a WAF block (403) or any network error is treated like unavailable
-data. Parsed flows go into one rolling cache file per asset, refreshed once the
+Keyless — but currently blocked. Since 2026-07-27 farside.co.uk answers
+non-browser clients with a Cloudflare JS challenge (HTTP 403, "Just a
+moment..."), which the browser-style User-Agent below does not get past; the
+vendor has had zero successful fetches since. It stays registered as the
+tail of the crypto_etf_flows chain behind the SoSoValue API vendor: it costs
+at most one failed request per refresh attempt, and if Farside ever unblocks
+API-style clients the fallback starts working again without a deploy. A WAF
+block (403) or any network error is treated like unavailable data. Parsed
+flows go into one rolling cache file per asset, refreshed once the
 cached snapshot is older than ``CACHE_TTL_HOURS``: a repeat call within that
 window reuses it, and a fetch failure falls back to that same snapshot (marked
 stale in the report) rather than losing the signal. A failed fetch is never
@@ -54,8 +60,11 @@ ASSET_PATHS = {"BTC": "/btc/", "ETH": "/eth/"}
 # Network timeout (seconds), consistent with the other vendors.
 REQUEST_TIMEOUT = 30
 
-# Cloudflare serves a challenge/403 to non-browser clients; a normal desktop
-# User-Agent gets the static table HTML.
+# Cloudflare serves a challenge/403 to non-browser clients. A desktop
+# User-Agent used to be enough to get the static table HTML; since 2026-07-27
+# it no longer is (the challenge requires JS execution), so today every fetch
+# 403s regardless. Kept because it is harmless and would matter again the day
+# Farside relaxes the challenge.
 BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"

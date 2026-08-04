@@ -136,7 +136,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "news_data": "yfinance",             # Options: alpha_vantage, yfinance
         "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
         "prediction_markets": "polymarket",  # Options: polymarket (keyless)
-        "crypto_etf_flows": "farside",       # Options: farside (keyless, BTC/ETH spot-ETF flows)
+        # sosovalue needs SOSOVALUE_API_KEY (free); with it unset the chain
+        # falls through to farside (currently Cloudflare-blocked; its stale
+        # cache may serve up to 14 days) and then the no-data sentinel — which
+        # is also the emergency-disable path.
+        "crypto_etf_flows": "sosovalue,farside",  # Options: sosovalue (SOSOVALUE_API_KEY), farside (keyless)
         "crypto_sentiment": "alternative_me",  # Options: alternative_me (keyless, Fear & Greed)
     },
     # Tool-level configuration (takes precedence over category-level)

@@ -21,6 +21,7 @@ from .farside import get_etf_flow_data as get_farside_etf_flows
 from .fear_greed import get_fear_greed_data as get_alternative_me_fear_greed
 from .fred import get_macro_data as get_fred_macro_data
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
+from .sosovalue import get_etf_flow_data as get_sosovalue_etf_flows
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -110,6 +111,7 @@ VENDOR_LIST = [
     "fred",
     "polymarket",
     "alpha_vantage",
+    "sosovalue",
     "farside",
     "alternative_me",
 ]
@@ -178,6 +180,7 @@ VENDOR_METHODS = {
     },
     # crypto_etf_flows
     "get_etf_flows": {
+        "sosovalue": get_sosovalue_etf_flows,
         "farside": get_farside_etf_flows,
     },
     # crypto_sentiment
@@ -259,19 +262,33 @@ def route_to_vendor(method: str, *args, **kwargs):
                 f"Configured vendor(s) {explicit} not available for '{method}'. "
                 f"Available: {all_available_vendors}."
             )
+        # A mis-typed name in a comma chain must not silently shrink it — the
+        # all-unknown raise above cannot fire once any sibling survives.
+        unknown = [v for v in explicit if v not in VENDOR_METHODS[method]]
+        if unknown:
+            logger.warning(
+                "Configured vendor(s) %s not available for '%s'; using %s. Available: %s.",
+                unknown,
+                method,
+                vendor_chain,
+                all_available_vendors,
+            )
     else:
         vendor_chain = all_available_vendors
 
     last_no_data: NoMarketDataError | None = None
     first_error: Exception | None = None
+    first_rate_limit: VendorRateLimitError | None = None
     for vendor in vendor_chain:
         vendor_impl = VENDOR_METHODS[method][vendor]
         impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
 
         try:
             return impl_func(*args, **kwargs)
-        except VendorRateLimitError:
+        except VendorRateLimitError as e:
             logger.warning("Vendor %r rate-limited for %s; trying next vendor.", vendor, method)
+            if first_rate_limit is None:
+                first_rate_limit = e
             continue
         except VendorNotConfiguredError as e:
             logger.warning("Vendor %r not configured for %s; trying next vendor.", vendor, method)
@@ -317,6 +334,13 @@ def route_to_vendor(method: str, *args, **kwargs):
             f"not covered, or the vendor returned stale data. Do not estimate or "
             f"fabricate values — report that data is unavailable for this symbol."
         )
+
+    # A chain exhausted by nothing but rate limits (e.g. a single-vendor chain
+    # hitting a 429 with no cache) must degrade like any other failure, not
+    # fall through to the bare no-vendor RuntimeError below. Recorded only as
+    # a fallback so a real error (network/auth/bug) stays the one surfaced.
+    if first_error is None:
+        first_error = first_rate_limit
 
     # No vendor returned data and none reported clean "no data" — surface the
     # first real error (e.g. the primary vendor's network failure). Optional

@@ -1,0 +1,72 @@
+{
+  "code": 0,
+  "message": "success",
+  "data": [
+    {
+      "ticker": "IBIT",
+      "name": "iShares Bitcoin Trust",
+      "exchange": "NASDAQ"
+    },
+    {
+      "ticker": "FBTC",
+      "name": "Fidelity Wise Origin Bitcoin Fund",
+      "exchange": "CBOE"
+    },
+    {
+      "ticker": "ARKB",
+      "name": "ARK 21Shares Bitcoin ETF",
+      "exchange": "CBOE"
+    },
+    {
+      "ticker": "BTCO",
+      "name": "Invesco Galaxy Bitcoin ETF",
+      "exchange": "CBOE"
+    },
+    {
+      "ticker": "BTCW",
+      "name": "WisdomTree Bitcoin Trust",
+      "exchange": "CBOE"
+    },
+    {
+      "ticker": "BRRR",
+      "name": "Valkyrie Bitcoin Fund",
+      "exchange": "NASDAQ"
+    },
+    {
+      "ticker": "BITB",
+      "name": "Bitwise Bitcoin ETF",
+      "exchange": "NYSE"
+    },
+    {
+      "ticker": "EZBC",
+      "name": "Franklin Templeton Digital Holdings Trust",
+      "exchange": "CBOE"
+    },
+    {
+      "ticker": "HODL",
+      "name": "VanEck Bitcoin ETF",
+      "exchange": "CBOE"
+    },
+    {
+      "ticker": "GBTC",
+      "name": "Grayscale Bitcoin Trust",
+      "exchange": "NYSE"
+    },
+    {
+      "ticker": "DEFI",
+      "name": "Hashdex Bitcoin ETF",
+      "exchange": "NYSE"
+    },
+    {
+      "ticker": "BTC",
+      "name": "Grayscale Bitcoin Mini Trust",
+      "exchange": "NYSE"
+    },
+    {
+      "ticker": "MSBT",
+      "name": "Morgan Stanley Bitcoin Trust",
+      "exchange": "NYSE"
+    }
+  ],
+  "details": null
+}

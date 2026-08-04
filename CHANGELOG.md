@@ -54,6 +54,10 @@ Breaking changes within the 0.x line are called out explicitly.
   same no-data sentinel as any other optional-category failure instead of
   aborting the call with a bare `RuntimeError`; a real error elsewhere in
   the chain still takes precedence in the surfaced message.
+- A mis-typed vendor name in an explicit comma chain is no longer dropped
+  silently when a sibling name is valid: the router logs a warning naming
+  the dropped vendor(s) while the survivors serve the call (an all-unknown
+  chain still raises).
 
 - **Crypto spot-ETF flows and Fear & Greed vendors.** Two keyless news-analyst
   data sources, bound only for crypto assets: BTC/ETH US spot-ETF daily net

@@ -1,0 +1,6 @@
+{
+  "code": 400001,
+  "message": "ETF ticker not found: NOTREAL",
+  "data": null,
+  "details": null
+}

@@ -10,6 +10,25 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **SoSoValue is now the primary crypto spot-ETF flow vendor.** farside.co.uk
+  has served a Cloudflare JS challenge to non-browser clients since 2026-07-27
+  (zero successful fetches since), so `crypto_etf_flows` now routes
+  `"sosovalue,farside"`: BTC/ETH US spot-ETF daily net flows come from the
+  SoSoValue OpenAPI (free Demo key, `SOSOVALUE_API_KEY`), with Farside kept as
+  a keyless fallback in case it ever unblocks. The report mirrors the Farside
+  shape (US$m units, latest day / window cumulative / streak / leaders /
+  recent-days table) and adds a since-launch cumulative, a fund breadth line
+  (how many of the funds that filed moved together, how concentrated the
+  flow was), and revision caveats whenever any still-visible day's figure
+  changed since the previous snapshot (issuers file over the US evening, so
+  fresh days firm up in place). The aggregate endpoint alone decides vendor
+  success — per-fund history failures degrade to a disclosed incomplete
+  breakdown, retried on a shorter 1-hour TTL — and the cache discipline
+  otherwise matches Farside (rolling per-asset file, 6h TTL, stale fallback
+  capped at 14 days, failures never cached). Unsetting
+  `SOSOVALUE_API_KEY` is the emergency-disable switch: the next call falls
+  through the chain with no code change.
+
 - **Crypto spot-ETF flows and Fear & Greed vendors.** Two keyless news-analyst
   data sources, bound only for crypto assets: BTC/ETH US spot-ETF daily net
   flows scraped from Farside (`crypto_etf_flows` / `get_etf_flows`, one rolling

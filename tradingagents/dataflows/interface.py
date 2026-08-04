@@ -21,6 +21,7 @@ from .farside import get_etf_flow_data as get_farside_etf_flows
 from .fear_greed import get_fear_greed_data as get_alternative_me_fear_greed
 from .fred import get_macro_data as get_fred_macro_data
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
+from .sosovalue import get_etf_flow_data as get_sosovalue_etf_flows
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -110,6 +111,7 @@ VENDOR_LIST = [
     "fred",
     "polymarket",
     "alpha_vantage",
+    "sosovalue",
     "farside",
     "alternative_me",
 ]
@@ -178,6 +180,7 @@ VENDOR_METHODS = {
     },
     # crypto_etf_flows
     "get_etf_flows": {
+        "sosovalue": get_sosovalue_etf_flows,
         "farside": get_farside_etf_flows,
     },
     # crypto_sentiment

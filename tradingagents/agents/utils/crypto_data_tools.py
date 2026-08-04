@@ -32,7 +32,7 @@ def get_etf_flows(
     ] = None,
 ) -> str:
     """
-    Retrieve US spot Bitcoin/Ethereum ETF daily net flows (US$m) from Farside.
+    Retrieve US spot Bitcoin/Ethereum ETF daily net flows (US$m).
     Returns the latest day's net flow, the window's cumulative net flow, the
     consecutive inflow/outflow streak, the latest day's issuer breakdown, and a
     recent daily-flow table. Persistent inflows/outflows are a demand-side

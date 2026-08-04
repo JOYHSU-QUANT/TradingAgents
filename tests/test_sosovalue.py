@@ -413,9 +413,18 @@ class TestDiffCumRestatement:
         # date overlaps (a cache resurrected after a long outage): either way
         # there is no anchor day to compare, so nothing is disclosed.
         rows = [_srow("2026-07-31", 1.0, cum_m=2.0)]
-        assert sosovalue._diff_cum_restatement(None, rows, {}) is None
+        assert sosovalue._diff_cum_restatement(None, rows) is None
         cached = {"summary_rows": [_srow("2026-06-01", 1.0, cum_m=9.0)]}
-        assert sosovalue._diff_cum_restatement(cached, rows, {}) is None
+        assert sosovalue._diff_cum_restatement(cached, rows) is None
+
+    def test_offsetting_changes_that_leave_the_cum_unmoved_yield_no_marker(self):
+        # The residual is material (the day's flow moved +$40M with no cum
+        # change, so pre-window history moved -$40M), but the two rendered
+        # cums agree — the since-launch figure the report shows never moved,
+        # so there is nothing visible to disclose.
+        cached = {"summary_rows": [_srow("2026-07-01", 10.0, cum_m=100.0)]}
+        rows = [_srow("2026-07-01", 50.0, cum_m=100.0)]
+        assert sosovalue._diff_cum_restatement(cached, rows) is None
 
 
 @pytest.mark.unit
@@ -574,6 +583,31 @@ class TestRender:
         )
         assert "**Breadth (2026-07-02):** 0 of 2 reporting funds saw inflows (2 flat)" in out
         assert "yet" not in out
+
+    def test_material_aggregate_with_flat_filings_owns_the_asynchrony(self):
+        # Mid-filing state: the aggregate already shows +250.0 while the only
+        # filings are an explicit $0 and a null. The Latest line, streak, and
+        # table all report the material figure, so the breadth line must not
+        # declare "a confirmed flat day" — the endpoints disagree and the
+        # wording has to own that instead of contradicting the header figure.
+        recs = [_srow("2026-07-01", 5.0), _srow("2026-07-02", 250.0)]
+        funds = {
+            "AAA": {"name": "A", "rows": [_frow("2026-07-02", 0.0)]},
+            "BBB": {"name": "B", "rows": [_frow("2026-07-02", None)]},
+        }
+        out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds=funds))
+        assert "**Latest (2026-07-02):** +250.0 net" in out
+        assert "confirmed flat day" not in out
+        assert "issuer filings for the day are likely still posting" in out
+        assert (
+            "**Latest-day leaders:** none — all 1 reporting fund filed flat "
+            "($0 at the 0.1 US$m granularity shown) for 2026-07-02" in out
+        )
+        # The flat-aggregate verdict is untouched: same filings, flat day.
+        flat_recs = [_srow("2026-07-01", 5.0), _srow("2026-07-02", 0.0)]
+        flat_out = self._render("2026-07-02", snapshot=_snapshot(summary=flat_recs, funds=funds))
+        assert "a confirmed flat day, not an unposted one" in flat_out
+        assert "still posting" not in flat_out
 
     def test_leaders_truncation_and_top3_slice_are_pinned(self):
         # Six directional funds with distinct magnitudes: the leaders line
@@ -1339,8 +1373,8 @@ class TestCacheAndLoad:
         assert payload["cum_restated"] == {"date": "2026-07-30", "old": 51589.9, "new": 51789.9}
 
     def test_cum_shift_explained_by_a_daily_revision_is_not_marked(self, tmp_path, monkeypatch):
-        # When the earliest overlapping day's own flow was revised, that
-        # (disclosed) revision explains the cum shift — flagging it as an
+        # The earliest overlapping day's own (disclosed) revision fully
+        # explains the cum shift — the residual is zero, so flagging it as an
         # out-of-window restatement too would double-report one event.
         self._setup(tmp_path, monkeypatch)
         _stub_requests(monkeypatch)
@@ -1360,6 +1394,41 @@ class TestCacheAndLoad:
         assert "Restatement" not in out
         payload = json.loads((tmp_path / "sosovalue_btc.json").read_text(encoding="utf-8"))
         assert payload["cum_restated"] is None
+
+    def test_revision_masking_an_out_of_window_restatement_is_still_marked(
+        self, tmp_path, monkeypatch
+    ):
+        # An issuer refiling straddles the window edge: the earliest
+        # overlapping day's flow is revised (+$100M, disclosed) AND its cum
+        # moves +$140M — the $40M residual can only come from pre-window
+        # history. A date-membership test would let the in-window revision
+        # silence the restatement permanently; the residual test must not.
+        self._setup(tmp_path, monkeypatch)
+        _stub_requests(monkeypatch)
+        sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        self._advance(monkeypatch, hours=sosovalue.CACHE_TTL_HOURS + 1)
+        refiled = [
+            dict(SUMMARY_API[0], cum_net_inflow=SUMMARY_API[0]["cum_net_inflow"] + 140e6),
+            dict(
+                SUMMARY_API[1],
+                total_net_inflow=SUMMARY_API[1]["total_net_inflow"] + 100e6,
+                cum_net_inflow=SUMMARY_API[1]["cum_net_inflow"] + 140e6,
+            ),
+        ]
+        _stub_requests(monkeypatch, summary=refiled)
+        out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert "(2026-07-30: +233.1 → +333.1, US$m)" in out
+        assert (
+            "_Restatement: the cumulative total as of 2026-07-30 moved "
+            "+51589.9 → +51729.9 US$m" in out
+        )
+        payload = json.loads((tmp_path / "sosovalue_btc.json").read_text(encoding="utf-8"))
+        assert payload["cum_restated"] == {"date": "2026-07-30", "old": 51589.9, "new": 51729.9}
+        assert "2026-07-30" in payload["revisions"]
+        # A TTL-fresh serve replays both disclosures from cache: the validator
+        # must accept the marker-plus-revision pair it just wrote.
+        out2 = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert "Restatement" in out2 and "Revision:" in out2
 
     def test_ttl_boundary_age_exactly_at_ttl_refetches(self, tmp_path, monkeypatch):
         # The freshness comparison is strict: a snapshot aged exactly
@@ -1595,10 +1664,17 @@ class TestReadCache:
     def test_valid_cum_restated_marker_round_trips(self, tmp_path):
         # A well-formed marker: date in the summary, "new" equal to that
         # row's cum at report granularity (_usd_m(2.0 USD) == 0.0), old
-        # different, and no revision on the same date (which would explain
-        # the shift and _diff_cum_restatement never writes).
+        # different.
         payload = self._valid_payload()
         payload["revisions"] = {}
+        payload["cum_restated"] = {"date": "2026-07-31", "old": 1.0, "new": 0.0}
+        assert sosovalue._read_cache(self._write(tmp_path, payload), "BTC") == payload
+
+    def test_marker_coexisting_with_a_revision_on_its_date_round_trips(self, tmp_path):
+        # Legal state: the day's flow was revised (disclosed) AND pre-window
+        # history was restated — the marker fires on the unexplained
+        # residual, so the validator must not treat the pair as exclusive.
+        payload = self._valid_payload()  # revisions already carry 2026-07-31
         payload["cum_restated"] = {"date": "2026-07-31", "old": 1.0, "new": 0.0}
         assert sosovalue._read_cache(self._write(tmp_path, payload), "BTC") == payload
 
@@ -1691,13 +1767,10 @@ class TestReadCache:
             {"cum_restated": {"date": "not-a-date", "old": 1.0, "new": 0.0}},
             {"cum_restated": {"date": "2026-07-31", "old": float("nan"), "new": 0.0}},
             # Cross-field: date absent from the summary; no-op pair; "new"
-            # disagreeing with the row's cum at report granularity; and a
-            # marker on a date that also carries a revision (the daily change
-            # already explains the cum shift, so the producer never writes it).
+            # disagreeing with the row's cum at report granularity.
             {"cum_restated": {"date": "2026-07-30", "old": 1.0, "new": 0.0}},
             {"cum_restated": {"date": "2026-07-31", "old": 0.0, "new": 0.0}},
             {"cum_restated": {"date": "2026-07-31", "old": 1.0, "new": 5.0}},
-            {"cum_restated": {"date": "2026-07-31", "old": 1.0, "new": 0.0}},  # revised date
             {"funds": {"IBIT": {"name": "iShares", "rows": []}}},  # empty history rows
         ],
     )

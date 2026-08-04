@@ -54,10 +54,10 @@ report window is disclosed as a revision — the common case is yesterday's
 provisional figure firming up after a newer day has already become the
 latest — so the analyst can tell reporting catch-up from a new flow event.
 The since-launch cumulative gets the matching guard: when the earliest
-overlapping day's cumulative moved although that day's own flow did not, the
-API restated (or backfilled) history older than the visible window, and the
-report discloses the shift instead of letting the since-launch figure drift
-silently between calls.
+overlapping day's cumulative moved beyond what that day's own flow change
+explains, the API restated (or backfilled) history older than the visible
+window, and the report discloses the shift instead of letting the
+since-launch figure drift silently between calls.
 
 Backtest reach: each call serves the API's current ~30-day window (reflecting
 the present, not curr_date) and then filters to rows on or before curr_date.
@@ -473,8 +473,9 @@ class _FlowSnapshot(NamedTuple):
     ``revisions`` maps a date to its ``[old, new]`` US$m figures from the
     refresh diff. ``cum_restated`` is the refresh diff's out-of-window
     restatement marker: ``None``, or ``{"date", "old", "new"}`` when the
-    earliest overlapping day's cumulative moved (US$m) although that day's
-    own flow did not — history older than the visible window changed.
+    earliest overlapping day's cumulative moved (US$m) beyond what that
+    day's own flow change explains — history older than the visible window
+    changed.
     """
 
     summary_rows: list[dict]
@@ -672,11 +673,11 @@ def _read_cache(path: str, asset: str) -> dict | None:
         if totals.get(date) != new or old == new:
             return _reject(f"revision for {date} does not match the summary rows")
     # Same agreement rule for the out-of-window restatement marker: its date
-    # must exist in the summary with a matching "new" cumulative, its own
-    # daily flow must not carry a disclosed revision (that would explain the
-    # cum shift, and _diff_cum_restatement never writes an explained one),
-    # and old must actually differ — or the caveat would contradict the
-    # figures it rides on.
+    # must name a summary row with a matching "new" cumulative, and old must
+    # actually differ — or the caveat would contradict the figures it rides
+    # on. A revision on the same date is legal: the marker fires on the
+    # residual the day's own flow change does not explain, and the residual
+    # itself needs the prior snapshot, which a read-side check cannot see.
     if "cum_restated" not in payload:
         return _reject("'cum_restated' is missing")
     cr = payload["cum_restated"]
@@ -694,7 +695,6 @@ def _read_cache(path: str, asset: str) -> dict | None:
             and _is_finite_number(cr.get("new"))
             and cr["old"] != cr["new"]
             and _usd_m(row["cum_net_inflow"]) == cr["new"]
-            and cr["date"] not in payload["revisions"]
         ):
             return _reject("'cum_restated' is malformed or contradicts the summary rows")
     if not isinstance(payload.get("fetched_at"), str) or not payload["fetched_at"]:
@@ -751,31 +751,38 @@ def _diff_revisions(cached: dict | None, summary_rows: list[dict]) -> dict:
     return revisions
 
 
-def _diff_cum_restatement(
-    cached: dict | None, summary_rows: list[dict], revisions: dict
-) -> dict | None:
-    """Out-of-window restatement marker: earliest overlapping day's cum moved.
+def _diff_cum_restatement(cached: dict | None, summary_rows: list[dict]) -> dict | None:
+    """Out-of-window restatement marker: earliest overlapping day's cum moved
+    beyond what its own flow change explains.
 
     ``_diff_revisions`` covers every visible day's flow, and the mirror-file
     cache drops rows that fall out of the API's ~30-day window — so a
     restatement of an *older* day is invisible to both, yet still moves every
     ``cum_net_inflow`` and with it the report's since-launch figure. The
-    earliest overlapping day pins it down: if its cumulative changed (at the
-    report's 0.1 US$m granularity, like the revision diff) while its own
-    daily flow did not (``revisions`` would already disclose that, explaining
-    the cum shift), then something before it — outside what either snapshot
-    can display — was restated or backfilled. Returns ``None`` when there is
-    nothing to disclose.
+    earliest overlapping day pins it down: subtracting its own flow change
+    (the part a disclosed daily revision already explains) from its
+    cumulative change leaves a residual that can only come from days before
+    it — outside what either snapshot can display. The residual test matters:
+    a date-membership test against ``revisions`` would let an in-window
+    revision mask a simultaneous out-of-window restatement in the same
+    refresh, permanently (the next refresh baselines it). No marker when the
+    residual is immaterial at the report's 0.1 US$m granularity, or when the
+    two rendered cums agree anyway (offsetting changes leave the rendered
+    since-launch figure unmoved — nothing visible to disclose).
     """
     if not cached:
         return None
-    prior_cum = {r["date"]: r["cum_net_inflow"] for r in cached["summary_rows"]}
+    prior = {r["date"]: r for r in cached["summary_rows"]}
     # summary_rows are sorted ascending, so the first match is the earliest.
-    first = next((r for r in summary_rows if r["date"] in prior_cum), None)
-    if first is None or first["date"] in revisions:
+    first = next((r for r in summary_rows if r["date"] in prior), None)
+    if first is None:
         return None
-    old_m, new_m = _usd_m(prior_cum[first["date"]]), _usd_m(first["cum_net_inflow"])
-    if old_m == new_m:
+    prev = prior[first["date"]]
+    residual = (first["cum_net_inflow"] - prev["cum_net_inflow"]) - (
+        first["total_net_inflow"] - prev["total_net_inflow"]
+    )
+    old_m, new_m = _usd_m(prev["cum_net_inflow"]), _usd_m(first["cum_net_inflow"])
+    if _usd_m(residual) == 0.0 or old_m == new_m:
         return None
     return {"date": first["date"], "old": old_m, "new": new_m}
 
@@ -895,7 +902,7 @@ def _fetch_all(asset: str, cached: dict | None) -> dict:
         "funds_unusable": funds_unusable,
         "list_fetched": list_fetched,
         "revisions": revisions,
-        "cum_restated": _diff_cum_restatement(cached, summary_rows, revisions),
+        "cum_restated": _diff_cum_restatement(cached, summary_rows),
     }
 
 
@@ -1234,11 +1241,11 @@ def get_etf_flow_data(
     if cr and cr["date"] in visible_dates:
         header_lines.append(
             f"_Restatement: the cumulative total as of {cr['date']} moved "
-            f"{cr['old']:+.1f} → {cr['new']:+.1f} US$m since the previous snapshot "
-            f"although that day's own flow did not change — the API restated or "
-            f"backfilled history older than the ~{PLAN_WINDOW_DAYS}-day window this "
-            f"report can display, so the since-launch cumulative shifted for "
-            f"reasons the daily rows below cannot show.{stale_note}_"
+            f"{cr['old']:+.1f} → {cr['new']:+.1f} US$m since the previous snapshot — a "
+            f"shift that day's own flow changes do not account for — so the API "
+            f"restated or backfilled history older than the ~{PLAN_WINDOW_DAYS}-day "
+            f"window this report can display, and the since-launch cumulative moved "
+            f"for reasons the daily rows below cannot show.{stale_note}_"
         )
 
     window_start_dt = curr_dt - timedelta(days=look_back_days)
@@ -1413,21 +1420,32 @@ def get_etf_flow_data(
         leaders_line = f"**Latest-day leaders:** {leaders_str}\n"
     elif reported:
         # Every filing for the latest day rounds to $0 at render granularity
-        # (an explicit flat $0 or a sub-$50k trickle): a confirmed flat day.
-        # "No fund has reported ... yet" (or a missing breadth line) would
-        # contradict the Latest line, which renders this same day as a
-        # confident +0.0. Concentration is omitted — there is no directional
-        # gross to concentrate.
+        # (an explicit flat $0 or a sub-$50k trickle). Whether that makes the
+        # DAY flat is the aggregate's call: the two come from separate
+        # endpoints, and mid-filing the aggregate routinely publishes a
+        # material figure while most issuers are still unfiled (null) — so a
+        # "confirmed flat day" verdict is only honest when the aggregate
+        # agrees, and must otherwise own the asynchrony instead of
+        # contradicting the Latest line two paragraphs up. Concentration is
+        # omitted either way — there is no directional gross to concentrate.
         leaders_line = (
             f"**Latest-day leaders:** none — all {reported} reporting "
             f"{_plural(reported, 'fund', 'funds')} filed flat "
             f"($0 at the 0.1 US$m granularity shown) for {latest['date']}\n"
         )
-        breadth_line = (
-            f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds saw "
-            f"inflows ({reported} flat) — a confirmed flat day, not an "
-            f"unposted one\n"
-        )
+        if _is_material(latest["total_net_inflow"]):
+            breadth_line = (
+                f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds saw "
+                f"inflows ({reported} flat) — the aggregate above shows a material "
+                f"net flow that no fund filing reflects, so issuer filings for the "
+                f"day are likely still posting\n"
+            )
+        else:
+            breadth_line = (
+                f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds saw "
+                f"inflows ({reported} flat) — a confirmed flat day, not an "
+                f"unposted one\n"
+            )
     elif snapshot.funds:
         leaders_line = (
             f"**Latest-day leaders:** no fund has filed a flow report for {latest['date']} yet\n"

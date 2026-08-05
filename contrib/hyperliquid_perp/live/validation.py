@@ -698,7 +698,9 @@ def _schedule_cancel_seconds(config_json: str | None) -> Decimal:
 # every real 121-600s lapse as covered and reported a genuinely exposed run as
 # live_ready (2026-08-01 round-14 review).
 #
-# Read from ANY row that states one, not only ``kill_switch_armed``. The manager's
+# Read from ``kill_switch_refreshed`` as well as ``kill_switch_armed`` — and from
+# those two event types only (the tally's allowlist; sweep rows dump arbitrary
+# JSON into this same column). The manager's
 # refresh rows carry no detail, so they simply say nothing and leave the standing
 # value alone — but ``live-smoke`` renews the cover at ``max(config, 120s)``, which
 # is LONGER than the armed row's number whenever a run is configured below 120. A
@@ -1006,11 +1008,12 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
     too lax for another. The constant it replaced was 300s against a 120s default
     deadline, which billed the whole 120–300s band — every stretch in which the
     switch demonstrably fires — as healthy covered time. Each stretch is measured
-    against the cover IN FORCE across it: any row that STATES a deadline is
-    believed — ``kill_switch_armed`` and ``kill_switch_refreshed`` alike —
-    while the daemon's refreshes carry no detail and leave the standing value
-    alone, and the genesis config supplies only the starting
-    value. Both events, not just arming: the smoke suite renews at
+    against the cover IN FORCE across it: a stated deadline is believed on the
+    two schedule-installing event types — ``kill_switch_armed`` and
+    ``kill_switch_refreshed`` alike, and on no other (sweep rows dump arbitrary
+    JSON into the same column) — while the daemon's refreshes carry no detail
+    and leave the standing value alone, and the genesis config supplies only
+    the starting value. Both events, not just arming: the smoke suite renews at
     ``max(config, 120s)``, so on a run configured below 120 its floored rows —
     the per-test refreshes, plus test 14's ``armed``/``refreshed`` pair — are
     the ONLY evidence of the longer cover actually in force. Reading genesis

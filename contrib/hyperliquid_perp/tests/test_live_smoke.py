@@ -524,8 +524,9 @@ def _ks_rows(db, run_id="live-BTC"):
 def test_the_preflight_refresh_records_the_cover_it_installed(live_db):
     """The suite's HIGHEST-VOLUME writer, which had no test at all.
 
-    ``_refresh_kill_switch`` runs once per order-placing test — 18 of the ~22
-    kill-switch rows a full suite writes, and the ONLY writer of the
+    ``_refresh_kill_switch`` runs before EVERY selected test once the selection
+    needed the pre-flight, not only before the order-placing ones (11 of 18) —
+    18 of the ~22 kill-switch rows a full suite writes, and the ONLY writer of the
     ``deadline=max(config,120)s`` token the validator parses. Both round-14 smoke
     tests drove ``only=[...]`` selections that are not in ``_ORDER_PLACING_TESTS``,
     so ``needs_preflight`` was False and this path never ran: restoring its
@@ -1230,8 +1231,11 @@ def test_preflight_arm_is_refreshed_before_every_test(live_db):
 
 
 def test_no_preflight_selection_never_touches_the_switch_between_tests(live_db):
-    # A selection without order-placing tests (no pre-flight arm) must not
-    # re-arm the wallet-wide switch — same scoping rule as the exit disarm.
+    # The between-test refresh keys on ``needs_preflight`` (an order-placing
+    # selection) — NOT on the wider arm-evidence flag the exit disarm keys on:
+    # an ``--only kill_switch_arm_refresh`` run arms, gets the exit disarm, and
+    # still must not be re-armed between tests. This selection arms nothing at
+    # all, so no schedule_cancel may go out.
     signed = _FakeSigned()
     with live_db:
         smoke.SmokeTestRunner(_ctx(live_db, signed)).run(only=["signed_client_init"])

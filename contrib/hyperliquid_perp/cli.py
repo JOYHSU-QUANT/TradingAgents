@@ -2901,7 +2901,9 @@ def _smoke_startup_recovery(
         payload_dir=payload_dir,
         # This manager belongs to a live-smoke run: its arm and its tick-driven
         # refreshes happen inside the suite, so they are cover but not evidence
-        # that the DAEMON exercised the switch (§20.3 sample floor).
+        # that the DAEMON exercised the switch — the marker drops these rows
+        # from the §20.3 sample floor AND from the clean-shutdown daemon
+        # verdict alike.
         suite_authored=True,
     )
     safe_mode = SafeModeManager(db=db, run_id=run_id, gate=gate)

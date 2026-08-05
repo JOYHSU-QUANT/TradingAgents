@@ -464,11 +464,6 @@ class LiveValidationReport:
                 "unresolved_unprotected_window is set but unprotected_window_count is "
                 f"{self.unprotected_window_count} (an open window is a counted window)"
             )
-        if self.unprotected_position_seconds < 0:
-            raise ValueError(
-                f"unprotected_position_seconds must be >= 0, got "
-                f"{self.unprotected_position_seconds}"
-            )
         # A reason without a type is a half-read episode: the gate keys on the
         # TYPE, so that shape would report the reason in the summary while
         # passing the run.
@@ -491,9 +486,33 @@ class LiveValidationReport:
                 "kill_switch_ended_without_clean_shutdown is None (no daemon rows) but "
                 f"kill_switch_refresh_total is {self.kill_switch_refresh_total}"
             )
+        # Every count/measure here is non-negative by construction in the tally
+        # (SQL counts; gaps between timestamp-ordered rows), but the report is
+        # also built by hand (tests, any future caller) and a negative renders
+        # raw into the summary — refresh_total and the three outage figures
+        # print on EVERY run, the same render class as the "(+-3 during
+        # live-smoke...)" shape this guard family exists for.
         for name in (
+            "cycle_count",
+            "api_failed_count",
+            "invalid_output_count",
+            "live_order_count",
+            "fill_count",
+            "exchange_fill_dedupe_error_count",
+            "orphan_exchange_order_count",
+            "duplicate_fill_apply_count",
+            "local_exchange_position_mismatch_count",
+            "account_replay_mismatch_count",
+            "unprotected_position_seconds",
+            "unprotected_window_count",
+            "kill_switch_refresh_total",
+            "kill_switch_outage_seconds",
+            "kill_switch_outage_episodes",
+            "kill_switch_covered_seconds",
             "kill_switch_fired_count",
             "kill_switch_disarm_failed_count",
+            "unresolved_reconciliation_mismatch_count",
+            "emergency_close_event_count",
             "kill_switch_suite_refresh_attempts",
         ):
             if getattr(self, name) < 0:

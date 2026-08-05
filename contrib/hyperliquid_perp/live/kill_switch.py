@@ -35,11 +35,14 @@
 
 Every state change lands in ``kill_switch_events`` (§18.5) — once per change,
 not once per attempt: a run of failed retries is one outage, and §20.3 measures
-it by the TIME from the failure row to the next row proving a schedule stands
-again — ``refreshed``, ``armed`` or ``disarmed``. That measure also opens an
-outage on SILENCE past the standing deadline, so one can exist with no failure
-row in the table at all (a killed or wedged process writes nothing). The manager
-only
+it by the TIME from the failure row to the next row of positive wire evidence —
+``refreshed`` or ``armed`` (a schedule stands again) or ``disarmed`` (the
+trigger is cleared). The measure also opens an outage on SILENCE past the
+standing deadline, so one can exist with no failure row in the table at all.
+Both ends come from rows, though: a killed or wedged process writes nothing
+later either, so until some later row (a restart, a smoke run) bounds the gap
+that outage has no measured seconds — the run is only flagged
+(``ended_without_clean_shutdown`` / ``ended_in_outage``). The manager only
 exists on runs where real orders are enabled — an unarmed (paper / gate-check)
 run has no exchange orders for a dead man's switch to protect.
 """

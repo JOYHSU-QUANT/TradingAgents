@@ -392,7 +392,7 @@ live run 會自動走 §20.3／§21.4 報告（依 `live.mode`）。指標與 ex
 | `validate` exit | 意義 | 下一步 |
 |---|---|---|
 | `0` | `live_ready` — 全部驗收指標達標 | testnet_live 通過；可準備 mainnet_tiny |
-| `4` | 一致但未到 gate（cycles/orders 未滿、smoke 未跑**或 failed/errored**、**kill-switch refresh 事件數 < 100**） | 繼續跑；smoke 紅的修好後 `live-smoke --only <key>` 重跑（latest-per-key 覆蓋） |
+| `4` | 一致但未到 gate（cycles/orders 未滿、smoke 未跑**或 failed/errored**、**kill-switch daemon refresh 事件數 < 100**（live-smoke 寫的列不計，見下）） | 繼續跑；smoke 紅的修好後 `live-smoke --only <key>` 重跑（latest-per-key 覆蓋） |
 | `5` | integrity failure（dedupe error、orphan、position/replay mismatch、unprotected 秒數 > 0、refresh rate < 99%、**`kill_switch_fired_count` > 0**、**run 仍在 MANUAL safe mode**；mainnet_tiny 另含未解 reconciliation／daily-loss 破線） | 先調查再相信結果 |
 
 > smoke 的 failed／errored **不算** exit 5——它可補救（修好原因、`live-smoke --only

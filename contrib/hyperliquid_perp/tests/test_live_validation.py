@@ -1896,7 +1896,8 @@ def test_the_two_end_of_run_flags_are_scoped_differently_on_purpose(tmp_path):
 def test_a_suite_row_closes_a_daemons_open_outage(tmp_path, closing_event):
     """Suite rows are COVER: they end an outage and stop the meter, whoever wrote them.
 
-    Only the sample floor excludes them (§20.3, user decision round 15) — the
+    The sample floor and the ``clean_shutdown`` daemon verdict exclude them
+    (§20.3, user decision round 15; the second consumer since round 17) — the
     outage machinery must not. Nothing pinned that: scoping the outage-closing
     branches to daemon rows, the same "consistency" edit that is right for the
     floor, left all 1992 tests green while moving a measured run from 87% to
@@ -1954,8 +1955,10 @@ def test_a_suite_run_that_never_recovers_the_switch_still_ends_in_outage(tmp_pat
 
     The suite's own ``armed`` row is in the fixture because a real re-run of the
     suite writes one: pre-flight recovery runs whenever the selection contains
-    an order-placing test, and it arms a real manager. (Not on ``--dry-run`` or
-    an ``--only`` of non-order-placing tests, which write no rows at all.)
+    an order-placing test, and it arms a real manager — and tests 14-17 arm
+    even without one (14 drives the switch directly, 15-17 each run a real
+    §19.1 recovery). Only ``--dry-run``, or an ``--only`` avoiding both sets,
+    writes no rows at all.
     Round 19 left it out, so the fixture was not the
     scenario its own docstring named and its episode count was the synthetic
     one — the real shape opens a SECOND episode, which is the number an
@@ -2568,6 +2571,42 @@ def test_post_init_rejects_a_negative_suite_attempt_count():
     # (2026-08-01 round-22 review).
     with pytest.raises(ValueError, match="must be >= 0"):
         _make_report(kill_switch_suite_refresh_attempts=-3)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "cycle_count",
+        "api_failed_count",
+        "invalid_output_count",
+        "live_order_count",
+        "fill_count",
+        "exchange_fill_dedupe_error_count",
+        "orphan_exchange_order_count",
+        "duplicate_fill_apply_count",
+        "local_exchange_position_mismatch_count",
+        "account_replay_mismatch_count",
+        "unprotected_position_seconds",
+        "unprotected_window_count",
+        "kill_switch_refresh_total",
+        "kill_switch_outage_seconds",
+        "kill_switch_outage_episodes",
+        "kill_switch_covered_seconds",
+        "kill_switch_fired_count",
+        "kill_switch_disarm_failed_count",
+        "unresolved_reconciliation_mismatch_count",
+        "emergency_close_event_count",
+        "kill_switch_suite_refresh_attempts",
+    ],
+)
+def test_post_init_rejects_every_negative_count(field):
+    # The guard grew one name at a time (fired, disarm_failed, then suite
+    # attempts) while seventeen sibling counts stayed unguarded — four of which
+    # render raw on the same summary the "(+-3 ...)" fix was about
+    # (refresh_total and the three outage figures). One param per field, so
+    # dropping a single name from the guard tuple fails exactly that param.
+    with pytest.raises(ValueError, match="must be >= 0"):
+        _make_report(**{field: -1})
 
 
 def test_post_init_rejects_no_daemon_rows_beside_daemon_refresh_evidence():

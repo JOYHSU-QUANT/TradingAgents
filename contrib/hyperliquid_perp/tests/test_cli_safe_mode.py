@@ -307,6 +307,58 @@ def test_stamping_requires_an_action_and_refuses_to_overwrite_one(store, capsys)
     assert "already disposed of as 'first call'" in capsys.readouterr().err
 
 
+def test_a_case_disposed_of_mid_command_is_reported_not_overwritten(store, capsys, monkeypatch):
+    # THE race the atomic stamp exists for. This command takes no run lease, so
+    # its "is this still open?" read and its write straddle a window in which the
+    # live daemon's own reconciliation pass can stamp the MACHINE disposition —
+    # what the system actually DID about the sighting. Simulated here by having
+    # the daemon win exactly that window (a second connection writes right after
+    # the CLI's guard read returns its snapshot): the operator's UPDATE must find
+    # action_taken already set, say so, and exit 1 — never erase the record with
+    # no error and no audit row.
+    path, db = store
+    event_id = _open_case(db)
+    db.close()
+
+    real_iter = repo.iter_exchange_reconciliation_events
+    fired = {"n": 0}
+
+    def _daemon_wins_the_window(conn, run_id, *, case_type=None):
+        rows = real_iter(conn, run_id, case_type=case_type)
+        if fired["n"] == 0:  # only the CLI's guard read, not any later lookup
+            fired["n"] = 1
+            with Database(path) as daemon, daemon.transaction() as other:
+                repo.set_reconciliation_action(other, event_id, "resolved_fill_booked")
+        return rows
+
+    monkeypatch.setattr(repo, "iter_exchange_reconciliation_events", _daemon_wins_the_window)
+    rc = main(
+        [
+            "safe-mode",
+            "--run-id",
+            "r",
+            "--db",
+            str(path),
+            "--stamp-case",
+            str(event_id),
+            "--action",
+            "human: reviewed the payload",
+        ]
+    )
+    monkeypatch.undo()
+    assert rc == 1
+    assert "disposed of by another writer" in capsys.readouterr().err
+    with Database(path) as db2:
+        (row,) = [
+            r
+            for r in repo.iter_exchange_reconciliation_events(db2.conn, "r")
+            if r["event_id"] == event_id
+        ]
+        # The daemon's disposition survived intact — not replaced by the human's.
+        assert row["action_taken"] == "resolved_fill_booked"
+    assert fired["n"] == 1  # the interleaving really happened (guard against a no-op test)
+
+
 def test_an_unmapped_sighting_is_refused_and_labelled_not_silently_stamped(store, capsys):
     # fill_unmapped resolves by an ANTI-JOIN against fills that never reads
     # action_taken — stamping one clears no verdict and would hide the row from

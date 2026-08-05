@@ -28,7 +28,7 @@ from __future__ import annotations
 
 __all__ = ["MIGRATIONS", "SCHEMA_MIGRATIONS_DDL", "SCHEMA_VERSION"]
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 9
 
 # --------------------------------------------------------------------------
 # Export logical tables (phase2-data §5–§12) — one-to-one with CSV exports.
@@ -471,6 +471,33 @@ CREATE TABLE safe_mode_events (
 )
 """
 
+# --------------------------------------------------------------------------
+# Phase 3 live acceptance tables (phase3-spec §20) — not exported to CSV.
+# --------------------------------------------------------------------------
+
+# §20.2 testnet smoke-test results (PR 6). Append-only audit: one row per test
+# execution, so a re-run after a fix leaves the earlier failure on record and
+# the gate reads the LATEST non-dry-run row per ``test_key`` (a fresh
+# result_id > any prior). ``dry_run`` rows are wiring checks that never satisfy
+# the cycle-entry gate (§20.2 "all smoke tests must pass"); ``test_number`` /
+# ``test_key`` name the §20.2 item so the acceptance validator can read the
+# four §20.3 ``*_test_passed`` booleans by key without positional guessing.
+_LIVE_SMOKE_TESTS = """
+CREATE TABLE live_smoke_tests (
+    result_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id        TEXT NOT NULL,
+    test_number   INTEGER NOT NULL,
+    test_key      TEXT NOT NULL,
+    test_name     TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    network       TEXT,
+    dry_run       INTEGER NOT NULL DEFAULT 0,
+    detail        TEXT,
+    error_message TEXT,
+    executed_at   TEXT NOT NULL
+)
+"""
+
 # schema_migrations is created by ``db.apply_migrations`` before any migration
 # runs (it is the bookkeeping table that records which migrations ran), so it is
 # intentionally separate from the versioned statement list below.
@@ -621,4 +648,16 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     # count survives a restart mid-segment (the count column landed in v6).
     # Internal column, never exported.
     7: ("ALTER TABLE scheduler_state ADD COLUMN last_settlement_wallet_balance TEXT",),
+    # v8: the §20.2 testnet smoke-test result log (PR 6). One append-only table;
+    # the acceptance validator reads its latest-per-key non-dry-run rows for the
+    # §20.3 gate and ``*_test_passed`` metrics. No existing table is touched.
+    8: (_LIVE_SMOKE_TESTS,),
+    # v9: the exchange-reported liquidation estimate, mirrored onto the run's
+    # current_positions row by the live reconciler each pass (clearinghouse
+    # ``liquidationPx``; cleared when the exchange reports flat). The live SL
+    # band (§3.6/§17.2) and the ai_inputs ``estimated_liquidation_price``
+    # column read it via the engine — before v9 those always saw NULL because
+    # PositionState carried no such field. Nullable so every existing paper row
+    # (and any live row before its first reconcile pass) stays valid.
+    9: ("ALTER TABLE current_positions ADD COLUMN exchange_liquidation_price TEXT",),
 }

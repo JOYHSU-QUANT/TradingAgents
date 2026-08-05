@@ -6,6 +6,8 @@
 
 network: mainnet              # Phase 1/2 = mainnet (read-only); testnet reserved for Phase 3 order testing
 network_timeout_s: 30         # HTTP timeout (seconds) per Hyperliquid request; a stalled read fails instead of hanging forever
+                              # NOTE: `live` REFUSES this default (exit 1) — it is a term of the
+                              # kill-switch timing invariant. Live runs need < 15 (RUNBOOK-live §1.5 uses 8).
 wallet_address: "0xYOUR..."   # read-only mainnet address; only needed for account/position reads, NOT for --context-only
 coins: [BTC]                  # single coin for Phase 1; add more later
 

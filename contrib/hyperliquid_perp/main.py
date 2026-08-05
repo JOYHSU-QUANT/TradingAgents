@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -220,8 +221,26 @@ def _load_risk_decision(config: dict) -> tuple[risk_gate.RiskConfig, DecisionCon
     return risk_cfg, decision_cfg
 
 
-def _build_context(config: dict, coin: str) -> tuple[PerpMarketContext, HyperliquidClient]:
-    """Fetch market data and assemble the :class:`PerpMarketContext` for ``coin``."""
+def _build_context(
+    config: dict, coin: str, *, on_blocking_read: Callable[[], None] | None = None
+) -> tuple[PerpMarketContext, HyperliquidClient]:
+    """Fetch market data and assemble the :class:`PerpMarketContext` for ``coin``.
+
+    ``on_blocking_read`` is called between the network reads below. It exists for
+    ONE caller — the live loop, where this runs on the single-threaded tick and
+    the four reads here (constructing the client fetches perp meta, then
+    snapshot, candles, funding) are the longest run of back-to-back REST calls in
+    the system, each riding the full ``network_timeout_s``. Left unrefreshed that
+    chain set ``kill_switch._MAX_UNREFRESHED_REST_CALLS`` to 4, which made the
+    operator advisory demand a timeout under 7.5s — and a live decision cycle has
+    NO within-cycle retry, so one market read that times out fail-closes the
+    cycle and re-anchors to the next 4h boundary. Refreshing between the reads
+    buys the kill-switch headroom back without paying for it with a possible
+    4-hour decision blackout (2026-08-01 lifecycle review).
+
+    ``None`` for every other caller (the one-shot CLI paths), where no dead man's
+    switch is being held open.
+    """
     md_cfg = config.get("market_data", {})
     interval = md_cfg.get("candle_interval") or "4h"
     # ``dict.get(key, default)`` only falls back when the key is absent; a present-
@@ -233,13 +252,34 @@ def _build_context(config: dict, coin: str) -> tuple[PerpMarketContext, Hyperliq
     window_days = int(raw_window) if raw_window is not None else 30
     indicator_names = _indicator_names(config)
 
+    def _between_reads() -> None:
+        """Refresh whatever the caller is holding open, between blocking reads.
+
+        Never lets a refresh failure abort the market read it was protecting —
+        the live wiring passes ``refresh_across_blocking_work``, which already
+        swallows, but this must hold for any caller.
+        """
+        if on_blocking_read is None:
+            return
+        try:
+            on_blocking_read()
+        except Exception:  # noqa: BLE001 — a refresh miss must not fail the cycle
+            logger.warning("on_blocking_read hook failed during market data build", exc_info=True)
+
+    # Constructing the client is itself a network read (Info() auto-fetches perp
+    # meta), so the refresh goes AFTER it, not only between the three explicit
+    # market calls.
     client = HyperliquidClient.from_config(config)
     market = HyperliquidMarketData(client)
+    _between_reads()
 
     print(f"Fetching {coin} market data from {client.network} (read-only)...", file=sys.stderr)
     snapshot = market.get_market_snapshot(coin)
+    _between_reads()
     candles = market.get_candles(coin, interval, lookback)
+    _between_reads()
     funding = market.get_funding_history(coin, window_days)
+    _between_reads()
 
     ctx = build_market_context(
         coin,

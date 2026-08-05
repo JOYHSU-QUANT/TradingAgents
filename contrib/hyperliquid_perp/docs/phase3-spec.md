@@ -1547,32 +1547,52 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    refresh=30` 能通過 config guard，但配上 60 秒的 tick 間隔就會留下 90 秒空窗、讓
    dead man's switch 在正常運行中觸發並掃掉全錢包掛單。
 
-   **已知殘餘風險：`network_timeout_s` 沒有被掃進這張時序帳**（PR 5 註記，
-   2026-07-22 拍板「軟性緩解」）：上述不變量只綁 `refresh_interval` 與
+   **更新（2026-08-01，PR 6 round-13）：`network_timeout_s` 已是硬不變量的一項。**
+   `kill_switch_timing_violation` 現在編列五項——`refresh_interval` ＋ `max_tick_gap`
+   ＋ 失敗那次自己燒掉的 `network_timeout_s` ＋ `min(timeout, backoff_cap)` ＋
+   **第二個** `max_tick_gap`（backoff 之後的 retry 也要再等一個 tick）。實務後果：
+   `network_timeout_s` 的預設 30 在 live 下不合法（啟動具名 exit 1），live 需 < 15，
+   RUNBOOK-live §1.5 用 8。以下保留為歷史脈絡，說明它當初為何只是 advisory。
+
+   **（歷史）已知殘餘風險：`network_timeout_s` 沒有被掃進這張時序帳**（PR 5 註記，
+   2026-07-22 拍板「軟性緩解」）：當時的不變量只綁 `refresh_interval` 與
    `max_tick_gap`，但 tick 內每一筆 REST 呼叫真正的阻塞上限是頂層
    `network_timeout_s`（預設 30s），且一個 tick 會連續打多筆——網路降級（慢但
    沒斷）時，單 tick 牆鐘時間可以拖過 `max_tick_gap` 的建構期承諾，讓交易所端
    scheduleCancel 在程序還活著時觸發、掃掉含 SL/TP 的全錢包掛單（protection 於
    下個健康 tick 重建，中間是裸倉窗口）。v1 緩解：live loop 的 sleep 扣除本次
-   tick 實耗（消除疊加放大），且啟動時若 `network_timeout_s >=
+   tick 實耗（消除疊加放大），且啟動時若 `network_timeout_s × 3 >=
    max_tick_gap_seconds` **或未設（unbounded）**即印 stderr 警告
    （`network_timeout_warning`，與硬檢查 `kill_switch_timing_violation`
-   併排、純函式可單測）。硬性建構期不變量（把每筆呼叫逾時納入
-   承諾檢查）與 live 專屬逾時延後 PR 6 網路層重做時一併處理。
+   併排、純函式可單測）。乘以 3 是因為最長的一條無 refresh 鏈是一次下單的 3 筆
+   REST（`_MAX_UNREFRESHED_REST_CALLS`：§8.3 前置查詢→下單→重複 ack 查詢）。
+   原本只編列 1 筆，於是 10s 逾時對 30s gap 被判為安全，實際上那條鏈剛好吃滿整個
+   gap（2026-07-31 deadline review）。其餘阻塞路徑（protection 修復梯與其
+   orderStatus 確認、reconcile 兩條 leg 與 per-order 迴圈、兩條分頁 ladder、
+   日切 baseline 讀取、**決策 cycle 的 4 筆行情讀取**）已改為跨阻塞工作 refresh，
+   故不再進入這筆預算。決策 cycle 那條之所以特別拆開（2026-08-01）：它本來是最長
+   的一條（4 筆），照它編列會逼 `network_timeout_s` 壓到 7.5 以下，但 live 決策
+   cycle **沒有 within-cycle retry**（「Live attempts are always try 1」），一筆行情
+   讀取逾時就 fail-closed 並 re-anchor 到下一個 4h 邊界——等於拿「4 小時沒有決策」
+   換 kill switch 餘裕，所以改成拆鏈而不是編列。
+   **這個數字是「各鏈的最大值」，所以每一個接縫都必須 refresh，否則真值會變成
+   各鏈的總和**——`engine.tick()` 與 `driver.pump()` 之間原本什麼都沒有，下單鏈與
+   `_build_context` 鏈背靠背，真值一度是 7；接縫已補（2026-08-01 lifecycle review）。
+   硬性建構期不變量與 live 專屬逾時延後網路層重做時一併處理。
    同族的 `sl_repair_retry_delay_seconds`（修復梯每次 sleep 完才 tick）也有
    姊妹 advisory（`sl_repair_delay_warning`，2026-07-22）。
 
-   **殘餘風險的兩個具名 fan-out 貢獻者（PR 5 盤點，2026-07-22——即使
-   `network_timeout_s` 過了 advisory，乘數仍可拖爆 gap；PR 6 網路層重做的
-   收斂清單）：**
+   **兩個具名 fan-out 貢獻者的現況（PR 5 盤點，2026-07-22；2026-08-01 更新）：**
    (1) **決策 cycle 的 `build_input`**：`driver.pump()` 在 tick thread 上做
    `_build_context`——新建 SDK client（建構即抓 perp meta）＋ snapshot／candles／
-   funding 三讀，~4 筆連續 REST、中間無 kill-switch 刷新；最壞 ≈ 4×
-   `network_timeout_s`（預設值下 ~120s）。每 ~4h 一次（含 retry/resume）。
+   funding 三讀，共 4 筆連續 REST。**已解決**（2026-08-01）：`_build_context` 收一個
+   optional `on_blocking_read` callback，四筆讀取之間各 refresh 一次（live 傳
+   `refresh_across_blocking_work`，其餘一次性 CLI 路徑傳 None），所以這條鏈的無
+   refresh 連續段是 1 筆。
    (2) **reconciler 單 pass 的呼叫數乘數**：open-orders＋clearinghouse＋fill
-   backfill 分頁＋每張 terminal/absent 單的 `orderStatus` 查詢——單筆皆有界，
-   但筆數由 `max_open_orders` 與分頁上限驅動，未對 kill-switch 預算驗證；
-   post-fill／heartbeat／protection-change 都會跑。
+   backfill 分頁＋每張 terminal/absent 單的 `orderStatus` 查詢——**已解決**
+   （2026-07-31）：兩條頂層 leg、兩個 per-order 迴圈與兩條分頁 ladder 全部改為
+   跨阻塞工作 refresh，所以筆數再多，無 refresh 的連續段仍是 1 筆。
 
    **`max_tick_gap_seconds` 的語意要照字面讀：兩次 tick() 之間的最壞牆鐘時間，不是
    sleep 間隔**（v7 新增，2026-07-13）。既有 `_paper_loop`（cli.py）的一輪是

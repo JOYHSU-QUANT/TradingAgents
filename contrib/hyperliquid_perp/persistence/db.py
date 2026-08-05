@@ -28,7 +28,13 @@ from pathlib import Path
 
 from .schema import MIGRATIONS, SCHEMA_MIGRATIONS_DDL
 
-__all__ = ["Database", "apply_migrations", "connect"]
+__all__ = [
+    "Database",
+    "SchemaVersionError",
+    "apply_migrations",
+    "connect",
+    "stored_schema_version",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -76,14 +82,47 @@ def connect(path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+class SchemaVersionError(RuntimeError):
+    """The store's schema does not match what this build can safely operate on."""
+
+
+def stored_schema_version(conn: sqlite3.Connection) -> int:
+    """The highest migration recorded in the store (0 for a fresh/empty one).
+
+    Reads ``schema_migrations`` WITHOUT applying anything, so a caller can
+    decide whether opening this store is safe before it is changed.
+    """
+    conn.execute(SCHEMA_MIGRATIONS_DDL)
+    row = conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
+    return 0 if row is None or row[0] is None else int(row[0])
+
+
 def apply_migrations(conn: sqlite3.Connection) -> int:
     """Bring ``conn``'s schema up to the latest version; return that version.
 
     Idempotent: each ``MIGRATIONS`` version runs once, inside its own
     transaction, and is recorded in ``schema_migrations``. Re-opening an
     up-to-date DB applies nothing.
+
+    A store NEWER than this build is refused rather than used. Nothing else
+    reads ``schema_migrations``, so without this an older binary opens a
+    migrated store silently and writes through it with the newer columns
+    unknown to its own SQL — e.g. a rolled-back build's ``upsert_current_position``
+    has no ``exchange_liquidation_price`` clause, so a stale mirrored
+    liquidation price survives a flip/flatten/re-open that the current build
+    would have cleared, and the §17 band can then read a liquidation that
+    belongs to a position that no longer exists (2026-07-30 migration review).
     """
-    conn.execute(SCHEMA_MIGRATIONS_DDL)
+    latest_known = max(MIGRATIONS)
+    found = stored_schema_version(conn)
+    if found > latest_known:
+        raise SchemaVersionError(
+            f"store schema is v{found} but this build only knows v{latest_known} — "
+            "it was migrated by a NEWER build. Refusing to open it: this build's SQL "
+            "does not know the newer columns and would write through them, corrupting "
+            "state the newer build relies on. Run the newer build, or restore a backup "
+            "taken before the upgrade."
+        )
     applied = {row[0] for row in conn.execute("SELECT version FROM schema_migrations")}
     latest = 0
     for version in sorted(MIGRATIONS):
@@ -126,11 +165,64 @@ class Database:
     single thread); this class deliberately does not pick one yet.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self, path: str | Path, *, migrate: bool = True, defer_migration: bool = False
+    ) -> None:
+        """Open the store under one of three schema policies.
+
+        ``migrate=True`` (default) — this command owns the store and upgrades it
+        on open. ``migrate=False`` — a reporting command: refuse either mismatch
+        rather than touch a store a daemon may own. ``defer_migration=True`` —
+        open as-is, check nothing, and leave the upgrade to the caller once it
+        HOLDS THE LEASE.
+
+        The third policy exists because ``migrate=True`` necessarily runs before
+        the lease can be taken (the lease lives in the store being opened), so an
+        owning command upgraded the schema underneath a running sibling daemon
+        and only THEN discovered it had to refuse — doing the damage on the way
+        to declining to do it. The lease table predates every migration this can
+        apply, so taking the lease against an unmigrated store is safe.
+
+        A caller that defers MUST call :func:`apply_migrations` once it owns the
+        run; that is the point of deferring, so the timing is deliberately the
+        caller's to choose and is not enforced here (2026-07-31 review).
+        """
+        if defer_migration and migrate:
+            raise ValueError(
+                "defer_migration requires migrate=False — it IS the deferral, and "
+                "migrate=True would already have upgraded the store on open"
+            )
         self._conn = connect(path)
         self._in_transaction = False
         try:
-            apply_migrations(self._conn)
+            if migrate:
+                apply_migrations(self._conn)
+            elif not defer_migration:
+                # Read-style commands (validate / export / live-smoke
+                # --gate-status) pass migrate=False. They take no run lease, so
+                # migrating here would silently upgrade a store a RUNNING
+                # daemon owns — turning a "just preview the gate" command on the
+                # deploy box into a mixed-version corruption vector. Refuse
+                # instead and let the operator upgrade deliberately, through a
+                # command that does hold the lease (2026-07-30 migration review).
+                found = stored_schema_version(self._conn)
+                latest_known = max(MIGRATIONS)
+                if found > latest_known:
+                    raise SchemaVersionError(
+                        f"store schema is v{found} but this build only knows "
+                        f"v{latest_known} — it was migrated by a NEWER build. "
+                        "Run the newer build, or restore a backup taken before "
+                        "the upgrade."
+                    )
+                if found < latest_known:
+                    raise SchemaVersionError(
+                        f"store schema is v{found}; this build needs v{latest_known}. "
+                        "This is a reporting command and will not migrate the store — "
+                        "a daemon may be running against it. Stop that daemon, then run "
+                        "the command that OWNS this store to migrate it: `paper "
+                        "--run-id <id> --db <this db>` for a paper store, or `live "
+                        "--run-id <id> --db <this db>` for a live one. Then retry."
+                    )
         except BaseException:
             # The caller never receives the instance, so nothing else can
             # release the already-open connection.

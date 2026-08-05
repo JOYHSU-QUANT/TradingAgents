@@ -275,6 +275,7 @@ class LiveReconciler:
         stream: LiveWsStream | None = None,
         payload_dir: Path | None = None,
         clock: Clock | None = None,
+        refresh_kill_switch: Callable[[], None] | None = None,
     ) -> None:
         self._db = db
         self._run_id = run_id
@@ -287,6 +288,22 @@ class LiveReconciler:
         self._stream = stream
         self._payload_dir = payload_dir
         self._clock = clock or WallClock()
+        # §18.2: a full sweep is the longest wall of REST traffic on the
+        # single-threaded live tick — two account reads, a paged fill backfill,
+        # and an orderStatus round-trip PER order in two separate loops whose
+        # length is bounded by the book, not by config (one of them deliberately
+        # spans runs). The only refresh otherwise is the one at the top of the
+        # tick, so a slow sweep lets the dead man's switch cancel every resting
+        # order on the wallet while the process is alive and mid-reconcile.
+        # Optional for TESTS, not for production: both real construction sites
+        # (the live loop and the smoke restart recovery) arm a switch and pass
+        # this (2026-07-31 deadline review).
+        self._refresh_kill_switch = refresh_kill_switch
+
+    def _refresh_deadline(self) -> None:
+        """Refresh the dead man's switch across this sweep's blocking work (§18.2)."""
+        if self._refresh_kill_switch is not None:
+            self._refresh_kill_switch()
 
     # ------------------------------------------------------------------ run
 
@@ -326,6 +343,10 @@ class LiveReconciler:
             # not need the CLI's aggregated stderr to diagnose the origin.
             logger.exception("reconciliation open_orders read failed")
             errors.append(f"open_orders failed: {exc}")
+        # §18.2: the two account reads are sequential and each can ride a full
+        # network timeout; refresh between them and after them so the pair never
+        # counts as one gap.
+        self._refresh_deadline()
 
         snapshot: AccountSnapshot | None = None
         raw_clearinghouse: Any = None
@@ -335,6 +356,7 @@ class LiveReconciler:
         except Exception as exc:  # noqa: BLE001
             logger.exception("reconciliation clearinghouse state read failed")
             errors.append(f"clearinghouse state read failed: {exc}")
+        self._refresh_deadline()
 
         # -- legs -----------------------------------------------------------
         # Each leg is individually guarded: the docstring's "raises nothing"
@@ -737,6 +759,15 @@ class LiveReconciler:
                 logger.exception("fill cross-check fetch failed")
                 errors.append(f"fill cross-check fetch failed: {exc}")
                 return None
+            # §18.2: the SECOND page ladder on this tick, and the one that is easy
+            # to miss — the backfiller's is in another module, this one is inline.
+            # Same shape, same budget (DEFAULT_MAX_PAGES), same hazard: without a
+            # refresh per page a fills-heavy window (>2000 fills, so the response
+            # comes back capped and it pages again) holds the single-threaded tick
+            # for up to 20 × network_timeout_s and the dead man's switch cancels
+            # every resting SL/TP while the process is alive
+            # (2026-07-31 deadline review, second pass).
+            self._refresh_deadline()
             newest_ms: int | None = None
             for f in raw:
                 tid = f.get("tid") if isinstance(f, dict) else None
@@ -791,6 +822,18 @@ class LiveReconciler:
         exchange_open_cloids: set[str] = set()
 
         for order in open_orders:
+            # §18.2: this loop's reopen check asks orderStatus per order, and the
+            # exchange decides how many orders there are — refresh every
+            # iteration so the wall of round-trips is never one unbroken gap.
+            #
+            # At the TOP, unlike the absent-order loop below, which refreshes
+            # only for rows it is about to probe. Several branches here can reach
+            # the wire and they do not share one guard, so tracking them
+            # individually would be the kind of bookkeeping that silently misses
+            # the branch added next year. A refresh on an iteration that turns
+            # out to do no I/O costs a clock read (tick() reaches the wire only
+            # when a refresh is due), which is the cheaper mistake.
+            self._refresh_deadline()
             if not isinstance(order, dict):
                 errors.append(f"malformed open_orders entry ({type(order).__name__})")
                 ok = False
@@ -862,6 +905,10 @@ class LiveReconciler:
             cloid = row["cloid_hex"]
             if cloid in exchange_open_cloids:
                 continue
+            # §18.2: one orderStatus round-trip per absent row, and this cursor
+            # deliberately spans runs — so the count is bounded by the store's
+            # history, not by anything this run configured. Refresh before each.
+            self._refresh_deadline()
             settled, case = self._settle_absent_order(row, now)
             if case is not None:
                 cases.append(case)
@@ -1145,6 +1192,53 @@ class LiveReconciler:
         exch_size = Decimal(0) if exch is None else exch.size
         local = repo.get_current_position(conn, self._run_id, self._coin)
         local_size = Decimal(0) if local is None else local.size
+
+        # Mirror the exchange-reported liquidation estimate onto the local row
+        # (§12.1: the exchange is the truth source). The engine's SL band and
+        # the ai_inputs ``estimated_liquidation_price`` column read it back via
+        # ``get_current_position``. An explicit ``None`` when the exchange is
+        # flat — or reports no liquidationPx — so a stale estimate never
+        # survives a flat; only reached with a SUCCESSFUL clearinghouse read
+        # (a failed read returns above and proves nothing either way). Skipped
+        # without a local row: the writer is UPDATE-only, so it would be a
+        # guaranteed no-op, and the size-mismatch lane below owns that case.
+        #
+        # Also ``None`` when the two views DISAGREE on direction — the flip fill
+        # landed between this pass's clearinghouse read and its fill backfill,
+        # so ``exch`` still describes the pre-flip side. A liquidation price is
+        # only meaningful for the side it was computed on; stamping the old
+        # side's estimate onto the freshly flipped row is precisely what makes
+        # the SL band answer CLOSE_NOW on a healthy position (§3.6
+        # ``liquidation_too_close`` → §17.2 emergency close → §13.5 manual
+        # latch). Withholding costs nothing: the band falls back to the
+        # entry-based one until a pass sees both views agree.
+        #
+        # ADVISORY, unlike every other write in this reconciler (decision
+        # 2026-07-29): this leg's verdict answers "do the local and exchange
+        # positions agree?", and the successful read above already answered it.
+        # The write is a cache for the SL band, not the evidence this leg
+        # produces — letting a transient store error retroactively mark the
+        # position unreconciled AND unprotected would drive safe mode (halted
+        # cycles, manual §13.6 release) off a metadata failure. A failure costs
+        # one tick of staleness: the next pass rewrites it, and the fallback it
+        # leaves is the entry-based band the engine used for every run before
+        # this mirror existed.
+        liq = None if exch is None else exch.liquidation_price
+        same_direction = exch_size != 0 and local_size != 0 and (exch_size > 0) == (local_size > 0)
+        if not same_direction:
+            liq = None
+        if local is not None and liq != local.liquidation_price:
+            try:
+                with self._db.transaction() as tx:
+                    repo.set_position_liquidation_price(tx, self._run_id, self._coin, liq)
+            except Exception as exc:  # noqa: BLE001 — advisory cache, see above
+                logger.warning(
+                    "liquidation mirror for %s failed (%s: %s) — the row keeps its "
+                    "previous estimate this tick; the next pass rewrites it",
+                    self._coin,
+                    type(exc).__name__,
+                    exc,
+                )
 
         if exch_size != local_size:
             ok = False

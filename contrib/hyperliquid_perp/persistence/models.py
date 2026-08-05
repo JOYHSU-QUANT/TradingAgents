@@ -16,7 +16,7 @@ codebase's enum convention (``TargetSide``, ``DecisionMode``, ...) so a typo lik
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
 
@@ -52,12 +52,27 @@ class PositionState:
     symbol's cumulative fill-realized PnL and is retained across a flat interval
     (a closed position keeps its realized total for the next open), which is why a
     flat state is a ``size = 0`` row here rather than an absent one.
+
+    ``liquidation_price`` is the exchange-reported liquidation estimate
+    (clearinghouse ``liquidationPx``), mirrored onto the row by the live
+    reconciler each pass; ``None`` until the first mirror and always in paper
+    mode. Deliberately NOT cross-validated against ``size`` here: the mirror
+    can land while the local books still believe flat (fills not yet booked),
+    and the reconciler's own position leg — not this dataclass — owns that
+    mismatch. It is ``compare=False`` because this dataclass's equality IS the
+    accounting identity the replay checks (``accounting.replay_within``
+    compares replayed against materialized positions field-by-field): the
+    mirror is exchange-reported metadata that no replay of the fill history can
+    ever reconstruct, so counting it would make every live run holding a
+    position report a phantom ``account_replay_mismatch`` — halting new
+    decision cycles and failing the §20.3 gate on a run whose books agree.
     """
 
     coin: str
     size: Decimal
     entry_price: Decimal | None
     realized_pnl: Decimal = Decimal(0)
+    liquidation_price: Decimal | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         if not self.coin or not self.coin.strip():

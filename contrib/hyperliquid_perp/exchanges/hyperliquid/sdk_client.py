@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
-from .errors import ExchangeError, ExchangeRequestError
+from .errors import ExchangeError, ExchangeRequestError, ExchangeThrottledError
 
 if TYPE_CHECKING:
     from eth_account.signers.local import LocalAccount
@@ -97,9 +97,55 @@ def call_sdk(fn: Callable[..., Any], *args: Any) -> Any:
         # Some SDK/network exceptions (e.g. a bare ConnectionError) stringify to "",
         # which would leave the top-level message — the one main.py prints — hollow.
         # Prefix the type name so the error is always diagnostic even when str(exc) is empty.
-        raise ExchangeRequestError(
-            f"Hyperliquid request failed: {type(exc).__name__}: {exc}"
-        ) from exc
+        message = f"Hyperliquid request failed: {type(exc).__name__}: {exc}"
+        if _looks_throttled(exc):
+            raise ExchangeThrottledError(message) from exc
+        raise ExchangeRequestError(message) from exc
+
+
+# Substrings marking a request the venue declined to SERVE, as opposed to one it
+# served and rejected. Deliberately a short, specific list matched against the
+# lowercased text: over-matching would let a real rejection be retried as though
+# it were transient, which is the more expensive mistake of the two.
+#
+# A bare "429" is NOT here, though it was in the first draft. The status code is
+# already checked exactly, so the substring only ever fired on non-SDK
+# exceptions — where it matched any message carrying those three digits inside a
+# larger number: an oid, an epoch-ms timestamp, a price. "order 184296 rejected:
+# insufficient margin" read as a rate limit, and three such attempts in a row
+# would classify a genuinely rejected stop-loss as THROTTLED, suppressing the
+# §17.2 escalation the position needed (2026-07-31 exit check).
+_THROTTLE_MARKERS = ("too many requests", "rate limit", "ratelimit", "slow down")
+# HTTP statuses that mean "not served, try later". 503 is included and 502/504
+# are not: a gateway that never reached the backend is a plain transport failure,
+# while 503 is the venue itself shedding load.
+_THROTTLE_STATUS_CODES = frozenset({429, 503})
+
+
+def _looks_throttled(exc: BaseException) -> bool:
+    """Whether ``exc`` reads as a rate-limit / overload refusal.
+
+    Prefers a status code when the exception carries one — several HTTP client
+    libraries expose ``status_code`` directly or via ``response``, and a number
+    beats a substring. Falls back to the message, because the SDK surfaces the
+    status only inside the text for most transports.
+    """
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int):
+        # A status code is AUTHORITATIVE — never fall through to the text.
+        # hyperliquid's ClientError does not call super().__init__(), so every
+        # constructor argument lands in ``args``, and api.py passes the response
+        # HEADERS as one of them. str(exc) therefore renders the whole tuple,
+        # headers included — and a 4xx from a Cloudflare-fronted endpoint
+        # routinely carries ``x-ratelimit-remaining``. Matching text after
+        # seeing the code turned "422 Order has invalid price" into a throttle,
+        # so a permanently rejected stop-loss would hold forever instead of
+        # escalating to §17.2 (2026-07-31 exit check).
+        return status in _THROTTLE_STATUS_CODES
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(marker in text for marker in _THROTTLE_MARKERS)
 
 
 class HyperliquidClient:

@@ -3,7 +3,7 @@
 Covers the PR 2 persistence contract (phase3-spec §16): the v5→v6 upgrade
 path, the fills dedupe UNIQUE, the cloid registry's idempotent/conflict
 semantics, the live_order_attempts evidence trail, and the §18.5 kill switch
-event log.
+event log — plus the v9 exchange-liquidation mirror and its one writer.
 """
 
 from __future__ import annotations
@@ -15,9 +15,16 @@ from decimal import Decimal
 import pytest
 
 from contrib.hyperliquid_perp.persistence import repository as repo
-from contrib.hyperliquid_perp.persistence.db import Database, apply_migrations, connect
+from contrib.hyperliquid_perp.persistence.db import (
+    Database,
+    SchemaVersionError,
+    apply_migrations,
+    connect,
+    stored_schema_version,
+)
 from contrib.hyperliquid_perp.persistence.ids import live_order_attempt_id
-from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS
+from contrib.hyperliquid_perp.persistence.models import PositionState
+from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS, SCHEMA_VERSION
 
 _NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
 _HEX = "0x" + "ab" * 16
@@ -41,8 +48,9 @@ def _columns(conn, table: str) -> set[str]:
 
 def test_v5_store_upgrades_to_latest_in_place(monkeypatch):
     # Build a store that stops at v5 (an existing paper DB), then re-open with
-    # the full migration list: the later migrations (v6, and v7's additive
-    # ADD COLUMN) apply, and the paper rows survive.
+    # the full migration list: the later migrations (v6, v7's additive ADD
+    # COLUMN, and v8's new live_smoke_tests table) apply, and the paper rows
+    # survive.
     conn = connect(":memory:")
     v5_only = {version: MIGRATIONS[version] for version in sorted(MIGRATIONS) if version <= 5}
     import contrib.hyperliquid_perp.persistence.db as db_module
@@ -86,7 +94,7 @@ def test_v5_store_upgrades_to_latest_in_place(monkeypatch):
     conn.execute(f"INSERT INTO scheduler_state (run_id, updated_at) VALUES ('r', '{stamp}')")
 
     monkeypatch.setattr(db_module, "MIGRATIONS", MIGRATIONS)
-    assert apply_migrations(conn) == 7
+    assert apply_migrations(conn) == SCHEMA_VERSION
 
     row = conn.execute("SELECT * FROM orders").fetchone()
     assert row["order_id"] == "o1"
@@ -100,6 +108,34 @@ def test_v5_store_upgrades_to_latest_in_place(monkeypatch):
     ):
         surviving = conn.execute(f"SELECT * FROM {table}").fetchall()
         assert [r[key] for r in surviving] == [value], table
+    # v8's new table actually landed on the upgraded (populated) connection —
+    # the real Lightsail scenario — with the columns the repository writes, and
+    # a result row round-trips through the repo layer.
+    assert {
+        "result_id",
+        "run_id",
+        "test_key",
+        "test_number",
+        "test_name",
+        "status",
+        "network",
+        "dry_run",
+        "detail",
+        "error_message",
+        "executed_at",
+    } <= _columns(conn, "live_smoke_tests")
+    repo.insert_smoke_test_result(
+        conn,
+        run_id="r",
+        test_number=1,
+        test_key="signed_client_init",
+        test_name="signed client initialization",
+        status="passed",
+        network="testnet",
+        executed_at=_NOW,
+    )
+    latest = repo.latest_smoke_test_results(conn, "r")
+    assert latest["signed_client_init"]["status"] == "passed"
     assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 
@@ -604,3 +640,325 @@ def test_iter_open_live_orders_sees_only_non_terminal_live_rows(db):
     _seed_order(db, order_id="live1", status="open", cloid_hex=_HEX)
     _seed_order(db, order_id="done1", status="filled", cloid_hex=_HEX2)
     assert [r["order_id"] for r in repo.iter_open_live_orders(db.conn)] == ["live1"]
+
+
+# ---------------------------------------------------------------------------
+# migration v9 + the exchange liquidation mirror
+# ---------------------------------------------------------------------------
+
+
+def test_v8_store_upgrades_to_v9_in_place(monkeypatch):
+    # Same shape as the v5 upgrade above, one version narrower: the paper run
+    # live on the server is already at v8, so v9's additive ADD COLUMN is what
+    # its next restart actually runs. Its existing position row must survive
+    # and read NULL — a paper run has no exchange estimate to mirror, and a
+    # NOT NULL column would have made the upgrade unrunnable.
+    conn = connect(":memory:")
+    v8_only = {version: MIGRATIONS[version] for version in sorted(MIGRATIONS) if version <= 8}
+    import contrib.hyperliquid_perp.persistence.db as db_module
+
+    monkeypatch.setattr(db_module, "MIGRATIONS", v8_only)
+    assert apply_migrations(conn) == 8
+    assert "exchange_liquidation_price" not in _columns(conn, "current_positions")
+    stamp = "2026-07-12T00:00:00+00:00"
+    conn.execute(
+        "INSERT INTO current_positions (run_id, symbol, size, entry_price, realized_pnl,"
+        f" updated_at) VALUES ('r', 'BTC', '0.01', '50000', '3', '{stamp}')"
+    )
+
+    monkeypatch.setattr(db_module, "MIGRATIONS", MIGRATIONS)
+    assert apply_migrations(conn) == SCHEMA_VERSION
+
+    assert "exchange_liquidation_price" in _columns(conn, "current_positions")
+    row = conn.execute("SELECT * FROM current_positions").fetchone()
+    assert (row["symbol"], row["size"], row["realized_pnl"]) == ("BTC", "0.01", "3")
+    assert row["exchange_liquidation_price"] is None
+    # And the reader hands that NULL back as None rather than tripping on it.
+    upgraded = repo.get_current_position(conn, "r", "BTC")
+    assert upgraded is not None and upgraded.liquidation_price is None
+    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def test_a_freshly_created_store_has_the_liquidation_column(db):
+    # The ADD COLUMN path and the CREATE path must agree: a brand-new live run
+    # never replays v9's ALTER against a v8 table, it runs the whole list.
+    assert "exchange_liquidation_price" in _columns(db.conn, "current_positions")
+
+
+def _seed_position(db, *, size="0.01", entry="50000"):
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal(size), entry_price=Decimal(entry)),
+            updated_at=_NOW,
+        )
+
+
+def test_liquidation_mirror_round_trips_and_a_none_clears_it(db):
+    _seed_position(db)
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", Decimal("43210.5"))
+    stored = repo.get_current_position(db.conn, "r", "BTC")
+    assert stored is not None and stored.liquidation_price == Decimal("43210.5")
+    # The reconciler writes an explicit None when the exchange reports flat (or
+    # no liquidationPx at all); a stale estimate surviving that would band the
+    # next position's SL off a dead number.
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", None)
+    cleared = repo.get_current_position(db.conn, "r", "BTC")
+    assert cleared is not None and cleared.liquidation_price is None
+
+
+def test_liquidation_mirror_on_a_missing_row_is_a_silent_no_op(db):
+    # Unlike set_position_protection, a missing row is NOT an error here: the
+    # exchange can report a position the local books have not booked yet, and
+    # that mismatch is the reconciler's own §12.3 lane, not this writer's. It
+    # must also not FABRICATE the row — a current_positions row nobody's fills
+    # created would read as a position the run opened.
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", Decimal("43210.5"))
+    assert repo.get_current_position(db.conn, "r", "BTC") is None
+    assert db.conn.execute("SELECT COUNT(*) FROM current_positions").fetchone()[0] == 0
+
+
+def test_upsert_current_position_preserves_the_mirrored_liquidation_price(db):
+    # The invariant upsert_current_position's docstring promises, same posture
+    # as the SL/TP pair: a position-changing fill lands between two reconcile
+    # passes and must not wipe the mirror, or the live SL band silently falls
+    # back to the entry-based one until the next heartbeat.
+    _seed_position(db)
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", Decimal("43210.5"))
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("0.02"), entry_price=Decimal("51000")),
+            updated_at=_NOW,
+        )
+    pos = repo.get_current_position(db.conn, "r", "BTC")
+    assert pos is not None
+    assert pos.size == Decimal("0.02")  # the fill landed
+    assert pos.liquidation_price == Decimal("43210.5")  # and the mirror survived it
+
+
+def test_a_flip_clears_the_mirrored_liquidation_price(db):
+    # The other half of that invariant, and the reason it is not "always
+    # preserve": the estimate describes a DIRECTION. Carried across a flip it
+    # sits on the wrong side of the new entry, and stops.stop_loss_decision
+    # reads a wrong-side liq as `liquidation_too_close` → CLOSE_NOW → a §17.2
+    # emergency close of a position that was never in danger, plus the §13.5
+    # manual latch a human has to clear.
+    _seed_position(db)
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", Decimal("43210.5"))
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("-0.01"), entry_price=Decimal("51000")),
+            updated_at=_NOW,
+        )
+    pos = repo.get_current_position(db.conn, "r", "BTC")
+    assert pos is not None
+    assert pos.size == Decimal("-0.01")  # the flip landed
+    assert pos.liquidation_price is None  # and took the long's estimate with it
+
+
+def test_a_flatten_clears_the_mirrored_liquidation_price(db):
+    # Close-and-reopen is the same hazard as a flip: an estimate from before the
+    # flat describes a position that no longer exists. The reconciler also
+    # clears on a flat exchange, but only on its next pass — this closes the
+    # ticks in between, where the closing fill is booked and no pass has run.
+    _seed_position(db)
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", Decimal("43210.5"))
+    with db.transaction() as conn:
+        repo.upsert_current_position(conn, "r", PositionState.flat("BTC"), updated_at=_NOW)
+    pos = repo.get_current_position(db.conn, "r", "BTC")
+    assert pos is not None and pos.size == 0
+    assert pos.liquidation_price is None
+
+
+# ---------------------------------------------------------------------------
+# schema-version safety (2026-07-30 migration review)
+# ---------------------------------------------------------------------------
+
+
+def test_stored_schema_version_reads_the_store_without_applying_anything():
+    # The whole point of this reader: a caller must be able to ask "what version
+    # is this store?" BEFORE deciding whether opening it is safe. If it migrated
+    # as a side effect (or needed the schema to already exist) the read-only
+    # commands could not use it as their gate.
+    conn = connect(":memory:")
+    assert stored_schema_version(conn) == 0  # brand-new store: nothing applied
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert tables == {"schema_migrations"}  # its own bookkeeping table and NOTHING else
+    assert apply_migrations(conn) == SCHEMA_VERSION
+    assert stored_schema_version(conn) == SCHEMA_VERSION  # now the max recorded version
+    conn.close()
+
+
+def test_a_store_migrated_by_a_newer_build_is_refused_not_written_through():
+    # The rollback hazard this exists for: an OLDER binary opening a store a
+    # NEWER one already migrated used to migrate-nothing and carry on writing
+    # through it, because nothing but apply_migrations reads schema_migrations.
+    # Its SQL does not know the newer columns (a pre-v9 upsert_current_position
+    # has no exchange_liquidation_price clause), so a stale mirrored liquidation
+    # survives a flip/flatten the current build clears — §17 then bands off a
+    # liquidation belonging to a position that no longer exists.
+    conn = connect(":memory:")
+    assert apply_migrations(conn) == SCHEMA_VERSION
+    future = max(MIGRATIONS) + 1
+    conn.execute(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+        (future, "2026-07-30T00:00:00+00:00"),
+    )
+    with pytest.raises(SchemaVersionError, match=f"v{future}"):
+        apply_migrations(conn)
+    # Negative control: with that row gone the very same call is a clean no-op —
+    # the refusal is keyed on the recorded version, not on re-opening at all.
+    conn.execute("DELETE FROM schema_migrations WHERE version = ?", (future,))
+    assert apply_migrations(conn) == SCHEMA_VERSION
+    conn.close()
+
+
+def test_a_read_only_open_of_an_up_to_date_store_applies_nothing(tmp_path):
+    # migrate=False must still be a perfectly ordinary open for the normal case
+    # (validate / export / live-smoke --gate-status against a current store):
+    # it opens, and it writes NO migration bookkeeping of its own.
+    path = tmp_path / "live.db"
+    with Database(path) as built:
+        before = [
+            tuple(row)
+            for row in built.conn.execute(
+                "SELECT version, applied_at FROM schema_migrations ORDER BY version"
+            )
+        ]
+    with Database(path, migrate=False) as reopened:
+        assert stored_schema_version(reopened.conn) == SCHEMA_VERSION
+        after = [
+            tuple(row)
+            for row in reopened.conn.execute(
+                "SELECT version, applied_at FROM schema_migrations ORDER BY version"
+            )
+        ]
+    assert after == before  # same versions AND same applied_at stamps: nothing re-ran
+
+
+def test_a_read_only_open_refuses_a_behind_store_instead_of_upgrading_it(tmp_path, monkeypatch):
+    # The other direction, and the one that bites on the deploy box: a read-style
+    # command takes NO run lease, so migrating here would silently upgrade a
+    # store a RUNNING daemon owns and leave that daemon writing through a schema
+    # it does not know. Refuse and tell the operator instead.
+    import contrib.hyperliquid_perp.persistence.db as db_module
+
+    path = tmp_path / "behind.db"
+    behind = sorted(MIGRATIONS)[-2]
+    older = {version: MIGRATIONS[version] for version in sorted(MIGRATIONS) if version <= behind}
+    monkeypatch.setattr(db_module, "MIGRATIONS", older)
+    with Database(path) as built:
+        assert stored_schema_version(built.conn) == behind
+        assert "exchange_liquidation_price" not in _columns(built.conn, "current_positions")
+
+    monkeypatch.setattr(db_module, "MIGRATIONS", MIGRATIONS)
+    with pytest.raises(SchemaVersionError, match="will not migrate"):
+        Database(path, migrate=False)
+
+    # The refusal is not just an exception AFTER the fact: the store on disk is
+    # byte-for-byte the version it was, so the daemon that owns it is unharmed.
+    conn = connect(path)
+    assert stored_schema_version(conn) == behind
+    assert "exchange_liquidation_price" not in _columns(conn, "current_positions")
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version > ?", (behind,)
+        ).fetchone()[0]
+        == 0
+    )
+    conn.close()
+
+    # Negative control: the migrating open — the lane an operator reaches through
+    # a command that DOES own the run — upgrades it exactly as before.
+    with Database(path) as upgraded:
+        assert stored_schema_version(upgraded.conn) == SCHEMA_VERSION
+        assert "exchange_liquidation_price" in _columns(upgraded.conn, "current_positions")
+
+
+# ---------------------------------------------------------------------------
+# atomic §12.3 case stamping (2026-07-30 concurrency review)
+# ---------------------------------------------------------------------------
+
+
+def _open_case(db, *, exchange_value="unparsed-deadbeef") -> int:
+    """One un-actioned §12.3 case — the shape `safe-mode --stamp-case` targets."""
+    with db.transaction() as conn:
+        repo.insert_exchange_reconciliation_event(
+            conn,
+            run_id="r",
+            trigger="live_fill_ingest",
+            case_type="fill_malformed",
+            exchange_value=exchange_value,
+            timestamp=_NOW,
+        )
+    return db.conn.execute("SELECT MAX(event_id) FROM exchange_reconciliation_events").fetchone()[0]
+
+
+def _action_of(db, event_id: int):
+    return db.conn.execute(
+        "SELECT action_taken FROM exchange_reconciliation_events WHERE event_id = ?", (event_id,)
+    ).fetchone()["action_taken"]
+
+
+def test_stamping_an_open_case_stamps_it_and_says_so(db):
+    event_id = _open_case(db)
+    with db.transaction() as conn:
+        assert repo.stamp_reconciliation_action_if_unset(
+            conn, event_id, "human: payload was garbage"
+        )
+    assert _action_of(db, event_id) == "human: payload was garbage"
+
+
+def test_stamping_a_case_another_writer_already_disposed_of_preserves_the_original(db):
+    # THE race: the operator's `--stamp-case` holds no run lease, so between its
+    # "is this still open?" read and its write the daemon's own reconciliation
+    # pass can stamp the MACHINE disposition — what the system actually DID about
+    # the sighting. A plain UPDATE would erase that with no error and no audit
+    # row. Putting the NULL test in the UPDATE's WHERE makes the loser of the
+    # race get told instead of silently winning.
+    event_id = _open_case(db)
+    with db.transaction() as conn:
+        repo.set_reconciliation_action(conn, event_id, "resolved_fill_booked")
+    with db.transaction() as conn:
+        assert (
+            repo.stamp_reconciliation_action_if_unset(conn, event_id, "human: looked at it")
+            is False
+        )
+    assert _action_of(db, event_id) == "resolved_fill_booked"  # the daemon's record survived
+
+    # Negative control — the two writers differ on purpose: the daemon keeps the
+    # overwriting writer, because revising its own disposition is legitimate
+    # there and it already does read/test/write inside one transaction.
+    with db.transaction() as conn:
+        repo.set_reconciliation_action(conn, event_id, "resolved_manual")
+    assert _action_of(db, event_id) == "resolved_manual"
+
+
+def test_stamping_a_nonexistent_case_raises_rather_than_reporting_a_lost_race(db):
+    # False means "someone else disposed of it"; a bad event_id is a different
+    # fact entirely (a typo'd id, a wrong store) and must not be dressed as a
+    # lost race — the CLI prints a completely different remedy for each.
+    with db.transaction() as conn, pytest.raises(ValueError, match="does not exist"):
+        repo.stamp_reconciliation_action_if_unset(conn, 4242, "human: looked at it")
+
+
+def test_stamping_with_a_blank_action_is_refused(db):
+    # The audit row's whole value is what the human attested; a blank (or
+    # whitespace) disposition would clear the verdict block while recording
+    # nothing — the same guard set_reconciliation_action carries.
+    event_id = _open_case(db)
+    for blank in ("", "   "):
+        with db.transaction() as conn, pytest.raises(ValueError, match="non-empty"):
+            repo.stamp_reconciliation_action_if_unset(conn, event_id, blank)
+    assert _action_of(db, event_id) is None  # and the case stays open, not half-stamped

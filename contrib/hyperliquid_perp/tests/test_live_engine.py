@@ -120,9 +120,13 @@ class _FakeProtection:
         # Mirrors ProtectionManager.orders_changed_last_sync (§12.2 rule 6):
         # tests flip it to assert the engine reconciles a protection-change tick.
         self.orders_changed_last_sync = False
+        # What the engine handed the SL band each sync (§3.6): the reconciler's
+        # mirrored exchange estimate, or None before the first mirror.
+        self.liquidation_prices: list[Decimal | None] = []
 
     def sync(self, *, position, liquidation_price, mark, plan_active):
         self.calls += 1
+        self.liquidation_prices.append(liquidation_price)
         if position.is_flat:
             return ProtectionOutcome.FLAT
         return self.outcome
@@ -214,6 +218,80 @@ def _script(engine, snaps):
 
 def _snap(mark=_MARK, mid=_MARK):
     return (D(mark), D(mid))
+
+
+def _refresh_log(engine, drive) -> list[str]:
+    """Swap in recording doubles, run ``drive``, return the interleaved log.
+
+    Shared by the two seam tests below. The ``_RecordingSwitch`` surface is the
+    engine's kill-switch protocol; kept in ONE place so that when the engine
+    starts calling a fourth method, both tests fail on the seam assertion they
+    were written for rather than one of them failing on a stale double.
+    """
+    log: list[str] = []
+    scripted = ScriptedSnapshotProvider("BTC", [_snap()])
+
+    class _RecordingProvider:
+        def fetch(self, coin, *, requested_at, timeout_seconds):
+            log.append("fetch")
+            return scripted.fetch(coin, requested_at=requested_at, timeout_seconds=timeout_seconds)
+
+    class _RecordingSwitch:
+        stop_new_orders = False
+
+        def tick(self) -> None:
+            log.append("refresh")
+
+        def release_safe_mode(self) -> bool:
+            return True
+
+    engine._provider = _RecordingProvider()
+    engine._kill_switch = _RecordingSwitch()
+    drive()
+    return log
+
+
+def test_the_market_snapshot_read_refreshes_the_switch_across_itself(tmp_path):
+    """``engine.tick()`` must refresh the dead man's switch across its own read.
+
+    The market snapshot rides the SAME ``network_timeout_s`` as everything else,
+    so unrefreshed it chains into the submit ladder and the real unrefreshed run
+    becomes their sum rather than ``_MAX_UNREFRESHED_REST_CALLS``.
+
+    DRIVEN, not inspected. The check this replaces searched ``tick``'s source for
+    ``refresh_across_blocking_work`` between two statements, and stayed green with
+    the switch argument mutated to ``None`` — the refresh gone entirely and 1918
+    tests still passing (mutation-verified, 2026-08-01 round-13 review).
+    """
+    db, clock, engine, gate, sub = _build(tmp_path)
+    log = _refresh_log(engine, engine.tick)
+
+    assert "fetch" in log, "the tick did not read the market at all"
+    # A refresh has to land AFTER the read — that is the seam being protected.
+    assert "refresh" in log[log.index("fetch") :], (
+        "engine.tick() read the market without refreshing the kill switch across "
+        f"it — the read chains into the submit ladder. log={log}"
+    )
+
+
+def test_the_plan_registrations_market_read_refreshes_the_switch_across_itself(tmp_path):
+    """``start_plan()`` has the identical seam, and had NEITHER form of cover.
+
+    Its own production comment calls this read "same full-timeout REST as tick()'s
+    snapshot … also on the loop thread". Round 13 replaced the source-slice check
+    on the ``tick()`` copy with a drive test — because the source form stayed green
+    with the switch argument mutated to ``None`` — and left this sibling with no
+    test at all: deleting the call outright kept the suite green (2026-08-01
+    round-14 mutation probe).
+    """
+    db, clock, engine, gate, sub = _build(tmp_path)
+    log = _refresh_log(engine, lambda: engine.start_plan(_decision("long", 5), output_id="o1"))
+
+    assert "fetch" in log, "start_plan did not read the market at all"
+    assert "refresh" in log[log.index("fetch") :], (
+        "engine.start_plan() read the market without refreshing the kill switch "
+        f"across it — the read chains into the submit ladder. log={log}"
+    )
 
 
 # -- start_plan / slice scheduling ------------------------------------------
@@ -354,6 +432,37 @@ def test_emergency_close_on_needs_close(tmp_path):
     assert close[0]["side"] == "sell"  # closing a long
     assert close[0]["reduce_only"] is True
     assert close[0]["size"] == D("0.05")
+
+
+# -- protection sync inputs -------------------------------------------------
+
+
+def test_protection_sync_is_fed_the_mirrored_liquidation_price(tmp_path):
+    prot = _FakeProtection()
+    db, clock, engine, gate, sub = _build(tmp_path, protection=prot)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.05"), entry_price=D(50000)),
+            updated_at=_T0,
+        )
+    engine._was_flat = False
+    _script(engine, [_snap(), _snap()])
+    engine.tick()
+    # Nothing mirrored yet (a fresh position before its first reconcile pass):
+    # None must reach sync so the SL band falls back to the entry-based one.
+    assert prot.liquidation_prices == [None]
+
+    # The reconciler's mirror lands on the row...
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", D("43210.5"))
+    clock.advance(30)
+    engine.tick()
+    # ...and the very next sync bands the SL off it. The probe sits far from the
+    # mark and from any entry-derived fallback, so an engine that dropped the
+    # exchange value could not reproduce it by accident.
+    assert prot.liquidation_prices == [None, D("43210.5")]
 
 
 # -- settlement detection ---------------------------------------------------
@@ -1112,6 +1221,38 @@ def _insert_plan(db, plan_id, *, flip_plan_id=None, flip_leg=None):
         )
 
 
+def test_restart_abandons_every_non_terminal_plan_status(tmp_path):
+    """The abandon sweep reads repo.LIVE_PLAN_STATUSES, not a literal "active".
+    The registry's non-terminal set also holds ``paused_market_data``; a
+    hand-copied subset would leave such a plan un-abandoned across a restart
+    while the sweep still clears gate.active_slice_plan — §9.3's "no active
+    plan" invariant broken, with decision.py's own query still seeing it."""
+    db, clock, engine, gate, sub = _build(tmp_path)
+    for plan_id, status in (("p-active", "active"), ("p-paused", "paused_market_data")):
+        with db.transaction() as conn:
+            repo.insert_execution_plan(
+                conn,
+                plan_id=plan_id,
+                run_id="r",
+                symbol="BTC",
+                status=status,
+                created_at=_T0,
+                planned_slices=1,
+                total_qty=D("0.004"),
+                remaining_qty=D("0.004"),
+                residual_qty=D(0),
+                rounding_residual_qty=D(0),
+            )
+    engine._abandon_dangling_plans()
+    rows = {p["plan_id"]: (p["status"], p["status_reason"]) for p in _plans(db)}
+    assert rows["p-active"] == ("expired", "restart_abandoned")
+    assert rows["p-paused"] == ("expired", "restart_abandoned")  # not left behind
+
+
+def _plans(db):
+    return repo.iter_execution_plans(db.conn, "r")
+
+
 def test_orphan_flip_close_leg_warns_at_startup(tmp_path, caplog):
     """v1 gap (fix in PR 6): a restart between a flip's two legs drops the
     pending open leg — the drop must be VISIBLE, not silent."""
@@ -1245,13 +1386,13 @@ def test_settlement_escalation_write_failure_never_rescores_the_segment(tmp_path
 
     monkeypatch.setattr(engine._safe_mode, "enter", _flaky_enter)
     with pytest.raises(_Boom):
-        engine._detect_settlement(clock.now())
+        engine._detect_settlement(clock.now(), [])
     state = repo.get_scheduler_state(db.conn, "r")
     assert state["consecutive_loss_count"] == 1  # the -100 loss was scored ONCE
     assert engine._was_flat is True  # the cursor advanced with the commit
     assert engine._emergency_close_pending is True  # the escalation is still owed
     # Next tick: no duplicate settlement (the streak survives), escalation lands.
-    engine._detect_settlement(clock.now())
+    engine._detect_settlement(clock.now(), [])
     state = repo.get_scheduler_state(db.conn, "r")
     assert state["consecutive_loss_count"] == 1  # NOT reset by a wallet==anchor re-score
     assert engine._emergency_close_pending is False
@@ -1409,6 +1550,108 @@ def test_flip_under_single_slot_config_still_budgets_both_legs(tmp_path):
     engine.tick()
     assert engine._flip is None  # the open leg registered (flip consumed)
     assert engine._leg is not None and engine._leg.flip_leg == "open"
+
+
+def test_a_stop_out_mid_plan_abandons_the_leg_instead_of_re_entering(tmp_path):
+    """A plan is sized ONCE, against the position that existed when the cycle
+    approved it, and ``_submit_due_slices`` re-reads nothing about the position.
+    So a stop-loss firing mid-plan used to leave the remaining slices to
+    re-open — as NON-reduce-only entry orders, at the crashed price — the very
+    position the stop had just closed. The flat transition must kill the leg."""
+    db, clock, engine, gate, sub = _build(tmp_path)
+    _script(engine, [_snap()])
+    reg = engine.start_plan(_decision("long", 10), output_id="o1")
+    assert reg.plan_id is not None and reg.reason is None
+    leg = engine._leg
+    assert leg is not None
+    assert leg.reduce_only is False and leg.order_role == "entry"  # the hazard
+    assert len(leg.slice_sizes) > 1  # slices remain after the first
+    # Slice 0 fills: the long opens...
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.004"), entry_price=_MARK),
+            updated_at=_T0,
+        )
+    engine._was_flat = False
+    # ...then the price crashes, the SL fires, and the position is flat again.
+    with db.transaction() as conn:
+        repo.upsert_current_position(conn, "r", PositionState.flat("BTC"), updated_at=_T0)
+    _script(engine, [_snap(mark=20000, mid=20000)])
+    res = engine.tick()
+    assert engine._leg is None  # the stale target died with the position
+    assert sub.calls == []  # and nothing re-opened it on the crash tick
+    assert any(e == f"plan_terminal:{reg.plan_id}:canceled" for e in res.events)
+    row = db.conn.execute(
+        "SELECT status, status_reason FROM execution_plans WHERE plan_id = ?",
+        (reg.plan_id,),
+    ).fetchone()
+    # A distinct reason: this cancel is not the same event as any other.
+    assert (row["status"], row["status_reason"]) == ("canceled", "position_flattened")
+
+
+def test_a_wrong_side_liquidation_mirror_is_discarded_by_the_sl_band(tmp_path):
+    """Reader-side half of the mirror invariant. A long's liquidation price sits
+    BELOW its entry; a value above it belongs to a position that no longer
+    exists, and stops.py answers a too-close liq with CLOSE_NOW — a §17.2
+    emergency close of a healthy position. Withhold it, don't band off it."""
+    db, clock, engine, gate, sub = _build(tmp_path)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.004"), entry_price=_MARK),
+            updated_at=_T0,
+        )
+        # A short's estimate, left behind on a row that is now long.
+        repo.set_position_liquidation_price(conn, "r", "BTC", D(100000))
+    assert engine._liquidation_price(engine._read_position()) is None  # withheld
+    # Control: the same reader USES a correctly-sided estimate, so the test
+    # discriminates the guard rather than the plumbing. Re-read the position —
+    # the reader deliberately judges the estimate against the side on the
+    # SNAPSHOT it is handed, so that one read cannot pair a fresh liq with a
+    # stale entry.
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", D(25000))
+    assert engine._liquidation_price(engine._read_position()) == D(25000)
+
+
+def test_the_wrong_side_warning_is_not_silenced_by_a_withheld_estimate(tmp_path, caplog):
+    """The latch must clear when the reconciler WITHHOLDS (writes None), not only
+    on a correctly-sided value. The reconciler discards a wrong-side estimate by
+    writing None — so ``liq is None`` is exactly the state that follows a warned
+    episode. Leaving the latch set there meant a SECOND wrong-side mirror on an
+    unchanged position compared equal to the first and logged nothing, silencing
+    every episode after the first of the very invariant break this warning exists
+    to expose."""
+    import logging
+
+    db, clock, engine, gate, sub = _build(tmp_path)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.004"), entry_price=_MARK),
+            updated_at=_T0,
+        )
+        repo.set_position_liquidation_price(conn, "r", "BTC", D(100000))
+    with caplog.at_level(logging.WARNING):
+        assert engine._liquidation_price(engine._read_position()) is None
+    assert "discarding wrong-side liquidation mirror" in caplog.text
+    caplog.clear()
+
+    # The reconciler's real response to a wrong-side sighting: withhold (None).
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", None)
+    assert engine._liquidation_price(engine._read_position()) is None
+
+    # A SECOND wrong-side episode on the same position must warn again.
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", D(100000))
+    with caplog.at_level(logging.WARNING):
+        assert engine._liquidation_price(engine._read_position()) is None
+    assert "discarding wrong-side liquidation mirror" in caplog.text
 
 
 # -- loss guards wired through the engine (§10.3 / §10.4) --------------------

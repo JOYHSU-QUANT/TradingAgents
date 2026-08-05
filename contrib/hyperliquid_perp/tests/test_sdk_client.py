@@ -13,6 +13,7 @@ import pytest
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
     ExchangeError,
     ExchangeRequestError,
+    ExchangeThrottledError,
     MalformedResponseError,
 )
 from contrib.hyperliquid_perp.exchanges.hyperliquid.sdk_client import (
@@ -176,3 +177,89 @@ def test_info_internal_typeerror_is_not_mislabeled_as_version_mismatch(monkeypat
     )
     with pytest.raises(TypeError, match="not subscriptable"):
         HyperliquidClient("mainnet")
+
+
+# -- throttle classification (the §17.2 escalation seam) ----------------------
+#
+# This is where "the venue would not serve us" is told apart from "the venue
+# rejected this order". Get it wrong one way and a rate limit market-closes a
+# healthy position; wrong the other way and a permanently refused stop-loss
+# holds forever instead of escalating. Neither direction had any coverage.
+
+
+class _SdkClientError(Exception):
+    """The shape hyperliquid's SDK actually raises.
+
+    Deliberately faithful in the detail that caused the bug: ClientError does
+    not call super().__init__(), so every constructor argument lands in ``args``
+    — including the response HEADERS — and str(exc) renders the whole tuple.
+    """
+
+    def __init__(self, status_code, code, message, headers, data=None):
+        self.status_code = status_code
+        self.error_code = code
+        self.error_message = message
+        self.header = headers
+        self.error_data = data
+
+
+def _raise(exc):
+    def _fn():
+        raise exc
+
+    return _fn
+
+
+def test_a_429_is_classified_as_throttled():
+    err = _SdkClientError(429, "TooManyRequests", "slow down", {})
+    with pytest.raises(ExchangeThrottledError):
+        call_sdk(_raise(err))
+
+
+def test_a_503_is_classified_as_throttled():
+    with pytest.raises(ExchangeThrottledError):
+        call_sdk(_raise(_SdkClientError(503, "Unavailable", "shedding load", {})))
+
+
+def test_a_rejection_carrying_ratelimit_headers_is_not_a_throttle():
+    # The regression that made this a Critical. A 4xx from a Cloudflare-fronted
+    # endpoint routinely carries x-ratelimit-* headers, and those headers land
+    # in str(exc) — so matching text after seeing the status turned "422 Order
+    # has invalid price" into a throttle. A throttled verdict suppresses §17.2,
+    # so a permanently rejected stop-loss would hold forever over a live
+    # position. A status code present is authoritative.
+    err = _SdkClientError(
+        422,
+        "BadRequest",
+        "Order has invalid price",
+        {"x-ratelimit-remaining": "812", "x-ratelimit-limit": "1200"},
+    )
+    with pytest.raises(ExchangeRequestError) as caught:
+        call_sdk(_raise(err))
+    assert not isinstance(caught.value, ExchangeThrottledError)
+
+
+def test_a_5xx_gateway_error_is_not_a_throttle():
+    # 502/504 mean a gateway never reached the backend — an ordinary transport
+    # failure, whose unknown outcome still deserves the §8.3 recovery probe that
+    # the throttle lane deliberately skips.
+    for status in (502, 504):
+        with pytest.raises(ExchangeRequestError) as caught:
+            call_sdk(_raise(_SdkClientError(status, "Gateway", "bad gateway", {})))
+        assert not isinstance(caught.value, ExchangeThrottledError)
+
+
+def test_a_status_less_transport_error_falls_back_to_the_message():
+    # Non-SDK exceptions (a bare urllib/requests wrapper) carry no status, so
+    # the marker words are the only signal left.
+    with pytest.raises(ExchangeThrottledError):
+        call_sdk(_raise(RuntimeError("HTTP 429 Too Many Requests")))
+
+
+def test_digits_inside_a_larger_number_are_not_a_throttle():
+    # The first draft matched a bare "429" substring, so an oid, an epoch-ms
+    # timestamp or a price containing those digits read as a rate limit.
+    for message in ("order 184296 rejected: insufficient margin", "ts 1785429011234 stale"):
+        with pytest.raises(ExchangeRequestError) as caught:
+            call_sdk(_raise(ValueError(message)))
+        assert not isinstance(caught.value, ExchangeThrottledError)

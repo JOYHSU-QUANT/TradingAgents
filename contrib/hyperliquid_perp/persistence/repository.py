@@ -32,9 +32,11 @@ __all__ = [
     "EXCHANGE_KNOWN_ATTEMPT_STATUSES",
     "KILL_SWITCH_EVENT_TYPES",
     "LIVE_LIQUIDITY_ROLES",
+    "LIVE_SMOKE_TEST_STATUSES",
     "PROTECTION_ORDER_EVENT_TYPES",
     "RECONCILIATION_CASE_TYPES",
     "RECONCILIATION_TRIGGERS",
+    "RESTING_ORDER_STATUSES",
     "ROLE_TO_ORDER_TYPE",
     "SAFE_MODE_EVENT_TYPES",
     "SAFE_MODE_TYPES",
@@ -84,6 +86,7 @@ __all__ = [
     "insert_run",
     "insert_run_seed_position",
     "insert_safe_mode_event",
+    "insert_smoke_test_result",
     "iter_accounting_adjustment_events",
     "iter_exchange_reconciliation_events",
     "iter_execution_plans",
@@ -95,8 +98,10 @@ __all__ = [
     "iter_orders",
     "iter_protection_order_events",
     "iter_safe_mode_events",
+    "iter_smoke_test_results",
     "iter_unresolved_fill_sightings",
     "last_live_fill_time",
+    "latest_smoke_test_results",
     "max_engine_seq",
     "newest_live_fill_order_key",
     "next_live_attempt_index",
@@ -105,6 +110,7 @@ __all__ = [
     "require_live_fill_basis",
     "set_funding_status",
     "set_reconciliation_action",
+    "set_position_liquidation_price",
     "set_position_protection",
     "update_decision_attempt",
     "update_execution_plan",
@@ -450,10 +456,31 @@ def upsert_current_position(
 
     Deliberately does **not** touch ``stop_loss_price`` / ``take_profit_price``:
     they default NULL on first insert and are left untouched on conflict, so a
-    position-changing fill preserves any active protection rather than wiping it.
-    The SL/TP lifecycle (write *and* read) lands together in PR 3, which owns
-    protection management (execution §2–§4).
+    position-changing fill preserves any active protection rather than wiping
+    it. The SL/TP lifecycle (write *and* read) lands together in PR 3, which
+    owns protection management (execution §2–§4).
+
+    ``exchange_liquidation_price`` is treated differently, and the difference is
+    load-bearing: it describes a position's DIRECTION, not merely its symbol.
+    Carried across a flip (or across a flat and back), it hands the live SL band
+    an estimate on the wrong side of the new entry — which
+    ``stops.stop_loss_decision`` reads as ``liquidation_too_close`` and answers
+    CLOSE_NOW, i.e. a §17.2 emergency close of a position that was never in
+    danger, followed by the §13.5 MANUAL safe-mode latch a human must clear. So
+    the column survives only a SAME-DIRECTION update; a sign change or a
+    flatten clears it and the reconciler's mirror (its one writer,
+    :func:`set_position_liquidation_price`) re-establishes it next pass.
     """
+    prior = conn.execute(
+        "SELECT size FROM current_positions WHERE run_id = ? AND symbol = ?",
+        (run_id, position.coin),
+    ).fetchone()
+    # Decided in Python rather than SQL: ``size`` is stored as TEXT (Decimal
+    # round-trip), so a SQLite-side sign test would compare strings.
+    prior_size = Decimal(0) if prior is None else Decimal(prior["size"])
+    keeps_liquidation = (
+        position.size != 0 and prior_size != 0 and (position.size > 0) == (prior_size > 0)
+    )
     conn.execute(
         """
         INSERT INTO current_positions
@@ -463,7 +490,9 @@ def upsert_current_position(
             size = excluded.size,
             entry_price = excluded.entry_price,
             realized_pnl = excluded.realized_pnl,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            exchange_liquidation_price = CASE
+                WHEN ? THEN exchange_liquidation_price ELSE NULL END
         """,
         (
             run_id,
@@ -472,6 +501,7 @@ def upsert_current_position(
             None if position.entry_price is None else str(position.entry_price),
             str(position.realized_pnl),
             _iso_utc(updated_at or datetime.now(timezone.utc)),
+            1 if keeps_liquidation else 0,
         ),
     )
 
@@ -482,6 +512,7 @@ def _row_to_position(row: sqlite3.Row) -> PositionState:
         size=Decimal(row["size"]),
         entry_price=_dec(row["entry_price"]),
         realized_pnl=Decimal(row["realized_pnl"]),
+        liquidation_price=_dec(row["exchange_liquidation_price"]),
     )
 
 
@@ -1185,6 +1216,15 @@ LIVE_ORDER_STATUSES: tuple[str, ...] = (
     "open",
     "partially_filled",
 )
+# The narrower "could be ON THE BOOK right now" subset: LIVE_ORDER_STATUSES minus
+# pending_market_data, which has by definition never been sent. Derived, not
+# re-typed, so a new live status joins both sets at once. Two consumers ask the
+# same question of different sources and must agree on the vocabulary:
+# active_protection_order() asks SQLite, and protection._row_still_rests() asks
+# the exchange's orderStatus when a fired kill switch has made the rows suspect.
+RESTING_ORDER_STATUSES: tuple[str, ...] = tuple(
+    status for status in LIVE_ORDER_STATUSES if status != "pending_market_data"
+)
 # §8.3 rule 10: the live-attempt statuses that are DURABLE PROOF the exchange
 # received the order — the only local evidence that can contradict an
 # "unknownOid" answer and forbid a resend. "duplicate" is proof at least as
@@ -1521,12 +1561,17 @@ def active_protection_order(
     (``submitted`` before the ack, ``open`` / ``partially_filled`` after);
     a filled / canceled / rejected protection order is history. Returns the
     most recent match so a just-replaced order never shadows its replacement.
+
+    The status set is :data:`RESTING_ORDER_STATUSES`, not a literal, so a caller
+    that has to ask the SAME question of a non-local source (protection.py
+    checking orderStatus when the rows are suspect) cannot drift from it.
     """
-    return conn.execute(
+    placeholders = ", ".join("?" * len(RESTING_ORDER_STATUSES))
+    return conn.execute(  # noqa: S608 — placeholders are '?' * a module constant
         "SELECT * FROM orders WHERE run_id = ? AND symbol = ? AND order_role = ? "
-        "AND status IN ('submitted', 'open', 'partially_filled') "
+        f"AND status IN ({placeholders}) "
         "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
-        (run_id, symbol, order_role),
+        (run_id, symbol, order_role, *RESTING_ORDER_STATUSES),
     ).fetchone()
 
 
@@ -1838,6 +1883,42 @@ def set_position_protection(
         )
 
 
+def set_position_liquidation_price(
+    conn: sqlite3.Connection,
+    run_id: str,
+    symbol: str,
+    value: Decimal | None,
+    *,
+    updated_at: datetime | None = None,
+) -> None:
+    """Mirror (or clear, with ``None``) the exchange-reported liquidation price.
+
+    The live reconciler is the one writer: each pass it copies the clearinghouse
+    ``liquidationPx`` for the run's coin onto the position row (``None`` when the
+    exchange reports flat, or when the two views disagree on direction, so an
+    estimate is only ever attributed to the position it actually describes).
+    ``upsert_current_position`` clears the column on a direction change or a
+    flatten — the second half of that same invariant, for the ticks between
+    reconciler passes. Unlike :func:`set_position_protection`, a missing row is a
+    NO-OP, not an error: the exchange can report a position the local books do
+    not have yet — that mismatch is the reconciler's own §12.3 case lane, not
+    this writer's job.
+    """
+    conn.execute(
+        """
+        UPDATE current_positions
+        SET exchange_liquidation_price = ?, updated_at = ?
+        WHERE run_id = ? AND symbol = ?
+        """,
+        (
+            _encode(value),
+            _iso_utc(updated_at or datetime.now(timezone.utc)),
+            run_id,
+            symbol,
+        ),
+    )
+
+
 def upsert_scheduler_state(
     conn: sqlite3.Connection,
     run_id: str,
@@ -1979,6 +2060,23 @@ def upsert_scheduler_state(
 
 def get_scheduler_state(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM scheduler_state WHERE run_id = ?", (run_id,)).fetchone()
+
+
+def iter_other_run_leases(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    """Lease rows for every OTHER run in this store that records a holder.
+
+    The run lease is keyed on ``run_id``, but the actions it protects are not:
+    the kill switch, ``updateLeverage`` and the §19.3 stale-order sweep are all
+    per-WALLET, and two runs in one store share a wallet. Callers use this to
+    refuse before doing wallet-wide work while a sibling run is live. Freshness
+    is left to the caller (it owns the clock and ``LOCK_STALE_SECONDS``)
+    (2026-07-30 concurrency review).
+    """
+    return conn.execute(
+        "SELECT run_id, lock_pid, lock_heartbeat_at FROM scheduler_state "
+        "WHERE run_id != ? AND lock_pid IS NOT NULL AND lock_heartbeat_at IS NOT NULL",
+        (run_id,),
+    ).fetchall()
 
 
 # --------------------------------------------------------------------------
@@ -2718,6 +2816,42 @@ def set_reconciliation_action(conn: sqlite3.Connection, event_id: int, action_ta
         raise ValueError(f"exchange_reconciliation_events row {event_id!r} does not exist")
 
 
+def stamp_reconciliation_action_if_unset(
+    conn: sqlite3.Connection, event_id: int, action_taken: str
+) -> bool:
+    """Stamp a case's disposition ONLY while it has none; True if this call stamped it.
+
+    The append-only-in-spirit variant of :func:`set_reconciliation_action`, for
+    the operator surface. ``safe-mode --stamp-case`` takes no run lease, so its
+    "is it already disposed of?" check and its write would otherwise straddle a
+    window in which the daemon's own reconciliation pass stamps the machine
+    disposition (what the system actually DID about the sighting) — and the
+    operator's UPDATE would erase it with no error and no audit row. Putting the
+    NULL test in the UPDATE's own WHERE makes check and write one atomic step,
+    so the loser of the race is told instead of silently winning
+    (2026-07-30 concurrency review).
+
+    The daemon keeps :func:`set_reconciliation_action`: revising a disposition
+    is legitimate there, and it already does its read, its test, and its write
+    inside one transaction.
+    """
+    if not action_taken or not action_taken.strip():
+        raise ValueError("action_taken must be a non-empty string")
+    cur = conn.execute(
+        "UPDATE exchange_reconciliation_events SET action_taken = ? "
+        "WHERE event_id = ? AND action_taken IS NULL",
+        (action_taken, event_id),
+    )
+    if cur.rowcount == 1:
+        return True
+    exists = conn.execute(
+        "SELECT 1 FROM exchange_reconciliation_events WHERE event_id = ?", (event_id,)
+    ).fetchone()
+    if exists is None:
+        raise ValueError(f"exchange_reconciliation_events row {event_id!r} does not exist")
+    return False
+
+
 def iter_unresolved_fill_sightings(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
     """``fill_unmapped`` sightings whose §14.2 key STILL has no fills row.
 
@@ -2845,3 +2979,95 @@ def has_safe_mode_reason_event(
         ).fetchone()
         is not None
     )
+
+
+# --------------------------------------------------------------------------
+# live_smoke_tests (phase3-spec §20.2) — PR 6 testnet smoke-test result log
+# --------------------------------------------------------------------------
+
+# The four §20.2 outcomes a smoke step can land on. "skipped" is the dry-run /
+# not-selected verdict (never satisfies the §20.2 cycle-entry gate); "error" is
+# the harness failing to even run the step (distinct from a step that ran and
+# "failed" its assertion) — the acceptance gate treats both non-"passed" the
+# same, but the operator triages them differently.
+LIVE_SMOKE_TEST_STATUSES = frozenset({"passed", "failed", "skipped", "error"})
+
+
+def insert_smoke_test_result(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    test_number: int,
+    test_key: str,
+    test_name: str,
+    status: str,
+    network: str | None = None,
+    dry_run: bool = False,
+    detail: str | None = None,
+    error_message: str | None = None,
+    executed_at: datetime | None = None,
+) -> None:
+    """Append one §20.2 smoke-test result row (append-only audit).
+
+    A re-run after a fix writes a NEW row rather than overwriting the earlier
+    failure — the gate (:func:`latest_smoke_test_results`) reads the latest
+    ``result_id`` per ``test_key``, so the history stays intact while the
+    verdict follows the freshest attempt. ``dry_run`` marks a wiring check that
+    placed no orders; such rows never satisfy the cycle-entry gate.
+    """
+    check_enum(status, LIVE_SMOKE_TEST_STATUSES, name="status")
+    # A dry-run row placed no orders (it is a wiring check), so its only honest
+    # verdict is "skipped". The gate (latest_smoke_test_results) already excludes
+    # dry-run rows regardless of status, but a dry_run=1/status='passed' row could
+    # still mislead a future direct reader — reject the contradiction at the write
+    # boundary rather than relying on every reader to filter it out.
+    if dry_run and status != "skipped":
+        raise ValueError(
+            f"a dry-run smoke row placed no orders and must be 'skipped', got {status!r}"
+        )
+    _insert(
+        conn,
+        "live_smoke_tests",
+        {
+            "run_id": run_id,
+            "test_number": test_number,
+            "test_key": test_key,
+            "test_name": test_name,
+            "status": status,
+            "network": network,
+            "dry_run": dry_run,
+            "detail": detail,
+            "error_message": error_message,
+            "executed_at": executed_at or datetime.now(timezone.utc),
+        },
+    )
+
+
+def iter_smoke_test_results(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    """A run's full smoke-test history in execution (insertion) order."""
+    return conn.execute(
+        "SELECT * FROM live_smoke_tests WHERE run_id = ? ORDER BY result_id",
+        (run_id,),
+    ).fetchall()
+
+
+def latest_smoke_test_results(
+    conn: sqlite3.Connection, run_id: str, *, include_dry_run: bool = False
+) -> dict[str, sqlite3.Row]:
+    """``{test_key: latest row}`` — the freshest result per key.
+
+    ``include_dry_run=False`` (the default, the gate's view) considers only
+    real-connection rows: a dry-run wiring check must never stand in for a
+    passing test in the §20.2 cycle-entry gate. The "latest" is the row with the
+    greatest ``result_id`` (append-only, monotonic), so a re-run supersedes its
+    predecessor without deleting the audit trail.
+    """
+    latest: dict[str, sqlite3.Row] = {}
+    sql = "SELECT * FROM live_smoke_tests WHERE run_id = ?"
+    if not include_dry_run:
+        sql += " AND dry_run = 0"
+    sql += " ORDER BY result_id"
+    for row in conn.execute(sql, (run_id,)):
+        # Ascending result_id: the last write for a key wins.
+        latest[row["test_key"]] = row
+    return latest

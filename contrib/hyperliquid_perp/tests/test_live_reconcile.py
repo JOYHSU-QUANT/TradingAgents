@@ -48,7 +48,12 @@ def _clearinghouse(
     }
 
 
-def _btc_position(szi: str = "0.001", upnl: str = "1", value: str = "51") -> dict:
+def _btc_position(
+    szi: str = "0.001",
+    upnl: str = "1",
+    value: str = "51",
+    liquidation_px: str | None = None,
+) -> dict:
     return {
         "coin": "BTC",
         "szi": szi,
@@ -56,6 +61,9 @@ def _btc_position(szi: str = "0.001", upnl: str = "1", value: str = "51") -> dic
         "unrealizedPnl": upnl,
         "positionValue": value,
         "marginUsed": value,
+        # Absent by default (the mapper treats a None liquidationPx as absent),
+        # so the mirror tests are the only ones that carry an estimate.
+        "liquidationPx": liquidation_px,
     }
 
 
@@ -115,6 +123,104 @@ def env(tmp_path):
     )
     yield db, seams, reconciler
     db.close()
+
+
+def test_the_sweep_refreshes_the_kill_switch_across_its_exchange_reads(env, tmp_path):
+    """§18.2: a sweep is the longest wall of REST traffic on the single-threaded
+    live tick — two account reads, a paged backfill, and an orderStatus
+    round-trip per order in two loops whose length the exchange and the store
+    decide, not config. The tick's own refresh is already spent by the time any
+    of it runs (2026-07-31 deadline review).
+
+    Three refreshes with an empty book: one between the account reads, one
+    after, and one for the fill cross-check's single (uncapped) page.
+    """
+    db, seams, _ = env
+    refreshes: list[int] = []
+    reconciler = LiveReconciler(
+        db=db,
+        run_id="r",
+        coin="BTC",
+        fetch_open_orders=seams.fetch_open_orders,
+        fetch_clearinghouse=seams.fetch_clearinghouse,
+        query_order_by_cloid=seams.query_order_by_cloid,
+        fetch_fills=seams.fetch_fills,
+        payload_dir=tmp_path / "payloads",
+        clock=ManualClock(_NOW),
+        refresh_kill_switch=lambda: refreshes.append(1),
+    )
+    reconciler.run("heartbeat")
+    assert len(refreshes) == 3
+
+
+def test_the_sweep_refreshes_once_per_open_order_not_once_per_leg(env, tmp_path):
+    """The per-order half of the guarantee above: the orderStatus round-trips in
+    the open-orders loop are as many as the exchange says, so the refresh has to
+    ride the loop, not the leg.
+
+    Uses malformed entries deliberately — the refresh sits at the top of the
+    loop body, so this isolates "one refresh per entry" from any registry or
+    order-row setup. Two entries → the three baseline refreshes of the test
+    above plus two more.
+    """
+    db, seams, _ = env
+    seams.open_orders = ["junk", "junk"]
+    refreshes: list[int] = []
+    reconciler = LiveReconciler(
+        db=db,
+        run_id="r",
+        coin="BTC",
+        fetch_open_orders=seams.fetch_open_orders,
+        fetch_clearinghouse=seams.fetch_clearinghouse,
+        query_order_by_cloid=seams.query_order_by_cloid,
+        fetch_fills=seams.fetch_fills,
+        payload_dir=tmp_path / "payloads",
+        clock=ManualClock(_NOW),
+        refresh_kill_switch=lambda: refreshes.append(1),
+    )
+    reconciler.run("heartbeat")
+    assert len(refreshes) == 5
+
+
+def test_the_fill_cross_check_ladder_refreshes_between_pages(env, tmp_path, monkeypatch):
+    """§18.2: the reconciler has its OWN page ladder for the fill cross-check,
+    separate from the backfiller's and easy to miss because it is inline.
+
+    The first pass of the deadline review wired only the backfiller's and left
+    this one untouched, which made the real worst case DEFAULT_MAX_PAGES deep
+    while ``_MAX_UNREFRESHED_REST_CALLS`` still claimed 3 — an advisory
+    promising headroom it could not deliver. One refresh per page.
+    """
+    from contrib.hyperliquid_perp.live import reconcile as reconcile_mod
+
+    db, seams, _ = env
+    monkeypatch.setattr(reconcile_mod, "RESPONSE_FILL_CAP", 1)  # every page "capped"
+    monkeypatch.setattr(reconcile_mod, "DEFAULT_MAX_PAGES", 3)
+    refreshes: list[int] = []
+    reconciler = LiveReconciler(
+        db=db,
+        run_id="r",
+        coin="BTC",
+        fetch_open_orders=seams.fetch_open_orders,
+        fetch_clearinghouse=seams.fetch_clearinghouse,
+        query_order_by_cloid=seams.query_order_by_cloid,
+        fetch_fills=seams.fetch_fills,
+        payload_dir=tmp_path / "payloads",
+        clock=ManualClock(_NOW),
+        refresh_kill_switch=lambda: refreshes.append(1),
+    )
+    window_start = _NOW - timedelta(hours=1)
+    base = int(window_start.timestamp() * 1000)
+    stamps = iter([base + 1, base + 2, base + 3])
+
+    def fetch_fills(start_ms, end_ms):
+        t = next(stamps)
+        return [{"tid": t, "time": t}]
+
+    errors: list[str] = []
+    keys = reconciler._fetch_window_fill_keys(fetch_fills, window_start, _NOW, errors)
+    assert keys is None  # budget exhausted, window unproven — the paging really ran
+    assert len(refreshes) == 3  # one per page, not one per leg
 
 
 def _gate() -> RealOrderGate:
@@ -415,6 +521,148 @@ def test_an_sl_covering_only_part_of_the_position_does_not_protect(env):
     ]
     report = reconciler.run("heartbeat")
     assert not report.position_protected
+
+
+def test_the_exchange_liquidation_estimate_is_mirrored_onto_the_local_row(env):
+    db, seams, reconciler = env
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("0.001"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+    seams.clearinghouse = _clearinghouse(
+        account_value="101",
+        positions=[_btc_position(liquidation_px="43210.5")],
+        maintenance="1",
+    )
+    reconciler.run("heartbeat")
+    # §12.1: the exchange is the truth source for the liq estimate, and this row
+    # is how it reaches the engine's SL band (§3.6/§17.2) — nothing else in the
+    # live path reads the clearinghouse for it.
+    pos = repo.get_current_position(db.conn, "r", "BTC")
+    assert pos is not None and pos.liquidation_price == Decimal("43210.5")
+
+
+def test_a_direction_disagreement_withholds_the_liquidation_mirror(env):
+    # The flip fill landed between this pass's clearinghouse read and its fill
+    # backfill, so the exchange still shows the PRE-flip side. Mirroring that
+    # estimate onto the freshly flipped row hands the SL band a liquidation
+    # price on the wrong side of entry, which stops.py answers CLOSE_NOW to —
+    # a §17.2 emergency close of a healthy position. Withhold instead.
+    db, seams, reconciler = env
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("-0.001"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+    seams.clearinghouse = _clearinghouse(
+        account_value="101",
+        # The exchange still reports the LONG the local books already flipped.
+        positions=[_btc_position(szi="0.001", liquidation_px="43210.5")],
+        maintenance="1",
+    )
+    reconciler.run("heartbeat")
+    pos = repo.get_current_position(db.conn, "r", "BTC")
+    assert pos is not None and pos.liquidation_price is None
+    # The size disagreement is still reported through its own lane — withholding
+    # the estimate must not also swallow the mismatch.
+    assert {r["exchange_value"] for r in _cases(db, "exchange_position_mismatch")} == {
+        "BTC:-0.001->0.001"
+    }
+
+
+def test_an_agreeing_direction_still_mirrors_after_a_flip(env):
+    # Negative control for the test above: once both views agree on the short,
+    # the short's own estimate (ABOVE entry) is mirrored normally.
+    db, seams, reconciler = env
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("-0.001"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+    seams.clearinghouse = _clearinghouse(
+        account_value="101",
+        positions=[_btc_position(szi="-0.001", liquidation_px="56789.5")],
+        maintenance="1",
+    )
+    reconciler.run("heartbeat")
+    pos = repo.get_current_position(db.conn, "r", "BTC")
+    assert pos is not None and pos.liquidation_price == Decimal("56789.5")
+
+
+def test_a_failed_liquidation_mirror_does_not_fail_the_position_leg(env, monkeypatch):
+    """The mirror is a cache for the SL band, not this leg's evidence.
+
+    The leg's verdict answers "do the local and exchange positions agree?", and
+    the read already answered it. A transient store error on the metadata write
+    must not retroactively mark the position unreconciled AND unprotected —
+    that drives safe mode (halted cycles, a manual §13.6 release) off a cache
+    failure (decision 2026-07-29).
+    """
+    db, seams, reconciler = env
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("0.001"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+    _insert_local_order(db, order_id="o-sl", hex_id=_HEX_SL, logical="log-sl", role="stop_loss")
+    seams.clearinghouse = _clearinghouse(
+        account_value="101",
+        positions=[_btc_position(liquidation_px="43210.5")],
+        maintenance="1",
+    )
+    seams.open_orders = [
+        {
+            "oid": 5,
+            "coin": "BTC",
+            "cloid": _HEX_SL,
+            "side": "A",
+            "sz": "0.001",
+            "reduceOnly": True,
+        }
+    ]
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(repo, "set_position_liquidation_price", _boom)
+    report = reconciler.run("heartbeat")
+
+    assert report.position_reconciled
+    assert report.position_protected
+    assert report.clean
+    # Unmirrored this tick: the engine falls back to the entry-based band, the
+    # same band it used before the mirror existed. The next pass rewrites it.
+    pos = repo.get_current_position(db.conn, "r", "BTC")
+    assert pos is not None and pos.liquidation_price is None
+
+
+def test_a_flat_exchange_clears_a_stale_mirrored_liquidation_estimate(env):
+    db, seams, reconciler = env
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("0.001"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+        repo.set_position_liquidation_price(conn, "r", "BTC", Decimal("43210.5"))
+    # The default clearinghouse holds no position at all.
+    report = reconciler.run("heartbeat")
+    # The clear does NOT wait for a clean pass: the local books still claim a
+    # position (a phantom), and that is exactly when a surviving estimate would
+    # be most misleading.
+    assert not report.position_reconciled
+    pos = repo.get_current_position(db.conn, "r", "BTC")
+    assert pos is not None and pos.liquidation_price is None
 
 
 # -- §12.3: equity tolerance -----------------------------------------------------
@@ -762,7 +1010,18 @@ def test_a_capped_fill_window_withholds_invalid_fill_verdicts(env):
     report = reconciler.run("heartbeat")
     assert not report.fills_reconciled  # inconclusive → fail-safe unclean
     assert not any(c.case_type == "invalid_local_fill" for c in report.cases)
-    assert any("not covered" in e for e in report.errors)
+    # The stalled-timestamp branch by name, not merely "not covered": the pager
+    # emits two errors under that same prefix, and the other one ("response
+    # still capped after N pages") is where this fixture falls through if the
+    # stall detection under test is removed — so the loose predicate could not
+    # tell the two apart (2026-08-01 round-18 concept scan).
+    stalled = next(e for e in report.errors if "no advanceable timestamp" in e)
+    # The shared prefix operators grep for, and the consequence clause — both
+    # were left unasserted when the predicate was narrowed to the distinguishing
+    # words, so either could be deleted from the message unnoticed
+    # (2026-08-01 round-19 mutation probe).
+    assert stalled.startswith("fill cross-check window not covered")
+    assert stalled.endswith("invalid-fill verdicts withheld")
 
 
 class _StubBackfiller:

@@ -36,6 +36,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from ..persistence.cloid import LIVE_ORDER_ROLES
 from .config import ExecutionMode, LiveConfig
 
 __all__ = [
@@ -62,6 +63,11 @@ _ConditionScope = Literal["always", "decision", "safe_mode"]
 # safe-mode gate lines only (state_reconciled / manual_safe_mode); the base wire
 # preconditions and the armed kill switch still bind them.
 PROTECTIVE_ORDER_ROLES = frozenset({"stop_loss", "take_profit", "emergency_close"})
+# Literal copy of LIVE_ORDER_ROLES members: a role renamed there without this
+# file would silently drop it from the safe-mode exemption — the one order most
+# needed under safe mode would be gated. Fail at import.
+if not PROTECTIVE_ORDER_ROLES <= LIVE_ORDER_ROLES:
+    raise AssertionError("PROTECTIVE_ORDER_ROLES drifted from LIVE_ORDER_ROLES")
 
 # The §3 modes in which real orders can exist at all. mainnet_live is included
 # because §4.1 lists it — config load already rejects it (§22), so its presence

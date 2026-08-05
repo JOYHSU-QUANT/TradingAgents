@@ -64,6 +64,18 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
+# Trading stores (hyperliquid_perp). RUNBOOK-live runs the CLI from THIS
+# directory with a relative --db, so live_trading.db / paper_trading.db are
+# created right here. They carry the full order/fill/position history, account
+# equity and the genesis config snapshot — no secrets (the agent key never
+# reaches the store), but real trading activity that must never be one
+# `git add -A` away from being published. Only db.sqlite3 was covered before
+# (2026-07-30 security review).
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
 # Flask stuff:
 instance/
 .webassets-cache

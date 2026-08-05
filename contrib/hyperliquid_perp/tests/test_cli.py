@@ -10,6 +10,7 @@ import csv
 import json
 import os
 import signal
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from contrib.hyperliquid_perp.cli import (
     _post_cycle_export,
     _raise_keyboard_interrupt,
     _run_config_subset,
+    _still_owns_run,
     main as cli_main,
 )
 from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, RiskConfig
@@ -33,8 +35,9 @@ from contrib.hyperliquid_perp.live.config import ExecutionMode
 from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.paper.scheduler import DecisionInput
 from contrib.hyperliquid_perp.persistence import repository as repo
-from contrib.hyperliquid_perp.persistence.db import Database
+from contrib.hyperliquid_perp.persistence.db import Database, connect
 from contrib.hyperliquid_perp.persistence.models import PositionState
+from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 
 from .conftest import insert_decision_attempts
 
@@ -130,7 +133,9 @@ def test_build_input_payload_write_failure_rides_retry_ladder(tmp_path, monkeypa
 
     as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
     ctx = _perp_ctx(as_of)
-    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, None))
+    # **kw absorbs on_blocking_read: the live provider passes the kill-switch
+    # refresh so _build_context's market reads do not form one unrefreshed chain.
+    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin, **kw: (ctx, None))
     monkeypatch.setattr(main_mod, "_warmup_threshold", lambda config: 1)
 
     provider = object.__new__(_EngineDecisionProvider)
@@ -290,6 +295,47 @@ def test_validate_operator_errors_exit_1(tmp_path, capsys):
     assert cli_main(["validate", "--run-id", "r", "--db", str(tmp_path / "nope.db")]) == 1
     err = capsys.readouterr().err
     assert "does not exist" in err
+
+
+def test_read_only_commands_refuse_a_store_that_needs_migrating(tmp_path, capsys):
+    # The offline commands take NO run lease, so the old behaviour — open, and
+    # migrate on the way in — meant "just preview the numbers" on the deploy box
+    # silently upgraded the store the running daemon owns, leaving that daemon
+    # writing through a schema it does not know. Both must refuse (exit 1, the
+    # operator-error lane) and leave the store exactly as they found it.
+    path, db = _seed_db(tmp_path)
+    with db.transaction() as conn:
+        conn.execute("DELETE FROM schema_migrations WHERE version = ?", (SCHEMA_VERSION,))
+    db.close()
+
+    assert cli_main(["validate", "--run-id", "r", "--db", str(path)]) == 1
+    err = capsys.readouterr().err
+    assert "store schema is v" in err and "will not migrate" in err
+
+    out_dir = tmp_path / "exp"
+    assert (
+        cli_main(["export", "--run-id", "r", "--output-dir", str(out_dir), "--db", str(path)]) == 1
+    )
+    assert "store schema is v" in capsys.readouterr().err
+
+    # Neither command wrote the missing migration back: the store is still the
+    # version the daemon is running against.
+    probe = connect(path)
+    recorded = probe.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+    probe.close()
+    assert recorded == SCHEMA_VERSION - 1
+
+    # Negative control: with the bookkeeping restored the very same command runs —
+    # the refusal is the version check, not a broken store path. (Written raw,
+    # not via a migrating open: this store's TABLES are already current, only its
+    # schema_migrations row was removed to stage the "needs upgrading" read.)
+    restore = connect(path)
+    restore.execute(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+        (SCHEMA_VERSION, "2026-07-30T00:00:00+00:00"),
+    )
+    restore.close()
+    assert cli_main(["validate", "--run-id", "r", "--db", str(path)]) == 4
 
 
 def test_export_subcommand_writes_eight_csvs(tmp_path, capsys):
@@ -864,6 +910,21 @@ def test_paper_invalid_config_exits_1(tmp_path, capsys, monkeypatch):
         (RuntimeError("HTTP 429 Too Many Requests"), "rate_limit"),
         (RuntimeError("Connection refused by host"), "connection"),
         (RuntimeError("something exploded"), "server_error"),
+        # A bare "429" used to match here, so any larger number containing those
+        # three digits — an oid, an epoch-ms timestamp, a price — filed as a rate
+        # limit. The sibling classifier in sdk_client.py deleted the marker for
+        # this reason; this copy kept it (2026-08-01 round-18 concept scan).
+        (RuntimeError("run 1429 aborted at 14290 ms"), "server_error"),
+        # And the class name alone still carries a real one, which is how the
+        # SDKs actually surface it.
+        (type("RateLimitError", (RuntimeError,), {})("slow down"), "rate_limit"),
+        # The spaced phrase — the other half of the argument for deleting "429",
+        # and the half nothing asserted (2026-08-01 round-19 mutation probe).
+        (RuntimeError("provider rate limit exceeded"), "rate_limit"),
+        # Order pinned in the two remaining collisions: rate_limit beats
+        # connection, and timeout beats rate_limit.
+        (RuntimeError("connection reset while rate limit backoff ran"), "rate_limit"),
+        (RuntimeError("rate limit wait timed out"), "timeout"),
         # Order pinned: when a message matches both vocabularies, timeout wins.
         (RuntimeError("connection timeout while reading"), "timeout"),
     ],
@@ -1184,6 +1245,66 @@ def test_live_heartbeat_contains_a_failing_safe_mode_write(monkeypatch):
     safe_mode = _RecordingSafeMode(raises=True)
     _live_heartbeat(object(), "r", pid=123, now=_T0, safe_mode=safe_mode)  # still no raise
     assert len(safe_mode.entered) == 1
+
+
+# --------------------------------------------------------------------------
+# _still_owns_run: the positive re-check guarding the §18.2 shutdown sweep
+# --------------------------------------------------------------------------
+
+
+def test_still_owns_run_false_once_a_successor_holds_the_lease(tmp_path):
+    # The shutdown sweep's ``superseded`` flag is absence-of-evidence: it is set
+    # only when the loop's heartbeat actually RAISED, and the Ctrl-C / SIGTERM
+    # lane leaves the loop with no heartbeat at all. So after a tick that blocked
+    # past LOCK_STALE_SECONDS a successor can already own the run while this
+    # process still reads ``superseded is False`` — and the §18.2 sweep would
+    # then cancel the SUCCESSOR's SL/TP and clear the wallet's dead-man switch.
+    # This is the re-ASK that catches it.
+    from contrib.hyperliquid_perp.paper.run_lock import LOCK_STALE_SECONDS, acquire_run_lock
+
+    db = Database(tmp_path / "own.db")
+    acquire_run_lock(db, "r", pid=101, now=_T0)
+    takeover_at = _T0 + timedelta(seconds=LOCK_STALE_SECONDS)
+    acquire_run_lock(db, "r", pid=202, now=takeover_at)  # legitimate takeover
+    assert _still_owns_run(db, "r", pid=101, now=takeover_at + timedelta(seconds=30)) is False
+    row = repo.get_scheduler_state(db.conn, "r")
+    assert row["lock_pid"] == 202  # and the loser must not stamp itself back on
+    assert row["lock_heartbeat_at"] == takeover_at.isoformat()
+    db.close()
+
+
+def test_still_owns_run_true_for_the_holder_and_refreshes_the_lease(tmp_path):
+    # The ordinary shutdown: the lease is ours, the sweep must run. The refresh
+    # is not incidental — the check goes through heartbeat_run_lock, so the
+    # lease stays warm for however long the sweep's cancels take on the wire.
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+
+    db = Database(tmp_path / "own.db")
+    acquire_run_lock(db, "r", pid=101, now=_T0)
+    beat = _T0 + timedelta(seconds=60)
+    assert _still_owns_run(db, "r", pid=101, now=beat) is True
+    assert repo.get_scheduler_state(db.conn, "r")["lock_heartbeat_at"] == beat.isoformat()
+    db.close()
+
+
+def test_still_owns_run_fails_open_when_the_store_blips(tmp_path, caplog, monkeypatch):
+    # Deliberately fail-OPEN, the opposite of _live_heartbeat's containment: a
+    # busy/locked SQLite store is not evidence of supersession, and treating it
+    # as one would skip the §18.2 sweep and strand this run's own resting orders
+    # on the wallet with nothing left to cancel them. Only RunLockError — a
+    # positive answer that someone else holds the lease — gives the run away.
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+
+    def busy(db_, run_id, *, pid, now):
+        raise sqlite3.OperationalError("database is locked")
+
+    db = Database(tmp_path / "own.db")
+    run_lock_mod.acquire_run_lock(db, "r", pid=101, now=_T0)
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", busy)
+    with caplog.at_level("WARNING"):
+        assert _still_owns_run(db, "r", pid=101, now=_T0 + timedelta(seconds=60)) is True
+    assert "could not re-verify the run lease" in caplog.text  # never silent
+    db.close()
 
 
 # --------------------------------------------------------------------------
@@ -2338,11 +2459,19 @@ def _live_yaml(
     top_level_network: str | None = None,
     live_lines: str | None = "  mode: testnet_live\n  network: testnet\n",
     risk_lines: str | None = "  leverage: 1\n  margin_mode: cross\n  max_target_margin_pct: 60\n",
+    # RUNBOOK §1.5's value, defaulted for the same reason the live-smoke helper
+    # defaults it: the 30s top-level default is deliberately illegal in live
+    # (30+30+30+15+30 = 135 >= 120 fires the timing preflight), so a helper that
+    # omitted it produced configs no operator could actually run — masked until
+    # the fake client stopped under-reporting its timeout (2026-08-01 round-16).
+    network_timeout_s: float | None = 8,
 ):
     path = tmp_path / "live-cfg.yaml"
     text = ""
     if wallet is not None:
         text += f'wallet_address: "{wallet}"\n'
+    if network_timeout_s is not None:
+        text += f"network_timeout_s: {network_timeout_s}\n"
     if top_level_network is not None:
         text += f"network: {top_level_network}\n"
     if risk_lines is not None:
@@ -2373,6 +2502,9 @@ def live_seams(monkeypatch):
 
     state = SimpleNamespace(
         equity=D(1000),
+        # A flat account by default — the shape every existing live CLI test
+        # already assumed the exchange had.
+        positions=[],
         account_error=None,
         auth_error=None,
         # Relative to the wall clock because _cmd_live's near-expiry warning
@@ -2387,6 +2519,10 @@ def live_seams(monkeypatch):
         signed_gates=[],
     )
 
+    from contrib.hyperliquid_perp.exchanges.hyperliquid.sdk_client import (
+        DEFAULT_NETWORK_TIMEOUT_S,
+    )
+
     class _FakeClient:
         def __init__(self, network="mainnet", *, timeout=None):
             if state.client_error is not None:
@@ -2398,7 +2534,17 @@ def live_seams(monkeypatch):
 
         @classmethod
         def from_config(cls, config, *, timeout=None, network=None):
-            # Mirrors the real from_config's network-override contract.
+            # Mirrors the real from_config's network-override contract AND its
+            # timeout resolution. Returning None for a config that states one made
+            # this double claim "no timeout", which silently dropped a term of the
+            # kill switch's timing invariant: `_cmd_live`'s preflight then passed
+            # configs that exit 1 in production, so the exit-4 smoke-gate contract
+            # these tests assert was never reachable there. The sibling double in
+            # test_live_smoke_cli.py was fixed one round earlier; this one was
+            # missed (2026-08-01 round-16 review).
+            if timeout is None:
+                raw = config.get("network_timeout_s")
+                timeout = float(raw) if raw is not None else DEFAULT_NETWORK_TIMEOUT_S
             return cls(network=network or config.get("network", "mainnet"), timeout=timeout)
 
     class _FakeAccount:
@@ -2409,7 +2555,15 @@ def live_seams(monkeypatch):
             state.snapshot_requests.append(addr)
             if state.account_error is not None:
                 raise state.account_error
-            return SimpleNamespace(account_value=state.equity)
+            # ``positions`` mirrors the real snapshot: _live_startup_recovery
+            # reads it to reject off-coin holdings on the ``--create`` path.
+            # Round 17 added it while pinning the daemon's KillSwitchManager
+            # kwargs and claimed the pin needed it; it does not — that test
+            # resumes an existing run and never enters the reading branch, and
+            # the suite is green without this field. Kept because the double is
+            # more faithful with it, and the daemon path really does read it
+            # under ``--create`` (2026-08-01 round-18 mutation probe).
+            return SimpleNamespace(account_value=state.equity, positions=state.positions)
 
     def _fake_verify(info, *, wallet_address, agent_key, now=None):
         state.auth_calls.append(wallet_address)
@@ -2424,6 +2578,12 @@ def live_seams(monkeypatch):
         def __init__(self, network, agent_key, *, wallet_address, gate, timeout=None):
             self.network = network
             self.wallet_address = wallet_address
+            # Mirrors the real signed client, which keeps its resolved timeout —
+            # the CLI hands it to KillSwitchManager as the failed-attempt term of
+            # the refresh-timing invariant. This is the third double in the suite
+            # to have been missing it; the two siblings were fixed in rounds 15
+            # and 16, and only a test that reaches manager construction can tell.
+            self.timeout = timeout
             # PR 2: the §4.1 gate is bound at construction; the config-only
             # command must hand over a fail-closed gate.
             state.signed_gates.append(gate)
@@ -2870,3 +3030,700 @@ def test_live_matching_top_level_network_does_not_warn(tmp_path, capsys, live_se
     rc = cli_main(["live", "--config", str(path)])
     assert rc == 0
     assert "ignores the top-level network" not in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# live-smoke + validate (live) — PR 6
+# --------------------------------------------------------------------------
+
+
+def _make_live_run(
+    tmp_path,
+    *,
+    mode="testnet_live",
+    run_id="live-BTC",
+    db_name="live_trading.db",
+    coin="BTC",
+    config_json=None,
+):
+    from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
+
+    if config_json is None:
+        # The identity fields a real `live --create` genesis always records —
+        # the live-smoke drift check (2026-07-28) reads coin + live.network.
+        config_json = json.dumps(
+            {
+                "coin": coin,
+                "live": {
+                    "mode": mode,
+                    "network": "testnet" if mode == "testnet_live" else "mainnet",
+                },
+            }
+        )
+    db = Database(tmp_path / db_name)
+    accounting.initialize_run(
+        db,
+        run_id=run_id,
+        mode="live",
+        initial_balance_usdc=Decimal(200),
+        schema_version=SCHEMA_VERSION,
+        config_json=config_json,
+    )
+    db.close()
+    return tmp_path / db_name
+
+
+def test_validate_dispatches_live_run(tmp_path, capsys):
+    dbp = _make_live_run(tmp_path)
+    rc = cli_main(["validate", "--run-id", "live-BTC", "--db", str(dbp)])
+    out = capsys.readouterr().out
+    assert "execution_mode: testnet_live" in out
+    # A freshly-initialized live run is internally consistent (clean replay) but
+    # short of the gate (0 cycles, no smoke) → exit 4 "keep running", not 5.
+    assert rc == 4
+    assert "shortfall:" in out
+
+
+def test_validate_live_missing_run_exits_1(tmp_path, capsys):
+    dbp = _make_live_run(tmp_path)
+    rc = cli_main(["validate", "--run-id", "nope", "--db", str(dbp)])
+    assert rc == 1
+    assert "does not exist" in capsys.readouterr().err
+
+
+def test_live_smoke_gate_status_reports_not_passed(tmp_path, capsys):
+    dbp = _make_live_run(tmp_path)
+    rc = cli_main(["live-smoke", "--run-id", "live-BTC", "--db", str(dbp), "--gate-status"])
+    out = capsys.readouterr().out
+    assert "smoke_gate_passed: no" in out
+    assert rc == 4
+
+
+def test_live_smoke_gate_status_nonexistent_run_exits_1(tmp_path, capsys):
+    dbp = _make_live_run(tmp_path)
+    rc = cli_main(["live-smoke", "--run-id", "nope", "--db", str(dbp), "--gate-status"])
+    assert rc == 1
+
+
+def test_live_smoke_bad_only_key_exits_1(tmp_path, capsys):
+    dbp = _make_live_run(tmp_path)
+    rc = cli_main(["live-smoke", "--run-id", "live-BTC", "--db", str(dbp), "--only", "bogus"])
+    assert rc == 1
+    assert "unknown smoke test key" in capsys.readouterr().err
+
+
+def test_live_smoke_dry_run_records_skipped(tmp_path, capsys):
+    # Dry-run needs a valid live config + the run to exist; it touches no network.
+    # Genesis matches the config (the drift identity check runs before the
+    # dry-run fork, 2026-07-28).
+    cfg = _live_yaml(tmp_path)
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg, run_id="live-BTC")
+    rc = cli_main(
+        ["live-smoke", "--config", str(cfg), "--run-id", "live-BTC", "--db", str(dbp), "--dry-run"]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "dry-run complete" in out
+    assert "smoke_gate_passed: no" in out  # dry-run rows never satisfy the gate
+
+
+def test_live_smoke_refuses_mainnet_mode(tmp_path, capsys):
+    # The §20.2 smoke suite is a TESTNET pre-flight; a mainnet_tiny config must be
+    # refused before any real order can reach mainnet (mainnet relies on the
+    # separately-run testnet smoke, §21.3).
+    cfg = _live_yaml(tmp_path, live_lines="  mode: mainnet_tiny\n  network: mainnet\n")
+    dbp = _make_live_run(tmp_path, mode="mainnet_tiny")
+    rc = cli_main(["live-smoke", "--config", str(cfg), "--run-id", "live-BTC", "--db", str(dbp)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "only against a testnet_live run" in err
+    assert "mainnet_tiny" in err
+
+
+def test_live_smoke_refuses_mainnet_even_with_dry_run(tmp_path, capsys):
+    # The guard sits before the dry-run branch: a mainnet config is refused even
+    # for the offline wiring check, so a green dry-run can never lull an operator.
+    cfg = _live_yaml(tmp_path, live_lines="  mode: mainnet_tiny\n  network: mainnet\n")
+    dbp = _make_live_run(tmp_path, mode="mainnet_tiny")
+    rc = cli_main(
+        ["live-smoke", "--config", str(cfg), "--run-id", "live-BTC", "--db", str(dbp), "--dry-run"]
+    )
+    assert rc == 1
+    assert "only against a testnet_live run" in capsys.readouterr().err
+
+
+def test_live_smoke_refuses_run_created_for_another_network(tmp_path, capsys):
+    # Q1 2026-07-28: run-identity discipline. A valid testnet config with a
+    # typo'd --run-id pointing at the mainnet acceptance run (same default db)
+    # must be refused BEFORE the pre-flight recovery can reconcile the testnet
+    # exchange against that ledger and file integrity cases the §5 cumulative
+    # policy makes permanent. The genesis live.network mismatch is the trip.
+    cfg = _live_yaml(tmp_path)  # testnet_live / testnet
+    dbp = _make_live_run(tmp_path, mode="mainnet_tiny")  # genesis network=mainnet
+    rc = cli_main(
+        ["live-smoke", "--config", str(cfg), "--run-id", "live-BTC", "--db", str(dbp), "--dry-run"]
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "live.network" in err
+    assert "new --run-id" in err
+
+
+def test_live_smoke_refuses_run_created_for_another_coin(tmp_path, capsys):
+    cfg = _live_yaml(tmp_path)  # allowed_symbols → BTC
+    dbp = _make_live_run(tmp_path, coin="ETH")
+    rc = cli_main(
+        ["live-smoke", "--config", str(cfg), "--run-id", "live-BTC", "--db", str(dbp), "--dry-run"]
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "created for coin 'ETH'" in err
+    assert "'BTC'" in err
+
+
+def test_live_smoke_gate_status_refuses_non_testnet_run(tmp_path, capsys):
+    # Q2 2026-07-28: a mainnet_tiny run's live_smoke_tests is empty BY DESIGN
+    # (§21.3) — raw buckets would print "not_yet_run: <all 18>" + exit 4 and
+    # read as "go smoke-test mainnet", contradicting validate's "n/a (§21.3)".
+    dbp = _make_live_run(tmp_path, mode="mainnet_tiny")
+    rc = cli_main(["live-smoke", "--run-id", "live-BTC", "--db", str(dbp), "--gate-status"])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "§21.3" in captured.err
+    assert "smoke_gate_passed" not in captured.out
+
+
+def test_live_smoke_gate_status_refuses_unknown_genesis_mode(tmp_path, capsys):
+    # A hand-built run whose genesis names no live.mode reads as "unknown" —
+    # fail-safe refusal, same as any non-testnet mode.
+    dbp = _make_live_run(tmp_path, config_json="{}")
+    rc = cli_main(["live-smoke", "--run-id", "live-BTC", "--db", str(dbp), "--gate-status"])
+    assert rc == 1
+    assert "'unknown'" in capsys.readouterr().err
+
+
+def test_live_smoke_gate_status_refuses_only_and_dry_run(tmp_path, capsys):
+    # --gate-status is a pure store read: combining it with an action flag is
+    # ambiguous operator intent (read the gate, or run/skip tests?) — refused
+    # by name before anything touches the store.
+    dbp = _make_live_run(tmp_path)
+    rc = cli_main(
+        [
+            "live-smoke",
+            "--run-id",
+            "live-BTC",
+            "--db",
+            str(dbp),
+            "--gate-status",
+            "--only",
+            "signed_client_init",
+        ]
+    )
+    assert rc == 1
+    assert "drop --dry-run/--only" in capsys.readouterr().err
+
+    rc2 = cli_main(
+        ["live-smoke", "--run-id", "live-BTC", "--db", str(dbp), "--gate-status", "--dry-run"]
+    )
+    assert rc2 == 1
+    assert "drop --dry-run/--only" in capsys.readouterr().err
+
+
+def test_live_smoke_only_status_without_submit_exits_1(tmp_path, capsys):
+    # Q3 2026-07-28: test 4 queries the order test 3 places in the same
+    # process, so this selection can never pass — refuse it at the entrance
+    # instead of writing a real FAILED row that validate would present as
+    # "exchange refused".
+    dbp = _make_live_run(tmp_path)
+    rc = cli_main(
+        ["live-smoke", "--run-id", "live-BTC", "--db", str(dbp), "--only", "slice_order_status"]
+    )
+    assert rc == 1
+    assert "select both" in capsys.readouterr().err
+
+
+# -- live --loop §20.2 gate consumer + live-smoke lease (2026-07-27) --------
+
+
+def _seed_live_run_with_genesis_subset(
+    tmp_path, cfg_path, *, run_id="r1", db_name="live_trading.db"
+):
+    """A live run whose genesis config_json matches what --create would record,
+    so a later ``live --run-id`` restart passes the drift check offline."""
+    from contrib.hyperliquid_perp.config import load_config
+    from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
+
+    conf = load_config(str(cfg_path))
+    subset = _run_config_subset(conf, "BTC")
+    subset["live"] = conf["live"]
+    dbp = tmp_path / db_name
+    db = Database(dbp)
+    accounting.initialize_run(
+        db,
+        run_id=run_id,
+        mode="live",
+        initial_balance_usdc=Decimal(200),
+        schema_version=SCHEMA_VERSION,
+        config_json=json.dumps(subset, ensure_ascii=False, default=str),
+    )
+    db.close()
+    return dbp
+
+
+def test_live_loop_refuses_testnet_run_until_smoke_passes(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # The gate CONSUMER itself (review 2026-07-27): a testnet_live restart with
+    # no passing smoke rows must be refused --loop by name, before the run lock
+    # or the kill switch is touched.
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp), "--loop"])
+    # Exit 4, not 1 (decision 2026-07-29): "the gate is not open" is the same
+    # not-yet-at-the-gate fact live-smoke itself reports as 4 — a supervisor
+    # must be able to tell it from a config/auth failure's exit 1.
+    assert rc == 4
+    err = capsys.readouterr().err
+    assert "§20.2 smoke suite" in err
+    assert "not yet run" in err
+
+
+def test_live_loop_open_smoke_gate_proceeds_past_the_gate(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # With all 18 smoke rows passed the gate opens: --loop prints the
+    # oldest-pass age line and moves on to the run lock (pre-held here, so the
+    # command stops at the lease refusal — proof it got PAST the gate).
+    from contrib.hyperliquid_perp.live import smoke as smoke_mod
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
+    db = Database(dbp)
+    with db.transaction() as conn:
+        for test in smoke_mod.SMOKE_TESTS:
+            repo.insert_smoke_test_result(
+                conn,
+                run_id="r1",
+                test_number=test.number,
+                test_key=test.key,
+                test_name=test.name,
+                status="passed",
+                network="testnet",
+                executed_at=datetime(2026, 7, 20, tzinfo=timezone.utc),
+            )
+    acquire_run_lock(db, "r1", pid=999999, now=datetime.now(timezone.utc))
+    db.close()
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp), "--loop"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "smoke gate open" in err  # the age line printed
+    assert "§20.2 smoke suite" not in err  # NOT the gate refusal
+    assert "2026-07-20" in err  # names the oldest pass
+
+
+def _open_smoke_gate(dbp, run_id="r1") -> None:
+    from contrib.hyperliquid_perp.live import smoke as smoke_mod
+
+    db = Database(dbp)
+    with db.transaction() as conn:
+        for test in smoke_mod.SMOKE_TESTS:
+            repo.insert_smoke_test_result(
+                conn,
+                run_id=run_id,
+                test_number=test.number,
+                test_key=test.key,
+                test_name=test.name,
+                status="passed",
+                network="testnet",
+                executed_at=datetime(2026, 7, 20, tzinfo=timezone.utc),
+            )
+    db.close()
+
+
+def test_live_create_refused_by_a_sibling_leaves_no_half_created_run(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # The refusal has to land BEFORE --create writes the run row. Refusing after
+    # left a half-created run behind, and the operator's corrected re-run was
+    # then rejected with "already exists — drop --create to resume it" — a
+    # second, unrelated error for a run they never got to start.
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+    from contrib.hyperliquid_perp.persistence import repository as repo_mod
+
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg, run_id="sibling")
+    db = Database(dbp)
+    acquire_run_lock(db, "sibling", pid=999999, now=datetime.now(timezone.utc))
+    db.close()
+    rc = cli_main(
+        ["live", "--config", str(cfg), "--run-id", "brand-new", "--db", str(dbp), "--create"]
+    )
+    assert rc == 1
+    assert "ACCOUNT-wide" in capsys.readouterr().err
+    # The run was never created, so the corrected re-run is a clean --create.
+    with Database(dbp) as db:
+        assert repo_mod.get_run(db.conn, "brand-new") is None
+
+
+def test_live_loop_refuses_a_same_wallet_sibling_run(tmp_path, capsys, live_seams, monkeypatch):
+    # The guard `live-smoke` has had since 2026-07-30, now on the path that runs
+    # with REAL money. The run lease is per-run_id and both runs hold their own
+    # quite happily, but this command arms and clears the ACCOUNT-wide
+    # scheduleCancel and runs the §19.3 sweep, whose bot-ownership lookup carries
+    # no run_id — so the two runs cancel each other's resting orders and
+    # whichever shuts down first strips the other's dead-man cover.
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
+    _seed_live_run_with_genesis_subset(tmp_path, cfg, run_id="sibling")
+    _open_smoke_gate(dbp)
+    db = Database(dbp)
+    acquire_run_lock(db, "sibling", pid=999999, now=datetime.now(timezone.utc))
+    db.close()
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp), "--loop"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "ACCOUNT-wide" in err
+    assert "sibling" in err
+    # And it must not offer the remedy that does not work: the hazard is
+    # per-wallet, so a separate store only hides the two runs from this check.
+    assert "does NOT help" in err
+
+
+def test_live_loop_smoke_gate_does_not_apply_to_a_mainnet_run(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    """The gate's testnet_live SCOPING, which had no test (review 2026-07-30).
+
+    §21.3 proves smoke on the separate testnet run, so a mainnet_tiny run's
+    live_smoke_tests table is empty BY DESIGN. Drop the `mode is TESTNET_LIVE`
+    clause from the gate and this run would find all 18 missing and exit 4
+    forever — permanently unstartable, which is exactly why the scoping exists.
+    The negative control is the testnet test above: same empty table, exit 4.
+    """
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: mainnet_tiny\n  network: mainnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
+    db = Database(dbp)
+    # Lease pre-held so the command stops at the lease refusal — proof it got
+    # PAST the gate rather than being refused by it.
+    acquire_run_lock(db, "r1", pid=999999, now=datetime.now(timezone.utc))
+    db.close()
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp), "--loop"])
+    assert rc == 1  # the lease, not the gate's exit 4
+    err = capsys.readouterr().err
+    assert "§20.2 smoke suite" not in err
+    assert "not yet run" not in err
+
+
+def test_live_loop_without_an_api_key_is_refused_up_front(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    """Without a key every 4h cycle records api_failed, which never counts toward
+    the §20.3 >=30-cycle gate — a real-money run could burn days producing nothing
+    gateable. _cmd_paper always checked this; the live path did not (2026-07-30).
+    """
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp), "--loop"])
+    assert rc == 1
+    assert "OPENROUTER_API_KEY" in capsys.readouterr().err
+
+
+def test_live_without_loop_still_runs_keyless(tmp_path, capsys, live_seams, monkeypatch):
+    """Control for the guard above: `live` without --loop never polls the AI.
+
+    It arms, sweeps and exits, so it must stay keyless — the guard belongs to
+    --loop alone. Stopped at the pre-held lease, well past the key check.
+    """
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
+    db = Database(dbp)
+    acquire_run_lock(db, "r1", pid=999999, now=datetime.now(timezone.utc))
+    db.close()
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    assert rc == 1  # the lease
+    assert "OPENROUTER_API_KEY" not in capsys.readouterr().err
+
+
+def test_live_refuses_a_nonexistent_db_without_create(tmp_path, capsys, live_seams, monkeypatch):
+    """Database() creates AND migrates, so a typo'd --db must not be opened.
+
+    Without this guard the command left an empty migrated live store behind
+    before failing on "run does not exist" — and with --create it would silently
+    open a SECOND live ledger over the same real wallet (review 2026-07-30).
+    """
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    missing = tmp_path / "typo.db"
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(missing)])
+    assert rc == 1
+    assert "does not exist" in capsys.readouterr().err
+    assert not missing.exists()  # nothing was created
+
+
+def test_the_daemon_writes_unmarked_rows(tmp_path, live_seams, monkeypatch):
+    """The inverse of the smoke marking, pinned where the wiring actually is.
+
+    ``suite_authored=True`` on the DAEMON's manager is one kwarg away, in the
+    sibling constructor 1500 lines from the smoke one, and it left the whole
+    suite green: a unit test on the manager's default cannot see what the CLI
+    passes. In production it would make every real refresh suite-authored, so
+    ``refreshed`` stays 0, the §20.3 floor is never reached, ``live_ready`` can
+    never be true — and the operator is told the run's refreshes "were written
+    during live-smoke" (2026-08-01 round-17 mutation probe).
+    """
+    import contextlib
+
+    from contrib.hyperliquid_perp.live import kill_switch as ks_mod
+
+    seen: list[dict] = []
+    real = ks_mod.KillSwitchManager
+
+    class _Recording(real):  # type: ignore[misc, valid-type]
+        def __init__(self, **kwargs):
+            seen.append(kwargs)
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(ks_mod, "KillSwitchManager", _Recording)
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg, run_id="r1")
+    # The recovery is NOT driven to completion, and that is deliberate rather than
+    # papered over: ``live_seams``' signed double stops short of the fill-backfill
+    # surface a full §19.1 pass needs. The fact under test is settled before then
+    # — what the CLI hands the constructor — and ``assert seen`` fails loudly if
+    # construction ever stops being reached.
+    with contextlib.suppress(Exception):
+        cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    assert seen, "no KillSwitchManager was constructed — the pin proves nothing"
+    assert all(kwargs.get("suite_authored", False) is False for kwargs in seen), seen
+    # The other term this call site carries, and the reason round 17 had to make
+    # ``_FakeSigned.timeout`` faithful in the first place: forcing it to None
+    # here left the whole suite green, so the daemon's copy of the §18.2 timing
+    # budget could lose its failed-attempt cost undetected. The smoke sibling
+    # pins the same value; this one asserted only the marker
+    # (2026-08-01 round-18 mutation probe).
+    assert all(kwargs.get("network_timeout_s") == 8 for kwargs in seen), seen
+
+
+def test_live_refuses_a_timeout_that_cannot_fit_the_kill_switch_budget(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    """The §18.2 timing preflight's exit-1 path, at the CLI, over a real config.
+
+    Only the pure function was tested, so nothing observed that the CLI reads the
+    timeout off the client at all — and the fake client under-reported it as
+    None, which silently dropped a term and let these tests reach assertions the
+    same config cannot reach in production. This is the end-to-end pin: the
+    top-level 30s DEFAULT is deliberately illegal in live
+    (30 + 30 + 30 + 15 + 30 = 135 >= 120) and must be refused by name before the
+    run lock is taken (2026-08-01 round-16 review).
+    """
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    cfg = _live_yaml(
+        tmp_path,
+        network_timeout_s=None,  # omitted -> the client resolves the 30s default
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(tmp_path / "l.db")])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "cannot be refreshed in time" in err
+    # The message names the knob the operator can actually change.
+    assert "network_timeout_s" in err
+
+
+def test_live_smoke_real_run_requires_the_run_lease(tmp_path, capsys, monkeypatch):
+    # live-smoke places real orders and runs recoveries — the same actions the
+    # run lease keeps single-owner. A held lease must refuse the suite.
+    from contrib.hyperliquid_perp import cli as cli_mod
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+
+    dbp = _make_live_run(tmp_path)
+    db = Database(dbp)
+    acquire_run_lock(db, "live-BTC", pid=999999, now=datetime.now(timezone.utc))
+    db.close()
+    monkeypatch.setattr(
+        cli_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+    )
+    rc = cli_main(
+        ["live-smoke", "--config", "unused.yaml", "--run-id", "live-BTC", "--db", str(dbp)]
+    )
+    assert rc == 1
+    assert "places real orders" in capsys.readouterr().err
+
+
+def test_live_smoke_preflight_failure_exits_4_and_releases_the_lease(tmp_path, capsys, monkeypatch):
+    # A pre-flight recovery failure aborts the suite: exit 4, the error named on
+    # stderr, and the lease released so the operator can immediately retry.
+    from contrib.hyperliquid_perp import cli as cli_mod
+    from contrib.hyperliquid_perp.live import smoke as smoke_mod
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+
+    dbp = _make_live_run(tmp_path)
+    monkeypatch.setattr(
+        cli_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+    )
+
+    def _fail_preflight(self, *, only=None):
+        raise smoke_mod.SmokePreflightError("pre-flight §19.1 recovery did not pass — offline test")
+
+    monkeypatch.setattr(smoke_mod.SmokeTestRunner, "run", _fail_preflight)
+    rc = cli_main(
+        ["live-smoke", "--config", "unused.yaml", "--run-id", "live-BTC", "--db", str(dbp)]
+    )
+    captured = capsys.readouterr()
+    assert rc == 4
+    assert "pre-flight" in captured.err
+    # The lease must be free again: a fresh acquire under a different pid works.
+    db = Database(dbp)
+    acquire_run_lock(db, "live-BTC", pid=424242, now=datetime.now(timezone.utc))
+    db.close()
+
+
+def test_live_smoke_superseded_lease_exits_1_by_name(tmp_path, capsys, monkeypatch):
+    # A mid-suite lease takeover surfaces as the named lock outcome (exit 1),
+    # not main()'s generic exit 2.
+    from contrib.hyperliquid_perp import cli as cli_mod
+    from contrib.hyperliquid_perp.live import smoke as smoke_mod
+    from contrib.hyperliquid_perp.paper.run_lock import RunLockError
+
+    dbp = _make_live_run(tmp_path)
+    monkeypatch.setattr(
+        cli_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+    )
+
+    def _superseded(self, *, only=None):
+        raise RunLockError("run 'live-BTC' lease superseded by pid 4242")
+
+    monkeypatch.setattr(smoke_mod.SmokeTestRunner, "run", _superseded)
+    rc = cli_main(
+        ["live-smoke", "--config", "unused.yaml", "--run-id", "live-BTC", "--db", str(dbp)]
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "superseded mid-suite" in err
+
+
+def test_live_smoke_disarm_warning_survives_an_unexpected_crash(tmp_path, capsys, monkeypatch):
+    # The disarm-failed WARNING prints from a finally (silent-failure review,
+    # 2026-07-29): a mid-suite exception escaping to main()'s generic handler
+    # is exactly when a failed disarm is most likely, and the warning must not
+    # be lost under that stack trace.
+    from contrib.hyperliquid_perp import cli as cli_mod
+    from contrib.hyperliquid_perp.live import smoke as smoke_mod
+
+    dbp = _make_live_run(tmp_path)
+    monkeypatch.setattr(
+        cli_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+    )
+
+    def _crash(self, *, only=None):
+        self.kill_switch_disarm_failed = True
+        raise RuntimeError("wire gone mid-suite")
+
+    monkeypatch.setattr(smoke_mod.SmokeTestRunner, "run", _crash)
+    rc = cli_main(
+        ["live-smoke", "--config", "unused.yaml", "--run-id", "live-BTC", "--db", str(dbp)]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2  # main()'s generic unexpected-error exit
+    assert "kill-switch disarm FAILED" in captured.err
+
+
+def test_live_smoke_staged_long_residual_warns_on_stderr(tmp_path, capsys, monkeypatch):
+    # The trigger block's staged long is closed BETWEEN tests, so a close that
+    # never flattened has no step row to land in: without this warning a real
+    # funded position is left on the wire with only a log line — which the
+    # operator may not be capturing — to show for it (review round 2026-07-29).
+    from contrib.hyperliquid_perp import cli as cli_mod
+    from contrib.hyperliquid_perp.live import smoke as smoke_mod
+
+    dbp = _make_live_run(tmp_path)
+    monkeypatch.setattr(
+        cli_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+    )
+    note = "cleanup: reduce-only close of 0.001 refused (no liquidity)"
+
+    def _leaves_a_residual(self, *, only=None):
+        self.staged_long_residual = note
+        return []
+
+    monkeypatch.setattr(smoke_mod.SmokeTestRunner, "run", _leaves_a_residual)
+    rc = cli_main(
+        ["live-smoke", "--config", "unused.yaml", "--run-id", "live-BTC", "--db", str(dbp)]
+    )
+    err = capsys.readouterr().err
+    assert rc == 4  # no verdicts recorded → the gate stays shut, as before
+    assert "trigger-block staging position may still be OPEN" in err
+    assert note in err  # the runner's own note, verbatim — the operator acts on it
+
+
+def test_live_smoke_flat_staged_long_prints_no_residual_warning(tmp_path, capsys, monkeypatch):
+    # The mirror: a suite that flattened its staged long must not cry wolf. An
+    # unconditional warning trains the operator to ignore the one run where a
+    # real position IS still open.
+    from contrib.hyperliquid_perp import cli as cli_mod
+    from contrib.hyperliquid_perp.live import smoke as smoke_mod
+
+    dbp = _make_live_run(tmp_path)
+    monkeypatch.setattr(
+        cli_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+    )
+    monkeypatch.setattr(smoke_mod.SmokeTestRunner, "run", lambda self, *, only=None: [])
+    rc = cli_main(
+        ["live-smoke", "--config", "unused.yaml", "--run-id", "live-BTC", "--db", str(dbp)]
+    )
+    err = capsys.readouterr().err
+    assert rc == 4
+    assert "staging position may still be OPEN" not in err

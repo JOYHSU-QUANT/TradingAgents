@@ -6,8 +6,9 @@
    at now + ``schedule_cancel_seconds``; the exchange cancels this wallet's
    open orders at that deadline if the process dies first.
 2. :meth:`tick` / :meth:`refresh` — push the deadline back every
-   ``refresh_interval_seconds``. A refresh failure records
-   ``kill_switch_refresh_failed``, drops ``gate.kill_switch_active`` (no new
+   ``refresh_interval_seconds``. A refresh failure records ONE
+   ``kill_switch_refresh_failed`` per outage episode (retries inside the same
+   outage add no rows; the next success closes it), drops ``gate.kill_switch_active`` (no new
    §4.1 order can pass), and raises :attr:`stop_new_orders` — the flag PR 4's
    safe-mode state machine consumes (``on_refresh_failed: safe_mode``); the
    full state machine is NOT in this PR. The flag is sticky AND enforced at
@@ -32,7 +33,16 @@
    trigger is wallet-wide, so leaving it armed would cancel the very non-bot
    orders the sweep skipped. Any failure keeps it armed as the backstop.
 
-Every state change lands in ``kill_switch_events`` (§18.5). The manager only
+Every state change lands in ``kill_switch_events`` (§18.5) — once per change,
+not once per attempt: a run of failed retries is one outage, and §20.3 measures
+it by the TIME from the failure row to the next row of positive wire evidence —
+``refreshed`` or ``armed`` (a schedule stands again) or ``disarmed`` (the
+trigger is cleared). The measure also opens an outage on SILENCE past the
+standing deadline, so one can exist with no failure row in the table at all.
+Both ends come from rows, though: a killed or wedged process writes nothing
+later either, so until some later row (a restart, a smoke run) bounds the gap
+that outage has no measured seconds — the run is only flagged
+(``ended_without_clean_shutdown`` / ``ended_in_outage``). The manager only
 exists on runs where real orders are enabled — an unarmed (paper / gate-check)
 run has no exchange orders for a dead man's switch to protect.
 """
@@ -47,6 +57,7 @@ from pathlib import Path
 from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
+from ..persistence.cloid import LIVE_ORDER_ROLES
 from ..persistence.db import Database
 from .cancel import cancel_bot_order_with_evidence
 from .config import KillSwitchConfig
@@ -57,6 +68,7 @@ __all__ = [
     "KillSwitchManager",
     "kill_switch_timing_violation",
     "network_timeout_warning",
+    "refresh_across_blocking_work",
     "sl_repair_delay_warning",
 ]
 
@@ -70,9 +82,16 @@ logger = logging.getLogger(__name__)
 # the interval, so it only ever pulls a refresh slightly EARLIER — never pushes
 # one past the deadline it exists to renew, and never turns a genuinely early
 # call into a refresh. The backstop for a gap LARGER than this is the constructor
-# invariant (refresh_interval + worst-case tick gap < schedule_cancel); the config
-# guard cannot be one, because it cannot see the caller's tick gap at all.
+# invariant (five terms — see kill_switch_timing_violation, the canonical account);
+# the config guard cannot be one, because it cannot see the caller's tick gap at all.
 _REFRESH_DUE_SLACK_S = 0.5
+
+# Wall clocks routinely slew backwards by milliseconds under NTP discipline.
+# Treating that as "the clock moved" would log a warning and burn a schedule
+# call on every tick, so only a step LARGER than this counts. Well below any
+# real step (seconds at minimum) and far inside the smallest sane
+# schedule_cancel window.
+_CLOCK_BACKWARDS_TOLERANCE_S = 1.0
 
 # How far this host's clock may differ from the exchange's before arming is
 # refused. scheduleCancel takes an ABSOLUTE deadline that we compute from the
@@ -97,18 +116,46 @@ _MAX_CLOCK_SKEW_S = 5.0
 
 
 def kill_switch_timing_violation(
-    config: KillSwitchConfig, max_tick_gap_seconds: float
+    config: KillSwitchConfig,
+    max_tick_gap_seconds: float,
+    network_timeout_s: float | None = None,
 ) -> str | None:
     """The constructor's refresh-timing invariant as a checkable message.
 
-    THE canonical account of the invariant (other sites point here). Worst
-    case between two refreshes is ``refresh_interval + the tick gap`` — the
-    tick after the interval elapses can land a whole gap late — and that must
-    stay strictly inside ``schedule_cancel``, or the dead man's switch fires
-    during normal operation and cancels every order on the wallet. The config
-    layer's own guard (``schedule_cancel >= 2 × refresh``) is only the
-    special case of a caller ticking exactly at the interval: it cannot see
+    THE canonical account of the invariant (other sites point here). The worst
+    case between two SUCCESSFUL refreshes walks the whole failure path, in the
+    order the code actually executes it::
+
+        refresh_interval          the deadline-to-due wait
+      + max_tick_gap              the tick after it comes due lands a gap late
+      + network_timeout_s         THAT attempt fails only after burning a timeout
+      + min(timeout, backoff_cap) the failure then suppresses the retry
+      + max_tick_gap              and the retry ALSO waits for a tick
+
+    and that must stay strictly inside ``schedule_cancel``, or the dead man's
+    switch fires during normal operation and cancels every order on the wallet.
+    The config layer's own guard (``schedule_cancel >= 2 × refresh``) is only
+    the special case of a caller ticking exactly at the interval: it cannot see
     the caller's tick gap at all.
+
+    Two of those five terms were missing until 2026-08-01, and both were owed by
+    the very commit that introduced the backoff: a failed attempt does not fail
+    instantly (``_retry_not_before`` is computed from ``failed_at``, i.e. AFTER
+    the request burned up to ``network_timeout_s``), and the backoff creates a
+    SECOND wait-for-a-tick stage (due→tick, then backoff-expiry→tick). Omitting
+    them let ``refresh=30 / max_tick_gap=30 / network_timeout=8 /
+    schedule_cancel=80`` pass at a computed 75s while the real worst case is
+    106s — the switch firing during normal operation, which is the single thing
+    this invariant exists to prevent (2026-08-01 rules-vs-untouched-code review).
+
+    ``network_timeout_s`` is the ONE term of the five that does not live in
+    ``KillSwitchConfig`` (it is the top-level REST timeout), so it is passed in.
+    When it is None the term is DROPPED rather than treated as unbounded: a
+    stubbed client has no timeout to read, and refusing to construct on that
+    would fail wiring this invariant is not about. The unbounded case belongs to
+    :func:`network_timeout_warning`, which already fires on None. Even with the
+    term dropped this check is strictly tighter than the version it replaces,
+    which counted only ONE ``max_tick_gap``.
 
     Returns the violation text, or None when the timing is sound. ONE
     definition, used by the constructor (which raises on it) and by the CLI's
@@ -120,17 +167,84 @@ def kill_switch_timing_violation(
     """
     if max_tick_gap_seconds <= 0:
         return f"max_tick_gap_seconds must be > 0, got {max_tick_gap_seconds}"
-    worst_case_gap = config.refresh_interval_seconds + max_tick_gap_seconds
+    # Every term above, summed in the same order. The failed attempt's own wall
+    # time and the second tick wait are NOT refinements — they are the two
+    # largest terms after the interval itself, and leaving them out is what made
+    # the pre-2026-08-01 check accept configs that fire the switch.
+    backoff_cap = config.refresh_interval_seconds * _FAILURE_BACKOFF_FRACTION
+    # The backoff is min(what the attempt cost, the cap) — see _in_failure_backoff.
+    # With no timeout to read, the cap is the only bound we have.
+    failed_attempt_cost = 0.0 if network_timeout_s is None else float(network_timeout_s)
+    backoff = backoff_cap if network_timeout_s is None else min(failed_attempt_cost, backoff_cap)
+    worst_case_gap = (
+        config.refresh_interval_seconds
+        + max_tick_gap_seconds
+        + failed_attempt_cost
+        + backoff
+        + max_tick_gap_seconds
+    )
     if worst_case_gap >= config.schedule_cancel_seconds:
+        timeout_term = (
+            "network timeout unknown"
+            if network_timeout_s is None
+            else f"failed-attempt network_timeout_s {failed_attempt_cost:g}s"
+        )
         return (
             f"the kill switch cannot be refreshed in time: a refresh may land "
-            f"{worst_case_gap}s apart (refresh_interval "
+            f"{worst_case_gap:g}s apart (refresh_interval "
             f"{config.refresh_interval_seconds}s + max_tick_gap "
-            f"{max_tick_gap_seconds}s), but the scheduled cancel fires after "
+            f"{max_tick_gap_seconds:g}s + {timeout_term} + post-failure backoff "
+            f"{backoff:g}s + a second max_tick_gap {max_tick_gap_seconds:g}s "
+            f"before the retry), but the scheduled cancel fires after "
             f"{config.schedule_cancel_seconds}s — the dead man's switch would "
             "cancel every order on the wallet during normal operation"
         )
     return None
+
+
+# How much of one refresh interval a FAILED attempt may suppress the retry for
+# (see KillSwitchManager._in_failure_backoff). Named and shared because
+# kill_switch_timing_violation has to budget for it: the backoff lengthens the
+# worst-case gap between two successful refreshes, and an invariant that does not
+# know about it is checking a slack the code no longer has.
+_FAILURE_BACKOFF_FRACTION = 0.5
+
+
+# The longest run of BACK-TO-BACK REST calls a tick can make with no
+# :func:`refresh_across_blocking_work` between them — the order-submission chain
+# in ``orders.submit_ioc_limit``: the §8.3 pre-check recovery probe (which falls
+# THROUGH when it cannot resolve the cloid, rather than returning), the place
+# itself, and the duplicate-ack recovery probe. Each rides the full
+# ``network_timeout_s``.
+#
+# Everything else refreshes ACROSS its blocking work and so contributes a run of
+# ONE however many calls it makes: protection's repair ladder and its orderStatus
+# confirmations, the reconcile legs and their per-order loops, BOTH page ladders
+# (the fill backfill's and the reconcile fill cross-check's own inline one), the
+# day-roll baseline read, and — since 2026-08-01 — the decision cycle's four
+# market-data reads in ``main._build_context``, which ``driver.pump()`` runs on
+# this same thread.
+#
+# That last one is why this is 3 rather than 4. Those reads share
+# ``network_timeout_s`` (``HyperliquidClient.from_config`` resolves from that key
+# and Info() fetches perp meta at construction), so unrefreshed they were the
+# longest chain and forced the advisory to demand <7.5s. But a live decision
+# cycle has NO within-cycle retry: one market read that times out fail-closes the
+# cycle and re-anchors to the next 4h boundary. Budgeting for that chain would
+# have bought kill-switch headroom with a possible 4-hour decision blackout, so
+# the chain was broken up instead.
+#
+# This number is a MAXIMUM OVER CHAINS, so every seam between two chains has to
+# refresh or the truth becomes their SUM. Twice that was the bug:
+#   - the first pass wired only the backfiller's ladder and left the
+#     cross-check's identical one untouched, making the real maximum 20
+#     (DEFAULT_MAX_PAGES) while this said 3;
+#   - the second left ``engine.tick()`` and ``driver.pump()`` adjacent with
+#     nothing between them, so the submit chain and the build_context chain ran
+#     back to back for a real maximum of 7 (2026-08-01 lifecycle review).
+# Any new REST loop MUST refresh per iteration, and any new pair of blocking
+# calls MUST refresh between them, or this number is a lie.
+_MAX_UNREFRESHED_REST_CALLS = 3
 
 
 def network_timeout_warning(timeout: float | None, max_tick_gap_seconds: float) -> str | None:
@@ -139,23 +253,33 @@ def network_timeout_warning(timeout: float | None, max_tick_gap_seconds: float) 
 
     Sister of :func:`kill_switch_timing_violation`, advisory rather than
     enforced: nothing ties the per-request REST timeout to the caller's
-    ``max_tick_gap_seconds`` promise, a tick makes several sequential REST
-    calls, and one call riding its full timeout on a degraded (slow, not
-    dead) network can stretch the wall gap past the promise — the dead man's
-    switch then cancels the resting SL/TP while the process is still alive
-    (protection re-covers on the next healthy tick, an unprotected window).
+    ``max_tick_gap_seconds`` promise, and REST calls riding their full timeout
+    on a degraded (slow, not dead) network can stretch the wall gap past the
+    promise — the dead man's switch then cancels the resting SL/TP while the
+    process is still alive (protection re-covers on the next healthy tick, an
+    unprotected window).
+
+    Budgets ``_MAX_UNREFRESHED_REST_CALLS``, not one. The single-call form
+    called a 10s timeout sound against a 30s gap while one unrefreshed chain
+    could spend 30s inside it — the arithmetic contradicted the very sentence
+    this docstring opened with ("a tick makes several sequential REST calls") and
+    under-reported the one number the operator can actually turn (2026-07-31
+    deadline review).
+
     Returns the warning text when the timeout cannot keep the promise (or is
     unbounded), None when it fits. The hard construction-time invariant is
-    deferred to PR 6's network-layer rework.
+    deferred to the network-layer rework.
     """
-    if timeout is not None and timeout < max_tick_gap_seconds:
+    budget = max_tick_gap_seconds / _MAX_UNREFRESHED_REST_CALLS
+    if timeout is not None and timeout * _MAX_UNREFRESHED_REST_CALLS < max_tick_gap_seconds:
         return None
     return (
-        f"network_timeout_s ({timeout}) is not below the kill switch's max "
-        f"tick gap ({max_tick_gap_seconds:g}s) — one slow REST call on a "
-        "degraded network can push the §18.2 refresh past the exchange-side "
-        "deadline and cancel the resting SL/TP. Set network_timeout_s below "
-        f"{max_tick_gap_seconds:g} in the config for headroom."
+        f"network_timeout_s ({timeout}) leaves no room under the kill switch's "
+        f"max tick gap ({max_tick_gap_seconds:g}s): an order submission can make "
+        f"{_MAX_UNREFRESHED_REST_CALLS} back-to-back REST calls with no refresh "
+        "between them, so on a degraded network that chain alone can push the "
+        "§18.2 refresh past the exchange-side deadline and cancel the resting "
+        f"SL/TP. Set network_timeout_s below {budget:g} in the config for headroom."
     )
 
 
@@ -170,18 +294,61 @@ def sl_repair_delay_warning(delay_seconds: float, max_tick_gap_seconds: float) -
     past the scheduleCancel budget and the dead man's switch cancels every
     resting order mid-repair. Config only enforces ``> 0``; like its sister
     this is a warn-not-refuse preflight, with the hard construction-time
-    invariant deferred to PR 6. The default (5s vs 30s) never warns.
+    invariant deferred to the network-layer rework.
+
+    Budgeted against ONE SLOT of ``_MAX_UNREFRESHED_REST_CALLS``, not the whole
+    tick gap — the same three-way split ``network_timeout_warning`` uses and that
+    ``protection._MAX_REPAIR_SLEEP_S`` clamps the backoff to. Comparing against
+    the WHOLE gap left the band between one slot and the gap (10s..30s at the
+    defaults) both unclamped — ``_maybe_delay`` never shortens a CONFIGURED delay
+    — and unwarned, so a 25s delay burned two and a half slots of the very budget
+    with nothing said (2026-08-01 round-13 exit check). The default (5s against a
+    10s slot) still never warns.
     """
-    if delay_seconds < max_tick_gap_seconds:
+    budget = max_tick_gap_seconds / _MAX_UNREFRESHED_REST_CALLS
+    if delay_seconds < budget:
         return None
     return (
-        f"live.protection.sl_repair_retry_delay_seconds ({delay_seconds:g}) is "
-        f"not below the kill switch's max tick gap ({max_tick_gap_seconds:g}s) "
+        f"live.protection.sl_repair_retry_delay_seconds ({delay_seconds:g}) is not "
+        f"below its share of the kill switch's max tick gap "
+        f"({max_tick_gap_seconds:g}s / {_MAX_UNREFRESHED_REST_CALLS} = {budget:g}s) "
         "— the repair ladder sleeps that long between attempts while the "
         "position has no valid stop, and can push the §18.2 refresh past the "
         "exchange-side deadline, cancelling every resting order mid-repair. "
-        f"Set it below {max_tick_gap_seconds:g} for headroom."
+        f"Set it below {budget:g} for headroom."
     )
+
+
+def refresh_across_blocking_work(kill_switch: KillSwitchManager | None, *, what: str) -> None:
+    """Refresh the dead man's switch across a long blocking operation.
+
+    THE helper for :meth:`KillSwitchManager.tick`'s stated contract — "the owner
+    must call this at least once per ``max_tick_gap_seconds``, INCLUDING from
+    inside a long decision cycle". The switch does not refresh itself, and the
+    live loop is single-threaded, so every site that blocks it for anything
+    approaching a network timeout has to call this or the exchange-side deadline
+    lapses and cancels every resting order on the wallet while the process is
+    alive and healthy — the §20.3 unprotected window opening at exactly the
+    moment the network is least able to close it.
+
+    CHEAP when a refresh is not due: :meth:`tick` reaches the wire only when
+    ``refresh_due()`` says so, so calling this once per loop iteration costs a
+    clock read plus the unconditional expired-deadline detection — and that
+    detection is half the point, since a lapse discovered mid-sweep is a lapse
+    the caller's own row-trust logic needs to know about.
+
+    Guarded, and deliberately never re-raising: a refresh miss must not abort
+    the work it was protecting. The caller is typically mid-repair or mid-sweep,
+    where dying is strictly worse than a stale switch the next tick retries.
+    Mirrors ``protection._maybe_delay``'s long-standing treatment, which this
+    replaced.
+    """
+    if kill_switch is None:
+        return
+    try:
+        kill_switch.tick()
+    except Exception:  # noqa: BLE001 — a refresh miss must not abort its caller
+        logger.warning("kill-switch refresh during %s failed", what, exc_info=True)
 
 
 # The resting protective roles ``shutdown(keep_protective=True)`` leaves
@@ -189,6 +356,116 @@ def sl_repair_delay_warning(delay_seconds: float, max_tick_gap_seconds: float) -
 # for the same reason as protection._SLTP_ROLES: emergency_close is a one-shot
 # IOC, never a resting order for a sweep to keep.
 _KEEP_PROTECTIVE_ROLES = frozenset({"stop_loss", "take_profit"})
+# Literal copy of LIVE_ORDER_ROLES members: a role renamed there without this
+# file would silently drop it from the shutdown keep-set — the sweep would
+# cancel a live position's resting SL/TP. Fail at import.
+if not _KEEP_PROTECTIVE_ROLES <= LIVE_ORDER_ROLES:
+    raise AssertionError("_KEEP_PROTECTIVE_ROLES drifted from LIVE_ORDER_ROLES")
+
+
+def deadline_detail(seconds: int, note: str) -> str:
+    """The ONE way to write "this row installed N seconds of cover".
+
+    ``validation._stated_deadline_seconds`` parses this token back out to size
+    every stretch of silence, so the two are a cross-module contract — and a
+    contract enforced by three independent f-strings agreeing by eye is not
+    enforced at all. The drift is already demonstrable one screen away:
+    ``kill_switch_cancel_triggered`` renders the same concept as
+    ``(deadline 120s)`` — a space, not ``=`` — which the reader silently ignores.
+    Ignoring it there is correct, but nothing structural made it so. With one
+    formatter there is a single writer to pin (2026-08-01 round-14 simplify pass).
+    """
+    return f"deadline={seconds}s {note}"
+
+
+# Marks a row the SMOKE SUITE wrote rather than the daemon. Both are real cover
+# and both must count toward outage seconds and toward the deadline in force —
+# the suite genuinely arms and renews the wallet-wide trigger. What suite rows
+# must NOT do is satisfy the §20.3 SAMPLE FLOOR, which asks a different question:
+# "has this run exercised the switch enough for its availability number to mean
+# anything?" Six back-to-back suites on one run-id reach 114 refreshes at 100%
+# with the daemon never started, so the floor would be answered entirely by
+# evidence from a phase that cannot speak to hours of unattended running
+# (2026-08-01 round-15 review; user decision: exclude from the count only).
+#
+# It has a SECOND consumer since round 17, and weakening the marker moves that
+# one too: ``validation.py`` derives the DAEMON subsequence from it, and the
+# last row of that subsequence is the run's clean-shutdown verdict. "Sample
+# floor only" was true for exactly one round (2026-08-01 round-21 review).
+#
+# A token rather than a substring sniff of free text, and read back through
+# ``is_suite_authored`` — same writer/reader discipline as ``deadline_detail``,
+# for the same reason: the one thing that must not happen is the two sides
+# drifting apart silently. RUNBOOK §20.3 shows operators this literal, and a test
+# pins the doc against this constant.
+#
+# STAMPED BY THE WRITER, never by each call site. Per-call-site lasted one round
+# and was wrong twice over. Three of the suite's six writers never got it — the
+# failed refresh among them, which made the exclusion branch that reads it
+# unreachable dead code and the RUNBOOK's claim about it false. And the one that
+# actually mattered: the suite ALSO drives a real KillSwitchManager for its
+# pre-flight recovery and restart tests 15-17, whose own ``tick()`` emits
+# refreshes across a suite that takes minutes per test. Those bought §20.3 sample
+# credit exactly as before, so the exclusion was never in force on a real run —
+# hidden only by an offline test clock that does not elapse (2026-08-01 round-16
+# review; user decision: mark at the manager).
+_SUITE_AUTHORED_TOKEN = "writer=live-smoke"
+
+
+def _stamp_suite_authored(detail: str | None) -> str:
+    """Append the marker, preserving whatever the row already said."""
+    return _SUITE_AUTHORED_TOKEN if not detail else f"{detail} {_SUITE_AUTHORED_TOKEN}"
+
+
+def is_suite_authored(detail: str | None) -> bool:
+    """Whether this row was written during ``live-smoke`` rather than by the daemon."""
+    # The token as the LAST whitespace-delimited field — the only shape
+    # ``_stamp_suite_authored`` writes — and not a substring anywhere in the
+    # column. ``detail`` is free text shared by six writers, one of which dumps
+    # a JSON blob carrying raw exchange and SQLite exception text into it, so a
+    # bare ``in`` let any row that merely QUOTED the token leave the daemon
+    # subsequence and take the run's clean-shutdown verdict with it. The reader
+    # of the same column in validation.py answers this with an event-type
+    # allowlist; this predicate runs over every event type and cannot, so it
+    # anchors instead (2026-08-01 round-18 review).
+    return bool(detail) and detail.split()[-1:] == [_SUITE_AUTHORED_TOKEN]
+
+
+def record_kill_switch_event(
+    db: Database,
+    *,
+    run_id: str,
+    event_type: str,
+    timestamp: datetime,
+    detail: str | None = None,
+    error: str | None = None,
+    suite_authored: bool = False,
+) -> None:
+    """Append one §18.5 row in its own transaction.
+
+    Shared by :meth:`KillSwitchManager._record` and the smoke suite, which drives
+    ``scheduleCancel`` on the raw signed client and so has to write these rows
+    itself. Only the WRITER is shared, deliberately not the state machine: the
+    suite needs arm→refresh→clear→clear, a shape ``arm()``/``refresh()`` forbid,
+    and installs ``max(config, 120s)`` of cover rather than the configured value.
+
+    ``suite_authored`` stamps the marker here, so EVERY row a caller writes is
+    marked by the fact of who the caller is — not by remembering at each call
+    site, which is how three of the suite's six writers went unmarked.
+
+    Fail-loud (an unguarded transaction): the row is the only durable evidence the
+    acceptance measure has, and a caller that must not raise says so at its own
+    call site rather than making silence the default.
+    """
+    with db.transaction() as conn:
+        repo.insert_kill_switch_event(
+            conn,
+            run_id=run_id,
+            event_type=event_type,
+            detail=_stamp_suite_authored(detail) if suite_authored else detail,
+            error_message=error,
+            timestamp=timestamp,
+        )
 
 
 class KillSwitchManager:
@@ -203,8 +480,10 @@ class KillSwitchManager:
         run_id: str,
         config: KillSwitchConfig,
         max_tick_gap_seconds: float,
+        network_timeout_s: float | None,
         payload_dir: Path,
         clock: Clock | None = None,
+        suite_authored: bool = False,
     ) -> None:
         if not config.enabled:
             # LiveConfig already rejects allow_real_orders without the switch;
@@ -233,9 +512,28 @@ class KillSwitchManager:
         # ``network_timeout_warning``) — pass the true worst-case gap here.
         # The invariant itself (worst-case math, config-guard blindness) is
         # kill_switch_timing_violation's docstring.
-        violation = kill_switch_timing_violation(config, max_tick_gap_seconds)
+        # PASSED IN, never probed off the client with ``getattr``. It was a
+        # getattr until 2026-08-01, and the probe silently swallowed the term on
+        # every production manager: the signed client — the only one a real
+        # manager is built on — forwarded its timeout to the SDK without keeping
+        # it, so the constructor checked four of five terms while the CLI
+        # preflight, reading the unsigned client, checked all five. One invariant,
+        # two halves, disagreeing. Exposing the attribute fixes today's symptom; a
+        # rename or a third client class silently reopens it, because
+        # ``getattr(x, "timeout", None)`` cannot tell "stub, degrade intended"
+        # from "production client that stopped exposing it". As an argument the
+        # degrade is a CALLER'S STATED CHOICE — the same reason
+        # ``ProtectionManager._note_firings`` gave up its own getattr default in
+        # this round (2026-08-01 round-14 simplify pass).
+        violation = kill_switch_timing_violation(config, max_tick_gap_seconds, network_timeout_s)
         if violation is not None:
             raise ValueError(violation)
+        # Set by the CLI when this manager belongs to a live-smoke run. It is a
+        # property of the RUN PHASE, not of any one call: the suite's own
+        # pre-flight recovery and restart tests 15-17 drive a real manager whose
+        # ``tick()`` refreshes during the suite, and those refreshes must not buy
+        # §20.3 sample credit any more than the runner's own do.
+        self._suite_authored = suite_authored
         self._client = client
         self._gate = gate
         self._db = db
@@ -263,6 +561,24 @@ class KillSwitchManager:
         # switch produces one event. Keyed on the schedule, not on the latch —
         # see _detect_expired_deadline.
         self._expiry_reported_for: datetime | None = None
+        # The earliest a DUE refresh may be re-attempted, and whether this outage
+        # episode has already been recorded. Both exist because ``refresh_due()``
+        # reads ``_last_scheduled_at``, which only advances on SUCCESS: once a
+        # refresh fails, "due" stays true forever, so every subsequent call to
+        # this manager retried immediately. Harmless at one call per tick; not
+        # harmless now that every blocking site refreshes across itself — a
+        # reconcile sweep over 40 open orders spent a full network timeout per row
+        # FAILING to refresh before each row's own read, doubling the sweep's wall
+        # time (so making the deadline it was protecting MORE likely to lapse) and
+        # writing 40 kill_switch_refresh_failed rows for one outage into the table
+        # §20.3 reads (2026-08-01 lifecycle review).
+        self._retry_not_before: datetime | None = None
+        self._failure_recorded_this_episode = False
+        # Firings this manager has OBSERVED, monotonic. Public via
+        # :attr:`fired_total` so a reader can tell "a NEW firing happened since I
+        # last looked" from "the switch is merely unhealthy" -- only the former
+        # invalidates anyone's local order rows (2026-07-31 exit check).
+        self._fired_total = 0
         # Sticky until PR 4's safe-mode release path clears it (§13.4). PRIVATE,
         # read through a property: it is the latch that blocks new orders, and a
         # bare writable attribute invites `ks.stop_new_orders = False` as a
@@ -294,15 +610,15 @@ class KillSwitchManager:
     def _record(
         self, event_type: str, *, detail: str | None = None, error: str | None = None
     ) -> None:
-        with self._db.transaction() as conn:
-            repo.insert_kill_switch_event(
-                conn,
-                run_id=self._run_id,
-                event_type=event_type,
-                detail=detail,
-                error_message=error,
-                timestamp=self._clock.now(),
-            )
+        record_kill_switch_event(
+            self._db,
+            run_id=self._run_id,
+            event_type=event_type,
+            detail=detail,
+            error=error,
+            timestamp=self._clock.now(),
+            suite_authored=self._suite_authored,
+        )
 
     def _schedule(self) -> None:
         """One scheduleCancel round-trip pushing the deadline to now + window."""
@@ -310,6 +626,10 @@ class KillSwitchManager:
         deadline = now + timedelta(seconds=self._config.schedule_cancel_seconds)
         self._client.schedule_cancel(cancel_at=deadline)
         self._last_scheduled_at = now
+        # A successful round-trip ENDS the outage episode: the backoff lifts and
+        # the next failure is a new event worth recording.
+        self._retry_not_before = None
+        self._failure_recorded_this_episode = False
 
     def _check_clock_skew(self) -> None:
         """Refuse to arm against a host clock the exchange does not agree with.
@@ -396,8 +716,10 @@ class KillSwitchManager:
         )
         self._record(
             "kill_switch_armed",
-            detail=f"deadline={self._config.schedule_cancel_seconds}s "
-            f"refresh={self._config.refresh_interval_seconds}s",
+            detail=deadline_detail(
+                self._config.schedule_cancel_seconds,
+                f"refresh={self._config.refresh_interval_seconds}s",
+            ),
         )
 
     def release_safe_mode(self) -> bool:
@@ -459,12 +781,65 @@ class KillSwitchManager:
         under the interval and SKIP the refresh, halving the real cadence to
         every other cycle. The slack keeps that from happening at all; what makes
         a skipped cycle SURVIVABLE if it happens anyway is the constructor
-        invariant (refresh_interval + worst-case tick gap < schedule_cancel).
+        invariant (five terms — see kill_switch_timing_violation).
         """
+        now = self._clock.now()
         if self._last_scheduled_at is None:
+            return not self._in_failure_backoff(now)
+        elapsed = (now - self._last_scheduled_at).total_seconds()
+        if elapsed < -_CLOCK_BACKWARDS_TOLERANCE_S:
+            # The clock moved BACKWARDS (an NTP step, a VM resume, a manual
+            # correction). The exchange's deadline was computed from the wall
+            # clock at schedule time and is ticking on ITS clock regardless, so
+            # "no time has passed" is the one reading that is certainly wrong.
+            # Refresh immediately — the fail-safe direction — rather than let a
+            # negative elapsed park the switch until the local clock catches
+            # back up, which for an hour-sized step means an hour of no
+            # refreshes while the deadline fires (2026-07-31 clock review).
+            logger.warning(
+                "kill switch: clock moved backwards (%.1fs since the last schedule) — "
+                "refreshing now rather than trusting the negative interval",
+                elapsed,
+            )
             return True
-        elapsed = (self._clock.now() - self._last_scheduled_at).total_seconds()
-        return elapsed >= self._config.refresh_interval_seconds - _REFRESH_DUE_SLACK_S
+        if elapsed < self._config.refresh_interval_seconds - _REFRESH_DUE_SLACK_S:
+            return False
+        return not self._in_failure_backoff(now)
+
+    def _in_failure_backoff(self, now: datetime) -> bool:
+        """Whether a just-failed attempt should suppress an otherwise-due refresh.
+
+        Bounds the RETRY rate, never the cadence: while refreshes succeed this is
+        always False and ``refresh_due`` behaves exactly as before.
+
+        The backoff is the failed attempt's OWN duration (capped at
+        ``_FAILURE_BACKOFF_FRACTION`` of an interval, which
+        :func:`kill_switch_timing_violation` budgets for), not a fixed delay,
+        because the thing being rationed is the
+        thread — not the exchange. The pathology is an attempt that burns a whole
+        ``network_timeout_s`` and then lets the caller do it again at the next
+        blocking site; a fixed delay would also silence the COMMON failures,
+        which come back in milliseconds (a 429 from the address rate limiter, a
+        connection reset) and cost nothing to retry. Charging each failure its
+        own cost makes the suppression land exactly where the waste is
+        (2026-08-01 lifecycle review).
+
+        NOT applied to the clock-backwards branch above: that is the fail-safe
+        reading and must never be delayed.
+        """
+        return self._retry_not_before is not None and now < self._retry_not_before
+
+    @property
+    def fired_total(self) -> int:
+        """Firings OBSERVED by this manager, monotonic.
+
+        A firing means the exchange cancelled every order on the wallet without
+        touching SQLite, so a consumer holding local order rows must re-verify
+        them. A merely UNHEALTHY switch -- one failed refresh -- cancels
+        nothing, and conflating the two makes an ordinary network blip look like
+        a wiped book, which is how a healthy run gets failed.
+        """
+        return self._fired_total
 
     def _detect_expired_deadline(self) -> None:
         """Notice that the dead man's switch already FIRED before we got here.
@@ -523,6 +898,7 @@ class KillSwitchManager:
         # already_reported and skip both the log and the write. Worst case now is
         # a repeated ERROR line on retry; never a lost firing.
         self._expiry_reported_for = self._last_scheduled_at
+        self._fired_total += 1
 
     def refresh(self) -> bool:
         """Push the exchange-side deadline back; False (plus flags) on failure.
@@ -544,11 +920,25 @@ class KillSwitchManager:
             raise RuntimeError("KillSwitchManager.refresh() before arm()")
         # Before anything else: did the switch already fire while we were away?
         self._detect_expired_deadline()
+        attempt_started = self._clock.now()
         try:
             self._schedule()
         except Exception as exc:
             self._gate.kill_switch_active = False
             self._stop_new_orders = True
+            failed_at = self._clock.now()
+            # Charge this failure its own cost (see _in_failure_backoff): a
+            # timeout that ate the thread earns a real pause, a 429 that came
+            # back instantly earns none. Capped so one pathological attempt
+            # cannot park the switch, and floored at zero against a clock that
+            # moved backwards mid-attempt.
+            spent = max(0.0, (failed_at - attempt_started).total_seconds())
+            self._retry_not_before = failed_at + timedelta(
+                seconds=min(
+                    spent,
+                    self._config.refresh_interval_seconds * _FAILURE_BACKOFF_FRACTION,
+                )
+            )
             # Log BEFORE the durable record: if the event write itself dies
             # (broken DB at the worst moment), the root cause is already on
             # the log. The write stays unguarded — losing the audit trail
@@ -565,7 +955,14 @@ class KillSwitchManager:
                     "kill switch entering safe mode: new orders are BLOCKED until "
                     "reconciliation releases them (§18.2 rule 3)"
                 )
-            self._record("kill_switch_refresh_failed", error=str(exc))
+            # ONE row per outage episode, keyed the same way _detect_expired_deadline
+            # keys its report: a run of failures is one fact, and the table is what
+            # §20.3 counts kill-switch trouble from. Writing a row per attempt let a
+            # single outage inside a 40-order sweep look like 40 separate incidents,
+            # and the retry rate — not the severity — decided the number.
+            if not self._failure_recorded_this_episode:
+                self._failure_recorded_this_episode = True
+                self._record("kill_switch_refresh_failed", error=str(exc))
             return False
         # The exchange-side switch is re-armed, but the §4.1 condition only
         # re-opens if no failure is outstanding: after a refresh failure,
@@ -596,6 +993,14 @@ class KillSwitchManager:
         """
         if self._shutdown_started:
             raise RuntimeError("KillSwitchManager.tick() after shutdown()")
+        # Fire detection runs UNCONDITIONALLY, not only when a refresh is due.
+        # It used to be reachable solely from inside refresh(), which tick()
+        # calls only when refresh_due() says so — so the one condition that
+        # suppresses refresh_due() (a backwards clock making elapsed negative)
+        # silently disabled the detector too, in the exact scenario where the
+        # exchange-side deadline is measured on a clock nobody moved
+        # (2026-07-31 clock review).
+        self._detect_expired_deadline()
         if self.refresh_due():
             self.refresh()
 

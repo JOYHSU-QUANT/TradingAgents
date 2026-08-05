@@ -113,12 +113,35 @@ class StopLossDecision:
 
 
 def round_to_tick(price: Decimal, tick: Decimal, *, up: bool) -> Decimal:
-    """Round ``price`` to a multiple of ``tick`` (up or down)."""
+    """Round ``price`` to an exchange-legal price on the ``tick`` grid (up or down).
+
+    Legality is Hyperliquid's px rule (DESIGN.md "Order 限制"), not just the
+    tick: a non-integer price may carry at most **5 significant figures**
+    (integer prices are always legal). Tick quantization alone leaves a
+    six-figure BTC price with 7 significant figures — refused at the wire — so
+    this rounds to the coarser of the tick and the 5-sig-fig step, the latter
+    capped at 1 (the integer exemption keeps six-figure prices on the 1s grid
+    rather than the 10s). Direction survives at the coarser quantum (CEILING
+    when ``up`` else FLOOR) so every caller's invariant — marketable side for
+    IOC limits, toward-entry for stops — is preserved, and the function stays
+    pure and idempotent (a legal price returns unchanged in either direction —
+    the §8.3 identical-resend contract depends on that determinism). A tick
+    that does not evenly divide the sig-fig step (non-power-of-ten test grids)
+    falls back to tick-only rounding.
+    """
     if tick <= 0:
         raise ValueError(f"tick must be > 0, got {tick}")
     with localcontext(DECIMAL_CONTEXT):
-        steps = (price / tick).to_integral_value(rounding=ROUND_CEILING if up else ROUND_FLOOR)
-        return steps * tick
+        quantum = tick
+        if price > 0:
+            sig_step = min(Decimal(1).scaleb(price.adjusted() - 4), Decimal(1))
+            if sig_step > tick and sig_step % tick == 0:
+                quantum = sig_step
+        steps = (price / quantum).to_integral_value(rounding=ROUND_CEILING if up else ROUND_FLOOR)
+        # Rounding up across a power-of-ten boundary (99 999.96 → 100 000) lands
+        # on a magnitude whose own step is coarser but still legal (the cap at 1
+        # makes the step monotone in magnitude), so one pass suffices.
+        return steps * quantum
 
 
 def _long_sl(

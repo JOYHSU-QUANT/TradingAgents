@@ -79,6 +79,16 @@ REASON_SL_MISSING = "position_sl_missing"  # §12.3: recoverable (PR 5 loop repa
 # a cancel that would not land AND a positions read it could not prove — so a
 # reason-keyed query never misclassifies a read failure as a cancel failure.
 REASON_STALE_ORDER_SWEEP_FAILED = "stale_order_sweep_failed"
+# The two severities, named. ``check_enum`` on the write boundary validates
+# MEMBERSHIP, which a rename passes — and then ``is_manual`` returns False
+# forever: try_auto_recover would release a MANUAL latch a human was required
+# to lift, release_manual would refuse the legitimate CLI release, and the
+# gate's manual_safe_mode line would stop blocking risk-adding orders. Exactly
+# what this class exists to prevent, so bind the copies to the registry.
+SAFE_MODE_MANUAL = "manual"
+SAFE_MODE_RECOVERABLE = "recoverable"
+if {SAFE_MODE_MANUAL, SAFE_MODE_RECOVERABLE} != repo.SAFE_MODE_TYPES:
+    raise AssertionError("safe-mode severity names drifted from repository.SAFE_MODE_TYPES")
 # §10.3 daily loss cap: recoverable (position + SL/TP kept, new entry/rebalance
 # stopped; auto-releases at the next UTC 00:00 baseline roll, still subject to
 # §13.4). §10.4 consecutive loss cap: manual (3 losing settlements suggest a
@@ -131,7 +141,7 @@ class SafeModeState:
 
     @property
     def is_manual(self) -> bool:
-        return self.safe_mode_type == "manual"
+        return self.safe_mode_type == SAFE_MODE_MANUAL
 
 
 class SafeModeManager:
@@ -225,7 +235,7 @@ class SafeModeManager:
         now = self._clock.now()
         entered_at: datetime = now
         if current is not None:
-            if current.is_manual or safe_mode_type == "recoverable":
+            if current.is_manual or safe_mode_type == SAFE_MODE_RECOVERABLE:
                 # Already at (or above) the requested severity — the state does
                 # not change. But a DISTINCT reason surfacing at the SAME
                 # severity already latched is a new independent fact the §13.6

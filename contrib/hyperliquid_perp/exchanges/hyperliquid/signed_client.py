@@ -283,6 +283,16 @@ class HyperliquidSignedClient:
             raise ValueError(f"network must be one of {sorted(_BASE_URLS)}, got {network!r}")
         self.network = key
         self.wallet_address = wallet_address
+        # Exposed for the same reason HyperliquidClient exposes it (sdk_client),
+        # plus one this class owns alone: the kill switch's timing invariant
+        # counts the failed attempt's own wall time as a term, and this is the
+        # client every KillSwitchManager is built on. Forwarding ``timeout`` into
+        # ``Exchange`` without keeping it here left that term unreadable, so the
+        # constructor silently checked four of its five terms on EVERY production
+        # manager while the CLI preflight checked all five — the two halves of one
+        # invariant disagreeing, with only the preflight live (2026-08-01 round-14
+        # review).
+        self.timeout = timeout
         self._gate = gate
         # Leak-safe key handling lives in one shared home (§6 rule 2).
         account = account_from_agent_key(agent_key, error_cls=ExchangeError)
@@ -331,6 +341,26 @@ class HyperliquidSignedClient:
         call_sdk(self._exchange.info.user_state, self.wallet_address)
 
     # ---- §7 exchange actions (PR 2) -------------------------------------
+
+    def update_leverage(self, *, coin: str, leverage: int, is_cross: bool = True) -> None:
+        """Set the account's leverage for ``coin`` (§7 ``updateLeverage``, PR 6).
+
+        The one signed exchange action the PR 1–5 order path never needed
+        (testnet_live / mainnet_tiny both pin ``leverage: 1`` and the exchange
+        default already sits there), but the §20.2 smoke suite must prove the
+        action reaches the exchange before the first real cycle — so PR 6 wraps
+        it. Rides ``require_exchange_action`` (the same wire gate as
+        ``schedule_cancel``: a signed account-config change, not an order that
+        opens exposure). ``updateLeverage`` is statusless — the envelope is the
+        whole verdict, and ``_response_payload`` raises ``ExchangeRequestError``
+        on a top-level ``err`` (a rejected leverage change never half-hides
+        behind a return code).
+        """
+        if leverage < 1:
+            raise ValueError(f"leverage must be >= 1 (§20.1 pins 1), got {leverage!r}")
+        self._gate.require_exchange_action()
+        response = call_sdk(self._exchange.update_leverage, leverage, coin, is_cross)
+        _response_payload(response, action="updateLeverage")
 
     def place_ioc_limit(
         self,

@@ -964,6 +964,28 @@ def test_adjustment_ledger_delta_rejects_unknown_type():
         accounting.adjustment_ledger_delta("yolo", Decimal("0"), Decimal("1"))
 
 
+def test_a_registry_type_with_no_fold_arm_fails_loud(monkeypatch):
+    # check_enum validates MEMBERSHIP, so a type ADDED to the registry sails
+    # past it. It used to land in the trailing realized_pnl arm — wrong wallet
+    # direction, wrong realized, wrong fees. And because this one definition
+    # feeds both the live wallet posting and replay's fold, the books would
+    # move wrong and replay would agree with itself, so
+    # account_replay_mismatch_count reads 0 and nothing ever surfaces it.
+    monkeypatch.setattr(
+        repo, "ACCOUNTING_ADJUSTMENT_TYPES", repo.ACCOUNTING_ADJUSTMENT_TYPES | {"rebate"}
+    )
+    with pytest.raises(AssertionError, match="no fold arm"):
+        accounting.adjustment_ledger_delta("rebate", Decimal("0"), Decimal("1"))
+    # Control: the three real types still fold, so this pins the fallthrough
+    # rather than the enum check in front of it.
+    assert accounting.adjustment_ledger_delta("fee", Decimal("0"), Decimal("1")) == (
+        Decimal("-1"),
+        Decimal("0"),
+        Decimal("1"),
+        Decimal("0"),
+    )
+
+
 @pytest.mark.parametrize(
     ("adj_type", "wallet", "realized", "fees", "funding"),
     [
@@ -1328,6 +1350,31 @@ def test_malformed_evidence_is_written_once_not_once_per_sighting(db, tmp_path, 
         proc.ingest_message({"channel": "userFills", "data": {"fills": [_fill(tid=7, sz="0")]}})
 
     assert len(list(tmp_path.glob("fill_parse_error-*.json"))) == 1
+
+
+def test_the_mirrored_liquidation_price_is_not_part_of_the_replay_identity(db, tmp_path, clock):
+    """A stored liq mirror must not make books that agree look mismatched.
+
+    ``replay_within`` compares replayed against materialized ``PositionState``
+    by dataclass equality, and no replay of the fill history can reconstruct an
+    exchange-reported estimate. Counting it would report a phantom
+    ``account_replay_mismatch`` on every live run holding a position — halting
+    new decision cycles (the post-cycle verify) and failing the §20.3 gate on a
+    run whose books are in fact correct.
+    """
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    proc.ingest(_fill(tid=1, sz="1", px="100", fee=None, time_ms=_TIME_MS))
+    assert accounting.replay(db, run_id="r").position_mismatches == ()
+
+    with db.transaction() as conn:
+        repo.set_position_liquidation_price(conn, "r", "BTC", Decimal("43210.5"))
+
+    replayed = accounting.replay(db, run_id="r")
+    assert _position(db).liquidation_price == Decimal("43210.5")  # stored...
+    assert replayed.position_mismatches == ()  # ...but not an accounting fact
+    assert replayed.account_matches
 
 
 def test_same_millisecond_fill_that_sorts_earlier_is_out_of_order(db, tmp_path, clock):

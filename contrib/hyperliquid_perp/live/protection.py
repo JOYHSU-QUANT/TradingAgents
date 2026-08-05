@@ -43,7 +43,7 @@ from decimal import Decimal, localcontext
 from enum import Enum
 
 from ..domains.perp.margin import DECIMAL_CONTEXT
-from ..exchanges.hyperliquid.errors import ExchangeError
+from ..exchanges.hyperliquid.errors import ExchangeError, ExchangeThrottledError
 from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
 from ..paper.clock import Clock, WallClock
 from ..paper.stops import (
@@ -55,12 +55,13 @@ from ..paper.stops import (
 )
 from ..paper.twap import floor_to_step
 from ..persistence import repository as repo
-from ..persistence.cloid import cloid_hex as derive_cloid_hex, cloid_logical
+from ..persistence.cloid import LIVE_ORDER_ROLES, cloid_hex as derive_cloid_hex, cloid_logical
 from ..persistence.db import Database
 from ..persistence.models import PositionState, Side
 from .config import LiveProtectionConfig
+from .kill_switch import refresh_across_blocking_work
 from .order_gate import LiveOrderGateRejected, RealOrderGate
-from .orders import local_status_for_exchange_status, parse_order_status
+from .orders import is_known_exchange_status, local_status_for_exchange_status, parse_order_status
 
 __all__ = ["ProtectionManager", "ProtectionOutcome"]
 
@@ -72,6 +73,26 @@ logger = logging.getLogger(__name__)
 _SLTP_ROLES = ("stop_loss", "take_profit")
 _ROLE_ORDER_TYPE = {"stop_loss": "stop_market", "take_profit": "take_market"}
 _ROLE_TPSL = {"stop_loss": "sl", "take_profit": "tp"}
+# Literal copies of LIVE_ORDER_ROLES members: a role renamed there without this
+# file would silently drop it from the clear/residual sweeps. Fail at import
+# (same guard family as startup.py's partition check).
+if not set(_SLTP_ROLES) <= LIVE_ORDER_ROLES:
+    raise AssertionError("_SLTP_ROLES drifted from LIVE_ORDER_ROLES")
+if set(_ROLE_ORDER_TYPE) != set(_ROLE_TPSL) or set(_ROLE_TPSL) != set(_SLTP_ROLES):
+    raise AssertionError("protection role tables must cover exactly _SLTP_ROLES")
+# Keys are not enough: _ROLE_ORDER_TYPE is a literal copy of the repository's
+# role→order_type mapping, and only its VALUES decide how an audit row is
+# labelled. Left key-checked, a changed order_type spelling would have this
+# file writing the old label while reconcile.py's orphan backfill writes the
+# new one — the same logical SL carrying two order_types depending on which
+# path recorded it. Compare the whole mapping (strictly stronger).
+if {r: repo.ROLE_TO_ORDER_TYPE[r] for r in _SLTP_ROLES} != _ROLE_ORDER_TYPE:
+    raise AssertionError("_ROLE_ORDER_TYPE drifted from repository.ROLE_TO_ORDER_TYPE")
+# Bound, not re-typed: _row_still_rests asks the EXCHANGE the same "is it still on
+# the book" question active_protection_order asks SQLite, and the two answering
+# from different status vocabularies is precisely the drift this file's other
+# import-time guards exist to prevent.
+_RESTING_ORDER_STATUSES = frozenset(repo.RESTING_ORDER_STATUSES)
 
 # §9.4 aggressive family (decided 2026-07-22): a stop-loss trigger only FIRES in
 # the violent move it protects against, so its fire-time limit needs the same
@@ -84,6 +105,28 @@ _ROLE_TPSL = {"stop_loss": "sl", "take_profit": "tp"}
 # with engine._EMERGENCY_SLIPPAGE_PCT (same §9.4 rationale, same 3%).
 _SL_FIRE_BAND_FLOOR_PCT = Decimal("0.03")
 
+# Ceiling on ONE backoff sleep inside the repair ladder. The ladder blocks the
+# single-threaded tick, and the §18.2 invariant every entry point preflights is
+# stated against the caller's worst-case tick gap (cli's _RECOVERY_MAX_TICK_GAP
+# _SECONDS, 30s). A backoff that grew past it would break the very promise the
+# preflight proved. Never shortens a configured delay — a delay already longer
+# than this is the operator's own choice, and sl_repair_delay_warning warns at or
+# above the same one-third budget.
+#
+# ONE THIRD of that gap, not all of it. The sleep is not alone in the stretch
+# between two refreshes: every rung reaches ``_maybe_delay`` after a wire call
+# that rode its full ``network_timeout_s``. A clamp set to the WHOLE gap
+# therefore permitted 8 + 30 = 38s inside a 30s promise at the RUNBOOK's
+# recommended timeout. (``_maybe_delay``'s docstring also names the
+# ExchangeError lane's orderStatus recovery probe as a SECOND back-to-back
+# timeout; that sentence predates the refresh 5d84d3d put BETWEEN the two, so
+# the real overshoot is 38-vs-30, not 46-vs-30 — this constant is therefore
+# conservative, not tight.) Three slots is the budget
+# ``network_timeout_warning`` already enforces (``_MAX_UNREFRESHED_REST_CALLS``
+# = 3, which is why it demands ``timeout * 3 < max_tick_gap``): the two timeouts
+# take two slots, this sleep takes the third (2026-08-01 round-13 concept scan).
+_MAX_REPAIR_SLEEP_S = 10.0
+
 
 class _EstablishResult(Enum):
     """How one §17.4 place/modify ladder ended (internal to the manager)."""
@@ -95,6 +138,15 @@ class _EstablishResult(Enum):
     # practice this means the kill switch: escalating to an emergency close is
     # futile (the same gate blocks it) — hold and retry next sync instead.
     GATE_BLOCKED = "gate_blocked"
+    # Every failure that reached the wire was the venue REFUSING TO SERVE the
+    # request (429 / overload), never a rejection of the order itself. Same
+    # disposition as GATE_BLOCKED — hold, retry next sync — for the same reason:
+    # escalating is wrong when nothing said this order cannot exist. §17.2's
+    # emergency close would market-out a healthy position and latch the run for
+    # a human, and a venue throttles hardest in exactly the violent move a stop
+    # exists for, so "rate limited" read as "this stop can never be placed" is
+    # the worst possible time to be wrong (2026-07-31 partial-failure review).
+    THROTTLED = "throttled"
 
 
 class ProtectionOutcome(str, Enum):
@@ -104,9 +156,11 @@ class ProtectionOutcome(str, Enum):
     PROTECTED = "protected"  # SL (and TP when no plan runs) are on the book
     DEGRADED = "degraded"  # §17.3: SL up but TP could not be (re)established
     NEEDS_EMERGENCY_CLOSE = "needs_emergency_close"  # §17.2: no safe SL — engine must close
-    # The wire gate refused every SL attempt PRE-SEND (kill switch): no SL rests,
-    # but escalating is futile (the same gate blocks the close) — the gate line
-    # stays up, the sync retries next tick, §12.3 SL-missing is the standing net.
+    # The wire gate refused every SL attempt PRE-SEND (kill switch). The SL the
+    # sync WANTED is not on the book — a previous one may still be, covering or
+    # not (the event records which) — but escalating is futile (the same gate
+    # blocks the close), so the gate line stays up, the sync retries next tick,
+    # and §12.3 SL-missing is the standing net.
     BLOCKED = "blocked"
 
 
@@ -153,11 +207,153 @@ class ProtectionManager:
         # §12.2 rule 6 signal: whether the LAST sync() placed / modified /
         # cancelled any exchange order — the engine reconciles that tick.
         self._orders_changed = False
+        # Latched when the kill switch is observed to have FIRED. While it is up,
+        # an ``orders`` row is not evidence in ITSELF that anything rests on the
+        # exchange: a fired scheduleCancel wipes the wallet's book without
+        # touching SQLite. What restores a row's standing is a positive
+        # orderStatus confirmation OF THAT ROW, recorded in ``_confirmed_cloid``
+        # below — the latch itself stays up, because a firing invalidates rows
+        # this manager has not looked at yet and will place later.
+        #
+        # A latch rather than a live read, because §13.4 reopens the gate while
+        # the rows are still stale — the staleness outlives the outage.
+        #
+        # Keyed on the switch's FIRING COUNT, not on ``gate.kill_switch_active``.
+        # The gate also drops on a single failed refresh, which cancels nothing:
+        # keying on it made one network blip force a fail-closed orderStatus read
+        # that the same blip would fail, so a still-protected position recorded a
+        # window that only a stop_loss_placed can close — and the no-op path never
+        # writes one. That is the "one blip fails an otherwise-healthy 30-cycle
+        # run" bug this file already fixed once, reintroduced from the other side
+        # (2026-07-31 exit check).
+        self._rows_unconfirmed = False
+        # PER ROLE, because the suspicion is per ORDER. ``_rows_unconfirmed`` says
+        # "a firing invalidated the rows"; this says WHICH row has since been
+        # positively confirmed, as role -> the cloid that was confirmed. A single
+        # shared "spent" flag was wrong in one specific, routine way: sync always
+        # establishes the SL first, so the SL's confirmation cleared the latch
+        # before the TP guard ever ran, and the TP then took the free path on the
+        # strength of evidence about a DIFFERENT order. After a firing the SL is
+        # commonly a freshly placed row, so its resting says nothing at all about
+        # the stale TP beside it — and a TP reported as resting when the switch
+        # cancelled it lifts §17.3's DEGRADED block and keeps
+        # position_protection.take_profit_price asserting a price that is gone
+        # (2026-08-01 malformed-response review).
+        #
+        # Bounded at one entry per role by construction (there is one active row
+        # per role), and reset wholesale on the next firing.
+        self._confirmed_cloid: dict[str, str] = {}
+        self._last_seen_firings = 0
 
     @property
     def orders_changed_last_sync(self) -> bool:
         """Whether the last :meth:`sync` changed any exchange order (§12.2 rule 6)."""
         return self._orders_changed
+
+    def _note_firings(self) -> None:
+        """Latch row-suspicion if the switch has fired since we last looked.
+
+        Called from :meth:`sync`'s top as well as from :meth:`_row_still_rests`,
+        because that method sits at the tail of two ``and`` chains: an earlier
+        term (a resized qty, a drifted trigger) short-circuits it away, and the
+        firing would then go unobserved until some later sync happened to reach
+        it — by which time §13.4 has reopened the gate and the no-op path is
+        reading a stale row as proof of protection.
+        """
+        # An explicit None check, NOT ``getattr(..., "fired_total", 0)``. The
+        # parameter is genuinely optional, but the getattr default covered a
+        # second, dishonest case: a switch object that exists and lacks the
+        # attribute silently reported "never fired", so the latch below never
+        # tripped and every stale local row kept counting as proof that an SL/TP
+        # was on the book — the exact §17.3 check this method exists to run. Same
+        # shape as the kill switch's own timeout term, which read None on every
+        # production client for the same reason (2026-08-01 round-14 concept scan).
+        if self._kill_switch is None:
+            return
+        firings = self._kill_switch.fired_total
+        if firings > self._last_seen_firings:
+            self._last_seen_firings = firings
+            self._rows_unconfirmed = True
+            # A NEW firing invalidates every earlier confirmation: an order
+            # confirmed resting before this scheduleCancel is exactly what the
+            # scheduleCancel just cancelled.
+            self._confirmed_cloid.clear()
+
+    def _row_still_rests(self, row, *, role: str) -> bool:
+        """Whether ``row``'s order is CONFIRMED still resting on the exchange.
+
+        Fast path: while the kill switch has never FIRED, nothing can have
+        mass-cancelled the book behind our back, so the local row stands on its
+        own and this costs nothing. After a firing the rows are suspect until
+        orderStatus says otherwise (§4.1 gates MUTATIONS, not reads, so this
+        question is always askable).
+
+        Fail-CLOSED on every uncertainty — unreadable payload, transport error,
+        a status word that is not a resting one — matching
+        ``reconcile._has_valid_sl``, which answers the same question from
+        ``open_orders`` and reads ``None`` as False. A false "still rests" leaves
+        a position naked while the audit trail calls it protected; a false "gone"
+        costs one redundant re-place of an order we want resting anyway.
+        """
+        self._note_firings()
+        if not self._rows_unconfirmed:
+            return True
+        hexid = row["cloid_hex"]
+        if hexid and self._confirmed_cloid.get(role) == hexid:
+            # THIS order was positively confirmed since the last firing. Confirming
+            # a sibling role buys nothing here (see _confirmed_cloid).
+            return True
+        if not hexid:
+            # No cloid to ask about (a pre-cloid or hand-repaired row). Cannot be
+            # confirmed, so it does not count as evidence.
+            return False
+        try:
+            parsed = parse_order_status(self._client.query_order_by_cloid(str(hexid)))
+        except Exception:  # noqa: BLE001 — an unresolvable read must not crash the tick
+            logger.warning(
+                "orderStatus check for the resting %s (cloid %s) could not resolve — "
+                "treating it as NOT resting (fail-closed)",
+                role,
+                hexid,
+                exc_info=True,
+            )
+            return False
+        finally:
+            # §18.2: that read just blocked the single-threaded tick for up to a
+            # full network timeout, and ONE sync can reach here three times (the
+            # SL no-op guard, the SL covering check on a gate-blocked repair, the
+            # TP no-op guard) because only a POSITIVE confirmation of THAT order
+            # caches — so the repeats are exactly the degraded-network case.
+            # In ``finally`` for the same reason: the timing-out read is the one
+            # that costs the most and the one that returns early
+            # (2026-07-31 deadline review).
+            refresh_across_blocking_work(self._kill_switch, what="orderStatus confirmation")
+        if parsed is None:
+            # The documented unknownOid marker: the exchange has never seen it,
+            # or no longer carries it. Either way nothing of ours rests.
+            return False
+        # KNOWN and resting, not merely "maps to a resting word": an unknown word
+        # maps to "open" by design (see is_known_exchange_status), and "open" is a
+        # resting status — so delegating the whole question would answer "yes, it
+        # rests" for a word we cannot classify, which is the exact fail-OPEN this
+        # docstring promises not to do (2026-08-01 malformed-response review).
+        if not is_known_exchange_status(parsed[1]):
+            logger.warning(
+                "orderStatus answered %r for the resting %s (cloid %s) — a word this "
+                "build cannot classify, so it is NOT evidence of a resting order "
+                "(fail-closed)",
+                parsed[1],
+                role,
+                hexid,
+            )
+            return False
+        if local_status_for_exchange_status(parsed[1]) not in _RESTING_ORDER_STATUSES:
+            return False
+        # Positively confirmed live — for THIS order only. The next sync takes the
+        # free path for this cloid; every other row stays suspect until it is
+        # confirmed on its own evidence.
+        self._confirmed_cloid[role] = str(hexid)
+        return True
 
     # -- public entry ---------------------------------------------------------
 
@@ -177,6 +373,11 @@ class ProtectionManager:
         """
         now = self._clock.now()
         self._orders_changed = False
+        # Sample the firing count BEFORE any short-circuiting predicate can hide
+        # it (see _note_firings): the engine can also skip _sync_protection
+        # entirely on a bad market-data snapshot, which is caused by the same
+        # outage that lapses a deadline.
+        self._note_firings()
         # Whether this sync began already carrying an unresolved protection failure
         # — so a recovery to PROTECTED can emit degraded_protection_cleared (the §17
         # audit trail should show protection RESTORED, not only degradation entered).
@@ -243,18 +444,85 @@ class ProtectionManager:
 
         assert sl_decision.price is not None
         sl_result = self._establish("stop_loss", position, sl_decision.price, now)
-        if sl_result is _EstablishResult.GATE_BLOCKED:
-            # Every attempt was refused PRE-SEND by the §4.1 wire gate (in
-            # practice: the kill switch — the protective entrypoint exempts the
-            # safe-mode lines). Nothing failed ON the exchange, and the same
-            # gate would refuse the emergency close too, so escalating would be
-            # a futile close storm. Keep the failure line up (blocks new risk),
-            # retry next sync once the gate reopens; §12.3's SL-missing check
-            # remains the standing net for the unprotected window.
+        if sl_result in (_EstablishResult.GATE_BLOCKED, _EstablishResult.THROTTLED):
+            # Two ways to arrive, one disposition — hold, do not escalate.
+            #
+            # GATE_BLOCKED: every attempt was refused PRE-SEND by the §4.1 wire
+            # gate (in practice: the kill switch — the protective entrypoint
+            # exempts the safe-mode lines). Nothing failed ON the exchange, and
+            # the same gate would refuse the emergency close too, so escalating
+            # would be a futile close storm.
+            #
+            # THROTTLED: every attempt that reached the wire was the venue
+            # declining to SERVE it. Nothing said this order cannot exist, so
+            # §17.2's market-out-and-latch would be a response to a rate limit —
+            # taken during the violent move a stop exists for, which is when a
+            # venue throttles hardest.
+            #
+            # Either way: keep the failure line up (blocks new risk), retry next
+            # sync; §12.3's SL-missing check remains the standing net for the
+            # unprotected window.
             self._gate.unresolved_protection_failure = True
+            # §17.4 is modify-before-cancel, so a gate-refused MODIFY can leave
+            # the previous SL resting while a gate-refused CREATE leaves
+            # nothing. Both reach here, and the §20.3 validator has to tell them
+            # apart: counting a still-protected position as unprotected seconds
+            # would fail an otherwise-healthy 30-cycle run on one kill-switch
+            # refresh blip. The distinction is recorded as this event's
+            # ``order_id`` — but the test is COVERAGE, not existence. §17.1
+            # rule 1 is a coverage rule and reconcile._has_valid_sl agrees
+            # (closing side + qty >= position), and the commonest blocked MODIFY
+            # is a RESIZE: a later slice filled and the resting SL now
+            # under-covers. Stamping it on the strength of "a row exists" would
+            # report "protected" while part of the position carries no stop at
+            # all. Compare on the same floored basis _establish uses, or step
+            # rounding alone re-opens the window.
+            resting = repo.active_protection_order(
+                self._db.conn, self._run_id, self._coin, "stop_loss"
+            )
+            with localcontext(DECIMAL_CONTEXT):
+                needed = floor_to_step(abs(position.size), self._qty_step)
+            closing_side = (Side.BUY if position.size < 0 else Side.SELL).value
+            # EXISTENCE of the row is not evidence here, and this branch is the
+            # one place where that is guaranteed: the only §4.1 line that refuses
+            # a PROTECTIVE order is the kill switch, so reaching this code means
+            # the switch is down — and a switch that went down by LAPSING its
+            # deadline has already had the exchange cancel every order on the
+            # wallet, leaving these rows untouched and wrong. Confirm against
+            # orderStatus before letting the row suppress a §20.3 window; a read
+            # that cannot confirm leaves ``covering`` None, so the window opens
+            # (fail-closed, matching reconcile._has_valid_sl).
+            covering = (
+                resting
+                if resting is not None
+                and resting["side"] == closing_side
+                and Decimal(resting["qty"]) >= needed
+                and self._row_still_rests(resting, role="stop_loss")
+                else None
+            )
+            shortfall = (
+                ""
+                if resting is None
+                else f" (resting {resting['side']} {resting['qty']} vs {needed} needed)"
+            )
             self._record_event(
                 "stop_loss_repair_blocked",
-                detail="wire gate refused every SL attempt pre-send (kill switch); retrying next sync",
+                # Only a COVERING order suppresses the unprotected window.
+                order_id=None if covering is None else covering["order_id"],
+                cloid_hex=None if covering is None else covering["cloid_hex"],
+                detail=(
+                    (
+                        "wire gate refused every SL attempt pre-send (kill switch); retrying "
+                        if sl_result is _EstablishResult.GATE_BLOCKED
+                        else "the exchange rate-limited every SL attempt (nothing was "
+                        "rejected, only unserved); retrying "
+                    )
+                    + (
+                        "next sync — the previous SL still rests and covers the position"
+                        if covering is not None
+                        else f"next sync — NO covering stop-loss rests{shortfall}"
+                    )
+                ),
                 now=now,
             )
             return ProtectionOutcome.BLOCKED
@@ -290,6 +558,20 @@ class ProtectionManager:
                     now=now,
                 )
                 return ProtectionOutcome.DEGRADED
+            # The TP is provably off the book (the still-resting check above
+            # returned), so drop the recorded price too. Previously only
+            # ``_clear`` (the flat path) nulled these columns, which left the
+            # row — and therefore every position_snapshots / ai_inputs row and
+            # both CSV exports written during the plan window — asserting a
+            # take-profit that no longer existed, for as long as the plan ran.
+            # Written AFTER the still-resting check on purpose: in the DEGRADED
+            # case a stale TP really IS still on the exchange and the column
+            # should keep saying so. Rule 6 re-establishment restores the value
+            # through _persist_placed.
+            recorded = repo.get_position_protection(self._db.conn, self._run_id, self._coin)
+            if recorded is not None and recorded[1] is not None:
+                with self._db.transaction() as conn:
+                    self._write_protection_price(conn, "take_profit", None, now)
             if was_failed:
                 self._record_event(
                     "degraded_protection_cleared",
@@ -363,14 +645,36 @@ class ProtectionManager:
 
         existing = repo.active_protection_order(self._db.conn, self._run_id, self._coin, role)
         existing_oid = existing["exchange_order_id"] if existing is not None else None
-        # A no-op: the resting order already covers this size at this trigger.
+        # A no-op: the resting order already covers this size at this trigger, on
+        # the closing side. SIDE is part of the test for the same reason it is part
+        # of the ``covering`` computation in sync's GATE_BLOCKED branch below:
+        # trigger and qty alone can match an order left over from the OPPOSITE
+        # direction (a same-size flip whose old SL was never confirmed cancelled),
+        # and returning ESTABLISHED over it would report PROTECTED while nothing on
+        # the book actually closes the current position.
+        #
+        # But the row is only evidence while the dead man's switch is healthy.
+        # ``scheduleCancel`` firing cancels EVERY order on the wallet and touches
+        # no SQLite: kill_switch.py's own ERROR says "local order rows are stale
+        # until then". Every field this test reads — side, trigger, qty — survives
+        # that untouched, so the match is 100% reliable and 100% wrong. That is
+        # WORSE than the GATE_BLOCKED branch's stale read below: this returns
+        # ESTABLISHED before any wire call, so no protection event is written at
+        # all (the §20.3 unprotected window never opens) and the outcome is
+        # PROTECTED, which LOWERS gate.unresolved_protection_failure. The part
+        # that actually costs money: once §13.4 reopens the gate this same stale
+        # row keeps matching, so the SL the exchange cancelled is never re-placed
+        # until reconciliation settles the row a heartbeat later — the no-op
+        # actively fights the recovery (2026-07-31 stale-evidence review).
         if (
             existing is not None
             and existing_oid is not None
+            and existing["side"] == (Side.BUY if is_buy else Side.SELL).value
             and existing["trigger_price"] is not None
             and Decimal(existing["trigger_price"]) == trigger_price
             and existing["qty"] is not None
             and Decimal(existing["qty"]) == size
+            and self._row_still_rests(existing, role=role)
         ):
             return _EstablishResult.ESTABLISHED
 
@@ -384,6 +688,12 @@ class ProtectionManager:
         # Flipped the moment any attempt reaches (or may have reached) the wire;
         # a ladder that ends with this still True never transmitted anything.
         all_gate_blocked = True
+        # Throttle bookkeeping: a ladder whose only wire-reaching failures were
+        # the venue declining to SERVE us must not escalate (see
+        # _EstablishResult.THROTTLED). One rejection of the ORDER anywhere in the
+        # ladder is enough to make this an ordinary exhaustion again.
+        saw_throttle = False
+        saw_other_wire_failure = False
         for attempt in range(1, attempts + 1):
             order_id, logical, hexid = self._mint_ids(role, seq)
             try:
@@ -423,13 +733,33 @@ class ProtectionManager:
                 self._log_attempt_failed(role, attempt, attempts, existing_oid, exc, now)
                 self._maybe_delay(attempt, attempts)
                 continue
+            except ExchangeThrottledError as exc:
+                all_gate_blocked = False
+                saw_throttle = True
+                # No orderStatus recovery probe here: it would ride the SAME
+                # rate limiter that just refused us, so it fails too and buys
+                # nothing but another request against the budget. The next sync
+                # re-establishes from scratch, and a landed-but-ack-lost order
+                # is picked up then (or by §12.3 reconciliation).
+                self._log_attempt_failed(role, attempt, attempts, existing_oid, exc, now)
+                self._maybe_delay(attempt, attempts, backoff=attempt)
+                continue
             except ExchangeError as exc:
                 all_gate_blocked = False
+                saw_other_wire_failure = True
                 # Unknown outcome (§8.3 rule 11): a lost ack / timeout may have left
                 # the order LIVE on the exchange. Ask orderStatus BEFORE counting a
                 # failure — a landed-but-ack-lost SL/TP must not be blind-resent
                 # (the resend hits a duplicate-cloid rejection) and must NOT drive a
                 # spurious emergency close of an already-protected position.
+                #
+                # §18.2: refresh BETWEEN the two. The lane is reached by a wire
+                # call that failed — commonly by timing out, i.e. having ridden
+                # the full network timeout — and the recovery probe below is a
+                # second one. Back to back they are the longest blocking stretch
+                # in the ladder, and the rung's own refresh only comes after
+                # (2026-07-31 deadline review).
+                refresh_across_blocking_work(self._kill_switch, what="SL/TP repair")
                 if self._recover_placed_order(
                     role=role,
                     order_id=order_id,
@@ -448,6 +778,16 @@ class ProtectionManager:
                 continue
 
             all_gate_blocked = False  # an ack came back — this attempt reached the wire
+            # §18.2: an ack means that call was ON the network. Refresh here and
+            # the invariant over this whole ladder becomes "every wire call is
+            # followed by a refresh", which the exception lanes and _maybe_delay
+            # cover on their own — but the two ESTABLISHED returns below do NOT
+            # reach _maybe_delay, so without this a successful SL place followed
+            # by a successful TP place is two round-trips inside one gap, and the
+            # duplicate lane below is a place plus an orderStatus probe. Cheap to
+            # repeat: tick() reaches the wire only when a refresh is actually due
+            # (2026-07-31 deadline review).
+            refresh_across_blocking_work(self._kill_switch, what="SL/TP repair")
             if ack.accepted:
                 self._persist_placed(
                     role=role,
@@ -465,26 +805,41 @@ class ProtectionManager:
                 )
                 return _EstablishResult.ESTABLISHED
 
-            if ack.is_duplicate and self._recover_placed_order(
-                role=role,
-                order_id=order_id,
-                logical=logical,
-                hexid=hexid,
-                size=size,
-                side=side,
-                trigger_price=trigger_price,
-                limit_price=limit_price,
-                replaced=existing,
-                now=now,
-            ):
-                # The exchange already knows this cloid from a prior attempt whose
-                # ack we never observed; orderStatus confirms it is resting (§8.3
-                # rules 2–4) → recovered, no resend.
-                return _EstablishResult.ESTABLISHED
+            if ack.is_duplicate:
+                recovered = self._recover_placed_order(
+                    role=role,
+                    order_id=order_id,
+                    logical=logical,
+                    hexid=hexid,
+                    size=size,
+                    side=side,
+                    trigger_price=trigger_price,
+                    limit_price=limit_price,
+                    replaced=existing,
+                    now=now,
+                )
+                # §18.2: that probe was a REST call, and the branch below RETURNS
+                # without passing _maybe_delay — the one exit from this ladder
+                # that reaches the wire and then leaves without a refresh. Left
+                # uncovered, an SL recovered this way and the TP ``_establish``
+                # that sync() runs next share a single gap.
+                refresh_across_blocking_work(self._kill_switch, what="SL/TP repair")
+                if recovered:
+                    # The exchange already knows this cloid from a prior attempt
+                    # whose ack we never observed; orderStatus confirms it is
+                    # resting (§8.3 rules 2–4) → recovered, no resend.
+                    return _EstablishResult.ESTABLISHED
 
+            # An ack that says "no" is the exchange REJECTING the order, which is
+            # exactly the evidence a throttle is not.
+            saw_other_wire_failure = True
             self._log_attempt_failed(role, attempt, attempts, existing_oid, ack.error, now)
             self._maybe_delay(attempt, attempts)
-        return _EstablishResult.GATE_BLOCKED if all_gate_blocked else _EstablishResult.EXHAUSTED
+        if all_gate_blocked:
+            return _EstablishResult.GATE_BLOCKED
+        if saw_throttle and not saw_other_wire_failure:
+            return _EstablishResult.THROTTLED
+        return _EstablishResult.EXHAUSTED
 
     def _log_attempt_failed(
         self,
@@ -544,6 +899,23 @@ class ProtectionManager:
         if parsed is None:
             return False  # the exchange does not know this cloid — nothing landed
         exchange_oid, exchange_status = parsed
+        if not is_known_exchange_status(exchange_status):
+            # A word this build cannot classify is not a POSITIVE confirmation,
+            # and this method's whole contract is that it only returns True on
+            # one. Testing "is it terminal?" reads the unknown-word fallback
+            # ("open") as proof of life and persists a possibly-dead order as
+            # live protection — the same fail-OPEN _row_still_rests carried, and
+            # reachable here with no kill-switch firing at all, off nothing but a
+            # lost ack (2026-08-01 malformed-response review).
+            logger.warning(
+                "orderStatus recovery for %s cloid %s answered %r — a word this build "
+                "cannot classify, so the placement is NOT confirmed (fail-closed: the "
+                "caller retries, and an exhausted ladder emergency-closes)",
+                role,
+                hexid,
+                exchange_status,
+            )
+            return False
         if local_status_for_exchange_status(exchange_status) in ("canceled", "rejected"):
             # Known to the exchange but no longer a live protective order: rejected
             # (never accepted) or a *Canceled — e.g. reduceOnlyCanceled — that was
@@ -574,20 +946,50 @@ class ProtectionManager:
         )
         return True
 
-    def _maybe_delay(self, attempt: int, attempts: int) -> None:
-        if attempt >= attempts:
-            return
-        self._sleep(float(self._config.sl_repair_retry_delay_seconds))
-        # §18.2: this delay blocked the single-threaded tick — refresh the dead
-        # man's switch across it (as the startup sweep does) so a repair episode
-        # never stretches the kill-switch refresh cadence toward ``max_tick_gap``
-        # and self-trips the switch when the system is least healthy. Guarded so a
-        # refresh miss never aborts the repair out from under the position.
-        if self._kill_switch is not None:
-            try:
-                self._kill_switch.tick()
-            except Exception:  # noqa: BLE001 — a refresh miss must not abort the repair
-                logger.warning("kill-switch refresh during SL/TP repair failed", exc_info=True)
+    def _maybe_delay(self, attempt: int, attempts: int, *, backoff: int = 1) -> None:
+        """Close out one ladder rung: sleep if another follows, always refresh.
+
+        ``backoff`` multiplies the configured delay. Retrying a rate limiter on
+        a flat cadence mostly spends the budget re-triggering it; the multiplier
+        is linear rather than exponential because the whole ladder still has to
+        fit inside the tick's timing envelope (§18.2), which the fixed delay was
+        chosen against.
+
+        That growth is DELIBERATELY TRUNCATED by the clamp below, and the
+        truncation is not a bug to fix later. Since ``_MAX_REPAIR_SLEEP_S`` became
+        one slot of the unrefreshed-REST budget (10s, not the whole 30s gap), the
+        default 5s delay yields rungs 5, 10, 10, 10 rather than 5, 10, 15, 20 —
+        flat from the second rung, which is the cadence the multiplier exists to
+        avoid. Both properties cannot hold at once: growing past one slot is
+        exactly the overshoot that pushes the §18.2 refresh past the exchange-side
+        deadline and cancels every resting order mid-repair. The budget wins,
+        because a rate limiter costs a retry and a fired scheduleCancel costs the
+        stop. Escaping the trade-off needs the deferred network-layer rework
+        (returning control to the tick loop between rungs so a real refresh lands
+        in between), not a larger constant. At the shipped
+        ``sl_repair_max_attempts: 3`` the product never reaches the clamp anyway,
+        so today this bites only a config with 4+ attempts (2026-08-01 round-14
+        review, user decision: keep the budget, document the truncation).
+
+        And CLAMPED to that envelope, because the multiplier alone breaks it.
+        ``sl_repair_delay_warning`` only ever compares the raw configured delay
+        against ``max_tick_gap``, and config bounds neither the delay nor the
+        attempt count — so ``delay=20, attempts=8`` would sleep 140s on the last
+        rung, past a 120s schedule_cancel, and the dead man's switch fires
+        DURING the stop-loss repair (2026-07-31 exit check).
+
+        The refresh is NOT conditional on having slept. It used to be — the
+        early return on the final rung skipped it — but the sleep was never the
+        only blocking thing here: every rung reaches this after a wire call, and
+        the ExchangeError lane after a wire call AND its orderStatus recovery
+        probe, two full timeouts back to back. Skipping the last rung left that
+        traffic uncovered and then handed control back to ``sync()``, which can
+        block again before the tick ends (2026-07-31 deadline review).
+        """
+        if attempt < attempts:
+            delay = float(self._config.sl_repair_retry_delay_seconds)
+            self._sleep(min(delay * backoff, max(delay, _MAX_REPAIR_SLEEP_S)))
+        refresh_across_blocking_work(self._kill_switch, what="SL/TP repair")
 
     def _persist_placed(
         self,
@@ -618,6 +1020,19 @@ class ProtectionManager:
             else "open"
         )
         remaining = Decimal(0) if local_status == "filled" else size
+        # An accepted ack for a LIVE order is the exchange telling us this cloid
+        # rests — the same fact ``_row_still_rests`` would spend a full-timeout
+        # orderStatus round-trip to learn, only first-hand and free. Seeding it
+        # here is what keeps the per-order suspicion from costing a REST read on
+        # every re-place for the rest of a process that has seen one firing: a
+        # slice plan re-places the SL as the position grows, so without this the
+        # tick pays for it every slice — on the very thread whose REST budget
+        # this PR is otherwise busy protecting. A terminal status seeds nothing
+        # (there is no resting order to vouch for) (2026-08-01 lifecycle review).
+        if local_status in _RESTING_ORDER_STATUSES:
+            self._confirmed_cloid[role] = hexid
+        else:
+            self._confirmed_cloid.pop(role, None)
         with self._db.transaction() as conn:
             repo.insert_cloid_mapping(
                 conn,
@@ -712,6 +1127,12 @@ class ProtectionManager:
             # reason to crash the protection pass. Leave the row; log loud.
             logger.warning("cancel of resting %s (%s) failed: %s", role, existing["order_id"], exc)
             return False
+        finally:
+            # §18.2: ``_clear`` calls this once per §17.1-rule-4 role, so a flat
+            # position pays two of these cancels back to back every tick — and a
+            # cancel that fails by timing out is precisely the one that spent the
+            # whole timeout getting there (2026-07-31 deadline review).
+            refresh_across_blocking_work(self._kill_switch, what="protection cancel")
         if not ack.success:
             # A NON-exceptional refusal (cancel_by_cloid returns CancelAck(success=
             # False) without raising — e.g. "already filled" / "unknown oid"): the
@@ -761,7 +1182,10 @@ class ProtectionManager:
         # of the trigger's own tick (up for a buy, down for a sell).
         return round_to_tick(limit, self._tick, up=is_buy)
 
-    def _write_protection_price(self, conn, role: str, price: Decimal, now: datetime) -> None:
+    def _write_protection_price(
+        self, conn, role: str, price: Decimal | None, now: datetime
+    ) -> None:
+        """Set one role's recorded price, preserving the other's. ``None`` clears."""
         current = repo.get_position_protection(self._db.conn, self._run_id, self._coin)
         sl, tp = (None, None) if current is None else current
         if role == "stop_loss":

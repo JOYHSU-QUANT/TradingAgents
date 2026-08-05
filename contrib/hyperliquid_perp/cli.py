@@ -1,6 +1,6 @@
 """Subcommand CLI for the Hyperliquid perp module.
 
-Four subcommands plus full Phase 1/2 backward compatibility:
+The subcommands (plus full Phase 1/2 backward compatibility):
 
 - ``python -m contrib.hyperliquid_perp paper --coin BTC`` — the long-running
   paper run: restart reconciliation (execution §1.2), then the 30-second
@@ -8,13 +8,22 @@ Four subcommands plus full Phase 1/2 backward compatibility:
   funding), with CSV export after every completed cycle and on shutdown.
 - ``python -m contrib.hyperliquid_perp export --run-id <id> --output-dir <dir>``
   — manual full-dataset CSV export (phase2-data §1.1).
-- ``python -m contrib.hyperliquid_perp validate --run-id <id>`` — the spec §5
-  acceptance report and Phase-3 verdict.
+- ``python -m contrib.hyperliquid_perp validate --run-id <id>`` — the acceptance
+  report and verdict. A PAPER run gets the phase2-spec §5 report; a LIVE run gets
+  the phase3-spec §20.3 / §21.4 report (the run's stored mode selects which).
 - ``python -m contrib.hyperliquid_perp live --config <yaml>`` — the Phase 3
   startup skeleton (phase3-spec PR 1): load the ``live:`` config gates, verify
   the agent-wallet authorization, print the effective notional caps, and exit
   without entering any trading loop (that is ``live --run-id --loop``, PR 5).
   Places no orders.
+- ``python -m contrib.hyperliquid_perp live-smoke --run-id <id> --config <yaml>``
+  — the phase3-spec §20.2 testnet smoke checklist (PR 6): drive each signed
+  exchange action against testnet, record the verdicts, and report the §20.2
+  cycle-entry gate. ``--gate-status`` reads the stored gate (no network);
+  ``--dry-run`` validates config + wiring and places no orders.
+- ``python -m contrib.hyperliquid_perp safe-mode --run-id <id> --status`` —
+  live-run safe-mode inspection and the manual lane (``--release``,
+  ``--stamp-case``) for §12.3/§13.5 operator actions.
 
 Empty argv and flag-style invocations (first argument starting with ``-``) —
 including the Phase 1 ``--context-only`` smoke run and the single-shot engine
@@ -27,15 +36,25 @@ operator/config/environment errors — including a protection-only ``paper`` run
 that self-terminates after its position closes (final export written; the
 books never re-verified, the API key was never supplied, or the engine
 failed to import — stderr says which), ``2`` unexpected error, ``4``
-(``validate`` only) the run is internally consistent but has not accumulated
-the 30-cycle gate yet ("keep running cycles"), ``5`` (``validate`` only) the
+not-yet-at-the-gate outcomes (``validate``: short of the 30-cycle gate or a
+red/missing smoke test — curable by a ``live-smoke`` re-run;
+``live-smoke``: the §20.2 gate is not satisfied, incl. a pre-flight abort;
+``live --loop``: the §20.2 smoke gate is not open on this run;
+``live`` without ``--loop``: recovery ran but judged unclean; ``safe-mode
+--status``: a safe mode is latched, recoverable OR manual — 4 means "latched",
+not "human action required"), ``5`` (``validate`` only) the
 run has integrity failures — orphans, snapshot or replay mismatches, or a
 store so corrupt the checks themselves cannot run ("the store is broken;
 investigate before trusting results"), ``130`` interrupted before a graceful
-lane could take over (Ctrl-C in ``export``/``validate``/``live`` or during
-``paper`` startup/reconciliation — SIGTERM likewise once ``paper`` has
-installed its handler; once the loop runs, both signals take the
-shutdown-export lane instead of ``130``). Legacy delegated invocations keep
+lane could take over (Ctrl-C in ``export``/``validate``/``live``/``live-smoke``
+or during ``paper`` startup/reconciliation — SIGTERM likewise once ``paper``,
+``live`` or ``live-smoke`` has installed its handler; once the ``paper`` loop
+runs, both signals take the shutdown-export lane instead of ``130``). For
+``live-smoke`` the handler is installed with the run lease, so an interrupt
+after that point still runs the suite's cleanup (sweep resting probes, close the
+staged long, disarm the switch — in that order, because flattening first makes
+the exchange auto-cancel the reduce-only probes) rather than stranding it.
+Legacy delegated invocations keep
 :mod:`.main`'s own exit contract.
 """
 
@@ -50,14 +69,16 @@ import sqlite3
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from functools import partial
 from pathlib import Path
 
 from .config import CONFIG_LOAD_ERRORS, dotenv_diagnosis, load_config, load_dotenv_files
-from .persistence.db import Database
+from .persistence.db import Database, SchemaVersionError, apply_migrations
 
 logger = logging.getLogger(__name__)
 
-_SUBCOMMANDS = ("paper", "export", "validate", "live", "safe-mode")
+_SUBCOMMANDS = ("paper", "export", "validate", "live", "live-smoke", "safe-mode")
 
 # Version stamp for the ai_inputs.prompt_version column: bump when the injected
 # context/format contract changes shape (the payload hash tracks content).
@@ -102,6 +123,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_validate(rest)
         if command == "live":
             return _cmd_live(rest)
+        if command == "live-smoke":
+            return _cmd_live_smoke(rest)
         if command == "safe-mode":
             return _cmd_safe_mode(rest)
         return _cmd_paper(rest)
@@ -119,16 +142,78 @@ def main(argv: list[str] | None = None) -> int:
 # --------------------------------------------------------------------------
 
 
-def _open_existing_db(path: str) -> Database | None:
-    """Open an existing store, or report why not (never create one implicitly).
+def _open_existing_db(
+    path: str, *, migrate: bool = False, defer_migration: bool = False
+) -> Database | None:
+    """Open an existing store, or report why not (never CREATE one implicitly).
 
     ``Database(path)`` would happily create an empty schema — and an offline
     command against a typo'd path would then "succeed" with zero rows.
+
+    ``migrate`` splits the callers by what they actually do:
+
+    * ``False`` (default) for the genuinely REPORT-ONLY commands — ``validate``,
+      ``export``, ``live-smoke --gate-status``. They take no run lease, so
+      migrating would silently upgrade a store a running daemon owns, leaving
+      that daemon writing through a schema it does not know. They refuse with
+      instructions instead (2026-07-30 migration review).
+    * ``True`` for ``safe-mode``, which legitimately CHANGES the run
+      (``--release`` / ``--stamp-case`` write, and ``--status`` is how an
+      operator diagnoses a latched run). Refusing it would disable exactly the
+      diagnostic tool an upgrade is most likely to need: the exit check found
+      ``safe-mode`` blocked by the very condition it exists to investigate
+      (2026-07-31). It takes no lease, so this remains a deliberate exception.
+    * ``defer_migration=True`` for the real ``live-smoke`` run, which owns the
+      store but cannot prove it until it holds the lease — it migrates itself
+      once it does. See :class:`Database` for why that ordering matters.
     """
     if not Path(path).exists():
         print(f"error: database {path!r} does not exist.", file=sys.stderr)
         return None
-    return Database(path)
+    try:
+        return Database(path, migrate=migrate, defer_migration=defer_migration)
+    except SchemaVersionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return None
+
+
+def _existing_run_row(conn, run_id: str, db_label: str, *, not_found_hint: str = ""):
+    """The run's row, or ``None`` after printing the standard missing-run error.
+
+    The one encoding of the "does this run exist" refusal, shared by every
+    read-style command (``validate``, ``live-smoke --gate-status``, and
+    ``live-smoke``'s real-run build) so a wording tweak cannot land on one
+    surface and not the other. ``not_found_hint`` lets a caller that can offer
+    a concrete remedy (e.g. "create it first with ...") append one without
+    forking the base message (2026-07-30 simplify pass).
+    """
+    from .persistence import repository as repo
+
+    row = repo.get_run(conn, run_id)
+    if row is None:
+        suffix = not_found_hint or "."
+        print(f"error: run {run_id!r} does not exist in {db_label}{suffix}", file=sys.stderr)
+    return row
+
+
+def _require_live_run_mode(run_row, run_id: str, db_label: str, *, extra: str = "") -> bool:
+    """True if ``run_row`` is a ``live``-mode run, else prints the refusal.
+
+    Shared by every command that only makes sense against a live run
+    (``live-smoke --gate-status``, ``live-smoke``'s real-run build) so the
+    "wrong run mode" wording can't drift between them (2026-07-30 simplify
+    pass). ``extra`` lets a caller insert a clause before the closing
+    "Fix --run-id / --db." sentence.
+    """
+    if run_row["mode"] != "live":
+        detail = f" — {extra}" if extra else ""
+        print(
+            f"error: run {run_id!r} in {db_label} is a {run_row['mode']} run{detail}. "
+            "Fix --run-id / --db.",
+            file=sys.stderr,
+        )
+        return False
+    return True
 
 
 def _cmd_export(argv: list[str]) -> int:
@@ -160,19 +245,34 @@ def _cmd_export(argv: list[str]) -> int:
 def _cmd_validate(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m contrib.hyperliquid_perp validate",
-        description="Spec §5 acceptance report: summary metrics + Phase-3 verdict.",
+        description=(
+            "Acceptance report + verdict. A PAPER run gets the phase2-spec §5 "
+            "report (Phase-3 verdict); a LIVE run gets the phase3-spec §20.3 / "
+            "§21.4 acceptance report (the profile follows the run's live.mode). "
+            "The run's stored mode selects the report — point --db at the right "
+            "store (live runs default to live_trading.db)."
+        ),
     )
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--db", default="paper_trading.db", help="SQLite store path.")
+    parser.add_argument(
+        "--db",
+        default="paper_trading.db",
+        help="SQLite store path (a live run's store is usually live_trading.db).",
+    )
     args = parser.parse_args(argv)
-
-    from .paper.validation import validate_run
 
     try:
         db = _open_existing_db(args.db)
         if db is None:
             return 1
         with db:
+            run_row = _existing_run_row(db.conn, args.run_id, args.db)
+            if run_row is None:
+                return 1
+            if run_row["mode"] == "live":
+                return _validate_live(db, args.run_id)
+            from .paper.validation import validate_run
+
             report = validate_run(db, run_id=args.run_id)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -189,6 +289,28 @@ def _cmd_validate(argv: list[str]) -> int:
         return 0
     # Integrity failures and a merely-short run are different operator actions
     # (investigate vs keep running) — give them distinct codes.
+    return 5 if report.failures else 4
+
+
+def _validate_live(db: Database, run_id: str) -> int:
+    """The live branch of ``validate`` (§20.3 / §21.4), reusing the 0/4/5 codes.
+
+    Same exit contract as the paper report: 0 = acceptance passed; 5 = an
+    integrity failure (dedupe error, orphan, position/replay mismatch, an
+    unprotected window, a low kill-switch refresh rate, or — mainnet_tiny — an
+    unresolved reconciliation case / breached daily-loss cap); 4 = internally
+    consistent but short of the gate (< 30 cycles / orders, smoke tests not yet
+    run, or a failed/errored smoke test — curable by a ``live-smoke --only``
+    re-run, so it is a shortfall, not an integrity verdict; decision
+    2026-07-29). Called inside the caller's ``with db:`` block.
+    """
+    from .live.validation import validate_live_run
+
+    report = validate_live_run(db, run_id=run_id)
+    for line in report.summary_lines():
+        print(line)
+    if report.live_ready:
+        return 0
     return 5 if report.failures else 4
 
 
@@ -267,7 +389,11 @@ def _cmd_safe_mode(argv: list[str]) -> int:
     from .live.safe_mode import SafeModeManager
     from .persistence import repository as repo
 
-    db = _open_existing_db(args.db)
+    # migrate=True: safe-mode WRITES (--release / --stamp-case), and --status is
+    # how an operator diagnoses a latched run. Refusing it on a store that needs
+    # upgrading would disable the diagnostic tool at exactly the moment it is
+    # needed — an upgrade that latches safe mode (2026-07-31 exit check).
+    db = _open_existing_db(args.db, migrate=True)
     if db is None:
         return 1
     with db:
@@ -518,7 +644,21 @@ def _stamp_reconciliation_case(db, repo, args) -> int:
         )
         return 1
     with db.transaction() as conn:
-        repo.set_reconciliation_action(conn, args.stamp_case, args.action)
+        # Re-tested INSIDE the write, not just above: this command takes no run
+        # lease, so between that read and here the daemon's own reconciliation
+        # pass can stamp the machine disposition — and a plain UPDATE would
+        # erase what the system recorded it DID, with no error and no audit row
+        # (2026-07-30 concurrency review).
+        stamped = repo.stamp_reconciliation_action_if_unset(conn, args.stamp_case, args.action)
+    if not stamped:
+        print(
+            f"error: case {args.stamp_case} was disposed of by another writer "
+            "while this command was running (the live daemon stamps cases its "
+            "reconciliation pass resolves) — nothing was overwritten. Re-check "
+            "`safe-mode --status` and stamp again only if it is still open.",
+            file=sys.stderr,
+        )
+        return 1
     print(f"case {args.stamp_case} ({row['case_type']}) stamped: {args.action}")
     print(
         "NOTE: trading does not resume yet — the run must pass its next full "
@@ -703,6 +843,16 @@ def _cmd_live(argv: list[str]) -> int:
         loop_cfgs = _load_risk_decision(config)
         if loop_cfgs is None:
             return 1
+        # The AI key, checked here for the same reason the config blocks above
+        # are: the loop drives a 4h AI cycle, and without a key EVERY cycle
+        # records api_failed — which never counts toward the §20.3 >=30-cycle
+        # gate. A real-money run could otherwise burn days producing nothing
+        # gateable, with no named error anywhere. _cmd_paper has always checked
+        # this; the live path did not (added 2026-07-30). After the config
+        # validation, so a typo in risk:/decision: still reports as the config
+        # error it is rather than being masked by a missing key.
+        if not _require_api_key():
+            return 1
 
     # A top-level ``network:`` that disagrees with ``live.network`` is legal —
     # the same file can drive paper reads on mainnet while live drills on
@@ -880,6 +1030,12 @@ def _cmd_live(argv: list[str]) -> int:
 # KillSwitchManager construction below, so the number the preflight proves is
 # the number the constructor enforces.
 _RECOVERY_MAX_TICK_GAP_SECONDS = 30.0
+# The narrowest dead-man cover the smoke suite will run under, whatever the
+# config says. The suite refreshes once per TEST rather than on a fixed tick,
+# and a test is an unbounded place/poll/cancel round-trip, so the config's
+# daemon-shaped invariant does not bound it. 120s is what the suite guaranteed
+# before the value was wired from config at all (2026-07-31).
+_SMOKE_MIN_KILL_SWITCH_DEADLINE = timedelta(seconds=120)
 
 
 def _live_startup_recovery(
@@ -916,12 +1072,7 @@ def _live_startup_recovery(
     from .exchanges.hyperliquid.signed_client import HyperliquidSignedClient
     from .live.fill_backfill import FillBackfiller
     from .live.fills import LiveFillProcessor
-    from .live.kill_switch import (
-        KillSwitchManager,
-        kill_switch_timing_violation,
-        network_timeout_warning,
-        sl_repair_delay_warning,
-    )
+    from .live.kill_switch import KillSwitchManager, refresh_across_blocking_work
     from .live.order_gate import RealOrderGate
     from .live.reconcile import LiveReconciler
     from .live.safe_mode import SafeModeManager
@@ -950,30 +1101,8 @@ def _live_startup_recovery(
         )
         return 1
 
-    # Refuse a violating kill-switch timing BEFORE any side effect (run row,
-    # run lock) with a named exit 1 — kill_switch_timing_violation's docstring
-    # owns the invariant and the why-a-preflight story.
-    violation = kill_switch_timing_violation(live_cfg.kill_switch, _RECOVERY_MAX_TICK_GAP_SECONDS)
-    if violation is not None:
-        print(
-            f"error: {violation}. Raise live.kill_switch.schedule_cancel_seconds "
-            "or lower live.kill_switch.refresh_interval_seconds.",
-            file=sys.stderr,
-        )
+    if _timing_preflight(live_cfg, client) != 0:
         return 1
-    # Its advisory sister (decided 2026-07-22 "soft mitigation"): warn — do
-    # not refuse — when the per-request REST timeout cannot keep the same
-    # max_tick_gap promise. Beside the enforced check so the two halves of
-    # the §18.2 timing story stay in one place for PR 6's hard invariant.
-    for advisory in (
-        network_timeout_warning(client.timeout, _RECOVERY_MAX_TICK_GAP_SECONDS),
-        sl_repair_delay_warning(
-            float(live_cfg.protection.sl_repair_retry_delay_seconds),
-            _RECOVERY_MAX_TICK_GAP_SECONDS,
-        ),
-    ):
-        if advisory is not None:
-            print(f"WARNING: {advisory}", file=sys.stderr)
 
     run_id: str = args.run_id
     coin = live_cfg.safety.allowed_symbols[0]
@@ -995,6 +1124,19 @@ def _live_startup_recovery(
     def fetch_clearinghouse():
         return call_sdk(client.info.user_state, wallet)
 
+    # Same guard the paper daemon applies, and it matters more here: Database()
+    # creates AND migrates a store, so a wrong CWD or typo'd --db would leave an
+    # empty live store behind before failing on "run does not exist" — and with
+    # --create it would silently open a SECOND live ledger over the same real
+    # wallet, each blind to the other's orders and books.
+    if not Path(db_path).exists() and not args.create:
+        print(
+            f"error: database {str(db_path)!r} does not exist. Pass --create to "
+            "start a new store, or point --db at the existing one.",
+            file=sys.stderr,
+        )
+        return 1
+
     with Database(db_path) as db:
         existing_run = repo.get_run(db.conn, run_id)
         is_restart = existing_run is not None
@@ -1009,6 +1151,37 @@ def _live_startup_recovery(
             print(
                 f"error: run {run_id!r} already exists in {db_path}. Drop --create "
                 "to resume it, or pick a new --run-id for a fresh run.",
+                file=sys.stderr,
+            )
+            return 1
+        # BEFORE --create writes the run row and before any wire action: a
+        # refusal taken later left a half-created run behind, and the operator's
+        # corrected re-run was then rejected as "already exists" (2026-07-31
+        # exit check). own_network comes from this session's config because a
+        # not-yet-created run has no genesis to read; the SIBLING's network is
+        # still read from the store.
+        #
+        # The same per-WALLET hazard `live-smoke` refuses, on the path that runs
+        # with REAL money. This command arms and clears the account-wide
+        # scheduleCancel and runs the §19.3 stale-order sweep, whose bot-ownership
+        # lookup (get_cloid_by_hex) carries no run_id — so a sibling live run on
+        # this wallet has its resting orders cancelled by our sweep, and whichever
+        # of us shuts down cleanly first strips the other's dead-man cover. The
+        # run lease cannot see this: it is per-run_id, and both runs hold their
+        # own quite happily. Guarding only the testnet suite and not this was the
+        # most asymmetric gap of the 2026-07-31 review.
+        conflict = _conflicting_run_lease(db, run_id, own_network=_norm_network(raw_live))
+        if conflict is not None:
+            other_run, other_pid = conflict
+            print(
+                f"error: run {other_run!r} in {args.db} is being driven by pid "
+                f"{other_pid} right now, on this same network — the same wallet. "
+                "This command's kill-switch arm/clear and §19.3 stale-order sweep are "
+                "ACCOUNT-wide, not run-scoped, so the two runs would cancel each "
+                "other's resting orders and strip each other's dead-man cover. Stop "
+                "that process, or wait for its lease to go stale. Moving either run "
+                "to a different --db does NOT help: the hazard is per-WALLET, so a "
+                "separate store only hides them from this check.",
                 file=sys.stderr,
             )
             return 1
@@ -1033,11 +1206,34 @@ def _live_startup_recovery(
             drift = _config_drift_report(existing_run["config_json"], config, coin)
             if drift is not None:
                 kind, message = drift
-                if kind in ("coin", "network"):
+                if kind in _HARD_DRIFT_KINDS:
                     print(f"error: {message}", file=sys.stderr)
                     return 1
                 logger.warning("config drift on live resume for %s: %s", run_id, message)
                 print(f"WARNING: {message}", file=sys.stderr)
+            # The STORE's own off-coin exposure, mirroring the paper daemon's
+            # resume guard. The --create branch below checks the same thing from
+            # the exchange snapshot, but resume never did: a live store carrying a
+            # non-flat off-coin current_positions row (an older build, a
+            # hand-seeded genesis, a coin edit that passed as soft "params" drift)
+            # would resume and trade with that exposure invisible to every equity
+            # and SL/TP computation — exactly the harm the paper message names.
+            store_off_coin = sorted(
+                p.coin
+                for p in repo.get_all_current_positions(db.conn, run_id)
+                if p.coin != coin and not p.is_flat
+            )
+            if store_off_coin:
+                print(
+                    f"error: run {run_id!r} holds open position(s) in "
+                    f"{', '.join(map(repr, store_off_coin))} but this run trades "
+                    f"only {coin!r} — they would be excluded from equity and "
+                    "SL/TP protection, and the reconciler flags them as unknown "
+                    "exchange positions (manual safe mode) on every pass. "
+                    "Resolve them before resuming (export/validate still work).",
+                    file=sys.stderr,
+                )
+                return 1
             if args.adopt_positions:
                 # Named rejection, not silence: the flag seeds a NEW run's
                 # genesis and has no meaning on resume — an operator who
@@ -1111,6 +1307,60 @@ def _live_startup_recovery(
             )
             print(f"created live run {run_id!r} in {db_path}", file=sys.stderr)
 
+        # §20.2 gate: testnet_live cycles may not start until the smoke suite has
+        # passed on THIS run. (mainnet_tiny relies on the testnet smoke pass per
+        # §21.3 — a different run/network — so this same-run gate is testnet-only;
+        # the one-shot recovery check, without --loop, never trades and so is not
+        # gated.) Checked here, before arming: a fresh --create run has no smoke
+        # results, so --loop on it is refused with the create → smoke → loop path.
+        from .live.config import ExecutionMode
+
+        if args.loop and live_cfg.mode is ExecutionMode.TESTNET_LIVE:
+            from .live.smoke import smoke_gate_report
+
+            gate_ok, gate_missing, gate_failed, gate_errored = smoke_gate_report(db.conn, run_id)
+            if not gate_ok:
+                if not is_restart:
+                    print(
+                        "error: --loop on a freshly-created testnet_live run needs the "
+                        "§20.2 smoke suite first. Create the run, run "
+                        f"`live-smoke --run-id {run_id}`, then re-run with --loop.",
+                        file=sys.stderr,
+                    )
+                else:
+                    parts = [
+                        f"{label.replace('_', ' ')}: {', '.join(keys)}"
+                        for label, keys in _smoke_gate_buckets(
+                            gate_missing, gate_failed, gate_errored
+                        )
+                        if keys
+                    ]
+                    print(
+                        "error: testnet_live cycles are gated on the §20.2 smoke suite "
+                        f"(all must pass) — {'; '.join(parts)}. Run "
+                        f"`live-smoke --run-id {run_id}` and re-run with --loop.",
+                        file=sys.stderr,
+                    )
+                # Exit 4, not 1: "the gate is not open" is the same
+                # not-yet-at-the-gate fact `live-smoke` itself reports as 4 (the
+                # module exit contract lists it there), and a supervisor must be
+                # able to tell "gate closed — human action needed" from a
+                # config/auth failure's exit 1 (decision 2026-07-29).
+                return 4
+            # Gate open: say how stale the proof is. Passes never expire (a hard
+            # max-age is a policy call deliberately not made here, 2026-07-27),
+            # so an operator returning after weeks should at least SEE the age
+            # and re-run live-smoke after significant code/config changes.
+            latest_smoke = repo.latest_smoke_test_results(db.conn, run_id)
+            if latest_smoke:
+                oldest_iso = min(row["executed_at"] for row in latest_smoke.values())
+                print(
+                    f"§20.2 smoke gate open — oldest passing result recorded {oldest_iso}; "
+                    "passes never expire, so re-run live-smoke after significant "
+                    "code/config changes.",
+                    file=sys.stderr,
+                )
+
         try:
             acquire_run_lock(db, run_id, pid=os.getpid(), now=now)
         except RunLockError as exc:
@@ -1125,13 +1375,29 @@ def _live_startup_recovery(
                 run_id=run_id,
                 config=live_cfg.kill_switch,
                 # The preflight above already proved this invariant with the
-                # SAME constant, so this constructor cannot raise on timing.
+                # SAME constant and the SAME timeout, so this constructor cannot
+                # raise on timing. Both are passed explicitly: the timeout used to
+                # be probed off the client with getattr, which silently dropped
+                # the term on every production manager.
                 max_tick_gap_seconds=_RECOVERY_MAX_TICK_GAP_SECONDS,
+                network_timeout_s=signed.timeout,
                 payload_dir=payload_dir,
             )
             safe_mode = SafeModeManager(db=db, run_id=run_id, gate=gate)
             processor = LiveFillProcessor(db=db, run_id=run_id, payload_dir=payload_dir)
-            backfiller = FillBackfiller(fetch=signed.user_fills_by_time, processor=processor)
+
+            # §18.2: both of these block the single-threaded tick for far longer
+            # than one round-trip (a paged backfill, a per-order orderStatus
+            # sweep), and the tick's own refresh happens before either runs — so
+            # they refresh across their own work (2026-07-31 deadline review).
+            def _refresh_across_sweep() -> None:
+                refresh_across_blocking_work(kill_switch, what="reconciliation")
+
+            backfiller = FillBackfiller(
+                fetch=signed.user_fills_by_time,
+                processor=processor,
+                refresh_kill_switch=_refresh_across_sweep,
+            )
             reconciler = LiveReconciler(
                 db=db,
                 run_id=run_id,
@@ -1142,6 +1408,7 @@ def _live_startup_recovery(
                 fetch_fills=signed.user_fills_by_time,
                 backfiller=backfiller,
                 payload_dir=payload_dir,
+                refresh_kill_switch=_refresh_across_sweep,
             )
             shutdown_problem: str | None = None
             superseded = False
@@ -1214,7 +1481,12 @@ def _live_startup_recovery(
                 print(f"error: startup recovery failed — {exc}", file=sys.stderr)
                 return 1
             finally:
-                if superseded:
+                # Re-ASKED, not merely remembered: ``superseded`` is only True
+                # when a heartbeat raised, and the Ctrl-C / SIGTERM lane reaches
+                # here without one (see _still_owns_run).
+                if superseded or not _still_owns_run(
+                    db, run_id, pid=os.getpid(), now=datetime.now(timezone.utc)
+                ):
                     # Lease lost: the successor owns every resting order and
                     # the dead-man's switch — skip the position re-read and the
                     # §18.2 sweep ENTIRELY; only the caller's pid-guarded lock
@@ -1299,7 +1571,7 @@ def _live_startup_recovery(
                                 f"(unknown ≠ flat) and {unclean_note} "
                                 "— the §18.2 shutdown sweep leaves the bot's resting "
                                 "SL/TP STANDING (reduce-only) and cancels other bot "
-                                "orders. Re-run with --loop, or intervene manually.",
+                                "orders. Re-run `live --run-id ...` (--loop only once the §20.2 smoke gate is open), or intervene manually.",
                                 file=sys.stderr,
                             )
                         else:
@@ -1321,7 +1593,7 @@ def _live_startup_recovery(
                                 f"and {unclean_note} — the §18.2 "
                                 "shutdown sweep leaves the bot's resting SL/TP "
                                 "STANDING (reduce-only) and cancels other bot orders. "
-                                "Re-run with --loop, or intervene manually.",
+                                "Re-run `live --run-id ...` (--loop only once the §20.2 smoke gate is open), or intervene manually.",
                                 file=sys.stderr,
                             )
                         else:
@@ -1387,9 +1659,11 @@ def _live_startup_recovery(
                                     "NOTE: the SL/TP described above as kept "
                                     "STANDING are NOT safe while the wallet-wide "
                                     "scheduleCancel stays armed — it cancels them "
-                                    "too at its deadline. Re-adopt with --loop "
-                                    "(a clean recovery disarms it) or clear the "
-                                    "trigger manually.",
+                                    "too at its deadline. Re-run `live --run-id ...`: its "
+                                    "clean shutdown sweep disarms the switch on "
+                                    "exit. The recovery itself ARMS the switch, and "
+                                    "a --loop run is refused while the §20.2 gate is "
+                                    "shut — or clear the trigger manually.",
                                     file=sys.stderr,
                                 )
 
@@ -1471,8 +1745,33 @@ def _live_startup_recovery(
 # The live loop's tick period. Kept well inside the kill-switch tick budget
 # (max_tick_gap 30s) so the §18.2 refresh never lands late even when a tick does
 # real work (reconciliation network reads, an SL repair). engine.tick() refreshes
-# the switch every call; the AI decision runs off-thread and never blocks it.
+# the switch every call and across its own blocking work; the AI's LLM call runs
+# off-thread, but the decision cycle's MARKET-DATA reads (_build_context) run on
+# this thread inside driver.pump(), which is why the loop refreshes between the
+# two (2026-08-01 lifecycle review).
 _LIVE_TICK_SECONDS = 10.0
+
+
+def _day_baseline_from_exchange(fetch_clearinghouse, kill_switch) -> Decimal:
+    """§10.3 rule 1's UTC-day baseline: the EXCHANGE's reconciled accountValue.
+
+    Module level, not a closure inside the loop, so it can be called directly by
+    a test — the first version was nested and its only "coverage" was a string
+    search for its name, which passed happily while the call site had the wrong
+    arity and the whole path was dead.
+
+    The refresh is in ``finally`` for the same reason protection's orderStatus
+    read is: this is a bare full-timeout REST call on the single-threaded tick,
+    landing between the protection sync and the slice submits, and the call that
+    TIMES OUT is both the expensive one and the one that leaves by exception.
+    """
+    from .exchanges.hyperliquid.mapper import map_account_snapshot
+    from .live.kill_switch import refresh_across_blocking_work
+
+    try:
+        return map_account_snapshot(fetch_clearinghouse()).account_value
+    finally:
+        refresh_across_blocking_work(kill_switch, what="day-roll baseline read")
 
 
 def _contain_as_recoverable_safe_mode(safe_mode, *, log_message: str, detail: str) -> None:
@@ -1522,6 +1821,183 @@ def _live_heartbeat(db, run_id: str, *, pid: int, now, safe_mode) -> None:
         )
 
 
+def _timing_preflight(live_cfg, client) -> int:
+    """The §18.2 refresh-timing preflight: ``0`` to proceed, ``1`` to refuse.
+
+    Shared by EVERY entry point that arms the dead man's switch, which is the
+    whole point. `live` refused a violating config here with a named exit 1 that
+    says which two knobs to move; `live-smoke` had no such check, so the same
+    bad config reached ``KillSwitchManager.__init__``, raised, was contained as
+    a ``SmokePreflightError`` and surfaced as exit 4. RUNBOOK §5 answers exit 4
+    with "the run state is unclean — check `safe-mode --status`", which is the
+    wrong investigation entirely, and §8 tells a supervisor to branch its
+    restart policy on 1-vs-4, so a script mis-routes it too (2026-07-31).
+
+    Refusing BEFORE any side effect (run row, run lock, wire action) is the
+    point of a preflight; ``kill_switch_timing_violation``'s docstring owns the
+    invariant itself.
+    """
+    from .live.kill_switch import (
+        kill_switch_timing_violation,
+        network_timeout_warning,
+        sl_repair_delay_warning,
+    )
+
+    violation = kill_switch_timing_violation(
+        live_cfg.kill_switch, _RECOVERY_MAX_TICK_GAP_SECONDS, client.timeout
+    )
+    if violation is not None:
+        print(
+            f"error: {violation}. Raise live.kill_switch.schedule_cancel_seconds, "
+            "lower live.kill_switch.refresh_interval_seconds, or lower "
+            "network_timeout_s — the failed attempt's own timeout is part of the "
+            "budget, so the 30s default does not fit a 120s scheduled cancel "
+            "(RUNBOOK §1.5 uses 8).",
+            file=sys.stderr,
+        )
+        return 1
+    # Its advisory sister (decided 2026-07-22 "soft mitigation"): warn — do
+    # not refuse — when the per-request REST timeout cannot keep the same
+    # max_tick_gap promise. Beside the enforced check so the two halves of
+    # the §18.2 timing story stay in one place.
+    for advisory in (
+        network_timeout_warning(client.timeout, _RECOVERY_MAX_TICK_GAP_SECONDS),
+        sl_repair_delay_warning(
+            float(live_cfg.protection.sl_repair_retry_delay_seconds),
+            _RECOVERY_MAX_TICK_GAP_SECONDS,
+        ),
+    ):
+        if advisory is not None:
+            print(f"WARNING: {advisory}", file=sys.stderr)
+    return 0
+
+
+def _run_genesis_network(config_json: str | None) -> object | None:
+    """``live.network`` from a run's genesis config, or None if unreadable.
+
+    Same defensive shape as :func:`live.validation.execution_mode`: a corrupt or
+    non-object ``config_json`` degrades to None rather than crashing a guard.
+
+    NORMALISED through the same helper the drift report uses, because LiveConfig
+    reads network case-insensitively: two runs whose genesis says "Testnet" and
+    "testnet" are the same exchange and the same wallet. Comparing the raw
+    strings made them look like different networks, sending the guard below
+    fail-OPEN in the one direction its own docstring forbids — "the cost of a
+    false pass is a stripped dead-man switch on a live wallet" (2026-07-31).
+    """
+    if not config_json:
+        return None
+    try:
+        parsed = json.loads(config_json)
+    except (ValueError, TypeError):
+        return None
+    live = parsed.get("live") if isinstance(parsed, dict) else None
+    if isinstance(live, dict) and isinstance(live.get("network"), str):
+        return _norm_network(live)
+    return None
+
+
+def _conflicting_run_lease(
+    db, run_id: str, *, own_network: object | None = None
+) -> tuple[str, int] | None:
+    """``(run_id, pid)`` of a SAME-NETWORK sibling holding a FRESH lease, else None.
+
+    The run lease is per-``run_id``; the kill switch, ``updateLeverage`` and the
+    §19.3 sweep are per-WALLET. So "my run's lease is free" does not mean "no one
+    else is on this wallet" (2026-07-30 concurrency review).
+
+    But "same store" is NOT the same as "same wallet": RUNBOOK-live §7.3
+    deliberately creates the mainnet_tiny run in the SAME ``live_trading.db`` as
+    the testnet run, and those are different exchanges with different accounts —
+    a testnet ``scheduleCancel`` cannot reach a mainnet order. Keying the refusal
+    on the store alone told the operator to stop a real-money run in order to
+    smoke-test testnet. It is keyed on the sibling's genesis ``live.network``
+    instead (2026-07-31 exit check).
+
+    Both networks are read from the STORE (each run's own genesis), not from the
+    caller's session, so the guard is self-contained and cannot disagree with
+    what the runs were actually created as.
+
+    ``own_network`` overrides that read for the one caller that has no genesis to
+    read yet: `live --create` must refuse BEFORE it writes the run row, or a
+    refusal leaves a half-created run whose re-run is then rejected as "already
+    exists" (2026-07-31 exit check). The sibling's network still comes from the
+    store, so the comparison is never made against the caller's own idea of what
+    the OTHER run is.
+
+    Either side being UNREADABLE is treated as a conflict: a corrupt genesis is
+    not evidence of safety, and the cost of a false refusal is one operator
+    message, while the cost of a false pass is a stripped dead-man switch on a
+    live wallet.
+    """
+    from .paper.run_lock import LOCK_STALE_SECONDS
+    from .paper.scheduler import parse_instant
+    from .persistence import repository as repo
+
+    if own_network is None:
+        own = repo.get_run(db.conn, run_id)
+        own_network = None if own is None else _run_genesis_network(own["config_json"])
+    now = datetime.now(timezone.utc)
+    for row in repo.iter_other_run_leases(db.conn, run_id):
+        age = (now - parse_instant(row["lock_heartbeat_at"])).total_seconds()
+        if age >= LOCK_STALE_SECONDS:
+            continue
+        sibling = repo.get_run(db.conn, str(row["run_id"]))
+        if sibling is not None and sibling["mode"] != "live":
+            # A PAPER run. It signs nothing and holds no wallet, so it cannot be
+            # harmed by an account-wide action and cannot take one. Checked
+            # before the network comparison because a paper genesis has no
+            # ``live`` block at all: it would read as an unreadable network and
+            # be refused fail-closed, with a message about stripping a dead-man
+            # cover it never had (2026-07-31).
+            continue
+        sibling_network = None if sibling is None else _run_genesis_network(sibling["config_json"])
+        if (
+            own_network is not None
+            and sibling_network is not None
+            and sibling_network != own_network
+        ):
+            # A different exchange entirely — its wallet cannot be touched by
+            # anything this suite does.
+            continue
+        return str(row["run_id"]), int(row["lock_pid"])
+    return None
+
+
+def _still_owns_run(db, run_id: str, *, pid: int, now) -> bool:
+    """Positively re-verify the lease before the §18.2 shutdown sweep.
+
+    The ``superseded`` flag is absence-of-evidence: it is set only when the
+    loop's heartbeat actually RAISED. A Ctrl-C / SIGTERM exits the loop through
+    ``except KeyboardInterrupt`` with no heartbeat at all, so after a tick that
+    blocked past ``LOCK_STALE_SECONDS`` a successor can already own the run
+    while this process still reads ``superseded is False`` — and the sweep then
+    cancels the successor's live SL/TP and clears the wallet's dead-man switch.
+    Stopping a hung process with SIGTERM is precisely how an operator reaches
+    that lane, so this asks the store instead of trusting the flag
+    (2026-07-30 concurrency review).
+
+    A transient store failure is not proof of supersession: the lease is most
+    likely still ours and skipping the sweep would leave resting orders behind,
+    so it is logged and treated as owned. Only ``RunLockError`` gives the run
+    away.
+    """
+    from .paper import run_lock
+
+    try:
+        run_lock.heartbeat_run_lock(db, run_id, pid=pid, now=now)
+    except run_lock.RunLockError:
+        return False
+    except Exception as exc:  # noqa: BLE001 — see docstring: not proof of supersession
+        logger.warning(
+            "could not re-verify the run lease before the §18.2 sweep (%s: %s) — "
+            "proceeding as the owner",
+            type(exc).__name__,
+            exc,
+        )
+    return True
+
+
 def _run_live_loop(
     *,
     cfgs,
@@ -1558,10 +2034,11 @@ def _run_live_loop(
     by design: the caller exits without the §18.2 sweep (the successor process
     owns the run's orders — see the caller's ``except RunLockError``).
     """
-    from .exchanges.hyperliquid.mapper import map_account_snapshot
+
     from .exchanges.hyperliquid.market_data import HyperliquidMarketData
     from .live.decision import LiveDecisionDriver, LiveDecisionWorker
     from .live.engine import LiveExecutionEngine
+    from .live.kill_switch import refresh_across_blocking_work
     from .live.loss_guards import LossGuards
     from .live.orders import LiveOrderSubmitter
     from .live.protection import ProtectionManager
@@ -1600,6 +2077,7 @@ def _run_live_loop(
         clock=clock,
         kill_switch=kill_switch,
     )
+
     loss_guards = LossGuards(
         db=db,
         run_id=run_id,
@@ -1608,7 +2086,19 @@ def _run_live_loop(
         # §10.3 rule 1: the UTC-day baseline is the EXCHANGE's reconciled
         # accountValue, fetched once at each day roll (per-tick drawdown
         # evaluation stays on the local ledger — zero extra REST per tick).
-        day_baseline_source=lambda: map_account_snapshot(fetch_clearinghouse()).account_value,
+        #
+        # Rare, but it is a bare full-timeout REST call landing between the
+        # protection sync and the slice submits, so it refreshes across itself
+        # like every other blocking read on this thread (§18.2).
+        #
+        # Bound with partial rather than a lambda ON PURPOSE: the first version
+        # wrapped a zero-arg closure in ``lambda: helper(kill_switch)``, so every
+        # day roll raised TypeError, LossGuards' except-Exception swallowed it,
+        # and the baseline silently fell back to the local ledger — defeating the
+        # whole point of §10.3 rule 1, with nothing on any surface to say so.
+        # partial binds the arguments where they are declared, so an arity
+        # mismatch cannot be written here (2026-08-01 incremental review).
+        day_baseline_source=partial(_day_baseline_from_exchange, fetch_clearinghouse, kill_switch),
     )
     ledger = repo.get_current_account_state(db.conn, run_id)
     if ledger is not None:
@@ -1640,7 +2130,18 @@ def _run_live_loop(
     # it into the next one.
     engine.settle_offline_flat()
     decision_provider = _EngineDecisionProvider(
-        config, risk_cfg=risk_cfg, decision_cfg=decision_cfg, payload_dir=payload_dir
+        config,
+        risk_cfg=risk_cfg,
+        decision_cfg=decision_cfg,
+        payload_dir=payload_dir,
+        # build_input runs on THIS thread inside driver.pump(); its four market
+        # reads are the longest back-to-back REST chain in the system. Refreshing
+        # between them keeps the unrefreshed run at the submit chain's 3 instead
+        # of 4, which is what lets the operator advisory stay at a ~10s timeout
+        # rather than demanding 7.5s from a cycle that cannot retry.
+        on_blocking_read=partial(
+            refresh_across_blocking_work, kill_switch, what="decision market data"
+        ),
     )
     worker = LiveDecisionWorker(provider=decision_provider)
     driver = LiveDecisionDriver(
@@ -1673,6 +2174,16 @@ def _run_live_loop(
             _live_heartbeat(db, run_id, pid=pid, now=now, safe_mode=safe_mode)
             try:
                 tick = engine.tick()
+                # The seam between the two blocking halves of one iteration.
+                # engine.tick() refreshes at its top and across its own blocking
+                # work, but driver.pump() then runs _build_context ON THIS THREAD:
+                # constructing the SDK client fetches perp meta, then snapshot,
+                # candles and funding — four back-to-back REST calls on the same
+                # network_timeout_s, with no refresh of their own. Without this
+                # line the two chains are consecutive, so the run of unrefreshed
+                # calls is their SUM, not the max the budget constant assumes
+                # (2026-08-01 lifecycle review).
+                refresh_across_blocking_work(kill_switch, what="decision pump")
                 cycle = driver.pump()
                 # Per-tick operator visibility: the live loop is otherwise silent
                 # between the startup banner and whatever individual components
@@ -1726,6 +2237,719 @@ def _run_live_loop(
 
 
 # --------------------------------------------------------------------------
+# live-smoke — the §20.2 testnet smoke checklist (PR 6)
+# --------------------------------------------------------------------------
+
+
+def _smoke_gate_buckets(
+    missing: tuple[str, ...],
+    failed: tuple[str, ...],
+    errored: tuple[str, ...],
+) -> list[tuple[str, tuple[str, ...]]]:
+    """``(label, keys)`` pairs for the §20.2 gate's non-passed buckets.
+
+    The one list BOTH renderings draw from (``live-smoke``'s per-line report and
+    the ``--loop`` refusal's one-liner), so a future bucket cannot appear on one
+    operator surface and not the other.
+    """
+    return [("not_yet_run", missing), ("failed", failed), ("errored", errored)]
+
+
+def _print_smoke_gate(
+    passed: bool,
+    missing: tuple[str, ...],
+    failed: tuple[str, ...],
+    errored: tuple[str, ...],
+) -> None:
+    """Print the §20.2 cycle-entry gate verdict (stdout: the machine contract).
+
+    The three non-passed buckets are printed separately so an operator triaging
+    a real-money go/no-go sees whether a test never ran, the exchange refused it,
+    or the harness itself broke — without querying live_smoke_tests.
+    """
+    print(f"smoke_gate_passed: {'yes' if passed else 'no'}")
+    for label, keys in _smoke_gate_buckets(missing, failed, errored):
+        if keys:
+            print(f"{label}: {', '.join(keys)}")
+
+
+def _cmd_live_smoke(argv: list[str]) -> int:
+    """Run the §20.2 testnet smoke checklist and report the cycle-entry gate.
+
+    Each of the 18 tests drives a real signed exchange action against testnet and
+    records its verdict in ``live_smoke_tests``; the gate (§20.2: all pass) then
+    lets ``live --loop`` start the testnet_live cycles. ``--gate-status`` reports
+    the stored gate without touching the network; ``--dry-run`` validates the
+    config and wiring and records every selected test ``skipped`` (places no
+    orders — the offline check the unit tests exercise). A real run takes the
+    run's lease first (refused with exit 1 while ``live``/``paper`` holds it) and,
+    when the selection places probe orders, runs one passing §19.1 pre-flight
+    recovery before the first test. Exit: 0 = the FULL §20.2 gate is open (every
+    one of the 18 tests' latest real result is ``passed``) — so ``--only`` on a
+    subset still exits 4 until the whole suite has passed — EXCEPT ``--dry-run``,
+    which exits 0 once the wiring check completes (its gate is never open); 4 =
+    ran (or read) but the gate is not satisfied, including a pre-flight recovery
+    failure that aborted the suite before any test; 1 = a named config / env /
+    network / lease error.
+
+    The restart tests (15–17) EACH drive a real §19.1 startup recovery (three
+    arms and three reconcile passes over the run, not one);
+    the operator stages their preconditions (an existing position / a stale
+    bot-owned order) on testnet before running the suite (docs/RUNBOOK-live.md).
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m contrib.hyperliquid_perp live-smoke",
+        description=(
+            "Run the phase3-spec §20.2 testnet smoke checklist against a live run, "
+            "record each verdict, and report the cycle-entry gate."
+        ),
+    )
+    parser.add_argument("--config", default=None, help="Config YAML path.")
+    parser.add_argument("--db", default="live_trading.db", help="SQLite store path for the run.")
+    parser.add_argument(
+        "--run-id", required=True, help="The live run to record smoke results under."
+    )
+    parser.add_argument(
+        "--only",
+        nargs="+",
+        default=None,
+        metavar="TEST_KEY",
+        help="Run only these smoke-test keys (default: all 18, in canonical order).",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate config + wiring and record every selected test skipped; place NO orders.",
+    )
+    parser.add_argument(
+        "--gate-status",
+        action="store_true",
+        help="Print the §20.2 gate for the run from the store and exit (no network, no orders).",
+    )
+    args = parser.parse_args(argv)
+
+    from .live.smoke import (
+        SmokePreflightError,
+        SmokeTestRunner,
+        smoke_gate_report,
+        validate_only_keys,
+    )
+
+    # Mutual exclusion BEFORE key validation: under --gate-status the --only
+    # keys are never going to be used, so answering a typo in them names the
+    # wrong mistake and sends the operator off correcting a key instead of
+    # dropping the flag.
+    if args.gate_status and (args.dry_run or args.only is not None):
+        print(
+            "error: --gate-status only reads the stored gate — drop --dry-run/--only.",
+            file=sys.stderr,
+        )
+        return 1
+    only: list[str] | None = None
+    if args.only is not None:
+        try:
+            only = list(validate_only_keys(args.only))
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    # --gate-status: a pure store read — no config, no network, no orders.
+    if args.gate_status:
+        db = _open_existing_db(args.db)
+        if db is None:
+            return 1
+        with db:
+            run_row = _existing_run_row(db.conn, args.run_id, args.db)
+            if run_row is None:
+                return 1
+            if not _require_live_run_mode(
+                run_row, args.run_id, args.db, extra="smoke results are live-run state"
+            ):
+                return 1
+            # The §20.2 gate is testnet-only state: a mainnet_tiny run's
+            # live_smoke_tests is empty BY DESIGN (§21.3 — smoke is proven on
+            # the separate testnet run), so reporting its raw buckets would
+            # print "not_yet_run: <all 18>" + exit 4 and read as "go smoke-test
+            # mainnet" — the exact misreading `validate` renders as "n/a
+            # (§21.3)". Refuse, mirroring the real-run testnet-only guard
+            # (decision 2026-07-28).
+            from .live.validation import execution_mode
+
+            genesis_mode = execution_mode(run_row["config_json"])
+            if genesis_mode != "testnet_live":
+                print(
+                    f"error: run {args.run_id!r} has genesis live.mode "
+                    f"{genesis_mode!r} — the §20.2 smoke gate applies only to "
+                    "testnet_live runs (a mainnet run relies on the smoke "
+                    "proven on the separate testnet run, §21.3); there is no "
+                    "smoke gate to report here.",
+                    file=sys.stderr,
+                )
+                return 1
+            passed, missing, failed, errored = smoke_gate_report(db.conn, args.run_id)
+            _print_smoke_gate(passed, missing, failed, errored)
+            return 0 if passed else 4
+
+    # This command OWNS the db handle: opened here, closed in the finally no
+    # matter how the build or the run fails (a raise, not just an int return) —
+    # the try/finally makes the cleanup structural, not dependent on every
+    # _build_* failure path returning an int (silent-failure review, 2026-07-27).
+    # Schema policy splits on --dry-run, not on the command:
+    #
+    # * a dry run takes NO lease (see below) and touches only this store to check
+    #   wiring, which makes it a reporting command by the same test `validate` and
+    #   `--gate-status` are judged by. Migrating there was the sharpest remaining
+    #   version of the hazard the reporting/owning split exists to close: the one
+    #   command advertised as the safe offline check was the one that silently
+    #   upgraded a store a running daemon owned.
+    # * a real run does own the store — but it cannot take the lease until the
+    #   store is open, so migrating AT open still upgraded the schema underneath a
+    #   sibling daemon and only then reached the conflict check that refuses. It
+    #   defers instead and migrates below, once it actually owns the run.
+    db = _open_existing_db(args.db, defer_migration=not args.dry_run)
+    if db is None:
+        return 1
+    preflight_error: str | None = None
+    import signal
+
+    from .paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
+
+    try:
+        session = _build_smoke_session(args, db)
+        if isinstance(session, int):
+            return session
+        lock_pid: int | None = None
+        if not args.dry_run:
+            # The suite places real orders and runs §19.1 recoveries — the same
+            # actions the run lease exists to keep single-owner. A concurrent
+            # `live --loop` on this run would race the probe orders, the
+            # recovery's stale-order sweep, and the account-wide kill switch;
+            # refuse instead (a dry run touches only this store, no lease needed).
+            # The lease is per-run_id; the damage this suite can do is per-WALLET.
+            # A sibling run in the same store shares the wallet, so its lease
+            # would be acquired happily while this suite arms/clears the
+            # ACCOUNT-WIDE kill switch, writes the account's leverage, and runs a
+            # §19.3 sweep whose bot-ownership lookup is not run-scoped — i.e. it
+            # cancels the sibling's resting orders. Refuse before any of that
+            # (2026-07-30 concurrency review).
+            conflict = _conflicting_run_lease(db, args.run_id)
+            if conflict is not None:
+                other_run, other_pid = conflict
+                print(
+                    f"error: run {other_run!r} in {args.db} is being driven by pid "
+                    f"{other_pid} right now, on this same network. "
+                    "The smoke suite's kill-switch arm/clear, updateLeverage and §19.3 "
+                    "stale-order sweep are ACCOUNT-wide, not run-scoped, so running it "
+                    "now would strip that run's dead-man cover and cancel its resting "
+                    "orders. Stop that process, or wait for its lease to go stale. "
+                    "Moving either run to a different --db does NOT help: the hazard "
+                    "is per-WALLET and same-network runs share the wallet, so a "
+                    "separate store only hides them from this check. A run on the "
+                    "OTHER network is a different exchange and does not conflict.",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                acquire_run_lock(db, args.run_id, pid=os.getpid(), now=datetime.now(timezone.utc))
+            except RunLockError as exc:
+                print(
+                    f"error: {exc} — the smoke suite places real orders and runs "
+                    "recoveries on this run; stop that process (or wait for its "
+                    "lease to expire) first.",
+                    file=sys.stderr,
+                )
+                return 1
+            lock_pid = os.getpid()
+            # The same handler `live` (cli.py) and `paper` install right after
+            # their own lock. Without it, `kill <pid>` — systemd's and docker's
+            # default, and what a `timeout` wrapper sends — kills this process
+            # outright: runner.run()'s finally never runs, so the staged long is
+            # left open, the probes are left resting, the account-wide kill
+            # switch is left armed, the two operator WARNINGs below are never
+            # printed, and the lease is left held for LOCK_STALE_SECONDS. This
+            # command needs it MORE than its two siblings, not less: they have a
+            # next tick and the §18.2 shutdown sweep behind them, while this
+            # finally is the only cleanup that exists (2026-07-31).
+            signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+        try:
+            if lock_pid is not None:
+                # The lease is ours: NOW the schema upgrade is safe, because no
+                # sibling can be mid-write against the old one. Deferred from
+                # open (see _open_existing_db) so a refusal above cannot leave a
+                # migrated store behind as its only lasting effect.
+                #
+                # Deferring also moved the "migrated by a NEWER build" refusal
+                # here, so it has to be caught: uncaught it reached main()'s
+                # last-resort handler as exit 2 ("fatal: unexpected error"),
+                # losing the named exit 1 the RUNBOOK documents and a supervisor
+                # branches on — the very failure the sibling commit was fixing.
+                # Inside the lease-releasing try, not before it. A `return 1`
+                # taken above the block that owns `finally: release_run_lock`
+                # left the lease stamped with this now-dead pid for the full
+                # LOCK_STALE_SECONDS, so the operator's corrected re-run was
+                # refused for 15 minutes by a message naming a process that no
+                # longer exists (2026-07-31 exit check).
+                try:
+                    apply_migrations(db.conn)
+                except SchemaVersionError as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 1
+            runner = SmokeTestRunner(session)
+            try:
+                try:
+                    runner.run(only=only)
+                except SmokePreflightError as exc:
+                    # No test executed, no verdict recorded; the exit disarm has
+                    # already run inside runner.run()'s finally.
+                    preflight_error = str(exc)
+                except RunLockError as exc:
+                    # The per-test heartbeat found this process superseded: a
+                    # successor legitimately took over the stale lease and now owns
+                    # the run AND the wallet's kill switch (the runner suppressed
+                    # its exit disarm for exactly that reason). Completed verdicts
+                    # are durable; stop by name.
+                    print(
+                        f"error: {exc} — the run lease was superseded mid-suite; the "
+                        "suite stopped and left the account-wide kill switch to the "
+                        "new owner. Re-run live-smoke once this run has a single owner.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                passed, missing, failed, errored = smoke_gate_report(db.conn, args.run_id)
+            finally:
+                # In a ``finally`` on purpose: the disarm runs inside
+                # runner.run()'s own finally on EVERY exit path, so its failure
+                # flag must be surfaced on every path too — an unexpected
+                # mid-suite exception (a wire/store error escaping to main()'s
+                # generic handler) is exactly the situation most likely to
+                # co-occur with a failed disarm, and the operator must not lose
+                # this warning under that stack trace (silent-failure review,
+                # 2026-07-29).
+                if runner.kill_switch_disarm_failed:
+                    print(
+                        "WARNING: the end-of-suite kill-switch disarm FAILED — the "
+                        "wallet may still hold an armed scheduleCancel that will "
+                        "cancel every resting order (including any SL/TP) at its "
+                        "deadline. Verify and clear it manually, or run `live "
+                        "--run-id ...` without --loop (it re-arms, sweeps, then "
+                        "disarms on a clean exit). --loop is NOT the remedy here: a "
+                        "suite whose disarm failed usually has red tests, so the "
+                        "§20.2 gate is shut and --loop exits 4 before arming.",
+                        file=sys.stderr,
+                    )
+                if runner.staged_long_residual is not None:
+                    # The trigger block's staged long closes BETWEEN tests, so a
+                    # failed close has no step row to land in. Say it here or a
+                    # real funded position is left on the wire with only a log
+                    # line to show for it (review round 2026-07-29).
+                    print(
+                        "WARNING: the trigger-block staging position may still be "
+                        f"OPEN — {runner.staged_long_residual}. Close it manually, then use a "
+                        "NEW run-id for acceptance: a post-genesis manual fill has "
+                        "no local order row, so it books fill_unmapped and pins "
+                        "this run's validate at exit 5. Re-running the suite does "
+                        "NOT flatten this residual — a fresh runner only closes the "
+                        "staging long it opened itself. Note the new run-id starts "
+                        "with an EMPTY §20.2 gate: re-run the full live-smoke suite "
+                        "under it (including the operator-staged preconditions for "
+                        "tests 16/17) or `live --loop` exits 4 with all 18 not_yet_run.",
+                        file=sys.stderr,
+                    )
+                if runner.position_residuals:
+                    # Accidental fills (a far IOC the book crossed anyway, a
+                    # slice that filled before its sibling aborted) whose
+                    # cleanup did not fully succeed. The staging long has had a
+                    # warning since 2026-07-29; these are the same thing —
+                    # a real funded position — and used to be visible only in
+                    # the detail column of a PASSED row.
+                    for note in runner.position_residuals:
+                        print(
+                            f"WARNING: a probe position may still be OPEN — {note}. "
+                            "Close it manually, then use a NEW run-id for acceptance: "
+                            "a manual fill has no local order row, so it books "
+                            "fill_unmapped and pins this run's validate at exit 5. "
+                            "The new run-id starts with an EMPTY §20.2 gate — re-run "
+                            "the full live-smoke suite under it, or `live --loop` "
+                            "exits 4 with all 18 tests not_yet_run.",
+                            file=sys.stderr,
+                        )
+                if runner.probe_residual is not None:
+                    # Same reasoning as the staging long, different artefact: a
+                    # trigger probe books no orders row, so the ONLY signal that
+                    # one was stranded used to be the detail column of a GREEN
+                    # row. It is not cosmetic — see the runner's note for why it
+                    # ends in a permanent exit 5 (2026-07-31 lifecycle review).
+                    print(
+                        f"WARNING: {runner.probe_residual}.",
+                        file=sys.stderr,
+                    )
+        finally:
+            if lock_pid is not None:
+                release_run_lock(db, args.run_id, pid=lock_pid, now=datetime.now(timezone.utc))
+    finally:
+        db.close()
+    _print_smoke_gate(passed, missing, failed, errored)
+    if preflight_error is not None:
+        print(f"error: {preflight_error}", file=sys.stderr)
+        return 4
+    if args.dry_run:
+        # A dry run places nothing, so the gate can never pass — that is the
+        # point (a wiring check, not a cycle-entry proof). Exit 0 to signal the
+        # wiring check itself completed; the operator reads "smoke_gate_passed:
+        # no" and knows a real run is still required.
+        print("dry-run complete — no orders placed; run without --dry-run for the real gate.")
+        return 0
+    return 0 if passed else 4
+
+
+def _build_smoke_session(args, db):
+    """Build the :class:`~.live.smoke.SmokeContext` for a real or dry run.
+
+    ``db`` is the caller-owned, already-open store (the caller closes it), so
+    every failure path here just returns an ``int`` exit code. A dry run stops
+    after config validation (it needs no network): the context carries no signed
+    client (``signed=None``) and market seams the runner never calls, so
+    ``--dry-run`` works fully offline.
+    """
+    from decimal import Decimal
+
+    from .domains.perp.risk_gate import RiskConfig
+    from .live.config import ExecutionMode, LiveConfig, validate_live_risk_consistency
+    from .live.smoke import SmokeContext
+    from .paper.clock import WallClock
+
+    try:
+        config = load_config(args.config)
+    except CONFIG_LOAD_ERRORS as exc:
+        print(f"error: invalid config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
+        return 1
+    raw_live = config.get("live")
+    if raw_live is None:
+        print(
+            "error: config has no live: block — live-smoke needs one (phase3-spec §4).",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        live_cfg = LiveConfig.from_dict(raw_live)
+    except ValueError as exc:
+        print(f"error: invalid live: config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
+        return 1
+    if live_cfg.mode is ExecutionMode.PAPER:
+        print("error: live.mode is 'paper' — the smoke suite is a live-mode tool.", file=sys.stderr)
+        return 1
+    if live_cfg.mode is not ExecutionMode.TESTNET_LIVE:
+        # The §20.2 smoke suite is a TESTNET pre-flight: it opens/closes real
+        # positions and rests/cancels real SL/TP triggers. mainnet_tiny relies on
+        # the smoke proven on the SEPARATE testnet run (§21.3) and is never
+        # smoke-tested on mainnet — refuse here (both --dry-run and real) so a
+        # mis-pointed config can never drive a real order onto mainnet.
+        print(
+            f"error: live-smoke runs only against a testnet_live run — live.mode is "
+            f"'{live_cfg.mode.value}'. mainnet_tiny relies on the smoke suite proven on "
+            "the separate testnet run (§21.3); it is never smoke-tested on mainnet.",
+            file=sys.stderr,
+        )
+        return 1
+    raw_risk = config.get("risk")
+    if raw_risk is None:
+        print(
+            "error: config has no risk: block — required for the live gate (§24).", file=sys.stderr
+        )
+        return 1
+    try:
+        risk_cfg = RiskConfig.from_dict(raw_risk)
+        validate_live_risk_consistency(live_cfg, risk_cfg, raw_risk)
+    except ValueError as exc:
+        print(f"error: invalid risk:/live: config — {exc}.", file=sys.stderr)
+        return 1
+
+    coin = live_cfg.safety.allowed_symbols[0]
+    clock = WallClock()
+    # The db is owned and closed by the caller (_cmd_live_smoke's try/finally),
+    # so every error path here just returns an int — no close needed.
+    not_found_hint = f" — create it first with `live --run-id {args.run_id} --create`."
+    run_row = _existing_run_row(db.conn, args.run_id, args.db, not_found_hint=not_found_hint)
+    if run_row is None:
+        return 1
+    if not _require_live_run_mode(run_row, args.run_id, args.db):
+        return 1
+    # Same identity discipline as `live` resume (decision 2026-07-28): the suite
+    # runs a real §19.1 recovery and books probe orders ON this run, so a typo'd
+    # --run-id pointing at another live run in the same store — the §21.4
+    # mainnet acceptance run lives in the same default db — would reconcile the
+    # TESTNET exchange against that run's ledger and file integrity cases that
+    # the §5 cumulative policy makes permanent. coin / live.network drift is a
+    # hard refusal (the mainnet run trips the network check); parameter drift
+    # warns, as on resume.
+    drift = _config_drift_report(run_row["config_json"], config, coin)
+    if drift is not None:
+        kind, message = drift
+        if kind in _HARD_DRIFT_KINDS:
+            print(f"error: {message}", file=sys.stderr)
+            return 1
+        print(f"WARNING: {message}", file=sys.stderr)
+
+    if args.dry_run:
+        # No network: signed stays None and the seams below are never called.
+        def _unavailable() -> Decimal:
+            raise RuntimeError("dry-run places no orders; mark_price is not fetched")
+
+        return SmokeContext(
+            signed=None,
+            db=db,
+            run_id=args.run_id,
+            coin=coin,
+            network=live_cfg.network,
+            payload_dir=Path(args.db).resolve().parent / "payloads" / args.run_id,
+            owner_prefix=live_cfg.order_owner_prefix,
+            mark_price=_unavailable,
+            qty_step=Decimal(1),
+            tick_size=Decimal(1),
+            now=clock.now,
+            dry_run=True,
+            run_recovery=None,
+        )
+
+    return _build_real_smoke_session(
+        args, config=config, live_cfg=live_cfg, coin=coin, clock=clock, db=db
+    )
+
+
+def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
+    """The network half of :func:`_build_smoke_session` (real, order-placing).
+
+    Verifies the §6.1 agent authorization, builds the runtime-armed signed
+    client, reads the asset meta and mark, and wires the ``run_recovery`` seam
+    to one real §19.1 startup recovery over the run. Returns the context or an
+    ``int`` exit code.
+    """
+
+    from .config import wallet_address
+    from .exchanges.hyperliquid.errors import ExchangeError
+    from .exchanges.hyperliquid.market_data import HyperliquidMarketData
+    from .exchanges.hyperliquid.sdk_client import HyperliquidClient
+    from .exchanges.hyperliquid.signed_client import HyperliquidSignedClient
+    from .live.authorization import AgentAuthorizationError, verify_agent_authorization
+    from .live.order_gate import RealOrderGate
+    from .live.secrets import agent_key_env_var, load_agent_key
+    from .live.smoke import SmokeContext
+    from .paper.engine import AssetSpec
+
+    if not live_cfg.allow_real_orders:
+        print(
+            "error: live.allow_real_orders is false — the smoke suite places real "
+            "signed orders on testnet. Enable it (with the agent key), or use "
+            "--dry-run for an offline wiring check.",
+            file=sys.stderr,
+        )
+        return 1
+    addr = wallet_address(config)
+    if not addr:
+        print(
+            "error: wallet_address is not configured (needed for the smoke suite).", file=sys.stderr
+        )
+        return 1
+    agent_key = load_agent_key(live_cfg.network)
+    if agent_key is None:
+        env_var = agent_key_env_var(live_cfg.network)
+        print(
+            f"error: {env_var} is not set — the smoke suite signs real testnet orders. "
+            f"Export the {live_cfg.network} agent key, or use --dry-run.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        client = HyperliquidClient.from_config(config, network=live_cfg.network)
+    except ExchangeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        verify_agent_authorization(client.info, wallet_address=addr, agent_key=agent_key)
+    except (AgentAuthorizationError, ExchangeError) as exc:
+        print(f"error: agent authorization failed — {exc}", file=sys.stderr)
+        return 1
+
+    # The SAME preflight `live` runs, so one bad config gets one exit code and
+    # one remedy. Without it the violation surfaced from KillSwitchManager's
+    # constructor as a contained SmokePreflightError → exit 4, which RUNBOOK §5
+    # answers with "check the run state" — the wrong investigation, and a
+    # supervisor branching on 1-vs-4 mis-routes it too. Needs `client` for the
+    # timeout advisory, so it sits here rather than with the config checks.
+    if _timing_preflight(live_cfg, client) != 0:
+        return 1
+
+    gate = RealOrderGate.from_config(live_cfg)
+    gate.agent_authorized = True
+    signed = HyperliquidSignedClient(
+        live_cfg.network, agent_key, wallet_address=addr, gate=gate, timeout=client.timeout
+    )
+    try:
+        signed.health_check()
+        market = HyperliquidMarketData(client)
+        sz_decimals, schedule = market.get_asset_meta(coin)
+    except ExchangeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    asset = AssetSpec(coin=coin, sz_decimals=sz_decimals, margin_schedule=schedule)
+
+    def _mark() -> Decimal:
+        return market.get_market_snapshot(coin).mark_price
+
+    payload_dir = Path(args.db).resolve().parent / "payloads" / args.run_id
+
+    def _run_recovery():
+        return _smoke_startup_recovery(
+            db=db,
+            run_id=args.run_id,
+            coin=coin,
+            live_cfg=live_cfg,
+            signed=signed,
+            gate=gate,
+            client=client,
+            wallet=addr,
+            payload_dir=payload_dir,
+        )
+
+    def _heartbeat() -> None:
+        # Keeps the lease _cmd_live_smoke acquired fresh across the suite;
+        # raises RunLockError once superseded (the runner aborts on it).
+        from .paper.run_lock import heartbeat_run_lock
+
+        heartbeat_run_lock(db, args.run_id, pid=os.getpid(), now=datetime.now(timezone.utc))
+
+    return SmokeContext(
+        signed=signed,
+        db=db,
+        run_id=args.run_id,
+        coin=coin,
+        network=live_cfg.network,
+        payload_dir=payload_dir,
+        owner_prefix=live_cfg.order_owner_prefix,
+        mark_price=_mark,
+        qty_step=asset.qty_step,
+        tick_size=asset.tick_size,
+        now=clock.now,
+        dry_run=False,
+        # The regime smoke test 2 writes is the RUN'S OWN (§4 live.safety) —
+        # the suite must never leave the account in a leverage/margin mode the
+        # config did not declare (decision 2026-07-29).
+        leverage=int(live_cfg.safety.leverage),
+        is_cross=live_cfg.safety.margin_mode.value == "cross",
+        # The run's OWN §18 deadline, not the dataclass default: the pre-flight
+        # recovery arms the switch from live.kill_switch.schedule_cancel_seconds,
+        # and the suite's per-test refresh then overwrites that deadline. Leaving
+        # it at 120s silently NARROWED a longer configured cover to 120s for the
+        # whole suite — so a test making a few round-trips on a slow network
+        # could let the switch fire and cancel the resting probe, exactly the
+        # failure the refresh exists to prevent (2026-07-30 concurrency review).
+        # ...but a FLOOR, not a plain hand-over. The config invariant only
+        # requires schedule_cancel > 5s and >= 2x refresh_interval, both judged
+        # against `live`'s 30s tick model — while the suite refreshes once per
+        # TEST, and a test is a place/poll/cancel round-trip with no upper bound.
+        # So a config that is perfectly legal for the daemon (say 40s/5s) would
+        # hand the suite a 40s cover, narrower than the 120s it had before the
+        # value was wired through at all, and the switch could fire mid-test and
+        # cancel the resting probe — recorded as "the exchange refused", which
+        # sends the operator to check config and market state rather than the
+        # clock. max() keeps 3ae0087's intent (a LONGER cover is honoured) while
+        # never going below what the suite used to guarantee (2026-07-31).
+        kill_switch_deadline=max(
+            timedelta(seconds=live_cfg.kill_switch.schedule_cancel_seconds),
+            _SMOKE_MIN_KILL_SWITCH_DEADLINE,
+        ),
+        run_recovery=_run_recovery,
+        heartbeat=_heartbeat,
+    )
+
+
+def _smoke_startup_recovery(
+    *, db, run_id, coin, live_cfg, signed, gate, client, wallet, payload_dir
+):
+    """One real §19.1 startup recovery for the restart smoke tests (15–17).
+
+    Builds the same recovery components ``live --run-id`` does and returns the
+    :class:`~.live.startup.StartupResult`. It arms the kill switch and reconciles
+    the run against the exchange — exactly the restart-reconciliation the smoke
+    tests assert is clean given the operator-staged preconditions.
+    """
+    from .exchanges.hyperliquid.sdk_client import call_sdk
+    from .live.fill_backfill import FillBackfiller
+    from .live.fills import LiveFillProcessor
+    from .live.kill_switch import KillSwitchManager, refresh_across_blocking_work
+    from .live.reconcile import LiveReconciler
+    from .live.safe_mode import SafeModeManager
+    from .live.startup import run_startup_recovery
+
+    def fetch_clearinghouse():
+        return call_sdk(client.info.user_state, wallet)
+
+    kill_switch = KillSwitchManager(
+        client=signed,
+        gate=gate,
+        db=db,
+        run_id=run_id,
+        config=live_cfg.kill_switch,
+        max_tick_gap_seconds=_RECOVERY_MAX_TICK_GAP_SECONDS,
+        network_timeout_s=signed.timeout,
+        payload_dir=payload_dir,
+        # This manager belongs to a live-smoke run: its arm and its tick-driven
+        # refreshes happen inside the suite, so they are cover but not evidence
+        # that the DAEMON exercised the switch — the marker drops these rows
+        # from the §20.3 sample floor AND from the clean-shutdown daemon
+        # verdict alike.
+        suite_authored=True,
+    )
+    safe_mode = SafeModeManager(db=db, run_id=run_id, gate=gate)
+    processor = LiveFillProcessor(db=db, run_id=run_id, payload_dir=payload_dir)
+
+    # §18.2: the same wiring as the live loop's, and for the same reason — this
+    # path ARMS the switch (it is handed to run_startup_recovery below) under the
+    # same _RECOVERY_MAX_TICK_GAP_SECONDS, so its sweep can lapse the deadline
+    # and cancel the wallet mid-recovery exactly as the live one can. Wiring only
+    # the live lane would have left the smoke restart tests (15–17) running the
+    # unrefreshed version of the very sweep they exist to exercise
+    # (2026-07-31 deadline review).
+    def _refresh_across_sweep() -> None:
+        refresh_across_blocking_work(kill_switch, what="reconciliation")
+
+    backfiller = FillBackfiller(
+        fetch=signed.user_fills_by_time,
+        processor=processor,
+        refresh_kill_switch=_refresh_across_sweep,
+    )
+    reconciler = LiveReconciler(
+        db=db,
+        run_id=run_id,
+        coin=coin,
+        fetch_open_orders=signed.open_orders,
+        fetch_clearinghouse=fetch_clearinghouse,
+        query_order_by_cloid=signed.query_order_by_cloid,
+        fetch_fills=signed.user_fills_by_time,
+        backfiller=backfiller,
+        payload_dir=payload_dir,
+        refresh_kill_switch=_refresh_across_sweep,
+    )
+    return run_startup_recovery(
+        db=db,
+        run_id=run_id,
+        client=signed,
+        fetch_clearinghouse=fetch_clearinghouse,
+        gate=gate,
+        kill_switch=kill_switch,
+        reconciler=reconciler,
+        safe_mode=safe_mode,
+        payload_dir=payload_dir,
+    )
+
+
+# --------------------------------------------------------------------------
 # paper — the long-running run
 # --------------------------------------------------------------------------
 
@@ -1774,6 +2998,14 @@ def _norm_network(live_block: dict) -> object:
     """``live.network`` normalised the way LiveConfig reads it (case-insensitive)."""
     net = live_block.get("network")
     return net.strip().lower() if isinstance(net, str) else net
+
+
+# The drift kinds that are run IDENTITY (a different instrument or a different
+# exchange). Every entry point that resumes/targets an existing run refuses
+# these with exit 1; any other kind is parameter drift and only warns. One
+# shared datum so the three call sites (paper resume, live resume, live-smoke)
+# can never diverge on what counts as hard.
+_HARD_DRIFT_KINDS = frozenset({"coin", "network"})
 
 
 def _config_drift_report(
@@ -1871,20 +3103,23 @@ def _config_drift_report(
 def _require_api_key() -> bool:
     """True when OPENROUTER_API_KEY is set; else print the abort message.
 
-    Checked only on paths that will actually drive the AI engine — a fresh run
-    (always, before the run row is written) and a healthy restart with nothing
-    live to protect. A restart into protection-only mode never polls the AI,
+    Checked only on paths that will actually drive the AI engine — a fresh paper
+    run (always, before the run row is written), a healthy paper restart with
+    nothing live to protect, and ``live --loop`` (up front, alongside its config
+    validation). A paper restart into protection-only mode never polls the AI,
     so it runs keyless — and a keyless healthy restart holding live work falls
     back to that same mode rather than exiting (the caller owns that fork:
     reconcile has already canceled the plans, so exiting would leave the
-    position with nobody watching its SL/TP).
+    position with nobody watching its SL/TP). ``live`` WITHOUT ``--loop`` is the
+    same keyless case: it arms, sweeps and exits without ever polling the AI.
     """
     if os.environ.get("OPENROUTER_API_KEY"):
         return True
     print(
-        "error: OPENROUTER_API_KEY is not set — the paper run drives the AI engine "
-        "every 4h. Use --context-only (legacy CLI) for a keyless dev loop. "
-        f"({dotenv_diagnosis('OPENROUTER_API_KEY')}.)",
+        "error: OPENROUTER_API_KEY is not set — the run drives the AI engine every "
+        "4h, and without a key every cycle records api_failed (which never counts "
+        "toward the §20.3 cycle gate). Use --context-only (legacy CLI) for a "
+        f"keyless dev loop. ({dotenv_diagnosis('OPENROUTER_API_KEY')}.)",
         file=sys.stderr,
     )
     return False
@@ -2128,7 +3363,7 @@ def _cmd_paper(argv: list[str]) -> int:
                     _stamp_breadcrumb(db, run_id, "config_drift", "ok", None)
                 else:
                     kind, message = drift
-                    if kind in ("coin", "network"):
+                    if kind in _HARD_DRIFT_KINDS:
                         print(f"error: {message}", file=sys.stderr)
                         return 1
                     logger.warning("config drift on resume for %s: %s", run_id, message)
@@ -2761,13 +3996,33 @@ class _EngineDecisionProvider:
     while the audit trail records the fresh input.
     """
 
-    def __init__(self, config: dict, *, risk_cfg, decision_cfg, payload_dir: Path) -> None:
+    # Class-level default so an instance built without __init__ (the tests use
+    # object.__new__ to skip the engine import) still answers the attribute —
+    # a missing hook must degrade to "no refresh", never to AttributeError
+    # inside build_input, which the §6.2 classifier would relabel as an API
+    # failure.
+    _on_blocking_read = None
+
+    def __init__(
+        self,
+        config: dict,
+        *,
+        risk_cfg,
+        decision_cfg,
+        payload_dir: Path,
+        on_blocking_read=None,
+    ) -> None:
         from .main import _build_engine_config
 
         self._config = config
         self._risk = risk_cfg
         self._decision = decision_cfg
         self._payload_dir = payload_dir
+        # Live only: ``build_input`` runs on the single-threaded tick and makes
+        # the longest unrefreshed REST chain in the system, so the live wiring
+        # passes a kill-switch refresh here. ``None`` for paper and the one-shot
+        # CLI paths, which hold no dead man's switch (2026-08-01 lifecycle review).
+        self._on_blocking_read = on_blocking_read
         self._engine_config, self._analysts = _build_engine_config(config)
 
     def build_input(self, *, coin: str, as_of: datetime):
@@ -2780,7 +4035,9 @@ class _EngineDecisionProvider:
         from .paper.scheduler import DecisionInput, RetryableDecisionError
 
         try:
-            ctx, _client = _build_context(self._config, coin)
+            ctx, _client = _build_context(
+                self._config, coin, on_blocking_read=self._on_blocking_read
+            )
         except ExchangeError as exc:
             raise RetryableDecisionError("connection", str(exc)) from exc
         # All three pre-LLM context guards (under-warm data, fully-dead
@@ -2882,7 +4139,19 @@ def _classify_engine_error(exc: Exception) -> str:
     text = f"{type(exc).__name__}: {exc}".lower()
     if "timeout" in text or "timed out" in text:
         return "timeout"
-    if "rate limit" in text or "ratelimit" in text or "429" in text:
+    # No bare "429": those three digits match any larger number that contains
+    # them — an oid, an epoch-ms timestamp, a price — so "run 1429 failed" filed
+    # as a rate limit. The sibling classifier in exchanges/hyperliquid/
+    # sdk_client.py deleted exactly this marker for exactly this reason and kept
+    # the phrases; this copy was missed. A real rate limit still lands here
+    # through the SDK's exception CLASS name (``RateLimitError`` → "ratelimit")
+    # or the phrase itself (2026-08-01 round-18 concept scan). The two lists are
+    # deliberately NOT identical and must not be merged: that one gates retry
+    # and §17.2 escalation on VENUE errors and carries the SDK-ism "slow down",
+    # while this one only labels an LLM-engine failure for the audit trail
+    # (``decision_attempts.error_type``, a closed vocabulary the scheduler
+    # retries identically whatever it says).
+    if "rate limit" in text or "ratelimit" in text or "too many requests" in text:
         return "rate_limit"
     if "connection" in text or "connect" in text or "network" in text:
         return "connection"

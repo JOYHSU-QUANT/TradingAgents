@@ -700,7 +700,7 @@ def _schedule_cancel_seconds(config_json: str | None) -> Decimal:
 #
 # Read from ``kill_switch_refreshed`` as well as ``kill_switch_armed`` — and from
 # those two event types only (the tally's allowlist; the sweep's completed row
-# dumps arbitrary JSON into this same column). The manager's
+# dumps arbitrary JSON into this same column). The daemon's
 # refresh rows carry no detail, so they simply say nothing and leave the standing
 # value alone — but ``live-smoke`` renews the cover at ``max(config, 120s)``, which
 # is LONGER than the armed row's number whenever a run is configured below 120. A
@@ -1109,8 +1109,9 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
         # dumps arbitrary JSON into this same column, so a cloid that happened to
         # contain the token would have re-sized the run's protection deadline.
         # Arming and refreshing are the two events that put a schedule on the
-        # exchange; every install — the manager's or the smoke suite's — is
-        # recorded under one of those two names.
+        # exchange; each install site records one of those two names right
+        # after the wire call, and no path records an install under any
+        # other name.
         if event in (_KILL_SWITCH_REFRESH_OK, _KILL_SWITCH_ARMED):
             stated_deadline = _stated_deadline_seconds(detail)
             if stated_deadline is not None:

@@ -525,9 +525,12 @@ def test_the_preflight_refresh_records_the_cover_it_installed(live_db):
     """The suite's HIGHEST-VOLUME writer, which had no test at all.
 
     ``_refresh_kill_switch`` runs before EVERY selected test once the selection
-    needed the pre-flight, not only before the order-placing ones (11 of 18) —
-    18 of the ~22 kill-switch rows a full suite writes, and the ONLY writer of the
-    ``deadline=max(config,120)s`` token the validator parses. Both round-14 smoke
+    needed the pre-flight, not only before the order-placing ones (11 of 18):
+    one row per selected test, 18 on a full suite — more than all other
+    kill-switch writers combined. Outside test 14's own ``armed``/``refreshed``
+    pair (floored the same way via ``ctx.kill_switch_deadline``), its rows are
+    the only ones stating the ``deadline=max(config,120)s`` cover on a run
+    configured below 120s. Both round-14 smoke
     tests drove ``only=[...]`` selections that are not in ``_ORDER_PLACING_TESTS``,
     so ``needs_preflight`` was False and this path never ran: restoring its
     pre-round-14 body (wire call, no row) left the whole suite green

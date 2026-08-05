@@ -10,6 +10,64 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Crypto options-implied volatility (Deribit).** A new keyless `options_data`
+  category, bound to the **market** analyst for crypto assets only (vol regime
+  is a technical read, so it sits alongside the indicators rather than with the
+  flows/sentiment tools on the news analyst). The report carries Deribit's DVOL
+  index — latest close and 30-day min/max — plus ATM implied vol, the 25-delta
+  call and put vols, and the 25-delta risk reversal (RR25 = call IV − put IV) for
+  the listed expiry nearest 30 days, which excludes anything inside 7 days as
+  pin-noisy. Wing vols come from an undiscounted Black-76 forward delta (Deribit
+  quotes `interest_rate: 0.0` on every listed option), interpolated between two
+  **strike-adjacent** listed contracts, and each wing is rendered with the two
+  strikes behind it. Two guards protect that number, because one collapsed or
+  stale `mark_iv` corrupts both a contract's IV and its delta. Ordering by strike
+  rather than by delta stops a bad quote pairing with a non-neighbour; and the
+  bracket must additionally sit in a stretch where delta falls with strike, as it
+  does on any well-formed smile. The second guard is not redundant: strike
+  adjacency alone leaves the wing at the mercy of a bad quote sitting *inside* the
+  bracket it legitimately borders, which printed exactly the strikes a reader
+  would expect and so had no visible symptom at all — a 61000 put collapsing to
+  0.5% IV moved RR25 from −4.74 to **+2.33**, reporting the opposite volatility
+  regime. A point the chain cannot bracket, or whose local smile is not monotone,
+  is reported `n/a` rather than extrapolated or guessed.
+  It **ships disabled** (`"options_data": "none"`). Being keyless, shipping it on
+  would change a running deployment's analyst input surface the moment the code
+  landed, with no server-side action to date the change from; enabling it is a
+  deliberate cutover.
+  The DVOL history is date-filtered to `curr_date` (bounded server-side and again
+  on the parsed rows) and lookahead-safe to the day; the candle dated today is
+  still open, so the report calls the series "readings" throughout and labels that
+  one rather than passing an intraday level off as a settled close. The chain
+  endpoint takes no date, so it is **withheld for a `curr_date` earlier than
+  today** and said to be withheld — quoting the present chain on a past date is
+  future information, and a prose warning is not an auditable guard. A `curr_date`
+  *later* than the UTC clock is served (callers derive it from a local clock, so
+  east of UTC it routinely runs hours ahead; the live chain is then older than the
+  analysis date, not newer) with a note saying so, and the feed is never called
+  late against a date that has not arrived.
+  A percentile is stated only when the window holds at least 10 daily readings:
+  the latest reading is itself in the sample, so a percentile over n of them
+  cannot read below 100/n, and a stalled feed would otherwise always report its
+  one surviving observation as the top of its own range. A window with no readings
+  at all reports no range either. The closing sentence restates the
+  figures and defines them — it deliberately does not characterise them, since it
+  is re-read verbatim by the research and risk agents downstream and a negative
+  RR25 is the resting state of crypto options rather than news.
+  Either half can fail without costing the other (any exception, not a fixed
+  allowlist); only losing both degrades the optional category to the no-data
+  sentinel, and a double throttle re-raises as `VendorRateLimitError` so the
+  router keeps its rate-limit lane. Deribit lists options for BTC and ETH only, so
+  another recognized crypto risk asset (SOL, XRP, ...) is served BTC's surface as
+  a market-wide crypto-vol proxy — labelled in the heading and named again in the
+  closing sentence, the two places that survive a downstream summary — and a
+  stablecoin or unrecognized symbol gets a no-signal note, the same classification
+  farside applies to ETF flows. Uncached by design (two GETs per call, both
+  freshness-sensitive), with one retry on transient faults only; a JSON-RPC error
+  or any other 4xx is deterministic and raises immediately rather than being slept
+  on and reported as unreachable, and an HTTP 429 raises the shared
+  `VendorRateLimitError`. The stock path's tools and prompt are unchanged.
+
 - **SoSoValue is now the primary crypto spot-ETF flow vendor.** farside.co.uk
   has served a Cloudflare JS challenge to non-browser clients since 2026-07-27
   (zero successful fetches since), so `crypto_etf_flows` now routes

@@ -5,8 +5,9 @@ the analysts only when ``asset_type == "crypto"``. Each routes through
 ``route_to_vendor`` so the configured vendor and the optional-category
 degradation behaviour apply, exactly like the stock/macro tools.
 
-Later data-source PRs add their crypto tools here too (Deribit options, whale
-positioning).
+The flows/sentiment tools go to the news analyst; the options-volatility tool
+goes to the market analyst, where vol regime belongs alongside the technical
+indicators. A later data-source PR adds whale positioning here too.
 """
 
 from typing import Annotated
@@ -74,3 +75,37 @@ def get_fear_greed(
         str: A formatted markdown report of the Fear & Greed Index
     """
     return route_to_vendor("get_fear_greed", curr_date, look_back_days)
+
+
+@tool
+def get_options_market(
+    asset: Annotated[
+        str,
+        "Crypto asset whose options market to read: 'BTC' or 'ETH' (pair forms "
+        "like 'BTC-USD' are accepted). Another recognized crypto risk asset "
+        "(SOL, XRP, ...) has no listed chain, so BTC's volatility surface is "
+        "returned as a market-wide proxy; a stablecoin or unrecognized symbol "
+        "returns a no-signal note.",
+    ],
+    curr_date: Annotated[str, "Current date in yyyy-mm-dd format; the end of the DVOL window"],
+) -> str:
+    """
+    Retrieve crypto options-implied volatility from Deribit: the DVOL index
+    (a 30-day forward implied-vol gauge) with its 30-day range, and its
+    percentile when the window holds enough closes for one, plus ATM implied
+    vol, the 25-delta call/put vols and the 25-delta risk reversal (RR25) for
+    the listed expiry nearest 30 days. RR25 is the 25-delta call IV minus the
+    25-delta put IV, so a negative value means the put wing carries the higher
+    implied vol. The DVOL history is filtered to curr_date; the options chain
+    has no historical endpoint, so its figures are served only when curr_date is
+    today and are withheld on any earlier date. Uses the configured options_data
+    vendor.
+
+    Args:
+        asset (str): 'BTC' or 'ETH' (recognized risk coins get BTC as a proxy)
+        curr_date (str): Current date in yyyy-mm-dd format
+
+    Returns:
+        str: A formatted markdown report of implied volatility and skew
+    """
+    return route_to_vendor("get_options_market", asset, curr_date)

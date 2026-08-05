@@ -4,15 +4,18 @@ from tradingagents.agents.utils.agent_utils import (
     get_indicators,
     get_instrument_context_from_state,
     get_language_instruction,
+    get_options_market,
     get_stock_data,
     get_verified_market_snapshot,
 )
+from tradingagents.dataflows.interface import is_category_disabled
 
 
 def create_market_analyst(llm):
 
     def market_analyst_node(state):
         current_date = state["trade_date"]
+        asset_type = state.get("asset_type", "stock")
         instrument_context = get_instrument_context_from_state(state)
 
         tools = [
@@ -20,6 +23,28 @@ def create_market_analyst(llm):
             get_indicators,
             get_verified_market_snapshot,
         ]
+
+        # Crypto-only options-volatility tool. Vol regime is a technical read, so
+        # it lands on this analyst rather than the news one. Bound only for crypto
+        # assets so the stock path's tools and prompt are unchanged, and only when
+        # the category is enabled — binding a tool whose category is switched off
+        # would just spend a tool call to receive the disabled sentinel.
+        crypto_tools_message = ""
+        if asset_type == "crypto" and not is_category_disabled(
+            "options_data", "get_options_market"
+        ):
+            tools = tools + [get_options_market]
+            crypto_tools_message = (
+                "\n\nSince this is a crypto asset, also call get_options_market(asset, curr_date) "
+                "for the options-implied volatility regime: the DVOL index with its 30-day range "
+                "and percentile, ATM implied vol, and the 25-delta risk reversal (RR25). Read "
+                "DVOL's percentile as where current implied vol sits versus its own recent range, "
+                "and RR25 as which wing carries the higher implied vol — negative means the put "
+                "wing does. Report what the figures say rather than restating the tool's own "
+                "wording, and respect its caveats: a percentile is omitted when the sample is "
+                "too thin for one, and the chain half is withheld entirely for a past analysis "
+                "date, in which case do not substitute today's skew for it."
+            )
 
         system_message = (
             """You are a trading assistant tasked with analyzing financial markets. Your role is to select the **most relevant indicators** for a given market condition or trading strategy from the following list. The goal is to choose up to **8 indicators** that provide complementary insights without redundancy. Categories and each category's indicators are:
@@ -51,6 +76,7 @@ Volume-Based Indicators:
 Before writing the final report, call get_verified_market_snapshot for this ticker and the current date, and treat it as the source of truth for any exact OHLCV, price-level, or indicator-value claim. If another tool's output conflicts with the verified snapshot, flag the discrepancy rather than inventing a reconciled number. Do not claim historical validation, support/resistance bounces, or exact percentage moves unless they are directly supported by tool output with concrete dates and prices.
 
 Write a very detailed and nuanced report of the trends you observe. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
+            + crypto_tools_message
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
             + get_language_instruction()
         )

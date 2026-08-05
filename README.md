@@ -253,6 +253,37 @@ that sentinel rather than aborting; the stock path is unchanged. A recognized
 crypto risk asset without its own spot ETF (e.g. SOL) gets BTC flows as a
 market-wide proxy; a stablecoin or unrecognized symbol gets a no-signal note.
 
+Crypto assets also have one **market**-analyst data source available:
+options-implied volatility from Deribit's public API (`options_data`, vendor
+`deribit`, keyless). It reports the DVOL index with its 30-day range, and its
+percentile when the window holds enough readings to make one meaningful, plus the
+ATM implied vol, the 25-delta call/put vols and the risk reversal (RR25) for the
+listed expiry nearest 30 days, each shown with the two strikes it was
+interpolated between. A point the chain cannot bracket — or whose surrounding
+quotes are not a monotone smile, the signature of a collapsed or stale mark — is
+reported `n/a` rather than extrapolated or guessed. The two halves fail
+independently, so a DVOL outage still leaves the skew and vice versa; only losing
+both degrades the category to the sentinel. Deribit lists options for BTC and ETH
+only, so other recognized crypto risk assets get BTC's surface as a market-wide
+crypto-vol proxy, on the same rule as ETF flows.
+
+The DVOL history is dated and filtered to `curr_date`. The chain endpoint takes
+no date, so it is **withheld when `curr_date` is earlier than today** and the
+report says so, because quoting the present chain on a past date is future
+information. A `curr_date` later than the UTC clock — which callers deriving it
+from a local clock east of UTC produce for the first hours of each day — is
+served with a note explaining that the chain predates the analysis date.
+
+This vendor **ships disabled** (`"options_data": "none"`). It needs no API key,
+so shipping it on would change a running deployment's analyst input surface — a
+new tool, a new prompt paragraph, a new report section — the moment the code
+lands, with no server-side action to date the change from. Set it to `"deribit"`
+as a deliberate cutover and record when:
+
+```python
+config["data_vendors"]["options_data"] = "deribit"
+```
+
 Any data category can be switched off by setting its vendor to `"none"`:
 
 ```python

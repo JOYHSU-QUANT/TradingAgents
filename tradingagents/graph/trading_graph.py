@@ -24,6 +24,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_insider_transactions,
     get_macro_indicators,
     get_news,
+    get_options_market,
     get_prediction_markets,
     get_stock_data,
     get_verified_market_snapshot,
@@ -178,6 +179,10 @@ class TradingAgentsGraph:
                     # LLM and required by its prompt; must be executable here or
                     # the call fails and the model reports it "unavailable").
                     get_verified_market_snapshot,
+                    # Crypto-only options-volatility tool; bound to the analyst
+                    # LLM only for crypto assets, but always registered here so
+                    # the bound call is executable (a stock run never binds it).
+                    get_options_market,
                 ]
             ),
             "social": ToolNode(

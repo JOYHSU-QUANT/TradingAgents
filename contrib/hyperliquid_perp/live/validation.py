@@ -699,8 +699,8 @@ def _schedule_cancel_seconds(config_json: str | None) -> Decimal:
 # live_ready (2026-08-01 round-14 review).
 #
 # Read from ``kill_switch_refreshed`` as well as ``kill_switch_armed`` — and from
-# those two event types only (the tally's allowlist; sweep rows dump arbitrary
-# JSON into this same column). The manager's
+# those two event types only (the tally's allowlist; the sweep's completed row
+# dumps arbitrary JSON into this same column). The manager's
 # refresh rows carry no detail, so they simply say nothing and leave the standing
 # value alone — but ``live-smoke`` renews the cover at ``max(config, 120s)``, which
 # is LONGER than the armed row's number whenever a run is configured below 120. A
@@ -1010,10 +1010,11 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
     switch demonstrably fires — as healthy covered time. Each stretch is measured
     against the cover IN FORCE across it: a stated deadline is believed on the
     two schedule-installing event types — ``kill_switch_armed`` and
-    ``kill_switch_refreshed`` alike, and on no other (sweep rows dump arbitrary
-    JSON into the same column) — while the daemon's refreshes carry no detail
-    and leave the standing value alone, and the genesis config supplies only
-    the starting value. Both events, not just arming: the smoke suite renews at
+    ``kill_switch_refreshed`` alike, and on no other (the sweep's completed row
+    dumps arbitrary JSON into the same column) — while the daemon's refreshes
+    carry no detail and leave the standing value alone, and the genesis config
+    supplies only the starting value. Both events, not just arming: the smoke
+    suite renews at
     ``max(config, 120s)``, so on a run configured below 120 its floored rows —
     the per-test refreshes, plus test 14's ``armed``/``refreshed`` pair — are
     the ONLY evidence of the longer cover actually in force. Reading genesis
@@ -1108,8 +1109,8 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
         # dumps arbitrary JSON into this same column, so a cloid that happened to
         # contain the token would have re-sized the run's protection deadline.
         # Arming and refreshing are the two events that put a schedule on the
-        # exchange, and they are exactly the two the manager and the smoke suite
-        # both write.
+        # exchange; every install — the manager's or the smoke suite's — is
+        # recorded under one of those two names.
         if event in (_KILL_SWITCH_REFRESH_OK, _KILL_SWITCH_ARMED):
             stated_deadline = _stated_deadline_seconds(detail)
             if stated_deadline is not None:

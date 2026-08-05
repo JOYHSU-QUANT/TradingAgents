@@ -423,8 +423,8 @@ shortfall——30s 一次的節奏下約 50 分鐘就滿，遠早於 30 cycles�
 把整個錢包的單（含 SL/TP）撤光——不管當時進程是卡住、被限流還是根本死了——一律以
 **全長**計入 outage。
 「當下實際生效」取自 `kill_switch_armed`／`kill_switch_refreshed` 兩種列當中
-**有寫 `deadline=...s` 的**——兩種都算、不是只有 arm，但也只認這兩種（sweep 列的
-detail 是整包 JSON，撞到字樣也不採信）；daemon 的 refresh 列不帶 detail、
+**有寫 `deadline=...s` 的**——兩種都算、不是只有 arm，但也只認這兩種（sweep 的
+completed 列 detail 是整包 JSON，撞到字樣也不採信）；daemon 的 refresh 列不帶 detail、
 不改變當下生效值；genesis
 （`--create` 當時的 `live:` 區塊）只提供還沒 arm 之前的起始值。原因是 `config_json` 只在
 `--create` 寫一次，而 resume 時改動 `live.kill_switch` 只印 WARNING 不擋——只讀 genesis

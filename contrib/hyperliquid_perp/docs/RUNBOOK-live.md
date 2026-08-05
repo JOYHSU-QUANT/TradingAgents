@@ -422,15 +422,18 @@ shortfall——30s 一次的節奏下約 50 分鐘就滿，遠早於 30 cycles�
 生效的** `schedule_cancel_seconds`，就代表那段期間沒有任何東西續約排程，交易所已在中途
 把整個錢包的單（含 SL/TP）撤光——不管當時進程是卡住、被限流還是根本死了——一律以
 **全長**計入 outage。
-「當下實際生效」取自**每一列「真的把排程掛上交易所」的事件自己寫的 `deadline=...s`**
-——`kill_switch_armed` 與 `kill_switch_refreshed` 兩種都算，不是只有 arm；genesis
+「當下實際生效」取自**有寫 `deadline=...s` 的列**——`kill_switch_armed` 與
+`kill_switch_refreshed` 兩種都算，不是只有 arm；daemon 的 refresh 列不帶 detail、
+不改變當下生效值；genesis
 （`--create` 當時的 `live:` 區塊）只提供還沒 arm 之前的起始值。原因是 `config_json` 只在
 `--create` 寫一次，而 resume 時改動 `live.kill_switch` 只印 WARNING 不擋——只讀 genesis
 的話，一個 genesis 600、實際以 120 arm 的 run，會把每一段真實的 121–600s 失聯都算成
 「有保護」，於是真的裸奔過的 run 報 `live_ready`。
 **兩種都算是必要的**：`live-smoke` 以 `max(config, 120s)` 續約，所以在
-`schedule_cancel_seconds` 設得比 120 小的 run 上，它的 refresh 列是「當下真的有更長保護」
-的唯一證據；只聽 arm 會把 smoke 期間每一段 41–120s 的間隔憑空判成 outage。
+`schedule_cancel_seconds` 設得比 120 小的 run 上，它的 floored 列——每個測試前的
+refresh，加上 test 14 自己的 armed/refreshed 兩列——是「當下真的有更長保護」
+的唯一證據（recovery 建的 manager 其 arm 列寫的是未 floor 的 config 值）；只聽 arm
+會把 smoke 期間每一段 41–120s 的間隔憑空判成 outage。
 另外，**`live-smoke` 期間寫進事件流的每一列都帶 `writer=live-smoke` 標記**——不只 suite
 自己打的那幾筆（pre-flight refresh、test 14 的 arm/refresh/clear、離場 disarm、失敗的
 refresh），**也包含 suite 為 pre-flight recovery 與 test 15-17 建的那個真 KillSwitchManager

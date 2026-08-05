@@ -522,12 +522,14 @@ def _ks_rows(db, run_id="live-BTC"):
 
 
 def test_the_preflight_refresh_records_the_cover_it_installed(live_db):
-    """The suite's HIGHEST-VOLUME writer, which had no test at all.
+    """The per-test refresh writer, which had no test at all.
 
     ``_refresh_kill_switch`` runs before EVERY selected test once the selection
     needed the pre-flight, not only before the order-placing ones (11 of 18):
-    one row per selected test, 18 on a full suite — more than all other
-    kill-switch writers combined. Outside test 14's own ``armed``/``refreshed``
+    one row per selected test, 18 on a full suite. (No volume superlative — on
+    a real testnet run the tick-driven refreshes of the recovery managers are
+    the bulk, RUNBOOK §20.3; the offline clock never lets those fire.)
+    Outside test 14's own ``armed``/``refreshed``
     pair (floored the same way via ``ctx.kill_switch_deadline``), its rows are
     the only ones stating the ``deadline=max(config,120)s`` cover on a run
     configured below 120s. Both round-14 smoke
@@ -653,10 +655,12 @@ def test_test_14_records_every_transition_it_makes(live_db):
     assert _stated_deadline_seconds(rows[0][1]) == _D(120)
     assert _stated_deadline_seconds(rows[1][1]) == _D(120)
     assert all(is_suite_authored(detail) for _, detail in rows), rows
-    # SEPARATED from what the row already said. `is_suite_authored` uses a
-    # substring test and the deadline regex parses the front, so both tolerate
-    # `...refresh)writer=live-smoke` — which defeats the hand-reading this
-    # column exists for (2026-08-01 round-17 probe).
+    # SEPARATED from what the row already said. The deadline regex parses the
+    # front; since the round-18 hardening, `is_suite_authored` anchors on the
+    # last whitespace-delimited field and rejects the glued
+    # `...refresh)writer=live-smoke` it once tolerated. This assertion pins
+    # the stricter shape on top — one plain space before the marker — the
+    # form the column's hand-reader relies on (2026-08-01 round-17 probe).
     from contrib.hyperliquid_perp.live.kill_switch import _SUITE_AUTHORED_TOKEN
 
     assert all(detail.endswith(f" {_SUITE_AUTHORED_TOKEN}") for _, detail in rows), rows

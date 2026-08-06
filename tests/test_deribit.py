@@ -696,6 +696,14 @@ class TestComputeSkew:
         assert "could not be used, so this is the next qualifying expiry" in section
         assert f"the listed expiry closest to {deribit.TARGET_DTE_DAYS} days" not in section
 
+    def test_the_reading_line_rounds_the_tenor_rather_than_truncating_it(self):
+        # A fractional tenor: truncation would print "(22-day)" for 22.6 days out.
+        # The fixture expiry is ~23.0 days, where rounding and truncation agree, so
+        # nothing else can tell the two apart.
+        contracts = _ladder("NEARBY", 22.6)
+        line = deribit._reading_line("BTC", deribit.compute_skew(contracts, NOW), None, 0)
+        assert "NEARBY (23-day) chain" in line
+
     @pytest.mark.parametrize(
         "quotes",
         [
@@ -1240,9 +1248,13 @@ class TestReport:
         out, recorder = _run_report(asset="USDT")
         assert "no listed options market for 'USDT'" in out
         assert "Do not substitute BTC or ETH implied volatility" in out
-        # No DVOL figure of any kind is served — the note may name the DVOL level
-        # as what a *recognized* risk asset would get, but must carry no section,
-        # no reading and no percentile of its own.
+        # What a *recognized* risk asset would have got is the DVOL level, not the
+        # volatility surface — the skew never transfers. Pinned literally: the
+        # structural assertions below pass under either wording.
+        assert "BTC's DVOL level serves as a market-wide proxy" in out
+        assert "surface" not in out
+        # No DVOL figure of any kind is served for this symbol: no section, no
+        # reading, no percentile of its own.
         assert "**DVOL" not in out
         assert "percentile" not in out
         assert "_Reading:_" not in out
@@ -1297,7 +1309,7 @@ class TestDvolSampleHonesty:
         out = _report(dvol=_dvol_days(5))
         assert (
             "**365d percentile:** not computed — the 365 days ending 2026-08-05 hold only "
-            "5 daily readings, so a percentile over them could not read below 20%" in out
+            "5 daily readings, so a percentile over that sample could not read below 20%" in out
         )
         assert "**30d range:** min 40.00 / max 40.40 over 5 daily readings" in out
         assert "sits at the" not in out
@@ -1554,6 +1566,42 @@ class TestPartialDegradation:
         assert (skew.n_calls, skew.atm) == (0, None)
         assert "no two strike-adjacent quotes bracket" in deribit._atm_line(skew)
 
+    def test_a_populated_call_curve_gets_the_bracket_reason_too(self):
+        # Mirror of the above. ATM is tried on the CALL curve FIRST, so calls-only
+        # is the commoner shape — yet only the puts-only side was covered, which
+        # left `max(n_calls, n_puts)` replaceable by `n_puts` with the suite green.
+        calls_only = [
+            _synthetic_contract("SOLO", 30, strike=float(k), is_call=True) for k in (58000, 59000)
+        ]
+        skew = deribit.compute_skew(calls_only, NOW)
+        assert (skew.n_calls, skew.n_puts, skew.atm) == (2, 0, None)
+        assert "no two strike-adjacent quotes bracket" in deribit._atm_line(skew)
+
+    def test_exactly_two_quotes_on_one_curve_counts_as_a_pair(self):
+        # The n == 2 boundary the predicate turns on. Raised to >= 3, this same
+        # input is told its quotes were missing when two were present.
+        strikes = [
+            _synthetic_contract("SOLO", 30, strike=float(k), is_call=True) for k in (58000, 59000)
+        ]
+        assert "no two strike-adjacent quotes bracket" in deribit._atm_line(
+            deribit.compute_skew(strikes, NOW)
+        )
+        assert "neither the call nor the put curve" in deribit._atm_line(
+            deribit.compute_skew(strikes[:1], NOW)
+        )
+
+    def test_the_rendered_section_uses_the_atm_reason(self):
+        # The tests above call _atm_line directly, so reverting _skew_section to
+        # the old _wing_line(atm, n_calls + n_puts) call left every one of them
+        # green while the wrong wording shipped. Assert through the RENDER.
+        one_each = [
+            _synthetic_contract("SOLO", 30, strike=60000.0, is_call=True),
+            _synthetic_contract("SOLO", 30, strike=68000.0, is_call=False),
+        ]
+        section = deribit._skew_section(deribit.compute_skew(one_each, NOW), "2026-08-05T06:06:00Z")
+        assert "**ATM IV (50Δ):** n/a (neither the call nor the put curve has two usable" in section
+        assert "no two strike-adjacent quotes bracket" not in section
+
     def test_a_single_quote_side_says_a_pair_is_what_is_missing(self):
         # One quote cannot bracket anything, so "no two strike-adjacent quotes
         # bracket this point" is technically true but points the reader at the
@@ -1566,6 +1614,32 @@ class TestPartialDegradation:
         )
         # With a real pair present, the bracket/monotonicity wording is correct.
         assert "strike-adjacent" in deribit._wing_line(None, 2)
+
+    @pytest.mark.parametrize(
+        "count,expected",
+        [(0, "0 daily readings"), (1, "1 daily reading"), (2, "2 daily readings")],
+    )
+    def test_a_lone_reading_is_singular(self, count, expected):
+        # The singular is the whole reason this helper exists, and it is reachable
+        # at two render sites (the 30d range line and the too-few-for-a-percentile
+        # line) — but nothing called it with 0 or 1, so the conditional could be
+        # deleted outright with the suite green.
+        assert deribit._readings(count) == expected
+
+    def test_a_one_reading_feed_renders_singular_end_to_end(self):
+        out = _report(dvol={"data": [_candle("2026-08-05", 60.5)]})
+        assert "**30d range:** min 60.50 / max 60.50 over 1 daily reading" in out
+        assert "hold only 1 daily reading, so a percentile over that sample" in out
+        assert "1 daily readings" not in out
+
+    def test_an_all_rows_rejected_chain_names_a_shape_change(self):
+        # The only operator-facing diagnostic in this area: every row failing the
+        # field checks means a renamed field, not a quiet market. Untested, the
+        # message reverts to a bare "no usable contracts" and sends whoever is on
+        # call to wait out an outage that will not end.
+        out = _report(chain=[{"instrument_name": "BTC-28AUG26-64000-C"}])
+        assert "every row failed the instrument-name, mark-IV, underlying or open-interest" in out
+        assert "response-shape change rather than an empty market" in out
 
     def test_report_sections_are_blank_line_separated(self):
         # Consecutive italic caveats joined by a single newline render as one

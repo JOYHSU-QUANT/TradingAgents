@@ -94,9 +94,9 @@ def get_options_market(
     (a 30-day forward implied-vol gauge) with its 30-day min/max range, and its
     365-day percentile when that window holds enough readings for one, plus ATM
     implied vol, the 25-delta call/put vols and the 25-delta risk reversal (RR25)
-    for the listed expiry nearest 30 days — or, when that expiry cannot bracket
-    both wings, the next-nearest one, which the report labels and whose tenor it
-    always prints. RR25 is the 25-delta call IV minus the
+    for the listed expiry nearest 30 days — or, when that expiry cannot be used,
+    the next-nearest one, which the report labels and whose tenor it always prints
+    (RR25 is not comparable across tenors). RR25 is the 25-delta call IV minus the
     25-delta put IV, so a negative value means the put wing carries the higher
     implied vol. The DVOL history is filtered to curr_date; the options chain has
     no historical endpoint, so its figures are withheld when curr_date is EARLIER

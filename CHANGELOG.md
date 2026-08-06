@@ -68,7 +68,8 @@ Breaking changes within the 0.x line are called out explicitly.
   defended it against one that merely sits there being wrong. An unheld strike is
   where a stale or purely modelled mark lives, and such a quote can be perfectly
   monotone with its neighbours — passing both guards and printing the very strikes
-  a reader expects. If the nearest-30-day expiry cannot bracket both wings, the
+  a reader expects. If the nearest-30-day expiry cannot be used — it fails to
+  bracket both wings, or it carries no usable forward — the
   next-nearest one is used and the report says so rather than repeating that this
   is "the expiry closest to 30 days"; a labelled neighbouring skew is a better
   input to a risk debate than an all-`n/a` section, and the tenor is printed both

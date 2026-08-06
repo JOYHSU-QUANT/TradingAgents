@@ -24,7 +24,7 @@ The two halves fail independently. Losing the chain should not also cost the
 DVOL history (and vice versa), so each is fetched inside its own try and the
 report renders whichever survived, naming what is missing. This module raises
 only when nothing at all can be served — both halves failed, or DVOL failed on a
-date or an asset where the chain is withheld by design — and the routing layer
+date, or for a proxied asset, where the chain is withheld by design — and the routing layer
 then degrades the optional ``options_data`` category to a sentinel. A throttle
 raises ``VendorRateLimitError`` rather than ``DeribitError`` so the router keeps
 its rate-limit lane.
@@ -230,9 +230,10 @@ class SkewSnapshot(NamedTuple):
     with, which need not be every contract Deribit listed for the expiry.
 
     ``is_fallback`` is True when this is NOT the expiry nearest the target tenor,
-    i.e. the nearest one could not bracket both wings and ``compute_skew`` moved
-    on. It exists so the report cannot keep calling the expiry "the listed expiry
-    closest to 30 days" while showing a different one.
+    i.e. the nearest one could not be used — it could not bracket both wings, or it
+    carried no usable forward — and ``compute_skew`` stepped once past it. It exists
+    so the report cannot keep calling the expiry "the listed expiry closest to 30
+    days" while showing a different one.
     """
 
     expiry: str
@@ -620,9 +621,9 @@ def select_expiry(contracts: list[Contract], now: datetime) -> str | None:
     """The best-ranked expiry token, or None when nothing clears the 7-day floor.
 
     The expiry the report ends up using is NOT necessarily this one: ``compute_skew``
-    walks the whole ranking and moves on when a candidate cannot bracket both wings.
-    This names the head of that ranking, which is what the tenor rules (the 7-day
-    floor, the 30-day target, the longer-dated tie-break) are stated in terms of.
+    may step once to the next-ranked expiry when this one cannot be used. This names
+    the head of that ranking, which is what the tenor rules (the 7-day floor, the
+    30-day target, the longer-dated tie-break) are stated in terms of.
     """
     ranked = rank_expiries(contracts, now)
     return ranked[0] if ranked else None
@@ -639,8 +640,9 @@ def _median(values: list[float]) -> float:
 def compute_skew(contracts: list[Contract], now: datetime) -> SkewSnapshot:
     """Compute the ATM and 25-delta wing vols for the ~30-day expiry.
 
-    Tries the nearest expiry and, if that one cannot bracket BOTH 25-delta wings,
-    the next-nearest — and stops there. A sparse or non-monotone stretch around the
+    Tries the nearest expiry and, if that one cannot be used — it fails to bracket
+    BOTH 25-delta wings, or it carries no usable forward — the next-nearest, and
+    stops there. A sparse or non-monotone stretch around the
     wing is a property of one expiry rather than of the surface, and its immediate
     neighbour is usually clean, so one labelled step is a far better input to a risk
     debate than the silence of an all-``n/a`` skew section. When neither candidate
@@ -971,7 +973,7 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, curr_date: str, today: 
         # what makes the percentile meaningless, and 100/n says how coarse it
         # would have been.
         shortfall = (
-            f"only {_readings(len(pct_window))}, so a percentile over them could not "
+            f"only {_readings(len(pct_window))}, so a percentile over that sample could not "
             f"read below {100 / len(pct_window):.0f}%"
             if pct_window
             else "no daily readings at all"
@@ -1058,8 +1060,8 @@ def _skew_section(skew: SkewSnapshot, snapshot_time: str) -> str:
     """Render the live-chain lines for the selected expiry."""
     if skew.is_fallback:
         expiry_basis = (
-            f"the expiry nearest {TARGET_DTE_DAYS} days could not be used, so "
-            f"this is the next qualifying expiry that could"
+            f"the expiry nearest {TARGET_DTE_DAYS} days could not be used, so this is the "
+            f"next qualifying expiry"
         )
     else:
         expiry_basis = (

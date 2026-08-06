@@ -1084,12 +1084,20 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
         f"**DVOL ({DVOL_INDEX_TENOR_DAYS}-day implied vol index), latest:** "
         f"{latest:.2f}% annualized on {series.latest_date}"
     )
-    if series.latest_date == today:
+    if series.latest_date >= today:
         # Deribit stamps a 1D candle at the START of its day, so the candle dated
         # today is still open and its value is only the level so far. Every line
         # below therefore says "reading", never "close": labelling it here and
         # then calling the same number "the latest close" two lines down would
         # take the caveat back in the same breath.
+        #
+        # ">=", not "==". ``today`` is the clock taken BEFORE the DVOL fetch, and
+        # that fetch can span UTC midnight (two timeouts plus the retry sleep,
+        # ~62s), in which case it returns a candle dated the NEW day — strictly
+        # greater than ``today``, and by definition seconds old. Under "==" the
+        # label was dropped from exactly that candle: the one case where it is most
+        # certainly open. The partial level then printed as the settled latest, set
+        # the 30-day max, and became what the percentile was measured against.
         # "That day", not "today". This line is dated by the clock the DVOL half
         # was read on, which an ahead-of-clock run can print three lines below a
         # caveat saying the clock has since reached the NEXT day — so the report
@@ -1570,7 +1578,11 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             f"further than any timezone offset explains. Deribit's options chain is a live "
             f"endpoint, so the ATM IV, 25Δ wings, RR25 and forward would be today's book, not "
             f"{curr_date}'s, and they are NOT served. The DVOL history below IS filtered to "
-            f"{curr_date}; its windows end at a date that has not arrived, so they hold fewer "
+            # Same fact as the ahead-of-clock note's DVOL sentence, so it is worded
+            # the same way. It was left on the pre-rewrite phrasing, which is still
+            # true here (days_ahead >= 2, so no mid-run crossing can reach
+            # curr_date) but stated the identical fact two ways three lines apart.
+            f"{curr_date}; its windows end at a date the feed has not reached, so they hold fewer "
             f"readings than their full spans._"
         )
     elif curr_date > today:
@@ -1620,17 +1632,21 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
                     f"clock reached the analysis date while this report was being built, so "
                     f"they fall within it rather than before it."
                 )
-        if dvol is not None:
-            # Phrased against WHEN THE WINDOWS WERE READ, not against whether the
-            # analysis date has arrived. The old wording asserted it had not, which
-            # the else-branch above directly contradicts five words earlier once the
-            # clock crosses into curr_date mid-run — both halves of that
-            # contradiction inside the one italic line a downstream summary keeps.
-            # The conclusion was never wrong (DVOL is fetched first, so its windows
-            # really do stop short); only the reason it gave could go stale.
+        if dvol is not None and dvol.latest_date < curr_date:
+            # Gated on the DATA, not on a clock. Two previous wordings here were
+            # clock-derived and both went stale: "a date that has not arrived"
+            # contradicted the chain sentence once the clock crossed into
+            # curr_date mid-run, and "had not arrived when they were read" was
+            # asserted from `today`, an instant captured BEFORE the DVOL fetch that
+            # can itself span midnight. Whether the windows actually fall short is
+            # decidable from what came back — the feed either reached the analysis
+            # date or it did not — so it is read off the series instead of inferred
+            # from a clock that may have moved. When the feed did reach curr_date
+            # the windows are full and there is no shortfall to declare, which is
+            # why this is now gated rather than reworded again.
             sentences.append(
-                "The DVOL windows end at the analysis date, which had not arrived when they "
-                "were read, so they hold fewer readings than their full spans."
+                f"The DVOL windows end at the analysis date but the feed has only reached "
+                f"{dvol.latest_date}, so they hold fewer readings than their full spans."
             )
         # Every sentence already ends in a full stop; only the closing italic marker
         # is appended.

@@ -2033,18 +2033,24 @@ class TestHistoricalDate:
         out = _report(curr_date="2026-08-06", chain=deribit.DeribitError("chain down"))
         assert "was ahead of the UTC clock (2026-08-05)" in out
         assert "the live book as of" not in out
-        assert "The DVOL windows end at the analysis date, which had not arrived" in out
+        assert (
+            "The DVOL windows end at the analysis date but the feed has only reached "
+            "2026-08-05" in out
+        )
 
     def test_the_ahead_of_clock_note_drops_the_dvol_sentence_when_dvol_is_absent(self):
         out = _report(curr_date="2026-08-06", dvol=deribit.DeribitError("dvol down"))
         assert "was ahead of the UTC clock (2026-08-05)" in out
         assert "the live book as of 2026-08-05" in out
-        assert "DVOL windows end at a date" not in out
+        assert "DVOL windows end at" not in out
 
     def test_the_ahead_of_clock_note_carries_both_when_both_halves_are_there(self):
         out = _report(curr_date="2026-08-06")
         assert "the live book as of 2026-08-05" in out
-        assert "The DVOL windows end at the analysis date, which had not arrived" in out
+        assert (
+            "The DVOL windows end at the analysis date but the feed has only reached "
+            "2026-08-05" in out
+        )
         # One closing italic marker, not two, and no doubled full stop.
         assert "spans._" in out
         assert ".._" not in out
@@ -2060,7 +2066,9 @@ class TestHistoricalDate:
     def test_the_open_candle_label_follows_the_clock_not_the_analysis_date(self):
         # The candle dated today is open because the day is not over, which has
         # nothing to do with which date is being analysed.
-        assert "still open when it was read, so this is the level so far" in _report(curr_date="2026-08-06")
+        assert "still open when it was read, so this is the level so far" in _report(
+            curr_date="2026-08-06"
+        )
 
     def test_dvol_failure_on_a_historical_date_raises(self):
         # Nothing left to report: the chain is withheld by design, not by failure.
@@ -2187,14 +2195,58 @@ class TestHistoricalDate:
             "_Analysis date 2026-08-06 was ahead of the UTC clock (2026-08-05) when this "
             "report was built." in out
         )
-        # ... and the DVOL sentence must not contradict the chain sentence above it
-        # by claiming the analysis date has still not arrived.
-        assert "which had not arrived when they were read" in out
-        assert "end at a date that has not arrived" not in out
         assert "the UTC clock reached the analysis date while this report was being built" in out
         # The three claims the stale clock used to make.
         assert "the live book as of 2026-08-05" not in out
         assert "which is BEFORE the analysis date" not in out
+        # The DVOL sentence must not contradict the chain sentence above it by
+        # claiming the analysis date has still not arrived. The feed reached
+        # 2026-08-05 only, so a shortfall does apply here — but it is stated from
+        # the DATA, never from a clock, and the word "arrived" is gone entirely.
+        assert (
+            "The DVOL windows end at the analysis date but the feed has only reached "
+            "2026-08-05" in out
+        )
+        assert "arrived" not in out
+
+    def test_a_dvol_fetch_that_crosses_midnight_labels_its_seconds_old_candle(self):
+        # The crossing landing inside the DVOL fetch rather than after it. `today`
+        # is captured BEFORE that fetch, so the returned candle is dated the NEW
+        # day: strictly greater than `today`, and by Deribit's start-of-day stamp
+        # it is seconds old. Under the `== today` gate the open-candle label was
+        # dropped from exactly that candle — the one most certainly still open —
+        # and the partial level printed as the settled latest, set the 30d max, and
+        # became what the percentile was measured against. The shortfall sentence
+        # must also disappear: the feed did reach the analysis date, so the windows
+        # are not short.
+        dvol = {
+            "data": [
+                _candle("2026-08-04", 30.0),
+                _candle("2026-08-05", 31.0),
+                _candle("2026-08-06", 99.0),
+            ]
+        }
+        out, _ = _run_report_with_clocks(
+            [
+                datetime(2026, 8, 5, 23, 59, 50, tzinfo=timezone.utc),
+                datetime(2026, 8, 6, 0, 0, 30, tzinfo=timezone.utc),
+            ],
+            curr_date="2026-08-06",
+            dvol=dvol,
+        )
+        assert "latest:** 99.00% annualized on 2026-08-06" in out
+        assert "that day's candle was still open when it was read" in out
+        # The feed reached the analysis date, so there is no shortfall to declare.
+        assert "DVOL windows end at" not in out
+        assert "the feed has only reached" not in out
+
+    def test_the_far_future_note_words_the_shortfall_the_same_way(self):
+        # The twin site. It kept the pre-rewrite phrasing, which is still true
+        # there but stated the identical fact a second way three lines apart in the
+        # file, and was pinned in neither direction.
+        out = _report(curr_date="2026-08-09")
+        assert "its windows end at a date the feed has not reached" in out
+        assert "has not arrived" not in out
 
 
 @pytest.mark.unit

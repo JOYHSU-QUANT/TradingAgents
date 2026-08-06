@@ -1807,7 +1807,7 @@ class TestReport:
         with pytest.raises(deribit.DeribitError, match="is not a yyyy-mm-dd date"):
             _report(curr_date=bad)
 
-    @pytest.mark.parametrize("bad", [12345, ["BTC"], {"symbol": "BTC"}])
+    @pytest.mark.parametrize("bad", [12345, ["BTC"], {"symbol": "BTC"}, b"BTC", bytearray(b"BTC")])
     def test_a_non_string_asset_is_the_vendor_error_not_an_attributeerror(self, bad):
         # The other caller-supplied argument. It reached
         # normalize_symbol((asset or "").replace(...)) and escaped as
@@ -2004,7 +2004,10 @@ class TestHistoricalDate:
         # A genuinely past date, so the mid-run-crossing clause must NOT appear:
         # it is what distinguishes "you asked for a past date" from "the clock
         # passed your date while this report was being built".
-        assert "_Historical date: Deribit's options chain is a live endpoint" in out
+        assert (
+            "_Historical date: Deribit's options chain is a live endpoint with no history, "
+            "so the ATM IV, 25Δ wings, RR25 and forward are NOT served for 2026-07-20" in out
+        )
         assert "the UTC clock passed the analysis date" not in out
         assert "Do not substitute today's skew for 2026-07-20" in out
 
@@ -2055,7 +2058,10 @@ class TestHistoricalDate:
         # A genuinely past date, so the mid-run-crossing clause must NOT appear:
         # it is what distinguishes "you asked for a past date" from "the clock
         # passed your date while this report was being built".
-        assert "_Historical date: Deribit's options chain is a live endpoint" in out
+        assert (
+            "_Historical date: Deribit's options chain is a live endpoint with no history, "
+            "so the ATM IV, 25Δ wings, RR25 and forward are NOT served for 2026-07-20" in out
+        )
         assert "the UTC clock passed the analysis date" not in out
         assert "not served for a historical analysis date" in out
         assert "not served for 'SOL'" not in out
@@ -2153,7 +2159,9 @@ class TestHistoricalDate:
         assert (
             f"_Analysis date {curr_date} was {days_ahead} days ahead of the UTC clock "
             f"(2026-08-05) when this report was built, further than any timezone offset "
-            f"explains." in out
+            f"explains. Deribit's options chain is a live endpoint, so the ATM IV, 25Δ "
+            f"wings, RR25 and forward would be the CURRENT book, not {curr_date}'s, and they "
+            f"are NOT served." in out
         )
         assert (
             f"**Options chain (ATM IV / 25Δ skew):** not served for an analysis date "

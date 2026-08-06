@@ -7,9 +7,10 @@ analyst as a crypto-only volatility-regime read:
   Lookahead-safe to the day: the fetch window ends at ``curr_date`` and rows
   dated after it are dropped, so a past ``curr_date`` never sees a later reading.
   Day granularity is the limit of the guarantee — the candle dated ``curr_date``
-  covers all of that UTC day — and the candle dated *today* is still open, which
-  the report labels and which is why every line calls the series "readings"
-  rather than "closes".
+  covers all of that UTC day — and the candle dated *today or later* is still
+  open, which the report labels and which is why every line calls the series
+  "readings" rather than "closes". ("Or later" because the DVOL fetch can itself
+  span UTC midnight, returning a candle dated the new day.)
 * **25-delta skew** — computed here from the live options chain: ATM (50-delta)
   implied vol, the 25-delta call and put vols, and the risk reversal between
   them. Read for one expiry inside a bounded band around 30 days, because a risk
@@ -1418,7 +1419,10 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             curr_date is not a yyyy-mm-dd date. The routing layer then degrades
             the optional options_data category to a sentinel. Whenever either half
             survives, the report renders it and names what is missing instead of
-            raising.
+            raising. Also raised for a truthy non-string ``asset``: both
+            caller-supplied arguments are validated into this type rather than
+            being left to escape as a built-in, since the router would report
+            either as a vendor outage.
     """
     # Normalise curr_date BEFORE any date comparison. strptime accepts
     # non-zero-padded input ("2026-6-5"), which then compares wrong against the
@@ -1442,6 +1446,12 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
     # ``normalize_symbol((asset or "").replace(...))`` and escapes as AttributeError
     # — a caller's bug reported as a Deribit outage, with a traceback naming
     # Deribit. Falsy values are already safe: they render the no-signal sentence.
+    # ``bytes`` must be rejected too, not merely non-str objects: it is truthy and
+    # survives to ``normalize_symbol``, where ``.replace("/", "-")`` raises
+    # TypeError on the str arguments. Deliberately an exact str test rather than a
+    # duck-typed one, so this also turns away string-likes such as
+    # collections.UserString — narrower than before, and matching what the tool's
+    # own ``Annotated[str, ...]`` already declares.
     if asset and not isinstance(asset, str):
         raise DeribitError(f"asset must be a symbol string, got {type(asset).__name__}")
     curr_date = curr_dt.strftime("%Y-%m-%d")
@@ -1612,7 +1622,8 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             f"_Analysis date {curr_date} was {days_ahead} days ahead of the UTC clock ({today}) "
             f"when this report was built, further than any timezone offset explains. Deribit's "
             f"options chain is a live "
-            f"endpoint, so the ATM IV, 25Δ wings, RR25 and forward would be today's book, not "
+            f"endpoint, so the ATM IV, 25Δ wings, RR25 and forward would be the CURRENT book, "
+            f"not "
             f"{curr_date}'s, and they are NOT served. The DVOL history below IS filtered to "
             # Same fact as the ahead-of-clock note's DVOL sentence, so it is worded
             # the same way. It was left on the pre-rewrite phrasing, which is still

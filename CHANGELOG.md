@@ -52,9 +52,8 @@ Breaking changes within the 0.x line are called out explicitly.
   than that is a mistyped argument rather than a timezone — `curr_date` arrives
   from an LLM tool call — so the chain is withheld again, with its own note. The
   chain also re-reads the clock immediately before fetching rather than reusing the
-  one taken before the DVOL half, so the printed snapshot instant is when the book
-  the chain fetch begins rather than before the DVOL half, and a run whose DVOL
-  half timed out across UTC midnight cannot
+  one taken before the DVOL half, so the printed snapshot instant is when the chain
+  fetch begins, and a run whose DVOL half timed out across UTC midnight cannot
   serve day D+1's chain for `curr_date` = D.
   The min/max range and the percentile are computed over **different windows** —
   30 days and 365 — and printed as separate lines, each naming its own span and

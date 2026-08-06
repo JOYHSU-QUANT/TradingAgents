@@ -83,23 +83,25 @@ def get_options_market(
         str,
         "Crypto asset whose options market to read: 'BTC' or 'ETH' (pair forms "
         "like 'BTC-USD' are accepted). Another recognized crypto risk asset "
-        "(SOL, XRP, ...) has no listed chain, so BTC's volatility surface is "
-        "returned as a market-wide proxy; a stablecoin or unrecognized symbol "
-        "returns a no-signal note.",
+        "(SOL, XRP, ...) has no listed chain, so BTC's DVOL level alone is "
+        "returned as a market-wide proxy and the skew is withheld; a stablecoin "
+        "or unrecognized symbol returns a no-signal note.",
     ],
     curr_date: Annotated[str, "Current date in yyyy-mm-dd format; the end of the DVOL window"],
 ) -> str:
     """
     Retrieve crypto options-implied volatility from Deribit: the DVOL index
-    (a 30-day forward implied-vol gauge) with its 30-day range, and its
-    percentile when the window holds enough closes for one, plus ATM implied
-    vol, the 25-delta call/put vols and the 25-delta risk reversal (RR25) for
-    the listed expiry nearest 30 days. RR25 is the 25-delta call IV minus the
+    (a 30-day forward implied-vol gauge) with its 30-day min/max range, and its
+    365-day percentile when that window holds enough readings for one, plus ATM
+    implied vol, the 25-delta call/put vols and the 25-delta risk reversal (RR25)
+    for the listed expiry nearest 30 days. RR25 is the 25-delta call IV minus the
     25-delta put IV, so a negative value means the put wing carries the higher
-    implied vol. The DVOL history is filtered to curr_date; the options chain
-    has no historical endpoint, so its figures are served only when curr_date is
-    today and are withheld on any earlier date. Uses the configured options_data
-    vendor.
+    implied vol. The DVOL history is filtered to curr_date; the options chain has
+    no historical endpoint, so its figures are withheld when curr_date is EARLIER
+    than today (a curr_date later than the UTC clock is served, with a note). The
+    chain is also withheld for an asset Deribit does not list, which receives
+    BTC's DVOL level as a market-wide proxy but not BTC's skew. Uses the
+    configured options_data vendor.
 
     Args:
         asset (str): 'BTC' or 'ETH' (recognized risk coins get BTC as a proxy)

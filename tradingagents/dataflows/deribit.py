@@ -24,27 +24,30 @@ The two halves fail independently. Losing the chain should not also cost the
 DVOL history (and vice versa), so each is fetched inside its own try and the
 report renders whichever survived, naming what is missing. This module raises
 only when nothing at all can be served — both halves failed, or DVOL failed on a
-historical date where the chain is withheld by design — and the routing layer
+date or an asset where the chain is withheld by design — and the routing layer
 then degrades the optional ``options_data`` category to a sentinel. A throttle
 raises ``VendorRateLimitError`` rather than ``DeribitError`` so the router keeps
 its rate-limit lane.
 
-Deribit lists options and publishes DVOL for BTC and ETH only. Another
-recognized crypto risk asset (SOL, XRP, ...) has no chain of its own, so BTC's
-volatility surface is served as a market-wide crypto-vol proxy, labelled as
-such; a stablecoin or an unrecognized symbol gets a no-signal note.
+Deribit lists options and publishes DVOL for BTC and ETH only. Another recognized
+crypto risk asset (SOL, XRP, ...) has no chain of its own, so BTC's DVOL **level**
+is served as a market-wide crypto-vol proxy, labelled as such — but its skew is
+not: crypto volatility moves together, which is what makes BTC's index the
+benchmark, whereas a 25-delta risk reversal measures how much more traders will
+pay for downside in one specific underlying and does not carry across. A
+stablecoin or an unrecognized symbol gets a no-signal note.
 
-Uncached by design: a tool call costs two GETs (one on a historical date, where
-the chain is withheld) against endpoints with no rate-limit concern at this
-volume, and both halves are freshness-sensitive — a cached vol snapshot is worth
-little.
+Uncached by design: a tool call costs two GETs (one where the chain is withheld)
+against endpoints with no rate-limit concern at this volume, and both halves are
+freshness-sensitive — a cached vol snapshot is worth little.
 """
 
 import logging
 import math
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from typing import NamedTuple
+from typing import NamedTuple, TypeVar
 
 import requests
 
@@ -52,6 +55,9 @@ from .errors import VendorError, VendorRateLimitError
 from .symbol_utils import CRYPTO_BASES, normalize_symbol
 
 logger = logging.getLogger(__name__)
+
+# The result type of one half's fetch, so _try_fetch does not erase it.
+_FetchedT = TypeVar("_FetchedT")
 
 DERIBIT_BASE = "https://www.deribit.com/api/v2/public"
 
@@ -86,15 +92,36 @@ DVOL_RESOLUTION = "1D"
 # Deribit actually publishes.
 DVOL_INDEX_TENOR_DAYS = 30
 
-# Trailing window for the DVOL min / max / percentile statistics: the
-# DVOL_WINDOW_DAYS calendar days ending at curr_date, curr_date included.
+# Trailing window for the DVOL min / max range: the DVOL_WINDOW_DAYS calendar days
+# ending at curr_date, curr_date included.
 DVOL_WINDOW_DAYS = 30
 
-# Extra days fetched beyond the statistics window. They are outside the window and
-# never enter the statistics — what they buy is a *latest reading* (and therefore a
-# report at all, rather than "No DVOL readings on or before ...") when the feed has
-# published nothing for the whole window.
+# Trailing window for the DVOL percentile — deliberately far longer than the
+# min/max window above, and reported on its own line so the two are never read as
+# one. A percentile is a claim about the volatility *regime*, and a month cannot
+# support one: through a sustained high-vol stretch every reading in the window is
+# high, so a 30-day percentile sits mid-range even at a multi-year extreme, muting
+# the signal exactly when volatility is the thing that matters. A year is the
+# horizon the options market means by "IV rank". The range stays at 30 days because
+# a recent high/low is a different and still useful fact.
+DVOL_PERCENTILE_WINDOW_DAYS = 365
+
+# Extra days fetched beyond the longest statistics window. They are outside both
+# windows and never enter the statistics — what they buy is a *latest reading* (and
+# therefore a report at all, rather than "No DVOL readings on or before ...") when
+# the feed has published nothing for the whole window.
 _DVOL_FETCH_BUFFER_DAYS = 10
+
+# Deribit caps get_volatility_index_data at this many candles per response,
+# returning the NEWEST page plus a ``continuation`` cursor pointing at older data.
+# The fetch below spans DVOL_PERCENTILE_WINDOW_DAYS + _DVOL_FETCH_BUFFER_DAYS
+# candles at the fixed 1D resolution, well under the cap, so no paging loop is
+# needed. Verified live: a 400-day 1D request returns 401 candles with
+# ``continuation: null``; a 2000-day one returns exactly 1000 with a cursor. Were
+# the cap ever hit it drops the OLDEST readings and always keeps the newest, so it
+# could shorten the percentile sample — which the report states by count — but
+# could never fabricate a data lag. A test pins the span against this bound.
+_DVOL_MAX_CANDLES_PER_RESPONSE = 1000
 
 # Maximum lag (days between the newest DVOL candle and curr_date) before the
 # report flags the *data* as behind. A successful fetch says nothing about
@@ -110,6 +137,11 @@ MIN_DTE_DAYS = 7
 
 # The delta the risk reversal is quoted at (the market-standard 25-delta wing).
 WING_DELTA = 0.25
+
+# The delta defining the at-the-money point. As much a convention as WING_DELTA,
+# and named for the same reason: both delta conventions should be greppable in one
+# place rather than one named and the other a bare literal in the maths.
+ATM_DELTA = 0.5
 
 # Deribit options expire at 08:00 UTC on their expiry date.
 _EXPIRY_HOUR_UTC = 8
@@ -186,6 +218,11 @@ class SkewSnapshot(NamedTuple):
     ``n_calls`` / ``n_puts`` count the contracts of each type on this expiry that
     yielded a usable delta — the quotes the interpolation actually had to work
     with, which need not be every contract Deribit listed for the expiry.
+
+    ``is_fallback`` is True when this is NOT the expiry nearest the target tenor,
+    i.e. the nearest one could not bracket both wings and ``compute_skew`` moved
+    on. It exists so the report cannot keep calling the expiry "the listed expiry
+    closest to 30 days" while showing a different one.
     """
 
     expiry: str
@@ -196,6 +233,7 @@ class SkewSnapshot(NamedTuple):
     put_25: WingQuote | None
     n_calls: int
     n_puts: int
+    is_fallback: bool = False
 
     @property
     def rr25(self) -> float | None:
@@ -209,10 +247,15 @@ class SkewSnapshot(NamedTuple):
 
 
 class DvolSeries(NamedTuple):
-    """The DVOL daily closes visible at curr_date, ascending by date.
+    """The DVOL daily readings visible at curr_date, ascending by date.
 
     Never empty: ``_fetch_dvol`` raises rather than building one with no rows, so
     ``latest`` / ``latest_date`` always have a value to return.
+
+    The field is named ``closes`` because that is the candle field it is read from
+    (``[timestamp, open, high, low, close]``), but every line of the report calls
+    these "readings": the candle dated today is still open, so its value is the
+    level so far rather than a settled close.
     """
 
     dates: list[str]
@@ -225,6 +268,23 @@ class DvolSeries(NamedTuple):
     @property
     def latest_date(self) -> str:
         return self.dates[-1]
+
+
+class DvolReport(NamedTuple):
+    """What ``_dvol_section`` hands back to the report builder.
+
+    ``percentile_n`` travels with ``percentile`` so the reading line can state the
+    sample the figure was computed over. Without it that sentence named only the
+    window's calendar span, which reads as one observation per day — so a feed that
+    stopped publishing a fortnight ago still produced "the Nth percentile of the
+    365-day window", with the shortfall disclosed only in the section above and
+    dropped by the first downstream summary.
+    """
+
+    markdown: str
+    percentile: float | None
+    percentile_n: int
+    stale_phrase: str | None
 
 
 def _utc_now() -> datetime:
@@ -377,8 +437,20 @@ def parse_chain(rows: object, now: datetime) -> list[Contract]:
 
     Rows that cannot be used are skipped, not fatal: the chain carries hundreds of
     contracts and a handful of unquoted or oddly-named ones is normal. A row is
-    kept only with a parseable option name, a strictly positive finite mark IV and
-    underlying price, and an expiry still in the future at ``now``.
+    kept only with a parseable option name, a strictly positive finite mark IV,
+    underlying price and open interest, and an expiry still in the future at
+    ``now``.
+
+    Open interest is required because the two guards in ``interpolate_iv_at_delta``
+    defend the wing against a bad quote that *inverts* the smile, and nothing else
+    defends it against one that merely sits there being wrong. The strikes nobody
+    holds are exactly the ones carrying a stale or modelled mark: Deribit still
+    publishes a confident ``mark_iv`` for a contract with no open interest, no
+    volume and a bid/ask spanning two orders of magnitude, and such a quote can be
+    perfectly monotone with its neighbours — so it passes both guards, gets
+    interpolated, and prints the very strikes a reader expects. Requiring a
+    contract someone actually holds costs nothing on a liquid chain and removes
+    that whole class of quote from the smile.
 
     Raises DeribitError only when the payload is not a list at all — that is a
     response-shape change, not a data quirk.
@@ -399,9 +471,12 @@ def parse_chain(rows: object, now: datetime) -> list[Contract]:
             continue
         mark_iv = row.get("mark_iv")
         underlying = row.get("underlying_price")
+        open_interest = row.get("open_interest")
         if not _is_finite_number(mark_iv) or mark_iv <= 0:
             continue
         if not _is_finite_number(underlying) or underlying <= 0:
+            continue
+        if not _is_finite_number(open_interest) or open_interest <= 0:
             continue
         contracts.append(
             Contract(expiry_token, expiry_dt, strike, is_call, float(mark_iv), float(underlying))
@@ -511,21 +586,36 @@ def _is_locally_monotone(ordered: list[tuple[float, float, float]], index: int) 
     return all(a[1] >= b[1] for a, b in zip(window, window[1:], strict=False))
 
 
-def select_expiry(contracts: list[Contract], now: datetime) -> str | None:
-    """Pick the expiry token whose tenor is closest to 30 days, ignoring < 7 days.
+def rank_expiries(contracts: list[Contract], now: datetime) -> list[str]:
+    """Expiry tokens clearing the 7-day floor, best-first by closeness to 30 days.
 
     Ties (two expiries equidistant from the 30-day target) go to the longer-dated
     one, consistent with the reason the 7-day floor exists at all: closer to expiry
-    is the noisier side. Returns None when nothing clears the floor.
+    is the noisier side. Returns an empty list when nothing clears the floor.
+
+    A ranking rather than a single winner because a sparse or non-monotone stretch
+    around the wing is a property of one expiry, not of the surface: the neighbour
+    is usually clean, and ``compute_skew`` falls through to it rather than
+    reporting no skew at all.
     """
     tenors: dict[str, float] = {}
     for contract in contracts:
         days = (contract.expiry_dt - now).total_seconds() / 86400.0
         if days >= MIN_DTE_DAYS:
             tenors[contract.expiry] = days
-    if not tenors:
-        return None
-    return min(tenors, key=lambda token: (abs(tenors[token] - TARGET_DTE_DAYS), -tenors[token]))
+    return sorted(tenors, key=lambda token: (abs(tenors[token] - TARGET_DTE_DAYS), -tenors[token]))
+
+
+def select_expiry(contracts: list[Contract], now: datetime) -> str | None:
+    """The best-ranked expiry token, or None when nothing clears the 7-day floor.
+
+    The expiry the report ends up using is NOT necessarily this one: ``compute_skew``
+    walks the whole ranking and moves on when a candidate cannot bracket both wings.
+    This names the head of that ranking, which is what the tenor rules (the 7-day
+    floor, the 30-day target, the longer-dated tie-break) are stated in terms of.
+    """
+    ranked = rank_expiries(contracts, now)
+    return ranked[0] if ranked else None
 
 
 def _median(values: list[float]) -> float:
@@ -539,21 +629,55 @@ def _median(values: list[float]) -> float:
 def compute_skew(contracts: list[Contract], now: datetime) -> SkewSnapshot:
     """Compute the ATM and 25-delta wing vols for the ~30-day expiry.
 
-    Raises DeribitError when no listed expiry clears the 7-day floor, or when the
-    chosen expiry has no usable forward — the cases where there is no surface to
-    read at all. A merely *incomplete* surface is not an error: a wing the chain
-    cannot bracket comes back as None on the snapshot for the report to disclose.
+    Tries the ranked expiries in order and returns the first whose chain brackets
+    BOTH 25-delta wings. A sparse or non-monotone stretch around the wing is a
+    property of one expiry rather than of the surface, and the report prints the
+    tenor it actually used, so a labelled neighbouring expiry is a far better input
+    to a risk debate than the silence of an all-``n/a`` skew section. When no
+    candidate brackets both wings the first one's snapshot is returned anyway, so
+    the forward, ATM and whichever wing exists are still reported.
+
+    Raises DeribitError when no listed expiry clears the 7-day floor, or when no
+    candidate has a usable forward — the cases where there is no surface to read at
+    all. A merely *incomplete* surface is not an error: a wing the chain cannot
+    bracket comes back as None on the snapshot for the report to disclose.
+    """
+    ranked = rank_expiries(contracts, now)
+    if not ranked:
+        raise DeribitError(
+            f"No listed expiry is at least {MIN_DTE_DAYS} days out in the options chain"
+        )
+    first_error: DeribitError | None = None
+    fallback: SkewSnapshot | None = None
+    for expiry in ranked:
+        try:
+            snapshot = _snapshot_for_expiry(contracts, expiry, now, is_fallback=expiry != ranked[0])
+        except DeribitError as e:
+            # No usable forward on this expiry; try the next rather than losing the
+            # whole chain half to one bad expiry. The first failure is kept so the
+            # error the caller sees is about the expiry it would have used.
+            if first_error is None:
+                first_error = e
+            continue
+        if snapshot.call_25 is not None and snapshot.put_25 is not None:
+            return snapshot
+        if fallback is None:
+            fallback = snapshot
+    if fallback is not None:
+        return fallback
+    raise first_error  # type: ignore[misc]  # ranked non-empty and every candidate failed
+
+
+def _snapshot_for_expiry(
+    contracts: list[Contract], expiry: str, now: datetime, is_fallback: bool = False
+) -> SkewSnapshot:
+    """Read the surface for ONE expiry token.
 
     The forward is the median ``underlying_price`` across the expiry's contracts.
     Deribit stamps each row with the index at its own quote instant, so the values
     differ in the last decimals across one snapshot; the median ignores that
     jitter and any single outlying row.
     """
-    expiry = select_expiry(contracts, now)
-    if expiry is None:
-        raise DeribitError(
-            f"No listed expiry is at least {MIN_DTE_DAYS} days out in the options chain"
-        )
     selected = [c for c in contracts if c.expiry == expiry]
     expiry_dt = selected[0].expiry_dt
     days_to_expiry = (expiry_dt - now).total_seconds() / 86400.0
@@ -582,9 +706,9 @@ def compute_skew(contracts: list[Contract], now: datetime) -> SkewSnapshot:
     # ATM is the 50-delta point. The call and put curves cross it at the same
     # strike (call delta 0.5 and put delta -0.5 both mean d1 = 0), so the put
     # curve is an exact substitute when the call side cannot bracket it.
-    atm = interpolate_iv_at_delta(call_quotes, 0.5)
+    atm = interpolate_iv_at_delta(call_quotes, ATM_DELTA)
     if atm is None:
-        atm = interpolate_iv_at_delta(put_quotes, -0.5)
+        atm = interpolate_iv_at_delta(put_quotes, -ATM_DELTA)
 
     return SkewSnapshot(
         expiry=expiry,
@@ -595,6 +719,7 @@ def compute_skew(contracts: list[Contract], now: datetime) -> SkewSnapshot:
         put_25=interpolate_iv_at_delta(put_quotes, -WING_DELTA),
         n_calls=len(call_quotes),
         n_puts=len(put_quotes),
+        is_fallback=is_fallback,
     )
 
 
@@ -612,13 +737,16 @@ def _fetch_chain(currency: str, now: datetime) -> SkewSnapshot:
 
 
 def _fetch_dvol(currency: str, curr_dt: datetime) -> DvolSeries:
-    """Fetch the DVOL daily closes for the window ending at ``curr_date``.
+    """Fetch the DVOL daily readings for the window ending at ``curr_date``.
 
     The request window ends at the last instant of ``curr_date`` (UTC) and the
     parsed rows are filtered again on the date string, so a past ``curr_date``
     cannot pick up a later reading even if Deribit widened the range it honours.
+
+    The span is driven by the longer of the two statistics windows (the
+    percentile's), since the shorter range window is a subset of it.
     """
-    window_start = curr_dt - timedelta(days=DVOL_WINDOW_DAYS + _DVOL_FETCH_BUFFER_DAYS)
+    window_start = curr_dt - timedelta(days=DVOL_PERCENTILE_WINDOW_DAYS + _DVOL_FETCH_BUFFER_DAYS)
     end = curr_dt.replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
     result = _request(
         "get_volatility_index_data",
@@ -634,6 +762,18 @@ def _fetch_dvol(currency: str, curr_dt: datetime) -> DvolSeries:
             "Deribit volatility-index response has no 'data' list "
             "(the endpoint's response shape may have changed)"
         )
+    if result.get("continuation") is not None:
+        # Unreachable at this module's span (see _DVOL_MAX_CANDLES_PER_RESPONSE).
+        # If Deribit ever lowers the cap this fires: the response is the newest
+        # page and older readings are missing, so the percentile sample is shorter
+        # than its window claims. The report already states that sample by count,
+        # so this is logged rather than fatal — but it must not pass unremarked.
+        logger.warning(
+            "Deribit truncated the %s DVOL history (continuation cursor set); the "
+            "percentile sample is shorter than the %d-day window",
+            currency,
+            DVOL_PERCENTILE_WINDOW_DAYS,
+        )
     curr_date = curr_dt.strftime("%Y-%m-%d")
     by_date: dict[str, float] = {}
     for row in result["data"]:
@@ -647,6 +787,22 @@ def _fetch_dvol(currency: str, curr_dt: datetime) -> DvolSeries:
             day = datetime.fromtimestamp(row[0] / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
         except (ValueError, OSError, OverflowError) as e:
             raise DeribitError(f"Out-of-range DVOL candle timestamp {row[0]!r}") from e
+        if row[4] <= 0:
+            # A zero or negative implied-vol index is not a low reading, it is a
+            # broken one, and parse_chain rejects a non-positive mark_iv or
+            # underlying for exactly this glitch class. Left in, a single 0.0
+            # candle renders as "0.00 ... 3rd percentile" — a maximally
+            # vol-is-cheap read — with no caveat at all. Skipped rather than
+            # fatal, like an unusable chain row: one bad candle should not cost a
+            # year of history, and dropping the newest one simply leaves an older
+            # reading as the latest, which the report dates and ages honestly.
+            logger.warning(
+                "Skipping non-positive Deribit DVOL close %r dated %s for %s",
+                row[4],
+                day,
+                currency,
+            )
+            continue
         if day <= curr_date:
             # Candles arrive ascending, so a repeated day (a resolution change, or
             # a partial candle alongside a settled one) keeps the later value.
@@ -698,8 +854,14 @@ def _ordinal(value: float) -> str:
 
     A hardcoded "th" produced "the 1th percentile" for every value ending in 1,
     2 or 3 — cosmetic, but this is the report's most-quoted figure.
+
+    Rounds half UP rather than via ``round()``, whose banker's rounding sends an
+    exact .5 to the nearest EVEN integer: 62.5 rendered "62nd" while 37.5 rendered
+    "38th", so the same half-percent landed a different way depending on the
+    neighbouring digit. Percentiles here are always positive, so ``floor(x + 0.5)``
+    is exactly half-up.
     """
-    number = round(value)
+    number = math.floor(value + 0.5)
     if 11 <= number % 100 <= 13:
         suffix = "th"
     else:
@@ -707,16 +869,15 @@ def _ordinal(value: float) -> str:
     return f"{number}{suffix}"
 
 
-def _dvol_section(
-    series: DvolSeries, curr_dt: datetime, curr_date: str, today: str
-) -> tuple[str, float | None, str | None]:
+def _dvol_section(series: DvolSeries, curr_dt: datetime, curr_date: str, today: str) -> DvolReport:
     """Render the DVOL lines.
 
-    Returns ``(markdown, percentile or None, staleness phrase or None)``; the
-    caller passes the last of these to the reading line so the closing sentence
-    cannot outlive the data it describes.
+    The range and the percentile are computed over DIFFERENT windows and printed on
+    separate lines, each naming its own span and its own sample count. Folding them
+    into one line was how "the latest reading sits at the Nth percentile" came to
+    sit beside a span it was not computed over.
 
-    The percentile is None — and no percentile is rendered — whenever the window
+    The percentile is None — and no percentile is rendered — whenever its window
     holds fewer than ``_MIN_PERCENTILE_SAMPLE`` readings, so a sparse or stalled
     feed cannot manufacture a position-within-range that only reflects how few
     observations arrived.
@@ -729,15 +890,22 @@ def _dvol_section(
     against whichever of the two is earlier (no feed can be behind a date that
     has not happened yet).
     """
-    # Exclusive lower bound: DVOL_WINDOW_DAYS calendar days ending at curr_date is
-    # curr_date-29 ... curr_date for a 30-day window. An inclusive bound would put
-    # 31 closes in a window the report calls "30d".
-    window_start = (curr_dt - timedelta(days=DVOL_WINDOW_DAYS)).strftime("%Y-%m-%d")
-    # strict=True: the two lists are built together in _fetch_dvol, so a length
-    # mismatch would mean dates and closes had drifted out of correspondence.
-    window = [c for d, c in zip(series.dates, series.closes, strict=True) if d > window_start]
+
+    # Exclusive lower bound: N calendar days ending at curr_date is
+    # curr_date-(N-1) ... curr_date. An inclusive bound would put N+1 readings in a
+    # window the report calls "Nd".
+    def _window(days: int) -> list[float]:
+        start = (curr_dt - timedelta(days=days)).strftime("%Y-%m-%d")
+        # strict=True: the two lists are built together in _fetch_dvol, so a length
+        # mismatch would mean dates and readings had drifted out of correspondence.
+        return [c for d, c in zip(series.dates, series.closes, strict=True) if d > start]
+
+    window = _window(DVOL_WINDOW_DAYS)
+    pct_window = _window(DVOL_PERCENTILE_WINDOW_DAYS)
     latest = series.latest
-    percentile = _percentile_of(latest, window) if len(window) >= _MIN_PERCENTILE_SAMPLE else None
+    percentile = (
+        _percentile_of(latest, pct_window) if len(pct_window) >= _MIN_PERCENTILE_SAMPLE else None
+    )
 
     latest_line = (
         f"**DVOL ({DVOL_INDEX_TENOR_DAYS}-day implied vol index), latest:** "
@@ -755,25 +923,39 @@ def _dvol_section(
     if not window:
         # Every reading predates the window: a stalled or backfilled feed. Say so
         # rather than computing a range over a one-element fallback sample, whose
-        # min, max and percentile would all be the latest value itself.
+        # min and max would both be the latest value itself.
         lines.append(
             f"**{DVOL_WINDOW_DAYS}d range:** not computed — no DVOL reading falls inside the "
             f"{DVOL_WINDOW_DAYS} days ending {curr_date}; the level above is the newest "
             f"reading Deribit has published at all"
         )
-    elif percentile is None:
+    else:
         lines.append(
             f"**{DVOL_WINDOW_DAYS}d range:** min {min(window):.2f} / max {max(window):.2f} "
-            f"over only {len(window)} daily readings — too few for a percentile (the latest "
-            f"reading is itself in the sample, so a percentile over {len(window)} of them "
-            f"could not read below {100 / len(window):.0f}%), so none is given"
+            f"over {len(window)} daily readings"
+        )
+
+    if percentile is None:
+        # Name the shortfall in readings, not in calendar days: the sample size is
+        # what makes the percentile meaningless, and 100/n says how coarse it
+        # would have been.
+        shortfall = (
+            f"only {len(pct_window)} daily readings, so a percentile over them could not "
+            f"read below {100 / len(pct_window):.0f}%"
+            if pct_window
+            else "no daily readings at all"
+        )
+        lines.append(
+            f"**{DVOL_PERCENTILE_WINDOW_DAYS}d percentile:** not computed — the "
+            f"{DVOL_PERCENTILE_WINDOW_DAYS} days ending {curr_date} hold {shortfall} "
+            f"(the latest reading is itself in the sample), so none is given"
         )
     else:
         lines.append(
-            f"**{DVOL_WINDOW_DAYS}d range:** min {min(window):.2f} / max {max(window):.2f} — "
-            f"the latest reading sits at the {_ordinal(percentile)} percentile of the "
-            f"{len(window)} daily readings in that window (percentile = share of those "
-            f"readings at or below it)"
+            f"**{DVOL_PERCENTILE_WINDOW_DAYS}d percentile:** the latest reading sits at the "
+            f"{_ordinal(percentile)} percentile of the {len(pct_window)} daily readings in "
+            f"the {DVOL_PERCENTILE_WINDOW_DAYS} days ending {curr_date} (percentile = share "
+            f"of those readings at or below it)"
         )
 
     # A feed cannot be behind a date that has not arrived: measure lateness from
@@ -795,7 +977,7 @@ def _dvol_section(
             f"since. Treat the level as {lag_days} days old._"
         )
         stale_phrase = f"as of {series.latest_date}, {lag_days} days old"
-    return "\n".join(lines), percentile, stale_phrase
+    return DvolReport("\n".join(lines), percentile, len(pct_window), stale_phrase)
 
 
 def _format_wing(quote: WingQuote | None) -> str:
@@ -808,19 +990,42 @@ def _format_wing(quote: WingQuote | None) -> str:
     return f"{quote.iv:.2f}% (between the {quote.strike_low:,.0f} and {quote.strike_high:,.0f} strikes)"
 
 
+def _wing_line(quote: WingQuote | None, n_quotes: int) -> str:
+    """Render a smile point, stating the TRUE reason when it is missing.
+
+    ``_format_wing``'s bracket/monotonicity wording presumes there were quotes to
+    bracket with. When a whole side of the expiry produced no usable delta — every
+    put unquoted, say — that wording names two causes that did not happen, and the
+    honest signal is buried in a quote count several lines up.
+    """
+    if quote is not None or n_quotes >= 2:
+        return _format_wing(quote)
+    if n_quotes == 0:
+        return "n/a (no quote on this side of the expiry yielded a usable delta)"
+    return "n/a (only one usable quote on this side, so no pair can bracket this point)"
+
+
 def _skew_section(skew: SkewSnapshot, snapshot_time: str) -> str:
     """Render the live-chain lines for the selected expiry."""
+    if skew.is_fallback:
+        expiry_basis = (
+            f"the nearest-{TARGET_DTE_DAYS}-day expiry could not bracket both 25Δ wings, so "
+            f"this is the next qualifying expiry that could"
+        )
+    else:
+        expiry_basis = (
+            f"the listed expiry closest to {TARGET_DTE_DAYS} days (expiries inside "
+            f"{MIN_DTE_DAYS} days are excluded as pin-noisy)"
+        )
     lines = [
         f"**Chain snapshot:** taken {snapshot_time} (Deribit publishes no historical chain, "
         f"so these figures are the live book at that instant)",
-        f"**Expiry used:** {skew.expiry} — {skew.days_to_expiry:.1f} days out, the listed "
-        f"expiry closest to {TARGET_DTE_DAYS} days (expiries inside {MIN_DTE_DAYS} days are "
-        f"excluded as pin-noisy); {skew.n_calls} call / {skew.n_puts} put quotes on this "
-        f"expiry yielded a usable delta",
+        f"**Expiry used:** {skew.expiry} — {skew.days_to_expiry:.1f} days out, {expiry_basis}; "
+        f"{skew.n_calls} call / {skew.n_puts} put quotes on this expiry yielded a usable delta",
         f"**Forward:** {skew.forward:,.2f}",
-        f"**ATM IV (50Δ):** {_format_wing(skew.atm)}",
-        f"**25Δ call IV:** {_format_wing(skew.call_25)}",
-        f"**25Δ put IV:** {_format_wing(skew.put_25)}",
+        f"**ATM IV ({ATM_DELTA * 100:.0f}Δ):** {_wing_line(skew.atm, skew.n_calls + skew.n_puts)}",
+        f"**25Δ call IV:** {_wing_line(skew.call_25, skew.n_calls)}",
+        f"**25Δ put IV:** {_wing_line(skew.put_25, skew.n_puts)}",
     ]
     if skew.rr25 is None:
         lines.append(
@@ -836,6 +1041,7 @@ def _reading_line(
     currency: str,
     skew: SkewSnapshot | None,
     percentile: float | None,
+    percentile_n: int,
     dvol_stale: str | None = None,
 ) -> str:
     """Restate the two headline numbers in words and define them — nothing further.
@@ -872,9 +1078,14 @@ def _reading_line(
         # currency does: this sentence is what survives a downstream summary, and
         # a percentile presented bare reads as current however old the reading is.
         as_of = f" ({dvol_stale})" if dvol_stale else ""
+        # State the sample, not just the span. "the 365-day window" reads as one
+        # observation per day, so a feed that stopped publishing weeks ago still
+        # sounded like a full year of evidence once this clause was quoted on its
+        # own — and this clause is exactly what gets quoted on its own.
         parts.append(
             f"{currency}'s latest DVOL reading{as_of} sits at the {_ordinal(percentile)} "
-            f"percentile of the {DVOL_WINDOW_DAYS}-day window ending on the analysis date"
+            f"percentile of the {percentile_n} daily readings in the "
+            f"{DVOL_PERCENTILE_WINDOW_DAYS}-day window ending on the analysis date"
         )
     if not parts:
         return ""
@@ -884,7 +1095,9 @@ def _reading_line(
     return "_Reading:_ " + sentence[0].upper() + sentence[1:] + "."
 
 
-def _try_fetch(fetch, label: str, currency: str) -> tuple[object | None, Exception | None]:
+def _try_fetch(
+    fetch: Callable[[], _FetchedT], label: str, currency: str
+) -> tuple[_FetchedT | None, Exception | None]:
     """Run one half's fetch, turning any failure into ``(None, error)``.
 
     Catches ``Exception``, not only this module's own types. The whole point of
@@ -892,6 +1105,11 @@ def _try_fetch(fetch, label: str, currency: str) -> tuple[object | None, Excepti
     exception escaping here would discard an already-successful half just as
     surely as a DeribitError would. ``exc_info`` so a genuine bug still leaves a
     traceback rather than looking like an ordinary outage.
+
+    Generic in the fetch's return type so the successful branch keeps it: an
+    ``object`` here erased ``DvolSeries`` and ``SkewSnapshot`` at the one point
+    where both flow through the same helper, leaving the renderers' argument types
+    unchecked.
     """
     try:
         return fetch(), None
@@ -906,18 +1124,21 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
     Args:
         asset: "BTC" or "ETH" (pair forms like "BTC-USD" are accepted). A
             recognized crypto risk asset without its own Deribit chain (SOL, XRP,
-            ...) is served BTC's surface as a market-wide crypto-vol proxy; a
-            stablecoin or unrecognized symbol gets a no-signal message.
+            ...) is served BTC's DVOL alone as a market-wide crypto-vol proxy — the
+            skew is withheld, being a claim about one underlying's own demand for
+            downside; a stablecoin or unrecognized symbol gets a no-signal message.
         curr_date: End of the DVOL window (yyyy-mm-dd). The chain half takes no
-            date, so it is served only when this is today's UTC date; on any
-            earlier date it is withheld rather than backfilled from the present.
+            date, so it is withheld when this is EARLIER than today's UTC date
+            rather than backfilled from the present. A curr_date later than the UTC
+            clock is served, with a note: the live chain then predates the analysis
+            date, which is not lookahead.
 
     Returns:
         A markdown report: the latest DVOL with its 30-day range and (when the
-        window holds enough closes) its percentile, and — for a curr_date of
-        today — the selected expiry, ATM IV, the 25-delta wings with the strikes
-        they were interpolated between, and the risk reversal, closing with one
-        fixed-format sentence restating those figures.
+        window holds enough readings) its 365-day percentile, and — unless the
+        chain is withheld — the selected expiry, ATM IV, the 25-delta wings with
+        the strikes they were interpolated between, and the risk reversal, closing
+        with one fixed-format sentence restating those figures.
 
     Raises:
         VendorRateLimitError: when Deribit throttled both requests, so the router
@@ -964,9 +1185,33 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
     # served either way.
     is_historical = curr_date < today
 
+    # Why the chain half is not in the report, classified ONCE. Three later sites
+    # have to explain it — the both-halves-failed raise, the header note and the
+    # section body — and re-testing is_historical/market_proxy at each of them
+    # means the precedence between the two reasons is re-decided by hand every
+    # time, so a fourth reason can update two sites and silently miss the third.
+    #
+    # A proxied asset gets the DVOL level but never the skew. A market-wide
+    # volatility LEVEL is a defensible stand-in — crypto vol moves together, which
+    # is what makes BTC's index the benchmark — but a 25-delta risk reversal is a
+    # statement about how much more traders will pay for downside in one specific
+    # underlying, and that does not transfer: alt skew responds to different flow
+    # and sits at a different level. Withheld rather than caveated, for the same
+    # reason the historical chain is: the caveat has to survive every downstream
+    # summarisation hop, and the number does not.
+    #
+    # Historical outranks proxy when both hold (a past date requested for SOL):
+    # the lookahead guard is the stronger claim and names a date the reader asked
+    # for, so it is the more useful of the two explanations.
+    chain_withheld: str | None = None
+    if is_historical:
+        chain_withheld = "historical"
+    elif market_proxy:
+        chain_withheld = "proxy"
+
     # The two halves are fetched independently so one outage cannot cost both.
     dvol, dvol_error = _try_fetch(lambda: _fetch_dvol(currency, curr_dt), "DVOL", currency)
-    if is_historical:
+    if chain_withheld is not None:
         skew, skew_error = None, None
     else:
         skew, skew_error = _try_fetch(
@@ -987,10 +1232,15 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         attempted = [e for e in (dvol_error, skew_error) if e is not None]
         if all(isinstance(e, VendorRateLimitError) for e in attempted):
             raise VendorRateLimitError(f"Deribit rate-limited every request made for {currency}")
-        if is_historical:
+        if chain_withheld == "historical":
             raise DeribitError(
                 f"Deribit DVOL is unavailable for {currency} ({dvol_error}), and the options "
                 f"chain is not served for the historical date {curr_date}"
+            )
+        if chain_withheld == "proxy":
+            raise DeribitError(
+                f"Deribit DVOL is unavailable for {currency} ({dvol_error}), and the options "
+                f"chain is not served for '{asset}', which has no Deribit chain of its own"
             )
         raise DeribitError(
             f"Deribit returned neither DVOL nor an options chain for {currency} "
@@ -1004,12 +1254,14 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         # proxy framing stripped off.
         header_lines = [
             f"## Options Volatility — {currency} (market-wide proxy for '{asset}', Deribit)",
-            f"_Deribit lists no options for '{asset}'; showing {currency} implied volatility "
-            f"as a market-wide crypto-vol proxy, not an '{asset}'-specific signal._",
+            f"_Deribit lists no options for '{asset}'; showing the {currency} DVOL level as a "
+            f"market-wide crypto-vol proxy, not an '{asset}'-specific signal. The 25Δ skew is "
+            f"NOT shown: a risk reversal measures demand for downside in {currency} itself and "
+            f"does not carry across to '{asset}'._",
         ]
     else:
         header_lines = [f"## Options Volatility — {currency} (Deribit)"]
-    if is_historical:
+    if chain_withheld == "historical":
         header_lines.append(
             f"_Historical date: Deribit's options chain is a live endpoint with no history, so "
             f"the ATM IV, 25Δ wings, RR25 and forward are NOT served for {curr_date} — quoting "
@@ -1019,33 +1271,56 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
     elif curr_date > today:
         # A curr_date past the UTC clock (a caller using a local date east of UTC).
         # The chain is still served — it predates the analysis date, so it is not
-        # lookahead — but it is not "as of" that date either, and the DVOL window
-        # runs past the data rather than the data stopping short.
-        header_lines.append(
-            f"_Analysis date {curr_date} is ahead of the UTC clock ({today}). The chain "
-            f"figures below are the live book as of {today}, which is BEFORE the analysis "
-            f"date rather than after it, and the DVOL window ends at a date that has not "
-            f"arrived — so it holds fewer readings than a full {DVOL_WINDOW_DAYS} days._"
+        # lookahead — but it is not "as of" that date either, and the DVOL windows
+        # run past the data rather than the data stopping short. The chain sentence
+        # is omitted when no chain is shown, so the note cannot point at absent
+        # figures. Each branch spells out its whole sentence: splicing a shared
+        # word-fragment across the two saves a line and costs the next editor the
+        # ability to reword either half without silently breaking the other.
+        windows_sentence = (
+            "The DVOL windows end at a date that has not arrived — so they hold fewer "
+            "readings than their full spans._"
         )
+        note = f"_Analysis date {curr_date} is ahead of the UTC clock ({today}). "
+        if chain_withheld is None:
+            note += (
+                f"The chain figures below are the live book as of {today}, which is BEFORE "
+                f"the analysis date rather than after it, and t{windows_sentence[1:]}"
+            )
+        else:
+            note += windows_sentence
+        header_lines.append(note)
     header_lines.append(f"- Source: deribit.com public API | DVOL window ending {curr_date}")
 
     sections = []
     percentile = None
+    percentile_n = 0
     dvol_stale = None
     if dvol is not None:
-        dvol_markdown, percentile, dvol_stale = _dvol_section(dvol, curr_dt, curr_date, today)
-        sections.append(dvol_markdown)
-    else:
-        sections.append(
-            f"**DVOL:** unavailable — the volatility-index request failed ({dvol_error}). "
-            f"Do not fabricate a DVOL level."
+        report = _dvol_section(dvol, curr_dt, curr_date, today)
+        percentile, percentile_n, dvol_stale = (
+            report.percentile,
+            report.percentile_n,
+            report.stale_phrase,
         )
+        sections.append(report.markdown)
+    else:
+        # Not "the request failed": _fetch_dvol also raises when the request
+        # SUCCEEDED and the response held no reading on or before curr_date, and
+        # naming the wrong cause sends an operator to the network first.
+        sections.append(f"**DVOL:** unavailable — {dvol_error}. Do not fabricate a DVOL level.")
     if skew is not None:
         sections.append(_skew_section(skew, snapshot_time))
-    elif is_historical:
+    elif chain_withheld == "historical":
         sections.append(
             f"**Options chain (ATM IV / 25Δ skew):** not served for a historical analysis "
             f"date — see the note above. Do not substitute today's skew for {curr_date}."
+        )
+    elif chain_withheld == "proxy":
+        sections.append(
+            f"**Options chain (ATM IV / 25Δ skew):** not served for '{asset}' — see the note "
+            f"above. {currency}'s skew describes demand for downside in {currency}, not in "
+            f"'{asset}'. Do not substitute it."
         )
     else:
         sections.append(
@@ -1053,7 +1328,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             f"({skew_error}). The DVOL figures above are unaffected; do not fabricate skew."
         )
 
-    reading = _reading_line(currency, skew, percentile, dvol_stale)
+    reading = _reading_line(currency, skew, percentile, percentile_n, dvol_stale)
     if reading:
         sections.append(reading)
 

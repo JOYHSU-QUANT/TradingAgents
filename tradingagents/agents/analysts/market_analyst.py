@@ -36,14 +36,18 @@ def create_market_analyst(llm):
             tools = tools + [get_options_market]
             crypto_tools_message = (
                 "\n\nSince this is a crypto asset, also call get_options_market(asset, curr_date) "
-                "for the options-implied volatility regime: the DVOL index with its 30-day range "
-                "and percentile, ATM implied vol, and the 25-delta risk reversal (RR25). Read "
-                "DVOL's percentile as where current implied vol sits versus its own recent range, "
-                "and RR25 as which wing carries the higher implied vol — negative means the put "
-                "wing does. Report what the figures say rather than restating the tool's own "
-                "wording, and respect its caveats: a percentile is omitted when the sample is "
-                "too thin for one, and the chain half is withheld entirely for a past analysis "
-                "date, in which case do not substitute today's skew for it."
+                "for the options-implied volatility regime: the DVOL index with its 30-day "
+                "min/max range and its 365-day percentile, ATM implied vol, and the 25-delta "
+                "risk reversal (RR25). Read DVOL's percentile as where current implied vol sits "
+                "versus its own trailing year, and RR25 as which wing carries the higher implied "
+                "vol — negative means the put wing does. Report what the figures say rather than "
+                "restating the tool's own wording, and respect its caveats: a percentile is "
+                "omitted when the sample is too thin for one; the chain half is withheld "
+                "entirely for a past analysis date, in which case do not substitute today's "
+                "skew for it; if the report is headed as a market-wide proxy the figures are "
+                "BTC's, so treat them as a crypto-wide volatility signal and never as that "
+                "asset's own; and if it carries a data-lag note, say how old the reading is "
+                "wherever you cite it."
             )
 
         system_message = (

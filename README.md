@@ -255,17 +255,24 @@ market-wide proxy; a stablecoin or unrecognized symbol gets a no-signal note.
 
 Crypto assets also have one **market**-analyst data source available:
 options-implied volatility from Deribit's public API (`options_data`, vendor
-`deribit`, keyless). It reports the DVOL index with its 30-day range, and its
-percentile when the window holds enough readings to make one meaningful, plus the
-ATM implied vol, the 25-delta call/put vols and the risk reversal (RR25) for the
-listed expiry nearest 30 days, each shown with the two strikes it was
-interpolated between. A point the chain cannot bracket — or whose surrounding
+`deribit`, keyless). It reports the DVOL index with its 30-day min/max range and
+its **365-day percentile** — separate windows on separate lines, each naming its
+own sample count, because a percentile is a claim about the volatility regime and
+a one-month lookback sits mid-range even at a multi-year extreme — plus the ATM
+implied vol and the 25-delta call/put vols for the listed expiry nearest 30 days,
+each shown with the two strikes it was interpolated between, and the risk reversal
+(RR25) computed from them. A point the chain cannot bracket — or whose surrounding
 quotes are not a monotone smile, the signature of a collapsed or stale mark — is
-reported `n/a` rather than extrapolated or guessed. The two halves fail
-independently, so a DVOL outage still leaves the skew and vice versa; only losing
-both degrades the category to the sentinel. Deribit lists options for BTC and ETH
-only, so other recognized crypto risk assets get BTC's surface as a market-wide
-crypto-vol proxy, on the same rule as ETF flows.
+reported `n/a` rather than extrapolated or guessed; if the nearest expiry cannot
+bracket both wings the next qualifying one is used and labelled as such. Only
+contracts with open interest enter the smile, since an unheld strike is where a
+stale or purely modelled mark lives. The two halves fail independently, so a DVOL
+outage still leaves the skew and vice versa; losing both degrades the category to
+the sentinel — as does losing DVOL alone on a date where the chain is withheld by
+design. Deribit lists options for BTC and ETH only, so other recognized crypto
+risk assets get BTC's **DVOL level** as a market-wide crypto-vol proxy, on the
+same rule as ETF flows; the skew is withheld for them, because a risk reversal
+measures demand for downside in one specific underlying and does not transfer.
 
 The DVOL history is dated and filtered to `curr_date`. The chain endpoint takes
 no date, so it is **withheld when `curr_date` is earlier than today** and the

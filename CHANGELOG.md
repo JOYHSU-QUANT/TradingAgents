@@ -14,7 +14,8 @@ Breaking changes within the 0.x line are called out explicitly.
   category, bound to the **market** analyst for crypto assets only (vol regime
   is a technical read, so it sits alongside the indicators rather than with the
   flows/sentiment tools on the news analyst). The report carries Deribit's DVOL
-  index — latest close and 30-day min/max — plus ATM implied vol, the 25-delta
+  index — latest reading, 30-day min/max and a 365-day percentile — plus ATM
+  implied vol, the 25-delta
   call and put vols, and the 25-delta risk reversal (RR25 = call IV − put IV) for
   the listed expiry nearest 30 days, which excludes anything inside 7 days as
   pin-noisy. Wing vols come from an undiscounted Black-76 forward delta (Deribit
@@ -46,7 +47,15 @@ Breaking changes within the 0.x line are called out explicitly.
   east of UTC it routinely runs hours ahead; the live chain is then older than the
   analysis date, not newer) with a note saying so, and the feed is never called
   late against a date that has not arrived.
-  A percentile is stated only when the window holds at least 10 daily readings:
+  The min/max range and the percentile are computed over **different windows** —
+  30 days and 365 — and printed as separate lines, each naming its own span and
+  its own sample count. A percentile is a claim about the volatility *regime*, and
+  a month cannot support one: through a sustained high-vol stretch every reading in
+  the window is high, so a 30-day percentile sits mid-range even at a multi-year
+  extreme, muting the signal exactly when volatility is what matters. The count
+  travels into the closing sentence too, because "the 365-day window" on its own
+  reads as one observation per day and that clause is what gets quoted alone.
+  A percentile is stated only when its window holds at least 10 daily readings:
   the latest reading is itself in the sample, so a percentile over n of them
   cannot read below 100/n, and a stalled feed would otherwise always report its
   one surviving observation as the top of its own range. A window with no readings
@@ -54,13 +63,27 @@ Breaking changes within the 0.x line are called out explicitly.
   figures and defines them — it deliberately does not characterise them, since it
   is re-read verbatim by the research and risk agents downstream and a negative
   RR25 is the resting state of crypto options rather than news.
+  Only contracts carrying open interest enter the smile: the two guards above
+  defend the wing against a bad quote that *inverts* the smile, and nothing else
+  defended it against one that merely sits there being wrong. An unheld strike is
+  where a stale or purely modelled mark lives, and such a quote can be perfectly
+  monotone with its neighbours — passing both guards and printing the very strikes
+  a reader expects. If the nearest-30-day expiry cannot bracket both wings, the
+  next qualifying expiry is used and the report says so rather than repeating that
+  this is "the expiry closest to 30 days"; a labelled 40-day skew is a better input
+  to a risk debate than an all-`n/a` section, and the tenor is always printed.
   Either half can fail without costing the other (any exception, not a fixed
-  allowlist); only losing both degrades the optional category to the no-data
-  sentinel, and a double throttle re-raises as `VendorRateLimitError` so the
-  router keeps its rate-limit lane. Deribit lists options for BTC and ETH only, so
-  another recognized crypto risk asset (SOL, XRP, ...) is served BTC's surface as
-  a market-wide crypto-vol proxy — labelled in the heading and named again in the
-  closing sentence, the two places that survive a downstream summary — and a
+  allowlist); losing both degrades the optional category to the no-data sentinel —
+  as does losing DVOL alone on a date where the chain is withheld by design — and
+  a double throttle re-raises as `VendorRateLimitError` so the router keeps its
+  rate-limit lane. Deribit lists options for BTC and ETH only, so
+  another recognized crypto risk asset (SOL, XRP, ...) is served BTC's **DVOL
+  level** as a market-wide crypto-vol proxy — labelled in the heading and named
+  again in the closing sentence, the two places that survive a downstream summary.
+  The 25Δ skew is **withheld** for such an asset: a market-wide vol *level* is a
+  defensible stand-in, but a risk reversal measures demand for downside in one
+  specific underlying and does not transfer, and a caveat that has to survive every
+  summarisation hop is not a substitute for not printing the number. A
   stablecoin or unrecognized symbol gets a no-signal note, the same classification
   farside applies to ETF flows. Uncached by design (two GETs per call, both
   freshness-sensitive), with one retry on transient faults only; a JSON-RPC error

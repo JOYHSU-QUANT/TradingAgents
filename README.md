@@ -259,30 +259,43 @@ options-implied volatility from Deribit's public API (`options_data`, vendor
 its **365-day percentile** — separate windows on separate lines, each naming its
 own sample count, because a percentile is a claim about the volatility regime and
 a one-month lookback sits mid-range even at a multi-year extreme — plus the ATM
-implied vol and the 25-delta call/put vols for the listed expiry nearest 30 days,
-each shown with the two strikes it was interpolated between, and the risk reversal
-(RR25) computed from them. A point the chain cannot bracket — or whose surrounding
-quotes are not a monotone smile, the signature of a collapsed or stale mark — is
-reported `n/a` rather than extrapolated or guessed; if the nearest expiry cannot be
-used the next-nearest one is used, labelled as such, and its tenor printed — one
-step only, since a risk reversal is not comparable across tenors and walking the
-whole ladder would trade "no skew today" for a skew from an unrelated expiry. Only
-contracts with open interest enter the smile, since an unheld strike is where a
-stale or purely modelled mark lives. The two halves fail independently, so a DVOL
-outage still leaves the skew and vice versa; losing both degrades the category to
-the sentinel — as does losing DVOL alone on a date, or for a proxied asset, where
-the chain is withheld by design. Deribit lists options for BTC and ETH only, so
-other recognized crypto risk assets get BTC's **DVOL level** as a market-wide
-crypto-vol proxy, on the same rule as ETF flows; the skew is withheld for them,
-because a risk reversal measures demand for downside in one specific underlying and
-does not transfer.
+(50-delta) implied vol and the 25-delta call/put vols, each shown with the two
+strikes it was interpolated between, and the risk reversal (RR25) computed from
+them. The range and the percentile each need a window holding enough readings to
+support them; below that the report states the shortfall rather than computing a
+figure that would only describe how much data arrived. A point the chain cannot
+bracket — or whose surrounding quotes are not a monotone smile, the signature of a
+collapsed or stale mark — is reported `n/a` rather than extrapolated or guessed.
 
-The DVOL history is dated and filtered to `curr_date`. The chain endpoint takes
-no date, so it is **withheld when `curr_date` is earlier than today** and the
-report says so, because quoting the present chain on a past date is future
-information. A `curr_date` later than the UTC clock — which callers deriving it
-from a local clock east of UTC produce for the first hours of each day — is
-served with a note explaining that the chain predates the analysis date.
+The chain figures come from **one expiry inside a bounded band around 30 days**
+(`MAX_TENOR_DISTANCE_DAYS`, currently ±15, and never inside the 7-day pin-noise
+floor). Normally that is the eligible expiry nearest 30 days; if it cannot be
+used, the next eligible one is, labelled as such and with its tenor printed — one
+step only. Nothing outside the band is read at all: a risk reversal is not
+comparable across tenors, so a thinned book yields **no skew** rather than a
+96-day figure presented under a 30-day heading. Only contracts with open interest
+enter the smile, since an unheld strike is where a stale or purely modelled mark
+lives. The two halves fail independently, so a DVOL outage still leaves the skew
+and vice versa; losing both degrades the category to the sentinel — as does losing
+DVOL alone on a date, or for a proxied asset, where the chain is withheld by
+design. This vendor reads chains for BTC and ETH, so other recognized crypto risk
+assets get BTC's **DVOL level** as a market-wide crypto-vol proxy, on the same
+rule as ETF flows; the skew is withheld for them, because a risk reversal measures
+demand for downside in one specific underlying and does not transfer. No rendered
+line claims Deribit itself lists nothing for those symbols — nothing at runtime
+checks that.
+
+The DVOL history is dated and filtered to `curr_date`, and its latest reading is
+always printed with an as-of date, since that clause is the one downstream agents
+quote on its own. The chain endpoint takes no date, so it is **withheld when
+`curr_date` is earlier than today** and the report says so, because quoting the
+present chain on a past date is future information. A `curr_date` up to
+`MAX_FUTURE_DAYS` (1) later than the UTC clock — which callers deriving it from a
+local clock east of UTC produce for the first hours of each day — is served with a
+note explaining that the chain predates the analysis date. Further ahead than that
+is a bad argument rather than a timezone, so the chain is withheld again. The chain
+also re-reads the clock immediately before fetching, so a run whose DVOL half timed
+out across UTC midnight cannot serve the next day's book for `curr_date`.
 
 This vendor **ships disabled** (`"options_data": "none"`). It needs no API key,
 so shipping it on would change a running deployment's analyst input surface — a

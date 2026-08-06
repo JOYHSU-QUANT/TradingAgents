@@ -14,11 +14,12 @@ Breaking changes within the 0.x line are called out explicitly.
   category, bound to the **market** analyst for crypto assets only (vol regime
   is a technical read, so it sits alongside the indicators rather than with the
   flows/sentiment tools on the news analyst). The report carries Deribit's DVOL
-  index — latest reading, 30-day min/max and a 365-day percentile — plus ATM
-  implied vol, the 25-delta
-  call and put vols, and the 25-delta risk reversal (RR25 = call IV − put IV) for
-  the listed expiry nearest 30 days, which excludes anything inside 7 days as
-  pin-noisy. Wing vols come from an undiscounted Black-76 forward delta (Deribit
+  index — latest reading (always with an as-of date), 30-day min/max and a
+  365-day percentile — plus ATM (50-delta) implied vol, the 25-delta
+  call and put vols, and the 25-delta risk reversal (RR25 = call IV − put IV),
+  read for one expiry inside a **bounded band** around 30 days: within
+  `MAX_TENOR_DISTANCE_DAYS` (±15) of the target and never inside the 7-day
+  pin-noise floor. Wing vols come from an undiscounted Black-76 forward delta (Deribit
   quotes `interest_rate: 0.0` on every listed option), interpolated between two
   **strike-adjacent** listed contracts, and each wing is rendered with the two
   strikes behind it. Two guards protect that number, because one collapsed or
@@ -43,10 +44,16 @@ Breaking changes within the 0.x line are called out explicitly.
   endpoint takes no date, so it is **withheld for a `curr_date` earlier than
   today** and said to be withheld — quoting the present chain on a past date is
   future information, and a prose warning is not an auditable guard. A `curr_date`
-  *later* than the UTC clock is served (callers derive it from a local clock, so
-  east of UTC it routinely runs hours ahead; the live chain is then older than the
-  analysis date, not newer) with a note saying so, and the feed is never called
-  late against a date that has not arrived.
+  up to `MAX_FUTURE_DAYS` (1) *later* than the UTC clock is served (callers derive
+  it from a local clock, so east of UTC it routinely runs hours ahead; the live
+  chain is then older than the analysis date, not newer) with a note saying so, and
+  the feed is never called late against a date that has not arrived. Further ahead
+  than that is a mistyped argument rather than a timezone — `curr_date` arrives
+  from an LLM tool call — so the chain is withheld again, with its own note. The
+  chain also re-reads the clock immediately before fetching rather than reusing the
+  one taken before the DVOL half, so the printed snapshot instant is when the book
+  was actually read, and a run whose DVOL half timed out across UTC midnight cannot
+  serve day D+1's chain for `curr_date` = D.
   The min/max range and the percentile are computed over **different windows** —
   30 days and 365 — and printed as separate lines, each naming its own span and
   its own sample count. A percentile is a claim about the volatility *regime*, and
@@ -58,8 +65,13 @@ Breaking changes within the 0.x line are called out explicitly.
   A percentile is stated only when its window holds at least 10 daily readings:
   the latest reading is itself in the sample, so a percentile over n of them
   cannot read below 100/n, and a stalled feed would otherwise always report its
-  one surviving observation as the top of its own range. A window with no readings
-  at all reports no range either. The closing sentence restates the
+  one surviving observation as the top of its own range. The min/max range needs
+  two readings for the same reason: at one, the min and the max are both the level
+  already printed above, and "min 62.30 / max 62.30" is the strongest possible
+  claim about the regime — a month of pinned volatility — manufactured from a
+  single observation, with no lag note beside it because a feed that stopped for
+  four weeks and resumed today is not late. A window with no readings at all
+  reports no range either. The closing sentence restates the
   figures and defines them — it deliberately does not characterise them, since it
   is re-read verbatim by the research and risk agents downstream and a negative
   RR25 is the resting state of crypto options rather than news.
@@ -68,22 +80,27 @@ Breaking changes within the 0.x line are called out explicitly.
   defended it against one that merely sits there being wrong. An unheld strike is
   where a stale or purely modelled mark lives, and such a quote can be perfectly
   monotone with its neighbours — passing both guards and printing the very strikes
-  a reader expects. If the nearest-30-day expiry cannot be used — it fails to
-  bracket both wings, or it carries no usable forward — the
-  next-nearest one is used and the report says so rather than repeating that this
+  a reader expects. If the eligible expiry nearest 30 days cannot be used — it
+  fails to bracket both wings, or it carries no usable forward — the
+  next eligible one is used and the report says so rather than repeating that this
   is "the expiry closest to 30 days"; a labelled neighbouring skew is a better
   input to a risk debate than an all-`n/a` section, and the tenor is printed both
-  in the section and in the closing sentence. The fallback is **one step only**:
-  the ranking is ordered by distance from 30 days, so its tail is months out, and a
-  risk reversal is not tenor-invariant — the 25-delta strikes on a 300-day expiry
-  sit nowhere near the 30-day ones, and every downstream agent reads this number as
-  a ~30-day figure.
+  in the section and in the closing sentence. Both branches of that sentence name
+  the same exclusions, so stepping to the second candidate no longer drops the only
+  line that states them. The fallback is **one step only**, and it can only land on
+  another expiry inside the band. Nothing outside the band is read at all: a risk
+  reversal is not tenor-invariant — the 25-delta strikes on a 300-day expiry sit
+  nowhere near the 30-day ones, and every downstream agent reads this number as a
+  ~30-day figure — so a thinned book whose only qualifying expiry is 96 days out
+  now yields **no skew** instead of a 96-day RR25 rendered under a 30-day heading
+  with `is_fallback` false, corrected only by a number a downstream summary drops.
   Either half can fail without costing the other (any exception, not a fixed
   allowlist); losing both degrades the optional category to the no-data sentinel —
   as does losing DVOL alone on a date, or for a proxied asset, where the chain is
   withheld by design — and
-  a double throttle re-raises as `VendorRateLimitError` so the router keeps its
-  rate-limit lane. Deribit lists options for BTC and ETH only, so
+  a throttle on every request actually made re-raises as `VendorRateLimitError` so
+  the router keeps its rate-limit lane — including a lone DVOL 429 on a call where
+  the chain was never attempted. This vendor reads chains for BTC and ETH, so
   another recognized crypto risk asset (SOL, XRP, ...) is served BTC's **DVOL
   level** as a market-wide crypto-vol proxy — labelled in the heading and named
   again in the closing sentence, the two places that survive a downstream summary.
@@ -92,7 +109,9 @@ Breaking changes within the 0.x line are called out explicitly.
   specific underlying and does not transfer, and a caveat that has to survive every
   summarisation hop is not a substitute for not printing the number. A
   stablecoin or unrecognized symbol gets a no-signal note, the same classification
-  farside applies to ETF flows. Uncached by design (two GETs per call, both
+  farside applies to ETF flows. No rendered line claims Deribit itself lists
+  nothing for those symbols — nothing at runtime checks that. Uncached by design
+  (two GETs per call, one where the chain is withheld, and both halves
   freshness-sensitive), with one retry on transient faults only; a JSON-RPC error
   or any other 4xx is deterministic and raises immediately rather than being slept
   on and reported as unreachable, and an HTTP 429 raises the shared

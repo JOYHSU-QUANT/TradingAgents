@@ -105,10 +105,36 @@ def _report(**kwargs):
     return _run_report(**kwargs)[0]
 
 
+def _run_report_with_clocks(clocks, asset="BTC", curr_date=TODAY, chain=CHAIN, dvol=DVOL):
+    """Render a report where ``_utc_now`` returns each of ``clocks`` in turn.
+
+    ``get_options_market_data`` reads the clock TWICE on the chain-serving path —
+    once up front and once immediately before the chain fetch — and the second
+    instant is the one that dates the snapshot and decides the historical rule.
+    ``_run_report``'s single ``return_value`` makes the two indistinguishable.
+    """
+    recorder = _RequestRecorder(chain, dvol)
+    with (
+        mock.patch.object(deribit, "_request", side_effect=recorder),
+        mock.patch.object(deribit, "_utc_now", side_effect=list(clocks)),
+    ):
+        return deribit.get_options_market_data(asset, curr_date), recorder
+
+
 def _candle(day: str, close: float):
     """A DVOL 1D candle stamped at midnight UTC of ``day`` (as Deribit stamps them)."""
     ts = int(datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
     return [ts, close, close, close, close]
+
+
+def _candle_at(when: datetime, close: float):
+    """A DVOL candle stamped at an EXPLICIT UTC instant rather than at midnight.
+
+    ``_candle``'s midnight stamp is exactly the instant at which a naive
+    timestamp conversion is hardest to see going wrong, so the timezone test
+    needs to place candles either side of UTC midnight instead.
+    """
+    return [int(when.timestamp() * 1000), close, close, close, close]
 
 
 def _dvol_days(count: int, end: str = TODAY, start_value: float = 40.0):
@@ -119,6 +145,25 @@ def _dvol_days(count: int, end: str = TODAY, start_value: float = 40.0):
             _candle(
                 (end_dt - dt.timedelta(days=count - 1 - i)).strftime("%Y-%m-%d"),
                 start_value + i * 0.1,
+            )
+            for i in range(count)
+        ]
+    }
+
+
+def _dvol_falling_days(count: int, end: str = TODAY, start_value: float = 100.0):
+    """The mirror of ``_dvol_days``: each candle 0.1 BELOW the last.
+
+    The newest reading is then the sample MINIMUM, which is the one-year-low case
+    the percentile's floor-at-1st exists for. ``_dvol_days`` only ever climbs, so
+    every ascending series puts the latest reading at the 100th percentile.
+    """
+    end_dt = datetime.strptime(end, "%Y-%m-%d")
+    return {
+        "data": [
+            _candle(
+                (end_dt - dt.timedelta(days=count - 1 - i)).strftime("%Y-%m-%d"),
+                start_value - i * 0.1,
             )
             for i in range(count)
         ]
@@ -423,6 +468,50 @@ class TestInterpolateIvAtDelta:
         ]
         assert deribit.interpolate_iv_at_delta(quotes, 0.25).iv == 35.0
 
+    def test_an_inversion_two_quotes_before_the_bracket_does_not_veto_it(self):
+        # The guard's window is documented as "the bracket plus one quote on each
+        # side", but nothing pinned either edge: widening it to `index - 2` left
+        # the whole suite green, because the test above puts its inversion at the
+        # very head of the list where a two-wide window still only half reaches
+        # it. Here the inverted PAIR sits exactly one step beyond the left edge,
+        # so a window that starts at `index - 2` swallows it and vetoes a bracket
+        # a rounding artefact three strikes away says nothing about.
+        quotes = [
+            (80.0, 0.70, 70.0),
+            (90.0, 0.80, 75.0),  # inverted, one quote past the window's left edge
+            (100.0, 0.40, 50.0),
+            (110.0, 0.10, 20.0),
+            (120.0, 0.05, 10.0),
+        ]
+        assert deribit.interpolate_iv_at_delta(quotes, 0.25).iv == 35.0
+
+    def test_an_inversion_two_quotes_after_the_bracket_does_not_veto_it(self):
+        # The right-edge mirror. The window ends at `index + 3`, one quote past
+        # the bracket; at `index + 4` this deep-wing inversion costs a bracket
+        # that has three clean quotes between it and the corruption.
+        quotes = [
+            (90.0, 0.60, 60.0),
+            (100.0, 0.40, 50.0),
+            (110.0, 0.10, 20.0),
+            (120.0, 0.05, 10.0),
+            (130.0, 0.09, 12.0),  # inverted, one quote past the window's right edge
+        ]
+        assert deribit.interpolate_iv_at_delta(quotes, 0.25).iv == 35.0
+
+    def test_an_inversion_one_quote_after_the_bracket_vetoes_it(self):
+        # ... and the inclusive end of that same window, which is the half the
+        # bordering-inversion test above does NOT cover: it corrupts the quote
+        # BELOW the bracket, so narrowing the window to `index + 2` — blind to
+        # everything past the bracket's own high strike — kept it green while a
+        # quote mis-pricing the smile immediately above the wing went unjudged.
+        quotes = [
+            (90.0, 0.60, 60.0),
+            (100.0, 0.40, 50.0),
+            (110.0, 0.10, 20.0),
+            (120.0, 0.15, 25.0),  # inverted, inside the window
+        ]
+        assert deribit.interpolate_iv_at_delta(quotes, 0.25) is None
+
     def test_no_bracket_returns_none_rather_than_extrapolating(self):
         # Every quote sits inside 0.25; extrapolating would invent an unlisted vol.
         assert (
@@ -447,59 +536,104 @@ class TestInterpolateIvAtDelta:
 # Expiry selection
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
-class TestSelectExpiry:
+class TestRankExpiries:
     def test_picks_the_expiry_nearest_thirty_days(self):
         contracts = deribit.parse_chain(CHAIN, NOW)
-        # 5AUG26 is ~0 days out, 28AUG26 ~23, 25DEC26 ~142.
-        assert deribit.select_expiry(contracts, NOW) == "28AUG26"
+        # 5AUG26 is ~0 days out, 28AUG26 ~23, 25DEC26 ~142. Only 28AUG26 is inside
+        # the eligible band, and it is also the nearest to the target.
+        assert deribit.rank_expiries(contracts, NOW)[0] == "28AUG26"
 
     def test_target_tenor_is_thirty_days_not_some_other_number(self):
-        # The pin is the literal constant. The expiry set below only discriminates
-        # a ~21-day band of targets (every value from 22 to 42 picks MID), so it
-        # cannot stand in for the constant on its own — it was claimed to, and did
-        # not.
+        # The pin is the literal constant. The expiry set below is chosen to sit
+        # INSIDE the eligible band on both sides of the target, so it discriminates
+        # the target itself rather than the band edges.
         assert deribit.TARGET_DTE_DAYS == 30
-        near = _synthetic_contract("NEAR", 12)
+        near = _synthetic_contract("NEAR", 17)
         mid = _synthetic_contract("MID", 31)
-        far = _synthetic_contract("FAR", 55)
-        assert deribit.select_expiry([near, mid, far], NOW) == "MID"
+        far = _synthetic_contract("FAR", 44)
+        assert deribit.rank_expiries([near, mid, far], NOW)[0] == "MID"
 
     def test_ranking_orders_every_qualifying_expiry_best_first(self):
-        # compute_skew walks this order when the nearest expiry cannot bracket a
-        # wing, so the tail of the ranking is load-bearing, not just its head.
-        near = _synthetic_contract("NEAR", 12)
+        # compute_skew steps down this order when the nearest expiry cannot bracket
+        # a wing, so the tail of the ranking is load-bearing, not just its head.
+        near = _synthetic_contract("NEAR", 17)
         mid = _synthetic_contract("MID", 31)
-        far = _synthetic_contract("FAR", 55)
-        # 31d is 1 from target, 12d is 18 away, 55d is 25 away.
+        far = _synthetic_contract("FAR", 44)
+        # 31d is 1 from target, 17d is 13 away, 44d is 14 away.
         assert deribit.rank_expiries([far, near, mid], NOW) == ["MID", "NEAR", "FAR"]
         assert deribit.rank_expiries([_synthetic_contract("TOO_NEAR", 3)], NOW) == []
 
-    def test_expiry_inside_the_floor_is_excluded(self):
-        # With only the sub-7-day expiry and the far one listed, the near expiry
-        # must lose even though its tenor error is the smaller of the two.
+    def test_the_eligible_band_is_bounded_on_both_sides(self):
+        # The band constants themselves, and the derivation that keeps them in
+        # agreement. Pinned literally: every other test in this class only
+        # discriminates a RANGE of values, so none of them alone can stand in for
+        # the constants.
+        assert deribit.MAX_TENOR_DISTANCE_DAYS == 15
+        assert deribit.MIN_ELIGIBLE_DTE_DAYS == 15
+        assert deribit.MAX_ELIGIBLE_DTE_DAYS == 45
+        assert (
+            max(deribit.MIN_DTE_DAYS, deribit.TARGET_DTE_DAYS - deribit.MAX_TENOR_DISTANCE_DAYS)
+            == deribit.MIN_ELIGIBLE_DTE_DAYS
+        )
+        assert deribit.MAX_ELIGIBLE_DTE_DAYS == (
+            deribit.TARGET_DTE_DAYS + deribit.MAX_TENOR_DISTANCE_DAYS
+        )
+
+    def test_the_pin_noise_floor_still_binds_if_the_band_is_widened(self):
+        # MIN_DTE_DAYS is currently subsumed (15 > 7), which is exactly how a floor
+        # quietly stops existing. The max() is what keeps it real, so pin the
+        # derivation at a width where the floor is the binding bound.
+        assert max(deribit.MIN_DTE_DAYS, deribit.TARGET_DTE_DAYS - 25) == deribit.MIN_DTE_DAYS
+
+    def test_an_expiry_beyond_the_ceiling_is_excluded_even_when_it_is_the_only_one(self):
+        # The whole point of the ceiling: a thinned book must yield NO skew rather
+        # than answer the ~30-day question with a 96-day risk reversal.
+        assert deribit.rank_expiries([_synthetic_contract("FAR_OUT", 96)], NOW) == []
+
+    def test_neither_bound_is_reachable_by_the_other(self):
+        # Both edges, and the first ineligible value outside each. 45 in / 45.01
+        # out proves the ceiling is not merely the floor restated.
+        assert deribit.rank_expiries([_synthetic_contract("AT_FLOOR", 15)], NOW) == ["AT_FLOOR"]
+        assert deribit.rank_expiries([_synthetic_contract("UNDER", 14.99)], NOW) == []
+        assert deribit.rank_expiries([_synthetic_contract("AT_CEIL", 45)], NOW) == ["AT_CEIL"]
+        assert deribit.rank_expiries([_synthetic_contract("OVER", 45.01)], NOW) == []
+
+    def test_an_expiry_inside_the_floor_is_excluded(self):
+        # With only the out-of-band expiries listed, nothing qualifies: 5AUG26 is
+        # ~0 days out and 25DEC26 ~142, so the near one loses to the floor and the
+        # far one to the ceiling. Before the ceiling existed this returned 25DEC26.
         contracts = [
             c for c in deribit.parse_chain(CHAIN, NOW) if c.expiry in ("5AUG26", "25DEC26")
         ]
-        assert deribit.select_expiry(contracts, NOW) == "25DEC26"
+        assert deribit.rank_expiries(contracts, NOW) == []
 
-    def test_returns_none_when_nothing_clears_the_floor(self):
+    def test_returns_empty_when_nothing_is_eligible(self):
         contracts = [c for c in deribit.parse_chain(CHAIN, NOW) if c.expiry == "5AUG26"]
-        assert deribit.select_expiry(contracts, NOW) is None
-
-    def test_exactly_at_the_seven_day_floor_is_eligible(self):
-        assert deribit.MIN_DTE_DAYS == 7
-        assert deribit.select_expiry([_synthetic_contract("AT_FLOOR", 7)], NOW) == "AT_FLOOR"
-
-    def test_just_inside_the_floor_is_not_eligible(self):
-        assert deribit.select_expiry([_synthetic_contract("JUST_INSIDE", 6.99)], NOW) is None
+        assert deribit.rank_expiries(contracts, NOW) == []
 
     def test_tie_goes_to_the_longer_dated_expiry(self):
         # 23 and 37 days are equidistant from the 30-day target; the pin-noise
         # rationale that motivates the floor also breaks the tie.
         near = _synthetic_contract("NEAR", 23)
         far = _synthetic_contract("FAR", 37)
-        assert deribit.select_expiry([near, far], NOW) == "FAR"
-        assert deribit.select_expiry([far, near], NOW) == "FAR"
+        assert deribit.rank_expiries([near, far], NOW)[0] == "FAR"
+        assert deribit.rank_expiries([far, near], NOW)[0] == "FAR"
+
+    def test_the_tenor_key_is_not_floored_to_whole_days(self):
+        # A "// 86400" ranking key collapses tenors that differ by under a day, so
+        # the longer-dated tie-break then resolves by dict insertion order instead
+        # of by tenor. Both of these floor to day 30, and LATE is genuinely nearer
+        # the target, so it must win from either input order.
+        early = _synthetic_contract("EARLY", 30.9)
+        late = _synthetic_contract("LATE", 30.1)
+        assert deribit.rank_expiries([early, late], NOW) == ["LATE", "EARLY"]
+        assert deribit.rank_expiries([late, early], NOW) == ["LATE", "EARLY"]
+
+    def test_select_expiry_is_gone(self):
+        # Deleted as dead production API: compute_skew calls rank_expiries
+        # directly, and the only callers were this test class. Its docstring had
+        # already drifted into describing compute_skew's behaviour.
+        assert not hasattr(deribit, "select_expiry")
 
 
 # --------------------------------------------------------------------------- #
@@ -611,8 +745,16 @@ class TestComputeSkew:
 
     def test_no_eligible_expiry_raises(self):
         contracts = [c for c in deribit.parse_chain(CHAIN, NOW) if c.expiry == "5AUG26"]
-        with pytest.raises(deribit.DeribitError, match="at least 7 days out"):
+        with pytest.raises(deribit.DeribitError, match="falls between 15 and 45 days out"):
             deribit.compute_skew(contracts, NOW)
+
+    def test_an_out_of_band_expiry_yields_no_skew_rather_than_a_wrong_tenor(self):
+        # A thinned book whose only listed expiry is months out. Before the tenor
+        # ceiling this returned a complete 96-day surface, which _skew_section then
+        # rendered as "the listed expiry closest to 30 days".
+        far = _ladder("FAR_OUT", 96)
+        with pytest.raises(deribit.DeribitError, match="falls between 15 and 45 days out"):
+            deribit.compute_skew(far, NOW)
 
     @pytest.mark.parametrize("bad_forward", [-1.0, 0.0])
     def test_unusable_forward_raises(self, bad_forward):
@@ -664,7 +806,10 @@ class TestComputeSkew:
         # The first failure is kept, not the last: the caller must be told about
         # the expiry the report would have shown, not one it never reached.
         near = _synthetic_contract("NEARBY", 25)._replace(underlying=-1.0)
-        far = _synthetic_contract("FARAWAY", 60)._replace(underlying=-1.0)
+        # 42d, not 60d: both candidates must be inside the eligible tenor band, or
+        # the ranking holds one entry and the "first failure is kept" rule is not
+        # exercised at all.
+        far = _synthetic_contract("FARAWAY", 42)._replace(underlying=-1.0)
         assert deribit.rank_expiries([near, far], NOW) == ["NEARBY", "FARAWAY"]
         with pytest.raises(deribit.DeribitError, match="NEARBY contracts carry no usable forward"):
             deribit.compute_skew([near, far], NOW)
@@ -693,16 +838,33 @@ class TestComputeSkew:
             deribit.compute_skew(contracts, NOW), "2026-08-05T06:06:00Z"
         )
         assert "**Expiry used:** NEXT — 40.0 days out" in section
-        assert "could not be used, so this is the next qualifying expiry" in section
-        assert f"the listed expiry closest to {deribit.TARGET_DTE_DAYS} days" not in section
+        assert "could not be used, so this is the next eligible one" in section
+        assert f"the eligible expiry closest to {deribit.TARGET_DTE_DAYS} days" not in section
+        # The fallback branch must carry the SAME exclusions as the non-fallback
+        # one. It used to name neither, so stepping to the second candidate
+        # silently dropped the only line that states them.
+        assert "only expiries 15-45 days out are eligible" in section
+        assert "no open interest never enter the smile" in section
 
-    def test_the_reading_line_rounds_the_tenor_rather_than_truncating_it(self):
-        # A fractional tenor: truncation would print "(22-day)" for 22.6 days out.
-        # The fixture expiry is ~23.0 days, where rounding and truncation agree, so
-        # nothing else can tell the two apart.
-        contracts = _ladder("NEARBY", 22.6)
+    def test_the_non_fallback_expiry_basis_names_its_exclusions(self):
+        # The other half of the pair above. This wording was entirely unpinned:
+        # reverting it to the older, narrower sentence shipped green.
+        section = deribit._skew_section(
+            deribit.compute_skew(_ladder("NEARBY", 25), NOW), "2026-08-05T06:06:00Z"
+        )
+        assert f"the eligible expiry closest to {deribit.TARGET_DTE_DAYS} days" in section
+        assert "only expiries 15-45 days out are eligible" in section
+        assert "no open interest never enter the smile" in section
+        assert "could not be used" not in section
+
+    def test_the_reading_line_prints_the_tenor_to_one_decimal(self):
+        # Matches _skew_section's "N.N days out". At ":.0f" this used format's
+        # banker's rounding — the very thing _ordinal avoids — so one report could
+        # say "22.5 days out" and "(22-day)". The fixture expiry is ~23.0 days,
+        # where nothing distinguishes the formats, so the tenor is synthetic.
+        contracts = _ladder("NEARBY", 22.5)
         line = deribit._reading_line("BTC", deribit.compute_skew(contracts, NOW), None, 0)
-        assert "NEARBY (23-day) chain" in line
+        assert "NEARBY (22.5-day) chain" in line
 
     @pytest.mark.parametrize(
         "quotes",
@@ -748,6 +910,18 @@ class TestComputeSkew:
         # single outlying row must not move the forward.
         selected = [c for c in deribit.parse_chain(CHAIN, NOW) if c.expiry == "28AUG26"]
         poisoned = [selected[0]._replace(underlying=1.0)] + selected[1:]
+        assert deribit.compute_skew(poisoned, NOW).forward == pytest.approx(64456.93, abs=0.5)
+
+    def test_the_forward_ignores_an_outlier_ABOVE_the_quotes_too(self):
+        # The mirror of the case above, and the only direction that separates a
+        # median from a max(): poisoning one row DOWNWARD leaves max() looking
+        # perfectly correct on this sample, so `_median(...)` could be swapped for
+        # `max(...)` with the whole suite green. A single stale row would then set
+        # the forward, putting every listed strike far out of the money — both
+        # wings collapse to n/a and "**Forward:** 1,000,000,000.00" is printed as
+        # BTC's price.
+        selected = [c for c in deribit.parse_chain(CHAIN, NOW) if c.expiry == "28AUG26"]
+        poisoned = [selected[0]._replace(underlying=1.0e9)] + selected[1:]
         assert deribit.compute_skew(poisoned, NOW).forward == pytest.approx(64456.93, abs=0.5)
 
     def test_median_of_an_even_sample_is_the_midpoint(self):
@@ -800,6 +974,78 @@ class TestDvol:
         # One candle per day at 1D, so the span in days IS the candle count.
         assert deribit.DVOL_RESOLUTION == "1D"
 
+    def test_the_fetch_span_follows_whichever_statistics_window_is_longer(self, monkeypatch):
+        # `max(DVOL_WINDOW_DAYS, DVOL_PERCENTILE_WINDOW_DAYS)`, not the percentile
+        # window named directly. At today's values the percentile window IS the
+        # longer one, so the pinned 375-day span above cannot tell the two forms
+        # apart — and the day the range window is widened past it, the range would
+        # be computed over a silently truncated sample and still labelled with its
+        # full span. Drive the range window past the percentile one and the fetch
+        # must follow it.
+        monkeypatch.setattr(deribit, "DVOL_WINDOW_DAYS", 500)
+        recorder = _RequestRecorder()
+        with mock.patch.object(deribit, "_request", side_effect=recorder):
+            deribit._fetch_dvol("BTC", datetime(2026, 7, 20))
+        params = recorder.params_for(DVOL_ENDPOINT)
+        start = datetime.fromtimestamp(params["start_timestamp"] / 1000, tz=timezone.utc)
+        # 500 + the 10-day buffer = 510 days before 2026-07-20.
+        assert start == datetime(2025, 2, 25, tzinfo=timezone.utc)
+
+    def test_candle_timestamps_are_read_in_utc_not_the_runner_s_local_zone(self):
+        # The `tz=timezone.utc` on the fromtimestamp call is invisible to every
+        # other test in this file: `_candle` stamps midnight UTC, and on a UTC+8
+        # runner a naive conversion lands at 08:00 the SAME day, so nothing moves.
+        # On a runner west of UTC that identical candle slides to the PREVIOUS
+        # day, and `day <= curr_date` then drops the newest reading — a report
+        # that is a day stale on one CI box and current on another. These two
+        # instants straddle UTC midnight, so any non-zero offset in either
+        # direction collapses them onto a single calendar day.
+        dvol = {
+            "data": [
+                _candle_at(datetime(2026, 8, 4, 23, 30, tzinfo=timezone.utc), 40.0),
+                _candle_at(datetime(2026, 8, 5, 0, 30, tzinfo=timezone.utc), 41.0),
+            ]
+        }
+        recorder = _RequestRecorder(dvol=dvol)
+        with mock.patch.object(deribit, "_request", side_effect=recorder):
+            series = deribit._fetch_dvol("BTC", datetime(2026, 8, 5))
+        assert series.dates == ["2026-08-04", "2026-08-05"]
+        assert series.closes == [40.0, 41.0]
+
+    def test_the_series_is_sorted_by_date_not_by_arrival_order(self):
+        # `sorted(by_date)`, not `list(by_date)`. Every other DVOL fixture arrives
+        # already ascending, so the dict's insertion order happens to be the right
+        # answer and the sort could be deleted outright. Deribit is only
+        # documented to page NEWEST-first; were a response ever to arrive
+        # descending, `latest` would return the OLDEST reading in the history and
+        # the report would date and age it as the current level.
+        dvol = {
+            "data": [
+                _candle("2026-08-05", 42.0),
+                _candle("2026-08-04", 41.0),
+                _candle("2026-08-03", 40.0),
+            ]
+        }
+        recorder = _RequestRecorder(dvol=dvol)
+        with mock.patch.object(deribit, "_request", side_effect=recorder):
+            series = deribit._fetch_dvol("BTC", datetime(2026, 8, 5))
+        assert series.dates == ["2026-08-03", "2026-08-04", "2026-08-05"]
+        assert series.closes == [40.0, 41.0, 42.0]
+        assert (series.latest, series.latest_date) == (42.0, "2026-08-05")
+
+    def test_a_repeated_day_keeps_the_later_candle(self):
+        # A resolution change, or a partial candle alongside the settled one for
+        # the same day. Plain assignment keeps the LAST value seen; `setdefault`
+        # would keep the first, freezing the report on a stale intraday print and
+        # never picking up the settled close. Nothing else in the suite feeds a
+        # duplicate day, so the two forms were indistinguishable.
+        dvol = {"data": [_candle("2026-08-05", 40.0), _candle("2026-08-05", 55.0)]}
+        recorder = _RequestRecorder(dvol=dvol)
+        with mock.patch.object(deribit, "_request", side_effect=recorder):
+            series = deribit._fetch_dvol("BTC", datetime(2026, 8, 5))
+        assert series.dates == ["2026-08-05"]
+        assert series.closes == [55.0]
+
     def test_a_truncated_history_is_not_passed_over_in_silence(self, caplog):
         # Unreachable at the current span, but if Deribit ever lowers the cap the
         # percentile sample is short and the operator must be able to see why.
@@ -834,7 +1080,7 @@ class TestDvol:
         recorder = _RequestRecorder(dvol=dvol)
         with (
             mock.patch.object(deribit, "_request", side_effect=recorder),
-            pytest.raises(deribit.DeribitError, match="No DVOL readings"),
+            pytest.raises(deribit.DeribitError, match="No BTC DVOL readings on or before"),
         ):
             deribit._fetch_dvol("BTC", datetime(2026, 7, 20))
 
@@ -871,7 +1117,7 @@ class TestDvol:
         # mis-window the statistics, so the zip is strict.
         broken = deribit.DvolSeries(dates=["2026-08-04", "2026-08-05"], closes=[40.0])
         with pytest.raises(ValueError):
-            deribit._dvol_section(broken, datetime(2026, 8, 5), TODAY, TODAY)
+            deribit._dvol_section(broken, datetime(2026, 8, 5), TODAY)
 
     @pytest.mark.parametrize("bad_close", [0.0, -12.5])
     def test_a_non_positive_reading_is_dropped_not_published(self, bad_close):
@@ -890,14 +1136,38 @@ class TestDvol:
         assert series.closes == [40.0]
         assert series.latest_date == "2026-08-04"
 
+    def test_a_dropped_non_positive_reading_says_so_in_the_log(self, caplog):
+        # Skipping is silent to the report — an older reading simply becomes the
+        # latest, dated and aged honestly — so the log line is the ONLY place a
+        # corrupt candle is visible at all. Deleting it left the suite green while
+        # a feed quietly publishing zeroes became indistinguishable from one that
+        # had merely stopped. Same pattern as the truncation warning above.
+        dvol = {"data": [_candle("2026-08-04", 40.0), _candle("2026-08-05", 0.0)]}
+        recorder = _RequestRecorder(dvol=dvol)
+        with (
+            caplog.at_level(logging.WARNING),
+            mock.patch.object(deribit, "_request", side_effect=recorder),
+        ):
+            deribit._fetch_dvol("BTC", datetime(2026, 8, 5))
+        assert (
+            "Skipping non-positive Deribit DVOL close 0.0 dated 2026-08-05 for BTC" in caplog.text
+        )
+
     def test_every_reading_being_unusable_raises(self):
-        # Skipping must not degrade into an empty series presented as a report.
+        # Skipping must not degrade into an empty series presented as a report, AND
+        # the message must not say the feed published nothing: it published a full
+        # history of corrupt candles, which is a different thing to go and look at.
+        # The message renders verbatim into "**DVOL:** unavailable — ...".
         recorder = _RequestRecorder(dvol={"data": [_candle("2026-08-05", 0.0)]})
         with (
             mock.patch.object(deribit, "_request", side_effect=recorder),
-            pytest.raises(deribit.DeribitError, match="No DVOL readings"),
+            pytest.raises(
+                deribit.DeribitError, match=r"Every BTC DVOL reading .* was non-positive"
+            ) as excinfo,
         ):
             deribit._fetch_dvol("BTC", datetime(2026, 8, 5))
+        assert "1 skipped" in str(excinfo.value)
+        assert "No BTC DVOL readings" not in str(excinfo.value)
 
 
 @pytest.mark.unit
@@ -1009,7 +1279,7 @@ class TestRequest:
                 deribit.requests, "get", return_value=_response(status=status, payload={})
             ) as get,
             mock.patch.object(deribit.time, "sleep") as sleep,
-            pytest.raises(deribit.DeribitError, match="unreachable after"),
+            pytest.raises(deribit.DeribitError, match="did not return a usable response after"),
         ):
             deribit._request(DVOL_ENDPOINT, {})
         assert get.call_count == 2
@@ -1045,6 +1315,46 @@ class TestRequest:
         assert get.call_count == 1  # deterministic failure: no wasted retry
         sleep.assert_not_called()
 
+    def test_a_5xx_that_explains_itself_is_believed_rather_than_retried(self):
+        # The ORDER of the two checks. The docstring's rule is "anything Deribit
+        # explains — a JSON-RPC error object AT ANY STATUS — is deterministic and
+        # raises immediately", and the only way to see that is a response that is
+        # both 5xx and carries the object: hoisting the `>= 500` test above the
+        # JSON-RPC test passes every other case in this class, then throws away
+        # Deribit's own reason, burns the retry and the two-second pause, and
+        # reports the vendor as not answering when it answered precisely.
+        payload = {"error": {"code": 10028, "message": "too_many_requests_for_currency"}}
+        with (
+            mock.patch.object(
+                deribit.requests, "get", return_value=_response(status=503, payload=payload)
+            ) as get,
+            mock.patch.object(deribit.time, "sleep") as sleep,
+            pytest.raises(deribit.DeribitError, match="too_many_requests_for_currency"),
+        ):
+            deribit._request(DVOL_ENDPOINT, {})
+        assert get.call_count == 1
+        sleep.assert_not_called()
+
+    def test_the_retry_announces_itself_before_sleeping(self, caplog):
+        # The one operator-facing trace that a request was repeated. Deleted, a
+        # vendor flapping on every other call looks perfectly healthy in the log
+        # (the second attempt succeeds and nothing is raised), and the latency
+        # this module's docstring budgets for has no evidence behind it.
+        with (
+            caplog.at_level(logging.WARNING),
+            mock.patch.object(
+                deribit.requests,
+                "get",
+                side_effect=[_response(status=503, payload={}), _response(payload={"result": 42})],
+            ),
+            mock.patch.object(deribit.time, "sleep"),
+        ):
+            assert deribit._request(DVOL_ENDPOINT, {}) == 42
+        assert (
+            "Deribit get_volatility_index_data request failed (HTTP 503); retrying in 2s"
+            in caplog.text
+        )
+
     def test_bare_4xx_is_not_retried(self):
         # A WAF block or renamed endpoint has no JSON-RPC error object. Leaving it
         # to raise_for_status() would raise requests.HTTPError — a RequestException
@@ -1074,7 +1384,7 @@ class TestRequest:
                 deribit.requests, "get", side_effect=requests.ConnectionError("boom")
             ) as get,
             mock.patch.object(deribit.time, "sleep") as sleep,
-            pytest.raises(deribit.DeribitError, match="unreachable after"),
+            pytest.raises(deribit.DeribitError, match="did not return a usable response after"),
         ):
             deribit._request(DVOL_ENDPOINT, {})
         # Literal: the module docstring turns this count into a latency-envelope
@@ -1143,6 +1453,27 @@ class TestClassifyAsset:
 
 
 # --------------------------------------------------------------------------- #
+# The clock source
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+class TestUtcClock:
+    def test_the_single_clock_source_is_timezone_aware_utc(self):
+        # Every other test in this file PATCHES `_utc_now`, so its two-line body
+        # never runs: dropping the `timezone.utc` argument ships a naive local
+        # datetime with the suite fully green. Downstream that instant is compared
+        # against tz-aware expiry datetimes (`expiry_dt <= now` in parse_chain),
+        # which raises TypeError and costs the entire chain half on a real run,
+        # and `strftime("%Y-%m-%d")` on it would date the report by the server's
+        # local calendar rather than by UTC.
+        now = deribit._utc_now()
+        assert now.tzinfo is not None
+        assert now.utcoffset() == dt.timedelta(0)
+        # It must remain usable in arithmetic against this module's own aware
+        # datetimes — the operation that actually breaks under a naive clock.
+        assert isinstance(now - deribit.parse_expiry("28AUG26"), dt.timedelta)
+
+
+# --------------------------------------------------------------------------- #
 # Report rendering
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
@@ -1153,8 +1484,8 @@ class TestReport:
         # fixture holds 35 readings, so the 365-day percentile sample is all of
         # them while the 30-day range sees only the last 30.
         out = _report()
-        assert "**DVOL (30-day implied vol index), latest:** 34.43 on 2026-08-05" in out
-        assert "**30d range:** min 34.04 / max 39.53 over 30 daily readings" in out
+        assert "**DVOL (30-day implied vol index), latest:** 34.43% annualized on 2026-08-05" in out
+        assert "**30d range:** min 34.04% / max 39.53% over 30 daily readings" in out
         assert (
             "**365d percentile:** the latest reading sits at the 6th percentile of the "
             "35 daily readings in the 365 days ending 2026-08-05" in out
@@ -1168,7 +1499,7 @@ class TestReport:
         # percentile the last 365, so neither window can quietly borrow the other's
         # span. Values are the observed render, not derived from the constants.
         out = _report(dvol=_dvol_days(400))
-        assert "**30d range:** min 77.00 / max 79.90 over 30 daily readings" in out
+        assert "**30d range:** min 77.00% / max 79.90% over 30 daily readings" in out
         assert "percentile of the 365 daily readings in the 365 days ending" in out
 
     def test_reports_the_surface_with_its_bracketing_strikes(self):
@@ -1183,6 +1514,85 @@ class TestReport:
         out = _report()
         assert "8 call quotes and 8 put quotes on this expiry yielded a usable delta" in out
 
+    def test_a_one_quote_side_is_counted_in_the_singular(self):
+        # `_quotes`'s singular branch had no render behind it: forcing the helper
+        # permanently plural shipped green, and "1 call quotes" is garbled exactly
+        # on the sparse chain the count exists to expose. Two contracts on a
+        # single ~30-day expiry is the smallest chain that reaches this line.
+        out = _report(
+            chain=[
+                {
+                    "instrument_name": "BTC-4SEP26-60000-C",
+                    "mark_iv": 30,
+                    "underlying_price": 64000,
+                    "open_interest": 5,
+                },
+                {
+                    "instrument_name": "BTC-4SEP26-68000-P",
+                    "mark_iv": 30,
+                    "underlying_price": 64000,
+                    "open_interest": 5,
+                },
+            ]
+        )
+        assert "1 call quote and 1 put quote on this expiry yielded a usable delta" in out
+        assert "1 call quotes" not in out
+        assert "1 put quotes" not in out
+
+    def test_the_forward_keeps_its_thousands_separator(self):
+        # Never asserted anywhere: the forward is a five-figure price and the
+        # report's other five-figure numbers (the bracketing strikes) are all
+        # grouped, so an ungrouped "64456.93" beside "between the 64,000 and
+        # 65,000 strikes" reads as a different quantity at a glance.
+        assert "**Forward:** 64,456.93" in _report()
+
+    def test_a_call_skewed_rr25_keeps_its_plus_sign_in_the_section(self):
+        # The fixture chain is put-skewed, so every rendered RR25 in this suite is
+        # negative and the sign is supplied by the minus that is part of the
+        # number. Only a POSITIVE risk reversal can see the explicit "+", and
+        # without it "**RR25 ...:** 2.00 vol points" is unsigned in a report whose
+        # whole subject is which wing is dearer. The reading line's own "+" is
+        # covered separately; this pins the section's.
+        skewed = deribit.compute_skew(deribit.parse_chain(CHAIN, NOW), NOW)._replace(
+            call_25=deribit.WingQuote(36.0, 67000.0, 68000.0),
+            put_25=deribit.WingQuote(34.0, 61000.0, 62000.0),
+        )
+        section = deribit._skew_section(skewed, "2026-08-05T06:06:00Z")
+        assert "**RR25 (25Δ call IV − 25Δ put IV):** +2.00 vol points" in section
+
+    def test_an_rr25_that_rounds_away_never_renders_a_negative_zero(self):
+        # An RR25 in (-0.005, 0): a minus sign asserting the put wing is richer,
+        # bolted to a magnitude saying the wings are level. The existing flat-skew
+        # test uses EXACTLY equal wings, where the raw format gives "+0.00" of its
+        # own accord, so the clamp itself was unpinned. Both render sites, because
+        # the reading line and the section format the number independently.
+        flat = deribit.compute_skew(deribit.parse_chain(CHAIN, NOW), NOW)._replace(
+            call_25=deribit.WingQuote(34.0, 67000.0, 68000.0),
+            put_25=deribit.WingQuote(34.001, 61000.0, 62000.0),
+        )
+        assert flat.rr25 < 0  # genuinely negative, and genuinely below the epsilon
+        assert abs(flat.rr25) < deribit._RR_ZERO_EPSILON
+        section = deribit._skew_section(flat, "2026-08-05T06:06:00Z")
+        assert "**RR25 (25Δ call IV − 25Δ put IV):** +0.00 vol points" in section
+        line = deribit._reading_line("BTC", flat, None, 0)
+        assert "both 25Δ wings carry the same implied vol (RR25 +0.00)" in line
+        assert "-0.00" not in section
+        assert "-0.00" not in line
+
+    def test_a_one_year_low_renders_as_the_1st_percentile_never_the_0th(self):
+        # A percentile here counts the readings at or below the latest one, and
+        # the latest reading is itself in the sample, so its true minimum is
+        # 100/n. Widening the window to 365 days made that minimum 0.27, which
+        # half-up rounding renders "0th" — a figure contradicting the definition
+        # printed on the same line, and reachable any day BTC's DVOL prints a
+        # one-year low. `_ordinal`'s unit tests all sit well above the floor.
+        out = _report(dvol=_dvol_falling_days(365))
+        assert (
+            "**365d percentile:** the latest reading sits at the 1st percentile of the "
+            "365 daily readings in the 365 days ending 2026-08-05" in out
+        )
+        assert "0th" not in out
+
     def test_chain_is_labelled_a_live_snapshot(self):
         assert "**Chain snapshot:** taken 2026-08-05T06:06:00Z" in _report()
 
@@ -1193,10 +1603,10 @@ class TestReport:
         # reader who assumes ~30 days would otherwise be reading a different
         # quantity than the one printed.
         assert (
-            "_Reading:_ In the live BTC 28AUG26 (23-day) chain, 25Δ puts are priced 4.74 vol "
-            "points above 25Δ calls (RR25 -4.74, defined as 25Δ call IV minus 25Δ put IV); and "
-            "BTC's latest DVOL reading sits at the 6th percentile of the 35 daily readings in "
-            "the 365-day window ending on the analysis date." in out
+            "_Reading:_ In the live BTC 28AUG26 (23.1-day) chain, 25Δ puts are priced 4.74 "
+            "vol points above 25Δ calls (RR25 -4.74, defined as 25Δ call IV minus 25Δ put IV); "
+            "and BTC's latest DVOL reading (as of 2026-08-05) sits at the 6th percentile of "
+            "the 35 daily readings in the 365-day window ending on the analysis date." in out
         )
         # No value-laden characterisation: this sentence is re-read verbatim by the
         # downstream research and risk agents.
@@ -1209,7 +1619,7 @@ class TestReport:
         # The heading's proxy framing is the only other place that says whose
         # surface this is, and it does not survive a downstream summary.
         out = _report(asset="SOL")
-        assert "BTC's latest DVOL reading sits at" in out
+        assert "BTC's latest DVOL reading (as of 2026-08-05) sits at" in out
 
     def test_reading_line_reports_a_call_skewed_chain_symmetrically(self):
         skew = deribit.compute_skew(deribit.parse_chain(CHAIN, NOW), NOW)._replace(
@@ -1246,8 +1656,13 @@ class TestReport:
 
     def test_unsupported_asset_gets_a_no_signal_note(self):
         out, recorder = _run_report(asset="USDT")
-        assert "no listed options market for 'USDT'" in out
+        assert "This vendor reads Deribit options for BTC and ETH only" in out
+        assert "'USDT' is not a recognized crypto risk asset" in out
         assert "Do not substitute BTC or ETH implied volatility" in out
+        # The sentence must not claim anything about what Deribit itself lists:
+        # nothing at runtime checks SUPPORTED_CURRENCIES against the exchange.
+        assert "Deribit lists no options" not in out
+        assert "no listed options market" not in out
         # What a *recognized* risk asset would have got is the DVOL level, not the
         # volatility surface — the skew never transfers. Pinned literally: the
         # structural assertions below pass under either wording.
@@ -1279,9 +1694,14 @@ class TestReport:
         assert "window ending 2026-07-09" in out
         assert "on 2026-07-09" in out
 
-    def test_invalid_curr_date_raises(self):
-        with pytest.raises(ValueError):
+    def test_invalid_curr_date_raises_the_vendor_error_not_a_bare_valueerror(self):
+        # curr_date is an LLM-supplied tool argument. A bare ValueError lands in
+        # route_to_vendor's generic lane and is logged with a traceback as "Vendor
+        # 'deribit' failed" — a caller's typo reported as a vendor outage.
+        with pytest.raises(deribit.DeribitError, match="is not a yyyy-mm-dd date") as excinfo:
             _report(curr_date="not-a-date")
+        assert type(excinfo.value) is deribit.DeribitError
+        assert "not-a-date" in str(excinfo.value)
 
     def test_missing_wing_renders_as_not_available(self):
         chain = [
@@ -1298,6 +1718,44 @@ class TestReport:
         assert "**RR25 (25Δ call IV − 25Δ put IV):** n/a" in out
         assert "no wing vol is extrapolated" in out
 
+    def test_a_mixed_case_chain_still_groups_into_one_expiry(self):
+        # The expiry token returned by parse_instrument_name is BOTH the grouping
+        # key (`c.expiry == expiry`) and the printed expiry, so dropping its
+        # `.strip().upper()` splits one expiry into two buckets: each holds half
+        # the ladder, neither brackets both wings, and the report shows a
+        # thinned-out surface for an expiry that was fully quoted. The same edit
+        # in parse_expiry drops a padded token on the 6/7-character length check,
+        # and in parse_instrument_name drops a lowercase "c"/"p" option type — so
+        # one chain carrying all four shapes covers all three sites.
+        mixed = []
+        for i, row in enumerate(CHAIN):
+            row = dict(row)
+            parts = row["instrument_name"].split("-")
+            if len(parts) == 4 and parts[1] == "28AUG26":
+                if i % 4 == 0:
+                    parts[1] = parts[1].lower()
+                elif i % 4 == 1:
+                    parts[1] = f" {parts[1]} "
+                elif i % 4 == 2:
+                    parts[3] = parts[3].lower()
+                else:
+                    parts[3] = f" {parts[3]} "
+                row["instrument_name"] = "-".join(parts)
+            mixed.append(row)
+        # All four shapes are actually present, or this proves nothing.
+        names = [r["instrument_name"] for r in mixed]
+        assert "BTC-28aug26-60000-C" in names
+        assert "BTC- 28AUG26 -60000-P" in names
+        assert "BTC-28AUG26-61000-c" in names
+        assert "BTC-28AUG26-61000- P " in names
+        out = _report(chain=mixed)
+        assert "**Expiry used:** 28AUG26 — 23.1 days out" in out
+        assert "8 call quotes and 8 put quotes on this expiry yielded a usable delta" in out
+        # The full surface survives, exactly as on the untouched fixture.
+        assert "**25Δ call IV:** 29.56% (between the 67,000 and 68,000 strikes)" in out
+        assert "**25Δ put IV:** 34.30% (between the 61,000 and 62,000 strikes)" in out
+        assert "28aug26" not in out
+
 
 @pytest.mark.unit
 class TestDvolSampleHonesty:
@@ -1312,7 +1770,7 @@ class TestDvolSampleHonesty:
             "5 daily readings, and the latest reading is itself in that sample, so a "
             "percentile over it could not read below 20%" in out
         )
-        assert "**30d range:** min 40.00 / max 40.40 over 5 daily readings" in out
+        assert "**30d range:** min 40.00% / max 40.40% over 5 daily readings" in out
         assert "sits at the" not in out
         # ... and the reading line drops the DVOL clause rather than stating it.
         assert "latest DVOL reading" not in out
@@ -1323,12 +1781,34 @@ class TestDvolSampleHonesty:
         # which used to render as "DVOL is near the top of its 30-day range".
         out = _report(dvol={"data": [_candle("2026-05-01", 58.0)]})
         assert "not computed — no DVOL reading falls inside the 30 days ending 2026-08-05" in out
-        assert "**DVOL (30-day implied vol index), latest:** 58.00 on 2026-05-01" in out
+        assert "**DVOL (30-day implied vol index), latest:** 58.00% annualized on 2026-05-01" in out
         # The reading is inside the 365-day percentile window even though it is
         # outside the 30-day range window — but one reading is far too few.
         assert "**365d percentile:** not computed" in out
         assert "sits at the" not in out
         assert "Data lag" in out
+
+    def test_a_series_entirely_outside_the_percentile_window_says_so_without_dividing_by_zero(
+        self,
+    ):
+        # The percentile's EMPTY-window branch, which nothing reached: every other
+        # sparse test leaves at least one reading inside the 365 days, so the
+        # non-empty branch always answered — and that branch computes
+        # `100 / len(pct_window)`, a ZeroDivisionError the moment it does not.
+        # Reachable because the fetch buffer runs 10 days beyond the window, so a
+        # feed that stopped just over a year ago still returns a latest reading
+        # with nothing inside either statistics window.
+        out = _report(dvol={"data": [_candle("2025-07-31", 58.0)]})
+        assert (
+            "**365d percentile:** not computed — no DVOL reading falls inside the 365 days "
+            "ending 2026-08-05" in out
+        )
+        # The "latest reading is itself in that sample" rationale belongs to the
+        # other branch: appended here it would claim an empty window contains it.
+        assert "the latest reading is itself in that sample" not in out
+        assert "could not read below" not in out
+        # The level still renders, which is the whole point of the fetch buffer.
+        assert "**DVOL (30-day implied vol index), latest:** 58.00% annualized on 2025-07-31" in out
 
     def test_the_percentile_gate_counts_its_own_window_not_the_range_window(self):
         # The whole point of the 365-day widening: a feed that published daily for
@@ -1373,10 +1853,15 @@ class TestDvolSampleHonesty:
         out = _report(dvol=_dvol_days(15, end=end))
         assert f"latest DVOL reading (as of {end}, 10 days old) sits at the" in out
 
-    def test_a_fresh_reading_carries_no_age_qualifier(self):
+    def test_a_fresh_reading_is_dated_but_carries_no_age_qualifier(self):
+        # The as-of date is unconditional: the reading line is the one clause a
+        # downstream summary quotes on its own, and a reading one or two days old
+        # used to be quoted with no date at all. Only the "N days old" half and the
+        # lag note stay gated on MAX_DATA_LAG_DAYS.
         out = _report()
         assert "Data lag" not in out
-        assert "latest DVOL reading sits at the" in out
+        assert "latest DVOL reading (as of 2026-08-05) sits at the" in out
+        assert "days old" not in out
 
 
 @pytest.mark.unit
@@ -1392,7 +1877,7 @@ class TestHistoricalDate:
 
     def test_dvol_half_is_still_served(self):
         out = _report(curr_date="2026-07-20")
-        assert "**DVOL (30-day implied vol index), latest:** 36.26 on 2026-07-20" in out
+        assert "**DVOL (30-day implied vol index), latest:** 36.26% annualized on 2026-07-20" in out
         assert "The DVOL history below IS filtered to 2026-07-20" in out
 
     def test_a_backtest_date_is_not_told_its_own_data_is_stale(self):
@@ -1509,6 +1994,99 @@ class TestHistoricalDate:
         with pytest.raises(deribit.DeribitError, match="not served for the historical date"):
             _report(curr_date="2026-07-20", dvol=deribit.DeribitError("dvol down"))
 
+    @pytest.mark.parametrize("curr_date,days_ahead", [("2026-08-07", 2), ("2026-09-01", 27)])
+    def test_a_date_further_ahead_than_the_tolerance_withholds_the_chain(
+        self, curr_date, days_ahead
+    ):
+        # One day covers every timezone on earth, so past that the gap is not an
+        # offset but a bad LLM-supplied argument, and "the live book, weeks before
+        # the analysis date" is not a reading of that date under any reading. Both
+        # ends of the range: two days is the first withheld value, and a month out
+        # must not fall through to some other branch.
+        out, recorder = _run_report(curr_date=curr_date)
+        assert recorder.endpoints() == {DVOL_ENDPOINT}
+        assert (
+            f"_Analysis date {curr_date} is {days_ahead} days ahead of the UTC clock "
+            f"(2026-08-05), further than any timezone offset explains." in out
+        )
+        assert (
+            f"**Options chain (ATM IV / 25Δ skew):** not served for an analysis date "
+            f"{days_ahead} days ahead of the UTC clock — see the note above. Do not "
+            f"substitute today's skew for {curr_date}." in out
+        )
+        # The ordinary ahead-of-clock note must not ALSO fire: it promises a live
+        # book below that was never fetched.
+        assert "The chain figures below are the live book as of" not in out
+        assert "Historical date:" not in out
+        # The DVOL half is genuinely date-filtered and is still served.
+        assert "**DVOL (30-day implied vol index), latest:** 34.43" in out
+
+    def test_the_future_tolerance_is_the_constant_not_a_hardcoded_day(self, monkeypatch):
+        # A literal `> 1` in the comparison behaves identically at today's value,
+        # so the two forms are indistinguishable from behaviour alone — and the
+        # constant carries the whole rationale for the number. Move it and the
+        # boundary must move with it.
+        assert deribit.MAX_FUTURE_DAYS == 1
+        # At the shipped value, one day ahead is served (a Taipei-clock morning)
+        # and two days ahead is not.
+        assert _run_report(curr_date="2026-08-06")[1].endpoints() == {
+            DVOL_ENDPOINT,
+            CHAIN_ENDPOINT,
+        }
+        assert _run_report(curr_date="2026-08-07")[1].endpoints() == {DVOL_ENDPOINT}
+        monkeypatch.setattr(deribit, "MAX_FUTURE_DAYS", 3)
+        out, recorder = _run_report(curr_date="2026-08-07")
+        assert recorder.endpoints() == {DVOL_ENDPOINT, CHAIN_ENDPOINT}
+        assert "further than any timezone offset explains" not in out
+        assert "is ahead of the UTC clock (2026-08-05)" in out
+
+    def test_dvol_failure_on_a_far_future_date_names_that_reason(self):
+        # The fourth branch of the both-halves-failed raise. Without it a
+        # far-future date falls through to "Deribit returned neither DVOL nor an
+        # options chain", which reports a chain outage that never happened — the
+        # chain was withheld by policy and never requested.
+        with pytest.raises(deribit.DeribitError) as excinfo:
+            _report(curr_date="2026-08-07", dvol=deribit.DeribitError("dvol down"))
+        assert str(excinfo.value) == (
+            "Deribit DVOL is unavailable for BTC (dvol down), and the options chain is not "
+            "served for 2026-08-07, which is 2 days ahead of the UTC clock (2026-08-05)"
+        )
+
+    def test_the_chain_is_dated_by_the_clock_it_was_actually_fetched_on(self):
+        # DVOL is fetched first, and its worst case is two timeouts plus the retry
+        # pause (~62s), so the instant taken at the top of the function is not
+        # when the book was read. The clock is re-taken immediately before the
+        # chain fetch, and that second instant must drive BOTH the printed
+        # snapshot time AND the tenor arithmetic — a single patched return value
+        # makes the two indistinguishable, which is why this uses a side_effect
+        # list. Fourteen hours apart so the tenor moves a visible tenth of a day.
+        out, _ = _run_report_with_clocks([NOW, datetime(2026, 8, 5, 20, 6, tzinfo=timezone.utc)])
+        assert "**Chain snapshot:** taken 2026-08-05T20:06:00Z" in out
+        assert "06:06:00Z" not in out
+        # parse_chain / compute_skew run against the same second instant.
+        assert "**Expiry used:** 28AUG26 — 22.5 days out" in out
+        assert "28AUG26 (22.5-day) chain" in out
+        assert "23.1 days out" not in out
+
+    def test_a_chain_fetch_that_crosses_utc_midnight_is_withheld_as_historical(self):
+        # The reason the clock is re-taken rather than reused: across a UTC
+        # midnight the opening instant is not even the same DAY as the fetch, so
+        # curr_date = D would be served the D+1 book. That is precisely the
+        # lookahead the withholding rule exists to prevent, and it is invisible to
+        # any test that pins the clock to one value.
+        out, recorder = _run_report_with_clocks(
+            [
+                datetime(2026, 8, 5, 23, 59, 30, tzinfo=timezone.utc),
+                datetime(2026, 8, 6, 0, 0, 30, tzinfo=timezone.utc),
+            ]
+        )
+        assert recorder.endpoints() == {DVOL_ENDPOINT}
+        assert "**Options chain (ATM IV / 25Δ skew):** not served for a historical analysis" in out
+        assert "Historical date:" in out
+        assert "Do not substitute today's skew for 2026-08-05" in out
+        # The DVOL half is unaffected and still dated by the FIRST instant's day.
+        assert "**DVOL (30-day implied vol index), latest:** 34.43% annualized on 2026-08-05" in out
+
 
 @pytest.mark.unit
 class TestPartialDegradation:
@@ -1530,8 +2108,49 @@ class TestPartialDegradation:
         # on or before curr_date. Calling that "the volatility-index request
         # failed" sends an operator to the network when the network was fine.
         out = _report(dvol={"data": [_candle("2026-08-06", 40.0)]})
-        assert "**DVOL:** unavailable — No DVOL readings on or before 2026-08-05" in out
+        assert "**DVOL:** unavailable — No BTC DVOL readings on or before 2026-08-05" in out
         assert "request failed" not in out
+
+    def test_an_unusable_chain_response_is_not_called_a_failed_request_either(self):
+        # The mirror of the DVOL case above, and untested: four of the five
+        # reachable causes come from a SUCCESSFUL 200. Here every row fails the
+        # field checks — the network was fine — so naming it "the chain request
+        # failed" sends whoever is on call hunting an outage that will never pass,
+        # in the same sentence that quotes the module saying otherwise.
+        out = _report(chain=[{"instrument_name": "BTC-28AUG26-64000-C"}])
+        assert (
+            "**Options chain (ATM IV / 25Δ skew):** unavailable — Deribit returned no usable "
+            "BTC option contracts" in out
+        )
+        assert "request failed" not in out
+        assert "The DVOL figures above are unaffected; do not fabricate skew." in out
+
+    def test_the_source_bullet_advertises_a_dvol_window_only_when_dvol_arrived(self):
+        # Unconditional, this clause advertised "DVOL window ending 2026-08-05"
+        # two lines above "**DVOL:** unavailable" — the header bullet is exactly
+        # what a downstream summary keeps when it drops the body, so it would hand
+        # the next agent a window that was never populated.
+        failed = _report(dvol=deribit.DeribitError("dvol down"))
+        assert "- Source: deribit.com public API\n" in failed
+        assert "DVOL window ending" not in failed
+        assert "**DVOL:** unavailable" in failed
+        # ... and it is still there on the ordinary path.
+        assert "- Source: deribit.com public API | DVOL window ending 2026-08-05" in _report()
+
+    def test_a_failed_half_logs_a_traceback_not_just_its_message(self, caplog):
+        # `exc_info=True` is the difference between an ordinary vendor outage and
+        # a bug in this module: _try_fetch deliberately catches bare Exception, so
+        # without the traceback a TypeError in the parsing code is logged as
+        # "Deribit options chain unavailable" and is indistinguishable from
+        # Deribit being down. Nothing asserted it, so it could be dropped.
+        with caplog.at_level(logging.WARNING):
+            _report(chain=RuntimeError("something nobody predicted"))
+        records = [
+            r for r in caplog.records if "options chain unavailable for BTC" in r.getMessage()
+        ]
+        assert len(records) == 1
+        assert records[0].exc_info is not None
+        assert records[0].exc_info[0] is RuntimeError
 
     def test_a_mixed_outage_is_not_reported_as_a_throttle(self):
         # `all`, not `any`: one 429 alongside a genuinely broken endpoint must not
@@ -1654,8 +2273,14 @@ class TestPartialDegradation:
         assert deribit._readings(count) == expected
 
     def test_a_one_reading_feed_renders_singular_end_to_end(self):
+        # A single reading buys no range at all: min and max would both be the
+        # level already printed above, which reads as a month of pinned vol.
         out = _report(dvol={"data": [_candle("2026-08-05", 60.5)]})
-        assert "**30d range:** min 60.50 / max 60.50 over 1 daily reading" in out
+        assert (
+            "**30d range:** not computed — the 30 days ending 2026-08-05 hold only 1 daily "
+            "reading, so a min and a max would both be the level above" in out
+        )
+        assert "min 60.50" not in out
         assert "hold only 1 daily reading, and the latest reading is itself in that sample" in out
         assert "1 daily readings" not in out
 

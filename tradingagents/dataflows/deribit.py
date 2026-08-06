@@ -10,15 +10,19 @@ analyst as a crypto-only volatility-regime read:
   covers all of that UTC day — and the candle dated *today* is still open, which
   the report labels and which is why every line calls the series "readings"
   rather than "closes".
-* **25-delta skew** — computed here from the live options chain: ATM implied vol,
-  the 25-delta call and put vols, and the risk reversal between them. The chain
-  endpoint takes no date, so it can only ever describe the present. It is
-  **withheld for a ``curr_date`` earlier than today**, and the report says so,
-  because quoting today's chain on a past date is future information and a prose
-  warning is not an auditable guard. A ``curr_date`` *later* than the UTC clock
-  is served with a note: callers derive it from a local clock, so east of UTC it
-  routinely runs a few hours ahead, and the live chain is then older than the
-  analysis date rather than newer.
+* **25-delta skew** — computed here from the live options chain: ATM (50-delta)
+  implied vol, the 25-delta call and put vols, and the risk reversal between
+  them. Read for one expiry inside a bounded band around 30 days, because a risk
+  reversal is not comparable across tenors and every downstream agent reads this
+  as a ~30-day figure. The chain endpoint takes no date, so it can only ever
+  describe the present. It is **withheld for a ``curr_date`` earlier than
+  today**, and the report says so, because quoting today's chain on a past date
+  is future information and a prose warning is not an auditable guard. A
+  ``curr_date`` up to ``MAX_FUTURE_DAYS`` *later* than the UTC clock is served
+  with a note: callers derive it from a local clock, so east of UTC it routinely
+  runs a few hours ahead, and the live chain is then older than the analysis date
+  rather than newer. Further ahead than that is a bad argument rather than a
+  timezone, and the chain is withheld again.
 
 The two halves fail independently. Losing the chain should not also cost the
 DVOL history (and vice versa), so each is fetched inside its own try and the
@@ -29,13 +33,14 @@ then degrades the optional ``options_data`` category to a sentinel. A throttle
 raises ``VendorRateLimitError`` rather than ``DeribitError`` so the router keeps
 its rate-limit lane.
 
-Deribit lists options and publishes DVOL for BTC and ETH only. Another recognized
-crypto risk asset (SOL, XRP, ...) has no chain of its own, so BTC's DVOL **level**
+This vendor reads a chain and a DVOL index for BTC and ETH. Another recognized
+crypto risk asset (SOL, XRP, ...) is not read directly, so BTC's DVOL **level**
 is served as a market-wide crypto-vol proxy, labelled as such — but its skew is
 not: crypto volatility moves together, which is what makes BTC's index the
 benchmark, whereas a 25-delta risk reversal measures how much more traders will
 pay for downside in one specific underlying and does not carry across. A
-stablecoin or an unrecognized symbol gets a no-signal note.
+stablecoin or an unrecognized symbol gets a no-signal note. No rendered line
+claims Deribit itself lists nothing for those symbols — see SUPPORTED_CURRENCIES.
 
 Uncached by design: a tool call costs two GETs (one where the chain is withheld)
 against endpoints with no rate-limit concern at this volume, and both halves are
@@ -61,9 +66,17 @@ _FetchedT = TypeVar("_FetchedT")
 
 DERIBIT_BASE = "https://www.deribit.com/api/v2/public"
 
-# Currencies for which Deribit lists options and publishes a DVOL index. Other
-# currencies are quotable on the exchange but return an empty chain / empty DVOL
-# series, so they are proxied to BTC rather than queried.
+# The currencies this vendor reads a chain and a DVOL index for. Everything else
+# recognized as a crypto risk asset is proxied to BTC's DVOL level rather than
+# queried.
+#
+# Nothing at runtime checks this against Deribit's actual listings, which is why
+# no rendered line states it as a fact ABOUT DERIBIT. It used to: the reports
+# said "Deribit lists no options for 'SOL'", an exchange claim derived from a
+# two-element tuple — and one this module elsewhere assumes is false, since
+# parse_instrument_name documents skipping the decimal-strike form "Deribit uses
+# on currencies this module does not serve". The wording now claims only what the
+# tuple can support: what this vendor reads.
 SUPPORTED_CURRENCIES = ("BTC", "ETH")
 
 # Network timeout (seconds), consistent with the other vendors.
@@ -129,20 +142,55 @@ _DVOL_MAX_CANDLES_PER_RESPONSE = 1000
 # 24/7 market, so anything past a couple of days means the feed itself stalled.
 MAX_DATA_LAG_DAYS = 2
 
-# Expiry selection for the skew calculation: the listed expiry closest to 30 days
-# out, ignoring anything inside 7 days. Near-expiry contracts carry pin/gamma
-# noise that distorts the delta-to-strike mapping the interpolation relies on.
+# How far ahead of the UTC clock ``curr_date`` may run and still be served the
+# live chain. The tolerance exists for exactly one reason — callers derive
+# curr_date from a LOCAL clock (cli/main.py does), so east of UTC it runs a few
+# hours ahead for the first hours of every local day — and one day covers every
+# timezone on earth. Past that, the argument is not a timezone offset but a
+# mistake: curr_date arrives from an LLM tool call, and the sibling fear_greed
+# vendor clamps its own LLM-supplied window (MAX_LOOKBACK_DAYS) for the same
+# reason. A far-future date has the chain withheld rather than served, because
+# "the live book, months before the analysis date" is not a reading of that date
+# under any interpretation. The DVOL half is genuinely date-filtered and is still
+# served, exactly as on a historical date.
+MAX_FUTURE_DAYS = 1
+
+# Expiry selection for the skew calculation: the eligible expiry closest to 30
+# days out, ignoring anything inside 7 days. Near-expiry contracts carry
+# pin/gamma noise that distorts the delta-to-strike mapping the interpolation
+# relies on. "Eligible" is bounded on both sides — see MAX_TENOR_DISTANCE_DAYS.
 TARGET_DTE_DAYS = 30
 MIN_DTE_DAYS = 7
 
+# How far from TARGET_DTE_DAYS an expiry may sit and still be read as this
+# report's ~30-day figure. Without a ceiling the only tenor rule was the 7-day
+# floor, so a thinned book whose nearest qualifying expiry was 96 days out
+# rendered a 96-day risk reversal under the section's 30-day framing, with
+# is_fallback False because it genuinely was the nearest — correct by the ranking
+# and wrong to every downstream agent that reads RR25 as a ~30-day number.
+# Bounded rather than labelled more loudly, because that is how this module
+# treats every other non-transferable figure: the proxied skew and the historical
+# chain are WITHHELD, on the stated grounds that a caveat has to survive each
+# summarisation hop and the number does not. A tenor from an unrelated part of
+# the surface is the same kind of claim.
+MAX_TENOR_DISTANCE_DAYS = 15
+
+# The eligible tenor band, derived so that neither bound can drift out of
+# agreement with the constants above. At the current values the distance bound
+# (15 days) is the binding floor and MIN_DTE_DAYS never fires; the max() keeps
+# the pin-noise floor honest anyway, so raising MAX_TENOR_DISTANCE_DAYS past
+# TARGET_DTE_DAYS - MIN_DTE_DAYS (23) re-arms it instead of silently admitting
+# 2-day expiries.
+MIN_ELIGIBLE_DTE_DAYS = max(MIN_DTE_DAYS, TARGET_DTE_DAYS - MAX_TENOR_DISTANCE_DAYS)
+MAX_ELIGIBLE_DTE_DAYS = TARGET_DTE_DAYS + MAX_TENOR_DISTANCE_DAYS
+
 # How many ranked expiries compute_skew may try before giving up on a complete
 # surface: the nearest, and — if it cannot bracket both 25-delta wings — the
-# next-nearest. Deliberately not the whole ranking. Ranking is by distance from
-# TARGET_DTE_DAYS, so the tail is months out, and a risk reversal is not
-# tenor-invariant: the 25-delta strikes on a 300-day expiry sit nowhere near the
-# 30-day ones. Walking until something answers would swap "no skew today" for "a
-# skew from an unrelated tenor", and every downstream agent reads this as a
-# ~30-day figure.
+# next-nearest. Deliberately not the whole ranking, even now that the tenor band
+# bounds how far the ranking can reach. The band decides which expiries may
+# answer the ~30-day question at all; this bounds how hard the module hunts for a
+# complete pair of wings within it, so a chain whose whole band is sparse reports
+# no skew instead of quietly settling for the last entry that happened to answer.
 _MAX_EXPIRY_CANDIDATES = 2
 
 # The delta the risk reversal is quoted at (the market-standard 25-delta wing).
@@ -178,6 +226,23 @@ _MONTHS = {
 # gives the range and the sample count and computes no percentile, rather than
 # publishing a number that is an artefact of how much data arrived.
 _MIN_PERCENTILE_SAMPLE = 10
+
+# Minimum number of readings before a min/max range is worth stating. At one
+# reading the min and the max are both the latest value, so the range renders as
+# "min 62.30 / max 62.30" — the strongest possible claim about the regime (a
+# month of pinned volatility) manufactured from a single observation, and with no
+# other warning beside it: a feed that stopped for four weeks and resumed today
+# has a lag of zero, so the data-lag note does not fire either. The empty-window
+# branch already refuses to compute a range for exactly this reason ("whose min
+# and max would both be the latest value itself"); this extends that refusal to
+# the one-reading case it did not cover. Lower than the percentile's threshold
+# because a range needs only two points to say something true.
+_MIN_RANGE_SAMPLE = 2
+
+# Below this magnitude an RR25 rounds away at the report's two decimals, so the
+# two wings are level as far as anything printed can tell and the report says so
+# rather than emitting a signed zero.
+_RR_ZERO_EPSILON = 0.005
 
 
 class DeribitError(VendorError):
@@ -232,8 +297,9 @@ class SkewSnapshot(NamedTuple):
     ``is_fallback`` is True when this is NOT the expiry nearest the target tenor,
     i.e. the nearest one could not be used — it could not bracket both wings, or it
     carried no usable forward — and ``compute_skew`` stepped once past it. It exists
-    so the report cannot keep calling the expiry "the listed expiry closest to 30
-    days" while showing a different one.
+    so the report cannot keep calling the expiry "the eligible expiry closest to 30
+    days" while showing a different one. Both candidates come from the same tenor
+    band, so a fallback is still a ~30-day expiry.
     """
 
     expiry: str
@@ -290,12 +356,18 @@ class DvolReport(NamedTuple):
     stopped publishing a fortnight ago still produced "the Nth percentile of the
     365-day window", with the shortfall disclosed only in the section above and
     dropped by the first downstream summary.
+
+    ``as_of_phrase`` is always populated, not only when the feed is late. It used
+    to exist solely as a staleness warning, so a reading one or two days old — the
+    ordinary case, below MAX_DATA_LAG_DAYS — reached the reading line with no date
+    at all, and that line is the one clause downstream agents quote on its own.
+    The "N days old" half is still appended only past the threshold.
     """
 
     markdown: str
     percentile: float | None
     percentile_n: int
-    stale_phrase: str | None
+    as_of_phrase: str
 
 
 def _utc_now() -> datetime:
@@ -367,8 +439,16 @@ def _request(endpoint: str, params: dict) -> object:
                     _RETRY_DELAY_SECONDS,
                 )
                 time.sleep(_RETRY_DELAY_SECONDS)
+    # "did not return a usable response", not "unreachable": both retryable faults
+    # can arrive on an answered request — _TransientDeribitFault covers an
+    # undecodable body (only the 429 check precedes it, so an HTTP 200 serving a
+    # CDN error page lands here) and a 5xx, where the server plainly responded.
+    # Only requests.RequestException is genuinely a reachability failure, and
+    # naming it for all three sends an operator hunting an outage that a WAF
+    # interception will not explain.
     raise DeribitError(
-        f"Deribit {endpoint} unreachable after {_RETRY_ATTEMPTS} attempts: {last_error}"
+        f"Deribit {endpoint} did not return a usable response after {_RETRY_ATTEMPTS} "
+        f"attempts: {last_error}"
     ) from last_error
 
 
@@ -598,11 +678,19 @@ def _is_locally_monotone(ordered: list[tuple[float, float, float]], index: int) 
 
 
 def rank_expiries(contracts: list[Contract], now: datetime) -> list[str]:
-    """Expiry tokens clearing the 7-day floor, best-first by closeness to 30 days.
+    """Expiry tokens inside the eligible tenor band, best-first by closeness to 30 days.
+
+    Eligible means ``MIN_ELIGIBLE_DTE_DAYS <= DTE <= MAX_ELIGIBLE_DTE_DAYS``, i.e.
+    within ``MAX_TENOR_DISTANCE_DAYS`` of the 30-day target and never inside the
+    ``MIN_DTE_DAYS`` pin-noise floor. The ceiling is what stops a thinned book from
+    answering the ~30-day question with a 96-day expiry; the floor is why a 3-day
+    expiry is not the answer either. Returns an empty list when nothing qualifies,
+    and ``compute_skew`` then reports no skew rather than a figure from an
+    unrelated tenor.
 
     Ties (two expiries equidistant from the 30-day target) go to the longer-dated
-    one, consistent with the reason the 7-day floor exists at all: closer to expiry
-    is the noisier side. Returns an empty list when nothing clears the floor.
+    one, consistent with the reason the floor exists at all: closer to expiry is
+    the noisier side.
 
     A ranking rather than a single winner because a sparse or non-monotone stretch
     around the wing is a property of one expiry, not of the surface: the neighbour
@@ -612,21 +700,9 @@ def rank_expiries(contracts: list[Contract], now: datetime) -> list[str]:
     tenors: dict[str, float] = {}
     for contract in contracts:
         days = (contract.expiry_dt - now).total_seconds() / 86400.0
-        if days >= MIN_DTE_DAYS:
+        if MIN_ELIGIBLE_DTE_DAYS <= days <= MAX_ELIGIBLE_DTE_DAYS:
             tenors[contract.expiry] = days
     return sorted(tenors, key=lambda token: (abs(tenors[token] - TARGET_DTE_DAYS), -tenors[token]))
-
-
-def select_expiry(contracts: list[Contract], now: datetime) -> str | None:
-    """The best-ranked expiry token, or None when nothing clears the 7-day floor.
-
-    The expiry the report ends up using is NOT necessarily this one: ``compute_skew``
-    may step once to the next-ranked expiry when this one cannot be used. This names
-    the head of that ranking, which is what the tenor rules (the 7-day floor, the
-    30-day target, the longer-dated tie-break) are stated in terms of.
-    """
-    ranked = rank_expiries(contracts, now)
-    return ranked[0] if ranked else None
 
 
 def _median(values: list[float]) -> float:
@@ -649,22 +725,23 @@ def compute_skew(contracts: list[Contract], now: datetime) -> SkewSnapshot:
     brackets both wings the first one's snapshot is returned, so the forward, ATM
     and whichever wing exists are still reported.
 
-    Deliberately NOT a walk down the whole ranking. The ranking is ordered by
-    distance from the 30-day target, so its tail is months out, and a risk reversal
-    is not tenor-invariant — the 25-delta strikes on a 300-day expiry sit nowhere
-    near the 30-day ones. Searching until something answers would trade "no skew
-    today" for "a skew from an unrelated tenor", and every downstream agent reads
-    this number as a ~30-day figure.
+    Both candidates come from ``rank_expiries``, so both are already inside the
+    eligible tenor band; the step can only ever move to another ~30-day expiry.
+    Deliberately NOT a walk down the whole ranking either, for the same reason the
+    band exists: a risk reversal is not tenor-invariant, and every downstream agent
+    reads this number as a ~30-day figure.
 
-    Raises DeribitError when no listed expiry clears the 7-day floor, or when no
-    candidate has a usable forward — the cases where there is no surface to read at
-    all. A merely *incomplete* surface is not an error: a wing the chain cannot
-    bracket comes back as None on the snapshot for the report to disclose.
+    Raises DeribitError when no listed expiry falls inside the eligible tenor band,
+    or when no candidate has a usable forward — the cases where there is no surface
+    to read at all. A merely *incomplete* surface is not an error: a wing the chain
+    cannot bracket comes back as None on the snapshot for the report to disclose.
     """
     ranked = rank_expiries(contracts, now)
     if not ranked:
         raise DeribitError(
-            f"No listed expiry is at least {MIN_DTE_DAYS} days out in the options chain"
+            f"No listed expiry falls between {MIN_ELIGIBLE_DTE_DAYS:.0f} and "
+            f"{MAX_ELIGIBLE_DTE_DAYS:.0f} days out in the options chain, so no expiry can be "
+            f"read as the {TARGET_DTE_DAYS}-day skew this report states"
         )
     first_error: DeribitError | None = None
     fallback: SkewSnapshot | None = None
@@ -684,7 +761,15 @@ def compute_skew(contracts: list[Contract], now: datetime) -> SkewSnapshot:
             fallback = snapshot
     if fallback is not None:
         return fallback
-    raise first_error  # type: ignore[misc]  # ranked non-empty and every candidate failed
+    if first_error is not None:
+        raise first_error
+    # Unreachable: ranked is non-empty, so the loop ran at least once, and every
+    # iteration either returns, records a fallback, or records a first_error.
+    # Spelled out rather than silenced with a type: ignore, so a future edit that
+    # breaks that reasoning fails with a message instead of a None-raise.
+    raise DeribitError(
+        f"No usable expiry among the {len(ranked[:_MAX_EXPIRY_CANDIDATES])} candidates tried"
+    )
 
 
 def _snapshot_for_expiry(
@@ -773,7 +858,13 @@ def _fetch_dvol(currency: str, curr_dt: datetime) -> DvolSeries:
     The span is driven by the longer of the two statistics windows (the
     percentile's), since the shorter range window is a subset of it.
     """
-    window_start = curr_dt - timedelta(days=DVOL_PERCENTILE_WINDOW_DAYS + _DVOL_FETCH_BUFFER_DAYS)
+    # max() rather than naming the percentile window directly: the span only has
+    # to cover the LONGER of the two statistics windows, and hardcoding which one
+    # that is turns a future change to DVOL_WINDOW_DAYS into a range computed over
+    # a silently truncated sample and still labelled with its full span.
+    window_start = curr_dt - timedelta(
+        days=max(DVOL_WINDOW_DAYS, DVOL_PERCENTILE_WINDOW_DAYS) + _DVOL_FETCH_BUFFER_DAYS
+    )
     end = curr_dt.replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
     result = _request(
         "get_volatility_index_data",
@@ -803,6 +894,7 @@ def _fetch_dvol(currency: str, curr_dt: datetime) -> DvolSeries:
         )
     curr_date = curr_dt.strftime("%Y-%m-%d")
     by_date: dict[str, float] = {}
+    skipped_non_positive = 0
     for row in result["data"]:
         # [timestamp_ms, open, high, low, close]; a shape change here would
         # silently reinterpret which number is the close, so it is fatal.
@@ -823,6 +915,7 @@ def _fetch_dvol(currency: str, curr_dt: datetime) -> DvolSeries:
             # fatal, like an unusable chain row: one bad candle should not cost a
             # year of history, and dropping the newest one simply leaves an older
             # reading as the latest, which the report dates and ages honestly.
+            skipped_non_positive += 1
             logger.warning(
                 "Skipping non-positive Deribit DVOL close %r dated %s for %s",
                 row[4],
@@ -835,7 +928,19 @@ def _fetch_dvol(currency: str, curr_dt: datetime) -> DvolSeries:
             # a partial candle alongside a settled one) keeps the later value.
             by_date[day] = float(row[4])
     if not by_date:
-        raise DeribitError(f"No DVOL readings on or before {curr_date}")
+        # Two different states, and the message is rendered verbatim into
+        # "**DVOL:** unavailable — ...". "No readings published" sends the reader
+        # to Deribit's status page; "every reading was non-positive" is a corrupt
+        # feed that answered with a full history. Also names the currency, which
+        # is the non-obvious part on a proxied asset — every other fetch-side
+        # error in this module states it.
+        if skipped_non_positive:
+            raise DeribitError(
+                f"Every {currency} DVOL reading on or before {curr_date} was non-positive "
+                f"({skipped_non_positive} skipped), so the feed returned history but no usable "
+                f"level"
+            )
+        raise DeribitError(f"No {currency} DVOL readings on or before {curr_date}")
     dates = sorted(by_date)
     return DvolSeries(dates=dates, closes=[by_date[d] for d in dates])
 
@@ -848,7 +953,7 @@ def _fetch_dvol(currency: str, curr_dt: datetime) -> DvolSeries:
 def _classify_asset(asset: str) -> tuple[str | None, bool]:
     """Classify a caller symbol for options reporting: ``(currency, is_proxy)``.
 
-    * ``(BTC|ETH, False)`` — Deribit lists options and publishes DVOL for it.
+    * ``(BTC|ETH, False)`` — this vendor reads a chain and a DVOL index for it.
     * ``("BTC", True)`` — a recognized crypto *risk* asset with no Deribit chain of
       its own (SOL, XRP, ...): BTC's DVOL *level* is the market's crypto-vol
       benchmark, so it is served as a market-wide proxy. Its skew is not — see the
@@ -902,8 +1007,16 @@ def _ordinal(value: float) -> str:
     "38th", so the same half-percent landed a different way depending on the
     neighbouring digit. Percentiles here are always positive, so ``floor(x + 0.5)``
     is exactly half-up.
+
+    Floored at 1st. A percentile here counts the readings at or below the latest
+    one, and the latest reading is itself in the sample, so the true value can
+    never be 0 — its minimum is 100/n. Widening the window to 365 days made that
+    minimum 0.27, which half-up rounding renders "0th": a figure contradicting the
+    definition printed on the same line, reachable any time BTC's DVOL prints a
+    one-year low. (At 30 days the floor was 3.33, so nothing below "3rd" could
+    appear and this could not arise.)
     """
-    number = math.floor(value + 0.5)
+    number = max(1, math.floor(value + 0.5))
     if 11 <= number % 100 <= 13:
         suffix = "th"
     else:
@@ -911,8 +1024,13 @@ def _ordinal(value: float) -> str:
     return f"{number}{suffix}"
 
 
-def _dvol_section(series: DvolSeries, curr_dt: datetime, curr_date: str, today: str) -> DvolReport:
+def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolReport:
     """Render the DVOL lines.
+
+    ``curr_date`` is derived here rather than passed alongside ``curr_dt``. As two
+    parameters nothing made them agree, and a mismatched pair computes both
+    windows off one while every rendered line names the other — a silently wrong
+    window of exactly the kind the ``_window`` bound comment exists to prevent.
 
     The range and the percentile are computed over DIFFERENT windows and printed on
     separate lines, each naming its own span and its own sample count. Folding them
@@ -932,6 +1050,7 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, curr_date: str, today: 
     against whichever of the two is earlier (no feed can be behind a date that
     has not happened yet).
     """
+    curr_date = curr_dt.strftime("%Y-%m-%d")
 
     # Exclusive lower bound: N calendar days ending at curr_date is
     # curr_date-(N-1) ... curr_date. An inclusive bound would put N+1 readings in a
@@ -949,9 +1068,13 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, curr_date: str, today: 
         _percentile_of(latest, pct_window) if len(pct_window) >= _MIN_PERCENTILE_SAMPLE else None
     )
 
+    # The unit is stated because the chain half labels its own figures ("39.59%",
+    # "vol points") and this one did not, leaving a downstream agent comparing
+    # "DVOL 40.45" against "ATM IV 39.59%" with nothing in the text saying the two
+    # are the same quantity. Both are annualized vol points.
     latest_line = (
         f"**DVOL ({DVOL_INDEX_TENOR_DAYS}-day implied vol index), latest:** "
-        f"{latest:.2f} on {series.latest_date}"
+        f"{latest:.2f}% annualized on {series.latest_date}"
     )
     if series.latest_date == today:
         # Deribit stamps a 1D candle at the START of its day, so the candle dated
@@ -971,9 +1094,18 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, curr_date: str, today: 
             f"{DVOL_WINDOW_DAYS} days ending {curr_date}; the level above is the newest "
             f"reading Deribit has published at all"
         )
+    elif len(window) < _MIN_RANGE_SAMPLE:
+        # The same objection as the empty case, one reading later: min and max
+        # would both be the latest value, printing a collapsed range that reads as
+        # a month of pinned volatility.
+        lines.append(
+            f"**{DVOL_WINDOW_DAYS}d range:** not computed — the {DVOL_WINDOW_DAYS} days ending "
+            f"{curr_date} hold only {_readings(len(window))}, so a min and a max would both be "
+            f"the level above"
+        )
     else:
         lines.append(
-            f"**{DVOL_WINDOW_DAYS}d range:** min {min(window):.2f} / max {max(window):.2f} "
+            f"**{DVOL_WINDOW_DAYS}d range:** min {min(window):.2f}% / max {max(window):.2f}% "
             f"over {_readings(len(window))}"
         )
 
@@ -1014,7 +1146,11 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, curr_date: str, today: 
     lag_days = (
         datetime.strptime(lag_from, "%Y-%m-%d") - datetime.strptime(series.latest_date, "%Y-%m-%d")
     ).days
-    stale_phrase = None
+    # Always dated, not only when late: this phrase is the only date the reading
+    # line carries, and that line is what a downstream summary quotes on its own.
+    # Gated on the lag threshold, a reading one or two days old — the ordinary
+    # case — was quoted bare and read as current.
+    as_of_phrase = f"as of {series.latest_date}"
     if lag_days > MAX_DATA_LAG_DAYS:
         # A successful fetch is not the same as a live series: Deribit can answer
         # normally with a history that stopped updating. (The threshold makes
@@ -1024,8 +1160,8 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, curr_date: str, today: 
             f"before {lag_from} — the fetch succeeded, so the index itself has not printed "
             f"since. Treat the level as {lag_days} days old._"
         )
-        stale_phrase = f"as of {series.latest_date}, {lag_days} days old"
-    return DvolReport("\n".join(lines), percentile, len(pct_window), stale_phrase)
+        as_of_phrase = f"as of {series.latest_date}, {lag_days} days old"
+    return DvolReport("\n".join(lines), percentile, len(pct_window), as_of_phrase)
 
 
 def _format_wing(quote: WingQuote | None) -> str:
@@ -1053,6 +1189,18 @@ def _wing_line(quote: WingQuote | None, n_quotes: int) -> str:
     return "n/a (only one usable quote on this side, so no pair can bracket this point)"
 
 
+def _rr_points(rr: float) -> str:
+    """Signed RR25 at the report's two decimals, with no negative zero.
+
+    An RR25 in (-0.005, 0) formats as "-0.00": a minus sign asserting the put wing
+    is the richer one, bolted to a magnitude saying the wings are level. That
+    reads as a data error rather than as the flat smile it is. Anything that
+    rounds away at two decimals is printed as +0.00, which is what two decimals
+    actually resolve.
+    """
+    return f"{0.0 if abs(rr) < _RR_ZERO_EPSILON else rr:+.2f}"
+
+
 def _atm_line(skew: SkewSnapshot) -> str:
     """Render the ATM point, which is interpolated per curve rather than per side.
 
@@ -1073,16 +1221,24 @@ def _atm_line(skew: SkewSnapshot) -> str:
 
 def _skew_section(skew: SkewSnapshot, snapshot_time: str) -> str:
     """Render the live-chain lines for the selected expiry."""
+    # Both branches name the same exclusions. The fallback branch used to name
+    # none of them, so a report that stepped to the second candidate dropped the
+    # only line carrying them — the same partial-update defect the non-fallback
+    # wording was widened to fix.
+    eligibility = (
+        f"only expiries {MIN_ELIGIBLE_DTE_DAYS:.0f}-{MAX_ELIGIBLE_DTE_DAYS:.0f} days out are "
+        f"eligible, since a risk reversal is not comparable across tenors, and contracts with "
+        f"no open interest never enter the smile"
+    )
     if skew.is_fallback:
         expiry_basis = (
-            f"the expiry nearest {TARGET_DTE_DAYS} days could not be used, so this is the "
-            f"next qualifying expiry"
+            f"the eligible expiry nearest {TARGET_DTE_DAYS} days could not be used, so this is "
+            f"the next eligible one; {eligibility}"
         )
     else:
         expiry_basis = (
-            f"the listed expiry closest to {TARGET_DTE_DAYS} days among those this report "
-            f"can read (expiries inside {MIN_DTE_DAYS} days are excluded as pin-noisy, and "
-            f"contracts with no open interest never enter the smile)"
+            f"the eligible expiry closest to {TARGET_DTE_DAYS} days among those this report "
+            f"can read; {eligibility}"
         )
     lines = [
         f"**Chain snapshot:** taken {snapshot_time} (Deribit publishes no historical chain, "
@@ -1101,7 +1257,7 @@ def _skew_section(skew: SkewSnapshot, snapshot_time: str) -> str:
             "wings, so the risk reversal is not computed (no wing vol is extrapolated)"
         )
     else:
-        lines.append(f"**RR25 (25Δ call IV − 25Δ put IV):** {skew.rr25:+.2f} vol points")
+        lines.append(f"**RR25 (25Δ call IV − 25Δ put IV):** {_rr_points(skew.rr25)} vol points")
     return "\n".join(lines)
 
 
@@ -1110,7 +1266,7 @@ def _reading_line(
     skew: SkewSnapshot | None,
     percentile: float | None,
     percentile_n: int,
-    dvol_stale: str | None = None,
+    dvol_as_of: str | None = None,
 ) -> str:
     """Restate the two headline numbers in words and define them — nothing further.
 
@@ -1133,24 +1289,28 @@ def _reading_line(
     parts = []
     if skew is not None and skew.rr25 is not None:
         rr = skew.rr25
-        tenor = f"{skew.expiry} ({skew.days_to_expiry:.0f}-day)"
-        if rr == 0:
+        # One decimal, matching _skew_section's "N.N days out". At ":.0f" this used
+        # format's banker's rounding — the very thing _ordinal goes out of its way
+        # to avoid — so one report could say "22.5 days out" and "(22-day)".
+        tenor = f"{skew.expiry} ({skew.days_to_expiry:.1f}-day)"
+        if abs(rr) < _RR_ZERO_EPSILON:
             parts.append(
                 f"in the live {currency} {tenor} chain both 25Δ wings carry the same "
-                f"implied vol (RR25 {rr:+.2f})"
+                f"implied vol (RR25 {_rr_points(rr)})"
             )
         else:
             richer, cheaper = ("puts", "calls") if rr < 0 else ("calls", "puts")
             parts.append(
                 f"in the live {currency} {tenor} chain, 25Δ {richer} are priced "
-                f"{abs(rr):.2f} vol points above 25Δ {cheaper} (RR25 {rr:+.2f}, defined as "
-                f"25Δ call IV minus 25Δ put IV)"
+                f"{abs(rr):.2f} vol points above 25Δ {cheaper} (RR25 {_rr_points(rr)}, defined "
+                f"as 25Δ call IV minus 25Δ put IV)"
             )
     if percentile is not None:
-        # The staleness qualifier travels with the claim for the same reason the
-        # currency does: this sentence is what survives a downstream summary, and
-        # a percentile presented bare reads as current however old the reading is.
-        as_of = f" ({dvol_stale})" if dvol_stale else ""
+        # The as-of date travels with the claim for the same reason the currency
+        # does: this sentence is what survives a downstream summary, and a
+        # percentile presented bare reads as current however old the reading is.
+        # Present on every report, not only late ones — see DvolReport.
+        as_of = f" ({dvol_as_of})" if dvol_as_of else ""
         # State the sample, not just the span. "the 365-day window" reads as one
         # observation per day, so a feed that stopped publishing weeks ago still
         # sounded like a full year of evidence once this clause was quoted on its
@@ -1196,38 +1356,56 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
 
     Args:
         asset: "BTC" or "ETH" (pair forms like "BTC-USD" are accepted). A
-            recognized crypto risk asset without its own Deribit chain (SOL, XRP,
-            ...) is served BTC's DVOL alone as a market-wide crypto-vol proxy — the
-            skew is withheld, being a claim about one underlying's own demand for
-            downside; a stablecoin or unrecognized symbol gets a no-signal message.
+            recognized crypto risk asset this vendor does not read a chain for
+            (SOL, XRP, ...) is served BTC's DVOL alone as a market-wide crypto-vol
+            proxy — the skew is withheld, being a claim about one underlying's own
+            demand for downside; a stablecoin or unrecognized symbol gets a
+            no-signal message rather than a markdown report.
         curr_date: End of the DVOL window (yyyy-mm-dd). The chain half takes no
             date, so it is withheld when this is EARLIER than today's UTC date
-            rather than backfilled from the present. A curr_date later than the UTC
-            clock is served, with a note: the live chain then predates the analysis
-            date, which is not lookahead.
+            rather than backfilled from the present. A curr_date up to
+            MAX_FUTURE_DAYS later than the UTC clock is served, with a note: the
+            live chain then predates the analysis date, which is not lookahead.
+            Further ahead than that is treated like a historical date and the
+            chain is withheld, since curr_date is an LLM-supplied argument and
+            past one day the gap is a mistake rather than a timezone.
 
     Returns:
-        A markdown report: the latest DVOL with its 30-day range and (when the
-        window holds enough readings) its 365-day percentile, and — unless the
-        chain is withheld — the selected expiry, ATM IV, the 25-delta wings with
-        the strikes they were interpolated between, and the risk reversal, closing
-        with one fixed-format sentence restating those figures.
+        A markdown report: the latest DVOL with its 30-day range (when that window
+        holds at least two readings) and its 365-day percentile (when that one
+        holds enough for a percentile to mean anything), and — unless the chain is
+        withheld — the selected expiry, ATM (50Δ) IV, the 25-delta wings with the
+        strikes they were interpolated between, and the risk reversal, closing
+        with one fixed-format sentence restating those figures. An unrecognized
+        symbol returns a bare no-signal sentence instead.
 
     Raises:
-        VendorRateLimitError: when Deribit throttled both requests, so the router
-            can treat it as a throttle rather than a broken vendor.
+        VendorRateLimitError: when Deribit throttled every request actually made
+            (one, where the chain is withheld), so the router can treat it as a
+            throttle rather than a broken vendor.
         DeribitError: when nothing could be served — both halves failed, or DVOL
-            failed on a historical date where the chain is withheld by design.
-            The routing layer then degrades the optional options_data category to
-            a sentinel. Whenever either half survives, the report renders it and
-            names what is missing instead of raising.
+            failed on a date where the chain is withheld by design — and when
+            curr_date is not a yyyy-mm-dd date. The routing layer then degrades
+            the optional options_data category to a sentinel. Whenever either half
+            survives, the report renders it and names what is missing instead of
+            raising.
     """
     # Normalise curr_date BEFORE any date comparison. strptime accepts
     # non-zero-padded input ("2026-6-5"), which then compares wrong against the
     # canonical ISO candle dates — '2026-12-31' <= '2026-6-5' is True — silently
     # admitting future readings and defeating the lookahead guard. (farside and
     # fear_greed carry the same guard.)
-    curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    #
+    # Wrapped because curr_date is an LLM-supplied tool argument, and this
+    # function's Raises: contract says DeribitError / VendorRateLimitError. A bare
+    # ValueError (or TypeError for None) escapes into route_to_vendor's generic
+    # `except Exception` lane, which logs it with exc_info and reports "Vendor
+    # 'deribit' failed" — a caller's malformed argument dressed up as a vendor
+    # outage, complete with a traceback pointing at Deribit.
+    try:
+        curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    except (ValueError, TypeError) as e:
+        raise DeribitError(f"curr_date {curr_date!r} is not a yyyy-mm-dd date ({e})") from e
     curr_date = curr_dt.strftime("%Y-%m-%d")
 
     currency, market_proxy = _classify_asset(asset)
@@ -1236,15 +1414,14 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         # is a "no signal" statement rather than an error, so it is returned (more
         # useful to the analyst than a generic degraded-category sentinel).
         return (
-            f"There is no listed options market for '{asset}' on Deribit, and it is not a "
-            f"recognized crypto risk asset for which BTC's DVOL level serves as a "
-            f"market-wide proxy (e.g. a stablecoin or an unrecognized symbol). Do not "
-            f"substitute BTC or ETH implied volatility for it."
+            f"This vendor reads Deribit options for {' and '.join(SUPPORTED_CURRENCIES)} only, "
+            f"and '{asset}' is not a recognized crypto risk asset for which BTC's DVOL level "
+            f"serves as a market-wide proxy (e.g. a stablecoin or an unrecognized symbol). Do "
+            f"not substitute BTC or ETH implied volatility for it."
         )
 
     now = _utc_now()
-    snapshot_time = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    today = snapshot_time[:10]
+    today = now.strftime("%Y-%m-%d")
     # The chain endpoint takes no date, so its figures are always the present.
     # Serving them for a PAST curr_date would be future information, and a prose
     # warning is not a guard — whether it holds depends on the model choosing to
@@ -1257,12 +1434,16 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
     # hours of every local day. The DVOL half is genuinely date-filtered and is
     # served either way.
     is_historical = curr_date < today
+    # Naive on both sides (``today`` is re-parsed rather than compared as text) so
+    # this is a day count, not a string ordering.
+    days_ahead = (curr_dt - datetime.strptime(today, "%Y-%m-%d")).days
 
     # Why the chain half is not in the report, classified ONCE. Three later sites
     # have to explain it — the both-halves-failed raise, the header note and the
     # section body — and re-testing is_historical/market_proxy at each of them
-    # means the precedence between the two reasons is re-decided by hand every
-    # time, so a fourth reason can update two sites and silently miss the third.
+    # means the precedence between the reasons is re-decided by hand every time,
+    # so a new reason can update two sites and silently miss the third. (This is
+    # now a four-valued classification for exactly that reason.)
     #
     # A proxied asset gets the DVOL level but never the skew. A market-wide
     # volatility LEVEL is a defensible stand-in — crypto vol moves together, which
@@ -1279,17 +1460,34 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
     chain_withheld: str | None = None
     if is_historical:
         chain_withheld = "historical"
+    elif days_ahead > MAX_FUTURE_DAYS:
+        chain_withheld = "far_future"
     elif market_proxy:
         chain_withheld = "proxy"
 
     # The two halves are fetched independently so one outage cannot cost both.
     dvol, dvol_error = _try_fetch(lambda: _fetch_dvol(currency, curr_dt), "DVOL", currency)
-    if chain_withheld is not None:
-        skew, skew_error = None, None
-    else:
-        skew, skew_error = _try_fetch(
-            lambda: _fetch_chain(currency, now), "options chain", currency
-        )
+    skew: SkewSnapshot | None = None
+    skew_error: Exception | None = None
+    # Set whenever the chain is actually fetched. ``skew`` stays None otherwise, so
+    # the empty default never reaches _skew_section.
+    snapshot_time = ""
+    if chain_withheld is None:
+        # Re-read the clock instead of reusing the one taken above. DVOL is
+        # fetched first and its worst case is two timeouts plus the retry sleep
+        # (~62s), so the earlier instant is not when the book was read — and
+        # across a UTC midnight it is not even the same day, which would serve a
+        # D+1 chain for curr_date = D. That is precisely the lookahead the
+        # withholding rule exists to prevent, so the rule is re-tested against the
+        # clock the fetch will actually use rather than against a stale one.
+        chain_now = _utc_now()
+        if curr_date < chain_now.strftime("%Y-%m-%d"):
+            chain_withheld = "historical"
+        else:
+            snapshot_time = chain_now.strftime("%Y-%m-%dT%H:%M:%SZ")
+            skew, skew_error = _try_fetch(
+                lambda: _fetch_chain(currency, chain_now), "options chain", currency
+            )
 
     if dvol is None and skew is None:
         # Keep a throttle in the router's rate-limit lane whichever path got here.
@@ -1310,6 +1508,12 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
                 f"Deribit DVOL is unavailable for {currency} ({dvol_error}), and the options "
                 f"chain is not served for the historical date {curr_date}"
             )
+        if chain_withheld == "far_future":
+            raise DeribitError(
+                f"Deribit DVOL is unavailable for {currency} ({dvol_error}), and the options "
+                f"chain is not served for {curr_date}, which is {days_ahead} days ahead of the "
+                f"UTC clock ({today})"
+            )
         if chain_withheld == "proxy":
             raise DeribitError(
                 f"Deribit DVOL is unavailable for {currency} ({dvol_error}), and the options "
@@ -1327,8 +1531,9 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         # proxy framing stripped off.
         header_lines = [
             f"## Options Volatility — {currency} (market-wide proxy for '{asset}', Deribit)",
-            f"_Deribit lists no options for '{asset}'; showing the {currency} DVOL level as a "
-            f"market-wide crypto-vol proxy, not a signal specific to '{asset}'. The 25Δ skew is "
+            f"_This vendor reads no options chain for '{asset}'; showing the {currency} DVOL "
+            f"level as a market-wide crypto-vol proxy, not a signal specific to '{asset}'. "
+            f"The 25Δ skew is "
             f"NOT shown: a risk reversal measures demand for downside in {currency} itself and "
             f"does not carry across to '{asset}'._",
         ]
@@ -1340,6 +1545,15 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             f"the ATM IV, 25Δ wings, RR25 and forward are NOT served for {curr_date} — quoting "
             f"today's chain would be future information. The DVOL history below IS filtered to "
             f"{curr_date} and is safe to use._"
+        )
+    elif chain_withheld == "far_future":
+        header_lines.append(
+            f"_Analysis date {curr_date} is {days_ahead} days ahead of the UTC clock ({today}), "
+            f"further than any timezone offset explains. Deribit's options chain is a live "
+            f"endpoint, so the ATM IV, 25Δ wings, RR25 and forward would be today's book, not "
+            f"{curr_date}'s, and they are NOT served. The DVOL history below IS filtered to "
+            f"{curr_date}; its windows end at a date that has not arrived, so they hold fewer "
+            f"readings than their full spans._"
         )
     elif curr_date > today:
         # A curr_date past the UTC clock (a caller using a local date east of UTC).
@@ -1369,18 +1583,24 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         # Every sentence already ends in a full stop; only the closing italic marker
         # is appended.
         header_lines.append(" ".join(sentences) + "_")
-    header_lines.append(f"- Source: deribit.com public API | DVOL window ending {curr_date}")
+    # The DVOL clause is gated on the half existing, for the same reason every
+    # sentence of the ahead-of-clock note is: unconditional, it advertised a
+    # window immediately above "**DVOL:** unavailable".
+    source_line = "- Source: deribit.com public API"
+    if dvol is not None:
+        source_line += f" | DVOL window ending {curr_date}"
+    header_lines.append(source_line)
 
     sections = []
     percentile = None
     percentile_n = 0
-    dvol_stale = None
+    dvol_as_of = None
     if dvol is not None:
-        report = _dvol_section(dvol, curr_dt, curr_date, today)
-        percentile, percentile_n, dvol_stale = (
+        report = _dvol_section(dvol, curr_dt, today)
+        percentile, percentile_n, dvol_as_of = (
             report.percentile,
             report.percentile_n,
-            report.stale_phrase,
+            report.as_of_phrase,
         )
         sections.append(report.markdown)
     else:
@@ -1395,6 +1615,12 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             f"**Options chain (ATM IV / 25Δ skew):** not served for a historical analysis "
             f"date — see the note above. Do not substitute today's skew for {curr_date}."
         )
+    elif chain_withheld == "far_future":
+        sections.append(
+            f"**Options chain (ATM IV / 25Δ skew):** not served for an analysis date "
+            f"{days_ahead} days ahead of the UTC clock — see the note above. Do not substitute "
+            f"today's skew for {curr_date}."
+        )
     elif chain_withheld == "proxy":
         sections.append(
             f"**Options chain (ATM IV / 25Δ skew):** not served for '{asset}' — see the note "
@@ -1402,12 +1628,19 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             f"'{asset}'. Do not substitute it."
         )
     else:
+        # Not "the chain request failed": four of the five reachable causes come
+        # from a SUCCESSFUL 200 — a payload that is not a list, no row surviving
+        # the name/IV/underlying/open-interest checks, no expiry inside the tenor
+        # band, no usable forward. Naming the network sends an operator to look
+        # for an outage that will never pass, and does it in the same sentence
+        # that quotes the module saying otherwise. Same fix already applied to the
+        # DVOL branch above.
         sections.append(
-            f"**Options chain (ATM IV / 25Δ skew):** unavailable — the chain request failed "
-            f"({skew_error}). The DVOL figures above are unaffected; do not fabricate skew."
+            f"**Options chain (ATM IV / 25Δ skew):** unavailable — {skew_error}. The DVOL "
+            f"figures above are unaffected; do not fabricate skew."
         )
 
-    reading = _reading_line(currency, skew, percentile, percentile_n, dvol_stale)
+    reading = _reading_line(currency, skew, percentile, percentile_n, dvol_as_of)
     if reading:
         sections.append(reading)
 

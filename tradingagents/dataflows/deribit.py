@@ -714,7 +714,7 @@ def _snapshot_for_expiry(
         )
         if delta is None:
             # Unreachable via _fetch_chain — parse_chain already requires a
-            # positive finite IV and underlying, and select_expiry a positive
+            # positive finite IV and underlying, and rank_expiries a positive
             # tenor — but compute_skew is a public pure function and a caller can
             # hand it contracts this module did not build.
             continue
@@ -877,6 +877,15 @@ def _readings(count: int) -> str:
     return f"{count} daily reading{'' if count == 1 else 's'}"
 
 
+def _quotes(count: int, side: str) -> str:
+    """ "N call quotes", singular at one.
+
+    A one-quote side is exactly the sparse-chain case this count exists to expose,
+    so it is the number least worth garbling.
+    """
+    return f"{count} {side} quote{'' if count == 1 else 's'}"
+
+
 def _percentile_of(value: float, sample: list[float]) -> float:
     """Percent of the sample at or below ``value`` (``value`` is in the sample)."""
     return 100.0 * sum(1 for x in sample if x <= value) / len(sample)
@@ -969,20 +978,26 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, curr_date: str, today: 
         )
 
     if percentile is None:
-        # Name the shortfall in readings, not in calendar days: the sample size is
-        # what makes the percentile meaningless, and 100/n says how coarse it
-        # would have been.
-        shortfall = (
-            f"only {_readings(len(pct_window))}, so a percentile over that sample could not "
-            f"read below {100 / len(pct_window):.0f}%"
-            if pct_window
-            else "no daily readings at all"
-        )
-        lines.append(
-            f"**{DVOL_PERCENTILE_WINDOW_DAYS}d percentile:** not computed — the "
-            f"{DVOL_PERCENTILE_WINDOW_DAYS} days ending {curr_date} hold {shortfall} "
-            f"(the latest reading is itself in the sample), so none is given"
-        )
+        # Two genuinely different states, and the "latest reading is itself in the
+        # sample" rationale only applies to one of them: appended to both, it told
+        # a reader that a window holding "no daily readings at all" nonetheless
+        # contained the latest reading. Name the shortfall in readings rather than
+        # calendar days, since the sample size is what makes the percentile
+        # meaningless, and 100/n says how coarse it would have been.
+        if pct_window:
+            lines.append(
+                f"**{DVOL_PERCENTILE_WINDOW_DAYS}d percentile:** not computed — the "
+                f"{DVOL_PERCENTILE_WINDOW_DAYS} days ending {curr_date} hold only "
+                f"{_readings(len(pct_window))}, and the latest reading is itself in that "
+                f"sample, so a percentile over it could not read below "
+                f"{100 / len(pct_window):.0f}%"
+            )
+        else:
+            lines.append(
+                f"**{DVOL_PERCENTILE_WINDOW_DAYS}d percentile:** not computed — no DVOL "
+                f"reading falls inside the {DVOL_PERCENTILE_WINDOW_DAYS} days ending "
+                f"{curr_date}"
+            )
     else:
         lines.append(
             f"**{DVOL_PERCENTILE_WINDOW_DAYS}d percentile:** the latest reading sits at the "
@@ -1065,14 +1080,16 @@ def _skew_section(skew: SkewSnapshot, snapshot_time: str) -> str:
         )
     else:
         expiry_basis = (
-            f"the listed expiry closest to {TARGET_DTE_DAYS} days (expiries inside "
-            f"{MIN_DTE_DAYS} days are excluded as pin-noisy)"
+            f"the listed expiry closest to {TARGET_DTE_DAYS} days among those this report "
+            f"can read (expiries inside {MIN_DTE_DAYS} days are excluded as pin-noisy, and "
+            f"contracts with no open interest never enter the smile)"
         )
     lines = [
         f"**Chain snapshot:** taken {snapshot_time} (Deribit publishes no historical chain, "
         f"so these figures are the live book at that instant)",
         f"**Expiry used:** {skew.expiry} — {skew.days_to_expiry:.1f} days out, {expiry_basis}; "
-        f"{skew.n_calls} call / {skew.n_puts} put quotes on this expiry yielded a usable delta",
+        f"{_quotes(skew.n_calls, 'call')} and {_quotes(skew.n_puts, 'put')} on this expiry "
+        f"yielded a usable delta",
         f"**Forward:** {skew.forward:,.2f}",
         f"**ATM IV ({ATM_DELTA * 100:.0f}Δ):** {_atm_line(skew)}",
         f"**25Δ call IV:** {_wing_line(skew.call_25, skew.n_calls)}",
@@ -1311,7 +1328,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         header_lines = [
             f"## Options Volatility — {currency} (market-wide proxy for '{asset}', Deribit)",
             f"_Deribit lists no options for '{asset}'; showing the {currency} DVOL level as a "
-            f"market-wide crypto-vol proxy, not an '{asset}'-specific signal. The 25Δ skew is "
+            f"market-wide crypto-vol proxy, not a signal specific to '{asset}'. The 25Δ skew is "
             f"NOT shown: a risk reversal measures demand for downside in {currency} itself and "
             f"does not carry across to '{asset}'._",
         ]
@@ -1328,24 +1345,30 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         # A curr_date past the UTC clock (a caller using a local date east of UTC).
         # The chain is still served — it predates the analysis date, so it is not
         # lookahead — but it is not "as of" that date either, and the DVOL windows
-        # run past the data rather than the data stopping short. The chain sentence
-        # is omitted when no chain is shown, so the note cannot point at absent
-        # figures. Each branch spells out its whole sentence: splicing a shared
-        # word-fragment across the two saves a line and costs the next editor the
-        # ability to reword either half without silently breaking the other.
-        windows_sentence = (
-            "The DVOL windows end at a date that has not arrived — so they hold fewer "
-            "readings than their full spans._"
-        )
-        note = f"_Analysis date {curr_date} is ahead of the UTC clock ({today}). "
-        if chain_withheld is None:
-            note += (
+        # run past the data rather than the data stopping short.
+        #
+        # Each sentence is gated on the half it describes ACTUALLY being present,
+        # not on whether it was withheld by policy: a half that was attempted and
+        # failed is equally absent, and this note is an italic caveat — exactly the
+        # line a downstream summary keeps when it drops the body. Claiming "the
+        # chain figures below are the live book as of ..." three lines above "the
+        # chain request failed" hands the next agent a live-book reading that was
+        # never fetched. At least one half is non-None here; both failing raises
+        # above.
+        sentences = [f"_Analysis date {curr_date} is ahead of the UTC clock ({today})."]
+        if skew is not None:
+            sentences.append(
                 f"The chain figures below are the live book as of {today}, which is BEFORE "
-                f"the analysis date rather than after it, and t{windows_sentence[1:]}"
+                f"the analysis date rather than after it."
             )
-        else:
-            note += windows_sentence
-        header_lines.append(note)
+        if dvol is not None:
+            sentences.append(
+                "The DVOL windows end at a date that has not arrived, so they hold fewer "
+                "readings than their full spans."
+            )
+        # Every sentence already ends in a full stop; only the closing italic marker
+        # is appended.
+        header_lines.append(" ".join(sentences) + "_")
     header_lines.append(f"- Source: deribit.com public API | DVOL window ending {curr_date}")
 
     sections = []

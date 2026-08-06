@@ -110,6 +110,8 @@ def get_options_market(
         curr_date (str): Current date in yyyy-mm-dd format
 
     Returns:
-        str: A formatted markdown report of implied volatility and skew
+        str: A markdown report of implied volatility and skew — or, for a symbol
+            with no crypto-vol signal to serve (a stablecoin, an unrecognized
+            ticker), a plain no-signal sentence carrying no figures at all.
     """
     return route_to_vendor("get_options_market", asset, curr_date)

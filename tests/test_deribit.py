@@ -1181,7 +1181,7 @@ class TestReport:
 
     def test_quote_counts_describe_what_was_counted(self):
         out = _report()
-        assert "8 call / 8 put quotes on this expiry yielded a usable delta" in out
+        assert "8 call quotes and 8 put quotes on this expiry yielded a usable delta" in out
 
     def test_chain_is_labelled_a_live_snapshot(self):
         assert "**Chain snapshot:** taken 2026-08-05T06:06:00Z" in _report()
@@ -1242,7 +1242,7 @@ class TestReport:
     def test_proxy_asset_is_labelled_in_the_heading(self):
         out = _report(asset="SOL")
         assert out.startswith("## Options Volatility — BTC (market-wide proxy for 'SOL', Deribit)")
-        assert "not an 'SOL'-specific signal" in out
+        assert "not a signal specific to 'SOL'" in out
 
     def test_unsupported_asset_gets_a_no_signal_note(self):
         out, recorder = _run_report(asset="USDT")
@@ -1309,7 +1309,8 @@ class TestDvolSampleHonesty:
         out = _report(dvol=_dvol_days(5))
         assert (
             "**365d percentile:** not computed — the 365 days ending 2026-08-05 hold only "
-            "5 daily readings, so a percentile over that sample could not read below 20%" in out
+            "5 daily readings, and the latest reading is itself in that sample, so a "
+            "percentile over it could not read below 20%" in out
         )
         assert "**30d range:** min 40.00 / max 40.40 over 5 daily readings" in out
         assert "sits at the" not in out
@@ -1464,6 +1465,32 @@ class TestHistoricalDate:
         assert "is ahead of the UTC clock (2026-08-05)" in out
         assert "which is BEFORE the analysis date rather than after it" in out
 
+    def test_the_ahead_of_clock_note_never_points_at_a_half_that_is_absent(self):
+        # Reachable on any Taipei-clock morning: curr_date runs ahead of UTC and
+        # the chain request happens to fail. The note is an italic caveat — exactly
+        # the line a downstream summary keeps when it drops the body — so a
+        # "the chain figures below are the live book as of ..." claim above a
+        # "the chain request failed" body hands the next agent a reading that was
+        # never fetched.
+        out = _report(curr_date="2026-08-06", chain=deribit.DeribitError("chain down"))
+        assert "is ahead of the UTC clock (2026-08-05)" in out
+        assert "the live book as of" not in out
+        assert "The DVOL windows end at a date that has not arrived" in out
+
+    def test_the_ahead_of_clock_note_drops_the_dvol_sentence_when_dvol_is_absent(self):
+        out = _report(curr_date="2026-08-06", dvol=deribit.DeribitError("dvol down"))
+        assert "is ahead of the UTC clock (2026-08-05)" in out
+        assert "the live book as of 2026-08-05" in out
+        assert "DVOL windows end at a date" not in out
+
+    def test_the_ahead_of_clock_note_carries_both_when_both_halves_are_there(self):
+        out = _report(curr_date="2026-08-06")
+        assert "the live book as of 2026-08-05" in out
+        assert "The DVOL windows end at a date that has not arrived" in out
+        # One closing italic marker, not two, and no doubled full stop.
+        assert "spans._" in out
+        assert ".._" not in out
+
     def test_a_date_ahead_of_the_clock_does_not_invent_a_data_lag(self):
         # lag must be measured from the earlier of the analysis date and the
         # clock: an index that printed today is not "27 days late" merely because
@@ -1529,7 +1556,7 @@ class TestPartialDegradation:
         section = deribit._skew_section(
             deribit.compute_skew(contracts, NOW), "2026-08-05T06:06:00Z"
         )
-        assert "0 call / 8 put quotes" in section
+        assert "0 call quotes and 8 put quotes" in section
         assert (
             "**25Δ call IV:** n/a (no quote on this side of the expiry yielded a usable delta)"
             in section
@@ -1629,7 +1656,7 @@ class TestPartialDegradation:
     def test_a_one_reading_feed_renders_singular_end_to_end(self):
         out = _report(dvol={"data": [_candle("2026-08-05", 60.5)]})
         assert "**30d range:** min 60.50 / max 60.50 over 1 daily reading" in out
-        assert "hold only 1 daily reading, so a percentile over that sample" in out
+        assert "hold only 1 daily reading, and the latest reading is itself in that sample" in out
         assert "1 daily readings" not in out
 
     def test_an_all_rows_rejected_chain_names_a_shape_change(self):
@@ -1691,6 +1718,18 @@ class TestPartialDegradation:
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
 class TestRouting:
+    def test_the_vendor_ships_disabled(self):
+        # The entire justification for shipping this keyless vendor off is that
+        # merging must not change the running paper deployment's analyst input
+        # surface — there is no server-side action to date such a change from.
+        # Nothing pinned it: the options_enabled fixture FORCES the value and
+        # restores a hardcoded "none", so it cannot see DEFAULT_CONFIG move.
+        # Flipping this to "deribit" would otherwise ship green.
+        from tradingagents.default_config import DEFAULT_CONFIG
+
+        assert DEFAULT_CONFIG["data_vendors"]["options_data"] == "none"
+        assert interface.is_category_disabled("options_data", "get_options_market") is True
+
     def test_category_routes_to_deribit(self, options_enabled):
         assert interface.get_category_for_method("get_options_market") == "options_data"
         with mock.patch.dict(

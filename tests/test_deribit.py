@@ -1169,6 +1169,22 @@ class TestDvol:
         assert "1 skipped" in str(excinfo.value)
         assert "No BTC DVOL readings" not in str(excinfo.value)
 
+    def test_a_non_positive_candle_after_curr_date_is_not_a_corrupt_feed(self):
+        # The non-positive check runs BEFORE the `day <= curr_date` filter, and
+        # Deribit may honour a wider range than asked — a state this function's
+        # docstring says the row-level filter exists for. Counting an out-of-window
+        # bad candle made "every reading was non-positive" fire on a window that
+        # simply held nothing, which is the wrong-cause defect this round fixed at
+        # three other sites.
+        recorder = _RequestRecorder(dvol={"data": [_candle("2026-08-05", 0.0)]})
+        with (
+            mock.patch.object(deribit, "_request", side_effect=recorder),
+            pytest.raises(deribit.DeribitError) as excinfo,
+        ):
+            deribit._fetch_dvol("BTC", datetime(2026, 7, 20))
+        assert "No BTC DVOL readings on or before 2026-07-20" in str(excinfo.value)
+        assert "non-positive" not in str(excinfo.value)
+
 
 @pytest.mark.unit
 class TestPercentile:
@@ -1579,6 +1595,27 @@ class TestReport:
         assert "-0.00" not in section
         assert "-0.00" not in line
 
+    def test_the_flat_smile_epsilon_is_half_the_last_printed_decimal(self):
+        # The test above asserts `abs(rr) < _RR_ZERO_EPSILON`, which moves WITH the
+        # constant and so cannot pin it: raising it to 0.05 left all 252 tests
+        # green. The value is derived, not chosen — half of the last decimal
+        # `:+.2f` prints — so pin the derivation and the literal, then prove the
+        # band between the two is still reported as a real skew.
+        assert deribit._RR_ZERO_EPSILON == 0.005
+        assert deribit._RR_ZERO_EPSILON == 0.01 / 2
+        skewed = deribit.compute_skew(deribit.parse_chain(CHAIN, NOW), NOW)._replace(
+            call_25=deribit.WingQuote(34.0, 67000.0, 68000.0),
+            put_25=deribit.WingQuote(34.03, 61000.0, 62000.0),
+        )
+        # -0.03 resolves perfectly well at two decimals; a wider epsilon would
+        # swallow a genuine put skew and call the smile flat, which is the -0.00
+        # defect pointing the other way.
+        section = deribit._skew_section(skewed, "2026-08-05T06:06:00Z")
+        assert "**RR25 (25Δ call IV − 25Δ put IV):** -0.03 vol points" in section
+        line = deribit._reading_line("BTC", skewed, None, 0)
+        assert "25Δ puts are priced 0.03 vol points above 25Δ calls (RR25 -0.03" in line
+        assert "carry the same implied vol" not in line
+
     def test_a_one_year_low_renders_as_the_1st_percentile_never_the_0th(self):
         # A percentile here counts the readings at or below the latest one, and
         # the latest reading is itself in the sample, so its true minimum is
@@ -1788,6 +1825,15 @@ class TestDvolSampleHonesty:
         assert "sits at the" not in out
         assert "Data lag" in out
 
+    def test_two_readings_are_enough_for_a_range(self):
+        # The other side of the threshold. Only the one-reading case was covered,
+        # so both `_MIN_RANGE_SAMPLE = 3` and `<` -> `<=` shipped green — the round
+        # pinned MAX_TENOR_DISTANCE_DAYS and MAX_FUTURE_DAYS literally and skipped
+        # this constant. Two readings are a real high and a real low.
+        assert deribit._MIN_RANGE_SAMPLE == 2
+        out = _report(dvol={"data": [_candle("2026-08-04", 61.0), _candle("2026-08-05", 63.0)]})
+        assert "**30d range:** min 61.00% / max 63.00% over 2 daily readings" in out
+
     def test_a_series_entirely_outside_the_percentile_window_says_so_without_dividing_by_zero(
         self,
     ):
@@ -1947,7 +1993,7 @@ class TestHistoricalDate:
         assert recorder.endpoints() == {DVOL_ENDPOINT, CHAIN_ENDPOINT}
         assert "**25Δ call IV:** 29.56%" in out
         assert "Historical date:" not in out
-        assert "is ahead of the UTC clock (2026-08-05)" in out
+        assert "was ahead of the UTC clock (2026-08-05)" in out
         assert "which is BEFORE the analysis date rather than after it" in out
 
     def test_the_ahead_of_clock_note_never_points_at_a_half_that_is_absent(self):
@@ -1958,13 +2004,13 @@ class TestHistoricalDate:
         # "the chain request failed" body hands the next agent a reading that was
         # never fetched.
         out = _report(curr_date="2026-08-06", chain=deribit.DeribitError("chain down"))
-        assert "is ahead of the UTC clock (2026-08-05)" in out
+        assert "was ahead of the UTC clock (2026-08-05)" in out
         assert "the live book as of" not in out
         assert "The DVOL windows end at a date that has not arrived" in out
 
     def test_the_ahead_of_clock_note_drops_the_dvol_sentence_when_dvol_is_absent(self):
         out = _report(curr_date="2026-08-06", dvol=deribit.DeribitError("dvol down"))
-        assert "is ahead of the UTC clock (2026-08-05)" in out
+        assert "was ahead of the UTC clock (2026-08-05)" in out
         assert "the live book as of 2026-08-05" in out
         assert "DVOL windows end at a date" not in out
 
@@ -2038,7 +2084,7 @@ class TestHistoricalDate:
         out, recorder = _run_report(curr_date="2026-08-07")
         assert recorder.endpoints() == {DVOL_ENDPOINT, CHAIN_ENDPOINT}
         assert "further than any timezone offset explains" not in out
-        assert "is ahead of the UTC clock (2026-08-05)" in out
+        assert "was ahead of the UTC clock (2026-08-05)" in out
 
     def test_dvol_failure_on_a_far_future_date_names_that_reason(self):
         # The fourth branch of the both-halves-failed raise. Without it a
@@ -2086,6 +2132,29 @@ class TestHistoricalDate:
         assert "Do not substitute today's skew for 2026-08-05" in out
         # The DVOL half is unaffected and still dated by the FIRST instant's day.
         assert "**DVOL (30-day implied vol index), latest:** 34.43% annualized on 2026-08-05" in out
+
+    def test_an_ahead_of_clock_run_crossing_midnight_dates_the_chain_by_its_own_clock(self):
+        # The midnight case one day further on, which is the routine east-of-UTC
+        # one: curr_date is a day ahead, so the chain is SERVED, and the clock
+        # crosses into curr_date while DVOL is being fetched. Re-clocking the fetch
+        # without re-clocking the sentence that describes it left the italic
+        # caveat — the line the module says a downstream summary keeps — asserting
+        # a book "as of 2026-08-05, BEFORE the analysis date" three lines above a
+        # snapshot stamped 2026-08-06, inside it.
+        out, recorder = _run_report_with_clocks(
+            [
+                datetime(2026, 8, 5, 23, 59, 30, tzinfo=timezone.utc),
+                datetime(2026, 8, 6, 0, 0, 30, tzinfo=timezone.utc),
+            ],
+            curr_date="2026-08-06",
+        )
+        assert recorder.endpoints() == {DVOL_ENDPOINT, CHAIN_ENDPOINT}
+        assert "**Chain snapshot:** taken 2026-08-06T00:00:30Z" in out
+        assert "the live book as of 2026-08-06" in out
+        assert "the UTC clock reached the analysis date while this report was being built" in out
+        # The three claims the stale clock used to make.
+        assert "the live book as of 2026-08-05" not in out
+        assert "which is BEFORE the analysis date" not in out
 
 
 @pytest.mark.unit
@@ -2472,6 +2541,20 @@ class TestMarketAnalystWiring:
         assert "get_options_market" in crypto_prompt
         assert "risk reversal" in crypto_prompt
         assert "get_options_market" not in stock_prompt
+
+    def test_the_prompt_exempts_the_forward_from_the_verified_snapshot_rule(self, options_enabled):
+        # The base prompt makes the verified snapshot the source of truth for any
+        # PRICE-LEVEL claim and orders the model to flag conflicts. **Forward:** is
+        # a price level that is supposed to differ from spot — different venue,
+        # different index, plus basis — so without an exemption every enabled
+        # crypto run either raises a spurious data-integrity flag or drops the
+        # forward. Nothing pinned this: the only crypto-prompt assertions were the
+        # tool name and "risk reversal", and the latter also appears elsewhere in
+        # the same string.
+        crypto_prompt = str(_run_analyst("crypto").prompt_value)
+        assert "source of truth for any exact OHLCV, price-level" in crypto_prompt
+        assert "not spot" in crypto_prompt
+        assert "do not reconcile the two and do not flag them as a discrepancy" in crypto_prompt
 
     def test_disabled_category_leaves_no_dangling_prompt_text(self):
         assert "get_options_market" not in str(_run_analyst("crypto").prompt_value)

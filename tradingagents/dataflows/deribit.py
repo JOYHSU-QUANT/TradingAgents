@@ -915,7 +915,15 @@ def _fetch_dvol(currency: str, curr_dt: datetime) -> DvolSeries:
             # fatal, like an unusable chain row: one bad candle should not cost a
             # year of history, and dropping the newest one simply leaves an older
             # reading as the latest, which the report dates and ages honestly.
-            skipped_non_positive += 1
+            if day <= curr_date:
+                # Only an IN-WINDOW candle counts toward the corrupt-feed verdict.
+                # The date filter below is there because Deribit may honour a wider
+                # range than asked, so a non-positive candle dated after curr_date
+                # was never a candidate for by_date — counting it let "every
+                # reading was non-positive" fire on a window that simply held no
+                # readings, naming the wrong cause exactly as the messages this
+                # round rewrote elsewhere did.
+                skipped_non_positive += 1
             logger.warning(
                 "Skipping non-positive Deribit DVOL close %r dated %s for %s",
                 row[4],
@@ -1469,9 +1477,11 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
     dvol, dvol_error = _try_fetch(lambda: _fetch_dvol(currency, curr_dt), "DVOL", currency)
     skew: SkewSnapshot | None = None
     skew_error: Exception | None = None
-    # Set whenever the chain is actually fetched. ``skew`` stays None otherwise, so
-    # the empty default never reaches _skew_section.
+    # Both set whenever the chain is actually fetched. ``skew`` stays None
+    # otherwise, so the empty default never reaches _skew_section, and
+    # ``chain_date`` is only read on branches guarded by ``skew is not None``.
     snapshot_time = ""
+    chain_date = today
     if chain_withheld is None:
         # Re-read the clock instead of reusing the one taken above. DVOL is
         # fetched first and its worst case is two timeouts plus the retry sleep
@@ -1481,7 +1491,8 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         # withholding rule exists to prevent, so the rule is re-tested against the
         # clock the fetch will actually use rather than against a stale one.
         chain_now = _utc_now()
-        if curr_date < chain_now.strftime("%Y-%m-%d"):
+        chain_date = chain_now.strftime("%Y-%m-%d")
+        if curr_date < chain_date:
             chain_withheld = "historical"
         else:
             snapshot_time = chain_now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1569,12 +1580,39 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         # chain request failed" hands the next agent a live-book reading that was
         # never fetched. At least one half is non-None here; both failing raises
         # above.
-        sentences = [f"_Analysis date {curr_date} is ahead of the UTC clock ({today})."]
+        sentences = [
+            f"_Analysis date {curr_date} was ahead of the UTC clock ({today}) when this "
+            f"report was built."
+        ]
         if skew is not None:
-            sentences.append(
-                f"The chain figures below are the live book as of {today}, which is BEFORE "
-                f"the analysis date rather than after it."
-            )
+            # Dated by the clock the book was ACTUALLY read on, not by the one taken
+            # before the DVOL half. Those differ by up to DVOL's whole envelope
+            # (~62s), and across UTC midnight they are different days — so on an
+            # east-of-UTC run started just before midnight this sentence claimed a
+            # book "as of {today}, BEFORE the analysis date" three lines above a
+            # **Chain snapshot** stamped the next day, inside the analysis date.
+            # Re-clocking the fetch without re-clocking the sentence that describes
+            # it left the caveat asserting the very thing it exists to deny.
+            #
+            # chain_date can only be <= curr_date here: a later one is exactly what
+            # the midnight re-test above withholds on. In the first branch it is
+            # further provably EQUAL to today — reaching it with a crossed midnight
+            # would need curr_date >= today + 2, which is withheld as far_future —
+            # so substituting `today` there is an equivalent mutation and no test
+            # can distinguish it. It stays `chain_date` because the second branch
+            # is the one that was wrong, and because widening MAX_FUTURE_DAYS would
+            # make the two diverge here as well.
+            if chain_date < curr_date:
+                sentences.append(
+                    f"The chain figures below are the live book as of {chain_date}, which is "
+                    f"BEFORE the analysis date rather than after it."
+                )
+            else:
+                sentences.append(
+                    f"The chain figures below are the live book as of {chain_date}: the UTC "
+                    f"clock reached the analysis date while this report was being built, so "
+                    f"they fall within it rather than before it."
+                )
         if dvol is not None:
             sentences.append(
                 "The DVOL windows end at a date that has not arrived, so they hold fewer "

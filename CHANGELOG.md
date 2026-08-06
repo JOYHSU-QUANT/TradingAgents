@@ -38,7 +38,8 @@ Breaking changes within the 0.x line are called out explicitly.
   landed, with no server-side action to date the change from; enabling it is a
   deliberate cutover.
   The DVOL history is date-filtered to `curr_date` (bounded server-side and again
-  on the parsed rows) and lookahead-safe to the day; the candle dated today is
+  on the parsed rows) and lookahead-safe to the day; the candle dated today (or
+  later, when the fetch crossed UTC midnight) is
   still open, so the report calls the series "readings" throughout and labels that
   one rather than passing an intraday level off as a settled close. The chain
   endpoint takes no date, so it is **withheld for a `curr_date` earlier than
@@ -52,7 +53,8 @@ Breaking changes within the 0.x line are called out explicitly.
   from an LLM tool call — so the chain is withheld again, with its own note. The
   chain also re-reads the clock immediately before fetching rather than reusing the
   one taken before the DVOL half, so the printed snapshot instant is when the book
-  was actually read, and a run whose DVOL half timed out across UTC midnight cannot
+  the chain fetch begins rather than before the DVOL half, and a run whose DVOL
+  half timed out across UTC midnight cannot
   serve day D+1's chain for `curr_date` = D.
   The min/max range and the percentile are computed over **different windows** —
   30 days and 365 — and printed as separate lines, each naming its own span and

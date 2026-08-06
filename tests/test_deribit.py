@@ -1169,6 +1169,38 @@ class TestDvol:
         assert "1 skipped" in str(excinfo.value)
         assert "No BTC DVOL readings" not in str(excinfo.value)
 
+    def test_a_json_rpc_success_carrying_a_null_error_is_not_a_rejection(self):
+        # The check is `payload.get("error")`, deliberately falsy rather than a key
+        # test: many JSON-RPC servers emit "error": null on success. Under
+        # `"error" in payload` EVERY such response raised "Deribit rejected the
+        # ... request: None", i.e. the vendor would look permanently broken.
+        with mock.patch.object(
+            deribit.requests,
+            "get",
+            return_value=_response(payload={"error": None, "result": {"ok": 1}}),
+        ):
+            assert deribit._request(DVOL_ENDPOINT, {}) == {"ok": 1}
+
+    @pytest.mark.parametrize("suffix", ["F", "S", "X", "CP", ""])
+    def test_an_unknown_instrument_type_is_rejected_not_treated_as_a_put(self, suffix):
+        # is_call is derived as `option_type == "C"`, so ANY type admitted past this
+        # membership test that is not "C" is silently classified as a PUT and
+        # priced into the put wing. Unreachable through _fetch_chain (kind:
+        # option), but parse_instrument_name and parse_chain are public.
+        assert deribit.parse_instrument_name(f"BTC-28AUG26-64000-{suffix}") is None
+
+    @pytest.mark.parametrize(
+        ("suffix", "is_call"), [("C", True), ("P", False), ("c", True), (" p ", False)]
+    )
+    def test_the_two_real_types_survive_case_and_padding(self, suffix, is_call):
+        parsed = deribit.parse_instrument_name(f"BTC-28AUG26-64000-{suffix}")
+        assert parsed is not None and parsed[3] is is_call
+
+    def test_the_latest_reading_line_is_emitted_once(self):
+        # The DVOL section's line multiset was unpinned, so duplicating the latest
+        # line shipped green.
+        assert _report().count("implied vol index), latest:**") == 1
+
     def test_a_non_positive_candle_after_curr_date_is_not_a_corrupt_feed(self):
         # The non-positive check runs BEFORE the `day <= curr_date` filter, and
         # Deribit may honour a wider range than asked — a state this function's
@@ -1767,6 +1799,30 @@ class TestReport:
         assert type(excinfo.value) is deribit.DeribitError
         assert "not-a-date" in str(excinfo.value)
 
+    @pytest.mark.parametrize("bad", [None, 20260805, b"2026-08-05", ["2026-08-05"]])
+    def test_a_non_string_curr_date_is_also_the_vendor_error(self, bad):
+        # strptime raises TypeError rather than ValueError for a non-str, so
+        # narrowing the except clause to ValueError alone shipped green — defeating
+        # the comment written specifically to explain why TypeError is caught.
+        with pytest.raises(deribit.DeribitError, match="is not a yyyy-mm-dd date"):
+            _report(curr_date=bad)
+
+    @pytest.mark.parametrize("bad", [12345, ["BTC"], {"symbol": "BTC"}])
+    def test_a_non_string_asset_is_the_vendor_error_not_an_attributeerror(self, bad):
+        # The other caller-supplied argument. It reached
+        # normalize_symbol((asset or "").replace(...)) and escaped as
+        # AttributeError, which route_to_vendor logs as "Vendor 'deribit' failed"
+        # with a traceback — a caller's bug dressed as a vendor outage, the exact
+        # thing the curr_date guard exists to prevent, one argument short.
+        with pytest.raises(deribit.DeribitError, match="asset must be a symbol string"):
+            _report(asset=bad)
+
+    @pytest.mark.parametrize("falsy", [None, "", 0])
+    def test_a_falsy_asset_still_gets_the_no_signal_sentence(self, falsy):
+        # Falsy values were always safe and must stay that way: the guard is scoped
+        # to truthy non-strings so it cannot swallow them into an error.
+        assert "not a recognized crypto risk asset" in _report(asset=falsy)
+
     def test_missing_wing_renders_as_not_available(self):
         chain = [
             row
@@ -1945,7 +2001,11 @@ class TestHistoricalDate:
         out, recorder = _run_report(curr_date="2026-07-20")
         assert recorder.endpoints() == {DVOL_ENDPOINT}
         assert "not served for a historical analysis date" in out
-        assert "Historical date:" in out
+        # A genuinely past date, so the mid-run-crossing clause must NOT appear:
+        # it is what distinguishes "you asked for a past date" from "the clock
+        # passed your date while this report was being built".
+        assert "_Historical date: Deribit's options chain is a live endpoint" in out
+        assert "the UTC clock passed the analysis date" not in out
         assert "Do not substitute today's skew for 2026-07-20" in out
 
     def test_dvol_half_is_still_served(self):
@@ -1992,7 +2052,11 @@ class TestHistoricalDate:
         # for — and it must be the SAME decision at all three sites that explain it.
         out, recorder = _run_report(asset="SOL", curr_date="2026-07-20")
         assert recorder.endpoints() == {DVOL_ENDPOINT}
-        assert "Historical date:" in out
+        # A genuinely past date, so the mid-run-crossing clause must NOT appear:
+        # it is what distinguishes "you asked for a past date" from "the clock
+        # passed your date while this report was being built".
+        assert "_Historical date: Deribit's options chain is a live endpoint" in out
+        assert "the UTC clock passed the analysis date" not in out
         assert "not served for a historical analysis date" in out
         assert "not served for 'SOL'" not in out
         # ... and the raise, when DVOL also dies, names the same reason.
@@ -2087,8 +2151,9 @@ class TestHistoricalDate:
         out, recorder = _run_report(curr_date=curr_date)
         assert recorder.endpoints() == {DVOL_ENDPOINT}
         assert (
-            f"_Analysis date {curr_date} is {days_ahead} days ahead of the UTC clock "
-            f"(2026-08-05), further than any timezone offset explains." in out
+            f"_Analysis date {curr_date} was {days_ahead} days ahead of the UTC clock "
+            f"(2026-08-05) when this report was built, further than any timezone offset "
+            f"explains." in out
         )
         assert (
             f"**Options chain (ATM IV / 25Δ skew):** not served for an analysis date "
@@ -2163,7 +2228,7 @@ class TestHistoricalDate:
         )
         assert recorder.endpoints() == {DVOL_ENDPOINT}
         assert "**Options chain (ATM IV / 25Δ skew):** not served for a historical analysis" in out
-        assert "Historical date:" in out
+        assert "_Historical date (the UTC clock passed the analysis date while this " in out
         assert "Do not substitute today's skew for 2026-08-05" in out
         # The DVOL half is unaffected and still dated by the FIRST instant's day.
         assert "**DVOL (30-day implied vol index), latest:** 34.43% annualized on 2026-08-05" in out
@@ -2208,6 +2273,43 @@ class TestHistoricalDate:
             "2026-08-05" in out
         )
         assert "arrived" not in out
+
+    def test_an_ordinary_same_day_report_carries_no_ahead_of_clock_note(self):
+        # The note's gate `curr_date > today` could be loosened to `>=` and ship
+        # green: nothing asserted the note is ABSENT on the normal path. Under `>=`
+        # EVERY same-day report gained a false italic caveat saying the clock
+        # reached the analysis date mid-run — in the line a summary keeps.
+        out = _report()
+        assert "ahead of the UTC clock" not in out
+        assert "when this report was built" not in out
+        assert "reached the analysis date" not in out
+
+    def test_the_ahead_of_clock_note_is_dropped_when_it_would_say_nothing(self):
+        # Both consequence sentences are separately gated, so both can be absent:
+        # a proxied asset (no chain) whose DVOL feed already reached curr_date. The
+        # opening sentence alone is a fact with no consequence, and it would sit in
+        # the italic line a downstream summary keeps.
+        dvol = {"data": [_candle("2026-08-05", 40.0), _candle("2026-08-06", 41.0)]}
+        out = _report(asset="SOL", curr_date="2026-08-06", dvol=dvol)
+        assert "ahead of the UTC clock" not in out
+        # ... while the proxy note it shares the header with is untouched.
+        assert "market-wide proxy for 'SOL'" in out
+
+    def test_the_caveat_sentences_are_space_separated(self):
+        # `" ".join(...)` -> `"".join(...)` shipped green, running the caveat's
+        # sentences together across the full stop.
+        out = _report(curr_date="2026-08-06")
+        assert "report was built. The chain figures" in out
+        assert "built.The" not in out
+
+    def test_report_sections_are_separated_by_a_blank_line(self):
+        # The comment at the join says the blank line exists "so consecutive italic
+        # caveats are not rendered as one run-on paragraph", but only the header
+        # join was pinned; the sections join shipped green as a single newline,
+        # merging the _Reading:_ line into the preceding paragraph.
+        out = _report()
+        assert "\n\n_Reading:_" in out
+        assert "vol points\n_Reading:_" not in out
 
     def test_a_dvol_fetch_that_crosses_midnight_labels_its_seconds_old_candle(self):
         # The crossing landing inside the DVOL fetch rather than after it. `today`

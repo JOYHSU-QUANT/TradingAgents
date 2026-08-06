@@ -90,6 +90,12 @@ REQUEST_TIMEOUT = 30
 # fear_greed's envelope. That is acceptable here (the analyst graph runs off the
 # trading hot path, on a multi-hour cycle), but anyone raising _RETRY_ATTEMPTS
 # should multiply that envelope rather than the request count.
+#
+# A FLOOR, not a guarantee: requests' timeout bounds each socket read, not the
+# call, so a server dribbling a byte every 29s holds the connection open
+# indefinitely and no wall-clock budget stops it. Bounding that properly needs a
+# deadline around the whole call, which this vendor does not have and its
+# siblings do not either. Stated so the number is not mistaken for an SLA.
 _RETRY_ATTEMPTS = 2
 _RETRY_DELAY_SECONDS = 2
 
@@ -331,7 +337,8 @@ class DvolSeries(NamedTuple):
 
     The field is named ``closes`` because that is the candle field it is read from
     (``[timestamp, open, high, low, close]``), but every line of the report calls
-    these "readings": the candle dated today is still open, so its value is the
+    these "readings": the candle dated today — or later, when the fetch itself
+    crossed UTC midnight — is still open, so its value is the
     level so far rather than a settled close.
     """
 
@@ -1429,6 +1436,14 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     except (ValueError, TypeError) as e:
         raise DeribitError(f"curr_date {curr_date!r} is not a yyyy-mm-dd date ({e})") from e
+    # The same guard for the other caller-supplied argument, which the comment
+    # above applies to verbatim and stopped one argument short of. A truthy
+    # non-string asset (a resolved-ticker object, a list) reaches
+    # ``normalize_symbol((asset or "").replace(...))`` and escapes as AttributeError
+    # — a caller's bug reported as a Deribit outage, with a traceback naming
+    # Deribit. Falsy values are already safe: they render the no-signal sentence.
+    if asset and not isinstance(asset, str):
+        raise DeribitError(f"asset must be a symbol string, got {type(asset).__name__}")
     curr_date = curr_dt.strftime("%Y-%m-%d")
 
     currency, market_proxy = _classify_asset(asset)
@@ -1565,17 +1580,38 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         ]
     else:
         header_lines = [f"## Options Volatility — {currency} (Deribit)"]
+    # A curr_date that was NOT historical at classification time but is by the time
+    # the chain is fetched: the clock crossed UTC midnight during the DVOL half.
+    # Without saying so the report calls today's date "a historical date" and gives
+    # the reader nothing to reconstruct why — the historical branch, unlike the
+    # far-future one, never prints the clock. Derivable rather than tracked as a
+    # flag: only the mid-run re-take can withhold as historical while curr_date is
+    # still >= the clock the run started on.
+    crossed_midnight = (
+        " (the UTC clock passed the analysis date while this report was being built)"
+        if chain_withheld == "historical" and curr_date >= today
+        else ""
+    )
     if chain_withheld == "historical":
         header_lines.append(
-            f"_Historical date: Deribit's options chain is a live endpoint with no history, so "
-            f"the ATM IV, 25Δ wings, RR25 and forward are NOT served for {curr_date} — quoting "
-            f"today's chain would be future information. The DVOL history below IS filtered to "
-            f"{curr_date} and is safe to use._"
+            f"_Historical date{crossed_midnight}: Deribit's options chain is a live endpoint "
+            f"with no history, so the ATM IV, 25Δ wings, RR25 and forward are NOT served for "
+            f"{curr_date} — quoting the current chain would be future information. The DVOL "
+            f"history below IS filtered to {curr_date} and is safe to use._"
         )
     elif chain_withheld == "far_future":
         header_lines.append(
-            f"_Analysis date {curr_date} is {days_ahead} days ahead of the UTC clock ({today}), "
-            f"further than any timezone offset explains. Deribit's options chain is a live "
+            # Past tense and attributed, for the same reason the sibling note at
+            # the branch below is: `today` and `days_ahead` are both derived from
+            # the clock taken BEFORE the DVOL fetch, and that fetch can span UTC
+            # midnight — after which a present-tense "is N days ahead of the UTC
+            # clock (X)" names a clock that has moved and a count one too large,
+            # three lines above a DVOL reading dated later than X. This is the
+            # fifth site of that defect; the previous four were all in the sibling
+            # note, which was rewritten three times without this one being read.
+            f"_Analysis date {curr_date} was {days_ahead} days ahead of the UTC clock ({today}) "
+            f"when this report was built, further than any timezone offset explains. Deribit's "
+            f"options chain is a live "
             f"endpoint, so the ATM IV, 25Δ wings, RR25 and forward would be today's book, not "
             f"{curr_date}'s, and they are NOT served. The DVOL history below IS filtered to "
             # Same fact as the ahead-of-clock note's DVOL sentence, so it is worded
@@ -1604,7 +1640,12 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             f"report was built."
         ]
         if skew is not None:
-            # Dated by the clock the book was ACTUALLY read on, not by the one taken
+            # Dated by the clock taken immediately BEFORE the chain fetch, not by
+            # the one taken before the DVOL half. (Not the read instant itself: the
+            # chain GET has its own envelope, so a retry across midnight can still
+            # leave this a day behind. That residue is ~62s wide and unfixable
+            # without timing the response, whereas the DVOL-half gap it replaces
+            # was the common case.) Not by the one taken
             # before the DVOL half. Those differ by up to DVOL's whole envelope
             # (~62s), and across UTC midnight they are different days — so on an
             # east-of-UTC run started just before midnight this sentence claimed a
@@ -1648,9 +1689,15 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
                 f"The DVOL windows end at the analysis date but the feed has only reached "
                 f"{dvol.latest_date}, so they hold fewer readings than their full spans."
             )
-        # Every sentence already ends in a full stop; only the closing italic marker
-        # is appended.
-        header_lines.append(" ".join(sentences) + "_")
+        # Both consequence sentences are separately gated, so both can be absent at
+        # once — a proxied asset (or a failed chain) whose DVOL feed did reach
+        # curr_date. The opening sentence alone states a fact with no consequence
+        # attached, in the italic line a downstream summary keeps, so the note is
+        # dropped entirely rather than rendered content-free.
+        if len(sentences) > 1:
+            # Every sentence already ends in a full stop; only the closing italic
+            # marker is appended.
+            header_lines.append(" ".join(sentences) + "_")
     # The DVOL clause is gated on the half existing, for the same reason every
     # sentence of the ahead-of-clock note is: unconditional, it advertised a
     # window immediately above "**DVOL:** unavailable".

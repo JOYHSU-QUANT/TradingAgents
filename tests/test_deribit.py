@@ -1185,6 +1185,26 @@ class TestDvol:
         assert "No BTC DVOL readings on or before 2026-07-20" in str(excinfo.value)
         assert "non-positive" not in str(excinfo.value)
 
+    def test_a_non_positive_candle_before_curr_date_still_counts_as_corrupt(self):
+        # The lower half of the same guard. The existing corrupt-feed test uses a
+        # candle dated exactly ON curr_date, and the test above one AFTER it, so
+        # `day <= curr_date` could be narrowed to `day == curr_date` and ship
+        # green — which would report a fortnight of zeroed in-window readings as
+        # "no readings published at all", the wrong cause this guard exists to
+        # avoid.
+        recorder = _RequestRecorder(
+            dvol={"data": [_candle("2026-08-01", 0.0), _candle("2026-08-02", 0.0)]}
+        )
+        with (
+            mock.patch.object(deribit, "_request", side_effect=recorder),
+            pytest.raises(deribit.DeribitError) as excinfo,
+        ):
+            deribit._fetch_dvol("BTC", datetime(2026, 8, 5))
+        assert "Every BTC DVOL reading on or before 2026-08-05 was non-positive" in str(
+            excinfo.value
+        )
+        assert "2 skipped" in str(excinfo.value)
+
 
 @pytest.mark.unit
 class TestPercentile:
@@ -1681,7 +1701,14 @@ class TestReport:
         assert deribit._reading_line("BTC", None, None, 0) == ""
 
     def test_todays_candle_is_labelled_in_progress(self):
-        assert "today's candle is still open, so this is the level so far" in _report()
+        assert (
+            "that day's candle was still open when it was read, so this is the level so far"
+            in _report()
+        )
+        # Never "today's": on an ahead-of-clock run this line is dated by the DVOL
+        # half's clock and can sit three lines below a caveat saying the clock has
+        # since reached the NEXT day.
+        assert "today's candle" not in _report()
 
     def test_a_past_date_has_no_in_progress_label(self):
         assert "still open" not in _report(curr_date="2026-07-20")
@@ -2006,7 +2033,7 @@ class TestHistoricalDate:
         out = _report(curr_date="2026-08-06", chain=deribit.DeribitError("chain down"))
         assert "was ahead of the UTC clock (2026-08-05)" in out
         assert "the live book as of" not in out
-        assert "The DVOL windows end at a date that has not arrived" in out
+        assert "The DVOL windows end at the analysis date, which had not arrived" in out
 
     def test_the_ahead_of_clock_note_drops_the_dvol_sentence_when_dvol_is_absent(self):
         out = _report(curr_date="2026-08-06", dvol=deribit.DeribitError("dvol down"))
@@ -2017,7 +2044,7 @@ class TestHistoricalDate:
     def test_the_ahead_of_clock_note_carries_both_when_both_halves_are_there(self):
         out = _report(curr_date="2026-08-06")
         assert "the live book as of 2026-08-05" in out
-        assert "The DVOL windows end at a date that has not arrived" in out
+        assert "The DVOL windows end at the analysis date, which had not arrived" in out
         # One closing italic marker, not two, and no doubled full stop.
         assert "spans._" in out
         assert ".._" not in out
@@ -2033,7 +2060,7 @@ class TestHistoricalDate:
     def test_the_open_candle_label_follows_the_clock_not_the_analysis_date(self):
         # The candle dated today is open because the day is not over, which has
         # nothing to do with which date is being analysed.
-        assert "still open, so this is the level so far" in _report(curr_date="2026-08-06")
+        assert "still open when it was read, so this is the level so far" in _report(curr_date="2026-08-06")
 
     def test_dvol_failure_on_a_historical_date_raises(self):
         # Nothing left to report: the chain is withheld by design, not by failure.
@@ -2151,6 +2178,19 @@ class TestHistoricalDate:
         assert recorder.endpoints() == {DVOL_ENDPOINT, CHAIN_ENDPOINT}
         assert "**Chain snapshot:** taken 2026-08-06T00:00:30Z" in out
         assert "the live book as of 2026-08-06" in out
+        # The OPENING sentence keeps the clock the run STARTED on. Clocking it by
+        # chain_date instead shipped green and rendered "Analysis date 2026-08-06
+        # was ahead of the UTC clock (2026-08-06)" — a date declared ahead of
+        # itself, in the caveat line. This is the only state where the two clocks
+        # differ, so it is the only test that can pin the choice.
+        assert (
+            "_Analysis date 2026-08-06 was ahead of the UTC clock (2026-08-05) when this "
+            "report was built." in out
+        )
+        # ... and the DVOL sentence must not contradict the chain sentence above it
+        # by claiming the analysis date has still not arrived.
+        assert "which had not arrived when they were read" in out
+        assert "end at a date that has not arrived" not in out
         assert "the UTC clock reached the analysis date while this report was being built" in out
         # The three claims the stale clock used to make.
         assert "the live book as of 2026-08-05" not in out

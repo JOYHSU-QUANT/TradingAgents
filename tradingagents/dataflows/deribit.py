@@ -1090,7 +1090,14 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
         # below therefore says "reading", never "close": labelling it here and
         # then calling the same number "the latest close" two lines down would
         # take the caveat back in the same breath.
-        latest_line += " (today's candle is still open, so this is the level so far)"
+        # "That day", not "today". This line is dated by the clock the DVOL half
+        # was read on, which an ahead-of-clock run can print three lines below a
+        # caveat saying the clock has since reached the NEXT day — so the report
+        # called one date "today" while stating the clock was on another. The claim
+        # itself is right either way: the candle was open when it was read.
+        latest_line += (
+            " (that day's candle was still open when it was read, so this is the level so far)"
+        )
     lines = [latest_line]
 
     if not window:
@@ -1614,9 +1621,16 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
                     f"they fall within it rather than before it."
                 )
         if dvol is not None:
+            # Phrased against WHEN THE WINDOWS WERE READ, not against whether the
+            # analysis date has arrived. The old wording asserted it had not, which
+            # the else-branch above directly contradicts five words earlier once the
+            # clock crosses into curr_date mid-run — both halves of that
+            # contradiction inside the one italic line a downstream summary keeps.
+            # The conclusion was never wrong (DVOL is fetched first, so its windows
+            # really do stop short); only the reason it gave could go stale.
             sentences.append(
-                "The DVOL windows end at a date that has not arrived, so they hold fewer "
-                "readings than their full spans."
+                "The DVOL windows end at the analysis date, which had not arrived when they "
+                "were read, so they hold fewer readings than their full spans."
             )
         # Every sentence already ends in a full stop; only the closing italic marker
         # is appended.

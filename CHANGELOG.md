@@ -69,12 +69,18 @@ Breaking changes within the 0.x line are called out explicitly.
   where a stale or purely modelled mark lives, and such a quote can be perfectly
   monotone with its neighbours — passing both guards and printing the very strikes
   a reader expects. If the nearest-30-day expiry cannot bracket both wings, the
-  next qualifying expiry is used and the report says so rather than repeating that
-  this is "the expiry closest to 30 days"; a labelled 40-day skew is a better input
-  to a risk debate than an all-`n/a` section, and the tenor is always printed.
+  next-nearest one is used and the report says so rather than repeating that this
+  is "the expiry closest to 30 days"; a labelled neighbouring skew is a better
+  input to a risk debate than an all-`n/a` section, and the tenor is printed both
+  in the section and in the closing sentence. The fallback is **one step only**:
+  the ranking is ordered by distance from 30 days, so its tail is months out, and a
+  risk reversal is not tenor-invariant — the 25-delta strikes on a 300-day expiry
+  sit nowhere near the 30-day ones, and every downstream agent reads this number as
+  a ~30-day figure.
   Either half can fail without costing the other (any exception, not a fixed
   allowlist); losing both degrades the optional category to the no-data sentinel —
-  as does losing DVOL alone on a date where the chain is withheld by design — and
+  as does losing DVOL alone on a date, or for a proxied asset, where the chain is
+  withheld by design — and
   a double throttle re-raises as `VendorRateLimitError` so the router keeps its
   rate-limit lane. Deribit lists options for BTC and ETH only, so
   another recognized crypto risk asset (SOL, XRP, ...) is served BTC's **DVOL

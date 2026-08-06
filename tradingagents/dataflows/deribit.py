@@ -135,6 +135,16 @@ MAX_DATA_LAG_DAYS = 2
 TARGET_DTE_DAYS = 30
 MIN_DTE_DAYS = 7
 
+# How many ranked expiries compute_skew may try before giving up on a complete
+# surface: the nearest, and — if it cannot bracket both 25-delta wings — the
+# next-nearest. Deliberately not the whole ranking. Ranking is by distance from
+# TARGET_DTE_DAYS, so the tail is months out, and a risk reversal is not
+# tenor-invariant: the 25-delta strikes on a 300-day expiry sit nowhere near the
+# 30-day ones. Walking until something answers would swap "no skew today" for "a
+# skew from an unrelated tenor", and every downstream agent reads this as a
+# ~30-day figure.
+_MAX_EXPIRY_CANDIDATES = 2
+
 # The delta the risk reversal is quoted at (the market-standard 25-delta wing).
 WING_DELTA = 0.25
 
@@ -629,13 +639,20 @@ def _median(values: list[float]) -> float:
 def compute_skew(contracts: list[Contract], now: datetime) -> SkewSnapshot:
     """Compute the ATM and 25-delta wing vols for the ~30-day expiry.
 
-    Tries the ranked expiries in order and returns the first whose chain brackets
-    BOTH 25-delta wings. A sparse or non-monotone stretch around the wing is a
-    property of one expiry rather than of the surface, and the report prints the
-    tenor it actually used, so a labelled neighbouring expiry is a far better input
-    to a risk debate than the silence of an all-``n/a`` skew section. When no
-    candidate brackets both wings the first one's snapshot is returned anyway, so
-    the forward, ATM and whichever wing exists are still reported.
+    Tries the nearest expiry and, if that one cannot bracket BOTH 25-delta wings,
+    the next-nearest — and stops there. A sparse or non-monotone stretch around the
+    wing is a property of one expiry rather than of the surface, and its immediate
+    neighbour is usually clean, so one labelled step is a far better input to a risk
+    debate than the silence of an all-``n/a`` skew section. When neither candidate
+    brackets both wings the first one's snapshot is returned, so the forward, ATM
+    and whichever wing exists are still reported.
+
+    Deliberately NOT a walk down the whole ranking. The ranking is ordered by
+    distance from the 30-day target, so its tail is months out, and a risk reversal
+    is not tenor-invariant — the 25-delta strikes on a 300-day expiry sit nowhere
+    near the 30-day ones. Searching until something answers would trade "no skew
+    today" for "a skew from an unrelated tenor", and every downstream agent reads
+    this number as a ~30-day figure.
 
     Raises DeribitError when no listed expiry clears the 7-day floor, or when no
     candidate has a usable forward — the cases where there is no surface to read at
@@ -649,7 +666,7 @@ def compute_skew(contracts: list[Contract], now: datetime) -> SkewSnapshot:
         )
     first_error: DeribitError | None = None
     fallback: SkewSnapshot | None = None
-    for expiry in ranked:
+    for expiry in ranked[:_MAX_EXPIRY_CANDIDATES]:
         try:
             snapshot = _snapshot_for_expiry(contracts, expiry, now, is_fallback=expiry != ranked[0])
         except DeribitError as e:
@@ -732,7 +749,15 @@ def _fetch_chain(currency: str, now: datetime) -> SkewSnapshot:
     result = _request("get_book_summary_by_currency", {"currency": currency, "kind": "option"})
     contracts = parse_chain(result, now)
     if not contracts:
-        raise DeribitError(f"Deribit returned no usable {currency} option contracts")
+        # Every row failed the name / IV / underlying / open-interest checks. On a
+        # live chain that means a response-shape change (a renamed field drops all
+        # rows at once), not a quiet market — say so, or the operator reads this as
+        # an ordinary outage and waits for it to pass.
+        raise DeribitError(
+            f"Deribit returned no usable {currency} option contracts — every row failed the "
+            f"instrument-name, mark-IV, underlying or open-interest checks, which on a live "
+            f"chain points at a response-shape change rather than an empty market"
+        )
     return compute_skew(contracts, now)
 
 
@@ -823,8 +848,9 @@ def _classify_asset(asset: str) -> tuple[str | None, bool]:
 
     * ``(BTC|ETH, False)`` — Deribit lists options and publishes DVOL for it.
     * ``("BTC", True)`` — a recognized crypto *risk* asset with no Deribit chain of
-      its own (SOL, XRP, ...): BTC's surface is the market's crypto-vol benchmark,
-      so it is served as a market-wide proxy.
+      its own (SOL, XRP, ...): BTC's DVOL *level* is the market's crypto-vol
+      benchmark, so it is served as a market-wide proxy. Its skew is not — see the
+      withholding rule in ``get_options_market_data``.
     * ``(None, False)`` — not a recognized crypto risk asset (a stablecoin, a
       quote-only, or an unrecognized symbol). A stablecoin has no crypto-vol
       character to proxy, so there is no signal to serve.
@@ -842,6 +868,11 @@ def _classify_asset(asset: str) -> tuple[str | None, bool]:
     if base in CRYPTO_BASES:
         return "BTC", True
     return None, False
+
+
+def _readings(count: int) -> str:
+    """ "N daily readings", singular at one — the count reaches a sparse feed's text."""
+    return f"{count} daily reading{'' if count == 1 else 's'}"
 
 
 def _percentile_of(value: float, sample: list[float]) -> float:
@@ -932,7 +963,7 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, curr_date: str, today: 
     else:
         lines.append(
             f"**{DVOL_WINDOW_DAYS}d range:** min {min(window):.2f} / max {max(window):.2f} "
-            f"over {len(window)} daily readings"
+            f"over {_readings(len(window))}"
         )
 
     if percentile is None:
@@ -940,7 +971,7 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, curr_date: str, today: 
         # what makes the percentile meaningless, and 100/n says how coarse it
         # would have been.
         shortfall = (
-            f"only {len(pct_window)} daily readings, so a percentile over them could not "
+            f"only {_readings(len(pct_window))}, so a percentile over them could not "
             f"read below {100 / len(pct_window):.0f}%"
             if pct_window
             else "no daily readings at all"
@@ -953,7 +984,7 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, curr_date: str, today: 
     else:
         lines.append(
             f"**{DVOL_PERCENTILE_WINDOW_DAYS}d percentile:** the latest reading sits at the "
-            f"{_ordinal(percentile)} percentile of the {len(pct_window)} daily readings in "
+            f"{_ordinal(percentile)} percentile of the {_readings(len(pct_window))} in "
             f"the {DVOL_PERCENTILE_WINDOW_DAYS} days ending {curr_date} (percentile = share "
             f"of those readings at or below it)"
         )
@@ -1005,11 +1036,29 @@ def _wing_line(quote: WingQuote | None, n_quotes: int) -> str:
     return "n/a (only one usable quote on this side, so no pair can bracket this point)"
 
 
+def _atm_line(skew: SkewSnapshot) -> str:
+    """Render the ATM point, which is interpolated per curve rather than per side.
+
+    ATM is tried on the call curve at +0.5 and then on the put curve at -0.5, so
+    neither side's count alone explains a miss and their SUM does not either: one
+    call and one put total two quotes while neither curve has the pair an
+    interpolation needs. The deciding number is the better-populated curve.
+    """
+    if skew.atm is not None:
+        return _format_wing(skew.atm)
+    if max(skew.n_calls, skew.n_puts) >= 2:
+        return _format_wing(None)
+    return (
+        "n/a (neither the call nor the put curve has two usable quotes, so there is no pair "
+        "to bracket the 50Δ point with)"
+    )
+
+
 def _skew_section(skew: SkewSnapshot, snapshot_time: str) -> str:
     """Render the live-chain lines for the selected expiry."""
     if skew.is_fallback:
         expiry_basis = (
-            f"the nearest-{TARGET_DTE_DAYS}-day expiry could not bracket both 25Δ wings, so "
+            f"the expiry nearest {TARGET_DTE_DAYS} days could not be used, so "
             f"this is the next qualifying expiry that could"
         )
     else:
@@ -1023,7 +1072,7 @@ def _skew_section(skew: SkewSnapshot, snapshot_time: str) -> str:
         f"**Expiry used:** {skew.expiry} — {skew.days_to_expiry:.1f} days out, {expiry_basis}; "
         f"{skew.n_calls} call / {skew.n_puts} put quotes on this expiry yielded a usable delta",
         f"**Forward:** {skew.forward:,.2f}",
-        f"**ATM IV ({ATM_DELTA * 100:.0f}Δ):** {_wing_line(skew.atm, skew.n_calls + skew.n_puts)}",
+        f"**ATM IV ({ATM_DELTA * 100:.0f}Δ):** {_atm_line(skew)}",
         f"**25Δ call IV:** {_wing_line(skew.call_25, skew.n_calls)}",
         f"**25Δ put IV:** {_wing_line(skew.put_25, skew.n_puts)}",
     ]
@@ -1054,22 +1103,27 @@ def _reading_line(
     and a negative RR25 is the ordinary resting state of crypto options rather
     than news. No sibling vendor in this package interprets its own figures.
 
-    It also names the currency: for a proxied asset the heading is otherwise the
-    only place that says whose surface this is, and a bare "the 28AUG26 skew ..."
-    is precisely what survives a downstream summary with the proxy framing gone.
+    It also names the currency and the tenor: for a proxied asset the heading is
+    otherwise the only place that says whose surface this is, and a bare "the
+    28AUG26 skew ..." is precisely what survives a downstream summary with the
+    proxy framing gone. The tenor is named for the same reason and became load
+    bearing once the expiry stopped being fixed — a risk reversal is not
+    tenor-invariant, so a reader who assumes ~30 days when the fallback supplied a
+    different expiry is reading a different quantity than the one printed.
     """
     parts = []
     if skew is not None and skew.rr25 is not None:
         rr = skew.rr25
+        tenor = f"{skew.expiry} ({skew.days_to_expiry:.0f}-day)"
         if rr == 0:
             parts.append(
-                f"in the live {currency} {skew.expiry} chain both 25Δ wings carry the same "
+                f"in the live {currency} {tenor} chain both 25Δ wings carry the same "
                 f"implied vol (RR25 {rr:+.2f})"
             )
         else:
             richer, cheaper = ("puts", "calls") if rr < 0 else ("calls", "puts")
             parts.append(
-                f"in the live {currency} {skew.expiry} chain, 25Δ {richer} are priced "
+                f"in the live {currency} {tenor} chain, 25Δ {richer} are priced "
                 f"{abs(rr):.2f} vol points above 25Δ {cheaper} (RR25 {rr:+.2f}, defined as "
                 f"25Δ call IV minus 25Δ put IV)"
             )
@@ -1084,7 +1138,7 @@ def _reading_line(
         # own — and this clause is exactly what gets quoted on its own.
         parts.append(
             f"{currency}'s latest DVOL reading{as_of} sits at the {_ordinal(percentile)} "
-            f"percentile of the {percentile_n} daily readings in the "
+            f"percentile of the {_readings(percentile_n)} in the "
             f"{DVOL_PERCENTILE_WINDOW_DAYS}-day window ending on the analysis date"
         )
     if not parts:
@@ -1164,7 +1218,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         # useful to the analyst than a generic degraded-category sentinel).
         return (
             f"There is no listed options market for '{asset}' on Deribit, and it is not a "
-            f"recognized crypto risk asset for which BTC's volatility surface serves as a "
+            f"recognized crypto risk asset for which BTC's DVOL level serves as a "
             f"market-wide proxy (e.g. a stablecoin or an unrecognized symbol). Do not "
             f"substitute BTC or ETH implied volatility for it."
         )

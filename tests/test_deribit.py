@@ -125,17 +125,27 @@ def _dvol_days(count: int, end: str = TODAY, start_value: float = 40.0):
     }
 
 
-def _ladder(name: str, days_out: float, call_max: float | None = None, iv: float = 30.0):
-    """A full strike ladder for one synthetic expiry, optionally truncated on calls.
+def _ladder(
+    name: str,
+    days_out: float,
+    call_max: float | None = None,
+    put_min: float | None = None,
+    iv: float = 30.0,
+):
+    """A full strike ladder for one synthetic expiry, optionally truncated per side.
 
     ``call_max`` stops the call side at that strike, which is how an expiry is made
     unable to reach down to 0.25 call delta while its put wing stays intact.
+    ``put_min`` does the mirror image for the put side — without it every fallback
+    test cripples the same side, and an acceptance test that checks only the call
+    wing looks fully covered.
     """
     return [
         _synthetic_contract(name, days_out, strike=float(k), is_call=is_call, iv=iv)
         for k in range(58000, 73000, 1000)
         for is_call in (True, False)
         if not (is_call and call_max is not None and k > call_max)
+        and not (not is_call and put_min is not None and k < put_min)
     ]
 
 
@@ -625,6 +635,40 @@ class TestComputeSkew:
         assert skew.is_fallback is True
         assert skew.call_25 is not None and skew.put_25 is not None
 
+    def test_a_missing_put_wing_also_triggers_the_fallback(self):
+        # Mirror of the call-side case. Without it, deleting the `put_25 is not
+        # None` half of the acceptance test leaves the whole suite green while
+        # compute_skew silently ships a half-skew with RR25 = None.
+        contracts = _ladder("NEARBY", 25, put_min=64000) + _ladder("NEXT", 40)
+        skew = deribit.compute_skew(contracts, NOW)
+        assert skew.expiry == "NEXT"
+        assert skew.is_fallback is True
+        assert skew.rr25 is not None
+
+    def test_the_fallback_is_one_step_and_never_walks_the_whole_ladder(self):
+        # A risk reversal is not comparable across tenors, so the walk stops after
+        # the next-nearest expiry. Here A (25d) and B (35d) both fail their call
+        # wing and C (45d) is clean — C must NOT be reached, because reporting a
+        # far-dated skew as if it were the ~30-day one is worse than reporting none.
+        contracts = (
+            _ladder("A", 25, call_max=64000) + _ladder("B", 35, call_max=64000) + _ladder("C", 45)
+        )
+        assert deribit._MAX_EXPIRY_CANDIDATES == 2
+        assert deribit.rank_expiries(contracts, NOW) == ["B", "A", "C"]
+        skew = deribit.compute_skew(contracts, NOW)
+        assert skew.expiry == "B"
+        assert skew.call_25 is None
+        assert skew.is_fallback is False
+
+    def test_the_raised_error_names_the_expiry_that_would_have_been_used(self):
+        # The first failure is kept, not the last: the caller must be told about
+        # the expiry the report would have shown, not one it never reached.
+        near = _synthetic_contract("NEARBY", 25)._replace(underlying=-1.0)
+        far = _synthetic_contract("FARAWAY", 60)._replace(underlying=-1.0)
+        assert deribit.rank_expiries([near, far], NOW) == ["NEARBY", "FARAWAY"]
+        with pytest.raises(deribit.DeribitError, match="NEARBY contracts carry no usable forward"):
+            deribit.compute_skew([near, far], NOW)
+
     def test_the_nearest_expiry_wins_when_it_can_bracket_both_wings(self):
         # The fallback must not fire when there is nothing to fall back from.
         contracts = _ladder("NEARBY", 25) + _ladder("NEXT", 40)
@@ -649,7 +693,7 @@ class TestComputeSkew:
             deribit.compute_skew(contracts, NOW), "2026-08-05T06:06:00Z"
         )
         assert "**Expiry used:** NEXT — 40.0 days out" in section
-        assert "could not bracket both 25Δ wings, so this is the next qualifying expiry" in section
+        assert "could not be used, so this is the next qualifying expiry" in section
         assert f"the listed expiry closest to {deribit.TARGET_DTE_DAYS} days" not in section
 
     @pytest.mark.parametrize(
@@ -734,9 +778,19 @@ class TestDvol:
         # OLDEST data out. At 1D resolution the fetch is one candle per day, so
         # this is the invariant that keeps the no-paging design honest: widening
         # the percentile window past the cap would silently truncate the history.
+        #
+        # Measured off the request actually sent, not recomputed from the same two
+        # constants the request is built from — that form restates the source and
+        # cannot see the request expression itself change.
         assert deribit._DVOL_MAX_CANDLES_PER_RESPONSE == 1000
-        span_days = deribit.DVOL_PERCENTILE_WINDOW_DAYS + deribit._DVOL_FETCH_BUFFER_DAYS
+        recorder = _RequestRecorder()
+        with mock.patch.object(deribit, "_request", side_effect=recorder):
+            deribit._fetch_dvol("BTC", datetime(2026, 7, 20))
+        params = recorder.params_for(DVOL_ENDPOINT)
+        span_days = (params["end_timestamp"] - params["start_timestamp"]) / 86_400_000
         assert span_days < deribit._DVOL_MAX_CANDLES_PER_RESPONSE
+        # One candle per day at 1D, so the span in days IS the candle count.
+        assert deribit.DVOL_RESOLUTION == "1D"
 
     def test_a_truncated_history_is_not_passed_over_in_silence(self, caplog):
         # Unreachable at the current span, but if Deribit ever lowers the cap the
@@ -875,7 +929,9 @@ class TestPercentile:
         # round() is banker's rounding: it sent an exact .5 to the nearest EVEN
         # integer, so 62.5 rendered "62nd" while 37.5 rendered "38th" — the same
         # half-percent landing differently depending on the neighbouring digit.
-        # Reachable whenever the sample size is 16, 20 or 24.
+        # Reachable whenever the sample size is a multiple of 8 (n=16 and n=24 both
+        # yield exactly {12.5, 37.5, 62.5, 87.5}); at n=20 every 100*k/20 is an
+        # integer, so no exact half arises there at all.
         assert deribit._ordinal(value) == expected
 
 
@@ -1124,11 +1180,15 @@ class TestReport:
 
     def test_reading_line_states_the_numbers_without_characterising_them(self):
         out = _report()
+        # The tenor is stated, not just the expiry token: RR25 is not comparable
+        # across tenors and the fallback can change which expiry this is, so a
+        # reader who assumes ~30 days would otherwise be reading a different
+        # quantity than the one printed.
         assert (
-            "_Reading:_ In the live BTC 28AUG26 chain, 25Δ puts are priced 4.74 vol points "
-            "above 25Δ calls (RR25 -4.74, defined as 25Δ call IV minus 25Δ put IV); and BTC's "
-            "latest DVOL reading sits at the 6th percentile of the 35 daily readings in the "
-            "365-day window ending on the analysis date." in out
+            "_Reading:_ In the live BTC 28AUG26 (23-day) chain, 25Δ puts are priced 4.74 vol "
+            "points above 25Δ calls (RR25 -4.74, defined as 25Δ call IV minus 25Δ put IV); and "
+            "BTC's latest DVOL reading sits at the 6th percentile of the 35 daily readings in "
+            "the 365-day window ending on the analysis date." in out
         )
         # No value-laden characterisation: this sentence is re-read verbatim by the
         # downstream research and risk agents.
@@ -1180,7 +1240,12 @@ class TestReport:
         out, recorder = _run_report(asset="USDT")
         assert "no listed options market for 'USDT'" in out
         assert "Do not substitute BTC or ETH implied volatility" in out
-        assert "DVOL" not in out
+        # No DVOL figure of any kind is served — the note may name the DVOL level
+        # as what a *recognized* risk asset would get, but must carry no section,
+        # no reading and no percentile of its own.
+        assert "**DVOL" not in out
+        assert "percentile" not in out
+        assert "_Reading:_" not in out
         assert recorder.calls == []  # no request is opened for a symbol with no signal
 
     def test_eth_is_requested_and_labelled_as_eth(self):
@@ -1251,6 +1316,21 @@ class TestDvolSampleHonesty:
         assert "**365d percentile:** not computed" in out
         assert "sits at the" not in out
         assert "Data lag" in out
+
+    def test_the_percentile_gate_counts_its_own_window_not_the_range_window(self):
+        # The whole point of the 365-day widening: a feed that published daily for
+        # 200 days and then stopped two months ago has ZERO readings in the 30-day
+        # range window but a full regime's worth in the percentile window. Pointing
+        # the min-sample gate at the range window would throw that away — and every
+        # other sample test uses series short enough that the two windows are the
+        # same size, so nothing else can see the difference.
+        end = (datetime.strptime(TODAY, "%Y-%m-%d") - dt.timedelta(days=60)).strftime("%Y-%m-%d")
+        out = _report(dvol=_dvol_days(200, end=end))
+        assert "**30d range:** not computed" in out
+        assert (
+            "**365d percentile:** the latest reading sits at the 100th percentile of the "
+            "200 daily readings in the 365 days ending 2026-08-05" in out
+        )
 
     def test_minimum_sample_is_ten_readings(self):
         # Literal, not derived from the constant: a test whose input is computed
@@ -1334,6 +1414,19 @@ class TestHistoricalDate:
         # No skew figure of any kind may reach the report or the reading line.
         for banned in ("RR25", "vol points", "**Expiry used:**", "**ATM IV"):
             assert banned not in out
+
+    def test_a_past_date_on_a_proxied_asset_reports_the_historical_reason(self):
+        # Both withholding reasons hold at once. The precedence is a decision — the
+        # lookahead guard is the stronger claim and names the date the caller asked
+        # for — and it must be the SAME decision at all three sites that explain it.
+        out, recorder = _run_report(asset="SOL", curr_date="2026-07-20")
+        assert recorder.endpoints() == {DVOL_ENDPOINT}
+        assert "Historical date:" in out
+        assert "not served for a historical analysis date" in out
+        assert "not served for 'SOL'" not in out
+        # ... and the raise, when DVOL also dies, names the same reason.
+        with pytest.raises(deribit.DeribitError, match="historical date 2026-07-20"):
+            _report(asset="SOL", curr_date="2026-07-20", dvol=deribit.DeribitError("down"))
 
     def test_a_supported_currency_still_gets_both_halves(self):
         # The proxy rule must key on the proxy flag, not on "not BTC".
@@ -1433,6 +1526,33 @@ class TestPartialDegradation:
         assert "**25Δ put IV:** 34.30%" in section
         # The bracket/monotonicity wording must not be reused for an empty side.
         assert "no two strike-adjacent quotes bracket" not in section
+
+    def test_the_atm_reason_reads_both_curves_not_their_sum(self):
+        # ATM is interpolated on the call curve at +0.5 and then the put curve at
+        # -0.5, so one call plus one put is two quotes and still no pair. Summing
+        # the sides would clear a >= 2 threshold and print the bracket/monotonicity
+        # wording — the false cause this reason exists to avoid.
+        one_each = [
+            _synthetic_contract("SOLO", 30, strike=60000.0, is_call=True),
+            _synthetic_contract("SOLO", 30, strike=68000.0, is_call=False),
+        ]
+        skew = deribit.compute_skew(one_each, NOW)
+        assert (skew.n_calls, skew.n_puts) == (1, 1)
+        assert skew.atm is None
+        assert deribit._atm_line(skew) == (
+            "n/a (neither the call nor the put curve has two usable quotes, so there is no "
+            "pair to bracket the 50Δ point with)"
+        )
+
+    def test_a_populated_curve_still_gets_the_bracket_reason_for_atm(self):
+        # Four puts and no calls: a pair existed, so the honest reason really is
+        # that nothing brackets 50Δ, not that quotes were missing.
+        puts_only = [
+            c for c in deribit.parse_chain(CHAIN, NOW) if not c.is_call and c.strike >= 65000
+        ]
+        skew = deribit.compute_skew(puts_only, NOW)
+        assert (skew.n_calls, skew.atm) == (0, None)
+        assert "no two strike-adjacent quotes bracket" in deribit._atm_line(skew)
 
     def test_a_single_quote_side_says_a_pair_is_what_is_missing(self):
         # One quote cannot bracket anything, so "no two strike-adjacent quotes

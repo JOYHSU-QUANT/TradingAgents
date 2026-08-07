@@ -387,6 +387,7 @@ class DvolSeries(NamedTuple):
     dates: list[str]
     closes: list[float]
     dropped_non_positive: int = 0
+    newest_dropped_date: str | None = None
 
     @property
     def latest(self) -> float:
@@ -459,7 +460,14 @@ def _utc_now() -> datetime:
 # diagnostics this runs on — deleting them turned Deribit's "start_timestamp must
 # be < end_timestamp" into "must be  end_timestamp", destroying the operator's
 # answer rather than merely shortening it.
-_MARKDOWN_CONTROL = str.maketrans(dict.fromkeys("#*`|"))
+#
+# Translated to a SPACE rather than deleted. Deletion joins the fragments either
+# side, and this runs on ``asset`` before classification: "BTC|USD" collapsed to
+# "BTCUSD", which normalize_symbol resolves to BTC, so a symbol this vendor had
+# always refused started producing a confident BTC report. A space keeps the
+# fragments apart and costs nothing, since whitespace is collapsed immediately
+# afterwards.
+_MARKDOWN_CONTROL = str.maketrans(dict.fromkeys("#*`|", " "))
 
 # "_" is handled separately because it is the one marker that also occurs inside
 # ordinary words: Deribit names the offending field in its error messages
@@ -500,8 +508,10 @@ def _sanitize(text: object, *, limit: int | None = None) -> str:
     Whitespace is collapsed before the strip so a fragment cannot rebuild a line
     break out of the characters that remain.
     """
-    flattened = " ".join(str(text).split())
-    stripped = _EMPHASIS_UNDERSCORE.sub("", flattened.translate(_MARKDOWN_CONTROL))
+    # Translate first, then collapse: the translation introduces spaces of its own
+    # and they must not survive as a run.
+    stripped = _EMPHASIS_UNDERSCORE.sub("", str(text).translate(_MARKDOWN_CONTROL))
+    stripped = " ".join(stripped.split())
     if limit is not None and len(stripped) > limit:
         stripped = stripped[:limit].rstrip() + "..."
     return stripped
@@ -1063,12 +1073,25 @@ def _fetch_dvol(currency: str, curr_dt: datetime) -> DvolSeries:
     # date nor the count in the report would change.
     ts_by_date: dict[str, float] = {}
     skipped_non_positive = 0
+    # The newest rejected day, so the report can say whether the rejections are
+    # what the data-lag gap is made of. Without it a genuine stall plus one
+    # unrelated rejection a year ago renders identically to a feed whose every
+    # recent print was rejected — two different operator actions.
+    newest_skipped: str | None = None
     for row in result["data"]:
         # [timestamp_ms, open, high, low, close]; a shape change here would
         # silently reinterpret which number is the close, so it is fatal.
         if not isinstance(row, list) or len(row) != 5 or not all(_is_finite_number(v) for v in row):
             raise DeribitError(
-                f"Malformed DVOL candle {row!r} (the endpoint's candle shape may have changed)"
+                # Capped here rather than where this is rendered: the render sites
+                # flatten a whole exception message without a length limit (so this
+                # module's own long diagnostics survive intact), and the raw row is
+                # unbounded vendor bytes. A response carrying a megabyte-long cell
+                # would otherwise reach the report twice — once in the body line and
+                # once in the Reading clause — burying the report's own sentences,
+                # which is exactly what _MAX_UNTRUSTED_CHARS exists to prevent.
+                f"Malformed DVOL candle {_sanitize(repr(row), limit=_MAX_UNTRUSTED_CHARS)} "
+                f"(the endpoint's candle shape may have changed)"
             )
         try:
             day = datetime.fromtimestamp(row[0] / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
@@ -1092,6 +1115,8 @@ def _fetch_dvol(currency: str, curr_dt: datetime) -> DvolSeries:
                 # readings, naming the wrong cause exactly as the messages this
                 # round rewrote elsewhere did.
                 skipped_non_positive += 1
+                if newest_skipped is None or day > newest_skipped:
+                    newest_skipped = day
             logger.warning(
                 "Skipping non-positive Deribit DVOL close %r dated %s for %s",
                 row[4],
@@ -1124,6 +1149,7 @@ def _fetch_dvol(currency: str, curr_dt: datetime) -> DvolSeries:
         dates=dates,
         closes=[by_date[d] for d in dates],
         dropped_non_positive=skipped_non_positive,
+        newest_dropped_date=newest_skipped,
     )
 
 
@@ -1304,9 +1330,13 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
         # analysis date, which is the ordinary case for any backtest, and stated
         # three lines under the header note saying the history was filtered.
         lines.append(
-            f"**{DVOL_WINDOW_DAYS}d range:** not computed — no DVOL reading falls inside the "
-            f"{DVOL_WINDOW_DAYS} days ending {curr_date}; the level above is the newest "
-            f"reading on or before {curr_date}"
+            # "no usable reading", for the reason _readings() carries the same
+            # word: candles rejected here are absent from this window too, so an
+            # unqualified "no DVOL reading falls inside" is false whenever the
+            # rejection note below is reporting prints that did fall inside it.
+            f"**{DVOL_WINDOW_DAYS}d range:** not computed — no usable DVOL reading falls "
+            f"inside the {DVOL_WINDOW_DAYS} days ending {curr_date}; the level above is the "
+            f"newest reading on or before {curr_date}"
         )
     elif len(window) < _MIN_RANGE_SAMPLE:
         # The same objection as the empty case, one reading later: min and max
@@ -1349,8 +1379,9 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
             )
         else:
             lines.append(
-                f"**{DVOL_PERCENTILE_WINDOW_DAYS}d percentile:** not computed — no DVOL "
-                f"reading falls inside the {DVOL_PERCENTILE_WINDOW_DAYS} days ending "
+                # "usable", for the reason the range branch above carries it.
+                f"**{DVOL_PERCENTILE_WINDOW_DAYS}d percentile:** not computed — no usable "
+                f"DVOL reading falls inside the {DVOL_PERCENTILE_WINDOW_DAYS} days ending "
                 f"{curr_date}"
             )
     else:
@@ -1400,9 +1431,16 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
             # successful fetch really does mean a live series that stopped
             # updating: Deribit answered normally with a history that ends short.
             lines.append(
+                # "published no usable reading", not "has not printed since". The
+                # rejection note below may be reporting that the index DID print
+                # across this very span and that this module dropped those prints
+                # — and the two lines are adjacent italics, so both survive a
+                # summary that keeps only those. The historical branch above was
+                # corrected for exactly this and this branch was left behind; the
+                # two operator actions differ (vendor status page vs corrupt feed).
                 f"_Data lag: the newest DVOL reading is {series.latest_date}, {lag_days} days "
-                f"before {lag_from} — the fetch succeeded, so the index itself has not printed "
-                f"since. Treat the level as {lag_days} days old._"
+                f"before {lag_from} — the fetch succeeded, so the index published no usable "
+                f"reading between the two. Treat the level as {lag_days} days old._"
             )
         # Names what the age is measured FROM. The reading line quotes this phrase
         # on its own beside "the window ending on the analysis date", so a bare "N
@@ -1421,12 +1459,19 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
             # counts rejections across the whole FETCH span (the longer window
             # plus its buffer), not within the two statistics windows named above,
             # so "the counts above are shorter" was false whenever the rejected
-            # candle fell outside them — or shared a day with a surviving one.
+            # candle fell outside them — or shared a day with a surviving one,
+            # where the day still counts once and no count moves at all.
+            #
+            # The newest rejected date is named so a reader can tell whether these
+            # rejections ARE the data-lag gap above or are unrelated history: a
+            # genuine stall plus one rejection a year ago otherwise rendered
+            # identically to a feed whose every recent print was rejected.
             f"_Rejected: {dropped} DVOL reading{'' if dropped == 1 else 's'} dated on or "
             f"before {curr_date} came back zero or negative and "
             f"{'was' if dropped == 1 else 'were'} dropped as broken (a non-positive vol index "
-            f"is not a low reading). Any of them falling inside a window above is absent from "
-            f"that window's count._"
+            f"is not a low reading), the newest of them dated {series.newest_dropped_date}. "
+            f"A rejected reading does not contribute to a window's count above, though a day "
+            f"that also carried a surviving reading still counts once._"
         )
     return DvolReport(
         "\n".join(lines), percentile, len(pct_window), as_of_phrase, latest, latest_is_open
@@ -1545,22 +1590,28 @@ def _skew_section(skew: SkewSnapshot, snapshot_time: str) -> str:
     return "\n".join(lines)
 
 
-def _widest_wing_bracket(skew: SkewSnapshot) -> float | None:
-    """Widest 25Δ bracket as a fraction of the forward, or None if none is wide.
+def _widest_wing_bracket(skew: SkewSnapshot) -> tuple[float, str] | None:
+    """Widest 25Δ bracket as ``(fraction_of_forward, side)``, or None if none is wide.
 
     Only the two RR25 inputs are measured. ATM's bracket is not: it qualifies a
     figure the reading line does not restate, and its absence is reported in its
     own right by the caller.
+
+    The SIDE travels with the number because the reading line is what survives a
+    downstream summary and the strikes that would identify the wing are body-only
+    — "that wing reads across the smile" named neither of the two.
     """
     if skew.forward <= 0:
         return None
     widths = [
-        (quote.strike_high - quote.strike_low) / skew.forward
-        for quote in (skew.call_25, skew.put_25)
+        ((quote.strike_high - quote.strike_low) / skew.forward, side)
+        for quote, side in ((skew.call_25, "call"), (skew.put_25, "put"))
         if quote is not None
     ]
-    widest = max(widths, default=0.0)
-    return widest if widest > _WIDE_BRACKET_FRACTION else None
+    if not widths:
+        return None
+    widest, side = max(widths)
+    return (widest, side) if widest > _WIDE_BRACKET_FRACTION else None
 
 
 def _reading_line(
@@ -1662,10 +1713,13 @@ def _reading_line(
         # otherwise disclosed only in the body — which is the half a summary
         # drops. Collected into one trailing clause so the sentence gains one
         # segment rather than three.
-        # No qualifier contains a comma, and they are joined with "; " rather than
-        # ", and ": the enclosing sentence already joins its clauses with "; and ",
-        # so comma-separated items carrying their own commas left the item
-        # boundaries ambiguous once all three fired at once.
+        # Parenthesised, and no qualifier contains a comma. The enclosing sentence
+        # joins its clauses with "; and " — the serial-semicolon CLOSING form — so
+        # a bare "; "-joined list left the sentence's own final clause reading as
+        # one more qualifier: "...; and BTC's latest DVOL reading is ..." parsed as
+        # a fourth qualification OF THE CHAIN, which is at its worst when that
+        # clause is the other half's absence. The brackets close the list so it
+        # cannot swallow what follows it.
         qualifiers = []
         if skew.is_fallback:
             qualifiers.append(
@@ -1677,31 +1731,34 @@ def _reading_line(
         if skew.rr25 is not None:
             widest = _widest_wing_bracket(skew)
             if widest is not None:
+                fraction, side = widest
                 # The measured width, not "up to N%": at ":.0%" a bracket spanning
                 # 10.49% rendered "up to 10%", an upper bound the figure it
                 # describes breaches — the same defect this round floored the
-                # percentile bound to remove.
+                # percentile bound to remove. Two decimals so a bracket just past
+                # the threshold cannot print AS the threshold.
                 qualifiers.append(
-                    f"its widest 25Δ bracket spans {widest:.1%} of the forward so that wing "
-                    f"reads across the smile rather than along it"
+                    f"its 25Δ {side} wing was interpolated across a bracket spanning "
+                    f"{fraction:.2%} of the forward so it reads across the smile rather "
+                    f"than along it"
                 )
         if qualifiers:
-            parts.append("this chain read is qualified: " + "; ".join(qualifiers))
+            parts.append("this chain read is qualified (" + "; ".join(qualifiers) + ")")
     if dvol_report is not None:
         # The as-of date travels with the claim for the same reason the currency
         # does: this sentence is what survives a downstream summary, and a level
         # presented bare reads as current however old the reading is. Present on
         # every report, not only late ones — see DvolReport.
-        as_of = f" ({dvol_report.as_of_phrase})" if dvol_report.as_of_phrase else ""
-        # The open-candle caveat follows the number it qualifies. Stating the level
-        # here without it quotes a provisional reading as a settled one in exactly
-        # the sentence built to survive a summary — the body's caveat is on the
-        # half that gets dropped.
-        so_far = ", the level so far in a still-open candle" if dvol_report.latest_is_open else ""
-        level = (
-            f"{currency}'s latest DVOL reading is {dvol_report.latest:.2f}% "
-            f"annualized{as_of}{so_far}"
-        )
+        # The open-candle caveat follows the number it qualifies — stating the
+        # level without it quotes a provisional reading as a settled one in the
+        # sentence built to survive a summary. Folded INSIDE the as-of parenthesis
+        # rather than trailing it, so the percentile clause's "it" still refers to
+        # the reading: appended outside, the nearest antecedent became "a
+        # still-open candle", and a candle does not sit at a percentile.
+        so_far = "; still an open candle, so this is the level so far"
+        detail = dvol_report.as_of_phrase + (so_far if dvol_report.latest_is_open else "")
+        as_of = f" ({detail})" if detail else ""
+        level = f"{currency}'s latest DVOL reading is {dvol_report.latest:.2f}% annualized{as_of}"
         if dvol_report.percentile is not None:
             # State the sample, not just the span. "the 365-day window" reads as
             # one observation per day, so a feed that stopped publishing weeks ago
@@ -1711,7 +1768,7 @@ def _reading_line(
             # lived only on the body line, and "at or below" is what makes a
             # repeating feed print the 100th percentile.
             parts.append(
-                f"{level}, which sits at the {_ordinal(dvol_report.percentile)} percentile of "
+                f"{level}, and it sits at the {_ordinal(dvol_report.percentile)} percentile of "
                 f"the {_readings(dvol_report.percentile_n)} in the "
                 f"{DVOL_PERCENTILE_WINDOW_DAYS}-day window ending on the analysis date "
                 f"(percentile = share of those readings at or below it)"
@@ -1719,10 +1776,20 @@ def _reading_line(
         else:
             # Says the rank is absent AND why, rather than dropping the half. The
             # level is still the report's headline number and is stated either way.
+            #
+            # An EMPTY window is not a thin one: "0 usable daily readings, too few
+            # to rank against" frames a window holding nothing as a shortfall, the
+            # same distinction the body's two branches already draw.
+            if dvol_report.percentile_n == 0:
+                shortfall = "no usable daily reading falls inside that window at all"
+            else:
+                shortfall = (
+                    f"{_readings(dvol_report.percentile_n)} in that window, too few to rank "
+                    f"the level against"
+                )
             parts.append(
                 f"{level}, and no {DVOL_PERCENTILE_WINDOW_DAYS}-day percentile is in this "
-                f"report ({_readings(dvol_report.percentile_n)} in that window, too few to "
-                f"rank the level against)"
+                f"report ({shortfall})"
             )
     elif dvol_absence:
         parts.append(f"no {currency} DVOL level is in this report ({dvol_absence})")
@@ -2114,8 +2181,14 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             # the windows are full and there is no shortfall to declare, which is
             # why this is now gated rather than reworded again.
             sentences.append(
-                f"The DVOL windows end at the analysis date but the feed has only reached "
-                f"{dvol.latest_date}, so they hold fewer readings than their full spans."
+                # "newest usable reading", not "the feed has only reached": a
+                # candle this module rejected leaves the feed's own reach further
+                # forward than this date, so the unqualified phrasing is false
+                # exactly when the rejection note is printing. Third site of that
+                # word; the others are _readings() and the two empty-window lines.
+                f"The DVOL windows end at the analysis date but the feed's newest usable "
+                f"reading is {dvol.latest_date}, so they hold fewer readings than their "
+                f"full spans."
             )
         # Both consequence sentences are separately gated, so both can be absent at
         # once — a proxied asset (or a failed chain) whose DVOL feed did reach

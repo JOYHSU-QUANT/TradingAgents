@@ -96,14 +96,41 @@ Breaking changes within the 0.x line are called out explicitly.
   now yields **no skew** instead of a 96-day RR25 rendered under a 30-day heading
   with `is_fallback` false, corrected only by a number a downstream summary drops.
   That sentence also states when a risk reversal is **not** in the report and
-  why — withheld by policy, a chain that could not be read, or wings the chain
-  does not supply — instead of simply omitting the clause. It is the one line a
-  downstream summary keeps, so an absence marked only by a missing clause was
-  precisely the signal that did not survive the hop: a backtest, a proxied asset
-  and a chain outage each produced a closing sentence differing from a healthy
-  report's only by something that was not there. A chain that was attempted and
-  failed now also carries its own italic header caveat, which the three
-  withheld-by-policy states already had and an outage did not.
+  why — withheld by policy, a chain that yielded no usable surface, or wings the
+  chain does not supply — instead of simply omitting the clause. It is the one
+  line a downstream summary keeps, so an absence marked only by a missing clause
+  was precisely the signal that did not survive the hop: a backtest, a proxied
+  asset and a chain outage each produced a closing sentence differing from a
+  healthy report's only by something that was not there. A chain that was
+  attempted and failed now also carries its own italic header caveat, which the
+  three withheld-by-policy states already had and an outage did not.
+  **The same treatment now covers the DVOL half and the chain degradations that
+  change what the printed figures mean.** The closing sentence states the DVOL
+  **level** unconditionally rather than only as the base of a percentile — gating
+  the whole clause on the percentile made an outage, a window too thin to rank,
+  and a feed stalled past a year all fall silent identically, while the body
+  above carried a usable level throughout — and names the half's absence with its
+  cause when it failed, alongside a matching italic header caveat whose only
+  previous trace was *subtractive* (a dropped clause on the source bullet). It
+  also now carries a fallback expiry, a missing ATM point, and a 25Δ wing
+  interpolated across a bracket wider than 10% of the forward: each changes which
+  quantity the figures describe, and each was disclosed only in the body a
+  summary drops. Sentences that named a cause the code does not support were
+  corrected — "the options chain could not be read" for four causes that are a
+  successful 200; "the newest reading Deribit has published at all" and "the
+  index has not printed since" on a historical date, asserted about a live feed
+  from a series this module deliberately truncated at `curr_date`. Counts are
+  labelled **usable** and readings rejected as non-positive are disclosed by
+  count, so a window this module partially emptied is no longer described as a
+  sparse calendar window; the too-few-to-rank floor is floored rather than
+  rounded, which at six readings had claimed a bound the figure could breach.
+  Vendor error text and the caller-supplied `asset` are flattened before they are
+  interpolated — whitespace collapsed and markdown control characters removed —
+  because the report is assembled into an LLM prompt and a fragment carrying line
+  breaks could otherwise open a forged heading or a second `_Reading:_` line
+  above the real one. It is applied where the fragment enters the message rather
+  than only where it renders, since the router hands an optional category's
+  failure to the model as `DATA_UNAVAILABLE: ... ({error})`.
   Either half can fail without costing the other (any exception, not a fixed
   allowlist); losing both degrades the optional category to the no-data sentinel —
   as does losing DVOL alone on a date, or for a proxied asset, where the chain is
@@ -132,8 +159,9 @@ Breaking changes within the 0.x line are called out explicitly.
   not a construction (a model-free 30-day index across the whole strike range
   versus one 50Δ point on one expiry), so the gap between them is neither a term
   structure nor a volatility risk premium; and RR25 has nothing to be ranked
-  against at all, since Deribit publishes no chain history, so it may be reported
-  by sign, magnitude and tenor but never called elevated or extreme. Each exists
+  against at all — and neither has ATM IV nor the wing vols, since Deribit
+  publishes no chain history, so each may be reported by level (RR25 by sign,
+  magnitude and tenor) but never called elevated or extreme. Each exists
   because an agent asked for actionable insight will otherwise fill the vacuum
   with a regime claim the tool output does not support.
   The stock path's tools and prompt are unchanged.

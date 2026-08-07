@@ -279,11 +279,19 @@ lives. The two halves fail independently, so a DVOL outage still leaves the skew
 and vice versa; losing both degrades the category to the sentinel — as does losing
 DVOL alone on a date, or for a proxied asset, where the chain is withheld by
 design. Whenever no risk reversal is in the report — withheld by policy, a chain
-that could not be read, or wings the chain does not supply — the closing one-line
-summary states that and why, and an unreadable chain also carries its own header
-caveat like the withheld cases do. Both exist because that italic line is what a
-downstream summariser keeps when it drops the body, so an absence signalled only
-by a missing clause is exactly what does not survive the hop.
+that yielded no usable surface, or wings the chain does not supply — the closing
+one-line summary states that and why, and such a chain also carries its own header
+caveat like the withheld cases do. **Either half's absence is disclosed this way**,
+and the closing line states the DVOL level itself rather than only its percentile,
+so a feed whose window is too thin to rank is not silent in the same way an outage
+is. That line also carries the chain degradations that change which quantity the
+figures describe: a fallback expiry, a missing ATM point, and a 25Δ wing
+interpolated between strikes more than 10% of the forward apart. All of this exists
+because that italic line is what a downstream summariser keeps when it drops the
+body, so an absence signalled only by a missing clause is exactly what does not
+survive the hop. Counts are labelled **usable**, and readings rejected as
+non-positive are disclosed by count, so a window this module partially emptied is
+never described as a sparse calendar window.
 This vendor reads chains for BTC and ETH, so other recognized crypto risk
 assets get BTC's **DVOL level** as a market-wide crypto-vol proxy, on the same
 rule as ETF flows; the skew is withheld for them, because a risk reversal measures
@@ -302,6 +310,15 @@ note explaining that the chain predates the analysis date. Further ahead than th
 is a bad argument rather than a timezone, so the chain is withheld again. The chain
 also re-reads the clock immediately before fetching, so a run whose DVOL half timed
 out across UTC midnight cannot serve the next day's book for `curr_date`.
+
+Text this vendor did not author — Deribit's error messages and both caller-supplied
+arguments, `asset` and `curr_date` — is flattened before it is interpolated:
+whitespace collapsed, mid-line markdown markers removed, length capped. The report is assembled into an LLM
+prompt, so a fragment carrying line breaks could otherwise open a forged heading or
+a second `_Reading:_` line above the real one, and the forgery is what a downstream
+summariser would quote. It is applied where the fragment enters the message rather
+than only where the report renders it, because a failure in an optional category
+reaches the model through the router as `DATA_UNAVAILABLE: ... ({error})` too.
 
 This vendor **ships disabled** (`"options_data": "none"`). It needs no API key,
 so shipping it on would change a running deployment's analyst input surface — a

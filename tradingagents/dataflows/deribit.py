@@ -35,8 +35,9 @@ does not survive the hop. A DVOL outage is currently named in the body alone,
 which is the same asymmetry one half further on. This module raises when nothing
 at all can be served — both halves failed, or DVOL failed on a date, or for a
 proxied asset, where the chain is withheld by design — and when either
-caller-supplied argument is malformed; the routing layer then degrades the
-optional ``options_data`` category to a sentinel. A throttle
+caller-supplied argument is malformed, except that a FALSY asset is a no-signal
+sentence rather than a raise; the routing layer then degrades the optional
+``options_data`` category to a sentinel. A throttle
 raises ``VendorRateLimitError`` rather than ``DeribitError`` so the router keeps
 its rate-limit lane.
 
@@ -1290,8 +1291,15 @@ def _skew_section(skew: SkewSnapshot, snapshot_time: str) -> str:
     ]
     if skew.rr25 is None:
         lines.append(
-            "**RR25 (25Δ call IV − 25Δ put IV):** n/a — the chain does not bracket both "
-            "wings, so the risk reversal is not computed (no wing vol is extrapolated)"
+            # "does not supply", not "does not bracket": _wing_line exists because
+            # a side with no usable quote — or one — was never a bracketing
+            # failure, and the monotonicity veto is a bracket that WAS found and
+            # rejected. Naming bracketing here contradicts the wing line printed
+            # directly above it in exactly those cases. The true reason is on
+            # that line; this one only has to be true in all of them.
+            "**RR25 (25Δ call IV − 25Δ put IV):** n/a — the chain does not supply both "
+            "wings (each wing line above says why), so the risk reversal is not computed "
+            "(no wing vol is extrapolated)"
         )
     else:
         lines.append(f"**RR25 (25Δ call IV − 25Δ put IV):** {_rr_points(skew.rr25)} vol points")
@@ -1357,14 +1365,16 @@ def _reading_line(
                 f"as 25Δ call IV minus 25Δ put IV)"
             )
     elif skew is not None:
-        # The chain WAS read and simply could not bracket both wings — a different
+        # The chain WAS read and simply did not yield both wings — a different
         # fact from an absent chain half, and the distinction is the reader's:
         # here the surface exists and is incomplete, there it was never seen at
         # all. Stated with the expiry so it cannot be read as a claim about the
-        # whole surface.
+        # whole surface, and worded "does not supply" rather than "does not
+        # bracket" for the reason _skew_section's RR25 line gives: two of the
+        # three reachable causes are not bracketing failures at all.
         parts.append(
             f"no 25Δ risk reversal is in this report (the live {currency} {skew.expiry} chain "
-            f"does not bracket both 25Δ wings)"
+            f"does not supply both 25Δ wings)"
         )
     elif chain_absence:
         parts.append(f"no 25Δ skew is in this report ({chain_absence})")
@@ -1441,7 +1451,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         strikes they were interpolated between, and the risk reversal, closing
         with one fixed-format sentence restating those figures. When no risk
         reversal is in the report that closing sentence says so and why (withheld
-        by policy, unreadable chain, or wings the chain cannot bracket) rather
+        by policy, unreadable chain, or wings the chain does not supply) rather
         than falling silent, since it is the line a downstream summary keeps. An
         unrecognized symbol returns a bare no-signal sentence instead.
 
@@ -1794,10 +1804,18 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
     if skew is not None:
         sections.append(_skew_section(skew, snapshot_time))
     elif chain_withheld == "historical":
+        # The third site of the mid-run distinction, and the one the "derive it
+        # once" refactor did not reach: calling curr_date "a historical analysis
+        # date" is false when the clock crossed into it mid-run, which is the
+        # same mis-framing the Reading line was corrected for.
+        basis = (
+            "an analysis date the UTC clock passed while this report was being built"
+            if withheld_mid_run
+            else "a historical analysis date"
+        )
         sections.append(
-            f"**Options chain (ATM IV / 25Δ skew):** not served for a historical analysis "
-            f"date — see the note above. Do not substitute the current chain's skew for "
-            f"{curr_date}."
+            f"**Options chain (ATM IV / 25Δ skew):** not served for {basis} — see the note "
+            f"above. Do not substitute the current chain's skew for {curr_date}."
         )
     elif chain_withheld == "far_future":
         sections.append(
@@ -1860,6 +1878,14 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             chain_absence = f"this vendor reads no options chain for '{asset}'"
         else:
             chain_absence = "the options chain could not be read"
+        if market_proxy and chain_withheld != "proxy":
+            # historical/far_future outrank proxy in chain_withheld, which is a
+            # settled precedence — but at the header and body the proxy fact is
+            # still carried, by the heading and its caveat. This line has no such
+            # second carrier, so without this the summarisable sentence says SOL's
+            # skew was withheld because of the DATE, implying a live date would
+            # serve it. It never will.
+            chain_absence += f", and this vendor reads no options chain for '{asset}' on any date"
     reading = _reading_line(currency, skew, percentile, percentile_n, dvol_as_of, chain_absence)
     if reading:
         sections.append(reading)

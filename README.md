@@ -279,7 +279,7 @@ lives. The two halves fail independently, so a DVOL outage still leaves the skew
 and vice versa; losing both degrades the category to the sentinel — as does losing
 DVOL alone on a date, or for a proxied asset, where the chain is withheld by
 design. Whenever no risk reversal is in the report — withheld by policy, a chain
-that could not be read, or wings the chain cannot bracket — the closing one-line
+that could not be read, or wings the chain does not supply — the closing one-line
 summary states that and why, and an unreadable chain also carries its own header
 caveat like the withheld cases do. Both exist because that italic line is what a
 downstream summariser keeps when it drops the body, so an absence signalled only

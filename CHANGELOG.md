@@ -97,7 +97,7 @@ Breaking changes within the 0.x line are called out explicitly.
   with `is_fallback` false, corrected only by a number a downstream summary drops.
   That sentence also states when a risk reversal is **not** in the report and
   why — withheld by policy, a chain that could not be read, or wings the chain
-  cannot bracket — instead of simply omitting the clause. It is the one line a
+  does not supply — instead of simply omitting the clause. It is the one line a
   downstream summary keeps, so an absence marked only by a missing clause was
   precisely the signal that did not survive the hop: a backtest, a proxied asset
   and a chain outage each produced a closing sentence differing from a healthy

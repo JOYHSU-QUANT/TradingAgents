@@ -1759,6 +1759,19 @@ class TestReport:
             "for 'SOL'); and BTC's latest DVOL reading" in out
         )
 
+    def test_a_proxied_asset_on_a_past_date_keeps_both_reasons(self):
+        # historical outranks proxy in chain_withheld, which is settled — but at
+        # the header and the body the proxy fact is carried anyway, by the heading
+        # and its caveat. The Reading line has no second carrier, so naming only
+        # the date told a summariser that SOL's skew was withheld BECAUSE of the
+        # date, implying a live date would serve it. It never will.
+        out = _report(asset="SOL", curr_date="2026-07-20")
+        assert (
+            "_Reading:_ No 25Δ skew is in this report (the options chain is not served for "
+            "the past analysis date 2026-07-20, and this vendor reads no options chain for "
+            "'SOL' on any date); and BTC's latest DVOL reading" in out
+        )
+
     def test_unsupported_asset_gets_a_no_signal_note(self):
         out, recorder = _run_report(asset="USDT")
         assert "This vendor reads Deribit options for BTC and ETH only" in out
@@ -1863,15 +1876,19 @@ class TestReport:
         assert "**25Δ call IV:** n/a (no two strike-adjacent quotes bracket this point" in out
         assert "**RR25 (25Δ call IV − 25Δ put IV):** n/a" in out
         assert "no wing vol is extrapolated" in out
-        # A chain that WAS read but could not bracket both wings is a different
-        # fact from an absent chain half, and the Reading line has to carry the
+        # A chain that WAS read but did not yield both wings is a different fact
+        # from an absent chain half, and the Reading line has to carry the
         # distinction: here the surface exists and is incomplete, there it was
         # never seen. Named with the expiry so it cannot read as a claim about the
-        # whole surface.
+        # whole surface. "does not supply", never "does not bracket": a side with
+        # no usable quote was never a bracketing failure, and the monotonicity
+        # veto is a bracket that WAS found and rejected — _wing_line exists to
+        # keep those apart, so the summary line must not undo it.
         assert (
             "_Reading:_ No 25Δ risk reversal is in this report (the live BTC 28AUG26 chain "
-            "does not bracket both 25Δ wings); and BTC's latest DVOL reading" in out
+            "does not supply both 25Δ wings); and BTC's latest DVOL reading" in out
         )
+        assert "does not bracket both" not in out
 
     def test_a_mixed_case_chain_still_groups_into_one_expiry(self):
         # The expiry token returned by parse_instrument_name is BOTH the grouping
@@ -2299,7 +2316,14 @@ class TestHistoricalDate:
             ]
         )
         assert recorder.endpoints() == {DVOL_ENDPOINT}
-        assert "**Options chain (ATM IV / 25Δ skew):** not served for a historical analysis" in out
+        # The body must not call this "a historical analysis date" either: the
+        # clock crossed INTO curr_date mid-run, so it is today. Third site of the
+        # same distinction the header and the Reading line already make.
+        assert (
+            "**Options chain (ATM IV / 25Δ skew):** not served for an analysis date the UTC "
+            "clock passed while this report was being built" in out
+        )
+        assert "not served for a historical analysis date" not in out
         # Spans the whole crossed_midnight interpolation INCLUDING its closing
         # paren and the ": Deribit's" join after it — the previous assertion
         # stopped mid-clause, so dropping either boundary character shipped green.

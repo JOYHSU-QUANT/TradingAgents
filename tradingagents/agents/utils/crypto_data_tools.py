@@ -110,7 +110,7 @@ def get_options_market(
     BTC's DVOL level as a market-wide proxy but not BTC's skew. The report's
     Forward is Deribit's forward for the selected expiry, not spot, and is
     expected to differ from a spot price level. Whenever no risk reversal is in
-    the report — the chain withheld, unreadable, or unable to bracket both wings
+    the report — the chain withheld, unreadable, or not supplying both wings
     — the report's closing one-line summary says so and why rather than falling
     silent, so the absence survives a downstream summary. Uses the configured
     options_data vendor.

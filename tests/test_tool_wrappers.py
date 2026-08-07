@@ -243,6 +243,25 @@ class TestIndicatorsWrapper:
             )
         assert out == "ROUTED\n\nUnsupported indicator: bogus"
 
+    def test_only_a_valueerror_becomes_report_text(self):
+        # The OTHER edge of that except clause, and the one that was unpinned:
+        # deleting the try/except is caught by the test above, but WIDENING it to
+        # `except Exception` shipped green. Widened, a VendorRateLimitError, a
+        # KeyError, or a TypeError from a mis-forwarded argument would be pasted
+        # into the market report as prose instead of failing — the silent
+        # degradation this file exists to prevent, and it would also mask any
+        # future argument-order regression in this same wrapper.
+        def boom(*_args, **_kwargs):
+            raise KeyError("unknown indicator")
+
+        with (
+            mock.patch.object(technical_indicators_tools, "route_to_vendor", boom),
+            pytest.raises(KeyError),
+        ):
+            technical_indicators_tools.get_indicators.invoke(
+                {"symbol": "AAPL", "indicator": "rsi", "curr_date": DATE}
+            )
+
 
 @pytest.mark.unit
 class TestNonRouterWrappers:
@@ -292,3 +311,21 @@ class TestCryptoWrappersAreCoveredToo:
             crypto_data_tools.get_fear_greed,
             {"curr_date": DATE, "look_back_days": 30},
         ) == ("get_fear_greed", DATE, 30)
+
+    def test_the_crypto_lookback_defaults_reach_the_router_as_none(self):
+        # Passing 30 explicitly above cannot see the declared default: the
+        # assertion holds identically whether it is None or 30. Every sibling
+        # optional default in this file IS pinned by an omitted-argument payload,
+        # so leaving these two out was an inconsistency, not a choice — and a
+        # wrapper hardcoding 30 here would silently override the deployment's
+        # configured ETF-flow and Fear & Greed windows.
+        assert _forwarded(
+            crypto_data_tools,
+            crypto_data_tools.get_etf_flows,
+            {"asset": "BTC", "curr_date": DATE},
+        ) == ("get_etf_flows", "BTC", DATE, None)
+        assert _forwarded(
+            crypto_data_tools,
+            crypto_data_tools.get_fear_greed,
+            {"curr_date": DATE},
+        ) == ("get_fear_greed", DATE, None)

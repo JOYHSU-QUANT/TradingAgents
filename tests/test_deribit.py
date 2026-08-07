@@ -3024,6 +3024,16 @@ class TestMarketAnalystWiring:
         assert "risk reversal" in crypto_prompt
         assert "get_options_market" not in stock_prompt
 
+    def test_the_prompt_admits_the_dvol_half_can_be_absent(self, options_enabled):
+        # The prompt's caveat inventory enumerated every way the CHAIN half can go
+        # missing and then asserted the DVOL level is "always printed" — false
+        # since the half gained its own outage disclosure, and this prompt was the
+        # one description site that round's sweep did not reach.
+        prompt = str(_run_analyst("crypto").prompt_value)
+        assert "the DVOL half can equally fail" in prompt
+        assert "carries an as-of date whenever it is present" in prompt
+        assert "always printed with an as-of date" not in prompt
+
     def test_the_prompt_exempts_the_forward_from_the_verified_snapshot_rule(self, options_enabled):
         # The base prompt makes the verified snapshot the source of truth for any
         # PRICE-LEVEL claim and orders the model to flag conflicts. **Forward:** is
@@ -3428,13 +3438,13 @@ class TestAHistoricalDateClaimsNothingAboutTheLiveFeed:
 
     def test_the_range_line_scopes_its_newest_reading_to_the_analysis_date(self):
         out = _report(curr_date="2026-06-01", dvol=self._STALLED)
-        assert "the level above is the newest reading on or before 2026-06-01" in out
+        assert "the level above is the newest usable reading on or before 2026-06-01" in out
         assert "Deribit has published at all" not in out
 
     def test_the_lag_note_does_not_assert_the_index_stopped_printing(self):
         out = _report(curr_date="2026-06-01", dvol=self._STALLED)
         assert (
-            "_Data lag: the newest DVOL reading on or before 2026-06-01 is 2026-04-21, 41 "
+            "_Data lag: the newest usable DVOL reading on or before 2026-06-01 is 2026-04-21, 41 "
             "days earlier — the index published no usable reading between the two. Treat the "
             "level as "
             "41 days old as at the analysis date._" in out
@@ -3496,6 +3506,13 @@ class TestRejectedReadingsAreDisclosed:
         assert "_Rejected: 5 DVOL readings" in out
         assert "the index published no usable reading between the two" in out
         assert "has not printed since" not in out
+        # The OPENING clause too. The rejection note names the newest rejected
+        # date, which is later than the newest surviving one — so an unqualified
+        # "the newest DVOL reading is X" is denied one italic line below, and both
+        # lines survive a summary that keeps only italics.
+        assert "the newest usable DVOL reading is 2026-07-30" in out
+        assert "the newest DVOL reading is" not in out
+        assert "the newest of them dated 2026-08-05" in out
 
     def test_an_emptied_window_is_not_called_a_sparse_one(self):
         # Every reading inside the 30-day window was rejected here, so "no DVOL

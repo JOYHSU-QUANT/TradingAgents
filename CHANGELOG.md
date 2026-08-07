@@ -124,8 +124,9 @@ Breaking changes within the 0.x line are called out explicitly.
   count, so a window this module partially emptied is no longer described as a
   sparse calendar window; the too-few-to-rank floor is floored rather than
   rounded, which at six readings had claimed a bound the figure could breach.
-  Vendor error text and the caller-supplied `asset` are flattened before they are
-  interpolated — whitespace collapsed and markdown control characters removed —
+  Vendor error text and both caller-supplied arguments (`asset` and `curr_date`)
+  are flattened before they are interpolated — whitespace collapsed and mid-line
+  markdown markers removed —
   because the report is assembled into an LLM prompt and a fragment carrying line
   breaks could otherwise open a forged heading or a second `_Reading:_` line
   above the real one. It is applied where the fragment enters the message rather

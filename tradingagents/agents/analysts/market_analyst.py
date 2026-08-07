@@ -68,11 +68,13 @@ def create_market_analyst(llm):
                 "and for an asset this vendor reads no chain for, and it can additionally "
                 "just fail to be read — in each case the report "
                 "says so in place of the ATM/RR25 figures, and you must not substitute the "
-                "current chain's or BTC's skew for them; if the report is headed as a "
-                "market-wide proxy the DVOL figures are BTC's and no skew is served at all, "
-                "so treat them as a crypto-wide volatility signal and never "
-                "as that asset's own; and the DVOL level is always printed with an as-of date, "
-                "so cite that date wherever you cite the level."
+                "current chain's or BTC's skew for them; the DVOL half can equally fail, and "
+                "the report then says so in place of the level, its range and its percentile, "
+                "so do not carry a DVOL reading over from an earlier cycle; if the report is "
+                "headed as a market-wide proxy the DVOL figures are BTC's and no skew is "
+                "served at all, so treat them as a crypto-wide volatility signal and never "
+                "as that asset's own; and the DVOL level carries an as-of date whenever it is "
+                "present, so cite that date wherever you cite the level."
             )
 
         system_message = (

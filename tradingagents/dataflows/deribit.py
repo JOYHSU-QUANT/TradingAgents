@@ -486,15 +486,19 @@ def _sanitize(text: object, *, limit: int | None = None) -> str:
     """Flatten a fragment this module did not author so it cannot forge structure.
 
     ``limit`` caps the result, and is passed ONLY where the untrusted fragment is
-    isolated — Deribit's ``error.message`` and the caller's ``asset``. It is not
-    passed when flattening a whole exception message, because most of that string
-    is this module's own carefully-worded diagnostic: capping there truncated
-    "...points at a response-shape change rather than an empty market" one clause
-    from the end, cutting off the very distinction the sentence exists to draw.
+    ISOLATED: Deribit's ``error.message``, a raw candle row echoed into the
+    malformed-shape error, and the two caller-supplied arguments ``asset`` and
+    ``curr_date`` (the latter twice — once quoted, once inside the ValueError it
+    raised). It is not passed when flattening a whole exception message, because
+    most of that string is this module's own carefully-worded diagnostic: capping
+    there truncated "...points at a response-shape change rather than an empty
+    market" one clause from the end, cutting off the very distinction the sentence
+    exists to draw.
 
-    Two inputs reach the report without this module choosing their contents:
-    Deribit's JSON-RPC ``error.message`` and the caller-supplied ``asset``.
-    Interpolated raw, either can close the sentence it sits in and open new
+    Several inputs reach the report without this module choosing their contents:
+    Deribit's JSON-RPC ``error.message``, a raw candle row, and the caller-supplied
+    ``asset`` and ``curr_date``.
+    Interpolated raw, any can close the sentence it sits in and open new
     blocks — a second ``_Reading:_`` line, a fresh ``##`` heading, a fabricated
     DVOL level — and the forged copy renders ABOVE the real one, so a downstream
     summariser keeping "the Reading line" quotes the forgery.
@@ -505,8 +509,9 @@ def _sanitize(text: object, *, limit: int | None = None) -> str:
     embedded in a RAISED error reaches the prompt just as surely as a rendered
     one, and sanitising only the renderers would leave that path open.
 
-    Whitespace is collapsed before the strip so a fragment cannot rebuild a line
-    break out of the characters that remain.
+    The strip runs FIRST and whitespace is collapsed after it, so neither the
+    spaces the translation introduces nor the ones already in the fragment can
+    survive as a run or rebuild a line break.
     """
     # Translate first, then collapse: the translation introduces spaces of its own
     # and they must not survive as a run.
@@ -1336,7 +1341,7 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
             # rejection note below is reporting prints that did fall inside it.
             f"**{DVOL_WINDOW_DAYS}d range:** not computed — no usable DVOL reading falls "
             f"inside the {DVOL_WINDOW_DAYS} days ending {curr_date}; the level above is the "
-            f"newest reading on or before {curr_date}"
+            f"newest usable reading on or before {curr_date}"
         )
     elif len(window) < _MIN_RANGE_SAMPLE:
         # The same objection as the empty case, one reading later: min and max
@@ -1421,7 +1426,13 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
                 # that this module dropped those prints as broken. Two adjacent
                 # italic lines asserting opposite facts about the same span is the
                 # contradiction this round exists to remove, not to add.
-                f"_Data lag: the newest DVOL reading on or before {curr_date} is "
+                # "newest USABLE reading" in the opening clause too. The rejection
+                # note below names the newest REJECTED date, which can be later
+                # than this one — so an unqualified "the newest DVOL reading is X"
+                # is contradicted one italic line down, on precisely the path (a
+                # feed whose recent prints are all corrupt) that note exists to
+                # expose.
+                f"_Data lag: the newest usable DVOL reading on or before {curr_date} is "
                 f"{series.latest_date}, {lag_days} days earlier — the index published no "
                 f"usable reading between the two. Treat the level as {lag_days} days old as "
                 f"at the analysis date._"
@@ -1438,9 +1449,10 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
                 # summary that keeps only those. The historical branch above was
                 # corrected for exactly this and this branch was left behind; the
                 # two operator actions differ (vendor status page vs corrupt feed).
-                f"_Data lag: the newest DVOL reading is {series.latest_date}, {lag_days} days "
-                f"before {lag_from} — the fetch succeeded, so the index published no usable "
-                f"reading between the two. Treat the level as {lag_days} days old._"
+                f"_Data lag: the newest usable DVOL reading is {series.latest_date}, "
+                f"{lag_days} days before {lag_from} — the fetch succeeded, so the index "
+                f"published no usable reading between the two. Treat the level as "
+                f"{lag_days} days old._"
             )
         # Names what the age is measured FROM. The reading line quotes this phrase
         # on its own beside "the window ending on the analysis date", so a bare "N
@@ -2109,10 +2121,13 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             f"endpoint, so the ATM IV, 25Δ wings, RR25 and forward would be the CURRENT book, "
             f"not "
             f"{curr_date}'s, and they are NOT served. The DVOL history below IS filtered to "
-            # Same fact as the ahead-of-clock note's DVOL sentence, so it is worded
-            # the same way. It was left on the pre-rewrite phrasing, which is still
-            # true here (days_ahead >= 2, so no mid-run crossing can reach
-            # curr_date) but stated the identical fact two ways three lines apart.
+            # The same fact as the ahead-of-clock note's DVOL sentence, stated
+            # differently on purpose. That sibling now reads "the feed's newest
+            # usable reading is X", because a candle this module rejected leaves
+            # the feed's own reach further forward. Here the distinction cannot
+            # arise: days_ahead >= 2, so the feed has genuinely not reached
+            # curr_date whatever it published, and "a date the feed has not
+            # reached" is the more direct claim.
             f"{curr_date}; its windows end at a date the feed has not reached, so they hold fewer "
             f"readings than their full spans._"
         )

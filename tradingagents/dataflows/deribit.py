@@ -1297,9 +1297,14 @@ def _skew_section(skew: SkewSnapshot, snapshot_time: str) -> str:
             # rejected. Naming bracketing here contradicts the wing line printed
             # directly above it in exactly those cases. The true reason is on
             # that line; this one only has to be true in all of them.
+            # "the wing lines above say which and why", not "each wing line": rr25
+            # is None when AT LEAST ONE wing is missing, so with the other wing
+            # present that line carries a number and no explanation — "each" points
+            # at it and quietly re-reads "does not supply both wings" as "supplies
+            # neither", the opposite of what is rendered.
             "**RR25 (25Δ call IV − 25Δ put IV):** n/a — the chain does not supply both "
-            "wings (each wing line above says why), so the risk reversal is not computed "
-            "(no wing vol is extrapolated)"
+            "wings (the wing lines above say which and why), so the risk reversal is not "
+            "computed (no wing vol is extrapolated)"
         )
     else:
         lines.append(f"**RR25 (25Δ call IV − 25Δ put IV):** {_rr_points(skew.rr25)} vol points")

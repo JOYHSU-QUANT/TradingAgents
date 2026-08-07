@@ -1772,6 +1772,18 @@ class TestReport:
             "'SOL' on any date); and BTC's latest DVOL reading" in out
         )
 
+    def test_a_proxied_asset_on_a_far_future_date_keeps_both_reasons(self):
+        # The append's second reachable arm. Only the historical one was covered,
+        # and this PR's recurring defect is a fix that reaches one sibling site
+        # and not the other.
+        out = _report(asset="SOL", curr_date="2026-09-01")
+        assert (
+            "_Reading:_ No 25Δ skew is in this report (the options chain is not served for "
+            "2026-09-01, which was 27 days ahead of the UTC clock (2026-08-05) when this "
+            "report was built, and this vendor reads no options chain for 'SOL' on any "
+            "date); and BTC's latest DVOL reading" in out
+        )
+
     def test_unsupported_asset_gets_a_no_signal_note(self):
         out, recorder = _run_report(asset="USDT")
         assert "This vendor reads Deribit options for BTC and ETH only" in out
@@ -1874,8 +1886,18 @@ class TestReport:
         ]
         out = _report(chain=chain)
         assert "**25Δ call IV:** n/a (no two strike-adjacent quotes bracket this point" in out
-        assert "**RR25 (25Δ call IV − 25Δ put IV):** n/a" in out
-        assert "no wing vol is extrapolated" in out
+        # One contiguous span, not two substrings with the middle unpinned: the
+        # forward reference is what makes the vaguer "does not supply both wings"
+        # acceptable, so deleting it silently returns the line to the imprecision
+        # the wording fix exists to prevent. Split assertions could not see it.
+        assert (
+            "**RR25 (25Δ call IV − 25Δ put IV):** n/a — the chain does not supply both wings "
+            "(the wing lines above say which and why), so the risk reversal is not computed "
+            "(no wing vol is extrapolated)" in out
+        )
+        # Only ONE wing is missing in this fixture, so a quantifier claiming every
+        # wing line explains itself would be false here.
+        assert "each wing line above" not in out
         # A chain that WAS read but did not yield both wings is a different fact
         # from an absent chain half, and the Reading line has to carry the
         # distinction: here the surface exists and is incomplete, there it was

@@ -114,14 +114,28 @@ class TestWrapperInventory:
         # Guards this file's stated job: to be the ONE place the whole @tool
         # surface is pinned, so a wrapper added later is visibly missing here
         # rather than quietly uncovered.
+        #
+        # Parsed with ast rather than a regex. A regex for the bare "@tool" form
+        # silently misses @tool("name"), @tool(parse_docstring=True), and a
+        # comment between the decorator and the def — every one of which is a
+        # real, importable, LLM-callable tool. Missing them defeats the whole
+        # point: such a tool appears in neither set, so the equality below holds
+        # and it ships with no coverage at all. Walking the tree matches the
+        # decorator whether or not it is called, and captures the FUNCTION name
+        # (an advertised-name override is what the sibling test above catches).
+        import ast
         import pathlib
-        import re
 
-        utils = pathlib.Path(__file__).resolve().parents[1] / "tradingagents" / "agents" / "utils"
+        root = pathlib.Path(__file__).resolve().parents[1] / "tradingagents"
         found = set()
-        for path in utils.glob("*.py"):
-            source = path.read_text(encoding="utf-8")
-            found.update(re.findall(r"^@tool\s*\ndef (\w+)", source, re.MULTILINE))
+        for path in root.rglob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for decorator in node.decorator_list:
+                    target = decorator.func if isinstance(decorator, ast.Call) else decorator
+                    if isinstance(target, ast.Name) and target.id == "tool":
+                        found.add(node.name)
         assert found == {attr for _, attr in ALL_WRAPPERS}
 
 

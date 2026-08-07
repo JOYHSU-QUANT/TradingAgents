@@ -17,8 +17,8 @@ analyst as a crypto-only volatility-regime read:
   reversal is not comparable across tenors and every downstream agent reads this
   as a ~30-day figure. The chain endpoint takes no date, so it can only ever
   describe the present. It is **withheld for a ``curr_date`` earlier than
-  today**, and the report says so, because quoting today's chain on a past date
-  is future information and a prose warning is not an auditable guard. A
+  today**, and the report says so, because quoting the current chain on a past
+  date is future information and a prose warning is not an auditable guard. A
   ``curr_date`` up to ``MAX_FUTURE_DAYS`` *later* than the UTC clock is served
   with a note: callers derive it from a local clock, so east of UTC it routinely
   runs a few hours ahead, and the live chain is then older than the analysis date
@@ -27,10 +27,16 @@ analyst as a crypto-only volatility-regime read:
 
 The two halves fail independently. Losing the chain should not also cost the
 DVOL history (and vice versa), so each is fetched inside its own try and the
-report renders whichever survived, naming what is missing. This module raises
-only when nothing at all can be served — both halves failed, or DVOL failed on a
-date, or for a proxied asset, where the chain is withheld by design — and the routing layer
-then degrades the optional ``options_data`` category to a sentinel. A throttle
+report renders whichever survived, naming what is missing. An absent CHAIN half
+is named in all three places a reader may stop at — the italic header note, the
+section body, and the closing ``_Reading:_`` sentence — the last because it is
+the one line a downstream summary keeps, so an absence stated only in the body
+does not survive the hop. A DVOL outage is currently named in the body alone,
+which is the same asymmetry one half further on. This module raises when nothing
+at all can be served — both halves failed, or DVOL failed on a date, or for a
+proxied asset, where the chain is withheld by design — and when either
+caller-supplied argument is malformed; the routing layer then degrades the
+optional ``options_data`` category to a sentinel. A throttle
 raises ``VendorRateLimitError`` rather than ``DeribitError`` so the router keeps
 its rate-limit lane.
 
@@ -1298,6 +1304,7 @@ def _reading_line(
     percentile: float | None,
     percentile_n: int,
     dvol_as_of: str | None = None,
+    chain_absence: str | None = None,
 ) -> str:
     """Restate the two headline numbers in words and define them — nothing further.
 
@@ -1316,6 +1323,19 @@ def _reading_line(
     bearing once the expiry stopped being fixed — a risk reversal is not
     tenor-invariant, so a reader who assumes ~30 days when the fallback supplied a
     different expiry is reading a different quantity than the one printed.
+
+    An RR25 that is NOT in the report is stated here rather than left out, which is
+    why ``chain_absence`` exists. Every other disclosure in this module is built on
+    "the caveat has to survive every summarisation hop" — it is the reason the
+    proxied and historical skews are withheld outright rather than annotated — yet
+    the one sentence written to survive that hop used to fall silent when the chain
+    half was absent. A backtest, a proxied asset and a chain outage then produced a
+    Reading line differing from a healthy report's only by a clause that is not
+    there, and an absent clause is precisely what a summary cannot preserve: the
+    next agent reads "options positioning: DVOL at the 41st percentile" and has no
+    way to know skew was never assessed. ``chain_absence`` carries WHY, since
+    "withheld by policy" and "the fetch failed" are different facts to a reader
+    deciding whether to wait for the next cycle.
     """
     parts = []
     if skew is not None and skew.rr25 is not None:
@@ -1336,6 +1356,18 @@ def _reading_line(
                 f"{abs(rr):.2f} vol points above 25Δ {cheaper} (RR25 {_rr_points(rr)}, defined "
                 f"as 25Δ call IV minus 25Δ put IV)"
             )
+    elif skew is not None:
+        # The chain WAS read and simply could not bracket both wings — a different
+        # fact from an absent chain half, and the distinction is the reader's:
+        # here the surface exists and is incomplete, there it was never seen at
+        # all. Stated with the expiry so it cannot be read as a claim about the
+        # whole surface.
+        parts.append(
+            f"no 25Δ risk reversal is in this report (the live {currency} {skew.expiry} chain "
+            f"does not bracket both 25Δ wings)"
+        )
+    elif chain_absence:
+        parts.append(f"no 25Δ skew is in this report ({chain_absence})")
     if percentile is not None:
         # The as-of date travels with the claim for the same reason the currency
         # does: this sentence is what survives a downstream summary, and a
@@ -1407,8 +1439,11 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         holds enough for a percentile to mean anything), and — unless the chain is
         withheld — the selected expiry, ATM (50Δ) IV, the 25-delta wings with the
         strikes they were interpolated between, and the risk reversal, closing
-        with one fixed-format sentence restating those figures. An unrecognized
-        symbol returns a bare no-signal sentence instead.
+        with one fixed-format sentence restating those figures. When no risk
+        reversal is in the report that closing sentence says so and why (withheld
+        by policy, unreadable chain, or wings the chain cannot bracket) rather
+        than falling silent, since it is the line a downstream summary keeps. An
+        unrecognized symbol returns a bare no-signal sentence instead.
 
     Raises:
         VendorRateLimitError: when Deribit throttled every request actually made
@@ -1446,12 +1481,15 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
     # ``normalize_symbol((asset or "").replace(...))`` and escapes as AttributeError
     # — a caller's bug reported as a Deribit outage, with a traceback naming
     # Deribit. Falsy values are already safe: they render the no-signal sentence.
-    # ``bytes`` must be rejected too, not merely non-str objects: it is truthy and
-    # survives to ``normalize_symbol``, where ``.replace("/", "-")`` raises
-    # TypeError on the str arguments. Deliberately an exact str test rather than a
-    # duck-typed one, so this also turns away string-likes such as
+    # ``bytes`` has to be caught by THIS guard rather than left to a duck-typed
+    # one: ``bytes.replace`` exists, so a hasattr check passes it straight through
+    # to ``normalize_symbol``, where ``.replace("/", "-")`` then raises TypeError
+    # on the str arguments. An isinstance test against ``str`` rather than a
+    # duck-typed one, so it also turns away string-likes such as
     # collections.UserString — narrower than before, and matching what the tool's
-    # own ``Annotated[str, ...]`` already declares.
+    # own ``Annotated[str, ...]`` already declares. isinstance and deliberately
+    # NOT ``type(asset) is str``: a str subclass is a genuine symbol string and
+    # every str operation below works on it, so it is accepted.
     if asset and not isinstance(asset, str):
         raise DeribitError(f"asset must be a symbol string, got {type(asset).__name__}")
     curr_date = curr_dt.strftime("%Y-%m-%d")
@@ -1597,9 +1635,13 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
     # far-future one, never prints the clock. Derivable rather than tracked as a
     # flag: only the mid-run re-take can withhold as historical while curr_date is
     # still >= the clock the run started on.
+    # Derived once and reused by the Reading line below, which needs the same
+    # distinction: the two sites otherwise re-decide it by hand, which is how the
+    # sibling notes drifted apart four times already.
+    withheld_mid_run = chain_withheld == "historical" and curr_date >= today
     crossed_midnight = (
         " (the UTC clock passed the analysis date while this report was being built)"
-        if chain_withheld == "historical" and curr_date >= today
+        if withheld_mid_run
         else ""
     )
     if chain_withheld == "historical":
@@ -1709,6 +1751,21 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             # Every sentence already ends in a full stop; only the closing italic
             # marker is appended.
             header_lines.append(" ".join(sentences) + "_")
+    # A chain that was ATTEMPTED and FAILED. Each of the three withheld-by-policy
+    # states above prints an italic header note; an outage printed none, so the
+    # absence lived only in a bold body line — and the italic line is exactly what
+    # a downstream summary keeps when it drops the body. That asymmetry made a
+    # cycle whose chain request died read as a complete report one hop later.
+    #
+    # Appended rather than folded into the elif chain above, because these are
+    # independent facts: an ahead-of-clock run can also fail its chain, and both
+    # notes are then true and both belong in the report.
+    if chain_withheld is None and skew is None:
+        header_lines.append(
+            "_The options chain could not be read for this report, so the ATM IV, 25Δ wings, "
+            "RR25 and forward are absent — absent, not flat and not zero. The DVOL history "
+            "below is unaffected by this failure._"
+        )
     # The DVOL clause is gated on the half existing, for the same reason every
     # sentence of the ahead-of-clock note is: unconditional, it advertised a
     # window immediately above "**DVOL:** unavailable".
@@ -1739,13 +1796,14 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
     elif chain_withheld == "historical":
         sections.append(
             f"**Options chain (ATM IV / 25Δ skew):** not served for a historical analysis "
-            f"date — see the note above. Do not substitute today's skew for {curr_date}."
+            f"date — see the note above. Do not substitute the current chain's skew for "
+            f"{curr_date}."
         )
     elif chain_withheld == "far_future":
         sections.append(
             f"**Options chain (ATM IV / 25Δ skew):** not served for an analysis date "
             f"{days_ahead} days ahead of the UTC clock — see the note above. Do not substitute "
-            f"today's skew for {curr_date}."
+            f"the current chain's skew for {curr_date}."
         )
     elif chain_withheld == "proxy":
         sections.append(
@@ -1766,7 +1824,43 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             f"figures above are unaffected; do not fabricate skew."
         )
 
-    reading = _reading_line(currency, skew, percentile, percentile_n, dvol_as_of)
+    # Why no 25Δ skew is in this report, worded for the Reading line. Read off the
+    # same four-valued classification the header note and the body section use, so
+    # a future withholding reason cannot update those two sites and silently miss
+    # this one — the partial-update failure chain_withheld exists to prevent.
+    chain_absence: str | None = None
+    if skew is None:
+        if withheld_mid_run:
+            # "the past analysis date" is false here and self-contradicting in
+            # this particular line: the DVOL clause beside it quotes that same
+            # date as the latest reading. Only the mid-run re-clock withholds as
+            # historical while curr_date is still >= the clock the run started on,
+            # which is what withheld_mid_run isolates.
+            chain_absence = (
+                f"the UTC clock passed the analysis date {curr_date} while this report was "
+                f"being built, and Deribit's options chain is a live endpoint with no history"
+            )
+        elif chain_withheld == "historical":
+            chain_absence = (
+                f"the options chain is not served for the past analysis date {curr_date}"
+            )
+        elif chain_withheld == "far_future":
+            # Past tense and naming the clock, for the reason the sibling header
+            # note documents at length: `today` and `days_ahead` are both taken
+            # BEFORE the DVOL fetch, and that fetch can span UTC midnight, after
+            # which a present-tense "is N days ahead of the UTC clock" states a
+            # count one too large against a clock that has moved. Naming `today`
+            # lets the reader reconstruct it; the header note is the only other
+            # site that does, and this line has to stand alone.
+            chain_absence = (
+                f"the options chain is not served for {curr_date}, which was {days_ahead} days "
+                f"ahead of the UTC clock ({today}) when this report was built"
+            )
+        elif chain_withheld == "proxy":
+            chain_absence = f"this vendor reads no options chain for '{asset}'"
+        else:
+            chain_absence = "the options chain could not be read"
+    reading = _reading_line(currency, skew, percentile, percentile_n, dvol_as_of, chain_absence)
     if reading:
         sections.append(reading)
 

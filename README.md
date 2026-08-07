@@ -278,7 +278,13 @@ enter the smile, since an unheld strike is where a stale or purely modelled mark
 lives. The two halves fail independently, so a DVOL outage still leaves the skew
 and vice versa; losing both degrades the category to the sentinel — as does losing
 DVOL alone on a date, or for a proxied asset, where the chain is withheld by
-design. This vendor reads chains for BTC and ETH, so other recognized crypto risk
+design. Whenever no risk reversal is in the report — withheld by policy, a chain
+that could not be read, or wings the chain cannot bracket — the closing one-line
+summary states that and why, and an unreadable chain also carries its own header
+caveat like the withheld cases do. Both exist because that italic line is what a
+downstream summariser keeps when it drops the body, so an absence signalled only
+by a missing clause is exactly what does not survive the hop.
+This vendor reads chains for BTC and ETH, so other recognized crypto risk
 assets get BTC's **DVOL level** as a market-wide crypto-vol proxy, on the same
 rule as ETF flows; the skew is withheld for them, because a risk reversal measures
 demand for downside in one specific underlying and does not transfer. No rendered

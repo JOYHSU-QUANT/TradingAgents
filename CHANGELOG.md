@@ -43,7 +43,7 @@ Breaking changes within the 0.x line are called out explicitly.
   still open, so the report calls the series "readings" throughout and labels that
   one rather than passing an intraday level off as a settled close. The chain
   endpoint takes no date, so it is **withheld for a `curr_date` earlier than
-  today** and said to be withheld — quoting the present chain on a past date is
+  today** and said to be withheld — quoting the current chain on a past date is
   future information, and a prose warning is not an auditable guard. A `curr_date`
   up to `MAX_FUTURE_DAYS` (1) *later* than the UTC clock is served (callers derive
   it from a local clock, so east of UTC it routinely runs hours ahead; the live
@@ -95,6 +95,15 @@ Breaking changes within the 0.x line are called out explicitly.
   ~30-day figure — so a thinned book whose only qualifying expiry is 96 days out
   now yields **no skew** instead of a 96-day RR25 rendered under a 30-day heading
   with `is_fallback` false, corrected only by a number a downstream summary drops.
+  That sentence also states when a risk reversal is **not** in the report and
+  why — withheld by policy, a chain that could not be read, or wings the chain
+  cannot bracket — instead of simply omitting the clause. It is the one line a
+  downstream summary keeps, so an absence marked only by a missing clause was
+  precisely the signal that did not survive the hop: a backtest, a proxied asset
+  and a chain outage each produced a closing sentence differing from a healthy
+  report's only by something that was not there. A chain that was attempted and
+  failed now also carries its own italic header caveat, which the three
+  withheld-by-policy states already had and an outage did not.
   Either half can fail without costing the other (any exception, not a fixed
   allowlist); losing both degrades the optional category to the no-data sentinel —
   as does losing DVOL alone on a date, or for a proxied asset, where the chain is
@@ -116,7 +125,18 @@ Breaking changes within the 0.x line are called out explicitly.
   freshness-sensitive), with one retry on transient faults only; a JSON-RPC error
   or any other 4xx is deterministic and raises immediately rather than being slept
   on and reported as unreachable, and an HTTP 429 raises the shared
-  `VendorRateLimitError`. The stock path's tools and prompt are unchanged.
+  `VendorRateLimitError`. The crypto prompt paragraph carries three read-guards
+  for comparisons the report cannot support on its own: the forward is Deribit's
+  forward for the selected expiry and is expected to differ from spot, so it is
+  not reconciled against the verified snapshot; DVOL and ATM IV share a unit but
+  not a construction (a model-free 30-day index across the whole strike range
+  versus one 50Δ point on one expiry), so the gap between them is neither a term
+  structure nor a volatility risk premium; and RR25 has nothing to be ranked
+  against at all, since Deribit publishes no chain history, so it may be reported
+  by sign, magnitude and tenor but never called elevated or extreme. Each exists
+  because an agent asked for actionable insight will otherwise fill the vacuum
+  with a regime claim the tool output does not support.
+  The stock path's tools and prompt are unchanged.
 
 - **SoSoValue is now the primary crypto spot-ETF flow vendor.** farside.co.uk
   has served a Cloudflare JS challenge to non-browser clients since 2026-07-27

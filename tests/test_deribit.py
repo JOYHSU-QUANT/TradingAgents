@@ -20,6 +20,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
 
 from tradingagents.agents.analysts.market_analyst import create_market_analyst
+from tradingagents.agents.utils import crypto_data_tools
 from tradingagents.dataflows import deribit, interface
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.errors import VendorRateLimitError
@@ -1556,7 +1557,8 @@ class TestReport:
         assert "**30d range:** min 34.04% / max 39.53% over 30 daily readings" in out
         assert (
             "**365d percentile:** the latest reading sits at the 6th percentile of the "
-            "35 daily readings in the 365 days ending 2026-08-05" in out
+            "35 daily readings in the 365 days ending 2026-08-05 (percentile = share "
+            "of those readings at or below it)" in out
         )
 
     def test_each_window_holds_exactly_its_own_span_of_readings(self):
@@ -1749,6 +1751,13 @@ class TestReport:
         out = _report(asset="SOL")
         assert out.startswith("## Options Volatility — BTC (market-wide proxy for 'SOL', Deribit)")
         assert "not a signal specific to 'SOL'" in out
+        # The proxy heading and this clause are the two places that survive a
+        # downstream summary; the Reading line has to say the skew is absent as
+        # well, or a proxied cycle reads as a full BTC report minus a clause.
+        assert (
+            "_Reading:_ No 25Δ skew is in this report (this vendor reads no options chain "
+            "for 'SOL'); and BTC's latest DVOL reading" in out
+        )
 
     def test_unsupported_asset_gets_a_no_signal_note(self):
         out, recorder = _run_report(asset="USDT")
@@ -1817,6 +1826,23 @@ class TestReport:
         with pytest.raises(deribit.DeribitError, match="asset must be a symbol string"):
             _report(asset=bad)
 
+    def test_a_str_subclass_is_accepted_but_a_string_like_is_not(self):
+        # The guard is an isinstance test, deliberately NOT ``type(asset) is str``.
+        # Nothing exercised either edge, so tightening it to an exact-type check
+        # shipped green while breaking any caller handing over a str subclass — a
+        # genuine symbol string on which every str operation below works.
+        # collections.UserString is the other edge and the deliberate exclusion:
+        # it is NOT a str subclass, so the same guard turns it away rather than
+        # letting it reach normalize_symbol.
+        from collections import UserString
+
+        class Ticker(str):
+            pass
+
+        assert _report(asset=Ticker("BTC")).startswith("## Options Volatility — BTC (Deribit)")
+        with pytest.raises(deribit.DeribitError, match="asset must be a symbol string"):
+            _report(asset=UserString("BTC"))
+
     @pytest.mark.parametrize("falsy", [None, "", 0])
     def test_a_falsy_asset_still_gets_the_no_signal_sentence(self, falsy):
         # Falsy values were always safe and must stay that way: the guard is scoped
@@ -1837,6 +1863,15 @@ class TestReport:
         assert "**25Δ call IV:** n/a (no two strike-adjacent quotes bracket this point" in out
         assert "**RR25 (25Δ call IV − 25Δ put IV):** n/a" in out
         assert "no wing vol is extrapolated" in out
+        # A chain that WAS read but could not bracket both wings is a different
+        # fact from an absent chain half, and the Reading line has to carry the
+        # distinction: here the surface exists and is incomplete, there it was
+        # never seen. Named with the expiry so it cannot read as a claim about the
+        # whole surface.
+        assert (
+            "_Reading:_ No 25Δ risk reversal is in this report (the live BTC 28AUG26 chain "
+            "does not bracket both 25Δ wings); and BTC's latest DVOL reading" in out
+        )
 
     def test_a_mixed_case_chain_still_groups_into_one_expiry(self):
         # The expiry token returned by parse_instrument_name is BOTH the grouping
@@ -2009,7 +2044,16 @@ class TestHistoricalDate:
             "so the ATM IV, 25Δ wings, RR25 and forward are NOT served for 2026-07-20" in out
         )
         assert "the UTC clock passed the analysis date" not in out
-        assert "Do not substitute today's skew for 2026-07-20" in out
+        assert "Do not substitute the current chain's skew for 2026-07-20" in out
+        # A backtest's Reading line must say the skew is absent. Without the
+        # clause it differs from a healthy report's only by a clause that is NOT
+        # there, and an absent clause is exactly what a downstream summary cannot
+        # preserve — the next agent reads "DVOL at the 26th percentile" and has no
+        # way to know skew was never assessed.
+        assert (
+            "_Reading:_ No 25Δ skew is in this report (the options chain is not served for "
+            "the past analysis date 2026-07-20); and BTC's latest DVOL reading" in out
+        )
 
     def test_dvol_half_is_still_served(self):
         out = _report(curr_date="2026-07-20")
@@ -2166,7 +2210,27 @@ class TestHistoricalDate:
         assert (
             f"**Options chain (ATM IV / 25Δ skew):** not served for an analysis date "
             f"{days_ahead} days ahead of the UTC clock — see the note above. Do not "
-            f"substitute today's skew for {curr_date}." in out
+            f"substitute the current chain's skew for {curr_date}." in out
+        )
+        # Spans the f-string concatenation seam between "IS filtered to " and the
+        # curr_date interpolation. The only other assertion on this clause pins the
+        # HISTORICAL header, so deleting the trailing space here rendered
+        # "filtered to2026-09-01;" in every far-future report and shipped green.
+        assert (
+            f"The DVOL history below IS filtered to {curr_date}; its windows end at a date "
+            f"the feed has not reached" in out
+        )
+        # The absence has to reach the one line built to survive a downstream
+        # summary, or a far-future cycle reads as a report that simply had nothing
+        # to say about skew.
+        # Past tense and naming the clock: `today`/`days_ahead` are taken BEFORE
+        # the DVOL fetch, which can span UTC midnight, so a present-tense "is N
+        # days ahead" would state a stale count against a clock that has moved —
+        # in the one line that has to stand alone downstream.
+        assert (
+            f"_Reading:_ No 25Δ skew is in this report (the options chain is not served for "
+            f"{curr_date}, which was {days_ahead} days ahead of the UTC clock (2026-08-05) "
+            f"when this report was built); and BTC's latest DVOL reading" in out
         )
         # The ordinary ahead-of-clock note must not ALSO fire: it promises a live
         # book below that was never fetched.
@@ -2236,8 +2300,24 @@ class TestHistoricalDate:
         )
         assert recorder.endpoints() == {DVOL_ENDPOINT}
         assert "**Options chain (ATM IV / 25Δ skew):** not served for a historical analysis" in out
-        assert "_Historical date (the UTC clock passed the analysis date while this " in out
-        assert "Do not substitute today's skew for 2026-08-05" in out
+        # Spans the whole crossed_midnight interpolation INCLUDING its closing
+        # paren and the ": Deribit's" join after it — the previous assertion
+        # stopped mid-clause, so dropping either boundary character shipped green.
+        assert (
+            "_Historical date (the UTC clock passed the analysis date while this report was "
+            "being built): Deribit's options chain is a live endpoint" in out
+        )
+        assert "Do not substitute the current chain's skew for 2026-08-05" in out
+        # The Reading line must NOT call this "the past analysis date": the DVOL
+        # clause beside it quotes 2026-08-05 as the latest reading, so that wording
+        # made the one summarisation-proof line contradict itself and report a live
+        # cycle as a backtest.
+        assert (
+            "_Reading:_ No 25Δ skew is in this report (the UTC clock passed the analysis date "
+            "2026-08-05 while this report was being built, and Deribit's options chain is a "
+            "live endpoint with no history); and BTC's latest DVOL reading" in out
+        )
+        assert "the past analysis date" not in out
         # The DVOL half is unaffected and still dated by the FIRST instant's day.
         assert "**DVOL (30-day implied vol index), latest:** 34.43% annualized on 2026-08-05" in out
 
@@ -2395,6 +2475,21 @@ class TestPartialDegradation:
         )
         assert "request failed" not in out
         assert "The DVOL figures above are unaffected; do not fabricate skew." in out
+        # Each of the three withheld-BY-POLICY states prints an italic header
+        # note; an outage printed none, so the absence lived only in the bold body
+        # line — and the italic line is what a downstream summary keeps when it
+        # drops the body. That asymmetry let a cycle whose chain request died read
+        # as a complete report one hop later.
+        assert (
+            "_The options chain could not be read for this report, so the ATM IV, 25Δ wings, "
+            "RR25 and forward are absent — absent, not flat and not zero. The DVOL history "
+            "below is unaffected by this failure._" in out
+        )
+        # ...and it must reach the Reading line too, for the same reason.
+        assert (
+            "_Reading:_ No 25Δ skew is in this report (the options chain could not be "
+            "read); and BTC's latest DVOL reading" in out
+        )
 
     def test_the_source_bullet_advertises_a_dvol_window_only_when_dvol_arrived(self):
         # Unconditional, this clause advertised "DVOL window ending 2026-08-05"
@@ -2768,3 +2863,113 @@ class TestMarketAnalystWiring:
             "the options tool is bound to the market analyst for crypto assets but not "
             "registered in the market ToolNode, so the model's call fails."
         )
+
+    def test_the_prompt_agrees_with_the_vendor_constants_it_quotes(self, options_enabled):
+        # The prompt hardcodes figures that live in deribit.py as constants. All of
+        # them agree today and nothing pinned that, so a future constant change
+        # would silently leave the prompt lying to the model about what it is
+        # reading. This is not hypothetical: DVOL_PERCENTILE_WINDOW_DAYS already
+        # moved 30 -> 365 in an earlier round, and every prose site describing it
+        # had to be swept by hand.
+        prompt = str(_run_analyst("crypto").prompt_value)
+        # Full phrases, not bare literals: the DVOL/ATM carve-out added later in
+        # this same prompt repeats "30-day" and "50Δ", so a bare-literal assertion
+        # would keep passing after the clause it exists to pin was deleted.
+        assert f"{deribit.DVOL_WINDOW_DAYS}-day min/max range" in prompt
+        assert f"{deribit.DVOL_PERCENTILE_WINDOW_DAYS}-day percentile" in prompt
+        assert f"ATM ({deribit.ATM_DELTA * 100:.0f}Δ) implied vol" in prompt
+        assert f"{deribit.WING_DELTA * 100:.0f}-delta risk reversal" in prompt
+        # MAX_FUTURE_DAYS is quoted as prose ("well ahead of the UTC clock") rather
+        # than as a number, so what is pinned is that the prompt still describes a
+        # far-future withholding rule at all.
+        assert "analysis date well ahead of the UTC clock" in prompt
+
+    def test_the_prompt_forbids_inventing_a_regime_for_rr25(self, options_enabled):
+        # DVOL carries a percentile; RR25 carries nothing, because Deribit
+        # publishes no chain history. Left unsaid, a model told to produce
+        # "actionable insights" fills the vacuum with "put skew is elevated" — a
+        # regime claim with zero supporting evidence in the tool output, which then
+        # anchors the bull/bear debate downstream.
+        prompt = str(_run_analyst("crypto").prompt_value)
+        assert "no RR25 range and no RR25 percentile" in prompt
+        # Spans the whole prohibition list to its end; stopping mid-list left the
+        # last two adjectives droppable.
+        assert "do NOT describe it as elevated, extreme, unusual, stretched or compressed" in (
+            prompt
+        )
+
+    def test_the_prompt_stops_dvol_and_atm_iv_being_reconciled(self, options_enabled):
+        # Both print as annualized vol points, so they look directly comparable and
+        # the module deliberately labels DVOL's unit to make them so. They are not
+        # the same construction, and their gap is dominated by wing convexity plus
+        # the tenor difference — so an LLM narrating it produces a term-structure
+        # claim the tool output cannot support. Mirrors the Forward carve-out.
+        prompt = str(_run_analyst("crypto").prompt_value)
+        assert "DVOL and ATM IV are likewise not the same quantity" in prompt
+        assert "do not read their gap as a term structure or as a volatility risk premium" in (
+            prompt
+        )
+
+
+@pytest.mark.unit
+class TestToolWrapperForwarding:
+    """The @tool wrapper bodies in crypto_data_tools, which nothing reached.
+
+    A mutation sweep found every wrapper body invisible to the whole suite:
+    replacing ``get_options_market``'s body with ``return "MUTANT"`` — or, far
+    worse, SWAPPING its two arguments — shipped green across all 1115 tests.
+
+    The swap is the dangerous one because it fails silently. ``route_to_vendor``
+    would call ``get_options_market_data("2026-08-05", "BTC")``, which raises
+    ``DeribitError("curr_date 'BTC' is not a yyyy-mm-dd date")``; because
+    options_data is an OPTIONAL category the router converts that into the
+    DATA_UNAVAILABLE sentinel. The vendor would be 100% broken in production, on
+    every cycle, with a green suite and nothing in the logs but a degraded
+    optional category.
+
+    The wiring tests above assert only on tool NAMES and on ToolNode membership,
+    which is exactly why they cannot see a wrong argument order. This pins the
+    forwarded tuple itself.
+
+    Scoped to this vendor's own tool. The defect class is the wrapper layer
+    rather than this vendor, so the whole ``@tool`` surface — the two sibling
+    crypto tools included — is pinned together in ``tests/test_tool_wrappers.py``,
+    which is the file a newly added wrapper is visibly missing from.
+    """
+
+    @staticmethod
+    def _recorder():
+        calls = []
+
+        def fake_route_to_vendor(*args, **kwargs):
+            calls.append((args, kwargs))
+            return "ROUTED"
+
+        return calls, fake_route_to_vendor
+
+    def test_options_tool_forwards_asset_then_curr_date(self):
+        calls, fake = self._recorder()
+        with mock.patch.object(crypto_data_tools, "route_to_vendor", fake):
+            out = crypto_data_tools.get_options_market.invoke(
+                {"asset": "BTC", "curr_date": "2026-08-05"}
+            )
+        assert out == "ROUTED", "the wrapper must return the router's result verbatim"
+        assert calls == [(("get_options_market", "BTC", "2026-08-05"), {})]
+
+
+@pytest.mark.unit
+class TestDisabledCategoryWithAVendorChain:
+    def test_a_none_anywhere_in_the_chain_disables_the_category(self):
+        # is_category_disabled uses any(), and every existing test configures a
+        # SINGLE vendor, under which any() and all() agree — so flipping it to
+        # all() shipped green. The shipped crypto_etf_flows default is already a
+        # comma chain ("sosovalue,farside"), and appending "none" is the documented
+        # way to switch a misbehaving vendor off, so "sosovalue,none" is a
+        # reachable operator config. Under all() the tool would still be bound and
+        # would spend a call to receive the disabled sentinel.
+        for chain in ("sosovalue,none", "none,farside", "none"):
+            with mock.patch.object(interface, "get_vendor", return_value=chain):
+                assert interface.is_category_disabled("crypto_etf_flows") is True, chain
+        for chain in ("sosovalue,farside", "farside"):
+            with mock.patch.object(interface, "get_vendor", return_value=chain):
+                assert interface.is_category_disabled("crypto_etf_flows") is False, chain

@@ -1747,6 +1747,34 @@ class TestReport:
     def test_a_past_date_has_no_in_progress_label(self):
         assert "still open" not in _report(curr_date="2026-07-20")
 
+    def test_a_served_chain_carries_no_outage_note(self):
+        # The outage caveat is guarded on BOTH "nothing was withheld by policy"
+        # AND "no skew came back". Only the first conjunct was pinned; dropping
+        # the second printed "the options chain could not be read ... ATM IV, 25Δ
+        # wings, RR25 and forward are absent" directly above the ATM IV and RR25
+        # the very same report had just served — a self-contradicting report, in
+        # the italic line this module argues is the one a summary keeps.
+        out = _report()
+        assert "**RR25 (25Δ call IV − 25Δ put IV):**" in out
+        assert "**ATM IV (50Δ):**" in out
+        assert "could not be read for this report" not in out
+
+    def test_the_header_and_the_first_section_are_separated_by_a_blank_line(self):
+        # The join BETWEEN the header block and the section block, which neither
+        # of the two inner joins covers. With one newline the first section is
+        # rendered as a continuation of the Source list item — which is exactly
+        # what the blank-line comment at the return statement exists to prevent.
+        out = _report()
+        assert (
+            "- Source: deribit.com public API | DVOL window ending 2026-08-05\n\n"
+            "**DVOL (30-day implied vol index), latest:**" in out
+        )
+
+    def test_the_report_ends_with_exactly_one_newline(self):
+        out = _report()
+        assert out.endswith("\n")
+        assert not out.endswith("\n\n")
+
     def test_proxy_asset_is_labelled_in_the_heading(self):
         out = _report(asset="SOL")
         assert out.startswith("## Options Volatility — BTC (market-wide proxy for 'SOL', Deribit)")
@@ -2247,9 +2275,10 @@ class TestHistoricalDate:
             f"are NOT served." in out
         )
         assert (
-            f"**Options chain (ATM IV / 25Δ skew):** not served for an analysis date "
-            f"{days_ahead} days ahead of the UTC clock — see the note above. Do not "
-            f"substitute the current chain's skew for {curr_date}." in out
+            f"**Options chain (ATM IV / 25Δ skew):** not served for an analysis date that "
+            f"was {days_ahead} days ahead of the UTC clock (2026-08-05) when this report "
+            f"was built — see the note above. Do not substitute the current chain's skew "
+            f"for {curr_date}." in out
         )
         # Spans the f-string concatenation seam between "IS filtered to " and the
         # curr_date interpolation. The only other assertion on this clause pins the
@@ -2929,6 +2958,16 @@ class TestMarketAnalystWiring:
         # than as a number, so what is pinned is that the prompt still describes a
         # far-future withholding rule at all.
         assert "analysis date well ahead of the UTC clock" in prompt
+
+    def test_the_crypto_block_precedes_the_closing_instructions(self, options_enabled):
+        # The block's PRESENCE and its sentence-by-sentence content are pinned;
+        # its position was not. Appended after get_language_instruction() the read
+        # guards land behind two instructions written to be terminal, which is
+        # where a model is least likely to still be applying them.
+        prompt = str(_run_analyst("crypto").prompt_value)
+        assert prompt.index("Since this is a crypto asset") < prompt.index(
+            "Make sure to append a Markdown table"
+        )
 
     def test_the_prompt_forbids_inventing_a_regime_for_rr25(self, options_enabled):
         # DVOL carries a percentile; RR25 carries nothing, because Deribit

@@ -51,6 +51,27 @@ from tradingagents.agents.utils import (
 
 DATE = "2026-08-05"
 
+# Every ``@tool`` in the repo, as (module, attribute name). The attribute name is
+# also the name the tool advertises to the LLM and the key ``route_to_vendor``
+# dispatches on, so the two must not drift.
+ALL_WRAPPERS = [
+    (core_stock_tools, "get_stock_data"),
+    (crypto_data_tools, "get_etf_flows"),
+    (crypto_data_tools, "get_fear_greed"),
+    (crypto_data_tools, "get_options_market"),
+    (fundamental_data_tools, "get_balance_sheet"),
+    (fundamental_data_tools, "get_cashflow"),
+    (fundamental_data_tools, "get_fundamentals"),
+    (fundamental_data_tools, "get_income_statement"),
+    (macro_data_tools, "get_macro_indicators"),
+    (market_data_validation_tools, "get_verified_market_snapshot"),
+    (news_data_tools, "get_global_news"),
+    (news_data_tools, "get_insider_transactions"),
+    (news_data_tools, "get_news"),
+    (prediction_markets_tools, "get_prediction_markets"),
+    (technical_indicators_tools, "get_indicators"),
+]
+
 
 def _recorder():
     """Return ``(calls, fake)``; ``fake`` records positional args and returns a marker."""
@@ -73,6 +94,35 @@ def _forwarded(module, tool, payload, attr="route_to_vendor"):
     args, kwargs = calls[0]
     assert kwargs == {}, "these wrappers forward positionally; a keyword here changes the contract"
     return args
+
+
+@pytest.mark.unit
+class TestWrapperInventory:
+    def test_every_wrapper_advertises_its_own_function_name(self):
+        # The @tool decorator takes an optional name override, so a tool can
+        # advertise something other than its function name while the Python
+        # attribute keeps working. Only get_options_market's name is pinned
+        # elsewhere (by the ToolNode and bound-tools assertions); the other
+        # fourteen could be renamed silently, and the LLM calls tools by the
+        # advertised name.
+        for module, attr in ALL_WRAPPERS:
+            assert getattr(module, attr).name == attr, (
+                f"{module.__name__}.{attr} advertises a different name to the LLM"
+            )
+
+    def test_the_inventory_lists_every_tool_in_the_repo(self):
+        # Guards this file's stated job: to be the ONE place the whole @tool
+        # surface is pinned, so a wrapper added later is visibly missing here
+        # rather than quietly uncovered.
+        import pathlib
+        import re
+
+        utils = pathlib.Path(__file__).resolve().parents[1] / "tradingagents" / "agents" / "utils"
+        found = set()
+        for path in utils.glob("*.py"):
+            source = path.read_text(encoding="utf-8")
+            found.update(re.findall(r"^@tool\s*\ndef (\w+)", source, re.MULTILINE))
+        assert found == {attr for _, attr in ALL_WRAPPERS}
 
 
 @pytest.mark.unit

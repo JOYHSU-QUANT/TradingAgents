@@ -1824,9 +1824,15 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         )
     elif chain_withheld == "far_future":
         sections.append(
-            f"**Options chain (ATM IV / 25Δ skew):** not served for an analysis date "
-            f"{days_ahead} days ahead of the UTC clock — see the note above. Do not substitute "
-            f"the current chain's skew for {curr_date}."
+            # Past tense and naming the clock, like the header note and the Reading
+            # clause: `days_ahead` and `today` are both taken BEFORE the DVOL
+            # fetch, which can span UTC midnight, after which a present-tense "is
+            # N days ahead of the UTC clock" states a count one too large against
+            # a clock it does not name. This was the seventh and last site.
+            f"**Options chain (ATM IV / 25Δ skew):** not served for an analysis date that "
+            f"was {days_ahead} days ahead of the UTC clock ({today}) when this report was "
+            f"built — see the note above. Do not substitute the current chain's skew for "
+            f"{curr_date}."
         )
     elif chain_withheld == "proxy":
         sections.append(

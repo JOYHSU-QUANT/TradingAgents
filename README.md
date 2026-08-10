@@ -264,14 +264,19 @@ strikes it was interpolated between, and the risk reversal (RR25) computed from
 them. The range and the percentile each need a window holding enough readings to
 support them; below that the report states the shortfall rather than computing a
 figure that would only describe how much data arrived. A point the chain cannot
-bracket — or whose surrounding quotes are not a monotone smile, the signature of a
-collapsed or stale mark — is reported `n/a` rather than extrapolated or guessed.
+bracket is reported `n/a` rather than extrapolated or guessed, and so is one whose
+surrounding quotes are not a monotone smile — but the two are reported as the
+different facts they are, a thin book against the signature of a collapsed or
+stale mark, since only the second says a listed quote should not be trusted.
 
 The chain figures come from **one expiry inside a bounded band around 30 days**
 (`MAX_TENOR_DISTANCE_DAYS`, currently ±15, and never inside the 7-day pin-noise
 floor). Normally that is the eligible expiry nearest 30 days; if it cannot be
 used, the next eligible one is, labelled as such and with its tenor printed — one
-step only. Nothing outside the band is read at all: a risk reversal is not
+step only. When neither of the two brackets both wings, the one carrying more of
+the three smile points wins and a tie leaves the nearer expiry in place, so a
+barren nearest expiry no longer hides a neighbour that had an ATM point and a wing
+to show. Nothing outside the band is read at all: a risk reversal is not
 comparable across tenors, so a thinned book yields **no skew** rather than a
 96-day figure presented under a 30-day heading. Only contracts with open interest
 enter the smile, since an unheld strike is where a stale or purely modelled mark
@@ -285,13 +290,20 @@ caveat like the withheld cases do. **Either half's absence is disclosed this way
 and the closing line states the DVOL level itself rather than only its percentile,
 so a feed whose window is too thin to rank is not silent in the same way an outage
 is. That line also carries the chain degradations that change which quantity the
-figures describe: a fallback expiry, a missing ATM point, and a 25Δ wing
-interpolated between strikes more than 10% of the forward apart. All of this exists
+figures describe: a fallback expiry and a missing ATM point unconditionally, and —
+only where a risk reversal is actually printed, since otherwise the line states no
+wing vol to qualify — each 25Δ wing interpolated between strikes further apart
+than 10% of the forward, naming both when both are that wide. All of this exists
 because that italic line is what a downstream summariser keeps when it drops the
 body, so an absence signalled only by a missing clause is exactly what does not
-survive the hop. Counts are labelled **usable**, and readings rejected as
-non-positive are disclosed by count, so a window this module partially emptied is
-never described as a sparse calendar window.
+survive the hop. Counts and the latest reading are labelled **usable**, and the two
+rejection classes — a non-positive reading, and a candle whose open or close falls
+outside its own high/low range — are each disclosed by count and by the newest date they
+reached, so a window this module partially emptied is never described as a sparse
+calendar window and a rejection newer than the reading on show cannot silently
+contradict it. The second class is what catches a **reordered candle**, which the
+length-and-finiteness shape check cannot see: permute the row and the day's low
+reads as its close, on every row, indefinitely.
 This vendor reads chains for BTC and ETH, so other recognized crypto risk
 assets get BTC's **DVOL level** as a market-wide crypto-vol proxy, on the same
 rule as ETF flows; the skew is withheld for them, because a risk reversal measures
@@ -306,7 +318,9 @@ quote on its own. The chain endpoint takes no date, so it is **withheld when
 present chain on a past date is future information. A `curr_date` up to
 `MAX_FUTURE_DAYS` (1) later than the UTC clock — which callers deriving it from a
 local clock east of UTC produce for the first hours of each day — is served with a
-note explaining that the chain predates the analysis date. Further ahead than that
+note explaining that the chain is not later than the analysis date: it either
+predates that date outright or, when the UTC clock reaches the date while the
+report is being built, falls inside it. The note says which. Further ahead than that
 is a bad argument rather than a timezone, so the chain is withheld again. The chain
 also re-reads the clock immediately before fetching, so a run whose DVOL half timed
 out across UTC midnight cannot serve the next day's book for `curr_date`.

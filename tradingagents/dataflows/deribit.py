@@ -21,8 +21,11 @@ analyst as a crypto-only volatility-regime read:
   date is future information and a prose warning is not an auditable guard. A
   ``curr_date`` up to ``MAX_FUTURE_DAYS`` *later* than the UTC clock is served
   with a note: callers derive it from a local clock, so east of UTC it routinely
-  runs a few hours ahead, and the live chain is then older than the analysis date
-  rather than newer. Further ahead than that is a bad argument rather than a
+  runs a few hours ahead, and the live chain is then never LATER than the analysis
+  date. The note says which of the two cases holds, because they are not the same
+  claim: ordinarily the book predates that date outright, but the clock can reach
+  it while the report is being built, and the chain then falls inside it.
+  Further ahead than that is a bad argument rather than a
   timezone, and the chain is withheld again.
 
 The two halves fail independently. Losing the chain should not also cost the
@@ -65,7 +68,7 @@ import re
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from typing import NamedTuple, TypeVar
+from typing import Literal, NamedTuple, TypeVar
 
 import requests
 
@@ -158,8 +161,17 @@ _DVOL_MAX_CANDLES_PER_RESPONSE = 1000
 # Maximum lag (days between the newest DVOL candle and curr_date) before the
 # report flags the *data* as behind. A successful fetch says nothing about
 # whether the series is still being published, and DVOL is a daily series on a
-# 24/7 market, so anything past a couple of days means the feed itself stalled.
-MAX_DATA_LAG_DAYS = 2
+# 24/7 market with no weekends and no holidays, so there is no benign reason for
+# a whole calendar day to carry no candle.
+#
+# The threshold is the largest lag that is still ORDINARY, and the flag fires
+# above it. Lag 0 is the normal case (the candle dated today, still open). Lag 1
+# is the one benign gap: a run in the first minutes of a UTC day, before that
+# day's candle exists. Lag 2 already means a full intervening day published
+# nothing, which on this series is a stall — so 1, not 2. At 2 that state
+# printed no italic lag line at all and the level travelled with a bare as-of
+# date, leaving the one sentence a downstream summary keeps with no age on it.
+MAX_DATA_LAG_DAYS = 1
 
 # How far ahead of the UTC clock ``curr_date`` may run and still be served the
 # live chain. The tolerance exists for exactly one reason — callers derive
@@ -204,8 +216,11 @@ MIN_ELIGIBLE_DTE_DAYS = max(MIN_DTE_DAYS, TARGET_DTE_DAYS - MAX_TENOR_DISTANCE_D
 MAX_ELIGIBLE_DTE_DAYS = TARGET_DTE_DAYS + MAX_TENOR_DISTANCE_DAYS
 
 # How many ranked expiries compute_skew may try before giving up on a complete
-# surface: the nearest, and — if it cannot bracket both 25-delta wings — the
-# next-nearest. Deliberately not the whole ranking, even now that the tenor band
+# surface: the nearest, and — if it cannot be used, meaning it either fails to
+# bracket both 25-delta wings or carries no usable forward — the next-nearest.
+# (Both conditions, matching SkewSnapshot.is_fallback and compute_skew; this
+# comment named only the first while four other sites named both.)
+# Deliberately not the whole ranking, even now that the tenor band
 # bounds how far the ranking can reach. The band decides which expiries may
 # answer the ~30-day question at all; this bounds how hard the module hunts for a
 # complete pair of wings within it, so a chain whose whole band is sparse reports
@@ -281,6 +296,30 @@ _RR_ZERO_EPSILON = 0.005
 # the case worth naming.
 _WIDE_BRACKET_FRACTION = 0.10
 
+# Why a 25Δ point could not be interpolated, as reported by
+# _interpolate_with_reason. Two distinct facts about the chain — a thin book
+# versus a quote the monotonicity guard judged suspect — kept apart because they
+# lead a reader to different conclusions about the same expiry.
+# A closed set rather than a bare str, because ``_wing_line`` tests only for
+# _MISS_NON_MONOTONE and falls through to the thin-book wording for anything else:
+# under a plain ``str`` a mistyped constant degrades SILENTLY into the wrong
+# disclosure, which is the class of failure this split exists to remove. As a
+# Literal it is a type error instead, at no runtime cost.
+_MissReason = Literal["no_bracket", "non_monotone"]
+
+_MISS_NO_BRACKET: _MissReason = "no_bracket"
+_MISS_NON_MONOTONE: _MissReason = "non_monotone"
+
+# The closing sentence both rejection notes carry. Each note can appear without
+# the other, so neither may lean on the other being present — but sharing it by
+# COPYING is how the two would drift, which is the defect those notes exist to
+# report. Only the noun differs (a "reading" was a usable value, a "candle" was a
+# whole malformed row), so the noun is the parameter and the caveat is one text.
+_WINDOW_COUNT_CAVEAT = (
+    "does not contribute to a window's count above, though a day that also carried a "
+    "surviving reading still counts once."
+)
+
 
 class DeribitError(VendorError):
     """Deribit was unreachable, or returned a payload this module cannot use.
@@ -337,6 +376,12 @@ class SkewSnapshot(NamedTuple):
     so the report cannot keep calling the expiry "the eligible expiry closest to 30
     days" while showing a different one. Both candidates come from the same tenor
     band, so a fallback is still a ~30-day expiry.
+
+    ``call_25_miss`` / ``put_25_miss`` carry WHICH guard refused a missing wing —
+    see ``_interpolate_with_reason``. They are None when that wing is present, and
+    default to None so a caller constructing a snapshot by hand still gets the
+    conservative "no bracket" wording rather than an unfounded claim that a quote
+    was suspect.
     """
 
     expiry: str
@@ -348,6 +393,8 @@ class SkewSnapshot(NamedTuple):
     n_calls: int
     n_puts: int
     is_fallback: bool = False
+    call_25_miss: _MissReason | None = None
+    put_25_miss: _MissReason | None = None
 
     @property
     def rr25(self) -> float | None:
@@ -382,12 +429,25 @@ class DvolSeries(NamedTuple):
     part of is not a sparse window. Without the count those sentences attribute a
     rejection here to the feed, and a reader deciding whether the sample is
     sufficient reads exactly that sentence.
+
+    ``dropped_inconsistent`` counts the second rejection class on the same terms: a
+    candle whose open OR close falls outside its own high/low range — both fields
+    are tested, and every sentence that reports the rejection says so, so no
+    description is narrower than the check. Kept as its own count
+    and its own sentence rather than folded into ``dropped_non_positive``, because
+    the two name different feed faults and therefore different operator actions —
+    a non-positive close is a broken value, whereas a self-contradicting candle is
+    most likely a CHANGED RESPONSE SHAPE (a reordered row), which is a vendor
+    integration change rather than a data glitch. Merging them would also make the
+    "came back zero or negative" wording false for half the candles it counted.
     """
 
     dates: list[str]
     closes: list[float]
     dropped_non_positive: int = 0
     newest_dropped_date: str | None = None
+    dropped_inconsistent: int = 0
+    newest_inconsistent_date: str | None = None
 
     @property
     def latest(self) -> float:
@@ -409,9 +469,9 @@ class DvolReport(NamedTuple):
     dropped by the first downstream summary.
 
     ``as_of_phrase`` is always populated, not only when the feed is late. It used
-    to exist solely as a staleness warning, so a reading one or two days old — the
-    ordinary case, below MAX_DATA_LAG_DAYS — reached the reading line with no date
-    at all, and that line is the one clause downstream agents quote on its own.
+    to exist solely as a staleness warning, so a reading a day old — the ordinary
+    case, at MAX_DATA_LAG_DAYS — reached the reading line with no date at all, and
+    that line is the one clause downstream agents quote on its own.
     The "N days old" half is still appended only past the threshold.
 
     ``latest`` travels alongside for the same reason ``percentile_n`` does: the
@@ -608,14 +668,30 @@ def _request(endpoint: str, params: dict) -> object:
 
 
 def _is_finite_number(x: object) -> bool:
-    """True only for a real, finite number (not a bool, NaN, or Infinity).
+    """True only for a real, finite number (not a bool, NaN, Infinity, or a huge int).
 
     bool is an int subclass, so a JSON ``true``/``false`` must not pass as a price
     or a vol. ``json`` decodes ``NaN``/``Infinity`` to non-finite floats, which
     would poison every comparison downstream (every comparison with NaN is False)
     and render as a literal "nan" figure.
+
+    ``math.isfinite`` RAISES on an int too large to convert to a float, and a JSON
+    integer literal has no bound, so ``json.loads`` can hand back an
+    arbitrary-precision int that makes this predicate throw rather than answer.
+    That inverts its contract at one of the input classes it exists to turn away,
+    and it does so at every call site: ``parse_chain`` documents "rows that cannot
+    be used are skipped, not fatal" and would instead lose all six chain figures to
+    a single row, while ``_fetch_dvol``'s own malformed-candle diagnostic would be
+    replaced by a bare "int too large to convert to float" — a message that reaches
+    the model through route_to_vendor's sentinel and sends an operator to
+    ``math.isfinite`` as though the bug were here.
     """
-    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+    if not isinstance(x, (int, float)) or isinstance(x, bool):
+        return False
+    try:
+        return math.isfinite(x)
+    except OverflowError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -802,9 +878,34 @@ def interpolate_iv_at_delta(
       printing the expected 61000/62000 bracket).
 
     Returns None when no strike-adjacent pair brackets the target, or when the
-    quotes around that pair are not a monotone smile. Both mean the same thing to
-    the caller: the chain does not support this point, and inventing it is the
-    fabrication this codebase refuses everywhere else.
+    quotes around that pair are not a monotone smile. Both mean the chain does not
+    support this point, and inventing it is the fabrication this codebase refuses
+    everywhere else — but they are not the same FACT about the chain, so
+    ``_interpolate_with_reason`` reports which one fired and the report says so.
+    """
+    return _interpolate_with_reason(quotes, target_delta)[0]
+
+
+def _interpolate_with_reason(
+    quotes: list[tuple[float, float, float]],
+    target_delta: float,
+) -> tuple[WingQuote | None, _MissReason | None]:
+    """``interpolate_iv_at_delta``, plus WHICH guard refused the point.
+
+    Split out rather than folded into the public function's return type so that
+    function keeps the plain ``WingQuote | None`` signature its callers and the
+    maths tests are written against.
+
+    The distinction is worth carrying because the two misses are different facts
+    about the market and lead to different reads. ``_MISS_NO_BRACKET`` is a THIN
+    BOOK: no two strike-adjacent quotes straddle the target delta, which is an
+    ordinary property of a sparse expiry. ``_MISS_NON_MONOTONE`` is a SUSPECT
+    QUOTE: a bracket was found and then rejected because delta rises with strike
+    across it, which no well-formed smile does — the guard that caught a 61000 put
+    collapsing to 0.5% IV and flipping RR25 from -4.74 to +2.33. Collapsing them
+    into one "or" sentence was the module's only remaining site where two causes
+    with different operator actions shared one message; ``_fetch_chain`` and
+    ``_wing_line`` both split theirs on exactly this ground.
     """
     ordered = sorted(quotes)
     # strict=False is the point of this zip: pairing each quote with its successor
@@ -818,7 +919,7 @@ def interpolate_iv_at_delta(
         if not min(delta_a, delta_b) <= target_delta <= max(delta_a, delta_b):
             continue
         if not _is_locally_monotone(ordered, index):
-            return None
+            return None, _MISS_NON_MONOTONE
         span = delta_b - delta_a
         if span == 0:
             # Both neighbours sit exactly on the target; neither is more correct
@@ -826,8 +927,8 @@ def interpolate_iv_at_delta(
             iv = (iv_a + iv_b) / 2.0
         else:
             iv = iv_a + (target_delta - delta_a) / span * (iv_b - iv_a)
-        return WingQuote(iv, strike_low, strike_high)
-    return None
+        return WingQuote(iv, strike_low, strike_high), None
+    return None, _MISS_NO_BRACKET
 
 
 def _is_locally_monotone(ordered: list[tuple[float, float, float]], index: int) -> bool:
@@ -872,6 +973,16 @@ def rank_expiries(contracts: list[Contract], now: datetime) -> list[str]:
     return sorted(tenors, key=lambda token: (abs(tenors[token] - TARGET_DTE_DAYS), -tenors[token]))
 
 
+def _points_read(snapshot: SkewSnapshot) -> int:
+    """How many of the three smile points (ATM, 25Δ call, 25Δ put) this one carries.
+
+    Used only to choose between two INCOMPLETE candidate expiries — a complete one
+    returns immediately — so it never competes with tenor closeness for a surface
+    the report could have used in full.
+    """
+    return sum(p is not None for p in (snapshot.atm, snapshot.call_25, snapshot.put_25))
+
+
 def _median(values: list[float]) -> float:
     ordered = sorted(values)
     mid = len(ordered) // 2
@@ -889,8 +1000,10 @@ def compute_skew(contracts: list[Contract], now: datetime) -> SkewSnapshot:
     wing is a property of one expiry rather than of the surface, and its immediate
     neighbour is usually clean, so one labelled step is a far better input to a risk
     debate than the silence of an all-``n/a`` skew section. When neither candidate
-    brackets both wings the first one's snapshot is returned, so the forward, ATM
-    and whichever wing exists are still reported.
+    brackets both wings, the one carrying MORE of the three smile points is
+    returned — ties going to the nearer expiry — so the forward, ATM and whichever
+    wings exist are still reported, and the richer of two incomplete surfaces is
+    the one the reader gets.
 
     Both candidates come from ``rank_expiries``, so both are already inside the
     eligible tenor band; the step can only ever move to another ~30-day expiry.
@@ -911,7 +1024,7 @@ def compute_skew(contracts: list[Contract], now: datetime) -> SkewSnapshot:
             f"read as the {TARGET_DTE_DAYS}-day skew this report states"
         )
     first_error: DeribitError | None = None
-    fallback: SkewSnapshot | None = None
+    best: SkewSnapshot | None = None
     for expiry in ranked[:_MAX_EXPIRY_CANDIDATES]:
         try:
             snapshot = _snapshot_for_expiry(contracts, expiry, now, is_fallback=expiry != ranked[0])
@@ -924,14 +1037,26 @@ def compute_skew(contracts: list[Contract], now: datetime) -> SkewSnapshot:
             continue
         if snapshot.call_25 is not None and snapshot.put_25 is not None:
             return snapshot
-        if fallback is None:
-            fallback = snapshot
-    if fallback is not None:
-        return fallback
+        # Neither candidate is complete so far, so keep whichever surface carries
+        # more of the three points. Latching the FIRST incomplete snapshot handed
+        # back an all-n/a section while the neighbouring expiry sat there with an
+        # ATM point and a wing — precisely "the silence of an all-n/a skew
+        # section" this second candidate exists to avoid. RR25 is None either way,
+        # so what moves is the body: the forward, the ATM line, one wing and the
+        # expiry the reading line names.
+        #
+        # STRICTLY greater, so a tie leaves the nearer expiry in place: closeness
+        # to the target tenor remains the tiebreak and only a genuinely richer
+        # surface displaces it.
+        if best is None or _points_read(snapshot) > _points_read(best):
+            best = snapshot
+    if best is not None:
+        return best
     if first_error is not None:
         raise first_error
     # Unreachable: ranked is non-empty, so the loop ran at least once, and every
-    # iteration either returns, records a fallback, or records a first_error.
+    # iteration either returns, records a candidate in `best`, or records a
+    # first_error.
     # Spelled out rather than silenced with a type: ignore, so a future edit that
     # breaks that reasoning fails with a message instead of a None-raise.
     raise DeribitError(
@@ -981,16 +1106,25 @@ def _snapshot_for_expiry(
     if atm is None:
         atm = interpolate_iv_at_delta(put_quotes, -ATM_DELTA)
 
+    # The 25Δ wings keep the reason their point is missing; ATM deliberately does
+    # not. ATM is attempted on TWO curves (calls at +0.5, then puts at -0.5), so
+    # there is no single guard to name — which is exactly why _atm_line keeps the
+    # combined "or" wording that the wing lines no longer use.
+    call_25, call_25_miss = _interpolate_with_reason(call_quotes, WING_DELTA)
+    put_25, put_25_miss = _interpolate_with_reason(put_quotes, -WING_DELTA)
+
     return SkewSnapshot(
         expiry=expiry,
         days_to_expiry=days_to_expiry,
         forward=forward,
         atm=atm,
-        call_25=interpolate_iv_at_delta(call_quotes, WING_DELTA),
-        put_25=interpolate_iv_at_delta(put_quotes, -WING_DELTA),
+        call_25=call_25,
+        put_25=put_25,
         n_calls=len(call_quotes),
         n_puts=len(put_quotes),
         is_fallback=is_fallback,
+        call_25_miss=call_25_miss,
+        put_25_miss=put_25_miss,
     )
 
 
@@ -1083,9 +1217,16 @@ def _fetch_dvol(currency: str, curr_dt: datetime) -> DvolSeries:
     # unrelated rejection a year ago renders identically to a feed whose every
     # recent print was rejected — two different operator actions.
     newest_skipped: str | None = None
+    # The same pair for the second rejection class (see the consistency check
+    # below), counted separately because it names a different fault.
+    skipped_inconsistent = 0
+    newest_inconsistent: str | None = None
     for row in result["data"]:
         # [timestamp_ms, open, high, low, close]; a shape change here would
-        # silently reinterpret which number is the close, so it is fatal.
+        # silently reinterpret which number is the close, so it is fatal. Note
+        # what this test can and cannot see: it catches a row of the wrong LENGTH
+        # or carrying a non-number, but a permutation of the five values passes it
+        # untouched. The consistency check below is what covers that case.
         if not isinstance(row, list) or len(row) != 5 or not all(_is_finite_number(v) for v in row):
             raise DeribitError(
                 # Capped here rather than where this is rendered: the render sites
@@ -1129,6 +1270,52 @@ def _fetch_dvol(currency: str, curr_dt: datetime) -> DvolSeries:
                 currency,
             )
             continue
+        # The open and the close must both lie inside the candle's own high/low.
+        # Until this check the row was guarded on ONE side only — a close of 0.0
+        # was refused as broken while a close of 3000.0 sitting in a 39.0/41.0
+        # candle was published as fact, and 3000% reads to a model as a real
+        # extreme-vol regime rather than as garbage. It set the headline level, the
+        # 30-day max and the percentile basis, in all three of the places an
+        # absence is otherwise disclosed, with no caveat anywhere. The row carries
+        # the evidence that refutes it.
+        #
+        # BOTH price fields are tested, not only the close this module reads: an
+        # open outside the range is the same evidence of the same fault. Every
+        # sentence describing the rejection therefore says "open or close", so the
+        # wording cannot be narrower than the test — which is the defect this whole
+        # round is correcting, and which the first draft of this guard reproduced.
+        #
+        # This is also the only check that can see a REORDERED row, which the shape
+        # guard above cannot: a permuted [ts, close, open, high, low] has length 5
+        # and five finite numbers, so the module would read the day's LOW as the
+        # close, silently, on every row, for a year.
+        #
+        # Skipped rather than fatal, on the grounds the non-positive branch already
+        # states: one bad candle must not cost a year of history, and dropping it
+        # leaves an older reading as the latest, which the report dates and ages
+        # honestly. No plausibility bound is implied — a uniformly rescaled candle
+        # is self-consistent and passes, and inventing a ceiling for DVOL is a
+        # different decision from enforcing the row's own arithmetic.
+        _, candle_open, candle_high, candle_low, candle_close = row
+        if not (
+            candle_low <= candle_open <= candle_high and candle_low <= candle_close <= candle_high
+        ):
+            if day <= curr_date:
+                # Counted on the same terms as the non-positive class above, and
+                # for the same reason: only an IN-WINDOW candle was ever a
+                # candidate for by_date.
+                skipped_inconsistent += 1
+                if newest_inconsistent is None or day > newest_inconsistent:
+                    newest_inconsistent = day
+            logger.warning(
+                "Skipping self-contradicting Deribit DVOL candle %r dated %s for %s "
+                "(open or close outside its own high/low range; a reordered row looks "
+                "like this)",
+                row,
+                day,
+                currency,
+            )
+            continue
         # A repeated day (a resolution change, or a partial candle alongside a
         # settled one) keeps whichever candle carries the later timestamp, rather
         # than whichever the response happened to list last.
@@ -1136,17 +1323,63 @@ def _fetch_dvol(currency: str, curr_dt: datetime) -> DvolSeries:
             ts_by_date[day] = row[0]
             by_date[day] = float(row[4])
     if not by_date:
-        # Two different states, and the message is rendered verbatim into
+        # Distinct states, and the message is rendered verbatim into
         # "**DVOL:** unavailable — ...". "No readings published" sends the reader
-        # to Deribit's status page; "every reading was non-positive" is a corrupt
-        # feed that answered with a full history. Also names the currency, which
-        # is the non-obvious part on a proxied asset — every other fetch-side
-        # error in this module states it.
+        # to Deribit's status page; a fully-rejected history is a corrupt feed that
+        # answered in full, and WHICH rejection emptied it decides what the
+        # operator looks at. Also names the currency, which is the non-obvious part
+        # on a proxied asset — every other fetch-side error in this module does.
+        #
+        # Both rejection classes are named, and named for what they are. Reporting
+        # only the non-positive count would have said "every reading was
+        # non-positive (0 skipped)" on a feed whose every candle was instead
+        # self-contradicting: a false cause with a self-refuting number beside it,
+        # sending the operator after a broken value when the likely fault is a
+        # changed response shape.
+        #
+        # The newest rejected date travels with every count, exactly as on the
+        # rendered path — and it matters MORE here, not less, because this is the
+        # branch where the reader gets no series at all, so it is the only thing
+        # saying whether the feed broke recently or has been broken throughout.
+        # The render note documents that reasoning at length; these raises had the
+        # value in scope and dropped it, the render-vs-raise drift this module has
+        # now been bitten by twice.
+        #
+        # ``default=None`` rather than a guard around the assignment: with no
+        # rejections at all both dates are None, and a bare max() over the empty
+        # generator would raise ValueError on the plainest of the paths below.
+        # Bound unconditionally so the name exists on every path — a guard whose
+        # condition has to stay exactly the union of the branches that read it is
+        # the kind of invariant that survives only in a comment, and a fifth branch
+        # added outside it would read a possibly-unbound local. Every branch that
+        # interpolates this requires a non-zero count, and a count is only ever
+        # incremented in the same branch that records its date.
+        newest_rejected = max(
+            (d for d in (newest_skipped, newest_inconsistent) if d is not None), default=None
+        )
+        if skipped_non_positive and skipped_inconsistent:
+            raise DeribitError(
+                f"Every {currency} DVOL reading on or before {curr_date} was rejected as broken "
+                f"({skipped_non_positive} non-positive and {skipped_inconsistent} with an open "
+                f"or close outside its own high/low range, the newest of them dated "
+                f"{newest_rejected}), so the feed returned history but no usable level — the "
+                f"self-contradicting ones point at a reordered candle shape rather than at bad "
+                f"values"
+            )
         if skipped_non_positive:
             raise DeribitError(
                 f"Every {currency} DVOL reading on or before {curr_date} was non-positive "
-                f"({skipped_non_positive} skipped), so the feed returned history but no usable "
-                f"level"
+                f"({skipped_non_positive} skipped, the newest dated {newest_rejected}), so the "
+                f"feed returned history but no usable level"
+            )
+        if skipped_inconsistent:
+            raise DeribitError(
+                f"Every {currency} DVOL candle on or before {curr_date} carried an open or close "
+                f"outside its own high/low range ({skipped_inconsistent} skipped, the newest "
+                f"dated {newest_rejected}), so the feed returned history but no usable level — "
+                f"across "
+                f"a whole history this points at a reordered candle shape rather than at bad "
+                f"values"
             )
         raise DeribitError(f"No {currency} DVOL readings on or before {curr_date}")
     dates = sorted(by_date)
@@ -1155,6 +1388,8 @@ def _fetch_dvol(currency: str, curr_dt: datetime) -> DvolSeries:
         closes=[by_date[d] for d in dates],
         dropped_non_positive=skipped_non_positive,
         newest_dropped_date=newest_skipped,
+        dropped_inconsistent=skipped_inconsistent,
+        newest_inconsistent_date=newest_inconsistent,
     )
 
 
@@ -1295,7 +1530,14 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
     # "DVOL 40.45" against "ATM IV 39.59%" with nothing in the text saying the two
     # are the same quantity. Both are annualized vol points.
     latest_line = (
-        f"**DVOL ({DVOL_INDEX_TENOR_DAYS}-day implied vol index), latest:** "
+        # "latest usable", not "latest". A candle this module rejected can be dated
+        # LATER than this one, and the rejection notes below print that date — so
+        # the unqualified label is contradicted a few italic lines down on exactly
+        # the path (a feed whose recent prints are all broken) those notes exist to
+        # expose. Same word, same reason, as _readings() and the four sentences
+        # already swept; this headline and the Reading line were the sites the
+        # sweep stopped short of.
+        f"**DVOL ({DVOL_INDEX_TENOR_DAYS}-day implied vol index), latest usable reading:** "
         f"{latest:.2f}% annualized on {series.latest_date}"
     )
     latest_is_open = series.latest_date >= today
@@ -1378,7 +1620,7 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
             lines.append(
                 f"**{DVOL_PERCENTILE_WINDOW_DAYS}d percentile:** not computed — the "
                 f"{DVOL_PERCENTILE_WINDOW_DAYS} days ending {curr_date} hold only "
-                f"{_readings(len(pct_window))}, and the latest reading is itself in that "
+                f"{_readings(len(pct_window))}, and the latest usable reading is itself in that "
                 f"sample, so a percentile over it could not read below "
                 f"{floor_pct:.1f}%"
             )
@@ -1391,7 +1633,8 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
             )
     else:
         lines.append(
-            f"**{DVOL_PERCENTILE_WINDOW_DAYS}d percentile:** the latest reading sits at the "
+            f"**{DVOL_PERCENTILE_WINDOW_DAYS}d percentile:** the latest usable reading sits at "
+            f"the "
             f"{_ordinal(percentile)} percentile of the {_readings(len(pct_window))} in "
             f"the {DVOL_PERCENTILE_WINDOW_DAYS} days ending {curr_date} (percentile = share "
             f"of those readings at or below it)"
@@ -1407,12 +1650,13 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
     ).days
     # Always dated, not only when late: this phrase is the only date the reading
     # line carries, and that line is what a downstream summary quotes on its own.
-    # Gated on the lag threshold, a reading one or two days old — the ordinary
+    # Gated on the lag threshold, a reading a day old — the ordinary
     # case — was quoted bare and read as current.
     as_of_phrase = f"as of {series.latest_date}"
     if lag_days > MAX_DATA_LAG_DAYS:
-        # (The threshold makes lag_days at least 3 here, so "days" is always the
-        # right plural.)
+        # (The threshold makes lag_days at least 2 here, so "days" is always the
+        # right plural. It stays right for any MAX_DATA_LAG_DAYS >= 1; drop the
+        # threshold to 0 and the singular case becomes reachable.)
         if curr_date < today:
             # A historical analysis date: readings AFTER curr_date were filtered
             # out by this module, so nothing here licenses a claim about what the
@@ -1482,8 +1726,28 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
             f"before {curr_date} came back zero or negative and "
             f"{'was' if dropped == 1 else 'were'} dropped as broken (a non-positive vol index "
             f"is not a low reading), the newest of them dated {series.newest_dropped_date}. "
-            f"A rejected reading does not contribute to a window's count above, though a day "
-            f"that also carried a surviving reading still counts once._"
+            f"A rejected reading {_WINDOW_COUNT_CAVEAT}_"
+        )
+    if series.dropped_inconsistent:
+        # Its own sentence rather than a second clause on the line above, because
+        # the two rejection classes point at different faults: a non-positive close
+        # is a broken VALUE, while an open or close outside its own candle points
+        # at a reordered response SHAPE. Folding them into one count would have made
+        # that line's "came back zero or negative" false for half of what it
+        # counted — the partial-update failure this module keeps re-learning.
+        #
+        # The two lines carry the same closing sentence about window counts because
+        # either can appear without the other, so neither may lean on the other
+        # being present — shared as _WINDOW_COUNT_CAVEAT rather than copied, since
+        # copying it is precisely how the two would drift apart.
+        bad = series.dropped_inconsistent
+        lines.append(
+            f"_Inconsistent: {bad} DVOL candle{'' if bad == 1 else 's'} dated on or before "
+            f"{curr_date} carried an open or close outside {'its' if bad == 1 else 'their'} own "
+            f"high/low range and {'was' if bad == 1 else 'were'} dropped as broken (a candle "
+            f"that contradicts itself cannot be read as a level, and a reordered candle shape "
+            f"would look exactly like this), the newest of them dated "
+            f"{series.newest_inconsistent_date}. A rejected candle {_WINDOW_COUNT_CAVEAT}_"
         )
     return DvolReport(
         "\n".join(lines), percentile, len(pct_window), as_of_phrase, latest, latest_is_open
@@ -1491,7 +1755,14 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
 
 
 def _format_wing(quote: WingQuote | None) -> str:
-    """Render an interpolated smile point with the strikes it came from."""
+    """Render an interpolated smile point with the strikes it came from.
+
+    The None wording keeps both causes in one "or" because the only caller that
+    can still reach it is ``_atm_line``, and ATM genuinely has no single guard to
+    name: it is attempted on the call curve and then on the put curve, so either
+    cause may have fired on either attempt. The 25Δ wings are attempted once each
+    and name the guard that actually fired — see ``_wing_line``.
+    """
     if quote is None:
         return (
             "n/a (no two strike-adjacent quotes bracket this point, or the quotes around it "
@@ -1500,19 +1771,35 @@ def _format_wing(quote: WingQuote | None) -> str:
     return f"{quote.iv:.2f}% (between the {quote.strike_low:,.0f} and {quote.strike_high:,.0f} strikes)"
 
 
-def _wing_line(quote: WingQuote | None, n_quotes: int) -> str:
+def _wing_line(quote: WingQuote | None, n_quotes: int, miss: _MissReason | None = None) -> str:
     """Render a smile point, stating the TRUE reason when it is missing.
 
-    ``_format_wing``'s bracket/monotonicity wording presumes there were quotes to
-    bracket with. When a whole side of the expiry produced no usable delta — every
-    put unquoted, say — that wording names two causes that did not happen, and the
-    honest signal is buried in a quote count several lines up.
+    ``_format_wing``'s wording presumes there were quotes to bracket with. When a
+    whole side of the expiry produced no usable delta — every put unquoted, say —
+    that wording names causes that did not happen, and the honest signal is buried
+    in a quote count several lines up.
+
+    With two or more quotes the reason comes from the guard that actually fired
+    (``miss``), because "the book is thin here" and "one of these quotes looks
+    corrupt" are different reads of the same expiry and the second is the stronger
+    signal: the monotonicity veto is the guard that catches a collapsed mark_iv
+    capable of inverting the sign of RR25. ``miss`` defaults to None so a caller
+    that has no reason to offer gets the conservative thin-book wording rather
+    than an unfounded suspicion about a quote.
     """
-    if quote is not None or n_quotes >= 2:
+    if quote is not None:
         return _format_wing(quote)
     if n_quotes == 0:
         return "n/a (no quote on this side of the expiry yielded a usable delta)"
-    return "n/a (only one usable quote on this side, so no pair can bracket this point)"
+    if n_quotes == 1:
+        return "n/a (only one usable quote on this side, so no pair can bracket this point)"
+    if miss == _MISS_NON_MONOTONE:
+        return (
+            "n/a (a strike-adjacent pair does bracket this point, but delta rises with strike "
+            "across it, which no well-formed smile does — so one of those quotes is suspect "
+            "and the point was refused rather than interpolated from it)"
+        )
+    return "n/a (no two strike-adjacent quotes bracket this point)"
 
 
 def _rr_points(rr: float) -> str:
@@ -1577,8 +1864,8 @@ def _skew_section(skew: SkewSnapshot, snapshot_time: str) -> str:
         # two percentages had only the tool docstring to tell them it is not spot.
         f"**Forward:** {skew.forward:,.2f} (Deribit's forward for this expiry, not spot)",
         f"**ATM IV ({ATM_DELTA * 100:.0f}Δ):** {_atm_line(skew)}",
-        f"**25Δ call IV:** {_wing_line(skew.call_25, skew.n_calls)}",
-        f"**25Δ put IV:** {_wing_line(skew.put_25, skew.n_puts)}",
+        f"**25Δ call IV:** {_wing_line(skew.call_25, skew.n_calls, skew.call_25_miss)}",
+        f"**25Δ put IV:** {_wing_line(skew.put_25, skew.n_puts, skew.put_25_miss)}",
     ]
     if skew.rr25 is None:
         lines.append(
@@ -1602,28 +1889,42 @@ def _skew_section(skew: SkewSnapshot, snapshot_time: str) -> str:
     return "\n".join(lines)
 
 
-def _widest_wing_bracket(skew: SkewSnapshot) -> tuple[float, str] | None:
-    """Widest 25Δ bracket as ``(fraction_of_forward, side)``, or None if none is wide.
+def _wide_wing_brackets(skew: SkewSnapshot) -> dict[str, float]:
+    """EVERY 25Δ bracket wider than the threshold, as ``{side: fraction_of_forward}``.
 
     Only the two RR25 inputs are measured. ATM's bracket is not: it qualifies a
     figure the reading line does not restate, and its absence is reported in its
     own right by the caller.
 
-    The SIDE travels with the number because the reading line is what survives a
+    The SIDE travels with each number because the reading line is what survives a
     downstream summary and the strikes that would identify the wing are body-only
     — "that wing reads across the smile" named neither of the two.
+
+    All of them rather than the widest one. Reporting only ``max()`` meant that
+    when BOTH wings were coarse the sentence named one and said nothing about the
+    other, so a summary keeping that line concluded the unnamed wing was sound —
+    and RR25 is the DIFFERENCE of the two, which makes both being coarse
+    materially worse than one, not the same thing said once. The old tie-break was
+    an artefact besides: ``max()`` on ``(fraction, side)`` pairs fell through to
+    comparing the side STRINGS at equal widths, so "put" beat "call" alphabetically
+    and two identically-wide brackets always reported the put.
+
+    Keyed by side rather than a list of pairs. The ``(fraction, side)`` element
+    order existed ONLY so ``max()`` would sort by width, and ``max()`` is gone —
+    leaving a shape the caller immediately rebuilt into this dict to look up
+    "call" and "put" by name. Insertion order is still call-first, so the report
+    reads in its own order rather than the data's.
     """
     if skew.forward <= 0:
-        return None
-    widths = [
-        ((quote.strike_high - quote.strike_low) / skew.forward, side)
-        for quote, side in ((skew.call_25, "call"), (skew.put_25, "put"))
-        if quote is not None
-    ]
-    if not widths:
-        return None
-    widest, side = max(widths)
-    return (widest, side) if widest > _WIDE_BRACKET_FRACTION else None
+        return {}
+    wide: dict[str, float] = {}
+    for quote, side in ((skew.call_25, "call"), (skew.put_25, "put")):
+        if quote is None:
+            continue
+        fraction = (quote.strike_high - quote.strike_low) / skew.forward
+        if fraction > _WIDE_BRACKET_FRACTION:
+            wide[side] = fraction
+    return wide
 
 
 def _reading_line(
@@ -1679,12 +1980,21 @@ def _reading_line(
     DVOL level themselves; the expiry and its tenor (a risk reversal is not
     tenor-invariant); a fallback expiry (the nearest one failed, which is itself
     the surface-sparseness signal); a missing ATM point (the prompt's longest
-    paragraph describes a figure that is then not there); and a 25Δ wing
-    interpolated across an implausibly wide bracket (the strikes are printed in
-    the body, but a summary keeps this line and drops them). Not here: the exact
-    strikes, the quote counts, the open-interest policy, and the window spans —
-    all of these qualify figures this line already names, and a reader who needs
-    them has the body.
+    paragraph describes a figure that is then not there); and — ONLY where an RR25
+    is printed — each 25Δ wing interpolated across an implausibly wide bracket
+    (the strikes are printed in the body, but a summary keeps this line and drops
+    them), both of them when both are that wide. That last one is gated where its
+    two siblings are not, because with no RR25 this line states no wing vol at
+    all, so there is nothing here for the qualifier to attach to; the wing lines in
+    the body still carry it. Not here: the exact strikes, the quote counts and the
+    open-interest policy — all of these qualify figures this line already names,
+    and a reader who needs them has the body.
+
+    The window SPANS are not on that exclusion list, though they read like they
+    belong on it: the percentile clause names its span and its sample count in
+    both branches, deliberately, because "the 365-day window" alone reads as one
+    observation per day and a stalled feed then sounds like a full year of
+    evidence once the clause is quoted on its own.
     """
     parts = []
     if skew is not None and skew.rr25 is not None:
@@ -1728,7 +2038,7 @@ def _reading_line(
         # Parenthesised, and no qualifier contains a comma. The enclosing sentence
         # joins its clauses with "; and " — the serial-semicolon CLOSING form — so
         # a bare "; "-joined list left the sentence's own final clause reading as
-        # one more qualifier: "...; and BTC's latest DVOL reading is ..." parsed as
+        # one more qualifier: "...; and BTC's latest usable DVOL reading is ..." parsed as
         # a fourth qualification OF THE CHAIN, which is at its worst when that
         # clause is the other half's absence. The brackets close the list so it
         # cannot swallow what follows it.
@@ -1741,18 +2051,29 @@ def _reading_line(
         if skew.atm is None:
             qualifiers.append(f"no ATM ({ATM_DELTA * 100:.0f}Δ) IV could be read from it")
         if skew.rr25 is not None:
-            widest = _widest_wing_bracket(skew)
-            if widest is not None:
-                fraction, side = widest
-                # The measured width, not "up to N%": at ":.0%" a bracket spanning
-                # 10.49% rendered "up to 10%", an upper bound the figure it
-                # describes breaches — the same defect this round floored the
-                # percentile bound to remove. Two decimals so a bracket just past
-                # the threshold cannot print AS the threshold.
+            wide = _wide_wing_brackets(skew)
+            # The measured width, not "up to N%": at ":.0%" a bracket spanning
+            # 10.49% rendered "up to 10%", an upper bound the figure it
+            # describes breaches — the same defect this round floored the
+            # percentile bound to remove. Two decimals so a bracket just past
+            # the threshold cannot print AS the threshold.
+            #
+            # Em-dashes and no commas in the two-wing form, for the reason the
+            # comment above this block gives: a comma inside a qualifier would let
+            # the "; "-joined list bleed into the enclosing sentence's own clauses.
+            if len(wide) == 1:
+                side, fraction = next(iter(wide.items()))
                 qualifiers.append(
                     f"its 25Δ {side} wing was interpolated across a bracket spanning "
                     f"{fraction:.2%} of the forward so it reads across the smile rather "
                     f"than along it"
+                )
+            elif wide:
+                qualifiers.append(
+                    f"BOTH 25Δ wings were interpolated across wide brackets — the call "
+                    f"spanning {wide['call']:.2%} of the forward and the put "
+                    f"{wide['put']:.2%} — so both read across the smile rather than along "
+                    f"it and RR25 is the difference between two such reads"
                 )
         if qualifiers:
             parts.append("this chain read is qualified (" + "; ".join(qualifiers) + ")")
@@ -1768,9 +2089,19 @@ def _reading_line(
         # the reading: appended outside, the nearest antecedent became "a
         # still-open candle", and a candle does not sit at a percentile.
         so_far = "; still an open candle, so this is the level so far"
+        # Unconditional parentheses: as_of_phrase is populated on every report (see
+        # DvolReport), so `detail` is never empty and the old `if detail else ""`
+        # guarded a state that cannot occur — it read as though a bare level were
+        # still reachable here, which is the opposite of the invariant.
         detail = dvol_report.as_of_phrase + (so_far if dvol_report.latest_is_open else "")
-        as_of = f" ({detail})" if detail else ""
-        level = f"{currency}'s latest DVOL reading is {dvol_report.latest:.2f}% annualized{as_of}"
+        as_of = f" ({detail})"
+        # "latest usable", for the reason the body headline carries it: a rejected
+        # candle can be newer, and this is the one sentence a downstream summary
+        # keeps — so an unqualified claim here outlives the note that corrects it.
+        level = (
+            f"{currency}'s latest usable DVOL reading is "
+            f"{dvol_report.latest:.2f}% annualized{as_of}"
+        )
         if dvol_report.percentile is not None:
             # State the sample, not just the span. "the 365-day window" reads as
             # one observation per day, so a feed that stopped publishing weeks ago
@@ -1850,7 +2181,9 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             date, so it is withheld when this is EARLIER than today's UTC date
             rather than backfilled from the present. A curr_date up to
             MAX_FUTURE_DAYS later than the UTC clock is served, with a note: the
-            live chain then predates the analysis date, which is not lookahead.
+            live chain is then never later than the analysis date, which is not
+            lookahead — it predates that date outright, or falls inside it when
+            the clock reaches the date mid-run, and the note says which.
             Further ahead than that is treated like a historical date and the
             chain is withheld, since curr_date is an LLM-supplied argument and
             past one day the gap is a mistake rather than a timezone.
@@ -1962,7 +2295,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
     # simply withheld. Note the test is "earlier than the clock", not "not equal
     # to it": callers derive curr_date from a local clock (cli/main.py does), so
     # east of UTC it routinely runs a few hours AHEAD of today. The live chain is
-    # then older than the analysis date, which is not lookahead at all, and
+    # then never later than the analysis date, which is not lookahead at all, and
     # treating it as such would withhold this vendor's main signal for the first
     # hours of every local day. The DVOL half is genuinely date-filtered and is
     # served either way.
@@ -2025,6 +2358,20 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
                 lambda: _fetch_chain(currency, chain_now), "options chain", currency
             )
 
+    # A curr_date that was NOT historical at classification time but is by the time
+    # the chain is fetched: the clock crossed UTC midnight during the DVOL half.
+    # Derivable rather than tracked as a flag: only the mid-run re-take can withhold
+    # as historical while curr_date is still >= the clock the run started on.
+    #
+    # Derived HERE, above the both-halves-failed raise, rather than below it. It
+    # used to sit under that block, so the raise was the one consumer of
+    # "historical" that could not read it and re-decided the wording by hand — and
+    # got it wrong in exactly the state the variable exists to isolate, calling
+    # today "the historical date" while its three rendered siblings all refuse to.
+    # That is the partial-update failure chain_withheld was introduced to prevent,
+    # reappearing one scope up.
+    withheld_mid_run = chain_withheld == "historical" and curr_date >= today
+
     if dvol is None and skew is None:
         # Keep a throttle in the router's rate-limit lane whichever path got here.
         # Collapsing it into a DeribitError would make a temporary throttle look
@@ -2046,16 +2393,46 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         # was authored by this module: a requests failure carries the URL and
         # query string, and an unforeseen bug carries whatever repr it has.
         dvol_reason = _sanitize(dvol_error)
+        # A proxied asset's chain is never served on ANY date, and the two
+        # withholding reasons that OUTRANK "proxy" say nothing about that. On the
+        # rendered path the proxy fact still reaches the reader twice — the heading
+        # and its italic caveat — and _reading_line re-adds it for precisely this
+        # reason; here there is no report at all, so this string is everything the
+        # operator and the model get. Without it a SOL backtest reads as "not
+        # served for the historical date", implying a live date would serve it. It
+        # never will. The caller's own symbol appears for the same reason: naming
+        # only the proxy currency shows an operator a BTC failure for a SOL request.
+        proxy_note = (
+            f", and this vendor reads no options chain for '{asset}' on any date"
+            if market_proxy and chain_withheld != "proxy"
+            else ""
+        )
         if chain_withheld == "historical":
+            # Read off withheld_mid_run rather than re-deciding it: the post-DVOL
+            # midnight re-test also classifies as "historical", with curr_date
+            # still equal to today, and calling that "the historical date"
+            # contradicts the three rendered sites corrected for exactly this.
+            basis = (
+                f"the analysis date {curr_date} — which the UTC clock passed while this "
+                f"report was being built"
+                if withheld_mid_run
+                else f"the historical date {curr_date}"
+            )
             raise DeribitError(
                 f"Deribit DVOL is unavailable for {currency} ({dvol_reason}), and the options "
-                f"chain is not served for the historical date {curr_date}"
+                f"chain is not served for {basis}{proxy_note}"
             )
         if chain_withheld == "far_future":
+            # Past tense and naming the clock — the eighth site of a sweep that
+            # covered seven. `today` and `days_ahead` are both taken BEFORE the
+            # DVOL fetch, and this is the ONE branch that requires that fetch to
+            # have burned its full retry envelope (~62s) to be reached at all, so
+            # it carries the highest prior of a midnight crossing of any site the
+            # sweep touched, and it was the site the sweep missed.
             raise DeribitError(
                 f"Deribit DVOL is unavailable for {currency} ({dvol_reason}), and the options "
-                f"chain is not served for {curr_date}, which is {days_ahead} days ahead of the "
-                f"UTC clock ({today})"
+                f"chain is not served for {curr_date}, which was {days_ahead} days ahead of "
+                f"the UTC clock ({today}) when this report was built{proxy_note}"
             )
         if chain_withheld == "proxy":
             raise DeribitError(
@@ -2082,17 +2459,12 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         ]
     else:
         header_lines = [f"## Options Volatility — {currency} (Deribit)"]
-    # A curr_date that was NOT historical at classification time but is by the time
-    # the chain is fetched: the clock crossed UTC midnight during the DVOL half.
     # Without saying so the report calls today's date "a historical date" and gives
     # the reader nothing to reconstruct why — the historical branch, unlike the
-    # far-future one, never prints the clock. Derivable rather than tracked as a
-    # flag: only the mid-run re-take can withhold as historical while curr_date is
-    # still >= the clock the run started on.
-    # Derived once and reused by the Reading line below, which needs the same
-    # distinction: the two sites otherwise re-decide it by hand, which is how the
-    # sibling notes drifted apart four times already.
-    withheld_mid_run = chain_withheld == "historical" and curr_date >= today
+    # far-future one, never prints the clock. ``withheld_mid_run`` is derived above
+    # the both-halves-failed raise and reused by all FOUR consumers (that raise,
+    # this note, the body section and the Reading line), which otherwise re-decide
+    # the distinction by hand — how the sibling notes drifted apart five times.
     crossed_midnight = (
         " (the UTC clock passed the analysis date while this report was being built)"
         if withheld_mid_run
@@ -2226,10 +2598,14 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
     if chain_withheld is None and skew is None:
         header_lines.append(
             # "No 25Δ skew could be derived", not "the chain could not be read".
-            # Four of the five reachable causes are a SUCCESSFUL 200 — a payload
-            # that is not a list, no row surviving the checks, no expiry in the
-            # tenor band, no usable forward — which is exactly why the body branch
-            # below is worded the way it is. This note and the Reading clause were
+            # Nearly every reachable cause is a SUCCESSFUL 200 — an empty chain, a
+            # payload that is not a list, no row surviving the checks, no expiry in
+            # the tenor band, no usable forward, or a 200 carrying a JSON-RPC error
+            # object or no "result" field — and only a genuine network fault is
+            # not. (Enumerated rather than counted: the count said "four of five"
+            # and was short by the empty-chain state and both _request cases, so it
+            # went stale the moment a cause was added.) That is exactly why the
+            # body branch below is worded as it is. This note and the Reading clause were
             # left on the network wording, so the italic line and the summarisable
             # line both told a reader to retry in the one state where retrying
             # cannot help: a book with no ~30-day expiry listed.
@@ -2311,10 +2687,11 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             f"'{asset}'. Do not substitute it."
         )
     else:
-        # Not "the chain request failed": four of the five reachable causes come
-        # from a SUCCESSFUL 200 — a payload that is not a list, no row surviving
-        # the name/IV/underlying/open-interest checks, no expiry inside the tenor
-        # band, no usable forward. Naming the network sends an operator to look
+        # Not "the chain request failed": nearly every reachable cause comes from
+        # a SUCCESSFUL 200 — an empty chain, a payload that is not a list, no row
+        # surviving the name/IV/underlying/open-interest checks, no expiry inside
+        # the tenor band, no usable forward, or a 200 carrying a JSON-RPC error
+        # object or no "result" field. Naming the network sends an operator to look
         # for an outage that will never pass, and does it in the same sentence
         # that quotes the module saying otherwise. Same fix already applied to the
         # DVOL branch above.
@@ -2360,9 +2737,9 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         else:
             # A cause, not a restatement: the template around it already says no
             # skew is in the report, so "no skew could be derived" read as a
-            # tautology there. Worded to hold for all five reachable causes — the
-            # request genuinely failing, and the four successful-200 payloads this
-            # module cannot build a surface from — because "could not be read"
+            # tautology there. Worded to hold for EVERY reachable cause — the
+            # request genuinely failing, and the several successful-200 payloads
+            # this module cannot build a surface from — because "could not be read"
             # named only the first and pointed the reader at the network.
             chain_absence = (
                 "the chain request did not yield a usable surface; the section above says why"

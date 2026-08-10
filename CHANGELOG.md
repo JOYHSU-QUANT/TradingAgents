@@ -47,7 +47,9 @@ Breaking changes within the 0.x line are called out explicitly.
   future information, and a prose warning is not an auditable guard. A `curr_date`
   up to `MAX_FUTURE_DAYS` (1) *later* than the UTC clock is served (callers derive
   it from a local clock, so east of UTC it routinely runs hours ahead; the live
-  chain is then older than the analysis date, not newer) with a note saying so, and
+  chain is then never later than the analysis date — predating it outright, or
+  falling inside it when the clock reaches that date mid-run) with a note saying
+  which of the two holds, and
   the feed is never called late against a date that has not arrived. Further ahead
   than that is a mistyped argument rather than a timezone — `curr_date` arrives
   from an LLM tool call — so the chain is withheld again, with its own note. The
@@ -112,18 +114,45 @@ Breaking changes within the 0.x line are called out explicitly.
   above carried a usable level throughout — and names the half's absence with its
   cause when it failed, alongside a matching italic header caveat whose only
   previous trace was *subtractive* (a dropped clause on the source bullet). It
-  also now carries a fallback expiry, a missing ATM point, and a 25Δ wing
-  interpolated across a bracket wider than 10% of the forward: each changes which
+  also now carries a fallback expiry and a missing ATM point, and — where a risk
+  reversal is printed, that being the case where the line states a wing vol to
+  qualify — each 25Δ wing interpolated across a bracket wider than
+  10% of the forward, both of them when both are that wide: each changes which
   quantity the figures describe, and each was disclosed only in the body a
   summary drops. Sentences that named a cause the code does not support were
-  corrected — "the options chain could not be read" for four causes that are a
-  successful 200; "the newest reading Deribit has published at all" and "the
+  corrected — "the options chain could not be read" for the several causes that
+  are a successful 200; "the newest reading Deribit has published at all" and "the
   index has not printed since" on a historical date, asserted about a live feed
   from a series this module deliberately truncated at `curr_date`. Counts are
   labelled **usable** and readings rejected as non-positive are disclosed by
   count, so a window this module partially emptied is no longer described as a
   sparse calendar window; the too-few-to-rank floor is floored rather than
   rounded, which at six readings had claimed a bound the figure could breach.
+  A DVOL candle is now also rejected when its **open or close falls outside its
+  own high/low range**, disclosed as its own count with the newest date it
+  reached.
+  The row had been guarded on one side only: a close of `0.0` was refused as
+  broken while a close of `3000.0` inside a 39/41 candle became the headline
+  level, the 30-day maximum and the percentile basis with no caveat anywhere.
+  This is also the only check that sees a **reordered candle** — a permuted row
+  passes the length-and-finiteness shape guard, and the day's low is then read as
+  its close on every row indefinitely. The **latest reading is labelled usable**
+  in the headline and in the `_Reading:_` line for the reason the counts already
+  were: a rejected candle can be dated later, and the rejection notes print that
+  date. `MAX_DATA_LAG_DAYS` drops from 2 to **1**, so a lag of two days — a whole
+  missing day on a 24/7 daily index — now raises the italic stall note and carries
+  its age into the summarisable line instead of passing as ordinary. A missing 25Δ
+  wing now states WHICH guard refused it: a thin book, or a bracket rejected
+  because delta rises with strike across it, which is a suspect quote rather than
+  a market fact. When neither candidate expiry brackets both wings the one
+  carrying more of the three smile points is used, ties going to the nearer
+  expiry. `_is_finite_number` answers `False` for an out-of-range JSON integer
+  instead of raising `OverflowError`, which had cost all six chain figures to a
+  single row in defiance of `parse_chain`'s skip-don't-fail contract. The
+  both-halves-failed raises now read the same `withheld_mid_run` classification
+  the rendered sites do, and carry the caller's own symbol plus the fact that a
+  proxied asset has no chain on ANY date — a SOL backtest had read as withheld
+  for the date, implying a live date would serve it.
   Vendor error text and both caller-supplied arguments (`asset` and `curr_date`)
   are flattened before they are interpolated — whitespace collapsed and mid-line
   markdown markers removed —

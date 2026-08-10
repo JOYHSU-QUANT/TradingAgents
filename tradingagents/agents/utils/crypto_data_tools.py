@@ -114,8 +114,10 @@ def get_options_market(
     both wings — the report's closing one-line summary says so and why rather than
     falling silent, so the absence survives a downstream summary; that sentence
     also carries the DVOL level itself (or names that half's absence) and any
-    fallback expiry, missing ATM point or unusually wide 25-delta bracket. Uses
-    the configured options_data vendor.
+    fallback expiry or missing ATM point. Where a risk reversal IS printed it
+    additionally names each 25-delta wing whose bracket was unusually wide, that
+    being a qualification of a figure the sentence itself states. Uses the
+    configured options_data vendor.
 
     Args:
         asset (str): 'BTC' or 'ETH' (recognized risk coins get BTC as a proxy)

@@ -353,6 +353,18 @@ _WINDOW_COUNT_CAVEAT = (
     "surviving reading still counts once."
 )
 
+# The both-classes descriptor, shared for the _WINDOW_COUNT_CAVEAT reason: the
+# empty-history raise and the staleness refusal's rejection note are the only two
+# sentences that name both rejection classes in one clause, and copying the
+# clause is precisely how the two would drift apart. Each site keeps its own
+# head (the raise counts bare, the refusal counts "candle{s}"), so the shared
+# text starts after the non-positive count.
+_BOTH_REJECTION_CLASSES = (
+    "with a non-positive reading and {inconsistent} with a non-positive low or an "
+    "open or close outside the candle's own high/low range, the newest of them "
+    "dated {newest}"
+)
+
 
 class DeribitError(VendorError):
     """Deribit was unreachable, or returned a payload this module cannot use.
@@ -1534,12 +1546,13 @@ def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
                 # whenever either class exceeds one, so "its own" was ungrammatical
                 # on the very branch that requires both classes to have fired.
                 f"Every {currency} DVOL candle on or before {curr_date} was rejected as broken "
-                f"({skipped_non_positive} with a non-positive reading and "
-                f"{skipped_inconsistent} with a non-positive low or an open or close outside "
-                f"the candle's own high/low range, the newest of them dated {newest_rejected}), "
-                f"so the feed "
-                f"returned history but no usable level — a self-contradicting candle points at "
-                f"a reordered candle shape rather than at bad values"
+                f"({skipped_non_positive} "
+                + _BOTH_REJECTION_CLASSES.format(
+                    inconsistent=skipped_inconsistent, newest=newest_rejected
+                )
+                + "), so the feed "
+                "returned history but no usable level — a self-contradicting candle points at "
+                "a reordered candle shape rather than at bad values"
             )
         if skipped_non_positive:
             raise DeribitError(
@@ -1579,14 +1592,47 @@ def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
         # that stopped publishing from one whose recent prints this module dropped,
         # and the two are different operator actions. Named only when non-zero, so
         # the ordinary stall says nothing about rejections that did not happen.
-        rejected = skipped_non_positive + skipped_inconsistent
+        #
+        # Split by class, like those raises and the rendered _Rejected:/
+        # _Inconsistent: notes — a summed "as broken" count dropped WHICH class
+        # fired, on a path where this sentence is all the reader gets: bad values
+        # and a reordered candle shape are different faults, and the class is what
+        # says which one to chase. A flat ladder like those raises, every clause
+        # guarded by its own count, so a rejection class this block does not know
+        # about degrades to the documented named-only-when-non-zero silence
+        # rather than to a zero-count cause; the both-class descriptor is shared
+        # with the both-class raise (_BOTH_REJECTION_CLASSES) rather than copied,
+        # which is what keeps those two from drifting apart.
+        if skipped_non_positive and skipped_inconsistent:
+            dropped_clause = (
+                f"{skipped_non_positive} candle"
+                f"{'' if skipped_non_positive == 1 else 's'} "
+                + _BOTH_REJECTION_CLASSES.format(
+                    inconsistent=skipped_inconsistent, newest=newest_rejected
+                )
+            )
+        elif skipped_non_positive:
+            dropped_clause = (
+                f"{skipped_non_positive} candle"
+                f"{'' if skipped_non_positive == 1 else 's'} with a non-positive "
+                f"reading, the newest dated {newest_rejected}"
+            )
+        elif skipped_inconsistent:
+            dropped_clause = (
+                f"{skipped_inconsistent} candle"
+                f"{'' if skipped_inconsistent == 1 else 's'} with a non-positive "
+                f"low or an open or close outside its own high/low range, the "
+                f"newest dated {newest_rejected}"
+            )
+        else:
+            dropped_clause = None
         dropped_note = (
-            f" (this module also rejected {rejected} "
-            f"candle{'' if rejected == 1 else 's'} as broken, the newest dated "
-            f"{newest_rejected}, so some of this gap may be prints that arrived and were "
-            f"dropped)"
-            if newest_rejected is not None
-            else ""
+            ""
+            if dropped_clause is None
+            else (
+                f" (this module also rejected {dropped_clause}, so some of this gap "
+                f"may be prints that arrived and were dropped)"
+            )
         )
         raise DeribitError(
             # "on or before {curr_date}", like every sibling message here and the
@@ -1795,10 +1841,13 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
         # No longer reachable through _fetch_dvol on an ordinary date: an empty
         # 30-day window needs a reading over 30 days old, and MAX_DVOL_STALENESS_DAYS
         # refuses one past 14. The stalled feed this used to describe is now a
-        # refusal, not an empty render. Two triggers survive — an analysis date
-        # roughly a year ahead of the clock, where the windows run past the data
-        # while the staleness bound is measured from the clock, and a caller invoking
-        # this renderer directly — so the branch stays and is tested on the latter.
+        # refusal, not an empty render. Two triggers survive — an analysis date 30
+        # or more days ahead of the clock, where this window, measured from
+        # curr_date, runs past a live feed's newest reading while the staleness
+        # bound, measured from the clock, still passes it (a month of lead, not
+        # the year that emptying the percentile window too would take) — and a
+        # caller invoking this renderer directly. The branch stays and both
+        # triggers are tested.
         #
         # "on or before {curr_date}", not "at all". The series is filtered to
         # curr_date, so on a historical date "the newest reading Deribit has
@@ -2282,8 +2331,9 @@ def _reading_line(
     stalled for over a year — a level so stale that both windows came back empty.
     The more broken the feed, the less that sentence said, while the body above it
     carried a usable number the whole time. (That third state is no longer reached
-    by a stall: MAX_DVOL_STALENESS_DAYS refuses a level past 14 days old, so the
-    empty-window forms now need an analysis date about a year ahead of the clock.
+    by a stall: MAX_DVOL_STALENESS_DAYS refuses a level past 14 days old, so
+    emptying both windows now needs an analysis date about a year ahead of the
+    clock — the 30-day range window alone empties from about a month of lead.
     The clause is unconditional either way, which is what stops the next cause
     added from silently re-creating the silence.)
 
@@ -3099,12 +3149,18 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         else:
             # A cause, not a restatement: the template around it already says no
             # skew is in the report, so "no skew could be derived" read as a
-            # tautology there. Worded to hold for EVERY reachable cause — the
-            # request genuinely failing, and the several successful-200 payloads
-            # this module cannot build a surface from — because "could not be read"
-            # named only the first and pointed the reader at the network.
+            # tautology there. The lead-in is worded to hold for EVERY reachable
+            # cause — the request genuinely failing, and the several successful-200
+            # payloads this module cannot build a surface from — because "could not
+            # be read" named only the first and pointed the reader at the network.
+            # The sanitized cause is inlined, as the DVOL clause below inlines its
+            # own: this line exists for the summary that DROPS the body, so the
+            # "the section above says why" it used to end with handed the one
+            # surviving sentence a pointer to text that did not survive — while
+            # its siblings, the policy branches above and the DVOL clause below,
+            # all carry their cause inside the clause itself.
             chain_absence = (
-                "the chain request did not yield a usable surface; the section above says why"
+                f"the chain request did not yield a usable surface — {_sanitize(skew_error)}"
             )
         if market_proxy and chain_withheld != "proxy":
             # historical/far_future outrank proxy in chain_withheld, which is a

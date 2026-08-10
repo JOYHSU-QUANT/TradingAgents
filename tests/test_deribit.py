@@ -3952,6 +3952,32 @@ class TestCandleSelfConsistency:
     def test_a_clean_feed_prints_no_inconsistency_note(self):
         assert "_Inconsistent:" not in _report()
 
+    def test_a_suppressed_rr25_sign_says_the_sign_is_not_information(self):
+        # _rr_points renders anything inside _RR_ZERO_EPSILON as "+0.00", so a
+        # marginally NEGATIVE risk reversal prints a plus. The analyst prompt tells
+        # the model RR25's sign is meaningful and to state it, and the body line
+        # was the one surface that disclosed the suppression nowhere.
+        flat = deribit.SkewSnapshot(
+            expiry="28AUG26",
+            days_to_expiry=22.5,
+            forward=62000.0,
+            atm=deribit.WingQuote(40.0, 61000.0, 62000.0),
+            call_25=deribit.WingQuote(40.0, 65000.0, 66000.0),
+            put_25=deribit.WingQuote(40.004, 58000.0, 59000.0),
+            n_calls=5,
+            n_puts=5,
+        )
+        assert flat.rr25 < 0, "fixture must be marginally NEGATIVE to be meaningful"
+        out = deribit._skew_section(flat, "2026-08-05T06:06:00Z")
+        assert "**RR25 (25Δ call IV − 25Δ put IV):** +0.00 vol points — the two wings are" in out
+        assert "the sign carries no information at this magnitude" in out
+
+    def test_a_real_rr25_carries_no_such_disclaimer(self):
+        # The other side, so the clause cannot leak onto a figure whose sign IS
+        # information.
+        out = _report()
+        assert "the sign carries no information" not in out
+
     def test_a_candle_dated_after_curr_date_is_not_counted(self):
         # Deribit may honour a wider range than asked, so a candle dated AFTER
         # curr_date was never a candidate for the series — counting it would let
@@ -4014,14 +4040,14 @@ class TestCandleSelfConsistency:
             (
                 ("2026-08-01",),
                 ("2026-08-02", "2026-08-03"),
-                "(1 non-positive and 2 with an open or close outside its own high/low range, "
-                "the newest of them dated 2026-08-03)",
+                "(1 with a non-positive reading and 2 with an open or close outside the "
+                "candle's own high/low range, the newest of them dated 2026-08-03)",
             ),
             (
                 ("2026-08-02", "2026-08-03"),
                 ("2026-08-01",),
-                "(2 non-positive and 1 with an open or close outside its own high/low range, "
-                "the newest of them dated 2026-08-03)",
+                "(2 with a non-positive reading and 1 with an open or close outside the "
+                "candle's own high/low range, the newest of them dated 2026-08-03)",
             ),
         ],
     )
@@ -4040,7 +4066,14 @@ class TestCandleSelfConsistency:
         }
         out = _report(dvol=dvol)
         assert f"was rejected as broken {expected}" in out
-        assert "point at a reordered candle shape rather than at bad values" in out
+        # The reordered-shape hint reaches the combined message too. It was on the
+        # single-class branch only, so the state most likely to BE a reordered
+        # shape — a history that is mostly self-contradicting — was the one that
+        # did not say so.
+        assert "a self-contradicting candle points at a reordered candle shape" in out
+        # Count-agnostic possessive: this branch requires both classes to have
+        # fired, so either count can exceed one and "its own" was ungrammatical.
+        assert "outside its own high/low range" not in out
 
     def test_a_feed_with_no_readings_at_all_still_says_so_plainly(self):
         # The guard around the newest-rejected date must not turn the no-rejections

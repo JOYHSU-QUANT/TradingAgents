@@ -1362,12 +1362,18 @@ def _fetch_dvol(currency: str, curr_dt: datetime) -> DvolSeries:
         )
         if skipped_non_positive and skipped_inconsistent:
             raise DeribitError(
-                f"Every {currency} DVOL reading on or before {curr_date} was rejected as broken "
-                f"({skipped_non_positive} non-positive and {skipped_inconsistent} with an open "
-                f"or close outside its own high/low range, the newest of them dated "
-                f"{newest_rejected}), so the feed returned history but no usable level — the "
-                f"self-contradicting ones point at a reordered candle shape rather than at bad "
-                f"values"
+                # "candle", not "reading", and possessives that do not assume a
+                # count. Half of what this sentence tallies is malformed ROWS, and
+                # the module's own noun rule (see _WINDOW_COUNT_CAVEAT) reserves
+                # "reading" for a usable value; the count is also plural here
+                # whenever either class exceeds one, so "its own" was ungrammatical
+                # on the very branch that requires both classes to have fired.
+                f"Every {currency} DVOL candle on or before {curr_date} was rejected as broken "
+                f"({skipped_non_positive} with a non-positive reading and "
+                f"{skipped_inconsistent} with an open or close outside the candle's own "
+                f"high/low range, the newest of them dated {newest_rejected}), so the feed "
+                f"returned history but no usable level — a self-contradicting candle points at "
+                f"a reordered candle shape rather than at bad values"
             )
         if skipped_non_positive:
             raise DeribitError(
@@ -1537,9 +1543,12 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
         # LATER than this one, and the rejection notes below print that date — so
         # the unqualified label is contradicted a few italic lines down on exactly
         # the path (a feed whose recent prints are all broken) those notes exist to
-        # expose. Same word, same reason, as _readings() and the four sentences
-        # already swept; this headline and the Reading line were the sites the
-        # sweep stopped short of.
+        # expose. Same word, same reason, as every other sentence here that names
+        # a reading or a count of them. Deliberately not enumerated: an earlier
+        # version of this comment counted the swept sites and was wrong in BOTH
+        # directions the moment the sweep widened — the same staleness the
+        # cause-count comments further down were de-counted to avoid. Grep
+        # "usable" for the live list.
         f"**DVOL ({DVOL_INDEX_TENOR_DAYS}-day implied vol index), latest usable reading:** "
         f"{latest:.2f}% annualized on {series.latest_date}"
     )
@@ -1886,6 +1895,19 @@ def _skew_section(skew: SkewSnapshot, snapshot_time: str) -> str:
             "**RR25 (25Δ call IV − 25Δ put IV):** n/a — the chain does not supply both "
             "wings (the wing lines above say which and why), so the risk reversal is not "
             "computed (no wing vol is extrapolated)"
+        )
+    elif abs(skew.rr25) < _RR_ZERO_EPSILON:
+        # The sign is deliberately suppressed at this magnitude (see _rr_points),
+        # and the analyst prompt tells the model that RR25's sign is meaningful and
+        # to state it — so a bare "+0.00" standing for a marginally NEGATIVE value
+        # is a manufactured sign the model is instructed to read. The Reading line
+        # already says this in words ("both wings carry the same implied vol"); the
+        # body line is where a reader meets the figure first, and it was the one
+        # surface stating the rule nowhere.
+        lines.append(
+            f"**RR25 (25Δ call IV − 25Δ put IV):** {_rr_points(skew.rr25)} vol points — the two "
+            f"wings are level at the two decimals this report prints, so the sign carries no "
+            f"information at this magnitude"
         )
     else:
         lines.append(f"**RR25 (25Δ call IV − 25Δ put IV):** {_rr_points(skew.rr25)} vol points")
@@ -2579,8 +2601,10 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
                 # "newest usable reading", not "the feed has only reached": a
                 # candle this module rejected leaves the feed's own reach further
                 # forward than this date, so the unqualified phrasing is false
-                # exactly when the rejection note is printing. Third site of that
-                # word; the others are _readings() and the two empty-window lines.
+                # exactly when EITHER rejection note is printing (there are two
+                # classes now, non-positive and self-contradicting). One of many
+                # sites carrying that word — grep "usable" rather than trusting a
+                # count here, which is how this comment went stale before.
                 f"The DVOL windows end at the analysis date but the feed's newest usable "
                 f"reading is {dvol.latest_date}, so they hold fewer readings than their "
                 f"full spans."

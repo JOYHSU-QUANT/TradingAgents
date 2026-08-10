@@ -268,8 +268,10 @@ bracket is reported `n/a` rather than extrapolated or guessed, and so is one who
 surrounding quotes are not a monotone smile. For the two **25Δ wings** those are
 reported as the different facts they are — a thin book against the signature of a
 collapsed or stale mark, since only the second says a listed quote should not be
-trusted. The ATM point names both causes together, because it is attempted on the
-call curve and then on the put curve, so no single guard explains the miss.
+trusted. Where a bracketing attempt was possible at all, the ATM point instead
+names both causes together, because it is attempted on the call curve and then on
+the put curve, so no single guard explains the miss; with neither curve carrying
+two usable quotes it says that plainly and names no guard.
 
 The chain figures come from **one expiry inside a bounded band around 30 days**
 (`MAX_TENOR_DISTANCE_DAYS`, currently ±15, and never inside the 7-day pin-noise

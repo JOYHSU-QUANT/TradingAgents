@@ -301,13 +301,35 @@ than 10% of the forward, naming both when both are that wide. All of this exists
 because that italic line is what a downstream summariser keeps when it drops the
 body, so an absence signalled only by a missing clause is exactly what does not
 survive the hop. Counts and the latest reading are labelled **usable**, and the two
-rejection classes — a non-positive reading, and a candle whose open or close falls
+rejection classes — a non-positive reading, and a candle whose low is not positive or
+whose open or close falls
 outside its own high/low range — are each disclosed by count and by the newest date they
 reached, so a window this module partially emptied is never described as a sparse
 calendar window and a rejection newer than the reading on show cannot silently
 contradict it. The second class is what catches a **reordered candle**, which the
 length-and-finiteness shape check cannot see: permute the row and the day's low
 reads as its close, on every row, indefinitely.
+A third disclosure covers a shortfall neither the feed nor this module caused: when
+Deribit answers with a **continuation cursor** the response is only its newest page,
+so the report says which readings were never delivered rather than letting the
+window's own count be read as the index publishing sparsely.
+
+Past `MAX_DVOL_STALENESS_DAYS` (14) the DVOL half is **withheld rather than
+caveated**. A level is only served while it is recent enough to describe the current
+regime, on the same judgement the withheld historical chain rests on: a caveat has to
+survive every downstream summarisation hop and the number it qualifies does not.
+Before this bound the only ceiling was however far the fetch happened to reach, so a
+feed stalled for weeks headlined a weeks-old print *and* ranked it, since the
+365-day window still held enough readings to compute a percentile.
+
+Chain rows are matched against the **currency that was requested**. The
+`get_book_summary_by_currency` payload names its underlying nowhere but the
+instrument names, so a misrouted or mis-served response would otherwise render one
+currency's forward and smile under another's heading, with nothing in the report
+contradicting it. The **Expiry used** line also states how many contracts Deribit
+lists for the selected expiry, so a thin smile can be told apart from a chain this
+module's own open-interest policy thinned.
+
 This vendor reads chains for BTC and ETH, so other recognized crypto risk
 assets get BTC's **DVOL level** as a market-wide crypto-vol proxy, on the same
 rule as ETF flows; the skew is withheld for them, because a risk reversal measures

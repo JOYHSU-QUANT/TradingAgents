@@ -128,9 +128,32 @@ Breaking changes within the 0.x line are called out explicitly.
   count, so a window this module partially emptied is no longer described as a
   sparse calendar window; the too-few-to-rank floor is floored rather than
   rounded, which at six readings had claimed a bound the figure could breach.
-  A DVOL candle is now also rejected when its **open or close falls outside its
-  own high/low range**, disclosed as its own count with the newest date it
-  reached.
+  A DVOL candle is now also rejected when its **low is not positive, or its open
+  or close falls outside its own high/low range**, disclosed as its own count
+  with the newest date it reached. The positivity term is keyed off the low, which
+  the ordering terms beside it extend to all four prices: previously only the
+  close was sign-checked, so a candle carrying an open of `-5` and a low of `-10`
+  beside a plausible close published untouched.
+  A DVOL reading older than **`MAX_DVOL_STALENESS_DAYS` (14)** is now withheld
+  rather than served with a caveat, measured from the earlier of the analysis date
+  and the clock — the same reference the rendered lag note uses, so the refusal and
+  the report can never disagree at the boundary. The previous ceiling was
+  whatever the fetch happened to span (375 days, a figure that moved as a side
+  effect of widening the percentile window), so a feed stalled for weeks headlined
+  a weeks-old print and ranked it against a window that still held enough readings.
+  A **continuation cursor** in the DVOL response is now disclosed in the report
+  instead of only logged, so a sample shortened by a truncated fetch is not read as
+  the index publishing sparsely.
+  Chain rows are now matched against the **requested currency**. The book-summary
+  payload identifies its underlying only inside the instrument names, and the
+  parser discarded that segment — so a misrouted or mis-served response rendered
+  one currency's forward and smile under another's heading with no log line, no
+  caveat and nothing downstream to catch it (the analyst prompt forbids
+  reconciling the forward against spot). The check also turns away the linear
+  `BTC_USDC-…` names, which otherwise parse and interleave a second,
+  differently-margined book into one smile. The **Expiry used** line now states
+  how many contracts Deribit lists for the selected expiry, so a thin smile can be
+  distinguished from a chain this module's own open-interest policy thinned.
   The row had been guarded on one side only: a close of `0.0` was refused as
   broken while a close of `3000.0` inside a 39/41 candle became the headline
   level, the 30-day maximum and the percentile basis with no caveat anywhere.

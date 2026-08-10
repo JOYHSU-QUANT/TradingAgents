@@ -362,9 +362,12 @@ class WingQuote(NamedTuple):
 class SkewSnapshot(NamedTuple):
     """The volatility surface read for one expiry.
 
-    ``atm`` / ``call_25`` / ``put_25`` are None when that point could not be
-    *bracketed* by two strike-adjacent listed contracts. Nothing is extrapolated:
-    a wing the chain does not reach is reported missing rather than guessed.
+    ``atm`` / ``call_25`` / ``put_25`` are None when the chain does not support
+    that point — either no two strike-adjacent listed contracts *bracket* it, or a
+    bracket was found and REFUSED because the quotes around it are not a monotone
+    smile. Nothing is extrapolated: a wing the chain does not reach is reported
+    missing rather than guessed, and one it reaches through a suspect quote is too.
+    (Which of the two fired is carried by ``call_25_miss`` / ``put_25_miss`` below.)
 
     ``n_calls`` / ``n_puts`` count the contracts of each type on this expiry that
     yielded a usable delta — the quotes the interpolation actually had to work
@@ -2505,9 +2508,14 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         )
     elif curr_date > today:
         # A curr_date past the UTC clock (a caller using a local date east of UTC).
-        # The chain is still served — it predates the analysis date, so it is not
-        # lookahead — but it is not "as of" that date either, and the DVOL windows
-        # run past the data rather than the data stopping short.
+        # The chain is still served — it is never LATER than the analysis date, so
+        # it is not lookahead — but it is not "as of" that date either, and the
+        # DVOL windows run past the data rather than the data stopping short.
+        # "Never later", not "predates": the two sentences below render the two
+        # cases separately, since the clock can reach the analysis date while the
+        # report is being built and the book then falls inside it rather than
+        # before it. Six sibling sites were corrected for this; the comment sitting
+        # directly above the code was the seventh.
         #
         # Each sentence is gated on the half it describes ACTUALLY being present,
         # not on whether it was withheld by policy: a half that was attempted and

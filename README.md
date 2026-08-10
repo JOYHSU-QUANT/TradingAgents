@@ -265,9 +265,11 @@ them. The range and the percentile each need a window holding enough readings to
 support them; below that the report states the shortfall rather than computing a
 figure that would only describe how much data arrived. A point the chain cannot
 bracket is reported `n/a` rather than extrapolated or guessed, and so is one whose
-surrounding quotes are not a monotone smile — but the two are reported as the
-different facts they are, a thin book against the signature of a collapsed or
-stale mark, since only the second says a listed quote should not be trusted.
+surrounding quotes are not a monotone smile. For the two **25Δ wings** those are
+reported as the different facts they are — a thin book against the signature of a
+collapsed or stale mark, since only the second says a listed quote should not be
+trusted. The ATM point names both causes together, because it is attempted on the
+call curve and then on the put curve, so no single guard explains the miss.
 
 The chain figures come from **one expiry inside a bounded band around 30 days**
 (`MAX_TENOR_DISTANCE_DAYS`, currently ±15, and never inside the 7-day pin-noise

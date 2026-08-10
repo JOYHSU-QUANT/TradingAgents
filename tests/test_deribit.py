@@ -2217,9 +2217,10 @@ class TestDvolSampleHonesty:
 
     def test_a_fresh_reading_is_dated_but_carries_no_age_qualifier(self):
         # The as-of date is unconditional: the reading line is the one clause a
-        # downstream summary quotes on its own, and a reading one or two days old
-        # used to be quoted with no date at all. Only the "N days old" half and the
-        # lag note stay gated on MAX_DATA_LAG_DAYS.
+        # downstream summary quotes on its own, and an unflagged reading — at
+        # MAX_DATA_LAG_DAYS = 1 that is one zero or one day old — used to be quoted
+        # with no date at all. Only the "N days old" half and the lag note stay
+        # gated on the threshold.
         out = _report()
         assert "Data lag" not in out
         assert (
@@ -3932,7 +3933,10 @@ class TestCandleSelfConsistency:
             (40.0, 41.0, 39.0, 39.0, True),  # close exactly ON the low
             (40.0, 41.0, 39.0, 41.000001, False),  # a hair above the high
             (40.0, 41.0, 39.0, 38.999999, False),  # a hair below the low
-            (41.5, 41.0, 39.0, 40.0, False),  # the OPEN is out of range
+            (41.5, 41.0, 39.0, 40.0, False),  # the OPEN is above the high
+            (30.0, 41.0, 39.0, 40.0, False),  # the OPEN is below the low
+            (41.0, 41.0, 39.0, 40.0, True),  # the open exactly ON the high
+            (39.0, 41.0, 39.0, 40.0, True),  # the open exactly ON the low
         ],
     )
     def test_the_boundary_is_inclusive_on_both_sides(self, open_, high, low, close, kept):
@@ -3947,6 +3951,39 @@ class TestCandleSelfConsistency:
 
     def test_a_clean_feed_prints_no_inconsistency_note(self):
         assert "_Inconsistent:" not in _report()
+
+    def test_a_candle_dated_after_curr_date_is_not_counted(self):
+        # Deribit may honour a wider range than asked, so a candle dated AFTER
+        # curr_date was never a candidate for the series — counting it would let
+        # "every candle was inconsistent" fire on a window that simply held none,
+        # naming the wrong cause. The non-positive sibling has two tests for this
+        # gate; this class had none, so replacing `if day <= curr_date:` with
+        # `if True:` shipped green.
+        dvol = {
+            "data": [
+                _candle("2026-07-19", 40.0),
+                _candle("2026-07-20", 41.0),
+                _ohlc("2026-08-05", 40.0, 41.0, 39.0, 3000.0),
+            ]
+        }
+        out = _report(curr_date="2026-07-20", dvol=dvol)
+        assert "_Inconsistent:" not in out
+        assert "latest usable reading:** 41.00% annualized on 2026-07-20" in out
+
+    def test_both_rejection_notes_carry_the_shared_window_count_caveat(self):
+        # The caveat was pulled into one constant precisely because copying it is
+        # how the two notes would drift apart — but nothing pinned it at either
+        # site, so the shared copy could be reworded or deleted unnoticed.
+        dvol = _dvol_days(40)
+        dvol["data"][-1] = _ohlc(TODAY, 40.0, 41.0, 39.0, 3000.0)
+        dvol["data"][-2] = _candle("2026-08-04", 0.0)
+        out = _report(dvol=dvol)
+        caveat = (
+            "does not contribute to a window's count above, though a day that also carried "
+            "a surviving reading still counts once."
+        )
+        assert f"A rejected reading {caveat}_" in out
+        assert f"A rejected candle {caveat}_" in out
 
     def test_the_plural_and_the_possessive_agree_at_two(self):
         # The rendered note's plural forms are otherwise unreachable: the only
@@ -3972,32 +4009,38 @@ class TestCandleSelfConsistency:
         assert "was non-positive" not in out
 
     @pytest.mark.parametrize(
-        "non_positive_day,inconsistent_day,newest",
+        "non_positive_days,inconsistent_days,expected",
         [
-            ("2026-08-01", "2026-08-02", "2026-08-02"),
-            ("2026-08-02", "2026-08-01", "2026-08-02"),
+            (
+                ("2026-08-01",),
+                ("2026-08-02", "2026-08-03"),
+                "(1 non-positive and 2 with an open or close outside its own high/low range, "
+                "the newest of them dated 2026-08-03)",
+            ),
+            (
+                ("2026-08-02", "2026-08-03"),
+                ("2026-08-01",),
+                "(2 non-positive and 1 with an open or close outside its own high/low range, "
+                "the newest of them dated 2026-08-03)",
+            ),
         ],
     )
     def test_a_mixed_rejection_history_names_both_classes(
-        self, non_positive_day, inconsistent_day, newest
+        self, non_positive_days, inconsistent_days, expected
     ):
         # Either message alone would state a cause that is only half true.
         #
-        # Both orderings, because the combined message takes max() over the two
-        # classes' newest dates: with only the inconsistent one newer, replacing
-        # that max() with `newest_inconsistent or newest_skipped` produces identical
-        # output and survives. Swapping which class is newer is what pins it.
+        # UNEQUAL counts, and both orderings of which class is newer. Equal counts
+        # made the sentence read the same with the two variables swapped, and a
+        # single ordering made `max()` interchangeable with
+        # `newest_inconsistent or newest_skipped`. Both mutations now fail.
         dvol = {
-            "data": [
-                _candle(non_positive_day, 0.0),
-                _ohlc(inconsistent_day, 40.0, 41.0, 39.0, 3000.0),
-            ]
+            "data": [_candle(day, 0.0) for day in non_positive_days]
+            + [_ohlc(day, 40.0, 41.0, 39.0, 3000.0) for day in inconsistent_days]
         }
         out = _report(dvol=dvol)
-        assert (
-            "was rejected as broken (1 non-positive and 1 with an open or close outside its own "
-            f"high/low range, the newest of them dated {newest})" in out
-        )
+        assert f"was rejected as broken {expected}" in out
+        assert "point at a reordered candle shape rather than at bad values" in out
 
     def test_a_feed_with_no_readings_at_all_still_says_so_plainly(self):
         # The guard around the newest-rejected date must not turn the no-rejections

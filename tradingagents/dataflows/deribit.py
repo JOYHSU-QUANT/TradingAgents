@@ -1788,9 +1788,17 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
     lines = [latest_line]
 
     if not window:
-        # Every reading predates the window: a stalled or backfilled feed. Say so
-        # rather than computing a range over a one-element fallback sample, whose
-        # min and max would both be the latest value itself.
+        # Every reading predates the window. Say so rather than computing a range
+        # over a one-element fallback sample, whose min and max would both be the
+        # latest value itself.
+        #
+        # No longer reachable through _fetch_dvol on an ordinary date: an empty
+        # 30-day window needs a reading over 30 days old, and MAX_DVOL_STALENESS_DAYS
+        # refuses one past 14. The stalled feed this used to describe is now a
+        # refusal, not an empty render. Two triggers survive — an analysis date
+        # roughly a year ahead of the clock, where the windows run past the data
+        # while the staleness bound is measured from the clock, and a caller invoking
+        # this renderer directly — so the branch stays and is tested on the latter.
         #
         # "on or before {curr_date}", not "at all". The series is filtered to
         # curr_date, so on a historical date "the newest reading Deribit has
@@ -2270,10 +2278,14 @@ def _reading_line(
     is now stated unconditionally rather than only as the base of a percentile.
     Gating the whole DVOL clause on the percentile conflated three different
     states into one silence: the half failed, the half arrived but its window held
-    too few readings to rank, and — in the worst case, a feed stalled for over a
-    year — a level so stale that both windows came back empty. The more broken the
-    feed, the less that sentence said, while the body above it carried a usable
-    number the whole time.
+    too few readings to rank, and — in the worst case as it then stood, a feed
+    stalled for over a year — a level so stale that both windows came back empty.
+    The more broken the feed, the less that sentence said, while the body above it
+    carried a usable number the whole time. (That third state is no longer reached
+    by a stall: MAX_DVOL_STALENESS_DAYS refuses a level past 14 days old, so the
+    empty-window forms now need an analysis date about a year ahead of the clock.
+    The clause is unconditional either way, which is what stops the next cause
+    added from silently re-creating the silence.)
 
     **Scope of what reaches this line.** Everything that changes WHICH quantity
     the figures describe, or whether they exist at all, belongs here; nothing that
@@ -2413,8 +2425,8 @@ def _reading_line(
         )
         if dvol_report.percentile is not None:
             # State the sample, not just the span. "the 365-day window" reads as
-            # one observation per day, so a feed that stopped publishing weeks ago
-            # still sounded like a full year of evidence once this clause was
+            # one observation per day, so a feed publishing only intermittently
+            # across it still sounded like a full year of evidence once this clause was
             # quoted on its own — and this clause is exactly what gets quoted on
             # its own. The definition travels with it for the same reason: it
             # lived only on the body line, and "at or below" is what makes a
@@ -2957,7 +2969,12 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             # prose site describing these two windows had to be swept by hand when
             # the percentile window moved 30 -> 365, and a fixed "365-day" here
             # would be the next site to miss.
-            f"_No DVOL history could be derived for this report, so the implied-vol level, "
+            # "No DVOL level is served", not "no history could be derived": the
+            # staleness ceiling refuses a fetch that returned history and found a
+            # usable reading in it, and the body line three lines down names that
+            # reading's date. This is the other italic a summariser keeps, so it
+            # must hold for every cause the section below can give.
+            f"_No DVOL level is served in this report, so the implied-vol level, "
             f"its {DVOL_WINDOW_DAYS}-day range and its {DVOL_PERCENTILE_WINDOW_DAYS}-day "
             f"percentile are absent — absent, not flat and not zero. The section below says "
             f"why. The chain figures are unaffected._"
@@ -3098,13 +3115,24 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             # serve it. It never will.
             chain_absence += f", and this vendor reads no options chain for '{asset}' on any date"
 
-    # Why no DVOL level is in this report, worded for the Reading line. Only one
-    # reason is reachable — the half is never withheld by policy, so unlike
-    # chain_absence there is no classification to read off. The cause text is the
-    # same one the body line carries; a reader deciding whether to wait for the
-    # next cycle needs it as much here as there.
+    # Why no DVOL level is in this report, worded for the Reading line. The cause
+    # text is the same one the body line carries; a reader deciding whether to wait
+    # for the next cycle needs it as much here as there.
+    #
+    # The wrapper states only that no LEVEL could be served, and leaves the cause
+    # entirely to the interpolated reason. It used to assert "no usable DVOL history
+    # came back", which was true of every reason then reachable — and false of the
+    # first one added since: MAX_DVOL_STALENESS_DAYS refuses a fetch that succeeded,
+    # returned history, and yielded a usable reading, rejecting it only for age. The
+    # sentence then contradicted its own next clause, which names that reading and
+    # its date, in the one line a downstream summary keeps. Worded to hold for EVERY
+    # reachable cause, exactly as chain_absence's fallback branch already is, so the
+    # next cause added cannot falsify it either.
+    # No currency here: _reading_line already opens the clause with "no {currency}
+    # DVOL level is in this report", so naming it again rendered the phrase twice
+    # inside one sentence.
     dvol_absence = (
-        f"no usable DVOL history came back — {_sanitize(dvol_error)}" if dvol is None else None
+        f"the DVOL half could not be served — {_sanitize(dvol_error)}" if dvol is None else None
     )
     reading = _reading_line(currency, skew, dvol_report, dvol_absence, chain_absence)
     if reading:

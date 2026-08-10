@@ -3591,7 +3591,7 @@ class TestDvolAbsenceSurvivesASummary:
         # level, range and percentile were never read.
         out = _report(dvol=deribit.DeribitError("dvol down"))
         assert (
-            "_No DVOL history could be derived for this report, so the implied-vol level, "
+            "_No DVOL level is served in this report, so the implied-vol level, "
             "its 30-day range and its 365-day percentile are absent — absent, not flat and "
             "not zero. The section below says why. The chain figures are unaffected._" in out
         )
@@ -3599,7 +3599,7 @@ class TestDvolAbsenceSurvivesASummary:
     def test_a_failed_dvol_half_reaches_the_reading_line_with_its_cause(self):
         out = _report(dvol=deribit.DeribitError("dvol down"))
         assert (
-            "and no BTC DVOL level is in this report (no usable DVOL history came back — "
+            "and no BTC DVOL level is in this report (the DVOL half could not be served — "
             "dvol down)" in out
         )
 
@@ -3685,7 +3685,7 @@ class TestChainDegradationsReachTheReadingLine:
             "BTC",
             skew._replace(is_fallback=True, atm=None, call_25=wing),
             None,
-            "no usable DVOL history came back — boom",
+            "the DVOL half could not be served — boom",
         )
         head, separator, _ = line.partition("; and no BTC DVOL level is in this report")
         assert separator, line
@@ -3990,6 +3990,26 @@ class TestTheStalenessCeiling:
         # order to say it is absent, which is the behaviour being confirmed.
         assert "sits at the" not in out
         assert "**365d percentile:**" not in out
+
+    def test_the_absence_wrappers_do_not_deny_the_history_that_arrived(self):
+        # The staleness ceiling created a state neither absence wrapper had been
+        # swept for: the fetch SUCCEEDED, history came back, a usable reading was
+        # found, and it was refused only for age. Both wrappers asserted the one
+        # cause reachable before that — "no usable DVOL history came back" and "No
+        # DVOL history could be derived" — so each contradicted the very clause it
+        # introduces, which names the reading that came back and its date. The
+        # Reading line is the sentence a downstream summary keeps, so the false half
+        # would outlive everything that corrects it.
+        out = _report(dvol={"data": [_candle(_days_back(40), 58.0)]})
+        assert "no usable DVOL history came back" not in out
+        assert "No DVOL history could be derived" not in out
+        assert "no BTC DVOL level is in this report (the DVOL half could not be served —" in out
+        assert "_No DVOL level is served in this report" in out
+        # The clause it introduces names the reading that did arrive; the wrapper
+        # must not be denying it two words earlier.
+        assert "The newest usable BTC DVOL reading on or before 2026-08-05 is dated" in out
+        # And the phrase is not doubled now that the wrapper dropped the currency.
+        assert out.count("BTC DVOL level") == 1
 
     def test_the_refusal_scopes_its_claim_to_the_analysis_date(self):
         # The series is filtered to curr_date, so an unqualified "the newest usable

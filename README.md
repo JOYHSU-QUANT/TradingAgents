@@ -311,8 +311,11 @@ length-and-finiteness shape check cannot see: permute the row and the day's low
 reads as its close, on every row, indefinitely.
 A third disclosure covers a shortfall neither the feed nor this module caused: when
 Deribit answers with a **continuation cursor** the response is only its newest page,
-so the report says which readings were never delivered rather than letting the
-window's own count be read as the index publishing sparsely.
+so the report says the older part of the fetch was never delivered rather than
+letting a window's own count be read as the index publishing sparsely. It names no
+boundary date, because the readings this module kept are not the ones delivery
+stopped at, and it says a count *may* be short rather than that the counts *are* —
+a cursor only shortens a window whose candles exceed the page cap.
 
 Past `MAX_DVOL_STALENESS_DAYS` (14) the DVOL half is **withheld rather than
 caveated**. A level is only served while it is recent enough to describe the current

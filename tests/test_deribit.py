@@ -4136,6 +4136,23 @@ class TestTheStalenessCeiling:
         )
         assert "with a non-positive reading" not in out
 
+    def test_two_inconsistent_rejections_agree_with_their_pronoun(self):
+        # The possessive is computed like the _Inconsistent: render note's, not a
+        # literal "its": with a plural count, "2 candles ... outside its own
+        # high/low range" was the one clause in the module whose pronoun did not
+        # agree with its noun. The singular sibling above keeps "its" pinned.
+        data = [
+            _candle(_days_back(30), 58.0),
+            _ohlc(_days_back(3), 40.0, 41.0, 39.0, 3000.0),
+            _ohlc(_days_back(2), 40.0, 41.0, 39.0, 3000.0),
+        ]
+        out = _report(dvol={"data": data})
+        assert (
+            "also rejected 2 candles with a non-positive low or an open or close outside "
+            f"their own high/low range, the newest dated {_days_back(2)}" in out
+        )
+        assert "outside its own" not in out
+
     def test_an_ordinary_stall_says_nothing_about_rejections(self):
         # The clause is gated on a rejection having happened: naming zero of them
         # would invent a second possible cause for a plain stall.

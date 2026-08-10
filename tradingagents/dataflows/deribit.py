@@ -1621,8 +1621,9 @@ def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
             dropped_clause = (
                 f"{skipped_inconsistent} candle"
                 f"{'' if skipped_inconsistent == 1 else 's'} with a non-positive "
-                f"low or an open or close outside its own high/low range, the "
-                f"newest dated {newest_rejected}"
+                f"low or an open or close outside "
+                f"{'its' if skipped_inconsistent == 1 else 'their'} own high/low "
+                f"range, the newest dated {newest_rejected}"
             )
         else:
             dropped_clause = None

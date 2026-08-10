@@ -147,8 +147,12 @@ DVOL_PERCENTILE_WINDOW_DAYS = 365
 # What they buy is a better DIAGNOSTIC, not a servable reading. They used to buy the
 # latter — a *latest reading*, and therefore a report at all, when the feed had
 # published nothing for the whole window — but MAX_DVOL_STALENESS_DAYS now caps a
-# servable reading at 14 days, which is deep inside the percentile window, so no
-# reading these days carry could ever be served. What survives is that a feed
+# servable reading at 14 days from min(curr_date, today), which is deep inside the
+# percentile window, so on any ordinary date no reading these days carry can be
+# served. (Not "ever": the windows are measured from curr_date while the staleness
+# bound is measured from the clock when curr_date runs ahead of it, so an analysis
+# date roughly a year in the future separates the two. Nothing bounds curr_date's
+# futureness — MAX_FUTURE_DAYS only withholds the CHAIN.) What survives is that a feed
 # stalled for just over a year raises "the newest usable reading is dated X, N days
 # before Y" instead of the far less useful "No DVOL readings on or before Y": the
 # reading is fetched, found, and named in the refusal rather than never seen.
@@ -1414,7 +1418,8 @@ def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
                 currency,
             )
             continue
-        # The open and the close must both lie inside the candle's own high/low.
+        # The candle must satisfy its own arithmetic: a positive low, with the open
+        # and the close both inside its high/low range.
         # Until this check the row was guarded on ONE side only — a close of 0.0
         # was refused as broken while a close of 3000.0 sitting in a 39.0/41.0
         # candle was published as fact, and 3000% reads to a model as a real
@@ -1584,10 +1589,17 @@ def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
             else ""
         )
         raise DeribitError(
-            f"The newest usable {currency} DVOL reading is dated {latest_date}, {stale_days} "
-            f"days before {lag_from} — further back than this vendor serves "
-            f"({MAX_DVOL_STALENESS_DAYS} days), so the level is withheld rather than presented "
-            f"as the current volatility regime{dropped_note}"
+            # "on or before {curr_date}", like every sibling message here and the
+            # rendered lag line. The series is filtered to curr_date, so an
+            # unqualified "the newest usable reading is dated X" is a claim about
+            # the LIVE feed made from a view this module deliberately truncated —
+            # false on any backtest where the index kept publishing, which is the
+            # ordinary case. This refusal was the one message that opted out of the
+            # rule the others follow.
+            f"The newest usable {currency} DVOL reading on or before {curr_date} is dated "
+            f"{latest_date}, {stale_days} days before {lag_from} — further back than this "
+            f"vendor serves ({MAX_DVOL_STALENESS_DAYS} days), so the level is withheld rather "
+            f"than presented as the current volatility regime{dropped_note}"
         )
     return DvolSeries(
         dates=dates,
@@ -1941,7 +1953,8 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
     if series.dropped_inconsistent:
         # Its own sentence rather than a second clause on the line above, because
         # the two rejection classes point at different faults: a non-positive close
-        # is a broken VALUE, while an open or close outside its own candle points
+        # is a broken VALUE, while a candle failing its own arithmetic — a
+        # non-positive low, or an open or close outside its high/low range — points
         # at a reordered response SHAPE. Folding them into one count would have made
         # that line's "came back zero or negative" false for half of what it
         # counted — the partial-update failure this module keeps re-learning.
@@ -1977,10 +1990,17 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
             # beside this one are exactly the states in which that happens. Naming
             # a date here would put a false boundary next to the notes that refute
             # it, so the mechanism is stated and the boundary is not.
+            # "a count above may be shorter than its window", not "the counts are".
+            # A cursor only shortens a window whose candles exceed the page cap, and
+            # the fetch spans ~376 candles — so a cap anywhere in 366..375 sets the
+            # cursor while leaving BOTH rendered counts complete (only buffer days,
+            # which enter no statistic, are lost), and a cap of 200 shortens the
+            # 365-day count while the 30-day one stays whole. The two rejection
+            # notes beside this one hedge for the same reason, in _WINDOW_COUNT_CAVEAT.
             "_Truncated: Deribit returned only the newest page of DVOL history and set a "
-            "continuation cursor, so the older part of the window was never delivered. The "
-            "counts above are therefore shorter than their windows for a reason that is not "
-            "the index's publishing — the level and its date are unaffected, since the newest "
+            "continuation cursor, so the older part of the fetch was never delivered. A count "
+            "above may therefore be shorter than its window for a reason that is not the "
+            "index's publishing — the level and its date are unaffected, since the newest "
             "readings are the ones a truncated page keeps._"
         )
     return DvolReport(
@@ -2956,9 +2976,14 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         dvol_report = _dvol_section(dvol, curr_dt, today)
         sections.append(dvol_report.markdown)
     else:
-        # Not "the request failed": _fetch_dvol also raises when the request
-        # SUCCEEDED and the response held no reading on or before curr_date, and
-        # naming the wrong cause sends an operator to the network first.
+        # Not "the request failed": several of _fetch_dvol's raises follow a request
+        # that SUCCEEDED — a response holding no reading on or before curr_date, one
+        # whose every candle was rejected as broken, and one whose newest usable
+        # reading was simply too old to serve. Naming the wrong cause sends an
+        # operator to the network first, and the staleness case is the one they
+        # would misdiagnose longest, since the feed is answering perfectly well.
+        # Uncounted deliberately: grep `raise DeribitError` in _fetch_dvol for the
+        # live set rather than trusting a number here.
         sections.append(
             f"**DVOL:** unavailable — {_sanitize(dvol_error)}. Do not fabricate a DVOL level."
         )

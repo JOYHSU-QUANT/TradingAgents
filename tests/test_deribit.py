@@ -3875,16 +3875,29 @@ class TestTheChainCensusNamesItsDenominator:
         # The open-interest policy is this module's own, and it is what produces the
         # thin book _WIDE_BRACKET_FRACTION flags — so a reader told the bracket is
         # wide must also be able to see who narrowed the chain.
+        #
+        # The remainder is asserted INSIDE one span, not by two assertions that
+        # bracket it. Pinning the text before the number and the text after it
+        # leaves the number itself unread in every direction — six mutations of the
+        # arithmetic survived that, including ones rendering "the other 0" (the
+        # self-refuting claim the two-form design exists to avoid) and "the other
+        # -1". A test named for stating the remainder as a number must read it.
+        #
+        # Three contracts dropped, not eight, so `dropped` (3) and `used` (13) are
+        # DIFFERENT: an even split lets a mutation that prints the wrong one of the
+        # two render the right digit by coincidence.
+        unheld = {"BTC-28AUG26-60000-P", "BTC-28AUG26-61000-P", "BTC-28AUG26-69000-C"}
         thinned = [
-            dict(row, open_interest=0.0)
-            if row["instrument_name"].startswith("BTC-28AUG26-6")
-            and row["instrument_name"].endswith("-C")
-            else row
+            dict(row, open_interest=0.0) if row["instrument_name"] in unheld else row
             for row in CHAIN
         ]
         out = _report(chain=thinned)
-        assert "out of the 16 Deribit lists for it — the other" in out
-        assert "carried no open interest, or no usable mark IV, underlying or delta" in out
+        assert (
+            "out of the 16 Deribit lists for it — the other 3 carried no open interest, "
+            "or no usable mark IV, underlying or delta" in out
+        )
+        # And the arithmetic closes: survivors + remainder == the denominator.
+        assert "7 call quotes and 6 put quotes on this expiry yielded a usable delta" in out
 
     def test_the_count_is_scoped_to_the_selected_expiry(self):
         # Counted against the chosen expiry, not the whole payload: the fixture
@@ -3915,7 +3928,12 @@ class TestATruncatedHistoryIsDisclosed:
         dvol["continuation"] = "cursor-token"
         out = _report(dvol=dvol)
         assert "_Truncated: Deribit returned only the newest page of DVOL history" in out
-        assert "the older part of the window was never delivered" in out
+        assert "the older part of the fetch was never delivered" in out
+        # Hedged, like the two rejection notes beside it: a cursor only shortens a
+        # window whose candles exceed the page cap, and the fetch spans ~376 — so a
+        # cap in 366..375 sets the cursor with BOTH counts still complete.
+        assert "A count above may therefore be shorter than its window" in out
+        assert "The counts above are therefore shorter" not in out
         # No date on the boundary: series.dates holds only KEPT readings, so its
         # earliest entry is not where delivery stopped once anything older was
         # rejected — and the rejection notes sit right beside this one.
@@ -3963,8 +3981,8 @@ class TestTheStalenessCeiling:
         assert "58.00%" not in out
         assert "**DVOL:** unavailable" in out
         assert (
-            "The newest usable BTC DVOL reading is dated 2026-07-21, 15 days before 2026-08-05 "
-            "— further back than this vendor serves (14 days)" in out
+            "The newest usable BTC DVOL reading on or before 2026-08-05 is dated 2026-07-21, "
+            "15 days before 2026-08-05 — further back than this vendor serves (14 days)" in out
         )
         # The percentile is the strongest claim in the report; it must not survive
         # a level the module refused to state. Asserted on the phrase that STATES a
@@ -3972,6 +3990,25 @@ class TestTheStalenessCeiling:
         # order to say it is absent, which is the behaviour being confirmed.
         assert "sits at the" not in out
         assert "**365d percentile:**" not in out
+
+    def test_the_refusal_scopes_its_claim_to_the_analysis_date(self):
+        # The series is filtered to curr_date, so an unqualified "the newest usable
+        # reading is dated X" is a claim about the LIVE feed made from a view this
+        # module truncated — false on any backtest where the index kept publishing,
+        # which is the ordinary case. Every sibling message in this module carries
+        # the qualifier; the staleness refusal was the one that opted out, and no
+        # test drove it on a historical date to notice.
+        # On a historical date the chain is withheld by design, so a refused DVOL
+        # half leaves nothing to render and the message arrives as the raise — which
+        # is exactly where an operator reads it.
+        with pytest.raises(deribit.DeribitError) as excinfo:
+            _report(
+                curr_date="2026-03-01",
+                dvol={"data": [_candle(_days_back(30, "2026-03-01"), 58.0)]},
+            )
+        message = str(excinfo.value)
+        assert "The newest usable BTC DVOL reading on or before 2026-03-01 is dated" in message
+        assert "The newest usable BTC DVOL reading is dated" not in message
 
     def test_staleness_is_measured_from_the_earlier_of_the_date_and_the_clock(self):
         # A curr_date east of UTC runs ahead of the clock, and a feed cannot be

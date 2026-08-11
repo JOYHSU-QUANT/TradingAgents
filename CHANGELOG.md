@@ -194,7 +194,8 @@ Breaking changes within the 0.x line are called out explicitly.
   the chain was never attempted. This vendor reads chains for BTC and ETH, so
   another recognized crypto risk asset (SOL, XRP, ...) is served BTC's **DVOL
   level** as a market-wide crypto-vol proxy — labelled in the heading and named
-  again in the closing sentence, the two places that survive a downstream summary.
+  again in the closing sentence, so the framing survives whichever line a
+  downstream summary keeps.
   The 25Δ skew is **withheld** for such an asset: a market-wide vol *level* is a
   defensible stand-in, but a risk reversal measures demand for downside in one
   specific underlying and does not transfer, and a caveat that has to survive every

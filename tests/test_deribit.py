@@ -1857,8 +1857,8 @@ class TestReport:
         assert "dVOL" not in out
 
     def test_reading_line_names_the_proxy_currency(self):
-        # The heading's proxy framing also says whose surface this is, but it
-        # does not survive a downstream summary.
+        # The heading's proxy framing also says whose surface this is, but this
+        # line cannot lean on a summary keeping the heading.
         out = _report(asset="SOL")
         assert (
             "BTC's latest usable DVOL reading is 34.43% annualized (as of 2026-08-05; that day's candle was "
@@ -1933,9 +1933,10 @@ class TestReport:
         out = _report(asset="SOL")
         assert out.startswith("## Options Volatility — BTC (market-wide proxy for 'SOL', Deribit)")
         assert "not a signal specific to 'SOL'" in out
-        # The proxy heading and this clause are the two places that survive a
-        # downstream summary; the Reading line has to say the skew is absent as
-        # well, or a proxied cycle reads as a full BTC report minus a clause.
+        # The proxy heading and this clause are the two places a downstream
+        # summary can carry the framing forward; the Reading line has to say the
+        # skew is absent as well, or a proxied cycle reads as a full BTC report
+        # minus a clause.
         assert (
             "_Reading:_ No 25Δ skew is in this report (this vendor reads no options chain "
             "for 'SOL'); and BTC's latest usable DVOL reading" in out

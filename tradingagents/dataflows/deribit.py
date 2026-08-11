@@ -2312,8 +2312,8 @@ def _reading_line(
     than news. No sibling vendor in this package interprets its own figures.
 
     It also names the currency and the tenor: for a proxied asset the lines that
-    otherwise say whose surface this is are ones a downstream summary drops, and
-    a bare "the 28AUG26 skew ..." is precisely what survives with the proxy
+    otherwise say whose surface this is are ones a downstream summary may drop,
+    and a bare "the 28AUG26 skew ..." is precisely what survives with the proxy
     framing gone. The tenor is named for the same reason and became load
     bearing once the expiry stopped being fixed — a risk reversal is not
     tenor-invariant, so a reader who assumes ~30 days when the fallback supplied a
@@ -2841,9 +2841,9 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
 
     if market_proxy:
         # The requested asset belongs in the heading, not only in a caveat below:
-        # this report is re-summarised by downstream agents, and a heading
-        # byte-identical to a real BTC report is what survives that hop with the
-        # proxy framing stripped off.
+        # this report is re-summarised by downstream agents, and a hop that keeps
+        # the heading would otherwise carry one byte-identical to a real BTC
+        # report, with the proxy framing stripped off.
         header_lines = [
             f"## Options Volatility — {currency} (market-wide proxy for '{asset}', Deribit)",
             f"_This vendor reads no options chain for '{asset}'; showing the {currency} DVOL "

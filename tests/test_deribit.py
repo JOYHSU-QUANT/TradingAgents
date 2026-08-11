@@ -1857,8 +1857,8 @@ class TestReport:
         assert "dVOL" not in out
 
     def test_reading_line_names_the_proxy_currency(self):
-        # The heading's proxy framing is the only other place that says whose
-        # surface this is, and it does not survive a downstream summary.
+        # The heading's proxy framing also says whose surface this is, but it
+        # does not survive a downstream summary.
         out = _report(asset="SOL")
         assert (
             "BTC's latest usable DVOL reading is 34.43% annualized (as of 2026-08-05; that day's candle was "
@@ -2171,8 +2171,9 @@ class TestDvolSampleHonesty:
         # Driven through _dvol_section rather than a whole report: on an ordinary
         # date an empty 30-day window means the newest reading is over 30 days
         # old, and MAX_DVOL_STALENESS_DAYS now refuses to serve one past 14 — from
-        # the pipeline the branch needs an analysis date 30+ days ahead of the
-        # clock, which the test below drives. This direct drive stays because
+        # the pipeline the branch needs an analysis date ahead of the clock (30+
+        # days for a current feed, 16+ for one served at the staleness
+        # allowance), which the test below drives. This direct drive stays because
         # _dvol_section is a pure function that must not compute a range over a
         # one-element fallback sample whatever series it is handed.
         series = deribit.DvolSeries(dates=["2026-05-01"], closes=[58.0])
@@ -2215,6 +2216,31 @@ class TestDvolSampleHonesty:
             "the 35 usable daily readings in the 365 days ending 2026-09-14" in out
         )
         assert "further back than this vendor serves" not in out
+
+    def test_a_feed_at_the_staleness_allowance_empties_the_range_at_sixteen_days_of_lead(self):
+        # The same trigger at its floor: the newest served reading can be up to
+        # MAX_DVOL_STALENESS_DAYS old, so the lead the empty branch needs is
+        # DVOL_WINDOW_DAYS minus that allowance — 16 days, not the 30 the
+        # current-feed case above needs. One day less lead and the same feed
+        # still occupies the window (its newest reading is the window's oldest
+        # admissible day), so both sides of the bound are pinned here.
+        dvol = _dvol_days(3, end="2026-07-22")  # newest is TODAY - 14: still served
+        out = _report(curr_date="2026-08-21", dvol=dvol)  # TODAY + 16
+        assert (
+            "**30d range:** not computed — no usable DVOL reading falls inside the 30 days "
+            "ending 2026-08-21" in out
+        )
+        assert (
+            "**DVOL (30-day implied vol index), latest usable reading:** 40.20% annualized "
+            "on 2026-07-22" in out
+        )
+        assert "further back than this vendor serves" not in out
+        out = _report(curr_date="2026-08-20", dvol=dvol)  # TODAY + 15
+        assert "no usable DVOL reading falls inside" not in out
+        assert (
+            "**30d range:** not computed — the 30 days ending 2026-08-20 hold only 1 usable "
+            "daily reading, so a min and a max would both be the level above" in out
+        )
 
     def test_two_readings_are_enough_for_a_range(self):
         # The other side of the threshold. Only the one-reading case was covered,
@@ -4139,8 +4165,8 @@ class TestTheStalenessCeiling:
     def test_two_inconsistent_rejections_agree_with_their_pronoun(self):
         # The possessive is computed like the _Inconsistent: render note's, not a
         # literal "its": with a plural count, "2 candles ... outside its own
-        # high/low range" was the one clause in the module whose pronoun did not
-        # agree with its noun. The singular sibling above keeps "its" pinned.
+        # high/low range" left the pronoun disagreeing with its plural noun. The
+        # singular sibling above keeps "its" pinned.
         data = [
             _candle(_days_back(30), 58.0),
             _ohlc(_days_back(3), 40.0, 41.0, 39.0, 3000.0),
@@ -4238,7 +4264,7 @@ class TestRejectedReadingsAreDisclosed:
             _candle("2026-08-01", 0.0),
         ]
         out = _report(dvol={"data": data})
-        assert "the newest of them dated 2026-08-01" in out
+        assert "the newest dated 2026-08-01" in out
         assert "2026-01-05" not in out
 
     def test_the_rejection_note_dates_its_newest_entry(self):
@@ -4246,7 +4272,7 @@ class TestRejectedReadingsAreDisclosed:
         # renders identically to a feed whose every recent print was rejected —
         # and those are different operator actions.
         data = _dvol_days(12)["data"][:-1] + [_candle("2026-08-05", 0.0)]
-        assert "the newest of them dated 2026-08-05" in _report(dvol={"data": data})
+        assert "the newest dated 2026-08-05" in _report(dvol={"data": data})
 
     def test_a_rejection_never_leaves_the_lag_note_blaming_the_feed(self):
         # Both are italic, so both survive a summary that keeps only italics. The
@@ -4265,7 +4291,7 @@ class TestRejectedReadingsAreDisclosed:
         # lines survive a summary that keeps only italics.
         assert "the newest usable DVOL reading is 2026-07-30" in out
         assert "the newest DVOL reading is" not in out
-        assert "the newest of them dated 2026-08-05" in out
+        assert "the newest dated 2026-08-05" in out
 
     def test_an_emptied_window_is_not_called_a_sparse_one(self):
         # Every reading inside the 30-day window was rejected here, so "no DVOL
@@ -4460,7 +4486,7 @@ class TestCandleSelfConsistency:
             "low, or an open or close outside its own high/low range, and was dropped as broken"
             in out
         )
-        assert "the newest of them dated 2026-08-05" in out
+        assert "the newest dated 2026-08-05" in out
         # NOT folded into the non-positive line: that wording would be false here,
         # and the two point at different faults (a broken value vs a changed
         # response shape).
@@ -4625,7 +4651,7 @@ class TestCandleSelfConsistency:
             "low, or an open or close outside their own high/low range, and were dropped as "
             "broken" in out
         )
-        assert "the newest of them dated 2026-08-05" in out
+        assert "the newest dated 2026-08-05" in out
 
     def test_a_wholly_inconsistent_history_names_that_cause_and_the_newest_date(self):
         # Not "was non-positive (0 skipped)", which is what a single shared counter

@@ -99,8 +99,8 @@ Breaking changes within the 0.x line are called out explicitly.
   with `is_fallback` false, corrected only by a number a downstream summary drops.
   That sentence also states when a risk reversal is **not** in the report and
   why — withheld by policy, a chain that yielded no usable surface, or wings the
-  chain does not supply — instead of simply omitting the clause. It is the one
-  line a downstream summary keeps, so an absence marked only by a missing clause
+  chain does not supply — instead of simply omitting the clause. That sentence is
+  the one line a downstream summary keeps, so an absence marked only by a missing clause
   was precisely the signal that did not survive the hop: a backtest, a proxied
   asset and a chain outage each produced a closing sentence differing from a
   healthy report's only by something that was not there. A chain that was
@@ -113,8 +113,8 @@ Breaking changes within the 0.x line are called out explicitly.
   and a feed stalled past a year all fall silent identically, while the body
   above carried a usable level throughout — and names the half's absence with its
   cause when it failed, alongside a matching italic header caveat whose only
-  previous trace was *subtractive* (a dropped clause on the source bullet). It
-  also now carries a fallback expiry and a missing ATM point, and — where a risk
+  previous trace was *subtractive* (a dropped clause on the source bullet). The
+  closing sentence also now carries a fallback expiry and a missing ATM point, and — where a risk
   reversal is printed, that being the case where the line states a wing vol to
   qualify — each 25Δ wing interpolated across a bracket wider than
   10% of the forward, both of them when both are that wide: each changes which
@@ -134,6 +134,15 @@ Breaking changes within the 0.x line are called out explicitly.
   the ordering terms beside it extend to all four prices: previously only the
   close was sign-checked, so a candle carrying an open of `-5` and a low of `-10`
   beside a plausible close published untouched.
+  The row had been guarded on one side only: a close of `0.0` was refused as
+  broken while a close of `3000.0` inside a 39/41 candle became the headline
+  level, the 30-day maximum and the percentile basis with no caveat anywhere.
+  This is also the only check that sees a **reordered candle** — a permuted row
+  passes the length-and-finiteness shape guard, and the day's low is then read as
+  its close on every row indefinitely. The **latest reading is labelled usable**
+  in the headline and in the `_Reading:_` line for the reason the counts already
+  were: a rejected candle can be dated later, and the rejection notes print that
+  date.
   A DVOL reading older than **`MAX_DVOL_STALENESS_DAYS` (14)** is now withheld
   rather than served with a caveat, measured from the earlier of the analysis date
   and the clock — the same reference the rendered lag note uses, so the refusal and
@@ -154,15 +163,7 @@ Breaking changes within the 0.x line are called out explicitly.
   differently-margined book into one smile. The **Expiry used** line now states
   how many contracts Deribit lists for the selected expiry, so a thin smile can be
   distinguished from a chain this module's own open-interest policy thinned.
-  The row had been guarded on one side only: a close of `0.0` was refused as
-  broken while a close of `3000.0` inside a 39/41 candle became the headline
-  level, the 30-day maximum and the percentile basis with no caveat anywhere.
-  This is also the only check that sees a **reordered candle** — a permuted row
-  passes the length-and-finiteness shape guard, and the day's low is then read as
-  its close on every row indefinitely. The **latest reading is labelled usable**
-  in the headline and in the `_Reading:_` line for the reason the counts already
-  were: a rejected candle can be dated later, and the rejection notes print that
-  date. `MAX_DATA_LAG_DAYS` drops from 2 to **1**, so a lag of two days — a whole
+  `MAX_DATA_LAG_DAYS` drops from 2 to **1**, so a lag of two days — a whole
   missing day on a 24/7 daily index — now raises the italic stall note and carries
   its age into the summarisable line instead of passing as ordinary. A missing 25Δ
   wing now states WHICH guard refused it: a thin book, or a bracket rejected
@@ -181,9 +182,9 @@ Breaking changes within the 0.x line are called out explicitly.
   markdown markers removed —
   because the report is assembled into an LLM prompt and a fragment carrying line
   breaks could otherwise open a forged heading or a second `_Reading:_` line
-  above the real one. It is applied where the fragment enters the message rather
-  than only where it renders, since the router hands an optional category's
-  failure to the model as `DATA_UNAVAILABLE: ... ({error})`.
+  above the real one. The flattening is applied where the fragment enters the
+  message rather than only where it renders, since the router hands an optional
+  category's failure to the model as `DATA_UNAVAILABLE: ... ({error})`.
   Either half can fail without costing the other (any exception, not a fixed
   allowlist); losing both degrades the optional category to the no-data sentinel —
   as does losing DVOL alone on a date, or for a proxied asset, where the chain is

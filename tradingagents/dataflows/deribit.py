@@ -1183,8 +1183,9 @@ def compute_skew(contracts: list[Contract], now: datetime) -> SkewSnapshot:
     # first_error.
     # Spelled out rather than silenced with a type: ignore, so a future edit that
     # breaks that reasoning fails with a message instead of a None-raise.
+    tried = len(ranked[:_MAX_EXPIRY_CANDIDATES])
     raise DeribitError(
-        f"No usable expiry among the {len(ranked[:_MAX_EXPIRY_CANDIDATES])} candidates tried"
+        f"No usable expiry among the {tried} candidate{'' if tried == 1 else 's'} tried"
     )
 
 
@@ -1520,7 +1521,7 @@ def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
         # to Deribit's status page; a fully-rejected history is a corrupt feed that
         # answered in full, and WHICH rejection emptied it decides what the
         # operator looks at. Also names the currency, which is the non-obvious part
-        # on a proxied asset — every other fetch-side error in this module does.
+        # on a proxied asset.
         #
         # Both rejection classes are named, and named for what they are. Reporting
         # only the non-positive count would have said "every reading was
@@ -1842,11 +1843,13 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
         # No longer reachable through _fetch_dvol on an ordinary date: an empty
         # 30-day window needs a reading over 30 days old, and MAX_DVOL_STALENESS_DAYS
         # refuses one past 14. The stalled feed this used to describe is now a
-        # refusal, not an empty render. Two triggers survive — an analysis date 30
-        # or more days ahead of the clock, where this window, measured from
-        # curr_date, runs past a live feed's newest reading while the staleness
-        # bound, measured from the clock, still passes it (a month of lead, not
-        # the year that emptying the percentile window too would take) — and a
+        # refusal, not an empty render. Two triggers survive — an analysis date
+        # ahead of the clock, where this window, measured from curr_date, runs
+        # past the newest served reading while the staleness bound, measured
+        # from the clock, still passes it (30 days of lead for a current feed,
+        # and as little as DVOL_WINDOW_DAYS - MAX_DVOL_STALENESS_DAYS = 16 for
+        # a feed at the staleness allowance — weeks of lead either way, not the
+        # year that emptying the percentile window too would take) — and a
         # caller invoking this renderer directly. The branch stays and both
         # triggers are tested.
         #
@@ -1875,8 +1878,8 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
             f"both be the level above"
         )
     else:
-        # Dated like every other line in this section. The success branch was the
-        # one DVOL line carrying no window end, so quoted on its own during a
+        # Dated, like both refusal branches of this line. The success branch was
+        # the one DVOL line carrying no window end, so quoted on its own during a
         # backtest it read as "the last 30 days" from the reader's present.
         lines.append(
             f"**{DVOL_WINDOW_DAYS}d range:** min {min(window):.2f}% / max {max(window):.2f}% "
@@ -2002,10 +2005,15 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
             # rejections ARE the data-lag gap above or are unrelated history: a
             # genuine stall plus one rejection a year ago otherwise rendered
             # identically to a feed whose every recent print was rejected.
+            # "the newest dated", with no plural pronoun, like the staleness
+            # ladder's clauses: this count can be 1, and "the newest of them"
+            # reads a set into the very branch that can hold a single reading.
+            # The both-class descriptor keeps "of them" — its two classes
+            # guarantee a plural.
             f"_Rejected: {dropped} DVOL reading{'' if dropped == 1 else 's'} dated on or "
             f"before {curr_date} came back zero or negative and "
             f"{'was' if dropped == 1 else 'were'} dropped as broken (a non-positive vol index "
-            f"is not a low reading), the newest of them dated {series.newest_dropped_date}. "
+            f"is not a low reading), the newest dated {series.newest_dropped_date}. "
             f"A rejected reading {_WINDOW_COUNT_CAVEAT}_"
         )
     if series.dropped_inconsistent:
@@ -2028,7 +2036,7 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
             f"{'its' if bad == 1 else 'their'} own "
             f"high/low range, and {'was' if bad == 1 else 'were'} dropped as broken (a candle "
             f"that contradicts itself cannot be read as a level, and a reordered candle shape "
-            f"would look exactly like this), the newest of them dated "
+            f"would look exactly like this), the newest dated "
             f"{series.newest_inconsistent_date}. A rejected candle {_WINDOW_COUNT_CAVEAT}_"
         )
     if series.truncated:
@@ -2303,10 +2311,10 @@ def _reading_line(
     and a negative RR25 is the ordinary resting state of crypto options rather
     than news. No sibling vendor in this package interprets its own figures.
 
-    It also names the currency and the tenor: for a proxied asset the heading is
-    otherwise the only place that says whose surface this is, and a bare "the
-    28AUG26 skew ..." is precisely what survives a downstream summary with the
-    proxy framing gone. The tenor is named for the same reason and became load
+    It also names the currency and the tenor: for a proxied asset the lines that
+    otherwise say whose surface this is are ones a downstream summary drops, and
+    a bare "the 28AUG26 skew ..." is precisely what survives with the proxy
+    framing gone. The tenor is named for the same reason and became load
     bearing once the expiry stopped being fixed — a risk reversal is not
     tenor-invariant, so a reader who assumes ~30 days when the fallback supplied a
     different expiry is reading a different quantity than the one printed.
@@ -2334,9 +2342,10 @@ def _reading_line(
     carried a usable number the whole time. (That third state is no longer reached
     by a stall: MAX_DVOL_STALENESS_DAYS refuses a level past 14 days old, so
     emptying both windows now needs an analysis date about a year ahead of the
-    clock — the 30-day range window alone empties from about a month of lead.
-    The clause is unconditional either way, which is what stops the next cause
-    added from silently re-creating the silence.)
+    clock — the 30-day range window alone empties from a month of lead for a
+    current feed, as little as 16 days (30 minus the staleness allowance) for
+    one at the staleness bound. The clause is unconditional either way, which
+    is what stops the next cause added from silently re-creating the silence.)
 
     **Scope of what reaches this line.** Everything that changes WHICH quantity
     the figures describe, or whether they exist at all, belongs here; nothing that
@@ -3077,7 +3086,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             # clause: `days_ahead` and `today` are both taken BEFORE the DVOL
             # fetch, which can span UTC midnight, after which a present-tense "is
             # N days ahead of the UTC clock" states a count one too large against
-            # a clock it does not name. This was the seventh and last site.
+            # a clock it does not name. This was the seventh site.
             f"**Options chain (ATM IV / 25Δ skew):** not served for an analysis date that "
             f"was {days_ahead} days ahead of the UTC clock ({today}) when this report was "
             f"built — see the note above. Do not substitute the current chain's skew for "
@@ -3132,8 +3141,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             # BEFORE the DVOL fetch, and that fetch can span UTC midnight, after
             # which a present-tense "is N days ahead of the UTC clock" states a
             # count one too large against a clock that has moved. Naming `today`
-            # lets the reader reconstruct it; the header note is the only other
-            # site that does, and this line has to stand alone.
+            # lets the reader reconstruct it, and this line has to stand alone.
             # The clock clause is parenthesised rather than left as a trailing
             # "which ..." relative clause. The proxy suffix below appends ", and
             # this vendor reads no options chain for '{asset}' on any date", which

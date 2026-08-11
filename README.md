@@ -359,7 +359,7 @@ arguments, `asset` and `curr_date` — is flattened before it is interpolated:
 whitespace collapsed, mid-line markdown markers removed, length capped. The report is assembled into an LLM
 prompt, so a fragment carrying line breaks could otherwise open a forged heading or
 a second `_Reading:_` line above the real one, and the forgery is what a downstream
-summariser would quote. It is applied where the fragment enters the message rather
+summariser would quote. The flattening is applied where the fragment enters the message rather
 than only where the report renders it, because a failure in an optional category
 reaches the model through the router as `DATA_UNAVAILABLE: ... ({error})` too.
 

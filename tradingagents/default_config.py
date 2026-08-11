@@ -142,6 +142,14 @@ DEFAULT_CONFIG = _apply_env_overrides({
         # is also the emergency-disable path.
         "crypto_etf_flows": "sosovalue,farside",  # Options: sosovalue (SOSOVALUE_API_KEY), farside (keyless)
         "crypto_sentiment": "alternative_me",  # Options: alternative_me (keyless, Fear & Greed)
+        # Crypto options implied volatility (DVOL index + 25-delta skew).
+        # Ships OFF. The vendor is keyless, so shipping it enabled would change a
+        # running deployment's analyst input surface — a new tool, a new prompt
+        # paragraph, a new report section — the moment the code lands, with no
+        # server-side action to date the change from. Set this to "deribit" as a
+        # deliberate cutover and record when, so a later review can attribute any
+        # behaviour change to it.
+        "options_data": "none",              # Options: deribit (keyless, BTC/ETH only), none
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {

@@ -10,6 +10,217 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Crypto options-implied volatility (Deribit).** A new keyless `options_data`
+  category, bound to the **market** analyst for crypto assets only (vol regime
+  is a technical read, so it sits alongside the indicators rather than with the
+  flows/sentiment tools on the news analyst). The report carries Deribit's DVOL
+  index — latest reading (always with an as-of date), 30-day min/max and a
+  365-day percentile — plus ATM (50-delta) implied vol, the 25-delta
+  call and put vols, and the 25-delta risk reversal (RR25 = call IV − put IV),
+  read for one expiry inside a **bounded band** around 30 days: within
+  `MAX_TENOR_DISTANCE_DAYS` (±15) of the target and never inside the 7-day
+  pin-noise floor. Wing vols come from an undiscounted Black-76 forward delta (Deribit
+  quotes `interest_rate: 0.0` on every listed option), interpolated between two
+  **strike-adjacent** listed contracts, and each wing is rendered with the two
+  strikes behind it. Two guards protect that number, because one collapsed or
+  stale `mark_iv` corrupts both a contract's IV and its delta. Ordering by strike
+  rather than by delta stops a bad quote pairing with a non-neighbour; and the
+  bracket must additionally sit in a stretch where delta falls with strike, as it
+  does on any well-formed smile. The second guard is not redundant: strike
+  adjacency alone leaves the wing at the mercy of a bad quote sitting *inside* the
+  bracket it legitimately borders, which printed exactly the strikes a reader
+  would expect and so had no visible symptom at all — a 61000 put collapsing to
+  0.5% IV moved RR25 from −4.74 to **+2.33**, reporting the opposite volatility
+  regime. A point the chain cannot bracket, or whose local smile is not monotone,
+  is reported `n/a` rather than extrapolated or guessed.
+  It **ships disabled** (`"options_data": "none"`). Being keyless, shipping it on
+  would change a running deployment's analyst input surface the moment the code
+  landed, with no server-side action to date the change from; enabling it is a
+  deliberate cutover.
+  The DVOL history is date-filtered to `curr_date` (bounded server-side and again
+  on the parsed rows) and lookahead-safe to the day; the candle dated today (or
+  later, when the fetch crossed UTC midnight) is
+  still open, so the report calls the series "readings" throughout and labels that
+  one rather than passing an intraday level off as a settled close. The chain
+  endpoint takes no date, so it is **withheld for a `curr_date` earlier than
+  today** and said to be withheld — quoting the current chain on a past date is
+  future information, and a prose warning is not an auditable guard. A `curr_date`
+  up to `MAX_FUTURE_DAYS` (1) *later* than the UTC clock is served (callers derive
+  it from a local clock, so east of UTC it routinely runs hours ahead; the live
+  chain is then never later than the analysis date — predating it outright, or
+  falling inside it when the clock reaches that date mid-run) with a note saying
+  which of the two holds, and
+  the feed is never called late against a date that has not arrived. Further ahead
+  than that is a mistyped argument rather than a timezone — `curr_date` arrives
+  from an LLM tool call — so the chain is withheld again, with its own note. The
+  chain also re-reads the clock immediately before fetching rather than reusing the
+  one taken before the DVOL half, so the printed snapshot instant is when the chain
+  fetch begins, and a run whose DVOL half timed out across UTC midnight cannot
+  serve day D+1's chain for `curr_date` = D.
+  The min/max range and the percentile are computed over **different windows** —
+  30 days and 365 — and printed as separate lines, each naming its own span and
+  its own sample count. A percentile is a claim about the volatility *regime*, and
+  a month cannot support one: through a sustained high-vol stretch every reading in
+  the window is high, so a 30-day percentile sits mid-range even at a multi-year
+  extreme, muting the signal exactly when volatility is what matters. The count
+  travels into the closing sentence too, because "the 365-day window" on its own
+  reads as one observation per day and that clause is what gets quoted alone.
+  A percentile is stated only when its window holds at least 10 daily readings:
+  the latest reading is itself in the sample, so a percentile over n of them
+  cannot read below 100/n, and a stalled feed would otherwise always report its
+  one surviving observation as the top of its own range. The min/max range needs
+  two readings for the same reason: at one, the min and the max are both the level
+  already printed above, and "min 62.30 / max 62.30" is the strongest possible
+  claim about the regime — a month of pinned volatility — manufactured from a
+  single observation, with no lag note beside it because a feed that stopped for
+  four weeks and resumed today is not late. A window with no readings at all
+  reports no range either. The closing sentence restates the
+  figures and defines them — it deliberately does not characterise them, since it
+  is re-read verbatim by the research and risk agents downstream and a negative
+  RR25 is the resting state of crypto options rather than news.
+  Only contracts carrying open interest enter the smile: the two guards above
+  defend the wing against a bad quote that *inverts* the smile, and nothing else
+  defended it against one that merely sits there being wrong. An unheld strike is
+  where a stale or purely modelled mark lives, and such a quote can be perfectly
+  monotone with its neighbours — passing both guards and printing the very strikes
+  a reader expects. If the eligible expiry nearest 30 days cannot be used — it
+  fails to bracket both wings, or it carries no usable forward — the
+  next eligible one is used and the report says so rather than repeating that this
+  is "the expiry closest to 30 days"; a labelled neighbouring skew is a better
+  input to a risk debate than an all-`n/a` section, and the tenor is printed both
+  in the section and in the closing sentence. Both branches of that sentence name
+  the same exclusions, so stepping to the second candidate no longer drops the only
+  line that states them. The fallback is **one step only**, and it can only land on
+  another expiry inside the band. Nothing outside the band is read at all: a risk
+  reversal is not tenor-invariant — the 25-delta strikes on a 300-day expiry sit
+  nowhere near the 30-day ones, and every downstream agent reads this number as a
+  ~30-day figure — so a thinned book whose only qualifying expiry is 96 days out
+  now yields **no skew** instead of a 96-day RR25 rendered under a 30-day heading
+  with `is_fallback` false, corrected only by a number a downstream summary drops.
+  That sentence also states when a risk reversal is **not** in the report and
+  why — withheld by policy, a chain that yielded no usable surface, or wings the
+  chain does not supply — instead of simply omitting the clause. That sentence is
+  the one line a downstream summary keeps, so an absence marked only by a missing clause
+  was precisely the signal that did not survive the hop: a backtest, a proxied
+  asset and a chain outage each produced a closing sentence differing from a
+  healthy report's only by something that was not there. A chain that was
+  attempted and failed now also carries its own italic header caveat, which the
+  three withheld-by-policy states already had and an outage did not.
+  **The same treatment now covers the DVOL half and the chain degradations that
+  change what the printed figures mean.** The closing sentence states the DVOL
+  **level** unconditionally rather than only as the base of a percentile — gating
+  the whole clause on the percentile made an outage, a window too thin to rank,
+  and a feed stalled past a year all fall silent identically, while the body
+  above carried a usable level throughout — and names the half's absence with its
+  cause when it failed, alongside a matching italic header caveat whose only
+  previous trace was *subtractive* (a dropped clause on the source bullet). The
+  closing sentence also now carries a fallback expiry and a missing ATM point, and — where a risk
+  reversal is printed, that being the case where the line states a wing vol to
+  qualify — each 25Δ wing interpolated across a bracket wider than
+  10% of the forward, both of them when both are that wide: each changes which
+  quantity the figures describe, and each was disclosed only in the body a
+  summary drops. Sentences that named a cause the code does not support were
+  corrected — "the options chain could not be read" for the several causes that
+  are a successful 200; "the newest reading Deribit has published at all" and "the
+  index has not printed since" on a historical date, asserted about a live feed
+  from a series this module deliberately truncated at `curr_date`. Counts are
+  labelled **usable** and readings rejected as non-positive are disclosed by
+  count, so a window this module partially emptied is no longer described as a
+  sparse calendar window; the too-few-to-rank floor is floored rather than
+  rounded, which at six readings had claimed a bound the figure could breach.
+  A DVOL candle is now also rejected when its **low is not positive, or its open
+  or close falls outside its own high/low range**, disclosed as its own count
+  with the newest date it reached. The positivity term is keyed off the low, which
+  the ordering terms beside it extend to all four prices: previously only the
+  close was sign-checked, so a candle carrying an open of `-5` and a low of `-10`
+  beside a plausible close published untouched.
+  The row had been guarded on one side only: a close of `0.0` was refused as
+  broken while a close of `3000.0` inside a 39/41 candle became the headline
+  level, the 30-day maximum and the percentile basis with no caveat anywhere.
+  This is also the only check that sees a **reordered candle** — a permuted row
+  passes the length-and-finiteness shape guard, and the day's low is then read as
+  its close on every row indefinitely. The **latest reading is labelled usable**
+  in the headline and in the `_Reading:_` line for the reason the counts already
+  were: a rejected candle can be dated later, and the rejection notes print that
+  date.
+  A DVOL reading older than **`MAX_DVOL_STALENESS_DAYS` (14)** is now withheld
+  rather than served with a caveat, measured from the earlier of the analysis date
+  and the clock — the same reference the rendered lag note uses, so the refusal and
+  the report can never disagree at the boundary. The previous ceiling was
+  whatever the fetch happened to span (375 days, a figure that moved as a side
+  effect of widening the percentile window), so a feed stalled for weeks headlined
+  a weeks-old print and ranked it against a window that still held enough readings.
+  A **continuation cursor** in the DVOL response is now disclosed in the report
+  instead of only logged, so a sample shortened by a truncated fetch is not read as
+  the index publishing sparsely.
+  Chain rows are now matched against the **requested currency**. The book-summary
+  payload identifies its underlying only inside the instrument names, and the
+  parser discarded that segment — so a misrouted or mis-served response rendered
+  one currency's forward and smile under another's heading with no log line, no
+  caveat and nothing downstream to catch it (the analyst prompt forbids
+  reconciling the forward against spot). The check also turns away the linear
+  `BTC_USDC-…` names, which otherwise parse and interleave a second,
+  differently-margined book into one smile. The **Expiry used** line now states
+  how many contracts Deribit lists for the selected expiry, so a thin smile can be
+  distinguished from a chain this module's own open-interest policy thinned.
+  `MAX_DATA_LAG_DAYS` drops from 2 to **1**, so a lag of two days — a whole
+  missing day on a 24/7 daily index — now raises the italic stall note and carries
+  its age into the summarisable line instead of passing as ordinary. A missing 25Δ
+  wing now states WHICH guard refused it: a thin book, or a bracket rejected
+  because delta rises with strike across it, which is a suspect quote rather than
+  a market fact. When neither candidate expiry brackets both wings the one
+  carrying more of the three smile points is used, ties going to the nearer
+  expiry. `_is_finite_number` answers `False` for an out-of-range JSON integer
+  instead of raising `OverflowError`, which had cost all six chain figures to a
+  single row in defiance of `parse_chain`'s skip-don't-fail contract. The
+  both-halves-failed raises now read the same `withheld_mid_run` classification
+  the rendered sites do, and carry the caller's own symbol plus the fact that a
+  proxied asset has no chain on ANY date — a SOL backtest had read as withheld
+  for the date, implying a live date would serve it.
+  Vendor error text and both caller-supplied arguments (`asset` and `curr_date`)
+  are flattened before they are interpolated — whitespace collapsed and mid-line
+  markdown markers removed —
+  because the report is assembled into an LLM prompt and a fragment carrying line
+  breaks could otherwise open a forged heading or a second `_Reading:_` line
+  above the real one. The flattening is applied where the fragment enters the
+  message rather than only where it renders, since the router hands an optional
+  category's failure to the model as `DATA_UNAVAILABLE: ... ({error})`.
+  Either half can fail without costing the other (any exception, not a fixed
+  allowlist); losing both degrades the optional category to the no-data sentinel —
+  as does losing DVOL alone on a date, or for a proxied asset, where the chain is
+  withheld by design — and
+  a throttle on every request actually made re-raises as `VendorRateLimitError` so
+  the router keeps its rate-limit lane — including a lone DVOL 429 on a call where
+  the chain was never attempted. This vendor reads chains for BTC and ETH, so
+  another recognized crypto risk asset (SOL, XRP, ...) is served BTC's **DVOL
+  level** as a market-wide crypto-vol proxy — labelled in the heading and named
+  again in the closing sentence, so the framing survives whichever line a
+  downstream summary keeps.
+  The 25Δ skew is **withheld** for such an asset: a market-wide vol *level* is a
+  defensible stand-in, but a risk reversal measures demand for downside in one
+  specific underlying and does not transfer, and a caveat that has to survive every
+  summarisation hop is not a substitute for not printing the number. A
+  stablecoin or unrecognized symbol gets a no-signal note, the same classification
+  farside applies to ETF flows. No rendered line claims Deribit itself lists
+  nothing for those symbols — nothing at runtime checks that. Uncached by design
+  (two GETs per call, one where the chain is withheld, and both halves
+  freshness-sensitive), with one retry on transient faults only; a JSON-RPC error
+  or any other 4xx is deterministic and raises immediately rather than being slept
+  on and reported as unreachable, and an HTTP 429 raises the shared
+  `VendorRateLimitError`. The crypto prompt paragraph carries three read-guards
+  for comparisons the report cannot support on its own: the forward is Deribit's
+  forward for the selected expiry and is expected to differ from spot, so it is
+  not reconciled against the verified snapshot; DVOL and ATM IV share a unit but
+  not a construction (a model-free 30-day index across the whole strike range
+  versus one 50Δ point on one expiry), so the gap between them is neither a term
+  structure nor a volatility risk premium; and RR25 has nothing to be ranked
+  against at all — and neither has ATM IV nor the wing vols, since Deribit
+  publishes no chain history, so each may be reported by level (RR25 by sign,
+  magnitude and tenor) but never called elevated or extreme. Each exists
+  because an agent asked for actionable insight will otherwise fill the vacuum
+  with a regime claim the tool output does not support.
+  The stock path's tools and prompt are unchanged.
+
 - **SoSoValue is now the primary crypto spot-ETF flow vendor.** farside.co.uk
   has served a Cloudflare JS challenge to non-browser clients since 2026-07-27
   (zero successful fetches since), so `crypto_etf_flows` now routes

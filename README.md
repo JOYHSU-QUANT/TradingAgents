@@ -253,6 +253,126 @@ that sentinel rather than aborting; the stock path is unchanged. A recognized
 crypto risk asset without its own spot ETF (e.g. SOL) gets BTC flows as a
 market-wide proxy; a stablecoin or unrecognized symbol gets a no-signal note.
 
+Crypto assets also have one **market**-analyst data source available:
+options-implied volatility from Deribit's public API (`options_data`, vendor
+`deribit`, keyless). It reports the DVOL index with its 30-day min/max range and
+its **365-day percentile** — separate windows on separate lines, each naming its
+own sample count, because a percentile is a claim about the volatility regime and
+a one-month lookback sits mid-range even at a multi-year extreme — plus the ATM
+(50-delta) implied vol and the 25-delta call/put vols, each shown with the two
+strikes it was interpolated between, and the risk reversal (RR25) computed from
+them. The range and the percentile each need a window holding enough readings to
+support them; below that the report states the shortfall rather than computing a
+figure that would only describe how much data arrived. A point the chain cannot
+bracket is reported `n/a` rather than extrapolated or guessed, and so is one whose
+surrounding quotes are not a monotone smile. For the two **25Δ wings** those are
+reported as the different facts they are — a thin book against the signature of a
+collapsed or stale mark, since only the second says a listed quote should not be
+trusted. Where a bracketing attempt was possible at all, the ATM point instead
+names both causes together, because it is attempted on the call curve and then on
+the put curve, so no single guard explains the miss; with neither curve carrying
+two usable quotes it says that plainly and names no guard.
+
+The chain figures come from **one expiry inside a bounded band around 30 days**
+(`MAX_TENOR_DISTANCE_DAYS`, currently ±15, and never inside the 7-day pin-noise
+floor). Normally that is the eligible expiry nearest 30 days; if it cannot be
+used, the next eligible one is, labelled as such and with its tenor printed — one
+step only. When neither of the two brackets both wings, the one carrying more of
+the three smile points wins and a tie leaves the nearer expiry in place, so a
+barren nearest expiry no longer hides a neighbour that had an ATM point and a wing
+to show. Nothing outside the band is read at all: a risk reversal is not
+comparable across tenors, so a thinned book yields **no skew** rather than a
+96-day figure presented under a 30-day heading. Only contracts with open interest
+enter the smile, since an unheld strike is where a stale or purely modelled mark
+lives. The two halves fail independently, so a DVOL outage still leaves the skew
+and vice versa; losing both degrades the category to the sentinel — as does losing
+DVOL alone on a date, or for a proxied asset, where the chain is withheld by
+design. Whenever no risk reversal is in the report — withheld by policy, a chain
+that yielded no usable surface, or wings the chain does not supply — the closing
+one-line summary states that and why, and such a chain also carries its own header
+caveat like the withheld cases do. **Either half's absence is disclosed this way**,
+and the closing line states the DVOL level itself rather than only its percentile,
+so a feed whose window is too thin to rank is not silent in the same way an outage
+is. That line also carries the chain degradations that change which quantity the
+figures describe: a fallback expiry and a missing ATM point unconditionally, and —
+only where a risk reversal is actually printed, since otherwise the line states no
+wing vol to qualify — each 25Δ wing interpolated between strikes further apart
+than 10% of the forward, naming both when both are that wide. All of this exists
+because that italic line is what a downstream summariser keeps when it drops the
+body, so an absence signalled only by a missing clause is exactly what does not
+survive the hop. Counts and the latest reading are labelled **usable**, and the two
+rejection classes — a non-positive reading, and a candle whose low is not positive or
+whose open or close falls
+outside its own high/low range — are each disclosed by count and by the newest date they
+reached, so a window this module partially emptied is never described as a sparse
+calendar window and a rejection newer than the reading on show cannot silently
+contradict it. The second class is what catches a **reordered candle**, which the
+length-and-finiteness shape check cannot see: permute the row and the day's low
+reads as its close, on every row, indefinitely.
+A third disclosure covers a shortfall neither the feed nor this module caused: when
+Deribit answers with a **continuation cursor** the response is only its newest page,
+so the report says the older part of the fetch was never delivered rather than
+letting a window's own count be read as the index publishing sparsely. It names no
+boundary date, because the readings this module kept are not the ones delivery
+stopped at, and it says a count *may* be short rather than that the counts *are* —
+a cursor only shortens a window whose candles exceed the page cap.
+
+Past `MAX_DVOL_STALENESS_DAYS` (14) the DVOL half is **withheld rather than
+caveated**. A level is only served while it is recent enough to describe the current
+regime, on the same judgement the withheld historical chain rests on: a caveat has to
+survive every downstream summarisation hop and the number it qualifies does not.
+Before this bound the only ceiling was however far the fetch happened to reach, so a
+feed stalled for weeks headlined a weeks-old print *and* ranked it, since the
+365-day window still held enough readings to compute a percentile.
+
+Chain rows are matched against the **currency that was requested**. The
+`get_book_summary_by_currency` payload names its underlying nowhere but the
+instrument names, so a misrouted or mis-served response would otherwise render one
+currency's forward and smile under another's heading, with nothing in the report
+contradicting it. The **Expiry used** line also states how many contracts Deribit
+lists for the selected expiry, so a thin smile can be told apart from a chain this
+module's own open-interest policy thinned.
+
+This vendor reads chains for BTC and ETH, so other recognized crypto risk
+assets get BTC's **DVOL level** as a market-wide crypto-vol proxy, on the same
+rule as ETF flows; the skew is withheld for them, because a risk reversal measures
+demand for downside in one specific underlying and does not transfer. No rendered
+line claims Deribit itself lists nothing for those symbols — nothing at runtime
+checks that.
+
+The DVOL history is dated and filtered to `curr_date`, and its latest reading is
+always printed with an as-of date, since that clause is the one downstream agents
+quote on its own. The chain endpoint takes no date, so it is **withheld when
+`curr_date` is earlier than today** and the report says so, because quoting the
+present chain on a past date is future information. A `curr_date` up to
+`MAX_FUTURE_DAYS` (1) later than the UTC clock — which callers deriving it from a
+local clock east of UTC produce for the first hours of each day — is served with a
+note explaining that the chain is not later than the analysis date: it either
+predates that date outright or, when the UTC clock reaches the date while the
+report is being built, falls inside it. The note says which. Further ahead than that
+is a bad argument rather than a timezone, so the chain is withheld again. The chain
+also re-reads the clock immediately before fetching, so a run whose DVOL half timed
+out across UTC midnight cannot serve the next day's book for `curr_date`.
+
+Text this vendor did not author — Deribit's error messages and both caller-supplied
+arguments, `asset` and `curr_date` — is flattened before it is interpolated:
+whitespace collapsed, mid-line markdown markers removed, length capped. The report is assembled into an LLM
+prompt, so a fragment carrying line breaks could otherwise open a forged heading or
+a second `_Reading:_` line above the real one, and the forgery is what a downstream
+summariser would quote. The flattening is applied where the fragment enters the message rather
+than only where the report renders it, because a failure in an optional category
+reaches the model through the router as `DATA_UNAVAILABLE: ... ({error})` too.
+
+This vendor **ships disabled** (`"options_data": "none"`). It needs no API key,
+so shipping it on would change a running deployment's analyst input surface — a
+new tool, a new prompt paragraph, a new report section — the moment the code
+lands, with no server-side action to date the change from. Set it to `"deribit"`
+as a deliberate cutover and record when:
+
+```python
+config["data_vendors"]["options_data"] = "deribit"
+```
+
 Any data category can be switched off by setting its vendor to `"none"`:
 
 ```python

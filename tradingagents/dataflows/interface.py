@@ -12,6 +12,7 @@ from .alpha_vantage import (
     get_stock as get_alpha_vantage_stock,
 )
 from .config import get_config
+from .deribit import get_options_market_data as get_deribit_options_market
 from .errors import (
     NoMarketDataError,
     VendorNotConfiguredError,
@@ -89,6 +90,12 @@ TOOLS_CATEGORIES = {
         "tools": [
             "get_fear_greed",
         ]
+    },
+    "options_data": {
+        "description": "Crypto options implied volatility: DVOL index and 25-delta skew",
+        "tools": [
+            "get_options_market",
+        ]
     }
 }
 
@@ -114,18 +121,21 @@ VENDOR_LIST = [
     "sosovalue",
     "farside",
     "alternative_me",
+    "deribit",
 ]
 
-# Optional enrichment categories. These add macro/event context to the news
-# analyst but are not core to a decision, so a vendor failure here degrades to a
-# sentinel instead of aborting the run (a bad LLM-supplied indicator, a missing
-# key, or a network blip should not crash an analysis over flavour data). Core
-# categories (prices, fundamentals, news) still raise so a broken primary is loud.
+# Optional enrichment categories. These add macro/event/positioning context to
+# the analysts but are not core to a decision, so a vendor failure here degrades
+# to a sentinel instead of aborting the run (a bad LLM-supplied indicator, a
+# missing key, or a network blip should not crash an analysis over flavour data).
+# Core categories (prices, fundamentals, news) still raise so a broken primary is
+# loud.
 OPTIONAL_CATEGORIES = {
     "macro_data",
     "prediction_markets",
     "crypto_etf_flows",
     "crypto_sentiment",
+    "options_data",
 }
 
 # Mapping of methods to their vendor-specific implementations
@@ -186,6 +196,10 @@ VENDOR_METHODS = {
     # crypto_sentiment
     "get_fear_greed": {
         "alternative_me": get_alternative_me_fear_greed,
+    },
+    # options_data
+    "get_options_market": {
+        "deribit": get_deribit_options_market,
     },
 }
 

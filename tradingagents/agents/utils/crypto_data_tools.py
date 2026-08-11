@@ -5,8 +5,9 @@ the analysts only when ``asset_type == "crypto"``. Each routes through
 ``route_to_vendor`` so the configured vendor and the optional-category
 degradation behaviour apply, exactly like the stock/macro tools.
 
-Later data-source PRs add their crypto tools here too (Deribit options, whale
-positioning).
+The flows/sentiment tools go to the news analyst; the options-volatility tool
+goes to the market analyst, where vol regime belongs alongside the technical
+indicators. A later data-source PR adds whale positioning here too.
 """
 
 from typing import Annotated
@@ -74,3 +75,57 @@ def get_fear_greed(
         str: A formatted markdown report of the Fear & Greed Index
     """
     return route_to_vendor("get_fear_greed", curr_date, look_back_days)
+
+
+@tool
+def get_options_market(
+    asset: Annotated[
+        str,
+        "Crypto asset whose options market to read: 'BTC' or 'ETH' (pair forms "
+        "like 'BTC-USD' are accepted). Another recognized crypto risk asset "
+        "(SOL, XRP, ...) has no chain read for it, so BTC's DVOL level alone is "
+        "returned as a market-wide proxy and the skew is withheld; a stablecoin "
+        "or unrecognized symbol returns a no-signal note.",
+    ],
+    curr_date: Annotated[str, "Current date in yyyy-mm-dd format; the end of the DVOL window"],
+) -> str:
+    """
+    Retrieve crypto options-implied volatility from Deribit: the DVOL index
+    (a 30-day forward implied-vol gauge) with its 30-day min/max range when that
+    window holds at least two readings, and its 365-day percentile when that
+    window holds enough readings for one, plus ATM (50-delta) implied vol, the
+    25-delta call/put vols and the 25-delta risk reversal (RR25). Those chain
+    figures are read for one expiry inside a bounded band around 30 days —
+    normally the eligible expiry nearest 30 days, or the next eligible one when
+    that cannot be used, which the report labels and whose tenor it always prints
+    (RR25 is not comparable across tenors, so an expiry outside the band yields no
+    skew at all rather than a figure from an unrelated tenor). RR25 is the
+    25-delta call IV minus the 25-delta put IV, so a negative value means the put
+    wing carries the higher implied vol. The DVOL history is filtered to
+    curr_date; the options chain has no historical endpoint, so its figures are
+    withheld when curr_date is EARLIER than today, and also when curr_date runs
+    more than a day AHEAD of the UTC clock (within a day is served with a note,
+    since callers east of UTC routinely run a few hours ahead). The chain is
+    likewise withheld for an asset this vendor reads no chain for, which receives
+    BTC's DVOL level as a market-wide proxy but not BTC's skew. The report's
+    Forward is Deribit's forward for the selected expiry, not spot, and is
+    expected to differ from a spot price level. Whenever no risk reversal is in
+    the report — the chain withheld, yielding no usable surface, or not supplying
+    both wings — the report's closing one-line summary says so and why rather than
+    falling silent, so the absence survives a downstream summary; that sentence
+    also carries the DVOL level itself (or names that half's absence) and any
+    fallback expiry or missing ATM point. Where a risk reversal IS printed it
+    additionally names each 25-delta wing whose bracket was unusually wide, that
+    being a qualification of a figure the sentence itself states. Uses the
+    configured options_data vendor.
+
+    Args:
+        asset (str): 'BTC' or 'ETH' (recognized risk coins get BTC as a proxy)
+        curr_date (str): Current date in yyyy-mm-dd format
+
+    Returns:
+        str: A markdown report of implied volatility and skew — or, for a symbol
+            with no crypto-vol signal to serve (a stablecoin, an unrecognized
+            ticker), a plain no-signal sentence carrying no figures at all.
+    """
+    return route_to_vendor("get_options_market", asset, curr_date)

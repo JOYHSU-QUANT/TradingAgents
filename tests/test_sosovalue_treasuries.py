@@ -618,9 +618,11 @@ class TestRender:
             }
         )
         report = _render(snapshot)
-        assert (
-            "| 2026-06-15 | X | -20 (from holdings change since 2026-05-20) | -0.5 | — |" in report
-        )
+        # The Cost cell goes blank too (user decision): the filed cost belongs
+        # to one filing while the BTC figure spans everything since the prior
+        # disclosure, so their signs are independent — a "-20 BTC | +0.5"
+        # disposal row reads as a purchase of that size.
+        assert "| 2026-06-15 | X | -20 (from holdings change since 2026-05-20) | — | — |" in report
 
     def test_a_sub_coin_disposal_keeps_its_sign(self):
         snapshot = _snapshot(
@@ -807,7 +809,12 @@ class TestRender:
             }
         )
         report = _render(snapshot)
-        assert "derived from a holdings change" not in report
+        # Assert on the mix NOTE, not the bare phrase: the column legend now
+        # explains what a derived row is on every report, so a substring test
+        # for the phrase alone would pass or fail on the legend's wording
+        # instead of on whether any derived row was actually counted.
+        assert "rows are derived from a holdings change rather than a filed" not in report
+        assert "row is derived from a holdings change rather than a filed" not in report
 
     def test_activity_table_is_capped_with_a_note(self):
         rows = [
@@ -861,3 +868,109 @@ class TestRouterIntegration:
         self._with_vendor("none")
         report = interface.route_to_vendor("get_btc_treasuries", "BTC", "2026-08-11", None)
         assert "disabled by configuration" in report
+
+
+# --------------------------------------------------------------------------- #
+# review-loop round 3: same-day ordering, injection surface, headline honesty
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+class TestSameDayFilingOrder:
+    def test_the_latest_of_two_same_day_filings_is_the_one_read(self):
+        # The API serves newest-first and Python's sort is stable, so sorting
+        # by date alone would leave the SUPERSEDED same-day row last — and
+        # every "latest disclosure" consumer reads rows[-1].
+        data = [
+            {"date": "2026-08-10", "btc_holding": "840447"},  # the revision
+            {"date": "2026-08-10", "btc_holding": "838757"},  # what it replaced
+            {"date": "2026-07-31", "btc_holding": "838757"},
+        ]
+        rows = sosovalue_treasuries._parse_purchase_rows(data, "MSTR")
+        assert [r["btc_holding"] for r in rows] == [838757.0, 838757.0, 840447.0]
+        assert rows[-1]["btc_holding"] == 840447.0
+
+    def test_the_combined_total_uses_the_revised_same_day_figure(self):
+        snapshot = _snapshot(
+            companies={
+                "X": {
+                    "name": "",
+                    "rows": [_prow("2026-08-10", 838757.0), _prow("2026-08-10", 840447.0)],
+                }
+            }
+        )
+        report = _render(snapshot)
+        assert "840,447 BTC" in report
+
+
+@pytest.mark.unit
+class TestUntrustedTextCannotForgeStructure:
+    def test_markdown_in_a_company_name_is_flattened(self):
+        snapshot = _snapshot(
+            companies={
+                "AAA": {
+                    "name": "Acme_ Corp** (STRONG BUY)",
+                    "rows": [_prow("2026-08-01", 1000.0, 10.0)],
+                }
+            }
+        )
+        report = _render(snapshot)
+        line = next(ln for ln in report.splitlines() if "Top holders" in ln)
+        assert "**" not in line.replace("**Top holders:**", "")
+        assert "Acme Corp (STRONG BUY)" in report
+
+    def test_a_negative_holding_is_refused_rather_than_rendered(self):
+        # btc_holding is a stock quantity; the sign _AMOUNT_RE allows exists
+        # for btc_acq. A negative one would push the concentration share past
+        # 100% and print a negative BTC balance.
+        with pytest.raises(sosovalue_common.SoSoValueError, match="non-negative btc_holding"):
+            sosovalue_treasuries._parse_purchase_rows(
+                [{"date": "2026-08-10", "btc_holding": "-500"}], "AAA"
+            )
+
+
+@pytest.mark.unit
+class TestHeadlineHonesty:
+    def _spread(self, shares):
+        return _snapshot(
+            companies={
+                f"C{i}": {"name": "", "rows": [_prow("2026-08-01", v)]}
+                for i, v in enumerate(shares)
+            }
+        )
+
+    def test_a_minority_leader_makes_no_dominance_claim(self):
+        report = _render(self._spread([150.0, 140.0, 140.0, 140.0, 140.0, 140.0, 140.0]))
+        assert "Concentration:" in report
+        assert "moves mostly with what this one company does" not in report
+
+    def test_a_majority_leader_does_make_the_claim(self):
+        report = _render(self._spread([900.0, 50.0, 50.0]))
+        assert "moves mostly with what this one company does" in report
+
+    def test_a_share_just_under_100_does_not_render_as_100(self):
+        report = _render(self._spread([99_900.0, 100.0]))
+        assert "= 100% of the" not in report
+        assert "99.9%" in report
+
+    def test_every_contributor_gets_an_as_of_date(self):
+        snapshot = _snapshot(
+            companies={
+                f"C{i}": {"name": "", "rows": [_prow(f"2026-0{i + 1}-01", 100.0 * (9 - i))]}
+                for i in range(8)
+            }
+        )
+        report = _render(snapshot)
+        assert "As-of date of every company in that total" in report
+        # The 6th-8th holders fall outside the top-5 line but still carry the
+        # full weight of their stale filing in the combined total.
+        for i in range(8):
+            assert f"C{i} 2026-0{i + 1}-01" in report
+        assert "No filing-age cut is applied" in report
+
+    def test_a_zero_filed_cost_yields_no_implied_price(self):
+        # Plausible for self-mined coins; "0" would read as a real US$/BTC.
+        snapshot = _snapshot(
+            companies={"X": {"name": "", "rows": [_prow("2026-08-01", 1000.0, 10.0, 0.0)]}}
+        )
+        report = _render(snapshot)
+        row = next(ln for ln in report.splitlines() if ln.startswith("| 2026-08-01 |"))
+        assert row.endswith("| — |")

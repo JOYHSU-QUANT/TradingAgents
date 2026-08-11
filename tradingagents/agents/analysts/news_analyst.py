@@ -37,10 +37,11 @@ def create_news_analyst(llm):
             get_prediction_markets,
         ]
 
-        # Crypto-only flows/sentiment tools. Bound only for crypto assets so the
-        # stock path's tools and prompt are unchanged, and only when the category
-        # is actually enabled — binding a tool whose category is switched off
-        # would just spend a tool call to receive the disabled sentinel.
+        # Crypto-only flows/sentiment/calendar/treasury tools. Bound only for
+        # crypto assets so the stock path's tools and prompt are unchanged, and
+        # only when the category is actually enabled — binding a tool whose
+        # category is switched off would just spend a tool call to receive the
+        # disabled sentinel.
         crypto_tools_message = ""
         if asset_type == "crypto":
             crypto_tools = []

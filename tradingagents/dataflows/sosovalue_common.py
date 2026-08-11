@@ -49,6 +49,47 @@ REQUEST_TIMEOUT = 30
 # in the report text.
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}\Z")
 
+# Markdown control characters that let a server-controlled fragment forge
+# report structure. The vendor modules render into markdown tables that reach
+# an LLM verbatim, so a value carrying "|" splits its cell into new columns —
+# a macro event named "Widget Index | 9.9% | 9.9%" lands fabricated figures in
+# the Forecast and Previous positions of its own row — and "#"/"*"/"`" open
+# headings, emphasis and code spans mid-report. Same remedy and rationale as
+# the Deribit vendor: neutralize where the fragment ENTERS the message rather
+# than at the parse boundary, because a raised error reaches the prompt too
+# (``route_to_vendor`` hands an optional category's failure to the model as
+# ``DATA_UNAVAILABLE: ... ({error})``), while the stored and compared value
+# must stay byte-exact — the macro history path sends event names back to the
+# API, so flattening them at parse time would break the request path.
+#
+# Translated to a SPACE, not deleted: deletion joins the fragments either side
+# and can fuse two tokens into a third that reads as legitimate.
+_MARKDOWN_CONTROL = str.maketrans(dict.fromkeys("#*`|", " "))
+
+# "_" is handled separately because it also occurs inside ordinary words (an
+# event name or a company name may legitimately carry one). Only underscores
+# in EMPHASIS position — at a word boundary, where the reports' own
+# "_caveat._" lines sit — are removed; one between two alphanumerics stays.
+_EMPHASIS_UNDERSCORE = re.compile(r"(?<![0-9A-Za-z])_|_(?![0-9A-Za-z])")
+
+
+def _sanitize(text: object, *, limit: int | None = None) -> str:
+    """Flatten a fragment this vendor did not author so it cannot forge structure.
+
+    The strip runs FIRST and whitespace is collapsed after it, so neither the
+    spaces the translation introduces nor the ones already in the fragment can
+    survive as a run or rebuild a line break inside a table cell. ``limit``
+    caps the result and is passed only where the fragment is ISOLATED (an
+    echoed raw row in a raised message), never when flattening a whole
+    exception message — most of that string is the module's own diagnostic,
+    and capping there would truncate the sentence that carries the meaning.
+    """
+    stripped = _EMPHASIS_UNDERSCORE.sub("", str(text).translate(_MARKDOWN_CONTROL))
+    stripped = " ".join(stripped.split())
+    if limit is not None and len(stripped) > limit:
+        stripped = stripped[:limit].rstrip() + "..."
+    return stripped
+
 
 class SoSoValueError(VendorError):
     """SoSoValue was unreachable, returned an error, or its response shape changed.
@@ -124,8 +165,11 @@ def _error_message(body: object, api_key: str) -> str:
         text = body.get("message") or body.get("msg") or body
     # Redact BEFORE truncating (cutting first could slice the key across the
     # boundary and leave its head visible), and truncate always — a structured
-    # message is exactly as server-controlled as the raw-body fallback.
-    return str(text).replace(api_key, "[redacted]")[:300]
+    # message is exactly as server-controlled as the raw-body fallback. The
+    # flattening matters as much as the truncation: this text rides a raised
+    # message into the router's LLM-visible ``DATA_UNAVAILABLE: ... ({error})``
+    # string, where a "|" or "##" could forge report structure.
+    return _sanitize(str(text).replace(api_key, "[redacted]"), limit=300)
 
 
 def _request(path: str, params: dict) -> list:
@@ -162,12 +206,16 @@ def _request(path: str, params: dict) -> list:
     # 400301), so judge the body, not just the status.
     if response.status_code != 200 or not isinstance(body, dict) or body.get("code") != 0:
         # `code` is only known to be != 0 — an arbitrary JSON value, not
-        # necessarily a small int — so it gets the same redact-then-truncate
-        # treatment as the message, at a display-width cap.
+        # necessarily a small int — so it gets the same redact-then-FLATTEN-
+        # then-truncate treatment as the message, at a display-width cap. It
+        # sits in the same sentence as the message and travels the same way
+        # (raised -> logs -> the router's LLM-visible DATA_UNAVAILABLE text),
+        # so sanitizing one and slicing the other would leave the pair only
+        # half closed: 40 characters is ample for "## Reading: | 9.9 |".
         code = body.get("code") if isinstance(body, dict) else "no-json"
         raise SoSoValueError(
             f"SoSoValue request to {path} failed (HTTP {response.status_code}, "
-            f"code {str(code).replace(api_key, '[redacted]')[:40]}): "
+            f"code {_sanitize(str(code).replace(api_key, '[redacted]'), limit=40)}): "
             f"{_error_message(body, api_key)}"
         )
     data = body.get("data")

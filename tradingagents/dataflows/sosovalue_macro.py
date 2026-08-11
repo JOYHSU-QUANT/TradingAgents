@@ -70,9 +70,13 @@ which the report flags whenever such a row is shown.
 
 Caching mirrors the family pattern: one rolling snapshot file, refreshed past
 ``CACHE_TTL_HOURS`` (or ``INCOMPLETE_CACHE_TTL_HOURS`` while any tracked
-history is missing), stale-served on a fetch failure up to ``MAX_STALE_DAYS``
-with a disclosed age, never written on failure, and discarded when read-side
-validation fails.
+history FAILED — an unknown one is not retried), stale-served on a fetch
+failure up to ``MAX_STALE_DAYS`` with a disclosed age, never written on
+failure, and discarded when read-side validation fails. The stale cap is the
+family's 14 days, but this feed's forward half is only ``AHEAD_DAYS`` wide, so
+a stale serve loses one day of schedule per day of age — the report states how
+much of the scheduled window the snapshot's age has eaten rather than letting
+an age-shortened schedule read as a quiet fortnight.
 """
 
 import json
@@ -98,7 +102,9 @@ from .sosovalue_common import (
     _is_iso_date,
     _iso_now,
     _plural,
+    _plural_days,
     _request,
+    _sanitize,
     get_api_key,
 )
 
@@ -151,13 +157,31 @@ HISTORY_LIMIT = 100
 
 # Soft bound on the calendar: the live ~2-week window holds a handful of rows
 # (6 when captured). A provider that widens its published horizon is benign
-# evolution, not a contract break, so a longer calendar keeps its most recent
-# day-rows (the report only reads forward from curr_date) and discloses the
-# drop — failing the vendor instead would serve stale until the 14-day cap
-# and then kill the category outright. Only a payload large enough to be
-# pathological rather than merely wider trips the hard bound.
+# evolution, not a contract break, so a longer calendar keeps the EARLIEST
+# day-rows and discloses the drop — failing the vendor instead would serve
+# stale until the 14-day cap and then kill the category outright. Only a
+# payload large enough to be pathological rather than merely wider trips the
+# hard bound.
+#
+# Earliest, not newest: the provider's calendar is anchored to the present
+# (it began one day back when captured), so the rows this report renders —
+# curr_date to curr_date + AHEAD_DAYS for a live caller — sit at the HEAD of
+# the ascending list. Keeping the tail would discard precisely the fortnight
+# the scheduled section reads and leave the empty-schedule branch calling
+# that absence legitimate.
 MAX_CALENDAR_ROWS = 40
 MAX_CALENDAR_ROWS_HARD = 400
+
+# The other axis of the same payload. MAX_CALENDAR_ROWS bounds day-rows; the
+# NAMES inside one day-row were unbounded, so a provider broadening
+# /macro/events from this US-only shape to a global calendar would parse
+# cleanly, be written to the snapshot file at unbounded size, and be
+# re-validated in full on every subsequent cache read — the render cap bounds
+# the prompt, not the cache. Hard, not soft: like MAX_CALENDAR_ROWS_HARD this
+# only trips on a payload that is pathological rather than merely wider (the
+# live calendar carries a handful of names per day), and failing the vendor
+# routes the call through the stale fallback instead of persisting the bloat.
+MAX_CALENDAR_EVENTS_HARD = 2000
 
 # Server-controlled strings are LLM-visible report text, so both get a
 # printable-ASCII charset check and a length bound at the parse boundary
@@ -168,10 +192,19 @@ MAX_VALUE_CHARS = 24
 # Row cap for the rendered released-events table, mirroring the family MAX_ROWS.
 MAX_ROWS = 40
 
-# Cache lifetimes, mirroring the ETF module: 6h TTL re-pulls a few times a
-# day (event figures change on release days only), the short TTL re-tries a
-# partially-failed history sweep, and stale serves are capped and disclosed.
-CACHE_TTL_HOURS = 6
+# Cache lifetimes: the TTL re-pulls a few times a day (event figures change on
+# release days only), the short TTL re-tries a partially-failed history sweep,
+# and stale serves are capped and disclosed.
+#
+# 5h, deliberately NOT the ETF module's 6h: the three SoSoValue modules share
+# one 20 req/min key, and this module's refresh is 1 + len(TRACKED_EVENTS)
+# requests while the ETF module's is ~15. Equal TTLs make the two caches
+# expire together, so a single analyst turn that touches both fires ~25
+# requests inside one minute and whichever runs second takes a 429 — the
+# category that ends up degraded rotating with tool-call order. An offset TTL
+# de-phases the two refreshes for the price of one constant. Do not "tidy"
+# this back to 6 to match the family.
+CACHE_TTL_HOURS = 5
 INCOMPLETE_CACHE_TTL_HOURS = 1
 MAX_STALE_DAYS = 14
 
@@ -228,8 +261,9 @@ def _parse_calendar(data: list) -> tuple[list[dict], int, int, int]:
     provider mislabelling two days as one — benign enough not to fail the
     vendor, not benign enough to apply silently; the per-date de-dupe still
     keeps an event from double-listing), and a calendar longer than
-    ``MAX_CALENDAR_ROWS`` keeps its most recent day-rows with ``truncated``
-    counting the older ones dropped.
+    ``MAX_CALENDAR_ROWS`` keeps its EARLIEST day-rows — the present-anchored
+    span the report actually renders — with ``truncated`` counting the
+    furthest-out ones dropped.
     """
     if not data:
         raise SoSoValueError("SoSoValue returned an empty macro calendar")
@@ -247,7 +281,7 @@ def _parse_calendar(data: list) -> tuple[list[dict], int, int, int]:
             or not _is_iso_date(raw.get("date"))
             or not isinstance(raw.get("events"), list)
         ):
-            raise SoSoValueError(f"Malformed macro calendar row {str(raw)[:200]!r}")
+            raise SoSoValueError(f"Malformed macro calendar row {_sanitize(repr(raw), limit=200)}")
         if raw["date"] in by_date:
             duplicated += 1
             logger.warning(
@@ -269,16 +303,24 @@ def _parse_calendar(data: list) -> tuple[list[dict], int, int, int]:
     rows = [{"date": date, "events": by_date[date]} for date in sorted(by_date)]
     truncated = max(0, len(rows) - MAX_CALENDAR_ROWS)
     if truncated:
-        # Keep the TAIL: the scheduled section reads forward from curr_date,
-        # so the newest day-rows are the ones it needs; dropping the oldest
-        # costs nothing the report renders.
-        rows = rows[-MAX_CALENDAR_ROWS:]
+        # Keep the HEAD: the provider's calendar is anchored to the present, so
+        # the span the scheduled section renders (curr_date forward, for a live
+        # caller) sits at the start of the ascending list. Dropping the tail
+        # costs only rows further out than this report ever reaches.
+        rows = rows[:MAX_CALENDAR_ROWS]
         logger.warning(
             "SoSoValue macro calendar returned %d day-rows (> %d); keeping the "
-            "most recent %d and disclosing the drop",
+            "%d earliest and disclosing the drop",
             truncated + MAX_CALENDAR_ROWS,
             MAX_CALENDAR_ROWS,
             MAX_CALENDAR_ROWS,
+        )
+    total_events = sum(len(r["events"]) for r in rows)
+    if total_events > MAX_CALENDAR_EVENTS_HARD:
+        raise SoSoValueError(
+            f"SoSoValue macro calendar carries {total_events} event names across its "
+            f"{len(rows)} kept day-rows (> {MAX_CALENDAR_EVENTS_HARD}); the API "
+            f"contract may have changed"
         )
     return rows, unusable, truncated, duplicated
 
@@ -307,7 +349,9 @@ def _parse_event_rows(data: list, name: str) -> list[dict]:
             and _is_iso_date(raw.get("date"))
             and all(_is_valid_value(raw.get(k)) for k in ("actual", "forecast", "previous"))
         ):
-            raise SoSoValueError(f"Malformed {name!r} history row {str(raw)[:200]!r}")
+            raise SoSoValueError(
+                f"Malformed {name!r} history row {_sanitize(repr(raw), limit=200)}"
+            )
         rows.append(
             {
                 "date": raw["date"],
@@ -325,7 +369,7 @@ class _MacroSnapshot(NamedTuple):
 
     ``calendar`` is the present-anchored ~2-week schedule (ascending unique
     dates, validated names only, with ``calendar_unusable`` counting dropped
-    names, ``calendar_truncated`` the older day-rows dropped when the provider
+    names, ``calendar_truncated`` the furthest-out day-rows dropped when the provider
     published more than ``MAX_CALENDAR_ROWS``, and ``calendar_duplicated`` the
     repeated day-rows merged into their date). ``histories`` maps
     each successfully-fetched tracked event to its
@@ -411,6 +455,11 @@ def _read_cache(path: str) -> dict | None:
     dates = [r["date"] for r in calendar]
     if any(a >= b for a, b in zip(dates, dates[1:], strict=False)):
         return _reject("'calendar' dates are not strictly ascending")
+    # Mirror the parse-side name bound exactly as the day-row cap is mirrored:
+    # a file written before this bound existed (or by hand) must cost one
+    # refetch rather than be re-validated in full on every read forever.
+    if sum(len(r["events"]) for r in calendar) > MAX_CALENDAR_EVENTS_HARD:
+        return _reject(f"'calendar' carries more than {MAX_CALENDAR_EVENTS_HARD} event names")
     for key in ("calendar_unusable", "calendar_truncated", "calendar_duplicated"):
         count = payload.get(key)
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
@@ -531,11 +580,12 @@ def _fetch_all() -> dict:
             skipped = [name, *remaining]
             events_failed.extend(skipped)
             logger.warning(
-                "SoSoValue macro: rate limit hit (%s); skipping the remaining "
-                "%d event histories (disclosed as incomplete, retried on the "
-                "short TTL)",
+                "SoSoValue macro: rate limit hit on %r (%s); that request and "
+                "the %d histories not yet attempted all go to events_failed "
+                "(disclosed as incomplete, retried on the short TTL)",
+                name,
                 e,
-                len(skipped),
+                len(skipped) - 1,
             )
             break
         except requests.RequestException:
@@ -570,10 +620,16 @@ def _fetch_all() -> dict:
                 f"SoSoValue macro: rate limited before any tracked event "
                 f"history could be fetched: {rate_limited}"
             ) from rate_limited
+        # Say which way it went, like the treasuries twin: "could not be
+        # fetched" would misdescribe a mass upstream rename, where all nine
+        # requests SUCCEEDED and returned empty lists — sending whoever reads
+        # this (or the model, once the stale cap is passed and it rides a
+        # DATA_UNAVAILABLE line) after a transport problem that never happened.
         raise SoSoValueError(
-            f"SoSoValue macro: none of the {len(TRACKED_EVENTS)} tracked event "
-            f"histories could be fetched; a schedule without figures is not a "
-            f"served signal"
+            f"SoSoValue macro: no usable history for any of the "
+            f"{len(TRACKED_EVENTS)} tracked events ({len(events_failed)} failed, "
+            f"{len(events_unknown)} unknown to the provider); a schedule without "
+            f"figures is not a served signal"
         )
     return {
         "calendar": calendar,
@@ -604,8 +660,9 @@ def _load_snapshot() -> _MacroSnapshot:
     """Return the macro snapshot, via the family's cache/stale discipline.
 
     Key first (the emergency-disable flip must not wait out a fresh cache);
-    a cache younger than its TTL is served as-is (missing event histories
-    earn the shorter ``INCOMPLETE_CACHE_TTL_HOURS``); otherwise fetch and
+    a cache younger than its TTL is served as-is (a *failed* history earns the
+    shorter ``INCOMPLETE_CACHE_TTL_HOURS`` — an unknown one cannot be healed by
+    retrying, so it does not); otherwise fetch and
     overwrite the rolling file; on a fetch failure fall back to the cached
     snapshot (``stale=True``) up to ``MAX_STALE_DAYS``. A failed fetch is
     never written to cache, and ``SoSoValueNotConfiguredError`` is never
@@ -641,7 +698,7 @@ def _load_snapshot() -> _MacroSnapshot:
                 )
                 raise wrap_cls(
                     f"SoSoValue macro fetch failed and the newest cache {stale_desc} "
-                    f"(> {MAX_STALE_DAYS}-day cap): {e}"
+                    f"(> {MAX_STALE_DAYS}-day cap): {_sanitize(e)}"
                 ) from e
             age_str = _humanize_age(fetched_at)
             if isinstance(e, SoSoValueError):
@@ -659,7 +716,12 @@ def _load_snapshot() -> _MacroSnapshot:
                     age_str,
                 )
             return _snapshot_from(cached, fetched_at, stale=True)
-        raise wrap_cls(f"SoSoValue macro unavailable and no usable cache exists: {e}") from e
+        # Not capped, only flattened: most of this string is the module's own
+        # diagnostic, and a foreign requests.RequestException can carry a
+        # server-influenced URL into the same LLM-visible line.
+        raise wrap_cls(
+            f"SoSoValue macro unavailable and no usable cache exists: {_sanitize(e)}"
+        ) from e
 
     fetched_at = _iso_now()
     payload["fetched_at"] = fetched_at
@@ -750,9 +812,10 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     covered: dict[str, list[datetime]] = {}
     # Rows on (or one day before) curr_date also count as covered without
     # being scheduled: a print released today renders in the released table,
-    # and its calendar entry — which can sit a day later than the history row
-    # (the live-observed skew) — would otherwise re-render as a phantom
-    # name-only scheduled row for the same print.
+    # and its calendar entry — which can sit a day later than the history row,
+    # or a day earlier, the live-observed skew running both ways — would
+    # otherwise re-render as a phantom name-only scheduled row for the same
+    # print now that the calendar sweep starts at curr_date inclusive.
     cover_floor = (curr_dt - timedelta(days=1)).strftime("%Y-%m-%d")
     for name in TRACKED_EVENTS:
         for row in snapshot.histories.get(name, ()):
@@ -771,8 +834,19 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     # 14-day window, and a name-keyed dedupe would silently swallow every
     # occurrence after the first, under-stating the very event risk this
     # report exists to surface.
+    #
+    # From curr_date INCLUSIVE, not the day after (user decision): an event
+    # scheduled for today is the most decision-relevant row this report can
+    # carry, and it reaches the reader through no other path — the released
+    # table is built from tracked histories alone, so a calendar-only name
+    # dated today used to vanish from the report entirely while the intraday
+    # caveat still promised "a figure shown below as not yet released". This
+    # inclusive start is also what makes ``cover_floor``'s day of slack bite:
+    # a tracked print whose history row sits on curr_date - 1 while its
+    # calendar entry sits on curr_date is now one match away from being
+    # double-listed.
     for cal in snapshot.calendar:
-        if curr_date < cal["date"] <= ahead_end:
+        if curr_date <= cal["date"] <= ahead_end:
             cal_dt = datetime.strptime(cal["date"], "%Y-%m-%d")
             for name in cal["events"]:
                 shown = covered.get(name, ())
@@ -796,6 +870,29 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     same_day = any(d == curr_date for d, _n, _row in released) or any(
         cal["date"] == curr_date and cal["events"] for cal in snapshot.calendar
     )
+    # Served-history-depth honesty, the counterpart of the treasuries module's
+    # ``shallow`` note and the ETF module's window clamp: the provider serves
+    # at most HISTORY_LIMIT rows per event, so 100 rows reach 8+ years for a
+    # monthly event but only ~2 for a weekly one. A window that outruns an
+    # event's served depth loses its prints with nothing else in the report
+    # saying so — events_failed/events_unknown are both empty in that case, so
+    # the coverage-gap note cannot cover it either.
+    shallow = sorted(
+        name for name, rows in snapshot.histories.items() if rows[0]["date"] > window_start
+    )
+    # One union for both empty-section notes: _coverage_gap_note centralizes
+    # the sentence precisely so a new failure bucket cannot be wired into one
+    # branch and forgotten in the other — building the input twice would hand
+    # that drift straight back.
+    missing_events = set(snapshot.events_failed) | set(snapshot.events_unknown)
+    shallow_note = (
+        f"\n_The provider's served history for {', '.join(shallow)} starts inside this "
+        f"window (at most {HISTORY_LIMIT} rows per event), so earlier prints exist that "
+        f"this snapshot cannot show; the window is short for "
+        f"{_plural(len(shallow), 'that event', 'those events')}, not empty._\n"
+        if shallow
+        else ""
+    )
 
     # ---- header ------------------------------------------------------------
     header_lines = ["## US Economic Calendar — scheduled events & releases (SoSoValue)"]
@@ -807,6 +904,25 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
             f"API contract break); showing the last cached snapshot (fetched "
             f"{snapshot.fetched_at}). Scheduled dates and figures may be outdated._"
         )
+        # A stale macro snapshot loses forward reach one day per day: the
+        # provider's calendar is anchored to when it was FETCHED, so the
+        # scheduled section narrows as the snapshot ages and is empty by
+        # construction near the stale cap, while the report still ships under
+        # a calendar's title. The family's 14-day cap is kept (user decision);
+        # what the age costs is stated instead of left for the reader to infer.
+        reach = (datetime.strptime(snapshot.calendar[-1]["date"], "%Y-%m-%d") - curr_dt).days
+        if reach < AHEAD_DAYS:
+            extent = (
+                "ends on or before this date, so it can contribute no forward schedule at all"
+                if reach <= 0
+                else f"reaches only {reach} {_plural_days(reach)} past it"
+            )
+            header_lines.append(
+                f"_That age also shortens the schedule below: this snapshot's calendar "
+                f"{extent}, against the {AHEAD_DAYS}-day window the scheduled section "
+                f"otherwise covers, so read a short or empty schedule as the snapshot's "
+                f"age rather than a quiet fortnight._"
+            )
 
     if snapshot.events_failed:
         # Count the events this sentence actually names: ``histories`` is also
@@ -841,8 +957,9 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         n = snapshot.calendar_truncated
         header_lines.append(
             f"_The provider published {n} more calendar day-{_plural(n, 'row', 'rows')} "
-            f"than this client keeps; the oldest {_plural(n, 'was', 'were')} dropped, so "
-            f"the calendar span below starts later than the provider's own._"
+            f"than this client keeps; the furthest-out {_plural(n, 'was', 'were')} "
+            f"dropped, so the calendar span below ends earlier than the provider's own "
+            f"and any event beyond it is missing rather than absent._"
         )
 
     if snapshot.calendar_duplicated:
@@ -876,11 +993,14 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     )
     header_lines.append(
         f"_Units are the provider's own and differ by row: percent readings carry "
-        f"'%'{thousands_clause}. Surprise is actual minus forecast in that same row's "
-        f"unit ('pp' = percentage points, a bare number = the same units as the row); "
-        f"its sign says only whether the print beat or missed consensus, NOT whether "
-        f"that is bullish — a hot inflation print and a hot payrolls print push risk "
-        f"appetite in opposite directions._"
+        f"'%'{thousands_clause}, and a K/M/B/T suffix is the provider's own magnitude "
+        f"letter. Surprise is actual minus forecast in that same row's unit ('pp' = "
+        f"percentage points, a bare number or magnitude letter = the same units as the "
+        f"row); 'n/a' means the two sides could not be subtracted (one did not parse, or "
+        f"they carry different units) and '—' that nothing is published yet, neither "
+        f"means a surprise of zero. The sign says only whether the print beat or missed "
+        f"consensus, NOT whether that is bullish — a hot inflation print and a hot "
+        f"payrolls print push risk appetite in opposite directions._"
     )
     if same_day:
         header_lines.append(
@@ -905,15 +1025,33 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
 
     # ---- scheduled table ----------------------------------------------------
     if scheduled:
+        # Keep the NEAREST rows. Nothing bounds names-per-day at the parse
+        # boundary (MAX_CALENDAR_ROWS bounds day-rows, not the events inside
+        # one), so a provider that broadened /macro/events from this US-only
+        # shape to a global calendar would otherwise pour every name of every
+        # day straight into the prompt; and a fortnight of event risk is read
+        # front to back, so the near rows are the ones worth keeping.
+        shown_scheduled = scheduled[:MAX_ROWS]
+        sched_note = (
+            f"\n_(showing the {MAX_ROWS} nearest of {len(scheduled)} scheduled rows "
+            f"in the window)_\n"
+            if len(scheduled) > MAX_ROWS
+            else ""
+        )
         lines = ["\n| Date | In | Event | Forecast | Previous |", "| --- | --- | --- | --- | --- |"]
-        for date, name, forecast, previous in scheduled:
+        for date, name, forecast, previous in shown_scheduled:
             days = (datetime.strptime(date, "%Y-%m-%d") - curr_dt).days
-            lines.append(f"| {date} | {days}d | {name} | {forecast} | {previous} |")
+            when = "today" if days == 0 else f"{days}d"
+            lines.append(
+                f"| {date} | {when} | {_sanitize(name)} | {_sanitize(forecast)} "
+                f"| {_sanitize(previous)} |"
+            )
         scheduled_block = (
-            f"\n**Scheduled (next {AHEAD_DAYS} days):** figures are consensus "
-            f"forecast vs the prior print; 'In' counts calendar days from "
-            f"{curr_date}; a — row is on the provider's calendar but carries no "
-            f"tracked figures\n" + "\n".join(lines) + "\n"
+            f"\n**Scheduled ({curr_date} and the next {AHEAD_DAYS} days):** figures are "
+            f"consensus forecast vs the prior print; 'In' counts calendar days from "
+            f"{curr_date}; a row showing — for both figures is either a calendar entry "
+            f"outside the tracked list or a tracked print whose figures the provider "
+            f"has not filed\n" + "\n".join(lines) + "\n" + sched_note
         )
     else:
         # Why the schedule is empty is NOT always benign: the provider's
@@ -922,21 +1060,44 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # before curr_date means it stopped publishing forward — a coverage
         # failure that must not be narrated as a quiet fortnight.
         cal_end = snapshot.calendar[-1]["date"]
-        if cal_end <= curr_date:
+        # Staleness and truncation are tested FIRST, ahead of the calendar's
+        # own end date: both mean this snapshot is not the calendar the
+        # provider published for this date, so neither the provider-blaming
+        # branch nor the benign one may speak. A stale calendar ending before
+        # curr_date has aged out of its forward reach — saying the provider
+        # "is publishing no forward schedule" would blame the source for the
+        # snapshot's age.
+        if snapshot.stale or snapshot.calendar_truncated:
+            why = (
+                f"The provider's calendar in this snapshot ends {cal_end}, but the "
+                f"snapshot does not hold a complete forward view of what the provider "
+                f"publishes for this date (see the caveats above), so read the empty "
+                f"schedule as an artefact of the snapshot rather than a quiet window."
+            )
+        elif cal_end <= curr_date:
             why = (
                 f"The provider's calendar ends {cal_end}, on or before this date, so it "
                 f"is publishing no forward schedule in this snapshot — read the empty "
                 f"schedule as missing coverage, not as a fortnight without events."
             )
         else:
+            # Not "a date far from the fetch date": that is only one of the two
+            # ways this branch is reached, and it is false whenever curr_date
+            # IS the fetch date and the calendar's day-rows simply carry no
+            # names in the window.
             why = (
-                f"The provider's calendar reaches {cal_end} and is anchored to the "
-                f"present, so a date far from when this snapshot was fetched "
-                f"legitimately shows none."
+                f"The provider's calendar reaches {cal_end} and is anchored to when this "
+                f"snapshot was fetched, so this is either a window that genuinely carries "
+                f"no scheduled entries, or a {curr_date} sitting far from that fetch date."
             )
+        # The window can also be empty because tracked histories are missing —
+        # for a historical curr_date the calendar cannot reach back, so the
+        # scheduled rows can ONLY come from histories. Same disclosure the
+        # released branch already makes.
+        gap = _coverage_gap_note(missing_events, "unavailable", "nothing is scheduled")
         scheduled_block = (
-            f"\n**Scheduled (next {AHEAD_DAYS} days):** none visible after {curr_date} "
-            f"through {ahead_end}. {why}\n"
+            f"\n**Scheduled ({curr_date} and the next {AHEAD_DAYS} days):** none visible "
+            f"from {curr_date} through {ahead_end}. {why}" + (f" {gap}" if gap else "") + "\n"
         )
 
     # ---- released table -----------------------------------------------------
@@ -973,8 +1134,9 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
                 actual = "not yet released"
                 surprise = "—"
             lines.append(
-                f"| {date} | {name} | {actual} | {row['forecast'] or '—'} | "
-                f"{surprise} | {row['previous'] or '—'} |"
+                f"| {date} | {_sanitize(name)} | {_sanitize(actual)} "
+                f"| {_sanitize(row['forecast'] or '—')} | {surprise} "
+                f"| {_sanitize(row['previous'] or '—')} |"
             )
         released_block = (
             f"\n**Released (last {look_back_days} days):** {mix}\n" + "\n".join(lines) + "\n" + note
@@ -984,14 +1146,12 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # this snapshot never fetched; the header discloses the gap separately,
         # so point back at it rather than letting "no releases" read as "nothing
         # happened".
-        gap = _coverage_gap_note(
-            set(snapshot.events_failed) | set(snapshot.events_unknown),
-            "unavailable",
-            "nothing printed",
-        )
+        gap = _coverage_gap_note(missing_events, "unavailable", "nothing printed")
         released_block = (
             f"\n**Released (last {look_back_days} days):** no tracked releases in the "
             f"window ending {curr_date}." + (f" {gap}" if gap else "") + "\n"
         )
 
-    return header + scheduled_block + released_block
+    # ``shallow_note`` is unconditional, so it rides the return rather than
+    # being appended in each released branch — a third branch cannot forget it.
+    return header + scheduled_block + released_block + shallow_note

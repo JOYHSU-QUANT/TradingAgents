@@ -89,6 +89,7 @@ from .sosovalue_common import (
     _iso_now,
     _plural,
     _request,
+    _sanitize,
     get_api_key,
 )
 from .symbol_utils import CRYPTO_BASES, normalize_symbol
@@ -225,19 +226,28 @@ def _parse_purchase_rows(data: list, ticker: str) -> list[dict]:
     backstop — ``_fetch_one_company`` pre-checks emptiness and routes it into
     ``companies_empty`` before this parser runs. Duplicate dates are kept —
     two same-day filings are two disclosures, and dropping one would hide a
-    real event; rows sort ascending by date, stable within a date.
+    real event; rows sort ascending by date, and within one date they keep the
+    provider's own sequence oldest-first, so ``rows[-1]`` is genuinely the
+    latest disclosure rather than the one an intraday revision replaced.
     """
     if not data:
         raise SoSoValueError(f"SoSoValue returned no treasury history rows for {ticker}")
     rows = []
     for raw in data:
         if not isinstance(raw, dict) or not _is_iso_date(raw.get("date")):
-            raise SoSoValueError(f"Malformed {ticker} treasury row {str(raw)[:200]!r}")
-        holding = _parse_amount(raw.get("btc_holding"))
-        if holding is None:
             raise SoSoValueError(
-                f"{ticker} treasury row for {raw['date']} has no readable btc_holding: "
-                f"{str(raw.get('btc_holding'))[:60]!r}"
+                f"Malformed {ticker} treasury row {_sanitize(repr(raw), limit=200)}"
+            )
+        holding = _parse_amount(raw.get("btc_holding"))
+        # >= 0, not merely finite: btc_holding is a stock quantity, and the
+        # sign _AMOUNT_RE allows exists for btc_acq (disposals are negative).
+        # A negative holding would flow into the combined total and make the
+        # concentration share exceed 100% while the top-holders line rendered
+        # a negative BTC balance — figures no reader could interpret.
+        if holding is None or holding < 0:
+            raise SoSoValueError(
+                f"{ticker} treasury row for {raw['date']} has no readable non-negative "
+                f"btc_holding: {_sanitize(repr(raw.get('btc_holding')), limit=60)}"
             )
         row = {"date": raw["date"], "btc_holding": holding}
         for field in ("btc_acq", "acq_cost"):
@@ -246,12 +256,21 @@ def _parse_purchase_rows(data: list, ticker: str) -> list[dict]:
                 if value is None:
                     raise SoSoValueError(
                         f"{ticker} treasury row for {raw['date']} has an unreadable "
-                        f"{field}: {str(raw[field])[:60]!r}"
+                        f"{field}: {_sanitize(repr(raw[field]), limit=60)}"
                     )
                 row[field] = value
             else:
                 row[field] = None
         rows.append(row)
+    # Reverse before the stable sort so a same-date pair ends up oldest-first.
+    # The API serves rows newest-first, and Python's sort is stable, so sorting
+    # the payload order by date alone would leave the NEWER of two same-day
+    # filings first and the superseded one last — and every "latest disclosure"
+    # consumer reads rows[-1]: the combined-holdings total, each company's
+    # as-of date, the concentration share, the listing-order check, and the
+    # derived-delta baseline. An intraday revision would have silently
+    # reported the figure it replaced.
+    rows.reverse()
     rows.sort(key=lambda r: r["date"])
     return rows
 
@@ -472,11 +491,13 @@ def _fetch_all() -> dict:
             skipped = [ticker, *(t for t, _ in remaining)]
             companies_failed.extend(skipped)
             logger.warning(
-                "SoSoValue treasuries: rate limit hit (%s); skipping the "
-                "remaining %d company histories (disclosed as incomplete, "
-                "retried on the short TTL)",
+                "SoSoValue treasuries: rate limit hit on %s (%s); that request "
+                "and the %d histories not yet attempted all go to "
+                "companies_failed (disclosed as incomplete, retried on the "
+                "short TTL)",
+                ticker,
                 e,
-                len(skipped),
+                len(skipped) - 1,
             )
             break
         except requests.RequestException:
@@ -596,7 +617,7 @@ def _load_snapshot() -> _TreasurySnapshot:
                 )
                 raise wrap_cls(
                     f"SoSoValue treasuries fetch failed and the newest cache "
-                    f"{stale_desc} (> {MAX_STALE_DAYS}-day cap): {e}"
+                    f"{stale_desc} (> {MAX_STALE_DAYS}-day cap): {_sanitize(e)}"
                 ) from e
             age_str = _humanize_age(fetched_at)
             if isinstance(e, SoSoValueError):
@@ -614,7 +635,12 @@ def _load_snapshot() -> _TreasurySnapshot:
                     age_str,
                 )
             return _snapshot_from(cached, fetched_at, stale=True)
-        raise wrap_cls(f"SoSoValue treasuries unavailable and no usable cache exists: {e}") from e
+        # Not capped, only flattened: most of this string is the module's own
+        # diagnostic, and a foreign requests.RequestException can carry a
+        # server-influenced URL into the same LLM-visible line.
+        raise wrap_cls(
+            f"SoSoValue treasuries unavailable and no usable cache exists: {_sanitize(e)}"
+        ) from e
 
     fetched_at = _iso_now()
     payload["fetched_at"] = fetched_at
@@ -647,6 +673,33 @@ def _classify_asset(asset: str) -> tuple[str | None, bool]:
     if base in CRYPTO_BASES:
         return "BTC", True
     return None, False
+
+
+class _Activity(NamedTuple):
+    """One rendered row of the activity table.
+
+    A record rather than a bare tuple because ``derived`` is consulted in four
+    places (the row's own label, the cost/implied suppression, the mix note's
+    count, and the legend it justifies) and the aggregates read two more
+    fields. Positional access to a 6-tuple couples every one of those to the
+    field order: inserting a field ahead of ``since`` would silently turn the
+    mix-note count into a read of ``implied`` — non-None on exactly the filed
+    rows and None on every derived one — inverting the very sentence whose job
+    is to disclose that the aggregate mixes filed and derived figures.
+    """
+
+    date: str
+    ticker: str
+    delta: float
+    cost: float | None
+    implied: float | None
+    # The previous disclosure's date on a holdings-derived row, else None: the
+    # delta then spans everything since that date rather than one filing.
+    since: str | None
+
+    @property
+    def derived(self) -> bool:
+        return self.since is not None
 
 
 def _fmt_signed_btc(value: float) -> str:
@@ -818,41 +871,79 @@ def get_btc_treasury_data(
         key=lambda kv: kv[1]["btc_holding"],
         reverse=True,
     )
+
+    def _label(ticker: str) -> str:
+        # The company name is free vendor text rendered verbatim into an
+        # LLM-visible line, so it is flattened here — _clean_name bounds the
+        # length and charset at the parse boundary but leaves markdown intact,
+        # and "*"/"`"/"|" inside a name can forge emphasis or a table cell.
+        name = _sanitize(snapshot.companies[ticker]["name"])
+        return f"{ticker} ({name})" if name else ticker
+
     top_str = "; ".join(
-        f"{t}{' (' + snapshot.companies[t]['name'] + ')' if snapshot.companies[t]['name'] else ''}"
-        f" {_fmt_btc(r['btc_holding'])} BTC (as of {r['date']})"
+        f"{_label(t)} {_fmt_btc(r['btc_holding'])} BTC (as of {r['date']})"
         for t, r in holders[:TOP_HOLDERS]
     )
     n_tracked = len(visible_by_company)
     # Per-company as-of dates can differ by months (some filers are
     # quarterly); the span makes that staleness mix visible on the headline
     # figure itself, not only in the top-5 as-of dates (user decision).
-    as_of_dates = sorted(v[-1]["date"] for v in visible_by_company.values())
+    #
+    # One ordering serves both the span sentence and the per-company list: two
+    # independent sorts of the same data could disagree about which filing is
+    # the oldest, and the two lines sit next to each other in the report.
+    by_as_of = sorted((v[-1]["date"], t) for t, v in visible_by_company.items())
     as_of_note = (
-        f"as of {as_of_dates[0]}"
-        if as_of_dates[0] == as_of_dates[-1]
-        else f"as-of dates span {as_of_dates[0]} → {as_of_dates[-1]}"
+        f"as of {by_as_of[0][0]}"
+        if by_as_of[0][0] == by_as_of[-1][0]
+        else f"as-of dates span {by_as_of[0][0]} → {by_as_of[-1][0]}"
     )
+    # Every contributor's as-of date, not just the top five (user decision):
+    # the combined total and the concentration share weight all of them
+    # equally, so a company that stopped filing a year ago carries its stale
+    # holdings at full weight into a figure the report presents as current —
+    # and outside the top five it had no visible date at all. Oldest first,
+    # because those are the ones worth discounting.
+    as_of_line = "; ".join(f"{t} {d}" for d, t in by_as_of)
     holdings_block = (
         f"\n**Combined holdings:** {_fmt_btc(combined)} BTC across {n_tracked} tracked "
         f"{_plural(n_tracked, 'company', 'companies')}, each as of its latest "
         f"disclosure on or before {curr_date} ({as_of_note})\n"
         f"**Top holders:** {top_str}\n"
+        f"**As-of date of every company in that total (oldest first):** {as_of_line}\n"
+        f"_No filing-age cut is applied: a company that has not disclosed for months "
+        f"still contributes its last known holding at full weight above, so read the "
+        f"oldest dates in that list as the staleness carried by the combined figure._\n"
     )
     if combined > 0:
         top_ticker, top_row = holders[0]
         share = top_row["btc_holding"] / combined * 100
+        # One decimal where rounding would print "100%" for a share that is
+        # not the whole: at 99.6% the flat format asserts the largest holder
+        # IS the entire multi-company total.
+        share_str = f"{share:.1f}%" if share < 100 and round(share) >= 100 else f"{share:.0f}%"
+        # Only claim dominance where the arithmetic supports it. Printed
+        # unconditionally, this clause told the reader to weight one filer's
+        # disclosures above everything else even at a 14% share — reachable
+        # whenever the mega-holder lands in companies_failed / companies_empty
+        # or has no disclosure on or before curr_date.
+        dominance = (
+            " and, at more than half the total, the combined figure moves mostly with "
+            "what this one company does"
+            if share >= 50
+            else ""
+        )
         holdings_block += (
-            f"**Concentration:** largest holder {top_ticker} = {share:.0f}% of the "
+            f"**Concentration:** largest holder {top_ticker} = {share_str} of the "
             f"{n_tracked}-company combined total above — not of the whole market, and "
             f"not a single-date measure (it divides holdings carrying the same mixed "
-            f"as-of dates); the totals move mostly with what it does\n"
+            f"as-of dates){dominance}\n"
         )
 
     # ---- activity -----------------------------------------------------------
     window_start = (curr_dt - timedelta(days=look_back_days)).strftime("%Y-%m-%d")
 
-    events = []  # (date, ticker, delta, cost, implied_price, from_holdings)
+    events: list[_Activity] = []
     underivable = 0
     for ticker, visible in visible_by_company.items():
         for i, row in enumerate(visible):
@@ -874,16 +965,21 @@ def get_btc_treasury_data(
                 # derive a change from — disclosed below, not guessed.
                 underivable += 1
                 continue
-            cost = row["acq_cost"]
-            # An implied price only makes sense for a filed quantity: a
-            # holdings-derived delta spans every transaction since the prior
-            # disclosure, and dividing one filing's cost by it would invent a
-            # price no transaction ever traded at.
-            implied = (
-                abs(cost / delta) if cost is not None and delta != 0 and since is None else None
-            )
-            events.append((row["date"], ticker, delta, cost, implied, since))
-    events.sort(key=lambda e: (e[0], e[1]))
+            # A filed cost belongs to a filed quantity. On a holdings-derived
+            # row the BTC change spans every transaction since the previous
+            # disclosure while acq_cost is one filing's own figure, so the two
+            # cells sit side by side with independent signs — a disposal row
+            # carrying a positive cost, which reads as a purchase of that size.
+            # Drop the cost on those rows (user decision) rather than print a
+            # number the legend cannot describe truthfully.
+            cost = row["acq_cost"] if since is None else None
+            # An implied price only makes sense for a filed quantity, and a
+            # zero cost is not a price: a self-mined coin filed at 0 would
+            # render an implied US$/BTC of exactly 0, indistinguishable in the
+            # column from a computed one.
+            implied = abs(cost / delta) if cost and delta != 0 else None
+            events.append(_Activity(row["date"], ticker, delta, cost, implied, since))
+    events.sort(key=lambda e: (e.date, e.ticker))
 
     # History-depth honesty: a company whose served history starts inside the
     # window may have had earlier activity the provider no longer serves.
@@ -902,31 +998,35 @@ def get_btc_treasury_data(
             "\n_BTC change is positive for an acquisition, negative for a disposal; "
             "Cost is the amount the company filed for that same event in millions of "
             "US dollars and carries the matching sign (negative = proceeds received on "
-            "a disposal, not a cost); Implied US$/BTC is that filing's own cost "
-            "divided by its own quantity as an absolute value — an average price for "
-            "that event, not a market price, and blank wherever no filed quantity "
-            "exists to divide by._",
+            "a disposal, not a cost); Implied US$/BTC is that filing's own cost divided "
+            "by its own quantity as an absolute value — an average price for that "
+            "event, not a market price. Both are blank on a row derived from a holdings "
+            "change: there the BTC figure spans every transaction since the previous "
+            "disclosure, so no single filed cost belongs to it. Implied US$/BTC is also "
+            "blank where the filing reported a quantity but no cost, or a cost of zero._",
             "\n| Date | Company | BTC change | Cost (US$m) | Implied US$/BTC |",
             "| --- | --- | --- | --- | --- |",
         ]
-        for date, ticker, delta, cost, implied, since in shown:
-            delta_cell = _fmt_signed_btc(delta) + (
-                f" (from holdings change since {since})" if since else ""
+        for e in shown:
+            delta_cell = _fmt_signed_btc(e.delta) + (
+                f" (from holdings change since {e.since})" if e.derived else ""
             )
-            cost_cell = f"{cost / _USD_PER_MILLION:+,.1f}" if cost is not None else "—"
-            implied_cell = f"{implied:,.0f}" if implied is not None else "—"
-            lines.append(f"| {date} | {ticker} | {delta_cell} | {cost_cell} | {implied_cell} |")
-        net = sum(e[2] for e in events)
+            cost_cell = f"{e.cost / _USD_PER_MILLION:+,.1f}" if e.cost is not None else "—"
+            implied_cell = f"{e.implied:,.0f}" if e.implied is not None else "—"
+            lines.append(
+                f"| {e.date} | {e.ticker} | {delta_cell} | {cost_cell} | {implied_cell} |"
+            )
+        net = sum(e.delta for e in events)
         by_company: dict[str, float] = {}
-        for _date, ticker, delta, _cost, _implied, _since in events:
-            by_company[ticker] = by_company.get(ticker, 0.0) + delta
+        for e in events:
+            by_company[e.ticker] = by_company.get(e.ticker, 0.0) + e.delta
         adders = sum(1 for v in by_company.values() if v > 0)
         reducers = sum(1 for v in by_company.values() if v < 0)
         # The rows are heterogeneous — filed quantities and holdings-derived
         # deltas — and only the rows say so. The net, the adding/reducing
         # counts and the window label all inherit that mix, so state it where
         # the aggregate is read (user decision).
-        derived = sum(1 for e in events if e[5] is not None)
+        derived = sum(1 for e in events if e.derived)
         mix_note = (
             f" Of these, {derived} {_plural(derived, 'row is', 'rows are')} derived "
             f"from a holdings change rather than a filed quantity, and each spans "

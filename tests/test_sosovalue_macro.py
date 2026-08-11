@@ -11,7 +11,7 @@ from the real API, so these run without a network connection or a key.
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 from urllib.parse import quote
 
@@ -107,7 +107,7 @@ class TestParseCalendar:
         with pytest.raises(sosovalue_common.SoSoValueError, match="empty macro calendar"):
             sosovalue_macro._parse_calendar([])
 
-    def test_a_widened_calendar_keeps_its_newest_rows_instead_of_failing(self, caplog):
+    def test_a_widened_calendar_keeps_its_earliest_rows_instead_of_failing(self, caplog):
         # A provider publishing a longer horizon is evolution, not breakage:
         # it must not fail the vendor into a stale serve that expires.
         data = [
@@ -121,9 +121,30 @@ class TestParseCalendar:
         assert len(rows) == sosovalue_macro.MAX_CALENDAR_ROWS
         assert truncated == len(data) - sosovalue_macro.MAX_CALENDAR_ROWS
         assert unusable == 0
-        # The TAIL is kept: the scheduled section reads forward from curr_date.
-        assert rows[-1]["date"] == data[-1]["date"]
-        assert rows[0]["date"] > data[0]["date"]
+        # The HEAD is kept. The provider's calendar is anchored to the present,
+        # so the span the report renders (curr_date forward, for a live caller)
+        # sits at the START of the ascending list — keeping the tail would drop
+        # exactly the fortnight the scheduled section reads.
+        assert rows[0]["date"] == data[0]["date"]
+        assert rows[-1]["date"] < data[-1]["date"]
+
+    def test_a_widened_calendar_keeps_the_rendered_window_not_the_far_future(self):
+        # The regression the direction exists to prevent: with a horizon wide
+        # enough to trip the cap, the next fortnight must survive truncation.
+        curr_date = "2026-01-05"
+        data = [
+            {"date": f"2026-{m:02d}-{d:02d}", "events": ["Widget Index"]}
+            for m in range(1, 4)
+            for d in range(1, 22)
+        ]
+        rows, _unusable, truncated, _duplicated = sosovalue_macro._parse_calendar(data)
+        assert truncated > 0
+        kept = {r["date"] for r in rows}
+        ahead_end = (
+            datetime.strptime(curr_date, "%Y-%m-%d") + timedelta(days=sosovalue_macro.AHEAD_DAYS)
+        ).strftime("%Y-%m-%d")
+        in_window = {r["date"] for r in data if curr_date <= r["date"] <= ahead_end}
+        assert in_window and in_window <= kept
 
     def test_a_pathologically_long_calendar_still_raises(self):
         data = [{"date": "2026-08-11", "events": ["CPI (YoY)"]}] * (
@@ -348,7 +369,7 @@ class TestFetchAll:
             history_error=requests.ConnectionError("down"), error_names=set(TRACKED)
         )
         monkeypatch.setattr(sosovalue_macro, "_request", impl)
-        with pytest.raises(sosovalue_common.SoSoValueError, match="none of the"):
+        with pytest.raises(sosovalue_common.SoSoValueError, match="no usable history"):
             sosovalue_macro._fetch_all()
         history_calls = [c for c in impl.calls if c != "/macro/events"]
         assert len(history_calls) == sosovalue_macro.MAX_CONSECUTIVE_NETWORK_FAILURES
@@ -724,12 +745,15 @@ class TestRender:
             ),
         )
         report = _render(snapshot, curr_date="2023-06-01")
-        # "after", not "for": the scheduled window's left boundary is
-        # exclusive (curr_date itself belongs to the released table).
-        assert "none visible after 2023-06-01" in report
+        # "from", not "after": the scheduled window includes curr_date itself,
+        # so an event scheduled today is reported rather than dropped.
+        assert "none visible from 2023-06-01" in report
         assert "no tracked releases" in report
-        # The calendar still reaches past this date, so "none" IS benign here.
-        assert "legitimately shows none" in report
+        # The calendar still reaches past this date and the snapshot is neither
+        # stale nor truncated, so the benign reading is offered — but only as
+        # one of the two ways this branch is reached, never asserted outright.
+        assert "sitting far from that fetch date" in report
+        assert "may be an artefact of the snapshot" not in report
 
     def test_a_calendar_that_stopped_publishing_forward_is_called_a_gap(self):
         # Same empty schedule, opposite meaning: a calendar ending on or
@@ -743,7 +767,7 @@ class TestRender:
         report = _render(snapshot, curr_date="2026-08-11")
         assert "publishing no forward schedule" in report
         assert "missing coverage" in report
-        assert "legitimately shows none" not in report
+        assert "sitting far from that fetch date" not in report
 
     def test_an_empty_released_window_points_back_at_the_coverage_gap(self):
         snapshot = _snapshot(
@@ -799,7 +823,7 @@ class TestRender:
                 _snapshot(histories={"CPI (YoY)": [_row("2026-08-10", "3.5%", "3.8%", "4.2%")]})
             )
         assert "THOUSANDS" not in report
-        assert "percent readings carry '%'." in report
+        assert "percent readings carry '%', and a K/M/B/T suffix" in report
 
     def test_the_snapshot_fetch_time_is_shown_even_when_fresh(self):
         report = _render(_snapshot(fetched_at="2026-08-11T05:00:00Z", stale=False))
@@ -873,3 +897,160 @@ class TestRouterIntegration:
         self._with_vendor("none")
         report = interface.route_to_vendor("get_economic_calendar", "2026-08-11", None)
         assert "disabled by configuration" in report
+
+
+# --------------------------------------------------------------------------- #
+# review-loop round 3: prompt-injection surface, today's rows, served depth
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+class TestUntrustedTextCannotForgeStructure:
+    def test_a_pipe_in_a_calendar_event_name_cannot_forge_table_columns(self):
+        # The name is server-controlled and lands in a markdown table cell; a
+        # raw "|" would split it into new columns, and the forged cells sit
+        # exactly where Forecast and Previous are read.
+        snapshot = _snapshot(
+            calendar=[{"date": "2026-08-12", "events": ["Widget Index | 9.9% | 9.9%"]}]
+        )
+        report = _render(snapshot, curr_date="2026-08-11")
+        row = next(ln for ln in report.splitlines() if "Widget Index" in ln)
+        assert row.count("|") == 6  # 5 columns => 6 delimiters, no forged cells
+        assert "9.9%" in row  # the text survives, only its structure is flattened
+
+    def test_markdown_in_a_value_string_cannot_open_emphasis_or_headings(self):
+        snapshot = _snapshot(
+            histories={"CPI (YoY)": [_row("2026-08-10", "3.5%", "**##`x`", "2.9%")]},
+            events_unknown=[n for n in TRACKED if n != "CPI (YoY)"],
+        )
+        report = _render(snapshot, curr_date="2026-08-11")
+        row = next(ln for ln in report.splitlines() if "2026-08-10" in ln and "CPI" in ln)
+        assert "**" not in row and "##" not in row and "`" not in row
+        assert row.count("|") == 7  # 6 columns
+
+    def test_a_newline_in_an_error_body_cannot_rebuild_a_line(self):
+        flattened = sosovalue_common._sanitize("a\nb  c|d")
+        assert flattened == "a b c d"
+
+
+@pytest.mark.unit
+class TestTodaysScheduleIsVisible:
+    def test_a_calendar_only_event_dated_today_is_shown(self):
+        # It reaches the reader through no other path: the released table is
+        # built from tracked histories alone, so before this it vanished while
+        # the intraday caveat still promised a row "not yet released".
+        snapshot = _snapshot(
+            calendar=[{"date": "2026-08-11", "events": ["ISM Services PMI"]}],
+            histories={"CPI (YoY)": [_row("2026-07-15", "3.1%", "3.0%", "2.9%")]},
+            events_unknown=[n for n in TRACKED if n != "CPI (YoY)"],
+        )
+        report = _render(snapshot, curr_date="2026-08-11")
+        assert "ISM Services PMI" in report
+        assert "| 2026-08-11 | today |" in report
+
+    def test_todays_tracked_print_is_not_double_listed(self):
+        # The history row renders in the released table as pending; its
+        # calendar entry for the same print must not re-appear as scheduled.
+        snapshot = _snapshot(
+            calendar=[{"date": "2026-08-11", "events": ["CPI (YoY)"]}],
+            histories={"CPI (YoY)": [_row("2026-08-11", "", "3.0%", "2.9%")]},
+            events_unknown=[n for n in TRACKED if n != "CPI (YoY)"],
+        )
+        report = _render(snapshot, curr_date="2026-08-11")
+        assert "not yet released" in report
+        assert "| 2026-08-11 | today | CPI (YoY)" not in report
+
+    def test_a_calendar_entry_one_day_off_its_history_row_is_not_double_listed(self):
+        # The live-observed skew: the print sits on curr_date - 1 in the deep
+        # history while the calendar carries it on curr_date.
+        snapshot = _snapshot(
+            calendar=[{"date": "2026-08-11", "events": ["CPI (YoY)"]}],
+            histories={"CPI (YoY)": [_row("2026-08-10", "3.5%", "3.0%", "2.9%")]},
+            events_unknown=[n for n in TRACKED if n != "CPI (YoY)"],
+        )
+        report = _render(snapshot, curr_date="2026-08-11")
+        assert "| 2026-08-11 | today | CPI (YoY)" not in report
+
+    def test_the_scheduled_table_is_capped_with_a_note(self):
+        # Nothing bounds names-per-day at the parse boundary, so a provider
+        # broadening the calendar must not pour every name into the prompt.
+        calendar = [
+            {"date": f"2026-08-{d:02d}", "events": [f"Event {i}" for i in range(12)]}
+            for d in range(12, 25)
+        ]
+        report = _render(_snapshot(calendar=calendar), curr_date="2026-08-11")
+        assert "nearest of" in report
+        body = report.split("**Scheduled")[1].split("**Released")[0]
+        data_rows = [ln for ln in body.splitlines() if ln.startswith("| 2026-")]
+        assert len(data_rows) == sosovalue_macro.MAX_ROWS
+        # The nearest days survive, the far ones are the ones dropped.
+        assert data_rows[0].startswith("| 2026-08-12")
+
+
+@pytest.mark.unit
+class TestServedDepthAndStaleReach:
+    def test_a_window_outrunning_the_served_history_says_so(self):
+        # 100 rows reach 8+ years for a monthly event but ~2 for a weekly one;
+        # events_failed/unknown are empty here, so nothing else discloses it.
+        snapshot = _snapshot(
+            histories={"CPI (YoY)": [_row("2026-08-01", "3.5%", "3.4%", "3.3%")]},
+            events_unknown=[n for n in TRACKED if n != "CPI (YoY)"],
+        )
+        report = _render(snapshot, curr_date="2026-08-11", look_back_days=365)
+        assert "served history for CPI (YoY) starts inside this window" in report
+
+    def test_a_stale_snapshot_states_how_much_forward_reach_is_left(self):
+        snapshot = _snapshot(
+            calendar=[{"date": "2026-08-14", "events": ["CPI (YoY)"]}],
+            fetched_at="2026-08-01T00:00:00Z",
+            stale=True,
+        )
+        report = _render(snapshot, curr_date="2026-08-11")
+        assert "reaches only 3 days past it" in report
+
+    def test_a_fresh_snapshot_makes_no_reach_claim(self):
+        report = _render(_snapshot(), curr_date="2026-08-11")
+        assert "also shortens the schedule below" not in report
+
+    def test_a_stale_empty_schedule_is_not_blamed_on_the_provider(self):
+        # The calendar ends before curr_date only because the snapshot aged
+        # out of its forward reach; saying the provider stopped publishing
+        # would blame the source for the snapshot's age.
+        snapshot = _snapshot(
+            calendar=[{"date": "2026-07-20", "events": ["CPI (YoY)"]}],
+            histories=_histories(
+                overrides={name: [_row("2026-01-15", "1%", "1%", "1%")] for name in TRACKED}
+            ),
+            fetched_at="2026-07-20T00:00:00Z",
+            stale=True,
+        )
+        report = _render(snapshot, curr_date="2026-08-11")
+        assert "publishing no forward schedule" not in report
+        assert "artefact of the snapshot" in report
+
+    def test_a_calendar_bloated_with_event_names_raises(self):
+        # The other axis of the payload: MAX_CALENDAR_ROWS bounds day-rows, so
+        # without this an unbounded names-per-day payload parses cleanly and is
+        # persisted to the snapshot file, then re-validated in full every read.
+        data = [
+            {"date": f"2026-08-{d:02d}", "events": [f"Event {i}" for i in range(200)]}
+            for d in range(1, 21)
+        ]
+        with pytest.raises(sosovalue_common.SoSoValueError, match="event names"):
+            sosovalue_macro._parse_calendar(data)
+
+    def test_a_bloated_cache_is_rejected_rather_than_revalidated_forever(self, tmp_path):
+        payload = {
+            "calendar": [
+                {"date": f"2026-08-{d:02d}", "events": [f"Event {i}" for i in range(200)]}
+                for d in range(1, 21)
+            ],
+            "calendar_unusable": 0,
+            "calendar_truncated": 0,
+            "calendar_duplicated": 0,
+            "histories": {"CPI (YoY)": [_row("2026-08-10", "3.5%", "3.4%", "3.3%")]},
+            "events_failed": [],
+            "events_unknown": [n for n in TRACKED if n != "CPI (YoY)"],
+            "fetched_at": "2026-08-11T00:00:00Z",
+        }
+        path = tmp_path / "sosovalue_macro.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        assert sosovalue_macro._read_cache(str(path)) is None

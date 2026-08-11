@@ -184,9 +184,17 @@ def _is_finite_number(x: object) -> bool:
 
     bool is an int subclass, so a JSON ``true`` must not pass as a figure;
     NaN/Infinity would poison downstream sums and render as literal
-    "nan"/"inf". Same boundary rule as the Farside vendor.
+    "nan"/"inf". Same boundary rule as the Farside vendor. An int too large
+    to convert to float makes ``math.isfinite`` raise OverflowError — such a
+    value can never be a usable figure, and letting the exception escape
+    would crash a cache read or parse outside the vendor taxonomy.
     """
-    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+    if not isinstance(x, (int, float)) or isinstance(x, bool):
+        return False
+    try:
+        return math.isfinite(x)
+    except OverflowError:
+        return False
 
 
 def _is_iso_date(x: object) -> bool:

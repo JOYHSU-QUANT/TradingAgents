@@ -392,6 +392,25 @@ class TestCacheAndLoad:
         assert impl.calls  # refetched
         assert snapshot.events_failed == []
 
+    def test_legitimate_degraded_payload_shapes_are_accepted(self, tmp_path, monkeypatch):
+        # The validator must accept everything _fetch_all can write: the
+        # live-verified NFP double print (two rows, one date), a pending
+        # empty actual, and a non-empty failed bucket — served from cache
+        # within even the short TTL, with zero requests. A tightening that
+        # rejects any of these turns the TTL throttle silently off.
+        impl = self._setup(tmp_path, monkeypatch, now="2026-08-11T05:30:00Z")
+        histories = _histories(failed=("GDP (QoQ)",))
+        histories["Nonfarm Payrolls"] = [
+            _row("2025-12-16", "-105", "", "119"),
+            _row("2025-12-16", "64", "51", "-105"),
+            _row("2026-08-12", "", "80", "64"),
+        ]
+        self._write_cache(tmp_path, histories=histories, events_failed=["GDP (QoQ)"])
+        snapshot = sosovalue_macro._load_snapshot()
+        assert impl.calls == []
+        assert snapshot.events_failed == ["GDP (QoQ)"]
+        assert len(snapshot.histories["Nonfarm Payrolls"]) == 3
+
     def test_unknown_events_do_not_shorten_the_ttl(self, tmp_path, monkeypatch):
         impl = self._setup(tmp_path, monkeypatch, now="2026-08-11T07:30:00Z")
         # 2.5h old with an unknown (renamed) event: still fresh under the 6h
@@ -645,7 +664,9 @@ class TestRender:
             ),
         )
         report = _render(snapshot, curr_date="2023-06-01")
-        assert "none visible for 2023-06-01" in report
+        # "after", not "for": the scheduled window's left boundary is
+        # exclusive (curr_date itself belongs to the released table).
+        assert "none visible after 2023-06-01" in report
         assert "no tracked releases" in report
 
     def test_non_padded_curr_date_is_normalized(self):

@@ -138,8 +138,11 @@ MAX_CONSECUTIVE_NETWORK_FAILURES = 3
 
 # BTC and USD figures arrive as digit strings ("840447", "-108600000") —
 # no comma grouping was observed, and accepting only this exact shape keeps
-# a malformed value from parsing as something else.
-_AMOUNT_RE = re.compile(r"^-?\d+(\.\d+)?$")
+# a malformed value from parsing as something else. Digit counts are bounded
+# (live values top out at 9 integer digits): an unbounded digit string would
+# float() to inf past ~309 digits, poisoning sums with a value the cache
+# validator then rejects forever (a silent perpetual-refetch loop).
+_AMOUNT_RE = re.compile(r"^-?\d{1,15}(\.\d{1,8})?$")
 
 # The report renders costs in US$m, unit-consistent with the ETF module.
 _USD_PER_MILLION = 1e6
@@ -281,8 +284,14 @@ def _valid_rows(rows: object) -> bool:
         isinstance(r, dict)
         and _is_iso_date(r.get("date"))
         and _is_finite_number(r.get("btc_holding"))
-        and (r.get("btc_acq") is None or _is_finite_number(r.get("btc_acq")))
-        and (r.get("acq_cost") is None or _is_finite_number(r.get("acq_cost")))
+        # The keys must be PRESENT (the parser always writes both): a
+        # missing key is not the legal null, and admitting it would let the
+        # renderer's row["btc_acq"] subscript raise a raw KeyError outside
+        # the vendor taxonomy instead of this validator rejecting the file.
+        and "btc_acq" in r
+        and (r["btc_acq"] is None or _is_finite_number(r["btc_acq"]))
+        and "acq_cost" in r
+        and (r["acq_cost"] is None or _is_finite_number(r["acq_cost"]))
         for r in rows
     ):
         return False
@@ -745,10 +754,19 @@ def get_btc_treasury_data(
         for t, r in holders[:TOP_HOLDERS]
     )
     n_tracked = len(visible_by_company)
+    # Per-company as-of dates can differ by months (some filers are
+    # quarterly); the span makes that staleness mix visible on the headline
+    # figure itself, not only in the top-5 as-of dates (user decision).
+    as_of_dates = sorted(v[-1]["date"] for v in visible_by_company.values())
+    as_of_note = (
+        f"as of {as_of_dates[0]}"
+        if as_of_dates[0] == as_of_dates[-1]
+        else f"as-of dates span {as_of_dates[0]} → {as_of_dates[-1]}"
+    )
     holdings_block = (
         f"\n**Combined holdings:** {_fmt_btc(combined)} BTC across {n_tracked} tracked "
         f"{_plural(n_tracked, 'company', 'companies')}, each as of its latest "
-        f"disclosure on or before {curr_date}\n"
+        f"disclosure on or before {curr_date} ({as_of_note})\n"
         f"**Top holders:** {top_str}\n"
     )
     if combined > 0:
@@ -770,12 +788,15 @@ def get_btc_treasury_data(
                 continue
             if row["btc_acq"] is not None:
                 delta = row["btc_acq"]
-                from_holdings = False
+                since = None
             elif i > 0:
                 # A holdings-only disclosure (live-verified: MARA): the change
-                # is implied by the move from the previous disclosure.
+                # is implied by the move from the previous disclosure, and it
+                # spans everything SINCE that disclosure — the tag carries the
+                # start date so a multi-month drift is not read as a one-day
+                # event (user decision).
                 delta = row["btc_holding"] - visible[i - 1]["btc_holding"]
-                from_holdings = True
+                since = visible[i - 1]["date"]
             else:
                 # First served row and no filed quantity: no baseline to
                 # derive a change from — disclosed below, not guessed.
@@ -787,9 +808,9 @@ def get_btc_treasury_data(
             # disclosure, and dividing one filing's cost by it would invent a
             # price no transaction ever traded at.
             implied = (
-                abs(cost / delta) if cost is not None and delta != 0 and not from_holdings else None
+                abs(cost / delta) if cost is not None and delta != 0 and since is None else None
             )
-            events.append((row["date"], ticker, delta, cost, implied, from_holdings))
+            events.append((row["date"], ticker, delta, cost, implied, since))
     events.sort(key=lambda e: (e[0], e[1]))
 
     # History-depth honesty: a company whose served history starts inside the
@@ -809,16 +830,16 @@ def get_btc_treasury_data(
             "\n| Date | Company | BTC change | Cost (US$m) | Implied US$/BTC |",
             "| --- | --- | --- | --- | --- |",
         ]
-        for date, ticker, delta, cost, implied, from_holdings in shown:
+        for date, ticker, delta, cost, implied, since in shown:
             delta_cell = _fmt_signed_btc(delta) + (
-                " (from holdings change)" if from_holdings else ""
+                f" (from holdings change since {since})" if since else ""
             )
             cost_cell = f"{cost / _USD_PER_MILLION:+,.1f}" if cost is not None else "—"
             implied_cell = f"{implied:,.0f}" if implied is not None else "—"
             lines.append(f"| {date} | {ticker} | {delta_cell} | {cost_cell} | {implied_cell} |")
         net = sum(e[2] for e in events)
         by_company: dict[str, float] = {}
-        for _date, ticker, delta, _cost, _implied, _fh in events:
+        for _date, ticker, delta, _cost, _implied, _since in events:
             by_company[ticker] = by_company.get(ticker, 0.0) + delta
         adders = sum(1 for v in by_company.values() if v > 0)
         reducers = sum(1 for v in by_company.values() if v < 0)

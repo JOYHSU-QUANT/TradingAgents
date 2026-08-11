@@ -701,12 +701,20 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     # renders an actual, even when the provider has since filled it in.
     scheduled = []
     covered: dict[str, list[datetime]] = {}
+    # Rows on (or one day before) curr_date also count as covered without
+    # being scheduled: a print released today renders in the released table,
+    # and its calendar entry — which can sit a day later than the history row
+    # (the live-observed skew) — would otherwise re-render as a phantom
+    # name-only scheduled row for the same print.
+    cover_floor = (curr_dt - timedelta(days=1)).strftime("%Y-%m-%d")
     for name in TRACKED_EVENTS:
         for row in snapshot.histories.get(name, ()):
             if curr_date < row["date"] <= ahead_end:
                 scheduled.append(
                     (row["date"], name, row["forecast"] or "—", row["previous"] or "—")
                 )
+                covered.setdefault(name, []).append(datetime.strptime(row["date"], "%Y-%m-%d"))
+            elif cover_floor <= row["date"] <= curr_date:
                 covered.setdefault(name, []).append(datetime.strptime(row["date"], "%Y-%m-%d"))
     # Calendar entries ride along name-only unless a figures row for the SAME
     # print is already shown. "Same print" is per (name, date +/- 1 day) —
@@ -751,8 +759,8 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         header_lines.append(
             f"_Tracked-event coverage incomplete ({fetched}/{len(TRACKED_EVENTS)}): "
             f"histories for {', '.join(sorted(snapshot.events_failed))} could not be "
-            f"fetched, so their scheduled prints and releases are missing from both "
-            f"tables below._"
+            f"fetched, so their figures are missing below; a calendar mention of such "
+            f"an event, if any, appears name-only._"
         )
 
     if snapshot.events_unknown:
@@ -760,8 +768,9 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         header_lines.append(
             f"_{n} tracked {_plural(n, 'event is', 'events are')} unknown to the "
             f"provider ({', '.join(sorted(snapshot.events_unknown))}): the name was "
-            f"renamed or dropped upstream, so {_plural(n, 'its', 'their')} rows are "
-            f"missing below until the tracked-name list is updated in code._"
+            f"renamed or dropped upstream, so {_plural(n, 'its', 'their')} figures are "
+            f"missing below (a calendar mention, if any, appears name-only) until the "
+            f"tracked-name list is updated in code._"
         )
 
     if snapshot.calendar_unusable:
@@ -811,8 +820,8 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         )
     else:
         scheduled_block = (
-            f"\n**Scheduled (next {AHEAD_DAYS} days):** none visible for {curr_date} → "
-            f"{ahead_end}. The provider's calendar is anchored to the present and "
+            f"\n**Scheduled (next {AHEAD_DAYS} days):** none visible after {curr_date} "
+            f"through {ahead_end}. The provider's calendar is anchored to the present and "
             f"scheduled prints exist only as far as it publishes them, so a backtest "
             f"date far from today legitimately shows none.\n"
         )

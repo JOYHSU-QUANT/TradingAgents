@@ -112,6 +112,14 @@ class TestParseAmount:
         assert sosovalue_treasuries._parse_amount("") is None
         assert sosovalue_treasuries._parse_amount(None) is None
 
+    def test_oversized_magnitudes_never_become_inf_or_raise(self):
+        # A 320-digit string would float() to inf (poisoning sums, then
+        # perma-rejected read-side); a bare int that large makes
+        # math.isfinite raise OverflowError. Both must resolve to None/False.
+        assert sosovalue_treasuries._parse_amount("9" * 320) is None
+        assert sosovalue_treasuries._parse_amount(10**400) is None
+        assert sosovalue_common._is_finite_number(10**400) is False
+
 
 # --------------------------------------------------------------------------- #
 # listing parsing
@@ -418,6 +426,49 @@ class TestCacheAndLoad:
         with pytest.raises(sosovalue_common.SoSoValueError, match="days stale"):
             sosovalue_treasuries._load_snapshot()
 
+    def test_legitimate_degraded_payload_shapes_are_accepted(self, tmp_path, monkeypatch):
+        # The validator must accept everything _fetch_all can write: same-day
+        # double filings, holdings-only rows (the live MARA shape, both
+        # optional fields None), and a non-empty failed bucket — served from
+        # cache within even the short TTL, with zero requests. A tightening
+        # that rejects any of these turns the TTL throttle silently off.
+        impl = self._setup(tmp_path, monkeypatch, now="2026-08-11T00:30:00Z")
+        self._write_cache(
+            tmp_path,
+            companies={
+                "MSTR": {
+                    "name": "Strategy",
+                    "rows": [
+                        _prow("2026-08-09", 100.0, 5.0, -300000.0),
+                        _prow("2026-08-09", 105.0, 5.0),
+                        _prow("2026-08-10", 90.0),
+                    ],
+                }
+            },
+            companies_failed=["MARA"],
+        )
+        snapshot = sosovalue_treasuries._load_snapshot()
+        assert impl.calls == []
+        assert snapshot.companies_failed == ["MARA"]
+        assert len(snapshot.companies["MSTR"]["rows"]) == 3
+
+    def test_a_row_missing_an_optional_key_rejects_the_cache(self, tmp_path, monkeypatch):
+        # Key ABSENT is not the legal null: the renderer subscripts both
+        # optional keys, so the validator must reject the file rather than
+        # let a KeyError escape the vendor taxonomy.
+        impl = self._setup(tmp_path, monkeypatch)
+        self._write_cache(
+            tmp_path,
+            companies={
+                "MSTR": {
+                    "name": "Strategy",
+                    "rows": [{"date": "2026-08-10", "btc_holding": 840447.0}],
+                }
+            },
+        )
+        sosovalue_treasuries._load_snapshot()
+        assert impl.calls  # rejected, refetched
+
     def test_cache_write_failure_is_non_fatal(self, tmp_path, monkeypatch, caplog):
         self._setup(tmp_path, monkeypatch)
         with (
@@ -513,7 +564,10 @@ class TestRender:
             }
         )
         report = _render(snapshot)
-        assert "| 2026-06-15 | X | -20 (from holdings change) | -0.5 | — |" in report
+        assert (
+            "| 2026-06-15 | X | -20 (from holdings change since 2026-05-20) | -0.5 | — |"
+            in report
+        )
 
     def test_a_sub_coin_disposal_keeps_its_sign(self):
         snapshot = _snapshot(
@@ -554,7 +608,10 @@ class TestRender:
             }
         )
         report = _render(snapshot)
-        assert "| 2026-06-15 | X | -20 (from holdings change) | — | — |" in report
+        assert (
+            "| 2026-06-15 | X | -20 (from holdings change since 2026-05-20) | — | — |"
+            in report
+        )
 
     def test_first_row_holdings_only_is_disclosed_not_guessed(self):
         snapshot = _snapshot(companies={"Y": {"name": "", "rows": [_prow("2026-06-01", 50.0)]}})

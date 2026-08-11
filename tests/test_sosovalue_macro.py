@@ -284,6 +284,20 @@ class TestFetchAll:
         history_calls = [c for c in impl.calls if c != "/macro/events"]
         assert len(history_calls) == 3  # two successes + the one 429
 
+    def test_a_first_request_429_keeps_its_rate_limit_type(self, monkeypatch):
+        # A quota trip that drains the whole sweep must stay a rate-limit
+        # error, not masquerade as structural breakage.
+        impl = _request_impl(
+            history_error=sosovalue_common.SoSoValueRateLimitError("429"),
+            error_names=set(TRACKED),
+        )
+        monkeypatch.setattr(sosovalue_macro, "_request", impl)
+        with pytest.raises(
+            sosovalue_common.SoSoValueRateLimitError, match="rate limited before any"
+        ):
+            sosovalue_macro._fetch_all()
+        assert len([c for c in impl.calls if c != "/macro/events"]) == 1
+
     def test_a_single_network_failure_is_non_fatal(self, monkeypatch):
         monkeypatch.setattr(
             sosovalue_macro,

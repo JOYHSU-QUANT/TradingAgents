@@ -252,13 +252,18 @@ class TestFetchAll:
         assert payload["companies_failed"] == ["MARA"]
         assert "MARA" not in payload["companies"]
 
-    def test_all_failed_histories_fail_the_vendor(self, monkeypatch):
+    def test_a_first_request_429_keeps_its_rate_limit_type(self, monkeypatch):
+        # A quota trip that drains the whole sweep must stay a rate-limit
+        # error: the router and the stale-fallback classify by type, and a
+        # 429 must not masquerade as structural breakage.
         impl = _request_impl(
             history_error=sosovalue_common.SoSoValueRateLimitError("429"),
             error_tickers=set(LIST_TICKERS),
         )
         monkeypatch.setattr(sosovalue_treasuries, "_request", impl)
-        with pytest.raises(sosovalue_common.SoSoValueError, match="all 12 selected"):
+        with pytest.raises(
+            sosovalue_common.SoSoValueRateLimitError, match="rate limited before any"
+        ):
             sosovalue_treasuries._fetch_all()
         # The first 429 drains the sweep: no further quota-burning requests.
         assert len([c for c in impl.calls if c != "/btc-treasuries"]) == 1

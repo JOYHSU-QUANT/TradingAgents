@@ -419,12 +419,14 @@ def _fetch_all() -> dict:
     selected = listing[:MAX_COMPANIES]
     companies: dict[str, dict] = {}
     companies_failed: list[str] = []
+    rate_limited: SoSoValueRateLimitError | None = None
     consecutive_network = 0
     remaining = iter(selected)
     for ticker, name in remaining:
         try:
             company = _fetch_one_company(ticker, name)
         except SoSoValueRateLimitError as e:
+            rate_limited = e
             # The 20 req/min limit is per-key and per-minute: this 429 proves
             # every further request in this sweep would 429 too, so drain the
             # rest into companies_failed (short-TTL retry) instead of burning
@@ -462,6 +464,14 @@ def _fetch_all() -> dict:
             companies[ticker] = company
 
     if not companies:
+        # Keep the taxonomy honest when a 429 drained the whole sweep: the
+        # router and _load_snapshot classify by type, and a quota trip must
+        # not masquerade as structural breakage (ERROR + traceback logs).
+        if rate_limited is not None:
+            raise SoSoValueRateLimitError(
+                f"SoSoValue treasuries: rate limited before any company "
+                f"history could be fetched: {rate_limited}"
+            ) from rate_limited
         raise SoSoValueError(
             f"SoSoValue treasuries histories failed for all {len(selected)} selected "
             f"companies; a listing without holdings figures is no signal"

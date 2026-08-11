@@ -106,7 +106,9 @@ logger = logging.getLogger(__name__)
 # Exact event-name strings, live-verified against /macro/events and per-name
 # history probes on 2026-08-11. The API takes the name verbatim in the history
 # path, so these must match byte-for-byte; a renamed event comes back as an
-# empty history and lands in ``events_failed`` (disclosed), not in bad data.
+# empty history and lands in ``events_unknown`` (disclosed, and deliberately
+# not retried on the short TTL — only editing this tuple fixes it), never in
+# bad data.
 # Probed-and-absent (documented so nobody re-adds them blind): every FOMC /
 # Fed-rate-decision variant, "Unemployment Rate", "ISM Manufacturing PMI",
 # "Michigan Consumer Sentiment", "Core PCE (MoM)", "PCE (YoY)",
@@ -471,12 +473,14 @@ def _fetch_all() -> dict:
     histories: dict[str, list[dict]] = {}
     events_failed: list[str] = []
     events_unknown: list[str] = []
+    rate_limited: SoSoValueRateLimitError | None = None
     consecutive_network = 0
     remaining = iter(TRACKED_EVENTS)
     for name in remaining:
         try:
             rows = _fetch_one_event(name)
         except SoSoValueRateLimitError as e:
+            rate_limited = e
             # The 20 req/min limit is per-key and per-minute: this 429 proves
             # every further request in this sweep would 429 too, so drain the
             # rest into events_failed (short-TTL retry) instead of burning a
@@ -515,6 +519,14 @@ def _fetch_all() -> dict:
         else:
             histories[name] = rows
     if not histories:
+        # Keep the taxonomy honest when a 429 drained the whole sweep: the
+        # router and _load_snapshot classify by type, and a quota trip must
+        # not masquerade as structural breakage (ERROR + traceback logs).
+        if rate_limited is not None:
+            raise SoSoValueRateLimitError(
+                f"SoSoValue macro: rate limited before any tracked event "
+                f"history could be fetched: {rate_limited}"
+            ) from rate_limited
         raise SoSoValueError(
             f"SoSoValue macro: none of the {len(TRACKED_EVENTS)} tracked event "
             f"histories could be fetched; a schedule without figures is not a "

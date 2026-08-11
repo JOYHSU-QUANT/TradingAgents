@@ -846,12 +846,14 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         )
 
     if snapshot.calendar_duplicated:
+        # The count is extra ROWS, which may be one date repeated many times
+        # or many dates each repeated once — the wording must fit both.
         n = snapshot.calendar_duplicated
         header_lines.append(
-            f"_The provider repeated a calendar date {n} "
-            f"{_plural(n, 'time', 'times')}; the repeated {_plural(n, 'row was', 'rows were')} "
-            f"merged into that date. Usually the provider split one day across rows, but it "
-            f"can also mean another day's events were labelled with this date — treat "
+            f"_The provider sent {n} calendar day-{_plural(n, 'row', 'rows')} whose date "
+            f"was already in the payload; {_plural(n, 'it was', 'each was')} merged into "
+            f"that date. Usually the provider split a day's schedule across rows, but it "
+            f"can also mean another day's events were labelled with the wrong date — treat "
             f"scheduled dates in this report with extra care._"
         )
 
@@ -949,9 +951,11 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
             if len(released) > MAX_ROWS
             else ""
         )
+        # "scheduled on or before", not "past": a print dated curr_date itself
+        # is pending without being late.
         mix = (
-            f"{len(released) - pending} published, {pending} past their scheduled date "
-            f"with no figure yet"
+            f"{len(released) - pending} published, {pending} scheduled on or before "
+            f"{curr_date} with no figure yet"
             if pending
             else f"{len(released)} published"
         )

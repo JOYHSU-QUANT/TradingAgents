@@ -761,11 +761,26 @@ class TestRender:
 
     def test_a_merged_duplicate_date_is_disclosed(self):
         report = _render(_snapshot(calendar_duplicated=2))
-        assert "repeated a calendar date 2 times" in report
+        # The count is extra ROWS, so the wording must fit both "one date
+        # repeated twice" and "two dates repeated once each" — it must not
+        # claim a single date was hit N times.
+        assert "sent 2 calendar day-rows whose date was already in the payload" in report
+        assert "a calendar date 2 times" not in report
         # The report must name the reading that would be a real fault, not
         # only the benign one.
-        assert "another day's events were labelled with this date" in report
-        assert "repeated a calendar date" not in _render(_snapshot())
+        assert "another day's events were labelled with the wrong date" in report
+        assert "already in the payload" not in _render(_snapshot())
+
+    def test_duplicates_across_distinct_dates_are_all_counted(self):
+        data = [
+            {"date": "2026-08-11", "events": ["CPI (YoY)"]},
+            {"date": "2026-08-11", "events": ["GDP (QoQ)"]},
+            {"date": "2026-08-12", "events": ["CPI (MoM)"]},
+            {"date": "2026-08-12", "events": ["Retail Sales (MoM)"]},
+        ]
+        rows, _unusable, _truncated, duplicated = sosovalue_macro._parse_calendar(data)
+        assert [r["date"] for r in rows] == ["2026-08-11", "2026-08-12"]
+        assert duplicated == 2
 
     def test_units_and_surprise_semantics_are_stated(self):
         report = _render(self._rich_snapshot())
@@ -801,7 +816,18 @@ class TestRender:
             )
         )
         report = _render(snapshot)
-        assert "1 published, 1 past their scheduled date with no figure yet" in report
+        assert "1 published, 1 scheduled on or before 2026-08-11 with no figure yet" in report
+
+    def test_a_print_dated_today_is_not_called_late(self):
+        # Dated curr_date and unreleased: pending, but not past its date.
+        snapshot = _snapshot(
+            histories=_histories(
+                overrides={"Nonfarm Payrolls": [_row("2026-08-11", "", "85", "57")]}
+            )
+        )
+        report = _render(snapshot)
+        assert "past their scheduled date" not in report
+        assert "scheduled on or before 2026-08-11 with no figure yet" in report
 
     def test_non_padded_curr_date_is_normalized(self):
         padded = _render(self._rich_snapshot(), curr_date="2026-08-11")

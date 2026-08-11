@@ -14,7 +14,8 @@ Breaking changes within the 0.x line are called out explicitly.
   news-analyst categories for crypto assets, served by the SoSoValue key
   already used for ETF flows (shared plumbing — auth, request envelope, error
   taxonomy, clock/cache-age helpers — extracted from `sosovalue.py` into
-  `sosovalue_common.py` with no behaviour change). `economic_calendar`
+  `sosovalue_common.py`, semantics unchanged except that an out-of-range int
+  now fails the finite-number check instead of raising). `economic_calendar`
   reports the next two weeks' scheduled US releases with consensus forecasts
   and the trailing window's releases with actual-vs-forecast surprises, for a
   live-verified whitelist of high-signal events (the API has no importance
@@ -36,6 +37,16 @@ Breaking changes within the 0.x line are called out explicitly.
   them enabled would change a running paper deployment's analyst input
   surface with no server-side action to date the change from — flip them as
   a deliberate cutover, ideally alongside the `options_data` one.
+  Both reports state the semantics of what they render rather than leaving
+  them to be inferred: the unit each figure carries (a payrolls actual of
+  `-23` is thousands of jobs), that a surprise is actual minus forecast and
+  its sign is not a directional verdict, when the snapshot was fetched even
+  when it is fresh, which aggregate figures mix filed with derived values,
+  and — when a section is empty — whether that is a quiet window or this
+  snapshot's own coverage gap. A provider that merely reshapes its output
+  (a longer calendar, a repeated calendar date, comma-grouped numbers, a
+  listed company with no filings yet) degrades to a disclosed, counted
+  partial rather than failing the category into a stale serve that expires.
 - **Crypto options-implied volatility (Deribit).** A new keyless `options_data`
   category, bound to the **market** analyst for crypto assets only (vol regime
   is a technical read, so it sits alongside the indicators rather than with the

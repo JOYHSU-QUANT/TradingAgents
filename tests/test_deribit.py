@@ -1686,8 +1686,8 @@ class TestReport:
             "**DVOL (30-day implied vol index), latest usable reading:** 34.43% annualized on 2026-08-05"
             in out
         )
-        # The range line names its window end like every other line in the
-        # section; it was the one DVOL line without one, so quoted on its own
+        # The range line names its window end, like the percentile line beside
+        # it; it was the one DVOL line without one, so quoted on its own
         # during a backtest it read as "the last 30 days" from the reader's
         # present. "usable" because candles this module rejected as broken are
         # absent from the count, and the shortfall sentences blame the window.

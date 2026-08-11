@@ -214,7 +214,7 @@ def _is_valid_event_name(x: object) -> bool:
     )
 
 
-def _parse_calendar(data: list) -> tuple[list[dict], int, int]:
+def _parse_calendar(data: list) -> tuple[list[dict], int, int, int]:
     """Validate /macro/events rows into ascending ``{"date", "events"}`` rows.
 
     Strict only where the data would otherwise be unreadable: an empty
@@ -224,9 +224,12 @@ def _parse_calendar(data: list) -> tuple[list[dict], int, int]:
     or reshaping its schedule is evolution, not breakage: an unusable event
     *name* is dropped (``unusable``, mirroring the ETF listing's
     unusable-ticker handling), a repeated date has its event lists merged
-    (the per-date de-dupe below still keeps an event from double-listing),
-    and a calendar longer than ``MAX_CALENDAR_ROWS`` keeps its most recent
-    day-rows with ``truncated`` counting the older ones dropped.
+    (``duplicated`` counting the extra rows, because a merge can also be the
+    provider mislabelling two days as one — benign enough not to fail the
+    vendor, not benign enough to apply silently; the per-date de-dupe still
+    keeps an event from double-listing), and a calendar longer than
+    ``MAX_CALENDAR_ROWS`` keeps its most recent day-rows with ``truncated``
+    counting the older ones dropped.
     """
     if not data:
         raise SoSoValueError("SoSoValue returned an empty macro calendar")
@@ -237,6 +240,7 @@ def _parse_calendar(data: list) -> tuple[list[dict], int, int]:
         )
     by_date: dict[str, list[str]] = {}
     unusable = 0
+    duplicated = 0
     for raw in data:
         if (
             not isinstance(raw, dict)
@@ -244,6 +248,14 @@ def _parse_calendar(data: list) -> tuple[list[dict], int, int]:
             or not isinstance(raw.get("events"), list)
         ):
             raise SoSoValueError(f"Malformed macro calendar row {str(raw)[:200]!r}")
+        if raw["date"] in by_date:
+            duplicated += 1
+            logger.warning(
+                "SoSoValue macro calendar repeats %s; merging the day's event "
+                "lists and disclosing it — the provider may have split one day "
+                "across rows, or mislabelled another day as this one",
+                raw["date"],
+            )
         names = by_date.setdefault(raw["date"], [])
         for name in raw["events"]:
             if not _is_valid_event_name(name):
@@ -268,7 +280,7 @@ def _parse_calendar(data: list) -> tuple[list[dict], int, int]:
             MAX_CALENDAR_ROWS,
             MAX_CALENDAR_ROWS,
         )
-    return rows, unusable, truncated
+    return rows, unusable, truncated, duplicated
 
 
 def _parse_event_rows(data: list, name: str) -> list[dict]:
@@ -313,8 +325,9 @@ class _MacroSnapshot(NamedTuple):
 
     ``calendar`` is the present-anchored ~2-week schedule (ascending unique
     dates, validated names only, with ``calendar_unusable`` counting dropped
-    names and ``calendar_truncated`` the older day-rows dropped when the
-    provider published more than ``MAX_CALENDAR_ROWS``). ``histories`` maps
+    names, ``calendar_truncated`` the older day-rows dropped when the provider
+    published more than ``MAX_CALENDAR_ROWS``, and ``calendar_duplicated`` the
+    repeated day-rows merged into their date). ``histories`` maps
     each successfully-fetched tracked event to its
     ascending rows; ``events_failed`` holds the tracked events whose history
     fetch failed (retried on the short TTL), and ``events_unknown`` those the
@@ -328,6 +341,7 @@ class _MacroSnapshot(NamedTuple):
     calendar: list[dict]
     calendar_unusable: int
     calendar_truncated: int
+    calendar_duplicated: int
     histories: dict[str, list[dict]]
     events_failed: list[str]
     events_unknown: list[str]
@@ -397,7 +411,7 @@ def _read_cache(path: str) -> dict | None:
     dates = [r["date"] for r in calendar]
     if any(a >= b for a, b in zip(dates, dates[1:], strict=False)):
         return _reject("'calendar' dates are not strictly ascending")
-    for key in ("calendar_unusable", "calendar_truncated"):
+    for key in ("calendar_unusable", "calendar_truncated", "calendar_duplicated"):
         count = payload.get(key)
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             return _reject(f"'{key}' is missing or not a non-negative integer")
@@ -497,7 +511,7 @@ def _fetch_all() -> dict:
     empty-history name lands in ``events_unknown`` (renamed upstream; not
     retried on the short TTL because retrying cannot heal it).
     """
-    calendar, unusable, truncated = _parse_calendar(_request("/macro/events", {}))
+    calendar, unusable, truncated, duplicated = _parse_calendar(_request("/macro/events", {}))
 
     histories: dict[str, list[dict]] = {}
     events_failed: list[str] = []
@@ -565,6 +579,7 @@ def _fetch_all() -> dict:
         "calendar": calendar,
         "calendar_unusable": unusable,
         "calendar_truncated": truncated,
+        "calendar_duplicated": duplicated,
         "histories": histories,
         "events_failed": events_failed,
         "events_unknown": events_unknown,
@@ -576,6 +591,7 @@ def _snapshot_from(payload: dict, fetched_at: str, stale: bool) -> _MacroSnapsho
         calendar=payload["calendar"],
         calendar_unusable=payload["calendar_unusable"],
         calendar_truncated=payload["calendar_truncated"],
+        calendar_duplicated=payload["calendar_duplicated"],
         histories=payload["histories"],
         events_failed=payload["events_failed"],
         events_unknown=payload["events_unknown"],
@@ -827,6 +843,16 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
             f"_The provider published {n} more calendar day-{_plural(n, 'row', 'rows')} "
             f"than this client keeps; the oldest {_plural(n, 'was', 'were')} dropped, so "
             f"the calendar span below starts later than the provider's own._"
+        )
+
+    if snapshot.calendar_duplicated:
+        n = snapshot.calendar_duplicated
+        header_lines.append(
+            f"_The provider repeated a calendar date {n} "
+            f"{_plural(n, 'time', 'times')}; the repeated {_plural(n, 'row was', 'rows were')} "
+            f"merged into that date. Usually the provider split one day across rows, but it "
+            f"can also mean another day's events were labelled with this date — treat "
+            f"scheduled dates in this report with extra care._"
         )
 
     header_lines.append(

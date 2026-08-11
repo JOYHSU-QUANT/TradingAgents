@@ -64,6 +64,7 @@ def _snapshot(
     calendar=None,
     calendar_unusable=0,
     calendar_truncated=0,
+    calendar_duplicated=0,
     histories=None,
     events_failed=(),
     events_unknown=(),
@@ -76,6 +77,7 @@ def _snapshot(
         else [{"date": "2026-08-11", "events": ["CPI (YoY)"]}],
         calendar_unusable=calendar_unusable,
         calendar_truncated=calendar_truncated,
+        calendar_duplicated=calendar_duplicated,
         histories=_histories() if histories is None else histories,
         events_failed=list(events_failed),
         events_unknown=list(events_unknown),
@@ -95,7 +97,7 @@ def _render(snapshot, curr_date="2026-08-11", look_back_days=None):
 @pytest.mark.unit
 class TestParseCalendar:
     def test_live_fixture_parses_ascending_with_names(self):
-        rows, unusable, truncated = sosovalue_macro._parse_calendar(CAL_FIX["data"])
+        rows, unusable, truncated, duplicated = sosovalue_macro._parse_calendar(CAL_FIX["data"])
         assert (unusable, truncated) == (0, 0)
         assert [r["date"] for r in rows] == sorted(r["date"] for r in rows)
         assert rows[0]["date"] == "2026-08-10"
@@ -115,7 +117,7 @@ class TestParseCalendar:
         ]
         assert len(data) > sosovalue_macro.MAX_CALENDAR_ROWS
         with caplog.at_level("WARNING"):
-            rows, unusable, truncated = sosovalue_macro._parse_calendar(data)
+            rows, unusable, truncated, duplicated = sosovalue_macro._parse_calendar(data)
         assert len(rows) == sosovalue_macro.MAX_CALENDAR_ROWS
         assert truncated == len(data) - sosovalue_macro.MAX_CALENDAR_ROWS
         assert unusable == 0
@@ -136,17 +138,21 @@ class TestParseCalendar:
         with pytest.raises(sosovalue_common.SoSoValueError, match="Malformed"):
             sosovalue_macro._parse_calendar([{"date": "not-a-date", "events": []}])
 
-    def test_a_repeated_date_merges_instead_of_failing(self):
+    def test_a_repeated_date_merges_and_is_counted(self, caplog):
         # One day's schedule split across two rows is still that day's
-        # schedule; the per-date de-dupe keeps it from double-listing.
+        # schedule; the per-date de-dupe keeps it from double-listing. But a
+        # merge can equally be the provider mislabelling another day as this
+        # one, so it must never be applied silently.
         data = [
             {"date": "2026-08-11", "events": ["CPI (YoY)"]},
             {"date": "2026-08-11", "events": ["PPI (MoM)", "CPI (YoY)"]},
         ]
-        rows, unusable, truncated = sosovalue_macro._parse_calendar(data)
+        with caplog.at_level("WARNING"):
+            rows, unusable, truncated, duplicated = sosovalue_macro._parse_calendar(data)
         assert len(rows) == 1
         assert rows[0]["events"] == ["CPI (YoY)", "PPI (MoM)"]
-        assert (unusable, truncated) == (0, 0)
+        assert (unusable, truncated, duplicated) == (0, 0, 1)
+        assert "repeats 2026-08-11" in caplog.text
 
     def test_unusable_names_are_dropped_and_counted(self, caplog):
         data = [
@@ -157,13 +163,13 @@ class TestParseCalendar:
             }
         ]
         with caplog.at_level("WARNING"):
-            rows, unusable, _truncated = sosovalue_macro._parse_calendar(data)
+            rows, unusable, _truncated, _duplicated = sosovalue_macro._parse_calendar(data)
         assert rows[0]["events"] == ["CPI (YoY)"]
         assert unusable == 4
 
     def test_duplicate_name_within_a_day_is_deduped_not_counted(self):
         data = [{"date": "2026-08-11", "events": ["CPI (YoY)", "CPI (YoY)"]}]
-        rows, unusable, _truncated = sosovalue_macro._parse_calendar(data)
+        rows, unusable, _truncated, _duplicated = sosovalue_macro._parse_calendar(data)
         assert rows[0]["events"] == ["CPI (YoY)"]
         assert unusable == 0
 
@@ -386,6 +392,7 @@ class TestCacheAndLoad:
             "calendar": [{"date": "2026-08-11", "events": ["CPI (YoY)"]}],
             "calendar_unusable": 0,
             "calendar_truncated": 0,
+            "calendar_duplicated": 0,
             "histories": _histories(),
             "events_failed": [],
             "events_unknown": [],
@@ -751,6 +758,14 @@ class TestRender:
     def test_a_truncated_calendar_is_disclosed(self):
         report = _render(_snapshot(calendar_truncated=5))
         assert "5 more calendar day-rows than this client keeps" in report
+
+    def test_a_merged_duplicate_date_is_disclosed(self):
+        report = _render(_snapshot(calendar_duplicated=2))
+        assert "repeated a calendar date 2 times" in report
+        # The report must name the reading that would be a real fault, not
+        # only the benign one.
+        assert "another day's events were labelled with this date" in report
+        assert "repeated a calendar date" not in _render(_snapshot())
 
     def test_units_and_surprise_semantics_are_stated(self):
         report = _render(self._rich_snapshot())

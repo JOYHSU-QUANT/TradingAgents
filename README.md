@@ -377,8 +377,10 @@ Two further news-analyst crypto sources ride on the same SoSoValue key
 (`SOSOVALUE_API_KEY`, the one already used for ETF flows):
 
 - **US economic calendar** (`economic_calendar`, vendor `sosovalue`): scheduled
-  releases over the next two weeks with consensus forecasts, and the trailing
-  window's releases with actual-vs-forecast surprises, for a curated whitelist
+  releases from `curr_date` itself through the next two weeks with consensus
+  forecasts (an event scheduled today is the most decision-relevant row the
+  report carries, so the window includes it), and the trailing window's
+  releases with actual-vs-forecast surprises, for a curated whitelist
   of high-signal events (CPI/Core CPI, Nonfarm Payrolls, Initial Jobless
   Claims, Core PCE, GDP, Retail Sales — exact live-verified names; the API has
   no importance field, so the whitelist is the importance filter). Calendar
@@ -391,9 +393,13 @@ Two further news-analyst crypto sources ride on the same SoSoValue key
   report frames event risk as a regime/risk modifier, not a directional signal.
 - **Corporate BTC treasuries** (`btc_treasuries`, vendor `sosovalue`): combined
   and top-5 holdings across the 15 largest tracked holders (the provider lists
-  by holdings) and the window's disclosed changes — buys and disposals, with an
-  implied US$/BTC where a cost was filed, and holdings-only disclosures
-  rendered as the implied change from the prior filing. Disclosure dates lag
+  by holdings, and every contributor's as-of date is printed because no
+  filing-age cut is applied) and the window's disclosed changes — buys and
+  disposals, with an implied US$/BTC where a cost was filed against a filed
+  quantity, and holdings-only disclosures rendered as the implied change from
+  the prior filing (those carry no cost or implied price: the change spans
+  everything since that filing, so no single filed cost belongs to it).
+  Disclosure dates lag
   the underlying transactions and some companies file only monthly or
   quarterly, which the report caveats. Treasuries hold BTC only, so **ETH and
   other recognized risk assets get the BTC data as a labelled market-wide

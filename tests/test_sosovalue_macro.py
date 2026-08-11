@@ -955,7 +955,9 @@ class TestTodaysScheduleIsVisible:
             events_unknown=[n for n in TRACKED if n != "CPI (YoY)"],
         )
         report = _render(snapshot, curr_date="2026-08-11")
-        assert "not yet released" in report
+        # The exact row, not the substring: "not yet released" also appears in
+        # the intraday caveat, which fires unconditionally for this fixture.
+        assert "| 2026-08-11 | CPI (YoY) | not yet released | 3.0% | — | 2.9% |" in report
         assert "| 2026-08-11 | today | CPI (YoY)" not in report
 
     def test_a_calendar_entry_one_day_off_its_history_row_is_not_double_listed(self):
@@ -968,6 +970,18 @@ class TestTodaysScheduleIsVisible:
         )
         report = _render(snapshot, curr_date="2026-08-11")
         assert "| 2026-08-11 | today | CPI (YoY)" not in report
+
+    def test_the_echo_dedupe_does_not_reach_a_two_day_gap(self):
+        # Pins the WIDTH, not just the presence, of the +/-1 day match: a
+        # widened window would swallow a genuine second print two days after a
+        # released one, understating the event risk this report exists to show.
+        snapshot = _snapshot(
+            calendar=[{"date": "2026-08-12", "events": ["CPI (YoY)"]}],
+            histories={"CPI (YoY)": [_row("2026-08-10", "3.5%", "3.0%", "2.9%")]},
+            events_unknown=[n for n in TRACKED if n != "CPI (YoY)"],
+        )
+        report = _render(snapshot, curr_date="2026-08-11")
+        assert "| 2026-08-12 | 1d | CPI (YoY) | — | — |" in report
 
     def test_the_scheduled_table_is_capped_with_a_note(self):
         # Nothing bounds names-per-day at the parse boundary, so a provider
@@ -987,15 +1001,35 @@ class TestTodaysScheduleIsVisible:
 
 @pytest.mark.unit
 class TestServedDepthAndStaleReach:
+    def _capped_history(self, end="2026-08-11"):
+        # A history the per-request cap actually truncated: HISTORY_LIMIT rows,
+        # the oldest still inside the window.
+        base = datetime.strptime(end, "%Y-%m-%d")
+        return [
+            _row((base - timedelta(days=i)).strftime("%Y-%m-%d"), "1%", "1%", "1%")
+            for i in reversed(range(sosovalue_macro.HISTORY_LIMIT))
+        ]
+
     def test_a_window_outrunning_the_served_history_says_so(self):
         # 100 rows reach 8+ years for a monthly event but ~2 for a weekly one;
         # events_failed/unknown are empty here, so nothing else discloses it.
+        snapshot = _snapshot(
+            histories={"CPI (YoY)": self._capped_history()},
+            events_unknown=[n for n in TRACKED if n != "CPI (YoY)"],
+        )
+        report = _render(snapshot, curr_date="2026-08-11", look_back_days=365)
+        assert "served history for CPI (YoY) starts inside this window" in report
+
+    def test_a_merely_short_history_is_not_called_truncated(self):
+        # The claim is "earlier prints exist that this snapshot cannot show",
+        # which only the cap can make true. A newly published series with three
+        # rows has nothing older, so asserting a gap would invent one.
         snapshot = _snapshot(
             histories={"CPI (YoY)": [_row("2026-08-01", "3.5%", "3.4%", "3.3%")]},
             events_unknown=[n for n in TRACKED if n != "CPI (YoY)"],
         )
         report = _render(snapshot, curr_date="2026-08-11", look_back_days=365)
-        assert "served history for CPI (YoY) starts inside this window" in report
+        assert "starts inside this window" not in report
 
     def test_a_stale_snapshot_states_how_much_forward_reach_is_left(self):
         snapshot = _snapshot(
@@ -1008,7 +1042,39 @@ class TestServedDepthAndStaleReach:
 
     def test_a_fresh_snapshot_makes_no_reach_claim(self):
         report = _render(_snapshot(), curr_date="2026-08-11")
+        # Assert on the CLAIM, not the sentence's prefix: pinning the prefix
+        # alone lets the reach block be lifted out of the stale guard (and the
+        # prefix reworded) while a fresh snapshot emits a bogus reach figure.
+        assert "reaches only" not in report
         assert "also shortens the schedule below" not in report
+
+    def test_a_calendar_ending_today_still_credits_todays_entries(self):
+        # reach == 0 must not say "no forward schedule at all": the calendar
+        # sweep starts at curr_date inclusive, so the table below does carry
+        # today's rows and the sentence would contradict it.
+        snapshot = _snapshot(
+            calendar=[{"date": "2026-08-11", "events": ["ISM Services PMI"]}],
+            fetched_at="2026-08-01T00:00:00Z",
+            stale=True,
+        )
+        report = _render(snapshot, curr_date="2026-08-11")
+        assert "contribute today's entries but nothing beyond" in report
+        assert "| 2026-08-11 | today | ISM Services PMI" in report
+
+    def test_reach_ignores_day_rows_whose_names_were_all_dropped(self):
+        # A row whose every name was unusable survives with an empty list;
+        # counting it would overstate what the calendar can still contribute.
+        snapshot = _snapshot(
+            calendar=[
+                {"date": "2026-08-12", "events": ["CPI (YoY)"]},
+                {"date": "2026-08-20", "events": []},
+            ],
+            calendar_unusable=1,
+            fetched_at="2026-08-01T00:00:00Z",
+            stale=True,
+        )
+        report = _render(snapshot, curr_date="2026-08-11")
+        assert "reaches only 1 day past it" in report
 
     def test_a_stale_empty_schedule_is_not_blamed_on_the_provider(self):
         # The calendar ends before curr_date only because the snapshot aged
@@ -1024,6 +1090,34 @@ class TestServedDepthAndStaleReach:
         )
         report = _render(snapshot, curr_date="2026-08-11")
         assert "publishing no forward schedule" not in report
+        assert "artefact of the snapshot" in report
+
+    def test_a_truncated_but_fresh_empty_schedule_is_not_blamed_on_the_provider(self):
+        # The other half of the disjunct: a fresh snapshot whose calendar was
+        # cut by this client is not the calendar the provider published.
+        snapshot = _snapshot(
+            calendar=[{"date": "2026-07-20", "events": ["CPI (YoY)"]}],
+            calendar_truncated=5,
+            histories=_histories(
+                overrides={name: [_row("2026-01-15", "1%", "1%", "1%")] for name in TRACKED}
+            ),
+        )
+        report = _render(snapshot, curr_date="2026-08-11")
+        assert "publishing no forward schedule" not in report
+        assert "artefact of the snapshot" in report
+
+    def test_an_all_names_dropped_empty_schedule_is_not_called_benign(self):
+        # Third half: this client dropped the names, so "genuinely carries no
+        # scheduled entries" is false.
+        snapshot = _snapshot(
+            calendar=[{"date": "2026-08-20", "events": []}],
+            calendar_unusable=3,
+            histories=_histories(
+                overrides={name: [_row("2026-01-15", "1%", "1%", "1%")] for name in TRACKED}
+            ),
+        )
+        report = _render(snapshot, curr_date="2026-08-11")
+        assert "genuinely carries" not in report
         assert "artefact of the snapshot" in report
 
     def test_a_calendar_bloated_with_event_names_raises(self):

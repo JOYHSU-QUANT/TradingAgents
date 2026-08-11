@@ -889,16 +889,19 @@ class TestSameDayFilingOrder:
         assert rows[-1]["btc_holding"] == 840447.0
 
     def test_the_combined_total_uses_the_revised_same_day_figure(self):
-        snapshot = _snapshot(
-            companies={
-                "X": {
-                    "name": "",
-                    "rows": [_prow("2026-08-10", 838757.0), _prow("2026-08-10", 840447.0)],
-                }
-            }
+        # Build the rows through the PARSER from the API's own newest-first
+        # order — handing the renderer a pre-sorted list would pin visible[-1]
+        # and leave rows.reverse() free to be deleted.
+        rows = sosovalue_treasuries._parse_purchase_rows(
+            [
+                {"date": "2026-08-10", "btc_holding": "840447"},
+                {"date": "2026-08-10", "btc_holding": "838757"},
+            ],
+            "X",
         )
-        report = _render(snapshot)
+        report = _render(_snapshot(companies={"X": {"name": "", "rows": rows}}))
         assert "840,447 BTC" in report
+        assert "838,757 BTC" not in report
 
 
 @pytest.mark.unit
@@ -946,10 +949,23 @@ class TestHeadlineHonesty:
         report = _render(self._spread([900.0, 50.0, 50.0]))
         assert "moves mostly with what this one company does" in report
 
+    def test_a_dominance_claim_needs_more_than_half(self):
+        # The clause says "at more than half the total", so an exact tie of
+        # two equal holders (50.0%) must not make it.
+        assert "moves mostly with what this one company does" not in _render(
+            self._spread([100.0, 100.0])
+        )
+        assert "moves mostly with what this one company does" in _render(
+            self._spread([101.0, 99.0])
+        )
+
     def test_a_share_just_under_100_does_not_render_as_100(self):
-        report = _render(self._spread([99_900.0, 100.0]))
-        assert "= 100% of the" not in report
-        assert "99.9%" in report
+        # Both rounding boundaries: .0f breaks from 99.5, .1f again from 99.95.
+        for shares in ([99_900.0, 100.0], [100_000.0, 30.0, 20.0]):
+            report = _render(self._spread(shares))
+            assert "= 100% of the" not in report
+            assert "= 100.0% of the" not in report
+        assert "99.9%" in _render(self._spread([100_000.0, 30.0, 20.0]))
 
     def test_every_contributor_gets_an_as_of_date(self):
         snapshot = _snapshot(

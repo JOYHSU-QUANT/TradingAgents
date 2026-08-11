@@ -877,8 +877,15 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     # event's served depth loses its prints with nothing else in the report
     # saying so — events_failed/events_unknown are both empty in that case, so
     # the coverage-gap note cannot cover it either.
+    # ``len(rows) >= HISTORY_LIMIT`` is what makes the claim true: only a
+    # history the per-request cap actually truncated can be hiding earlier
+    # prints. A short history that simply starts inside the window — a newly
+    # published series, or one the provider has only lately begun serving —
+    # has nothing older to show, and asserting otherwise would invent a gap.
     shallow = sorted(
-        name for name, rows in snapshot.histories.items() if rows[0]["date"] > window_start
+        name
+        for name, rows in snapshot.histories.items()
+        if len(rows) >= HISTORY_LIMIT and rows[0]["date"] > window_start
     )
     # One union for both empty-section notes: _coverage_gap_note centralizes
     # the sentence precisely so a new failure bucket cannot be wired into one
@@ -910,13 +917,27 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # construction near the stale cap, while the report still ships under
         # a calendar's title. The family's 14-day cap is kept (user decision);
         # what the age costs is stated instead of left for the reader to infer.
-        reach = (datetime.strptime(snapshot.calendar[-1]["date"], "%Y-%m-%d") - curr_dt).days
-        if reach < AHEAD_DAYS:
-            extent = (
-                "ends on or before this date, so it can contribute no forward schedule at all"
-                if reach <= 0
-                else f"reaches only {reach} {_plural_days(reach)} past it"
-            )
+        # Measured from the last day-row that actually carries names: a row
+        # whose every name was dropped as unusable survives with an empty
+        # list, and counting it would overstate what the calendar can still
+        # contribute.
+        dated = [r["date"] for r in snapshot.calendar if r["events"]]
+        reach = (datetime.strptime(dated[-1], "%Y-%m-%d") - curr_dt).days if dated else None
+        if reach is None or reach < AHEAD_DAYS:
+            if reach is None:
+                extent = "carries no usable event names at all"
+            elif reach < 0:
+                extent = "ends before this date, so it can contribute no schedule at all"
+            elif reach == 0:
+                # Not "no forward schedule": the calendar sweep starts at
+                # curr_date INCLUSIVE, so a calendar ending today still
+                # contributes today's entries — the table below can show rows
+                # this sentence would otherwise deny.
+                extent = (
+                    "ends on this date, so it can contribute today's entries but nothing beyond"
+                )
+            else:
+                extent = f"reaches only {reach} {_plural_days(reach)} past it"
             header_lines.append(
                 f"_That age also shortens the schedule below: this snapshot's calendar "
                 f"{extent}, against the {AHEAD_DAYS}-day window the scheduled section "
@@ -1060,14 +1081,15 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # before curr_date means it stopped publishing forward — a coverage
         # failure that must not be narrated as a quiet fortnight.
         cal_end = snapshot.calendar[-1]["date"]
-        # Staleness and truncation are tested FIRST, ahead of the calendar's
-        # own end date: both mean this snapshot is not the calendar the
-        # provider published for this date, so neither the provider-blaming
-        # branch nor the benign one may speak. A stale calendar ending before
-        # curr_date has aged out of its forward reach — saying the provider
-        # "is publishing no forward schedule" would blame the source for the
-        # snapshot's age.
-        if snapshot.stale or snapshot.calendar_truncated:
+        # Staleness, truncation and dropped names are tested FIRST, ahead of
+        # the calendar's own end date: each means this snapshot is not the
+        # calendar the provider published for this date, so neither the
+        # provider-blaming branch nor the benign one may speak. A stale
+        # calendar ending before curr_date has aged out of its forward reach —
+        # saying the provider "is publishing no forward schedule" would blame
+        # the source for the snapshot's age; and when this client dropped the
+        # names itself, "genuinely carries no scheduled entries" is false.
+        if snapshot.stale or snapshot.calendar_truncated or snapshot.calendar_unusable:
             why = (
                 f"The provider's calendar in this snapshot ends {cal_end}, but the "
                 f"snapshot does not hold a complete forward view of what the provider "

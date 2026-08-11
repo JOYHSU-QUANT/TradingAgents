@@ -65,6 +65,7 @@ are normalized to floats at the parse boundary, so the cache stores numbers.
 
 import json
 import logging
+import math
 import os
 import re
 from datetime import datetime, timedelta
@@ -918,10 +919,17 @@ def get_btc_treasury_data(
     if combined > 0:
         top_ticker, top_row = holders[0]
         share = top_row["btc_holding"] / combined * 100
-        # One decimal where rounding would print "100%" for a share that is
-        # not the whole: at 99.6% the flat format asserts the largest holder
-        # IS the entire multi-company total.
-        share_str = f"{share:.1f}%" if share < 100 and round(share) >= 100 else f"{share:.0f}%"
+        # "100" may be printed only for a share that IS the whole. Any
+        # ROUNDING format breaks that on its own boundary — .0f fails from
+        # 99.5 and .1f fails again from 99.95 — so the near-100 band is
+        # truncated toward zero instead, which can never round up into the
+        # claim that one company is the entire multi-company total.
+        if share >= 100:
+            share_str = "100%"
+        elif round(share) >= 100:
+            share_str = f"{math.floor(share * 10) / 10:.1f}%"
+        else:
+            share_str = f"{share:.0f}%"
         # Only claim dominance where the arithmetic supports it. Printed
         # unconditionally, this clause told the reader to weight one filer's
         # disclosures above everything else even at a 14% share — reachable
@@ -930,7 +938,7 @@ def get_btc_treasury_data(
         dominance = (
             " and, at more than half the total, the combined figure moves mostly with "
             "what this one company does"
-            if share >= 50
+            if share > 50
             else ""
         )
         holdings_block += (
@@ -1003,7 +1011,8 @@ def get_btc_treasury_data(
             "event, not a market price. Both are blank on a row derived from a holdings "
             "change: there the BTC figure spans every transaction since the previous "
             "disclosure, so no single filed cost belongs to it. Implied US$/BTC is also "
-            "blank where the filing reported a quantity but no cost, or a cost of zero._",
+            "blank where the filing reported a quantity but no cost, a cost of zero, or a "
+            "quantity of zero — there is nothing to divide in any of those._",
             "\n| Date | Company | BTC change | Cost (US$m) | Implied US$/BTC |",
             "| --- | --- | --- | --- | --- |",
         ]

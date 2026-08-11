@@ -16,7 +16,8 @@ Breaking changes within the 0.x line are called out explicitly.
   taxonomy, clock/cache-age helpers — extracted from `sosovalue.py` into
   `sosovalue_common.py`, semantics unchanged except that an out-of-range int
   now fails the finite-number check instead of raising). `economic_calendar`
-  reports the next two weeks' scheduled US releases with consensus forecasts
+  reports the scheduled US releases from `curr_date` through the next two
+  weeks (today included) with consensus forecasts
   and the trailing window's releases with actual-vs-forecast surprises, for a
   live-verified whitelist of high-signal events (the API has no importance
   field, so the whitelist is the importance filter; calendar names outside it
@@ -30,7 +31,9 @@ Breaking changes within the 0.x line are called out explicitly.
   disposals (numeric strings normalized at the parse boundary; the API's
   `avg_btc_cost` field is live-verified unusable and never rendered), with
   holdings-only disclosures rendered as the implied change from the prior
-  filing; ETH and other recognized risk assets get the BTC data as a labelled
+  filing (carrying no cost or implied price, since that change spans
+  everything since that filing); ETH and other recognized risk assets get the
+  BTC data as a labelled
   market-wide demand proxy. Both categories are optional (sentinel
   degradation), cache on rolling snapshots with stale fallback, and **ship
   disabled** (`"none"`): the key already sits on deployed boxes, so landing

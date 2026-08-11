@@ -51,6 +51,7 @@ def _snapshot(
     companies=None,
     companies_total=None,
     companies_failed=(),
+    companies_empty=(),
     companies_unusable=0,
     order_unverified=False,
     fetched_at="2026-08-11T00:00:00Z",
@@ -80,6 +81,7 @@ def _snapshot(
         companies=companies,
         companies_total=len(companies) if companies_total is None else companies_total,
         companies_failed=list(companies_failed),
+        companies_empty=list(companies_empty),
         companies_unusable=companies_unusable,
         order_unverified=order_unverified,
         fetched_at=fetched_at,
@@ -104,13 +106,29 @@ class TestParseAmount:
         assert sosovalue_treasuries._parse_amount(5) == 5.0
         assert sosovalue_treasuries._parse_amount(-3.25) == -3.25
 
+    def test_comma_grouping_parses(self):
+        # The same provider's macro feed emits grouped numbers, so a switch to
+        # this shape must not fail every company at once.
+        assert sosovalue_treasuries._parse_amount("840,447") == 840447.0
+        assert sosovalue_treasuries._parse_amount("-108,600,000") == -108600000.0
+        assert sosovalue_treasuries._parse_amount("1,234.5") == 1234.5
+
     def test_everything_else_is_none(self):
         assert sosovalue_treasuries._parse_amount(True) is None
         assert sosovalue_treasuries._parse_amount(float("nan")) is None
-        assert sosovalue_treasuries._parse_amount("1,234") is None
+        # Grouping is accepted only in its exact shape.
+        assert sosovalue_treasuries._parse_amount("1,23") is None
+        assert sosovalue_treasuries._parse_amount("1,2345") is None
+        assert sosovalue_treasuries._parse_amount(",123") is None
+        assert sosovalue_treasuries._parse_amount("1 690") is None
+        assert sosovalue_treasuries._parse_amount("1.6k") is None
         assert sosovalue_treasuries._parse_amount("abc") is None
         assert sosovalue_treasuries._parse_amount("") is None
         assert sosovalue_treasuries._parse_amount(None) is None
+
+    def test_grouped_digits_stay_bounded(self):
+        # The digit cap still holds: an unbounded string would float() to inf.
+        assert sosovalue_treasuries._parse_amount("1,234,567,890,123,456") is None
 
     def test_oversized_magnitudes_never_become_inf_or_raise(self):
         # A 320-digit string would float() to inf (poisoning sums, then
@@ -190,7 +208,7 @@ class TestParsePurchaseRows:
         # cannot read is a contract break.
         with pytest.raises(sosovalue_common.SoSoValueError, match="unreadable btc_acq"):
             sosovalue_treasuries._parse_purchase_rows(
-                [{"date": "2026-08-10", "btc_holding": "10", "btc_acq": "1,690"}], "X"
+                [{"date": "2026-08-10", "btc_holding": "10", "btc_acq": "1 690"}], "X"
             )
 
     def test_duplicate_dates_are_both_kept(self):
@@ -254,10 +272,27 @@ class TestFetchAll:
         monkeypatch.setattr(
             sosovalue_treasuries,
             "_request",
-            _request_impl(history_by_ticker={"MARA": []}),
+            _request_impl(
+                history_error=sosovalue_common.SoSoValueError("boom"), error_tickers=("MARA",)
+            ),
         )
         payload = sosovalue_treasuries._fetch_all()
         assert payload["companies_failed"] == ["MARA"]
+        assert payload["companies_empty"] == []
+        assert "MARA" not in payload["companies"]
+
+    def test_an_empty_history_is_its_own_bucket_not_a_failure(self, monkeypatch):
+        # A listed company that has filed nothing is not a failure: counting
+        # it as one would pin the cache to the 1h incomplete TTL forever and
+        # re-run the whole sweep every hour with nothing to heal.
+        monkeypatch.setattr(
+            sosovalue_treasuries,
+            "_request",
+            _request_impl(history_by_ticker={"MARA": []}),
+        )
+        payload = sosovalue_treasuries._fetch_all()
+        assert payload["companies_empty"] == ["MARA"]
+        assert payload["companies_failed"] == []
         assert "MARA" not in payload["companies"]
 
     def test_a_first_request_429_keeps_its_rate_limit_type(self, monkeypatch):
@@ -307,7 +342,10 @@ class TestFetchAll:
             error_tickers=set(LIST_TICKERS),
         )
         monkeypatch.setattr(sosovalue_treasuries, "_request", impl)
-        with pytest.raises(sosovalue_common.SoSoValueError, match="all 12 selected"):
+        # The message must name the way it went — 12 failed, none merely empty.
+        with pytest.raises(
+            sosovalue_common.SoSoValueError, match=r"12 selected .*12 failed, 0 empty"
+        ):
             sosovalue_treasuries._fetch_all()
         history_calls = [c for c in impl.calls if c != "/btc-treasuries"]
         assert len(history_calls) == sosovalue_treasuries.MAX_CONSECUTIVE_NETWORK_FAILURES
@@ -357,6 +395,7 @@ class TestCacheAndLoad:
             },
             "companies_total": 57,
             "companies_failed": [],
+            "companies_empty": [],
             "companies_unusable": 0,
             "order_unverified": False,
             "fetched_at": "2026-08-11T00:00:00Z",
@@ -379,6 +418,21 @@ class TestCacheAndLoad:
         snapshot = sosovalue_treasuries._load_snapshot()
         assert impl.calls
         assert snapshot.companies_failed == []
+
+    def test_empty_histories_do_not_shorten_the_ttl(self, tmp_path, monkeypatch):
+        impl = self._setup(tmp_path, monkeypatch, now="2026-08-11T02:00:00Z")
+        # 2h old with a company that simply has not filed: still fresh under
+        # the 24h TTL. Treating it as incomplete would re-run the whole
+        # 16-request sweep every hour forever with nothing to heal.
+        self._write_cache(tmp_path, companies_empty=["MARA"])
+        snapshot = sosovalue_treasuries._load_snapshot()
+        assert impl.calls == []
+        assert snapshot.companies_empty == ["MARA"]
+
+    def test_an_empty_bucket_overlapping_a_failure_rejects_the_cache(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        self._write_cache(tmp_path, companies_failed=["MARA"], companies_empty=["MARA"])
+        assert sosovalue_treasuries._read_cache(str(tmp_path / "sosovalue_treasuries.json")) is None
 
     def test_past_ttl_refetches(self, tmp_path, monkeypatch):
         impl = self._setup(tmp_path, monkeypatch, now="2026-08-12T01:00:00Z")  # 25h
@@ -565,8 +619,7 @@ class TestRender:
         )
         report = _render(snapshot)
         assert (
-            "| 2026-06-15 | X | -20 (from holdings change since 2026-05-20) | -0.5 | — |"
-            in report
+            "| 2026-06-15 | X | -20 (from holdings change since 2026-05-20) | -0.5 | — |" in report
         )
 
     def test_a_sub_coin_disposal_keeps_its_sign(self):
@@ -608,10 +661,7 @@ class TestRender:
             }
         )
         report = _render(snapshot)
-        assert (
-            "| 2026-06-15 | X | -20 (from holdings change since 2026-05-20) | — | — |"
-            in report
-        )
+        assert "| 2026-06-15 | X | -20 (from holdings change since 2026-05-20) | — | — |" in report
 
     def test_first_row_holdings_only_is_disclosed_not_guessed(self):
         snapshot = _snapshot(companies={"Y": {"name": "", "rows": [_prow("2026-06-01", 50.0)]}})
@@ -678,19 +728,86 @@ class TestRender:
             companies_total=57, companies_failed=["HUT", "RIOT"], companies_unusable=1
         )
         report = _render(snapshot)
-        assert "Coverage incomplete (2/4 selected companies)" in report
+        # The numerator counts the companies this sentence names.
+        assert "Coverage incomplete (2 of 4 selected companies)" in report
         assert "HUT, RIOT" in report
         assert "1 listing entry had no usable ticker" in report
         assert "top 4 of 57 listed companies" in report
+
+    def test_empty_histories_are_disclosed_separately_from_failures(self):
+        snapshot = _snapshot(companies_total=57, companies_empty=["HUT"])
+        report = _render(snapshot)
+        assert "listed by the provider but" in report
+        assert "no served purchase history at all" in report
+        assert "Coverage incomplete" not in report
+        # The selection denominator counts them too.
+        assert "top 3 of 57 listed companies" in report
+
+    def test_a_company_with_no_disclosure_by_curr_date_is_disclosed_not_dropped(self):
+        # It leaves the combined total, the tracked count and the
+        # concentration denominator — that must not happen silently.
+        snapshot = _snapshot(
+            companies={
+                "MSTR": {"name": "Strategy", "rows": [_prow("2026-08-10", 840447.0, -1690.0)]},
+                "FUTR": {"name": "Future Filer", "rows": [_prow("2026-09-30", 100.0, 100.0)]},
+            }
+        )
+        report = _render(snapshot, curr_date="2026-08-11")
+        assert "(FUTR) has no disclosure dated on or before 2026-08-11" in report
+        assert "excluded from every figure below" in report
+        assert "across 1 tracked company" in report
 
     def test_stale_snapshot_is_disclosed(self):
         report = _render(_snapshot(fetched_at="2026-08-09T00:00:00Z", stale=True))
         assert "STALE by" in report
 
+    def test_an_empty_activity_window_points_back_at_the_coverage_gap(self):
+        snapshot = _snapshot(
+            companies={
+                "MSTR": {"name": "Strategy", "rows": [_prow("2025-02-01", 471107.0, 20356.0)]}
+            },
+            companies_total=57,
+            companies_failed=["MARA"],
+        )
+        report = _render(snapshot, curr_date="2026-08-11", look_back_days=30)
+        assert "no disclosed holdings changes in the window" in report
+        assert "Coverage is incomplete in this snapshot (MARA contributed nothing)" in report
+
+    def test_the_snapshot_fetch_time_is_shown_even_when_fresh(self):
+        report = _render(_snapshot(fetched_at="2026-08-11T00:00:00Z", stale=False))
+        assert "STALE by" not in report
+        assert "Snapshot fetched 2026-08-11T00:00:00Z" in report
+
     def test_fixed_caveats_are_always_present(self):
         report = _render(_snapshot())
         assert "disclosure dates" in report
         assert "announcement-driven and lumpy" in report
+
+    def test_the_column_semantics_are_stated(self):
+        report = _render(_snapshot())
+        assert "negative = proceeds received on a disposal, not a cost" in report
+        assert "not a market price" in report
+
+    def test_the_concentration_denominator_is_stated(self):
+        report = _render(_snapshot())
+        assert "not of the whole market" in report
+        assert "not a single-date measure" in report
+
+    def test_a_derived_delta_is_disclosed_on_the_headline_too(self):
+        # The row-level "since" tag alone leaves the net, the adding/reducing
+        # counts and the window label reading as filed quantities.
+        report = _render(_snapshot(), look_back_days=365)
+        assert "1 row is derived from a holdings change" in report
+        assert "can start before this 365-day window" in report
+
+    def test_an_all_filed_window_makes_no_derived_claim(self):
+        snapshot = _snapshot(
+            companies={
+                "MSTR": {"name": "Strategy", "rows": [_prow("2026-08-10", 840447.0, -1690.0)]}
+            }
+        )
+        report = _render(snapshot)
+        assert "derived from a holdings change" not in report
 
     def test_activity_table_is_capped_with_a_note(self):
         rows = [

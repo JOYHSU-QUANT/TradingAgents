@@ -291,3 +291,22 @@ def _plural(count: int, singular: str, plural: str) -> str:
 
 def _plural_days(count: int) -> str:
     return _plural(count, "day", "days")
+
+
+def _coverage_gap_note(missing: set[str] | list[str], did_what: str, otherwise: str) -> str:
+    """A sentence naming what an empty section might really be, or "".
+
+    An empty table reads as "nothing happened" unless the report says the
+    snapshot was short of the things that would have filled it. The union
+    guard and the shared clause live here so a module that grows another
+    failure bucket cannot fix the wording in one empty branch and forget the
+    next: each caller passes every bucket that contributed nothing, plus its
+    own two context phrases.
+    """
+    names = sorted(missing)
+    if not names:
+        return ""
+    return (
+        f"Coverage is incomplete in this snapshot ({', '.join(names)} {did_what}), "
+        f"so the window may be empty because of that gap rather than because {otherwise}."
+    )

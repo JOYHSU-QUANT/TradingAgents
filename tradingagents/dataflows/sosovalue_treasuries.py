@@ -80,6 +80,7 @@ from .sosovalue_common import (
     SoSoValueRateLimitError,
     _cache_age_hours,
     _cache_dir,
+    _coverage_gap_note,
     _days_stale,
     _humanize_age,
     _is_finite_number,
@@ -136,13 +137,16 @@ MAX_STALE_DAYS = 14
 # skipped into ``companies_failed`` unattempted — family breaker.
 MAX_CONSECUTIVE_NETWORK_FAILURES = 3
 
-# BTC and USD figures arrive as digit strings ("840447", "-108600000") —
-# no comma grouping was observed, and accepting only this exact shape keeps
-# a malformed value from parsing as something else. Digit counts are bounded
+# BTC and USD figures arrive as digit strings ("840447", "-108600000").
+# Comma grouping was not observed here, but the same provider's macro feed
+# does emit it, so a switch to "840,447" is a formatting change to expect —
+# and refusing it would fail every company at once and take the vendor down
+# with it. Both shapes parse; anything else still does not, so a malformed
+# value cannot slip through as something else. Digit counts stay bounded
 # (live values top out at 9 integer digits): an unbounded digit string would
 # float() to inf past ~309 digits, poisoning sums with a value the cache
 # validator then rejects forever (a silent perpetual-refetch loop).
-_AMOUNT_RE = re.compile(r"^-?\d{1,15}(\.\d{1,8})?$")
+_AMOUNT_RE = re.compile(r"^-?(?:\d{1,3}(?:,\d{3}){1,4}|\d{1,15})(?:\.\d{1,8})?$")
 
 # The report renders costs in US$m, unit-consistent with the ETF module.
 _USD_PER_MILLION = 1e6
@@ -158,7 +162,7 @@ def _parse_amount(x: object) -> float | None:
     if _is_finite_number(x):
         return float(x)
     if isinstance(x, str) and _AMOUNT_RE.match(x):
-        return float(x)
+        return float(x.replace(",", ""))
     return None
 
 
@@ -217,9 +221,11 @@ def _parse_purchase_rows(data: list, ticker: str) -> list[dict]:
     absence maps to None; but a *present* field that fails to parse raises,
     because a filed figure this module cannot read safely is a contract
     break, not an absence. Raises land the company in ``companies_failed``
-    (non-fatal, disclosed). Duplicate dates are kept — two same-day filings
-    are two disclosures, and dropping one would hide a real event; rows sort
-    ascending by date, stable within a date.
+    (non-fatal, disclosed). An empty ``data`` raises too, as a defensive
+    backstop — ``_fetch_one_company`` pre-checks emptiness and routes it into
+    ``companies_empty`` before this parser runs. Duplicate dates are kept —
+    two same-day filings are two disclosures, and dropping one would hide a
+    real event; rows sort ascending by date, stable within a date.
     """
     if not data:
         raise SoSoValueError(f"SoSoValue returned no treasury history rows for {ticker}")
@@ -255,8 +261,11 @@ class _TreasurySnapshot(NamedTuple):
 
     ``companies`` maps ticker -> {"name": str, "rows": [normalized rows]} for
     each fetched history; ``companies_failed`` the selected tickers whose
-    fetch failed (their union is the MAX_COMPANIES-capped selection, in
-    listing order); ``companies_total`` counts the full usable listing (the
+    fetch failed (retried on the short TTL) and ``companies_empty`` those the
+    provider answered with no rows — listed but not yet filing, which no
+    retry can heal, so they do not shorten the TTL. The three together are
+    the MAX_COMPANIES-capped selection, in listing order.
+    ``companies_total`` counts the full usable listing (the
     "top N of M" disclosure denominator) and ``companies_unusable`` the
     dropped listing entries. ``order_unverified`` records that the fetched
     holdings contradicted the listing's largest-first ordering, so the
@@ -266,6 +275,7 @@ class _TreasurySnapshot(NamedTuple):
     companies: dict[str, dict]
     companies_total: int
     companies_failed: list[str]
+    companies_empty: list[str]
     companies_unusable: int
     order_unverified: bool
     fetched_at: str
@@ -345,13 +355,17 @@ def _read_cache(path: str) -> dict | None:
         # Non-empty by the vendor-success decision: _fetch_all raises rather
         # than writing a payload with zero fetched histories.
         return _reject("'companies' is missing, empty, or contains a malformed entry")
-    failed = payload.get("companies_failed")
-    if not isinstance(failed, list) or not all(_is_valid_ticker(t) for t in failed):
-        return _reject("'companies_failed' is missing or not a list of plausible tickers")
-    failed_set = set(failed)
-    if len(failed_set) != len(failed) or failed_set & companies.keys():
-        return _reject("'companies_failed' repeats a ticker or overlaps 'companies'")
-    selected = len(companies) + len(failed)
+    buckets = {}
+    for key in ("companies_failed", "companies_empty"):
+        tickers = payload.get(key)
+        if not isinstance(tickers, list) or not all(_is_valid_ticker(t) for t in tickers):
+            return _reject(f"'{key}' is missing or not a list of plausible tickers")
+        buckets[key] = set(tickers)
+        if len(buckets[key]) != len(tickers) or buckets[key] & companies.keys():
+            return _reject(f"'{key}' repeats a ticker or overlaps 'companies'")
+    if buckets["companies_failed"] & buckets["companies_empty"]:
+        return _reject("'companies_failed' overlaps 'companies_empty'")
+    selected = len(companies) + sum(len(b) for b in buckets.values())
     if selected > MAX_COMPANIES:
         # Also covers a cache written under a larger historical cap.
         return _reject(f"selection ({selected}) exceeds MAX_COMPANIES ({MAX_COMPANIES})")
@@ -368,10 +382,18 @@ def _read_cache(path: str) -> dict | None:
     return payload
 
 
-def _fetch_one_company(ticker: str, name: str) -> dict | None:
-    """Fetch and parse one company's history; None on a non-fatal failure.
+def _fetch_one_company(ticker: str, name: str) -> dict | str | None:
+    """Fetch and parse one company's history.
 
-    Mirrors the family per-item handler: a rejected key and a 429 both
+    Returns the company entry, the string ``"empty"`` when the provider
+    answers with no rows, or ``None`` on a non-fatal failure worth retrying.
+    An empty history is a listed company that has not filed yet, not a
+    failure: counting it as one would keep ``companies_failed`` permanently
+    non-empty and pin the cache to the 1h incomplete TTL forever, re-running
+    the whole sweep every hour against a shared quota with nothing to heal.
+    Mirrors the macro module's ``events_unknown`` handling.
+
+    Otherwise the family per-item handler: a rejected key and a 429 both
     propagate (config breakage must reach the router; a 429 makes the rest
     of the sweep pointless, so the caller drains it), a structural break
     logs at ERROR with a traceback, a transient stays a warning, and a
@@ -379,13 +401,19 @@ def _fetch_one_company(ticker: str, name: str) -> dict | None:
     count the streak.
     """
     try:
-        rows = _parse_purchase_rows(
-            _request(
-                f"/btc-treasuries/{quote(ticker, safe='')}/purchase-history",
-                {"limit": HISTORY_LIMIT},
-            ),
-            ticker,
+        data = _request(
+            f"/btc-treasuries/{quote(ticker, safe='')}/purchase-history",
+            {"limit": HISTORY_LIMIT},
         )
+        if not data:
+            logger.warning(
+                "SoSoValue treasuries %s has an empty purchase history — the "
+                "company is listed but has filed nothing this endpoint serves; "
+                "disclosing it rather than retrying it",
+                ticker,
+            )
+            return "empty"
+        rows = _parse_purchase_rows(data, ticker)
         return {"name": name, "rows": rows}
     except (requests.RequestException, SoSoValueError) as e:
         if isinstance(e, SoSoValueError):
@@ -428,6 +456,7 @@ def _fetch_all() -> dict:
     selected = listing[:MAX_COMPANIES]
     companies: dict[str, dict] = {}
     companies_failed: list[str] = []
+    companies_empty: list[str] = []
     rate_limited: SoSoValueRateLimitError | None = None
     consecutive_network = 0
     remaining = iter(selected)
@@ -467,7 +496,9 @@ def _fetch_all() -> dict:
                 break
             continue
         consecutive_network = 0
-        if company is None:
+        if company == "empty":
+            companies_empty.append(ticker)
+        elif company is None:
             companies_failed.append(ticker)
         else:
             companies[ticker] = company
@@ -481,9 +512,14 @@ def _fetch_all() -> dict:
                 f"SoSoValue treasuries: rate limited before any company "
                 f"history could be fetched: {rate_limited}"
             ) from rate_limited
+        # Say which way it went: "failed" would misdescribe a sweep where every
+        # selected company simply has no served history, sending a reader after
+        # a transport problem that never happened.
         raise SoSoValueError(
-            f"SoSoValue treasuries histories failed for all {len(selected)} selected "
-            f"companies; a listing without holdings figures is no signal"
+            f"SoSoValue treasuries returned no usable history for any of the "
+            f"{len(selected)} selected companies ({len(companies_failed)} failed, "
+            f"{len(companies_empty)} empty); a listing without holdings figures "
+            f"is no signal"
         )
     # Verify the ordering the selection and the report's "largest holders"
     # claim both rest on: the fetched companies' latest holdings must be
@@ -505,6 +541,7 @@ def _fetch_all() -> dict:
         "companies": companies,
         "companies_total": len(listing),
         "companies_failed": companies_failed,
+        "companies_empty": companies_empty,
         "companies_unusable": unusable,
         "order_unverified": order_unverified,
     }
@@ -515,6 +552,7 @@ def _snapshot_from(payload: dict, fetched_at: str, stale: bool) -> _TreasurySnap
         companies=payload["companies"],
         companies_total=payload["companies_total"],
         companies_failed=payload["companies_failed"],
+        companies_empty=payload["companies_empty"],
         companies_unusable=payload["companies_unusable"],
         order_unverified=payload["order_unverified"],
         fetched_at=fetched_at,
@@ -525,8 +563,9 @@ def _snapshot_from(payload: dict, fetched_at: str, stale: bool) -> _TreasurySnap
 def _load_snapshot() -> _TreasurySnapshot:
     """Return the treasuries snapshot, via the family cache/stale discipline.
 
-    Key first; TTL-fresh cache served as-is (incomplete coverage earns the
-    short TTL); otherwise fetch + overwrite; on failure fall back to the
+    Key first; TTL-fresh cache served as-is (a *failed* history earns the
+    short TTL — an empty one cannot be healed by retrying, so it does not);
+    otherwise fetch + overwrite; on failure fall back to the
     cached snapshot up to MAX_STALE_DAYS; failures never written;
     ``SoSoValueNotConfiguredError`` never absorbed.
     """
@@ -695,12 +734,24 @@ def get_btc_treasury_data(
             f"{snapshot.fetched_at}). Treat with caution._"
         )
 
-    selected = len(snapshot.companies) + len(snapshot.companies_failed)
+    selected = (
+        len(snapshot.companies) + len(snapshot.companies_failed) + len(snapshot.companies_empty)
+    )
     if snapshot.companies_failed:
+        n = len(snapshot.companies_failed)
         header_lines.append(
-            f"_Coverage incomplete ({len(snapshot.companies)}/{selected} selected "
-            f"companies): histories for {', '.join(sorted(snapshot.companies_failed))} "
-            f"could not be fetched, so the figures below exclude them._"
+            f"_Coverage incomplete ({n} of {selected} selected companies): histories "
+            f"for {', '.join(sorted(snapshot.companies_failed))} could not be fetched, "
+            f"so the figures below exclude them._"
+        )
+    if snapshot.companies_empty:
+        n = len(snapshot.companies_empty)
+        header_lines.append(
+            f"_{n} selected {_plural(n, 'company', 'companies')} "
+            f"({', '.join(sorted(snapshot.companies_empty))}) "
+            f"{_plural(n, 'is', 'are')} listed by the provider but "
+            f"{_plural(n, 'has', 'have')} no served purchase history at all, so "
+            f"{_plural(n, 'it holds', 'they hold')} no figures below._"
         )
     if snapshot.companies_unusable:
         n = snapshot.companies_unusable
@@ -709,6 +760,20 @@ def get_btc_treasury_data(
             f"{_plural(n, 'was', 'were')} skipped; a dropped entry may itself be a "
             f"large holder, so the top-{selected} cut may not be the true top "
             f"{selected}._"
+        )
+    # A fetched company whose every disclosure postdates curr_date drops out of
+    # the whole report — combined holdings, the tracked count and the
+    # concentration denominator all shrink with it. That is a coverage gap like
+    # any other and must be disclosed, not applied silently.
+    no_disclosure = sorted(set(snapshot.companies) - set(visible_by_company))
+    if no_disclosure:
+        n = len(no_disclosure)
+        header_lines.append(
+            f"_{n} fetched {_plural(n, 'company', 'companies')} "
+            f"({', '.join(no_disclosure)}) {_plural(n, 'has', 'have')} no disclosure "
+            f"dated on or before {curr_date}, so {_plural(n, 'it is', 'they are')} "
+            f"excluded from every figure below, including the combined total, the "
+            f"tracked-company count and the concentration share._"
         )
 
     header_lines.append(
@@ -727,18 +792,23 @@ def get_btc_treasury_data(
         else "provider lists largest holders first"
     )
     header_lines.append(
-        f"- Source: SoSoValue OpenAPI (BTC treasuries) | Coverage: top {selected} of "
+        f"- Source: SoSoValue OpenAPI (BTC treasuries) | Snapshot fetched "
+        f"{snapshot.fetched_at} | Coverage: top {selected} of "
         f"{snapshot.companies_total} listed companies ({ordering}) | Window ending "
         f"{curr_date}"
     )
     header = "\n\n".join(header_lines) + "\n"
 
     if not visible_by_company:
+        # Do not assert a single cause: served-history depth is one reason this
+        # can be empty, but so are the coverage gaps disclosed above, or a
+        # curr_date earlier than every disclosure this snapshot holds.
         return (
-            header + f"\nNo treasury disclosures on or before {curr_date} within the "
-            f"provider's served history (up to {HISTORY_LIMIT} rows per company, "
-            f"reaching only so far back). Report this as no treasury data for the "
-            f"date; do not fabricate values."
+            header + f"\nNo treasury disclosures on or before {curr_date} in this "
+            f"snapshot. That can be the provider's served history not reaching back "
+            f"this far (up to {HISTORY_LIMIT} rows per company), or the coverage gaps "
+            f"disclosed above. Report this as no treasury data for the date; do not "
+            f"fabricate values."
         )
 
     # ---- holdings -----------------------------------------------------------
@@ -774,7 +844,9 @@ def get_btc_treasury_data(
         share = top_row["btc_holding"] / combined * 100
         holdings_block += (
             f"**Concentration:** largest holder {top_ticker} = {share:.0f}% of the "
-            f"combined tracked holdings — the totals move mostly with what it does\n"
+            f"{n_tracked}-company combined total above — not of the whole market, and "
+            f"not a single-date measure (it divides holdings carrying the same mixed "
+            f"as-of dates); the totals move mostly with what it does\n"
         )
 
     # ---- activity -----------------------------------------------------------
@@ -827,6 +899,13 @@ def get_btc_treasury_data(
             else ""
         )
         lines = [
+            "\n_BTC change is positive for an acquisition, negative for a disposal; "
+            "Cost is the amount the company filed for that same event in millions of "
+            "US dollars and carries the matching sign (negative = proceeds received on "
+            "a disposal, not a cost); Implied US$/BTC is that filing's own cost "
+            "divided by its own quantity as an absolute value — an average price for "
+            "that event, not a market price, and blank wherever no filed quantity "
+            "exists to divide by._",
             "\n| Date | Company | BTC change | Cost (US$m) | Implied US$/BTC |",
             "| --- | --- | --- | --- | --- |",
         ]
@@ -843,10 +922,24 @@ def get_btc_treasury_data(
             by_company[ticker] = by_company.get(ticker, 0.0) + delta
         adders = sum(1 for v in by_company.values() if v > 0)
         reducers = sum(1 for v in by_company.values() if v < 0)
+        # The rows are heterogeneous — filed quantities and holdings-derived
+        # deltas — and only the rows say so. The net, the adding/reducing
+        # counts and the window label all inherit that mix, so state it where
+        # the aggregate is read (user decision).
+        derived = sum(1 for e in events if e[5] is not None)
+        mix_note = (
+            f" Of these, {derived} {_plural(derived, 'row is', 'rows are')} derived "
+            f"from a holdings change rather than a filed quantity, and each spans "
+            f"everything since that company's previous disclosure — which can start "
+            f"before this {look_back_days}-day window, so the net and the "
+            f"adding/reducing counts can cover a longer period than the label."
+            if derived
+            else ""
+        )
         activity_block = (
             f"\n**{look_back_days}d disclosed net change:** {_fmt_signed_btc(net)} BTC "
             f"({adders} {_plural(adders, 'company', 'companies')} adding, {reducers} "
-            f"reducing, of {n_tracked} tracked)\n" + "\n".join(lines) + "\n" + note
+            f"reducing, of {n_tracked} tracked).{mix_note}\n" + "\n".join(lines) + "\n" + note
         )
     else:
         latest_any = max(v[-1]["date"] for v in visible_by_company.values())
@@ -869,5 +962,16 @@ def get_btc_treasury_data(
             f"window, so earlier activity may exist that the provider no longer "
             f"serves; the window totals can understate it._\n"
         )
+    if not events:
+        # Every bucket that contributed nothing, not just the failures: a
+        # company the provider lists with no served history at all, and one
+        # whose disclosures all postdate curr_date, leave the same hole.
+        gap = _coverage_gap_note(
+            set(snapshot.companies_failed) | set(snapshot.companies_empty) | set(no_disclosure),
+            "contributed nothing",
+            "no company disclosed a change",
+        )
+        if gap:
+            activity_block += f"\n_{gap}_\n"
 
     return header + holdings_block + activity_block

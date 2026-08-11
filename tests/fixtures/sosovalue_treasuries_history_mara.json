@@ -1,0 +1,69 @@
+{
+ "code": 0,
+ "message": "success",
+ "data": [
+  {
+   "date": "2026-03-31",
+   "ticker": "MARA",
+   "btc_holding": "35303",
+   "avg_btc_cost": 0
+  },
+  {
+   "date": "2025-09-30",
+   "ticker": "MARA",
+   "btc_holding": "52850",
+   "btc_acq": "736",
+   "avg_btc_cost": 0
+  },
+  {
+   "date": "2025-08-31",
+   "ticker": "MARA",
+   "btc_holding": "52477",
+   "btc_acq": "705",
+   "avg_btc_cost": 0
+  },
+  {
+   "date": "2025-07-31",
+   "ticker": "MARA",
+   "btc_holding": "50639",
+   "btc_acq": "703",
+   "avg_btc_cost": 0
+  },
+  {
+   "date": "2025-06-30",
+   "ticker": "MARA",
+   "btc_holding": "49940",
+   "btc_acq": "713",
+   "avg_btc_cost": 0
+  },
+  {
+   "date": "2025-05-31",
+   "ticker": "MARA",
+   "btc_holding": "49179",
+   "btc_acq": "950",
+   "avg_btc_cost": 0
+  },
+  {
+   "date": "2025-04-30",
+   "ticker": "MARA",
+   "btc_holding": "48237",
+   "btc_acq": "705",
+   "avg_btc_cost": 0
+  },
+  {
+   "date": "2025-03-31",
+   "ticker": "MARA",
+   "btc_holding": "47532",
+   "btc_acq": "829",
+   "avg_btc_cost": 0
+  },
+  {
+   "date": "2025-02-28",
+   "ticker": "MARA",
+   "btc_holding": "46374",
+   "btc_acq": "706",
+   "avg_btc_cost": 0
+  }
+ ],
+ "details": null
+}

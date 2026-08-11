@@ -1,6 +1,8 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from tradingagents.agents.utils.agent_utils import (
+    get_btc_treasuries,
+    get_economic_calendar,
     get_etf_flows,
     get_fear_greed,
     get_global_news,
@@ -58,6 +60,24 @@ def create_news_analyst(llm):
                 crypto_hints.append(
                     "get_fear_greed(curr_date, look_back_days) for the Crypto Fear & "
                     "Greed Index (a 0-100 crowd-sentiment gauge)"
+                )
+            if not is_category_disabled("economic_calendar", "get_economic_calendar"):
+                crypto_tools.append(get_economic_calendar)
+                crypto_hints.append(
+                    "get_economic_calendar(curr_date, look_back_days) for the US macro "
+                    "calendar — upcoming CPI/NFP/PCE-style releases with forecasts and "
+                    "the recent prints with surprises; treat event risk as a regime / "
+                    "risk modifier, not a directional signal (the feed carries no Fed "
+                    "rate-decision events, so never infer a quiet Fed from it)"
+                )
+            if not is_category_disabled("btc_treasuries", "get_btc_treasuries"):
+                crypto_tools.append(get_btc_treasuries)
+                crypto_hints.append(
+                    "get_btc_treasuries(asset, curr_date, look_back_days) for corporate "
+                    "BTC treasury holdings and disclosed buys/disposals of the largest "
+                    "holders — an announcement-driven demand-side signal (for assets "
+                    "other than BTC it is a market-wide proxy, not that asset's own "
+                    "flows)"
                 )
             if crypto_tools:
                 tools = tools + crypto_tools

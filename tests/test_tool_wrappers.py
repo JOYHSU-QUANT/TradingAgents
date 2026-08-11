@@ -56,6 +56,8 @@ DATE = "2026-08-05"
 # dispatches on, so the two must not drift.
 ALL_WRAPPERS = [
     (core_stock_tools, "get_stock_data"),
+    (crypto_data_tools, "get_btc_treasuries"),
+    (crypto_data_tools, "get_economic_calendar"),
     (crypto_data_tools, "get_etf_flows"),
     (crypto_data_tools, "get_fear_greed"),
     (crypto_data_tools, "get_options_market"),
@@ -375,6 +377,16 @@ class TestCryptoWrappersAreCoveredToo:
             crypto_data_tools.get_fear_greed,
             {"curr_date": DATE, "look_back_days": 30},
         ) == ("get_fear_greed", DATE, 30)
+        assert _forwarded(
+            crypto_data_tools,
+            crypto_data_tools.get_economic_calendar,
+            {"curr_date": DATE, "look_back_days": 30},
+        ) == ("get_economic_calendar", DATE, 30)
+        assert _forwarded(
+            crypto_data_tools,
+            crypto_data_tools.get_btc_treasuries,
+            {"asset": "BTC", "curr_date": DATE, "look_back_days": 90},
+        ) == ("get_btc_treasuries", "BTC", DATE, 90)
 
     def test_the_crypto_lookback_defaults_reach_the_router_as_none(self):
         # Passing 30 explicitly above cannot see the declared default: the
@@ -393,3 +405,13 @@ class TestCryptoWrappersAreCoveredToo:
             crypto_data_tools.get_fear_greed,
             {"curr_date": DATE},
         ) == ("get_fear_greed", DATE, None)
+        assert _forwarded(
+            crypto_data_tools,
+            crypto_data_tools.get_economic_calendar,
+            {"curr_date": DATE},
+        ) == ("get_economic_calendar", DATE, None)
+        assert _forwarded(
+            crypto_data_tools,
+            crypto_data_tools.get_btc_treasuries,
+            {"asset": "BTC", "curr_date": DATE},
+        ) == ("get_btc_treasuries", "BTC", DATE, None)

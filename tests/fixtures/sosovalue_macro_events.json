@@ -1,0 +1,46 @@
+{
+ "code": 0,
+ "message": "success",
+ "data": [
+  {
+   "date": "2026-08-10",
+   "events": [
+    "Existing Home Sales"
+   ]
+  },
+  {
+   "date": "2026-08-11",
+   "events": [
+    "CPI (YoY)",
+    "CPI (MoM)",
+    "Core CPI (MoM)"
+   ]
+  },
+  {
+   "date": "2026-08-12",
+   "events": [
+    "PPI (MoM)"
+   ]
+  },
+  {
+   "date": "2026-08-13",
+   "events": [
+    "Retail Sales (MoM)"
+   ]
+  },
+  {
+   "date": "2026-08-20",
+   "events": [
+    "S&P Global US Manufacturing PMI",
+    "S&P Global Services PMI"
+   ]
+  },
+  {
+   "date": "2026-08-24",
+   "events": [
+    "New Home Sales"
+   ]
+  }
+ ],
+ "details": null
+}

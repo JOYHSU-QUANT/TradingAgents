@@ -10,6 +10,32 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **US economic calendar + corporate BTC treasuries (SoSoValue).** Two new
+  news-analyst categories for crypto assets, served by the SoSoValue key
+  already used for ETF flows (shared plumbing — auth, request envelope, error
+  taxonomy, clock/cache-age helpers — extracted from `sosovalue.py` into
+  `sosovalue_common.py` with no behaviour change). `economic_calendar`
+  reports the next two weeks' scheduled US releases with consensus forecasts
+  and the trailing window's releases with actual-vs-forecast surprises, for a
+  live-verified whitelist of high-signal events (the API has no importance
+  field, so the whitelist is the importance filter; calendar names outside it
+  appear name-only). Scheduled rows never render an actual and released
+  figures appear only on or before `curr_date` (lookahead-safe); surprises
+  are computed only when actual and forecast share a unit; the report flags
+  that the feed carries no Fed rate-decision events at all, and frames event
+  risk as a regime/risk modifier rather than a directional signal.
+  `btc_treasuries` reports combined and top-5 holdings across the 15 largest
+  tracked corporate holders plus the window's disclosed changes — buys and
+  disposals (numeric strings normalized at the parse boundary; the API's
+  `avg_btc_cost` field is live-verified unusable and never rendered), with
+  holdings-only disclosures rendered as the implied change from the prior
+  filing; ETH and other recognized risk assets get the BTC data as a labelled
+  market-wide demand proxy. Both categories are optional (sentinel
+  degradation), cache on rolling snapshots with stale fallback, and **ship
+  disabled** (`"none"`): the key already sits on deployed boxes, so landing
+  them enabled would change a running paper deployment's analyst input
+  surface with no server-side action to date the change from — flip them as
+  a deliberate cutover, ideally alongside the `options_data` one.
 - **Crypto options-implied volatility (Deribit).** A new keyless `options_data`
   category, bound to the **market** analyst for crypto assets only (vol regime
   is a technical read, so it sits alongside the indicators rather than with the

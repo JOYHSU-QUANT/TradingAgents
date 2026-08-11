@@ -16,6 +16,10 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 _CRYPTO_TOOLS = {"get_etf_flows", "get_fear_greed"}
 
+# The SoSoValue calendar/treasuries categories ship disabled ("none"), so
+# these two are bound only after the deliberate cutover enables them.
+_SHIPPED_OFF_TOOLS = {"get_economic_calendar", "get_btc_treasuries"}
+
 
 class _CapturingLLM:
     """Records the tools bound to it; its bound runnable returns a no-tool-call reply."""
@@ -72,11 +76,33 @@ def test_disabled_category_is_not_bound():
 
 
 @pytest.mark.unit
+def test_shipped_off_categories_are_not_bound_by_default():
+    # economic_calendar and btc_treasuries ship as "none": a default-config
+    # crypto run must not bind them (the call could only return the disabled
+    # sentinel); enabling them is a deliberate cutover.
+    bound = _run("crypto", "BTC-USD")
+    assert not (_SHIPPED_OFF_TOOLS & bound)
+
+
+@pytest.mark.unit
+def test_enabled_calendar_and_treasuries_bind_for_crypto_only():
+    set_config({"data_vendors": {"economic_calendar": "sosovalue", "btc_treasuries": "sosovalue"}})
+    try:
+        assert _run("crypto", "BTC-USD") >= _SHIPPED_OFF_TOOLS
+        assert not (_SHIPPED_OFF_TOOLS & _run("stock", "AAPL"))
+    finally:
+        set_config({"data_vendors": {"economic_calendar": "none", "btc_treasuries": "none"}})
+
+
+@pytest.mark.unit
 def test_news_toolnode_can_execute_crypto_tools():
     # _create_tool_nodes does not use self -> call unbound (avoids building LLMs).
     nodes = TradingAgentsGraph._create_tool_nodes(None)
     news_tools = set(nodes["news"].tools_by_name)
-    assert news_tools >= _CRYPTO_TOOLS, (
-        "crypto flows/sentiment tools are bound to the news analyst for crypto "
-        "assets but not registered in the news ToolNode, so the model's call fails."
+    # The shipped-off tools stay registered here too: once the cutover enables
+    # them, the bound call must be executable without a code change.
+    assert news_tools >= _CRYPTO_TOOLS | _SHIPPED_OFF_TOOLS, (
+        "crypto flows/sentiment/calendar/treasury tools are bound to the news "
+        "analyst for crypto assets but not registered in the news ToolNode, so "
+        "the model's call fails."
     )

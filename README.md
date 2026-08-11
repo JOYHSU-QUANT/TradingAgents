@@ -373,6 +373,45 @@ as a deliberate cutover and record when:
 config["data_vendors"]["options_data"] = "deribit"
 ```
 
+Two further news-analyst crypto sources ride on the same SoSoValue key
+(`SOSOVALUE_API_KEY`, the one already used for ETF flows):
+
+- **US economic calendar** (`economic_calendar`, vendor `sosovalue`): scheduled
+  releases over the next two weeks with consensus forecasts, and the trailing
+  window's releases with actual-vs-forecast surprises, for a curated whitelist
+  of high-signal events (CPI/Core CPI, Nonfarm Payrolls, Initial Jobless
+  Claims, Core PCE, GDP, Retail Sales — exact live-verified names; the API has
+  no importance field, so the whitelist is the importance filter). Calendar
+  names outside the whitelist appear as name-only lines. Scheduled rows render
+  forecast and previous but **never an actual**, and released figures appear
+  only on or before `curr_date`, so a backtest date cannot see a future print;
+  forecasts are the provider's current values, which the report says. The feed
+  carries **no Fed rate-decision events at all** — the report flags that
+  coverage gap so an empty FOMC row is never read as a quiet Fed schedule. The
+  report frames event risk as a regime/risk modifier, not a directional signal.
+- **Corporate BTC treasuries** (`btc_treasuries`, vendor `sosovalue`): combined
+  and top-5 holdings across the 15 largest tracked holders (the provider lists
+  by holdings) and the window's disclosed changes — buys and disposals, with an
+  implied US$/BTC where a cost was filed, and holdings-only disclosures
+  rendered as the implied change from the prior filing. Disclosure dates lag
+  the underlying transactions and some companies file only monthly or
+  quarterly, which the report caveats. Treasuries hold BTC only, so **ETH and
+  other recognized risk assets get the BTC data as a labelled market-wide
+  demand proxy**; stablecoins and unrecognized symbols get a no-signal note.
+
+Both **ship disabled** (`"economic_calendar": "none"`, `"btc_treasuries":
+"none"`) for the same reason as `options_data`: the SoSoValue key already sits
+on a deployed box for ETF flows, so landing these enabled would change a
+running deployment's analyst input surface the moment the code deploys, with no
+server-side action to date the change from. Flip them (ideally together with
+the `options_data` cutover, so the paper run's input surface gains one
+segmentation point instead of three) with:
+
+```python
+config["data_vendors"]["economic_calendar"] = "sosovalue"
+config["data_vendors"]["btc_treasuries"] = "sosovalue"
+```
+
 Any data category can be switched off by setting its vendor to `"none"`:
 
 ```python

@@ -5,9 +5,15 @@ the analysts only when ``asset_type == "crypto"``. Each routes through
 ``route_to_vendor`` so the configured vendor and the optional-category
 degradation behaviour apply, exactly like the stock/macro tools.
 
-The flows/sentiment tools go to the news analyst; the options-volatility tool
-goes to the market analyst, where vol regime belongs alongside the technical
-indicators. A later data-source PR adds whale positioning here too.
+The flows/sentiment/calendar/treasury tools go to the news analyst; the
+options-volatility tool goes to the market analyst, where vol regime belongs
+alongside the technical indicators. A later data-source PR adds whale
+positioning here too.
+
+The economic calendar is not crypto-specific data — FOMC-week risk moves
+equities too — but it is bound crypto-only for now so the stock path's tools
+and prompts stay byte-identical (the standing rule for these data PRs);
+offering it to stock runs is a separate, deliberate change.
 """
 
 from typing import Annotated
@@ -129,3 +135,76 @@ def get_options_market(
             ticker), a plain no-signal sentence carrying no figures at all.
     """
     return route_to_vendor("get_options_market", asset, curr_date)
+
+
+@tool
+def get_economic_calendar(
+    curr_date: Annotated[str, "Current date in yyyy-mm-dd format; the anchor of the window"],
+    look_back_days: Annotated[
+        int | None, "Trailing window for the released section; omit for a 30-day window"
+    ] = None,
+) -> str:
+    """
+    Retrieve the US macro economic calendar: scheduled releases over the next
+    two weeks (CPI, NFP, jobless claims, PCE, GDP, retail sales — with the
+    consensus forecast and prior print) and the releases of the trailing
+    window with actual-vs-forecast surprises. Event risk contextualizes
+    position sizing and timing (a regime / risk modifier); it is not a
+    directional signal, and the report says so. The feed carries no Fed
+    rate-decision events at all — the report flags that coverage gap so an
+    empty FOMC row is never read as a quiet Fed schedule. Scheduled rows show
+    forecast and previous but never an actual; released figures appear only
+    on or before curr_date, so a backtest date never sees a future print.
+    Uses the configured economic_calendar vendor.
+
+    Args:
+        curr_date (str): Current date in yyyy-mm-dd format
+        look_back_days (int): Trailing window for the released section; omit
+            for a 30-day window
+
+    Returns:
+        str: A formatted markdown report of scheduled events and releases
+    """
+    return route_to_vendor("get_economic_calendar", curr_date, look_back_days)
+
+
+@tool
+def get_btc_treasuries(
+    asset: Annotated[
+        str,
+        "Crypto asset the demand signal is for: 'BTC' natively (pair forms like "
+        "'BTC-USD' are accepted). Corporate treasuries hold BTC only, so another "
+        "recognized crypto risk asset (ETH, SOL, ...) is served the BTC data as a "
+        "market-wide demand proxy; a stablecoin or unrecognized symbol returns a "
+        "no-signal note.",
+    ],
+    curr_date: Annotated[str, "Current date in yyyy-mm-dd format; the end of the window"],
+    look_back_days: Annotated[
+        int | None,
+        "Trailing window for the activity section; omit for a 90-day window "
+        "(treasury disclosures are sparse)",
+    ] = None,
+) -> str:
+    """
+    Retrieve corporate BTC treasury holdings and disclosed changes from the
+    largest tracked holders: combined and top-5 holdings (each company as of
+    its own latest disclosure), and the window's disclosed buys/disposals with
+    an implied US$/BTC where a cost was filed. A demand-side flow signal of
+    the same family as spot-ETF flows, but announcement-driven and lumpy —
+    a medium-term narrative input, not a timing signal. Disclosure dates can
+    lag the underlying transactions, and some companies file only monthly or
+    quarterly snapshots. Corporate treasuries hold BTC only, so a recognized
+    crypto risk asset other than BTC (ETH included) receives the BTC data as
+    a market-wide demand proxy; a stablecoin or unrecognized symbol returns a
+    no-signal note. Uses the configured btc_treasuries vendor.
+
+    Args:
+        asset (str): 'BTC' (other recognized risk coins get the BTC data as a proxy)
+        curr_date (str): Current date in yyyy-mm-dd format
+        look_back_days (int): Trailing window for the activity section; omit
+            for a 90-day window
+
+    Returns:
+        str: A formatted markdown report of treasury holdings and activity
+    """
+    return route_to_vendor("get_btc_treasuries", asset, curr_date, look_back_days)

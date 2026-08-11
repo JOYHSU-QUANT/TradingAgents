@@ -1,0 +1,842 @@
+"""SoSoValue BTC corporate-treasury vendor.
+
+Serves corporate BTC treasury holdings and disclosed holdings changes from
+SoSoValue's OpenAPI btc-treasuries module (shared plumbing in
+``sosovalue_common``), as a news-side demand-flow signal of the same family as
+the spot-ETF flows: who holds how much, and who added or reduced inside the
+window. Treasury flow is announcement-driven and lumpy — a medium-term
+demand-side narrative, not a timing signal — and the report says so.
+
+Live-verified API facts this module is built on (2026-08-11):
+
+- ``GET /btc-treasuries`` takes no parameters and returned 57 companies
+  ordered by holdings, largest first (MSTR, then XXI, Metaplanet, MARA —
+  matching the real-world ranking), each ``{"ticker", "name",
+  "list_location"}`` with NO holdings figure — so the listing's own order is
+  the only way to pick the biggest holders without fetching every history,
+  and the ``MAX_COMPANIES`` cut assumes it. International tickers appear
+  ("3350", "0434.HK", "ADE.DE"), which the shared ticker filter accepts.
+- ``GET /btc-treasuries/{ticker}/purchase-history`` (``limit`` capped at 100)
+  serves rows newest-first. Numeric fields arrive as STRINGS ("840447",
+  "-1690"); ``btc_acq`` is negative for disposals (MSTR was reducing when
+  captured) and — with ``acq_cost`` — can be MISSING entirely: MARA's newest
+  row carries only ``btc_holding``, its ~17.5k BTC reduction visible only as
+  a holdings drop. Some companies disclose per-purchase, others only monthly
+  or quarterly snapshots. ``avg_btc_cost`` is unusable (0 or 0.09 where
+  ~$64k/BTC is implied by cost/quantity) and is neither stored nor rendered;
+  a per-row implied price is computed from ``acq_cost / btc_acq`` instead.
+- History depth varies and is bounded (MSTR's reached ~19 months when
+  captured), so a look-back window can outrun the served history — the
+  report discloses that instead of reading absence as inactivity.
+
+The fan-out is capped at ``MAX_COMPANIES`` histories (1 + N requests against
+the shared 20 req/min plan limit), taken in listing order — i.e. the largest
+holders. Vendor success needs the listing AND at least one company history
+(decision Q3): unlike the ETF module there is no aggregate endpoint, the
+signal lives entirely in the histories, and a report of bare company names
+would be no signal at all. Individual history failures below that threshold
+are disclosed and retried on the short incomplete-TTL, with the family's
+consecutive-network-failure breaker — and an immediate drain on the first
+429: the plan limit is per-key and per-minute, so once it trips every
+remaining request this sweep would 429 too (a deliberate divergence from the
+ETF module's decided keep-trying-after-429 behaviour, which predates the key
+being shared by three fan-outs). The holdings-order assumption is verified
+after each fetch — the fetched companies' latest holdings must be
+non-increasing in listing order — and a violation downgrades the report's
+"largest holders" claim to "ordering unverified" instead of asserting a
+ranking the data contradicts. A rejected or unset key raises out of any
+request so the emergency-disable flip stays immediate.
+
+Asset scope: the module serves BTC only (that is the product). ``BTC`` gets
+the native report; another recognized crypto risk asset (including ETH, which
+has no treasuries module here) gets the same data labelled as a market-wide
+demand proxy; a stablecoin or unrecognized symbol gets a no-signal note —
+mirroring the ETF module's classification, with ETH on the proxy side this
+time.
+
+Caching mirrors the family: one rolling snapshot file on a 24h TTL (treasury
+disclosures are event-frequency; a day-scale TTL also keeps this module's
+16-request refresh from crowding the ETF and macro modules' shares of the
+rate limit), the short TTL while any selected history is missing, stale
+serves capped at ``MAX_STALE_DAYS`` and disclosed, failures never written,
+and a cache that fails read-side validation discarded. All numeric strings
+are normalized to floats at the parse boundary, so the cache stores numbers.
+"""
+
+import json
+import logging
+import os
+import re
+from datetime import datetime, timedelta
+from typing import NamedTuple
+from urllib.parse import quote
+
+import requests
+
+from .errors import VendorError
+from .sosovalue_common import (
+    SoSoValueError,
+    SoSoValueNotConfiguredError,
+    SoSoValueRateLimitError,
+    _cache_age_hours,
+    _cache_dir,
+    _days_stale,
+    _humanize_age,
+    _is_finite_number,
+    _is_iso_date,
+    _is_valid_ticker,
+    _iso_now,
+    _plural,
+    _request,
+    get_api_key,
+)
+from .symbol_utils import CRYPTO_BASES, normalize_symbol
+
+logger = logging.getLogger(__name__)
+
+# Only BTC has a treasuries module; every other recognized risk asset is
+# served the BTC data as a labelled market-wide proxy (see module docstring).
+SUPPORTED_ASSETS = {"BTC"}
+
+# Histories fetched per refresh, taken in listing order — the provider lists
+# by holdings, largest first (live-verified), so this is a top-holders cut.
+# 1 + 15 requests fits a single refresh inside the shared 20 req/min limit.
+MAX_COMPANIES = 15
+
+# Default trailing window for the activity section. Treasury disclosures are
+# sparse (some companies file monthly or quarterly), so the family's 30-day
+# default would routinely show an empty table; a quarter captures at least
+# one disclosure cycle for most filers.
+DEFAULT_LOOKBACK_DAYS = 90
+
+# The documented per-request row cap (values above are silently clamped).
+HISTORY_LIMIT = 100
+
+# Row cap for the rendered activity table, mirroring the family MAX_ROWS.
+MAX_ROWS = 40
+
+# Companies shown in the top-holders line.
+TOP_HOLDERS = 5
+
+# Bound on the listing's free-text company name. Unlike the ETF module's
+# stored-only fund names these ARE rendered (the top-holders line), so the
+# charset is restricted to printable ASCII as well as bounded — a name that
+# fails is dropped to "" and the report falls back to the ticker alone.
+MAX_COMPANY_NAME_CHARS = 60
+
+# Cache lifetimes. 24h TTL: disclosures are event-frequency (announcement
+# driven), and the longer interval keeps this module's 16-request refresh
+# from crowding the ETF/macro modules on the shared 20 req/min plan. The
+# short TTL re-tries missing histories; stale serves are capped + disclosed.
+CACHE_TTL_HOURS = 24
+INCOMPLETE_CACHE_TTL_HOURS = 1
+MAX_STALE_DAYS = 14
+
+# Consecutive transport-level failures before the remaining histories are
+# skipped into ``companies_failed`` unattempted — family breaker.
+MAX_CONSECUTIVE_NETWORK_FAILURES = 3
+
+# BTC and USD figures arrive as digit strings ("840447", "-108600000") —
+# no comma grouping was observed, and accepting only this exact shape keeps
+# a malformed value from parsing as something else.
+_AMOUNT_RE = re.compile(r"^-?\d+(\.\d+)?$")
+
+# The report renders costs in US$m, unit-consistent with the ETF module.
+_USD_PER_MILLION = 1e6
+
+
+def _parse_amount(x: object) -> float | None:
+    """A finite number from the API's numeric-string (or bare-number) fields.
+
+    Returns None for anything else — including bools, NaN/Infinity, and
+    strings with grouping or units — so the caller decides whether a field
+    is required (raise) or optional (absent).
+    """
+    if _is_finite_number(x):
+        return float(x)
+    if isinstance(x, str) and _AMOUNT_RE.match(x):
+        return float(x)
+    return None
+
+
+def _clean_name(x: object) -> str:
+    """A renderable company name, or "" to fall back to the ticker.
+
+    Rendered verbatim in report text, so it must be printable ASCII and
+    bounded; anything else is dropped rather than escaped (the ticker is
+    always shown anyway).
+    """
+    if (
+        isinstance(x, str)
+        and 0 < len(x) <= MAX_COMPANY_NAME_CHARS
+        and x == x.strip()
+        and all(32 <= ord(c) <= 126 for c in x)
+    ):
+        return x
+    return ""
+
+
+def _parse_company_list(data: list) -> tuple[list[tuple[str, str]], int]:
+    """Validate the listing into ``((ticker, name) pairs, unusable count)``.
+
+    Mirrors the ETF listing parser: an entry without a plausible ticker is
+    dropped with a warning and counted (the report discloses the shrunken
+    universe); duplicates keep the first entry; order is preserved — it IS
+    the holdings ranking (live-verified), which the MAX_COMPANIES cut relies
+    on. An unusable name does not drop the entry: the ticker still names the
+    company.
+    """
+    companies: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    unusable = 0
+    for raw in data:
+        ticker = raw.get("ticker") if isinstance(raw, dict) else None
+        if not _is_valid_ticker(ticker):
+            unusable += 1
+            logger.warning(
+                "SoSoValue treasuries list entry %.120r has no usable ticker; skipping it",
+                raw,
+            )
+            continue
+        if ticker in seen:
+            continue
+        seen.add(ticker)
+        companies.append((ticker, _clean_name(raw.get("name"))))
+    return companies, unusable
+
+
+def _parse_purchase_rows(data: list, ticker: str) -> list[dict]:
+    """Validate one company's history into ascending normalized rows.
+
+    ``btc_holding`` is required on every row (every live row carries it, and
+    it is what the holdings section reads). ``btc_acq``/``acq_cost`` are
+    OPTIONAL — live-verified missing on holdings-only disclosures (MARA), so
+    absence maps to None; but a *present* field that fails to parse raises,
+    because a filed figure this module cannot read safely is a contract
+    break, not an absence. Raises land the company in ``companies_failed``
+    (non-fatal, disclosed). Duplicate dates are kept — two same-day filings
+    are two disclosures, and dropping one would hide a real event; rows sort
+    ascending by date, stable within a date.
+    """
+    if not data:
+        raise SoSoValueError(f"SoSoValue returned no treasury history rows for {ticker}")
+    rows = []
+    for raw in data:
+        if not isinstance(raw, dict) or not _is_iso_date(raw.get("date")):
+            raise SoSoValueError(f"Malformed {ticker} treasury row {str(raw)[:200]!r}")
+        holding = _parse_amount(raw.get("btc_holding"))
+        if holding is None:
+            raise SoSoValueError(
+                f"{ticker} treasury row for {raw['date']} has no readable btc_holding: "
+                f"{str(raw.get('btc_holding'))[:60]!r}"
+            )
+        row = {"date": raw["date"], "btc_holding": holding}
+        for field in ("btc_acq", "acq_cost"):
+            if field in raw and raw[field] is not None:
+                value = _parse_amount(raw[field])
+                if value is None:
+                    raise SoSoValueError(
+                        f"{ticker} treasury row for {raw['date']} has an unreadable "
+                        f"{field}: {str(raw[field])[:60]!r}"
+                    )
+                row[field] = value
+            else:
+                row[field] = None
+        rows.append(row)
+    rows.sort(key=lambda r: r["date"])
+    return rows
+
+
+class _TreasurySnapshot(NamedTuple):
+    """What ``_load_snapshot`` resolved.
+
+    ``companies`` maps ticker -> {"name": str, "rows": [normalized rows]} for
+    each fetched history; ``companies_failed`` the selected tickers whose
+    fetch failed (their union is the MAX_COMPANIES-capped selection, in
+    listing order); ``companies_total`` counts the full usable listing (the
+    "top N of M" disclosure denominator) and ``companies_unusable`` the
+    dropped listing entries. ``order_unverified`` records that the fetched
+    holdings contradicted the listing's largest-first ordering, so the
+    report must not claim a top-N ranking.
+    """
+
+    companies: dict[str, dict]
+    companies_total: int
+    companies_failed: list[str]
+    companies_unusable: int
+    order_unverified: bool
+    fetched_at: str
+    stale: bool
+
+
+def _cache_path() -> str:
+    """Path of the single rolling snapshot (the data is BTC-wide, no asset key)."""
+    return os.path.join(_cache_dir(), "sosovalue_treasuries.json")
+
+
+def _valid_rows(rows: object) -> bool:
+    if not (isinstance(rows, list) and rows):
+        return False
+    if not all(
+        isinstance(r, dict)
+        and _is_iso_date(r.get("date"))
+        and _is_finite_number(r.get("btc_holding"))
+        and (r.get("btc_acq") is None or _is_finite_number(r.get("btc_acq")))
+        and (r.get("acq_cost") is None or _is_finite_number(r.get("acq_cost")))
+        for r in rows
+    ):
+        return False
+    dates = [r["date"] for r in rows]
+    # Non-descending, not strictly ascending: duplicate dates are legal
+    # (two same-day disclosures) and preserved by the parser.
+    return all(a <= b for a, b in zip(dates, dates[1:], strict=False))
+
+
+def _read_cache(path: str) -> dict | None:
+    """Return a fully-validated cached payload, or None if untrusted.
+
+    Family discipline: every rejection logged with its reason, a rejected
+    cache costs one re-fetch and never bad data. The bookkeeping invariants
+    ``_fetch_all`` always writes are re-checked: the selection (fetched +
+    failed) is non-empty, within the cap, disjoint, and no larger than the
+    disclosed universe — violations would render "-3 of 57" style coverage
+    lines or a holdings section the caveats say cannot exist.
+    """
+
+    def _reject(reason: str) -> None:
+        logger.warning("Ignoring SoSoValue treasuries cache %s: %s", path, reason)
+        return None
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        return _reject(f"unreadable ({e})")
+    if not isinstance(payload, dict):
+        return _reject(f"top-level JSON is a {type(payload).__name__}, expected an object")
+    companies = payload.get("companies")
+    if not (
+        isinstance(companies, dict)
+        and companies
+        and all(
+            _is_valid_ticker(t)
+            and isinstance(c, dict)
+            # The same predicate as the live parse side (_clean_name is
+            # idempotent: valid names pass through, anything else maps to
+            # ""): these names render verbatim into LLM-visible report text,
+            # so the cache read must not admit what the parser would not.
+            and isinstance(c.get("name"), str)
+            and c["name"] == _clean_name(c["name"])
+            and _valid_rows(c.get("rows"))
+            for t, c in companies.items()
+        )
+    ):
+        # Non-empty by the vendor-success decision: _fetch_all raises rather
+        # than writing a payload with zero fetched histories.
+        return _reject("'companies' is missing, empty, or contains a malformed entry")
+    failed = payload.get("companies_failed")
+    if not isinstance(failed, list) or not all(_is_valid_ticker(t) for t in failed):
+        return _reject("'companies_failed' is missing or not a list of plausible tickers")
+    failed_set = set(failed)
+    if len(failed_set) != len(failed) or failed_set & companies.keys():
+        return _reject("'companies_failed' repeats a ticker or overlaps 'companies'")
+    selected = len(companies) + len(failed)
+    if selected > MAX_COMPANIES:
+        # Also covers a cache written under a larger historical cap.
+        return _reject(f"selection ({selected}) exceeds MAX_COMPANIES ({MAX_COMPANIES})")
+    total = payload.get("companies_total")
+    if not isinstance(total, int) or isinstance(total, bool) or total < selected:
+        return _reject("'companies_total' is missing or smaller than the selection")
+    unusable = payload.get("companies_unusable")
+    if not isinstance(unusable, int) or isinstance(unusable, bool) or unusable < 0:
+        return _reject("'companies_unusable' is missing or not a non-negative integer")
+    if not isinstance(payload.get("order_unverified"), bool):
+        return _reject("'order_unverified' is missing or not a boolean")
+    if not isinstance(payload.get("fetched_at"), str) or not payload["fetched_at"]:
+        return _reject("'fetched_at' is missing or not a non-empty string")
+    return payload
+
+
+def _fetch_one_company(ticker: str, name: str) -> dict | None:
+    """Fetch and parse one company's history; None on a non-fatal failure.
+
+    Mirrors the family per-item handler: a rejected key and a 429 both
+    propagate (config breakage must reach the router; a 429 makes the rest
+    of the sweep pointless, so the caller drains it), a structural break
+    logs at ERROR with a traceback, a transient stays a warning, and a
+    transport failure is re-raised after logging so the caller's breaker can
+    count the streak.
+    """
+    try:
+        rows = _parse_purchase_rows(
+            _request(
+                f"/btc-treasuries/{quote(ticker, safe='')}/purchase-history",
+                {"limit": HISTORY_LIMIT},
+            ),
+            ticker,
+        )
+        return {"name": name, "rows": rows}
+    except (requests.RequestException, SoSoValueError) as e:
+        if isinstance(e, SoSoValueError):
+            logger.error(
+                "SoSoValue treasuries %s history failed structurally (coverage "
+                "disclosed as incomplete) — the client likely needs a fix: %s",
+                ticker,
+                e,
+                exc_info=True,
+            )
+        else:
+            logger.warning(
+                "SoSoValue treasuries %s history failed (coverage will be "
+                "disclosed as incomplete): %s",
+                ticker,
+                e,
+            )
+        if isinstance(e, requests.RequestException):
+            raise
+        return None
+
+
+def _fetch_all() -> dict:
+    """One full refresh: company listing, then the top-MAX_COMPANIES histories.
+
+    Returns a cache payload (without ``fetched_at``). Raises on a listing
+    failure, on a rejected key from ANY request, and — the Q3 decision — when
+    every selected history failed: with no aggregate endpoint the histories
+    ARE the signal, and bare company names would be served as if they were
+    one. Below that threshold, failures degrade into a disclosed-incomplete
+    coverage with the family's consecutive-network-failure breaker.
+    """
+    listing, unusable = _parse_company_list(_request("/btc-treasuries", {}))
+    if not listing:
+        raise SoSoValueError(
+            "SoSoValue treasuries listing returned no usable companies "
+            f"({unusable} unusable entries)"
+        )
+
+    selected = listing[:MAX_COMPANIES]
+    companies: dict[str, dict] = {}
+    companies_failed: list[str] = []
+    consecutive_network = 0
+    remaining = iter(selected)
+    for ticker, name in remaining:
+        try:
+            company = _fetch_one_company(ticker, name)
+        except SoSoValueRateLimitError as e:
+            # The 20 req/min limit is per-key and per-minute: this 429 proves
+            # every further request in this sweep would 429 too, so drain the
+            # rest into companies_failed (short-TTL retry) instead of burning
+            # a quota call per remaining company.
+            skipped = [ticker, *(t for t, _ in remaining)]
+            companies_failed.extend(skipped)
+            logger.warning(
+                "SoSoValue treasuries: rate limit hit (%s); skipping the "
+                "remaining %d company histories (disclosed as incomplete, "
+                "retried on the short TTL)",
+                e,
+                len(skipped),
+            )
+            break
+        except requests.RequestException:
+            companies_failed.append(ticker)
+            consecutive_network += 1
+            if consecutive_network >= MAX_CONSECUTIVE_NETWORK_FAILURES:
+                skipped = [t for t, _ in remaining]
+                if skipped:
+                    companies_failed.extend(skipped)
+                    logger.warning(
+                        "SoSoValue treasuries: %d consecutive network failures; "
+                        "skipping the remaining %d company histories "
+                        "(disclosed as incomplete, retried on the short TTL)",
+                        consecutive_network,
+                        len(skipped),
+                    )
+                break
+            continue
+        consecutive_network = 0
+        if company is None:
+            companies_failed.append(ticker)
+        else:
+            companies[ticker] = company
+
+    if not companies:
+        raise SoSoValueError(
+            f"SoSoValue treasuries histories failed for all {len(selected)} selected "
+            f"companies; a listing without holdings figures is no signal"
+        )
+    # Verify the ordering the selection and the report's "largest holders"
+    # claim both rest on: the fetched companies' latest holdings must be
+    # non-increasing in listing order. Every fetched history carries
+    # btc_holding, so the assumption is cheaply checkable — and a violation
+    # must downgrade the claim, not ship a ranking the data contradicts. A
+    # false trip (per-company as-of dates can skew adjacent, similar-sized
+    # holders) only costs wording confidence, never a wrong figure.
+    in_order = [companies[t]["rows"][-1]["btc_holding"] for t, _ in selected if t in companies]
+    order_unverified = any(
+        later > earlier for earlier, later in zip(in_order, in_order[1:], strict=False)
+    )
+    if order_unverified:
+        logger.warning(
+            "SoSoValue treasuries listing is not ordered by holdings for this "
+            "snapshot; the report will present the selection as unranked"
+        )
+    return {
+        "companies": companies,
+        "companies_total": len(listing),
+        "companies_failed": companies_failed,
+        "companies_unusable": unusable,
+        "order_unverified": order_unverified,
+    }
+
+
+def _snapshot_from(payload: dict, fetched_at: str, stale: bool) -> _TreasurySnapshot:
+    return _TreasurySnapshot(
+        companies=payload["companies"],
+        companies_total=payload["companies_total"],
+        companies_failed=payload["companies_failed"],
+        companies_unusable=payload["companies_unusable"],
+        order_unverified=payload["order_unverified"],
+        fetched_at=fetched_at,
+        stale=stale,
+    )
+
+
+def _load_snapshot() -> _TreasurySnapshot:
+    """Return the treasuries snapshot, via the family cache/stale discipline.
+
+    Key first; TTL-fresh cache served as-is (incomplete coverage earns the
+    short TTL); otherwise fetch + overwrite; on failure fall back to the
+    cached snapshot up to MAX_STALE_DAYS; failures never written;
+    ``SoSoValueNotConfiguredError`` never absorbed.
+    """
+    get_api_key()
+
+    path = _cache_path()
+    cached = _read_cache(path)
+    if cached:
+        age_h = _cache_age_hours(cached["fetched_at"])
+        ttl = INCOMPLETE_CACHE_TTL_HOURS if cached["companies_failed"] else CACHE_TTL_HOURS
+        if age_h is not None and 0 <= age_h < ttl:
+            return _snapshot_from(cached, cached["fetched_at"], stale=False)
+
+    try:
+        payload = _fetch_all()
+    except SoSoValueNotConfiguredError:
+        raise
+    except (requests.RequestException, VendorError) as e:
+        wrap_cls = type(e) if isinstance(e, VendorError) else SoSoValueError
+        if cached:
+            fetched_at = cached["fetched_at"]
+            age = _days_stale(fetched_at)
+            if age is None or age > MAX_STALE_DAYS:
+                stale_desc = (
+                    "has an unparseable or future-dated fetch date"
+                    if age is None
+                    else f"is {age} days stale"
+                )
+                raise wrap_cls(
+                    f"SoSoValue treasuries fetch failed and the newest cache "
+                    f"{stale_desc} (> {MAX_STALE_DAYS}-day cap): {e}"
+                ) from e
+            age_str = _humanize_age(fetched_at)
+            if isinstance(e, SoSoValueError):
+                logger.error(
+                    "SoSoValue treasuries refresh failed structurally (%s); serving "
+                    "stale cache (%s old) — the client likely needs a fix",
+                    e,
+                    age_str,
+                    exc_info=True,
+                )
+            else:
+                logger.warning(
+                    "SoSoValue treasuries refresh failed (%s); using stale cache (%s old)",
+                    e,
+                    age_str,
+                )
+            return _snapshot_from(cached, fetched_at, stale=True)
+        raise wrap_cls(f"SoSoValue treasuries unavailable and no usable cache exists: {e}") from e
+
+    fetched_at = _iso_now()
+    payload["fetched_at"] = fetched_at
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+    except OSError as e:  # a cache-write failure must not fail the call
+        logger.warning(
+            "Could not write SoSoValue treasuries cache %s: %s — the fetch "
+            "throttle stays disabled until a write succeeds, so further calls "
+            "will each re-fetch",
+            path,
+            e,
+        )
+    return _snapshot_from(payload, fetched_at, stale=False)
+
+
+def _classify_asset(asset: str) -> tuple[str | None, bool]:
+    """Classify a caller symbol: ``(asset_key, is_proxy)``.
+
+    Mirrors the ETF module's classifier with BTC as the only native asset:
+    the treasuries product tracks BTC holdings, so every other recognized
+    crypto risk asset — ETH included — is served the BTC data as a labelled
+    market-wide demand proxy, and a stablecoin or unrecognized symbol gets a
+    no-signal note.
+    """
+    base = normalize_symbol((asset or "").replace("/", "-")).split("-")[0]
+    if base in SUPPORTED_ASSETS:
+        return base, False
+    if base in CRYPTO_BASES:
+        return "BTC", True
+    return None, False
+
+
+def _fmt_signed_btc(value: float) -> str:
+    """A signed BTC change with thousands grouping, whole-coin granularity.
+
+    A non-zero value that would round to zero keeps two decimals instead: a
+    -0.4 BTC disposal rendered "+0" would carry the wrong sign AND contradict
+    the reducers tally computed from the unrounded deltas. ``+ 0.0``
+    normalizes a negative zero on the whole-coin path.
+    """
+    rounded = round(value)
+    if rounded == 0 and value != 0:
+        return f"{value:+.2f}"
+    return f"{rounded + 0.0:+,.0f}"
+
+
+def _fmt_btc(value: float) -> str:
+    return f"{value:,.0f}"
+
+
+def get_btc_treasury_data(
+    asset: str,
+    curr_date: str,
+    look_back_days: int | None = None,
+) -> str:
+    """Fetch corporate BTC treasury holdings/activity as a markdown report.
+
+    Args:
+        asset: "BTC" natively; another recognized crypto risk asset (ETH,
+            SOL, ...) is served the BTC data as a market-wide demand proxy;
+            a stablecoin or unrecognized symbol gets a no-signal message.
+        curr_date: End of the window (yyyy-mm-dd); disclosures dated after it
+            are dropped so a past date never leaks future filings.
+        look_back_days: Trailing window for the activity section; ``None``
+            uses DEFAULT_LOOKBACK_DAYS (90 — disclosures are sparse).
+
+    Returns:
+        A markdown report: combined and top-5 holdings (each company as of
+        its latest visible disclosure), a windowed activity table of
+        disclosed holdings changes (buys positive, disposals negative, with
+        an implied US$/BTC where cost was filed), and coverage caveats.
+    """
+    if look_back_days is None or look_back_days <= 0:
+        look_back_days = DEFAULT_LOOKBACK_DAYS
+
+    # Normalise curr_date BEFORE any lexical date comparison (family rule).
+    curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    curr_date = curr_dt.strftime("%Y-%m-%d")
+
+    asset_key, market_proxy = _classify_asset(asset)
+    if asset_key is None:
+        return (
+            f"There is no corporate BTC-treasury signal for '{asset}': it is not a "
+            f"recognized crypto risk asset for which BTC treasury flows serve as a "
+            f"market-wide demand proxy (e.g. a stablecoin or an unrecognized symbol). "
+            f"Do not substitute BTC figures."
+        )
+
+    snapshot = _load_snapshot()
+
+    # Visible rows per company; a company's latest disclosure is its last
+    # visible row (one source of truth — a parallel latest-row dict could
+    # silently disagree after a later filter).
+    visible_by_company: dict[str, list[dict]] = {}
+    for ticker, company in snapshot.companies.items():
+        visible = [r for r in company["rows"] if r["date"] <= curr_date]
+        if visible:
+            visible_by_company[ticker] = visible
+
+    if market_proxy:
+        header_lines = [
+            f"## BTC Corporate Treasuries (market-wide demand proxy for '{asset}', SoSoValue)",
+            f"_Corporate treasuries hold BTC, not '{asset}'; showing BTC treasury "
+            f"holdings and flows as a market-wide crypto demand proxy, not an "
+            f"'{asset}'-specific signal._",
+        ]
+    else:
+        header_lines = ["## BTC Corporate Treasuries (SoSoValue)"]
+
+    if snapshot.stale:
+        age_str = _humanize_age(snapshot.fetched_at)
+        header_lines.append(
+            f"_STALE by {age_str}: live refresh failed (network error, rate limit, or "
+            f"an API contract break); showing the last cached snapshot (fetched "
+            f"{snapshot.fetched_at}). Treat with caution._"
+        )
+
+    selected = len(snapshot.companies) + len(snapshot.companies_failed)
+    if snapshot.companies_failed:
+        header_lines.append(
+            f"_Coverage incomplete ({len(snapshot.companies)}/{selected} selected "
+            f"companies): histories for {', '.join(sorted(snapshot.companies_failed))} "
+            f"could not be fetched, so the figures below exclude them._"
+        )
+    if snapshot.companies_unusable:
+        n = snapshot.companies_unusable
+        header_lines.append(
+            f"_{n} listing {_plural(n, 'entry', 'entries')} had no usable ticker and "
+            f"{_plural(n, 'was', 'were')} skipped; a dropped entry may itself be a "
+            f"large holder, so the top-{selected} cut may not be the true top "
+            f"{selected}._"
+        )
+
+    header_lines.append(
+        "_Dates are disclosure dates and may lag the underlying transactions; some "
+        "companies disclose only monthly or quarterly snapshots, so each holding is "
+        "as of that company's own latest filing, not a common date._"
+    )
+    header_lines.append(
+        "_Treasury flow is announcement-driven and lumpy — read it as a medium-term "
+        "demand-side signal, not a timing signal._"
+    )
+    ordering = (
+        "provider ordering unverified for this snapshot, so these may not be the "
+        "true largest holders"
+        if snapshot.order_unverified
+        else "provider lists largest holders first"
+    )
+    header_lines.append(
+        f"- Source: SoSoValue OpenAPI (BTC treasuries) | Coverage: top {selected} of "
+        f"{snapshot.companies_total} listed companies ({ordering}) | Window ending "
+        f"{curr_date}"
+    )
+    header = "\n\n".join(header_lines) + "\n"
+
+    if not visible_by_company:
+        return (
+            header + f"\nNo treasury disclosures on or before {curr_date} within the "
+            f"provider's served history (up to {HISTORY_LIMIT} rows per company, "
+            f"reaching only so far back). Report this as no treasury data for the "
+            f"date; do not fabricate values."
+        )
+
+    # ---- holdings -----------------------------------------------------------
+    combined = sum(v[-1]["btc_holding"] for v in visible_by_company.values())
+    holders = sorted(
+        ((t, v[-1]) for t, v in visible_by_company.items()),
+        key=lambda kv: kv[1]["btc_holding"],
+        reverse=True,
+    )
+    top_str = "; ".join(
+        f"{t}{' (' + snapshot.companies[t]['name'] + ')' if snapshot.companies[t]['name'] else ''}"
+        f" {_fmt_btc(r['btc_holding'])} BTC (as of {r['date']})"
+        for t, r in holders[:TOP_HOLDERS]
+    )
+    n_tracked = len(visible_by_company)
+    holdings_block = (
+        f"\n**Combined holdings:** {_fmt_btc(combined)} BTC across {n_tracked} tracked "
+        f"{_plural(n_tracked, 'company', 'companies')}, each as of its latest "
+        f"disclosure on or before {curr_date}\n"
+        f"**Top holders:** {top_str}\n"
+    )
+    if combined > 0:
+        top_ticker, top_row = holders[0]
+        share = top_row["btc_holding"] / combined * 100
+        holdings_block += (
+            f"**Concentration:** largest holder {top_ticker} = {share:.0f}% of the "
+            f"combined tracked holdings — the totals move mostly with what it does\n"
+        )
+
+    # ---- activity -----------------------------------------------------------
+    window_start = (curr_dt - timedelta(days=look_back_days)).strftime("%Y-%m-%d")
+
+    events = []  # (date, ticker, delta, cost, implied_price, from_holdings)
+    underivable = 0
+    for ticker, visible in visible_by_company.items():
+        for i, row in enumerate(visible):
+            if row["date"] < window_start:
+                continue
+            if row["btc_acq"] is not None:
+                delta = row["btc_acq"]
+                from_holdings = False
+            elif i > 0:
+                # A holdings-only disclosure (live-verified: MARA): the change
+                # is implied by the move from the previous disclosure.
+                delta = row["btc_holding"] - visible[i - 1]["btc_holding"]
+                from_holdings = True
+            else:
+                # First served row and no filed quantity: no baseline to
+                # derive a change from — disclosed below, not guessed.
+                underivable += 1
+                continue
+            cost = row["acq_cost"]
+            # An implied price only makes sense for a filed quantity: a
+            # holdings-derived delta spans every transaction since the prior
+            # disclosure, and dividing one filing's cost by it would invent a
+            # price no transaction ever traded at.
+            implied = (
+                abs(cost / delta) if cost is not None and delta != 0 and not from_holdings else None
+            )
+            events.append((row["date"], ticker, delta, cost, implied, from_holdings))
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    # History-depth honesty: a company whose served history starts inside the
+    # window may have had earlier activity the provider no longer serves.
+    shallow = sorted(
+        t for t, visible in visible_by_company.items() if visible[0]["date"] > window_start
+    )
+
+    if events:
+        shown = events[-MAX_ROWS:]
+        note = (
+            f"\n_(showing the most recent {MAX_ROWS} of {len(events)} disclosures in the window)_\n"
+            if len(events) > MAX_ROWS
+            else ""
+        )
+        lines = [
+            "\n| Date | Company | BTC change | Cost (US$m) | Implied US$/BTC |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for date, ticker, delta, cost, implied, from_holdings in shown:
+            delta_cell = _fmt_signed_btc(delta) + (
+                " (from holdings change)" if from_holdings else ""
+            )
+            cost_cell = f"{cost / _USD_PER_MILLION:+,.1f}" if cost is not None else "—"
+            implied_cell = f"{implied:,.0f}" if implied is not None else "—"
+            lines.append(f"| {date} | {ticker} | {delta_cell} | {cost_cell} | {implied_cell} |")
+        net = sum(e[2] for e in events)
+        by_company: dict[str, float] = {}
+        for _date, ticker, delta, _cost, _implied, _fh in events:
+            by_company[ticker] = by_company.get(ticker, 0.0) + delta
+        adders = sum(1 for v in by_company.values() if v > 0)
+        reducers = sum(1 for v in by_company.values() if v < 0)
+        activity_block = (
+            f"\n**{look_back_days}d disclosed net change:** {_fmt_signed_btc(net)} BTC "
+            f"({adders} {_plural(adders, 'company', 'companies')} adding, {reducers} "
+            f"reducing, of {n_tracked} tracked)\n" + "\n".join(lines) + "\n" + note
+        )
+    else:
+        latest_any = max(v[-1]["date"] for v in visible_by_company.values())
+        activity_block = (
+            f"\n**{look_back_days}d disclosed net change:** no disclosed holdings "
+            f"changes in the window ending {curr_date} (latest disclosure across "
+            f"tracked companies: {latest_any})\n"
+        )
+    if underivable:
+        activity_block += (
+            f"\n_{underivable} holdings-only "
+            f"{_plural(underivable, 'disclosure', 'disclosures')} in the window "
+            f"{_plural(underivable, 'is', 'are')} not in the table: as the first "
+            f"served row of {_plural(underivable, 'its company', 'their companies')}, "
+            f"no prior disclosure exists to derive the change from._\n"
+        )
+    if shallow:
+        activity_block += (
+            f"\n_The served history for {', '.join(shallow)} starts inside the "
+            f"window, so earlier activity may exist that the provider no longer "
+            f"serves; the window totals can understate it._\n"
+        )
+
+    return header + holdings_block + activity_block

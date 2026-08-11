@@ -9,6 +9,8 @@ from langchain_core.messages import HumanMessage, RemoveMessage
 # Import tools from separate utility files
 from tradingagents.agents.utils.core_stock_tools import get_stock_data
 from tradingagents.agents.utils.crypto_data_tools import (
+    get_btc_treasuries,
+    get_economic_calendar,
     get_etf_flows,
     get_fear_greed,
     get_options_market,
@@ -46,6 +48,8 @@ __all__ = [
     "get_etf_flows",
     "get_fear_greed",
     "get_options_market",
+    "get_economic_calendar",
+    "get_btc_treasuries",
     "get_verified_market_snapshot",
     "build_instrument_context",
     "resolve_instrument_identity",

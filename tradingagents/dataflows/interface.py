@@ -23,6 +23,8 @@ from .fear_greed import get_fear_greed_data as get_alternative_me_fear_greed
 from .fred import get_macro_data as get_fred_macro_data
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
 from .sosovalue import get_etf_flow_data as get_sosovalue_etf_flows
+from .sosovalue_macro import get_economic_calendar_data as get_sosovalue_economic_calendar
+from .sosovalue_treasuries import get_btc_treasury_data as get_sosovalue_btc_treasuries
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -38,26 +40,14 @@ logger = logging.getLogger(__name__)
 
 # Tools organized by category
 TOOLS_CATEGORIES = {
-    "core_stock_apis": {
-        "description": "OHLCV stock price data",
-        "tools": [
-            "get_stock_data"
-        ]
-    },
+    "core_stock_apis": {"description": "OHLCV stock price data", "tools": ["get_stock_data"]},
     "technical_indicators": {
         "description": "Technical analysis indicators",
-        "tools": [
-            "get_indicators"
-        ]
+        "tools": ["get_indicators"],
     },
     "fundamental_data": {
         "description": "Company fundamentals",
-        "tools": [
-            "get_fundamentals",
-            "get_balance_sheet",
-            "get_cashflow",
-            "get_income_statement"
-        ]
+        "tools": ["get_fundamentals", "get_balance_sheet", "get_cashflow", "get_income_statement"],
     },
     "news_data": {
         "description": "News and insider data",
@@ -65,38 +55,50 @@ TOOLS_CATEGORIES = {
             "get_news",
             "get_global_news",
             "get_insider_transactions",
-        ]
+        ],
     },
     "macro_data": {
         "description": "Macroeconomic indicators (rates, inflation, labor, growth)",
         "tools": [
             "get_macro_indicators",
-        ]
+        ],
     },
     "prediction_markets": {
         "description": "Market-implied probabilities for forward-looking events",
         "tools": [
             "get_prediction_markets",
-        ]
+        ],
     },
     "crypto_etf_flows": {
         "description": "BTC/ETH US spot-ETF daily net flows (crypto)",
         "tools": [
             "get_etf_flows",
-        ]
+        ],
     },
     "crypto_sentiment": {
         "description": "Crypto Fear & Greed Index sentiment gauge",
         "tools": [
             "get_fear_greed",
-        ]
+        ],
     },
     "options_data": {
         "description": "Crypto options implied volatility: DVOL index and 25-delta skew",
         "tools": [
             "get_options_market",
-        ]
-    }
+        ],
+    },
+    "economic_calendar": {
+        "description": "US macro economic calendar: scheduled events and releases vs forecast",
+        "tools": [
+            "get_economic_calendar",
+        ],
+    },
+    "btc_treasuries": {
+        "description": "Corporate BTC treasury holdings and disclosed changes (crypto)",
+        "tools": [
+            "get_btc_treasuries",
+        ],
+    },
 }
 
 # Configuring a category (or tool) to this sentinel switches it off entirely.
@@ -136,6 +138,8 @@ OPTIONAL_CATEGORIES = {
     "crypto_etf_flows",
     "crypto_sentiment",
     "options_data",
+    "economic_calendar",
+    "btc_treasuries",
 }
 
 # Mapping of methods to their vendor-specific implementations
@@ -201,7 +205,16 @@ VENDOR_METHODS = {
     "get_options_market": {
         "deribit": get_deribit_options_market,
     },
+    # economic_calendar
+    "get_economic_calendar": {
+        "sosovalue": get_sosovalue_economic_calendar,
+    },
+    # btc_treasuries
+    "get_btc_treasuries": {
+        "sosovalue": get_sosovalue_btc_treasuries,
+    },
 }
+
 
 def get_category_for_method(method: str) -> str:
     """Get the category that contains the specified method."""
@@ -209,6 +222,7 @@ def get_category_for_method(method: str) -> str:
         if method in info["tools"]:
             return category
     raise ValueError(f"Method '{method}' not found in any category")
+
 
 def get_vendor(category: str, method: str = None) -> str:
     """Get the configured vendor for a data category or specific tool method.
@@ -225,6 +239,7 @@ def get_vendor(category: str, method: str = None) -> str:
     # Fall back to category-level configuration
     return config.get("data_vendors", {}).get(category, "default")
 
+
 def is_category_disabled(category: str, method: str = None) -> bool:
     """True when a category (or tool) is configured to the "none" sentinel.
 
@@ -235,11 +250,12 @@ def is_category_disabled(category: str, method: str = None) -> bool:
         v.strip().lower() == DISABLED_VENDOR for v in get_vendor(category, method).split(",")
     )
 
+
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
     category = get_category_for_method(method)
     vendor_config = get_vendor(category, method)
-    primary_vendors = [v.strip() for v in vendor_config.split(',')]
+    primary_vendors = [v.strip() for v in vendor_config.split(",")]
 
     if method not in VENDOR_METHODS:
         raise ValueError(f"Method '{method}' not supported")
@@ -258,9 +274,7 @@ def route_to_vendor(method: str, *args, **kwargs):
     # is never logged as a vendor failure.
     if any(v.lower() == DISABLED_VENDOR for v in explicit):
         if category in OPTIONAL_CATEGORIES:
-            logger.info(
-                "Optional %s is disabled by configuration; skipping %s", category, method
-            )
+            logger.info("Optional %s is disabled by configuration; skipping %s", category, method)
             return (
                 f"DATA_UNAVAILABLE: optional {category} is disabled by configuration. "
                 f"Proceed without it; do not fabricate values."
@@ -333,7 +347,8 @@ def route_to_vendor(method: str, *args, **kwargs):
             # verdict can't hide a broken primary (network/auth/etc.).
             logger.warning(
                 "Returning NO_DATA for %s, but a vendor errored earlier: %s",
-                method, first_error,
+                method,
+                first_error,
             )
         sym = last_no_data.symbol
         canonical = last_no_data.canonical

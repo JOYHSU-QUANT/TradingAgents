@@ -1,0 +1,103 @@
+{
+ "code": 0,
+ "message": "success",
+ "data": [
+  {
+   "date": "2026-08-10",
+   "ticker": "MSTR",
+   "btc_holding": "840447",
+   "btc_acq": "-1690",
+   "acq_cost": "-108600000",
+   "avg_btc_cost": 0.09
+  },
+  {
+   "date": "2026-08-03",
+   "ticker": "MSTR",
+   "btc_holding": "842138",
+   "btc_acq": "-1638",
+   "acq_cost": "-104730000",
+   "avg_btc_cost": 0.09
+  },
+  {
+   "date": "2026-07-05",
+   "ticker": "MSTR",
+   "btc_holding": "843775",
+   "btc_acq": "-2225",
+   "acq_cost": "-135200000",
+   "avg_btc_cost": 0.09
+  },
+  {
+   "date": "2026-06-30",
+   "ticker": "MSTR",
+   "btc_holding": "846000",
+   "btc_acq": "-1363",
+   "acq_cost": "-80800000",
+   "avg_btc_cost": 0.09
+  },
+  {
+   "date": "2026-06-22",
+   "ticker": "MSTR",
+   "btc_holding": "847363",
+   "btc_acq": "520",
+   "acq_cost": "34900000",
+   "avg_btc_cost": 0.09
+  },
+  {
+   "date": "2026-06-15",
+   "ticker": "MSTR",
+   "btc_holding": "846842",
+   "btc_acq": "1587",
+   "acq_cost": "100000000",
+   "avg_btc_cost": 0.09
+  },
+  {
+   "date": "2026-06-08",
+   "ticker": "MSTR",
+   "btc_holding": "845256",
+   "btc_acq": "1550",
+   "acq_cost": "101000000",
+   "avg_btc_cost": 0.09
+  },
+  {
+   "date": "2026-06-01",
+   "ticker": "MSTR",
+   "btc_holding": "843706",
+   "btc_acq": "-32",
+   "acq_cost": "-2500000",
+   "avg_btc_cost": 0.09
+  },
+  {
+   "date": "2025-01-27",
+   "ticker": "MSTR",
+   "btc_holding": "471107",
+   "btc_acq": "10107",
+   "acq_cost": "1100000000",
+   "avg_btc_cost": 0.15
+  },
+  {
+   "date": "2025-01-21",
+   "ticker": "MSTR",
+   "btc_holding": "461000",
+   "btc_acq": "11000",
+   "acq_cost": "1100000000",
+   "avg_btc_cost": 0.15
+  },
+  {
+   "date": "2025-01-13",
+   "ticker": "MSTR",
+   "btc_holding": "450000",
+   "btc_acq": "2530",
+   "acq_cost": "243000000",
+   "avg_btc_cost": 0.15
+  },
+  {
+   "date": "2025-01-06",
+   "ticker": "MSTR",
+   "btc_holding": "447470",
+   "btc_acq": "1070",
+   "acq_cost": "101000000",
+   "avg_btc_cost": 0.15
+  }
+ ],
+ "details": null
+}

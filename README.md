@@ -394,7 +394,11 @@ Two further news-analyst crypto sources ride on the same SoSoValue key
 - **Corporate BTC treasuries** (`btc_treasuries`, vendor `sosovalue`): combined
   and top-5 holdings across the 15 largest tracked holders (the provider lists
   by holdings, and every contributor's as-of date is printed because no
-  filing-age cut is applied) and the window's disclosed changes — buys and
+  filing-age cut is applied; individual disclosures are filtered to
+  `curr_date` but that top-15 cut is not — it is the listing as ranked when
+  the snapshot was fetched, so a historical date sees today's universe rather
+  than that date's, which the report states) and the window's disclosed
+  changes — buys and
   disposals, with an implied US$/BTC where a cost was filed against a filed
   quantity, and holdings-only disclosures rendered as the implied change from
   the prior filing (those carry no cost or implied price: the change spans

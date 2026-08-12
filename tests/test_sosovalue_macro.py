@@ -11,6 +11,7 @@ from the real API, so these run without a network connection or a key.
 
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 from urllib.parse import quote
@@ -1310,17 +1311,37 @@ class TestBucketsBreakerAndBounds:
         assert "CPI (YoY) could not be fetched" in report
         assert "1 tracked event is unknown" in report
 
-    def test_the_coverage_gap_union_carries_both_buckets(self):
+    def test_the_coverage_gap_union_carries_every_zero_contributing_bucket(self):
+        # Three buckets, not two: a failed fetch, an upstream rename, and an
+        # event fetched whole whose every print postdates curr_date all leave
+        # the same hole. The third is invisible to both failure buckets — it is
+        # only findable by comparing the history against curr_date — so a union
+        # built from failures alone under-reports the very gap it exists for.
         report = _render(
             _snapshot(
                 calendar=[{"date": "2026-08-11", "events": []}],
-                histories=_histories(failed=["CPI (YoY)"], unknown=["GDP (QoQ)"]),
+                histories=_histories(
+                    # Fetched whole, but its only print postdates curr_date —
+                    # invisible to both failure buckets.
+                    overrides={"Nonfarm Payrolls": [_row("2026-08-11", "1", "2", "3")]},
+                    failed=["CPI (YoY)"],
+                    unknown=["GDP (QoQ)"],
+                ),
                 events_failed=["CPI (YoY)"],
                 events_unknown=["GDP (QoQ)"],
             ),
             curr_date="2026-03-01",
         )
-        assert "CPI (YoY), GDP (QoQ) unavailable" in report
+        # Assert against the gap sentence itself, not the whole report: the
+        # header's "Tracked: ..." line names every tracked event, so a
+        # substring check over the report would pass no matter what.
+        named = re.search(r"snapshot \((.*?) contributed nothing\)", report)
+        assert named, report
+        assert set(named.group(1).split(", ")) == {
+            "CPI (YoY)",
+            "GDP (QoQ)",
+            "Nonfarm Payrolls",
+        }
 
     def test_the_breaker_counts_only_consecutive_failures(self, monkeypatch):
         # Four failures, never three in a row. The reset after each success is
@@ -1439,3 +1460,85 @@ class TestTodayIsNeverEvictedByThePriorityCut:
         )
         assert "| 2026-08-11 | today | Some Local Print | — | — |" in report
         assert "may print at any hour of that day" in report
+
+
+# review-loop round 5: visible-view claims, calendar overlap, unobserved tail
+
+
+@pytest.mark.unit
+class TestVisibleViewAndCoverage:
+    def _capped_weekly(self, start="2026-01-01"):
+        first = datetime.strptime(start, "%Y-%m-%d")
+        return [
+            _row((first + timedelta(days=7 * i)).strftime("%Y-%m-%d"), "1.0%", "1.1%", "0.9%")
+            for i in range(sosovalue_macro.HISTORY_LIMIT)
+        ]
+
+    def test_a_history_entirely_after_curr_date_is_not_called_merely_short(self):
+        # Measured on the RAW history the earliest row still postdates
+        # window_start, so the shallow note fires and tells the reader the
+        # window is "short for that event, not empty" — inverting the
+        # correction (it is not short, it is total) and contradicting the "no
+        # tracked releases in the window" line printed just above it.
+        report = _render(
+            _snapshot(histories=_histories(overrides={TRACKED[0]: self._capped_weekly()})),
+            curr_date="2020-01-01",
+        )
+        assert "starts inside this window" not in report
+        # It is not silently dropped either: with no failure bucket to name it,
+        # the zero-contributing union is the only thing that can. Matched
+        # inside the gap sentence — the header's "Tracked: ..." line names
+        # every event, so a whole-report substring check proves nothing.
+        named = re.search(r"snapshot \((.*?) contributed nothing\)", report)
+        assert named, report
+        assert TRACKED[0] in named.group(1).split(", ")
+
+    def test_a_history_starting_inside_the_window_still_earns_the_shallow_note(self):
+        # The positive control for the guard above: same capped depth, but a
+        # curr_date the history actually reaches. Without this the fix could
+        # be "never emit the note" and still pass.
+        report = _render(
+            _snapshot(histories=_histories(overrides={TRACKED[0]: self._capped_weekly()})),
+            curr_date="2027-08-11",
+            look_back_days=365 * 4,
+        )
+        assert "starts inside this window" in report
+        assert TRACKED[0] in report
+
+    def test_a_calendar_that_misses_the_window_is_disclosed(self):
+        report = _render(
+            _snapshot(calendar=[{"date": "2026-08-11", "events": ["CPI (YoY)"]}]),
+            curr_date="2026-03-01",
+        )
+        assert "No calendar entry in this snapshot falls between 2026-03-01" in report
+        # Fires on the effect (no overlap), not the cause, so a FRESH snapshot
+        # at a historical curr_date is covered — the case the stale-gated
+        # sentence could never reach.
+        assert "No calendar entry in this snapshot falls between" not in _render(_snapshot())
+
+    def test_the_source_span_counts_only_day_rows_that_carry_names(self):
+        # A trailing row whose every name was dropped as unusable must not
+        # extend the advertised coverage: the stale-reach line already
+        # measures the filtered view, and two spans in one header contradict.
+        report = _render(
+            _snapshot(
+                calendar=[
+                    {"date": "2026-08-11", "events": ["CPI (YoY)"]},
+                    {"date": "2026-09-30", "events": []},
+                ],
+                calendar_unusable=1,
+            )
+        )
+        assert "Provider calendar covers 2026-08-11 → 2026-08-11" in report
+        assert "2026-09-30" not in report
+
+    def test_a_stale_snapshot_names_its_unobserved_window_tail(self):
+        report = _render(
+            _snapshot(fetched_at="2026-08-01T00:00:00Z", stale=True),
+            curr_date="2026-08-11",
+        )
+        assert "cannot carry anything published after 2026-08-01" in report
+        assert "most recent 10 days" in report
+        # No blind tail when the snapshot was fetched on curr_date itself.
+        same_day = _render(_snapshot(fetched_at="2026-08-11T00:00:00Z", stale=True))
+        assert "cannot carry anything published after" not in same_day

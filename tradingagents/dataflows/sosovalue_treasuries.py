@@ -83,12 +83,14 @@ from .sosovalue_common import (
     _cache_dir,
     _coverage_gap_note,
     _days_stale,
+    _days_unobserved,
     _humanize_age,
     _is_finite_number,
     _is_iso_date,
     _is_valid_ticker,
     _iso_now,
     _plural,
+    _plural_days,
     _request,
     _sanitize,
     get_api_key,
@@ -142,7 +144,14 @@ MAX_COMPANY_NAME_CHARS = 60
 # from crowding the ETF/macro modules on the shared 20 req/min plan. The
 # short TTL re-tries missing histories; stale serves are capped + disclosed.
 CACHE_TTL_HOURS = 24
-INCOMPLETE_CACHE_TTL_HOURS = 1
+# Not the family's 1h: the short TTL re-runs the WHOLE 16-request sweep (there
+# is no per-item resume), and not every cause self-heals — a malformed row or a
+# MAX_HISTORY_ROWS_HARD breach for one company is deterministic and lands in
+# companies_failed on every retry. At 1h that pins a module budgeted for 16
+# requests/day at 384, a 24x amplification of the exact quota the 24h TTL was
+# chosen to protect. Held at base/4, matching the ETF module's 6h->1h ratio, so
+# a transient gap still heals the same day.
+INCOMPLETE_CACHE_TTL_HOURS = 6
 MAX_STALE_DAYS = 14
 
 # Consecutive transport-level failures before the remaining histories are
@@ -578,8 +587,14 @@ def _fetch_all() -> dict:
     # must downgrade the claim, not ship a ranking the data contradicts. A
     # false trip (per-company as-of dates can skew adjacent, similar-sized
     # holders) only costs wording confidence, never a wrong figure.
+    # Fewer than two fetched histories means the check never RAN: any() over an
+    # empty pair sequence is False, which would ship the confident "largest
+    # holders first" wording having compared nothing. That state is routine
+    # here, not exotic — a 429 on the second company drains the rest into
+    # companies_failed, and three consecutive transport errors trip the
+    # breaker — so it has to read as unverified rather than as verified.
     in_order = [companies[t]["rows"][-1]["btc_holding"] for t, _ in selected if t in companies]
-    order_unverified = any(
+    order_unverified = len(in_order) < 2 or any(
         later > earlier for earlier, later in zip(in_order, in_order[1:], strict=False)
     )
     if order_unverified:
@@ -745,6 +760,27 @@ def _fmt_signed_btc(value: float) -> str:
     return f"{rounded + 0.0:+,.0f}"
 
 
+def _fmt_signed_usd_m(value: float) -> str:
+    """A signed filed cost in US$m, tenth-of-a-million granularity.
+
+    The Cost column's twin of ``_fmt_signed_btc`` and for the same reason: a
+    filing under $50k rounds to "+0.0" here while the Implied US$/BTC cell on
+    the same row still prints a price computed from the unrounded figure, and
+    the legend says Implied is blank on a cost of zero — two cells the reader
+    is told cannot both be true. Drop a granularity step instead. ``+ 0.0``
+    normalizes a negative zero on the coarse path, which a sub-tick disposal
+    would otherwise render as "-0.0". A filing under $500 still shows +0.000;
+    at this universe (top-15 corporate holders) that is not a reachable
+    disclosure, and an unbounded precision escape would make the column
+    unreadable.
+    """
+    millions = value / _USD_PER_MILLION
+    rounded = round(millions, 1)
+    if rounded == 0 and millions != 0:
+        return f"{millions:+,.3f}"
+    return f"{rounded + 0.0:+,.1f}"
+
+
 def _fmt_btc(value: float) -> str:
     return f"{value:,.0f}"
 
@@ -815,6 +851,22 @@ def get_btc_treasury_data(
             f"an API contract break); showing the last cached snapshot (fetched "
             f"{snapshot.fetched_at}). Treat with caution._"
         )
+        # The window below is labelled by curr_date, but no snapshot can carry
+        # a disclosure filed after it was fetched, so its most recent stretch
+        # is empty by construction rather than quiet. Treasury flow is lumpy
+        # and announcement-driven: "no disclosed holdings changes" is exactly
+        # the sentence a reader turns into "no corporate accumulation", so the
+        # unobserved tail has to be named rather than left to be inferred from
+        # the fetch date above. Counterpart of the macro module's sentence.
+        fetched_day = snapshot.fetched_at[:10]
+        blind = _days_unobserved(snapshot.fetched_at, curr_dt)
+        if blind is not None and blind > 0:
+            header_lines.append(
+                f"_That age also truncates the window below: this snapshot cannot carry a "
+                f"disclosure filed after {fetched_day}, so the most recent {blind} "
+                f"{_plural_days(blind)} of it are unobserved rather than quiet — read a "
+                f"flat net change as coverage ending early, not as no accumulation._"
+            )
 
     selected = (
         len(snapshot.companies) + len(snapshot.companies_failed) + len(snapshot.companies_empty)
@@ -1084,7 +1136,7 @@ def get_btc_treasury_data(
             delta_cell = _fmt_signed_btc(e.delta) + (
                 f" (from holdings change since {e.since})" if e.derived else ""
             )
-            cost_cell = f"{e.cost / _USD_PER_MILLION:+,.1f}" if e.cost is not None else "—"
+            cost_cell = _fmt_signed_usd_m(e.cost) if e.cost is not None else "—"
             implied_cell = f"{e.implied:,.0f}" if e.implied is not None else "—"
             lines.append(f"| {e.date} | {e.ticker} | {delta_cell} | {cost_cell} | {implied_cell} |")
         net = sum(e.delta for e in events)

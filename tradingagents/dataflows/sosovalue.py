@@ -36,7 +36,8 @@ letting the router fall through to the next vendor. A hanging network gets the
 one exception to trying every fund: after ``MAX_CONSECUTIVE_NETWORK_FAILURES``
 back-to-back transport failures the remaining histories are skipped straight
 into the same disclosed-incomplete path — the outcome is identical, and the
-call stops burning a full ``REQUEST_TIMEOUT`` per dead fund. A snapshot whose breakdown
+call stops burning a full ``sosovalue_common.REQUEST_TIMEOUT`` per dead fund. A
+snapshot whose breakdown
 came back incomplete is cached under the shorter ``INCOMPLETE_CACHE_TTL_HOURS``
 so the missing funds are re-tried on the next call past that window instead of
 persisting for the full refresh interval.
@@ -96,6 +97,7 @@ from .sosovalue_common import (
     _plural,
     _plural_days,
     _request,
+    _sanitize,
     _sign,
     get_api_key,
 )
@@ -237,7 +239,7 @@ def _parse_summary_rows(data: list, asset: str) -> list[dict]:
     for raw in data:
         if not _valid_summary_row(raw):
             raise SoSoValueError(
-                f"Malformed {asset} summary row {str(raw)[:200]!r} "
+                f"Malformed {asset} summary row {_sanitize(repr(raw), limit=200)} "
                 f"(the API contract may have changed)"
             )
         rows.append(
@@ -325,9 +327,11 @@ def _parse_fund_rows(data: list, ticker: str) -> list[dict]:
                 # it can be any JSON blob — so bound it like the raw row below.
                 raise SoSoValueError(
                     f"Non-finite {ticker} net_inflow on {raw['date']}: "
-                    f"{str(raw.get('net_inflow'))[:200]!r}"
+                    f"{_sanitize(repr(raw.get('net_inflow')), limit=200)}"
                 )
-            raise SoSoValueError(f"Malformed {ticker} history row {str(raw)[:200]!r}")
+            raise SoSoValueError(
+                f"Malformed {ticker} history row {_sanitize(repr(raw), limit=200)}"
+            )
         rows[raw["date"]] = {"date": raw["date"], "net_inflow": raw.get("net_inflow")}
     return [rows[d] for d in sorted(rows)]
 
@@ -858,7 +862,7 @@ def _load_snapshot(asset: str) -> _FlowSnapshot:
                 )
                 raise wrap_cls(
                     f"SoSoValue {asset} fetch failed and the newest cache {stale_desc} "
-                    f"(> {MAX_STALE_DAYS}-day cap): {e}"
+                    f"(> {MAX_STALE_DAYS}-day cap): {_sanitize(e)}"
                 ) from e
             # A SoSoValueError here is a contract/parse break (a code fix is
             # likely needed) and must not hide among network-blip warnings for
@@ -882,7 +886,9 @@ def _load_snapshot(asset: str) -> _FlowSnapshot:
                 )
             return _snapshot_from(cached, fetched_at, stale=True)
         # "usable": the file may exist but have failed read-side validation.
-        raise wrap_cls(f"SoSoValue {asset} unavailable and no usable cache exists: {e}") from e
+        raise wrap_cls(
+            f"SoSoValue {asset} unavailable and no usable cache exists: {_sanitize(e)}"
+        ) from e
 
     fetched_at = _iso_now()
     payload["fetched_at"] = fetched_at

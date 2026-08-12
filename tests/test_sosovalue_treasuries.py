@@ -414,18 +414,36 @@ class TestCacheAndLoad:
         assert impl.calls == []
 
     def test_incomplete_snapshot_uses_the_short_ttl(self, tmp_path, monkeypatch):
-        impl = self._setup(tmp_path, monkeypatch, now="2026-08-11T02:00:00Z")
-        # 2h old: fresh under 24h, expired under the 1h incomplete TTL.
+        impl = self._setup(tmp_path, monkeypatch, now="2026-08-11T08:00:00Z")
+        # 8h old: fresh under the 24h base TTL, expired under the 6h
+        # incomplete one. The age sits BETWEEN the two, so this can only pass
+        # if the failed bucket really does select the shorter TTL.
         self._write_cache(tmp_path, companies_failed=["MARA"])
         snapshot = sosovalue_treasuries._load_snapshot()
         assert impl.calls
         assert snapshot.companies_failed == []
 
-    def test_empty_histories_do_not_shorten_the_ttl(self, tmp_path, monkeypatch):
+    def test_a_recent_incomplete_snapshot_is_not_re_swept_hourly(self, tmp_path, monkeypatch):
+        # The amplification guard, and the only test that pins the incomplete
+        # TTL's VALUE rather than merely "shorter than base": at the family's
+        # 1h this 2h-old snapshot re-runs the whole 16-request sweep. Not every
+        # cause self-heals — a malformed row or a MAX_HISTORY_ROWS_HARD breach
+        # is deterministic and lands in companies_failed on every retry — so 1h
+        # means 384 requests/day against a module budgeted for 16.
         impl = self._setup(tmp_path, monkeypatch, now="2026-08-11T02:00:00Z")
-        # 2h old with a company that simply has not filed: still fresh under
-        # the 24h TTL. Treating it as incomplete would re-run the whole
-        # 16-request sweep every hour forever with nothing to heal.
+        self._write_cache(tmp_path, companies_failed=["MARA"])
+        snapshot = sosovalue_treasuries._load_snapshot()
+        assert impl.calls == []
+        assert snapshot.companies_failed == ["MARA"]
+
+    def test_empty_histories_do_not_shorten_the_ttl(self, tmp_path, monkeypatch):
+        impl = self._setup(tmp_path, monkeypatch, now="2026-08-11T08:00:00Z")
+        # Deliberately the same 8h age as its sibling above: past the
+        # incomplete TTL, inside the base one. A company that simply has not
+        # filed must NOT take the short path — there is nothing to heal, and
+        # re-running the whole 16-request sweep would burn the quota the 24h
+        # TTL exists to protect. Only this shared age discriminates; at 2h the
+        # assertion would hold under either TTL.
         self._write_cache(tmp_path, companies_empty=["MARA"])
         snapshot = sosovalue_treasuries._load_snapshot()
         assert impl.calls == []
@@ -1186,3 +1204,77 @@ class TestWindowEdgesAndAggregateScope:
         )
         row = next(ln for ln in report.splitlines() if ln.startswith("| 2026-08-01 |"))
         assert row == "| 2026-08-01 | X | +10 | +0.6 | 64,000 |"
+
+
+# review-loop round 5: vacuous verification, display precision, unobserved tail
+
+
+@pytest.mark.unit
+class TestVerificationAndPrecision:
+    def test_a_single_fetched_history_cannot_verify_the_ordering(self, monkeypatch):
+        # any() over an empty pair sequence is False, so with one company
+        # fetched the ranking check performs ZERO comparisons and the
+        # confident "largest holders first" wording would ship unearned.
+        # Routine rather than exotic: a 429 on the second company drains the
+        # rest, and three transport failures trip the breaker.
+        impl = _request_impl(
+            history_error=requests.ConnectionError("down"),
+            error_tickers=set(LIST_TICKERS[1:]),
+        )
+        monkeypatch.setattr(sosovalue_treasuries, "_request", impl)
+        payload = sosovalue_treasuries._fetch_all()
+        assert len(payload["companies"]) == 1
+        assert payload["order_unverified"] is True
+
+    def test_a_small_filed_cost_does_not_render_as_zero(self):
+        # $32k rounds to +0.0 at tenth-of-a-million granularity while the
+        # Implied cell on the same row still prints a price computed from the
+        # unrounded figure — and the legend promises Implied is blank on a
+        # cost of zero, so the two cells cannot both be true.
+        report = _render(
+            _snapshot(
+                companies={
+                    "X": {
+                        "name": "",
+                        "rows": [
+                            _prow("2026-07-01", 10.0),
+                            _prow("2026-08-01", 10.5, 0.5, 32000.0),
+                        ],
+                    }
+                }
+            ),
+            look_back_days=90,
+        )
+        row = next(ln for ln in report.splitlines() if ln.startswith("| 2026-08-01 |"))
+        assert "| +0.0 |" not in row
+        assert "+0.032" in row
+
+    def test_a_sub_tick_disposal_does_not_render_negative_zero(self):
+        report = _render(
+            _snapshot(
+                companies={
+                    "X": {
+                        "name": "",
+                        "rows": [
+                            _prow("2026-07-01", 10.0),
+                            _prow("2026-08-01", 9.5, -0.5, -40000.0),
+                        ],
+                    }
+                }
+            ),
+            look_back_days=90,
+        )
+        row = next(ln for ln in report.splitlines() if ln.startswith("| 2026-08-01 |"))
+        assert "-0.0 " not in row
+        assert "-0.040" in row
+
+    def test_a_stale_snapshot_names_its_unobserved_window_tail(self):
+        report = _render(
+            _snapshot(fetched_at="2026-08-01T00:00:00Z", stale=True),
+            curr_date="2026-08-11",
+        )
+        assert "cannot carry a disclosure filed after 2026-08-01" in report
+        assert "most recent 10 days" in report
+        # No blind tail when the snapshot was fetched on curr_date itself.
+        same_day = _render(_snapshot(fetched_at="2026-08-11T00:00:00Z", stale=True))
+        assert "cannot carry a disclosure filed after" not in same_day

@@ -98,6 +98,7 @@ from .sosovalue_common import (
     _cache_dir,
     _coverage_gap_note,
     _days_stale,
+    _days_unobserved,
     _humanize_age,
     _is_iso_date,
     _iso_now,
@@ -897,6 +898,20 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     same_day = any(d == curr_date for d, _n, _row in released) or any(
         cal["date"] == curr_date and cal["events"] for cal in snapshot.calendar
     )
+    # Per-event view of what this curr_date can actually see, mirroring the
+    # treasuries module's ``visible_by_company``. A fetched event is not
+    # automatically a contributing one: for a curr_date older than the served
+    # depth every print postdates the window, and the event vanishes from both
+    # tables while every failure bucket stays empty.
+    visible_by_event: dict[str, list[dict]] = {}
+    no_disclosure: list[str] = []
+    for name, rows in snapshot.histories.items():
+        visible = [row for row in rows if row["date"] <= curr_date]
+        if visible:
+            visible_by_event[name] = visible
+        else:
+            no_disclosure.append(name)
+
     # Served-history-depth honesty, the counterpart of the treasuries module's
     # ``shallow`` note and the ETF module's window clamp: the provider serves
     # at most HISTORY_LIMIT rows per event, so 100 rows reach 8+ years for a
@@ -909,16 +924,25 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     # prints. A short history that simply starts inside the window — a newly
     # published series, or one the provider has only lately begun serving —
     # has nothing older to show, and asserting otherwise would invent a gap.
+    # Driven off what this curr_date can actually see, not the raw history:
+    # rows are ascending, so the visible slice is a prefix, but an event whose
+    # every print POSTDATES curr_date has no visible slice at all. Measuring
+    # the start date on the raw history would call that event's window "short,
+    # not empty" when it is total — the opposite correction. Depth still comes
+    # from the full history: the per-request cap drops the OLDEST rows,
+    # independently of this filter. Same split as the treasuries twin.
     shallow = sorted(
         name
-        for name, rows in snapshot.histories.items()
-        if len(rows) >= HISTORY_LIMIT and rows[0]["date"] > window_start
+        for name, visible in visible_by_event.items()
+        if len(snapshot.histories[name]) >= HISTORY_LIMIT and visible[0]["date"] > window_start
     )
     # One union for both empty-section notes: _coverage_gap_note centralizes
     # the sentence precisely so a new failure bucket cannot be wired into one
     # branch and forgotten in the other — building the input twice would hand
-    # that drift straight back.
-    missing_events = set(snapshot.events_failed) | set(snapshot.events_unknown)
+    # that drift straight back. Every bucket that contributed nothing, not just
+    # the failures: an event fetched whole whose every print postdates
+    # curr_date leaves the same hole a failed fetch does.
+    missing_events = set(snapshot.events_failed) | set(snapshot.events_unknown) | set(no_disclosure)
     shallow_note = (
         f"\n_The provider's served history for {', '.join(shallow)} starts inside this "
         f"window (at most {HISTORY_LIMIT} rows per event), so earlier prints exist that "
@@ -929,6 +953,16 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     )
 
     # ---- header ------------------------------------------------------------
+    # The day-rows that can still contribute: a row whose every name was
+    # dropped as unusable survives with an empty list, and counting it would
+    # overstate the calendar's reach. Shared by the stale-reach line, the
+    # window-overlap disclosure and the Source line so the three cannot drift.
+    cal_dated = [r["date"] for r in snapshot.calendar if r["events"]]
+    # Does the calendar reach the window this report renders at all? On a
+    # historical curr_date the whole calendar postdates it, so the schedule
+    # below can only come from tracked histories — the same distortion the
+    # stale branch discloses, arriving by a route staleness never sees.
+    cal_overlaps = any(curr_date <= d <= ahead_end for d in cal_dated)
     header_lines = ["## US Economic Calendar — scheduled events & releases (SoSoValue)"]
 
     if snapshot.stale:
@@ -948,8 +982,7 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # whose every name was dropped as unusable survives with an empty
         # list, and counting it would overstate what the calendar can still
         # contribute.
-        dated = [r["date"] for r in snapshot.calendar if r["events"]]
-        reach = (datetime.strptime(dated[-1], "%Y-%m-%d") - curr_dt).days if dated else None
+        reach = (datetime.strptime(cal_dated[-1], "%Y-%m-%d") - curr_dt).days if cal_dated else None
         if reach is None or reach < AHEAD_DAYS:
             if reach is None:
                 extent = "carries no usable event names at all"
@@ -971,6 +1004,27 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
                 f"otherwise covers, so read a short or empty schedule as the snapshot's "
                 f"age rather than a quiet fortnight._"
             )
+        # The backward half of the same age. The released table is labelled by
+        # curr_date, but no snapshot can carry what the provider published
+        # after it was fetched, so the most recent stretch of that window is
+        # empty by construction rather than quiet — the reading most likely to
+        # be taken as "nothing printed".
+        fetched_day = snapshot.fetched_at[:10]
+        blind = _days_unobserved(snapshot.fetched_at, curr_dt)
+        if blind is not None and blind > 0:
+            header_lines.append(
+                f"_That age also truncates the released window below: this snapshot cannot "
+                f"carry anything published after {fetched_day}, so the most recent {blind} "
+                f"{_plural_days(blind)} of that window are empty by construction, not quiet._"
+            )
+
+    if not cal_overlaps:
+        header_lines.append(
+            f"_No calendar entry in this snapshot falls between {curr_date} and "
+            f"{ahead_end}, so the schedule below carries only the {len(TRACKED_EVENTS)} "
+            f"tracked events: an event outside that list is missing from this window "
+            f"rather than absent from it._"
+        )
 
     if snapshot.events_failed:
         # Count the events this sentence actually names: ``histories`` is also
@@ -1062,10 +1116,16 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         "directional trade signal._"
     )
 
-    cal_span = f"{snapshot.calendar[0]['date']} → {snapshot.calendar[-1]['date']}"
+    # Measured from the day-rows that actually carry names, matching the
+    # stale-reach line above: a row whose every name was dropped as unusable
+    # survives with an empty list, and spanning it here would claim coverage
+    # the calendar cannot contribute — two contradictory spans in one header.
+    cal_span = (
+        f"covers {cal_dated[0]} → {cal_dated[-1]}" if cal_dated else "carries no usable event names"
+    )
     header_lines.append(
         f"- Source: SoSoValue OpenAPI (US macro) | Snapshot fetched "
-        f"{snapshot.fetched_at} | Provider calendar covers {cal_span}; the released "
+        f"{snapshot.fetched_at} | Provider calendar {cal_span}; the released "
         f"figures below come from per-event histories that reach further back | "
         f"Tracked: {', '.join(TRACKED_EVENTS)} | Window ending {curr_date}"
     )
@@ -1170,7 +1230,7 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # for a historical curr_date the calendar cannot reach back, so the
         # scheduled rows can ONLY come from histories. Same disclosure the
         # released branch already makes.
-        gap = _coverage_gap_note(missing_events, "unavailable", "nothing is scheduled")
+        gap = _coverage_gap_note(missing_events, "contributed nothing", "nothing is scheduled")
         scheduled_block = (
             f"\n**Scheduled ({curr_date} and the next {AHEAD_DAYS} days):** none visible "
             f"from {curr_date} through {ahead_end}. {why}" + (f" {gap}" if gap else "") + "\n"
@@ -1222,7 +1282,7 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # this snapshot never fetched; the header discloses the gap separately,
         # so point back at it rather than letting "no releases" read as "nothing
         # happened".
-        gap = _coverage_gap_note(missing_events, "unavailable", "nothing printed")
+        gap = _coverage_gap_note(missing_events, "contributed nothing", "nothing printed")
         released_block = (
             f"\n**Released (last {look_back_days} days):** no tracked releases in the "
             f"window ending {curr_date}." + (f" {gap}" if gap else "") + "\n"

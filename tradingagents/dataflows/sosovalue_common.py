@@ -308,6 +308,23 @@ def _days_stale(fetched_at: str) -> int | None:
     return int(hours // 24)
 
 
+def _days_unobserved(fetched_at: str, curr_dt: datetime) -> int | None:
+    """Days of a report's window that postdate the snapshot, or None.
+
+    Not ``_days_stale``: that measures the snapshot against wall-clock now for
+    the TTL and the stale cap, while this measures it against the report's
+    ``curr_date``, which on a backtest can sit far from now (and before the
+    fetch, giving a non-positive result callers are expected to ignore). It is
+    what a stale serve's trailing window cannot have seen — no snapshot carries
+    what the provider published after it was fetched — so both vendor modules
+    can say so instead of leaving the reader to subtract two printed dates.
+    """
+    fetched_day = fetched_at[:10]
+    if not _is_iso_date(fetched_day):
+        return None
+    return (curr_dt - datetime.strptime(fetched_day, "%Y-%m-%d")).days
+
+
 def _humanize_age(fetched_at: str) -> str:
     """Human-readable snapshot age for the STALE caveat.
 

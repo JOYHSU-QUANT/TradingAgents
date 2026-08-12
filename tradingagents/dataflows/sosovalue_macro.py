@@ -996,13 +996,12 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     # the last of those four was the one site this rule had already been
     # written down for and not applied to. A new such site belongs here too.
     cal_dated = [r["date"] for r in snapshot.calendar if r["events"]]
-    # The calendar's coverage of THIS window, kept as the day-rows themselves
-    # rather than a bool: the fact is per-day, so an all-or-nothing test falls
-    # silent on a window the calendar covers only partly. The forward end is
-    # the reach sentence's job just below; this list drives the backward half,
-    # which staleness never causes — the provider's calendar is anchored to the
-    # FETCH, so a curr_date earlier than the fetch leaves the front of the
-    # rendered window with no calendar rows at all.
+    # Does the calendar contribute anything at all to THIS window? Its only
+    # consumer is the zero-coverage note below, so emptiness is all that is
+    # read off it — the two PARTIAL-coverage notes are bounded by the
+    # calendar's own endpoints instead (`cal_dated[0]` for the front gap,
+    # `cal_dated[-1]` for the reach), because a dateless day inside that span
+    # is one the provider covered and simply had nothing to list.
     in_window = [d for d in cal_dated if curr_date <= d <= ahead_end]
     header_lines = ["## US Economic Calendar — scheduled events & releases (SoSoValue)"]
 
@@ -1123,13 +1122,21 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
             "%Y-%m-%d"
         )
         blind_days = (datetime.strptime(cal_dated[0], "%Y-%m-%d") - curr_dt).days
+        # A one-day gap collapses to the single date: "X → X" reads as a broken
+        # range. The arrow is the header's house style for a span (the Source
+        # line uses it), and an en-dash between two hyphen-bearing ISO dates is
+        # hard to parse. "predates the calendar", not "predate it": the nearest
+        # antecedent of "it" is "this window", under which the clause is false —
+        # those days OPEN the window rather than predating it.
+        span = curr_date if blind_days == 1 else f"{curr_date} → {gap_end}"
         header_lines.append(
             f"_This snapshot's calendar begins {cal_dated[0]}, after this window opens, so "
-            f"{curr_date}–{gap_end} ({blind_days} {_plural_days(blind_days)}) predate it: "
-            f"over that stretch the schedule below carries only the "
-            f"{len(TRACKED_EVENTS)} tracked events, and an event outside that list is "
-            f"missing from {_plural(blind_days, 'that day', 'those days')} rather than "
-            f"absent from {_plural(blind_days, 'it', 'them')}._"
+            f"{span} ({blind_days} {_plural_days(blind_days)}) "
+            f"{_plural(blind_days, 'predates', 'predate')} the calendar: over that stretch "
+            f"the schedule below carries only the {len(TRACKED_EVENTS)} tracked events, and "
+            f"an event outside that list is missing from "
+            f"{_plural(blind_days, 'that day', 'those days')} rather than absent from "
+            f"{_plural(blind_days, 'it', 'them')}._"
         )
 
     if snapshot.events_failed:

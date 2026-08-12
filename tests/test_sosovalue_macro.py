@@ -283,7 +283,15 @@ class TestSixthLoopDisclosures:
         )
         assert "covers 2026-08-09 → 2026-08-14" in report
         assert "after this window opens" not in report
-        assert "predate it" not in report
+        # Positive control on the SAME needles: without it a reworded sentence
+        # would leave the negatives vacuously true, and the test would stay
+        # green with the bug restored.
+        fires = _render(
+            _snapshot(calendar=[{"date": "2026-08-14", "events": ["Retail Sales (MoM)"]}]),
+            curr_date="2026-08-11",
+        )
+        assert "after this window opens" in fires
+        assert "calendar begins 2026-08-14" in fires
 
     def test_partial_backward_calendar_coverage_is_disclosed(self):
         # A backtest curr_date: the calendar is anchored to the fetch, so the
@@ -304,7 +312,24 @@ class TestSixthLoopDisclosures:
         # are days no calendar row could have covered.
         line = _sentence(report, "after this window opens")
         assert "calendar begins 2026-08-11" in line
-        assert "2026-08-05–2026-08-10 (6 days)" in line
+        assert "2026-08-05 → 2026-08-10 (6 days) predate the calendar" in line
+
+    def test_a_one_day_front_gap_reads_as_a_single_date_in_the_singular(self):
+        # Reachable on a live, non-stale, curr_date == fetched_at serve: the
+        # provider's window opens a day or two before the fetch, so a quiet
+        # weekend puts the first event day one day out. "X → X" would read as
+        # a broken range, and every clause must agree in number.
+        report = _render(
+            _snapshot(
+                calendar=[{"date": "2026-08-17", "events": ["CPI (MoM)"]}],
+                fetched_at="2026-08-16T09:00:00Z",
+            ),
+            curr_date="2026-08-16",
+        )
+        line = _sentence(report, "after this window opens")
+        assert "2026-08-16 (1 day) predates the calendar" in line
+        assert "missing from that day rather than absent from it" in line
+        assert "→" not in line
         # Not the zero-overlap sentence: the window IS partly covered.
         assert "No calendar entry in this snapshot falls between" not in report
 

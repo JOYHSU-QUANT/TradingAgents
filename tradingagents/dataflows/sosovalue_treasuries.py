@@ -874,10 +874,15 @@ def get_btc_treasury_data(
             # the window it describes ("the most recent 10 days" of a 5-day
             # window). When the age swallows the window the true statement is
             # the stronger one, not a truncated version of the weaker one.
+            # Strict >, not >=: the window is inclusive at both ends, so it
+            # spans look_back_days + 1 days while the unobserved stretch
+            # (fetched_day, curr_date] is exactly blind. At equality
+            # fetched_day IS window_start, whose own filings are observable —
+            # the whole-window claim needs the fetch to precede the window.
             unseen = min(blind, look_back_days)
             extent = (
                 "the whole of it is"
-                if unseen >= look_back_days
+                if blind > look_back_days
                 else f"the most recent {unseen} {_plural_days(unseen)} of it "
                 f"{_plural(unseen, 'is', 'are')}"
             )

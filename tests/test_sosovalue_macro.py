@@ -1552,7 +1552,29 @@ class TestVisibleViewAndCoverage:
             look_back_days=5,
         )
         assert "most recent 10 days" not in report
-        assert "the whole of that window is empty by construction" in report
+        assert "the whole of that window is empty of published figures" in report
+
+    def test_an_age_equal_to_the_window_does_not_claim_the_whole_window(self):
+        # The boundary the first version got wrong. The window is inclusive at
+        # both ends, so it spans look_back_days + 1 days; at blind ==
+        # look_back_days the fetch date IS window_start and that day's prints
+        # are observable. Pinned with a real released row on that very day.
+        report = _render(
+            _snapshot(
+                fetched_at="2026-08-01T00:00:00Z",
+                stale=True,
+                histories=_histories(
+                    overrides={"Nonfarm Payrolls": [_row("2026-08-01", "5.5%", "5.0%", "4.9%")]}
+                ),
+            ),
+            curr_date="2026-08-11",
+            look_back_days=10,
+        )
+        assert "the whole of that window" not in report
+        assert "the most recent 10 days of that window are empty of published figures" in report
+        # The observable window_start row really does render, which is what
+        # makes the strong claim false at this boundary.
+        assert "| 2026-08-01 | Nonfarm Payrolls |" in report
 
     def test_a_one_day_tail_reads_singular(self):
         # blind == 1 is the modal stale serve, and the noun was pluralised by

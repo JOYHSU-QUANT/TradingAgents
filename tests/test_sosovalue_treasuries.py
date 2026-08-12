@@ -1290,6 +1290,32 @@ class TestVerificationAndPrecision:
         assert "most recent 10 days" not in report
         assert "the whole of it is unobserved" in report
 
+    def test_an_age_equal_to_the_window_does_not_claim_the_whole_window(self):
+        # The boundary the first version got wrong: the window is inclusive at
+        # both ends, so at blind == look_back_days the fetch date IS
+        # window_start and that day's filings are observable.
+        report = _render(
+            _snapshot(
+                companies={
+                    "X": {
+                        "name": "",
+                        # The second row lands exactly on window_start, which
+                        # is also the fetch date at this boundary.
+                        "rows": [_prow("2026-07-20", 100.0), _prow("2026-08-01", 150.0, 50.0)],
+                    }
+                },
+                fetched_at="2026-08-01T00:00:00Z",
+                stale=True,
+            ),
+            curr_date="2026-08-11",
+            look_back_days=10,
+        )
+        assert "the whole of it" not in report
+        assert "the most recent 10 days of it are unobserved" in report
+        # The window_start disclosure really does render, which is exactly what
+        # makes the whole-window claim false at this boundary.
+        assert "| 2026-08-01 | X |" in report
+
     def test_a_one_day_tail_reads_singular(self):
         report = _render(
             _snapshot(fetched_at="2026-08-10T00:00:00Z", stale=True),

@@ -991,7 +991,7 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     # The day-rows that can still contribute: a row whose every name was
     # dropped as unusable survives with an empty list, and counting it would
     # overstate the calendar's reach. Shared by EVERY site that measures the
-    # calendar's extent — the stale-reach line, the window-overlap disclosure,
+    # calendar's extent — the reach line, the window-overlap disclosure,
     # the Source span and the empty-schedule narration — so they cannot drift;
     # the last of those four was the one site this rule had already been
     # written down for and not applied to. A new such site belongs here too.
@@ -1039,10 +1039,17 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
             extent = "ends on this date, so it can contribute today's entries but nothing beyond"
         else:
             extent = f"reaches only {reach} {_plural_days(reach)} past it"
+        # The subject is the CALENDAR's reach, never "the scheduled section is
+        # short": that section is fed by forward-dated tracked-history rows as
+        # well as calendar rows, and histories reach ahead_end independently of
+        # the calendar — so a table full to the window edge can sit directly
+        # under this sentence. What is actually true past the calendar's last
+        # dated entry is narrower: only tracked events can still appear there.
         header_lines.append(
-            f"_The scheduled section below reaches less far than its title: this "
-            f"snapshot's calendar {extent}, against the {AHEAD_DAYS}-day window that "
-            f"section otherwise covers, so read a short or empty schedule as the "
+            f"_Measured from {curr_date}, this snapshot's calendar {extent}, short of the "
+            f"{AHEAD_DAYS}-day window the scheduled section covers — so beyond the "
+            f"calendar's last dated entry the schedule below can only carry the "
+            f"{len(TRACKED_EVENTS)} tracked events, and a thin tail there is the "
             f"calendar's reach rather than a quiet fortnight._"
         )
     # The backward half of the same arithmetic, and NOT gated on staleness: the
@@ -1098,11 +1105,17 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # test reads as covered. Only the front is reported here: a gap at the
         # far end is the reach sentence's subject, and saying it twice would
         # put two spans for one hole in one header.
+        # "covers nothing in this window before D", NOT "the calendar starts at
+        # D": in_window[0] is the first covered date INSIDE the window, and the
+        # calendar itself routinely begins earlier — the Source line prints
+        # that real start, so naming this one as the start contradicts it in
+        # the same header. The span is stated exclusively for the same reason:
+        # in_window[0] is by construction a day the calendar does cover.
         header_lines.append(
-            f"_This snapshot's calendar starts at {in_window[0]}, inside this window, so "
-            f"from {curr_date} to that date the schedule below carries only the "
-            f"{len(TRACKED_EVENTS)} tracked events: an event outside that list is missing "
-            f"from those days rather than absent from them._"
+            f"_This snapshot's calendar covers nothing in this window before "
+            f"{in_window[0]}, so for {curr_date} through the day before it the schedule "
+            f"below carries only the {len(TRACKED_EVENTS)} tracked events: an event "
+            f"outside that list is missing from those days rather than absent from them._"
         )
 
     if snapshot.events_failed:
@@ -1216,7 +1229,7 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     )
 
     # Measured from the day-rows that actually carry names, matching the
-    # stale-reach line above: a row whose every name was dropped as unusable
+    # reach line above: a row whose every name was dropped as unusable
     # survives with an empty list, and spanning it here would claim coverage
     # the calendar cannot contribute — two contradictory spans in one header.
     cal_span = (

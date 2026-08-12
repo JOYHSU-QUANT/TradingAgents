@@ -219,7 +219,7 @@ class TestSixthLoopDisclosures:
             curr_date="2026-08-11",
         )
         assert "STALE" not in report
-        line = _sentence(report, "reaches less far than its title")
+        line = _sentence(report, "calendar's last dated entry")
         assert "reaches only 13 days past it" in line
 
     def test_a_calendar_covering_the_whole_window_says_nothing(self):
@@ -229,7 +229,46 @@ class TestSixthLoopDisclosures:
             _snapshot(calendar=[{"date": "2026-08-25", "events": ["CPI (YoY)"]}]),
             curr_date="2026-08-11",
         )
-        assert "reaches less far than its title" not in report
+        assert "calendar's last dated entry" not in report
+
+    def test_the_reach_note_does_not_claim_the_schedule_itself_is_short(self):
+        # The scheduled table is fed by forward-dated TRACKED HISTORY rows as
+        # well as calendar rows, and histories reach ahead_end independently of
+        # the calendar — so the table can be full to the window edge while the
+        # calendar is short. The note must speak only about the calendar's
+        # reach, never assert that the section below is short.
+        report = _render(
+            _snapshot(
+                calendar=[{"date": "2026-08-12", "events": ["Nonfarm Payrolls"]}],
+                histories=_histories(
+                    overrides={"CPI (YoY)": [_row("2026-08-25", "", "3.0%", "2.9%")]}
+                ),
+            ),
+            curr_date="2026-08-11",
+        )
+        line = _sentence(report, "calendar's last dated entry")
+        assert "reaches only 1 day past it" in line
+        # The schedule below does reach the window edge, contradicting any
+        # claim that the section itself is short.
+        assert "2026-08-25" in report
+
+    def test_the_front_gap_note_does_not_contradict_the_source_line(self):
+        # in_window[0] is the first covered date INSIDE the window; the
+        # calendar itself routinely starts earlier, and the Source line prints
+        # that real start. Naming this one as "the calendar starts at" put two
+        # different calendar starts in one header.
+        report = _render(
+            _snapshot(
+                calendar=[
+                    {"date": "2026-08-09", "events": ["CPI (YoY)"]},
+                    {"date": "2026-08-14", "events": ["Retail Sales (MoM)"]},
+                ]
+            ),
+            curr_date="2026-08-11",
+        )
+        assert "covers 2026-08-09 → 2026-08-14" in report
+        assert "calendar starts at 2026-08-14" not in report
+        assert "covers nothing in this window before 2026-08-14" in report
 
     def test_partial_backward_calendar_coverage_is_disclosed(self):
         # A backtest curr_date: the calendar is anchored to the fetch, so the
@@ -246,7 +285,7 @@ class TestSixthLoopDisclosures:
             ),
             curr_date="2026-08-05",
         )
-        assert "calendar starts at 2026-08-11, inside this window" in report
+        assert "covers nothing in this window before 2026-08-11" in report
         # Not the zero-overlap sentence: the window IS partly covered.
         assert "No calendar entry in this snapshot falls between" not in report
 

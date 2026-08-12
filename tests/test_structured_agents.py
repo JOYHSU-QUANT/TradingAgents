@@ -7,11 +7,13 @@ behavior we added for the Trader, Research Manager, and Sentiment Analyst
 so they share the same deterministic output shape.
 """
 
+import types
 from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError
 
+from tradingagents.agents.analysts import sentiment_analyst as sentiment_analyst_mod
 from tradingagents.agents.analysts.sentiment_analyst import create_sentiment_analyst
 from tradingagents.agents.managers.portfolio_manager import create_portfolio_manager
 from tradingagents.agents.managers.research_manager import create_research_manager
@@ -372,6 +374,34 @@ def _structured_sentiment_llm(captured: dict, report: SentimentReport | None = N
 
 @pytest.mark.unit
 class TestSentimentAnalystAgent:
+    @pytest.fixture(autouse=True)
+    def _offline_sources(self, monkeypatch):
+        """Stub the node's three pre-fetch calls so these stay unit tests.
+
+        ``sentiment_analyst_node`` eagerly fetches news, StockTwits and Reddit
+        before it ever reaches the LLM, and each fetcher swallows its own
+        failures by design. Unstubbed, every test in this class made three
+        real network calls, waited out their timeouts (~20s each, ~99s of a
+        ~108s suite), and then passed regardless — so the network round-trip
+        bought no coverage while making the suite slow and non-hermetic.
+        The fetchers have their own tests; here they are just prompt input.
+        """
+        monkeypatch.setattr(
+            sentiment_analyst_mod,
+            "get_news",
+            types.SimpleNamespace(func=lambda *a, **k: "NEWS BLOCK"),
+        )
+        monkeypatch.setattr(
+            sentiment_analyst_mod,
+            "fetch_stocktwits_messages",
+            lambda *a, **k: "STOCKTWITS BLOCK",
+        )
+        monkeypatch.setattr(
+            sentiment_analyst_mod,
+            "fetch_reddit_posts",
+            lambda *a, **k: "REDDIT BLOCK",
+        )
+
     def test_structured_path_produces_rendered_markdown(self):
         captured = {}
         report = SentimentReport(

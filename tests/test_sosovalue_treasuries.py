@@ -1278,3 +1278,21 @@ class TestVerificationAndPrecision:
         # No blind tail when the snapshot was fetched on curr_date itself.
         same_day = _render(_snapshot(fetched_at="2026-08-11T00:00:00Z", stale=True))
         assert "cannot carry a disclosure filed after" not in same_day
+
+    def test_the_unobserved_tail_never_outruns_the_window(self):
+        # look_back_days is a caller-supplied tool argument, so an age larger
+        # than it would claim "the most recent 10 days" of a 5-day window.
+        report = _render(
+            _snapshot(fetched_at="2026-08-01T00:00:00Z", stale=True),
+            curr_date="2026-08-11",
+            look_back_days=5,
+        )
+        assert "most recent 10 days" not in report
+        assert "the whole of it is unobserved" in report
+
+    def test_a_one_day_tail_reads_singular(self):
+        report = _render(
+            _snapshot(fetched_at="2026-08-10T00:00:00Z", stale=True),
+            curr_date="2026-08-11",
+        )
+        assert "the most recent 1 day of it is unobserved" in report

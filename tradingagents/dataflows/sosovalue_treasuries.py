@@ -149,8 +149,9 @@ CACHE_TTL_HOURS = 24
 # MAX_HISTORY_ROWS_HARD breach for one company is deterministic and lands in
 # companies_failed on every retry. At 1h that pins a module budgeted for 16
 # requests/day at 384, a 24x amplification of the exact quota the 24h TTL was
-# chosen to protect. Held at base/4, matching the ETF module's 6h->1h ratio, so
-# a transient gap still heals the same day.
+# chosen to protect. base/4 keeps a transient gap healing the same day while
+# bounding a permanent one at 4 sweeps; the ETF module stays at its own 1h
+# because base/6 of a 6h TTL is already that.
 INCOMPLETE_CACHE_TTL_HOURS = 6
 MAX_STALE_DAYS = 14
 
@@ -598,9 +599,15 @@ def _fetch_all() -> dict:
         later > earlier for earlier, later in zip(in_order, in_order[1:], strict=False)
     )
     if order_unverified:
+        # Say which of the two it was: below two fetched histories nothing was
+        # compared, so claiming the listing is misordered would be the same
+        # unearned assertion the report no longer makes.
         logger.warning(
-            "SoSoValue treasuries listing is not ordered by holdings for this "
-            "snapshot; the report will present the selection as unranked"
+            "SoSoValue treasuries listing ordering %s for this snapshot; the "
+            "report will present the selection as unranked",
+            "could not be checked (fewer than two histories fetched)"
+            if len(in_order) < 2
+            else "is not by holdings",
         )
     return {
         "companies": companies,
@@ -769,10 +776,11 @@ def _fmt_signed_usd_m(value: float) -> str:
     the legend says Implied is blank on a cost of zero — two cells the reader
     is told cannot both be true. Drop a granularity step instead. ``+ 0.0``
     normalizes a negative zero on the coarse path, which a sub-tick disposal
-    would otherwise render as "-0.0". A filing under $500 still shows +0.000;
-    at this universe (top-15 corporate holders) that is not a reachable
-    disclosure, and an unbounded precision escape would make the column
-    unreadable.
+    would otherwise render as "-0.0"; the fine path needs no such guard for
+    the values it is reached with, but shares the residual below: a filing
+    under $500 renders "+0.000"/"-0.000". At this universe (top-15 corporate
+    holders) that is not a reachable disclosure, and an unbounded precision
+    escape would make the column unreadable.
     """
     millions = value / _USD_PER_MILLION
     rounded = round(millions, 1)
@@ -861,11 +869,23 @@ def get_btc_treasury_data(
         fetched_day = snapshot.fetched_at[:10]
         blind = _days_unobserved(snapshot.fetched_at, curr_dt)
         if blind is not None and blind > 0:
+            # Clamped to the window: look_back_days is a caller-supplied tool
+            # argument, so an age larger than it would claim a tail longer than
+            # the window it describes ("the most recent 10 days" of a 5-day
+            # window). When the age swallows the window the true statement is
+            # the stronger one, not a truncated version of the weaker one.
+            unseen = min(blind, look_back_days)
+            extent = (
+                "the whole of it is"
+                if unseen >= look_back_days
+                else f"the most recent {unseen} {_plural_days(unseen)} of it "
+                f"{_plural(unseen, 'is', 'are')}"
+            )
             header_lines.append(
                 f"_That age also truncates the window below: this snapshot cannot carry a "
-                f"disclosure filed after {fetched_day}, so the most recent {blind} "
-                f"{_plural_days(blind)} of it are unobserved rather than quiet — read a "
-                f"flat net change as coverage ending early, not as no accumulation._"
+                f"disclosure filed after {fetched_day}, so {extent} unobserved rather than "
+                f"quiet — read a flat net change as coverage ending early, not as no "
+                f"accumulation._"
             )
 
     selected = (

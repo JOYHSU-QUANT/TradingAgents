@@ -1012,10 +1012,22 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         fetched_day = snapshot.fetched_at[:10]
         blind = _days_unobserved(snapshot.fetched_at, curr_dt)
         if blind is not None and blind > 0:
+            # Clamped to the window: look_back_days is a caller-supplied tool
+            # argument, so an age larger than it would claim a tail longer than
+            # the window it describes ("the most recent 10 days" of a 5-day
+            # window). When the age swallows the window the true statement is
+            # the stronger one, not a truncated version of the weaker one.
+            unseen = min(blind, look_back_days)
+            extent = (
+                "the whole of that window is"
+                if unseen >= look_back_days
+                else f"the most recent {unseen} {_plural_days(unseen)} of that window "
+                f"{_plural(unseen, 'is', 'are')}"
+            )
             header_lines.append(
                 f"_That age also truncates the released window below: this snapshot cannot "
-                f"carry anything published after {fetched_day}, so the most recent {blind} "
-                f"{_plural_days(blind)} of that window are empty by construction, not quiet._"
+                f"carry anything published after {fetched_day}, so {extent} empty by "
+                f"construction, not quiet._"
             )
 
     if not cal_overlaps:
@@ -1282,7 +1294,13 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # this snapshot never fetched; the header discloses the gap separately,
         # so point back at it rather than letting "no releases" read as "nothing
         # happened".
-        gap = _coverage_gap_note(missing_events, "contributed nothing", "nothing printed")
+        # "no release in this window", not the scheduled branch's blanket
+        # "contributed nothing": an event whose only served rows sit ahead of
+        # curr_date is in no_disclosure yet can be visible in the scheduled
+        # table above, so the stronger phrase would deny a row the reader sees.
+        gap = _coverage_gap_note(
+            missing_events, "contributed no release to this window", "nothing printed"
+        )
         released_block = (
             f"\n**Released (last {look_back_days} days):** no tracked releases in the "
             f"window ending {curr_date}." + (f" {gap}" if gap else "") + "\n"

@@ -38,8 +38,10 @@ Breaking changes within the 0.x line are called out explicitly.
   degradation), cache on rolling snapshots with stale fallback, and **ship
   disabled** (`"none"`): the key already sits on deployed boxes, so landing
   them enabled would change a running paper deployment's analyst input
-  surface with no server-side action to date the change from — flip them as
-  a deliberate cutover, ideally alongside the `options_data` one.
+  surface with no server-side action to date the change from — flip them
+  together as one deliberate, separately dated cutover, clear of the
+  `options_data` one (already dated 2026-08-12), so the two input-surface
+  changes stay attributable apart.
   Both reports state the semantics of what they render rather than leaving
   them to be inferred: the unit each figure carries (a payrolls actual of
   `-23` is thousands of jobs), that a surprise is actual minus forecast and
@@ -73,10 +75,13 @@ Breaking changes within the 0.x line are called out explicitly.
   0.5% IV moved RR25 from −4.74 to **+2.33**, reporting the opposite volatility
   regime. A point the chain cannot bracket, or whose local smile is not monotone,
   is reported `n/a` rather than extrapolated or guessed.
-  It **ships disabled** (`"options_data": "none"`). Being keyless, shipping it on
-  would change a running deployment's analyst input surface the moment the code
-  landed, with no server-side action to date the change from; enabling it is a
-  deliberate cutover.
+  It shipped **disabled** and was **cut over to `"deribit"` on 2026-08-12**, so
+  the category is on by default. Being keyless, shipping it on at merge time
+  would have changed a running deployment's analyst input surface the moment the
+  code landed, with no server-side action to date the change from; the dated
+  cutover is that action. The perp engine's config overlay carries a fixed key
+  list and does not pipe `data_vendors` through, so for that deployment this
+  default is the live value and switching the category back off is a code change.
   The DVOL history is date-filtered to `curr_date` (bounded server-side and again
   on the parsed rows) and lookahead-safe to the day; the candle dated today (or
   later, when the fetch crossed UTC midnight) is

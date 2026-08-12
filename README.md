@@ -363,15 +363,12 @@ summariser would quote. The flattening is applied where the fragment enters the 
 than only where the report renders it, because a failure in an optional category
 reaches the model through the router as `DATA_UNAVAILABLE: ... ({error})` too.
 
-This vendor **ships disabled** (`"options_data": "none"`). It needs no API key,
-so shipping it on would change a running deployment's analyst input surface — a
-new tool, a new prompt paragraph, a new report section — the moment the code
-lands, with no server-side action to date the change from. Set it to `"deribit"`
-as a deliberate cutover and record when:
-
-```python
-config["data_vendors"]["options_data"] = "deribit"
-```
+This vendor shipped **disabled** and was **cut over to `"deribit"` on
+2026-08-12**; it is now the default and needs no opt-in. Being keyless, shipping
+it on at merge time would have changed a running deployment's analyst input
+surface — a new tool, a new prompt paragraph, a new report section — the moment
+the code landed, with no server-side action to date the change from. The dated
+cutover is that action, so a later review can attribute a behaviour change to it.
 
 Two further news-analyst crypto sources ride on the same SoSoValue key
 (`SOSOVALUE_API_KEY`, the one already used for ETF flows):
@@ -410,12 +407,12 @@ Two further news-analyst crypto sources ride on the same SoSoValue key
   demand proxy**; stablecoins and unrecognized symbols get a no-signal note.
 
 Both **ship disabled** (`"economic_calendar": "none"`, `"btc_treasuries":
-"none"`) for the same reason as `options_data`: the SoSoValue key already sits
-on a deployed box for ETF flows, so landing these enabled would change a
-running deployment's analyst input surface the moment the code deploys, with no
-server-side action to date the change from. Flip them (ideally together with
-the `options_data` cutover, so the paper run's input surface gains one
-segmentation point instead of three) with:
+"none"`): the SoSoValue key already sits on a deployed box for ETF flows, so
+landing these enabled would change a running deployment's analyst input surface
+the moment the code deploys, with no server-side action to date the change from.
+Flip them together, as one deliberate cutover, and record when — `options_data`
+already had its own dated cutover (2026-08-12), so a separate date here keeps
+the two input-surface changes attributable apart:
 
 ```python
 config["data_vendors"]["economic_calendar"] = "sosovalue"

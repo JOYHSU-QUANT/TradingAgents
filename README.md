@@ -363,15 +363,12 @@ summariser would quote. The flattening is applied where the fragment enters the 
 than only where the report renders it, because a failure in an optional category
 reaches the model through the router as `DATA_UNAVAILABLE: ... ({error})` too.
 
-This vendor **ships disabled** (`"options_data": "none"`). It needs no API key,
-so shipping it on would change a running deployment's analyst input surface — a
-new tool, a new prompt paragraph, a new report section — the moment the code
-lands, with no server-side action to date the change from. Set it to `"deribit"`
-as a deliberate cutover and record when:
-
-```python
-config["data_vendors"]["options_data"] = "deribit"
-```
+This vendor shipped **disabled** and was **cut over to `"deribit"` on
+2026-08-12**; it is now the default and needs no opt-in. Being keyless, shipping
+it on at merge time would have changed a running deployment's analyst input
+surface — a new tool, a new prompt paragraph, a new report section — the moment
+the code landed, with no server-side action to date the change from. The dated
+cutover is that action, so a later review can attribute a behaviour change to it.
 
 Any data category can be switched off by setting its vendor to `"none"`:
 

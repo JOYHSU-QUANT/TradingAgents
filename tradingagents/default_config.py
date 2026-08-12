@@ -143,13 +143,15 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "crypto_etf_flows": "sosovalue,farside",  # Options: sosovalue (SOSOVALUE_API_KEY), farside (keyless)
         "crypto_sentiment": "alternative_me",  # Options: alternative_me (keyless, Fear & Greed)
         # Crypto options implied volatility (DVOL index + 25-delta skew).
-        # Ships OFF. The vendor is keyless, so shipping it enabled would change a
-        # running deployment's analyst input surface — a new tool, a new prompt
-        # paragraph, a new report section — the moment the code lands, with no
-        # server-side action to date the change from. Set this to "deribit" as a
-        # deliberate cutover and record when, so a later review can attribute any
-        # behaviour change to it.
-        "options_data": "none",              # Options: deribit (keyless, BTC/ETH only), none
+        # Shipped OFF and cut over to "deribit" on 2026-08-12 — the deliberate,
+        # dated server-side action the ship-off note asked for. From that date the
+        # paper-BTC deployment's analyst input surface gains a tool, a prompt
+        # paragraph and a report section, so a later review can attribute any
+        # behaviour change to it. The perp engine's config overlay carries a fixed
+        # key list and does not pipe ``data_vendors`` through (see
+        # dataflows/interface.py), so this default IS that deployment's live value:
+        # switching the category back off is a code change, not a YAML edit.
+        "options_data": "deribit",           # Options: deribit (keyless, BTC/ETH only), none
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {

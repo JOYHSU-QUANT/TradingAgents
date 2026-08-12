@@ -11,6 +11,7 @@ import datetime as dt
 import json
 import logging
 import os
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from unittest import mock
 
@@ -58,17 +59,48 @@ def _days_back(days: int, base: str = TODAY) -> str:
     return (datetime.strptime(base, "%Y-%m-%d") - dt.timedelta(days=days)).strftime("%Y-%m-%d")
 
 
+@contextmanager
+def _options_vendor(vendor: str):
+    """Force the category to `vendor`, then restore the value DEFAULT_CONFIG ships.
+
+    `set_config` mutates a process-wide dict, so anything switching this must
+    switch it back. Restoring a hardcoded literal is what previously let this
+    survive a move of the shipped value; reading DEFAULT_CONFIG back at teardown
+    means it follows a cutover instead of quietly pinning a stale vendor.
+    """
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    set_config({"data_vendors": {"options_data": vendor}})
+    try:
+        yield
+    finally:
+        set_config(
+            {"data_vendors": {"options_data": DEFAULT_CONFIG["data_vendors"]["options_data"]}}
+        )
+
+
 @pytest.fixture
 def options_enabled():
-    """Turn the category on for the duration of a test.
+    """Force the category on for the duration of a test.
 
-    The shipped default is "none" (an opt-in cutover, so merging cannot silently
-    change a running deployment's input surface), and `set_config` mutates a
-    process-wide dict, so anything switching it on must switch it back.
+    The 2026-08-12 cutover made "deribit" the shipped default, so this is now
+    usually a no-op — it stays because these tests assert vendor behaviour and
+    should not silently become disabled-path tests if the category is ever
+    switched back off.
     """
-    set_config({"data_vendors": {"options_data": "deribit"}})
-    yield
-    set_config({"data_vendors": {"options_data": "none"}})
+    with _options_vendor("deribit"):
+        yield
+
+
+@pytest.fixture
+def options_disabled():
+    """Force the category off for the duration of a test.
+
+    The mirror of `options_enabled`, for the tests that pin what an operator
+    switching this category back off actually gets.
+    """
+    with _options_vendor("none"):
+        yield
 
 
 class _RequestRecorder:
@@ -3174,17 +3206,18 @@ class TestPartialDegradation:
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
 class TestRouting:
-    def test_the_vendor_ships_disabled(self):
-        # The entire justification for shipping this keyless vendor off is that
-        # merging must not change the running paper deployment's analyst input
-        # surface — there is no server-side action to date such a change from.
-        # Nothing pinned it: the options_enabled fixture FORCES the value and
-        # restores a hardcoded "none", so it cannot see DEFAULT_CONFIG move.
-        # Flipping this to "deribit" would otherwise ship green.
+    def test_the_vendor_is_live_since_the_dated_cutover(self):
+        # The vendor shipped off so that merging could not change the running
+        # paper deployment's analyst input surface unannounced; the 2026-08-12
+        # cutover is that announced change, made server-side-visible by a dated
+        # commit. The assertion is kept pointing the other way for the same
+        # reason it existed: the fixtures FORCE the value, so without this
+        # nothing sees DEFAULT_CONFIG move and a silent flip back — which would
+        # drop DVOL and the skew out of every cycle — would ship green.
         from tradingagents.default_config import DEFAULT_CONFIG
 
-        assert DEFAULT_CONFIG["data_vendors"]["options_data"] == "none"
-        assert interface.is_category_disabled("options_data", "get_options_market") is True
+        assert DEFAULT_CONFIG["data_vendors"]["options_data"] == "deribit"
+        assert interface.is_category_disabled("options_data", "get_options_market") is False
 
     def test_category_routes_to_deribit(self, options_enabled):
         assert interface.get_category_for_method("get_options_market") == "options_data"
@@ -3216,7 +3249,11 @@ class TestRouting:
             out = interface.route_to_vendor("get_options_market", "BTC", TODAY)
         assert "DATA_UNAVAILABLE" in out
 
-    def test_ships_disabled_so_a_merge_cannot_change_a_running_deployment(self):
+    def test_switching_the_category_off_stops_the_vendor_being_called(self, options_disabled):
+        # The off path outlives the cutover: it is how an operator kills this
+        # vendor without a code change to the call sites, so it stays pinned —
+        # the sentinel must come back WITHOUT the implementation being reached
+        # (a disabled category must not open a connection).
         called = {"n": 0}
 
         def _impl(*a, **k):
@@ -3279,6 +3316,14 @@ class TestMarketAnalystWiring:
         # the existing market tools are untouched
         assert bound >= {"get_stock_data", "get_indicators", "get_verified_market_snapshot"}
 
+    def test_the_shipped_default_binds_the_tool_for_crypto(self):
+        # Deliberately takes NO fixture: every other binding test FORCES the
+        # category, so none can see the shipped default move. The binding-side
+        # half of TestRouting's config assertion — that one pins the value, this
+        # one pins what the analyst does with it, and only the pair rules out a
+        # bypassed gate.
+        assert "get_options_market" in {t.name for t in _run_analyst("crypto").bound_tools}
+
     def test_stock_does_not_bind_the_options_tool(self, options_enabled):
         bound = {t.name for t in _run_analyst("stock", "AAPL").bound_tools}
         assert "get_options_market" not in bound
@@ -3291,9 +3336,10 @@ class TestMarketAnalystWiring:
         )
         assert "get_options_market" not in {t.name for t in llm.bound_tools}
 
-    def test_disabled_category_is_not_bound(self):
+    def test_disabled_category_is_not_bound(self, options_disabled):
         # Binding a tool whose category is switched off would spend a tool call
-        # only to receive the disabled sentinel. This is also the shipped default.
+        # only to receive the disabled sentinel. No longer the shipped default
+        # (cut over 2026-08-12), so the state has to be forced to stay covered.
         bound = {t.name for t in _run_analyst("crypto").bound_tools}
         assert "get_options_market" not in bound
 
@@ -3343,7 +3389,7 @@ class TestMarketAnalystWiring:
         assert "not spot" in crypto_prompt
         assert "do not reconcile the two and do not flag them as a discrepancy" in crypto_prompt
 
-    def test_disabled_category_leaves_no_dangling_prompt_text(self):
+    def test_disabled_category_leaves_no_dangling_prompt_text(self, options_disabled):
         assert "get_options_market" not in str(_run_analyst("crypto").prompt_value)
 
     def test_market_toolnode_can_execute_the_options_tool(self):

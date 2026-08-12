@@ -369,6 +369,43 @@ def _valid_rows(rows: object) -> bool:
     return all(a <= b for a, b in zip(dates, dates[1:], strict=False))
 
 
+_ORDER_DESCENDING = "descending"
+_ORDER_TOO_FEW = "too_few"
+_ORDER_CONTRADICTED = "contradicted"
+
+
+def _holdings_order(companies: dict) -> str:
+    """How the fetched holdings relate to the provider's listing order.
+
+    One definition for the three sites that have to agree: ``_fetch_all`` sets
+    the stored flag from it, ``_read_cache`` refuses a cache whose flag is more
+    confident than its own rows support, and the renderer picks which of the
+    two unverified causes to name. That agreement is load-bearing rather than
+    incidental — the renderer's plain "unverified" wording is right ONLY
+    because ``_read_cache`` deliberately accepts a stored ``True`` sitting over
+    holdings that do descend — so the predicate lives here instead of in three
+    copies coupled by prose.
+
+    ``companies`` is keyed in the provider's listing order (the fetch loop
+    inserts in that order and JSON round-trips it), and the comparison is on
+    each company's LATEST row, deliberately unfiltered by ``curr_date``: the
+    claim under test is about the listing the provider served, not about the
+    window a report renders.
+
+    Distinguishing ``too_few`` matters because it is routine here, not exotic:
+    a 429 on the second company drains the rest, and three consecutive
+    transport errors trip the breaker. ``any()`` over an empty pair sequence is
+    False, so collapsing it into "descending" would ship the confident wording
+    having compared nothing.
+    """
+    holdings = [c["rows"][-1]["btc_holding"] for c in companies.values()]
+    if len(holdings) < 2:
+        return _ORDER_TOO_FEW
+    if any(later > earlier for earlier, later in zip(holdings, holdings[1:], strict=False)):
+        return _ORDER_CONTRADICTED
+    return _ORDER_DESCENDING
+
+
 def _read_cache(path: str) -> dict | None:
     """Return a fully-validated cached payload, or None if untrusted.
 
@@ -435,6 +472,18 @@ def _read_cache(path: str) -> dict | None:
         return _reject("'companies_unusable' is missing or not a non-negative integer")
     if not isinstance(payload.get("order_unverified"), bool):
         return _reject("'order_unverified' is missing or not a boolean")
+    # The last parse-side invariant left without a read-side mirror, and only
+    # the confident direction is worth rejecting: a file claiming the listing
+    # IS ordered while its own stored holdings ascend would put "provider lists
+    # largest holders first" on top of data that contradicts it, the exact
+    # unearned claim the flag exists to prevent. The opposite (stored True over
+    # holdings that do descend) only costs wording confidence, so it is
+    # accepted rather than made to cost a full 16-request refetch — and the
+    # renderer's third wording depends on that acceptance. Feeding _fetch_all's
+    # own output back through here is a no-op: it set the flag from this same
+    # predicate over this same order.
+    if not payload["order_unverified"] and _holdings_order(companies) != _ORDER_DESCENDING:
+        return _reject("'order_unverified' is False but the stored holdings are not descending")
     if not isinstance(payload.get("fetched_at"), str) or not payload["fetched_at"]:
         return _reject("'fetched_at' is missing or not a non-empty string")
     return payload
@@ -516,6 +565,15 @@ def _fetch_all() -> dict:
     companies_failed: list[str] = []
     companies_empty: list[str] = []
     rate_limited: SoSoValueRateLimitError | None = None
+    # The transport counterpart of ``rate_limited``, kept for the same reason:
+    # every RequestException is absorbed per company, so without it an
+    # all-failed sweep can only raise a bare SoSoValueError.
+    last_network: requests.RequestException | None = None
+    # Set when a company fails for a reason no retry can heal —
+    # _fetch_one_company returns None only after swallowing a SoSoValueError (a
+    # parse/contract break) — so the transport classification below cannot
+    # claim a pure outage while a real structural break is in the same sweep.
+    structural_failure = False
     consecutive_network = 0
     remaining = iter(selected)
     for ticker, name in remaining:
@@ -539,7 +597,8 @@ def _fetch_all() -> dict:
                 len(skipped) - 1,
             )
             break
-        except requests.RequestException:
+        except requests.RequestException as e:
+            last_network = e
             companies_failed.append(ticker)
             consecutive_network += 1
             if consecutive_network >= MAX_CONSECUTIVE_NETWORK_FAILURES:
@@ -559,6 +618,7 @@ def _fetch_all() -> dict:
         if company == "empty":
             companies_empty.append(ticker)
         elif company is None:
+            structural_failure = True
             companies_failed.append(ticker)
         else:
             companies[ticker] = company
@@ -575,6 +635,22 @@ def _fetch_all() -> dict:
         # Say which way it went: "failed" would misdescribe a sweep where every
         # selected company simply has no served history, sending a reader after
         # a transport problem that never happened.
+        # The transport sibling of the rate-limit rule directly above. Every
+        # RequestException is absorbed per company, so a total outage would
+        # otherwise surface here as a bare SoSoValueError — which _load_snapshot
+        # classifies as structural breakage and logs at ERROR with a traceback
+        # and "the client likely needs a fix", for an outage no code change can
+        # heal. Raising the transport class routes it to the warning branch,
+        # where the ETF module's network failures already land. Only when the
+        # sweep died PURELY of transport: an empty served history or a swallowed
+        # parse break means the cause is not the network, and the generic error
+        # below stays the honest answer.
+        if last_network is not None and not structural_failure and not companies_empty:
+            raise requests.RequestException(
+                f"SoSoValue treasuries returned no usable history for any of the "
+                f"{len(selected)} selected companies; every attempt failed at the "
+                f"transport layer (last: {last_network})"
+            ) from last_network
         raise SoSoValueError(
             f"SoSoValue treasuries returned no usable history for any of the "
             f"{len(selected)} selected companies ({len(companies_failed)} failed, "
@@ -594,10 +670,8 @@ def _fetch_all() -> dict:
     # here, not exotic — a 429 on the second company drains the rest into
     # companies_failed, and three consecutive transport errors trip the
     # breaker — so it has to read as unverified rather than as verified.
-    in_order = [companies[t]["rows"][-1]["btc_holding"] for t, _ in selected if t in companies]
-    order_unverified = len(in_order) < 2 or any(
-        later > earlier for earlier, later in zip(in_order, in_order[1:], strict=False)
-    )
+    order = _holdings_order(companies)
+    order_unverified = order != _ORDER_DESCENDING
     if order_unverified:
         # Say which of the two it was: below two fetched histories nothing was
         # compared, so claiming the listing is misordered would be the same
@@ -606,7 +680,7 @@ def _fetch_all() -> dict:
             "SoSoValue treasuries listing ordering %s for this snapshot; the "
             "report will present the selection as unranked",
             "could not be checked (fewer than two histories fetched)"
-            if len(in_order) < 2
+            if order == _ORDER_TOO_FEW
             else "is not by holdings",
         )
     return {
@@ -859,39 +933,43 @@ def get_btc_treasury_data(
             f"an API contract break); showing the last cached snapshot (fetched "
             f"{snapshot.fetched_at}). Treat with caution._"
         )
-        # The window below is labelled by curr_date, but no snapshot can carry
-        # a disclosure filed after it was fetched, so its most recent stretch
-        # is empty by construction rather than quiet. Treasury flow is lumpy
-        # and announcement-driven: "no disclosed holdings changes" is exactly
-        # the sentence a reader turns into "no corporate accumulation", so the
-        # unobserved tail has to be named rather than left to be inferred from
-        # the fetch date above. Counterpart of the macro module's sentence.
-        fetched_day = snapshot.fetched_at[:10]
-        blind = _days_unobserved(snapshot.fetched_at, curr_dt)
-        if blind is not None and blind > 0:
-            # Clamped to the window: look_back_days is a caller-supplied tool
-            # argument, so an age larger than it would claim a tail longer than
-            # the window it describes ("the most recent 10 days" of a 5-day
-            # window). When the age swallows the window the true statement is
-            # the stronger one, not a truncated version of the weaker one.
-            # Strict >, not >=: the window is inclusive at both ends, so it
-            # spans look_back_days + 1 days while the unobserved stretch
-            # (fetched_day, curr_date] is exactly blind. At equality
-            # fetched_day IS window_start, whose own filings are observable —
-            # the whole-window claim needs the fetch to precede the window.
-            unseen = min(blind, look_back_days)
-            extent = (
-                "the whole of it is"
-                if blind > look_back_days
-                else f"the most recent {unseen} {_plural_days(unseen)} of it "
-                f"{_plural(unseen, 'is', 'are')}"
-            )
-            header_lines.append(
-                f"_That age also truncates the window below: this snapshot cannot carry a "
-                f"disclosure filed after {fetched_day}, so {extent} unobserved rather than "
-                f"quiet — read a flat net change as coverage ending early, not as no "
-                f"accumulation._"
-            )
+    # NOT gated on staleness. The window below is labelled by curr_date, but no
+    # snapshot can carry a disclosure filed after it was fetched, so its most
+    # recent stretch is empty by construction rather than quiet. Treasury flow
+    # is lumpy and announcement-driven: "no disclosed holdings changes" is
+    # exactly the sentence a reader turns into "no corporate accumulation", and
+    # that misreading does not depend on the snapshot being stale — at a 24h
+    # TTL any serve whose fetch fell on an earlier day has the same blind tail,
+    # which is an ordinary serve rather than an edge case. The guard is the
+    # fact itself (blind > 0), so on the production default
+    # curr_date == fetched_at[:10] the sentence stays silent. Counterpart of
+    # the macro module's sentence.
+    fetched_day = snapshot.fetched_at[:10]
+    blind = _days_unobserved(snapshot.fetched_at, curr_dt)
+    if blind is not None and blind > 0:
+        # Clamped to the window: look_back_days is a caller-supplied tool
+        # argument, so an age larger than it would claim a tail longer than
+        # the window it describes ("the most recent 10 days" of a 5-day
+        # window). When the age swallows the window the true statement is
+        # the stronger one, not a truncated version of the weaker one.
+        # Strict >, not >=: the window is inclusive at both ends, so it
+        # spans look_back_days + 1 days while the unobserved stretch
+        # (fetched_day, curr_date] is exactly blind. At equality
+        # fetched_day IS window_start, whose own filings are observable —
+        # the whole-window claim needs the fetch to precede the window.
+        unseen = min(blind, look_back_days)
+        extent = (
+            "the whole of it is"
+            if blind > look_back_days
+            else f"the most recent {unseen} {_plural_days(unseen)} of it "
+            f"{_plural(unseen, 'is', 'are')}"
+        )
+        header_lines.append(
+            f"_The window below is bounded by the fetch date: this snapshot cannot carry "
+            f"a disclosure filed after {fetched_day}, so {extent} unobserved rather than "
+            f"quiet — read a flat net change as coverage ending early, not as no "
+            f"accumulation._"
+        )
 
     selected = (
         len(snapshot.companies) + len(snapshot.companies_failed) + len(snapshot.companies_empty)
@@ -944,12 +1022,40 @@ def get_btc_treasury_data(
         "_Treasury flow is announcement-driven and lumpy — read it as a medium-term "
         "demand-side signal, not a timing signal._"
     )
-    ordering = (
-        "provider ordering unverified for this snapshot, so these may not be the "
-        "true largest holders"
-        if snapshot.order_unverified
-        else "provider lists largest holders first"
-    )
+    # Which of the two states the flag records, said apart the way the
+    # fetch-time log already says them apart. Below two fetched histories
+    # nothing was compared, so calling the listing misordered would be the same
+    # unearned assertion the flag exists to avoid; an actual contradiction is
+    # the stronger fact — the provider's own ordering disagrees with the
+    # figures it served — and reached the reader as the same hedge. Recomputed
+    # rather than inferred from len(): a cache may legitimately carry True over
+    # holdings that do descend, and that third state must claim neither.
+    if not snapshot.order_unverified:
+        ordering = "provider lists largest holders first"
+    else:
+        # Recomputed rather than inferred from the flag alone: the flag records
+        # only THAT the claim is unearned, and the two causes read very
+        # differently to an analyst. "only 1 history" is exact — _fetch_all
+        # raises rather than returning zero companies and _read_cache rejects
+        # an empty dict, so the too-few case is always exactly one.
+        order = _holdings_order(snapshot.companies)
+        if order == _ORDER_TOO_FEW:
+            ordering = (
+                "provider ordering unchecked — only 1 history fetched, so nothing was "
+                "compared; these may not be the true largest holders"
+            )
+        elif order == _ORDER_CONTRADICTED:
+            ordering = (
+                "the fetched holdings contradict the provider's listing order, so this "
+                "selection may not be the true largest holders"
+            )
+        else:
+            # A cache may legitimately carry True over holdings that do
+            # descend (see _read_cache), so this third state claims neither.
+            ordering = (
+                "provider ordering unverified for this snapshot, so these may not be the "
+                "true largest holders"
+            )
     # The rows are lookahead-filtered to curr_date but the SELECTION is not:
     # the listing is fetched now and ranked by present holdings. On a
     # historical curr_date that is a hindsight universe — a company that was a

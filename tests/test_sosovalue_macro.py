@@ -92,6 +92,109 @@ def _render(snapshot, curr_date="2026-08-11", look_back_days=None):
         return sosovalue_macro.get_economic_calendar_data(curr_date, look_back_days)
 
 
+def _sentence(report: str, needle: str) -> str:
+    """The single report line carrying ``needle``.
+
+    Asserting a name against the whole report is zero-discrimination here: the
+    header's ``Tracked: ...`` line already prints every tracked event name, so
+    a subject assertion has to be made INSIDE the sentence under test.
+    """
+    hits = [line for line in report.splitlines() if needle in line]
+    assert len(hits) == 1, f"expected exactly one line containing {needle!r}, got {len(hits)}"
+    return hits[0]
+
+
+@pytest.mark.unit
+class TestSixthLoopDisclosures:
+    """Gating and calendar-extent fixes from the sixth review loop."""
+
+    def test_an_event_with_no_visible_print_is_named_while_both_tables_render(self):
+        # The coverage-gap notes carry this bucket only when a SECTION is
+        # empty. Here both tables render, so before the header caveat existed
+        # the event vanished from the report while the Tracked line still
+        # advertised it — and the shallow note excludes it by construction.
+        report = _render(
+            _snapshot(
+                histories=_histories(
+                    overrides={
+                        "CPI (YoY)": [_row("2026-08-10", "3.0%", "2.9%", "2.8%")],
+                        "GDP (QoQ)": [_row("2026-08-20", "", "1.5%", "1.4%")],
+                    }
+                )
+            ),
+            curr_date="2026-08-11",
+        )
+        line = _sentence(report, "no print dated on or before")
+        assert "GDP (QoQ)" in line
+        assert "CPI (YoY)" not in line
+        # The state under test: neither empty-section gap note is speaking.
+        assert "contributed no release to this window" not in report
+        assert "contributed nothing" not in report
+
+    def test_the_unobserved_tail_is_disclosed_on_a_fresh_snapshot(self):
+        # Un-gated from staleness: a within-TTL snapshot fetched on an earlier
+        # day has exactly the same blind tail, and at a 5h TTL that is an
+        # ordinary serve.
+        report = _render(
+            _snapshot(fetched_at="2026-08-09T00:00:00Z", stale=False), curr_date="2026-08-11"
+        )
+        assert "STALE" not in report
+        line = _sentence(report, "bounded by the fetch date")
+        assert "2026-08-09" in line
+        assert "the most recent 2 days" in line
+
+    def test_no_unobserved_tail_when_curr_date_is_the_fetch_date(self):
+        # The production default. The guard is the fact itself, so the
+        # sentence must stay silent rather than claim a zero-day tail.
+        report = _render(
+            _snapshot(fetched_at="2026-08-11T00:00:00Z", stale=False), curr_date="2026-08-11"
+        )
+        assert "bounded by the fetch date" not in report
+
+    def test_a_trailing_nameless_day_row_does_not_extend_the_calendar_end(self):
+        # _parse_calendar keeps a day-row whose every name was dropped, and the
+        # provider can send an empty events list itself. Measured on the raw
+        # calendar, that row dates the calendar past anything it can
+        # contribute and flips the empty-schedule narration to the benign
+        # branch — while the Source span, driven off the named rows, disagrees.
+        report = _render(
+            _snapshot(
+                calendar=[
+                    {"date": "2026-08-05", "events": ["CPI (YoY)"]},
+                    {"date": "2026-08-30", "events": []},
+                ]
+            ),
+            curr_date="2026-08-11",
+        )
+        assert "ends 2026-08-05, on or before this date" in report
+        assert "read the empty schedule as missing coverage" in report
+        assert "genuinely carries no scheduled entries" not in report
+
+    def test_a_merged_duplicate_date_blocks_the_benign_empty_schedule_reading(self):
+        # calendar_duplicated is the sibling of stale/truncated/unusable in the
+        # "this snapshot is not the provider's calendar" gate: its own caveat
+        # says scheduled dates may be mislabelled, which the benign branch
+        # would flatly contradict.
+        calendar = [
+            {"date": "2026-08-05", "events": ["CPI (YoY)"]},
+            {"date": "2026-08-30", "events": ["Nonfarm Payrolls"]},
+        ]
+        report = _render(_snapshot(calendar=calendar, calendar_duplicated=2), "2026-08-11")
+        assert "does not hold a complete forward view" in report
+        assert "genuinely carries no scheduled entries" not in report
+
+    def test_without_a_duplicate_the_benign_reading_still_speaks(self):
+        # The control for the gate above: same calendar, no duplicate merge.
+        # Without it the change would be indistinguishable from silencing the
+        # benign branch outright.
+        calendar = [
+            {"date": "2026-08-05", "events": ["CPI (YoY)"]},
+            {"date": "2026-08-30", "events": ["Nonfarm Payrolls"]},
+        ]
+        report = _render(_snapshot(calendar=calendar), "2026-08-11")
+        assert "genuinely carries no scheduled entries" in report
+
+
 # --------------------------------------------------------------------------- #
 # calendar parsing
 # --------------------------------------------------------------------------- #
@@ -370,14 +473,32 @@ class TestFetchAll:
             history_error=requests.ConnectionError("down"), error_names=set(TRACKED)
         )
         monkeypatch.setattr(sosovalue_macro, "_request", impl)
-        with pytest.raises(sosovalue_common.SoSoValueError, match="no usable history"):
+        # A sweep that died purely of transport keeps the TRANSPORT class.
+        # _load_snapshot classifies by type: a SoSoValueError here logs the
+        # outage at ERROR with a traceback and "the client likely needs a fix"
+        # — a structural verdict on something no code change can heal.
+        with pytest.raises(requests.RequestException, match="failed at the transport layer") as exc:
             sosovalue_macro._fetch_all()
+        assert not isinstance(exc.value, sosovalue_common.SoSoValueError)
         history_calls = [c for c in impl.calls if c != "/macro/events"]
         # Literal 3, not the constant: comparing against the value under test
         # makes the assertion true for every breaker setting, including a 9
         # that equals len(TRACKED_EVENTS) and disables the breaker outright.
         assert len(history_calls) == 3
         assert sosovalue_macro.MAX_CONSECUTIVE_NETWORK_FAILURES == 3
+
+    def test_an_all_unknown_sweep_stays_structural(self, monkeypatch):
+        # The other side of that split: nothing failed at the transport layer,
+        # the provider answered every tracked name with an empty history (a
+        # mass upstream rename), so the structural class — and the
+        # ERROR-with-traceback classification it earns — is the honest one.
+        monkeypatch.setattr(
+            sosovalue_macro, "_request", _request_impl(history_by_name=dict.fromkeys(TRACKED, []))
+        )
+        with pytest.raises(
+            sosovalue_common.SoSoValueError, match=r"0 failed, 9 unknown to the provider"
+        ):
+            sosovalue_macro._fetch_all()
 
     def test_rejected_key_mid_loop_propagates(self, monkeypatch):
         monkeypatch.setattr(
@@ -434,6 +555,39 @@ class TestCacheAndLoad:
         snapshot = sosovalue_macro._load_snapshot()
         assert snapshot.stale is False
         assert impl.calls == []
+
+    def test_a_truncation_count_without_a_full_calendar_rejects_the_cache(
+        self, tmp_path, monkeypatch
+    ):
+        # The parser drops day-rows only once the cap is reached, so a positive
+        # count over a one-row calendar is a shape it cannot write. Served, it
+        # prints "the provider published 5 more calendar day-rows than this
+        # client keeps" over a calendar that was never truncated, and forces
+        # the empty-schedule branch into its snapshot-artefact wording.
+        impl = self._setup(tmp_path, monkeypatch)
+        self._write_cache(tmp_path, calendar_truncated=5)
+        sosovalue_macro._load_snapshot()
+        assert impl.calls  # rejected, refetched
+
+    def test_a_truncation_count_at_the_row_cap_is_accepted(self, tmp_path, monkeypatch):
+        # The accepted direction: a genuinely truncated calendar sits exactly
+        # at the cap, and must still be served rather than refetched forever.
+        impl = self._setup(tmp_path, monkeypatch)
+        base = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        self._write_cache(
+            tmp_path,
+            calendar=[
+                {
+                    "date": (base + timedelta(days=i)).strftime("%Y-%m-%d"),
+                    "events": ["CPI (YoY)"],
+                }
+                for i in range(sosovalue_macro.MAX_CALENDAR_ROWS)
+            ],
+            calendar_truncated=5,
+        )
+        snapshot = sosovalue_macro._load_snapshot()
+        assert impl.calls == []
+        assert snapshot.calendar_truncated == 5
 
     def test_incomplete_snapshot_uses_the_short_ttl(self, tmp_path, monkeypatch):
         impl = self._setup(tmp_path, monkeypatch, now="2026-08-11T06:30:00Z")
@@ -1502,8 +1656,12 @@ class TestVisibleViewAndCoverage:
             curr_date="2027-08-11",
             look_back_days=365 * 4,
         )
-        assert "starts inside this window" in report
-        assert TRACKED[0] in report
+        # Asserted INSIDE the sentence: the header's "Tracked: ..." line prints
+        # every tracked name on every render, so `TRACKED[0] in report` passes
+        # no matter which set the note actually names.
+        line = _sentence(report, "starts inside this window")
+        assert TRACKED[0] in line
+        assert TRACKED[1] not in line
 
     def test_a_calendar_that_misses_the_window_is_disclosed(self):
         report = _render(

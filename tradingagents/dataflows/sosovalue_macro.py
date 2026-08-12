@@ -492,6 +492,14 @@ def _read_cache(path: str) -> dict | None:
         count = payload.get(key)
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             return _reject(f"'{key}' is missing or not a non-negative integer")
+    # Same cache-mirror family: the parser only drops day-rows once the cap is
+    # reached, so a positive count implies a calendar sitting exactly at it.
+    # Unmirrored, a hand-edited file prints "the provider published N more
+    # calendar day-rows than this client keeps" over a two-row calendar, and
+    # forces the empty-schedule branch into its snapshot-artefact wording for a
+    # calendar that was never truncated.
+    if payload["calendar_truncated"] and len(calendar) != MAX_CALENDAR_ROWS:
+        return _reject("'calendar_truncated' is positive but the calendar is not at the row cap")
     histories = payload.get("histories")
     if not (
         isinstance(histories, dict)
@@ -594,6 +602,15 @@ def _fetch_all() -> dict:
     events_failed: list[str] = []
     events_unknown: list[str] = []
     rate_limited: SoSoValueRateLimitError | None = None
+    # The transport counterpart of ``rate_limited``, kept for the same reason:
+    # every RequestException is absorbed per event, so without it an all-failed
+    # sweep can only raise a bare SoSoValueError.
+    last_network: requests.RequestException | None = None
+    # Set when an event fails for a reason no retry can heal — _fetch_one_event
+    # returns None only after swallowing a SoSoValueError (a parse/contract
+    # break) — so the transport classification below cannot claim a pure
+    # outage while a real structural break is in the same sweep.
+    structural_failure = False
     consecutive_network = 0
     remaining = iter(TRACKED_EVENTS)
     for name in remaining:
@@ -616,7 +633,8 @@ def _fetch_all() -> dict:
                 len(skipped) - 1,
             )
             break
-        except requests.RequestException:
+        except requests.RequestException as e:
+            last_network = e
             events_failed.append(name)
             consecutive_network += 1
             if consecutive_network >= MAX_CONSECUTIVE_NETWORK_FAILURES:
@@ -636,6 +654,7 @@ def _fetch_all() -> dict:
         if rows == "unknown":
             events_unknown.append(name)
         elif rows is None:
+            structural_failure = True
             events_failed.append(name)
         else:
             histories[name] = rows
@@ -653,6 +672,22 @@ def _fetch_all() -> dict:
         # requests SUCCEEDED and returned empty lists — sending whoever reads
         # this (or the model, once the stale cap is passed and it rides a
         # DATA_UNAVAILABLE line) after a transport problem that never happened.
+        # The transport sibling of the rate-limit rule directly above. Every
+        # RequestException is absorbed per event, so a total outage would
+        # otherwise surface here as a bare SoSoValueError — which _load_snapshot
+        # classifies as structural breakage and logs at ERROR with a traceback
+        # and "the client likely needs a fix", for an outage no code change can
+        # heal. Raising the transport class routes it to the warning branch,
+        # where the ETF module's network failures already land. Only when the
+        # sweep died PURELY of transport: an unknown event or a swallowed parse
+        # break means something structural is in the mix, and the generic error
+        # below stays the honest answer.
+        if last_network is not None and not structural_failure and not events_unknown:
+            raise requests.RequestException(
+                f"SoSoValue macro: no usable history for any of the "
+                f"{len(TRACKED_EVENTS)} tracked events; every attempt failed at the "
+                f"transport layer (last: {last_network})"
+            ) from last_network
         raise SoSoValueError(
             f"SoSoValue macro: no usable history for any of the "
             f"{len(TRACKED_EVENTS)} tracked events ({len(events_failed)} failed, "
@@ -955,8 +990,11 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     # ---- header ------------------------------------------------------------
     # The day-rows that can still contribute: a row whose every name was
     # dropped as unusable survives with an empty list, and counting it would
-    # overstate the calendar's reach. Shared by the stale-reach line, the
-    # window-overlap disclosure and the Source line so the three cannot drift.
+    # overstate the calendar's reach. Shared by EVERY site that measures the
+    # calendar's extent — the stale-reach line, the window-overlap disclosure,
+    # the Source span and the empty-schedule narration — so they cannot drift;
+    # the last of those four was the one site this rule had already been
+    # written down for and not applied to. A new such site belongs here too.
     cal_dated = [r["date"] for r in snapshot.calendar if r["events"]]
     # Does the calendar reach the window this report renders at all? On a
     # historical curr_date the whole calendar postdates it, so the schedule
@@ -1004,40 +1042,44 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
                 f"otherwise covers, so read a short or empty schedule as the snapshot's "
                 f"age rather than a quiet fortnight._"
             )
-        # The backward half of the same age. The released table is labelled by
-        # curr_date, but no snapshot can carry what the provider published
-        # after it was fetched, so the most recent stretch of that window is
-        # empty by construction rather than quiet — the reading most likely to
-        # be taken as "nothing printed".
-        fetched_day = snapshot.fetched_at[:10]
-        blind = _days_unobserved(snapshot.fetched_at, curr_dt)
-        if blind is not None and blind > 0:
-            # Clamped to the window: look_back_days is a caller-supplied tool
-            # argument, so an age larger than it would claim a tail longer than
-            # the window it describes ("the most recent 10 days" of a 5-day
-            # window). When the age swallows the window the true statement is
-            # the stronger one, not a truncated version of the weaker one.
-            # Strict >, not >=: the window is inclusive at both ends, so it
-            # spans look_back_days + 1 days while the unobserved stretch
-            # (fetched_day, curr_date] is exactly blind. At equality
-            # fetched_day IS window_start, whose own prints are observable —
-            # the whole-window claim needs the fetch to precede the window.
-            unseen = min(blind, look_back_days)
-            extent = (
-                "the whole of that window is"
-                if blind > look_back_days
-                else f"the most recent {unseen} {_plural_days(unseen)} of that window "
-                f"{_plural(unseen, 'is', 'are')}"
-            )
-            # "empty of published figures", not "empty": a forward-dated row
-            # carrying only a forecast was already in the snapshot at fetch
-            # time and still renders here as "not yet released", so the
-            # stretch is not empty of ROWS — only of prints.
-            header_lines.append(
-                f"_That age also truncates the released window below: this snapshot cannot "
-                f"carry anything published after {fetched_day}, so {extent} empty of "
-                f"published figures by construction, not quiet._"
-            )
+    # The backward half of the same arithmetic, and NOT gated on staleness: the
+    # released table is labelled by curr_date, but no snapshot can carry what
+    # the provider published after it was fetched, so the most recent stretch
+    # of that window is empty by construction rather than quiet — the reading
+    # most likely to be taken as "nothing printed". A within-TTL snapshot has
+    # exactly the same blind tail whenever it was fetched on an earlier day,
+    # which at a 5h TTL is an ordinary serve, not an edge case. The guard is
+    # the fact itself (blind > 0), so on the production default
+    # curr_date == fetched_at[:10] the sentence stays silent.
+    fetched_day = snapshot.fetched_at[:10]
+    blind = _days_unobserved(snapshot.fetched_at, curr_dt)
+    if blind is not None and blind > 0:
+        # Clamped to the window: look_back_days is a caller-supplied tool
+        # argument, so an age larger than it would claim a tail longer than
+        # the window it describes ("the most recent 10 days" of a 5-day
+        # window). When the age swallows the window the true statement is
+        # the stronger one, not a truncated version of the weaker one.
+        # Strict >, not >=: the window is inclusive at both ends, so it
+        # spans look_back_days + 1 days while the unobserved stretch
+        # (fetched_day, curr_date] is exactly blind. At equality
+        # fetched_day IS window_start, whose own prints are observable —
+        # the whole-window claim needs the fetch to precede the window.
+        unseen = min(blind, look_back_days)
+        extent = (
+            "the whole of that window is"
+            if blind > look_back_days
+            else f"the most recent {unseen} {_plural_days(unseen)} of that window "
+            f"{_plural(unseen, 'is', 'are')}"
+        )
+        # "empty of published figures", not "empty": a forward-dated row
+        # carrying only a forecast was already in the snapshot at fetch
+        # time and still renders here as "not yet released", so the
+        # stretch is not empty of ROWS — only of prints.
+        header_lines.append(
+            f"_The released window below is bounded by the fetch date: this snapshot "
+            f"cannot carry anything published after {fetched_day}, so {extent} empty of "
+            f"published figures by construction, not quiet._"
+        )
 
     if not cal_overlaps:
         header_lines.append(
@@ -1067,6 +1109,26 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
             f"renamed or dropped upstream, so {_plural(n, 'its', 'their')} figures are "
             f"missing below (a calendar mention, if any, appears name-only) until the "
             f"tracked-name list is updated in code._"
+        )
+
+    # Unconditional, mirroring the treasuries twin. The coverage-gap notes that
+    # also carry this bucket reach the reader only when a SECTION renders
+    # nothing, so an event that contributed nothing while both tables are
+    # non-empty disappears from the report entirely while the Tracked line
+    # above still advertises it — and the shallow note cannot cover it either,
+    # since an event with no visible slice is excluded from that check by
+    # construction. Deliberately weaker than the treasuries wording ("excluded
+    # from every figure"): these events keep their forward-dated rows, so one
+    # can still be visible in the scheduled table below.
+    if no_disclosure:
+        n = len(no_disclosure)
+        header_lines.append(
+            f"_{n} tracked {_plural(n, 'event has', 'events have')} no print dated on or "
+            f"before {curr_date} in this snapshot ({', '.join(sorted(no_disclosure))}): "
+            f"every served print for {_plural(n, 'it', 'them')} postdates this date, so "
+            f"{_plural(n, 'it contributes', 'they contribute')} no released figure to the "
+            f"window below. Read that as a history this snapshot does not carry back to "
+            f"{curr_date}, not as an event that printed nothing._"
         )
 
     if snapshot.calendar_unusable:
@@ -1213,25 +1275,47 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # only when it still reaches past curr_date. A calendar that ends on or
         # before curr_date means it stopped publishing forward — a coverage
         # failure that must not be narrated as a quiet fortnight.
-        cal_end = snapshot.calendar[-1]["date"]
-        # Staleness, truncation and dropped names are tested FIRST, ahead of
-        # the calendar's own end date: each means this snapshot is not the
-        # calendar the provider published for this date, so neither the
-        # provider-blaming branch nor the benign one may speak. A stale
-        # calendar ending before curr_date has aged out of its forward reach —
-        # saying the provider "is publishing no forward schedule" would blame
-        # the source for the snapshot's age; and when this client dropped the
-        # names itself, "genuinely carries no scheduled entries" is false.
-        if snapshot.stale or snapshot.calendar_truncated or snapshot.calendar_unusable:
+        # The fourth consumer of the calendar's extent, and the last one to be
+        # moved off the raw day-rows. _parse_calendar keeps a day-row whose
+        # every name was dropped, and the provider can send an empty ``events``
+        # list itself, so ``calendar[-1]`` can date the calendar past anything
+        # it is able to contribute: that both prints an end date contradicting
+        # the Source span and the overlap disclosure, and — worse — selects the
+        # benign branch below off a row that schedules nothing.
+        cal_end = cal_dated[-1] if cal_dated else None
+        # Staleness, truncation, dropped names and merged duplicate dates are
+        # tested FIRST, ahead of the calendar's own end date: each means this
+        # snapshot is not the calendar the provider published for this date, so
+        # neither the provider-blaming branch nor the benign one may speak. A
+        # stale calendar ending before curr_date has aged out of its forward
+        # reach — saying the provider "is publishing no forward schedule" would
+        # blame the source for the snapshot's age; when this client dropped the
+        # names itself, "genuinely carries no scheduled entries" is false; and a
+        # merged duplicate date is the one caveat above that tells the reader
+        # scheduled dates may be mislabelled, so an entry belonging to this
+        # window may have been folded onto a date outside it — a doubt the
+        # benign branch would flatly contradict.
+        if (
+            snapshot.stale
+            or snapshot.calendar_truncated
+            or snapshot.calendar_unusable
+            or snapshot.calendar_duplicated
+        ):
+            ends = f"ends {cal_end}" if cal_end else "carries no usable event names"
             why = (
-                f"The provider's calendar in this snapshot ends {cal_end}, but the "
+                f"The provider's calendar in this snapshot {ends}, but the "
                 f"snapshot does not hold a complete forward view of what the provider "
                 f"publishes for this date (see the caveats above), so read the empty "
                 f"schedule as an artefact of the snapshot rather than a quiet window."
             )
-        elif cal_end <= curr_date:
+        elif cal_end is None or cal_end <= curr_date:
+            ends = (
+                f"ends {cal_end}, on or before this date"
+                if cal_end
+                else "carries no usable event names at all"
+            )
             why = (
-                f"The provider's calendar ends {cal_end}, on or before this date, so it "
+                f"The provider's calendar {ends}, so it "
                 f"is publishing no forward schedule in this snapshot — read the empty "
                 f"schedule as missing coverage, not as a fortnight without events."
             )

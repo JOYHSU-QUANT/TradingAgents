@@ -94,6 +94,64 @@ def _render(snapshot, asset="BTC", curr_date="2026-08-11", look_back_days=None):
         return sosovalue_treasuries.get_btc_treasury_data(asset, curr_date, look_back_days)
 
 
+@pytest.mark.unit
+class TestSixthLoopDisclosures:
+    """Gating and ordering-wording fixes from the sixth review loop."""
+
+    def test_the_unobserved_tail_is_disclosed_on_a_fresh_snapshot(self):
+        # Un-gated from staleness: at a 24h TTL any serve whose fetch fell on
+        # an earlier day has the same blind tail, and "no disclosed holdings
+        # changes" is exactly the sentence a reader turns into "no corporate
+        # accumulation".
+        report = _render(_snapshot(fetched_at="2026-08-09T00:00:00Z", stale=False))
+        assert "STALE" not in report
+        assert "bounded by the fetch date" in report
+        assert "the most recent 2 days" in report
+
+    def test_no_unobserved_tail_when_curr_date_is_the_fetch_date(self):
+        # The production default: the guard is the fact itself, so the
+        # sentence stays silent rather than claiming a zero-day tail.
+        report = _render(_snapshot(fetched_at="2026-08-11T00:00:00Z", stale=False))
+        assert "bounded by the fetch date" not in report
+
+    def test_a_single_fetched_history_says_nothing_was_compared(self):
+        # The 429-drain/breaker state. Nothing contradicted the ordering here,
+        # so the report must not imply the listing is misordered.
+        report = _render(
+            _snapshot(
+                companies={"MSTR": {"name": "Strategy", "rows": [_prow("2026-08-10", 840447.0)]}},
+                order_unverified=True,
+            )
+        )
+        assert "only 1 history fetched, so nothing was compared" in report
+        assert "contradict the provider's listing order" not in report
+
+    def test_contradicting_holdings_name_the_contradiction(self):
+        # The stronger data-integrity fact — the provider's own ordering
+        # disagrees with the figures it served — which previously reached the
+        # reader as the same hedge as "nothing was compared".
+        report = _render(
+            _snapshot(
+                companies={
+                    "MSTR": {"name": "Strategy", "rows": [_prow("2026-08-10", 100.0)]},
+                    "MARA": {"name": "MARA Holdings", "rows": [_prow("2026-08-10", 900.0)]},
+                },
+                order_unverified=True,
+            )
+        )
+        assert "the fetched holdings contradict the provider's listing order" in report
+        assert "nothing was compared" not in report
+
+    def test_a_flag_over_descending_holdings_claims_neither_cause(self):
+        # Reachable from a cache: the read-side check accepts a stored True
+        # over holdings that do descend, so the wording is recomputed rather
+        # than inferred, and that third state must claim neither cause.
+        report = _render(_snapshot(order_unverified=True))
+        assert "provider ordering unverified for this snapshot" in report
+        assert "nothing was compared" not in report
+        assert "contradict the provider's listing order" not in report
+
+
 # --------------------------------------------------------------------------- #
 # numeric-string parsing
 # --------------------------------------------------------------------------- #
@@ -342,15 +400,31 @@ class TestFetchAll:
             error_tickers=set(LIST_TICKERS),
         )
         monkeypatch.setattr(sosovalue_treasuries, "_request", impl)
-        # The message must name the way it went — 12 failed, none merely empty.
+        # A sweep that died purely of transport keeps the TRANSPORT class — see
+        # the macro twin for why the structural class would misclassify it.
         with pytest.raises(
-            sosovalue_common.SoSoValueError, match=r"12 selected .*12 failed, 0 empty"
-        ):
+            requests.RequestException, match=r"12 selected .*failed at the transport layer"
+        ) as exc:
             sosovalue_treasuries._fetch_all()
+        assert not isinstance(exc.value, sosovalue_common.SoSoValueError)
         history_calls = [c for c in impl.calls if c != "/btc-treasuries"]
         # Literal 3, not the constant under test — see the macro twin.
         assert len(history_calls) == 3
         assert sosovalue_treasuries.MAX_CONSECUTIVE_NETWORK_FAILURES == 3
+
+    def test_an_all_empty_sweep_stays_structural(self, monkeypatch):
+        # The other side of that split: nothing failed at the transport layer,
+        # every listed company simply has no served purchase history, so the
+        # structural class is honest and the counts must name which way it went.
+        monkeypatch.setattr(
+            sosovalue_treasuries,
+            "_request",
+            _request_impl(history_by_ticker=dict.fromkeys(LIST_TICKERS, [])),
+        )
+        with pytest.raises(
+            sosovalue_common.SoSoValueError, match=r"12 selected .*0 failed, 12 empty"
+        ):
+            sosovalue_treasuries._fetch_all()
 
     def test_rejected_key_mid_loop_propagates(self, monkeypatch):
         monkeypatch.setattr(
@@ -399,7 +473,11 @@ class TestCacheAndLoad:
             "companies_failed": [],
             "companies_empty": [],
             "companies_unusable": 0,
-            "order_unverified": False,
+            # True, not False: this payload carries ONE company, and _fetch_all
+            # writes True whenever fewer than two histories came back (nothing
+            # was compared). False here would be a shape the parser cannot
+            # produce, and the cache validator now refuses it.
+            "order_unverified": True,
             "fetched_at": "2026-08-11T00:00:00Z",
         }
         payload.update(overrides)
@@ -624,6 +702,52 @@ class TestCacheAndLoad:
         )
         sosovalue_treasuries._load_snapshot()
         assert impl.calls  # rejected, refetched
+
+    def test_ascending_cached_holdings_reject_a_confident_ordering_flag(
+        self, tmp_path, monkeypatch
+    ):
+        # The last parse-side invariant to gain a read-side mirror. Served,
+        # this file makes the Coverage line assert "provider lists largest
+        # holders first" directly over stored holdings that ascend — the
+        # unearned claim the flag exists to keep out of the report.
+        impl = self._setup(tmp_path, monkeypatch)
+        self._write_cache(
+            tmp_path,
+            companies={
+                "MSTR": {"name": "Strategy", "rows": [_prow("2026-08-10", 100.0)]},
+                "MARA": {"name": "MARA Holdings", "rows": [_prow("2026-08-10", 900.0)]},
+            },
+            order_unverified=False,
+        )
+        sosovalue_treasuries._load_snapshot()
+        assert impl.calls  # rejected, refetched
+
+    def test_a_single_cached_company_may_not_claim_verified_ordering(self, tmp_path, monkeypatch):
+        # The other arm of the same flag: below two histories nothing was
+        # compared, so _fetch_all writes True. False here is a shape the parser
+        # cannot produce, and would ship the confident wording having compared
+        # nothing — the 429-drain/breaker state this module reaches routinely.
+        impl = self._setup(tmp_path, monkeypatch)
+        self._write_cache(tmp_path, order_unverified=False)
+        sosovalue_treasuries._load_snapshot()
+        assert impl.calls  # rejected, refetched
+
+    def test_descending_cached_holdings_keep_the_confident_flag(self, tmp_path, monkeypatch):
+        # The accepted direction, pinned so the mirror above cannot widen into
+        # "any cached ordering flag costs a refetch" — that would re-run the
+        # whole 16-request sweep for a file that contradicts nothing.
+        impl = self._setup(tmp_path, monkeypatch)
+        self._write_cache(
+            tmp_path,
+            companies={
+                "MSTR": {"name": "Strategy", "rows": [_prow("2026-08-10", 900.0)]},
+                "MARA": {"name": "MARA Holdings", "rows": [_prow("2026-08-10", 100.0)]},
+            },
+            order_unverified=False,
+        )
+        snapshot = sosovalue_treasuries._load_snapshot()
+        assert impl.calls == []
+        assert snapshot.order_unverified is False
 
 
 # --------------------------------------------------------------------------- #

@@ -252,11 +252,26 @@ class TestSixthLoopDisclosures:
         # claim that the section itself is short.
         assert "2026-08-25" in report
 
-    def test_the_front_gap_note_does_not_contradict_the_source_line(self):
-        # in_window[0] is the first covered date INSIDE the window; the
-        # calendar itself routinely starts earlier, and the Source line prints
-        # that real start. Naming this one as "the calendar starts at" put two
-        # different calendar starts in one header.
+    def test_a_calendar_with_no_usable_names_does_not_point_at_a_last_entry(self):
+        # reach is None means there IS no dated entry, so "beyond the calendar's
+        # last dated entry" would anchor on nothing — while the Source line in
+        # the same header says the calendar carries no usable names at all. The
+        # unanchored, stronger form is used there instead.
+        report = _render(
+            _snapshot(calendar=[{"date": "2026-08-20", "events": []}], calendar_unusable=2),
+            curr_date="2026-08-11",
+        )
+        assert "carries no usable event names at all" in report
+        assert "beyond the calendar's last dated entry" not in report
+
+    def test_quiet_days_inside_the_calendar_span_are_not_called_unfetched(self):
+        # The provider emits a day-row only where it has events, so a dateless
+        # day INSIDE [cal_dated[0], cal_dated[-1]] is covered-and-quiet, not
+        # unfetched. Here the calendar spans 08-09 → 08-14 and curr_date is
+        # 08-11, so 08-11..08-13 are days the provider covered and listed
+        # nothing on — the front-gap note must stay silent, or it tells the
+        # analyst an ordinary quiet weekday is unknowable while the Source
+        # line two paragraphs down prints the span that contains it.
         report = _render(
             _snapshot(
                 calendar=[
@@ -267,8 +282,8 @@ class TestSixthLoopDisclosures:
             curr_date="2026-08-11",
         )
         assert "covers 2026-08-09 → 2026-08-14" in report
-        assert "calendar starts at 2026-08-14" not in report
-        assert "covers nothing in this window before 2026-08-14" in report
+        assert "after this window opens" not in report
+        assert "predate it" not in report
 
     def test_partial_backward_calendar_coverage_is_disclosed(self):
         # A backtest curr_date: the calendar is anchored to the fetch, so the
@@ -285,7 +300,11 @@ class TestSixthLoopDisclosures:
             ),
             curr_date="2026-08-05",
         )
-        assert "covers nothing in this window before 2026-08-11" in report
+        # The calendar genuinely BEGINS after the window opens, so 08-05..08-10
+        # are days no calendar row could have covered.
+        line = _sentence(report, "after this window opens")
+        assert "calendar begins 2026-08-11" in line
+        assert "2026-08-05–2026-08-10 (6 days)" in line
         # Not the zero-overlap sentence: the window IS partly covered.
         assert "No calendar entry in this snapshot falls between" not in report
 
@@ -1782,7 +1801,7 @@ class TestVisibleViewAndCoverage:
 
     def test_the_source_span_counts_only_day_rows_that_carry_names(self):
         # A trailing row whose every name was dropped as unusable must not
-        # extend the advertised coverage: the stale-reach line already
+        # extend the advertised coverage: the reach line already
         # measures the filtered view, and two spans in one header contradict.
         report = _render(
             _snapshot(

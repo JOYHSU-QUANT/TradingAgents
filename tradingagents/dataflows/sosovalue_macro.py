@@ -1045,12 +1045,20 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # the calendar — so a table full to the window edge can sit directly
         # under this sentence. What is actually true past the calendar's last
         # dated entry is narrower: only tracked events can still appear there.
+        # With no dated entry at all that anchor points at nothing, so the
+        # stronger, unanchored form is used instead.
+        consequence = (
+            f"so the schedule below can only carry the {len(TRACKED_EVENTS)} tracked "
+            f"events at all, and a thin schedule is the calendar's reach rather than a "
+            f"quiet fortnight"
+            if reach is None
+            else f"so beyond the calendar's last dated entry the schedule below can only "
+            f"carry the {len(TRACKED_EVENTS)} tracked events, and a thin tail there is "
+            f"the calendar's reach rather than a quiet fortnight"
+        )
         header_lines.append(
             f"_Measured from {curr_date}, this snapshot's calendar {extent}, short of the "
-            f"{AHEAD_DAYS}-day window the scheduled section covers — so beyond the "
-            f"calendar's last dated entry the schedule below can only carry the "
-            f"{len(TRACKED_EVENTS)} tracked events, and a thin tail there is the "
-            f"calendar's reach rather than a quiet fortnight._"
+            f"{AHEAD_DAYS}-day window the scheduled section covers — {consequence}._"
         )
     # The backward half of the same arithmetic, and NOT gated on staleness: the
     # released table is labelled by curr_date, but no snapshot can carry what
@@ -1098,24 +1106,30 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
             f"tracked events: an event outside that list is missing from this window "
             f"rather than absent from it._"
         )
-    elif in_window[0] > curr_date:
-        # Partial coverage, the backward half. The calendar is anchored to the
-        # fetch, so a curr_date earlier than it leaves the front of the window
-        # uncovered while the tail still overlaps — which an all-or-nothing
-        # test reads as covered. Only the front is reported here: a gap at the
-        # far end is the reach sentence's subject, and saying it twice would
-        # put two spans for one hole in one header.
-        # "covers nothing in this window before D", NOT "the calendar starts at
-        # D": in_window[0] is the first covered date INSIDE the window, and the
-        # calendar itself routinely begins earlier — the Source line prints
-        # that real start, so naming this one as the start contradicts it in
-        # the same header. The span is stated exclusively for the same reason:
-        # in_window[0] is by construction a day the calendar does cover.
+    elif cal_dated[0] > curr_date:
+        # Partial coverage, the backward half — bounded by the calendar's own
+        # START, never by its first event-bearing day inside the window. Those
+        # are different dates, and only the former marks unfetched days: the
+        # provider emits a day-row only where it has events, so inside
+        # [cal_dated[0], cal_dated[-1]] a dateless day is one the calendar DID
+        # cover and simply had nothing to list. The live capture spans 15 days
+        # with day-rows on 6, so keying this on in_window[0] would tell the
+        # reader an ordinary quiet weekday is unknowable — and contradict the
+        # Source line, which prints cal_dated[0] as the real start. Mirrors the
+        # reach line, which measures the far end with cal_dated[-1]. Only the
+        # front is reported here: a gap past the calendar's end is that line's
+        # subject, and saying it twice would put two spans on one hole.
+        gap_end = (datetime.strptime(cal_dated[0], "%Y-%m-%d") - timedelta(days=1)).strftime(
+            "%Y-%m-%d"
+        )
+        blind_days = (datetime.strptime(cal_dated[0], "%Y-%m-%d") - curr_dt).days
         header_lines.append(
-            f"_This snapshot's calendar covers nothing in this window before "
-            f"{in_window[0]}, so for {curr_date} through the day before it the schedule "
-            f"below carries only the {len(TRACKED_EVENTS)} tracked events: an event "
-            f"outside that list is missing from those days rather than absent from them._"
+            f"_This snapshot's calendar begins {cal_dated[0]}, after this window opens, so "
+            f"{curr_date}–{gap_end} ({blind_days} {_plural_days(blind_days)}) predate it: "
+            f"over that stretch the schedule below carries only the "
+            f"{len(TRACKED_EVENTS)} tracked events, and an event outside that list is "
+            f"missing from {_plural(blind_days, 'that day', 'those days')} rather than "
+            f"absent from {_plural(blind_days, 'it', 'them')}._"
         )
 
     if snapshot.events_failed:

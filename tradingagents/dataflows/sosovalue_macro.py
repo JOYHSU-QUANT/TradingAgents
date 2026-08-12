@@ -155,6 +155,16 @@ DEFAULT_LOOKBACK_DAYS = 30
 # deep enough for any backtest window this report serves.
 HISTORY_LIMIT = 100
 
+# The other unbounded payload axis, same reasoning as MAX_CALENDAR_EVENTS_HARD
+# below: HISTORY_LIMIT is a request PARAMETER the server clamps, not a bound
+# this client enforces, so a provider that stops honouring it would write an
+# unbounded snapshot file that every subsequent cache read re-validates in
+# full — the render caps bound the prompt, not the cache. Hard rather than
+# soft, and set far above the served depth, so only a payload that is
+# pathological rather than merely deeper trips it; failing routes the call
+# through the stale fallback instead of persisting the bloat.
+MAX_HISTORY_ROWS_HARD = 1000
+
 # Soft bound on the calendar: the live ~2-week window holds a handful of rows
 # (6 when captured). A provider that widens its published horizon is benign
 # evolution, not a contract break, so a longer calendar keeps the EARLIEST
@@ -342,6 +352,12 @@ def _parse_event_rows(data: list, name: str) -> list[dict]:
             f"SoSoValue returned no history rows for macro event {name!r} "
             f"(an unknown or renamed event name returns an empty list)"
         )
+    if len(data) > MAX_HISTORY_ROWS_HARD:
+        raise SoSoValueError(
+            f"SoSoValue served {len(data)} history rows for macro event {name!r} "
+            f"(> {MAX_HISTORY_ROWS_HARD}, against a requested limit of {HISTORY_LIMIT}); "
+            f"the API contract may have changed"
+        )
     rows = []
     for raw in data:
         if not (
@@ -399,7 +415,10 @@ def _cache_path() -> str:
 
 
 def _valid_history_rows(rows: object) -> bool:
-    if not (isinstance(rows, list) and rows):
+    # The row-count bound is mirrored read-side like every other parse-boundary
+    # bound: a file written before it existed (or by hand) must cost one
+    # refetch rather than be re-validated in full on every read forever.
+    if not (isinstance(rows, list) and rows and len(rows) <= MAX_HISTORY_ROWS_HARD):
         return False
     if not all(
         isinstance(r, dict)
@@ -455,6 +474,14 @@ def _read_cache(path: str) -> dict | None:
     dates = [r["date"] for r in calendar]
     if any(a >= b for a, b in zip(dates, dates[1:], strict=False)):
         return _reject("'calendar' dates are not strictly ascending")
+    # Mirror the parser's per-date de-dupe (``elif name not in names``). The
+    # scheduled builder iterates a day-row's names with no dedupe of its own —
+    # the ``covered`` guard only suppresses names already shown in the RELEASED
+    # table — so a repeat that only a cache file can carry renders the same
+    # event twice in the schedule, overstating event risk and spending two of
+    # the table's MAX_ROWS slots on one print.
+    if any(len(set(r["events"])) != len(r["events"]) for r in calendar):
+        return _reject("'calendar' repeats an event name inside one day-row")
     # Mirror the parse-side name bound exactly as the day-row cap is mirrored:
     # a file written before this bound existed (or by hand) must cost one
     # refetch rather than be re-validated in full on every read forever.
@@ -1046,17 +1073,28 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
 
     # ---- scheduled table ----------------------------------------------------
     if scheduled:
-        # Keep the NEAREST rows. Nothing bounds names-per-day at the parse
+        # Bound the table, but never let a row carrying no figures evict one
+        # that does (user decision). Nothing bounds names-per-day at the parse
         # boundary (MAX_CALENDAR_ROWS bounds day-rows, not the events inside
         # one), so a provider that broadened /macro/events from this US-only
         # shape to a global calendar would otherwise pour every name of every
-        # day straight into the prompt; and a fortnight of event risk is read
-        # front to back, so the near rows are the ones worth keeping.
-        shown_scheduled = scheduled[:MAX_ROWS]
+        # day straight into the prompt — and under a plain nearest-40 cut a
+        # couple of dense foreign days would push every CPI/NFP forecast out
+        # of the table, losing precisely what this section exists to carry.
+        # Figure-bearing rows are kept first, then the nearest name-only ones
+        # fill what is left; the union is re-sorted so the table still reads
+        # front to back in date order.
+        with_figures = [r for r in scheduled if r[2] != "—" or r[3] != "—"]
+        name_only = [r for r in scheduled if r[2] == "—" and r[3] == "—"]
+        shown_scheduled = sorted(
+            with_figures[:MAX_ROWS] + name_only[: max(0, MAX_ROWS - len(with_figures))]
+        )
+        dropped = len(scheduled) - len(shown_scheduled)
         sched_note = (
-            f"\n_(showing the {MAX_ROWS} nearest of {len(scheduled)} scheduled rows "
-            f"in the window)_\n"
-            if len(scheduled) > MAX_ROWS
+            f"\n_(showing {len(shown_scheduled)} of {len(scheduled)} scheduled rows in "
+            f"the window: rows carrying figures take priority over name-only calendar "
+            f"entries, and within each group the nearest are kept)_\n"
+            if dropped
             else ""
         )
         lines = ["\n| Date | In | Event | Forecast | Previous |", "| --- | --- | --- | --- | --- |"]
@@ -1070,9 +1108,14 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         scheduled_block = (
             f"\n**Scheduled ({curr_date} and the next {AHEAD_DAYS} days):** figures are "
             f"consensus forecast vs the prior print; 'In' counts calendar days from "
-            f"{curr_date}; a row showing — for both figures is either a calendar entry "
-            f"outside the tracked list or a tracked print whose figures the provider "
-            f"has not filed\n" + "\n".join(lines) + "\n" + sched_note
+            f"{curr_date}; a row showing — for both figures is a calendar entry outside "
+            f"the tracked list, a tracked print whose figures the provider has not filed, "
+            f"or a tracked event whose history this snapshot could not fetch — the "
+            f"coverage caveats above name that last case, and the provider may well have "
+            f"filed a forecast this snapshot simply does not carry\n"
+            + "\n".join(lines)
+            + "\n"
+            + sched_note
         )
     else:
         # Why the schedule is empty is NOT always benign: the provider's
@@ -1109,8 +1152,10 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
             # names in the window.
             why = (
                 f"The provider's calendar reaches {cal_end} and is anchored to when this "
-                f"snapshot was fetched, so this is either a window that genuinely carries "
-                f"no scheduled entries, or a {curr_date} sitting far from that fetch date."
+                f"snapshot was fetched, so this is a window that genuinely carries no "
+                f"scheduled entries, or one whose every entry echoes a print already "
+                f"listed as released below, or a {curr_date} sitting far from that fetch "
+                f"date."
             )
         # The window can also be empty because tracked histories are missing —
         # for a historical curr_date the calendar cannot reach back, so the

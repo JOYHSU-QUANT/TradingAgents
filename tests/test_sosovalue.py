@@ -1387,6 +1387,25 @@ class TestCacheAndLoad:
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
 
+    def test_valid_funds_refuses_two_rows_for_one_date(self):
+        # _parse_fund_rows keys rows by date, so only a foreign or hand-edited
+        # file carries a duplicate — and _fund_flows_on stops at the FIRST row
+        # matching the date with a non-null flow, so the leaders line would
+        # report whichever copy the file happens to list first. This is also
+        # the premise _read_cache's row-ORDER exemption rests on.
+        name = "iShares Bitcoin Trust"
+        assert sosovalue._valid_funds(
+            {"IBIT": {"name": name, "rows": [_frow("2026-07-31", 900.0)]}}
+        )
+        assert not sosovalue._valid_funds(
+            {
+                "IBIT": {
+                    "name": name,
+                    "rows": [_frow("2026-07-31", 50.0), _frow("2026-07-31", 900.0)],
+                }
+            }
+        )
+
     def test_within_ttl_reuses_cache(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
         calls = []

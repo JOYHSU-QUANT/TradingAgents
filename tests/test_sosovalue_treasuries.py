@@ -12,7 +12,7 @@ from the real API, so these run without a network connection or a key.
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 from urllib.parse import quote
 
@@ -348,7 +348,9 @@ class TestFetchAll:
         ):
             sosovalue_treasuries._fetch_all()
         history_calls = [c for c in impl.calls if c != "/btc-treasuries"]
-        assert len(history_calls) == sosovalue_treasuries.MAX_CONSECUTIVE_NETWORK_FAILURES
+        # Literal 3, not the constant under test — see the macro twin.
+        assert len(history_calls) == 3
+        assert sosovalue_treasuries.MAX_CONSECUTIVE_NETWORK_FAILURES == 3
 
     def test_rejected_key_mid_loop_propagates(self, monkeypatch):
         monkeypatch.setattr(
@@ -585,6 +587,26 @@ class TestCacheAndLoad:
         sosovalue_treasuries._load_snapshot()
         assert impl.calls
 
+    def test_valid_rows_refuses_a_negative_holding(self):
+        # The sign check the parser applies, asserted on the cache validator
+        # itself: an end-to-end refetch assertion cannot tell this rejection
+        # apart from the other reasons a 'companies' entry is malformed.
+        assert not sosovalue_treasuries._valid_rows([_prow("2026-08-10", -1.0)])
+        assert sosovalue_treasuries._valid_rows([_prow("2026-08-10", 1.0)])
+
+    def test_a_negative_cached_holding_rejects_the_cache(self, tmp_path, monkeypatch):
+        # The cache is the lower trust tier, so it must refuse what the parser
+        # refuses. Served, this row renders a negative BTC balance in the
+        # top-holders line and pulls the combined total below the largest
+        # holder's own, which the near-100 band then prints as "100%".
+        impl = self._setup(tmp_path, monkeypatch)
+        self._write_cache(
+            tmp_path,
+            companies={"MSTR": {"name": "Strategy", "rows": [_prow("2026-08-10", -5000.0)]}},
+        )
+        sosovalue_treasuries._load_snapshot()
+        assert impl.calls  # rejected, refetched
+
 
 # --------------------------------------------------------------------------- #
 # rendering
@@ -684,7 +706,26 @@ class TestRender:
         assert "No treasury disclosures on or before 2026-08-01" in report
         assert "do not fabricate" in report
 
-    def test_shallow_history_inside_the_window_is_disclosed(self):
+    def test_a_capped_history_starting_inside_the_window_is_disclosed(self):
+        # At the per-company cap AND starting inside the window: the provider
+        # really is withholding earlier rows, so the understatement warning is
+        # true. Daily rows from 2026-05-14 run past curr_date; the lookahead
+        # filter drops the tail, leaving visible[0] == 2026-05-14, one day
+        # inside the 90-day window that starts 2026-05-13.
+        start = datetime(2026, 5, 14)
+        rows = [
+            _prow((start + timedelta(days=i)).strftime("%Y-%m-%d"), 100.0 + i, 1.0)
+            for i in range(sosovalue_treasuries.HISTORY_LIMIT)
+        ]
+        report = _render(_snapshot(companies={"X": {"name": "", "rows": rows}}))
+        assert "served history for X is at the provider's per-company cap" in report
+
+    def test_a_merely_short_history_is_not_called_capped(self):
+        # The treasuries twin of the macro module's
+        # test_a_merely_short_history_is_not_called_truncated. A company that
+        # simply began disclosing inside the window has nothing older to show,
+        # so claiming the provider is hiding earlier activity would invent a
+        # gap and tell the reader to discount a complete net-change figure.
         snapshot = _snapshot(
             companies={
                 "X": {
@@ -697,7 +738,8 @@ class TestRender:
             }
         )
         report = _render(snapshot)  # window start 2026-05-13 < 2026-07-01
-        assert "served history for X starts inside the window" in report
+        assert "per-company cap" not in report
+        assert "starts inside the window" not in report
 
     def test_empty_window_names_the_latest_disclosure(self):
         snapshot = _snapshot(
@@ -990,3 +1032,58 @@ class TestHeadlineHonesty:
         report = _render(snapshot)
         row = next(ln for ln in report.splitlines() if ln.startswith("| 2026-08-01 |"))
         assert row.endswith("| — |")
+
+
+# --------------------------------------------------------------------------- #
+# fourth review loop: payload bounds and report-claim corrections
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+class TestHistoryRowBound:
+    def test_a_bloated_history_is_refused_at_the_parse_boundary(self):
+        # HISTORY_LIMIT is a request parameter the server clamps, not a bound
+        # this client enforces; without one, a provider that stopped honouring
+        # it would write an unbounded snapshot re-walked on every cache read.
+        data = [{"date": "2026-08-01", "btc_holding": "100"}] * (
+            sosovalue_treasuries.MAX_HISTORY_ROWS_HARD + 1
+        )
+        with pytest.raises(sosovalue_common.SoSoValueError, match="history rows"):
+            sosovalue_treasuries._parse_purchase_rows(data, "MSTR")
+
+    def test_the_bound_is_mirrored_on_the_cache_read(self):
+        rows = [_prow("2026-08-01", 100.0)] * sosovalue_treasuries.MAX_HISTORY_ROWS_HARD
+        assert sosovalue_treasuries._valid_rows(rows)
+        assert not sosovalue_treasuries._valid_rows([*rows, _prow("2026-08-02", 100.0)])
+
+
+@pytest.mark.unit
+class TestUniverseAndConcentrationClaims:
+    def test_the_universe_is_disclosed_as_fetch_time_ranked(self):
+        # Rows are lookahead-filtered to curr_date but the top-N selection is
+        # not: on a historical date that is a hindsight universe, and a company
+        # that has since dropped out of the listing's head is absent with
+        # nothing naming it.
+        report = _render(_snapshot())
+        assert "ranking as of the snapshot fetch, not as of 2026-08-11" in report
+
+    def test_a_single_contributor_is_not_called_mixed_as_of(self):
+        # Routine after a mid-sweep 429, or on a curr_date that leaves the rest
+        # in no_disclosure. The old clause asserted mixed dates three rows
+        # under a combined-holdings line printing one.
+        report = _render(
+            _snapshot(companies={"X": {"name": "", "rows": [_prow("2026-08-01", 1000.0, 10.0)]}})
+        )
+        assert "(as of 2026-08-01)" in report
+        assert "divides holdings that are all as of 2026-08-01" in report
+        assert "mixed as-of dates" not in report
+
+    def test_differing_as_of_dates_still_report_a_mix(self):
+        report = _render(
+            _snapshot(
+                companies={
+                    "X": {"name": "", "rows": [_prow("2026-08-01", 1000.0, 10.0)]},
+                    "Y": {"name": "", "rows": [_prow("2026-07-01", 500.0, 5.0)]},
+                }
+            )
+        )
+        assert "as-of dates span 2026-07-01 → 2026-08-01" in report
+        assert "mixed as-of dates" in report

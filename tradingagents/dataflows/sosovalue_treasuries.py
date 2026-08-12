@@ -115,6 +115,16 @@ DEFAULT_LOOKBACK_DAYS = 90
 # The documented per-request row cap (values above are silently clamped).
 HISTORY_LIMIT = 100
 
+# Client-side hard bound on a company's served history, the twin of the macro
+# module's MAX_HISTORY_ROWS_HARD: HISTORY_LIMIT is a request parameter the
+# server clamps, not a bound this client enforces, so a provider that stopped
+# honouring it would write an unbounded snapshot file that every later cache
+# read re-validates in full. Set far above the served depth so only a
+# pathological payload trips it; a trip raises, which lands the company in
+# companies_failed (or routes the call through the stale fallback) rather than
+# persisting the bloat.
+MAX_HISTORY_ROWS_HARD = 1000
+
 # Row cap for the rendered activity table, mirroring the family MAX_ROWS.
 MAX_ROWS = 40
 
@@ -233,6 +243,12 @@ def _parse_purchase_rows(data: list, ticker: str) -> list[dict]:
     """
     if not data:
         raise SoSoValueError(f"SoSoValue returned no treasury history rows for {ticker}")
+    if len(data) > MAX_HISTORY_ROWS_HARD:
+        raise SoSoValueError(
+            f"SoSoValue served {len(data)} treasury history rows for {ticker} "
+            f"(> {MAX_HISTORY_ROWS_HARD}, against a requested limit of {HISTORY_LIMIT}); "
+            f"the API contract may have changed"
+        )
     rows = []
     for raw in data:
         if not isinstance(raw, dict) or not _is_iso_date(raw.get("date")):
@@ -308,12 +324,24 @@ def _cache_path() -> str:
 
 
 def _valid_rows(rows: object) -> bool:
-    if not (isinstance(rows, list) and rows):
+    # Row-count bound mirrored read-side, like every other parse-boundary bound
+    # in this family: a snapshot written before it existed must cost one
+    # refetch rather than be re-walked in full on every read forever.
+    if not (isinstance(rows, list) and rows and len(rows) <= MAX_HISTORY_ROWS_HARD):
         return False
     if not all(
         isinstance(r, dict)
         and _is_iso_date(r.get("date"))
         and _is_finite_number(r.get("btc_holding"))
+        # Non-negative, mirroring the parse boundary exactly. The cache is the
+        # lower trust tier of the two, so an invariant the parser enforces must
+        # not be reachable by hand-editing the snapshot or by a file an older
+        # code version wrote: a negative holding puts a negative BTC balance in
+        # the top-holders line and pulls the combined total below the largest
+        # holder's own, which the near-100 band then reports as a "100%"
+        # concentration share — every figure disagreeing with the next, inside
+        # a report carrying no staleness or degradation caveat at all.
+        and r["btc_holding"] >= 0
         # The keys must be PRESENT (the parser always writes both): a
         # missing key is not the legal null, and admitting it would let the
         # renderer's row["btc_acq"] subscript raise a raw KeyError outside
@@ -845,6 +873,20 @@ def get_btc_treasury_data(
         if snapshot.order_unverified
         else "provider lists largest holders first"
     )
+    # The rows are lookahead-filtered to curr_date but the SELECTION is not:
+    # the listing is fetched now and ranked by present holdings. On a
+    # historical curr_date that is a hindsight universe — a company that was a
+    # large holder then and has since fallen out of the listing's head is
+    # absent from every figure here, and the no_disclosure caveat cannot name
+    # it because it was never fetched. Same class of disclosure as the macro
+    # module's "current figures, not point-in-time snapshots".
+    header_lines.append(
+        f"_The company universe is the provider's ranking as of the snapshot fetch, not "
+        f"as of {curr_date}: individual disclosures are filtered to that date, but the "
+        f"top-{selected} cut is not, so a company that ranked large then and has since "
+        f"dropped out of the listing's head is missing from every figure below with "
+        f"nothing above naming it._"
+    )
     header_lines.append(
         f"- Source: SoSoValue OpenAPI (BTC treasuries) | Snapshot fetched "
         f"{snapshot.fetched_at} | Coverage: top {selected} of "
@@ -894,9 +936,13 @@ def get_btc_treasury_data(
     # independent sorts of the same data could disagree about which filing is
     # the oldest, and the two lines sit next to each other in the report.
     by_as_of = sorted((v[-1]["date"], t) for t, v in visible_by_company.items())
+    # One test feeding two sentences: the concentration line's basis clause
+    # below must not assert a mix of as-of dates while this line prints a
+    # single one. They sit three rows apart in the report.
+    single_as_of = by_as_of[0][0] == by_as_of[-1][0]
     as_of_note = (
         f"as of {by_as_of[0][0]}"
-        if by_as_of[0][0] == by_as_of[-1][0]
+        if single_as_of
         else f"as-of dates span {by_as_of[0][0]} → {by_as_of[-1][0]}"
     )
     # Every contributor's as-of date, not just the top five (user decision):
@@ -941,11 +987,19 @@ def get_btc_treasury_data(
             if share > 50
             else ""
         )
+        # With one contributor — routine after a mid-sweep 429, or on a
+        # historical curr_date that leaves the rest in no_disclosure — every
+        # holding shares one as-of date, and the mixed-dates clause would
+        # contradict the combined-holdings line three rows above.
+        basis = (
+            f"and it divides holdings that are all as of {by_as_of[0][0]}"
+            if single_as_of
+            else "and not a single-date measure (it divides holdings carrying mixed as-of dates)"
+        )
         holdings_block += (
             f"**Concentration:** largest holder {top_ticker} = {share_str} of the "
-            f"{n_tracked}-company combined total above — not of the whole market, and "
-            f"not a single-date measure (it divides holdings carrying the same mixed "
-            f"as-of dates){dominance}\n"
+            f"{n_tracked}-company combined total above — not of the whole market, "
+            f"{basis}{dominance}\n"
         )
 
     # ---- activity -----------------------------------------------------------
@@ -989,10 +1043,19 @@ def get_btc_treasury_data(
             events.append(_Activity(row["date"], ticker, delta, cost, implied, since))
     events.sort(key=lambda e: (e.date, e.ticker))
 
-    # History-depth honesty: a company whose served history starts inside the
-    # window may have had earlier activity the provider no longer serves.
+    # History-depth honesty, gated on the provider's per-company row cap.
+    # ``len(rows) >= HISTORY_LIMIT`` is what makes the claim true, matching the
+    # macro twin: only a history the per-request cap actually truncated can be
+    # hiding earlier activity. A company that simply began disclosing inside
+    # the window — a recent adopter, the common shape among smaller filers —
+    # has nothing older to show, and saying otherwise invents a gap and tells
+    # the reader to discount a net-change figure that is in fact complete.
+    # Measured on the full served history rather than the curr_date-filtered
+    # view: the cap drops the OLDEST rows, independently of that filter.
     shallow = sorted(
-        t for t, visible in visible_by_company.items() if visible[0]["date"] > window_start
+        t
+        for t, visible in visible_by_company.items()
+        if len(snapshot.companies[t]["rows"]) >= HISTORY_LIMIT and visible[0]["date"] > window_start
     )
 
     if events:
@@ -1022,9 +1085,7 @@ def get_btc_treasury_data(
             )
             cost_cell = f"{e.cost / _USD_PER_MILLION:+,.1f}" if e.cost is not None else "—"
             implied_cell = f"{e.implied:,.0f}" if e.implied is not None else "—"
-            lines.append(
-                f"| {e.date} | {e.ticker} | {delta_cell} | {cost_cell} | {implied_cell} |"
-            )
+            lines.append(f"| {e.date} | {e.ticker} | {delta_cell} | {cost_cell} | {implied_cell} |")
         net = sum(e.delta for e in events)
         by_company: dict[str, float] = {}
         for e in events:
@@ -1067,9 +1128,10 @@ def get_btc_treasury_data(
         )
     if shallow:
         activity_block += (
-            f"\n_The served history for {', '.join(shallow)} starts inside the "
-            f"window, so earlier activity may exist that the provider no longer "
-            f"serves; the window totals can understate it._\n"
+            f"\n_The served history for {', '.join(shallow)} is at the provider's "
+            f"per-company cap ({HISTORY_LIMIT} rows) and still starts inside the window, "
+            f"so earlier activity exists that this snapshot cannot show; the window "
+            f"totals can understate it._\n"
         )
     if not events:
         # Every bucket that contributed nothing, not just the failures: a

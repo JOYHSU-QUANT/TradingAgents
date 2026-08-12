@@ -106,3 +106,24 @@ def test_news_toolnode_can_execute_crypto_tools():
         "analyst for crypto assets but not registered in the news ToolNode, so "
         "the model's call fails."
     )
+
+
+@pytest.mark.unit
+def test_each_shipped_off_category_binds_only_its_own_tool():
+    # The cutover flips one category at a time, so each flag must gate its own
+    # tool alone. Enabling both at once (the test above) cannot see a guard
+    # that reads the sibling category's key: that mutation binds both tools
+    # from one flip, or neither.
+    for category, tool in (
+        ("economic_calendar", "get_economic_calendar"),
+        ("btc_treasuries", "get_btc_treasuries"),
+    ):
+        set_config({"data_vendors": {category: "sosovalue"}})
+        try:
+            bound = _run("crypto", "BTC-USD")
+            assert tool in bound, f"{category} enabled but {tool} was not bound"
+            assert not (_SHIPPED_OFF_TOOLS - {tool}) & bound, (
+                f"only {category} was enabled, but a sibling shipped-off tool bound too"
+            )
+        finally:
+            set_config({"data_vendors": {category: "none"}})

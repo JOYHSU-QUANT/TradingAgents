@@ -396,6 +396,13 @@ def _valid_funds(funds: object) -> bool:
         and isinstance(f.get("rows"), list)
         and f["rows"]
         and all(_valid_fund_row(r) for r in f["rows"])
+        # One row per date, mirroring _parse_fund_rows' date-keyed dict. This
+        # is what _read_cache's order exemption below rests on: _fund_flows_on
+        # stops at the FIRST row matching the date with a non-null flow, so the
+        # lookup is order-insensitive only while dates are unique. Two rows for
+        # one date and a fund's leaders-line figure becomes whichever copy the
+        # file happens to list first.
+        and len({r["date"] for r in f["rows"]}) == len(f["rows"])
         for t, f in funds.items()
     )
 
@@ -518,8 +525,10 @@ def _read_cache(path: str, asset: str) -> dict | None:
     if not isinstance(payload.get("fetched_at"), str) or not payload["fetched_at"]:
         return _reject("'fetched_at' is missing or not a non-empty string")
     # Deliberately unchecked: per-fund row order (the flow lookup is
-    # order-insensitive) and the fetched_at format (an unparseable stamp
-    # already fails every freshness check downstream, before any render).
+    # order-insensitive, which holds because _valid_funds enforces one row per
+    # date — that uniqueness is the premise this exemption rests on) and the
+    # fetched_at format (an unparseable stamp already fails every freshness
+    # check downstream, before any render).
     return payload
 
 

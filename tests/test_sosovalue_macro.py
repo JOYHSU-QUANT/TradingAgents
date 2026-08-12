@@ -170,18 +170,85 @@ class TestSixthLoopDisclosures:
         assert "read the empty schedule as missing coverage" in report
         assert "genuinely carries no scheduled entries" not in report
 
-    def test_a_merged_duplicate_date_blocks_the_benign_empty_schedule_reading(self):
-        # calendar_duplicated is the sibling of stale/truncated/unusable in the
-        # "this snapshot is not the provider's calendar" gate: its own caveat
-        # says scheduled dates may be mislabelled, which the benign branch
-        # would flatly contradict.
+    def test_a_merged_duplicate_date_earns_its_own_empty_schedule_reading(self):
+        # calendar_duplicated must still block the benign "genuinely carries no
+        # scheduled entries" — its caveat says dates may be mislabelled — but
+        # it earns its OWN sentence rather than the incompleteness one:
+        # _parse_calendar merges same-date rows and de-dupes names within a
+        # date, so no day-row and no name is lost. Asserting an incomplete
+        # forward view here would contradict the merge caveat two lines up.
         calendar = [
             {"date": "2026-08-05", "events": ["CPI (YoY)"]},
             {"date": "2026-08-30", "events": ["Nonfarm Payrolls"]},
         ]
         report = _render(_snapshot(calendar=calendar, calendar_duplicated=2), "2026-08-11")
-        assert "does not hold a complete forward view" in report
+        assert "may carry a date outside it" in report
         assert "genuinely carries no scheduled entries" not in report
+        assert "does not hold a complete forward view" not in report
+
+    def test_a_calendar_ending_before_this_date_outranks_the_duplicate_reading(self):
+        # Ordering inside the empty-schedule chain. When the calendar ALSO
+        # ends on or before curr_date, "publishing no forward schedule" is the
+        # salient fact; the duplicate reading would discuss mislabelled dates
+        # while silently dropping that the calendar never reaches the window.
+        # The duplicate branch exists to outrank only the benign reading.
+        report = _render(
+            _snapshot(
+                calendar=[{"date": "2026-08-01", "events": ["CPI (YoY)"]}], calendar_duplicated=2
+            ),
+            "2026-08-11",
+        )
+        assert "read the empty schedule as missing coverage" in report
+        assert "may carry a date outside it" not in report
+
+    def test_the_forward_reach_shortfall_is_disclosed_on_a_fresh_snapshot(self):
+        # The forward sibling of the unobserved-tail sentence, un-gated for the
+        # same reason: the calendar is anchored to the FETCH, so a snapshot
+        # fetched on an earlier day already reaches less far than the scheduled
+        # section's title claims. Previously stale-gated, so a fresh serve
+        # shipped a 14-day title over a 13-day calendar with no caveat.
+        report = _render(
+            _snapshot(
+                calendar=[
+                    {"date": "2026-08-11", "events": ["CPI (YoY)"]},
+                    {"date": "2026-08-24", "events": ["CPI (MoM)"]},
+                ],
+                fetched_at="2026-08-10T23:00:00Z",
+                stale=False,
+            ),
+            curr_date="2026-08-11",
+        )
+        assert "STALE" not in report
+        line = _sentence(report, "reaches less far than its title")
+        assert "reaches only 13 days past it" in line
+
+    def test_a_calendar_covering_the_whole_window_says_nothing(self):
+        # The control: at exactly AHEAD_DAYS of reach the sentence must stay
+        # silent, or it would fire on every ordinary serve.
+        report = _render(
+            _snapshot(calendar=[{"date": "2026-08-25", "events": ["CPI (YoY)"]}]),
+            curr_date="2026-08-11",
+        )
+        assert "reaches less far than its title" not in report
+
+    def test_partial_backward_calendar_coverage_is_disclosed(self):
+        # A backtest curr_date: the calendar is anchored to the fetch, so the
+        # FRONT of the rendered window carries no calendar rows while the tail
+        # still overlaps — which the old all-or-nothing test read as covered,
+        # leaving a non-tracked event on those days looking absent rather than
+        # unfetched.
+        report = _render(
+            _snapshot(
+                calendar=[
+                    {"date": "2026-08-11", "events": ["CPI (YoY)"]},
+                    {"date": "2026-08-26", "events": ["CPI (MoM)"]},
+                ]
+            ),
+            curr_date="2026-08-05",
+        )
+        assert "calendar starts at 2026-08-11, inside this window" in report
+        # Not the zero-overlap sentence: the window IS partly covered.
+        assert "No calendar entry in this snapshot falls between" not in report
 
     def test_without_a_duplicate_the_benign_reading_still_speaks(self):
         # The control for the gate above: same calendar, no duplicate merge.

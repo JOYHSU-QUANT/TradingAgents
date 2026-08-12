@@ -996,11 +996,14 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     # the last of those four was the one site this rule had already been
     # written down for and not applied to. A new such site belongs here too.
     cal_dated = [r["date"] for r in snapshot.calendar if r["events"]]
-    # Does the calendar reach the window this report renders at all? On a
-    # historical curr_date the whole calendar postdates it, so the schedule
-    # below can only come from tracked histories — the same distortion the
-    # stale branch discloses, arriving by a route staleness never sees.
-    cal_overlaps = any(curr_date <= d <= ahead_end for d in cal_dated)
+    # The calendar's coverage of THIS window, kept as the day-rows themselves
+    # rather than a bool: the fact is per-day, so an all-or-nothing test falls
+    # silent on a window the calendar covers only partly. The forward end is
+    # the reach sentence's job just below; this list drives the backward half,
+    # which staleness never causes — the provider's calendar is anchored to the
+    # FETCH, so a curr_date earlier than the fetch leaves the front of the
+    # rendered window with no calendar rows at all.
+    in_window = [d for d in cal_dated if curr_date <= d <= ahead_end]
     header_lines = ["## US Economic Calendar — scheduled events & releases (SoSoValue)"]
 
     if snapshot.stale:
@@ -1010,38 +1013,38 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
             f"API contract break); showing the last cached snapshot (fetched "
             f"{snapshot.fetched_at}). Scheduled dates and figures may be outdated._"
         )
-        # A stale macro snapshot loses forward reach one day per day: the
-        # provider's calendar is anchored to when it was FETCHED, so the
-        # scheduled section narrows as the snapshot ages and is empty by
-        # construction near the stale cap, while the report still ships under
-        # a calendar's title. The family's 14-day cap is kept (user decision);
-        # what the age costs is stated instead of left for the reader to infer.
-        # Measured from the last day-row that actually carries names: a row
-        # whose every name was dropped as unusable survives with an empty
-        # list, and counting it would overstate what the calendar can still
-        # contribute.
-        reach = (datetime.strptime(cal_dated[-1], "%Y-%m-%d") - curr_dt).days if cal_dated else None
-        if reach is None or reach < AHEAD_DAYS:
-            if reach is None:
-                extent = "carries no usable event names at all"
-            elif reach < 0:
-                extent = "ends before this date, so it can contribute no schedule at all"
-            elif reach == 0:
-                # Not "no forward schedule": the calendar sweep starts at
-                # curr_date INCLUSIVE, so a calendar ending today still
-                # contributes today's entries — the table below can show rows
-                # this sentence would otherwise deny.
-                extent = (
-                    "ends on this date, so it can contribute today's entries but nothing beyond"
-                )
-            else:
-                extent = f"reaches only {reach} {_plural_days(reach)} past it"
-            header_lines.append(
-                f"_That age also shortens the schedule below: this snapshot's calendar "
-                f"{extent}, against the {AHEAD_DAYS}-day window the scheduled section "
-                f"otherwise covers, so read a short or empty schedule as the snapshot's "
-                f"age rather than a quiet fortnight._"
-            )
+    # Forward reach, and NOT gated on staleness — the sibling of the backward
+    # unobserved-tail sentence below, un-gated for the same reason. The
+    # provider's calendar is anchored to when it was FETCHED, so a snapshot
+    # fetched on an earlier day already reaches less far than the scheduled
+    # section's title claims, stale or not; at a 5h TTL that is an ordinary
+    # serve. Staleness only makes it worse (a day of reach per day of age), and
+    # the STALE line above already attributes that. The family's 14-day cap is
+    # kept (user decision); what the shortfall costs is stated instead of left
+    # for the reader to infer. Measured from the last day-row that actually
+    # carries names: a row whose every name was dropped as unusable survives
+    # with an empty list, and counting it would overstate what the calendar can
+    # still contribute.
+    reach = (datetime.strptime(cal_dated[-1], "%Y-%m-%d") - curr_dt).days if cal_dated else None
+    if reach is None or reach < AHEAD_DAYS:
+        if reach is None:
+            extent = "carries no usable event names at all"
+        elif reach < 0:
+            extent = "ends before this date, so it can contribute no schedule at all"
+        elif reach == 0:
+            # Not "no forward schedule": the calendar sweep starts at
+            # curr_date INCLUSIVE, so a calendar ending today still
+            # contributes today's entries — the table below can show rows
+            # this sentence would otherwise deny.
+            extent = "ends on this date, so it can contribute today's entries but nothing beyond"
+        else:
+            extent = f"reaches only {reach} {_plural_days(reach)} past it"
+        header_lines.append(
+            f"_The scheduled section below reaches less far than its title: this "
+            f"snapshot's calendar {extent}, against the {AHEAD_DAYS}-day window that "
+            f"section otherwise covers, so read a short or empty schedule as the "
+            f"calendar's reach rather than a quiet fortnight._"
+        )
     # The backward half of the same arithmetic, and NOT gated on staleness: the
     # released table is labelled by curr_date, but no snapshot can carry what
     # the provider published after it was fetched, so the most recent stretch
@@ -1081,12 +1084,25 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
             f"published figures by construction, not quiet._"
         )
 
-    if not cal_overlaps:
+    if not in_window:
         header_lines.append(
             f"_No calendar entry in this snapshot falls between {curr_date} and "
             f"{ahead_end}, so the schedule below carries only the {len(TRACKED_EVENTS)} "
             f"tracked events: an event outside that list is missing from this window "
             f"rather than absent from it._"
+        )
+    elif in_window[0] > curr_date:
+        # Partial coverage, the backward half. The calendar is anchored to the
+        # fetch, so a curr_date earlier than it leaves the front of the window
+        # uncovered while the tail still overlaps — which an all-or-nothing
+        # test reads as covered. Only the front is reported here: a gap at the
+        # far end is the reach sentence's subject, and saying it twice would
+        # put two spans for one hole in one header.
+        header_lines.append(
+            f"_This snapshot's calendar starts at {in_window[0]}, inside this window, so "
+            f"from {curr_date} to that date the schedule below carries only the "
+            f"{len(TRACKED_EVENTS)} tracked events: an event outside that list is missing "
+            f"from those days rather than absent from them._"
         )
 
     if snapshot.events_failed:
@@ -1283,25 +1299,16 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # the Source span and the overlap disclosure, and — worse — selects the
         # benign branch below off a row that schedules nothing.
         cal_end = cal_dated[-1] if cal_dated else None
-        # Staleness, truncation, dropped names and merged duplicate dates are
-        # tested FIRST, ahead of the calendar's own end date: each means this
-        # snapshot is not the calendar the provider published for this date, so
-        # neither the provider-blaming branch nor the benign one may speak. A
-        # stale calendar ending before curr_date has aged out of its forward
-        # reach — saying the provider "is publishing no forward schedule" would
-        # blame the source for the snapshot's age; when this client dropped the
-        # names itself, "genuinely carries no scheduled entries" is false; and a
-        # merged duplicate date is the one caveat above that tells the reader
-        # scheduled dates may be mislabelled, so an entry belonging to this
-        # window may have been folded onto a date outside it — a doubt the
-        # benign branch would flatly contradict.
-        if (
-            snapshot.stale
-            or snapshot.calendar_truncated
-            or snapshot.calendar_unusable
-            or snapshot.calendar_duplicated
-        ):
-            ends = f"ends {cal_end}" if cal_end else "carries no usable event names"
+        # Staleness, truncation and dropped names are tested FIRST, ahead of
+        # the calendar's own end date: each means this snapshot does not hold
+        # the whole calendar the provider published for this date, so neither
+        # the provider-blaming branch nor the benign one may speak. A stale
+        # calendar ending before curr_date has aged out of its forward reach —
+        # saying the provider "is publishing no forward schedule" would blame
+        # the source for the snapshot's age; and when this client dropped the
+        # names itself, "genuinely carries no scheduled entries" is false.
+        ends = f"ends {cal_end}" if cal_end else "carries no usable event names"
+        if snapshot.stale or snapshot.calendar_truncated or snapshot.calendar_unusable:
             why = (
                 f"The provider's calendar in this snapshot {ends}, but the "
                 f"snapshot does not hold a complete forward view of what the provider "
@@ -1309,15 +1316,35 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
                 f"schedule as an artefact of the snapshot rather than a quiet window."
             )
         elif cal_end is None or cal_end <= curr_date:
-            ends = (
+            # Its own phrasing, not the shared ``ends`` above: this branch has
+            # to say the end date is on or before curr_date, which is the whole
+            # reason it fires.
+            stops = (
                 f"ends {cal_end}, on or before this date"
                 if cal_end
                 else "carries no usable event names at all"
             )
             why = (
-                f"The provider's calendar {ends}, so it "
+                f"The provider's calendar {stops}, so it "
                 f"is publishing no forward schedule in this snapshot — read the empty "
                 f"schedule as missing coverage, not as a fortnight without events."
+            )
+        elif snapshot.calendar_duplicated:
+            # Duplication belongs here too — the benign "genuinely carries no
+            # scheduled entries" must not speak over it — but it earns its own
+            # sentence rather than the incompleteness one above. _parse_calendar
+            # MERGES same-date rows and de-dupes names within a date, losing no
+            # day-row and no name, and truncation is computed after the merge,
+            # so nothing is missing. What duplication costs is confidence in the
+            # DATES: the caveat above says an entry may have been labelled with
+            # the wrong date, so one belonging to this window may be sitting on
+            # a date outside it. Claiming an incomplete forward view here would
+            # assert a gap the merge caveat two lines up denies.
+            why = (
+                f"The provider's calendar in this snapshot {ends} and holds every day-row "
+                f"it sent, but it repeated dates (see the caveat above), so an entry "
+                f"belonging to this window may carry a date outside it — read the empty "
+                f"schedule as dates worth double-checking rather than a quiet window."
             )
         else:
             # Not "a date far from the fetch date": that is only one of the two

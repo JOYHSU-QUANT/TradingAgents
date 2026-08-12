@@ -881,11 +881,12 @@ def get_btc_treasury_data(
     # it because it was never fetched. Same class of disclosure as the macro
     # module's "current figures, not point-in-time snapshots".
     header_lines.append(
-        f"_The company universe is the provider's ranking as of the snapshot fetch, not "
-        f"as of {curr_date}: individual disclosures are filtered to that date, but the "
-        f"top-{selected} cut is not, so a company that ranked large then and has since "
-        f"dropped out of the listing's head is missing from every figure below with "
-        f"nothing above naming it._"
+        f"_The company universe is the provider's listing order at the time this "
+        f"snapshot was fetched. Individual disclosures are filtered to {curr_date}, but "
+        f"the top-{selected} cut is not — so where {curr_date} sits earlier than that "
+        f"fetch, a company that ranked large then and has since dropped out of the "
+        f"listing's head is missing from every figure below with nothing above naming "
+        f"it._"
     )
     header_lines.append(
         f"- Source: SoSoValue OpenAPI (BTC treasuries) | Snapshot fetched "
@@ -1128,10 +1129,10 @@ def get_btc_treasury_data(
         )
     if shallow:
         activity_block += (
-            f"\n_The served history for {', '.join(shallow)} is at the provider's "
-            f"per-company cap ({HISTORY_LIMIT} rows) and still starts inside the window, "
-            f"so earlier activity exists that this snapshot cannot show; the window "
-            f"totals can understate it._\n"
+            f"\n_The served history for {', '.join(shallow)} runs to the provider's "
+            f"per-company cap (at least {HISTORY_LIMIT} rows) and still starts inside "
+            f"the window, so earlier activity exists that this snapshot cannot show; "
+            f"the window totals can understate it._\n"
         )
     if not events:
         # Every bucket that contributed nothing, not just the failures: a

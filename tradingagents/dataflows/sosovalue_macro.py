@@ -1081,19 +1081,30 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # day straight into the prompt — and under a plain nearest-40 cut a
         # couple of dense foreign days would push every CPI/NFP forecast out
         # of the table, losing precisely what this section exists to carry.
-        # Figure-bearing rows are kept first, then the nearest name-only ones
-        # fill what is left; the union is re-sorted so the table still reads
-        # front to back in date order.
-        with_figures = [r for r in scheduled if r[2] != "—" or r[3] != "—"]
-        name_only = [r for r in scheduled if r[2] == "—" and r[3] == "—"]
+        # Priority rows are kept first, then the nearest of the rest fill what
+        # is left. A row dated curr_date is priority even with no figures: the
+        # decision to fold today's calendar entries into this table exists
+        # because they reach the reader through no other path, and the intraday
+        # caveat below promises a row for them — ranking a fortnight-out
+        # forecast above today's event would re-open exactly that hole.
+        # Sorted on (date, name) only, like the sort that built ``scheduled``:
+        # a plain tuple sort falls through to the figures and would reorder two
+        # same-date prints out of the provider's own sequence.
+        def _is_priority(r: tuple) -> bool:
+            return r[0] == curr_date or r[2] != "—" or r[3] != "—"
+
+        priority = [r for r in scheduled if _is_priority(r)]
+        rest = [r for r in scheduled if not _is_priority(r)]
         shown_scheduled = sorted(
-            with_figures[:MAX_ROWS] + name_only[: max(0, MAX_ROWS - len(with_figures))]
+            priority[:MAX_ROWS] + rest[: max(0, MAX_ROWS - len(priority))],
+            key=lambda r: (r[0], r[1]),
         )
         dropped = len(scheduled) - len(shown_scheduled)
         sched_note = (
             f"\n_(showing {len(shown_scheduled)} of {len(scheduled)} scheduled rows in "
-            f"the window: rows carrying figures take priority over name-only calendar "
-            f"entries, and within each group the nearest are kept)_\n"
+            f"the window: rows dated {curr_date} and rows carrying figures take priority "
+            f"over name-only calendar entries further out, and within each group the "
+            f"nearest are kept)_\n"
             if dropped
             else ""
         )
@@ -1110,12 +1121,10 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
             f"consensus forecast vs the prior print; 'In' counts calendar days from "
             f"{curr_date}; a row showing — for both figures is a calendar entry outside "
             f"the tracked list, a tracked print whose figures the provider has not filed, "
-            f"or a tracked event whose history this snapshot could not fetch — the "
-            f"coverage caveats above name that last case, and the provider may well have "
-            f"filed a forecast this snapshot simply does not carry\n"
-            + "\n".join(lines)
-            + "\n"
-            + sched_note
+            f"or a tracked event whose history this snapshot does not carry at all — a "
+            f"failed fetch or an upstream rename, both named in the coverage caveats "
+            f"above, and in either case the provider may well have filed a forecast this "
+            f"snapshot simply never received\n" + "\n".join(lines) + "\n" + sched_note
         )
     else:
         # Why the schedule is empty is NOT always benign: the provider's

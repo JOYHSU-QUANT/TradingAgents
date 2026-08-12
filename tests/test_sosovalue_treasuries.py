@@ -718,7 +718,7 @@ class TestRender:
             for i in range(sosovalue_treasuries.HISTORY_LIMIT)
         ]
         report = _render(_snapshot(companies={"X": {"name": "", "rows": rows}}))
-        assert "served history for X is at the provider's per-company cap" in report
+        assert "served history for X runs to the provider's per-company cap" in report
 
     def test_a_merely_short_history_is_not_called_capped(self):
         # The treasuries twin of the macro module's
@@ -1063,7 +1063,12 @@ class TestUniverseAndConcentrationClaims:
         # that has since dropped out of the listing's head is absent with
         # nothing naming it.
         report = _render(_snapshot())
-        assert "ranking as of the snapshot fetch, not as of 2026-08-11" in report
+        assert "listing order at the time this snapshot was fetched" in report
+        # Phrased so it stays true on a live call, where curr_date IS the
+        # fetch date: the hindsight gap is scoped by "where {curr_date} sits
+        # earlier than that fetch" rather than asserted outright, which would
+        # contradict the Source line two rows below.
+        assert "where 2026-08-11 sits earlier than that fetch" in report
 
     def test_a_single_contributor_is_not_called_mixed_as_of(self):
         # Routine after a mid-sweep 429, or on a curr_date that leaves the rest
@@ -1086,4 +1091,98 @@ class TestUniverseAndConcentrationClaims:
             )
         )
         assert "as-of dates span 2026-07-01 → 2026-08-01" in report
-        assert "mixed as-of dates" in report
+        # The full new clause, not just "mixed as-of dates": the OLD wording
+        # ("carrying the same mixed as-of dates") contained that substring too,
+        # so the short form passed with the production change reverted.
+        assert (
+            "not a single-date measure (it divides holdings carrying mixed as-of dates)" in report
+        )
+
+
+@pytest.mark.unit
+class TestWindowEdgesAndAggregateScope:
+    def test_a_disclosure_dated_exactly_on_curr_date_is_included(self):
+        # The most decision-relevant filing there is, and no fixture or test
+        # covered it: a `<` lookahead filter drops it from the combined total,
+        # the top-holders line, the concentration share and the activity table
+        # all at once, and every assertion in the suite still passes.
+        report = _render(
+            _snapshot(companies={"X": {"name": "", "rows": [_prow("2026-08-11", 1000.0, 10.0)]}}),
+            curr_date="2026-08-11",
+        )
+        assert "1,000 BTC across 1 tracked company" in report
+        assert "| 2026-08-11 | X |" in report
+
+    def test_a_disclosure_dated_exactly_at_the_window_start_is_included(self):
+        report = _render(
+            _snapshot(
+                companies={
+                    "X": {
+                        "name": "",
+                        "rows": [_prow("2026-06-01", 100.0, 5.0), _prow("2026-07-12", 110.0, 10.0)],
+                    }
+                }
+            ),
+            curr_date="2026-08-11",
+            look_back_days=30,
+        )
+        assert "| 2026-07-12 | X |" in report
+
+    def test_the_as_of_line_reports_each_latest_row_oldest_first(self):
+        # Every existing as-of test gives its companies a single row, so
+        # v[0] == v[-1] and neither the latest-row read nor the ordering is
+        # actually pinned; the span sentence had no assertion at all.
+        report = _render(
+            _snapshot(
+                companies={
+                    "OLD": {
+                        "name": "",
+                        "rows": [_prow("2026-01-05", 10.0), _prow("2026-02-10", 20.0)],
+                    },
+                    "NEW": {
+                        "name": "",
+                        "rows": [_prow("2026-03-01", 30.0), _prow("2026-07-20", 40.0)],
+                    },
+                }
+            )
+        )
+        assert "as-of dates span 2026-02-10 → 2026-07-20" in report
+        assert "(oldest first):** OLD 2026-02-10; NEW 2026-07-20" in report
+
+    def test_the_headline_net_covers_the_window_not_the_shown_rows(self):
+        # 42 disclosures against a 40-row table: the net, the adding/reducing
+        # counts and the window label all describe the window, so recomputing
+        # any of them over the shown subset would contradict the table's own
+        # "40 of 42" note.
+        rows = [_prow(f"2026-07-{d:02d}", 100.0 + d, 1.0) for d in range(1, 32)]
+        rows += [_prow(f"2026-08-{d:02d}", 200.0 + d, 1.0) for d in range(1, 12)]
+        report = _render(
+            _snapshot(companies={"X": {"name": "", "rows": rows}}),
+            curr_date="2026-08-11",
+            look_back_days=90,
+        )
+        assert f"most recent {sosovalue_treasuries.MAX_ROWS} of {len(rows)} disclosures" in report
+        assert f"**90d disclosed net change:** +{len(rows)} BTC" in report
+
+    def test_an_explicit_json_null_is_treated_as_absent(self):
+        # The live fixture OMITS the optional keys. A provider that starts
+        # sending explicit nulls instead is routine evolution, and reading it
+        # as unparseable would fail every holdings-only company at once.
+        rows = sosovalue_treasuries._parse_purchase_rows(
+            [{"date": "2026-08-01", "btc_holding": "100", "btc_acq": None, "acq_cost": None}], "X"
+        )
+        assert rows[0]["btc_acq"] is None
+        assert rows[0]["acq_cost"] is None
+
+    def test_an_acquisition_row_renders_a_signed_cost_and_implied_price(self):
+        # Every activity assertion in the suite uses a disposal, a derived row
+        # or a zero cost, inherited from the MSTR fixture's reducing phase, so
+        # the legend's "carries the matching sign" was never exercised on the
+        # positive side and neither was the implied price's abs().
+        report = _render(
+            _snapshot(
+                companies={"X": {"name": "", "rows": [_prow("2026-08-01", 1000.0, 10.0, 640000.0)]}}
+            )
+        )
+        row = next(ln for ln in report.splitlines() if ln.startswith("| 2026-08-01 |"))
+        assert row == "| 2026-08-01 | X | +10 | +0.6 | 64,000 |"

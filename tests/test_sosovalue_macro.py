@@ -1227,7 +1227,7 @@ class TestScheduledTablePriority:
 
     def test_the_cap_note_describes_the_priority_it_applies(self):
         report = _render(self._crowded())
-        assert "rows carrying figures take priority over name-only calendar entries" in report
+        assert "rows carrying figures take priority" in report
 
 
 @pytest.mark.unit
@@ -1244,7 +1244,7 @@ class TestScheduledLegendAndEmptyBranch:
             )
         )
         assert "| 2026-08-11 | today | CPI (YoY) | — | — |" in report
-        assert "whose history this snapshot could not fetch" in report
+        assert "whose history this snapshot does not carry at all" in report
 
     def test_an_all_echo_window_is_not_called_genuinely_empty(self):
         # Every in-window calendar name is suppressed as the echo of a print
@@ -1290,3 +1290,152 @@ class TestEveryServerAuthoredCellIsFlattened:
         assert scheduled.count("|") == 6  # Date | In | Event | Forecast | Previous
         assert released.count("|") == 7  # + Actual and Surprise
         assert "**BUY**" not in report
+
+
+@pytest.mark.unit
+class TestBucketsBreakerAndBounds:
+    def test_both_failure_buckets_can_be_populated_at_once(self):
+        # Every other macro test sets one bucket or the other, which hides
+        # three behaviours: the failed-sentence numerator must count the names
+        # it lists (not TRACKED minus histories, which also loses the unknown
+        # bucket), and the coverage-gap union must carry both buckets.
+        report = _render(
+            _snapshot(
+                histories=_histories(failed=["CPI (YoY)"], unknown=["GDP (QoQ)"]),
+                events_failed=["CPI (YoY)"],
+                events_unknown=["GDP (QoQ)"],
+            )
+        )
+        assert f"1 of {len(TRACKED)} tracked events" in report
+        assert "CPI (YoY) could not be fetched" in report
+        assert "1 tracked event is unknown" in report
+
+    def test_the_coverage_gap_union_carries_both_buckets(self):
+        report = _render(
+            _snapshot(
+                calendar=[{"date": "2026-08-11", "events": []}],
+                histories=_histories(failed=["CPI (YoY)"], unknown=["GDP (QoQ)"]),
+                events_failed=["CPI (YoY)"],
+                events_unknown=["GDP (QoQ)"],
+            ),
+            curr_date="2026-03-01",
+        )
+        assert "CPI (YoY), GDP (QoQ) unavailable" in report
+
+    def test_the_breaker_counts_only_consecutive_failures(self, monkeypatch):
+        # Four failures, never three in a row. The reset after each success is
+        # the only thing keeping the breaker shut: delete it and the sweep is
+        # drained at the third failure with the rest never attempted.
+        failing = {TRACKED[0], TRACKED[2], TRACKED[4], TRACKED[6]}
+        impl = _request_impl(history_error=requests.ConnectionError("down"), error_names=failing)
+        monkeypatch.setattr(sosovalue_macro, "_request", impl)
+        payload = sosovalue_macro._fetch_all()
+        assert set(payload["events_failed"]) == failing
+        assert set(payload["histories"]) == set(TRACKED) - failing
+        assert len([c for c in impl.calls if c != "/macro/events"]) == len(TRACKED)
+
+    def test_the_history_request_asks_for_the_documented_row_cap(self, monkeypatch):
+        # The report quotes this cap ("at most 100 rows per event") and the
+        # shallow disclosure's truth depends on it, but no test asserted the
+        # request actually carries it.
+        seen = {}
+
+        def impl(path, params):
+            seen[path] = params
+            return CAL_FIX["data"] if path == "/macro/events" else CPI_FIX["data"]
+
+        monkeypatch.setattr(sosovalue_macro, "_request", impl)
+        sosovalue_macro._fetch_all()
+        history_params = [p for path, p in seen.items() if path != "/macro/events"]
+        assert history_params
+        assert all(p == {"limit": sosovalue_macro.HISTORY_LIMIT} for p in history_params)
+        assert sosovalue_macro.HISTORY_LIMIT == 100
+
+    def test_the_macro_ttl_stays_offset_from_the_etf_module(self):
+        # Deliberate de-phasing: three modules share one 20 req/min key, so
+        # equal TTLs expire two caches together and whichever refresh runs
+        # second takes a 429. Do not "tidy" this back to the family's 6.
+        from tradingagents.dataflows import sosovalue
+
+        assert sosovalue_macro.CACHE_TTL_HOURS == 5
+        assert sosovalue_macro.CACHE_TTL_HOURS != sosovalue.CACHE_TTL_HOURS
+
+
+@pytest.mark.unit
+class TestWindowAndScheduledEdges:
+    def test_a_print_dated_exactly_at_the_window_start_is_included(self):
+        report = _render(
+            _snapshot(
+                histories=_histories(
+                    overrides={"CPI (YoY)": [_row("2026-07-12", "3.1%", "3.0%", "2.9%")]}
+                )
+            ),
+            curr_date="2026-08-11",
+            look_back_days=30,
+        )
+        assert "| 2026-07-12 | CPI (YoY) |" in report
+
+    def test_a_scheduled_row_with_no_forecast_shows_a_dash_not_the_actual(self):
+        # The backtest lookahead leak: the provider has since filled in the
+        # actual for a date that is still in the future for this caller.
+        report = _render(
+            _snapshot(
+                histories=_histories(
+                    overrides={"CPI (YoY)": [_row("2026-08-20", "3.3%", "", "2.9%")]}
+                )
+            ),
+            curr_date="2026-08-11",
+        )
+        assert "| 2026-08-20 | 9d | CPI (YoY) | — | 2.9% |" in report
+        assert "3.3%" not in report
+
+    def test_the_stale_reach_sentence_measures_the_last_dated_row(self):
+        report = _render(
+            _snapshot(
+                calendar=[
+                    {"date": "2026-08-11", "events": ["A"]},
+                    {"date": "2026-08-20", "events": ["B"]},
+                ],
+                stale=True,
+                fetched_at="2026-08-05T00:00:00Z",
+            ),
+            curr_date="2026-08-11",
+        )
+        assert "reaches only 9 days past it" in report
+
+
+@pytest.mark.unit
+class TestLegendCoversBothMissingBuckets:
+    def test_an_unknown_tracked_event_is_also_covered_by_the_legend(self):
+        # events_unknown is the sibling of events_failed: the provider ANSWERED
+        # with an empty history (an upstream rename), so "could not fetch" did
+        # not describe it. Closing the enumeration for one bucket and leaving
+        # the other out is the same half-closed shape a prior round hit.
+        report = _render(
+            _snapshot(
+                calendar=[{"date": "2026-08-13", "events": ["CPI (YoY)"]}],
+                histories=_histories(unknown=["CPI (YoY)"]),
+                events_unknown=["CPI (YoY)"],
+            )
+        )
+        assert "| 2026-08-13 | 2d | CPI (YoY) | — | — |" in report
+        assert "a failed fetch or an upstream rename" in report
+
+
+@pytest.mark.unit
+class TestTodayIsNeverEvictedByThePriorityCut:
+    def test_a_today_calendar_row_survives_a_table_full_of_forecasts(self):
+        # The fold-today-into-scheduled decision exists because a today-dated
+        # calendar name reaches the reader through no other path, and the
+        # intraday caveat promises a row for it. A priority cut that ranked
+        # figure-bearing rows above it would re-open that hole.
+        future = [_row(f"2026-08-{d:02d}", "", "3.0%", "2.9%") for d in range(12, 26)]
+        report = _render(
+            _snapshot(
+                calendar=[{"date": "2026-08-11", "events": ["Some Local Print"]}],
+                histories=_histories(overrides={"CPI (YoY)": future, "GDP (QoQ)": future}),
+            ),
+            curr_date="2026-08-11",
+        )
+        assert "| 2026-08-11 | today | Some Local Print | — | — |" in report
+        assert "may print at any hour of that day" in report

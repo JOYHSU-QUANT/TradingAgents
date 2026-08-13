@@ -1726,11 +1726,23 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
 
     if snapshot.calendar_truncated:
         n = snapshot.calendar_truncated
+        # Same gate as the malformed caveat's endpoint clause, and for the same
+        # reason: with every kept row nameless there is no span, and the Source
+        # line and the reach note both say so. This arm is the stronger of the
+        # two — it asserts "ends earlier" outright rather than hedging — so a
+        # dangling reference here contradicts them harder. The rest of the
+        # sentence stands on its own: rows really were dropped and an event on
+        # one of them really is missing rather than absent.
+        span_note = (
+            "so the calendar span below ends earlier than the provider's own and any event "
+            "beyond it is"
+            if cal_dated
+            else "so any event on one of them is"
+        )
         header_lines.append(
             f"_The provider published {n} more calendar day-{_plural(n, 'row', 'rows')} "
             f"than this client keeps; the furthest-out {_plural(n, 'was', 'were')} "
-            f"dropped, so the calendar span below ends earlier than the provider's own "
-            f"and any event beyond it is missing rather than absent._"
+            f"dropped, {span_note} missing rather than absent._"
         )
 
     if snapshot.calendar_duplicated:

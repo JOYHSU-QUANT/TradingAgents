@@ -2445,6 +2445,28 @@ class TestDroppedCalendarContentIsNamedNotBlamedOnTheProvider:
         )
         assert "its span may" not in interior
 
+    def test_the_truncation_caveat_also_needs_a_span_to_point_at(self):
+        # The sibling bucket, found by the exit check's re-verification: the
+        # truncation caveat had the identical dangling reference and asserted it
+        # harder ("ends earlier", not "may end earlier"). Reachable when a
+        # broadened calendar overruns the row cap AND every kept row is nameless
+        # — the Source line then says the calendar names no event at all.
+        nameless = _render(
+            _snapshot(
+                calendar=[{"date": "2026-08-12", "events": []}],
+                calendar_truncated=1,
+            ),
+            curr_date="2026-08-11",
+        )
+        assert "1 more calendar day-row than this client keeps" in nameless
+        assert "missing rather than absent" in nameless
+        assert "span below" not in nameless
+        assert "names no event on any day-row it carries" in nameless
+
+        # The control: with a span to point at, the clause still prints.
+        spanned = _render(_snapshot(calendar_truncated=1), curr_date="2026-08-11")
+        assert "the calendar span below ends earlier than the provider's own" in spanned
+
     def test_an_unnamed_drop_keeps_the_endpoint_clause(self):
         # It could have sat at either end, so the claim stands.
         assert "its span may start later or end earlier than the provider's own" in _render(

@@ -2257,6 +2257,13 @@ class TestDroppedCalendarContentIsNamedNotBlamedOnTheProvider:
         )
         assert "missing from the calendar below entirely" in report
         assert "missing from the span below entirely" not in report
+        # The POSITIVE counterpart, without which this test went vacuous the
+        # moment the span reference moved out of that phrase and into the
+        # appended endpoint clause: with no dated row there is no span, so no
+        # sentence here may describe how its ends moved — the Source line and
+        # the reach note both say the calendar names no event at all.
+        assert "its span may" not in report
+        assert "names no event on any day-row it carries" in report
 
     def test_the_source_line_does_not_call_a_client_side_drop_provider_silence(self):
         # Every name dropped by THIS client leaves cal_dated empty. Labelling

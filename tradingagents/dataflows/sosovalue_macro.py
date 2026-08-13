@@ -76,8 +76,8 @@ Caching mirrors the family pattern: one rolling snapshot file, refreshed past
 tracked history FAILED — an unknown one is not retried — or the middle
 ``MALFORMED_CACHE_TTL_HOURS`` while a calendar day-row was dropped;
 stale-served on a fetch failure up to ``MAX_STALE_DAYS`` with a disclosed age,
-never written on
-failure, and discarded when read-side validation fails. The stale cap is the
+never written on failure, and discarded when read-side validation fails. The
+stale cap is the
 family's 14 days, but this feed's forward half is only ``AHEAD_DAYS`` wide, so
 a stale serve loses one day of schedule per day of age — the report states how
 much of the scheduled window the snapshot's age has eaten rather than letting
@@ -316,6 +316,11 @@ def _parse_calendar(data: list) -> tuple[list[dict], int, int, int, int, list[st
     ``MAX_CALENDAR_ROWS`` keeps its EARLIEST day-rows — the present-anchored
     span the report actually renders — with ``truncated`` counting the
     furthest-out ones dropped.
+
+    Returns the kept rows, the four counts, and last the dates recovered from
+    dropped rows that still carried a readable one, minus any date the kept rows
+    still carry: a subset of what ``malformed`` counts, so the count stays the
+    authority on how much was lost and the dates only name what can be named.
     """
     if not data:
         raise SoSoValueError("SoSoValue returned an empty macro calendar")
@@ -1686,14 +1691,28 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # Both use the hoisted predicates, computed from the UNFILTERED dates: a
         # date the tables render from a history was still dropped from the
         # calendar, so it still bears on where the calendar's endpoints sit.
-        _ends = [
-            text
-            for text, possible in (
-                ("start later", span_start_moved_possible),
-                ("end earlier", span_end_moved_possible),
-            )
-            if possible
-        ]
+        # Gated on there BEING a span. With every kept row nameless cal_dated is
+        # empty, both predicates come out True (``_all_named`` short-circuits on
+        # the falsy list), and this clause would describe how the two ends of a
+        # span moved while the Source line and the reach note both say the
+        # calendar names no event on any day-row it carries. That is the same
+        # dangling-reference bug the "not the span below" rename fixed, walked
+        # back in by the clause that replaced it. The predicates themselves stay
+        # True there because ``loss_beyond_reach`` needs them to be — with no
+        # dated entry the drop certainly could have sat past one — so the guard
+        # belongs here, at the site that needs a span to point at.
+        _ends = (
+            [
+                text
+                for text, possible in (
+                    ("start later", span_start_moved_possible),
+                    ("end earlier", span_end_moved_possible),
+                )
+                if possible
+            ]
+            if cal_dated
+            else []
+        )
         span_clause = (
             f", and its span may {' or '.join(_ends)} than the provider's own" if _ends else ""
         )
@@ -1786,8 +1805,10 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     # keeps the head, a malformed or wholly-unusable row drops out of
     # cal_dated), and the empty arm fires precisely when THIS client dropped
     # every name. Labelling either as the provider's reads client-side loss as
-    # provider absence — the one thing every caveat above is worded to avoid,
-    # and this was the last extent-site still asserting it.
+    # provider absence — the one thing every caveat above is worded to avoid.
+    # The covered-and-quiet note prints the same endpoint pair as "The
+    # provider's calendar", but it earns the label: its gate requires
+    # ``not snapshot_incomplete``, so no client-side loss happened there.
     header_lines.append(
         f"- Source: SoSoValue OpenAPI (US macro) | Snapshot fetched "
         f"{snapshot.fetched_at} | Calendar in this snapshot {cal_span}; the released "

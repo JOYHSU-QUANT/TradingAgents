@@ -566,11 +566,11 @@ code block, with exactly these six fields and no others:
 ```
 
 That block is a schema, not an answer: every `<...>` placeholder MUST be
-replaced with a real value of your own (an entry marked optional may instead be
-dropped, along with the entry itself). A leftover placeholder in
-"decision_mode", "target_side", "requested_target_margin_pct" or "confidence"
-is not a legal value, so the whole output is discarded and treated as
-maintain_current.
+replaced with a real value of your own (a placeholder marked optional may
+instead be dropped, along with the array entry holding it). A leftover
+placeholder in "decision_mode", "target_side", "requested_target_margin_pct" or
+"confidence" is not a legal value, so the whole output is discarded and treated
+as maintain_current.
 
 Keep the quotes wherever the real value is a string: "decision_mode",
 "target_side" (unless it is null), "rationale", and every entry of "key_risks".

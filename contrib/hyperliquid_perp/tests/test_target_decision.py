@@ -466,8 +466,9 @@ def test_format_instructions_schema_block_has_no_copyable_answer():
     # unparseable block is recorded as a bare invalid_output — same lost cycle,
     # but without a tag naming the field that broke.
     # Both halves need their *contents* pinned, not just their opening clause:
-    # dropping "(unless it is null)" or flipping the last sentence to the string
-    # "null" would each steer the model into invalid_target_side /
+    # dropping "(unless it is null)", or flipping "write null as the JSON
+    # literal null" to the quoted string, would each steer the model into
+    # invalid_target_side /
     # margin_not_numeric — a discarded cycle, the very thing this contract is
     # being reshaped to avoid — while every other test stayed green.
     assert (

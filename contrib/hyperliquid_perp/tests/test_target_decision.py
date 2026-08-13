@@ -468,13 +468,15 @@ def test_format_instructions_schema_block_has_no_copyable_answer():
     # The two numeric fields are quoted only to keep the block valid JSON, which
     # invites substituting in place and keeping the quotes — a shape the parser
     # rejects (test_invalid_margin_not_numeric, test_invalid_confidence_not_numeric).
+    # Quoting a null lands per field: target_side on invalid_target_side,
+    # requested_target_margin_pct on margin_not_numeric.
     # Pin both halves by their *contents*, not just their opening clause. A
     # blanket "unquote" would strip decision_mode's quotes, and an unparseable
     # block is recorded as a bare invalid_output — the same lost cycle, minus
     # the tag naming the field that broke. In the other direction, losing a
     # field from the null carve-out steers that field's null into
-    # invalid_target_side / maintain_current_with_target, and quoting the JSON
-    # literal null does the same. Each is a discarded cycle, the very thing this
+    # invalid_target_side / maintain_current_with_target, and quoting it lands
+    # on the per-field tags noted above. Each is a discarded cycle, the very thing this
     # contract is being reshaped to avoid, and each has at some point left every
     # other test green.
     # Pinned as narrow needles rather than whole sentences: a sentence verbatim
@@ -495,8 +497,19 @@ def test_format_instructions_schema_block_has_no_copyable_answer():
     # in the leftover-placeholder sentence a paragraph earlier, so dropping
     # either from this list — the exact regression the list guards — left the
     # test green. Verified by mutation.
-    carve = normalized.split("write those two as bare JSON numbers.")[1]
-    carve = carve.split("A quoted number")[0]
+    # Both boundaries asserted BEFORE slicing on them. `split(x)[0]` returns the
+    # whole string when x is absent, so an unpinned right needle fails OPEN: a
+    # cosmetic reword of the closing sentence silently widened `carve` to
+    # include the Rules bullets, which carry "decision_mode" /
+    # "requested_target_margin_pct" / "rationale" verbatim — and every needle
+    # below went vacuous again behind a slice that was supposed to fix exactly
+    # that. Verified by mutation.
+    _open, _close = "write those two as bare JSON numbers.", "A quoted number"
+    assert _open in normalized
+    assert _close in normalized
+    carve = normalized.split(_open)[1].split(_close)[0]
+    # And the slice really is the one sentence, not a runaway.
+    assert len(carve) < 400
     # The null half must name BOTH nullable fields. Losing
     # requested_target_margin_pct sends a maintain_current to
     # maintain_current_with_target or margin_not_numeric; losing target_side

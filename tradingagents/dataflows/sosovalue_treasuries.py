@@ -1199,7 +1199,10 @@ def get_btc_treasury_data(
     unreadable = ""
     if snapshot.companies_unusable:
         n_bad = snapshot.companies_unusable
-        listing_scope = f"{snapshot.companies_total} readable listing entries"
+        listing_scope = (
+            f"{snapshot.companies_total} readable listing "
+            f"{_plural(snapshot.companies_total, 'entry', 'entries')}"
+        )
         unreadable = f"; {n_bad} further {_plural(n_bad, 'entry', 'entries')} could not be read"
     header_lines.append(
         f"- Source: SoSoValue OpenAPI (BTC treasuries) | Snapshot fetched "

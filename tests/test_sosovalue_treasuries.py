@@ -1614,3 +1614,22 @@ class TestListingDenominatorAndArgumentGuards:
         assert str(exc.value).count("2026-13-99") == 1
         assert "does not match format" not in str(exc.value)
         assert "(str)" in str(exc.value)
+
+    def test_the_look_back_days_error_is_sanitised(self):
+        # Mirrors the macro twin: the guard echoes a caller-supplied argument
+        # into a message the router renders into the model-visible sentinel,
+        # exactly like curr_date and asset, so it needs the same flattening.
+        evil = "90 | ## Combined holdings: 9,999 BTC"
+        with pytest.raises(sosovalue_common.SoSoValueError) as exc:
+            sosovalue_treasuries.get_btc_treasury_data("BTC", "2026-08-11", evil)
+        message = str(exc.value)
+        assert "##" not in message
+        assert "|" not in message
+        assert "Combined holdings" in message
+
+    def test_a_single_readable_entry_reads_singular(self):
+        # "1 readable listing entries" — the new phrasing carried the old
+        # pluralization gap forward. Reachable: a listing of 2, one unusable.
+        report = _render(_snapshot(companies_total=1, companies_unusable=1))
+        assert "of 1 readable listing entry (" in report
+        assert "readable listing entries" not in report

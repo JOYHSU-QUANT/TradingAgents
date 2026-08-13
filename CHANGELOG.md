@@ -61,16 +61,25 @@ Breaking changes within the 0.x line are called out explicitly.
   failing it over one bad row would discard every tracked event's figures too.
   An unreadable day-row is disclosed by the dates it cost (a row whose only
   fault was its event list still carries a usable one) and shortens the cache
-  TTL to the incomplete value, so the hole is retried within the hour rather
-  than re-served for the full period; the count stays the authority on how much
-  was dropped, since a row that lost its date too can be counted but not named,
-  and a date the report still carries is withheld rather than listed as lost.
+  TTL, so the hole is retried in hours rather than re-served for the full
+  period — to a dedicated middle value, not the shortest one, which stays
+  reserved for failures that are transient by construction; a permanently
+  malformed provider row on the shortest TTL would be a standing fivefold
+  request amplification with no path back. The count stays the authority on how
+  much was dropped: a row that lost its date too is counted but cannot be
+  named, a date still rendered anywhere in the report — from the calendar or
+  from a tracked event's history, which the tables draw on equally — is
+  withheld rather than listed as lost, and a long list is capped so a wholesale
+  contract break cannot push kilobytes of dates into the prompt.
   Coverage claims are worded so that content **this client** dropped is never
   read back as the provider's own silence: the snapshot's calendar span is
   labelled as the snapshot's rather than the provider's, and where a caveat in
   the same header already names the cause of a short calendar — a dropped row,
   or a snapshot fetched before the report's date — the report names it too
-  instead of calling it unknowable. Reading an empty window as genuinely quiet
+  instead of calling it unknowable. Only where that cause could actually
+  account for the gap, though: a dropped row the report can place inside the
+  span it renders, or a dropped event *name*, which costs no date at all,
+  explains nothing about a short forward tail and is not offered as if it did. Reading an empty window as genuinely quiet
   additionally requires that the scheduled table really is empty (it is fed by
   forward-dated event histories as well as by the calendar) and that the
   snapshot is current, and it no longer extends to events this feed does not

@@ -363,9 +363,9 @@ Breaking changes within the 0.x line are called out explicitly.
   once the margin coerced to a number: `margin_off_step_grid` and
   `margin_out_of_range` (the value itself was rejected), plus
   `flat_with_nonzero_margin`, `directional_side_with_zero_margin` and
-  `set_target_without_confidence`. All but one sit past the
+  `set_target_without_confidence`. All five sit past the
   `set_target_without_margin` guard, which is what makes a null margin unable to
-  reach them; the exception is `margin_off_step_grid`, which is also emitted
+  reach them; one of them, `margin_off_step_grid`, is additionally emitted
   inside the coercion block for a non-integral number. "Anything tagged after the
   coercion" is the wrong rule — a null margin skips the coercion rather than
   failing it, so

@@ -546,8 +546,10 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     Fail-closed reaches the same harmless no-op — but countable.
 
     No placeholder advertises ``|null``, though the parser accepts null for
-    ``target_side``, ``requested_target_margin_pct`` and ``confidence`` (the
-    rules below say exactly when each applies). Offering it *inside a quoted
+    ``target_side``, ``requested_target_margin_pct`` and ``confidence``. The
+    rules below say when the first two are null and deliberately never offer it
+    for ``confidence`` — the prompt is narrower than the contract there, which
+    the next sentence is about. Offering it *inside a quoted
     placeholder* invites the substitution that keeps the quotes — the failure
     this whole change exists to remove, and one that costs a real proposal
     rather than an echo. For ``confidence`` the narrowing is wanted on its own
@@ -570,9 +572,10 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     NULL bucket as its own visible share of all cycles; on its own, "the spike
     is gone" is an artifact of the prompt change, not evidence about conviction.
 
-    The quotes are load-bearing in both directions: they are an artifact only on
-    the two numeric fields, so the text names what to unquote rather than
-    telling the model to strip quotes generally. Both mistakes cost the whole
+    The quotes are load-bearing in both directions: they are an artifact on the
+    two numeric fields and on a null ``target_side``, never on the rest, so the
+    text names what to unquote rather than telling the model to strip quotes
+    generally. Both mistakes cost the whole
     output, but they cost different things afterwards. A quoted number is
     tagged ``margin_not_numeric`` / ``confidence_not_numeric``, and because the
     gate discards what the model asked for, the row stores

@@ -498,7 +498,9 @@ safe mode**、四項 smoke 布林（`restart_reconciliation_passed`
 > 會落在 `invalid_output`（先前照抄是**合法**的 `maintain_current`，被算成 cycle）。
 > 這裡的 `invalid_output` 指 `decision_attempts.status`——每一種解不開都是它。同一個
 > 字在 `ai_outputs.risk_reason` 那一欄另有窄義，照抄在那欄記的是
-> `invalid_decision_mode`；RUNBOOK §5 用的是後者。
+> `invalid_decision_mode`。RUNBOOK §5 兩種意思都用到:開頭講 ≥30 那道門的那句是
+> `decision_attempts.status`（所以照抄的 cycle 也計入），後面做成因鑑別的那句才是
+> `risk_reason`。
 > 所以相對 v2 會看到 **`invalid_output_count` 上升、`cycle_count` 同步下降**——這是
 > 既有照抄被顯性化，不是新缺陷，但 ≥30 那道門因此需要更多 cycle 才跨得過。要判斷
 > 修法有沒有效看的是提案率，不是這兩個計數。

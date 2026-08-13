@@ -560,9 +560,10 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     the old echo's ``0.55`` spike from the histogram **whether or not the model
     changed its behaviour**. Every reachable fail-closed row stores NULL: the one
     branch that would pass a parsed confidence through is the flip re-run's
-    re-validation, and it re-validates the SAME ``ParsedDecision`` against the
-    same config (so it cannot newly succeed) and writes no ``ai_outputs`` row
-    either way. A confidence
+    re-validation, and reaching it requires that re-validation to FAIL — on the
+    same ``ParsedDecision`` against the same config object that just accepted
+    it, so it cannot. It writes no ``ai_outputs`` row either way: the flip legs
+    persist an execution-plan row, never a decision row. A confidence
     distribution compared across the version boundary must therefore render the
     NULL bucket as its own visible share of all cycles; on its own, "the spike
     is gone" is an artifact of the prompt change, not evidence about conviction.
@@ -577,15 +578,24 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     proposing reads as one that has not, on the very metric this change is
     judged by.
 
-    Reading the proposal rate therefore needs a correction, and the obvious one
-    is wrong in both directions. Those two tags are ambiguous rather than
-    evidence of a proposal: margin is coerced before confidence, so
-    ``confidence_not_numeric`` only proves margin was null-or-integer, and a
-    ``maintain_current`` that quoted its ``"null"`` lands on
-    ``margin_not_numeric``. What DOES prove a numeric margin was supplied is any
-    tag raised after that coercion succeeds — ``margin_off_step_grid``,
-    ``margin_out_of_range``, ``set_target_without_confidence``,
-    ``invalid_key_risks`` — and those are the ones to net back in.
+    Reading the proposal rate therefore needs a correction, and the obvious
+    ones are wrong. ``margin_not_numeric`` / ``confidence_not_numeric`` are
+    ambiguous rather than evidence of a proposal: margin is coerced before
+    confidence, so the second only proves margin was null-or-integer, and a
+    ``maintain_current`` that quoted its ``"null"`` lands on the first. Nor is
+    the rule "any tag after margin coercion succeeds" — coercion also succeeds
+    on a null margin, so ``invalid_key_risks`` and ``missing_rationale`` are
+    reachable with nothing proposed at all.
+
+    The predicate that works is narrower: tags reachable **only** when the
+    margin coerced to a number. There are five, and each is worth naming
+    because the set is not guessable —
+    ``margin_off_step_grid`` and ``margin_out_of_range`` (the value itself was
+    rejected), ``flat_with_nonzero_margin`` and
+    ``directional_side_with_zero_margin`` (cross-field checks that sit past the
+    ``set_target_without_margin`` guard, so a null margin cannot reach them),
+    and ``set_target_without_confidence`` (same guard). Those are the cycles to
+    net back in.
     An unquoted ``decision_mode`` costs the diagnosis instead: the block stops
     parsing at all and is recorded as a bare ``invalid_output``.
     """
@@ -617,10 +627,11 @@ cycle is recorded as a model-format failure.
 
 The "requested_target_margin_pct" and "confidence" placeholders are quoted only
 so the block above stays valid JSON: write those two as bare JSON numbers.
-Where the rules below call for null — including for "target_side" — write the
-JSON literal null, without quotes. Keep the quotes on "decision_mode", on
-"rationale", and on every entry of "key_risks". A quoted number ("35") or a
-quoted null ("null") is discarded exactly like a leftover placeholder.
+Every other field's real value is a string and keeps its quotes —
+"decision_mode", "target_side", "rationale", and every entry of "key_risks" —
+except where the rules below call for null, "target_side" included: write that
+as the JSON literal null, without quotes. A quoted number ("35") or a quoted
+null ("null") is discarded exactly like a leftover placeholder.
 
 Rules (violations are discarded and treated as maintain_current — they are
 never repaired or rounded):

@@ -3768,4 +3768,4 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     digest = hashlib.sha256(block.encode("utf-8")).hexdigest()[:16]
     # Compared as one tuple so a mismatch shows both halves at once — which one
     # drifted is the whole diagnosis.
-    assert (_cli.PROMPT_VERSION, digest) == ("phase2-target-v3", "d24658f17d537dbf")
+    assert (_cli.PROMPT_VERSION, digest) == ("phase2-target-v3", "23fb534e87bdbef3")

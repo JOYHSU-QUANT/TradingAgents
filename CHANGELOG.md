@@ -358,11 +358,15 @@ Breaking changes within the 0.x line are called out explicitly.
   explicitly if the distribution is plotted at all. The proposal rate needs one
   correction of its own: a fail-closed row stores `requested_target_margin_pct`
   as NULL whatever the model asked for, so the cycles that prove a numeric
-  margin was nevertheless supplied — anything tagged after that coercion
-  succeeds: `margin_off_step_grid`, `margin_out_of_range`,
-  `set_target_without_confidence`, `invalid_key_risks` — must be netted back in,
-  or a recovered model reads as one that never proposed. `margin_not_numeric`
-  and `confidence_not_numeric` are **not** in that set despite looking like it:
+  margin was nevertheless supplied must be netted back in, or a recovered model
+  reads as one that never proposed. Those are the five tags reachable **only**
+  once the margin coerced to a number: `margin_off_step_grid` and
+  `margin_out_of_range`, plus `flat_with_nonzero_margin`,
+  `directional_side_with_zero_margin` and `set_target_without_confidence`, which
+  all sit past the `set_target_without_margin` guard. "Anything tagged after the
+  coercion" is the wrong rule — coercion succeeds on a null margin too, so
+  `invalid_key_risks` and `missing_rationale` are reachable with nothing
+  proposed. `margin_not_numeric` and `confidence_not_numeric` are likewise out:
   margin is coerced first, so the second only proves margin was null-or-integer,
   and a `maintain_current` that quoted its `"null"` lands on the first.
 

@@ -535,9 +535,18 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
 
     Two deliberate asymmetries in the block. ``confidence`` is the one field the
     parser lets be null whose placeholder does not advertise ``|null``: the
-    prompt is narrower than the contract on purpose, so that every cycle yields
-    a confidence number and the distribution stays measurable — which is the
-    whole point of a run being judged on whether conviction spread out again.
+    prompt is narrower than the contract on purpose, so that every *parsed*
+    cycle carries a confidence number rather than opting out of the one signal
+    that says how strongly the model held its view.
+
+    That is only true of parsed cycles, and the gap matters when reading a
+    before/after: a fail-closed cycle stores ``confidence`` as NULL
+    (``risk_gate._no_target_result``), so switching to this block deletes the
+    old echo's ``0.55`` spike from the histogram **whether or not the model
+    changed its behaviour**. A confidence distribution compared across the
+    version boundary must therefore render the NULL bucket as its own visible
+    share of all cycles; on its own, "the spike is gone" is an artifact of the
+    prompt change, not evidence about conviction.
     And the quotes are load-bearing in both directions: they are an artifact
     only on the two numeric fields and on a null ``target_side``, so the text
     names what to unquote rather than telling the model to strip quotes

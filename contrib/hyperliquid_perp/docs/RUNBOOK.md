@@ -125,9 +125,13 @@ prompt 的 context／format 契約改 shape 時，另要 bump `cli.py` 的
 部署只改 prompt、且目的正是量測「這個 prompt 改動有沒有效」，那就刻意讓現有 run 跨過
 部署點，改以 `ai_inputs.prompt_version` 切段——同一個 run 的市場條件與帳戶狀態連續，
 比開新 run 更乾淨。前提是那個 run 的**策略價值已經是零**（否則等於汙染基線），且判讀
-只看 prompt 敏感的指標（提案率、信心分布），不看權益曲線。`phase2-target-v3` 就打算
-照這條例外部署——跨過部署點的會是最後成交停在 2026-07-16、此後零成交、策略價值歸零的
-`paper-BTC`。
+只看 prompt 敏感的指標，不看權益曲線。`phase2-target-v3` 就打算照這條例外部署——跨過
+部署點的會是最後成交停在 2026-07-16、此後零成交、策略價值歸零的 `paper-BTC`。
+
+判讀時**主判準是提案率**（`requested_target_margin_pct` 非 null 的佔比）。信心分布只能
+當輔助，而且必須把 `confidence IS NULL` 當成一個看得見的桶一起畫：fail-closed 的 cycle
+存的是 NULL，所以光是換 prompt 就會讓舊段照抄的信心尖峰整批消失——**模型行為完全沒變
+也會出現這個變化**，把它讀成「信心散開了」就是被自己的部署騙了。
 
 **空倉才換段（硬規則）**：舊 run 還有未平倉倉位時不要換段。換段後那個倉位
 會永遠凍結在舊段 DB——沒人看管、沒有 SL/TP，舊段末端 equity 掛著一筆未實現
@@ -184,6 +188,14 @@ deploy 的 restart 不是修復（§3 的警告同樣適用）——先照 §5 �
 LLM 呼叫**之前**的失敗（連線、warmup、payload 寫入）零 AI 花費——LLM 逾時／
 限流類的 api_failed 每次嘗試（最多 3 次）都已產生費用。
 
+`invalid_output` cycle（模型輸出不合契約、fail-closed 成 `maintain_current`）
+與 `api_failed` 不同：它**計入** 30 輪門檻，且每筆都會把
+`ai_outputs.risk_action` 寫成 `invalid_fail_closed`——那是文件上的 model-drift
+告警值（見 phase2-data.md）。`phase2-target-v3` 起這個值會成批出現屬預期
+（模型照抄 schema 區塊由「合法」變成「不合法」），不是新故障；真正要看的是它
+有沒有隨著時間下降、以及提案率有沒有上來。判斷成因看 `risk_reason`：整段照抄
+記 `invalid_decision_mode`，找不到 JSON 區塊才是 `invalid_output`。
+
 ## 6. 驗收（約 5 天後）
 
 ```bash
@@ -196,7 +208,7 @@ python -m contrib.hyperliquid_perp validate --run-id paper-BTC
 
 | `validate` exit | 意義 | 下一步 |
 |---|---|---|
-| `0` | `cycle_count >= 30` 且 orphan／snapshot／replay mismatch 全為 0 | **可進 Phase 3** |
+| `0` | `cycle_count >= 30` 且 orphan／snapshot／replay mismatch 全為 0 | **可進 Phase 3**——但 `cycle_count` 含 `invalid_output`（那裡量的是「排程有沒有在跑」），而 paper 報告沒有 live 那個 `invalid_output_count` 欄可以拆。下判斷前先看同一份報告的 `order_count`，必要時到 export 的 `decision_attempts.csv` 數 status 分佈：30 個解不開、一單沒下的 run 一樣會印 exit 0 |
 | `4` | 資料一致但 cycles 未滿 30 | 繼續掛著跑 |
 | `5` | integrity failure（orphan／mismatch／store 壞掉） | 先調查再相信任何結果 |
 | `1` | 操作錯誤（db／run 不存在） | 檢查 `--db`／`--run-id` |

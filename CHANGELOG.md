@@ -323,10 +323,24 @@ Breaking changes within the 0.x line are called out explicitly.
   cycles used to parse as valid `maintain_current` and therefore counted toward
   the live validator's ≥30 `cycle_count` gate, which admits `completed` only; a
   live acceptance run will now need proportionally more cycles. The paper
-  validator is unaffected (it counts `invalid_output` toward its own gate). The
+  validator still counts them toward its own gate — which is the half worth
+  saying out loud: its `cycle_count` cannot tell 30 decisions from 30
+  unparseable outputs, and unlike the live report it carries no
+  `invalid_output_count` to separate them, so read `order_count` and the
+  exported `decision_attempts` statuses before trusting `phase3_ready`. The
   one-shot `python -m contrib.hyperliquid_perp.main` path also exits **3**
   (documented in SETUP.md as the model-drift alarm) on an echo that previously
   exited 0; the paper and live daemons do not go through that path.
+
+  Each such cycle now stores `risk_action = invalid_fail_closed` — documented in
+  `phase2-data.md` as the model-drift alarm — plus `risk_reason` /
+  `decision_reason = invalid_decision_mode`, `confidence = NULL` and an empty
+  `key_risks`, where the same echo previously stored `approved` /
+  `maintain_current` / `0.55`. Expect the alarm value in bulk at first. The NULL
+  confidence also biases any before/after comparison of the confidence
+  distribution: the old echo's `0.55` spike disappears whether or not the model
+  changed, so judge the change on the proposal rate and render the NULL bucket
+  explicitly if the distribution is plotted at all.
 
 ### Fixed
 

@@ -461,27 +461,46 @@ def test_format_instructions_schema_block_has_no_copyable_answer():
     # The two numeric fields are quoted only to keep the block valid JSON, which
     # invites substituting in place and keeping the quotes — a shape the parser
     # rejects (test_invalid_margin_not_numeric, test_invalid_confidence_not_numeric).
-    # Pin both halves: which fields to unquote, and that the instruction stays
-    # scoped. A blanket "unquote" would strip decision_mode's quotes, and an
-    # unparseable block is recorded as a bare invalid_output — same lost cycle,
-    # but without a tag naming the field that broke.
-    # Both halves need their *contents* pinned, not just their opening clause:
-    # dropping "(unless it is null)", or flipping "write null as the JSON
-    # literal null" to the quoted string, would each steer the model into
-    # invalid_target_side /
-    # margin_not_numeric — a discarded cycle, the very thing this contract is
-    # being reshaped to avoid — while every other test stayed green.
-    assert (
-        'Keep the quotes wherever the real value is a string: "decision_mode", '
-        '"target_side" (unless it is null), "rationale", and every entry of "key_risks".'
-        in normalized
-    )
+    # Pin both halves by their *contents*, not just their opening clause. A
+    # blanket "unquote" would strip decision_mode's quotes, and an unparseable
+    # block is recorded as a bare invalid_output — the same lost cycle, minus
+    # the tag naming the field that broke. In the other direction, dropping
+    # "(unless it is null)" steers a null target_side into invalid_target_side,
+    # and quoting the JSON literal null does the same to whichever field is
+    # null. Each is a discarded cycle, the very thing this contract is being
+    # reshaped to avoid, and each left every other test green.
+    # Pinned as two narrow needles rather than the whole sentence: the sentence
+    # verbatim would also fail on a harmless rewording of its opening clause,
+    # and then a deletion and a reword are indistinguishable from the failure.
+    assert '"target_side" (unless it is null)' in normalized
+    assert 'and every entry of "key_risks"' in normalized
     assert (
         'The "requested_target_margin_pct" and "confidence" placeholders are quoted only'
         in normalized
     )
     assert "write those two as bare JSON numbers" in normalized
     assert "write null as the JSON literal null" in normalized
+
+
+def test_free_text_placeholders_stay_legal_on_purpose():
+    # The mirror of the test below: rationale and key_risks are NOT type-illegal,
+    # so a model that fills the four typed fields itself and leaves these two
+    # echoed still produces a live sized target carrying a placeholder rationale.
+    # That is the documented, accepted carve-out (see decision_format_instructions)
+    # — direction and size were still the model's own choices. Pinned so that
+    # tightening it, or widening the prompt's four-field promise to all six,
+    # is a deliberate edit rather than a silent drift.
+    parsed = parse_target_decision(
+        _text(
+            rationale="<one short paragraph explaining the decision>",
+            key_risks=["<risk>", "<risk 2 — optional; 3 entries total maximum>"],
+        ),
+        _CFG,
+    )
+    assert parsed.is_valid
+    assert parsed.decision.decision_mode is DecisionMode.SET_TARGET
+    assert parsed.decision.target_side is TargetSide.LONG
+    assert parsed.decision.rationale.startswith("<one short paragraph")
 
 
 @pytest.mark.parametrize(

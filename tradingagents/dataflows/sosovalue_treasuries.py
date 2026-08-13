@@ -304,8 +304,8 @@ def _parse_purchase_rows(data: list, ticker: str) -> list[dict]:
     # total, each company's as-of date, the concentration share, the
     # listing-order check, and the derived-delta baseline.
     #
-    # The API serves DATES newest-first but lists two rows sharing one date
-    # OLDEST-first. No treasuries fixture carries a duplicate date, so the
+    # The API serves DATES newest-first; two rows sharing one date are taken to
+    # arrive OLDEST-first. No treasuries fixture carries a duplicate date, so the
     # evidence is the sibling endpoint of the same API family:
     # tests/fixtures/sosovalue_macro_history_nfp.json holds 2025-12-16 twice,
     # actual=-105 then actual=64, and the ``previous`` chain
@@ -916,14 +916,26 @@ def get_btc_treasury_data(
 
     Raises:
         SoSoValueError: if ``curr_date`` is not a yyyy-mm-dd date, or if
-            ``asset`` is truthy but not a string. A caller's malformed argument
+            ``asset`` is truthy but not a string (a caller's malformed argument
             is reported as this vendor's error class rather than left to escape
             as a raw ``ValueError``/``AttributeError``, which the router would
             render into the model-visible sentinel — with the argument echoed
-            verbatim in the ``curr_date`` case. An unrecognized but well-formed
-            asset is NOT an error: it returns a no-signal message. Vendor-side
-            failures do not raise here either; they degrade to a stale snapshot
-            or a disabled/unavailable note.
+            verbatim in the ``curr_date`` case); or if the live fetch fails —
+            including on a pure network error — and no cache is usable, because
+            none exists or the newest is past ``MAX_STALE_DAYS``. An
+            unrecognized but well-formed asset is NOT an error: it returns a
+            no-signal message.
+        SoSoValueRateLimitError: same no-usable-cache case when the sweep died
+            on a 429; the type is preserved through the wrap so the router can
+            classify by behaviour.
+        SoSoValueNotConfiguredError: if the key is unset or rejected. Never
+            absorbed by the stale fallback, so the emergency-disable flip takes
+            effect on the next call.
+
+    A degraded serve is what happens INSTEAD of raising only while a usable
+    cache exists; the disabled/unavailable note the caller sees in the other
+    cases is produced by ``route_to_vendor`` catching these, downstream of the
+    raise rather than in place of it.
     """
     if look_back_days is None or look_back_days <= 0:
         look_back_days = DEFAULT_LOOKBACK_DAYS

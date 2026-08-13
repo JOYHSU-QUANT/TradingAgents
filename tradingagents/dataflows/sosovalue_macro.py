@@ -149,10 +149,13 @@ THOUSANDS_EVENTS = ("Nonfarm Payrolls", "Initial Jobless Claims")
 #
 # It is NOT a claim that the two sources the section merges cover the same
 # span: the deep histories reach the full 14 days, while the calendar's last
-# EVENT-BEARING day-row sat 13 days out in the live capture — and it falls
-# short of 14 whenever the 14th day happens to be quiet, because the feed emits
-# a day-row only where it has events. The reach note below therefore fires on
-# ordinary serves and is worded not to resolve which of the two causes it is.
+# EVENT-BEARING day-row sat 13 days out in the live capture — because the feed
+# emits a day-row only where it has events, so the measured reach falls short
+# whenever NO day-row at or beyond day 14 carries any (not merely when day 14
+# itself is quiet: the reach is measured off the last dated row globally, which
+# a wider horizon or a historical curr_date can push well past the window).
+# The reach note below therefore fires on ordinary serves and is worded not to
+# resolve which of the two causes it is.
 AHEAD_DAYS = 14
 
 # Default trailing window for the released section when the caller does not
@@ -896,12 +899,24 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         carries no Fed rate decisions.
 
     Raises:
-        SoSoValueError: if ``curr_date`` is not a yyyy-mm-dd date. A caller's
+        SoSoValueError: if ``curr_date`` is not a yyyy-mm-dd date (a caller's
             malformed argument is reported as this vendor's error class rather
             than left to escape as a raw ``ValueError``, which the router would
             render into the model-visible sentinel with the argument echoed
-            verbatim. Vendor-side failures do NOT raise here — they degrade to
-            a stale snapshot or a disabled/unavailable note.
+            verbatim); or if the live fetch fails — including on a pure network
+            error — and no cache is usable, because none exists or the newest
+            is past ``MAX_STALE_DAYS``.
+        SoSoValueRateLimitError: same no-usable-cache case when the sweep died
+            on a 429; the type is preserved through the wrap so the router can
+            classify by behaviour.
+        SoSoValueNotConfiguredError: if the key is unset or rejected. Never
+            absorbed by the stale fallback, so the emergency-disable flip takes
+            effect on the next call.
+
+    A degraded serve is what happens INSTEAD of raising only while a usable
+    cache exists; the disabled/unavailable note the caller sees in the other
+    cases is produced by ``route_to_vendor`` catching these, downstream of the
+    raise rather than in place of it.
     """
     if look_back_days is None or look_back_days <= 0:
         look_back_days = DEFAULT_LOOKBACK_DAYS

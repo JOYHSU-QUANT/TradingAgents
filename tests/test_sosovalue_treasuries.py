@@ -923,7 +923,11 @@ class TestRender:
         assert "Coverage incomplete (2 of 4 selected companies)" in report
         assert "HUT, RIOT" in report
         assert "1 listing entry had no usable ticker" in report
-        assert "top 4 of 57 listed companies" in report
+        assert "top 4 of 57 readable listing entries (" in report
+        assert "1 further entry could not be read)" in report
+        # The denominator is len(listing) AFTER the unusable drop, so it must
+        # not be presented as the provider's own count of listed companies.
+        assert "57 listed companies" not in report
 
     def test_empty_histories_are_disclosed_separately_from_failures(self):
         snapshot = _snapshot(companies_total=57, companies_empty=["HUT"])
@@ -1560,3 +1564,53 @@ class TestCallerArgumentsCannotForgeStructure:
         assert cells[3] == "—"  # Cost, blank despite being a filed row
         assert "from holdings change since" not in row_2026
         assert "derived from a holdings change" not in report.split("_BTC change is positive")[0]
+
+
+# --------------------------------------------------------------------------- #
+# the coverage denominator, and caller-supplied argument guards
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+class TestListingDenominatorAndArgumentGuards:
+    def test_a_shrunk_denominator_is_not_presented_as_the_providers_count(self):
+        # companies_total is len(listing) AFTER _parse_company_list drops
+        # entries with no valid ticker, so "of 57 listed companies" stated a
+        # provider figure short by exactly this client's drops — the two
+        # numbers either side of "of" came from different universes.
+        report = _render(_snapshot(companies_total=57, companies_unusable=1))
+        assert "of 57 readable listing entries (" in report
+        assert "1 further entry could not be read)" in report
+        assert "57 listed companies" not in report
+        # One parenthetical, not two back to back: the shortfall rides inside
+        # the ordering clause rather than opening a second bracket.
+        coverage = report.split("Coverage:")[1].split("| Window ending")[0]
+        assert ") (" not in coverage
+
+    def test_a_clean_listing_still_reads_as_listed_companies(self):
+        # The control: with nothing dropped the two numbers do share a
+        # universe, and the plain wording is the accurate one.
+        report = _render(_snapshot(companies_total=57))
+        assert "of 57 listed companies" in report
+        assert "readable listing entries" not in report
+
+    def test_a_non_integer_look_back_days_is_a_vendor_error(self):
+        # Reaches ``<=`` first without the guard, where the TypeError escapes
+        # the taxonomy into the router's bare except and is rendered into the
+        # model-visible sentinel. Raised before _load_snapshot, so no network.
+        with pytest.raises(sosovalue_common.SoSoValueError, match="look_back_days"):
+            sosovalue_treasuries.get_btc_treasury_data("BTC", "2026-08-11", "90")
+
+    def test_a_bool_look_back_days_is_rejected_rather_than_meaning_one_day(self):
+        # It passes isinstance(x, int), so without the explicit bool arm True
+        # silently means a one-day window instead of the default.
+        with pytest.raises(sosovalue_common.SoSoValueError, match="look_back_days"):
+            sosovalue_treasuries.get_btc_treasury_data("BTC", "2026-08-11", True)
+
+    def test_the_curr_date_error_echoes_the_argument_once(self):
+        # _sanitize's ``limit`` is documented for isolated fragments, never for
+        # flattening a whole exception message — and strptime's own message
+        # only repeats the argument, so echoing it printed it twice.
+        with pytest.raises(sosovalue_common.SoSoValueError) as exc:
+            sosovalue_treasuries.get_btc_treasury_data("BTC", "2026-13-99", None)
+        assert str(exc.value).count("2026-13-99") == 1
+        assert "does not match format" not in str(exc.value)
+        assert "(str)" in str(exc.value)

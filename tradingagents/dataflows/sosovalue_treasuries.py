@@ -747,6 +747,20 @@ def _load_snapshot() -> _TreasurySnapshot:
     cached = _read_cache(path)
     if cached:
         age_h = _cache_age_hours(cached["fetched_at"])
+        # Every degradation bucket is named here and every exclusion argued
+        # here, following the ETF module's TTL site and the macro twin — the
+        # enumeration is what stops a new bucket being wired into the report
+        # and forgotten by the refresh. Shortened only for companies_failed
+        # (429 / network / breaker, transient by definition). NOT shortened:
+        #   companies_empty — listed but not yet filing; no retry heals it.
+        #   companies_unusable — a listing entry whose ticker fails validation
+        #     is deterministic, same payload drops the same entry every sweep
+        #     (the ETF module settled this for its funds_unusable twin).
+        #   order_unverified — a fact about the listing versus filed holdings,
+        #     not lost data; and whenever its TOO_FEW arm is caused by
+        #     something retriable, companies_failed is already non-empty.
+        # The 6h value is itself deliberate (see the constant): do not drag it
+        # back to the family's 1h.
         ttl = INCOMPLETE_CACHE_TTL_HOURS if cached["companies_failed"] else CACHE_TTL_HOURS
         if age_h is not None and 0 <= age_h < ttl:
             return _snapshot_from(cached, cached["fetched_at"], stale=False)
@@ -916,7 +930,8 @@ def get_btc_treasury_data(
         an implied US$/BTC where cost was filed), and coverage caveats.
 
     Raises:
-        SoSoValueError: if ``curr_date`` is not a yyyy-mm-dd date, or if
+        SoSoValueError: if ``curr_date`` is not a yyyy-mm-dd date, if
+            ``look_back_days`` is not an integer, or if
             ``asset`` is truthy but not a string (a caller's malformed argument
             is reported as this vendor's error class rather than left to escape
             as a raw ``ValueError``/``AttributeError``, which the router would
@@ -938,6 +953,18 @@ def get_btc_treasury_data(
     cases is produced by ``route_to_vendor`` catching these, downstream of the
     raise rather than in place of it.
     """
+    # Guarded like curr_date and asset below, and for the same reason: a
+    # non-int reaches ``<=`` first, where the TypeError escapes the vendor
+    # taxonomy into the router's bare except and is rendered into the
+    # model-visible sentinel. bool is rejected explicitly even though it passes
+    # isinstance(x, int) — True would silently mean a one-day window rather
+    # than the default. Mirrors the macro twin.
+    if look_back_days is not None and (
+        isinstance(look_back_days, bool) or not isinstance(look_back_days, int)
+    ):
+        raise SoSoValueError(
+            f"look_back_days {_sanitize(repr(look_back_days), limit=120)} is not an integer"
+        )
     if look_back_days is None or look_back_days <= 0:
         look_back_days = DEFAULT_LOOKBACK_DAYS
 
@@ -952,9 +979,15 @@ def get_btc_treasury_data(
     try:
         curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     except (ValueError, TypeError) as e:
+        # The exception's own message only repeats curr_date and the format
+        # string, so echoing it prints the caller's argument a SECOND time —
+        # and _sanitize's ``limit`` is documented for isolated fragments, never
+        # for flattening a whole exception message. The value is echoed once,
+        # capped, with the type name carrying what the TypeError case would
+        # otherwise have contributed. Mirrors the macro twin.
         detail = _sanitize(curr_date, limit=200)
         raise SoSoValueError(
-            f"curr_date {detail!r} is not a yyyy-mm-dd date ({_sanitize(e, limit=200)})"
+            f"curr_date {detail!r} ({type(curr_date).__name__}) is not a yyyy-mm-dd date"
         ) from e
     curr_date = curr_dt.strftime("%Y-%m-%d")
 
@@ -1151,10 +1184,27 @@ def get_btc_treasury_data(
         f"listing's head is missing from every figure below with nothing above naming "
         f"it._"
     )
+    # "listed companies" only while the two numbers come from the same
+    # universe. companies_total is len(listing) AFTER _parse_company_list drops
+    # entries with no valid ticker, so with companies_unusable > 0 the
+    # denominator is the provider's count minus this client's drops — "top 15
+    # of 47 listed companies" would state a provider figure that is short by
+    # exactly those drops. The caveat above discloses that entries were skipped
+    # and that the top-N cut may be wrong, but never that the denominator
+    # itself shrank.
+    # The shortfall rides inside the ordering parenthetical rather than opening
+    # a second one: two bracketed clauses back to back on the same line read as
+    # a formatting slip, and this line already carries three fields.
+    listing_scope = f"{snapshot.companies_total} listed companies"
+    unreadable = ""
+    if snapshot.companies_unusable:
+        n_bad = snapshot.companies_unusable
+        listing_scope = f"{snapshot.companies_total} readable listing entries"
+        unreadable = f"; {n_bad} further {_plural(n_bad, 'entry', 'entries')} could not be read"
     header_lines.append(
         f"- Source: SoSoValue OpenAPI (BTC treasuries) | Snapshot fetched "
         f"{snapshot.fetched_at} | Coverage: top {selected} of "
-        f"{snapshot.companies_total} listed companies ({ordering}) | Window ending "
+        f"{listing_scope} ({ordering}{unreadable}) | Window ending "
         f"{curr_date}"
     )
     header = "\n\n".join(header_lines) + "\n"

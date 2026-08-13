@@ -59,6 +59,26 @@ Breaking changes within the 0.x line are called out explicitly.
   disclosed, counted partial rather than failing the category into a stale
   serve that expires — the calendar is parsed before any history request, so
   failing it over one bad row would discard every tracked event's figures too.
+  An unreadable day-row is disclosed by the dates it cost (a row whose only
+  fault was its event list still carries a usable one) and shortens the cache
+  TTL to the incomplete value, so the hole is retried within the hour rather
+  than re-served for the full period; the count stays the authority on how much
+  was dropped, since a row that lost its date too can be counted but not named,
+  and a date the report still carries is withheld rather than listed as lost.
+  Coverage claims are worded so that content **this client** dropped is never
+  read back as the provider's own silence: the snapshot's calendar span is
+  labelled as the snapshot's rather than the provider's, and where a caveat in
+  the same header already names the cause of a short calendar — a dropped row,
+  or a snapshot fetched before the report's date — the report names it too
+  instead of calling it unknowable. Reading an empty window as genuinely quiet
+  additionally requires that the scheduled table really is empty (it is fed by
+  forward-dated event histories as well as by the calendar) and that the
+  snapshot is current, and it no longer extends to events this feed does not
+  carry at all, which would have contradicted the standing Fed-decision caveat.
+  A malformed caller argument — a non-integer `look_back_days`, an unparseable
+  `curr_date` — is reported as this vendor's error class rather than escaping
+  as a raw `TypeError`, and the treasuries coverage denominator no longer
+  presents a client-shrunk listing count as the provider's own.
 - **Crypto options-implied volatility (Deribit).** A new keyless `options_data`
   category, bound to the **market** analyst for crypto assets only (vol regime
   is a technical read, so it sits alongside the indicators rather than with the

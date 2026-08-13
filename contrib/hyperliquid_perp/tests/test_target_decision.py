@@ -187,8 +187,12 @@ def test_invalid_margin_boolean_is_not_numeric():
     _assert_fail_closed(parsed, "margin_not_numeric")
 
 
-def test_invalid_confidence_not_numeric():
-    parsed = parse_target_decision(_text(confidence="high"), _CFG)
+@pytest.mark.parametrize("value", ["high", "0.78"])
+def test_invalid_confidence_not_numeric(value):
+    # "0.78" as well as prose: the format contract promises a *quoted number* is
+    # discarded, and only a numeric-looking string can catch a coercion that
+    # starts str-parsing (`Decimal(str(value))` would happily accept it).
+    parsed = parse_target_decision(_text(confidence=value), _CFG)
     _assert_fail_closed(parsed, "confidence_not_numeric")
 
 
@@ -442,12 +446,20 @@ def test_format_instructions_schema_block_has_no_copyable_answer():
     assert payload["target_side"] == "<long|short|flat|null>"
     assert payload["requested_target_margin_pct"] == "<integer 0-60|null>"
     assert payload["confidence"] == "<0.0-1.0>"
+    normalized = " ".join(text.split())
+    # Fail-closed survives without any instruction at all, so the suite would
+    # stay green if the directive to substitute went missing — and the change
+    # would then do nothing but hand the model an unexplained block. Pin it.
+    assert "schema, not an answer" in normalized
+    assert "every `<...>` placeholder MUST be replaced" in normalized
     # The last two are quoted only to keep the block valid JSON, which invites
     # substituting in place and keeping the quotes — a shape the parser rejects
     # (test_invalid_margin_not_numeric, test_invalid_confidence_not_numeric).
-    # So the prompt must keep telling the model to drop the quotes.
-    normalized = " ".join(text.split())
-    assert '"requested_target_margin_pct" and "confidence" as bare JSON numbers' in normalized
+    # So the prompt must keep telling the model to drop the quotes on those two
+    # specifically: a blanket "unquote" would strip decision_mode's quotes and
+    # make the whole block unparseable, losing the answer instead of a field.
+    assert "Keep the quotes wherever the real value is a string" in normalized
+    assert "write those two as bare JSON numbers" in normalized
 
 
 @pytest.mark.parametrize(
@@ -488,9 +500,10 @@ def test_format_instructions_reflect_config():
     normalized = " ".join(text.split())
     assert "confidence below 0.4 is rejected" in normalized
     assert "needs confidence >= 0.7" in normalized  # default resize bar, other clause
-    # The schema block renders the same grid it advertises in prose. (Its
-    # unparseability is config-independent — the other three placeholders are
-    # constant literals — so it is pinned once, in the echo test above.)
+    # The schema block renders the same *bounds* it advertises in prose (the
+    # step lives only in the prose bullet). Its unparseability is
+    # config-independent — the other three typed placeholders are constant
+    # literals — so that is pinned once, in the echo test above.
     assert '"requested_target_margin_pct": "<integer 0-80|null>"' in text
 
 

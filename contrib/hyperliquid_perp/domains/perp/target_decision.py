@@ -532,6 +532,17 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     :func:`extract_json_block` takes the last parseable object, so a block that
     reads as a directional decision would become a live sized target if echoed.
     Fail-closed reaches the same harmless no-op — but countable.
+
+    Two deliberate asymmetries in the block. The ``confidence`` placeholder is
+    the only one that does not advertise ``|null``, though the parser accepts a
+    null confidence on ``maintain_current``: the prompt is narrower than the
+    contract on purpose, so that every cycle yields a confidence number and the
+    distribution stays measurable — which is the whole point of a run that is
+    being judged on whether conviction spread out again. And the quotes are
+    load-bearing in both directions: they are an artifact only on the two
+    numeric fields, so the text says which ones to unquote rather than telling
+    the model to strip quotes generally — an unquoted ``decision_mode`` would
+    make the block unparseable and lose the entire answer, not just a field.
     """
     lo = config.ai_target_margin_min_pct
     hi = config.ai_target_margin_max_pct if max_pct is None else max_pct
@@ -548,7 +559,7 @@ code block, with exactly these six fields and no others:
   "requested_target_margin_pct": "<integer {lo}-{hi}|null>",
   "confidence": "<0.0-1.0>",
   "rationale": "<one short paragraph explaining the decision>",
-  "key_risks": ["<risk>", "<risk>"]
+  "key_risks": ["<risk>", "<more risks, {_MAX_KEY_RISKS} at most>"]
 }}
 ```
 
@@ -558,11 +569,12 @@ replaced with a real value of your own. A leftover placeholder in
 is not a legal value, so the whole output is discarded and treated as
 maintain_current.
 
-Every placeholder above is quoted only so the schema block stays valid JSON.
-Replace the quotes along with the placeholder wherever the real value is not a
-string: write "requested_target_margin_pct" and "confidence" as bare JSON
-numbers, and write null as the JSON literal null. A quoted number ("35") or a
-quoted null ("null") is discarded exactly like a leftover placeholder.
+Keep the quotes wherever the real value is a string: "decision_mode",
+"target_side" (unless it is null), "rationale", and every entry of "key_risks".
+The "requested_target_margin_pct" and "confidence" placeholders are quoted only
+so the block above stays valid JSON — write those two as bare JSON numbers, and
+write null as the JSON literal null. A quoted number ("35") or a quoted null
+("null") is discarded exactly like a leftover placeholder.
 
 Rules (violations are discarded and treated as maintain_current — they are
 never repaired or rounded):

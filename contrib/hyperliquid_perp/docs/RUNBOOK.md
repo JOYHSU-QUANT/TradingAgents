@@ -121,6 +121,13 @@ pending funding、accounting replay 驗證、gap SL 檢查；若這次重啟真�
 prompt 的 context／format 契約改 shape 時，另要 bump `cli.py` 的
 `PROMPT_VERSION`，讓 `ai_inputs.prompt_version` 在資料裡標出改版點。
 
+**例外：只改 prompt 的 A/B 驗證**。上面那條規則是為了讓**績效指標**跨段可比。若這次
+部署只改 prompt、且目的正是量測「這個 prompt 改動有沒有效」，那就刻意讓現有 run 跨過
+部署點，改以 `ai_inputs.prompt_version` 切段——同一個 run 的市場條件與帳戶狀態連續，
+比開新 run 更乾淨。前提是那個 run 的**策略價值已經是零**（否則等於汙染基線），且判讀
+只看 prompt 敏感的指標（提案率、信心分布），不看權益曲線。`phase2-target-v3` 就是照
+這條例外部署到 `paper-BTC` 的。
+
 **空倉才換段（硬規則）**：舊 run 還有未平倉倉位時不要換段。換段後那個倉位
 會永遠凍結在舊段 DB——沒人看管、沒有 SL/TP，舊段末端 equity 掛著一筆未實現
 PnL，正是跨段對照要避免的汙染。等 cycle 自然回到空倉（或 AI 自己 flat 平倉）
@@ -206,6 +213,6 @@ python -m contrib.hyperliquid_perp validate --run-id paper-BTC
 | `--context-only` 不印倉位行／完整輪報 no usable account equity（exit 1） | `wallet_address` 還是佔位符；填真實唯讀地址。 |
 | 太年輕的標的每 4h 一筆 `api_failed` | 市場資料 warmup 不足，暖機完成前屬預期行為。 |
 | 每 4h 一筆 `api_failed`，error_message 是 `every technical indicator failed` 或 `… is/are unavailable`（點名 `atr_14`／`ema_20`／`ema_50` 中死掉的那些） | indicator 引擎（stockstats）壞掉或 regime 指標算不出來——三者任一缺席 regime 都會被捏造成 RANGING，daemon 與 one-shot 同樣拒跑（不燒 LLM）。（非空的 `indicators:` 清單漏配三者任一現在直接在 config load 擋下；會走到這裡的 config 成因只剩刻意的 `indicators: []`。）修 stockstats 相容性後，`--context-only` 走同一套 guard：照樣渲染但印同一句 refusal 警告並 exit 4（健康 context 是 exit 0），可拿來免 key 驗證修好了沒。 |
-| **每一個** cycle 都 `invalid_output`（fail-closed、零下單），且 log 裡不再出現 `structured-output invocation failed` fallback 警告 | 模型的 structured output 成功了，渲染輸出天生不含 Phase 2 target JSON → 解析必失敗。確認 `engine.structured_output` 沒被設成 `true`（perp 預設 false、強制 free-text 路徑）；若真的被設成 `true`，engine config 建構（provider 啟動）時會在 log＋stderr 雙通道發警告——直接搜 `engine.structured_output: true` 即可確認（兩個通道都含這段；`warning: ` 前綴只在 stderr 那份）。gate 生效的正向訊號是 paper/live log 每次 AI 呼叫三行 `structured output disabled by config; using free-text generation` INFO（Portfolio/Research Manager、Trader 各一；重試的 cycle 每次嘗試都會再印一組），看到它們就代表 free-text 路徑在跑。2026-07-27 paper-BTC 換模事故即此成因。 |
+| **每一個** cycle 都 `invalid_output`（fail-closed、零下單），且 log 裡不再出現 `structured-output invocation failed` fallback 警告 | 模型的 structured output 成功了，渲染輸出天生不含 Phase 2 target JSON → 解析必失敗。確認 `engine.structured_output` 沒被設成 `true`（perp 預設 false、強制 free-text 路徑）；若真的被設成 `true`，engine config 建構（provider 啟動）時會在 log＋stderr 雙通道發警告——直接搜 `engine.structured_output: true` 即可確認（兩個通道都含這段；`warning: ` 前綴只在 stderr 那份）。gate 生效的正向訊號是 paper/live log 每次 AI 呼叫三行 `structured output disabled by config; using free-text generation` INFO（Portfolio/Research Manager、Trader 各一；重試的 cycle 每次嘗試都會再印一組），看到它們就代表 free-text 路徑在跑。2026-07-27 paper-BTC 換模事故即此成因。**注意 `phase2-target-v3` 起有第二個成因與此症狀完全同形**（structured output 確實關著、三行 INFO 也都在，但每個 cycle 仍解不開）：schema 區塊改成型別非法佔位符後，模型整段照抄會 fail-closed。分辨方式是看 `ai_outputs.risk_reason`——照抄記 `invalid_decision_mode`，structured-output 事故記 `invalid_output`（連 JSON 區塊都找不到）。 |
 
 更多症狀見 [SETUP §7](./SETUP.md#7-troubleshooting)。

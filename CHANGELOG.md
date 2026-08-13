@@ -297,26 +297,46 @@ Breaking changes within the 0.x line are called out explicitly.
 ### Changed
 
 - **The perp decision prompt ships a schema, not a worked example.** The
-  output-format contract used to end with a complete, *valid* `maintain_current`
+  output-format contract used to carry a complete, *valid* `maintain_current`
   example (`confidence: 0.55`), and models returned it as their answer: on the
   `paper-BTC` run, 117 of 159 outputs (74%) reproduced its four decision fields
   verbatim, every output carrying exactly 0.55 was one of them, and the run went
-  21 days without a fill — the position was frozen because no decision was ever
-  proposed, not because risk gates rejected one. The block's values are now
+  21 days without a fill — the position was frozen because no *target* was ever
+  proposed, not because risk gates rejected one. The four typed fields now hold
   type-illegal placeholders (`"<set_target|maintain_current>"`, `"<0.0-1.0>"`,
-  …), rendered from the live config so the advertised margin grid still cannot
-  drift. An echo keeps landing on the same harmless `maintain_current` — the
-  parser fails closed on `decision_mode` — but is now tagged
-  `invalid_decision_mode` instead of counted as a decision. **Expect
-  `invalid_output` volume to rise**: that is previously-hidden echoing becoming
-  visible, not a new defect, and no validator gates on it. Placeholders are
-  quoted only to keep the block valid JSON, so the contract also spells out that
-  `requested_target_margin_pct` and `confidence` must be written as bare JSON
-  numbers and `null` as the JSON literal. `PROMPT_VERSION` moves to
+  …), with `requested_target_margin_pct`'s rendered from the live config so the
+  advertised grid still cannot drift; `rationale` and `key_risks` keep
+  legal-string placeholders, since only the typed fields decide whether an
+  output is a directional order. An echo keeps landing on the same harmless
+  `maintain_current` — the parser fails closed on `decision_mode` — but is now
+  tagged `invalid_decision_mode` instead of counted as a decision. The
+  `requested_target_margin_pct` and `confidence` placeholders are quoted only so
+  the block stays valid JSON, so the contract spells out that those two are
+  written as bare JSON numbers and `null` as the JSON literal, while every
+  genuinely-string field keeps its quotes. `PROMPT_VERSION` moves to
   `phase2-target-v3` so `ai_inputs.prompt_version` splits before/after when
   measuring whether the proposal rate recovered.
 
+  **Expect more unparseable cycles while echoing persists** — that is
+  previously-hidden echoing becoming visible, not a new defect — and note where
+  that lands. No validator has a threshold on `invalid_output_count`, but these
+  cycles used to parse as valid `maintain_current` and therefore counted toward
+  the live validator's ≥30 `cycle_count` gate, which admits `completed` only; a
+  live acceptance run will now need proportionally more cycles. The paper
+  validator is unaffected (it counts `invalid_output` toward its own gate). The
+  one-shot `python -m contrib.hyperliquid_perp.main` path also exits **3**
+  (documented in SETUP.md as the model-drift alarm) on an echo that previously
+  exited 0; the paper and live daemons do not go through that path.
+
 ### Fixed
+
+- **The daemon's pre-LLM context guards have a working test again.** When the
+  live loop's `on_blocking_read` callback was added to `main._build_context`,
+  `test_build_input_refuses_untradeable_indicators`'s two-argument stand-in was
+  not updated, so every one of its four cases raised `TypeError` at the call
+  site instead of exercising the warm-up / dead-indicator guards it targets —
+  and had been doing so since the callback landed. The stand-in now accepts the
+  keyword.
 
 - **Perp runs no longer lose the target-JSON contract to structured output.**
   The Hyperliquid Phase 2 target contract is injected as prompt text and only

@@ -496,7 +496,9 @@ safe mode**、四項 smoke 布林（`restart_reconciliation_passed`
 > cycle 也會報 `live_ready`（paper-BTC 換模後就出現過 6/6 `invalid_output`）。
 > 另注意 `phase2-target-v3` 起 prompt 的 schema 區塊是型別非法佔位符，模型整段照抄
 > 會落在 `invalid_output`（先前照抄是**合法**的 `maintain_current`，被算成 cycle）。
-> 所以此計數相對 v2 上升是預期中的顯性化，不代表新缺陷——要看的是提案率有沒有回來。
+> 所以相對 v2 會看到 **`invalid_output_count` 上升、`cycle_count` 同步下降**——這是
+> 既有照抄被顯性化，不是新缺陷，但 ≥30 那道門因此需要更多 cycle 才跨得過。要判斷
+> 修法有沒有效看的是提案率，不是這兩個計數。
 
 > **unprotected 秒數只算「沒有一張足以覆蓋的 SL」的時段**：§17.4 是
 > modify-before-cancel，所以 wire gate 擋掉一次 **modify** 時舊的那張 SL 可能還掛在

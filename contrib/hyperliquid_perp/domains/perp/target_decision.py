@@ -558,8 +558,11 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     before/after: at the parse seam ``risk_gate`` fails closed without passing
     a confidence, so the row stores NULL, and switching to this block deletes
     the old echo's ``0.55`` spike from the histogram **whether or not the model
-    changed its behaviour**. (Not every fail-closed row is NULL — the flip
-    re-run's re-validation does pass the parsed value through.) A confidence
+    changed its behaviour**. Every reachable fail-closed row stores NULL: the one
+    branch that would pass a parsed confidence through is the flip re-run's
+    re-validation, and it re-validates the SAME ``ParsedDecision`` against the
+    same config (so it cannot newly succeed) and writes no ``ai_outputs`` row
+    either way. A confidence
     distribution compared across the version boundary must therefore render the
     NULL bucket as its own visible share of all cycles; on its own, "the spike
     is gone" is an artifact of the prompt change, not evidence about conviction.
@@ -572,7 +575,17 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     gate discards what the model asked for, the row stores
     ``requested_target_margin_pct`` as NULL — so a model that HAS started
     proposing reads as one that has not, on the very metric this change is
-    judged by. Netting those two tags back in is part of reading the result.
+    judged by.
+
+    Reading the proposal rate therefore needs a correction, and the obvious one
+    is wrong in both directions. Those two tags are ambiguous rather than
+    evidence of a proposal: margin is coerced before confidence, so
+    ``confidence_not_numeric`` only proves margin was null-or-integer, and a
+    ``maintain_current`` that quoted its ``"null"`` lands on
+    ``margin_not_numeric``. What DOES prove a numeric margin was supplied is any
+    tag raised after that coercion succeeds — ``margin_off_step_grid``,
+    ``margin_out_of_range``, ``set_target_without_confidence``,
+    ``invalid_key_risks`` — and those are the ones to net back in.
     An unquoted ``decision_mode`` costs the diagnosis instead: the block stops
     parsing at all and is recorded as a bare ``invalid_output``.
     """
@@ -604,10 +617,10 @@ cycle is recorded as a model-format failure.
 
 The "requested_target_margin_pct" and "confidence" placeholders are quoted only
 so the block above stays valid JSON: write those two as bare JSON numbers.
-Where the rules below call for null, write the JSON literal null without
-quotes. Every other field's real value is a string and keeps its quotes. A
-quoted number ("35") or a quoted null ("null") is discarded exactly like a
-leftover placeholder.
+Where the rules below call for null — including for "target_side" — write the
+JSON literal null, without quotes. Keep the quotes on "decision_mode", on
+"rationale", and on every entry of "key_risks". A quoted number ("35") or a
+quoted null ("null") is discarded exactly like a leftover placeholder.
 
 Rules (violations are discarded and treated as maintain_current — they are
 never repaired or rounded):

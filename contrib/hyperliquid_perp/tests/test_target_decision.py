@@ -484,8 +484,14 @@ def test_format_instructions_schema_block_has_no_copyable_answer():
         in normalized
     )
     assert "write those two as bare JSON numbers" in normalized
-    assert "write the JSON literal null without quotes" in normalized
-    assert "Every other field's real value is a string and keeps its quotes" in normalized
+    # The two carve-outs a blanket "everything else is a string" got wrong:
+    # target_side's real value is null on maintain_current (the majority
+    # outcome), and key_risks is an array whose ENTRIES are the strings.
+    # Quoting a null target_side is invalid_target_side — the whole output
+    # discarded, on the highest-volume path in the contract.
+    assert 'call for null — including for "target_side" — write the' in normalized
+    assert "JSON literal null, without quotes" in normalized
+    assert 'on every entry of "key_risks"' in normalized
     # The consequence names the RECORD, not the position. Both are true, but
     # the measured v2 failure was a model that preferred a costless no-op, and
     # the old wording advertised non-substitution as a route to exactly that —
@@ -727,12 +733,15 @@ def test_the_echo_tag_boundary_is_pinned(mutate, reason):
     _assert_fail_closed(parse_target_decision(text, _CFG), reason)
 
 
-def test_the_echo_tag_is_a_proxy_not_a_proof():
+def test_an_echo_and_a_hallucinated_mode_are_indistinguishable():
     # invalid_decision_mode is emitted for ANY mode outside the two enum
-    # members, so a hallucinated one records a row byte-identical to a verbatim
-    # echo. The runbooks must not read the tag backwards as "this was an echo",
-    # and nothing else survives to tell them apart: the daemons clear
+    # members, so the runbooks must not read the tag backwards as "this was an
+    # echo". Asserted as an EQUALITY between the two shapes rather than as the
+    # tag of one of them — the latter is already covered by
+    # test_invalid_unknown_decision_mode and would pin nothing new. Nothing
+    # else survives to tell them apart either: both daemons clear
     # pending_raw_response on finalize.
-    _assert_fail_closed(
-        parse_target_decision(_text(decision_mode="hold"), _CFG), "invalid_decision_mode"
-    )
+    echo = parse_target_decision(decision_format_instructions(_CFG), _CFG)
+    hallucinated = parse_target_decision(_text(decision_mode="hold"), _CFG)
+    assert echo.invalid_reason == hallucinated.invalid_reason == "invalid_decision_mode"
+    assert echo.decision == hallucinated.decision

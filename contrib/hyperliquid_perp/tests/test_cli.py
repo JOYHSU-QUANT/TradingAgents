@@ -3736,14 +3736,16 @@ def test_live_smoke_flat_staged_long_prints_no_residual_warning(tmp_path, capsys
 def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     """The version stamp and the text it versions must move together.
 
-    RUNBOOK §1.5's A/B exception deliberately lets one run straddle a
+    RUNBOOK §4's A/B exception deliberately lets one run straddle a
     prompt-only deploy and segments the before/after populations on
     ``ai_inputs.prompt_version`` — which makes this stamp the ONLY thing
     separating them. It lives in ``cli.py`` while the text it versions lives in
-    ``domains/perp/target_decision.py``, with no import, no assertion and
-    nothing else in the suite referencing it, so a prompt edit that forgot the
-    bump would merge the two populations into one bucket and the merge would be
-    invisible in the data: the query still returns a clean two-value split.
+    ``domains/perp/target_decision.py``; ``cli.py`` does import that function,
+    but an import is not a coupling — nothing makes the constant track the
+    text, no assertion relates them, and nothing else in the suite references
+    the constant. So a prompt edit that forgot the bump would merge the two
+    populations into one bucket and the merge would be invisible in the data:
+    the query still returns a clean two-value split.
 
     The digest covers the block as rendered from ``DecisionConfig()``, so a
     changed config DEFAULT trips it too. That is the intended reading rather
@@ -3766,4 +3768,4 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     digest = hashlib.sha256(block.encode("utf-8")).hexdigest()[:16]
     # Compared as one tuple so a mismatch shows both halves at once — which one
     # drifted is the whole diagnosis.
-    assert (_cli.PROMPT_VERSION, digest) == ("phase2-target-v3", "8774ca9232056dd8")
+    assert (_cli.PROMPT_VERSION, digest) == ("phase2-target-v3", "d24658f17d537dbf")

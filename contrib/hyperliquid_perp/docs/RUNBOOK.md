@@ -123,9 +123,9 @@ prompt 的 context／format 契約改 shape 時，另要 bump `cli.py` 的
 **凡是跨越量測邊界的部署都要 bump，回滾也算**：回滾到舊 prompt 不算「改 shape」，
 但沿用已退役的舊值會讓 `GROUP BY prompt_version` 把 v3 之前與回滾之後併成同一桶，
 正好污染要拿來比的基線。退役過的值一律不得重用（回滾就給 `phase2-target-v4`，
-內容等不等於 v2 無所謂）。另注意 `decision_format_instructions` 的文字與這個常數
-不在同一個模組、彼此沒有 import，所以有一個測試把版本戳釘在渲染出來的區塊指紋上：
-改了 prompt 文字卻忘了改戳就會紅。
+內容等不等於 v2 無所謂）。另注意 `decision_format_instructions` 的文字與這個常數不在同一個
+模組——`cli.py` 確實 import 了它，但 import 不會讓常數跟著文字動——所以有一個測試把
+版本戳釘在渲染出來的區塊指紋上：改了 prompt 文字卻忘了改戳就會紅。
 
 **例外：只改 prompt 的 A/B 驗證**。上面那條規則是為了讓**績效指標**跨段可比。若這次
 部署只改 prompt、且目的正是量測「這個 prompt 改動有沒有效」，那就刻意讓現有 run 跨過
@@ -137,9 +137,13 @@ prompt 的 context／format 契約改 shape 時，另要 bump `cli.py` 的
 判讀時**主判準是提案率**（`requested_target_margin_pct` 非 null 的佔比）。**但這一欄
 會低估**：fail-closed 的 cycle 一律把它寫成 NULL，模型實際要求了什麼在 parse 接縫就被
 丟掉了，所以「提了案但格式被擋掉」與「根本沒提案」在這一欄完全同形。量提案率時要把
-`risk_reason` 為 `margin_not_numeric` 或 `confidence_not_numeric` 的 cycle 加回來算成
-提案——這兩個 tag 的意思正是模型填了數字、只是把引號留著。少了這一步，已經恢復提案的
-模型會被讀成「還是不提案」，剛好在這次改動要判生死的那個指標上。信心分布只能
+**margin 強制轉型成功之後**才發的 tag 的 cycle 加回來算成提案：
+`margin_off_step_grid`／`margin_out_of_range`／`set_target_without_confidence`／
+`invalid_key_risks`——它們都證明模型確實給了一個數值 margin。**不要**直接把
+`margin_not_numeric`／`confidence_not_numeric` 加回來：margin 比 confidence 早轉型，
+所以後者只證明 margin 是 null 或整數；而 `maintain_current` 把 `"null"` 加引號也會落進
+前者。兩個都兩義，單獨當提案會高估。少了這個修正，已經恢復提案的模型會被讀成「還是
+不提案」，剛好在這次改動要判生死的那個指標上；而 `raw_response` 不落地，事後補不回來。信心分布只能
 當輔助，而且必須把 `confidence IS NULL` 當成一個看得見的桶一起畫：fail-closed 的 cycle
 存的是 NULL，所以光是換 prompt 就會讓舊段照抄的信心尖峰整批消失——**模型行為完全沒變
 也會出現這個變化**，把它讀成「信心散開了」就是被自己的部署騙了。

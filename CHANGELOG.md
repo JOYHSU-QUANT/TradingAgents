@@ -311,9 +311,10 @@ Breaking changes within the 0.x line are called out explicitly.
   `maintain_current` — the parser fails closed — but is now tagged rather than
   counted as a decision. Which tag depends on the echo: a whole-block echo that
   keeps the block's quoting fails on `decision_mode`, the earliest of the four
-  the parser coerces; a partial echo fails on whichever placeholder it kept; and
-  an echo that also unquotes the numeric fields stops parsing as JSON and lands
-  on `invalid_output`. None of these tags is exclusive to echoing — a
+  the parser coerces; a partial echo fails on whichever **typed** placeholder it
+  kept (one that kept only `rationale` or `key_risks` parses cleanly, by
+  design); and an echo that also unquotes the numeric fields stops parsing as
+  JSON and lands on `invalid_output`. None of these tags is exclusive to echoing — a
   hallucinated `decision_mode` records identically — so read them as a proxy for
   it, not as proof. The `requested_target_margin_pct` and `confidence`
   placeholders are quoted only so the block stays valid JSON, so the contract
@@ -324,9 +325,9 @@ Breaking changes within the 0.x line are called out explicitly.
   proposal rather than an echo. `PROMPT_VERSION` moves to `phase2-target-v3` so
   `ai_inputs.prompt_version` splits before/after when measuring whether the
   proposal rate recovered; a test pins the stamp to a fingerprint of the
-  rendered block, since the two live in different modules with no import
-  between them and a prompt edit that forgot the bump would merge the two
-  populations silently.
+  rendered block, since the two live in different modules and nothing makes the
+  constant track the text, so a prompt edit that forgot the bump would merge the
+  two populations silently.
 
   **Expect more unparseable cycles while echoing persists** — that is
   previously-hidden echoing becoming visible, not a new defect — and note where
@@ -356,10 +357,14 @@ Breaking changes within the 0.x line are called out explicitly.
   changed, so judge the change on the proposal rate and render the NULL bucket
   explicitly if the distribution is plotted at all. The proposal rate needs one
   correction of its own: a fail-closed row stores `requested_target_margin_pct`
-  as NULL whatever the model asked for, so cycles tagged `margin_not_numeric` or
-  `confidence_not_numeric` — a model that filled the numbers in but kept the
-  quotes — must be netted back in, or a recovered model reads as one that never
-  proposed.
+  as NULL whatever the model asked for, so the cycles that prove a numeric
+  margin was nevertheless supplied — anything tagged after that coercion
+  succeeds: `margin_off_step_grid`, `margin_out_of_range`,
+  `set_target_without_confidence`, `invalid_key_risks` — must be netted back in,
+  or a recovered model reads as one that never proposed. `margin_not_numeric`
+  and `confidence_not_numeric` are **not** in that set despite looking like it:
+  margin is coerced first, so the second only proves margin was null-or-integer,
+  and a `maintain_current` that quoted its `"null"` lands on the first.
 
 ### Fixed
 

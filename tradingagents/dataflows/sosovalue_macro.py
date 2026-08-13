@@ -73,10 +73,10 @@ which the report flags whenever such a row is shown.
 
 Caching mirrors the family pattern: one rolling snapshot file, refreshed past
 ``CACHE_TTL_HOURS``, or the shorter ``INCOMPLETE_CACHE_TTL_HOURS`` while any
-tracked history FAILED, or the middle ``MALFORMED_CACHE_TTL_HOURS`` while a
-calendar day-row was dropped (an unknown event is not retried), stale-served
-on a fetch
-failure up to ``MAX_STALE_DAYS`` with a disclosed age, never written on
+tracked history FAILED — an unknown one is not retried — or the middle
+``MALFORMED_CACHE_TTL_HOURS`` while a calendar day-row was dropped;
+stale-served on a fetch failure up to ``MAX_STALE_DAYS`` with a disclosed age,
+never written on
 failure, and discarded when read-side validation fails. The stale cap is the
 family's 14 days, but this feed's forward half is only ``AHEAD_DAYS`` wide, so
 a stale serve loses one day of schedule per day of age — the report states how
@@ -1232,15 +1232,19 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     # Client-side loss that could actually sit BEYOND the calendar's last dated
     # entry — the only kind the reach note may offer as a cause for a short
     # forward tail. Counting the buckets alone over-claims, and the header
-    # disproves it. Note none of these reuses ``span_moved_possible``: that
-    # predicate is true when EITHER endpoint could have moved, and a drop in
-    # FRONT of the span explains nothing about a short tail behind it.
+    # disproves it. The malformed arm REUSES ``span_end_moved_possible`` rather
+    # than re-deriving it: this note and the caveat's far-end clause have to
+    # answer the same question, and they disagreed once already when one
+    # boolean covering both ends was shared between them. Only the far end
+    # matters here — a drop in FRONT of the span explains nothing about a short
+    # tail behind it, which is why the undivided predicate was wrong for this
+    # site and the split one is right.
     #   truncated  — keeps the HEAD, so every dropped row is dated after the
     #                last kept one. Unconditionally in scope.
     #   malformed  — in scope unless every drop is named AND every named date
-    #                lands before the last dated entry. This is exactly
-    #                ``span_end_moved_possible``, which the caveat below prints
-    #                its far-end clause from, so the two cannot disagree.
+    #                lands before the last dated entry, i.e. exactly
+    #                ``span_end_moved_possible``. Shared by name, so the caveat
+    #                below cannot print a far-end clause this note contradicts.
     #   unusable   — a dropped NAME costs no date: the row survives with its
     #                other names. It shortens the reach only when it emptied a
     #                row whole AND that row sits past the last dated entry.
@@ -1250,18 +1254,10 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     #                The bucket is kept anyway — without it a purely
     #                provider-sent empty row would trigger the claim — and the
     #                sentence stays a "may", which survives that case.)
-    mdates = _mdates
     far_end = cal_dated[-1] if cal_dated else None
     loss_beyond_reach = bool(
         snapshot.calendar_truncated
-        or (
-            snapshot.calendar_malformed
-            and (
-                far_end is None
-                or len(mdates) != snapshot.calendar_malformed
-                or any(d > far_end for d in mdates)
-            )
-        )
+        or (snapshot.calendar_malformed and span_end_moved_possible)
         or (
             snapshot.calendar_unusable
             and any(

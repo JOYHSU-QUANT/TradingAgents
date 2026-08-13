@@ -78,7 +78,7 @@ Breaking changes within the 0.x line are called out explicitly.
   or a snapshot fetched before the report's date — the report names it too
   alongside it — but only where that cause could actually account for the gap.
   A dropped row the report can place before the calendar's last dated entry, or
-  a dropped event *name* whose day-row was not the calendar's furthest-out one,
+  a dropped event *name* that left every day-row past that entry standing,
   explains nothing about a short forward tail and is not offered as if it did;
   and the caveat naming the drop now claims each end of the rendered span
   separately, so it cannot re-raise a possibility the sentence above just

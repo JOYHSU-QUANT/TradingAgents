@@ -17,10 +17,12 @@ Live-verified API facts this module is built on (2026-08-11):
   and the ``MAX_COMPANIES`` cut assumes it. International tickers appear
   ("3350", "0434.HK", "ADE.DE"), which the shared ticker filter accepts.
 - ``GET /btc-treasuries/{ticker}/purchase-history`` (``limit`` capped at 100)
-  serves DATES newest-first — but two rows sharing one date arrive
-  OLDEST-first, which is why the parser sorts ascending without reversing
-  (the evidence is the macro history endpoint's live capture; see
-  ``_parse_purchase_rows``). Numeric fields arrive as STRINGS ("840447",
+  serves DATES newest-first. Two rows sharing ONE date were not observed on
+  this endpoint — no captured company has a duplicate date — so the parser's
+  within-date rule is INFERRED from the sibling ``/macro/events/{event}/history``
+  endpoint, whose capture lists a same-date pair oldest-first; that is why the
+  parser sorts ascending without reversing (see ``_parse_purchase_rows``).
+  Numeric fields arrive as STRINGS ("840447",
   "-1690"); ``btc_acq`` is negative for disposals (MSTR was reducing when
   captured) and — with ``acq_cost`` — can be MISSING entirely: MARA's newest
   row carries only ``btc_holding``, its ~17.5k BTC reduction visible only as
@@ -250,9 +252,13 @@ def _parse_purchase_rows(data: list, ticker: str) -> list[dict]:
     backstop — ``_fetch_one_company`` pre-checks emptiness and routes it into
     ``companies_empty`` before this parser runs. Duplicate dates are kept —
     two same-day filings are two disclosures, and dropping one would hide a
-    real event; rows sort ascending by date, and within one date they keep the
-    provider's own sequence oldest-first, so ``rows[-1]`` is genuinely the
-    latest disclosure rather than the one an intraday revision replaced.
+    real event; rows sort ascending by date and keep the provider's own
+    sequence within one date, so ``rows[-1]`` is the last row the provider
+    listed for the latest date. That it is also the LATEST disclosure rests on
+    the within-date direction being oldest-first, which this endpoint's capture
+    cannot confirm (no company has a duplicate date) and which is inferred from
+    the sibling history endpoint — see the module docstring and the ordering
+    comment below, and keep all three at the same confidence.
     """
     if not data:
         raise SoSoValueError(f"SoSoValue returned no treasury history rows for {ticker}")
@@ -907,6 +913,17 @@ def get_btc_treasury_data(
         its latest visible disclosure), a windowed activity table of
         disclosed holdings changes (buys positive, disposals negative, with
         an implied US$/BTC where cost was filed), and coverage caveats.
+
+    Raises:
+        SoSoValueError: if ``curr_date`` is not a yyyy-mm-dd date, or if
+            ``asset`` is truthy but not a string. A caller's malformed argument
+            is reported as this vendor's error class rather than left to escape
+            as a raw ``ValueError``/``AttributeError``, which the router would
+            render into the model-visible sentinel — with the argument echoed
+            verbatim in the ``curr_date`` case. An unrecognized but well-formed
+            asset is NOT an error: it returns a no-signal message. Vendor-side
+            failures do not raise here either; they degrade to a stale snapshot
+            or a disabled/unavailable note.
     """
     if look_back_days is None or look_back_days <= 0:
         look_back_days = DEFAULT_LOOKBACK_DAYS

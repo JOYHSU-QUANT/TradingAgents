@@ -1550,3 +1550,13 @@ class TestCallerArgumentsCannotForgeStructure:
         )
         assert "Cost is blank on a FILED row too" in report
         assert "a blank Cost does not by itself mark a row as derived" in report
+        # The shape the legend now has to explain must actually be on the page,
+        # or these two needles pin nothing: a row with a filed quantity, a blank
+        # Cost, and NO derived label — while the mix note counts zero derived
+        # rows. Without this the test passed on any non-empty activity table.
+        row_2026 = next(ln for ln in report.splitlines() if ln.startswith("| 2026-08-01 |"))
+        cells = [c.strip() for c in row_2026.strip("|").split("|")]
+        assert cells[2] == "+100"  # BTC change, filed quantity
+        assert cells[3] == "—"  # Cost, blank despite being a filed row
+        assert "from holdings change since" not in row_2026
+        assert "derived from a holdings change" not in report.split("_BTC change is positive")[0]

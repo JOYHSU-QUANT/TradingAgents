@@ -2096,3 +2096,40 @@ class TestQuietIsNotUncovered:
         assert "covered and are genuinely quiet" in _render(
             _snapshot(calendar=calendar), curr_date="2026-08-11"
         )
+
+    def test_unverified_dates_also_block_the_covered_and_quiet_reading(self):
+        # calendar_duplicated is NOT in snapshot_incomplete — in the
+        # empty-schedule chain it has its own branch to speak in, and folding it
+        # into the shared boolean would make that branch unreachable. This note
+        # has no such alternative, so it must check duplication separately: a
+        # merge can put an in-window entry onto an out-of-window date, which is
+        # exactly what "absent from this window" would deny.
+        calendar = [
+            {"date": "2026-08-10", "events": ["Off-List A"]},
+            {"date": "2026-08-30", "events": ["Off-List B"]},
+        ]
+        report = _render(
+            _snapshot(calendar=calendar, calendar_duplicated=1), curr_date="2026-08-11"
+        )
+        assert "was already in the payload" in report
+        assert "covered and are genuinely quiet" not in report
+        assert "missing from this window rather than absent from it" in report
+        # Control: same calendar, no duplication -> the note is back.
+        assert "covered and are genuinely quiet" in _render(
+            _snapshot(calendar=calendar), curr_date="2026-08-11"
+        )
+
+    def test_a_calendar_that_names_nothing_is_not_called_unreceived(self):
+        # cal_dated empty with the incompleteness gate already passed means
+        # calendar_unusable == 0, and both the parser and the cache validator
+        # reject an empty calendar list — so the ONLY way here is the provider
+        # sending day-rows that carry no event names. The calendar WAS received,
+        # and the "a day-row only where it has events" premise is falsified by
+        # the very state that selects this arm.
+        report = _render(
+            _snapshot(calendar=[{"date": "2026-08-12", "events": []}]), curr_date="2026-08-11"
+        )
+        assert "names no event on any of its day-rows" in report
+        assert "the provider sent the days and listed nothing on them" in report
+        assert "never received" not in report
+        assert "cannot distinguish a calendar which stops there" not in report

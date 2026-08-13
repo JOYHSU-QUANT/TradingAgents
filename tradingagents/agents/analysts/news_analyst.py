@@ -32,8 +32,8 @@ def create_news_analyst(llm):
             # below; un-advertising them means restructuring that prompt, which is
             # out of scope for this change. Folding the whole set into one
             # table-driven registration is the follow-up; the crypto block below
-            # already registers its categories that way, so it is these two
-            # unguarded entries — not the guarded ones — that still need it.
+            # is still hand-written too, but it at least GUARDS each category,
+            # so it is these two unguarded entries that are the gap.
             get_macro_indicators,
             get_prediction_markets,
         ]

@@ -149,10 +149,10 @@ THOUSANDS_EVENTS = ("Nonfarm Payrolls", "Initial Jobless Claims")
 #
 # It is NOT a claim that the two sources the section merges cover the same
 # span: the deep histories reach the full 14 days, while the calendar's last
-# EVENT-BEARING day-row sat 13 days out in the live capture — and it must,
-# whenever the 14th day happens to be quiet, because the feed emits a day-row
-# only where it has events. The reach note below therefore fires on ordinary
-# serves and is worded not to resolve which of the two causes it is.
+# EVENT-BEARING day-row sat 13 days out in the live capture — and it falls
+# short of 14 whenever the 14th day happens to be quiet, because the feed emits
+# a day-row only where it has events. The reach note below therefore fires on
+# ordinary serves and is worded not to resolve which of the two causes it is.
 AHEAD_DAYS = 14
 
 # Default trailing window for the released section when the caller does not
@@ -337,8 +337,8 @@ def _parse_calendar(data: list) -> tuple[list[dict], int, int, int, int]:
         # treasuries listing, which drops entries but raises on an empty result.
         raise SoSoValueError(
             f"SoSoValue macro calendar has {malformed} "
-            f"day-{_plural(malformed, 'row', 'rows')} and none of "
-            f"{_plural(malformed, 'it is', 'them is')} readable; "
+            f"day-{_plural(malformed, 'row', 'rows')} and "
+            f"{_plural(malformed, 'it is not readable', 'none of them is readable')}; "
             f"the API contract may have changed"
         )
     rows = [{"date": date, "events": by_date[date]} for date in sorted(by_date)]
@@ -894,6 +894,14 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         forecasts, other calendar names without figures), a released-events
         table with surprises, and fixed caveats — including that this feed
         carries no Fed rate decisions.
+
+    Raises:
+        SoSoValueError: if ``curr_date`` is not a yyyy-mm-dd date. A caller's
+            malformed argument is reported as this vendor's error class rather
+            than left to escape as a raw ``ValueError``, which the router would
+            render into the model-visible sentinel with the argument echoed
+            verbatim. Vendor-side failures do NOT raise here — they degrade to
+            a stale snapshot or a disabled/unavailable note.
     """
     if look_back_days is None or look_back_days <= 0:
         look_back_days = DEFAULT_LOOKBACK_DAYS
@@ -1175,11 +1183,13 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         )
 
     if not in_window:
-        # With no dated row inside the window, exactly three states are
-        # reachable — the calendar ends before the window, starts after it, or
-        # BRACKETS it — because any dated row in [curr_date, ahead_end] would
-        # have landed in in_window (which also makes the two comparisons below
-        # strict: equality at either endpoint is unreachable here).
+        # With at least one dated row but none inside the window, exactly three
+        # states are reachable — the calendar ends before the window, starts
+        # after it, or BRACKETS it — because any dated row in
+        # [curr_date, ahead_end] would have landed in in_window (which also
+        # makes the two comparisons below strict: equality at either endpoint
+        # is unreachable here). A fourth state, no dated row at all, takes the
+        # else with the rest.
         #
         # Only the bracketed case tells us the provider covered these days. The
         # feed emits a day-row only where it has events, so a window sitting
@@ -1201,9 +1211,21 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # empties in_window while the rows either side of it remain. Calling
         # that "genuinely quiet" denies precisely the off-list event this
         # client dropped, two lines above the caveat that admits dropping it.
+        #
+        # calendar_duplicated is checked HERE but is not a member of
+        # snapshot_incomplete, and the asymmetry is the point: in the
+        # empty-schedule chain duplication has its own branch to speak in, so
+        # folding it into the shared boolean would make that branch unreachable
+        # and assert an incompleteness the merge disproves. This note has no
+        # such alternative — its only other arm is the conservative "missing
+        # rather than absent" — and a merge can put an in-window entry on an
+        # out-of-window date, which is exactly what "absent from this window"
+        # would deny. Same bucket, opposite handling, because the two consumers
+        # offer different alternatives.
         if (
             cal_dated
             and not snapshot_incomplete
+            and not snapshot.calendar_duplicated
             and cal_dated[0] < curr_date
             and cal_dated[-1] > ahead_end
         ):
@@ -1215,9 +1237,13 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
                 f"missing from it._"
             )
         else:
-            # Unchanged: the window is not covered (or the calendar carries no
-            # dated row at all), so "missing rather than absent" stays right.
-            # No span is named here — with cal_dated empty there is none.
+            # Unchanged wording, for every other state: the window is not
+            # covered, or the calendar carries no dated row at all, or the
+            # snapshot is incomplete / its dates are unverified. "Missing
+            # rather than absent" is the conservative reading and stays right
+            # in all of them. No span is named — one exists in most of these
+            # states but naming it would imply the coverage claim this arm is
+            # precisely declining to make.
             header_lines.append(
                 f"_No calendar entry in this snapshot falls between {curr_date} and "
                 f"{ahead_end}, so the schedule below carries only the {len(TRACKED_EVENTS)} "
@@ -1495,24 +1521,24 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
             # Its own phrasing, not the shared ``ends`` above: this branch has
             # to say the end date is on or before curr_date, which is the whole
             # reason it fires.
-            stops = (
-                f"ends {cal_end}, on or before this date"
-                if cal_end
-                else "carries no usable event names at all"
-            )
-            # Two phrasings, because "beyond it" / "stops here" need a date to
-            # point at: with no dated row at all there is no "here", and the
-            # honest statement is the unanchored one.
+            # Two phrasings, because the no-date arm has no date to point at
+            # AND a different cause. The incompleteness gate above already took
+            # every stale/truncated/dropped-name snapshot, and _parse_calendar
+            # raises on an empty payload while _read_cache requires a non-empty
+            # calendar list — so cal_end is None here means exactly one thing:
+            # the PROVIDER sent day-rows carrying no event names. The calendar
+            # was received; saying it never was would be false, and the
+            # "a day-row only where it has events" premise is falsified by the
+            # very state that selects this arm. What is left is the plain fact.
             why = (
-                f"The provider's calendar {stops}, so this snapshot carries no dated entry "
-                f"beyond it — and because the feed publishes a day-row only where it has "
-                f"events, that cannot distinguish a calendar which stops there from a "
-                f"fortnight without events."
+                f"The provider's calendar ends {cal_end}, on or before this date, so this "
+                f"snapshot carries no dated entry beyond it — and because the feed "
+                f"publishes a day-row only where it has events, that cannot distinguish a "
+                f"calendar which stops there from a fortnight without events."
                 if cal_end
-                else f"The provider's calendar {stops}, so this snapshot carries no dated "
-                f"entry at all — and because the feed publishes a day-row only where it "
-                f"has events, that cannot distinguish a calendar this snapshot never "
-                f"received from a fortnight without events."
+                else "The provider's calendar in this snapshot names no event on any of its "
+                "day-rows, so it can place nothing in this window — the provider sent the "
+                "days and listed nothing on them."
             )
         elif snapshot.calendar_duplicated:
             # Duplication belongs here too — the benign "genuinely carries no

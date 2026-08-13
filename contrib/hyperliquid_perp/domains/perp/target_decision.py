@@ -521,8 +521,20 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     that replaced it: the four typed fields (``decision_mode``,
     ``target_side``, ``requested_target_margin_pct``, ``confidence``) must hold
     placeholders their own coercion rejects, and ``decision_mode`` is the
-    earliest one the parser coerces, so a whole-block echo always lands on
-    ``invalid_decision_mode`` rather than on a tag naming the wrong field.
+    earliest **of those four** the parser coerces, so a whole-block echo that
+    keeps the block's quoting lands on ``invalid_decision_mode`` rather than on
+    a tag naming the wrong field.
+
+    Not *always*, and the exceptions matter to anyone reading the tag as
+    evidence. The key-set checks run before any coercion, so an echo that adds
+    or drops a field lands on ``unexpected_fields`` / ``missing_fields`` first;
+    and an echo that unquotes the two numeric placeholders — which this block's
+    own text asks for — stops being valid JSON and lands on ``invalid_output``.
+    The implication runs the other way too, and is the one that bites: the tag
+    is many-to-one. ``invalid_decision_mode`` is emitted for *any* mode outside
+    the two enum members, so a hallucinated ``"hold"`` and a verbatim echo are
+    indistinguishable in the stored row. Treat the tag as a proxy for echoing,
+    never as proof of it.
     ``rationale`` and ``key_risks`` take free text, so their placeholders are
     legal strings a partial echo can carry into the audit record — cosmetic,
     since a decision is only directional once ``decision_mode`` and
@@ -533,27 +545,36 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     reads as a directional decision would become a live sized target if echoed.
     Fail-closed reaches the same harmless no-op — but countable.
 
-    Two deliberate asymmetries in the block. ``confidence`` is the one field the
-    parser lets be null whose placeholder does not advertise ``|null``: the
-    prompt is narrower than the contract on purpose, so that every *parsed*
-    cycle carries a confidence number rather than opting out of the one signal
-    that says how strongly the model held its view.
+    No placeholder advertises ``|null``, though the parser accepts null for
+    ``target_side``, ``requested_target_margin_pct`` and ``confidence`` (the
+    rules below say exactly when each applies). Offering it *inside a quoted
+    placeholder* invites the substitution that keeps the quotes — the failure
+    this whole change exists to remove, and one that costs a real proposal
+    rather than an echo. For ``confidence`` the narrowing is wanted on its own
+    terms as well: every *parsed* cycle should carry a number rather than opt
+    out of the one signal saying how strongly the model held its view.
 
     That is only true of parsed cycles, and the gap matters when reading a
-    before/after: a fail-closed cycle stores ``confidence`` as NULL
-    (``risk_gate._no_target_result``), so switching to this block deletes the
-    old echo's ``0.55`` spike from the histogram **whether or not the model
-    changed its behaviour**. A confidence distribution compared across the
-    version boundary must therefore render the NULL bucket as its own visible
-    share of all cycles; on its own, "the spike is gone" is an artifact of the
-    prompt change, not evidence about conviction.
-    And the quotes are load-bearing in both directions: they are an artifact
-    only on the two numeric fields and on a null ``target_side``, so the text
-    names what to unquote rather than telling the model to strip quotes
-    generally. Both mistakes cost the whole output, but an unquoted
-    ``decision_mode`` costs the diagnosis too — the block stops being parseable
-    at all, so it is recorded as a bare ``invalid_output`` instead of a tag that
-    names the offending field.
+    before/after: at the parse seam ``risk_gate`` fails closed without passing
+    a confidence, so the row stores NULL, and switching to this block deletes
+    the old echo's ``0.55`` spike from the histogram **whether or not the model
+    changed its behaviour**. (Not every fail-closed row is NULL — the flip
+    re-run's re-validation does pass the parsed value through.) A confidence
+    distribution compared across the version boundary must therefore render the
+    NULL bucket as its own visible share of all cycles; on its own, "the spike
+    is gone" is an artifact of the prompt change, not evidence about conviction.
+
+    The quotes are load-bearing in both directions: they are an artifact only on
+    the two numeric fields, so the text names what to unquote rather than
+    telling the model to strip quotes generally. Both mistakes cost the whole
+    output, but they cost different things afterwards. A quoted number is
+    tagged ``margin_not_numeric`` / ``confidence_not_numeric``, and because the
+    gate discards what the model asked for, the row stores
+    ``requested_target_margin_pct`` as NULL — so a model that HAS started
+    proposing reads as one that has not, on the very metric this change is
+    judged by. Netting those two tags back in is part of reading the result.
+    An unquoted ``decision_mode`` costs the diagnosis instead: the block stops
+    parsing at all and is recorded as a bare ``invalid_output``.
     """
     lo = config.ai_target_margin_min_pct
     hi = config.ai_target_margin_max_pct if max_pct is None else max_pct
@@ -566,8 +587,8 @@ code block, with exactly these six fields and no others:
 ```json
 {{
   "decision_mode": "<set_target|maintain_current>",
-  "target_side": "<long|short|flat|null>",
-  "requested_target_margin_pct": "<integer {lo}-{hi}|null>",
+  "target_side": "<long|short|flat>",
+  "requested_target_margin_pct": "<integer {lo}-{hi}>",
   "confidence": "<0.0-1.0>",
   "rationale": "<one short paragraph explaining the decision>",
   "key_risks": ["<risk>", "<risk 2 — optional; {_MAX_KEY_RISKS} entries total maximum>"]
@@ -578,15 +599,15 @@ That block is a schema, not an answer: every `<...>` placeholder MUST be
 replaced with a real value of your own (a placeholder marked optional may
 instead be dropped, along with the array entry holding it). A leftover
 placeholder in "decision_mode", "target_side", "requested_target_margin_pct" or
-"confidence" is not a legal value, so the whole output is discarded and treated
-as maintain_current.
+"confidence" is not a legal value, so the whole output is discarded and the
+cycle is recorded as a model-format failure.
 
-Keep the quotes wherever the real value is a string: "decision_mode",
-"target_side" (unless it is null), "rationale", and every entry of "key_risks".
 The "requested_target_margin_pct" and "confidence" placeholders are quoted only
-so the block above stays valid JSON — write those two as bare JSON numbers, and
-write null as the JSON literal null. A quoted number ("35") or a quoted null
-("null") is discarded exactly like a leftover placeholder.
+so the block above stays valid JSON: write those two as bare JSON numbers.
+Where the rules below call for null, write the JSON literal null without
+quotes. Every other field's real value is a string and keeps its quotes. A
+quoted number ("35") or a quoted null ("null") is discarded exactly like a
+leftover placeholder.
 
 Rules (violations are discarded and treated as maintain_current — they are
 never repaired or rounded):

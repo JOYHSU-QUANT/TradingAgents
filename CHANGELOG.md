@@ -308,14 +308,25 @@ Breaking changes within the 0.x line are called out explicitly.
   so they still cannot drift; `rationale` and `key_risks` keep
   legal-string placeholders, since only the typed fields decide whether an
   output is a directional order. An echo keeps landing on the same harmless
-  `maintain_current` — the parser fails closed on `decision_mode` — but is now
-  tagged `invalid_decision_mode` instead of counted as a decision. The
-  `requested_target_margin_pct` and `confidence` placeholders are quoted only so
-  the block stays valid JSON, so the contract spells out that those two are
-  written as bare JSON numbers and `null` as the JSON literal, while every
-  genuinely-string field keeps its quotes. `PROMPT_VERSION` moves to
-  `phase2-target-v3` so `ai_inputs.prompt_version` splits before/after when
-  measuring whether the proposal rate recovered.
+  `maintain_current` — the parser fails closed — but is now tagged rather than
+  counted as a decision. Which tag depends on the echo: a whole-block echo that
+  keeps the block's quoting fails on `decision_mode`, the earliest of the four
+  the parser coerces; a partial echo fails on whichever placeholder it kept; and
+  an echo that also unquotes the numeric fields stops parsing as JSON and lands
+  on `invalid_output`. None of these tags is exclusive to echoing — a
+  hallucinated `decision_mode` records identically — so read them as a proxy for
+  it, not as proof. The `requested_target_margin_pct` and `confidence`
+  placeholders are quoted only so the block stays valid JSON, so the contract
+  spells out that those two are written as bare JSON numbers and `null` as the
+  JSON literal, while every genuinely-string field keeps its quotes; no
+  placeholder offers `|null` inside its quotes, because that is an invitation to
+  substitute in place and leave them — the one mistake that costs a real
+  proposal rather than an echo. `PROMPT_VERSION` moves to `phase2-target-v3` so
+  `ai_inputs.prompt_version` splits before/after when measuring whether the
+  proposal rate recovered; a test pins the stamp to a fingerprint of the
+  rendered block, since the two live in different modules with no import
+  between them and a prompt edit that forgot the bump would merge the two
+  populations silently.
 
   **Expect more unparseable cycles while echoing persists** — that is
   previously-hidden echoing becoming visible, not a new defect — and note where
@@ -336,11 +347,19 @@ Breaking changes within the 0.x line are called out explicitly.
   `phase2-data.md` as the model-drift alarm — plus `risk_reason` /
   `decision_reason = invalid_decision_mode`, `confidence = NULL` and an empty
   `key_risks`, where the same echo previously stored `approved` /
-  `maintain_current` / `0.55`. Expect the alarm value in bulk at first. The NULL
+  `maintain_current` / `0.55`. The `decision_mode` column still reads
+  `maintain_current` for these rows, so grouping by it shows no change at all
+  across the boundary unless `risk_action` is filtered too. Expect the alarm
+  value in bulk at first. The NULL
   confidence also biases any before/after comparison of the confidence
   distribution: the old echo's `0.55` spike disappears whether or not the model
   changed, so judge the change on the proposal rate and render the NULL bucket
-  explicitly if the distribution is plotted at all.
+  explicitly if the distribution is plotted at all. The proposal rate needs one
+  correction of its own: a fail-closed row stores `requested_target_margin_pct`
+  as NULL whatever the model asked for, so cycles tagged `margin_not_numeric` or
+  `confidence_not_numeric` — a model that filled the numbers in but kept the
+  quotes — must be netted back in, or a recovered model reads as one that never
+  proposed.
 
 ### Fixed
 

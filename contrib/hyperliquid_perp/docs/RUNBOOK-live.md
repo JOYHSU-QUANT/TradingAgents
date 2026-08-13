@@ -496,6 +496,9 @@ safe mode**、四項 smoke 布林（`restart_reconciliation_passed`
 > cycle 也會報 `live_ready`（paper-BTC 換模後就出現過 6/6 `invalid_output`）。
 > 另注意 `phase2-target-v3` 起 prompt 的 schema 區塊是型別非法佔位符，模型整段照抄
 > 會落在 `invalid_output`（先前照抄是**合法**的 `maintain_current`，被算成 cycle）。
+> 這裡的 `invalid_output` 指 `decision_attempts.status`——每一種解不開都是它。同一個
+> 字在 `ai_outputs.risk_reason` 那一欄另有窄義，照抄在那欄記的是
+> `invalid_decision_mode`；RUNBOOK §5 用的是後者。
 > 所以相對 v2 會看到 **`invalid_output_count` 上升、`cycle_count` 同步下降**——這是
 > 既有照抄被顯性化，不是新缺陷，但 ≥30 那道門因此需要更多 cycle 才跨得過。要判斷
 > 修法有沒有效看的是提案率，不是這兩個計數。

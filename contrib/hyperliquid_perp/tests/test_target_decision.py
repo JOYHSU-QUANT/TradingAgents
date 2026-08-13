@@ -444,8 +444,15 @@ def test_format_instructions_schema_block_has_no_copyable_answer():
     assert block is not None
     payload = json.loads(block)
     assert payload["decision_mode"] == "<set_target|maintain_current>"
-    assert payload["target_side"] == "<long|short|flat|null>"
-    assert payload["requested_target_margin_pct"] == "<integer 0-60|null>"
+    assert payload["target_side"] == "<long|short|flat>"
+    assert payload["requested_target_margin_pct"] == "<integer 0-60>"
+    # No quoted placeholder offers `|null`. Inside quotes it invites
+    # substituting in place and leaving them, and a quoted value is the one
+    # mistake that costs a REAL proposal rather than an echo: the row stores
+    # requested_target_margin_pct as NULL, which is exactly what "the model
+    # still is not proposing" looks like on the metric this change is judged by.
+    for _f in ("decision_mode", "target_side", "requested_target_margin_pct", "confidence"):
+        assert "null" not in payload[_f], _f
     assert payload["confidence"] == "<0.0-1.0>"
     # key_risks is pinned too, and for a reason the typed fields don't have: the
     # legal range is 1-3, so a second slot whose cap has no named subject reads
@@ -472,14 +479,20 @@ def test_format_instructions_schema_block_has_no_copyable_answer():
     # Pinned as two narrow needles rather than the whole sentence: the sentence
     # verbatim would also fail on a harmless rewording of its opening clause,
     # and then a deletion and a reword are indistinguishable from the failure.
-    assert '"target_side" (unless it is null)' in normalized
-    assert 'and every entry of "key_risks"' in normalized
     assert (
         'The "requested_target_margin_pct" and "confidence" placeholders are quoted only'
         in normalized
     )
     assert "write those two as bare JSON numbers" in normalized
-    assert "write null as the JSON literal null" in normalized
+    assert "write the JSON literal null without quotes" in normalized
+    assert "Every other field's real value is a string and keeps its quotes" in normalized
+    # The consequence names the RECORD, not the position. Both are true, but
+    # the measured v2 failure was a model that preferred a costless no-op, and
+    # the old wording advertised non-substitution as a route to exactly that —
+    # in the most salient position in the contract. It also misdescribed what a
+    # post-mortem finds, which is risk_action = invalid_fail_closed.
+    assert "the cycle is recorded as a model-format failure" in normalized
+    assert "the whole output is discarded and treated as maintain_current" not in normalized
 
 
 def test_free_text_placeholders_stay_legal_on_purpose():
@@ -507,10 +520,10 @@ def test_free_text_placeholders_stay_legal_on_purpose():
     ("field", "placeholder", "reason"),
     [
         ("decision_mode", "<set_target|maintain_current>", "invalid_decision_mode"),
-        ("target_side", "<long|short|flat|null>", "invalid_target_side"),
+        ("target_side", "<long|short|flat>", "invalid_target_side"),
         # Only type-illegality is under test, so the rendered grid is irrelevant
         # here; this spells out _CFG's own (0-100) to stay self-consistent.
-        ("requested_target_margin_pct", "<integer 0-100|null>", "margin_not_numeric"),
+        ("requested_target_margin_pct", "<integer 0-100>", "margin_not_numeric"),
         ("confidence", "<0.0-1.0>", "confidence_not_numeric"),
     ],
 )
@@ -545,7 +558,7 @@ def test_format_instructions_reflect_config():
     # step lives only in the prose bullet). Its unparseability is
     # config-independent — the other three typed placeholders are constant
     # literals — so that is pinned once, in the echo test above.
-    assert '"requested_target_margin_pct": "<integer 0-80|null>"' in text
+    assert '"requested_target_margin_pct": "<integer 0-80>"' in text
 
 
 def test_format_instructions_advertise_effective_cap():
@@ -688,3 +701,38 @@ def test_config_from_dict_rejects_non_mapping_block():
     # ValueError, not a TypeError from set(cfg) that escapes the exit-1 handler.
     with pytest.raises(ValueError, match="mapping"):
         DecisionConfig.from_dict("0.3")
+
+
+@pytest.mark.parametrize(
+    ("mutate", "reason"),
+    [
+        (lambda t: t, "invalid_decision_mode"),
+        (
+            lambda t: t.replace('"<integer 0-100>"', "<integer 0-100>").replace(
+                '"<0.0-1.0>"', "<0.0-1.0>"
+            ),
+            "invalid_output",
+        ),
+    ],
+    ids=["verbatim", "numeric-placeholders-unquoted"],
+)
+def test_the_echo_tag_boundary_is_pinned(mutate, reason):
+    # RUNBOOK §5 and §7 hand operators a differential keyed on risk_reason, so
+    # which tag each echo shape produces is a documented contract rather than an
+    # accident. The unquoted variant is the one this block's own text invites:
+    # it asks for the two numeric fields as bare JSON numbers, so a model that
+    # obeys that clause while still echoing breaks the JSON entirely and loses
+    # the tag that names the offending field.
+    text = mutate(decision_format_instructions(_CFG))
+    _assert_fail_closed(parse_target_decision(text, _CFG), reason)
+
+
+def test_the_echo_tag_is_a_proxy_not_a_proof():
+    # invalid_decision_mode is emitted for ANY mode outside the two enum
+    # members, so a hallucinated one records a row byte-identical to a verbatim
+    # echo. The runbooks must not read the tag backwards as "this was an echo",
+    # and nothing else survives to tell them apart: the daemons clear
+    # pending_raw_response on finalize.
+    _assert_fail_closed(
+        parse_target_decision(_text(decision_mode="hold"), _CFG), "invalid_decision_mode"
+    )

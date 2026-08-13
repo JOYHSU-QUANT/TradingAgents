@@ -294,6 +294,28 @@ Breaking changes within the 0.x line are called out explicitly.
   Previously a keyless vendor could only be stopped by editing code, having no
   API key to unset.
 
+### Changed
+
+- **The perp decision prompt ships a schema, not a worked example.** The
+  output-format contract used to end with a complete, *valid* `maintain_current`
+  example (`confidence: 0.55`), and models returned it as their answer: on the
+  `paper-BTC` run, 117 of 159 outputs (74%) reproduced its four decision fields
+  verbatim, every output carrying exactly 0.55 was one of them, and the run went
+  21 days without a fill — the position was frozen because no decision was ever
+  proposed, not because risk gates rejected one. The block's values are now
+  type-illegal placeholders (`"<set_target|maintain_current>"`, `"<0.0-1.0>"`,
+  …), rendered from the live config so the advertised margin grid still cannot
+  drift. An echo keeps landing on the same harmless `maintain_current` — the
+  parser fails closed on `decision_mode` — but is now tagged
+  `invalid_decision_mode` instead of counted as a decision. **Expect
+  `invalid_output` volume to rise**: that is previously-hidden echoing becoming
+  visible, not a new defect, and no validator gates on it. Placeholders are
+  quoted only to keep the block valid JSON, so the contract also spells out that
+  `requested_target_margin_pct` and `confidence` must be written as bare JSON
+  numbers and `null` as the JSON literal. `PROMPT_VERSION` moves to
+  `phase2-target-v3` so `ai_inputs.prompt_version` splits before/after when
+  measuring whether the proposal rate recovered.
+
 ### Fixed
 
 - **Perp runs no longer lose the target-JSON contract to structured output.**

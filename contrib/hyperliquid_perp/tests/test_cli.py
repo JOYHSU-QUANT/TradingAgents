@@ -211,7 +211,11 @@ def test_build_input_refuses_untradeable_indicators(
     # can't mimic: candle_count 200 clears the warm-up gate, 100 exercises it
     # only if the guard really reads _warmup_threshold(config).
     ctx = SimpleNamespace(candle_count=candle_count, indicators=indicators)
-    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, None))
+    # Keyword-only `on_blocking_read` included: the provider always passes it,
+    # so a two-arg stand-in raises TypeError before the guard under test runs.
+    monkeypatch.setattr(
+        main_mod, "_build_context", lambda config, coin, on_blocking_read=None: (ctx, None)
+    )
     monkeypatch.setattr(main_mod, "_warmup_threshold", lambda config: 150)
 
     # Only _config is needed: the guard fires before the risk/decision/payload

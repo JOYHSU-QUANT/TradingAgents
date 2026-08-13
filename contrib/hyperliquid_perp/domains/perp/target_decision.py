@@ -514,11 +514,24 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     change guaranteed past the gate, funneling mid-confidence de-risking
     into fee-heavier flat exits.
 
-    The worked example is deliberately a ``maintain_current``: models routinely
-    echo format examples verbatim, and :func:`extract_json_block` takes the last
-    parseable object — an echoed directional example would become a live sized
-    target, while an echoed ``maintain_current`` is a harmless no-op (the same
-    outcome as fail-closed).
+    The schema block carries **placeholders, not a worked example**, because
+    models return the example as their answer — measured, not feared: 74% of
+    ``paper-BTC``'s outputs echoed the previous example's decision fields
+    verbatim (see the CHANGELOG entry for ``phase2-target-v3``). The invariant
+    that replaced it: the four typed fields (``decision_mode``,
+    ``target_side``, ``requested_target_margin_pct``, ``confidence``) must hold
+    placeholders their own coercion rejects, and ``decision_mode`` is the
+    earliest one the parser coerces, so a whole-block echo always lands on
+    ``invalid_decision_mode`` rather than on a tag naming the wrong field.
+    ``rationale`` and ``key_risks`` take free text, so their placeholders are
+    legal strings a partial echo can carry into the audit record — cosmetic,
+    since a decision is only directional once ``decision_mode`` and
+    ``target_side`` are both values the model chose.
+
+    This preserves what the old ``maintain_current`` example was for:
+    :func:`extract_json_block` takes the last parseable object, so a block that
+    reads as a directional decision would become a live sized target if echoed.
+    Fail-closed reaches the same harmless no-op — but countable.
     """
     lo = config.ai_target_margin_min_pct
     hi = config.ai_target_margin_max_pct if max_pct is None else max_pct
@@ -530,14 +543,26 @@ code block, with exactly these six fields and no others:
 
 ```json
 {{
-  "decision_mode": "maintain_current",
-  "target_side": null,
-  "requested_target_margin_pct": null,
-  "confidence": 0.55,
-  "rationale": "One short paragraph explaining the decision.",
-  "key_risks": ["Risk one", "Risk two"]
+  "decision_mode": "<set_target|maintain_current>",
+  "target_side": "<long|short|flat|null>",
+  "requested_target_margin_pct": "<integer {lo}-{hi}|null>",
+  "confidence": "<0.0-1.0>",
+  "rationale": "<one short paragraph explaining the decision>",
+  "key_risks": ["<risk>", "<risk>"]
 }}
 ```
+
+That block is a schema, not an answer: every `<...>` placeholder MUST be
+replaced with a real value of your own. A leftover placeholder in
+"decision_mode", "target_side", "requested_target_margin_pct" or "confidence"
+is not a legal value, so the whole output is discarded and treated as
+maintain_current.
+
+Every placeholder above is quoted only so the schema block stays valid JSON.
+Replace the quotes along with the placeholder wherever the real value is not a
+string: write "requested_target_margin_pct" and "confidence" as bare JSON
+numbers, and write null as the JSON literal null. A quoted number ("35") or a
+quoted null ("null") is discarded exactly like a leftover placeholder.
 
 Rules (violations are discarded and treated as maintain_current — they are
 never repaired or rounded):

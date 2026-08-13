@@ -419,13 +419,54 @@ def test_extract_survives_unmatched_brace_in_prose():
     assert parse_target_decision(text, _CFG).is_valid
 
 
-def test_format_instructions_example_echo_is_harmless():
-    # Models echo format examples; the instructions' own example must parse to
-    # a maintain_current (a no-op), never to a live directional target.
+def test_format_instructions_schema_block_echo_fails_closed():
+    # Models echo format examples, so the schema block must not be a valid
+    # answer: an echo fails closed and is tagged, making it countable instead of
+    # counted as a decision (see decision_format_instructions).
     parsed = parse_target_decision(decision_format_instructions(_CFG), _CFG)
-    assert parsed.is_valid
-    assert parsed.decision.decision_mode.value == "maintain_current"
-    assert parsed.decision.target_side is None
+    _assert_fail_closed(parsed, "invalid_decision_mode")
+
+
+def test_format_instructions_schema_block_has_no_copyable_answer():
+    # The counterpart to the echo test: pin the placeholders themselves, so
+    # putting a concrete value back into a typed field fails here and not only
+    # through the echo path. Written as literals on purpose — deriving them from
+    # the module under test would let that regression pass. The margin
+    # placeholder renders the live grid (here the effective cap 60) so it cannot
+    # drift from the rules text below it.
+    text = decision_format_instructions(DecisionConfig(), max_pct=60)
+    block = extract_json_block(text)
+    assert block is not None
+    payload = json.loads(block)
+    assert payload["decision_mode"] == "<set_target|maintain_current>"
+    assert payload["target_side"] == "<long|short|flat|null>"
+    assert payload["requested_target_margin_pct"] == "<integer 0-60|null>"
+    assert payload["confidence"] == "<0.0-1.0>"
+    # The last two are quoted only to keep the block valid JSON, which invites
+    # substituting in place and keeping the quotes — a shape the parser rejects
+    # (test_invalid_margin_not_numeric, test_invalid_confidence_not_numeric).
+    # So the prompt must keep telling the model to drop the quotes.
+    normalized = " ".join(text.split())
+    assert '"requested_target_margin_pct" and "confidence" as bare JSON numbers' in normalized
+
+
+@pytest.mark.parametrize(
+    ("field", "placeholder", "reason"),
+    [
+        ("decision_mode", "<set_target|maintain_current>", "invalid_decision_mode"),
+        ("target_side", "<long|short|flat|null>", "invalid_target_side"),
+        # Only type-illegality is under test, so the rendered grid is irrelevant
+        # here; this spells out _CFG's own (0-100) to stay self-consistent.
+        ("requested_target_margin_pct", "<integer 0-100|null>", "margin_not_numeric"),
+        ("confidence", "<0.0-1.0>", "confidence_not_numeric"),
+    ],
+)
+def test_leftover_placeholder_in_a_typed_field_fails_closed(field, placeholder, reason):
+    # The prompt tells the model that a leftover placeholder in any of these
+    # four fields discards the whole output. That promise is only true because
+    # each one is typed at parse time — a partial echo (model fills some fields,
+    # copies the rest) must not slip through as a live target.
+    _assert_fail_closed(parse_target_decision(_text(**{field: placeholder}), _CFG), reason)
 
 
 # --------------------------------------------------------------------------
@@ -447,8 +488,10 @@ def test_format_instructions_reflect_config():
     normalized = " ".join(text.split())
     assert "confidence below 0.4 is rejected" in normalized
     assert "needs confidence >= 0.7" in normalized  # default resize bar, other clause
-    # The instructions' own example must survive the parser it feeds.
-    assert parse_target_decision(text, cfg).is_valid
+    # The schema block renders the same grid it advertises in prose. (Its
+    # unparseability is config-independent — the other three placeholders are
+    # constant literals — so it is pinned once, in the echo test above.)
+    assert '"requested_target_margin_pct": "<integer 0-80|null>"' in text
 
 
 def test_format_instructions_advertise_effective_cap():

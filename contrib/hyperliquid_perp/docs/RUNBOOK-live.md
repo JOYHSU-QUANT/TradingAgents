@@ -494,6 +494,9 @@ safe mode**、四項 smoke 布林（`restart_reconciliation_passed`
 > 它（那裡量的是「排程有沒有在跑」），live 驗收器不計——這裡問的是「bot 能不能
 > 交易」，而 §21.4 沒有 order count 可以背書；不然 30 個連續解不開、一單沒下的
 > cycle 也會報 `live_ready`（paper-BTC 換模後就出現過 6/6 `invalid_output`）。
+> 另注意 `phase2-target-v3` 起 prompt 的 schema 區塊是型別非法佔位符，模型整段照抄
+> 會落在 `invalid_output`（先前照抄是**合法**的 `maintain_current`，被算成 cycle）。
+> 所以此計數相對 v2 上升是預期中的顯性化，不代表新缺陷——要看的是提案率有沒有回來。
 
 > **unprotected 秒數只算「沒有一張足以覆蓋的 SL」的時段**：§17.4 是
 > modify-before-cancel，所以 wire gate 擋掉一次 **modify** 時舊的那張 SL 可能還掛在

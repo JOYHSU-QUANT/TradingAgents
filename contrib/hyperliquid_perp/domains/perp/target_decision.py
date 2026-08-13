@@ -559,11 +559,13 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     a confidence, so the row stores NULL, and switching to this block deletes
     the old echo's ``0.55`` spike from the histogram **whether or not the model
     changed its behaviour**. Every reachable fail-closed row stores NULL: the one
-    branch that would pass a parsed confidence through is the flip re-run's
-    re-validation, and reaching it requires that re-validation to FAIL — on the
-    same ``ParsedDecision`` against the same config object that just accepted
-    it, so it cannot. It writes no ``ai_outputs`` row either way: the flip legs
-    persist an execution-plan row, never a decision row. A confidence
+    branch that would pass a parsed confidence through is ``risk_gate``'s
+    re-validation of an already-valid parse, and reaching it requires that
+    re-validation to FAIL — on the same ``ParsedDecision`` against the same
+    config object that just accepted it, so it cannot. (That re-validation runs
+    on every ``evaluate``, not only on the flip re-run; the config is built once
+    per process and reaches both the parse and the gate on all three wirings.)
+    Nothing on the flip legs writes an ``ai_outputs`` row in any case. A confidence
     distribution compared across the version boundary must therefore render the
     NULL bucket as its own visible share of all cycles; on its own, "the spike
     is gone" is an artifact of the prompt change, not evidence about conviction.
@@ -583,9 +585,9 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     ambiguous rather than evidence of a proposal: margin is coerced before
     confidence, so the second only proves margin was null-or-integer, and a
     ``maintain_current`` that quoted its ``"null"`` lands on the first. Nor is
-    the rule "any tag after margin coercion succeeds" — coercion also succeeds
-    on a null margin, so ``invalid_key_risks`` and ``missing_rationale`` are
-    reachable with nothing proposed at all.
+    the rule "any tag after margin coercion succeeds" — a null margin SKIPS the
+    coercion rather than failing it, so ``invalid_key_risks`` and
+    ``missing_rationale`` are reachable with nothing proposed at all.
 
     The predicate that works is narrower: tags reachable **only** when the
     margin coerced to a number. There are five, and each is worth naming
@@ -627,11 +629,11 @@ cycle is recorded as a model-format failure.
 
 The "requested_target_margin_pct" and "confidence" placeholders are quoted only
 so the block above stays valid JSON: write those two as bare JSON numbers.
-Every other field's real value is a string and keeps its quotes —
-"decision_mode", "target_side", "rationale", and every entry of "key_risks" —
-except where the rules below call for null, "target_side" included: write that
-as the JSON literal null, without quotes. A quoted number ("35") or a quoted
-null ("null") is discarded exactly like a leftover placeholder.
+Where the rules below call for null — that is "target_side" and
+"requested_target_margin_pct" — write the JSON literal null, without quotes.
+Everything else keeps its quotes: "decision_mode", "target_side" when it names
+a side, "rationale", and every entry of "key_risks". A quoted number ("35") or
+a quoted null ("null") is discarded exactly like a leftover placeholder.
 
 Rules (violations are discarded and treated as maintain_current — they are
 never repaired or rounded):

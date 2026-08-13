@@ -471,14 +471,15 @@ def test_format_instructions_schema_block_has_no_copyable_answer():
     # Pin both halves by their *contents*, not just their opening clause. A
     # blanket "unquote" would strip decision_mode's quotes, and an unparseable
     # block is recorded as a bare invalid_output — the same lost cycle, minus
-    # the tag naming the field that broke. In the other direction, dropping
-    # "(unless it is null)" steers a null target_side into invalid_target_side,
-    # and quoting the JSON literal null does the same to whichever field is
-    # null. Each is a discarded cycle, the very thing this contract is being
-    # reshaped to avoid, and each left every other test green.
-    # Pinned as two narrow needles rather than the whole sentence: the sentence
-    # verbatim would also fail on a harmless rewording of its opening clause,
-    # and then a deletion and a reword are indistinguishable from the failure.
+    # the tag naming the field that broke. In the other direction, losing a
+    # field from the null carve-out steers that field's null into
+    # invalid_target_side / maintain_current_with_target, and quoting the JSON
+    # literal null does the same. Each is a discarded cycle, the very thing this
+    # contract is being reshaped to avoid, and each has at some point left every
+    # other test green.
+    # Pinned as narrow needles rather than whole sentences: a sentence verbatim
+    # would also fail on a harmless rewording of its opening clause, and then a
+    # deletion and a reword are indistinguishable from the failure.
     assert (
         'The "requested_target_margin_pct" and "confidence" placeholders are quoted only'
         in normalized
@@ -489,18 +490,29 @@ def test_format_instructions_schema_block_has_no_copyable_answer():
     # outcome), and key_risks is an array whose ENTRIES are the strings.
     # Quoting a null target_side is invalid_target_side — the whole output
     # discarded, on the highest-volume path in the contract.
-    assert "Every other field's real value is a string and keeps its quotes" in normalized
-    # Every one of the four named, because the list reads as CLOSED: a model
-    # that treats it as exhaustive and finds target_side absent writes
-    # `"target_side": long` unquoted, which stops the block parsing at all —
-    # invalid_output, the tag this same contract calls out as the one that
-    # costs the diagnosis, on the set_target path the change exists to unblock.
-    for _field in ("decision_mode", "target_side", "rationale", "key_risks"):
-        assert f'"{_field}", ' in normalized or f'"{_field}" ' in normalized, _field
-    # And the null carve-out, which a closed list would otherwise contradict:
-    # target_side's real value IS null on maintain_current, the majority path.
-    assert 'call for null, "target_side" included' in normalized
-    assert "write that as the JSON literal null, without quotes" in normalized
+    # SLICED to the carve-out sentence before matching. Bare `in normalized`
+    # needles were vacuous here: "decision_mode" and "target_side" both appear
+    # in the leftover-placeholder sentence a paragraph earlier, so dropping
+    # either from this list — the exact regression the list guards — left the
+    # test green. Verified by mutation.
+    carve = normalized.split("write those two as bare JSON numbers.")[1]
+    carve = carve.split("A quoted number")[0]
+    # The null half must name BOTH nullable fields. Losing
+    # requested_target_margin_pct sends a maintain_current to
+    # maintain_current_with_target or margin_not_numeric; losing target_side
+    # sends it to invalid_target_side. Either discards the whole output on the
+    # highest-volume path in the contract.
+    assert '"target_side" and' in carve
+    assert '"requested_target_margin_pct"' in carve
+    assert "write the JSON literal null, without quotes" in carve
+    # And the quoted half must cover every remaining real value, including
+    # target_side when it names a side (unquoted there, the block stops parsing
+    # at all → a bare invalid_output) and the ENTRIES of key_risks, which is an
+    # array rather than a string.
+    assert '"decision_mode"' in carve
+    assert '"target_side" when it names' in carve
+    assert '"rationale"' in carve
+    assert 'every entry of "key_risks"' in carve
     # The consequence names the RECORD, not the position. Both are true, but
     # the measured v2 failure was a model that preferred a costless no-op, and
     # the old wording advertised non-substitution as a route to exactly that —

@@ -361,10 +361,12 @@ Breaking changes within the 0.x line are called out explicitly.
   margin was nevertheless supplied must be netted back in, or a recovered model
   reads as one that never proposed. Those are the five tags reachable **only**
   once the margin coerced to a number: `margin_off_step_grid` and
-  `margin_out_of_range`, plus `flat_with_nonzero_margin`,
-  `directional_side_with_zero_margin` and `set_target_without_confidence`, which
-  all sit past the `set_target_without_margin` guard. "Anything tagged after the
-  coercion" is the wrong rule — coercion succeeds on a null margin too, so
+  `margin_out_of_range` (rejected at coercion), plus `flat_with_nonzero_margin`,
+  `directional_side_with_zero_margin` and `set_target_without_confidence` —
+  those last three sitting past the `set_target_without_margin` guard, which is
+  what makes a null margin unable to reach them. "Anything tagged after the
+  coercion" is the wrong rule — a null margin skips the coercion rather than
+  failing it, so
   `invalid_key_risks` and `missing_rationale` are reachable with nothing
   proposed. `margin_not_numeric` and `confidence_not_numeric` are likewise out:
   margin is coerced first, so the second only proves margin was null-or-integer,

@@ -1,6 +1,8 @@
-"""The news analyst must bind the crypto-only flows/sentiment tools
-(get_etf_flows, get_fear_greed) only when the asset is crypto, and never for a
-stock — and the news ToolNode must be able to execute them when bound.
+"""The news analyst must bind the crypto-only tools (get_etf_flows,
+get_fear_greed, get_economic_calendar, get_btc_treasuries) only when the asset
+is crypto, and never for a stock — and the news ToolNode must be able to
+execute them when bound. Each is also gated on its own category being enabled,
+so a shipped-off category binds nothing.
 
 A fake LLM captures the tools passed to bind_tools so the wiring is asserted
 without any network or real model.

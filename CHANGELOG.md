@@ -14,11 +14,13 @@ Breaking changes within the 0.x line are called out explicitly.
   news-analyst categories for crypto assets, served by the SoSoValue key
   already used for ETF flows (shared plumbing — auth, request envelope, error
   taxonomy, clock/cache-age helpers — extracted from `sosovalue.py` into
-  `sosovalue_common.py`; three deltas for the ETF path: an out-of-range int now
+  `sosovalue_common.py`; four deltas for the ETF path: an out-of-range int now
   fails the finite-number check instead of raising, vendor text reaching a
   raised message is flattened through the shared markdown sanitizer rather than
-  raw-sliced, and the unset-key message names the SoSoValue-backed category
-  generically instead of the ETF chain). `economic_calendar`
+  raw-sliced, the unset-key message names the SoSoValue-backed category
+  generically instead of the ETF chain, and a cached fund carrying two rows for
+  one date is now rejected at read time — previously whichever copy the file
+  listed first was served as that day's flow). `economic_calendar`
   reports the scheduled US releases from `curr_date` through the next two
   weeks (today included) with consensus forecasts
   and the trailing window's releases with actual-vs-forecast surprises, for a

@@ -104,9 +104,10 @@ class TestWrapperInventory:
         # The @tool decorator takes an optional name override, so a tool can
         # advertise something other than its function name while the Python
         # attribute keeps working. Only get_options_market's name is pinned
-        # elsewhere (by the ToolNode and bound-tools assertions); the other
-        # fourteen could be renamed silently, and the LLM calls tools by the
-        # advertised name.
+        # elsewhere (by the ToolNode and bound-tools assertions); every other
+        # entry in ALL_WRAPPERS could be renamed silently, and the LLM calls
+        # tools by the advertised name. Deliberately uncounted: the number went
+        # stale the moment this branch added two more wrappers.
         for module, attr in ALL_WRAPPERS:
             assert getattr(module, attr).name == attr, (
                 f"{module.__name__}.{attr} advertises a different name to the LLM"

@@ -66,6 +66,7 @@ def _snapshot(
     calendar_unusable=0,
     calendar_truncated=0,
     calendar_duplicated=0,
+    calendar_malformed=0,
     histories=None,
     events_failed=(),
     events_unknown=(),
@@ -79,6 +80,7 @@ def _snapshot(
         calendar_unusable=calendar_unusable,
         calendar_truncated=calendar_truncated,
         calendar_duplicated=calendar_duplicated,
+        calendar_malformed=calendar_malformed,
         histories=_histories() if histories is None else histories,
         events_failed=list(events_failed),
         events_unknown=list(events_unknown),
@@ -167,7 +169,7 @@ class TestSixthLoopDisclosures:
             curr_date="2026-08-11",
         )
         assert "ends 2026-08-05, on or before this date" in report
-        assert "read the empty schedule as missing coverage" in report
+        assert "carries no dated entry beyond it" in report
         assert "genuinely carries no scheduled entries" not in report
 
     def test_a_merged_duplicate_date_earns_its_own_empty_schedule_reading(self):
@@ -198,7 +200,7 @@ class TestSixthLoopDisclosures:
             ),
             "2026-08-11",
         )
-        assert "read the empty schedule as missing coverage" in report
+        assert "carries no dated entry beyond it" in report
         assert "may carry a date outside it" not in report
 
     def test_the_forward_reach_shortfall_is_disclosed_on_a_fresh_snapshot(self):
@@ -351,7 +353,9 @@ class TestSixthLoopDisclosures:
 @pytest.mark.unit
 class TestParseCalendar:
     def test_live_fixture_parses_ascending_with_names(self):
-        rows, unusable, truncated, duplicated = sosovalue_macro._parse_calendar(CAL_FIX["data"])
+        rows, unusable, truncated, duplicated, _malformed = sosovalue_macro._parse_calendar(
+            CAL_FIX["data"]
+        )
         assert (unusable, truncated) == (0, 0)
         assert [r["date"] for r in rows] == sorted(r["date"] for r in rows)
         assert rows[0]["date"] == "2026-08-10"
@@ -371,7 +375,9 @@ class TestParseCalendar:
         ]
         assert len(data) > sosovalue_macro.MAX_CALENDAR_ROWS
         with caplog.at_level("WARNING"):
-            rows, unusable, truncated, duplicated = sosovalue_macro._parse_calendar(data)
+            rows, unusable, truncated, duplicated, _malformed = sosovalue_macro._parse_calendar(
+                data
+            )
         assert len(rows) == sosovalue_macro.MAX_CALENDAR_ROWS
         assert truncated == len(data) - sosovalue_macro.MAX_CALENDAR_ROWS
         assert unusable == 0
@@ -391,7 +397,7 @@ class TestParseCalendar:
             for m in range(1, 4)
             for d in range(1, 22)
         ]
-        rows, _unusable, truncated, _duplicated = sosovalue_macro._parse_calendar(data)
+        rows, _unusable, truncated, _duplicated, _malformed = sosovalue_macro._parse_calendar(data)
         assert truncated > 0
         kept = {r["date"] for r in rows}
         ahead_end = (
@@ -407,11 +413,52 @@ class TestParseCalendar:
         with pytest.raises(sosovalue_common.SoSoValueError, match="day-rows"):
             sosovalue_macro._parse_calendar(data)
 
-    def test_malformed_row_raises(self):
-        with pytest.raises(sosovalue_common.SoSoValueError, match="Malformed"):
-            sosovalue_macro._parse_calendar([{"date": "2026-08-11"}])
-        with pytest.raises(sosovalue_common.SoSoValueError, match="Malformed"):
-            sosovalue_macro._parse_calendar([{"date": "not-a-date", "events": []}])
+    def test_a_malformed_row_is_dropped_and_counted_not_fatal(self, caplog):
+        # This parser runs BEFORE any history request, so raising over one bad
+        # day-row would discard all nine tracked histories and the released
+        # table too. Dropped and counted instead, mirroring the treasuries
+        # listing; the count reaches the reader as its own disclosure.
+        data = [
+            {"date": "2026-08-11", "events": ["CPI (YoY)"]},
+            {"date": "2026-08-12"},  # no events key
+            {"date": "not-a-date", "events": []},
+        ]
+        with caplog.at_level("WARNING"):
+            rows, _unusable, _truncated, _duplicated, malformed = sosovalue_macro._parse_calendar(
+                data
+            )
+        assert malformed == 2
+        assert rows == [{"date": "2026-08-11", "events": ["CPI (YoY)"]}]
+        assert "malformed" in caplog.text
+
+    def test_a_calendar_with_no_readable_row_still_raises(self):
+        # Every row unreadable is a contract break, not evolution: nothing is
+        # left to render, so this routes through the stale fallback.
+        with pytest.raises(sosovalue_common.SoSoValueError, match="none of them is readable"):
+            sosovalue_macro._parse_calendar([{"date": "2026-08-11"}, {"date": "nope"}])
+
+    def test_the_malformed_count_is_disclosed_in_the_report(self):
+        assert "2 calendar day-rows could not be read" in _render(_snapshot(calendar_malformed=2))
+        # Singular reads singular, and a zero count stays silent.
+        assert "1 calendar day-row could not be read" in _render(_snapshot(calendar_malformed=1))
+        assert "could not be read" not in _render(_snapshot())
+
+    def test_a_malformed_but_fresh_empty_schedule_is_not_blamed_on_the_provider(self):
+        # calendar_malformed joins the incompleteness gate for the same reason
+        # truncation and dropped names are in it: a dropped day-row means this
+        # snapshot does not hold the whole calendar the provider published, so
+        # neither the provider-blaming branch nor the benign one may speak.
+        snapshot = _snapshot(
+            calendar=[{"date": "2026-07-20", "events": ["CPI (YoY)"]}],
+            calendar_malformed=1,
+            histories=_histories(
+                overrides={name: [_row("2026-01-15", "1%", "1%", "1%")] for name in TRACKED}
+            ),
+        )
+        report = _render(snapshot, curr_date="2026-08-11")
+        assert "artefact of the snapshot" in report
+        assert "cannot distinguish a calendar which stops there" not in report
+        assert "genuinely carries no scheduled entries" not in report
 
     def test_a_repeated_date_merges_and_is_counted(self, caplog):
         # One day's schedule split across two rows is still that day's
@@ -423,7 +470,9 @@ class TestParseCalendar:
             {"date": "2026-08-11", "events": ["PPI (MoM)", "CPI (YoY)"]},
         ]
         with caplog.at_level("WARNING"):
-            rows, unusable, truncated, duplicated = sosovalue_macro._parse_calendar(data)
+            rows, unusable, truncated, duplicated, _malformed = sosovalue_macro._parse_calendar(
+                data
+            )
         assert len(rows) == 1
         assert rows[0]["events"] == ["CPI (YoY)", "PPI (MoM)"]
         assert (unusable, truncated, duplicated) == (0, 0, 1)
@@ -438,13 +487,15 @@ class TestParseCalendar:
             }
         ]
         with caplog.at_level("WARNING"):
-            rows, unusable, _truncated, _duplicated = sosovalue_macro._parse_calendar(data)
+            rows, unusable, _truncated, _duplicated, _malformed = sosovalue_macro._parse_calendar(
+                data
+            )
         assert rows[0]["events"] == ["CPI (YoY)"]
         assert unusable == 4
 
     def test_duplicate_name_within_a_day_is_deduped_not_counted(self):
         data = [{"date": "2026-08-11", "events": ["CPI (YoY)", "CPI (YoY)"]}]
-        rows, unusable, _truncated, _duplicated = sosovalue_macro._parse_calendar(data)
+        rows, unusable, _truncated, _duplicated, _malformed = sosovalue_macro._parse_calendar(data)
         assert rows[0]["events"] == ["CPI (YoY)"]
         assert unusable == 0
 
@@ -690,6 +741,7 @@ class TestCacheAndLoad:
             "calendar_unusable": 0,
             "calendar_truncated": 0,
             "calendar_duplicated": 0,
+            "calendar_malformed": 0,
             "histories": _histories(),
             "events_failed": [],
             "events_unknown": [],
@@ -701,7 +753,7 @@ class TestCacheAndLoad:
 
     def test_within_ttl_reuses_cache_without_requests(self, tmp_path, monkeypatch):
         impl = self._setup(tmp_path, monkeypatch)
-        self._write_cache(tmp_path)  # 1h old vs 6h TTL
+        self._write_cache(tmp_path)  # 1h old vs this module's 5h TTL
         snapshot = sosovalue_macro._load_snapshot()
         assert snapshot.stale is False
         assert impl.calls == []
@@ -741,7 +793,9 @@ class TestCacheAndLoad:
 
     def test_incomplete_snapshot_uses_the_short_ttl(self, tmp_path, monkeypatch):
         impl = self._setup(tmp_path, monkeypatch, now="2026-08-11T06:30:00Z")
-        # 1.5h old: fresh under the 6h TTL, expired under the 1h incomplete TTL.
+        # 1.5h old: fresh under this module's 5h TTL (deliberately offset from
+        # the ETF module's 6h — do not "align the family" back), expired under
+        # the 1h incomplete TTL.
         self._write_cache(
             tmp_path,
             histories=_histories(failed=("GDP (QoQ)",)),
@@ -1093,9 +1147,12 @@ class TestRender:
         assert "sitting far from that fetch date" in report
         assert "artefact of the snapshot" not in report
 
-    def test_a_calendar_that_stopped_publishing_forward_is_called_a_gap(self):
-        # Same empty schedule, opposite meaning: a calendar ending on or
-        # before curr_date is missing coverage, not a quiet fortnight.
+    def test_a_calendar_that_stops_before_this_date_does_not_resolve_the_cause(self):
+        # This branch used to assert "missing coverage, not a fortnight without
+        # events". It cannot: the feed publishes a day-row only where it has
+        # events, so a FRESH snapshot over a genuinely quiet fortnight lands
+        # here too, and the sentence denied exactly the right reading. It now
+        # states the fact and leaves the cause open.
         snapshot = _snapshot(
             calendar=[{"date": "2026-07-01", "events": ["CPI (YoY)"]}],
             histories=_histories(
@@ -1103,8 +1160,10 @@ class TestRender:
             ),
         )
         report = _render(snapshot, curr_date="2026-08-11")
-        assert "publishing no forward schedule" in report
-        assert "missing coverage" in report
+        assert "carries no dated entry beyond it" in report
+        assert "cannot distinguish a calendar which stops there" in report
+        # The denial the branch used to make must not come back.
+        assert "missing coverage" not in report
         assert "sitting far from that fetch date" not in report
 
     def test_an_empty_released_window_points_back_at_the_coverage_gap(self):
@@ -1140,7 +1199,7 @@ class TestRender:
             {"date": "2026-08-12", "events": ["CPI (MoM)"]},
             {"date": "2026-08-12", "events": ["Retail Sales (MoM)"]},
         ]
-        rows, _unusable, _truncated, duplicated = sosovalue_macro._parse_calendar(data)
+        rows, _unusable, _truncated, duplicated, _malformed = sosovalue_macro._parse_calendar(data)
         assert [r["date"] for r in rows] == ["2026-08-11", "2026-08-12"]
         assert duplicated == 2
 
@@ -1427,7 +1486,7 @@ class TestServedDepthAndStaleReach:
             stale=True,
         )
         report = _render(snapshot, curr_date="2026-08-11")
-        assert "publishing no forward schedule" not in report
+        assert "carries no dated entry beyond it" not in report
         assert "artefact of the snapshot" in report
 
     def test_a_truncated_but_fresh_empty_schedule_is_not_blamed_on_the_provider(self):
@@ -1441,7 +1500,7 @@ class TestServedDepthAndStaleReach:
             ),
         )
         report = _render(snapshot, curr_date="2026-08-11")
-        assert "publishing no forward schedule" not in report
+        assert "carries no dated entry beyond it" not in report
         assert "artefact of the snapshot" in report
 
     def test_an_all_names_dropped_empty_schedule_is_not_called_benign(self):
@@ -1478,6 +1537,7 @@ class TestServedDepthAndStaleReach:
             "calendar_unusable": 0,
             "calendar_truncated": 0,
             "calendar_duplicated": 0,
+            "calendar_malformed": 0,
             "histories": {"CPI (YoY)": [_row("2026-08-10", "3.5%", "3.4%", "3.3%")]},
             "events_failed": [],
             "events_unknown": [n for n in TRACKED if n != "CPI (YoY)"],
@@ -1911,3 +1971,128 @@ class TestVisibleViewAndCoverage:
         assert "| Nonfarm Payrolls |" in report
         assert "Nonfarm Payrolls contributed nothing" not in report
         assert "contributed no release to this window" in report
+
+
+# --------------------------------------------------------------------------- #
+# review-loop round 7: absence of a row is not absence of coverage
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+class TestQuietIsNotUncovered:
+    """The feed emits a day-row only where it has events, so no report sentence
+    may read the absence of rows as the absence of coverage."""
+
+    def test_a_window_bracketed_by_the_calendar_is_called_covered_and_quiet(self):
+        # The calendar starts before the window and ends after it, so every day
+        # in between was fetched and simply had nothing scheduled. Saying
+        # "missing rather than absent" here contradicted both the Source line's
+        # own span and the benign empty-schedule branch, in one header.
+        report = _render(
+            _snapshot(
+                calendar=[
+                    {"date": "2026-08-05", "events": ["CPI (YoY)"]},
+                    {"date": "2026-08-30", "events": ["Nonfarm Payrolls"]},
+                ]
+            ),
+            curr_date="2026-08-11",
+        )
+        assert "covered and are genuinely quiet" in report
+        assert "absent from this window rather than missing from it" in report
+        assert "missing from this window rather than absent from it" not in report
+        # And it must agree with the Source line rather than contradict it.
+        assert "Provider calendar covers 2026-08-05 → 2026-08-30" in report
+
+    def test_a_window_past_the_calendars_end_is_still_called_missing(self):
+        # The positive control for the branch above: when the window really does
+        # reach past the calendar's span, "missing rather than absent" is right.
+        report = _render(
+            _snapshot(calendar=[{"date": "2026-08-05", "events": ["CPI (YoY)"]}]),
+            curr_date="2026-08-11",
+        )
+        assert "missing from this window rather than absent from it" in report
+        assert "covered and are genuinely quiet" not in report
+
+    def test_the_reach_note_does_not_resolve_which_cause_shortened_the_tail(self):
+        # reach == AHEAD_DAYS - 1 is the ORDINARY live shape (the captured
+        # calendar's last event-bearing row sits 13 days out), so this note
+        # rides normal serves; it must not tell the reader the calendar stopped
+        # when the payload cannot distinguish that from a quiet last day.
+        report = _render(
+            _snapshot(
+                calendar=[{"date": "2026-08-24", "events": ["CPI (YoY)"]}],
+                fetched_at="2026-08-11T00:00:00Z",
+            ),
+            curr_date="2026-08-11",
+        )
+        assert "reaches only 13 days past it" in report
+        assert "cannot say whether that stretch is unpublished or simply quiet" in report
+        assert "rather than a quiet fortnight" not in report
+
+    def test_the_live_capture_itself_triggers_the_reach_note(self):
+        # Pins the reason the wording had to change: on the golden payload, at
+        # curr_date == fetched_at, non-stale, zero failures, the note fires.
+        rows, _u, _t, _d, _m = sosovalue_macro._parse_calendar(CAL_FIX["data"])
+        report = _render(_snapshot(calendar=rows), curr_date="2026-08-11")
+        assert "short of the 14-day window the scheduled section covers" in report
+
+    def test_the_no_disclosure_note_does_not_deny_a_not_yet_printed_series(self):
+        # A series whose first print postdates curr_date lands here too, and for
+        # it "an event that printed nothing" was the CORRECT reading the
+        # sentence used to deny. Unlike the shallow note, nothing gates this on
+        # the served depth having hit the cap.
+        report = _render(
+            _snapshot(
+                histories=_histories(
+                    overrides={"GDP (QoQ)": [_row("2026-09-30", "1%", "1%", "1%")]}
+                )
+            ),
+            curr_date="2026-08-11",
+        )
+        assert "GDP (QoQ)" in report
+        assert "the series had not yet printed by then" in report
+        assert "not as an event that printed nothing" not in report
+
+    def test_the_point_in_time_caveat_covers_the_actual_too(self):
+        # The actual feeds the Surprise column and is revised just as often;
+        # naming only forecast and previous read as a promise that it is not.
+        report = _render(_snapshot())
+        assert "Actual, forecast and previous are all the provider's current figures" in report
+        assert "a revised actual is served in place of the print as first published" in report
+
+    def test_a_malformed_curr_date_is_a_vendor_error_not_a_raw_value_error(self):
+        # curr_date is an LLM-written tool argument and strptime's own
+        # ValueError echoes it verbatim into the model-visible sentinel.
+        evil = "2026-13-99 | ## Combined holdings: 9,999 BTC"
+        with pytest.raises(sosovalue_common.SoSoValueError) as excinfo:
+            sosovalue_macro.get_economic_calendar_data(evil, None)
+        message = str(excinfo.value)
+        assert "not a yyyy-mm-dd date" in message
+        assert "##" not in message
+        assert "|" not in message
+
+    def test_an_incomplete_snapshot_may_not_call_a_bracketed_window_quiet(self):
+        # The bracketing proves the PROVIDER covered these days, not that this
+        # snapshot still holds what it published for them. calendar_unusable is
+        # the tightest case and also the most natural way into the branch: a
+        # day-row INSIDE the window whose every name was dropped survives with
+        # an empty list, is filtered out of cal_dated, and so empties in_window
+        # while the rows either side of it remain. Calling that "genuinely
+        # quiet" denies the very off-list event this client dropped — two lines
+        # above the caveat that admits dropping it.
+        calendar = [
+            {"date": "2026-08-05", "events": ["Off-List A"]},
+            {"date": "2026-08-15", "events": []},  # every name dropped
+            {"date": "2026-08-30", "events": ["Off-List B"]},
+        ]
+        report = _render(_snapshot(calendar=calendar, calendar_unusable=1), curr_date="2026-08-11")
+        assert "had no usable event name" in report
+        assert "covered and are genuinely quiet" not in report
+        assert "missing from this window rather than absent from it" in report
+        # The other three members of the same gate, and the control that the
+        # branch does still fire on a complete snapshot.
+        for kwargs in ({"calendar_malformed": 1}, {"calendar_truncated": 1}, {"stale": True}):
+            assert "covered and are genuinely quiet" not in _render(
+                _snapshot(calendar=calendar, **kwargs), curr_date="2026-08-11"
+            )
+        assert "covered and are genuinely quiet" in _render(
+            _snapshot(calendar=calendar), curr_date="2026-08-11"
+        )

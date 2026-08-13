@@ -17,7 +17,10 @@ Live-verified API facts this module is built on (2026-08-11):
   and the ``MAX_COMPANIES`` cut assumes it. International tickers appear
   ("3350", "0434.HK", "ADE.DE"), which the shared ticker filter accepts.
 - ``GET /btc-treasuries/{ticker}/purchase-history`` (``limit`` capped at 100)
-  serves rows newest-first. Numeric fields arrive as STRINGS ("840447",
+  serves DATES newest-first — but two rows sharing one date arrive
+  OLDEST-first, which is why the parser sorts ascending without reversing
+  (the evidence is the macro history endpoint's live capture; see
+  ``_parse_purchase_rows``). Numeric fields arrive as STRINGS ("840447",
   "-1690"); ``btc_acq`` is negative for disposals (MSTR was reducing when
   captured) and — with ``acq_cost`` — can be MISSING entirely: MARA's newest
   row carries only ``btc_holding``, its ~17.5k BTC reduction visible only as
@@ -289,15 +292,22 @@ def _parse_purchase_rows(data: list, ticker: str) -> list[dict]:
             else:
                 row[field] = None
         rows.append(row)
-    # Reverse before the stable sort so a same-date pair ends up oldest-first.
-    # The API serves rows newest-first, and Python's sort is stable, so sorting
-    # the payload order by date alone would leave the NEWER of two same-day
-    # filings first and the superseded one last — and every "latest disclosure"
-    # consumer reads rows[-1]: the combined-holdings total, each company's
-    # as-of date, the concentration share, the listing-order check, and the
-    # derived-delta baseline. An intraday revision would have silently
-    # reported the figure it replaced.
-    rows.reverse()
+    # Stable ascending sort with NO pre-reversal, so a same-date pair keeps the
+    # provider's own sequence and ``rows[-1]`` is the latest disclosure — which
+    # is what every "latest disclosure" consumer reads: the combined-holdings
+    # total, each company's as-of date, the concentration share, the
+    # listing-order check, and the derived-delta baseline.
+    #
+    # The API serves DATES newest-first but lists two rows sharing one date
+    # OLDEST-first. No treasuries fixture carries a duplicate date, so the
+    # evidence is the sibling endpoint of the same API family:
+    # tests/fixtures/sosovalue_macro_history_nfp.json holds 2025-12-16 twice,
+    # actual=-105 then actual=64, and the ``previous`` chain
+    # (119 -> -105 -> 64 -> 50) fixes -105 as the EARLIER print.
+    # sosovalue_macro._parse_event_rows correspondingly does not reverse.
+    # An earlier revision of this parser did, on the assumption that
+    # "newest-first" also held within a date; that made ``rows[-1]`` the
+    # SUPERSEDED filing — exactly the inversion the reversal was meant to stop.
     rows.sort(key=lambda r: r["date"])
     return rows
 
@@ -482,8 +492,17 @@ def _read_cache(path: str) -> dict | None:
     # renderer's third wording depends on that acceptance. Feeding _fetch_all's
     # own output back through here is a no-op: it set the flag from this same
     # predicate over this same order.
-    if not payload["order_unverified"] and _holdings_order(companies) != _ORDER_DESCENDING:
-        return _reject("'order_unverified' is False but the stored holdings are not descending")
+    order = _holdings_order(companies)
+    if not payload["order_unverified"] and order != _ORDER_DESCENDING:
+        # Named per arm: the too-few arm compared nothing at all, so calling it
+        # "not descending" would report a contradiction that was never observed
+        # — the very distinction _holdings_order was extracted to preserve.
+        return _reject(
+            "'order_unverified' is False but only one company is stored, so the "
+            "listing order was never verified"
+            if order == _ORDER_TOO_FEW
+            else "'order_unverified' is False but the stored holdings are not descending"
+        )
     if not isinstance(payload.get("fetched_at"), str) or not payload["fetched_at"]:
         return _reject("'fetched_at' is missing or not a non-empty string")
     return payload
@@ -893,9 +912,40 @@ def get_btc_treasury_data(
         look_back_days = DEFAULT_LOOKBACK_DAYS
 
     # Normalise curr_date BEFORE any lexical date comparison (family rule).
-    curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    #
+    # Guarded like deribit's twin: curr_date is an LLM-written tool argument,
+    # and strptime's own ValueError echoes it verbatim ("time data '...' does
+    # not match format"). ValueError/TypeError are outside the vendor taxonomy,
+    # so that message escapes to the router's bare except and is rendered into
+    # the model-visible DATA_UNAVAILABLE sentinel unsanitized and unbounded —
+    # a caller's malformed argument dressed up as a SoSoValue outage.
+    try:
+        curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    except (ValueError, TypeError) as e:
+        detail = _sanitize(curr_date, limit=200)
+        raise SoSoValueError(
+            f"curr_date {detail!r} is not a yyyy-mm-dd date ({_sanitize(e, limit=200)})"
+        ) from e
     curr_date = curr_dt.strftime("%Y-%m-%d")
 
+    # The other caller-supplied argument, guarded the same way. A truthy
+    # non-string asset reaches ``normalize_symbol((asset or "").replace(...))``
+    # and escapes as AttributeError — again a caller's bug reported as a vendor
+    # outage. ``bytes`` has to be caught HERE rather than duck-typed away:
+    # ``bytes.replace`` exists, so it survives a hasattr check and only fails
+    # deeper in. isinstance rather than ``type(...) is str`` so a str subclass,
+    # which every operation below handles, is still accepted.
+    if asset and not isinstance(asset, str):
+        raise SoSoValueError(f"asset must be a symbol string, got {type(asset).__name__}")
+    # Flattened BEFORE classification, not after, so exactly one string is both
+    # decided on and rendered — sanitising afterwards makes the classified and
+    # the rendered strings disagree (deribit's comment spells out that failure).
+    # ``asset`` is an LLM-written tool argument echoed into a markdown ``##``
+    # heading, an emphasis caveat and the no-signal sentence, so every copy is a
+    # chance to forge structure: an asset of
+    # "ETH-USD | ## Combined holdings: 9,999,999 BTC" classifies on its base
+    # "ETH", takes the proxy branch, and lands that heading inside the report.
+    asset = _sanitize(asset, limit=200)
     asset_key, market_proxy = _classify_asset(asset)
     if asset_key is None:
         return (
@@ -1257,9 +1307,12 @@ def get_btc_treasury_data(
             "by its own quantity as an absolute value — an average price for that "
             "event, not a market price. Both are blank on a row derived from a holdings "
             "change: there the BTC figure spans every transaction since the previous "
-            "disclosure, so no single filed cost belongs to it. Implied US$/BTC is also "
-            "blank where the filing reported a quantity but no cost, a cost of zero, or a "
-            "quantity of zero — there is nothing to divide in any of those._",
+            "disclosure, so no single filed cost belongs to it. Cost is blank on a FILED "
+            "row too whenever the company reported a quantity without a cost — common on "
+            "monthly snapshot disclosures — so a blank Cost does not by itself mark a row "
+            "as derived; only the 'from holdings change since' label does. Implied US$/BTC "
+            "is blank in that case as well, and on a cost of zero or a quantity of zero — "
+            "there is nothing to divide in any of those._",
             "\n| Date | Company | BTC change | Cost (US$m) | Implied US$/BTC |",
             "| --- | --- | --- | --- | --- |",
         ]

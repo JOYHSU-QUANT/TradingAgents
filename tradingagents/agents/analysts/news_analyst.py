@@ -30,9 +30,10 @@ def create_news_analyst(llm):
             # only return the disabled sentinel. They stay unguarded here because
             # their descriptions are welded into the single system_message string
             # below; un-advertising them means restructuring that prompt, which is
-            # out of scope for this change. Folding all four into one table-driven
-            # registration is the follow-up — worth doing before further optional
-            # crypto tools are added to this block.
+            # out of scope for this change. Folding the whole set into one
+            # table-driven registration is the follow-up; the crypto block below
+            # already registers its categories that way, so it is these two
+            # unguarded entries — not the guarded ones — that still need it.
             get_macro_indicators,
             get_prediction_markets,
         ]
@@ -82,9 +83,21 @@ def create_news_analyst(llm):
                 )
             if crypto_tools:
                 tools = tools + crypto_tools
-                crypto_tools_message = (
-                    " Since this is a crypto asset, also use " + ", and ".join(crypto_hints) + "."
+                # "and" before the LAST hint only. A plain ", and ".join reads
+                # "A, and B, and C, and D" once more than two categories are
+                # enabled, and each hint already carries its own commas,
+                # semicolons and em-dashes — the repeated conjunction makes the
+                # boundaries between hints unreadable. Two hints still read
+                # "A, and B", which is what this block produced before the
+                # calendar and treasuries categories were added.
+                joined = (
+                    crypto_hints[0]
+                    if len(crypto_hints) == 1
+                    else ", and ".join(crypto_hints)
+                    if len(crypto_hints) == 2
+                    else ", ".join(crypto_hints[:-1]) + ", and " + crypto_hints[-1]
                 )
+                crypto_tools_message = " Since this is a crypto asset, also use " + joined + "."
 
         system_message = (
             f"You are a news researcher tasked with analyzing recent news and trends over the past week. Please write a comprehensive report of the current state of the world that is relevant for trading and macroeconomics. Use the available tools: get_news(query, start_date, end_date) for {asset_label}-specific or targeted news searches, get_global_news(curr_date, look_back_days, limit) for broader macroeconomic news, get_macro_indicators(indicator, curr_date, look_back_days) to ground macro commentary in actual data from FRED (e.g. 'cpi', 'core_pce', 'unemployment', 'fed_funds_rate', '10y_treasury', 'yield_curve'), and get_prediction_markets(topic, limit) for live market-implied probabilities of forward-looking events (e.g. 'Fed rate cut', 'recession 2026', geopolitical or sector events). Provide specific, actionable insights with supporting evidence to help traders make informed decisions."

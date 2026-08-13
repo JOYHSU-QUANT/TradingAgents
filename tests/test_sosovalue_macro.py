@@ -2400,6 +2400,44 @@ class TestDroppedCalendarContentIsNamedNotBlamedOnTheProvider:
         assert "could not be read and was dropped (2026-08-20)" in report
         assert "its span may start later or end earlier" not in report
 
+    def test_each_span_end_is_claimed_separately(self):
+        # One boolean for both ends made this sentence re-raise the far end a
+        # paragraph after the reach note had declined it, on a drop that
+        # provably sat in front of the span.
+        span = [
+            {"date": "2026-08-14", "events": ["CPI (YoY)"]},
+            {"date": "2026-08-20", "events": ["Nonfarm Payrolls"]},
+        ]
+        front = _render(
+            _snapshot(calendar=span, calendar_malformed=1, calendar_malformed_dates=["2026-08-12"]),
+            curr_date="2026-08-11",
+        )
+        assert "its span may start later than the provider's own" in front
+        assert "end earlier" not in front
+
+        back = _render(
+            _snapshot(calendar=span, calendar_malformed=1, calendar_malformed_dates=["2026-08-25"]),
+            curr_date="2026-08-11",
+        )
+        assert "its span may end earlier than the provider's own" in back
+        assert "start later" not in back
+
+        both = _render(
+            _snapshot(
+                calendar=span,
+                calendar_malformed=2,
+                calendar_malformed_dates=["2026-08-12", "2026-08-25"],
+            ),
+            curr_date="2026-08-11",
+        )
+        assert "its span may start later or end earlier than the provider's own" in both
+
+        interior = _render(
+            _snapshot(calendar=span, calendar_malformed=1, calendar_malformed_dates=["2026-08-16"]),
+            curr_date="2026-08-11",
+        )
+        assert "its span may" not in interior
+
     def test_an_unnamed_drop_keeps_the_endpoint_clause(self):
         # It could have sat at either end, so the claim stands.
         assert "its span may start later or end earlier than the provider's own" in _render(

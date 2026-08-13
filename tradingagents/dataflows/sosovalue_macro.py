@@ -72,9 +72,10 @@ published at some unknown point during that day (the API has no time-of-day),
 which the report flags whenever such a row is shown.
 
 Caching mirrors the family pattern: one rolling snapshot file, refreshed past
-``CACHE_TTL_HOURS`` (or ``MALFORMED_CACHE_TTL_HOURS`` while a calendar
-day-row was dropped, or ``INCOMPLETE_CACHE_TTL_HOURS`` while any tracked
-history FAILED — an unknown one is not retried), stale-served on a fetch
+``CACHE_TTL_HOURS``, or the shorter ``INCOMPLETE_CACHE_TTL_HOURS`` while any
+tracked history FAILED, or the middle ``MALFORMED_CACHE_TTL_HOURS`` while a
+calendar day-row was dropped (an unknown event is not retried), stale-served
+on a fetch
 failure up to ``MAX_STALE_DAYS`` with a disclosed age, never written on
 failure, and discarded when read-side validation fails. The stale cap is the
 family's 14 days, but this feed's forward half is only ``AHEAD_DAYS`` wide, so
@@ -1216,16 +1217,18 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     # the last of those four was the one site this rule had already been
     # written down for and not applied to. A new such site belongs here too.
     cal_dated = [r["date"] for r in snapshot.calendar if r["events"]]
-    # Could a dropped day-row have moved the span the Source line prints? Only
-    # provably not when every drop is named AND every named date lies strictly
-    # inside the rendered span; an unnamed drop could have sat anywhere. Hoisted
-    # because two sites need it: the caveat's endpoint clause, and the reach
-    # note's decision about whether client-side loss can explain a short tail.
-    span_moved_possible = not (
-        cal_dated
-        and len(snapshot.calendar_malformed_dates) == snapshot.calendar_malformed
-        and all(cal_dated[0] < d < cal_dated[-1] for d in snapshot.calendar_malformed_dates)
-    )
+    # Could a dropped day-row have moved the span the Source line prints —
+    # and at WHICH end? Split, because the two ends are claimed separately and
+    # a single boolean made the caveat re-raise the far end one paragraph after
+    # the reach note had declined it. Provably unmoved at an end only when
+    # every drop is named (an unnamed drop could have sat anywhere) and no
+    # named date falls beyond that end. Named dates can never EQUAL a rendered
+    # date — the parser subtracts the dates the calendar still carries, and the
+    # cache mirrors that — so the comparisons are strict without loss.
+    _mdates = snapshot.calendar_malformed_dates
+    _all_named = cal_dated and len(_mdates) == snapshot.calendar_malformed
+    span_start_moved_possible = not (_all_named and all(d > cal_dated[0] for d in _mdates))
+    span_end_moved_possible = not (_all_named and all(d < cal_dated[-1] for d in _mdates))
     # Client-side loss that could actually sit BEYOND the calendar's last dated
     # entry — the only kind the reach note may offer as a cause for a short
     # forward tail. Counting the buckets alone over-claims, and the header
@@ -1235,15 +1238,19 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     #   truncated  — keeps the HEAD, so every dropped row is dated after the
     #                last kept one. Unconditionally in scope.
     #   malformed  — in scope unless every drop is named AND every named date
-    #                lands at or before the last dated entry, which is the one
-    #                state the caveat below has already ruled out.
+    #                lands before the last dated entry. This is exactly
+    #                ``span_end_moved_possible``, which the caveat below prints
+    #                its far-end clause from, so the two cannot disagree.
     #   unusable   — a dropped NAME costs no date: the row survives with its
     #                other names. It shortens the reach only when it emptied a
     #                row whole AND that row sits past the last dated entry.
-    #                (A provider-sent empty row looks identical here, so the
-    #                bucket is still required: it keeps the claim to loss this
-    #                client can actually account for.)
-    mdates = snapshot.calendar_malformed_dates
+    #                (A provider-sent empty row is byte-identical to a
+    #                client-emptied one, so the conjunction can fire when the
+    #                dropped name came off a DIFFERENT row that still stands.
+    #                The bucket is kept anyway — without it a purely
+    #                provider-sent empty row would trigger the claim — and the
+    #                sentence stays a "may", which survives that case.)
+    mdates = _mdates
     far_end = cal_dated[-1] if cal_dated else None
     loss_beyond_reach = bool(
         snapshot.calendar_truncated
@@ -1676,17 +1683,23 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # about the calendar this report carries, which exists either way.
         # The endpoint clause mirrors the truncation caveat — a dropped row at
         # either end moves the rendered span inward, so the span on the Source
-        # line is not the provider's own. It is dropped where the report can
-        # rule that out: every drop named, and every named date strictly inside
-        # the rendered span, means the endpoints provably did not move. An
-        # unnamed drop could have sat anywhere, so it keeps the clause.
-        # Uses the hoisted predicate, which is computed from the UNFILTERED
-        # dates: a date the tables render from a history was still dropped from
-        # the calendar, so it still bears on where the calendar's endpoints sit.
+        # line is not the provider's own. Each end is claimed only where the
+        # report cannot rule it out — one boolean for both made this sentence
+        # re-raise the far end a paragraph after the reach note had declined it,
+        # on a drop that provably sat in front of the span.
+        # Both use the hoisted predicates, computed from the UNFILTERED dates: a
+        # date the tables render from a history was still dropped from the
+        # calendar, so it still bears on where the calendar's endpoints sit.
+        _ends = [
+            text
+            for text, possible in (
+                ("start later", span_start_moved_possible),
+                ("end earlier", span_end_moved_possible),
+            )
+            if possible
+        ]
         span_clause = (
-            ", and its span may start later or end earlier than the provider's own"
-            if span_moved_possible
-            else ""
+            f", and its span may {' or '.join(_ends)} than the provider's own" if _ends else ""
         )
         header_lines.append(
             f"_{n} calendar day-{_plural(n, 'row', 'rows')} could not be read and "

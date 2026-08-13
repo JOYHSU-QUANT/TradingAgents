@@ -76,10 +76,11 @@ Breaking changes within the 0.x line are called out explicitly.
   labelled as the snapshot's rather than the provider's, and where a caveat in
   the same header already names the cause of a short calendar — a dropped row,
   or a snapshot fetched before the report's date — the report names it too
-  instead of calling it unknowable. Only where that cause could actually
-  account for the gap, though: a dropped row the report can place inside the
-  span it renders, or a dropped event *name*, which costs no date at all,
-  explains nothing about a short forward tail and is not offered as if it did. Reading an empty window as genuinely quiet
+  instead of calling it unknowable — but only where that cause could actually
+  account for the gap. A dropped row the report can place at or before the
+  calendar's last dated entry, or a dropped event *name* that left its day-row
+  standing with other names, explains nothing about a short forward tail and is
+  not offered as if it did. Reading an empty window as genuinely quiet
   additionally requires that the scheduled table really is empty (it is fed by
   forward-dated event histories as well as by the calendar) and that the
   snapshot is current, and it no longer extends to events this feed does not

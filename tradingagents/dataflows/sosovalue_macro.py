@@ -72,7 +72,8 @@ published at some unknown point during that day (the API has no time-of-day),
 which the report flags whenever such a row is shown.
 
 Caching mirrors the family pattern: one rolling snapshot file, refreshed past
-``CACHE_TTL_HOURS`` (or ``INCOMPLETE_CACHE_TTL_HOURS`` while any tracked
+``CACHE_TTL_HOURS`` (or ``MALFORMED_CACHE_TTL_HOURS`` while a calendar
+day-row was dropped, or ``INCOMPLETE_CACHE_TTL_HOURS`` while any tracked
 history FAILED — an unknown one is not retried), stale-served on a fetch
 failure up to ``MAX_STALE_DAYS`` with a disclosed age, never written on
 failure, and discarded when read-side validation fails. The stale cap is the
@@ -883,7 +884,11 @@ def _load_snapshot() -> _MacroSnapshot:
         #     nothing says the row is permanently bad; a null events array or a
         #     half-written row in a present-anchored calendar is exactly what an
         #     hour later returns clean. Left on the full TTL it is re-served for
-        #     five hours with a hole the report has to keep disclosing.
+        #     five hours with a hole the report has to keep disclosing. It gets
+        #     its OWN middle value rather than the failed-history one — see the
+        #     branch below — because nothing proves the row shape is transient
+        #     and the shortest TTL on a permanent break is a standing 5x
+        #     amplification.
         # NOT shortened, each for its own reason:
         #   events_unknown — proven permanent (200 + empty list = renamed
         #     upstream); only a TRACKED_EVENTS edit heals it.
@@ -893,10 +898,8 @@ def _load_snapshot() -> _MacroSnapshot:
         #     identically, and the kept head is the span this report renders.
         #   calendar_duplicated — the merge loses no day-row and no name; it
         #     costs date confidence, not data.
-        #   calendar_malformed — shortened, but to its OWN middle value rather
-        #     than the failed-history one: a re-fetch can heal it, yet nothing
-        #     proves the row shape is transient, and pinning the shortest TTL on
-        #     a permanent break is a standing 5x request amplification.
+        # Both buckets at once takes the shortest: a transient failure is
+        # already in the payload, so the amplification argument does not apply.
         if cached["events_failed"]:
             ttl = INCOMPLETE_CACHE_TTL_HOURS
         elif cached["calendar_malformed"]:
@@ -1225,19 +1228,40 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     )
     # Client-side loss that could actually sit BEYOND the calendar's last dated
     # entry — the only kind the reach note may offer as a cause for a short
-    # tail. Counting the buckets alone over-claims, and the header disproves it:
-    #   truncated  — keeps the HEAD, so what it drops is exactly the
-    #                furthest-out rows. Unconditionally in scope.
-    #   malformed  — only when the drop cannot be proven interior. With
-    #                span_moved_possible False the caveat has already asserted
-    #                the opposite two paragraphs down.
+    # forward tail. Counting the buckets alone over-claims, and the header
+    # disproves it. Note none of these reuses ``span_moved_possible``: that
+    # predicate is true when EITHER endpoint could have moved, and a drop in
+    # FRONT of the span explains nothing about a short tail behind it.
+    #   truncated  — keeps the HEAD, so every dropped row is dated after the
+    #                last kept one. Unconditionally in scope.
+    #   malformed  — in scope unless every drop is named AND every named date
+    #                lands at or before the last dated entry, which is the one
+    #                state the caveat below has already ruled out.
     #   unusable   — a dropped NAME costs no date: the row survives with its
-    #                other names and the calendar's forward extent is unchanged.
-    #                It shortens the reach only when some row was emptied whole.
+    #                other names. It shortens the reach only when it emptied a
+    #                row whole AND that row sits past the last dated entry.
+    #                (A provider-sent empty row looks identical here, so the
+    #                bucket is still required: it keeps the claim to loss this
+    #                client can actually account for.)
+    mdates = snapshot.calendar_malformed_dates
+    far_end = cal_dated[-1] if cal_dated else None
     loss_beyond_reach = bool(
         snapshot.calendar_truncated
-        or (snapshot.calendar_malformed and span_moved_possible)
-        or (snapshot.calendar_unusable and any(not r["events"] for r in snapshot.calendar))
+        or (
+            snapshot.calendar_malformed
+            and (
+                far_end is None
+                or len(mdates) != snapshot.calendar_malformed
+                or any(d > far_end for d in mdates)
+            )
+        )
+        or (
+            snapshot.calendar_unusable
+            and any(
+                not r["events"] and (far_end is None or r["date"] > far_end)
+                for r in snapshot.calendar
+            )
+        )
     )
     # Does the calendar contribute anything at all to THIS window? Its only
     # consumer is the zero-coverage note below, so emptiness is all that is
@@ -1361,9 +1385,13 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         elif blind is not None and blind > 0 and cal_dated and cal_dated[-1] >= fetched_day:
             # The added clause asserts a reach deficit of exactly ``blind``,
             # which rests on the provider's horizon being anchored to the fetch
-            # and roughly constant. A calendar that already stopped BEFORE its
-            # own fetch day disproves that premise with the payload in hand, so
-            # the clause is withheld there and only the honest half is said.
+            # and roughly constant. Two states are withheld, and only the
+            # honest half is said in both: a calendar that already stopped
+            # BEFORE its own fetch day disproves the premise with the payload in
+            # hand, and one with no dated row at all has no reach to be "that
+            # much less far" than anything. The boundary is inclusive — at
+            # cal_dated[-1] == fetched_day the constant-horizon premise still
+            # yields exactly ``blind`` days of deficit.
             cause = (
                 f"and this snapshot cannot say whether {stretch} is unpublished or simply "
                 f"quiet — though its calendar was fetched {blind} {_plural_days(blind)} "
@@ -1615,6 +1643,13 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # rendered from a history, and naming it would say "missing from this
         # report" directly above a row carrying it. Same wrong-subject error
         # the covered-and-quiet gate's ``not scheduled`` term exists for.
+        # Built from the UNCAPPED row lists: both tables cut to MAX_ROWS
+        # further down, so a date whose only row is cut is withheld here while
+        # nothing in the report carries it. That errs toward saying less, which
+        # is the safe direction for a caveat, and it keeps this site off the
+        # table-capping logic. Unreachable on the live payload (neither table
+        # approaches the cap); a broadened calendar or a large caller-supplied
+        # look_back_days can get there.
         shown = {row[0] for row in scheduled} | {row[0] for row in released}
         dates = [d for d in snapshot.calendar_malformed_dates if d not in shown]
         # Name the days, because a bare count cannot be acted on and a row

@@ -1195,7 +1195,10 @@ def get_btc_treasury_data(
     # The shortfall rides inside the ordering parenthetical rather than opening
     # a second one: two bracketed clauses back to back on the same line read as
     # a formatting slip, and this line already carries three fields.
-    listing_scope = f"{snapshot.companies_total} listed companies"
+    listing_scope = (
+        f"{snapshot.companies_total} listed "
+        f"{_plural(snapshot.companies_total, 'company', 'companies')}"
+    )
     unreadable = ""
     if snapshot.companies_unusable:
         n_bad = snapshot.companies_unusable

@@ -1630,6 +1630,30 @@ class TestListingDenominatorAndArgumentGuards:
     def test_a_single_readable_entry_reads_singular(self):
         # "1 readable listing entries" — the new phrasing carried the old
         # pluralization gap forward. Reachable: a listing of 2, one unusable.
-        report = _render(_snapshot(companies_total=1, companies_unusable=1))
-        assert "of 1 readable listing entry (" in report
+        # companies_total must be >= len(companies) or the fixture is a state
+        # _parse_company_list cannot write, and the assertion passes on a
+        # self-contradictory line ("top 2 of 1").
+        report = _render(
+            _snapshot(
+                companies={
+                    "MSTR": {"name": "MicroStrategy", "rows": [_prow("2026-08-10", 1000.0)]}
+                },
+                companies_total=1,
+                companies_unusable=1,
+            )
+        )
+        assert "top 1 of 1 readable listing entry (" in report
         assert "readable listing entries" not in report
+
+    def test_a_single_listed_company_reads_singular(self):
+        # The sibling branch carried the same pluralization gap.
+        report = _render(
+            _snapshot(
+                companies={
+                    "MSTR": {"name": "MicroStrategy", "rows": [_prow("2026-08-10", 1000.0)]}
+                },
+                companies_total=1,
+            )
+        )
+        assert "top 1 of 1 listed company (" in report
+        assert "listed companies" not in report

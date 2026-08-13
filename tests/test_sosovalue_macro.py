@@ -2312,9 +2312,9 @@ class TestDroppedCalendarContentIsNamedNotBlamedOnTheProvider:
         assert not [r for r in caplog.records if "further malformed day-" in r.getMessage()]
 
     def test_a_dropped_day_row_earns_the_short_ttl(self, tmp_path, monkeypatch):
-        # Unlike an unknown event, a malformed row is not proven permanent: a
-        # re-fetch an hour later can return it. Left on the 5h TTL the hole is
-        # re-served all afternoon.
+        # 3h: past the bucket's own 2h TTL, still inside the 5h base one, so
+        # only the malformed bucket can explain the refetch. (The middle value
+        # itself is pinned by TestRoundTwoDropDisclosure.)
         impl = self._cache_setup(tmp_path, monkeypatch)
         self._cache(tmp_path, calendar_malformed=1, calendar_malformed_dates=["2026-08-12"])
         sosovalue_macro._load_snapshot()
@@ -2322,8 +2322,7 @@ class TestDroppedCalendarContentIsNamedNotBlamedOnTheProvider:
 
     def test_a_clean_calendar_of_the_same_age_is_still_served(self, tmp_path, monkeypatch):
         # The control that makes the test above discriminate: 3h is inside the
-        # 5h base TTL and outside the 1h incomplete TTL, so only the malformed
-        # bucket can explain the refetch.
+        # 5h base TTL, so a clean snapshot of the same age is still served.
         impl = self._cache_setup(tmp_path, monkeypatch)
         self._cache(tmp_path)
         assert sosovalue_macro._load_snapshot().stale is False
@@ -2332,9 +2331,9 @@ class TestDroppedCalendarContentIsNamedNotBlamedOnTheProvider:
     def test_more_malformed_dates_than_drops_rejects_the_cache(self, tmp_path, monkeypatch):
         # The parse side cannot produce this shape; unmirrored, a hand-written
         # file makes the caveat name days nothing was dropped on.
-        # Clocked 30 min out, INSIDE the 1h incomplete TTL a malformed count
-        # now earns: at the default 3h the short TTL alone would force the
-        # refetch and the assertion would hold with no validator at all.
+        # Clocked 30 min out, INSIDE the 2h TTL a malformed count now earns:
+        # at the default 3h that TTL alone would force the refetch and the
+        # assertion would hold with no validator at all.
         impl = self._cache_setup(tmp_path, monkeypatch, now="2026-08-11T05:30:00Z")
         self._cache(
             tmp_path,
@@ -2345,14 +2344,14 @@ class TestDroppedCalendarContentIsNamedNotBlamedOnTheProvider:
         assert impl.calls
 
     def test_a_non_iso_malformed_date_rejects_the_cache(self, tmp_path, monkeypatch):
-        # Inside the 1h incomplete TTL, for the reason above.
+        # Inside the 2h malformed TTL, for the reason above.
         impl = self._cache_setup(tmp_path, monkeypatch, now="2026-08-11T05:30:00Z")
         self._cache(tmp_path, calendar_malformed=1, calendar_malformed_dates=["nope"])
         sosovalue_macro._load_snapshot()
         assert impl.calls
 
     def test_a_repeated_malformed_date_rejects_the_cache(self, tmp_path, monkeypatch):
-        # Inside the 1h incomplete TTL, for the reason above.
+        # Inside the 2h malformed TTL, for the reason above.
         impl = self._cache_setup(tmp_path, monkeypatch, now="2026-08-11T05:30:00Z")
         self._cache(
             tmp_path, calendar_malformed=2, calendar_malformed_dates=["2026-08-12", "2026-08-12"]
@@ -2462,6 +2461,69 @@ class TestTheReachNoteNamesTheCauseWhenItIsKnown:
             report = _render(snap, curr_date="2026-08-11")
             assert "dropped calendar content of its own" not in report
             assert "cannot say whether that stretch is unpublished or simply quiet" in report
+
+    def test_a_drop_in_front_of_the_span_is_not_offered_as_the_cause(self):
+        # The reach note is about the region PAST the last dated entry, so a
+        # drop before the span's start explains nothing about it. The earlier
+        # predicate reused span_moved_possible, which is true when EITHER
+        # endpoint could have moved — and it pointed the reader at a caveat
+        # naming a date in the opposite direction.
+        report = _render(
+            _snapshot(
+                calendar=[
+                    {"date": "2026-08-14", "events": ["CPI (YoY)"]},
+                    {"date": "2026-08-16", "events": ["Nonfarm Payrolls"]},
+                ],
+                calendar_malformed=1,
+                calendar_malformed_dates=["2026-08-12"],
+            ),
+            curr_date="2026-08-11",
+        )
+        assert "was dropped (2026-08-12)" in report  # the caveat still names it
+        assert "dropped calendar content of its own" not in report
+        assert "cannot say whether that stretch is unpublished or simply quiet" in report
+
+    def test_a_drop_past_the_span_is_offered_as_the_cause(self):
+        # The control for the boundary above.
+        report = _render(
+            _snapshot(
+                calendar=[{"date": "2026-08-14", "events": ["CPI (YoY)"]}],
+                calendar_malformed=1,
+                calendar_malformed_dates=["2026-08-20"],
+            ),
+            curr_date="2026-08-11",
+        )
+        assert "dropped calendar content of its own" in report
+
+    def test_an_emptied_row_in_front_of_the_span_is_not_offered_as_the_cause(self):
+        # A dropped NAME costs no date; even when it empties a row whole, a row
+        # before the span leaves the forward extent exactly the provider's.
+        report = _render(
+            _snapshot(
+                calendar=[
+                    {"date": "2026-08-12", "events": []},
+                    {"date": "2026-08-14", "events": ["CPI (YoY)"]},
+                    {"date": "2026-08-16", "events": ["Nonfarm Payrolls"]},
+                ],
+                calendar_unusable=1,
+            ),
+            curr_date="2026-08-11",
+        )
+        assert "dropped calendar content of its own" not in report
+        assert "cannot say whether that stretch is unpublished or simply quiet" in report
+
+    def test_an_emptied_row_past_the_span_is_offered_as_the_cause(self):
+        report = _render(
+            _snapshot(
+                calendar=[
+                    {"date": "2026-08-14", "events": ["CPI (YoY)"]},
+                    {"date": "2026-08-20", "events": []},
+                ],
+                calendar_unusable=1,
+            ),
+            curr_date="2026-08-11",
+        )
+        assert "dropped calendar content of its own" in report
 
     def test_a_snapshot_fetched_earlier_names_the_anchoring_instead(self):
         report = _render(

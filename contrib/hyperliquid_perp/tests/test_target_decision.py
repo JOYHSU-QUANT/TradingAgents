@@ -448,10 +448,10 @@ def test_format_instructions_schema_block_has_no_copyable_answer():
     assert payload["requested_target_margin_pct"] == "<integer 0-60|null>"
     assert payload["confidence"] == "<0.0-1.0>"
     # key_risks is pinned too, and for a reason the typed fields don't have: the
-    # legal range is 1-3, so a second slot that reads as "3 MORE" invites a
-    # 4-entry answer, which is discarded whole as invalid_key_risks. The slot
-    # must keep saying the cap is on the array, not on the remainder.
-    assert payload["key_risks"] == ["<risk>", "<optional; 3 entries maximum>"]
+    # legal range is 1-3, so a second slot whose cap has no named subject reads
+    # as a cap on *that slot* and invites a 4-entry answer, which is discarded
+    # whole as invalid_key_risks. The cap must stay attached to the array.
+    assert payload["key_risks"] == ["<risk>", "<risk 2 — optional; 3 entries total maximum>"]
     normalized = " ".join(text.split())
     # Fail-closed survives without any instruction at all, so the suite would
     # stay green if the directive to substitute went missing — and the change
@@ -465,12 +465,22 @@ def test_format_instructions_schema_block_has_no_copyable_answer():
     # scoped. A blanket "unquote" would strip decision_mode's quotes, and an
     # unparseable block is recorded as a bare invalid_output — same lost cycle,
     # but without a tag naming the field that broke.
-    assert "Keep the quotes wherever the real value is a string" in normalized
+    # Both halves need their *contents* pinned, not just their opening clause:
+    # dropping "(unless it is null)" or flipping the last sentence to the string
+    # "null" would each steer the model into invalid_target_side /
+    # margin_not_numeric — a discarded cycle, the very thing this contract is
+    # being reshaped to avoid — while every other test stayed green.
+    assert (
+        'Keep the quotes wherever the real value is a string: "decision_mode", '
+        '"target_side" (unless it is null), "rationale", and every entry of "key_risks".'
+        in normalized
+    )
     assert (
         'The "requested_target_margin_pct" and "confidence" placeholders are quoted only'
         in normalized
     )
     assert "write those two as bare JSON numbers" in normalized
+    assert "write null as the JSON literal null" in normalized
 
 
 @pytest.mark.parametrize(

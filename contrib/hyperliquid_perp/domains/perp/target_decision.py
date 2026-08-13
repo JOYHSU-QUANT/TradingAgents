@@ -561,12 +561,13 @@ code block, with exactly these six fields and no others:
   "requested_target_margin_pct": "<integer {lo}-{hi}|null>",
   "confidence": "<0.0-1.0>",
   "rationale": "<one short paragraph explaining the decision>",
-  "key_risks": ["<risk>", "<optional; {_MAX_KEY_RISKS} entries maximum>"]
+  "key_risks": ["<risk>", "<risk 2 — optional; {_MAX_KEY_RISKS} entries total maximum>"]
 }}
 ```
 
 That block is a schema, not an answer: every `<...>` placeholder MUST be
-replaced with a real value of your own. A leftover placeholder in
+replaced with a real value of your own (an entry marked optional may instead be
+dropped, along with the entry itself). A leftover placeholder in
 "decision_mode", "target_side", "requested_target_margin_pct" or "confidence"
 is not a legal value, so the whole output is discarded and treated as
 maintain_current.

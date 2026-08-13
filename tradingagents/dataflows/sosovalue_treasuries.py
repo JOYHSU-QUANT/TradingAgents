@@ -521,8 +521,9 @@ def _fetch_one_company(ticker: str, name: str) -> dict | str | None:
     answers with no rows, or ``None`` on a non-fatal failure worth retrying.
     An empty history is a listed company that has not filed yet, not a
     failure: counting it as one would keep ``companies_failed`` permanently
-    non-empty and pin the cache to the 1h incomplete TTL forever, re-running
-    the whole sweep every hour against a shared quota with nothing to heal.
+    non-empty and pin the cache to the INCOMPLETE_CACHE_TTL_HOURS refresh
+    forever, re-running the whole 16-request sweep on that cadence against a
+    shared quota with nothing to heal.
     Mirrors the macro module's ``events_unknown`` handling.
 
     Otherwise the family per-item handler: a rejected key and a 429 both

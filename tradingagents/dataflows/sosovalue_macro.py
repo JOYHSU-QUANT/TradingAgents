@@ -1118,7 +1118,7 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     reach = (datetime.strptime(cal_dated[-1], "%Y-%m-%d") - curr_dt).days if cal_dated else None
     if reach is None or reach < AHEAD_DAYS:
         if reach is None:
-            extent = "carries no usable event names at all"
+            extent = "names no event on any day-row it carries"
         elif reach < 0:
             extent = "ends before this date, so it can contribute no schedule at all"
         elif reach == 0:
@@ -1434,7 +1434,9 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     # survives with an empty list, and spanning it here would claim coverage
     # the calendar cannot contribute — two contradictory spans in one header.
     cal_span = (
-        f"covers {cal_dated[0]} → {cal_dated[-1]}" if cal_dated else "carries no usable event names"
+        f"covers {cal_dated[0]} → {cal_dated[-1]}"
+        if cal_dated
+        else "names no event on any day-row it carries"
     )
     header_lines.append(
         f"- Source: SoSoValue OpenAPI (US macro) | Snapshot fetched "
@@ -1521,7 +1523,7 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # saying the provider "is publishing no forward schedule" would blame
         # the source for the snapshot's age; and when this client dropped the
         # names itself, "genuinely carries no scheduled entries" is false.
-        ends = f"ends {cal_end}" if cal_end else "carries no usable event names"
+        ends = f"ends {cal_end}" if cal_end else "names no event on any day-row it carries"
         # Shares snapshot_incomplete with the covered-and-quiet note in the
         # header (see its definition): calendar_malformed is a member for the
         # same reason truncation and dropped names are, and DUPLICATION is not.
@@ -1551,9 +1553,10 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
                 f"publishes a day-row only where it has events, that cannot distinguish a "
                 f"calendar which stops there from a fortnight without events."
                 if cal_end
-                else "The provider's calendar in this snapshot names no event on any of its "
-                "day-rows, so it can place nothing in this window — the provider sent the "
-                "days and listed nothing on them."
+                else "The provider's calendar in this snapshot names no event on any day-row "
+                "it carries, so it can place nothing in this window — and with no dated "
+                "entry to measure from, this snapshot cannot say whether the window is "
+                "unpublished or simply quiet."
             )
         elif snapshot.calendar_duplicated:
             # Duplication belongs here too — the benign "genuinely carries no

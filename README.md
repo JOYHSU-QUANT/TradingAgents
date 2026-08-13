@@ -383,8 +383,10 @@ Two further news-analyst crypto sources ride on the same SoSoValue key
   no importance field, so the whitelist is the importance filter). Calendar
   names outside the whitelist appear as name-only lines. Scheduled rows render
   forecast and previous but **never an actual**, and released figures appear
-  only on or before `curr_date`, so a backtest date cannot see a future print;
-  forecasts are the provider's current values, which the report says. The feed
+  only on or before `curr_date`, so a backtest date cannot see a future print.
+  Actuals, forecasts and previous values are all the provider's *current*
+  figures rather than point-in-time snapshots — macro actuals get revised, and
+  the report says so rather than implying the printed actual is as-published. The feed
   carries **no Fed rate-decision events at all** — the report flags that
   coverage gap so an empty FOMC row is never read as a quiet Fed schedule. The
   report frames event risk as a regime/risk modifier, not a directional signal.

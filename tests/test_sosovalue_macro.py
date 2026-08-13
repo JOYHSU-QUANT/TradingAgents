@@ -263,7 +263,12 @@ class TestSixthLoopDisclosures:
             _snapshot(calendar=[{"date": "2026-08-20", "events": []}], calendar_unusable=2),
             curr_date="2026-08-11",
         )
-        assert "carries no usable event names at all" in report
+        # Neutral about the cause: this state is reached both when the client
+        # dropped every name AND when the provider sent nameless day-rows, so
+        # the phrasing must not credit either. All four extent-reporting sites
+        # share it.
+        assert "names no event on any day-row it carries" in report
+        assert "no usable event names" not in report
         assert "beyond the calendar's last dated entry" not in report
 
     def test_quiet_days_inside_the_calendar_span_are_not_called_unfetched(self):
@@ -2129,7 +2134,12 @@ class TestQuietIsNotUncovered:
         report = _render(
             _snapshot(calendar=[{"date": "2026-08-12", "events": []}]), curr_date="2026-08-11"
         )
-        assert "names no event on any of its day-rows" in report
-        assert "the provider sent the days and listed nothing on them" in report
+        assert "names no event on any day-row it carries" in report
+        # Agnostic about the cause, like its sibling arm: the provider sent
+        # day-rows only as far as it sent them, so claiming it "sent the days"
+        # over-claims past the last one — and would contradict both the reach
+        # note and the not-in-window note in this same render.
+        assert "cannot say whether the window is unpublished or simply quiet" in report
         assert "never received" not in report
+        assert "the provider sent the days" not in report
         assert "cannot distinguish a calendar which stops there" not in report

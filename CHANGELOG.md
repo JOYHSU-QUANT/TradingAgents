@@ -54,9 +54,11 @@ Breaking changes within the 0.x line are called out explicitly.
   when it is fresh, which aggregate figures mix filed with derived values,
   and — when a section is empty — whether that is a quiet window or this
   snapshot's own coverage gap. A provider that merely reshapes its output
-  (a longer calendar, a repeated calendar date, comma-grouped numbers, a
-  listed company with no filings yet) degrades to a disclosed, counted
-  partial rather than failing the category into a stale serve that expires.
+  (a longer calendar, a repeated calendar date, an unreadable calendar day-row,
+  comma-grouped numbers, a listed company with no filings yet) degrades to a
+  disclosed, counted partial rather than failing the category into a stale
+  serve that expires — the calendar is parsed before any history request, so
+  failing it over one bad row would discard every tracked event's figures too.
 - **Crypto options-implied volatility (Deribit).** A new keyless `options_data`
   category, bound to the **market** analyst for crypto assets only (vol regime
   is a technical read, so it sits alongside the indicators rather than with the

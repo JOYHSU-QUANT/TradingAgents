@@ -533,16 +533,18 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     reads as a directional decision would become a live sized target if echoed.
     Fail-closed reaches the same harmless no-op — but countable.
 
-    Two deliberate asymmetries in the block. The ``confidence`` placeholder is
-    the only one that does not advertise ``|null``, though the parser accepts a
-    null confidence on ``maintain_current``: the prompt is narrower than the
-    contract on purpose, so that every cycle yields a confidence number and the
-    distribution stays measurable — which is the whole point of a run that is
-    being judged on whether conviction spread out again. And the quotes are
-    load-bearing in both directions: they are an artifact only on the two
-    numeric fields, so the text says which ones to unquote rather than telling
-    the model to strip quotes generally — an unquoted ``decision_mode`` would
-    make the block unparseable and lose the entire answer, not just a field.
+    Two deliberate asymmetries in the block. ``confidence`` is the one field the
+    parser lets be null whose placeholder does not advertise ``|null``: the
+    prompt is narrower than the contract on purpose, so that every cycle yields
+    a confidence number and the distribution stays measurable — which is the
+    whole point of a run being judged on whether conviction spread out again.
+    And the quotes are load-bearing in both directions: they are an artifact
+    only on the two numeric fields and on a null ``target_side``, so the text
+    names what to unquote rather than telling the model to strip quotes
+    generally. Both mistakes cost the whole output, but an unquoted
+    ``decision_mode`` costs the diagnosis too — the block stops being parseable
+    at all, so it is recorded as a bare ``invalid_output`` instead of a tag that
+    names the offending field.
     """
     lo = config.ai_target_margin_min_pct
     hi = config.ai_target_margin_max_pct if max_pct is None else max_pct
@@ -559,7 +561,7 @@ code block, with exactly these six fields and no others:
   "requested_target_margin_pct": "<integer {lo}-{hi}|null>",
   "confidence": "<0.0-1.0>",
   "rationale": "<one short paragraph explaining the decision>",
-  "key_risks": ["<risk>", "<more risks, {_MAX_KEY_RISKS} at most>"]
+  "key_risks": ["<risk>", "<optional; {_MAX_KEY_RISKS} entries maximum>"]
 }}
 ```
 

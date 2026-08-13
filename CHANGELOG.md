@@ -304,8 +304,8 @@ Breaking changes within the 0.x line are called out explicitly.
   21 days without a fill — the position was frozen because no *target* was ever
   proposed, not because risk gates rejected one. The four typed fields now hold
   type-illegal placeholders (`"<set_target|maintain_current>"`, `"<0.0-1.0>"`,
-  …), with `requested_target_margin_pct`'s rendered from the live config so the
-  advertised grid still cannot drift; `rationale` and `key_risks` keep
+  …), with `requested_target_margin_pct`'s bounds rendered from the live config
+  so they still cannot drift; `rationale` and `key_risks` keep
   legal-string placeholders, since only the typed fields decide whether an
   output is a directional order. An echo keeps landing on the same harmless
   `maintain_current` — the parser fails closed on `decision_mode` — but is now

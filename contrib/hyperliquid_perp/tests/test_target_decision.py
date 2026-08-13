@@ -190,8 +190,9 @@ def test_invalid_margin_boolean_is_not_numeric():
 @pytest.mark.parametrize("value", ["high", "0.78"])
 def test_invalid_confidence_not_numeric(value):
     # "0.78" as well as prose: the format contract promises a *quoted number* is
-    # discarded, and only a numeric-looking string can catch a coercion that
-    # starts str-parsing (`Decimal(str(value))` would happily accept it).
+    # discarded, and a numeric-looking string is what catches a coercion that
+    # starts str-parsing gracefully (`Decimal(str(value))` accepts it, where
+    # "high" would raise and merely turn the test red for the wrong reason).
     parsed = parse_target_decision(_text(confidence=value), _CFG)
     _assert_fail_closed(parsed, "confidence_not_numeric")
 
@@ -436,8 +437,8 @@ def test_format_instructions_schema_block_has_no_copyable_answer():
     # putting a concrete value back into a typed field fails here and not only
     # through the echo path. Written as literals on purpose — deriving them from
     # the module under test would let that regression pass. The margin
-    # placeholder renders the live grid (here the effective cap 60) so it cannot
-    # drift from the rules text below it.
+    # placeholder renders the live bounds (here the effective cap 60) so they
+    # cannot drift from the rules text below it.
     text = decision_format_instructions(DecisionConfig(), max_pct=60)
     block = extract_json_block(text)
     assert block is not None
@@ -446,19 +447,29 @@ def test_format_instructions_schema_block_has_no_copyable_answer():
     assert payload["target_side"] == "<long|short|flat|null>"
     assert payload["requested_target_margin_pct"] == "<integer 0-60|null>"
     assert payload["confidence"] == "<0.0-1.0>"
+    # key_risks is pinned too, and for a reason the typed fields don't have: the
+    # legal range is 1-3, so a second slot that reads as "3 MORE" invites a
+    # 4-entry answer, which is discarded whole as invalid_key_risks. The slot
+    # must keep saying the cap is on the array, not on the remainder.
+    assert payload["key_risks"] == ["<risk>", "<optional; 3 entries maximum>"]
     normalized = " ".join(text.split())
     # Fail-closed survives without any instruction at all, so the suite would
     # stay green if the directive to substitute went missing — and the change
     # would then do nothing but hand the model an unexplained block. Pin it.
     assert "schema, not an answer" in normalized
     assert "every `<...>` placeholder MUST be replaced" in normalized
-    # The last two are quoted only to keep the block valid JSON, which invites
-    # substituting in place and keeping the quotes — a shape the parser rejects
-    # (test_invalid_margin_not_numeric, test_invalid_confidence_not_numeric).
-    # So the prompt must keep telling the model to drop the quotes on those two
-    # specifically: a blanket "unquote" would strip decision_mode's quotes and
-    # make the whole block unparseable, losing the answer instead of a field.
+    # The two numeric fields are quoted only to keep the block valid JSON, which
+    # invites substituting in place and keeping the quotes — a shape the parser
+    # rejects (test_invalid_margin_not_numeric, test_invalid_confidence_not_numeric).
+    # Pin both halves: which fields to unquote, and that the instruction stays
+    # scoped. A blanket "unquote" would strip decision_mode's quotes, and an
+    # unparseable block is recorded as a bare invalid_output — same lost cycle,
+    # but without a tag naming the field that broke.
     assert "Keep the quotes wherever the real value is a string" in normalized
+    assert (
+        'The "requested_target_margin_pct" and "confidence" placeholders are quoted only'
+        in normalized
+    )
     assert "write those two as bare JSON numbers" in normalized
 
 

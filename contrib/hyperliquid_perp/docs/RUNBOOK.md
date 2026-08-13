@@ -125,8 +125,8 @@ prompt 的 context／format 契約改 shape 時，另要 bump `cli.py` 的
 部署只改 prompt、且目的正是量測「這個 prompt 改動有沒有效」，那就刻意讓現有 run 跨過
 部署點，改以 `ai_inputs.prompt_version` 切段——同一個 run 的市場條件與帳戶狀態連續，
 比開新 run 更乾淨。前提是那個 run 的**策略價值已經是零**（否則等於汙染基線），且判讀
-只看 prompt 敏感的指標（提案率、信心分布），不看權益曲線。`phase2-target-v3` 就是照
-這條例外部署到 `paper-BTC` 的。
+只看 prompt 敏感的指標（提案率、信心分布），不看權益曲線。`phase2-target-v3` 就打算
+照這條例外部署——跨過部署點的會是已停滯 21 天、策略價值歸零的 `paper-BTC`。
 
 **空倉才換段（硬規則）**：舊 run 還有未平倉倉位時不要換段。換段後那個倉位
 會永遠凍結在舊段 DB——沒人看管、沒有 SL/TP，舊段末端 equity 掛著一筆未實現

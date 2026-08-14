@@ -128,8 +128,11 @@ def test_the_stock_path_is_told_about_the_calendar_it_now_carries():
         llm = _bind("stock", "AAPL")
         assert "get_economic_calendar" in {t.name for t in llm.bound_tools}
         assert "get_economic_calendar(curr_date, look_back_days)" in llm.prompt
-        # The stock path must not pick up the crypto preamble along with it.
+        # The stock path must not pick up the crypto preamble along with it —
+        # with a positive counterpart on the same needle, or rewording the
+        # preamble would make the negative assertion vacuously true.
         assert "Since this is a crypto asset" not in llm.prompt
+        assert "Since this is a crypto asset" in _bind("crypto", "BTC-USD").prompt
     finally:
         set_config({"data_vendors": {"economic_calendar": "none"}})
 

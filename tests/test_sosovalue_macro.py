@@ -3014,6 +3014,22 @@ class TestAnEarlyExitIsAttributedToWhoeverCausedIt:
         assert payload["rate_limited"] is False
         assert payload["breaker_skipped"] is False
 
+    def test_a_breaker_that_trips_on_the_last_event_skipped_nothing(self, monkeypatch):
+        # The boundary the ``if skipped:`` gate exists for: trip the breaker on
+        # the FINAL tracked event and there is no remainder to skip, so there is
+        # nothing to correct and the flag must stay down. The cache validator
+        # leans on this — a set flag is supposed to mean "names in the bucket
+        # were never requested", and here every name in it was.
+        impl = _request_impl(
+            history_error=requests.ConnectionError("down"),
+            error_names=set(TRACKED[-3:]),
+        )
+        monkeypatch.setattr(sosovalue_macro, "_request", impl)
+        payload = sosovalue_macro._fetch_all()
+        assert payload["breaker_skipped"] is False
+        assert set(payload["events_failed"]) == set(TRACKED[-3:])
+        assert set(payload["histories"]) == set(TRACKED[:-3])
+
     def test_the_transport_verdict_counts_only_the_requests_it_made(self, monkeypatch):
         # "every attempt failed" over the whole tracked list turned three
         # observed failures into nine claimed ones, and this message is

@@ -1733,6 +1733,18 @@ class TestAnEarlyExitIsAttributedToWhoeverCausedIt:
         assert payload["rate_limited"] is False
         assert payload["breaker_skipped"] is False
 
+    def test_a_breaker_that_trips_on_the_last_company_skipped_nothing(self, monkeypatch):
+        # The macro twin's boundary: the breaker trips on the FINAL selected
+        # company, so there is no remainder to skip and the flag must stay down.
+        impl = _request_impl(
+            history_error=requests.ConnectionError("down"),
+            error_tickers=set(LIST_TICKERS[-3:]),
+        )
+        monkeypatch.setattr(sosovalue_treasuries, "_request", impl)
+        payload = sosovalue_treasuries._fetch_all()
+        assert payload["breaker_skipped"] is False
+        assert set(payload["companies_failed"]) == set(LIST_TICKERS[-3:])
+
     def test_the_transport_verdict_counts_only_the_requests_it_made(self, monkeypatch):
         impl = _request_impl(
             history_error=requests.ConnectionError("down"),

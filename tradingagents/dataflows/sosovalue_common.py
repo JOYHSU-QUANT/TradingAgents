@@ -283,8 +283,10 @@ def _is_safe_text(x: object, max_len: int, *, min_len: int = 1, stripped: bool =
 
     The predicate behind the free-text fields the family gates this way
     (macro value strings and event names, treasuries company names; the ETF
-    module's fund names predate it and keep their own narrower check): these
-    strings render verbatim into LLM-visible report text, so anything
+    module's fund names predate it and keep their own weaker
+    isinstance-and-truncate check — fine because that name is stored for
+    diagnosability and never rendered): these strings render verbatim into
+    LLM-visible report text, so anything
     unprintable or oversized is rejected at the trust boundary rather than
     escaped. The defaults sit at the strict end (non-empty, no surrounding
     whitespace) so a future call site that forgets the keywords fails closed

@@ -135,10 +135,11 @@ def _validate_table(table):
     """Reject a mis-authored table row at import time.
 
     A typo'd category would fail OPEN — an unknown category is never
-    "disabled" (the vendor lookup falls back to "default"), so the tool
-    would stay bound while the user's real config said none — and a typo'd
-    scope would only surface on the first node run. Fail where the table
-    edit happens instead.
+    disabled by category-level config (the vendor lookup falls back to
+    "default"; only a tool-level "none" override would still catch it), so
+    the tool would stay bound while the user's real config said none — and a
+    typo'd scope would only surface on the first node run. Fail where the
+    table edit happens instead.
     """
     for entry in table:
         if entry.scope not in ("base", "calendar", "crypto"):

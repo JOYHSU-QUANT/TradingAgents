@@ -70,10 +70,9 @@ class Unset:
     """Sentinel type: a keyword the caller did not supply (vs an explicit ``None``)."""
 
 
-# Every patch-style writer (orders, execution plans, scheduler state) uses this
-# as a default argument value — defaults are bound at function-definition
-# (import) time, so the sentinel must exist before those sibling table modules
-# import it.
+# Every patch-style writer uses this as a default argument value — defaults are
+# bound at function-definition (import) time, so the sentinel must exist before
+# those sibling table modules import it.
 #
 # PUBLIC, unlike most of this module's helpers: a caller sometimes has to say
 # "leave this column ALONE" as a *value*, and the distinction matters. The live

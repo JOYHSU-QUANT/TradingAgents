@@ -44,7 +44,7 @@ from .account import (
     require_current_account_state,
     upsert_current_account_state,
 )
-from .cloid import get_cloid_by_hex, get_cloid_by_logical, insert_cloid_mapping
+from .cloid_registry import get_cloid_by_hex, get_cloid_by_logical, insert_cloid_mapping
 from .decisions import (
     find_in_progress_attempt,
     get_decision_attempt,

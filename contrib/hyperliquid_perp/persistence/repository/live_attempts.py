@@ -1,4 +1,4 @@
-"""The ``live_order_attempts`` table (§8.3 / §16.5) — one row per exchange round-trip."""
+"""The ``live_order_attempts`` table (phase3-spec §8.3 / §16.5) — one row per round-trip."""
 
 from __future__ import annotations
 

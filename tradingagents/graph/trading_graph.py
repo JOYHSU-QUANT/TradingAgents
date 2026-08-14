@@ -201,10 +201,12 @@ class TradingAgentsGraph:
                     get_insider_transactions,
                     get_macro_indicators,
                     get_prediction_markets,
-                    # Crypto-only flows/sentiment/calendar/treasury tools; bound
-                    # to the analyst LLM only for crypto assets, but always
-                    # registered here so the bound call is executable (a stock
-                    # run never binds them).
+                    # Flows/sentiment/treasury are bound to the analyst LLM only
+                    # for crypto assets, but always registered here so the bound
+                    # call is executable (a stock run never binds those three).
+                    # The macro calendar is the exception: it takes no asset
+                    # argument and is bound on both paths, gated on its category
+                    # alone — registration here was never conditional anyway.
                     get_etf_flows,
                     get_fear_greed,
                     get_economic_calendar,

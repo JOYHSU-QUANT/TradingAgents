@@ -370,8 +370,11 @@ surface — a new tool, a new prompt paragraph, a new report section — the mom
 the code landed, with no server-side action to date the change from. The dated
 cutover is that action, so a later review can attribute a behaviour change to it.
 
-Two further news-analyst crypto sources ride on the same SoSoValue key
-(`SOSOVALUE_API_KEY`, the one already used for ETF flows):
+Two further news-analyst sources ride on the same SoSoValue key
+(`SOSOVALUE_API_KEY`, the one already used for ETF flows). The calendar takes no
+asset argument and is bound on the **stock path too** — CPI/NFP/PCE releases are
+event risk for equities as much as for crypto; treasuries is a BTC-holdings feed
+and stays crypto-only. Both are still gated on their own category being enabled:
 
 - **US economic calendar** (`economic_calendar`, vendor `sosovalue`): scheduled
   releases from `curr_date` itself through the next two weeks with consensus

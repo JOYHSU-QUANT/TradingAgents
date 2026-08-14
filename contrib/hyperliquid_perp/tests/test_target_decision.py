@@ -177,9 +177,26 @@ def test_directional_below_grid_minimum_is_invalid():
     _assert_fail_closed(parsed, "margin_out_of_range")
 
 
-def test_invalid_margin_not_numeric():
-    parsed = parse_target_decision(_text(requested_target_margin_pct="35"), _CFG)
+@pytest.mark.parametrize("value", ["<integer 5-60>", "null", "high", "", "nan", "Infinity"])
+def test_invalid_margin_not_numeric(value):
+    # What is left on this tag once quoted figures move off it: the strings
+    # that are not figures at all — an echoed placeholder, a quoted null,
+    # prose, empty. "nan"/"Infinity" belong here too: Decimal parses them, so
+    # only the finiteness guard keeps them off the proposal-rate netting set,
+    # and dropping that guard would silently start counting them as proposals.
+    parsed = parse_target_decision(_text(requested_target_margin_pct=value), _CFG)
     _assert_fail_closed(parsed, "margin_not_numeric")
+
+
+@pytest.mark.parametrize("value", ["35", " 35 ", "35.0"])
+def test_a_quoted_margin_figure_is_tagged_apart_from_an_echo(value):
+    # Still discarded, still fail-closed — only the tag differs. A proposal the
+    # model typed as a string has to be countable apart from an echoed
+    # placeholder: the proposal rate is the metric this prompt change is judged
+    # by, and a fail-closed row stores requested_target_margin_pct as NULL
+    # either way, so the tag is the only surviving evidence.
+    parsed = parse_target_decision(_text(requested_target_margin_pct=value), _CFG)
+    _assert_fail_closed(parsed, "margin_quoted_number")
 
 
 def test_invalid_margin_boolean_is_not_numeric():
@@ -187,9 +204,37 @@ def test_invalid_margin_boolean_is_not_numeric():
     _assert_fail_closed(parsed, "margin_not_numeric")
 
 
-def test_invalid_confidence_not_numeric():
-    parsed = parse_target_decision(_text(confidence="high"), _CFG)
+@pytest.mark.parametrize("value", ["high", "<0.0-1.0>", "null", "nan", "Infinity"])
+def test_invalid_confidence_not_numeric(value):
+    parsed = parse_target_decision(_text(confidence=value), _CFG)
     _assert_fail_closed(parsed, "confidence_not_numeric")
+
+
+def test_a_quoted_confidence_figure_gets_its_own_tag():
+    # A numeric-looking string is what catches a coercion that starts
+    # str-parsing gracefully (`Decimal(str(value))` accepts it, where "high"
+    # would raise and merely turn the test red for the wrong reason). The
+    # format contract still discards it; only the tag is new.
+    parsed = parse_target_decision(_text(confidence="0.78"), _CFG)
+    _assert_fail_closed(parsed, "confidence_quoted_number")
+
+
+def test_a_quoted_confidence_does_not_prove_a_proposal():
+    # Why this tag stays OUT of the proposal-rate correction set while its
+    # margin sibling goes in: margin is coerced first and a null margin SKIPS
+    # that block rather than failing it, so a maintain_current that proposed
+    # nothing still reaches confidence_quoted_number. Netting it in would count
+    # non-proposals as proposals on the one metric that decides this change.
+    parsed = parse_target_decision(
+        _text(
+            decision_mode="maintain_current",
+            target_side=None,
+            requested_target_margin_pct=None,
+            confidence="0.78",
+        ),
+        _CFG,
+    )
+    _assert_fail_closed(parsed, "confidence_quoted_number")
 
 
 def test_invalid_confidence_boolean_is_not_numeric():
@@ -419,13 +464,155 @@ def test_extract_survives_unmatched_brace_in_prose():
     assert parse_target_decision(text, _CFG).is_valid
 
 
-def test_format_instructions_example_echo_is_harmless():
-    # Models echo format examples; the instructions' own example must parse to
-    # a maintain_current (a no-op), never to a live directional target.
+def test_format_instructions_schema_block_echo_fails_closed():
+    # Models echo format examples, so the schema block must not be a valid
+    # answer: an echo fails closed and is tagged, making it countable instead of
+    # counted as a decision (see decision_format_instructions).
     parsed = parse_target_decision(decision_format_instructions(_CFG), _CFG)
+    _assert_fail_closed(parsed, "invalid_decision_mode")
+
+
+def test_format_instructions_schema_block_has_no_copyable_answer():
+    # The counterpart to the echo test: pin the placeholders themselves, so
+    # putting a concrete value back into a typed field fails here and not only
+    # through the echo path. Written as literals on purpose — deriving them from
+    # the module under test would let that regression pass. The margin
+    # placeholder renders the live bounds (here the effective cap 60) so they
+    # cannot drift from the rules text below it.
+    text = decision_format_instructions(DecisionConfig(), max_pct=60)
+    block = extract_json_block(text)
+    assert block is not None
+    payload = json.loads(block)
+    assert payload["decision_mode"] == "<set_target|maintain_current>"
+    assert payload["target_side"] == "<long|short|flat>"
+    assert payload["requested_target_margin_pct"] == "<integer 0-60>"
+    # No quoted placeholder offers `|null`. Inside quotes it invites
+    # substituting in place and leaving them, and a quoted value is the one
+    # mistake that costs a REAL proposal rather than an echo: the row stores
+    # requested_target_margin_pct as NULL, which is exactly what "the model
+    # still is not proposing" looks like on the metric this change is judged by.
+    for _f in ("decision_mode", "target_side", "requested_target_margin_pct", "confidence"):
+        assert "null" not in payload[_f], _f
+    assert payload["confidence"] == "<0.0-1.0>"
+    # key_risks is pinned too, and for a reason the typed fields don't have: the
+    # legal range is 1-3, so a second slot whose cap has no named subject reads
+    # as a cap on *that slot* and invites a 4-entry answer, which is discarded
+    # whole as invalid_key_risks. The cap must stay attached to the array.
+    assert payload["key_risks"] == ["<risk>", "<risk 2 — optional; 3 entries total maximum>"]
+    normalized = " ".join(text.split())
+    # Fail-closed survives without any instruction at all, so the suite would
+    # stay green if the directive to substitute went missing — and the change
+    # would then do nothing but hand the model an unexplained block. Pin it.
+    assert "schema, not an answer" in normalized
+    assert "every `<...>` placeholder MUST be replaced" in normalized
+    # The two numeric fields are quoted only to keep the block valid JSON, which
+    # invites substituting in place and keeping the quotes — a shape the parser
+    # rejects (test_invalid_margin_not_numeric, test_invalid_confidence_not_numeric).
+    # Quoting a null lands per field: target_side on invalid_target_side,
+    # requested_target_margin_pct on margin_not_numeric.
+    # Pin both halves by their *contents*, not just their opening clause. A
+    # blanket "unquote" would strip decision_mode's quotes, and an unparseable
+    # block is recorded as a bare invalid_output — the same lost cycle, minus
+    # the tag naming the field that broke. In the other direction, losing a
+    # field from the null carve-out steers that field's null into
+    # invalid_target_side / maintain_current_with_target, and quoting it lands
+    # on the per-field tags noted above. Each is a discarded cycle, the very thing this
+    # contract is being reshaped to avoid, and each has at some point left every
+    # other test green.
+    # Pinned as narrow needles rather than whole sentences: a sentence verbatim
+    # would also fail on a harmless rewording of its opening clause, and then a
+    # deletion and a reword are indistinguishable from the failure.
+    assert (
+        'The "requested_target_margin_pct" and "confidence" placeholders are quoted only'
+        in normalized
+    )
+    assert "write those two as bare JSON numbers" in normalized
+    # The two carve-outs a blanket "everything else is a string" got wrong:
+    # target_side's real value is null on maintain_current (the majority
+    # outcome), and key_risks is an array whose ENTRIES are the strings.
+    # Quoting a null target_side is invalid_target_side — the whole output
+    # discarded, on the highest-volume path in the contract.
+    # SLICED to the carve-out sentence before matching. Bare `in normalized`
+    # needles were vacuous here: "decision_mode" and "target_side" both appear
+    # in the leftover-placeholder sentence a paragraph earlier, so dropping
+    # either from this list — the exact regression the list guards — left the
+    # test green. Verified by mutation.
+    # Both boundaries asserted BEFORE slicing on them. `split(x)[0]` returns the
+    # whole string when x is absent, so an unpinned right needle fails OPEN: a
+    # cosmetic reword of the closing sentence silently widened `carve` to
+    # include the Rules bullets, which carry "decision_mode" /
+    # "requested_target_margin_pct" / "rationale" verbatim — and every needle
+    # below went vacuous again behind a slice that was supposed to fix exactly
+    # that. Verified by mutation.
+    _open, _close = "write those two as bare JSON numbers.", "A quoted number"
+    assert _open in normalized
+    assert _close in normalized
+    carve = normalized.split(_open)[1].split(_close)[0]
+    # And the slice really is the one sentence, not a runaway.
+    assert len(carve) < 400
+    # The null half must name BOTH nullable fields. Losing
+    # requested_target_margin_pct sends a maintain_current to
+    # maintain_current_with_target or margin_not_numeric; losing target_side
+    # sends it to invalid_target_side. Either discards the whole output on the
+    # highest-volume path in the contract.
+    assert '"target_side" and' in carve
+    assert '"requested_target_margin_pct"' in carve
+    assert "write the JSON literal null, without quotes" in carve
+    # And the quoted half must cover every remaining real value, including
+    # target_side when it names a side (unquoted there, the block stops parsing
+    # at all → a bare invalid_output) and the ENTRIES of key_risks, which is an
+    # array rather than a string.
+    assert '"decision_mode"' in carve
+    assert '"target_side" when it names' in carve
+    assert '"rationale"' in carve
+    assert 'every entry of "key_risks"' in carve
+    # The consequence names the RECORD, not the position. Both are true, but
+    # the measured v2 failure was a model that preferred a costless no-op, and
+    # the old wording advertised non-substitution as a route to exactly that —
+    # in the most salient position in the contract. It also misdescribed what a
+    # post-mortem finds, which is risk_action = invalid_fail_closed.
+    assert "the cycle is recorded as a model-format failure" in normalized
+    assert "the whole output is discarded and treated as maintain_current" not in normalized
+
+
+def test_free_text_placeholders_stay_legal_on_purpose():
+    # The mirror of the test below: rationale and key_risks are NOT type-illegal,
+    # so a model that fills the four typed fields itself and leaves these two
+    # echoed still produces a live sized target carrying a placeholder rationale.
+    # That is the documented, accepted carve-out (see decision_format_instructions)
+    # — direction and size were still the model's own choices. Pinned so that
+    # tightening it, or widening the prompt's four-field promise to all six,
+    # is a deliberate edit rather than a silent drift.
+    parsed = parse_target_decision(
+        _text(
+            rationale="<one short paragraph explaining the decision>",
+            key_risks=["<risk>", "<risk 2 — optional; 3 entries total maximum>"],
+        ),
+        _CFG,
+    )
     assert parsed.is_valid
-    assert parsed.decision.decision_mode.value == "maintain_current"
-    assert parsed.decision.target_side is None
+    assert parsed.decision.decision_mode is DecisionMode.SET_TARGET
+    assert parsed.decision.target_side is TargetSide.LONG
+    assert parsed.decision.rationale.startswith("<one short paragraph")
+
+
+@pytest.mark.parametrize(
+    ("field", "placeholder", "reason"),
+    [
+        ("decision_mode", "<set_target|maintain_current>", "invalid_decision_mode"),
+        ("target_side", "<long|short|flat>", "invalid_target_side"),
+        # Only type-illegality is under test, so the rendered grid is irrelevant
+        # here; this spells out _CFG's own (0-100) to stay self-consistent.
+        ("requested_target_margin_pct", "<integer 0-100>", "margin_not_numeric"),
+        ("confidence", "<0.0-1.0>", "confidence_not_numeric"),
+    ],
+)
+def test_leftover_placeholder_in_a_typed_field_fails_closed(field, placeholder, reason):
+    # The prompt tells the model that a leftover placeholder in any of these
+    # four fields discards the whole output. That promise is only true because
+    # each one is typed at parse time — a partial echo (model fills some fields,
+    # copies the rest) must not slip through as a live target.
+    _assert_fail_closed(parse_target_decision(_text(**{field: placeholder}), _CFG), reason)
 
 
 # --------------------------------------------------------------------------
@@ -447,8 +634,11 @@ def test_format_instructions_reflect_config():
     normalized = " ".join(text.split())
     assert "confidence below 0.4 is rejected" in normalized
     assert "needs confidence >= 0.7" in normalized  # default resize bar, other clause
-    # The instructions' own example must survive the parser it feeds.
-    assert parse_target_decision(text, cfg).is_valid
+    # The schema block renders the same *bounds* it advertises in prose (the
+    # step lives only in the prose bullet). Its unparseability is
+    # config-independent — the other three typed placeholders are constant
+    # literals — so that is pinned once, in the echo test above.
+    assert '"requested_target_margin_pct": "<integer 0-80>"' in text
 
 
 def test_format_instructions_advertise_effective_cap():
@@ -591,3 +781,45 @@ def test_config_from_dict_rejects_non_mapping_block():
     # ValueError, not a TypeError from set(cfg) that escapes the exit-1 handler.
     with pytest.raises(ValueError, match="mapping"):
         DecisionConfig.from_dict("0.3")
+
+
+@pytest.mark.parametrize(
+    ("mutate", "reason"),
+    [
+        (lambda t: t, "invalid_decision_mode"),
+        (
+            lambda t: t.replace('"<integer 0-100>"', "<integer 0-100>").replace(
+                '"<0.0-1.0>"', "<0.0-1.0>"
+            ),
+            "invalid_output",
+        ),
+    ],
+    ids=["verbatim", "numeric-placeholders-unquoted"],
+)
+def test_the_echo_tag_boundary_is_pinned(mutate, reason):
+    # RUNBOOK §5 and §7 hand operators a differential keyed on risk_reason, so
+    # which tag each echo shape produces is a documented contract rather than an
+    # accident. The unquoted variant is the one this block's own text invites:
+    # it asks for the two numeric fields as bare JSON numbers, so a model that
+    # obeys that clause while still echoing breaks the JSON entirely and loses
+    # the tag that names the offending field.
+    text = mutate(decision_format_instructions(_CFG))
+    _assert_fail_closed(parse_target_decision(text, _CFG), reason)
+
+
+def test_an_echo_and_a_hallucinated_mode_are_indistinguishable():
+    # invalid_decision_mode is emitted for ANY mode outside the two enum
+    # members, so the runbooks must not read the tag backwards as "this was an
+    # echo". The discriminating content is the SHARED TAG below: each half is
+    # already pinned elsewhere (the echo by test_the_echo_tag_boundary_is_pinned,
+    # the hallucination by test_invalid_unknown_decision_mode), and what is new
+    # is only their conjunction — it fails the moment the parser distinguishes
+    # the two shapes. The decision equality that follows is a tautology by
+    # contrast (ParsedDecision.__post_init__ forces every invalid parse to carry
+    # fail_closed()), kept only to say the stored row is identical too. Nothing
+    # else survives to tell them apart: both daemons clear pending_raw_response
+    # on finalize.
+    echo = parse_target_decision(decision_format_instructions(_CFG), _CFG)
+    hallucinated = parse_target_decision(_text(decision_mode="hold"), _CFG)
+    assert echo.invalid_reason == hallucinated.invalid_reason == "invalid_decision_mode"
+    assert echo.decision == hallucinated.decision

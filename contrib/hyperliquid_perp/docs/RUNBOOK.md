@@ -120,6 +120,50 @@ pending funding、accounting replay 驗證、gap SL 檢查；若這次重啟真�
 行為，所以調參 code 的部署必須與新 run-id 同批上線，不要讓舊段跨過部署點。
 prompt 的 context／format 契約改 shape 時，另要 bump `cli.py` 的
 `PROMPT_VERSION`，讓 `ai_inputs.prompt_version` 在資料裡標出改版點。
+**凡是跨越量測邊界的部署都要 bump，回滾也算**：回滾到舊 prompt 不算「改 shape」，
+但沿用已退役的舊值會讓 `GROUP BY prompt_version` 把 v3 之前與回滾之後併成同一桶，
+正好污染要拿來比的基線。退役過的值一律不得重用（回滾就給 `phase2-target-v4`，
+內容等不等於 v2 無所謂）。另注意 `decision_format_instructions` 的文字與這個常數不在同一個
+模組——`cli.py` 確實 import 了它，但 import 不會讓常數跟著文字動——所以有一個測試把
+版本戳釘在渲染出來的區塊指紋上：改了 prompt 文字卻忘了改戳就會紅。
+
+**例外：只改 prompt 的 A/B 驗證**。上面那條規則是為了讓**績效指標**跨段可比。若這次
+部署只改 prompt、且目的正是量測「這個 prompt 改動有沒有效」，那就刻意讓現有 run 跨過
+部署點，改以 `ai_inputs.prompt_version` 切段——同一個 run 的市場條件與帳戶狀態連續，
+比開新 run 更乾淨。前提是那個 run 的**策略價值已經是零**（否則等於汙染基線），且判讀
+只看 prompt 敏感的指標，不看權益曲線。`phase2-target-v3` 就打算照這條例外部署——跨過
+部署點的會是最後成交停在 2026-07-16、此後零成交、策略價值歸零的 `paper-BTC`。
+
+**這條例外附一個硬規則：量測窗內不得夾帶其他輸入面變更。** 切段鍵是
+`prompt_version`，而它只在 context／format **契約改形狀**時才 bump；輸入面的**內容**
+變了（例如把某個 ships-OFF 的 vendor 翻成啟用）不改形狀、不會 bump，`input_payload_hash`
+每個 cycle 本來就不同也切不了段——於是 after 段的前半後半是兩個不同的輸入制度，而資料
+裡完全看不出來。所以跨過 v3 邊界之後、量測窗結束之前，`deploy/paper` **只准**帶 prompt
+變更；若不得不夾帶（含 PR #21 macro／treasuries 那種需要第二個 cutover commit 才生效的
+vendor），這一段量測作廢、bump 到下一個版本戳重來。`paper-BTC` 當初 159 個 cycle 橫跨五個
+制度斷點而無法解讀，就是這條規則不存在的代價。
+
+判讀時**主判準是提案率**（`requested_target_margin_pct` 非 null 的佔比）。**但這一欄
+會低估**：fail-closed 的 cycle 一律把它寫成 NULL，模型實際要求了什麼在 parse 接縫就被
+丟掉了，所以「提了案但格式被擋掉」與「根本沒提案」在這一欄完全同形。量提案率時要把
+**只可能跟在模型真的給了一個數字 margin 之後**的那六個 tag 的 cycle 加回來算成提案：
+`margin_off_step_grid`／`margin_out_of_range`（值本身被拒）、
+`flat_with_nonzero_margin`／`directional_side_with_zero_margin`／
+`set_target_without_confidence`（三個都排在 `set_target_without_margin` 那道守衛之後，
+null margin 到不了）、以及 `margin_quoted_number`（模型寫了數字但加了引號，例如
+`"35"`——唯一一個發生在轉型**之前**的成員）。這六個要逐一列出，因為這個集合猜不出來。
+
+**不要**用「margin 轉型成功之後發的 tag」當判準——轉型對 null 也算成功，所以
+`invalid_key_risks` 與 `missing_rationale` 在完全沒提案時也到得了（實測：
+`maintain_current` + `requested_target_margin_pct: null` + 空 `key_risks`）。也**不要**
+直接加 `margin_not_numeric`／`confidence_not_numeric`：這兩個裝的是「根本不是數字」的
+字串（照抄的佔位符、`maintain_current` 把 `"null"` 加引號、散文），證明不了任何提案。
+`confidence_quoted_number` 同樣**不算**——margin 比 confidence 早轉型，而 null margin 是
+**跳過**轉型不是通過，所以零提案時它照樣到得了。少了這個修正，已經恢復提案的模型會被讀成「還是不提案」，剛好在這次改動要
+判生死的那個指標上；而 `raw_response` 不落地，事後補不回來。信心分布只能
+當輔助，而且必須把 `confidence IS NULL` 當成一個看得見的桶一起畫：fail-closed 的 cycle
+存的是 NULL，所以光是換 prompt 就會讓舊段照抄的信心尖峰整批消失——**模型行為完全沒變
+也會出現這個變化**，把它讀成「信心散開了」就是被自己的部署騙了。
 
 **空倉才換段（硬規則）**：舊 run 還有未平倉倉位時不要換段。換段後那個倉位
 會永遠凍結在舊段 DB——沒人看管、沒有 SL/TP，舊段末端 equity 掛著一筆未實現
@@ -176,6 +220,19 @@ deploy 的 restart 不是修復（§3 的警告同樣適用）——先照 §5 �
 LLM 呼叫**之前**的失敗（連線、warmup、payload 寫入）零 AI 花費——LLM 逾時／
 限流類的 api_failed 每次嘗試（最多 3 次）都已產生費用。
 
+`invalid_output` cycle（模型輸出不合契約、fail-closed 成 `maintain_current`）
+與 `api_failed` 不同：它**計入** 30 輪門檻，且每筆都會把
+`ai_outputs.risk_action` 寫成 `invalid_fail_closed`——那是文件上的 model-drift
+告警值（見 phase2-data.md）。`phase2-target-v3` 起這個值會成批出現屬預期
+（模型照抄 schema 區塊由「合法」變成「不合法」），不是新故障；真正要看的是它
+有沒有隨著時間下降、以及提案率有沒有上來。判斷成因看 `risk_reason`，但要知道它是**多對一**的：照抄記
+`invalid_decision_mode`，然而任何落在兩個 enum 值以外的 mode（模型自己編的 `hold`、
+大小寫變體）也記同一個值；`invalid_output` 則同時涵蓋「找不到 JSON 區塊」「回覆是空
+字串或非字串」與「JSON 解不開」，**包含照抄時順手把兩個數值欄的引號拿掉**——區塊自己
+的說明就要求那兩欄寫成裸數字，所以那是最可能的部分遵從形狀。因此
+`invalid_decision_mode` 只能當照抄的**代理量**、不能當證據，`invalid_output` 也不等於
+structured-output 事故。
+
 ## 6. 驗收（約 5 天後）
 
 ```bash
@@ -188,7 +245,7 @@ python -m contrib.hyperliquid_perp validate --run-id paper-BTC
 
 | `validate` exit | 意義 | 下一步 |
 |---|---|---|
-| `0` | `cycle_count >= 30` 且 orphan／snapshot／replay mismatch 全為 0 | **可進 Phase 3** |
+| `0` | `cycle_count >= 30` 且 orphan／snapshot／replay mismatch 全為 0 | **可進 Phase 3**——但 `cycle_count` 含 `invalid_output`（那裡量的是「排程有沒有在跑」），而 paper 報告沒有 live 那個 `invalid_output_count` 欄可以拆。下判斷前先看同一份報告的 `order_count`，必要時到 export 的 `decision_attempts.csv` 數 status 分佈：30 個解不開、一單沒下的 run 一樣會印 exit 0 |
 | `4` | 資料一致但 cycles 未滿 30 | 繼續掛著跑 |
 | `5` | integrity failure（orphan／mismatch／store 壞掉） | 先調查再相信任何結果 |
 | `1` | 操作錯誤（db／run 不存在） | 檢查 `--db`／`--run-id` |
@@ -206,6 +263,6 @@ python -m contrib.hyperliquid_perp validate --run-id paper-BTC
 | `--context-only` 不印倉位行／完整輪報 no usable account equity（exit 1） | `wallet_address` 還是佔位符；填真實唯讀地址。 |
 | 太年輕的標的每 4h 一筆 `api_failed` | 市場資料 warmup 不足，暖機完成前屬預期行為。 |
 | 每 4h 一筆 `api_failed`，error_message 是 `every technical indicator failed` 或 `… is/are unavailable`（點名 `atr_14`／`ema_20`／`ema_50` 中死掉的那些） | indicator 引擎（stockstats）壞掉或 regime 指標算不出來——三者任一缺席 regime 都會被捏造成 RANGING，daemon 與 one-shot 同樣拒跑（不燒 LLM）。（非空的 `indicators:` 清單漏配三者任一現在直接在 config load 擋下；會走到這裡的 config 成因只剩刻意的 `indicators: []`。）修 stockstats 相容性後，`--context-only` 走同一套 guard：照樣渲染但印同一句 refusal 警告並 exit 4（健康 context 是 exit 0），可拿來免 key 驗證修好了沒。 |
-| **每一個** cycle 都 `invalid_output`（fail-closed、零下單），且 log 裡不再出現 `structured-output invocation failed` fallback 警告 | 模型的 structured output 成功了，渲染輸出天生不含 Phase 2 target JSON → 解析必失敗。確認 `engine.structured_output` 沒被設成 `true`（perp 預設 false、強制 free-text 路徑）；若真的被設成 `true`，engine config 建構（provider 啟動）時會在 log＋stderr 雙通道發警告——直接搜 `engine.structured_output: true` 即可確認（兩個通道都含這段；`warning: ` 前綴只在 stderr 那份）。gate 生效的正向訊號是 paper/live log 每次 AI 呼叫三行 `structured output disabled by config; using free-text generation` INFO（Portfolio/Research Manager、Trader 各一；重試的 cycle 每次嘗試都會再印一組），看到它們就代表 free-text 路徑在跑。2026-07-27 paper-BTC 換模事故即此成因。 |
+| **每一個** cycle 都 `invalid_output`（fail-closed、零下單），且 log 裡不再出現 `structured-output invocation failed` fallback 警告 | 模型的 structured output 成功了，渲染輸出天生不含 Phase 2 target JSON → 解析必失敗。確認 `engine.structured_output` 沒被設成 `true`（perp 預設 false、強制 free-text 路徑）；若真的被設成 `true`，engine config 建構（provider 啟動）時會在 log＋stderr 雙通道發警告——直接搜 `engine.structured_output: true` 即可確認（兩個通道都含這段；`warning: ` 前綴只在 stderr 那份）。gate 生效的正向訊號是 paper/live log 每次 AI 呼叫三行 `structured output disabled by config; using free-text generation` INFO（Portfolio/Research Manager、Trader 各一；重試的 cycle 每次嘗試都會再印一組），看到它們就代表 free-text 路徑在跑。2026-07-27 paper-BTC 換模事故即此成因。**注意 `phase2-target-v3` 起有第二個成因與此症狀完全同形**（structured output 確實關著、三行 INFO 也都在，但每個 cycle 仍解不開）：schema 區塊改成型別非法佔位符後，模型整段照抄會 fail-closed。分辨方式是看 `ai_outputs.risk_reason`。**先注意這一格裡 `invalid_output` 出現兩次而意思不同**：症狀欄講的是 `decision_attempts.status`，兩種事故都是它；能分辨的是 `risk_reason` 這個同名但不同欄的值。照抄多半記 `invalid_decision_mode`，structured-output 事故記 `invalid_output`。但兩邊都不是唯一成因——照抄若照著區塊的指示把兩個數值欄的引號拿掉，也會記 `invalid_output`，與 structured-output 事故完全同形。此時改看 log：那三行 `structured output disabled by config` INFO 還在，就不是 structured-output 事故。 |
 
 更多症狀見 [SETUP §7](./SETUP.md#7-troubleshooting)。

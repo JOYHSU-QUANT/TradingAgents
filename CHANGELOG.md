@@ -294,7 +294,119 @@ Breaking changes within the 0.x line are called out explicitly.
   Previously a keyless vendor could only be stopped by editing code, having no
   API key to unset.
 
+### Changed
+
+- **The perp decision prompt ships a schema, not a worked example.** The
+  output-format contract used to carry a complete, *valid* `maintain_current`
+  example (`confidence: 0.55`), and models returned it as their answer: on the
+  `paper-BTC` run, 117 of 159 outputs (74%) reproduced its four decision fields
+  verbatim, every output carrying exactly 0.55 was one of them, and the run went
+  21 days without a fill — the position was frozen because no *target* was ever
+  proposed, not because risk gates rejected one. The four typed fields now hold
+  type-illegal placeholders (`"<set_target|maintain_current>"`, `"<0.0-1.0>"`,
+  …), with `requested_target_margin_pct`'s bounds rendered from the live config
+  so they still cannot drift; `rationale` and `key_risks` keep
+  legal-string placeholders, since only the typed fields decide whether an
+  output is a directional order. An echo keeps landing on the same harmless
+  `maintain_current` — the parser fails closed — but is now tagged rather than
+  counted as a decision. Which tag depends on the echo: a whole-block echo that
+  keeps the block's quoting fails on `decision_mode`, the earliest of the four
+  the parser coerces; a partial echo fails on whichever **typed** placeholder it
+  kept (one that kept only `rationale` or `key_risks` parses cleanly, by
+  design); and an echo that also unquotes the numeric fields stops parsing as
+  JSON and lands on `invalid_output`. None of these tags is exclusive to echoing — a
+  hallucinated `decision_mode` records identically — so read them as a proxy for
+  it, not as proof. The `requested_target_margin_pct` and `confidence`
+  placeholders are quoted only so the block stays valid JSON, so the contract
+  spells out that those two are written as bare JSON numbers and `null` as the
+  JSON literal, while every genuinely-string field keeps its quotes; no
+  placeholder offers `|null` inside its quotes, because that is an invitation to
+  substitute in place and leave them — the one mistake that costs a real
+  proposal rather than an echo. `PROMPT_VERSION` moves to `phase2-target-v3` so
+  `ai_inputs.prompt_version` splits before/after when measuring whether the
+  proposal rate recovered; a test pins the stamp to a fingerprint of the
+  rendered block, since the two live in different modules and nothing makes the
+  constant track the text, so a prompt edit that forgot the bump would merge the
+  two populations silently.
+
+  **Expect more unparseable cycles while echoing persists** — that is
+  previously-hidden echoing becoming visible, not a new defect — and note where
+  that lands. No validator has a threshold on `invalid_output_count`, but these
+  cycles used to parse as valid `maintain_current` and therefore counted toward
+  the live validator's ≥30 `cycle_count` gate, which admits `completed` only; a
+  live acceptance run will now need proportionally more cycles. The paper
+  validator still counts them toward its own gate — which is the half worth
+  saying out loud: its `cycle_count` cannot tell 30 decisions from 30
+  unparseable outputs, and unlike the live report it carries no
+  `invalid_output_count` to separate them, so read `order_count` and the
+  exported `decision_attempts` statuses before trusting `phase3_ready`. The
+  one-shot `python -m contrib.hyperliquid_perp.main` path also exits **3**
+  (documented in SETUP.md as the model-drift alarm) on an echo that previously
+  exited 0; the paper and live daemons do not go through that path.
+
+  Each such cycle now stores `risk_action = invalid_fail_closed` — documented in
+  `phase2-data.md` as the model-drift alarm — plus `risk_reason` /
+  `decision_reason = invalid_decision_mode`, `confidence = NULL` and an empty
+  `key_risks`, where the same echo previously stored `approved` /
+  `maintain_current` / `0.55`. The `decision_mode` column still reads
+  `maintain_current` for these rows, so grouping by it shows no change at all
+  across the boundary unless `risk_action` is filtered too. Expect the alarm
+  value in bulk at first. The NULL
+  confidence also biases any before/after comparison of the confidence
+  distribution: the old echo's `0.55` spike disappears whether or not the model
+  changed, so judge the change on the proposal rate and render the NULL bucket
+  explicitly if the distribution is plotted at all. The proposal rate needs one
+  correction of its own: a fail-closed row stores `requested_target_margin_pct`
+  as NULL whatever the model asked for, so the cycles that prove a numeric
+  margin was nevertheless supplied must be netted back in, or a recovered model
+  reads as one that never proposed. Those are the six tags that can only follow
+  a margin the model actually supplied as a figure: `margin_off_step_grid` and
+  `margin_out_of_range` (the value itself was rejected), plus
+  `flat_with_nonzero_margin`, `directional_side_with_zero_margin` and
+  `set_target_without_confidence` — all five sitting past the
+  `set_target_without_margin` guard, which is what makes a null margin unable to
+  reach them (one of them, `margin_off_step_grid`, is additionally emitted
+  inside the coercion block for a non-integral number) — and
+  `margin_quoted_number`, the one member that fails *before* the coercion.
+  "Anything tagged after the coercion" is the wrong rule — a null margin skips
+  the coercion rather than failing it, so
+  `invalid_key_risks` and `missing_rationale` are reachable with nothing
+  proposed. `margin_not_numeric` and `confidence_not_numeric` are likewise out:
+  they now carry only the strings that are not figures at all — an echoed
+  placeholder, or a `maintain_current` that quoted its `"null"`. So is
+  `confidence_quoted_number`: margin is coerced first and a null margin skips
+  that block, so it is reachable with nothing proposed.
+- **A quoted figure is tagged apart from an echoed placeholder.** A string in
+  `requested_target_margin_pct` / `confidence` is still refused and the cycle is
+  still fail-closed — the safety semantics are unchanged — but the tag now says
+  which refusal it was: `margin_quoted_number` / `confidence_quoted_number` when
+  the string parses as a finite number, `margin_not_numeric` /
+  `confidence_not_numeric` otherwise. One tag previously covered a leftover
+  placeholder, a quoted `"null"` and a figure typed as `"35"`, and because a
+  fail-closed row stores the margin as NULL and the raw response is not
+  persisted, the three were indistinguishable afterwards — on the single metric
+  this prompt change is judged by. Like `margin_off_step_grid`,
+  `margin_quoted_number` is emitted inside the coercion block and reads no
+  `decision_mode`, so a `maintain_current` that quoted its margin as `"0"`
+  reaches it too: the netted rate counts cycles where the model supplied a
+  figure, which is what the proposal rate has always proxied.
+- **The Rules preamble no longer advertises maintain_current as the cost of a
+  violation.** It said violations are "discarded and treated as
+  maintain_current", ten lines under a new sentence saying the same cycle is
+  "recorded as a model-format failure" — one page, two answers, and the one it
+  gave first is a zero-cost no-op for a model whose failure mode is exactly
+  preferring no-ops. The wording is now the same in both places; the discard
+  behaviour itself is unchanged.
+
 ### Fixed
+
+- **The daemon's pre-LLM context guards have a working test again.** When the
+  live loop's `on_blocking_read` callback was added to `main._build_context`,
+  `test_build_input_refuses_untradeable_indicators`'s two-argument stand-in was
+  not updated, so every one of its four cases raised `TypeError` at the call
+  site instead of exercising the warm-up / dead-indicator guards it targets —
+  and had been doing so since the callback landed. The stand-in now accepts the
+  keyword.
 
 - **Perp runs no longer lose the target-JSON contract to structured output.**
   The Hyperliquid Phase 2 target contract is injected as prompt text and only

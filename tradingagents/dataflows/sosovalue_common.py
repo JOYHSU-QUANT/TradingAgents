@@ -11,8 +11,9 @@ helper with its redaction discipline, the value/date/ticker trust-boundary
 predicates, the clock and cache-age helpers every rolling-snapshot cache
 shares, and the two orchestration skeletons the modules used to carry as
 near-verbatim copies — the cache/TTL/stale-fallback discipline
-(``load_rolling_snapshot``) and the per-item sweep with its 429 drain and
-consecutive-network-failure breaker (``fetch_each``). Anything
+(``load_rolling_snapshot``, all three) and the per-item sweep with its 429
+drain and consecutive-network-failure breaker (``fetch_each``, macro and
+treasuries only; the ETF fund loop keeps its older semantics). Anything
 module-specific (parsers, snapshot shapes, cache payloads, TTL policy,
 report rendering, the vendor-success threshold) stays in the vendor modules.
 

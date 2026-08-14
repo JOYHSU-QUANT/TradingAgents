@@ -196,10 +196,10 @@ class TradingAgentsGraph:
                     get_insider_transactions,
                     # Every optional news category, from the same table the news
                     # analyst binds from — so a category cannot be bound there
-                    # and left unregistered here. The crypto-only and
-                    # shipped-off entries are bound to the analyst LLM only
-                    # conditionally, but always registered here so a bound call
-                    # is always executable.
+                    # and left unregistered here. Every table entry is bound to
+                    # the analyst LLM only conditionally (category gates; the
+                    # crypto-only rows also by asset type), but always
+                    # registered here so a bound call is always executable.
                     *(entry.tool for entry in OPTIONAL_NEWS_TOOLS),
                 ]
             ),

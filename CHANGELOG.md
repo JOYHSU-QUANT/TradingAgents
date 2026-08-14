@@ -382,9 +382,12 @@ Breaking changes within the 0.x line are called out explicitly.
   cache/TTL/stale-fallback discipline and the two twin per-item sweep loops
   (429 drain + network breaker) now live once in `sosovalue_common.py`
   (`load_rolling_snapshot`, `fetch_each`); each module keeps only its own TTL
-  policy and payload shape, and its logger, log wording, raised messages and
-  cache formats are unchanged. The ETF module's fund loop deliberately keeps
-  its older per-item-retry rate-limit semantics rather than adopting the drain.
+  policy and payload shape, and its logger, raised messages and cache formats
+  are unchanged; log wording is too, except the 429-drain line's bare
+  "histories" noun, which now matches the breaker line's per-module noun
+  ("event histories" / "company histories"). The ETF module's fund loop
+  deliberately keeps its older per-item-retry rate-limit semantics rather
+  than adopting the drain.
   The four-way `_classify_asset` copy (farside / sosovalue / treasuries /
   deribit) became `symbol_utils.classify_crypto_asset`, and the family's
   printable-ASCII text gates and STALE caveat line are shared

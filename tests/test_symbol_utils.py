@@ -6,6 +6,7 @@ import pytest
 
 from tradingagents.dataflows.symbol_utils import (
     NoMarketDataError,
+    classify_crypto_asset,
     is_yahoo_safe,
     normalize_symbol,
 )
@@ -64,6 +65,21 @@ class TestNoMarketDataError(unittest.TestCase):
     def test_canonical_defaults_to_symbol(self):
         err = NoMarketDataError("FOOBAR")
         self.assertEqual(err.canonical, "FOOBAR")
+
+
+@pytest.mark.unit
+class TestClassifyCryptoAsset(unittest.TestCase):
+    def test_bare_string_native_raises(self):
+        # str satisfies Collection[str]; membership would silently become
+        # substring matching ("TC" in "BTC"), so a bare string must fail loud.
+        with self.assertRaises(TypeError):
+            classify_crypto_asset("TC", "BTC")
+
+    def test_collection_native_still_classifies(self):
+        # Positive control on the same inputs the guard test uses.
+        self.assertEqual(classify_crypto_asset("BTC", {"BTC", "ETH"}), ("BTC", False))
+        self.assertEqual(classify_crypto_asset("SOL", {"BTC", "ETH"}), ("BTC", True))
+        self.assertEqual(classify_crypto_asset("USDT", {"BTC", "ETH"}), (None, False))
 
 
 @pytest.mark.unit

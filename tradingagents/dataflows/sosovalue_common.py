@@ -278,18 +278,20 @@ def _is_valid_ticker(x: object) -> bool:
     return isinstance(x, str) and bool(_TICKER_RE.match(x))
 
 
-def _is_safe_text(x: object, max_len: int, *, min_len: int = 0, stripped: bool = False) -> bool:
+def _is_safe_text(x: object, max_len: int, *, min_len: int = 1, stripped: bool = True) -> bool:
     """True for a bounded, printable-ASCII string (the family's charset gate).
 
-    The one predicate behind every free-text field the family accepts from
-    the server (macro value strings and event names, treasuries company
-    names): these strings render verbatim into LLM-visible report text, so
-    anything unprintable or oversized is rejected at the trust boundary
-    rather than escaped. ``min_len`` defaults to 0 because emptiness can be a
-    meaning, not a defect (a macro ``actual`` is "" until the print is
-    released); ``stripped`` additionally rejects leading/trailing whitespace
-    where the value doubles as an identifier the module compares or
-    interpolates.
+    The predicate behind the free-text fields the family gates this way
+    (macro value strings and event names, treasuries company names; the ETF
+    module's fund names predate it and keep their own narrower check): these
+    strings render verbatim into LLM-visible report text, so anything
+    unprintable or oversized is rejected at the trust boundary rather than
+    escaped. The defaults sit at the strict end (non-empty, no surrounding
+    whitespace) so a future call site that forgets the keywords fails closed
+    rather than letting "" or padded strings into LLM-visible text; a caller
+    for whom emptiness is a meaning, not a defect, opts down explicitly with
+    ``min_len=0, stripped=False`` (a macro ``actual`` is "" until the print
+    is released).
     """
     return (
         isinstance(x, str)
@@ -372,10 +374,10 @@ def _stale_caveat(fetched_at: str, closing: str) -> str:
     """The family's STALE header line: age, cause set, provenance, ``closing``.
 
     One template so the modules cannot drift on the cause enumeration —
-    network error, rate limit, or an API contract break is exactly the set
-    ``load_rolling_snapshot``'s fallback absorbs — while each module supplies
-    the closing warning its own reader needs (what, concretely, may be
-    outdated).
+    network error, rate limit, and an API contract break are the causes
+    ``load_rolling_snapshot``'s fallback absorbs for this family — while
+    each module supplies the closing warning its own reader needs (what,
+    concretely, may be outdated).
     """
     return (
         f"_STALE by {_humanize_age(fetched_at)}: live refresh failed (network error, "
@@ -424,10 +426,11 @@ def _coverage_gap_note(missing: set[str] | list[str], did_what: str, otherwise: 
 class FetchSweep(NamedTuple):
     """What one ``fetch_each`` sweep produced, and why it stopped short.
 
-    The classification fields exist because every failure is absorbed
-    per-item, so only the sweep itself can say what an all-failed outcome
-    was — the caller's vendor-success check reads them to raise the honest
-    type instead of a bare structural error:
+    The classification fields exist because the failures the sweep owns are
+    absorbed per-item (a rejected key still propagates out untouched), so
+    only the sweep itself can say what an all-failed outcome was — the
+    caller's vendor-success check reads them to raise the honest type
+    instead of a bare structural error:
 
     * ``rate_limited`` — the 429 that drained the sweep, or None. Persisted
       by callers (not just logged) because the drain fills ``failed`` with
@@ -464,7 +467,11 @@ class FetchSweep(NamedTuple):
         items this client never asked for, and by the time the report is
         rendered the local that knew why is long gone. One method so a flag
         added here reaches every module's payload without a hand-edit per
-        module.
+        module — on the write side only: each module's cache-read validator
+        and report renderer name these flags individually and need their own
+        edits before a new flag is consumed anywhere (and the read validators
+        reject missing keys, not unknown ones), so adding a flag here is the
+        start of a per-module change, not the whole of it.
         """
         return {
             "rate_limited": self.rate_limited is not None,
@@ -490,9 +497,12 @@ def fetch_each(
     parsed data on success, a string sentinel for an item the provider
     answered about but served nothing for (``flagged``; a code edit or the
     provider, not a retry, resolves those), or ``None`` after swallowing a
-    structural break (``failed``). A rejected key propagates out of the sweep
-    untouched (config breakage must reach the router even mid-batch), and so
-    do the two flow-control failures this loop owns:
+    structural break (``failed``). Any string return lands in ``flagged`` —
+    each module has exactly one such sentinel, so a second sentinel with a
+    different meaning must not be introduced without splitting the bucket.
+    A rejected key propagates out of the sweep untouched (config breakage
+    must reach the router even mid-batch), and so do the two flow-control
+    failures this loop owns:
 
     * A 429 proves every further request in this sweep would 429 too (the
       20 req/min limit is per-key and per-minute), so the rest is drained
@@ -516,6 +526,10 @@ def fetch_each(
     the 429 drain and keeps its per-item-retry rate-limit semantics (a PR #19
     decision), so folding it in would be a behaviour change, not a refactor.
     """
+    if isinstance(items, str):
+        # A bare string is iterable too — it would silently sweep one HTTP
+        # request per character instead of failing loudly.
+        raise TypeError("fetch_each items must be a collection of items, not a bare string")
     results: dict = {}
     failed: list[str] = []
     flagged: list[str] = []

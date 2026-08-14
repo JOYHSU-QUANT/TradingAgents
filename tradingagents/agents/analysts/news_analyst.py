@@ -14,7 +14,10 @@ from tradingagents.agents.utils.agent_utils import (
     get_news,
     get_prediction_markets,
 )
-from tradingagents.dataflows.interface import is_category_disabled
+from tradingagents.dataflows.interface import (
+    get_category_for_method,
+    is_category_disabled,
+)
 
 
 class _OptionalNewsTool(NamedTuple):
@@ -23,9 +26,18 @@ class _OptionalNewsTool(NamedTuple):
     ``scope`` places the hint in the prompt: ``"base"`` joins the always-on
     tool list in the opening sentence, ``"calendar"`` is its own appended
     sentence (asset-agnostic, both paths), ``"crypto"`` joins the
-    crypto-only preamble. The binding gate is the same for all three —
-    binding a tool whose category is switched off would just spend a tool
-    call to receive the disabled sentinel.
+    crypto-only preamble — and ``"crypto"`` also gates *binding* by asset
+    type (crypto rows are skipped entirely on a stock run). The category
+    gate is the same for all three — binding a tool whose category is
+    switched off would just spend a tool call to receive the disabled
+    sentinel.
+
+    Hint format follows the scope: ``"base"`` and ``"crypto"`` hints are
+    sentence *fragments* (``_join_hints`` supplies the commas and the final
+    "and"; the surrounding wrapper adds the framing text), while a
+    ``"calendar"`` hint is a *complete sentence* carrying its own leading
+    space and final period. Pasting a fragment into a calendar row (or vice
+    versa) silently malforms the prompt.
     """
 
     tool: object
@@ -39,6 +51,10 @@ class _OptionalNewsTool(NamedTuple):
 # ToolNode in trading_graph registers from the same rows — so a new category
 # cannot be bound here and forgotten there (or vice versa), and none of the
 # entries can end up bound but unadvertised or advertised but gated off.
+# Scope note: this table governs the GATED categories only. The always-on
+# news tools (get_news / get_global_news here, plus get_insider_transactions
+# in the ToolNode) stay hand-maintained in each consumer — the no-divergence
+# guarantee does not extend to them.
 # Row order is binding order, which the prompt's {tool_names} echoes.
 OPTIONAL_NEWS_TOOLS = (
     _OptionalNewsTool(
@@ -115,8 +131,31 @@ OPTIONAL_NEWS_TOOLS = (
     ),
 )
 
+def _validate_table(table):
+    """Reject a mis-authored table row at import time.
 
-def _join_hints(hints):
+    A typo'd category would fail OPEN — an unknown category is never
+    "disabled" (the vendor lookup falls back to "default"), so the tool
+    would stay bound while the user's real config said none — and a typo'd
+    scope would only surface on the first node run. Fail where the table
+    edit happens instead.
+    """
+    for entry in table:
+        if entry.scope not in ("base", "calendar", "crypto"):
+            raise ValueError(f"unknown OPTIONAL_NEWS_TOOLS scope {entry.scope!r}")
+        mapped = get_category_for_method(entry.tool.name)
+        if mapped != entry.category:
+            raise ValueError(
+                f"OPTIONAL_NEWS_TOOLS row {entry.tool.name!r} names category "
+                f"{entry.category!r} but the vendor config maps that method to "
+                f"{mapped!r}"
+            )
+
+
+_validate_table(OPTIONAL_NEWS_TOOLS)
+
+
+def _join_hints(hints: list[str]) -> str:
     """Join tool hints with "and" before the LAST hint only.
 
     A plain ", and ".join reads "A, and B, and C, and D" once more than two
@@ -161,8 +200,10 @@ def create_news_analyst(llm):
             elif entry.scope == "crypto":
                 crypto_hints.append(entry.hint)
             else:
-                # Fail loud: a typo'd scope must not silently drop a hint into
-                # the wrong sentence while the tool still binds.
+                # Unreachable for a table _validate_table accepted; kept so a
+                # scope added to that allowlist without a branch here fails
+                # loud instead of silently dropping the hint while the tool
+                # still binds.
                 raise ValueError(f"unknown OPTIONAL_NEWS_TOOLS scope {entry.scope!r}")
         crypto_tools_message = (
             " Since this is a crypto asset, also use " + _join_hints(crypto_hints) + "."

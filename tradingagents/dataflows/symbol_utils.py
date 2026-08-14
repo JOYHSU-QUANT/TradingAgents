@@ -147,9 +147,11 @@ def classify_crypto_asset(
     """Classify a caller symbol for a crypto vendor: ``(asset_key, is_proxy)``.
 
     The one classification rule the crypto vendors share (farside and
-    sosovalue ETF flows, sosovalue treasuries, deribit options), so switching
-    vendors never changes which symbols get a native report, a market-wide
-    proxy, or a no-signal note:
+    sosovalue ETF flows, sosovalue treasuries, deribit options): the rule's
+    shape is fixed here, while which symbols count as native stays each
+    vendor's own ``native`` set (treasuries serves only BTC natively; the
+    others serve BTC and ETH) — so switching vendors changes the outcome
+    only through that set, never through the rule:
 
     * a symbol whose base is in ``native`` is served its own data;
     * any other recognized crypto *risk* asset (``CRYPTO_BASES``) is served
@@ -167,6 +169,10 @@ def classify_crypto_asset(
     for a vendor — which report ships, which proxy caveat is worded how —
     stays documented on that vendor's own ``_classify_asset`` wrapper.
     """
+    if isinstance(native, str):
+        # A str satisfies Collection[str] — membership would silently degrade
+        # to substring matching ("TC" in "BTC" is True).
+        raise TypeError("native must be a collection of base symbols, not a bare string")
     base = normalize_symbol((asset or "").replace("/", "-")).split("-")[0]
     if base in native:
         return base, False

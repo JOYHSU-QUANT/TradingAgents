@@ -197,7 +197,7 @@ def _clean_name(x: object) -> str:
     bounded; anything else is dropped rather than escaped (the ticker is
     always shown anyway).
     """
-    return x if _is_safe_text(x, MAX_COMPANY_NAME_CHARS, min_len=1, stripped=True) else ""
+    return x if _is_safe_text(x, MAX_COMPANY_NAME_CHARS) else ""
 
 
 def _parse_company_list(data: list) -> tuple[list[tuple[str, str]], int]:

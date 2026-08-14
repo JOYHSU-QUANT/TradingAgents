@@ -174,6 +174,24 @@ def test_every_optional_table_row_is_registered_in_the_news_toolnode():
 
 
 @pytest.mark.unit
+def test_table_validation_rejects_a_wrong_category_and_a_wrong_scope():
+    # A typo'd category fails OPEN at the gate (an unknown category is never
+    # "disabled"), so the import-time validator must be the thing that
+    # catches it — and the current table must pass the same validator.
+    from tradingagents.agents.analysts.news_analyst import (
+        OPTIONAL_NEWS_TOOLS,
+        _validate_table,
+    )
+
+    _validate_table(OPTIONAL_NEWS_TOOLS)  # the shipped table passes
+    good = OPTIONAL_NEWS_TOOLS[0]
+    with pytest.raises(ValueError, match="names category"):
+        _validate_table([good._replace(category="macro_dta")])
+    with pytest.raises(ValueError, match="scope"):
+        _validate_table([good._replace(scope="bsae")])
+
+
+@pytest.mark.unit
 def test_news_toolnode_can_execute_crypto_tools():
     # _create_tool_nodes does not use self -> call unbound (avoids building LLMs).
     nodes = TradingAgentsGraph._create_tool_nodes(None)

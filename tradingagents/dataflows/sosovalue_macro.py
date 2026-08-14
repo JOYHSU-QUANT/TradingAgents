@@ -269,10 +269,10 @@ def _is_valid_value(x: object) -> bool:
     """True for a bounded, printable-ASCII value string (empty string legal).
 
     ``actual`` is the empty string until a print is released (live-verified),
-    so emptiness is a meaning, not a defect — hence the family charset gate
-    at its default ``min_len=0``.
+    so emptiness is a meaning, not a defect — hence the explicit opt-down
+    from the family charset gate's strict defaults.
     """
-    return _is_safe_text(x, MAX_VALUE_CHARS)
+    return _is_safe_text(x, MAX_VALUE_CHARS, min_len=0, stripped=False)
 
 
 def _is_valid_event_name(x: object) -> bool:
@@ -283,7 +283,7 @@ def _is_valid_event_name(x: object) -> bool:
     parse and the cache read, like the family's ticker filter. ``stripped``
     because the name is compared byte-exact against ``TRACKED_EVENTS``.
     """
-    return _is_safe_text(x, MAX_EVENT_NAME_CHARS, min_len=1, stripped=True)
+    return _is_safe_text(x, MAX_EVENT_NAME_CHARS)
 
 
 def _parse_calendar(data: list) -> tuple[list[dict], int, int, int, int, list[str]]:

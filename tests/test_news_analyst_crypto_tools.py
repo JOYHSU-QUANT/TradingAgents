@@ -1,7 +1,8 @@
 """The news analyst must bind the crypto-only tools (get_etf_flows,
-get_fear_greed, get_economic_calendar, get_btc_treasuries) only when the asset
-is crypto, and never for a stock — and the news ToolNode must be able to
-execute them when bound. Each is also gated on its own category being enabled,
+get_fear_greed, get_btc_treasuries) only when the asset is crypto, and never
+for a stock — and the news ToolNode must be able to execute them when bound.
+get_economic_calendar is the exception: it takes no asset argument and is
+bound on both paths. Each is also gated on its own category being enabled,
 so a shipped-off category binds nothing.
 
 A fake LLM captures the tools passed to bind_tools so the wiring is asserted
@@ -28,13 +29,21 @@ class _CapturingLLM:
 
     def __init__(self):
         self.bound_tools = None
+        self.prompt = None
 
     def bind_tools(self, tools):
         self.bound_tools = list(tools)
-        return RunnableLambda(lambda _inp: AIMessage(content="ok"))
+
+        def _capture(inp):
+            # The rendered prompt: binding a tool without advertising it in the
+            # system message leaves the model a tool it has no reason to call.
+            self.prompt = str(inp)
+            return AIMessage(content="ok")
+
+        return RunnableLambda(_capture)
 
 
-def _run(asset_type, ticker):
+def _bind(asset_type, ticker):
     llm = _CapturingLLM()
     node = create_news_analyst(llm)
     node(
@@ -45,7 +54,11 @@ def _run(asset_type, ticker):
             "messages": [],
         }
     )
-    return {t.name for t in llm.bound_tools}
+    return llm
+
+
+def _run(asset_type, ticker):
+    return {t.name for t in _bind(asset_type, ticker).bound_tools}
 
 
 @pytest.mark.unit
@@ -82,18 +95,43 @@ def test_shipped_off_categories_are_not_bound_by_default():
     # economic_calendar and btc_treasuries ship as "none": a default-config
     # crypto run must not bind them (the call could only return the disabled
     # sentinel); enabling them is a deliberate cutover.
-    bound = _run("crypto", "BTC-USD")
-    assert not (_SHIPPED_OFF_TOOLS & bound)
+    assert not (_SHIPPED_OFF_TOOLS & _run("crypto", "BTC-USD"))
+    # The stock path too, now that the calendar's binding no longer sits behind
+    # the crypto gate: the category flag is all that keeps it off there.
+    assert not (_SHIPPED_OFF_TOOLS & _run("stock", "AAPL"))
 
 
 @pytest.mark.unit
-def test_enabled_calendar_and_treasuries_bind_for_crypto_only():
+def test_the_calendar_binds_on_both_paths_but_treasuries_stays_crypto():
+    # The macro calendar takes no asset argument and CPI/NFP/PCE releases are
+    # event risk for equities too, so it is the one category here bound outside
+    # the crypto block. Treasuries is a BTC-holdings feed and stays crypto-only:
+    # asserting both in one test is what stops the split being widened by
+    # accident in either direction.
     set_config({"data_vendors": {"economic_calendar": "sosovalue", "btc_treasuries": "sosovalue"}})
     try:
         assert _run("crypto", "BTC-USD") >= _SHIPPED_OFF_TOOLS
-        assert not (_SHIPPED_OFF_TOOLS & _run("stock", "AAPL"))
+        stock = _run("stock", "AAPL")
+        assert "get_economic_calendar" in stock
+        assert "get_btc_treasuries" not in stock
     finally:
         set_config({"data_vendors": {"economic_calendar": "none", "btc_treasuries": "none"}})
+
+
+@pytest.mark.unit
+def test_the_stock_path_is_told_about_the_calendar_it_now_carries():
+    # The hint moved out of the crypto-only block along with the binding, and
+    # both halves have to land: a bound-but-unadvertised tool is one the model
+    # never calls, which would read exactly like the category still being off.
+    set_config({"data_vendors": {"economic_calendar": "sosovalue"}})
+    try:
+        llm = _bind("stock", "AAPL")
+        assert "get_economic_calendar" in {t.name for t in llm.bound_tools}
+        assert "get_economic_calendar(curr_date, look_back_days)" in llm.prompt
+        # The stock path must not pick up the crypto preamble along with it.
+        assert "Since this is a crypto asset" not in llm.prompt
+    finally:
+        set_config({"data_vendors": {"economic_calendar": "none"}})
 
 
 @pytest.mark.unit

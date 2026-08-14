@@ -177,11 +177,13 @@ def test_directional_below_grid_minimum_is_invalid():
     _assert_fail_closed(parsed, "margin_out_of_range")
 
 
-@pytest.mark.parametrize("value", ["<integer 5-60>", "null", "high", ""])
+@pytest.mark.parametrize("value", ["<integer 5-60>", "null", "high", "", "nan", "Infinity"])
 def test_invalid_margin_not_numeric(value):
     # What is left on this tag once quoted figures move off it: the strings
     # that are not figures at all — an echoed placeholder, a quoted null,
-    # prose, empty.
+    # prose, empty. "nan"/"Infinity" belong here too: Decimal parses them, so
+    # only the finiteness guard keeps them off the proposal-rate netting set,
+    # and dropping that guard would silently start counting them as proposals.
     parsed = parse_target_decision(_text(requested_target_margin_pct=value), _CFG)
     _assert_fail_closed(parsed, "margin_not_numeric")
 
@@ -202,7 +204,7 @@ def test_invalid_margin_boolean_is_not_numeric():
     _assert_fail_closed(parsed, "margin_not_numeric")
 
 
-@pytest.mark.parametrize("value", ["high", "<0.0-1.0>", "null"])
+@pytest.mark.parametrize("value", ["high", "<0.0-1.0>", "null", "nan", "Infinity"])
 def test_invalid_confidence_not_numeric(value):
     parsed = parse_target_decision(_text(confidence=value), _CFG)
     _assert_fail_closed(parsed, "confidence_not_numeric")

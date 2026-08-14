@@ -12,7 +12,7 @@ The derivation is deterministic: one logical order maps to exactly one wire
 id, forever. That is what makes the §8.3 idempotent-retry protocol work — a
 retry re-derives the same cloid_hex, so the exchange can recognise the
 duplicate instead of accepting a second order. The mapping is persisted in
-``cloid_registry`` (repository.py) because the hash is one-way: the exchange
+``cloid_registry`` (the repository package) because the hash is one-way: the exchange
 echoes back only cloid_hex, and reverse lookup through the registry is the
 one way to decide an order is bot-owned (§19.3).
 
@@ -33,9 +33,10 @@ __all__ = ["LIVE_ORDER_ROLES", "assert_cloid_provenance", "cloid_hex", "cloid_lo
 
 # §8.1: every live order carries one of these roles. Phase 2 already uses
 # entry / rebalance / stop_loss / take_profit; close / emergency_close /
-# cleanup_cancel are the live-only additions. repository._ORDER_ROLES IS this
-# frozenset (aliased, not copied), so the id layer and the write boundary cannot
-# drift — do not re-introduce an independent set there.
+# cleanup_cancel are the live-only additions. The repository package's
+# ``_vocab._ORDER_ROLES`` IS this frozenset (aliased, not copied), so the id
+# layer and the write boundary cannot drift — do not re-introduce an
+# independent set there.
 LIVE_ORDER_ROLES = frozenset(
     {
         "entry",

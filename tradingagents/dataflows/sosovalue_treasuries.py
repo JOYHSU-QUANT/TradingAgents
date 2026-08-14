@@ -79,28 +79,25 @@ from urllib.parse import quote
 
 import requests
 
-from .errors import VendorError
 from .sosovalue_common import (
     SoSoValueError,
-    SoSoValueNotConfiguredError,
-    SoSoValueRateLimitError,
-    _cache_age_hours,
     _cache_dir,
     _coverage_gap_note,
-    _days_stale,
     _days_unobserved,
-    _humanize_age,
     _is_finite_number,
     _is_iso_date,
+    _is_safe_text,
     _is_valid_ticker,
-    _iso_now,
     _plural,
     _plural_days,
     _request,
     _sanitize,
-    get_api_key,
+    _stale_caveat,
+    fetch_each,
+    load_rolling_snapshot,
+    raise_all_failed,
 )
-from .symbol_utils import CRYPTO_BASES, normalize_symbol
+from .symbol_utils import classify_crypto_asset
 
 logger = logging.getLogger(__name__)
 
@@ -200,14 +197,7 @@ def _clean_name(x: object) -> str:
     bounded; anything else is dropped rather than escaped (the ticker is
     always shown anyway).
     """
-    if (
-        isinstance(x, str)
-        and 0 < len(x) <= MAX_COMPANY_NAME_CHARS
-        and x == x.strip()
-        and all(32 <= ord(c) <= 126 for c in x)
-    ):
-        return x
-    return ""
+    return x if _is_safe_text(x, MAX_COMPANY_NAME_CHARS, min_len=1, stripped=True) else ""
 
 
 def _parse_company_list(data: list) -> tuple[list[tuple[str, str]], int]:
@@ -616,114 +606,49 @@ def _fetch_all() -> dict:
         )
 
     selected = listing[:MAX_COMPANIES]
-    companies: dict[str, dict] = {}
-    companies_failed: list[str] = []
-    companies_empty: list[str] = []
-    rate_limited: SoSoValueRateLimitError | None = None
-    # The transport counterpart of ``rate_limited``, kept for the same reason:
-    # every RequestException is absorbed per company, so without it an
-    # all-failed sweep can only raise a bare SoSoValueError.
-    last_network: requests.RequestException | None = None
-    # Set when a company fails for a reason no retry can heal —
-    # _fetch_one_company returns None only after swallowing a SoSoValueError (a
-    # parse/contract break) — so the transport classification below cannot
-    # claim a pure outage while a real structural break is in the same sweep.
-    structural_failure = False
-    consecutive_network = 0
-    # The breaker's counterpart to ``rate_limited``: it too leaves tickers in
-    # companies_failed that were never requested, and the report must not let
-    # the proven failures stand in for the skipped ones. Set only when
-    # something was actually skipped — the breaker also trips on the last
-    # company, where nothing went unattempted and there is nothing to disclose.
-    breaker_skipped = False
-    # Only the requests this sweep actually made. The all-failed message below
-    # said "every attempt failed" over the whole selection, which turns
-    # MAX_CONSECUTIVE_NETWORK_FAILURES observed failures into fifteen claimed.
-    attempted = 0
-    remaining = iter(selected)
-    for ticker, name in remaining:
-        attempted += 1
-        try:
-            company = _fetch_one_company(ticker, name)
-        except SoSoValueRateLimitError as e:
-            rate_limited = e
-            # The 20 req/min limit is per-key and per-minute: this 429 proves
-            # every further request in this sweep would 429 too, so drain the
-            # rest into companies_failed (short-TTL retry) instead of burning
-            # a quota call per remaining company.
-            skipped = [ticker, *(t for t, _ in remaining)]
-            companies_failed.extend(skipped)
-            logger.warning(
-                "SoSoValue treasuries: rate limit hit on %s (%s); that request "
-                "and the %d histories not yet attempted all go to "
-                "companies_failed (disclosed as incomplete, retried on the "
-                "short TTL)",
-                ticker,
-                e,
-                len(skipped) - 1,
-            )
-            break
-        except requests.RequestException as e:
-            last_network = e
-            companies_failed.append(ticker)
-            consecutive_network += 1
-            if consecutive_network >= MAX_CONSECUTIVE_NETWORK_FAILURES:
-                skipped = [t for t, _ in remaining]
-                if skipped:
-                    companies_failed.extend(skipped)
-                    breaker_skipped = True
-                    logger.warning(
-                        "SoSoValue treasuries: %d consecutive network failures; "
-                        "skipping the remaining %d company histories "
-                        "(disclosed as incomplete, retried on the short TTL)",
-                        consecutive_network,
-                        len(skipped),
-                    )
-                break
-            continue
-        consecutive_network = 0
-        if company == "empty":
-            companies_empty.append(ticker)
-        elif company is None:
-            structural_failure = True
-            companies_failed.append(ticker)
-        else:
-            companies[ticker] = company
+    # The family sweep: per-company handling in _fetch_one_company, the 429
+    # drain and the consecutive-network-failure breaker in fetch_each. "empty"
+    # results (listed but not yet filing) land in the flagged bucket; None (a
+    # swallowed parse break) and transport failures in failed.
+    sweep = fetch_each(
+        selected,
+        lambda item: _fetch_one_company(item[0], item[1]),
+        key=lambda item: item[0],
+        describe=lambda item: item[0],
+        label="treasuries",
+        failed_bucket="companies_failed",
+        noun="company histories",
+        max_consecutive_network=MAX_CONSECUTIVE_NETWORK_FAILURES,
+        log=logger,
+    )
+    companies = sweep.results
+    companies_failed = sweep.failed
+    companies_empty = sweep.flagged
 
     if not companies:
-        # Keep the taxonomy honest when a 429 drained the whole sweep: the
-        # router and _load_snapshot classify by type, and a quota trip must
-        # not masquerade as structural breakage (ERROR + traceback logs).
-        if rate_limited is not None:
-            raise SoSoValueRateLimitError(
+        # The which-type judgment is raise_all_failed's; only the wording is
+        # this module's. "empty", not "failed", for the flagged count: every
+        # selected company simply having no served history is not a transport
+        # problem, and saying so would send a reader after one that never
+        # happened.
+        raise_all_failed(
+            sweep,
+            on_rate_limited=lambda: (
                 f"SoSoValue treasuries: rate limited before any company "
-                f"history could be fetched: {rate_limited}"
-            ) from rate_limited
-        # Say which way it went: "failed" would misdescribe a sweep where every
-        # selected company simply has no served history, sending a reader after
-        # a transport problem that never happened.
-        # The transport sibling of the rate-limit rule directly above. Every
-        # RequestException is absorbed per company, so a total outage would
-        # otherwise surface here as a bare SoSoValueError — which _load_snapshot
-        # classifies as structural breakage and logs at ERROR with a traceback
-        # and "the client likely needs a fix", for an outage no code change can
-        # heal. Raising the transport class routes it to the warning branch,
-        # where the ETF module's network failures already land. Only when the
-        # sweep died PURELY of transport: an empty served history or a swallowed
-        # parse break means the cause is not the network, and the generic error
-        # below stays the honest answer.
-        if last_network is not None and not structural_failure and not companies_empty:
-            raise requests.RequestException(
+                f"history could be fetched: {sweep.rate_limited}"
+            ),
+            on_transport=lambda: (
                 f"SoSoValue treasuries returned no usable history for any of the "
                 f"{len(selected)} selected companies; every request this sweep made "
-                f"({attempted} of {len(selected)}) failed at the transport layer "
-                f"(last: {last_network})"
-            ) from last_network
-        raise SoSoValueError(
-            f"SoSoValue treasuries returned no usable history for any of the "
-            f"{len(selected)} selected companies ({len(companies_failed)} failed, "
-            f"{len(companies_empty)} empty); a listing without holdings figures "
-            f"is no signal"
+                f"({sweep.attempted} of {len(selected)}) failed at the transport layer "
+                f"(last: {sweep.last_network})"
+            ),
+            on_structural=lambda: (
+                f"SoSoValue treasuries returned no usable history for any of the "
+                f"{len(selected)} selected companies ({len(companies_failed)} failed, "
+                f"{len(companies_empty)} empty); a listing without holdings figures "
+                f"is no signal"
+            ),
         )
     # Verify the ordering the selection and the report's "largest holders"
     # claim both rest on: the fetched companies' latest holdings must be
@@ -758,11 +683,7 @@ def _fetch_all() -> dict:
         "companies_empty": companies_empty,
         "companies_unusable": unusable,
         "order_unverified": order_unverified,
-        # Persisted, not just logged: the drain fills ``companies_failed`` with
-        # tickers this client never asked for, and by the time the report is
-        # rendered the local that knew why is long gone.
-        "rate_limited": rate_limited is not None,
-        "breaker_skipped": breaker_skipped,
+        **sweep.persisted_flags(),
     }
 
 
@@ -781,95 +702,46 @@ def _snapshot_from(payload: dict, fetched_at: str, stale: bool) -> _TreasurySnap
     )
 
 
+def _cache_ttl_hours(cached: dict) -> int:
+    """The module's TTL policy for one cached payload.
+
+    Every degradation bucket is named here and every exclusion argued
+    here, following the ETF module's TTL site and the macro twin — the
+    enumeration is what stops a new bucket being wired into the report
+    and forgotten by the refresh. Shortened only for companies_failed
+    (429 / network / breaker, transient by definition). NOT shortened:
+      companies_empty — listed but not yet filing; no retry heals it.
+      companies_unusable — a listing entry whose ticker fails validation
+        is deterministic, same payload drops the same entry every sweep
+        (the ETF module settled this for its funds_unusable twin).
+      order_unverified — a fact about the listing versus filed holdings,
+        not lost data; and whenever its TOO_FEW arm is caused by
+        something retriable, companies_failed is already non-empty.
+    The 6h value is itself deliberate (see the constant): do not drag it
+    back to the family's 1h.
+    """
+    return INCOMPLETE_CACHE_TTL_HOURS if cached["companies_failed"] else CACHE_TTL_HOURS
+
+
 def _load_snapshot() -> _TreasurySnapshot:
     """Return the treasuries snapshot, via the family cache/stale discipline.
 
-    Key first; TTL-fresh cache served as-is (a *failed* history earns the
-    short TTL — an empty one cannot be healed by retrying, so it does not);
-    otherwise fetch + overwrite; on failure fall back to the
-    cached snapshot up to MAX_STALE_DAYS; failures never written;
-    ``SoSoValueNotConfiguredError`` never absorbed.
+    ``load_rolling_snapshot`` owns the shared skeleton (key first, TTL-fresh
+    serve, fetch + overwrite, stale fallback up to MAX_STALE_DAYS, config
+    breakage never absorbed); this module supplies the TTL policy
+    (``_cache_ttl_hours``) and the payload shape.
     """
-    get_api_key()
-
-    path = _cache_path()
-    cached = _read_cache(path)
-    if cached:
-        age_h = _cache_age_hours(cached["fetched_at"])
-        # Every degradation bucket is named here and every exclusion argued
-        # here, following the ETF module's TTL site and the macro twin — the
-        # enumeration is what stops a new bucket being wired into the report
-        # and forgotten by the refresh. Shortened only for companies_failed
-        # (429 / network / breaker, transient by definition). NOT shortened:
-        #   companies_empty — listed but not yet filing; no retry heals it.
-        #   companies_unusable — a listing entry whose ticker fails validation
-        #     is deterministic, same payload drops the same entry every sweep
-        #     (the ETF module settled this for its funds_unusable twin).
-        #   order_unverified — a fact about the listing versus filed holdings,
-        #     not lost data; and whenever its TOO_FEW arm is caused by
-        #     something retriable, companies_failed is already non-empty.
-        # The 6h value is itself deliberate (see the constant): do not drag it
-        # back to the family's 1h.
-        ttl = INCOMPLETE_CACHE_TTL_HOURS if cached["companies_failed"] else CACHE_TTL_HOURS
-        if age_h is not None and 0 <= age_h < ttl:
-            return _snapshot_from(cached, cached["fetched_at"], stale=False)
-
-    try:
-        payload = _fetch_all()
-    except SoSoValueNotConfiguredError:
-        raise
-    except (requests.RequestException, VendorError) as e:
-        wrap_cls = type(e) if isinstance(e, VendorError) else SoSoValueError
-        if cached:
-            fetched_at = cached["fetched_at"]
-            age = _days_stale(fetched_at)
-            if age is None or age > MAX_STALE_DAYS:
-                stale_desc = (
-                    "has an unparseable or future-dated fetch date"
-                    if age is None
-                    else f"is {age} days stale"
-                )
-                raise wrap_cls(
-                    f"SoSoValue treasuries fetch failed and the newest cache "
-                    f"{stale_desc} (> {MAX_STALE_DAYS}-day cap): {_sanitize(e)}"
-                ) from e
-            age_str = _humanize_age(fetched_at)
-            if isinstance(e, SoSoValueError):
-                logger.error(
-                    "SoSoValue treasuries refresh failed structurally (%s); serving "
-                    "stale cache (%s old) — the client likely needs a fix",
-                    e,
-                    age_str,
-                    exc_info=True,
-                )
-            else:
-                logger.warning(
-                    "SoSoValue treasuries refresh failed (%s); using stale cache (%s old)",
-                    e,
-                    age_str,
-                )
-            return _snapshot_from(cached, fetched_at, stale=True)
-        # Not capped, only flattened: most of this string is the module's own
-        # diagnostic, and a foreign requests.RequestException can carry a
-        # server-influenced URL into the same LLM-visible line.
-        raise wrap_cls(
-            f"SoSoValue treasuries unavailable and no usable cache exists: {_sanitize(e)}"
-        ) from e
-
-    fetched_at = _iso_now()
-    payload["fetched_at"] = fetched_at
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f)
-    except OSError as e:  # a cache-write failure must not fail the call
-        logger.warning(
-            "Could not write SoSoValue treasuries cache %s: %s — the fetch "
-            "throttle stays disabled until a write succeeds, so further calls "
-            "will each re-fetch",
-            path,
-            e,
-        )
-    return _snapshot_from(payload, fetched_at, stale=False)
+    payload, fetched_at, stale = load_rolling_snapshot(
+        path=_cache_path(),
+        read_cache=_read_cache,
+        fetch_all=lambda cached: _fetch_all(),
+        ttl_hours=_cache_ttl_hours,
+        label="treasuries",
+        cache_name="SoSoValue treasuries cache",
+        max_stale_days=MAX_STALE_DAYS,
+        log=logger,
+    )
+    return _snapshot_from(payload, fetched_at, stale)
 
 
 def _classify_asset(asset: str) -> tuple[str | None, bool]:
@@ -881,12 +753,7 @@ def _classify_asset(asset: str) -> tuple[str | None, bool]:
     market-wide demand proxy, and a stablecoin or unrecognized symbol gets a
     no-signal note.
     """
-    base = normalize_symbol((asset or "").replace("/", "-")).split("-")[0]
-    if base in SUPPORTED_ASSETS:
-        return base, False
-    if base in CRYPTO_BASES:
-        return "BTC", True
-    return None, False
+    return classify_crypto_asset(asset, SUPPORTED_ASSETS)
 
 
 class _Activity(NamedTuple):
@@ -1089,12 +956,7 @@ def get_btc_treasury_data(
         header_lines = ["## BTC Corporate Treasuries (SoSoValue)"]
 
     if snapshot.stale:
-        age_str = _humanize_age(snapshot.fetched_at)
-        header_lines.append(
-            f"_STALE by {age_str}: live refresh failed (network error, rate limit, or "
-            f"an API contract break); showing the last cached snapshot (fetched "
-            f"{snapshot.fetched_at}). Treat with caution._"
-        )
+        header_lines.append(_stale_caveat(snapshot.fetched_at, "Treat with caution."))
     # NOT gated on staleness. The window below is labelled by curr_date, but no
     # snapshot can carry a disclosure filed after it was fetched, so its most
     # recent stretch is empty by construction rather than quiet. Treasury flow

@@ -94,24 +94,21 @@ from urllib.parse import quote
 
 import requests
 
-from .errors import VendorError
 from .sosovalue_common import (
     SoSoValueError,
-    SoSoValueNotConfiguredError,
-    SoSoValueRateLimitError,
-    _cache_age_hours,
     _cache_dir,
     _coverage_gap_note,
-    _days_stale,
     _days_unobserved,
-    _humanize_age,
     _is_iso_date,
-    _iso_now,
+    _is_safe_text,
     _plural,
     _plural_days,
     _request,
     _sanitize,
-    get_api_key,
+    _stale_caveat,
+    fetch_each,
+    load_rolling_snapshot,
+    raise_all_failed,
 )
 
 logger = logging.getLogger(__name__)
@@ -272,11 +269,10 @@ def _is_valid_value(x: object) -> bool:
     """True for a bounded, printable-ASCII value string (empty string legal).
 
     ``actual`` is the empty string until a print is released (live-verified),
-    so emptiness is a meaning, not a defect. Anything unprintable or oversized
-    is rejected at the trust boundary: these strings render verbatim into
-    LLM-visible report text.
+    so emptiness is a meaning, not a defect — hence the family charset gate
+    at its default ``min_len=0``.
     """
-    return isinstance(x, str) and len(x) <= MAX_VALUE_CHARS and all(32 <= ord(c) <= 126 for c in x)
+    return _is_safe_text(x, MAX_VALUE_CHARS)
 
 
 def _is_valid_event_name(x: object) -> bool:
@@ -284,14 +280,10 @@ def _is_valid_event_name(x: object) -> bool:
 
     Names are interpolated (URL-quoted) into history request paths and render
     verbatim in report text, so the same one predicate guards both the live
-    parse and the cache read, like the family's ticker filter.
+    parse and the cache read, like the family's ticker filter. ``stripped``
+    because the name is compared byte-exact against ``TRACKED_EVENTS``.
     """
-    return (
-        isinstance(x, str)
-        and 1 <= len(x) <= MAX_EVENT_NAME_CHARS
-        and x == x.strip()
-        and all(32 <= ord(c) <= 126 for c in x)
-    )
+    return _is_safe_text(x, MAX_EVENT_NAME_CHARS, min_len=1, stripped=True)
 
 
 def _parse_calendar(data: list) -> tuple[list[dict], int, int, int, int, list[str]]:
@@ -763,114 +755,49 @@ def _fetch_all() -> dict:
         _request("/macro/events", {})
     )
 
-    histories: dict[str, list[dict]] = {}
-    events_failed: list[str] = []
-    events_unknown: list[str] = []
-    rate_limited: SoSoValueRateLimitError | None = None
-    # The transport counterpart of ``rate_limited``, kept for the same reason:
-    # every RequestException is absorbed per event, so without it an all-failed
-    # sweep can only raise a bare SoSoValueError.
-    last_network: requests.RequestException | None = None
-    # Set when an event fails for a reason no retry can heal — _fetch_one_event
-    # returns None only after swallowing a SoSoValueError (a parse/contract
-    # break) — so the transport classification below cannot claim a pure
-    # outage while a real structural break is in the same sweep.
-    structural_failure = False
-    consecutive_network = 0
-    # The breaker's counterpart to ``rate_limited``: it too leaves names in
-    # events_failed that were never requested, and the report must not let the
-    # proven failures stand in for the skipped ones. Set only when something
-    # was actually skipped — the breaker also trips on the last event, where
-    # nothing went unattempted and there is nothing to disclose.
-    breaker_skipped = False
-    # Only the requests this sweep actually made. The all-failed message below
-    # said "every attempt failed" over the whole tracked list, which turns
-    # MAX_CONSECUTIVE_NETWORK_FAILURES observed failures into nine claimed ones.
-    attempted = 0
-    remaining = iter(TRACKED_EVENTS)
-    for name in remaining:
-        attempted += 1
-        try:
-            rows = _fetch_one_event(name)
-        except SoSoValueRateLimitError as e:
-            rate_limited = e
-            # The 20 req/min limit is per-key and per-minute: this 429 proves
-            # every further request in this sweep would 429 too, so drain the
-            # rest into events_failed (short-TTL retry) instead of burning a
-            # quota call per remaining event.
-            skipped = [name, *remaining]
-            events_failed.extend(skipped)
-            logger.warning(
-                "SoSoValue macro: rate limit hit on %r (%s); that request and "
-                "the %d histories not yet attempted all go to events_failed "
-                "(disclosed as incomplete, retried on the short TTL)",
-                name,
-                e,
-                len(skipped) - 1,
-            )
-            break
-        except requests.RequestException as e:
-            last_network = e
-            events_failed.append(name)
-            consecutive_network += 1
-            if consecutive_network >= MAX_CONSECUTIVE_NETWORK_FAILURES:
-                skipped = list(remaining)
-                if skipped:
-                    events_failed.extend(skipped)
-                    breaker_skipped = True
-                    logger.warning(
-                        "SoSoValue macro: %d consecutive network failures; "
-                        "skipping the remaining %d event histories "
-                        "(disclosed as incomplete, retried on the short TTL)",
-                        consecutive_network,
-                        len(skipped),
-                    )
-                break
-            continue
-        consecutive_network = 0
-        if rows == "unknown":
-            events_unknown.append(name)
-        elif rows is None:
-            structural_failure = True
-            events_failed.append(name)
-        else:
-            histories[name] = rows
+    # The family sweep: per-event handling in _fetch_one_event, the 429 drain
+    # and the consecutive-network-failure breaker in fetch_each. "unknown"
+    # results (200 + empty history = renamed upstream) land in the flagged
+    # bucket; None (a swallowed parse break) and transport failures in failed.
+    sweep = fetch_each(
+        TRACKED_EVENTS,
+        _fetch_one_event,
+        key=lambda name: name,
+        describe=repr,
+        label="macro",
+        failed_bucket="events_failed",
+        noun="event histories",
+        max_consecutive_network=MAX_CONSECUTIVE_NETWORK_FAILURES,
+        log=logger,
+    )
+    histories = sweep.results
+    events_failed = sweep.failed
+    events_unknown = sweep.flagged
     if not histories:
-        # Keep the taxonomy honest when a 429 drained the whole sweep: the
-        # router and _load_snapshot classify by type, and a quota trip must
-        # not masquerade as structural breakage (ERROR + traceback logs).
-        if rate_limited is not None:
-            raise SoSoValueRateLimitError(
-                f"SoSoValue macro: rate limited before any tracked event "
-                f"history could be fetched: {rate_limited}"
-            ) from rate_limited
-        # Say which way it went, like the treasuries twin: "could not be
-        # fetched" would misdescribe a mass upstream rename, where all nine
-        # requests SUCCEEDED and returned empty lists — sending whoever reads
-        # this (or the model, once the stale cap is passed and it rides a
+        # The which-type judgment is raise_all_failed's; only the wording is
+        # this module's. "unknown to the provider" instead of "could not be
+        # fetched", because a mass upstream rename means all nine requests
+        # SUCCEEDED and returned empty lists — sending whoever reads this (or
+        # the model, once the stale cap is passed and it rides a
         # DATA_UNAVAILABLE line) after a transport problem that never happened.
-        # The transport sibling of the rate-limit rule directly above. Every
-        # RequestException is absorbed per event, so a total outage would
-        # otherwise surface here as a bare SoSoValueError — which _load_snapshot
-        # classifies as structural breakage and logs at ERROR with a traceback
-        # and "the client likely needs a fix", for an outage no code change can
-        # heal. Raising the transport class routes it to the warning branch,
-        # where the ETF module's network failures already land. Only when the
-        # sweep died PURELY of transport: an unknown event or a swallowed parse
-        # break means something structural is in the mix, and the generic error
-        # below stays the honest answer.
-        if last_network is not None and not structural_failure and not events_unknown:
-            raise requests.RequestException(
+        raise_all_failed(
+            sweep,
+            on_rate_limited=lambda: (
+                f"SoSoValue macro: rate limited before any tracked event "
+                f"history could be fetched: {sweep.rate_limited}"
+            ),
+            on_transport=lambda: (
                 f"SoSoValue macro: no usable history for any of the "
                 f"{len(TRACKED_EVENTS)} tracked events; every request this sweep made "
-                f"({attempted} of {len(TRACKED_EVENTS)}) failed at the transport layer "
-                f"(last: {last_network})"
-            ) from last_network
-        raise SoSoValueError(
-            f"SoSoValue macro: no usable history for any of the "
-            f"{len(TRACKED_EVENTS)} tracked events ({len(events_failed)} failed, "
-            f"{len(events_unknown)} unknown to the provider); a schedule without "
-            f"figures is not a served signal"
+                f"({sweep.attempted} of {len(TRACKED_EVENTS)}) failed at the transport layer "
+                f"(last: {sweep.last_network})"
+            ),
+            on_structural=lambda: (
+                f"SoSoValue macro: no usable history for any of the "
+                f"{len(TRACKED_EVENTS)} tracked events ({len(events_failed)} failed, "
+                f"{len(events_unknown)} unknown to the provider); a schedule without "
+                f"figures is not a served signal"
+            ),
         )
     return {
         "calendar": calendar,
@@ -882,11 +809,7 @@ def _fetch_all() -> dict:
         "histories": histories,
         "events_failed": events_failed,
         "events_unknown": events_unknown,
-        # Persisted, not just logged: the drain fills ``events_failed`` with
-        # names this client never asked for, and by the time the report is
-        # rendered the local that knew why is long gone.
-        "rate_limited": rate_limited is not None,
-        "breaker_skipped": breaker_skipped,
+        **sweep.persisted_flags(),
     }
 
 
@@ -908,120 +831,61 @@ def _snapshot_from(payload: dict, fetched_at: str, stale: bool) -> _MacroSnapsho
     )
 
 
+def _cache_ttl_hours(cached: dict) -> int:
+    """The module's TTL policy for one cached payload.
+
+    Every degradation bucket is named here and every exclusion is argued
+    here, following the ETF module's TTL site — the enumeration is what
+    stops a new bucket being wired into the report and forgotten by the
+    refresh. Shortened for the two a re-fetch can actually heal:
+      events_failed  — 429 / network / breaker, transient by definition.
+      calendar_malformed — a dropped day-row costs a whole DATE, and
+        nothing says the row is permanently bad; a null events array or a
+        half-written row in a present-anchored calendar is exactly what an
+        hour later returns clean. Left on the full TTL it is re-served for
+        five hours with a hole the report has to keep disclosing. It gets
+        its OWN middle value rather than the failed-history one — see the
+        branch below — because nothing proves the row shape is transient
+        and the shortest TTL on a permanent break is a standing 5x
+        amplification.
+    NOT shortened, each for its own reason:
+      events_unknown — proven permanent (200 + empty list = renamed
+        upstream); only a TRACKED_EVENTS edit heals it.
+      calendar_unusable — a name failing the charset filter is
+        deterministic, same as the ETF listing's unusable tickers.
+      calendar_truncated — deterministic: a re-fetch re-truncates
+        identically, and the kept head is the span this report renders.
+      calendar_duplicated — the merge loses no day-row and no name; it
+        costs date confidence, not data.
+    Both buckets at once takes the shortest: a transient failure is
+    already in the payload, so the amplification argument does not apply.
+    """
+    if cached["events_failed"]:
+        return INCOMPLETE_CACHE_TTL_HOURS
+    if cached["calendar_malformed"]:
+        return MALFORMED_CACHE_TTL_HOURS
+    return CACHE_TTL_HOURS
+
+
 def _load_snapshot() -> _MacroSnapshot:
     """Return the macro snapshot, via the family's cache/stale discipline.
 
-    Key first (the emergency-disable flip must not wait out a fresh cache);
-    a cache younger than its TTL is served as-is (a *failed* history earns the
-    shortest ``INCOMPLETE_CACHE_TTL_HOURS`` and a *dropped* calendar day-row the
-    middle ``MALFORMED_CACHE_TTL_HOURS``, because a re-fetch can heal both but
-    only the first is transient by construction; an unknown event, a dropped
-    name, a truncation and a merged duplicate cannot be healed that way, so they
-    do not — the TTL site itself argues each case); otherwise fetch and
-    overwrite the rolling file; on a fetch failure fall back to the cached
-    snapshot (``stale=True``) up to ``MAX_STALE_DAYS``. A failed fetch is
-    never written to cache, and ``SoSoValueNotConfiguredError`` is never
-    absorbed by the stale fallback.
+    ``load_rolling_snapshot`` owns the shared skeleton (key first, TTL-fresh
+    serve, fetch + overwrite, stale fallback up to ``MAX_STALE_DAYS``, config
+    breakage never absorbed); this module supplies the three-tier TTL policy
+    (``_cache_ttl_hours``) and the payload shape.
     """
-    get_api_key()
-
-    path = _cache_path()
-    cached = _read_cache(path)
-    if cached:
-        age_h = _cache_age_hours(cached["fetched_at"])
-        # Every degradation bucket is named here and every exclusion is argued
-        # here, following the ETF module's TTL site — the enumeration is what
-        # stops a new bucket being wired into the report and forgotten by the
-        # refresh. Shortened for the two a re-fetch can actually heal:
-        #   events_failed  — 429 / network / breaker, transient by definition.
-        #   calendar_malformed — a dropped day-row costs a whole DATE, and
-        #     nothing says the row is permanently bad; a null events array or a
-        #     half-written row in a present-anchored calendar is exactly what an
-        #     hour later returns clean. Left on the full TTL it is re-served for
-        #     five hours with a hole the report has to keep disclosing. It gets
-        #     its OWN middle value rather than the failed-history one — see the
-        #     branch below — because nothing proves the row shape is transient
-        #     and the shortest TTL on a permanent break is a standing 5x
-        #     amplification.
-        # NOT shortened, each for its own reason:
-        #   events_unknown — proven permanent (200 + empty list = renamed
-        #     upstream); only a TRACKED_EVENTS edit heals it.
-        #   calendar_unusable — a name failing the charset filter is
-        #     deterministic, same as the ETF listing's unusable tickers.
-        #   calendar_truncated — deterministic: a re-fetch re-truncates
-        #     identically, and the kept head is the span this report renders.
-        #   calendar_duplicated — the merge loses no day-row and no name; it
-        #     costs date confidence, not data.
-        # Both buckets at once takes the shortest: a transient failure is
-        # already in the payload, so the amplification argument does not apply.
-        if cached["events_failed"]:
-            ttl = INCOMPLETE_CACHE_TTL_HOURS
-        elif cached["calendar_malformed"]:
-            ttl = MALFORMED_CACHE_TTL_HOURS
-        else:
-            ttl = CACHE_TTL_HOURS
-        if age_h is not None and 0 <= age_h < ttl:
-            return _snapshot_from(cached, cached["fetched_at"], stale=False)
-
-    try:
-        payload = _fetch_all()
-    except SoSoValueNotConfiguredError:
-        raise
-    except (requests.RequestException, VendorError) as e:
-        # Keep the exact vendor-taxonomy type through the context-adding wrap
-        # (the router classifies by type); only a network error becomes the
-        # generic SoSoValueError. Same rationale as the ETF module.
-        wrap_cls = type(e) if isinstance(e, VendorError) else SoSoValueError
-        if cached:
-            fetched_at = cached["fetched_at"]
-            age = _days_stale(fetched_at)
-            if age is None or age > MAX_STALE_DAYS:
-                stale_desc = (
-                    "has an unparseable or future-dated fetch date"
-                    if age is None
-                    else f"is {age} days stale"
-                )
-                raise wrap_cls(
-                    f"SoSoValue macro fetch failed and the newest cache {stale_desc} "
-                    f"(> {MAX_STALE_DAYS}-day cap): {_sanitize(e)}"
-                ) from e
-            age_str = _humanize_age(fetched_at)
-            if isinstance(e, SoSoValueError):
-                logger.error(
-                    "SoSoValue macro refresh failed structurally (%s); serving "
-                    "stale cache (%s old) — the client likely needs a fix",
-                    e,
-                    age_str,
-                    exc_info=True,
-                )
-            else:
-                logger.warning(
-                    "SoSoValue macro refresh failed (%s); using stale cache (%s old)",
-                    e,
-                    age_str,
-                )
-            return _snapshot_from(cached, fetched_at, stale=True)
-        # Not capped, only flattened: most of this string is the module's own
-        # diagnostic, and a foreign requests.RequestException can carry a
-        # server-influenced URL into the same LLM-visible line.
-        raise wrap_cls(
-            f"SoSoValue macro unavailable and no usable cache exists: {_sanitize(e)}"
-        ) from e
-
-    fetched_at = _iso_now()
-    payload["fetched_at"] = fetched_at
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f)
-    except OSError as e:  # a cache-write failure must not fail the call
-        logger.warning(
-            "Could not write SoSoValue macro cache %s: %s — the fetch throttle "
-            "stays disabled until a write succeeds, so further calls will each "
-            "re-fetch",
-            path,
-            e,
-        )
-    return _snapshot_from(payload, fetched_at, stale=False)
+    payload, fetched_at, stale = load_rolling_snapshot(
+        path=_cache_path(),
+        read_cache=_read_cache,
+        fetch_all=lambda cached: _fetch_all(),
+        ttl_hours=_cache_ttl_hours,
+        label="macro",
+        cache_name="SoSoValue macro cache",
+        max_stale_days=MAX_STALE_DAYS,
+        log=logger,
+    )
+    return _snapshot_from(payload, fetched_at, stale)
 
 
 def _parse_value(s: str) -> tuple[float, str] | None:
@@ -1359,11 +1223,8 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     header_lines = ["## US Economic Calendar — scheduled events & releases (SoSoValue)"]
 
     if snapshot.stale:
-        age_str = _humanize_age(snapshot.fetched_at)
         header_lines.append(
-            f"_STALE by {age_str}: live refresh failed (network error, rate limit, or an "
-            f"API contract break); showing the last cached snapshot (fetched "
-            f"{snapshot.fetched_at}). Scheduled dates and figures may be outdated._"
+            _stale_caveat(snapshot.fetched_at, "Scheduled dates and figures may be outdated.")
         )
     # Hoisted above the forward-reach note because BOTH halves of the
     # arithmetic need it: the backward note prints the blind tail, and the

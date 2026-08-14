@@ -81,27 +81,28 @@ from urllib.parse import quote
 
 import requests
 
-from .errors import VendorError
+# SoSoValueNotConfiguredError and get_api_key are re-exported (redundant-alias
+# form): this module is the family's public face, and its tests and callers
+# address the key check and the config-breakage type through it even though the
+# shared load skeleton is what raises them now.
 from .sosovalue_common import (
     SoSoValueError,
-    SoSoValueNotConfiguredError,
+    SoSoValueNotConfiguredError as SoSoValueNotConfiguredError,
     SoSoValueRateLimitError,
-    _cache_age_hours,
     _cache_dir,
-    _days_stale,
-    _humanize_age,
     _is_finite_number,
     _is_iso_date,
     _is_valid_ticker,
-    _iso_now,
     _plural,
     _plural_days,
     _request,
     _sanitize,
     _sign,
-    get_api_key,
+    _stale_caveat,
+    get_api_key as get_api_key,
+    load_rolling_snapshot,
 )
-from .symbol_utils import CRYPTO_BASES, normalize_symbol
+from .symbol_utils import classify_crypto_asset
 
 logger = logging.getLogger(__name__)
 
@@ -793,116 +794,49 @@ def _snapshot_from(payload: dict, fetched_at: str, stale: bool) -> _FlowSnapshot
     )
 
 
-def _load_snapshot(asset: str) -> _FlowSnapshot:
-    """Return the flow snapshot for asset.
+def _cache_ttl_hours(cached: dict) -> int:
+    """The module's TTL policy for one cached payload.
 
-    Key first: an unset key must raise even when a fresh cache could serve the
-    call, or the emergency-disable flip (unset the key on the server) would be
-    delayed by up to the cache TTL. Then the Farside pattern: a cache younger
-    than its TTL is served as-is (an incomplete breakdown earns the shorter
-    INCOMPLETE_CACHE_TTL_HOURS so the gap is re-tried sooner); otherwise fetch
-    + overwrite the rolling file; on a fetch failure fall back to the cached
-    snapshot (``stale=True``) up to MAX_STALE_DAYS. A failed fetch is never
-    written to cache. ``SoSoValueNotConfiguredError`` (unset or rejected key)
-    is deliberately NOT absorbed by the stale fallback: config breakage should
-    surface to the router immediately, not be papered over for two weeks.
+    An incomplete breakdown (failed fund histories, a failed fund list,
+    or a listing that came back empty) re-tries on the short TTL: the
+    gap is usually a transient blip/429, and honouring the full window
+    would leave the leaders/breadth lines undercounting — or, for an
+    empty listing that overwrote a good snapshot, absent — for cycles.
+    Unusable listing entries alone do not shorten it — a re-fetch
+    cannot heal those, so the empty-listing clause requires
+    funds_unusable == 0 (an all-unusable listing is "empty" only
+    because every entry was dropped, and stays on the full TTL).
     """
-    get_api_key()
-
-    path = _cache_path(asset)
-    cached = _read_cache(path, asset)
-    if cached:
-        age_h = _cache_age_hours(cached["fetched_at"])
-        # An incomplete breakdown (failed fund histories, a failed fund list,
-        # or a listing that came back empty) re-tries on the short TTL: the
-        # gap is usually a transient blip/429, and honouring the full window
-        # would leave the leaders/breadth lines undercounting — or, for an
-        # empty listing that overwrote a good snapshot, absent — for cycles.
-        # Unusable listing entries alone do not shorten it — a re-fetch
-        # cannot heal those, so the empty-listing clause requires
-        # funds_unusable == 0 (an all-unusable listing is "empty" only
-        # because every entry was dropped, and stays on the full TTL).
-        ttl = (
-            INCOMPLETE_CACHE_TTL_HOURS
-            if (
-                cached["funds_failed"]
-                or not cached["list_fetched"]
-                or (not cached["funds_total"] and not cached["funds_unusable"])
-            )
-            else CACHE_TTL_HOURS
+    return (
+        INCOMPLETE_CACHE_TTL_HOURS
+        if (
+            cached["funds_failed"]
+            or not cached["list_fetched"]
+            or (not cached["funds_total"] and not cached["funds_unusable"])
         )
-        # 0 <= age guards against a future-dated stamp being treated as fresh.
-        if age_h is not None and 0 <= age_h < ttl:
-            return _snapshot_from(cached, cached["fetched_at"], stale=False)
+        else CACHE_TTL_HOURS
+    )
 
-    try:
-        payload = _fetch_all(asset, cached)
-    except SoSoValueNotConfiguredError:
-        raise
-    except (requests.RequestException, VendorError) as e:
-        # A vendor-taxonomy error keeps its exact type through the
-        # context-adding wraps below: the router classifies by type (a
-        # VendorRateLimitError is a routine quiet fall-through; a plain
-        # SoSoValueError is unexpected breakage, logged with a traceback and
-        # surfaced as the chain's first error), so the wrap must add context
-        # without re-classifying. Only a network error
-        # (requests.RequestException) becomes the generic SoSoValueError.
-        wrap_cls = type(e) if isinstance(e, VendorError) else SoSoValueError
-        if cached:
-            fetched_at = cached["fetched_at"]
-            age = _days_stale(fetched_at)
-            # Unknown age (unparseable or future-dated stamp) is treated as
-            # beyond the cap — the case where an unbounded-age serve is most
-            # likely — rather than served with a nonsense age caveat.
-            if age is None or age > MAX_STALE_DAYS:
-                stale_desc = (
-                    "has an unparseable or future-dated fetch date"
-                    if age is None
-                    else f"is {age} days stale"
-                )
-                raise wrap_cls(
-                    f"SoSoValue {asset} fetch failed and the newest cache {stale_desc} "
-                    f"(> {MAX_STALE_DAYS}-day cap): {_sanitize(e)}"
-                ) from e
-            # A SoSoValueError here is a contract/parse break (a code fix is
-            # likely needed) and must not hide among network-blip warnings for
-            # up to the stale cap; an outage or rate-limit stays a warning.
-            age_str = _humanize_age(fetched_at)
-            if isinstance(e, SoSoValueError):
-                logger.error(
-                    "SoSoValue %s refresh failed structurally (%s); serving stale "
-                    "cache (%s old) — the client likely needs a fix",
-                    asset,
-                    e,
-                    age_str,
-                    exc_info=True,
-                )
-            else:
-                logger.warning(
-                    "SoSoValue %s refresh failed (%s); using stale cache (%s old)",
-                    asset,
-                    e,
-                    age_str,
-                )
-            return _snapshot_from(cached, fetched_at, stale=True)
-        # "usable": the file may exist but have failed read-side validation.
-        raise wrap_cls(
-            f"SoSoValue {asset} unavailable and no usable cache exists: {_sanitize(e)}"
-        ) from e
 
-    fetched_at = _iso_now()
-    payload["fetched_at"] = fetched_at
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f)
-    except OSError as e:  # a cache-write failure must not fail the call
-        logger.warning(
-            "Could not write SoSoValue cache %s: %s — the fetch throttle stays "
-            "disabled until a write succeeds, so further calls will each re-fetch",
-            path,
-            e,
-        )
-    return _snapshot_from(payload, fetched_at, stale=False)
+def _load_snapshot(asset: str) -> _FlowSnapshot:
+    """Return the flow snapshot for asset, via the family cache/stale discipline.
+
+    ``load_rolling_snapshot`` owns the shared skeleton (key first, TTL-fresh
+    serve, fetch + overwrite, stale fallback up to MAX_STALE_DAYS, config
+    breakage never absorbed); this module supplies the TTL policy
+    (``_cache_ttl_hours``) and the payload shape.
+    """
+    payload, fetched_at, stale = load_rolling_snapshot(
+        path=_cache_path(asset),
+        read_cache=lambda path: _read_cache(path, asset),
+        fetch_all=lambda cached: _fetch_all(asset, cached),
+        ttl_hours=_cache_ttl_hours,
+        label=asset,
+        cache_name="SoSoValue cache",
+        max_stale_days=MAX_STALE_DAYS,
+        log=logger,
+    )
+    return _snapshot_from(payload, fetched_at, stale)
 
 
 def _classify_asset(asset: str) -> tuple[str | None, bool]:
@@ -913,12 +847,7 @@ def _classify_asset(asset: str) -> tuple[str | None, bool]:
     risk assets without their own spot ETF), or a no-signal note (stablecoins
     and unrecognized symbols).
     """
-    base = normalize_symbol((asset or "").replace("/", "-")).split("-")[0]
-    if base in SUPPORTED_ASSETS:
-        return base, False
-    if base in CRYPTO_BASES:
-        return "BTC", True
-    return None, False
+    return classify_crypto_asset(asset, SUPPORTED_ASSETS)
 
 
 def _fund_flows_on(funds: dict, date: str) -> dict[str, float]:
@@ -1027,12 +956,7 @@ def get_etf_flow_data(
         header_lines = [f"## Spot ETF Flows — {asset_key} (SoSoValue, net US$m)"]
 
     if snapshot.stale:
-        age_str = _humanize_age(snapshot.fetched_at)
-        header_lines.append(
-            f"_STALE by {age_str}: live refresh failed (network error, rate limit, or an "
-            f"API contract break); showing the last cached snapshot (fetched "
-            f"{snapshot.fetched_at}). Treat with caution._"
-        )
+        header_lines.append(_stale_caveat(snapshot.fetched_at, "Treat with caution."))
 
     # Both breakdown caveats are guarded on ``latest`` like the window-clamp
     # one: with no visible rows the report below is the no-rows message, and

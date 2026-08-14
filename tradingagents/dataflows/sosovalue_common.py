@@ -8,9 +8,13 @@ several product modules off one base URL, one ``x-soso-api-key`` header, one
 BTC corporate treasuries (``sosovalue_treasuries.py``) — share that plumbing
 here: the error taxonomy, API-key retrieval and sanitization, the request
 helper with its redaction discipline, the value/date/ticker trust-boundary
-predicates, and the clock and cache-age helpers every rolling-snapshot cache
-shares. Anything module-specific (parsers, snapshot shapes, cache payloads,
-report rendering) stays in the vendor modules.
+predicates, the clock and cache-age helpers every rolling-snapshot cache
+shares, and the two orchestration skeletons the modules used to carry as
+near-verbatim copies — the cache/TTL/stale-fallback discipline
+(``load_rolling_snapshot``) and the per-item sweep with its 429 drain and
+consecutive-network-failure breaker (``fetch_each``). Anything
+module-specific (parsers, snapshot shapes, cache payloads, TTL policy,
+report rendering, the vendor-success threshold) stays in the vendor modules.
 
 The one shared key means unsetting ``SOSOVALUE_API_KEY`` on a deployed box is
 a single emergency-disable switch for every SoSoValue-backed category at once:
@@ -18,11 +22,14 @@ each module checks the key before consulting its cache, so the flip takes
 effect on the very next call.
 """
 
+import json
 import logging
 import math
 import os
 import re
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
+from typing import NamedTuple, NoReturn
 
 import requests
 
@@ -271,6 +278,27 @@ def _is_valid_ticker(x: object) -> bool:
     return isinstance(x, str) and bool(_TICKER_RE.match(x))
 
 
+def _is_safe_text(x: object, max_len: int, *, min_len: int = 0, stripped: bool = False) -> bool:
+    """True for a bounded, printable-ASCII string (the family's charset gate).
+
+    The one predicate behind every free-text field the family accepts from
+    the server (macro value strings and event names, treasuries company
+    names): these strings render verbatim into LLM-visible report text, so
+    anything unprintable or oversized is rejected at the trust boundary
+    rather than escaped. ``min_len`` defaults to 0 because emptiness can be a
+    meaning, not a defect (a macro ``actual`` is "" until the print is
+    released); ``stripped`` additionally rejects leading/trailing whitespace
+    where the value doubles as an identifier the module compares or
+    interpolates.
+    """
+    return (
+        isinstance(x, str)
+        and min_len <= len(x) <= max_len
+        and (not stripped or x == x.strip())
+        and all(32 <= ord(c) <= 126 for c in x)
+    )
+
+
 def _utc_now() -> datetime:
     """The single UTC clock source (tests patch this one function)."""
     return datetime.now(timezone.utc)
@@ -340,6 +368,22 @@ def _humanize_age(fetched_at: str) -> str:
     return f"{days} {_plural_days(days)}"
 
 
+def _stale_caveat(fetched_at: str, closing: str) -> str:
+    """The family's STALE header line: age, cause set, provenance, ``closing``.
+
+    One template so the modules cannot drift on the cause enumeration —
+    network error, rate limit, or an API contract break is exactly the set
+    ``load_rolling_snapshot``'s fallback absorbs — while each module supplies
+    the closing warning its own reader needs (what, concretely, may be
+    outdated).
+    """
+    return (
+        f"_STALE by {_humanize_age(fetched_at)}: live refresh failed (network error, "
+        f"rate limit, or an API contract break); showing the last cached snapshot "
+        f"(fetched {fetched_at}). {closing}_"
+    )
+
+
 def _cache_dir() -> str:
     cache_dir = get_config()["data_cache_dir"]
     os.makedirs(cache_dir, exist_ok=True)
@@ -375,3 +419,315 @@ def _coverage_gap_note(missing: set[str] | list[str], did_what: str, otherwise: 
         f"Coverage is incomplete in this snapshot ({', '.join(names)} {did_what}), "
         f"so the window may be empty because of that gap rather than because {otherwise}."
     )
+
+
+class FetchSweep(NamedTuple):
+    """What one ``fetch_each`` sweep produced, and why it stopped short.
+
+    The classification fields exist because every failure is absorbed
+    per-item, so only the sweep itself can say what an all-failed outcome
+    was — the caller's vendor-success check reads them to raise the honest
+    type instead of a bare structural error:
+
+    * ``rate_limited`` — the 429 that drained the sweep, or None. Persisted
+      by callers (not just logged) because the drain fills ``failed`` with
+      items this client never asked for, and by render time the local that
+      knew why is long gone.
+    * ``last_network`` — the last transport failure, kept because without it
+      a pure outage could only surface as structural breakage.
+    * ``structural_failure`` — True when ``fetch_one`` returned None (it
+      swallowed a parse/contract break), so the transport classification
+      cannot claim a pure outage while a real structural break is in the
+      same sweep.
+    * ``breaker_skipped`` — True only when the breaker left items
+      unattempted (it also trips on the last item, where nothing went
+      unattempted and there is nothing to disclose); the report must not let
+      the proven failures stand in for the skipped ones.
+    * ``attempted`` — only the requests this sweep actually made, so an
+      all-failed message cannot turn a breaker-length streak of observed
+      failures into a whole-list claim.
+    """
+
+    results: dict
+    failed: list[str]
+    flagged: list[str]
+    rate_limited: SoSoValueRateLimitError | None
+    last_network: requests.RequestException | None
+    structural_failure: bool
+    breaker_skipped: bool
+    attempted: int
+
+    def persisted_flags(self) -> dict:
+        """The sweep-outcome flags every cache payload persists, not just logs.
+
+        Persisted because the drain and the breaker both fill ``failed`` with
+        items this client never asked for, and by the time the report is
+        rendered the local that knew why is long gone. One method so a flag
+        added here reaches every module's payload without a hand-edit per
+        module.
+        """
+        return {
+            "rate_limited": self.rate_limited is not None,
+            "breaker_skipped": self.breaker_skipped,
+        }
+
+
+def fetch_each(
+    items: Iterable,
+    fetch_one: Callable,
+    *,
+    key: Callable[[object], str],
+    describe: Callable[[object], str],
+    label: str,
+    failed_bucket: str,
+    noun: str,
+    max_consecutive_network: int,
+    log: logging.Logger,
+) -> FetchSweep:
+    """The family's per-item sweep: 429 drain, network breaker, three buckets.
+
+    ``fetch_one(item)`` follows the family's per-item contract: it returns
+    parsed data on success, a string sentinel for an item the provider
+    answered about but served nothing for (``flagged``; a code edit or the
+    provider, not a retry, resolves those), or ``None`` after swallowing a
+    structural break (``failed``). A rejected key propagates out of the sweep
+    untouched (config breakage must reach the router even mid-batch), and so
+    do the two flow-control failures this loop owns:
+
+    * A 429 proves every further request in this sweep would 429 too (the
+      20 req/min limit is per-key and per-minute), so the rest is drained
+      into ``failed`` (short-TTL retry) instead of burning a quota call per
+      remaining item.
+    * ``max_consecutive_network`` transport failures trip the breaker: a
+      network that hangs instead of failing fast would otherwise turn one
+      refresh into sequential full timeouts inside a single analyst tool
+      call, and the post-breaker outcome (disclosed-incomplete, short TTL)
+      is identical to riding the brownout out. Any completed request resets
+      the streak — the server answered, so each remaining item is still
+      worth its own try.
+
+    ``label``/``failed_bucket``/``noun`` only shape the two log lines;
+    ``key`` names an item in the buckets and ``describe`` renders it in logs
+    (the macro module logs reprs, the treasuries module bare tickers).
+    ``log`` is the calling module's logger: log attribution stays per-module
+    so operators (and the tests) can keep filtering by the vendor's name.
+
+    The ETF module's fund loop deliberately does NOT use this: it predates
+    the 429 drain and keeps its per-item-retry rate-limit semantics (a PR #19
+    decision), so folding it in would be a behaviour change, not a refactor.
+    """
+    results: dict = {}
+    failed: list[str] = []
+    flagged: list[str] = []
+    rate_limited: SoSoValueRateLimitError | None = None
+    last_network: requests.RequestException | None = None
+    structural_failure = False
+    consecutive_network = 0
+    breaker_skipped = False
+    attempted = 0
+    remaining = iter(items)
+    for item in remaining:
+        attempted += 1
+        try:
+            result = fetch_one(item)
+        except SoSoValueRateLimitError as e:
+            rate_limited = e
+            skipped = [key(item), *(key(i) for i in remaining)]
+            failed.extend(skipped)
+            log.warning(
+                "SoSoValue %s: rate limit hit on %s (%s); that request and "
+                "the %d %s not yet attempted all go to %s "
+                "(disclosed as incomplete, retried on the short TTL)",
+                label,
+                describe(item),
+                e,
+                len(skipped) - 1,
+                noun,
+                failed_bucket,
+            )
+            break
+        except requests.RequestException as e:
+            last_network = e
+            failed.append(key(item))
+            consecutive_network += 1
+            if consecutive_network >= max_consecutive_network:
+                skipped = [key(i) for i in remaining]
+                if skipped:
+                    failed.extend(skipped)
+                    breaker_skipped = True
+                    log.warning(
+                        "SoSoValue %s: %d consecutive network failures; "
+                        "skipping the remaining %d %s "
+                        "(disclosed as incomplete, retried on the short TTL)",
+                        label,
+                        consecutive_network,
+                        len(skipped),
+                        noun,
+                    )
+                break
+            continue
+        consecutive_network = 0
+        if isinstance(result, str):
+            flagged.append(key(item))
+        elif result is None:
+            structural_failure = True
+            failed.append(key(item))
+        else:
+            results[key(item)] = result
+    return FetchSweep(
+        results=results,
+        failed=failed,
+        flagged=flagged,
+        rate_limited=rate_limited,
+        last_network=last_network,
+        structural_failure=structural_failure,
+        breaker_skipped=breaker_skipped,
+        attempted=attempted,
+    )
+
+
+def raise_all_failed(
+    sweep: FetchSweep,
+    *,
+    on_rate_limited: Callable[[], str],
+    on_transport: Callable[[], str],
+    on_structural: Callable[[], str],
+) -> NoReturn:
+    """Raise the honest type for a sweep that produced no results at all.
+
+    The judgment lives here — once, next to the sweep that produced the
+    evidence — because the router and ``load_rolling_snapshot`` classify by
+    type, and each misclassification tells a lie with a distinct cost:
+
+    * A 429 that drained the whole sweep must not masquerade as structural
+      breakage (ERROR + traceback logs for a routine quota trip).
+    * A sweep that died PURELY of transport must raise the transport class,
+      routing it to the warning branch where network failures already land —
+      not a bare ``SoSoValueError``, which reads as "the client likely needs
+      a fix" for an outage no code change can heal. "Purely" is the gate: a
+      flagged item (the provider answered and served nothing) or a swallowed
+      parse break means something structural is in the mix, and the generic
+      error stays the honest answer.
+
+    The callables supply each module's message — worded over its own universe
+    and counts — so the shared predicate cannot drift between modules while
+    the prose stays theirs.
+    """
+    if sweep.rate_limited is not None:
+        raise SoSoValueRateLimitError(on_rate_limited()) from sweep.rate_limited
+    if sweep.last_network is not None and not sweep.structural_failure and not sweep.flagged:
+        raise requests.RequestException(on_transport()) from sweep.last_network
+    raise SoSoValueError(on_structural())
+
+
+def load_rolling_snapshot(
+    *,
+    path: str,
+    read_cache: Callable[[str], dict | None],
+    fetch_all: Callable[[dict | None], dict],
+    ttl_hours: Callable[[dict], float],
+    label: str,
+    cache_name: str,
+    max_stale_days: int,
+    log: logging.Logger,
+) -> tuple[dict, str, bool]:
+    """The family's cache/TTL/stale discipline; returns (payload, fetched_at, stale).
+
+    ``log`` is the calling module's logger — the stale-serve warnings and
+    errors keep their per-module attribution, so operators (and the tests)
+    can keep filtering by the vendor's name.
+
+    Key first: an unset key must raise even when a fresh cache could serve
+    the call, or the emergency-disable flip (unset the key on the server)
+    would be delayed by up to the cache TTL. Then the Farside pattern: a
+    cache younger than its TTL is served as-is — the TTL is the module's
+    policy call (``ttl_hours(cached)``), where each degradation bucket's
+    shortened-or-not argument lives — otherwise ``fetch_all(cached)`` runs
+    and overwrites the rolling file; on a fetch failure the call falls back
+    to the cached snapshot (``stale=True``) up to ``max_stale_days``. A
+    failed fetch is never written to cache. ``SoSoValueNotConfiguredError``
+    (unset or rejected key) is deliberately NOT absorbed by the stale
+    fallback: config breakage should surface to the router immediately, not
+    be papered over for two weeks.
+
+    A vendor-taxonomy error keeps its exact type through the context-adding
+    wraps: the router classifies by type (a rate limit is a routine quiet
+    fall-through; a plain ``SoSoValueError`` is unexpected breakage, logged
+    with a traceback and surfaced as the chain's first error), so the wrap
+    must add context without re-classifying. Only a network error
+    (``requests.RequestException``) becomes the generic ``SoSoValueError``.
+    """
+    get_api_key()
+
+    cached = read_cache(path)
+    if cached:
+        age_h = _cache_age_hours(cached["fetched_at"])
+        # 0 <= age guards against a future-dated stamp being treated as fresh.
+        if age_h is not None and 0 <= age_h < ttl_hours(cached):
+            return cached, cached["fetched_at"], False
+
+    try:
+        payload = fetch_all(cached)
+    except SoSoValueNotConfiguredError:
+        raise
+    except (requests.RequestException, VendorError) as e:
+        wrap_cls = type(e) if isinstance(e, VendorError) else SoSoValueError
+        if cached:
+            fetched_at = cached["fetched_at"]
+            age = _days_stale(fetched_at)
+            # Unknown age (unparseable or future-dated stamp) is treated as
+            # beyond the cap — the case where an unbounded-age serve is most
+            # likely — rather than served with a nonsense age caveat.
+            if age is None or age > max_stale_days:
+                stale_desc = (
+                    "has an unparseable or future-dated fetch date"
+                    if age is None
+                    else f"is {age} days stale"
+                )
+                raise wrap_cls(
+                    f"SoSoValue {label} fetch failed and the newest cache {stale_desc} "
+                    f"(> {max_stale_days}-day cap): {_sanitize(e)}"
+                ) from e
+            # A SoSoValueError here is a contract/parse break (a code fix is
+            # likely needed) and must not hide among network-blip warnings for
+            # up to the stale cap; an outage or rate-limit stays a warning.
+            age_str = _humanize_age(fetched_at)
+            if isinstance(e, SoSoValueError):
+                log.error(
+                    "SoSoValue %s refresh failed structurally (%s); serving stale "
+                    "cache (%s old) — the client likely needs a fix",
+                    label,
+                    e,
+                    age_str,
+                    exc_info=True,
+                )
+            else:
+                log.warning(
+                    "SoSoValue %s refresh failed (%s); using stale cache (%s old)",
+                    label,
+                    e,
+                    age_str,
+                )
+            return cached, fetched_at, True
+        # "usable": the file may exist but have failed read-side validation.
+        # Not capped, only flattened: most of this string is the module's own
+        # diagnostic, and a foreign requests.RequestException can carry a
+        # server-influenced URL into the same LLM-visible line.
+        raise wrap_cls(
+            f"SoSoValue {label} unavailable and no usable cache exists: {_sanitize(e)}"
+        ) from e
+
+    fetched_at = _iso_now()
+    payload["fetched_at"] = fetched_at
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+    except OSError as e:  # a cache-write failure must not fail the call
+        log.warning(
+            "Could not write %s %s: %s — the fetch throttle stays disabled "
+            "until a write succeeds, so further calls will each re-fetch",
+            cache_name,
+            path,
+            e,
+        )
+    return payload, fetched_at, False

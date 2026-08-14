@@ -59,6 +59,8 @@ def _snapshot(
     companies_empty=(),
     companies_unusable=0,
     order_unverified=False,
+    rate_limited=False,
+    breaker_skipped=False,
     fetched_at="2026-08-11T00:00:00Z",
     stale=False,
 ):
@@ -89,6 +91,8 @@ def _snapshot(
         companies_empty=list(companies_empty),
         companies_unusable=companies_unusable,
         order_unverified=order_unverified,
+        rate_limited=rate_limited,
+        breaker_skipped=breaker_skipped,
         fetched_at=fetched_at,
         stale=stale,
     )
@@ -483,6 +487,8 @@ class TestCacheAndLoad:
             # was compared). False here would be a shape the parser cannot
             # produce, and the cache validator now refuses it.
             "order_unverified": True,
+            "rate_limited": False,
+            "breaker_skipped": False,
             "fetched_at": "2026-08-11T00:00:00Z",
         }
         payload.update(overrides)
@@ -1657,3 +1663,123 @@ class TestListingDenominatorAndArgumentGuards:
         )
         assert "top 1 of 1 listed company (" in report
         assert "listed companies" not in report
+
+
+# --------------------------------------------------------------------------- #
+# ninth review loop: an early exit this client chose is not provider silence
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+class TestAnEarlyExitIsAttributedToWhoeverCausedIt:
+    """Mirrors the macro twin: ``companies_failed`` also collects tickers that
+    were never requested — drained by this client's own per-minute quota, or
+    skipped by this client's breaker after a run of transport failures. Here
+    the stakes are higher than a missing row: a skipped mega-holder shrinks the
+    combined total, the holder ranking and the concentration denominator, and
+    the sentence would have booked all of it to the provider.
+    """
+
+    def _payload(self, **overrides):
+        payload = {
+            "companies": {"MSTR": {"name": "Strategy", "rows": [_prow("2026-08-10", 840447.0)]}},
+            "companies_total": 57,
+            "companies_failed": [],
+            "companies_empty": [],
+            "companies_unusable": 0,
+            # One company means nothing was compared, which is the only shape
+            # _fetch_all writes here.
+            "order_unverified": True,
+            "rate_limited": False,
+            "breaker_skipped": False,
+            "fetched_at": "2026-08-11T00:00:00Z",
+        }
+        payload.update(overrides)
+        return payload
+
+    def _read(self, tmp_path, payload):
+        path = tmp_path / "sosovalue_treasuries.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return sosovalue_treasuries._read_cache(str(path))
+
+    def _line(self, report, needle):
+        [line] = [ln for ln in report.splitlines() if needle in ln]
+        return line
+
+    def test_a_drained_sweep_records_the_quota_as_the_cause(self, monkeypatch):
+        impl = _request_impl(
+            history_error=sosovalue_common.SoSoValueRateLimitError("429"),
+            error_tickers={LIST_TICKERS[2]},
+        )
+        monkeypatch.setattr(sosovalue_treasuries, "_request", impl)
+        payload = sosovalue_treasuries._fetch_all()
+        assert payload["rate_limited"] is True
+        assert payload["breaker_skipped"] is False
+
+    def test_the_breaker_records_that_it_skipped_the_rest(self, monkeypatch):
+        impl = _request_impl(
+            history_error=requests.ConnectionError("down"),
+            error_tickers=set(LIST_TICKERS[2:5]),
+        )
+        monkeypatch.setattr(sosovalue_treasuries, "_request", impl)
+        payload = sosovalue_treasuries._fetch_all()
+        assert payload["breaker_skipped"] is True
+        assert payload["rate_limited"] is False
+        assert set(payload["companies_failed"]) == set(LIST_TICKERS[2:])
+
+    def test_a_clean_sweep_claims_neither(self, monkeypatch):
+        monkeypatch.setattr(sosovalue_treasuries, "_request", _request_impl())
+        payload = sosovalue_treasuries._fetch_all()
+        assert payload["rate_limited"] is False
+        assert payload["breaker_skipped"] is False
+
+    def test_the_transport_verdict_counts_only_the_requests_it_made(self, monkeypatch):
+        impl = _request_impl(
+            history_error=requests.ConnectionError("down"),
+            error_tickers=set(LIST_TICKERS),
+        )
+        monkeypatch.setattr(sosovalue_treasuries, "_request", impl)
+        with pytest.raises(requests.RequestException) as exc:
+            sosovalue_treasuries._fetch_all()
+        assert f"({sosovalue_treasuries.MAX_CONSECUTIVE_NETWORK_FAILURES} of " in str(exc.value)
+        assert "every attempt failed" not in str(exc.value)
+
+    def test_a_quota_gap_is_not_left_reading_as_provider_silence(self):
+        line = self._line(
+            _render(_snapshot(companies_failed=["MARA"], rate_limited=True)),
+            "Coverage incomplete",
+        )
+        assert "per-minute request quota" in line
+        assert "never attempted" in line
+        # The control: without the flag the same bucket must not carry it.
+        plain = self._line(_render(_snapshot(companies_failed=["MARA"])), "Coverage incomplete")
+        assert "per-minute request quota" not in plain
+        assert "could not be fetched" in plain
+
+    def test_a_breaker_gap_claims_only_what_was_observed(self):
+        line = self._line(
+            _render(_snapshot(companies_failed=["MARA"], breaker_skipped=True)),
+            "Coverage incomplete",
+        )
+        assert "consecutive transport failures" in line
+        assert "established only for the ones actually attempted" in line
+        assert "per-minute request quota" not in line
+
+    def test_the_baseline_payload_is_accepted(self, tmp_path):
+        assert self._read(tmp_path, self._payload()) is not None
+
+    def test_a_cache_written_before_the_flags_existed_costs_one_refetch(self, tmp_path):
+        for missing in ("rate_limited", "breaker_skipped"):
+            payload = self._payload()
+            del payload[missing]
+            assert self._read(tmp_path, payload) is None
+
+    def test_a_flag_over_an_empty_failure_bucket_is_rejected(self, tmp_path):
+        assert self._read(tmp_path, self._payload(rate_limited=True)) is None
+        assert self._read(tmp_path, self._payload(breaker_skipped=True)) is None
+
+    def test_both_early_exit_flags_at_once_are_rejected(self, tmp_path):
+        payload = self._payload(companies_failed=["MARA"], rate_limited=True, breaker_skipped=True)
+        assert self._read(tmp_path, payload) is None
+        payload["breaker_skipped"] = False
+        assert self._read(tmp_path, payload) is not None

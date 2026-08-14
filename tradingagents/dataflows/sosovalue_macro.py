@@ -505,7 +505,15 @@ class _MacroSnapshot(NamedTuple):
     code edit, not a retry, fixes those, so they do not shorten the TTL).
     The three always partition ``TRACKED_EVENTS``, an invariant the cache
     validator re-checks read-side; ``histories`` is never empty (all-failed
-    is a vendor failure by decision).
+    is a vendor failure by decision). ``rate_limited`` records that this
+    client's own per-minute quota refused a request mid-sweep and drained
+    the rest — the failure bucket then holds names nothing upstream went
+    wrong with, and the report has to say so rather than let a gap this
+    client opened read as the provider going quiet. ``breaker_skipped`` is
+    its sibling for the consecutive-transport-failure breaker: there the
+    upstream trouble is real, but it was only ever observed on the events
+    actually requested, so the bucket must not read as that many proven
+    failures. The two are mutually exclusive — either break ends the sweep.
     """
 
     calendar: list[dict]
@@ -517,6 +525,8 @@ class _MacroSnapshot(NamedTuple):
     histories: dict[str, list[dict]]
     events_failed: list[str]
     events_unknown: list[str]
+    rate_limited: bool
+    breaker_skipped: bool
     fetched_at: str
     stale: bool
 
@@ -664,6 +674,24 @@ def _read_cache(path: str) -> dict | None:
         # report claims whitelist-wide coverage, so a mismatched universe must
         # cost one refetch, not render with silently missing events.
         return _reject("'histories' + failure buckets do not partition TRACKED_EVENTS")
+    if not isinstance(payload.get("rate_limited"), bool):
+        return _reject("'rate_limited' is missing or not a boolean")
+    # The drain always adds the event the 429 landed on, so a set flag over an
+    # empty failure bucket is a shape the parser cannot write. Served, it would
+    # blame this client's quota for a sweep that lost nothing — the mirror of
+    # every other parse-boundary invariant this validator re-checks.
+    if payload["rate_limited"] and not buckets["events_failed"]:
+        return _reject("'rate_limited' is set but no event landed in 'events_failed'")
+    if not isinstance(payload.get("breaker_skipped"), bool):
+        return _reject("'breaker_skipped' is missing or not a boolean")
+    # Same mirror, and one more: the two flags mark the two ways the sweep can
+    # end early, and either one BREAKS the loop, so a file carrying both is a
+    # shape no sweep produced. Served, the report would print both corrections
+    # and blame one gap on two incompatible causes.
+    if payload["breaker_skipped"] and not buckets["events_failed"]:
+        return _reject("'breaker_skipped' is set but no event landed in 'events_failed'")
+    if payload["rate_limited"] and payload["breaker_skipped"]:
+        return _reject("'rate_limited' and 'breaker_skipped' cannot both be set")
     if not isinstance(payload.get("fetched_at"), str) or not payload["fetched_at"]:
         return _reject("'fetched_at' is missing or not a non-empty string")
     return payload
@@ -749,8 +777,19 @@ def _fetch_all() -> dict:
     # outage while a real structural break is in the same sweep.
     structural_failure = False
     consecutive_network = 0
+    # The breaker's counterpart to ``rate_limited``: it too leaves names in
+    # events_failed that were never requested, and the report must not let the
+    # proven failures stand in for the skipped ones. Set only when something
+    # was actually skipped — the breaker also trips on the last event, where
+    # nothing went unattempted and there is nothing to disclose.
+    breaker_skipped = False
+    # Only the requests this sweep actually made. The all-failed message below
+    # said "every attempt failed" over the whole tracked list, which turns
+    # MAX_CONSECUTIVE_NETWORK_FAILURES observed failures into nine claimed ones.
+    attempted = 0
     remaining = iter(TRACKED_EVENTS)
     for name in remaining:
+        attempted += 1
         try:
             rows = _fetch_one_event(name)
         except SoSoValueRateLimitError as e:
@@ -778,6 +817,7 @@ def _fetch_all() -> dict:
                 skipped = list(remaining)
                 if skipped:
                     events_failed.extend(skipped)
+                    breaker_skipped = True
                     logger.warning(
                         "SoSoValue macro: %d consecutive network failures; "
                         "skipping the remaining %d event histories "
@@ -822,8 +862,9 @@ def _fetch_all() -> dict:
         if last_network is not None and not structural_failure and not events_unknown:
             raise requests.RequestException(
                 f"SoSoValue macro: no usable history for any of the "
-                f"{len(TRACKED_EVENTS)} tracked events; every attempt failed at the "
-                f"transport layer (last: {last_network})"
+                f"{len(TRACKED_EVENTS)} tracked events; every request this sweep made "
+                f"({attempted} of {len(TRACKED_EVENTS)}) failed at the transport layer "
+                f"(last: {last_network})"
             ) from last_network
         raise SoSoValueError(
             f"SoSoValue macro: no usable history for any of the "
@@ -841,6 +882,11 @@ def _fetch_all() -> dict:
         "histories": histories,
         "events_failed": events_failed,
         "events_unknown": events_unknown,
+        # Persisted, not just logged: the drain fills ``events_failed`` with
+        # names this client never asked for, and by the time the report is
+        # rendered the local that knew why is long gone.
+        "rate_limited": rate_limited is not None,
+        "breaker_skipped": breaker_skipped,
     }
 
 
@@ -855,6 +901,8 @@ def _snapshot_from(payload: dict, fetched_at: str, stale: bool) -> _MacroSnapsho
         histories=payload["histories"],
         events_failed=payload["events_failed"],
         events_unknown=payload["events_unknown"],
+        rate_limited=payload["rate_limited"],
+        breaker_skipped=payload["breaker_skipped"],
         fetched_at=fetched_at,
         stale=stale,
     )
@@ -1230,10 +1278,19 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     # named date falls beyond that end. Named dates can never EQUAL a rendered
     # date — the parser subtracts the dates the calendar still carries, and the
     # cache mirrors that — so the comparisons are strict without loss.
+    # SUFFICIENT for "every drop is named", not equivalent to it: the parser
+    # collects the dates in a SET and subtracts the ones the calendar still
+    # carries, so two unreadable rows sharing a date — or one whose date
+    # survives on another row — leave fewer names than there were drops and
+    # read here as unpinned. That errs toward the hedge, which is the safe
+    # direction for a "may have moved" claim, so the imprecision is left rather
+    # than bought off with a fourth count threaded down the whole
+    # parse/cache/render chain. Do not rename this to "all named" again: the
+    # two are not the same predicate.
     _mdates = snapshot.calendar_malformed_dates
-    _all_named = cal_dated and len(_mdates) == snapshot.calendar_malformed
-    span_start_moved_possible = not (_all_named and all(d > cal_dated[0] for d in _mdates))
-    span_end_moved_possible = not (_all_named and all(d < cal_dated[-1] for d in _mdates))
+    _all_pinned = cal_dated and len(_mdates) == snapshot.calendar_malformed
+    span_start_moved_possible = not (_all_pinned and all(d > cal_dated[0] for d in _mdates))
+    span_end_moved_possible = not (_all_pinned and all(d < cal_dated[-1] for d in _mdates))
     # Client-side loss that could actually sit BEYOND the calendar's last dated
     # entry — the only kind the reach note may offer as a cause for a short
     # forward tail. Counting the buckets alone over-claims, and the header
@@ -1592,11 +1649,39 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # short by the unknown bucket, which the next paragraph explains, so a
         # histories-based numerator would not add up to the names listed here.
         n = len(snapshot.events_failed)
+        # "could not be fetched" on its own reads as the provider withholding
+        # these histories, and a reader who downgrades the whole feed on that
+        # basis is acting on a gap this client opened. Appended rather than
+        # substituted: the bucket also collects transport failures and
+        # swallowed parse breaks from before the 429, so the quota explains
+        # part of the list, never provably all of it.
+        # Two ways the sweep ends early, two different corrections: the quota is
+        # a gap this client OPENED, while the breaker leaves real upstream
+        # trouble that was only ever OBSERVED on the events actually asked for.
+        # Mutually exclusive by construction (either arm breaks the loop) and
+        # read-side too, so the branch order carries no precedence.
+        quota = ""
+        if snapshot.rate_limited:
+            quota = (
+                " This client's own per-minute request quota ran out partway through the "
+                "sweep: the request it stopped on was refused for that reason and every "
+                "event behind it was never attempted, so that much of the gap is this "
+                "client's rather than the provider going quiet, and it is retried on the "
+                "short TTL."
+            )
+        elif snapshot.breaker_skipped:
+            quota = (
+                f" This client stopped the sweep after "
+                f"{MAX_CONSECUTIVE_NETWORK_FAILURES} consecutive transport failures, so "
+                f"the events behind that point were never requested: the failures are "
+                f"established only for the ones actually attempted, and the rest are "
+                f"retried on the short TTL."
+            )
         header_lines.append(
             f"_Tracked-event coverage incomplete ({n} of {len(TRACKED_EVENTS)} tracked "
             f"events): histories for {', '.join(sorted(snapshot.events_failed))} could "
             f"not be fetched, so their figures are missing below; a calendar mention of "
-            f"such an event, if any, appears name-only._"
+            f"such an event, if any, appears name-only.{quota}_"
         )
 
     if snapshot.events_unknown:
@@ -1692,7 +1777,7 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # date the tables render from a history was still dropped from the
         # calendar, so it still bears on where the calendar's endpoints sit.
         # Gated on there BEING a span. With every kept row nameless cal_dated is
-        # empty, both predicates come out True (``_all_named`` short-circuits on
+        # empty, both predicates come out True (``_all_pinned`` short-circuits on
         # the falsy list), and this clause would describe how the two ends of a
         # span moved while the Source line and the reach note both say the
         # calendar names no event on any day-row it carries. That is the same

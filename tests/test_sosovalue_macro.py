@@ -71,6 +71,8 @@ def _snapshot(
     histories=None,
     events_failed=(),
     events_unknown=(),
+    rate_limited=False,
+    breaker_skipped=False,
     fetched_at="2026-08-11T00:00:00Z",
     stale=False,
 ):
@@ -86,6 +88,8 @@ def _snapshot(
         histories=_histories() if histories is None else histories,
         events_failed=list(events_failed),
         events_unknown=list(events_unknown),
+        rate_limited=rate_limited,
+        breaker_skipped=breaker_skipped,
         fetched_at=fetched_at,
         stale=stale,
     )
@@ -757,6 +761,8 @@ class TestCacheAndLoad:
             "histories": _histories(),
             "events_failed": [],
             "events_unknown": [],
+            "rate_limited": False,
+            "breaker_skipped": False,
             "fetched_at": "2026-08-11T05:00:00Z",
         }
         payload.update(overrides)
@@ -1575,6 +1581,8 @@ class TestServedDepthAndStaleReach:
             "histories": {"CPI (YoY)": [_row("2026-08-10", "3.5%", "3.4%", "3.3%")]},
             "events_failed": [],
             "events_unknown": [n for n in TRACKED if n != "CPI (YoY)"],
+            "rate_limited": False,
+            "breaker_skipped": False,
             "fetched_at": "2026-08-11T00:00:00Z",
         }
         path = tmp_path / "sosovalue_macro.json"
@@ -2198,6 +2206,8 @@ class TestDroppedCalendarContentIsNamedNotBlamedOnTheProvider:
             "histories": _histories(),
             "events_failed": [],
             "events_unknown": [],
+            "rate_limited": False,
+            "breaker_skipped": False,
             "fetched_at": "2026-08-11T05:00:00Z",
         }
         payload.update(overrides)
@@ -2773,6 +2783,8 @@ class TestRoundTwoDropDisclosure:
             "histories": _histories(),
             "events_failed": [],
             "events_unknown": [],
+            "rate_limited": False,
+            "breaker_skipped": False,
             "fetched_at": "2026-08-11T05:00:00Z",
         }
         payload.update(overrides)
@@ -2930,3 +2942,148 @@ class TestRoundTwoDropDisclosure:
         assert "|" not in message
         # Still echoed, just flattened — the operator needs to see the value.
         assert "Combined holdings" in message
+
+
+# --------------------------------------------------------------------------- #
+# ninth review loop: an early exit this client chose is not provider silence
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+class TestAnEarlyExitIsAttributedToWhoeverCausedIt:
+    """``events_failed`` also collects events that were never requested.
+
+    Two ways the sweep ends early — this client's own per-minute quota, and
+    this client's breaker after a run of transport failures — and both leave
+    the bucket holding names nothing was ever observed about. The report has
+    to separate "we opened this gap" from "the provider went quiet", and the
+    flags carrying that distinction have to survive the cache round trip.
+    """
+
+    def _payload(self, **overrides):
+        payload = {
+            "calendar": [{"date": "2026-08-11", "events": ["CPI (YoY)"]}],
+            "calendar_unusable": 0,
+            "calendar_truncated": 0,
+            "calendar_duplicated": 0,
+            "calendar_malformed": 0,
+            "calendar_malformed_dates": [],
+            "histories": _histories(),
+            "events_failed": [],
+            "events_unknown": [],
+            "rate_limited": False,
+            "breaker_skipped": False,
+            "fetched_at": "2026-08-11T00:00:00Z",
+        }
+        payload.update(overrides)
+        return payload
+
+    def _read(self, tmp_path, payload):
+        path = tmp_path / "sosovalue_macro.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return sosovalue_macro._read_cache(str(path))
+
+    def test_a_drained_sweep_records_the_quota_as_the_cause(self, monkeypatch):
+        impl = _request_impl(
+            history_error=sosovalue_common.SoSoValueRateLimitError("429"),
+            error_names={TRACKED[2]},
+        )
+        monkeypatch.setattr(sosovalue_macro, "_request", impl)
+        payload = sosovalue_macro._fetch_all()
+        assert payload["rate_limited"] is True
+        assert payload["breaker_skipped"] is False
+
+    def test_the_breaker_records_that_it_skipped_the_rest(self, monkeypatch):
+        # Three consecutive transport failures trip the breaker; everything
+        # behind it is never asked for, and the two earlier successes keep the
+        # payload writable so the flag actually reaches the cache file.
+        impl = _request_impl(
+            history_error=requests.ConnectionError("down"),
+            error_names=set(TRACKED[2:5]),
+        )
+        monkeypatch.setattr(sosovalue_macro, "_request", impl)
+        payload = sosovalue_macro._fetch_all()
+        assert payload["breaker_skipped"] is True
+        assert payload["rate_limited"] is False
+        assert set(payload["events_failed"]) == set(TRACKED[2:])
+
+    def test_a_clean_sweep_claims_neither(self, monkeypatch):
+        # Without this the two assertions above pass on a flag wired to True.
+        monkeypatch.setattr(sosovalue_macro, "_request", _request_impl())
+        payload = sosovalue_macro._fetch_all()
+        assert payload["rate_limited"] is False
+        assert payload["breaker_skipped"] is False
+
+    def test_the_transport_verdict_counts_only_the_requests_it_made(self, monkeypatch):
+        # "every attempt failed" over the whole tracked list turned three
+        # observed failures into nine claimed ones, and this message is
+        # model-visible: it rides a DATA_UNAVAILABLE line once the stale cap
+        # is passed.
+        impl = _request_impl(
+            history_error=requests.ConnectionError("down"), error_names=set(TRACKED)
+        )
+        monkeypatch.setattr(sosovalue_macro, "_request", impl)
+        with pytest.raises(requests.RequestException) as exc:
+            sosovalue_macro._fetch_all()
+        assert f"({sosovalue_macro.MAX_CONSECUTIVE_NETWORK_FAILURES} of {len(TRACKED)})" in str(
+            exc.value
+        )
+        assert "every attempt failed" not in str(exc.value)
+
+    def test_a_quota_gap_is_not_left_reading_as_provider_silence(self):
+        failed = list(TRACKED[3:])
+        line = _sentence(
+            _render(_snapshot(events_failed=failed, rate_limited=True)),
+            "coverage incomplete",
+        )
+        assert "per-minute request quota" in line
+        assert "never attempted" in line
+        # The control: the same bucket without the flag must NOT carry it, or
+        # the assertion above would pass on an unconditional sentence.
+        plain = _sentence(_render(_snapshot(events_failed=failed)), "coverage incomplete")
+        assert "per-minute request quota" not in plain
+        assert "could not be fetched" in plain
+
+    def test_a_breaker_gap_claims_only_what_was_observed(self):
+        # The other correction: here the upstream trouble is real, but it was
+        # only ever seen on the events actually asked for.
+        line = _sentence(
+            _render(_snapshot(events_failed=list(TRACKED[3:]), breaker_skipped=True)),
+            "coverage incomplete",
+        )
+        assert "consecutive transport failures" in line
+        assert "established only for the ones actually attempted" in line
+        assert "per-minute request quota" not in line
+
+    def test_the_baseline_payload_is_accepted(self, tmp_path):
+        # Zero-discrimination guard: each rejection below must fail for the
+        # reason it names, not because this fixture was invalid all along.
+        assert self._read(tmp_path, self._payload()) is not None
+
+    def test_a_cache_written_before_the_flags_existed_costs_one_refetch(self, tmp_path):
+        for missing in ("rate_limited", "breaker_skipped"):
+            payload = self._payload()
+            del payload[missing]
+            assert self._read(tmp_path, payload) is None
+
+    def test_a_flag_over_an_empty_failure_bucket_is_rejected(self, tmp_path):
+        # The drain always adds the event it stopped on, so this shape blames
+        # an early exit for a sweep that lost nothing.
+        assert self._read(tmp_path, self._payload(rate_limited=True)) is None
+        assert self._read(tmp_path, self._payload(breaker_skipped=True)) is None
+
+    def test_both_early_exit_flags_at_once_are_rejected(self, tmp_path):
+        # Either arm BREAKS the loop, so no sweep writes both; served, the
+        # report would blame one gap on two incompatible causes.
+        histories = _histories()
+        payload = self._payload(
+            events_failed=list(TRACKED[3:]),
+            histories={n: histories[n] for n in TRACKED[:3]},
+            rate_limited=True,
+            breaker_skipped=True,
+        )
+        assert self._read(tmp_path, payload) is None
+        # The same payload with one flag is accepted, so the rejection above
+        # is the conjunction and not the bucket it sits next to.
+        payload["breaker_skipped"] = False
+        assert self._read(tmp_path, payload) is not None

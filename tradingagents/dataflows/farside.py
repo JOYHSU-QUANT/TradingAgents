@@ -48,7 +48,7 @@ from parsel import Selector
 
 from .config import get_config
 from .errors import VendorError
-from .symbol_utils import CRYPTO_BASES, normalize_symbol
+from .symbol_utils import classify_crypto_asset
 
 logger = logging.getLogger(__name__)
 
@@ -716,12 +716,7 @@ def _classify_asset(asset: str) -> tuple[str | None, bool]:
     ``BTCB``) and stablecoins fall through to no-signal. Slash pair forms are
     converted to the dash form first (``normalize_symbol`` only strips dashes).
     """
-    base = normalize_symbol((asset or "").replace("/", "-")).split("-")[0]
-    if base in ASSET_PATHS:
-        return base, False
-    if base in CRYPTO_BASES:
-        return "BTC", True
-    return None, False
+    return classify_crypto_asset(asset, ASSET_PATHS)
 
 
 def _sign(value: float) -> int:

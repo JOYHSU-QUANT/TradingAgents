@@ -11,23 +11,18 @@ import yfinance as yf
 from langgraph.prebuilt import ToolNode
 
 # Import the abstract tool methods from agent_utils
+from tradingagents.agents.analysts.news_analyst import OPTIONAL_NEWS_TOOLS
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     get_balance_sheet,
-    get_btc_treasuries,
     get_cashflow,
-    get_economic_calendar,
-    get_etf_flows,
-    get_fear_greed,
     get_fundamentals,
     get_global_news,
     get_income_statement,
     get_indicators,
     get_insider_transactions,
-    get_macro_indicators,
     get_news,
     get_options_market,
-    get_prediction_markets,
     get_stock_data,
     get_verified_market_snapshot,
     resolve_instrument_identity,
@@ -199,18 +194,13 @@ class TradingAgentsGraph:
                     get_news,
                     get_global_news,
                     get_insider_transactions,
-                    get_macro_indicators,
-                    get_prediction_markets,
-                    # Flows/sentiment/treasury are bound to the analyst LLM only
-                    # for crypto assets, but always registered here so the bound
-                    # call is executable (a stock run never binds those three).
-                    # The macro calendar is the exception: it takes no asset
-                    # argument and is bound on both paths, gated on its category
-                    # alone — registration here was never conditional anyway.
-                    get_etf_flows,
-                    get_fear_greed,
-                    get_economic_calendar,
-                    get_btc_treasuries,
+                    # Every optional news category, from the same table the news
+                    # analyst binds from — so a category cannot be bound there
+                    # and left unregistered here. Every table entry is bound to
+                    # the analyst LLM only conditionally (category gates; the
+                    # crypto-only rows also by asset type), but always
+                    # registered here so a bound call is always executable.
+                    *(entry.tool for entry in OPTIONAL_NEWS_TOOLS),
                 ]
             ),
             "fundamentals": ToolNode(

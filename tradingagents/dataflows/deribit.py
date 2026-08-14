@@ -73,7 +73,7 @@ from typing import Literal, NamedTuple, TypeVar
 import requests
 
 from .errors import VendorError, VendorRateLimitError
-from .symbol_utils import CRYPTO_BASES, normalize_symbol
+from .symbol_utils import classify_crypto_asset
 
 logger = logging.getLogger(__name__)
 
@@ -1684,12 +1684,7 @@ def _classify_asset(asset: str) -> tuple[str | None, bool]:
     and stablecoins fall through to no-signal. Slash pair forms are converted to
     the dash form first, because ``normalize_symbol`` only strips dashes.
     """
-    base = normalize_symbol((asset or "").replace("/", "-")).split("-")[0]
-    if base in SUPPORTED_CURRENCIES:
-        return base, False
-    if base in CRYPTO_BASES:
-        return "BTC", True
-    return None, False
+    return classify_crypto_asset(asset, SUPPORTED_CURRENCIES)
 
 
 def _readings(count: int) -> str:

@@ -2758,6 +2758,32 @@ class TestArgumentGuards:
         assert "does not match format" not in str(exc.value)
         assert "(str)" in str(exc.value)
 
+    def test_fetch_each_rejects_a_bare_string_item_list(self):
+        # A string is iterable too — without the guard it would sweep one
+        # HTTP request per character with single-character bucket keys.
+        with pytest.raises(TypeError, match="bare string"):
+            sosovalue_common.fetch_each(
+                "Nonfarm Payrolls",
+                lambda item: None,
+                key=lambda item: item,
+                describe=repr,
+                label="macro calendar",
+                failed_bucket="events_failed",
+                noun="event histories",
+                max_consecutive_network=3,
+                log=sosovalue_macro.logger,
+            )
+
+    def test_is_safe_text_defaults_are_the_strict_end(self):
+        # A call site that forgets the keywords must fail closed: empty and
+        # whitespace-padded strings are rejected by default and need the
+        # explicit opt-down the macro value predicate uses.
+        assert not sosovalue_common._is_safe_text("", 10)
+        assert not sosovalue_common._is_safe_text(" x ", 10)
+        assert sosovalue_common._is_safe_text("x", 10)
+        assert sosovalue_common._is_safe_text("", 10, min_len=0, stripped=False)
+        assert sosovalue_common._is_safe_text(" x ", 10, min_len=0, stripped=False)
+
 
 # --------------------------------------------------------------------------- #
 # round-2: what the caveat may name, what the TTL costs, and argument hygiene

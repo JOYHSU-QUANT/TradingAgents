@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Collection
 
 # NoMarketDataError lives in the vendor-error taxonomy (errors.py); re-exported
 # here for the many call sites that import it alongside normalize_symbol.
@@ -138,3 +139,43 @@ def normalize_symbol(raw: str) -> str:
 def is_yahoo_safe(symbol: str) -> bool:
     """True when ``symbol`` only contains characters Yahoo symbols use."""
     return bool(symbol) and _YAHOO_SAFE.fullmatch(symbol) is not None
+
+
+def classify_crypto_asset(
+    asset: str, native: Collection[str], proxy_to: str = "BTC"
+) -> tuple[str | None, bool]:
+    """Classify a caller symbol for a crypto vendor: ``(asset_key, is_proxy)``.
+
+    The one classification rule the crypto vendors share (farside and
+    sosovalue ETF flows, sosovalue treasuries, deribit options): the rule's
+    shape is fixed here, while which symbols count as native stays each
+    vendor's own ``native`` set (treasuries serves only BTC natively; the
+    others serve BTC and ETH) — so switching vendors changes the outcome
+    only through that set, never through the rule:
+
+    * a symbol whose base is in ``native`` is served its own data;
+    * any other recognized crypto *risk* asset (``CRYPTO_BASES``) is served
+      ``proxy_to``'s data, flagged as a market-wide proxy;
+    * anything else — a stablecoin, a quote-only, an unrecognized symbol —
+      gets ``(None, False)``: a stablecoin has no risk character to proxy,
+      so there is no signal to serve.
+
+    Delegates to ``normalize_symbol`` so pair forms and crypto-base
+    recognition match the rest of the system (``BTC``, ``ETH-USD``,
+    ``ETHUSD``, ``ETHUSDT`` and ``BTC/USD`` resolve to their base;
+    look-alikes like ``ETHW``/``WETH``/``BTCB`` fall through to no-signal).
+    Slash pair forms are converted to the dash form first, because
+    ``normalize_symbol`` only strips dashes. What each classification MEANS
+    for a vendor — which report ships, which proxy caveat is worded how —
+    stays documented on that vendor's own ``_classify_asset`` wrapper.
+    """
+    if isinstance(native, str):
+        # A str satisfies Collection[str] — membership would silently degrade
+        # to substring matching ("TC" in "BTC" is True).
+        raise TypeError("native must be a collection of base symbols, not a bare string")
+    base = normalize_symbol((asset or "").replace("/", "-")).split("-")[0]
+    if base in native:
+        return base, False
+    if base in CRYPTO_BASES:
+        return proxy_to, True
+    return None, False

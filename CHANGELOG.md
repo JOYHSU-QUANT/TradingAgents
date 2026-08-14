@@ -377,6 +377,29 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **Vendor plumbing deduplicated; a disabled news category is no longer
+  advertised.** The SoSoValue vendor family's three near-verbatim copies of the
+  cache/TTL/stale-fallback discipline and the two twin per-item sweep loops
+  (429 drain + network breaker) now live once in `sosovalue_common.py`
+  (`load_rolling_snapshot`, `fetch_each`); each module keeps only its own TTL
+  policy and payload shape, and its logger, raised messages and cache formats
+  are unchanged; log wording is too, except the 429-drain line's bare
+  "histories" noun, which now matches the breaker line's per-module noun
+  ("event histories" / "company histories"). The ETF module's fund loop
+  deliberately keeps its older per-item-retry rate-limit semantics rather
+  than adopting the drain.
+  The four-way `_classify_asset` copy (farside / sosovalue / treasuries /
+  deribit) became `symbol_utils.classify_crypto_asset`, and the family's
+  printable-ASCII text gates and STALE caveat line are shared
+  (`_is_safe_text`, `_stale_caveat`). The news analyst's optional-tool
+  registration is table-driven (`OPTIONAL_NEWS_TOOLS`), and the news ToolNode
+  registers from the same table, so a category can no longer be bound in one
+  place and forgotten in the other. One behaviour change rides along: setting
+  `macro_data` or `prediction_markets` to `"none"` now removes both the tool
+  binding *and* its sentence from the analyst prompt — previously both stayed,
+  and the model could spend a tool call only to receive the disabled sentinel.
+  Default-config prompts and bindings are byte-identical.
+
 - **The perp decision prompt ships a schema, not a worked example.** The
   output-format contract used to carry a complete, *valid* `maintain_current`
   example (`confidence: 0.55`), and models returned it as their answer: on the

@@ -138,6 +138,60 @@ def test_the_stock_path_is_told_about_the_calendar_it_now_carries():
 
 
 @pytest.mark.unit
+def test_disabled_base_category_is_neither_bound_nor_advertised():
+    # macro_data and prediction_markets used to be bound unconditionally, with
+    # their descriptions welded into the opening sentence — switching either
+    # category to "none" left the model a bound, advertised tool that could
+    # only return the disabled sentinel. The table-driven registration closed
+    # that: the gate now drops both the binding and the hint together.
+    set_config({"data_vendors": {"macro_data": "none"}})
+    try:
+        llm = _bind("stock", "AAPL")
+        assert "get_macro_indicators" not in {t.name for t in llm.bound_tools}
+        assert "get_macro_indicators(indicator, curr_date, look_back_days)" not in llm.prompt
+        # its sibling in the opening sentence is untouched
+        assert "get_prediction_markets(topic, limit)" in llm.prompt
+    finally:
+        set_config({"data_vendors": {"macro_data": "fred"}})
+    # Positive control on the same needles: with the category back on, the
+    # binding and the hint both return — so the negative assertions above
+    # cannot go vacuously true if the hint wording is ever rewritten.
+    llm = _bind("stock", "AAPL")
+    assert "get_macro_indicators" in {t.name for t in llm.bound_tools}
+    assert "get_macro_indicators(indicator, curr_date, look_back_days)" in llm.prompt
+
+
+@pytest.mark.unit
+def test_every_optional_table_row_is_registered_in_the_news_toolnode():
+    # The invariant the shared table exists to enforce: a category added to
+    # OPTIONAL_NEWS_TOOLS is thereby registered in the news ToolNode, so the
+    # analyst can never bind a tool whose call is not executable.
+    from tradingagents.agents.analysts.news_analyst import OPTIONAL_NEWS_TOOLS
+
+    nodes = TradingAgentsGraph._create_tool_nodes(None)
+    news_tools = set(nodes["news"].tools_by_name)
+    assert news_tools >= {entry.tool.name for entry in OPTIONAL_NEWS_TOOLS}
+
+
+@pytest.mark.unit
+def test_table_validation_rejects_a_wrong_category_and_a_wrong_scope():
+    # A typo'd category fails OPEN at the gate (an unknown category is never
+    # "disabled"), so the import-time validator must be the thing that
+    # catches it — and the current table must pass the same validator.
+    from tradingagents.agents.analysts.news_analyst import (
+        OPTIONAL_NEWS_TOOLS,
+        _validate_table,
+    )
+
+    _validate_table(OPTIONAL_NEWS_TOOLS)  # the shipped table passes
+    good = OPTIONAL_NEWS_TOOLS[0]
+    with pytest.raises(ValueError, match="names category"):
+        _validate_table([good._replace(category="macro_dta")])
+    with pytest.raises(ValueError, match="scope"):
+        _validate_table([good._replace(scope="bsae")])
+
+
+@pytest.mark.unit
 def test_news_toolnode_can_execute_crypto_tools():
     # _create_tool_nodes does not use self -> call unbound (avoids building LLMs).
     nodes = TradingAgentsGraph._create_tool_nodes(None)

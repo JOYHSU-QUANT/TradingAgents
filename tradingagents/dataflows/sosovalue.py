@@ -36,7 +36,8 @@ letting the router fall through to the next vendor. A hanging network gets the
 one exception to trying every fund: after ``MAX_CONSECUTIVE_NETWORK_FAILURES``
 back-to-back transport failures the remaining histories are skipped straight
 into the same disclosed-incomplete path — the outcome is identical, and the
-call stops burning a full ``REQUEST_TIMEOUT`` per dead fund. A snapshot whose breakdown
+call stops burning a full ``sosovalue_common.REQUEST_TIMEOUT`` per dead fund. A
+snapshot whose breakdown
 came back incomplete is cached under the shorter ``INCOMPLETE_CACHE_TTL_HOURS``
 so the missing funds are re-tried on the next call past that window instead of
 persisting for the full refresh interval.
@@ -73,22 +74,36 @@ reaches — the report says so instead of pretending the history is complete.
 
 import json
 import logging
-import math
 import os
-import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import NamedTuple
 from urllib.parse import quote
 
 import requests
 
-from .config import get_config
-from .errors import VendorError, VendorNotConfiguredError, VendorRateLimitError
+from .errors import VendorError
+from .sosovalue_common import (
+    SoSoValueError,
+    SoSoValueNotConfiguredError,
+    SoSoValueRateLimitError,
+    _cache_age_hours,
+    _cache_dir,
+    _days_stale,
+    _humanize_age,
+    _is_finite_number,
+    _is_iso_date,
+    _is_valid_ticker,
+    _iso_now,
+    _plural,
+    _plural_days,
+    _request,
+    _sanitize,
+    _sign,
+    get_api_key,
+)
 from .symbol_utils import CRYPTO_BASES, normalize_symbol
 
 logger = logging.getLogger(__name__)
-
-SOSOVALUE_API_BASE = "https://openapi.sosovalue.com/openapi/v1"
 
 # Assets with their own US spot ETF on SoSoValue that we serve. The API itself
 # covers more symbols (DOGE ETFs exist and return 200), but the analyst-facing
@@ -98,9 +113,6 @@ SUPPORTED_ASSETS = {"BTC", "ETH"}
 
 # Only US-listed spot ETFs; the API also serves HK, out of scope here.
 COUNTRY_CODE = "US"
-
-# Network timeout (seconds), consistent with the other vendors.
-REQUEST_TIMEOUT = 30
 
 # Consecutive transport-level failures (requests.RequestException: timeouts,
 # connection errors) in the fund-history loop before the remaining histories
@@ -174,187 +186,12 @@ RECONCILE_REL_TOL = 0.02
 # with the Farside vendor.
 _USD_PER_MILLION = 1e6
 
-# A plausible US ETF ticker from the /etfs listing. Tickers are interpolated
-# into a URL path, so anything not matching is dropped — and disclosed via the
-# unusable-entry count — rather than requested. The first character must be
-# alphanumeric: URL-quoting leaves "." unescaped (it sits in urllib's
-# always-safe set regardless of ``safe=``), so a dot-led token like ".." would
-# otherwise survive quoting as a path-traversal-shaped segment. Anchored with
-# ``\Z``, not ``$``: ``$`` also matches before a trailing newline, so
-# "IBIT\n" would pass and land its raw newline mid-line in the report text.
-_TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}\Z")
-
 # Bound on the listing's free-text fund name, the one server-controlled string
 # stored verbatim (for diagnosability — it is never rendered or interpolated).
 # Unbounded, an oversized value would ride into the per-asset cache file and
 # bloat every subsequent load until the next overwrite. Enforced at the parse
 # boundary and re-checked read-side, mirroring the ticker filter's two sites.
 MAX_FUND_NAME_CHARS = 120
-
-
-class SoSoValueError(VendorError):
-    """SoSoValue was unreachable, returned an error, or its response shape changed.
-
-    A ``VendorError`` (the shared taxonomy in ``errors.py``) so the routing
-    layer reacts by behaviour rather than by vendor and the optional
-    crypto_etf_flows category degrades down the chain instead of aborting.
-    """
-
-
-class SoSoValueNotConfiguredError(VendorNotConfiguredError):
-    """Raised when SoSoValue is selected but no usable API key is configured.
-
-    Covers an unset ``SOSOVALUE_API_KEY``, a set key that fails the
-    header-safety check in ``get_api_key``, and a key the server rejects
-    (HTTP 401): all are configuration breakage, not an outage, so none is
-    papered over with a stale cache — the router falls to the next vendor at
-    once, which is what makes unsetting the key an emergency-disable switch.
-    """
-
-
-class SoSoValueRateLimitError(VendorRateLimitError):
-    """The 20 req/min / 100k req/month plan limit was hit (HTTP 429)."""
-
-
-def get_api_key() -> str:
-    """Retrieve and sanitize the SoSoValue API key from the environment.
-
-    Surrounding whitespace is stripped rather than rejected: a key deployed
-    through a Windows env file routinely gains a trailing CRLF, and failing
-    the deploy over line endings helps nobody. What remains must be printable
-    ASCII with no embedded whitespace — anything else can never be a valid
-    key, and letting it reach the request header makes ``requests`` raise a
-    pre-network error whose message embeds the full key verbatim (leaking it
-    into logs and the LLM-visible DATA_UNAVAILABLE text) on a path classified
-    as a network outage, which would stale-serve config breakage for up to
-    the stale cap. The rejection message deliberately never echoes the key.
-    """
-    api_key = (os.getenv("SOSOVALUE_API_KEY") or "").strip()
-    if not api_key:
-        raise SoSoValueNotConfiguredError(
-            "SOSOVALUE_API_KEY environment variable is not set. Get a free Demo "
-            "key from the sosovalue.com developer dashboard and set "
-            "SOSOVALUE_API_KEY; without it the ETF-flow chain falls through to "
-            "the next vendor."
-        )
-    if not all(33 <= ord(c) <= 126 for c in api_key):
-        raise SoSoValueNotConfiguredError(
-            "SOSOVALUE_API_KEY contains characters that cannot travel in an "
-            "HTTP header (embedded whitespace, control bytes, or non-ASCII "
-            "text; the key itself is not echoed here). Re-set it with the raw "
-            "key from the sosovalue.com developer dashboard."
-        )
-    return api_key
-
-
-def _error_message(body: object, api_key: str) -> str:
-    """Best-effort human message from an error body, with the key redacted.
-
-    SoSoValue has two live-verified error shapes: structured
-    ``{"code": 400xxx, "message": ...}`` and a gateway shape
-    ``{"code": 1, "msg": ...}`` — note ``msg``, not ``message``. A body that
-    failed JSON parsing arrives here as ``None`` and renders a fixed
-    placeholder instead of the literal string "None". The body is
-    server-controlled text that ends up in raised messages (and from there in
-    logs and the router's LLM-visible DATA_UNAVAILABLE string), and an error
-    body — a 401 especially — is exactly where a server may echo the
-    submitted credential back, so the key is scrubbed before the text leaves
-    this module.
-    """
-    text = "(non-JSON response body)" if body is None else body
-    if isinstance(body, dict):
-        text = body.get("message") or body.get("msg") or body
-    # Redact BEFORE truncating (cutting first could slice the key across the
-    # boundary and leave its head visible), and truncate always — a structured
-    # message is exactly as server-controlled as the raw-body fallback.
-    return str(text).replace(api_key, "[redacted]")[:300]
-
-
-def _request(path: str, params: dict) -> list:
-    """GET a SoSoValue endpoint and return its ``data`` list.
-
-    Raises the vendor taxonomy: 401 -> not-configured (bad key is config
-    breakage, not an outage), 429 -> rate-limited, anything else that is not a
-    clean ``{"code": 0, "data": [...]}`` -> ``SoSoValueError``. Network errors
-    propagate as ``requests.RequestException`` for the caller's stale-cache
-    handling, mirroring the Farside vendor.
-    """
-    api_key = get_api_key()
-    response = requests.get(
-        f"{SOSOVALUE_API_BASE}{path}",
-        params=params,
-        headers={"x-soso-api-key": api_key},
-        timeout=REQUEST_TIMEOUT,
-    )
-    try:
-        body = response.json()
-    except ValueError:
-        body = None
-    if response.status_code == 401:
-        raise SoSoValueNotConfiguredError(
-            f"SoSoValue rejected the API key (HTTP 401): {_error_message(body, api_key)} "
-            f"Verify SOSOVALUE_API_KEY; until then the chain falls to the next vendor."
-        )
-    if response.status_code == 429:
-        raise SoSoValueRateLimitError(
-            f"SoSoValue rate limit hit (HTTP 429) on {path}: {_error_message(body, api_key)}"
-        )
-    # Envelope errors can ride on any HTTP status (a missing-param error is
-    # HTTP 400 with code 1; the over-window error is HTTP 403 with code
-    # 400301), so judge the body, not just the status.
-    if response.status_code != 200 or not isinstance(body, dict) or body.get("code") != 0:
-        # `code` is only known to be != 0 — an arbitrary JSON value, not
-        # necessarily a small int — so it gets the same redact-then-truncate
-        # treatment as the message, at a display-width cap.
-        code = body.get("code") if isinstance(body, dict) else "no-json"
-        raise SoSoValueError(
-            f"SoSoValue request to {path} failed (HTTP {response.status_code}, "
-            f"code {str(code).replace(api_key, '[redacted]')[:40]}): "
-            f"{_error_message(body, api_key)}"
-        )
-    data = body.get("data")
-    if not isinstance(data, list):
-        raise SoSoValueError(
-            f"SoSoValue response for {path} has no 'data' list "
-            f"(got {type(data).__name__}); the API contract may have changed"
-        )
-    return data
-
-
-def _is_finite_number(x: object) -> bool:
-    """True only for a real, finite number (not a bool, NaN, or Infinity).
-
-    bool is an int subclass, so a JSON ``true`` must not pass as a flow figure;
-    NaN/Infinity would poison the cumulative and streak and render as literal
-    "nan"/"inf". Same boundary rule as the Farside vendor.
-    """
-    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
-
-
-def _is_iso_date(x: object) -> bool:
-    """True only for a canonical zero-padded ``YYYY-MM-DD`` date string.
-
-    A non-canonical date would silently mis-order the lexical
-    ``date <= curr_date`` lookahead filter, so it is rejected wherever a date
-    crosses a trust boundary (API response or cache file).
-    """
-    if not isinstance(x, str):
-        return False
-    try:
-        return datetime.strptime(x, "%Y-%m-%d").strftime("%Y-%m-%d") == x
-    except ValueError:
-        return False
-
-
-def _is_valid_ticker(x: object) -> bool:
-    """True only for a string passing the plausible-ticker filter.
-
-    The one ticker predicate shared by the live listing parser and the cache
-    validator (the ``_valid_summary_row``/``_valid_fund_row`` pairing applied
-    to the security-sensitive value), so the two trust boundaries cannot
-    drift apart on what may be interpolated into a URL path or report text.
-    """
-    return isinstance(x, str) and bool(_TICKER_RE.match(x))
 
 
 def _valid_summary_row(row: object) -> bool:
@@ -402,7 +239,7 @@ def _parse_summary_rows(data: list, asset: str) -> list[dict]:
     for raw in data:
         if not _valid_summary_row(raw):
             raise SoSoValueError(
-                f"Malformed {asset} summary row {str(raw)[:200]!r} "
+                f"Malformed {asset} summary row {_sanitize(repr(raw), limit=200)} "
                 f"(the API contract may have changed)"
             )
         rows.append(
@@ -490,9 +327,11 @@ def _parse_fund_rows(data: list, ticker: str) -> list[dict]:
                 # it can be any JSON blob — so bound it like the raw row below.
                 raise SoSoValueError(
                     f"Non-finite {ticker} net_inflow on {raw['date']}: "
-                    f"{str(raw.get('net_inflow'))[:200]!r}"
+                    f"{_sanitize(repr(raw.get('net_inflow')), limit=200)}"
                 )
-            raise SoSoValueError(f"Malformed {ticker} history row {str(raw)[:200]!r}")
+            raise SoSoValueError(
+                f"Malformed {ticker} history row {_sanitize(repr(raw), limit=200)}"
+            )
         rows[raw["date"]] = {"date": raw["date"], "net_inflow": raw.get("net_inflow")}
     return [rows[d] for d in sorted(rows)]
 
@@ -525,64 +364,6 @@ class _FlowSnapshot(NamedTuple):
     cum_restated: dict | None
     fetched_at: str
     stale: bool
-
-
-def _utc_now() -> datetime:
-    """The single UTC clock source (tests patch this one function)."""
-    return datetime.now(timezone.utc)
-
-
-def _iso_now() -> str:
-    """Current UTC instant as ``YYYY-MM-DDTHH:MM:SSZ`` for the cache fetched_at."""
-    return _utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _cache_age_hours(fetched_at: str) -> float | None:
-    """Hours since ``fetched_at``, or None if the stamp cannot be parsed.
-
-    The one parse and one clock every freshness decision shares (TTL, stale
-    cap, displayed age), so a stamp is readable by all of them or by none.
-    """
-    if not fetched_at:
-        return None
-    try:
-        fetched = datetime.strptime(fetched_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    except ValueError:
-        return None
-    return (_utc_now() - fetched).total_seconds() / 3600.0
-
-
-def _days_stale(fetched_at: str) -> int | None:
-    """Whole elapsed days since fetched_at; None for unparseable or future stamps.
-
-    A future-dated stamp (clock skew / tampered file) must read as unknown so
-    the stale cap refuses it rather than serving it forever.
-    """
-    hours = _cache_age_hours(fetched_at)
-    if hours is None or hours < 0:
-        return None
-    return int(hours // 24)
-
-
-def _humanize_age(fetched_at: str) -> str:
-    """Human-readable snapshot age for the STALE caveat.
-
-    Hour-granular under a day (the hourly TTL can stale-serve within one UTC
-    day, where "0 days" would read as nearly current), day-granular beyond.
-    """
-    hours = _cache_age_hours(fetched_at)
-    if hours is None or hours < 0:
-        return "an unknown age"
-    if hours < 24:
-        return f"{hours:.1f} hours"
-    days = int(hours // 24)
-    return f"{days} {_plural_days(days)}"
-
-
-def _cache_dir() -> str:
-    cache_dir = get_config()["data_cache_dir"]
-    os.makedirs(cache_dir, exist_ok=True)
-    return cache_dir
 
 
 def _cache_path(asset: str) -> str:
@@ -619,6 +400,13 @@ def _valid_funds(funds: object) -> bool:
         and isinstance(f.get("rows"), list)
         and f["rows"]
         and all(_valid_fund_row(r) for r in f["rows"])
+        # One row per date, mirroring _parse_fund_rows' date-keyed dict. This
+        # is what _read_cache's order exemption below rests on: _fund_flows_on
+        # stops at the FIRST row matching the date with a non-null flow, so the
+        # lookup is order-insensitive only while dates are unique. Two rows for
+        # one date and a fund's leaders-line figure becomes whichever copy the
+        # file happens to list first.
+        and len({r["date"] for r in f["rows"]}) == len(f["rows"])
         for t, f in funds.items()
     )
 
@@ -741,8 +529,10 @@ def _read_cache(path: str, asset: str) -> dict | None:
     if not isinstance(payload.get("fetched_at"), str) or not payload["fetched_at"]:
         return _reject("'fetched_at' is missing or not a non-empty string")
     # Deliberately unchecked: per-fund row order (the flow lookup is
-    # order-insensitive) and the fetched_at format (an unparseable stamp
-    # already fails every freshness check downstream, before any render).
+    # order-insensitive, which holds because _valid_funds enforces one row per
+    # date — that uniqueness is the premise this exemption rests on) and the
+    # fetched_at format (an unparseable stamp already fails every freshness
+    # check downstream, before any render).
     return payload
 
 
@@ -1072,7 +862,7 @@ def _load_snapshot(asset: str) -> _FlowSnapshot:
                 )
                 raise wrap_cls(
                     f"SoSoValue {asset} fetch failed and the newest cache {stale_desc} "
-                    f"(> {MAX_STALE_DAYS}-day cap): {e}"
+                    f"(> {MAX_STALE_DAYS}-day cap): {_sanitize(e)}"
                 ) from e
             # A SoSoValueError here is a contract/parse break (a code fix is
             # likely needed) and must not hide among network-blip warnings for
@@ -1096,7 +886,9 @@ def _load_snapshot(asset: str) -> _FlowSnapshot:
                 )
             return _snapshot_from(cached, fetched_at, stale=True)
         # "usable": the file may exist but have failed read-side validation.
-        raise wrap_cls(f"SoSoValue {asset} unavailable and no usable cache exists: {e}") from e
+        raise wrap_cls(
+            f"SoSoValue {asset} unavailable and no usable cache exists: {_sanitize(e)}"
+        ) from e
 
     fetched_at = _iso_now()
     payload["fetched_at"] = fetched_at
@@ -1127,18 +919,6 @@ def _classify_asset(asset: str) -> tuple[str | None, bool]:
     if base in CRYPTO_BASES:
         return "BTC", True
     return None, False
-
-
-def _sign(value: float) -> int:
-    return (value > 0) - (value < 0)
-
-
-def _plural(count: int, singular: str, plural: str) -> str:
-    return singular if count == 1 else plural
-
-
-def _plural_days(count: int) -> str:
-    return _plural(count, "day", "days")
 
 
 def _fund_flows_on(funds: dict, date: str) -> dict[str, float]:

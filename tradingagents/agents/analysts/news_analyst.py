@@ -1,6 +1,8 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from tradingagents.agents.utils.agent_utils import (
+    get_btc_treasuries,
+    get_economic_calendar,
     get_etf_flows,
     get_fear_greed,
     get_global_news,
@@ -28,17 +30,35 @@ def create_news_analyst(llm):
             # only return the disabled sentinel. They stay unguarded here because
             # their descriptions are welded into the single system_message string
             # below; un-advertising them means restructuring that prompt, which is
-            # out of scope for this change. Folding all four into one table-driven
-            # registration is the follow-up — worth doing before further optional
-            # crypto tools are added to this block.
+            # out of scope for this change. Folding the whole set into one
+            # table-driven registration is the follow-up; the crypto block below
+            # is still hand-written too, but it at least GUARDS each category,
+            # so it is these two unguarded entries that are the gap.
             get_macro_indicators,
             get_prediction_markets,
         ]
 
-        # Crypto-only flows/sentiment tools. Bound only for crypto assets so the
-        # stock path's tools and prompt are unchanged, and only when the category
-        # is actually enabled — binding a tool whose category is switched off
-        # would just spend a tool call to receive the disabled sentinel.
+        # The macro calendar is asset-agnostic and bound on BOTH paths: it takes
+        # no asset argument, and CPI/NFP/PCE/GDP releases are canonical event
+        # risk for equities every bit as much as for crypto — the one category
+        # here whose description carries no "(crypto)" marker. Guarded on the
+        # category like the crypto block below, for the same reason.
+        calendar_message = ""
+        if not is_category_disabled("economic_calendar", "get_economic_calendar"):
+            tools = tools + [get_economic_calendar]
+            calendar_message = (
+                " Also use get_economic_calendar(curr_date, look_back_days) for the US "
+                "macro calendar — upcoming CPI/NFP/PCE-style releases with forecasts and "
+                "the recent prints with surprises; treat event risk as a regime / risk "
+                "modifier, not a directional signal (the feed carries no Fed "
+                "rate-decision events, so never infer a quiet Fed from it)."
+            )
+
+        # Crypto-only flows/sentiment/treasury tools. Bound only for crypto
+        # assets so the stock path's tools and prompt are unchanged, and only
+        # when the category is actually enabled — binding a tool whose category
+        # is switched off would just spend a tool call to receive the disabled
+        # sentinel.
         crypto_tools_message = ""
         if asset_type == "crypto":
             crypto_tools = []
@@ -59,14 +79,36 @@ def create_news_analyst(llm):
                     "get_fear_greed(curr_date, look_back_days) for the Crypto Fear & "
                     "Greed Index (a 0-100 crowd-sentiment gauge)"
                 )
+            if not is_category_disabled("btc_treasuries", "get_btc_treasuries"):
+                crypto_tools.append(get_btc_treasuries)
+                crypto_hints.append(
+                    "get_btc_treasuries(asset, curr_date, look_back_days) for corporate "
+                    "BTC treasury holdings and disclosed buys/disposals of the largest "
+                    "holders — an announcement-driven demand-side signal (for assets "
+                    "other than BTC it is a market-wide proxy, not that asset's own "
+                    "flows)"
+                )
             if crypto_tools:
                 tools = tools + crypto_tools
-                crypto_tools_message = (
-                    " Since this is a crypto asset, also use " + ", and ".join(crypto_hints) + "."
+                # "and" before the LAST hint only. A plain ", and ".join reads
+                # "A, and B, and C, and D" once more than two categories are
+                # enabled, and each hint already carries its own commas,
+                # semicolons and em-dashes — the repeated conjunction makes the
+                # boundaries between hints unreadable. Two hints still read
+                # "A, and B", which is what this block produced before the
+                # calendar and treasuries categories were added.
+                joined = (
+                    crypto_hints[0]
+                    if len(crypto_hints) == 1
+                    else ", and ".join(crypto_hints)
+                    if len(crypto_hints) == 2
+                    else ", ".join(crypto_hints[:-1]) + ", and " + crypto_hints[-1]
                 )
+                crypto_tools_message = " Since this is a crypto asset, also use " + joined + "."
 
         system_message = (
             f"You are a news researcher tasked with analyzing recent news and trends over the past week. Please write a comprehensive report of the current state of the world that is relevant for trading and macroeconomics. Use the available tools: get_news(query, start_date, end_date) for {asset_label}-specific or targeted news searches, get_global_news(curr_date, look_back_days, limit) for broader macroeconomic news, get_macro_indicators(indicator, curr_date, look_back_days) to ground macro commentary in actual data from FRED (e.g. 'cpi', 'core_pce', 'unemployment', 'fed_funds_rate', '10y_treasury', 'yield_curve'), and get_prediction_markets(topic, limit) for live market-implied probabilities of forward-looking events (e.g. 'Fed rate cut', 'recession 2026', geopolitical or sector events). Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
+            + calendar_message
             + crypto_tools_message
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
             + get_language_instruction()

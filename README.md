@@ -370,6 +370,60 @@ surface — a new tool, a new prompt paragraph, a new report section — the mom
 the code landed, with no server-side action to date the change from. The dated
 cutover is that action, so a later review can attribute a behaviour change to it.
 
+Two further news-analyst sources ride on the same SoSoValue key
+(`SOSOVALUE_API_KEY`, the one already used for ETF flows). The calendar takes no
+asset argument and is bound on the **stock path too** — CPI/NFP/PCE releases are
+event risk for equities as much as for crypto; treasuries is a BTC-holdings feed
+and stays crypto-only. Both are still gated on their own category being enabled:
+
+- **US economic calendar** (`economic_calendar`, vendor `sosovalue`): scheduled
+  releases from `curr_date` itself through the next two weeks with consensus
+  forecasts (an event scheduled today is the most decision-relevant row the
+  report carries, so the window includes it), and the trailing window's
+  releases with actual-vs-forecast surprises, for a curated whitelist
+  of high-signal events (CPI/Core CPI, Nonfarm Payrolls, Initial Jobless
+  Claims, Core PCE, GDP, Retail Sales — exact live-verified names; the API has
+  no importance field, so the whitelist is the importance filter). Calendar
+  names outside the whitelist appear as name-only lines. Scheduled rows render
+  forecast and previous but **never an actual**, and released figures appear
+  only on or before `curr_date`, so a backtest date cannot see a future print.
+  Actuals, forecasts and previous values are all the provider's *current*
+  figures rather than point-in-time snapshots — macro actuals get revised, and
+  the report says so rather than implying the printed actual is as-published. The feed
+  carries **no Fed rate-decision events at all** — the report flags that
+  coverage gap so an empty FOMC row is never read as a quiet Fed schedule. The
+  report frames event risk as a regime/risk modifier, not a directional signal.
+- **Corporate BTC treasuries** (`btc_treasuries`, vendor `sosovalue`): combined
+  and top-5 holdings across the 15 largest tracked holders (the provider lists
+  by holdings, and every contributor's as-of date is printed because no
+  filing-age cut is applied; individual disclosures are filtered to
+  `curr_date` but that top-15 cut is not — it is the listing as ranked when
+  the snapshot was fetched, so a historical date sees today's universe rather
+  than that date's, which the report states) and the window's disclosed
+  changes — buys and
+  disposals, with an implied US$/BTC where a cost was filed against a filed
+  quantity, and holdings-only disclosures rendered as the implied change from
+  the prior filing (those carry no cost or implied price: the change spans
+  everything since that filing, so no single filed cost belongs to it).
+  Disclosure dates lag
+  the underlying transactions and some companies file only monthly or
+  quarterly, which the report caveats. Treasuries hold BTC only, so **ETH and
+  other recognized risk assets get the BTC data as a labelled market-wide
+  demand proxy**; stablecoins and unrecognized symbols get a no-signal note.
+
+Both **ship disabled** (`"economic_calendar": "none"`, `"btc_treasuries":
+"none"`): the SoSoValue key already sits on a deployed box for ETF flows, so
+landing these enabled would change a running deployment's analyst input surface
+the moment the code deploys, with no server-side action to date the change from.
+Flip them together, as one deliberate cutover, and record when — `options_data`
+already had its own dated cutover (2026-08-12), so a separate date here keeps
+the two input-surface changes attributable apart:
+
+```python
+config["data_vendors"]["economic_calendar"] = "sosovalue"
+config["data_vendors"]["btc_treasuries"] = "sosovalue"
+```
+
 Any data category can be switched off by setting its vendor to `"none"`:
 
 ```python

@@ -10,6 +10,87 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **US economic calendar + corporate BTC treasuries (SoSoValue).** Two new
+  news-analyst categories for crypto assets, served by the SoSoValue key
+  already used for ETF flows (shared plumbing — auth, request envelope, error
+  taxonomy, clock/cache-age helpers — extracted from `sosovalue.py` into
+  `sosovalue_common.py`; four deltas for the ETF path: an out-of-range int now
+  fails the finite-number check instead of raising, vendor text reaching a
+  raised message is flattened through the shared markdown sanitizer rather than
+  raw-sliced, the unset-key message names the SoSoValue-backed category
+  generically instead of the ETF chain, and a cached fund carrying two rows for
+  one date is now rejected at read time — previously whichever copy the file
+  listed first was served as that day's flow). `economic_calendar`
+  reports the scheduled US releases from `curr_date` through the next two
+  weeks (today included) with consensus forecasts
+  and the trailing window's releases with actual-vs-forecast surprises, for a
+  live-verified whitelist of high-signal events (the API has no importance
+  field, so the whitelist is the importance filter; calendar names outside it
+  appear name-only). Scheduled rows never render an actual and released
+  figures appear only on or before `curr_date` (lookahead-safe); surprises
+  are computed only when actual and forecast share a unit; the report flags
+  that the feed carries no Fed rate-decision events at all, and frames event
+  risk as a regime/risk modifier rather than a directional signal.
+  `btc_treasuries` reports combined and top-5 holdings across the 15 largest
+  tracked corporate holders plus the window's disclosed changes — buys and
+  disposals (numeric strings normalized at the parse boundary; the API's
+  `avg_btc_cost` field is live-verified unusable and never rendered), with
+  holdings-only disclosures rendered as the implied change from the prior
+  filing (carrying no cost or implied price, since that change spans
+  everything since that filing); ETH and other recognized risk assets get the
+  BTC data as a labelled
+  market-wide demand proxy. Both categories are optional (sentinel
+  degradation), cache on rolling snapshots with stale fallback, and **ship
+  disabled** (`"none"`): the key already sits on deployed boxes, so landing
+  them enabled would change a running paper deployment's analyst input
+  surface with no server-side action to date the change from — flip them
+  together as one deliberate, separately dated cutover, clear of the
+  `options_data` one (already dated 2026-08-12), so the two input-surface
+  changes stay attributable apart.
+  Both reports state the semantics of what they render rather than leaving
+  them to be inferred: the unit each figure carries (a payrolls actual of
+  `-23` is thousands of jobs), that a surprise is actual minus forecast and
+  its sign is not a directional verdict, when the snapshot was fetched even
+  when it is fresh, which aggregate figures mix filed with derived values,
+  and — when a section is empty — whether that is a quiet window or this
+  snapshot's own coverage gap. A provider that merely reshapes its output
+  (a longer calendar, a repeated calendar date, an unreadable calendar day-row,
+  comma-grouped numbers, a listed company with no filings yet) degrades to a
+  disclosed, counted partial rather than failing the category into a stale
+  serve that expires — the calendar is parsed before any history request, so
+  failing it over one bad row would discard every tracked event's figures too.
+  An unreadable day-row is disclosed by the dates it cost (a row whose only
+  fault was its event list still carries a usable one) and shortens the cache
+  TTL, so the hole is retried in hours rather than re-served for the full
+  period — to a dedicated middle value, not the shortest one, which stays
+  reserved for failures that are transient by construction; a permanently
+  malformed provider row on the shortest TTL would be a standing fivefold
+  request amplification with no path back. The count stays the authority on how
+  much was dropped: a row that lost its date too is counted but cannot be
+  named, a date still rendered anywhere in the report — from the calendar or
+  from a tracked event's history, which the tables draw on equally — is
+  withheld rather than listed as lost, and a long list is capped so a wholesale
+  contract break cannot push kilobytes of dates into the prompt.
+  Coverage claims are worded so that content **this client** dropped is never
+  read back as the provider's own silence: the snapshot's calendar span is
+  labelled as the snapshot's rather than the provider's, and where a caveat in
+  the same header already names the cause of a short calendar — a dropped row,
+  or a snapshot fetched before the report's date — the report names it too
+  alongside it — but only where that cause could actually account for the gap.
+  A dropped row the report can place before the calendar's last dated entry, or
+  a dropped event *name* that left every day-row past that entry standing,
+  explains nothing about a short forward tail and is not offered as if it did;
+  and the caveat naming the drop now claims each end of the rendered span
+  separately, so it cannot re-raise a possibility the sentence above just
+  declined. Reading an empty window as genuinely quiet
+  additionally requires that the scheduled table really is empty (it is fed by
+  forward-dated event histories as well as by the calendar) and that the
+  snapshot is current, and it no longer extends to events this feed does not
+  carry at all, which would have contradicted the standing Fed-decision caveat.
+  A malformed caller argument — a non-integer `look_back_days`, an unparseable
+  `curr_date` — is reported as this vendor's error class rather than escaping
+  as a raw `TypeError`, and the treasuries coverage denominator no longer
+  presents a client-shrunk listing count as the provider's own.
 - **Crypto options-implied volatility (Deribit).** A new keyless `options_data`
   category, bound to the **market** analyst for crypto assets only (vol regime
   is a technical read, so it sits alongside the indicators rather than with the

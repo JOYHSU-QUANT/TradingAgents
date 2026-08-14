@@ -23,6 +23,8 @@ from .fear_greed import get_fear_greed_data as get_alternative_me_fear_greed
 from .fred import get_macro_data as get_fred_macro_data
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
 from .sosovalue import get_etf_flow_data as get_sosovalue_etf_flows
+from .sosovalue_macro import get_economic_calendar_data as get_sosovalue_economic_calendar
+from .sosovalue_treasuries import get_btc_treasury_data as get_sosovalue_btc_treasuries
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -96,6 +98,18 @@ TOOLS_CATEGORIES = {
         "tools": [
             "get_options_market",
         ]
+    },
+    "economic_calendar": {
+        "description": "US macro economic calendar: scheduled events and releases vs forecast",
+        "tools": [
+            "get_economic_calendar",
+        ]
+    },
+    "btc_treasuries": {
+        "description": "Corporate BTC treasury holdings and disclosed changes (crypto)",
+        "tools": [
+            "get_btc_treasuries",
+        ]
     }
 }
 
@@ -136,6 +150,8 @@ OPTIONAL_CATEGORIES = {
     "crypto_etf_flows",
     "crypto_sentiment",
     "options_data",
+    "economic_calendar",
+    "btc_treasuries",
 }
 
 # Mapping of methods to their vendor-specific implementations
@@ -200,6 +216,14 @@ VENDOR_METHODS = {
     # options_data
     "get_options_market": {
         "deribit": get_deribit_options_market,
+    },
+    # economic_calendar
+    "get_economic_calendar": {
+        "sosovalue": get_sosovalue_economic_calendar,
+    },
+    # btc_treasuries
+    "get_btc_treasuries": {
+        "sosovalue": get_sosovalue_btc_treasuries,
     },
 }
 

@@ -152,6 +152,19 @@ DEFAULT_CONFIG = _apply_env_overrides({
         # dataflows/interface.py), so this default IS that deployment's live value:
         # switching the category back off is a code change, not a YAML edit.
         "options_data": "deribit",           # Options: deribit (keyless, BTC/ETH only), none
+        # US macro economic calendar (scheduled events + releases vs forecast)
+        # and corporate BTC treasury holdings/activity, both served by the
+        # SoSoValue key already deployed for crypto_etf_flows. Ship OFF: the key
+        # being on the box means landing these enabled would change a running
+        # deployment's analyst input surface the moment the code deploys, with no
+        # server-side action to date the change from — and per the note above this
+        # default is that deployment's live value, so the flip is a code change,
+        # not a YAML edit. Flip both to "sosovalue" as one deliberate cutover and
+        # record when; options_data already has its own dated cutover
+        # (2026-08-12), so keeping this one separate leaves the two input-surface
+        # changes attributable apart.
+        "economic_calendar": "none",         # Options: sosovalue (SOSOVALUE_API_KEY), none
+        "btc_treasuries": "none",            # Options: sosovalue (SOSOVALUE_API_KEY), none
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {

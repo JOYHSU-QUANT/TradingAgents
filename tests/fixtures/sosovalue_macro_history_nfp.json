@@ -1,0 +1,79 @@
+{
+ "code": 0,
+ "message": "success",
+ "data": [
+  {
+   "date": "2026-08-07",
+   "actual": "-23",
+   "forecast": "85",
+   "previous": "57"
+  },
+  {
+   "date": "2026-07-02",
+   "actual": "57",
+   "forecast": "114",
+   "previous": "172"
+  },
+  {
+   "date": "2026-06-05",
+   "actual": "172",
+   "forecast": "85",
+   "previous": "115"
+  },
+  {
+   "date": "2026-05-08",
+   "actual": "115",
+   "forecast": "65",
+   "previous": "178"
+  },
+  {
+   "date": "2026-04-03",
+   "actual": "178",
+   "forecast": "65",
+   "previous": "-92"
+  },
+  {
+   "date": "2026-03-06",
+   "actual": "-92",
+   "forecast": "58",
+   "previous": "130"
+  },
+  {
+   "date": "2026-02-11",
+   "actual": "130",
+   "forecast": "66",
+   "previous": "50"
+  },
+  {
+   "date": "2026-01-09",
+   "actual": "50",
+   "forecast": "66",
+   "previous": "64"
+  },
+  {
+   "date": "2025-12-16",
+   "actual": "-105",
+   "forecast": "",
+   "previous": "119"
+  },
+  {
+   "date": "2025-12-16",
+   "actual": "64",
+   "forecast": "51",
+   "previous": "-105"
+  },
+  {
+   "date": "2025-11-20",
+   "actual": "119",
+   "forecast": "53",
+   "previous": "22"
+  },
+  {
+   "date": "2025-09-05",
+   "actual": "22",
+   "forecast": "75",
+   "previous": "73"
+  }
+ ],
+ "details": null
+}

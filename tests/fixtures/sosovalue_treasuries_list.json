@@ -1,0 +1,67 @@
+{
+ "code": 0,
+ "message": "success",
+ "data": [
+  {
+   "ticker": "MSTR",
+   "name": "Strategy",
+   "list_location": "United States"
+  },
+  {
+   "ticker": "CEP",
+   "name": "XXI",
+   "list_location": "United States"
+  },
+  {
+   "ticker": "3350",
+   "name": "Metaplanet",
+   "list_location": "Japan"
+  },
+  {
+   "ticker": "MARA",
+   "name": "MARA Holdings",
+   "list_location": "United States"
+  },
+  {
+   "ticker": "BSTR",
+   "name": "Bitcoin Standard Treasury Company",
+   "list_location": "United States"
+  },
+  {
+   "ticker": "BLSH",
+   "name": "Bullish",
+   "list_location": "United States"
+  },
+  {
+   "ticker": "ASST",
+   "name": "Strive Inc.",
+   "list_location": "United States"
+  },
+  {
+   "ticker": "SPCX",
+   "name": "SpaceX",
+   "list_location": "United States"
+  },
+  {
+   "ticker": "COIN",
+   "name": "Coinbase",
+   "list_location": "United States"
+  },
+  {
+   "ticker": "HUT",
+   "name": "Hut8",
+   "list_location": "United States"
+  },
+  {
+   "ticker": "0434.HK",
+   "name": "Boyaa",
+   "list_location": "Hong Kong"
+  },
+  {
+   "ticker": "ADE.DE",
+   "name": "Bitcoin group SE",
+   "list_location": "Germany"
+  }
+ ],
+ "details": null
+}

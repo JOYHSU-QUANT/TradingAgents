@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
@@ -312,6 +312,37 @@ def _as_decimal(value: object) -> Decimal | None:
     return result if result.is_finite() else None
 
 
+def _is_quoted_number(value: object) -> bool:
+    """True for a string that would have been a number without its quotes.
+
+    ``_as_decimal`` refuses strings on purpose and that does not change here:
+    a quoted figure stays a format failure and the decision stays fail-closed.
+    What changes is only which tag records it. One tag covered three very
+    different outputs — a leftover placeholder, a ``maintain_current`` that
+    quoted its own ``"null"``, and a figure the model typed into the margin
+    field with quotes around it — and only the last is a cycle where the model
+    put a size there at all. The proposal rate is the single number this prompt
+    change is judged on, so a tag that cannot separate "asked for 35%" from
+    "echoed the schema" makes the before/after unreadable exactly where it has
+    to be read.
+
+    Like its netting-set sibling ``margin_off_step_grid``, this fires before
+    ``validate_target_decision`` and so reads no ``decision_mode``: a
+    ``maintain_current`` that quoted its margin as ``"0"`` lands here too. The
+    set therefore counts "the model supplied a figure", which is the proxy the
+    proposal rate has always used, not a proven ``set_target``.
+    """
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = Decimal(value.strip())
+    except (InvalidOperation, ValueError):
+        return False
+    # "nan"/"inf" parse but are not figures anyone asked for; they belong with
+    # the unreadable strings, not with a size the model chose.
+    return parsed.is_finite()
+
+
 def _validate_margin_grid(margin: Decimal, config: DecisionConfig) -> str | None:
     """Range + integer-step-grid check; returns an error tag or ``None``.
 
@@ -432,6 +463,12 @@ def parse_target_decision(raw: object, config: DecisionConfig) -> ParsedDecision
     else:
         margin_dec = _as_decimal(raw_margin)
         if margin_dec is None:
+            # Same refusal, a tag that says which refusal. See _is_quoted_number:
+            # a quoted figure is a size the model actually put in this field,
+            # wearing the wrong type, and it has to be countable apart from an
+            # echoed placeholder.
+            if _is_quoted_number(raw_margin):
+                return _invalid("margin_quoted_number")
             return _invalid("margin_not_numeric")
         if margin_dec != margin_dec.to_integral_value():
             # The default grid is integer percent; a fractional value is off-grid
@@ -448,6 +485,12 @@ def parse_target_decision(raw: object, config: DecisionConfig) -> ParsedDecision
     else:
         confidence = _as_decimal(raw_confidence)
         if confidence is None:
+            # The margin's sibling. NOT evidence of a proposal, though: margin
+            # is coerced first and a null margin SKIPS that block rather than
+            # failing it, so this tag is reachable with nothing proposed and
+            # must stay out of the proposal-rate correction set.
+            if _is_quoted_number(raw_confidence):
+                return _invalid("confidence_quoted_number")
             return _invalid("confidence_not_numeric")
 
     rationale = payload["rationale"]
@@ -577,30 +620,34 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     text names what to unquote rather than telling the model to strip quotes
     generally. Both mistakes cost the whole
     output, but they cost different things afterwards. A quoted number is
-    tagged ``margin_not_numeric`` / ``confidence_not_numeric``, and because the
-    gate discards what the model asked for, the row stores
+    tagged ``margin_quoted_number`` / ``confidence_quoted_number``, and because
+    the gate discards what the model asked for, the row stores
     ``requested_target_margin_pct`` as NULL — so a model that HAS started
-    proposing reads as one that has not, on the very metric this change is
-    judged by.
+    proposing would read as one that has not, on the very metric this change is
+    judged by, unless those cycles are netted back in.
 
     Reading the proposal rate therefore needs a correction, and the obvious
     ones are wrong. ``margin_not_numeric`` / ``confidence_not_numeric`` are
-    ambiguous rather than evidence of a proposal: margin is coerced before
-    confidence, so the second only proves margin was null-or-integer, and a
-    ``maintain_current`` that quoted its ``"null"`` lands on the first. Nor is
-    the rule "any tag after margin coercion succeeds" — a null margin SKIPS the
-    coercion rather than failing it, so ``invalid_key_risks`` and
-    ``missing_rationale`` are reachable with nothing proposed at all.
+    ambiguous rather than evidence of a proposal: they cover the strings that
+    are not figures at all — an echoed placeholder, or a ``maintain_current``
+    that quoted its ``"null"`` — and margin is coerced before confidence, so
+    the second proves nothing about the first either. Nor is the rule "any tag
+    after margin coercion succeeds" — a null margin SKIPS the coercion rather
+    than failing it, so ``invalid_key_risks`` and ``missing_rationale`` are
+    reachable with nothing proposed at all.
 
-    The predicate that works is narrower: tags reachable **only** when the
-    margin coerced to a number. There are five, and each is worth naming
-    because the set is not guessable —
+    The predicate that works is narrower: tags that can only follow a margin
+    the model actually supplied as a figure. There are six, and each is worth
+    naming because the set is not guessable —
     ``margin_off_step_grid`` and ``margin_out_of_range`` (the value itself was
     rejected), ``flat_with_nonzero_margin`` and
     ``directional_side_with_zero_margin`` (cross-field checks that sit past the
     ``set_target_without_margin`` guard, so a null margin cannot reach them),
-    and ``set_target_without_confidence`` (same guard). Those are the cycles to
-    net back in.
+    ``set_target_without_confidence`` (same guard), and ``margin_quoted_number``
+    (a figure supplied with quotes around it — the one member that fails before
+    the coercion rather than after it). Those are the cycles to net back in.
+    ``confidence_quoted_number`` is NOT one of them: margin is coerced first and
+    a null margin skips that block, so it is reachable with nothing proposed.
     An unquoted ``decision_mode`` costs the diagnosis instead: the block stops
     parsing at all and is recorded as a bare ``invalid_output``.
     """
@@ -638,8 +685,8 @@ Everything else keeps its quotes: "decision_mode", "target_side" when it names
 a side, "rationale", and every entry of "key_risks". A quoted number ("35") or
 a quoted null ("null") is discarded exactly like a leftover placeholder.
 
-Rules (violations are discarded and treated as maintain_current — they are
-never repaired or rounded):
+Rules (violations are discarded and recorded as a model-format failure — they
+are never repaired or rounded):
 
 - "decision_mode": "set_target" to establish a new target, or
   "maintain_current" to keep the current position unchanged.

@@ -359,20 +359,44 @@ Breaking changes within the 0.x line are called out explicitly.
   correction of its own: a fail-closed row stores `requested_target_margin_pct`
   as NULL whatever the model asked for, so the cycles that prove a numeric
   margin was nevertheless supplied must be netted back in, or a recovered model
-  reads as one that never proposed. Those are the five tags reachable **only**
-  once the margin coerced to a number: `margin_off_step_grid` and
+  reads as one that never proposed. Those are the six tags that can only follow
+  a margin the model actually supplied as a figure: `margin_off_step_grid` and
   `margin_out_of_range` (the value itself was rejected), plus
   `flat_with_nonzero_margin`, `directional_side_with_zero_margin` and
-  `set_target_without_confidence`. All five sit past the
+  `set_target_without_confidence` — all five sitting past the
   `set_target_without_margin` guard, which is what makes a null margin unable to
-  reach them; one of them, `margin_off_step_grid`, is additionally emitted
-  inside the coercion block for a non-integral number. "Anything tagged after the
-  coercion" is the wrong rule — a null margin skips the coercion rather than
-  failing it, so
+  reach them (one of them, `margin_off_step_grid`, is additionally emitted
+  inside the coercion block for a non-integral number) — and
+  `margin_quoted_number`, the one member that fails *before* the coercion.
+  "Anything tagged after the coercion" is the wrong rule — a null margin skips
+  the coercion rather than failing it, so
   `invalid_key_risks` and `missing_rationale` are reachable with nothing
   proposed. `margin_not_numeric` and `confidence_not_numeric` are likewise out:
-  margin is coerced first, so the second only proves margin was null-or-integer,
-  and a `maintain_current` that quoted its `"null"` lands on the first.
+  they now carry only the strings that are not figures at all — an echoed
+  placeholder, or a `maintain_current` that quoted its `"null"`. So is
+  `confidence_quoted_number`: margin is coerced first and a null margin skips
+  that block, so it is reachable with nothing proposed.
+- **A quoted figure is tagged apart from an echoed placeholder.** A string in
+  `requested_target_margin_pct` / `confidence` is still refused and the cycle is
+  still fail-closed — the safety semantics are unchanged — but the tag now says
+  which refusal it was: `margin_quoted_number` / `confidence_quoted_number` when
+  the string parses as a finite number, `margin_not_numeric` /
+  `confidence_not_numeric` otherwise. One tag previously covered a leftover
+  placeholder, a quoted `"null"` and a figure typed as `"35"`, and because a
+  fail-closed row stores the margin as NULL and the raw response is not
+  persisted, the three were indistinguishable afterwards — on the single metric
+  this prompt change is judged by. Like `margin_off_step_grid`,
+  `margin_quoted_number` is emitted inside the coercion block and reads no
+  `decision_mode`, so a `maintain_current` that quoted its margin as `"0"`
+  reaches it too: the netted rate counts cycles where the model supplied a
+  figure, which is what the proposal rate has always proxied.
+- **The Rules preamble no longer advertises maintain_current as the cost of a
+  violation.** It said violations are "discarded and treated as
+  maintain_current", ten lines under a new sentence saying the same cycle is
+  "recorded as a model-format failure" — one page, two answers, and the one it
+  gave first is a zero-cost no-op for a model whose failure mode is exactly
+  preferring no-ops. The wording is now the same in both places; the discard
+  behaviour itself is unchanged.
 
 ### Fixed
 

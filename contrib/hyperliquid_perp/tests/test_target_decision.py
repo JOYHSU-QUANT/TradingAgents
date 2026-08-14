@@ -177,9 +177,24 @@ def test_directional_below_grid_minimum_is_invalid():
     _assert_fail_closed(parsed, "margin_out_of_range")
 
 
-def test_invalid_margin_not_numeric():
-    parsed = parse_target_decision(_text(requested_target_margin_pct="35"), _CFG)
+@pytest.mark.parametrize("value", ["<integer 5-60>", "null", "high", ""])
+def test_invalid_margin_not_numeric(value):
+    # What is left on this tag once quoted figures move off it: the strings
+    # that are not figures at all — an echoed placeholder, a quoted null,
+    # prose, empty.
+    parsed = parse_target_decision(_text(requested_target_margin_pct=value), _CFG)
     _assert_fail_closed(parsed, "margin_not_numeric")
+
+
+@pytest.mark.parametrize("value", ["35", " 35 ", "35.0"])
+def test_a_quoted_margin_figure_is_tagged_apart_from_an_echo(value):
+    # Still discarded, still fail-closed — only the tag differs. A proposal the
+    # model typed as a string has to be countable apart from an echoed
+    # placeholder: the proposal rate is the metric this prompt change is judged
+    # by, and a fail-closed row stores requested_target_margin_pct as NULL
+    # either way, so the tag is the only surviving evidence.
+    parsed = parse_target_decision(_text(requested_target_margin_pct=value), _CFG)
+    _assert_fail_closed(parsed, "margin_quoted_number")
 
 
 def test_invalid_margin_boolean_is_not_numeric():
@@ -187,14 +202,37 @@ def test_invalid_margin_boolean_is_not_numeric():
     _assert_fail_closed(parsed, "margin_not_numeric")
 
 
-@pytest.mark.parametrize("value", ["high", "0.78"])
+@pytest.mark.parametrize("value", ["high", "<0.0-1.0>", "null"])
 def test_invalid_confidence_not_numeric(value):
-    # "0.78" as well as prose: the format contract promises a *quoted number* is
-    # discarded, and a numeric-looking string is what catches a coercion that
-    # starts str-parsing gracefully (`Decimal(str(value))` accepts it, where
-    # "high" would raise and merely turn the test red for the wrong reason).
     parsed = parse_target_decision(_text(confidence=value), _CFG)
     _assert_fail_closed(parsed, "confidence_not_numeric")
+
+
+def test_a_quoted_confidence_figure_gets_its_own_tag():
+    # A numeric-looking string is what catches a coercion that starts
+    # str-parsing gracefully (`Decimal(str(value))` accepts it, where "high"
+    # would raise and merely turn the test red for the wrong reason). The
+    # format contract still discards it; only the tag is new.
+    parsed = parse_target_decision(_text(confidence="0.78"), _CFG)
+    _assert_fail_closed(parsed, "confidence_quoted_number")
+
+
+def test_a_quoted_confidence_does_not_prove_a_proposal():
+    # Why this tag stays OUT of the proposal-rate correction set while its
+    # margin sibling goes in: margin is coerced first and a null margin SKIPS
+    # that block rather than failing it, so a maintain_current that proposed
+    # nothing still reaches confidence_quoted_number. Netting it in would count
+    # non-proposals as proposals on the one metric that decides this change.
+    parsed = parse_target_decision(
+        _text(
+            decision_mode="maintain_current",
+            target_side=None,
+            requested_target_margin_pct=None,
+            confidence="0.78",
+        ),
+        _CFG,
+    )
+    _assert_fail_closed(parsed, "confidence_quoted_number")
 
 
 def test_invalid_confidence_boolean_is_not_numeric():

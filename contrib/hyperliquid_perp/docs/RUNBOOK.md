@@ -134,21 +134,32 @@ prompt 的 context／format 契約改 shape 時，另要 bump `cli.py` 的
 只看 prompt 敏感的指標，不看權益曲線。`phase2-target-v3` 就打算照這條例外部署——跨過
 部署點的會是最後成交停在 2026-07-16、此後零成交、策略價值歸零的 `paper-BTC`。
 
+**這條例外附一個硬規則：量測窗內不得夾帶其他輸入面變更。** 切段鍵是
+`prompt_version`，而它只在 context／format **契約改形狀**時才 bump；輸入面的**內容**
+變了（例如把某個 ships-OFF 的 vendor 翻成啟用）不改形狀、不會 bump，`input_payload_hash`
+每個 cycle 本來就不同也切不了段——於是 after 段的前半後半是兩個不同的輸入制度，而資料
+裡完全看不出來。所以跨過 v3 邊界之後、量測窗結束之前，`deploy/paper` **只准**帶 prompt
+變更；若不得不夾帶（含 PR #21 macro／treasuries 那種需要第二個 cutover commit 才生效的
+vendor），這一段量測作廢、bump 到下一個版本戳重來。`paper-BTC` 當初 159 個 cycle 橫跨五個
+制度斷點而無法解讀，就是這條規則不存在的代價。
+
 判讀時**主判準是提案率**（`requested_target_margin_pct` 非 null 的佔比）。**但這一欄
 會低估**：fail-closed 的 cycle 一律把它寫成 NULL，模型實際要求了什麼在 parse 接縫就被
 丟掉了，所以「提了案但格式被擋掉」與「根本沒提案」在這一欄完全同形。量提案率時要把
-**只有在 margin 轉成數字時才到得了**的那五個 tag 的 cycle 加回來算成提案：
+**只可能跟在模型真的給了一個數字 margin 之後**的那六個 tag 的 cycle 加回來算成提案：
 `margin_off_step_grid`／`margin_out_of_range`（值本身被拒）、
 `flat_with_nonzero_margin`／`directional_side_with_zero_margin`／
 `set_target_without_confidence`（三個都排在 `set_target_without_margin` 那道守衛之後，
-null margin 到不了）。這五個要逐一列出，因為這個集合猜不出來。
+null margin 到不了）、以及 `margin_quoted_number`（模型寫了數字但加了引號，例如
+`"35"`——唯一一個發生在轉型**之前**的成員）。這六個要逐一列出，因為這個集合猜不出來。
 
 **不要**用「margin 轉型成功之後發的 tag」當判準——轉型對 null 也算成功，所以
 `invalid_key_risks` 與 `missing_rationale` 在完全沒提案時也到得了（實測：
 `maintain_current` + `requested_target_margin_pct: null` + 空 `key_risks`）。也**不要**
-直接加 `margin_not_numeric`／`confidence_not_numeric`：margin 比 confidence 早轉型，所以
-後者只證明 margin 是 null 或整數；而 `maintain_current` 把 `"null"` 加引號會落進前者。
-兩個都兩義。少了這個修正，已經恢復提案的模型會被讀成「還是不提案」，剛好在這次改動要
+直接加 `margin_not_numeric`／`confidence_not_numeric`：這兩個裝的是「根本不是數字」的
+字串（照抄的佔位符、`maintain_current` 把 `"null"` 加引號、散文），證明不了任何提案。
+`confidence_quoted_number` 同樣**不算**——margin 比 confidence 早轉型，而 null margin 是
+**跳過**轉型不是通過，所以零提案時它照樣到得了。少了這個修正，已經恢復提案的模型會被讀成「還是不提案」，剛好在這次改動要
 判生死的那個指標上；而 `raw_response` 不落地，事後補不回來。信心分布只能
 當輔助，而且必須把 `confidence IS NULL` 當成一個看得見的桶一起畫：fail-closed 的 cycle
 存的是 NULL，所以光是換 prompt 就會讓舊段照抄的信心尖峰整批消失——**模型行為完全沒變

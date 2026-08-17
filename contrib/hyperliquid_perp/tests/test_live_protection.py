@@ -1628,7 +1628,7 @@ def test_an_unreadable_recovery_answer_is_recorded_under_its_own_cause(env):
 
     The recovery probe runs AFTER a wire failure, and the caller's
     ``*_repair_failed`` row names THAT error (here: the timeout). When the probe
-    itself answers unusably -- a misrouted cloid, an unreadable shape -- the
+    itself answers unusably — a misrouted cloid, an unreadable shape — the
     durable trail said "timeout" for a fault that is not one, and a ladder
     exhausted by unreadable answers (and any emergency close it drives) was
     attributed to the wrong cause entirely (2026-08-17 identity-echo review).
@@ -1657,13 +1657,53 @@ def test_an_unreadable_recovery_answer_is_recorded_under_its_own_cause(env):
     failed = [e for e in rows if e["event_type"] == "stop_loss_repair_failed"]
     assert failed, [e["event_type"] for e in rows]
     # The row names the probe's own verdict, not only the wire error that sent
-    # us to it -- and it still names that one too, so neither cause is lost.
+    # us to it — and it still names that one too, so neither cause is lost.
     assert all("answered with cloid" in e["detail"] for e in failed), failed[0]["detail"]
     assert all("network down" in e["detail"] for e in failed), failed[0]["detail"]
     # ...and the recovery still failed closed: the ladder went on to place the
-    # stop for real, so an SL is active -- but it is OURS. The stranger's oid
+    # stop for real, so an SL is active — but it is OURS. The stranger's oid
     # from the misrouted answer was never booked as our resting protection,
     # which is the whole point of refusing to read it.
     active = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
     assert active is not None
     assert active["exchange_order_id"] != "4242"
+
+
+def test_an_unreadable_recovery_reason_does_not_leak_into_later_attempt_rows(env):
+    """The consume-and-clear, pinned.
+
+    Dropping the clear in _log_attempt_failed leaves the whole suite green
+    (2026-08-17 round-2 mutation probe), so nothing guaranteed that a stale
+    verdict from attempt 1's probe could not be stamped onto every later row --
+    including rows whose attempt never reached the wire at all.
+    """
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    # Three attempts: only the FIRST one's recovery probe answers unusably.
+    client.place_script = ["raise", "raise", "raise"]
+    client.status_script = [
+        {
+            "status": "order",
+            "order": {"order": {"oid": 4242, "cloid": "0x" + "cd" * 16}, "status": "open"},
+        },
+        {"status": "unknownOid"},
+        {"status": "unknownOid"},
+    ]
+    mgr = _manager(db, client, gate)
+    mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+
+    details = [
+        e["detail"]
+        for e in repo.iter_protection_order_events(db.conn, "r")
+        if e["event_type"] == "stop_loss_repair_failed"
+    ]
+    assert len(details) == 3, details
+    carrying = [d for d in details if "answered with cloid" in d]
+    assert len(carrying) == 1, details
+    assert carrying[0].startswith("attempt 1:"), carrying[0]

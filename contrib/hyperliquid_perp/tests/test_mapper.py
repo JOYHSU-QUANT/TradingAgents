@@ -697,9 +697,9 @@ def test_candles_identity_match_passes():
 def test_candles_identity_compare_is_exact_not_case_folded():
     """The docstring's "exact match, not hex" decision, pinned.
 
-    ``hex_identity_matches`` sits fifteen lines above ``_require_identity_echo``
-    in the same module, and a "these two do the same thing" cleanup would swap
-    it in with the whole suite green -- after which ``expected_coin="btc"``
+    ``hex_identity_matches`` sits just above ``_require_identity_echo`` in the
+    same module, and a "these two do the same thing" cleanup would swap
+    it in with the whole suite green — after which ``expected_coin="btc"``
     silently accepts BTC bars. Coins and intervals are the venue's own
     vocabulary words, not hex digits, so the compare stays verbatim
     (2026-08-17 mutation probe).
@@ -717,8 +717,8 @@ def test_candles_identity_compare_is_exact_not_case_folded():
 
 def test_candles_wrong_coin_raises_even_with_drop_budget_wide_open():
     # A mis-identified bar is a misrouted RESPONSE, not a transient glitch: it must
-    # abort the whole snapshot -- ETH bars read as BTC would feed the indicators a
-    # full bar of ordinary-looking numbers -- never be dropped under the per-bar budget.
+    # abort the whole snapshot — ETH bars read as BTC would feed the indicators a
+    # full bar of ordinary-looking numbers — never be dropped under the per-bar budget.
     with pytest.raises(MalformedResponseError, match=r"candleSnapshot\[0\] carries coin 'ETH'"):
         mapper.map_candles(
             [_bar(s="ETH")], expected_coin="BTC", expected_interval="1m", max_drop_fraction=1.0

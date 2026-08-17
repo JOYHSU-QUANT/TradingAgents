@@ -264,7 +264,8 @@ PROTECTION_ORDER_EVENT_TYPES = frozenset(
 # file older than every backfill window is reachable by nothing). Resolution is
 # PER TYPE (§12.3): only ``fill_unmapped`` rows carry the §14.2 dedupe key in
 # ``exchange_value`` and resolve by anti-join against ``fills.exchange_fill_key``;
-# ``fill_malformed`` (bare tid / content digest) and the two drift types
+# ``fill_malformed`` (a bare tid, a content digest, or an ``envelope-`` fact key
+# for a fault that belongs to the STREAM rather than to one message) and the two drift types
 # (``key|digest`` describing fills that ARE booked) can never match that column
 # and resolve by human review via PR 4's ``action_taken``.
 RECONCILIATION_CASE_TYPES = frozenset(

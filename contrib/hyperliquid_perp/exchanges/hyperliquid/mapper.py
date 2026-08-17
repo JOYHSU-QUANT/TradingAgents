@@ -374,10 +374,11 @@ def map_candles(
     would feed ATR/RSI/regime a full bar of ordinary-looking numbers each — so
     it raises immediately rather than joining the per-bar drop budget:
     mis-identity is systematic, not a transient glitch, and one such bar
-    indicts the whole response. A bar MISSING the echo under a requested check is format drift
-    and raises the same way (strictness confirmed 2026-08-17). ``None`` (the
-    default) skips the check — production callers must pass both; the defaults
-    exist so identity-agnostic tests need not decorate every synthetic bar.
+    indicts the whole response. A bar MISSING the echo under a requested check
+    is format drift and raises the same way (strictness confirmed 2026-08-17).
+    ``None`` (the default) skips the check — production callers must pass both;
+    the defaults exist so identity-agnostic tests need not decorate every
+    synthetic bar.
     """
     if raw_candles is None:
         # A null payload is an anomaly, not "no candles" — fail loud so the run

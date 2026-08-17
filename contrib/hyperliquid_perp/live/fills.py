@@ -109,6 +109,9 @@ _FEE_TOKEN_USDC = "USDC"
 # in _malformed_key below, which is right for a single bad fill.
 _ENVELOPE_WRONG_USER_FACT_KEY = "envelope-wrong-user"
 _ENVELOPE_NO_FILLS_FACT_KEY = "envelope-no-fills-list"
+# Reserved: _malformed_key must never DERIVE one of these from an untrusted
+# payload, or the two would silently share one evidence file and one case row.
+_RESERVED_FACT_KEYS = frozenset({_ENVELOPE_WRONG_USER_FACT_KEY, _ENVELOPE_NO_FILLS_FACT_KEY})
 
 
 def _malformed_key(raw: Any) -> str:
@@ -127,7 +130,14 @@ def _malformed_key(raw: Any) -> str:
     """
     if isinstance(raw, dict):
         tid = raw.get("tid")
-        if tid is not None and str(tid) != "":
+        # A malformed payload's tid is UNTRUSTED and stringifies to anything at
+        # all, including one of the envelope fact keys above — and that string
+        # collision would silently discard this payload's evidence (``once``
+        # returns the existing file) and suppress its case row (the fact key is
+        # already recorded), which is the precise silent loss the digest exists
+        # to prevent. Reserved keys therefore fall through to the digest; a real
+        # tid is an integer and never reaches this branch.
+        if tid is not None and str(tid) not in ("", *_RESERVED_FACT_KEYS):
             return str(tid)
     return f"unparsed-{_payload_digest(raw)}"
 
@@ -1303,6 +1313,14 @@ class LiveFillProcessor:
                 # between several. The recorded payload is the header alone —
                 # enough to prove the fact, and another wallet's fill data has
                 # no business on our disk.
+                #
+                # Two costs, taken deliberately. A stream that later serves a
+                # DIFFERENT stranger adds no second file and no second case: the
+                # durable backlog names the first address, the rest live only in
+                # the log. And because the fills themselves are not kept, one
+                # cannot tell after the fact whether a mislabeled envelope was
+                # carrying our own fills. Both are the price of one stampable
+                # case per fault, which is what keeps the run recoverable.
                 self._record_malformed(
                     {"channel": message.get("channel"), "data": {"user": envelope_user}},
                     f"userFills envelope carries user {envelope_user!r}, expected "

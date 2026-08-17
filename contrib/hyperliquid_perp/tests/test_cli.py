@@ -3566,8 +3566,8 @@ def test_the_daemon_hands_the_fill_processor_the_signed_wallet(tmp_path, live_se
     left at None, so the cli call sites are the load-bearing part. The sibling
     pin in test_live_smoke_cli.py drives ``live-smoke`` and therefore reaches
     only the smoke constructor; deleting the kwarg from the DAEMON constructor
-    -- the processor handed to the live loop and to FillBackfiller, the one that
-    ingests real userFills for weeks -- left the whole suite green
+    — the processor handed to the live loop and to FillBackfiller, the one that
+    ingests real userFills for weeks — left the whole suite green
     (2026-08-17 identity-echo mutation probe). Same shape, and same reason, as
     the suite_authored pin above.
     """

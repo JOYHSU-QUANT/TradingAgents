@@ -1921,6 +1921,11 @@ def test_the_wallet_mismatch_evidence_keeps_the_header_not_the_other_wallets_fil
     )
     [evidence] = list(tmp_path.glob("fill_parse_error-*.json"))
     body = evidence.read_text(encoding="utf-8")
+    # The header IS kept — asserted positively, because the wallet address
+    # alone would also be satisfied by the error string written beside it, and
+    # a future change narrowing the payload to {} would slip past the
+    # absence-shaped assertions below.
+    assert '"channel": "userFills"' in body
     assert _OTHER_WALLET in body  # the fact itself is recorded
     assert "98765.4" not in body  # ...but not the stranger's fills
     assert "4242" not in body
@@ -1946,4 +1951,67 @@ def test_a_persistent_shape_drift_records_one_fact_not_one_per_message(db, clock
     # channel's data and the drifted shape is the whole clue, so the one file
     # kept is the FIRST full message rather than a summary of it.
     [evidence] = list(tmp_path.glob("fill_parse_error-*.json"))
-    assert '"orders"' in evidence.read_text(encoding="utf-8")
+    # ``[0]`` pins BOTH halves of that claim: a full message rather than a
+    # summary of one, and the FIRST of the five rather than whichever arrived
+    # last (``once`` keeps the earliest file for a key).
+    assert '"orders": [0]' in evidence.read_text(encoding="utf-8")
+
+
+def test_two_different_wrong_wallets_still_record_one_fact(db, clock, tmp_path):
+    """The case the CONSTANT key exists for -- and the one a single wallet hides.
+
+    With one offending wallet the header payload is byte-identical every
+    message, so the derived digest already collapses to a single key: deleting
+    ``key=_ENVELOPE_WRONG_USER_FACT_KEY`` leaves the single-wallet tests green
+    (2026-08-17 round-2 mutation probe). It is a stream serving SEVERAL wrong
+    addresses that separates the two -- distinct digests, one blocking case per
+    address, each needing its own human stamp -- which is exactly the scenario
+    the code comment cites as its justification.
+    """
+    _live_run(db)
+    _live_order(db)
+    proc = _wallet_proc(db, clock, tmp_path)
+    for i, stranger in enumerate(("0x" + "bb" * 20, "0x" + "cc" * 20, "0x" + "dd" * 20)):
+        assert (
+            proc.ingest_message(
+                {
+                    "channel": "userFills",
+                    "data": {"user": stranger, "fills": [_fill(tid=i + 1, sz="1")]},
+                }
+            )
+            == []
+        )
+
+    assert db.conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
+    assert len(list(tmp_path.glob("fill_parse_error-*.json"))) == 1
+    cases = db.conn.execute(
+        "SELECT COUNT(*) FROM exchange_reconciliation_events WHERE case_type = 'fill_malformed'"
+    ).fetchone()[0]
+    assert cases == 1, "a stream serving several wrong wallets is still ONE fault"
+
+
+def test_a_fill_whose_tid_spells_a_fact_key_keeps_its_own_evidence(db, clock, tmp_path):
+    """An untrusted tid must not be able to impersonate an envelope fact key.
+
+    ``_malformed_key`` stringifies the tid, so a payload carrying
+    ``"tid": "envelope-wrong-user"`` would derive the reserved key -- and then
+    ``once`` would hand back the envelope fault's file while the case row was
+    suppressed as already-recorded, silently losing this payload's evidence.
+    """
+    _live_run(db)
+    _live_order(db)
+    proc = _wallet_proc(db, clock, tmp_path)
+    # The envelope fault records first and takes the reserved key.
+    proc.ingest_message(
+        {"channel": "userFills", "data": {"user": _OTHER_WALLET, "fills": [_fill(tid=1)]}}
+    )
+    # ...then a malformed fill tries to derive the same one.
+    impostor = _fill(tid=1)
+    impostor["tid"] = "envelope-wrong-user"
+    del impostor["px"]  # malformed for an ordinary reason, so it takes the §11.3 lane
+    proc.ingest_message({"channel": "userFills", "data": {"fills": [impostor]}})
+
+    files = sorted(f.name for f in tmp_path.glob("fill_parse_error-*.json"))
+    assert len(files) == 2, files
+    assert any("envelope-wrong-user" in name for name in files)
+    assert any("unparsed-" in name for name in files)

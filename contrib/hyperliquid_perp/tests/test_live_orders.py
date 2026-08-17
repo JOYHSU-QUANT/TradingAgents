@@ -30,6 +30,7 @@ from contrib.hyperliquid_perp.live.orders import (
     LiveOrderSubmitter,
     SubmitOutcome,
     local_status_for_exchange_status,
+    parse_order_status,
 )
 from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.persistence import repository as repo
@@ -38,6 +39,8 @@ from contrib.hyperliquid_perp.persistence.cloid import (
     cloid_logical,
 )
 from contrib.hyperliquid_perp.persistence.db import Database
+
+from .conftest import echo_order_status_cloid
 
 _NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
 _LOGICAL = "hta_r_BTC_out1_plan1_open_000_entry"
@@ -77,7 +80,7 @@ class _FakeClient:
         result = self.status_results.pop(0)
         if isinstance(result, Exception):
             raise result
-        return result
+        return echo_order_status_cloid(result, cloid_hex)
 
 
 def _open_gate() -> RealOrderGate:
@@ -901,3 +904,72 @@ def test_pre_wire_store_failure_raises_presubmit_and_leaves_no_evidence(env, mon
     outcome = _submit(submitter)
     assert outcome.outcome == "acknowledged"
     assert len(client.place_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# identity echo (2026-08-17): orderStatus must answer for the queried cloid
+# ---------------------------------------------------------------------------
+
+
+_OTHER_CLOID = "0x" + "cd" * 16
+
+
+def test_order_status_cloid_mismatch_raises_never_reads():
+    # An answer carrying another order's cloid is a misrouted response; reading
+    # its oid/status would bind a stranger's order to this cloid and feed the
+    # verdict into a §8.3 resend decision.
+    payload = {
+        "status": "order",
+        "order": {"order": {"oid": 1, "cloid": _OTHER_CLOID}, "status": "filled"},
+    }
+    with pytest.raises(MalformedResponseError, match="answered with cloid"):
+        parse_order_status(payload, expected_cloid_hex=_HEX)
+
+
+def test_order_status_missing_cloid_raises():
+    # Bot orders always carry a cloid (§8.3 rule 7) and the venue echoes it, so
+    # an inner order WITHOUT one is format drift — the strict side of the
+    # 2026-08-17 decision — and must not quietly disarm the identity check.
+    payload = {"status": "order", "order": {"order": {"oid": 1}, "status": "filled"}}
+    with pytest.raises(MalformedResponseError, match="answered with cloid None"):
+        parse_order_status(payload, expected_cloid_hex=_HEX)
+
+
+def test_order_status_cloid_match_is_case_insensitive():
+    # The hex digits are the identity, not their case (checksummed vs lowercase).
+    payload = {
+        "status": "order",
+        "order": {"order": {"oid": 7, "cloid": _HEX.upper()}, "status": "resting"},
+    }
+    assert parse_order_status(payload, expected_cloid_hex=_HEX) == ("7", "resting")
+
+
+def test_order_status_unknownoid_needs_no_cloid_echo():
+    # The documented miss shape has no order to echo anything from.
+    assert parse_order_status({"status": "unknownOid"}, expected_cloid_hex=_HEX) is None
+
+
+def test_recovery_refuses_a_wrong_cloid_order_status_answer(env):
+    # Caller-level: the §8.3 recovery read propagates the identity failure loud
+    # (the same lane as any malformed payload) instead of back-filling SQLite
+    # with another order's oid and reporting recovered_existing.
+    db, client, _, submitter = env
+    client.place_results = [ExchangeRequestError("timeout")]
+    with pytest.raises(ExchangeRequestError):
+        _submit(submitter)
+    client.status_results = [
+        {
+            "status": "order",
+            "order": {"order": {"oid": 111, "cloid": _OTHER_CLOID}, "status": "resting"},
+        }
+    ]
+    with pytest.raises(MalformedResponseError, match="answered with cloid"):
+        _submit(submitter)
+    # The pre-wire evidence row exists (written before the first send) and is
+    # UNTOUCHED by the misrouted answer: still the pre-wire status, no
+    # stranger's oid back-filled. Asserting the concrete word, not merely
+    # "not open" — an absence-shaped assertion would also pass if a future
+    # change wrote some other wrong-but-not-open status.
+    order = repo.get_order(db.conn, "o1")
+    assert order["exchange_order_id"] is None
+    assert order["status"] == "submitted"

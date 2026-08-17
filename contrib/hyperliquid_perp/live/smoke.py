@@ -1049,7 +1049,10 @@ class SmokeTestRunner:
         ``fill_unmapped`` case against this run forever.
         """
         try:
-            resolved = parse_order_status(self._wire.query_order_by_cloid(cloid_hex_value))
+            resolved = parse_order_status(
+                self._wire.query_order_by_cloid(cloid_hex_value),
+                expected_cloid_hex=cloid_hex_value,
+            )
         except Exception:  # noqa: BLE001 — recovery is best-effort by definition
             logger.warning(
                 "smoke: orderStatus recovery for lost IOC %s could not resolve",
@@ -1325,7 +1328,7 @@ class SmokeTestRunner:
                 ),
             )
         payload = self._wire.query_order_by_cloid(self._last_submit["cloid_hex"])
-        resolved = parse_order_status(payload)
+        resolved = parse_order_status(payload, expected_cloid_hex=self._last_submit["cloid_hex"])
         booked_oid = self._last_submit["oid"]
         if booked_oid:
             if resolved is None:

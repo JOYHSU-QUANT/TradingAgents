@@ -21,13 +21,13 @@ structured target 與 Phase 1 legacy `PerpTradeDecision`）。決策如何從引
 | `type` | 用途 | 主要回傳欄位 | 認證 |
 |---|---|---|---|
 | `metaAndAssetCtxs` | 市場 snapshot：mark/index price、OI、funding、volume。Phase 1 最重要的一支呼叫——所有市場資料都來自這裡。 | `markPx`, `oraclePx`, `funding`, `openInterest`, `dayNtlVlm`, `prevDayPx`, `premium` | 公開 |
-| `candleSnapshot` | OHLCV K 線歷史。Body：`req:{coin, interval:"4h", startTime, endTime}` | `o`, `h`, `l`, `c`, `v`, `t`, `T` | 公開 |
-| `fundingHistory` | 歷史 funding rate。Body：`coin`、`startTime` | `fundingRate`, `premium`, `time` | 公開 |
+| `candleSnapshot` | OHLCV K 線歷史。Body：`req:{coin, interval:"4h", startTime, endTime}` | `o`, `h`, `l`, `c`, `v`, `t`, `T`；每根還回聲 `s`（coin）與 `i`（interval）——Phase 3 會拿它們比對請求，不符或缺少即拒收整份回應 | 公開 |
+| `fundingHistory` | 歷史 funding rate。Body：`coin`、`startTime` | `fundingRate`, `premium`, `time`；每筆還回聲 `coin`（同上，會比對） | 公開 |
 | `predictedFundings` | 預測的下一期 funding rate，含各交易所的預測值可跨場所比較。 | `nextFunding`, `nextFundingTime` | 公開 |
 | `clearinghouseState` | 帳戶狀態：margin、倉位、掛單。Body：`user`——**必須是 wallet address，不是 agent address**。 | `marginSummary`, `accountValue`, `withdrawable`, `assetPositions[].szi`, `entryPx`, `leverage`, `unrealizedPnl`, `liquidationPx`, `openOrders[]` | Wallet address |
 | `userFillsByTime` | 區間成交。Phase 1 用於 realized PnL；Phase 3 是 fill backfill 的來源（`live/fill_backfill.py`）。Body：`user`、`startTime`、`endTime`（epoch ms，由呼叫方給定）。單次回應上限 2000 筆——整頁滿代表被截斷，必須續頁。 | `tid`（穩定 fill id＝§14.2 去重鍵）, `oid`, `coin`, `side`（`"B"`=bid/買、`"A"`=ask/賣）, `sz`, `px`, `closedPnl`（**gross of fee**）, `fee`, `feeToken`, `crossed`（true=taker）, `time` | Wallet address |
 | `userFunding` | 今日 funding 收付。Body：`user`、`startTime=今日 00:00 UTC`；`delta` 要自己加總。 | `delta`, `time` | Wallet address |
-| `orderStatus` | 查詢單一 order 的目前狀態（例如 limit 是否成交）。Body：`user`、`oid`。由 Phase 3 live 層用來輪詢 order 狀態（見 phase3-spec §7）。 | `status: open / filled / canceled / rejected` | Wallet address |
+| `orderStatus` | 查詢單一 order 的目前狀態（例如 limit 是否成交）。Body：`user`、`oid` 或 `cloid`——Phase 3 一律用 **cloid** 查（§8.3 rule 7）。由 live 層用來輪詢 order 狀態（見 phase3-spec §7）。 | `status: open / filled / canceled / rejected`；內層 order 回聲 `cloid`，Phase 3 會比對，不符或缺少即拒收 | Wallet address |
 
 ## Exchange endpoint
 

@@ -43,7 +43,11 @@ from decimal import Decimal, localcontext
 from enum import Enum
 
 from ..domains.perp.margin import DECIMAL_CONTEXT
-from ..exchanges.hyperliquid.errors import ExchangeError, ExchangeThrottledError
+from ..exchanges.hyperliquid.errors import (
+    ExchangeError,
+    ExchangeThrottledError,
+    MalformedResponseError,
+)
 from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
 from ..paper.clock import Clock, WallClock
 from ..paper.stops import (
@@ -244,6 +248,10 @@ class ProtectionManager:
         # per role), and reset wholesale on the next firing.
         self._confirmed_cloid: dict[str, str] = {}
         self._last_seen_firings = 0
+        # The reason the last recovery probe could not read its answer, carried
+        # from _recover_placed_order to the attempt-failed row the caller writes
+        # (see _log_attempt_failed, which consumes and clears it).
+        self._last_recovery_error: str | None = None
 
     @property
     def orders_changed_last_sync(self) -> bool:
@@ -308,7 +316,9 @@ class ProtectionManager:
             # confirmed, so it does not count as evidence.
             return False
         try:
-            parsed = parse_order_status(self._client.query_order_by_cloid(str(hexid)))
+            parsed = parse_order_status(
+                self._client.query_order_by_cloid(str(hexid)), expected_cloid_hex=str(hexid)
+            )
         except Exception:  # noqa: BLE001 — an unresolvable read must not crash the tick
             logger.warning(
                 "orderStatus check for the resting %s (cloid %s) could not resolve — "
@@ -850,15 +860,26 @@ class ProtectionManager:
         error,
         now: datetime,
     ) -> None:
+        # An unreadable recovery answer is folded into THIS row rather than
+        # given one of its own: the §17 event vocabulary is closed, and one
+        # attempt should still leave one attempt-failed row (the exhaustion
+        # count is read off them). ``error`` alone would name the wire failure
+        # that sent us to the probe, never the probe's own verdict — see
+        # _recover_placed_order. Consumed here so it cannot leak into the next
+        # attempt's row (2026-08-17 identity-echo review).
+        recovery_error, self._last_recovery_error = self._last_recovery_error, None
+        detail = f"attempt {attempt}: {error}"
+        if recovery_error is not None:
+            detail += f"; orderStatus recovery answered unusably: {recovery_error}"
         logger.warning(
             "%s %s attempt %d/%d failed: %s",
             "modify" if existing_oid else "place",
             role,
             attempt,
             attempts,
-            error,
+            detail,
         )
-        self._record_event(f"{role}_repair_failed", detail=f"attempt {attempt}: {error}", now=now)
+        self._record_event(f"{role}_repair_failed", detail=detail, now=now)
 
     def _recover_placed_order(
         self,
@@ -890,7 +911,23 @@ class ProtectionManager:
         eventually emergency-close is the safe fallback) and never crash the tick.
         """
         try:
-            parsed = parse_order_status(self._client.query_order_by_cloid(hexid))
+            parsed = parse_order_status(
+                self._client.query_order_by_cloid(hexid), expected_cloid_hex=hexid
+            )
+        except MalformedResponseError as exc:
+            # The venue ANSWERED and the answer was unusable — a misrouted
+            # identity, or a shape we cannot read. Handed to the caller so its
+            # attempt-failed row can name it: that row otherwise names only the
+            # error that SENT us here (a timeout, a duplicate-cloid rejection),
+            # so a ladder exhausted by unreadable answers — and any emergency
+            # close it drives — was filed in the durable trail under a fault
+            # that did not happen. Still fail-closed: an unusable answer is not
+            # a positive confirmation (2026-08-17 identity-echo review).
+            logger.warning(
+                "orderStatus recovery for %s cloid %s answered unusably: %s", role, hexid, exc
+            )
+            self._last_recovery_error = str(exc)
+            return False
         except Exception:  # noqa: BLE001 — an unresolvable recovery must not crash the tick
             logger.warning(
                 "orderStatus recovery for %s cloid %s could not resolve", role, hexid, exc_info=True

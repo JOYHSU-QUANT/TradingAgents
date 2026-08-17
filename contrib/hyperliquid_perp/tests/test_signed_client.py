@@ -24,6 +24,7 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import (
     CancelAck,
     HyperliquidSignedClient,
     OrderAck,
+    _parse_order_ack,
     is_duplicate_cloid_error,
 )
 from contrib.hyperliquid_perp.live.authorization import derive_agent_address
@@ -113,6 +114,26 @@ class _FakeInfo:
         return self.open_orders_result
 
 
+def _echo_ack_cloid(result, cloid):
+    # Ack-shaped sibling of conftest.echo_order_status_cloid: same contract
+    # (echo unless already present, so a test can script a mismatch; copy,
+    # don't mutate the shared canned dicts).
+    if cloid is None or not isinstance(result, dict):
+        return result
+    resp = result.get("response")
+    data = resp.get("data") if isinstance(resp, dict) else None
+    if not isinstance(data, dict) or not isinstance(data.get("statuses"), list):
+        return result
+    statuses = []
+    for s in data["statuses"]:
+        if isinstance(s, dict):
+            for key in ("resting", "filled"):
+                if isinstance(s.get(key), dict) and "cloid" not in s[key]:
+                    s = {**s, key: {**s[key], "cloid": cloid.to_raw()}}
+        statuses.append(s)
+    return {**result, "response": {**resp, "data": {**data, "statuses": statuses}}}
+
+
 class _FakeExchange:
     """Mirrors the SDK signature we rely on; records construction args."""
 
@@ -141,13 +162,13 @@ class _FakeExchange:
 
     def order(self, name, is_buy, sz, limit_px, order_type, reduce_only=False, cloid=None):
         self.order_calls.append((name, is_buy, sz, limit_px, order_type, reduce_only, cloid))
-        return self.order_result
+        return _echo_ack_cloid(self.order_result, cloid)
 
     def modify_order(
         self, oid, name, is_buy, sz, limit_px, order_type, reduce_only=False, cloid=None
     ):
         self.modify_calls.append((oid, name, is_buy, sz, limit_px, order_type, reduce_only, cloid))
-        return self.order_result
+        return _echo_ack_cloid(self.order_result, cloid)
 
     def cancel(self, name, oid):
         self.cancel_calls.append(("oid", name, oid))
@@ -741,3 +762,93 @@ def test_update_leverage_raises_on_error_envelope(fake_exchange):
     client._exchange.leverage_result = {"status": "err", "response": "leverage change rejected"}
     with pytest.raises(ExchangeRequestError, match="leverage change rejected"):
         client.update_leverage(coin="BTC", leverage=1)
+
+
+# ---------------------------------------------------------------------------
+# identity echo (2026-08-17): the ack must answer for the submitted cloid
+# ---------------------------------------------------------------------------
+
+
+_OTHER_CLOID = "0x" + "cd" * 16
+
+
+def test_place_ioc_ack_with_wrong_cloid_raises_not_booked(fake_exchange):
+    # A resting ack naming another cloid must not be booked as THIS order's
+    # acceptance — its oid would misbind, and every later cancel/modify/fill
+    # attach would act on the wrong order. The raise lands on the caller's
+    # malformed-response lane (attempt 'failed'), which §8.3 resolves through
+    # orderStatus — recoverable, unlike a wrong booking.
+    client = _client()
+    client._exchange.order_result = {
+        "status": "ok",
+        "response": {
+            "type": "order",
+            "data": {"statuses": [{"resting": {"oid": 111, "cloid": _OTHER_CLOID}}]},
+        },
+    }
+    with pytest.raises(MalformedResponseError, match="refusing to book"):
+        client.place_ioc_limit(
+            coin="BTC",
+            is_buy=True,
+            size=Decimal("0.01"),
+            limit_price=Decimal("100.5"),
+            cloid_hex=_CLOID,
+        )
+
+
+def test_filled_ack_with_wrong_cloid_raises(fake_exchange):
+    client = _client()
+    client._exchange.order_result = {
+        "status": "ok",
+        "response": {
+            "type": "order",
+            "data": {
+                "statuses": [
+                    {"filled": {"oid": 1, "totalSz": "0.01", "avgPx": "100", "cloid": _OTHER_CLOID}}
+                ]
+            },
+        },
+    }
+    with pytest.raises(MalformedResponseError, match="refusing to book"):
+        client.place_ioc_limit(
+            coin="BTC",
+            is_buy=True,
+            size=Decimal("0.01"),
+            limit_price=Decimal("100.5"),
+            cloid_hex=_CLOID,
+        )
+
+
+def test_ack_missing_cloid_raises_strict():
+    # Missing echo = format drift, the strict side of the 2026-08-17 decision.
+    # Exercised on the parser directly: the fake exchange models the well-behaved
+    # venue (it echoes), so absence is only reachable as venue drift.
+    response = {
+        "status": "ok",
+        "response": {"type": "order", "data": {"statuses": [{"resting": {"oid": 111}}]}},
+    }
+    with pytest.raises(MalformedResponseError, match="answered with cloid None"):
+        _parse_order_ack(response, expected_cloid_hex=_CLOID)
+
+
+def test_ack_cloid_match_is_case_insensitive():
+    response = {
+        "status": "ok",
+        "response": {
+            "type": "order",
+            "data": {"statuses": [{"resting": {"oid": 111, "cloid": _CLOID.upper()}}]},
+        },
+    }
+    ack = _parse_order_ack(response, expected_cloid_hex=_CLOID)
+    assert ack.status == "resting" and ack.exchange_order_id == "111"
+
+
+def test_error_ack_needs_no_cloid_echo():
+    # A rejection books nothing — there is no oid to misbind, and the venue's
+    # error status carries no cloid to compare.
+    response = {
+        "status": "ok",
+        "response": {"type": "order", "data": {"statuses": [{"error": "Insufficient margin"}]}},
+    }
+    ack = _parse_order_ack(response, expected_cloid_hex=_CLOID)
+    assert ack.status == "error"

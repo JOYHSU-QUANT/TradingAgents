@@ -37,7 +37,7 @@ from hyperliquid.utils.types import Cloid
 
 from ...ports import OrderGate
 from .errors import ExchangeError, ExchangeRequestError, MalformedResponseError
-from .mapper import require_decimal
+from .mapper import hex_identity_matches, require_decimal
 from .sdk_client import (
     _BASE_URLS,
     DEFAULT_NETWORK_TIMEOUT_S,
@@ -220,10 +220,32 @@ def _decimal_field(container: Any, key: str, *, kind: str) -> Decimal:
     return require_decimal(_field(container, key, kind=kind), field=f"{kind} {key}")
 
 
-def _parse_order_ack(response: Any) -> OrderAck:
+def _check_ack_cloid(body: Any, *, expected_cloid_hex: str, kind: str) -> None:
+    """The accepted ack must echo the submitted cloid, or nothing is booked.
+
+    Same identity discipline — and the same strict stance on a MISSING echo —
+    as ``live.orders.parse_order_status``; see there for the full rationale.
+    The stake specific to this site: booking a mismatched ack would bind
+    another order's oid to this cloid in the orders row, and every later
+    cancel/modify/fill-attach would act on the wrong order, whereas raising
+    lands on the caller's malformed-response lane (attempt 'failed', outcome
+    unknown), which the §8.3 same-cloid retry resolves through orderStatus.
+    An ``error`` verdict has no identity to check (nothing booked, no oid to
+    misbind).
+    """
+    echoed = body.get("cloid") if isinstance(body, dict) else None
+    if not hex_identity_matches(echoed, expected_cloid_hex):
+        raise MalformedResponseError(
+            f"Hyperliquid {kind} status for cloid {expected_cloid_hex} answered with "
+            f"cloid {echoed!r} — refusing to book another order's ack"
+        )
+
+
+def _parse_order_ack(response: Any, *, expected_cloid_hex: str) -> OrderAck:
     status = _single_status(response, action="order")
     if isinstance(status, dict) and "resting" in status:
         resting = status["resting"]
+        _check_ack_cloid(resting, expected_cloid_hex=expected_cloid_hex, kind="resting order")
         return OrderAck(
             status="resting",
             exchange_order_id=str(_field(resting, "oid", kind="resting order")),
@@ -231,6 +253,7 @@ def _parse_order_ack(response: Any) -> OrderAck:
         )
     if isinstance(status, dict) and "filled" in status:
         filled = status["filled"]
+        _check_ack_cloid(filled, expected_cloid_hex=expected_cloid_hex, kind="filled order")
         return OrderAck(
             status="filled",
             exchange_order_id=str(_field(filled, "oid", kind="filled order")),
@@ -409,7 +432,7 @@ class HyperliquidSignedClient:
             reduce_only,
             Cloid.from_str(cloid_hex),
         )
-        return _parse_order_ack(response)
+        return _parse_order_ack(response, expected_cloid_hex=cloid_hex)
 
     def place_trigger_order(
         self,
@@ -456,7 +479,7 @@ class HyperliquidSignedClient:
             reduce_only,
             Cloid.from_str(cloid_hex),
         )
-        return _parse_order_ack(response)
+        return _parse_order_ack(response, expected_cloid_hex=cloid_hex)
 
     def modify_trigger_order(
         self,
@@ -497,7 +520,7 @@ class HyperliquidSignedClient:
             reduce_only,
             Cloid.from_str(cloid_hex),
         )
-        return _parse_order_ack(response)
+        return _parse_order_ack(response, expected_cloid_hex=cloid_hex)
 
     def cancel_by_oid(self, *, coin: str, exchange_order_id: str) -> CancelAck:
         """Cancel one order by exchange order id (§7 ``cancel``).

@@ -53,7 +53,11 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from ..exchanges.hyperliquid.errors import MalformedResponseError
-from ..exchanges.hyperliquid.mapper import HL_SIDE_TO_LOCAL, require_decimal
+from ..exchanges.hyperliquid.mapper import (
+    HL_SIDE_TO_LOCAL,
+    hex_identity_matches,
+    require_decimal,
+)
 from ..paper.accounting import (
     LiveFillEffect,
     adjustment_ledger_delta,
@@ -73,6 +77,7 @@ from .payloads import write_raw_payload
 from .ws_stream import USER_FILLS_CHANNEL
 
 __all__ = [
+    "ENVELOPE_FACT_KEY_PREFIX",
     "BackfillOutcome",
     "BackfillResult",
     "ExchangeFill",
@@ -98,6 +103,16 @@ logger = logging.getLogger(__name__)
 _FEE_TOKEN_USDC = "USDC"
 
 
+# Fact keys for the two ENVELOPE-level faults, which are properties of the
+# stream rather than of any one message (see ingest_message). Constants, so a
+# condition that repeats at message cadence still records once — mirroring
+# reconcile's _EQUITY_MISMATCH_FACT_KEY, and unlike the per-payload derivation
+# in _malformed_key below, which is right for a single bad fill.
+ENVELOPE_FACT_KEY_PREFIX = "envelope-"
+_ENVELOPE_WRONG_USER_FACT_KEY = f"{ENVELOPE_FACT_KEY_PREFIX}wrong-user"
+_ENVELOPE_NO_FILLS_FACT_KEY = f"{ENVELOPE_FACT_KEY_PREFIX}no-fills-list"
+
+
 def _malformed_key(raw: Any) -> str:
     """A stable, COLLISION-FREE evidence key for a payload that would not parse.
 
@@ -114,8 +129,21 @@ def _malformed_key(raw: Any) -> str:
     """
     if isinstance(raw, dict):
         tid = raw.get("tid")
-        if tid is not None and str(tid) != "":
-            return str(tid)
+        # A malformed payload's tid is UNTRUSTED and stringifies to anything at
+        # all, including an envelope fact key — and that collision would
+        # silently discard this payload's evidence (``once`` hands back the
+        # existing file) and suppress its case row (the fact key is already
+        # recorded), the precise silent loss the digest exists to prevent.
+        #
+        # The whole PREFIX is reserved, not the two literals: ``once`` dedupes
+        # by globbing ``<kind>-<key>-*.json``, so ``envelope-wrong-user-1`` is
+        # a key whose FILE the real fact key's glob matches — an exact-match
+        # guard is one character from being useless. Case-folded because that
+        # glob is case-insensitive on Windows and macOS. A real tid is an
+        # integer and never reaches any of this.
+        derived = "" if tid is None else str(tid)
+        if derived and not derived.lower().startswith(ENVELOPE_FACT_KEY_PREFIX):
+            return derived
     return f"unparsed-{_payload_digest(raw)}"
 
 
@@ -826,11 +854,17 @@ class LiveFillProcessor:
         run_id: str,
         payload_dir: Path,
         clock: Clock | None = None,
+        wallet_address: str | None = None,
     ) -> None:
+        # ``wallet_address`` arms ingest_message's envelope-identity check (the
+        # WS ``userFills`` envelope names the wallet it is for). ``None`` skips
+        # it — identity-agnostic tests — and production wiring passes the
+        # signed client's wallet (both cli.py sites, 2026-08-17).
         self._db = db
         self._run_id = run_id
         self._payload_dir = payload_dir
         self._clock = clock or WallClock()
+        self._wallet_address = wallet_address
 
     def ingest(self, raw_fill: Any, *, fill: ExchangeFill | None = None) -> IngestResult:
         """Apply one raw fill (parse may raise ``MalformedResponseError`` — §11.3).
@@ -1258,12 +1292,69 @@ class LiveFillProcessor:
         if not isinstance(message, dict) or message.get("channel") != USER_FILLS_CHANNEL:
             return []
         data = message.get("data")
+        # Envelope identity (2026-08-17): the WS envelope names the wallet it is
+        # for, and a mismatch means these are ANOTHER wallet's fills — a
+        # subscription mix-up. Not one of them may be applied, but the drain
+        # must survive, so it is recorded as malformed evidence and skipped
+        # (§11.3), like the no-fills-list envelope below. Checked only when the
+        # key is PRESENT: the REST backfill reuses this path through a synthetic
+        # envelope that carries no ``user`` — there the identity lives in the
+        # by-wallet request itself (decision 2026-08-17).
+        if self._wallet_address is not None and isinstance(data, dict) and "user" in data:
+            envelope_user = data["user"]
+            if not hex_identity_matches(envelope_user, self._wallet_address):
+                # Keyed on the FACT, not the message: §11.3's evidence is
+                # written once per fact, and the fact is "this stream is not
+                # serving our wallet". A crossed subscription repeats at fill
+                # cadence with different fills every time, so the derived key
+                # (a digest, there being no ``tid`` on an envelope) would mint a
+                # fresh evidence file AND a fresh blocking fill_malformed case
+                # per message, without bound — the exact growth that key exists
+                # to prevent, and every such case needs its own human stamp
+                # before the run can be clean again. A CONSTANT rather than the
+                # offending address: which wrong wallet it is belongs in the
+                # message (it is there), while an untrusted value would reach a
+                # filename and reopen the cardinality hole if the stream flips
+                # between several. The recorded payload is the header alone —
+                # enough to prove the fact, and another wallet's fill data has
+                # no business on our disk.
+                #
+                # Two costs, taken deliberately. A stream that later serves a
+                # DIFFERENT stranger adds no second file and no second case: the
+                # durable backlog names the first address, the rest live only in
+                # the log. And because the fills themselves are not kept, one
+                # cannot tell after the fact whether a mislabeled envelope was
+                # carrying our own fills. Both are the price of one stampable
+                # case per fault, which is what keeps the run recoverable.
+                self._record_malformed(
+                    {"channel": message.get("channel"), "data": {"user": envelope_user}},
+                    f"userFills envelope carries user {envelope_user!r}, expected "
+                    f"{self._wallet_address!r} — refusing another wallet's fills",
+                    key=_ENVELOPE_WRONG_USER_FACT_KEY,
+                )
+                return []
         fills = data.get("fills") if isinstance(data, dict) else None
         if not isinstance(fills, list):
             # A userFills envelope whose payload is not a fills list is itself
             # malformed — record it and skip, the same §11.3 discipline a bad fill
             # gets, rather than raising into the drain loop.
-            self._record_malformed(message, "userFills message has no fills list")
+            #
+            # Keyed on the fact for the same reason as the wallet branch above:
+            # "envelopes on this channel carry no fills list" is a schema drift,
+            # a property of the stream and not of one message, and it repeats at
+            # message cadence with a different body each time. The derived key
+            # would digest each of those differently and mint an unbounded run
+            # of evidence files and blocking cases — and an envelope-level case
+            # can never resolve itself (reconcile counts it unresolved until a
+            # human stamps it), so the cardinality decides whether the run is
+            # recoverable at all. Unlike the wallet branch this records the WHOLE
+            # message: the drifted shape is the diagnosis, it is our own
+            # channel's data, and ``once`` keeps the first one that carried it.
+            self._record_malformed(
+                message,
+                "userFills message has no fills list",
+                key=_ENVELOPE_NO_FILLS_FACT_KEY,
+            )
             return []
 
         # Parse first, so the batch can be ordered before ANY of it is applied; a
@@ -1283,8 +1374,16 @@ class LiveFillProcessor:
         parsed.sort(key=lambda item: (item[0].fill_time, item[0].exchange_fill_key))
         return [self.ingest(raw_fill, fill=fill) for fill, raw_fill in parsed]
 
-    def _record_malformed(self, raw: Any, error: str) -> None:
+    def _record_malformed(self, raw: Any, error: str, *, key: str | None = None) -> None:
         """Persist a malformed event's raw payload + error, applying nothing (§11.3).
+
+        ``key`` overrides the derived one for a caller whose FACT is not the
+        payload. The default derivation assumes one bad payload = one fact,
+        which holds for a fill; it does not for an ENVELOPE-level fault, where
+        one persistent stream property (wrong wallet, no fills list) re-arrives
+        with different contents at message cadence and would digest differently
+        every time. Those callers name their fact, and the evidence still keeps
+        the first payload that carried it (2026-08-17 identity-echo review).
 
         The whole point of §11.3 is that a payload we could not parse is still
         EVIDENCE — dropped silently, a feed/format change would be invisible until
@@ -1304,7 +1403,7 @@ class LiveFillProcessor:
         ``tid`` is missing, so distinct evidence stays distinct while a re-sighting of
         the SAME payload still dedupes.
         """
-        key = _malformed_key(raw)
+        key = _malformed_key(raw) if key is None else key
         logger.warning("skipping malformed live fill (%s): %r", error, raw)
         raw_path = write_raw_payload(
             payload_dir=self._payload_dir,

@@ -52,6 +52,7 @@ from .fill_backfill import (
     BackfillSummary,
     FillBackfiller,
 )
+from .fills import ENVELOPE_FACT_KEY_PREFIX
 from .orders import local_status_for_exchange_status, parse_order_status
 from .payloads import write_raw_payload
 from .safe_mode import (
@@ -634,8 +635,23 @@ class LiveReconciler:
             if row["action_taken"] is not None:
                 continue
             key = row["exchange_value"]
-            if not key or key.startswith("unparsed-"):
-                unresolved_malformed += 1  # digest-keyed: unkeyable, human territory
+            # Three shapes reach here and only ONE is keyed by a tid: a bare
+            # tid, a ``unparsed-`` digest, and an ``envelope-`` fact key (a
+            # stream-level fault — wrong wallet, channel schema drift). The
+            # latter two are unkeyable and can only be settled by a human.
+            #
+            # The envelope arm is not merely a shortcut. The key it carries is
+            # a CONSTANT this code chose, but the tid the resolver would derive
+            # from it is untrusted input: a venue fill whose tid is literally
+            # "envelope-wrong-user" books under exchange_fill_key
+            # "tid|envelope-wrong-user", and letting the lookup run would find
+            # it and stamp the STREAM fault resolved_fill_booked — retiring the
+            # one signal that says we are being served another wallet's fills,
+            # with no human ever seeing it. fills._malformed_key fences the same
+            # namespace on the write side; this is the read side of that fence
+            # (2026-08-17 exit sweep).
+            if not key or key.startswith("unparsed-") or key.startswith(ENVELOPE_FACT_KEY_PREFIX):
+                unresolved_malformed += 1  # unkeyable: human territory
                 continue
             try:
                 booked = repo.get_fill_by_exchange_key(conn, exchange_fill_key(tid=key))
@@ -932,7 +948,7 @@ class LiveReconciler:
         cloid = local["cloid_hex"]
         oid = str(order.get("oid", "?"))
         try:
-            parsed = parse_order_status(self._query_order_by_cloid(cloid))
+            parsed = parse_order_status(self._query_order_by_cloid(cloid), expected_cloid_hex=cloid)
         except Exception as exc:  # noqa: BLE001 — a failed read is a verdict
             # Log-at-origin, same as _settle_absent_order's sibling tiebreaker:
             # the case detail is an in-memory value (and its row write is
@@ -1080,7 +1096,7 @@ class LiveReconciler:
         order_id = row["order_id"]
         try:
             payload = self._query_order_by_cloid(cloid)
-            parsed = parse_order_status(payload)
+            parsed = parse_order_status(payload, expected_cloid_hex=cloid)
         except Exception as exc:  # noqa: BLE001
             logger.warning("orderStatus for cloid %s failed: %s", cloid, exc)
             return False, ReconciliationCase(

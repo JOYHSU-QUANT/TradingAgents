@@ -14,6 +14,8 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
     UnknownCoinError,
 )
 
+from .conftest import synthetic_bar as _bar
+
 
 def test_market_snapshot_picks_correct_coin(meta_and_asset_ctxs):
     snap = mapper.map_market_snapshot(meta_and_asset_ctxs, "ETH")
@@ -680,3 +682,83 @@ def test_map_sz_decimals_rejects_non_int(bad):
     meta = _meta_with({"name": "BTC", "szDecimals": bad})
     with pytest.raises(MalformedResponseError, match=r"szDecimals"):
         mapper.map_sz_decimals(meta, "BTC")
+
+
+# ---------------------------------------------------------------------------
+# identity echo (2026-08-17): the response must answer THIS request
+# ---------------------------------------------------------------------------
+
+
+def test_candles_identity_match_passes():
+    candles = mapper.map_candles([_bar()], expected_coin="BTC", expected_interval="1m")
+    assert len(candles) == 1
+
+
+def test_candles_identity_compare_is_exact_not_case_folded():
+    """The docstring's "exact match, not hex" decision, pinned.
+
+    ``hex_identity_matches`` sits just above ``_require_identity_echo`` in the
+    same module, and a "these two do the same thing" cleanup would swap
+    it in with the whole suite green — after which ``expected_coin="btc"``
+    silently accepts BTC bars. Coins and intervals are the venue's own
+    vocabulary words, not hex digits, so the compare stays verbatim
+    (2026-08-17 mutation probe).
+    """
+    with pytest.raises(MalformedResponseError, match="carries coin 'BTC'"):
+        mapper.map_candles([_bar()], expected_coin="btc")
+    with pytest.raises(MalformedResponseError, match="carries interval '1m'"):
+        mapper.map_candles([_bar()], expected_interval="1M")
+    with pytest.raises(MalformedResponseError, match="carries coin 'BTC'"):
+        mapper.map_funding_history(
+            [{"coin": "BTC", "time": 1000, "fundingRate": "0.00001", "premium": "0"}],
+            expected_coin="btc",
+        )
+
+
+def test_candles_wrong_coin_raises_even_with_drop_budget_wide_open():
+    # A mis-identified bar is a misrouted RESPONSE, not a transient glitch: it must
+    # abort the whole snapshot — ETH bars read as BTC would feed the indicators a
+    # full bar of ordinary-looking numbers — never be dropped under the per-bar budget.
+    with pytest.raises(MalformedResponseError, match=r"candleSnapshot\[0\] carries coin 'ETH'"):
+        mapper.map_candles(
+            [_bar(s="ETH")], expected_coin="BTC", expected_interval="1m", max_drop_fraction=1.0
+        )
+
+
+def test_candles_wrong_interval_raises():
+    # Same coin, wrong timeframe: a 4h series read as 1m rescales every indicator.
+    with pytest.raises(MalformedResponseError, match="carries interval '4h'"):
+        mapper.map_candles([_bar(i="4h")], expected_coin="BTC", expected_interval="1m")
+
+
+def test_candles_missing_identity_under_check_raises():
+    # Missing echo = format drift, the same loud path as a mismatch (strictness
+    # decision 2026-08-17) — an absent field must not quietly disarm the check.
+    bar = _bar()
+    del bar["s"]
+    with pytest.raises(MalformedResponseError, match="carries coin None"):
+        mapper.map_candles([bar], expected_coin="BTC")
+
+
+def test_candles_identity_check_skipped_when_not_requested():
+    # The None default skips the check (identity-agnostic fixtures elsewhere stay
+    # valid); the production callers always pass both — pinned by the wiring
+    # tests in test_market_data.py.
+    assert len(mapper.map_candles([_bar(s="ETH", i="4h")])) == 1
+
+
+def test_funding_history_wrong_coin_raises():
+    raw = [{"coin": "ETH", "time": 1000, "fundingRate": "0.00001", "premium": "0"}]
+    with pytest.raises(MalformedResponseError, match=r"fundingHistory\[0\] carries coin 'ETH'"):
+        mapper.map_funding_history(raw, expected_coin="BTC", max_drop_fraction=1.0)
+
+
+def test_funding_history_missing_coin_under_check_raises():
+    raw = [{"time": 1000, "fundingRate": "0.00001", "premium": "0"}]
+    with pytest.raises(MalformedResponseError, match="carries coin None"):
+        mapper.map_funding_history(raw, expected_coin="BTC")
+
+
+def test_funding_history_matching_coin_passes():
+    raw = [{"coin": "BTC", "time": 1000, "fundingRate": "0.00001", "premium": "0"}]
+    assert len(mapper.map_funding_history(raw, expected_coin="BTC")) == 1

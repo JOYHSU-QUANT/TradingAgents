@@ -23,6 +23,8 @@ from contrib.hyperliquid_perp.persistence.ids import exchange_fill_key
 from contrib.hyperliquid_perp.persistence.models import PositionState
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 
+from .conftest import echo_order_status_cloid
+
 _NOW = datetime(2026, 7, 16, 8, 0, tzinfo=timezone.utc)
 _HEX = "0x" + "ab" * 16
 _HEX_SL = "0x" + "cd" * 16
@@ -90,7 +92,7 @@ class _Seams:
         result = self.order_status.get(cloid_hex, {"status": "unknownOid"})
         if isinstance(result, Exception):
             raise result
-        return result
+        return echo_order_status_cloid(result, cloid_hex)
 
     def fetch_fills(self, start_ms, end_ms):
         if isinstance(self.fills, Exception):
@@ -691,12 +693,15 @@ def test_equity_within_tolerance_is_clean(env):
 # -- §12.3: fills ------------------------------------------------------------------
 
 
-def _insert_booked_fill(db, *, tid="4521", fill_time):
+def _insert_booked_fill(db, *, tid="4521", fill_time, hex_seed=None):
+    # ``hex_seed`` exists because a tid is only NUMERIC by convention: the wire
+    # type is str-or-int (persistence.ids.usable_fill_tid), so a caller probing
+    # a non-numeric tid needs a cloid that does not derive from int(tid).
     key = exchange_fill_key(tid=tid)
     _insert_local_order(
         db,
         order_id=f"o-fill-{tid}",
-        hex_id="0x" + f"{int(tid):032x}",
+        hex_id="0x" + f"{int(tid) if hex_seed is None else hex_seed:032x}",
         logical=f"log-{tid}",
         exchange_order_id="88",
         status="filled",
@@ -791,6 +796,40 @@ def test_a_malformed_sighting_whose_tid_was_booked_is_swept_resolved(env):
     assert report.clean
     (row,) = _cases(db, "fill_malformed")
     assert row["action_taken"] == "resolved_fill_booked"
+
+
+def test_an_envelope_fault_is_not_cleared_by_a_fill_whose_tid_spells_its_key(env):
+    """The read side of the reserved-namespace fence.
+
+    The envelope fact key is a constant WE choose, but the resolver takes it
+    back out of the row as an untrusted tid: a venue fill whose tid is literally
+    ``envelope-wrong-user`` books under ``tid|envelope-wrong-user``, and letting
+    the lookup run would find it and stamp the STREAM fault
+    ``resolved_fill_booked`` -- retiring the one durable signal that says we are
+    being served another wallet's fills, with no human ever seeing it. The
+    write side is fenced in fills._malformed_key; this is the other half
+    (2026-08-17 exit sweep).
+    """
+    db, seams, reconciler = env
+    with db.transaction() as conn:
+        repo.insert_exchange_reconciliation_event(
+            conn,
+            run_id="r",
+            trigger="live_fill_ingest",
+            case_type="fill_malformed",
+            exchange_value="envelope-wrong-user",
+        )
+    _insert_booked_fill(
+        db, tid="envelope-wrong-user", fill_time=_NOW - timedelta(hours=1), hex_seed=0xEE
+    )
+    seams.fills = [{"tid": "envelope-wrong-user"}]
+
+    report = reconciler.run("heartbeat")
+
+    assert not report.fills_reconciled
+    assert any("malformed fill sighting" in e for e in report.errors)
+    (row,) = _cases(db, "fill_malformed")
+    assert row["action_taken"] is None, "a stream-level fault must wait for a human"
 
 
 def test_a_digest_keyed_malformed_sighting_blocks_until_a_human_stamps_it(env):

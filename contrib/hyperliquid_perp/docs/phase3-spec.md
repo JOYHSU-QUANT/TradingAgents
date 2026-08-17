@@ -495,6 +495,17 @@ order、都有自己的 cloid——不存在 v2 native TWAP 母單「cloid_hex, 
     高估「還活著」可回復（單會繼續被看管、對帳會關掉它），高估「被拒絕」會鑄新單，
     高估「已結束」會丟掉活單。
 
+13. **回應必須回聲它被問的 cloid（2026-08-17 新增）**。`orderStatus` 的內層 order、
+    以及被接受的下單 ack（`resting` / `filled`）都會帶 `cloid`；不符**或缺少**一律
+    以 `MalformedResponseError` 拒收，不讀它的 `oid`／`status`。理由是 rule 3／9／10
+    全都把 orderStatus 當成「rejected 還是 exists」與「確認不存在」的權威，而一個
+    誤路由的答案會把別人的 oid 綁到我們的 cloid 上，並可能壓抑或授權一次重送。
+    **缺少也擋**是刻意的（不是「有才比」）：本 client 每張單都帶 cloid（rule 7），
+    所以沒有回聲就是格式漂移，而 testnet live-smoke 會在上 mainnet 前先撞到。
+    拒收後走的是 **rule 11 的未知結果車道**（attempt 記 `failed`、同 cloid 重試由
+    orderStatus 收斂），**不**構成 rule 5 的「確認不存在」，因此不授權重送。
+    `error` 判決不做此檢查——它沒有記帳任何東西，也沒有 oid 會被綁錯。
+
 ## 9. Sliced TWAP Execution（v3 全章改寫）
 
 Phase 3 的正常 entry / rebalance path 使用**自管切片 TWAP**：由 live 引擎
@@ -872,6 +883,14 @@ ws_reconnected
 ws_event_parse_failed
 → record raw payload + error
 → do not apply malformed event
+
+ws_envelope_wrong_user / ws_envelope_no_fills_list
+→ 整個 envelope 被拒（wrong_user 的 envelope 本身良構，錯的是身分；
+   no_fills_list 則是 envelope 的形狀本身不對）
+→ 以固定 fact key 記一次，不是每則訊息一個 digest
+   （wrong_user 只留表頭，不留對方的成交明細）
+→ 不套用其中任何一筆；drain 繼續
+→ 一列擋 verdict 的 fill_malformed case，只能人工 stamp
 ```
 
 ### 11.4 併發模型（v3 新增）
@@ -953,8 +972,9 @@ resolution 不改寫 case rows（它們是 log），且**「已解決」的定�
   fill 但 SQLite 沒記錄」那一列的已知起點清單（含 `detail` JSON 內的
   `exchange_fill_time`，給補抓窗口定位）；「已解決」= anti-join 不再命中（§8.3
   recovery 補上 mapping 後 re-ingest 入帳即自然除帳）。
-- **`fill_malformed`**：`exchange_value` 是裸 tid 或 content digest（§11.3 的 malformed
-  key），**永遠 join 不到** `fills.exchange_fill_key`。它代表「有一筆看不懂的 payload」
+- **`fill_malformed`**：`exchange_value` 是裸 tid、content digest，或 `envelope-` 開頭的
+  **固定 fact key**（§11.3 的 malformed key 三種形狀），**永遠 join 不到**
+  `fills.exchange_fill_key`。它代表「有一筆看不懂的 payload」
   而非「有一筆確定的 fill 沒入帳」；解決路徑是人工檢視證據檔（修 parser、或確認
   payload 本來就是垃圾），由 PR 4 的 sweep 以 `action_taken` 標記處置。
   **未 stamp `action_taken` 者擋住 verdict（2026-07-17 定案）**：交易所報過、SQLite
@@ -962,9 +982,11 @@ resolution 不改寫 case rows（它們是 log），且**「已解決」的定�
   倉位尺寸推歪、又藏在 equity 容差內，audit-only 會讓 run 判 clean 照常交易——故
   改為擋 clean、在 report 的 `errors` 具名，直到人工 stamp 才放行；裸 tid 的 sighting
   若事後被 §8.3 recovery 補入帳，sweep 仍自動標 `resolved_fill_booked` 除帳。
+  **`envelope-` fact key 不吃這條自動車道**：它記的是串流層故障（訂閱錯錢包、channel
+  schema 漂移），不是某一筆 fill，沒有任何 fill 能證明它已解決——只能人工 stamp。
   人工標記的**工具**是 `safe-mode --stamp-case <event_id> --action "<處置說明>"`
-  （event_id 由 `safe-mode --status` 的 open-cases 清單提供）：digest-keyed 的
-  sighting 永遠 join 不到 fills、自動車道永遠救不了它，若無此指令，交易所丟一筆
+  （event_id 由 `safe-mode --status` 的 open-cases 清單提供）：digest-keyed 與
+  `envelope-` keyed 的 sighting 永遠 join 不到 fills、自動車道永遠救不了它，若無此指令，交易所丟一筆
   看不懂的 payload 就會讓 run 永久卡在 safe mode，只能對正式庫手寫 SQL。已記錄的
   處置不覆寫（第一筆就是稽核事實），且 stamp 不等於恢復交易——仍須過下一輪對帳。
   **`fill_unmapped` 具名拒絕 stamp**：它的「已解決」是對 `fills` 的 anti-join（見

@@ -323,17 +323,62 @@ def map_sz_decimals(meta_and_asset_ctxs: Any, coin: str) -> int:
     return raw
 
 
+def hex_identity_matches(value: Any, expected: str) -> bool:
+    """Whether a response-echoed hex identifier names ``expected``.
+
+    Case-insensitive: the hex digits are the identity, not their case
+    (checksummed vs lowercase). A non-string never matches — absence or a
+    malformed echo must not quietly pass an identity check. Shared by every
+    identity-echo site (order status, order ack, fills envelope) so the
+    matching semantics cannot drift apart.
+    """
+    return isinstance(value, str) and value.lower() == expected.lower()
+
+
+def _require_identity_echo(
+    rec: dict, index: int, *, site: str, key: str, label: str, expected: str | None
+) -> None:
+    """Raise unless ``rec`` echoes the request's identity (``None`` skips).
+
+    Exact match, not hex: coins and intervals are the venue's own vocabulary
+    words, compared verbatim.
+    """
+    if expected is not None and rec.get(key) != expected:
+        raise MalformedResponseError(
+            f"{site}[{index}] carries {label} {rec.get(key)!r}, expected "
+            f"{expected!r} — response does not match the request"
+        )
+
+
 # --------------------------------------------------------------------------
 # candleSnapshot -> [Candle]
 # --------------------------------------------------------------------------
 
 
-def map_candles(raw_candles: Any, *, max_drop_fraction: float = _MAX_DROP_FRACTION) -> list[Candle]:
+def map_candles(
+    raw_candles: Any,
+    *,
+    max_drop_fraction: float = _MAX_DROP_FRACTION,
+    expected_coin: str | None = None,
+    expected_interval: str | None = None,
+) -> list[Candle]:
     """Map a ``candleSnapshot`` list to ``Candle`` objects, oldest first.
 
     Drops individual malformed bars (transient glitch), but raises
     :class:`MalformedResponseError` if more than ``max_drop_fraction`` of the bars
     are bad — a gappy series silently skews the downstream indicators.
+
+    ``expected_coin`` / ``expected_interval`` are the request's identity, and
+    every bar echoes its own back (``"s"`` / ``"i"``). A bar carrying a
+    DIFFERENT identity is a misrouted response — ETH/1m bars read as BTC/4h
+    would feed ATR/RSI/regime a full bar of ordinary-looking numbers each — so
+    it raises immediately rather than joining the per-bar drop budget:
+    mis-identity is systematic, not a transient glitch, and one such bar
+    indicts the whole response. A bar MISSING the echo under a requested check
+    is format drift and raises the same way (strictness confirmed 2026-08-17).
+    ``None`` (the default) skips the check — production callers must pass both;
+    the defaults exist so identity-agnostic tests need not decorate every
+    synthetic bar.
     """
     if raw_candles is None:
         # A null payload is an anomaly, not "no candles" — fail loud so the run
@@ -349,6 +394,12 @@ def map_candles(raw_candles: Any, *, max_drop_fraction: float = _MAX_DROP_FRACTI
             raise MalformedResponseError(
                 f"candleSnapshot[{i}] is {type(c).__name__}, expected dict"
             )
+        _require_identity_echo(
+            c, i, site="candleSnapshot", key="s", label="coin", expected=expected_coin
+        )
+        _require_identity_echo(
+            c, i, site="candleSnapshot", key="i", label="interval", expected=expected_interval
+        )
     candles: list[Candle] = []
     for i, c in enumerate(raw_candles):
         try:
@@ -410,13 +461,22 @@ def map_candles(raw_candles: Any, *, max_drop_fraction: float = _MAX_DROP_FRACTI
 
 
 def map_funding_history(
-    raw: Any, *, max_drop_fraction: float = _MAX_DROP_FRACTION
+    raw: Any,
+    *,
+    max_drop_fraction: float = _MAX_DROP_FRACTION,
+    expected_coin: str | None = None,
 ) -> list[FundingPoint]:
     """Map a ``fundingHistory`` list to ``FundingPoint`` objects, oldest first.
 
     Drops individual malformed points (transient glitch), but raises
     :class:`MalformedResponseError` if more than ``max_drop_fraction`` of the points
     are bad — a truncated window silently skews the funding z-score.
+
+    ``expected_coin`` is the request's identity, echoed per point as ``"coin"``.
+    Same discipline as ``map_candles``: a different or missing echo under a
+    requested check raises immediately (misrouted response / format drift, not
+    a per-point glitch); ``None`` skips the check for identity-agnostic tests,
+    and production callers must pass it.
     """
     if raw is None:
         # A null payload is an anomaly, not "no history" — fail loud (see map_candles).
@@ -430,6 +490,9 @@ def map_funding_history(
             raise MalformedResponseError(
                 f"fundingHistory[{i}] is {type(p).__name__}, expected dict"
             )
+        _require_identity_echo(
+            p, i, site="fundingHistory", key="coin", label="coin", expected=expected_coin
+        )
     points: list[FundingPoint] = []
     for i, p in enumerate(raw):
         try:

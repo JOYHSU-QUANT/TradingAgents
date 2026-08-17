@@ -38,6 +38,7 @@ from contrib.hyperliquid_perp.live.smoke import SMOKE_TEST_KEYS
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 
+from .conftest import echo_order_status_cloid
 from .test_cli import _seed_live_run_with_genesis_subset as _seed_genesis_run
 from .test_live_startup import _clearinghouse
 from .test_live_validation import _healthy
@@ -234,7 +235,10 @@ def smoke_seams(monkeypatch):
         def query_order_by_cloid(self, cloid_hex):
             # The fake books every IOC (full-fill echo), so test 4's cloid
             # resolves — the real Info hit shape from live/orders.py.
-            return {"status": "order", "order": {"order": {"oid": 1}, "status": "filled"}}
+            return echo_order_status_cloid(
+                {"status": "order", "order": {"order": {"oid": 1}, "status": "filled"}},
+                cloid_hex,
+            )
 
         def user_fills_by_time(self, start_time_ms, end_time_ms=None):
             return []
@@ -337,6 +341,35 @@ def test_the_cli_hands_the_manager_the_clients_own_timeout(tmp_path, monkeypatch
     # The number the failed attempt would actually burn, not None: the whole point
     # is that the constructor and the CLI preflight now read the SAME value.
     assert all(value == 8 for value in seen), seen
+
+
+def test_the_cli_hands_the_fill_processor_the_signed_wallet(tmp_path, monkeypatch, smoke_seams):
+    """The envelope-identity check is armed by wiring, so the wiring is pinned.
+
+    ``LiveFillProcessor.wallet_address`` is optional (identity-agnostic tests
+    construct bare processors), which makes the cli call sites the load-bearing
+    part - exactly the ``network_timeout_s`` shape pinned above: a refactor
+    that rebuilds the construction and drops the argument disarms the check
+    with every other test still green.
+    """
+    # cli.py imports the class lazily inside the command function, so the seam
+    # is the SOURCE module, not a cli attribute.
+    from contrib.hyperliquid_perp.live import fills as fills_mod
+
+    seen: list[object] = []
+    real = fills_mod.LiveFillProcessor
+
+    class _Recording(real):  # type: ignore[misc, valid-type]
+        def __init__(self, **kwargs):
+            seen.append(kwargs.get("wallet_address"))
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(fills_mod, "LiveFillProcessor", _Recording)
+    cfg = _smoke_yaml(tmp_path)
+    dbp = _seed_genesis_run(tmp_path, cfg)
+    assert cli_main(["live-smoke", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)]) == 0
+    assert seen, "no LiveFillProcessor was constructed - the pin proves nothing"
+    assert all(value == _SMOKE_WALLET for value in seen), seen
 
 
 def test_every_row_a_smoke_run_writes_is_marked_including_the_managers(tmp_path, smoke_seams):

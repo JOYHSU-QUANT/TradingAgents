@@ -543,8 +543,8 @@ close 落在同一個時鐘刻度）照樣 exit 5，不會讀成「從來沒有�
 | 看什麼 | 在哪裡 | 正常 | 異常時 |
 |---|---|---|---|
 | kill switch 刷新 | stderr log／`kill_switch_events` | 每 30s 一次 `kill_switch_refreshed` | outage 有**兩種**開頭：一列 `kill_switch_refresh_failed`（同一次中斷只寫一列，不論重試幾次），**或是沉默超過當下 deadline**——進程被砍／卡死時它連失敗都寫不出來，所以**表裡可能一列 `refresh_failed` 都沒有卻仍記到 outage**（這種的長度從**前一列**算起，不是從 deadline 到期那一刻算起）。長度算到下一列 `kill_switch_armed`／`_refreshed`／`_disarmed` 為止（`fired`、`disarm_failed`、撤單 sweep 那幾列**不**結束 outage）。進 safe mode、擋新單，查網路。`validate` 的 refresh 可用率就是用這個時間長度算的，不是用列數 |
-| reconciliation | `exchange_reconciliation_events` | 無 open case | 有 mismatch → safe mode（見下） |
-| protection | `protection_order_events` | 有部位時 SL 在書上 | `stop_loss_repair_exhausted` → unprotected，可能 emergency close |
+| reconciliation | `exchange_reconciliation_events` | 無 open case | 有 mismatch → safe mode（見下）。**`fill_malformed` 且 `exchange_value` 以 `envelope-` 開頭＝串流層故障**（訂閱錯錢包／channel schema 漂移），不是單筆 fill 壞掉——先修接線，別急著 stamp（見下方 envelope 專節） |
+| protection | `protection_order_events` | 有部位時 SL 在書上 | `stop_loss_repair_exhausted` → unprotected，可能 emergency close。`*_repair_failed` 的 detail 若帶 `orderStatus recovery answered unusably:`，代表修復梯是被**交易所答非所問**耗盡的（誤路由），不是網路中斷——查的方向完全不同 |
 | 中途健檢 | `validate --run-id live-BTC --db live_trading.db` | exit 4（一致、未滿） | exit 5 → 停下來調查 |
 
 **Safe mode**（§13）：進入來源有 WS 斷線 > 5min、kill switch 刷新失敗、
@@ -565,6 +565,25 @@ python -m contrib.hyperliquid_perp safe-mode --run-id live-BTC --db live_trading
 python -m contrib.hyperliquid_perp safe-mode --run-id live-BTC --db live_trading.db \
   --stamp-case <event_id> --action "已確認為交易所延遲、無需動作"
 ```
+
+**⚠️ envelope-* 的 case 不適用上面那個範例。** `fill_malformed` 有一類 case 的
+`exchange_value` 是 **`envelope-` 開頭的固定字串**，它記的不是「某一筆 fill 壞掉」，
+而是**整條 WS 串流層級的故障**。stamp 掉它等於把唯一的訊號消音，而且**不可逆**：
+這類 case 刻意用固定 key（否則錯線期間每則訊息都會生一列、每列都要人工 stamp），
+所以同一個 run 一旦 stamp 過，之後即使故障還在，也**不會再寫第二列**。
+
+| `exchange_value` | 意思 | 先做什麼 |
+|---|---|---|
+| `envelope-wrong-user` | `userFills` **這條 WS 串流**送來的是別的錢包的成交，本 run 自己的成交不再從 socket 進來（沒有任何一筆髒資料被寫入）。帳本不會就此漂掉——每一輪對帳的 REST backfill 走的是不帶 `user` 的合成 envelope，不受這個檢查影響，仍照常補記自己的 fills；真正的風險是**落在 backfill 視窗之外**的成交，以及 case 擋住 verdict 期間 run 進 manual safe mode 不再開新曝險。 | **先停 run**，核對 `live.wallet_address` 與 agent key 是否同一個錢包、SDK 訂閱是否被別處覆寫。修好重啟後 backfill 會把視窗內漏掉的補齊。**確認訂閱正確之後**才 stamp。 |
+| `envelope-no-fills-list` | 該 channel 的 envelope 不再帶 `fills` 陣列——交易所 schema 漂移。 | 讀證據檔（**完整保留了第一則訊息**，形狀就是線索），確認新格式後改 parser，再 stamp。 |
+
+證據檔在 `payloads/<run_id>/fill_parse_error-envelope-*.json`。`envelope-wrong-user`
+那支**只留表頭**（channel＋對方位址），刻意不留對方的成交明細——所以事後無法從磁碟
+反推「那些 fills 其實是不是我們的」，這是換取「一個故障一列可 stamp 的 case」的代價。
+
+（升級注意：本版之前這兩類故障是按訊息內容 digest 記的，key 長 `unparsed-<digest>`。
+既有 run 若已有那種列，本版第一次再遇到同一故障會另外寫一列新 key 的——多 stamp 一次，
+沒有證據遺失。）
 
 ---
 
@@ -661,5 +680,6 @@ mode 切換都手動改 config（§22／§26）。
 | `live.allow_real_orders is false` | live-smoke／--loop 要真下單；設 `allow_real_orders: true` 並備妥 agent key，或 live-smoke 用 `--dry-run`。 |
 | `validate` exit 5、replay unverifiable | store 帳本對不上；先查（別盲目重啟），必要時 `safe-mode --status`。 |
 | run 反覆進 manual safe mode | 查 `safe-mode --status` 的 open cases；換 coin／改 run 定義是硬錯誤，用新 run-id。 |
+| `answered with cloid ...` ／ `refusing to book another order's ack` ／ `carries coin/interval ... response does not match the request` ／ `userFills envelope carries user ...` | **身分回聲不符**：交易所（或中間的 proxy）拿別的單／別的商品／別的錢包的資料回答我們的請求，也可能是 client 指向了錯的錢包。全部 **fail-closed**——沒有任何一筆被記帳。訂單側走 §8.3 同 cloid 的 orderStatus 恢復（attempt 記 `failed`＝結果未知，不會換新 cloid 重送）；K 線／funding 側該 tick 的 market read 中止、下一根 4h 重來；fills 側留證據後 drain 繼續（見 §6 的 envelope 專節）。**缺少**回聲欄位和不符一樣擋——這是刻意的，venue 格式漂移應該由 testnet live-smoke 先撞到。 |
 
 更多規格細節見 [phase3-spec](./phase3-spec.md)。

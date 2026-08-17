@@ -1621,3 +1621,49 @@ def test_orders_changed_last_sync_tracks_real_order_changes(env):
     )
     assert outcome is ProtectionOutcome.FLAT
     assert mgr.orders_changed_last_sync  # the flat clear cancelled resting orders
+
+
+def test_an_unreadable_recovery_answer_is_recorded_under_its_own_cause(env):
+    """The §17 trail must not file an identity fault under the error that preceded it.
+
+    The recovery probe runs AFTER a wire failure, and the caller's
+    ``*_repair_failed`` row names THAT error (here: the timeout). When the probe
+    itself answers unusably -- a misrouted cloid, an unreadable shape -- the
+    durable trail said "timeout" for a fault that is not one, and a ladder
+    exhausted by unreadable answers (and any emergency close it drives) was
+    attributed to the wrong cause entirely (2026-08-17 identity-echo review).
+    """
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    client.place_script = ["raise"]  # ack lost -> recovery probe runs
+    # The venue answers, but for ANOTHER order: parse_order_status raises
+    # MalformedResponseError rather than handing back a stranger's status.
+    client.status_script = [
+        {
+            "status": "order",
+            "order": {"order": {"oid": 4242, "cloid": "0x" + "cd" * 16}, "status": "open"},
+        }
+    ]
+    mgr = _manager(db, client, gate)
+    mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+
+    rows = list(repo.iter_protection_order_events(db.conn, "r"))
+    failed = [e for e in rows if e["event_type"] == "stop_loss_repair_failed"]
+    assert failed, [e["event_type"] for e in rows]
+    # The row names the probe's own verdict, not only the wire error that sent
+    # us to it -- and it still names that one too, so neither cause is lost.
+    assert all("answered with cloid" in e["detail"] for e in failed), failed[0]["detail"]
+    assert all("network down" in e["detail"] for e in failed), failed[0]["detail"]
+    # ...and the recovery still failed closed: the ladder went on to place the
+    # stop for real, so an SL is active -- but it is OURS. The stranger's oid
+    # from the misrouted answer was never booked as our resting protection,
+    # which is the whole point of refusing to read it.
+    active = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
+    assert active is not None
+    assert active["exchange_order_id"] != "4242"

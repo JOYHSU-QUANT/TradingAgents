@@ -1870,3 +1870,80 @@ def test_envelope_user_ignored_when_no_wallet_configured(db, clock, tmp_path):
     }
     results = proc.ingest_message(msg)
     assert [r.outcome for r in results] == [IngestOutcome.APPLIED]
+
+
+def test_a_persistent_wallet_mixup_records_one_fact_not_one_per_message(db, clock, tmp_path):
+    """A crossed subscription is ONE fact, however many messages it spans.
+
+    The envelope carries no ``tid``, so _malformed_key digests the payload --
+    and a real mix-up streams a DIFFERENT set of fills every message. Handing
+    the whole envelope over would mint a fresh evidence file and a fresh
+    BLOCKING fill_malformed case per message, unbounded, which is the exact
+    growth that key exists to prevent (see _record_malformed's docstring). Each
+    such case can only be cleared by a human `safe-mode --stamp-case`, one at a
+    time, so the cardinality is what makes the check usable at all.
+    """
+    _live_run(db)
+    _live_order(db)
+    proc = _wallet_proc(db, clock, tmp_path)
+    for tid in range(1, 6):
+        assert (
+            proc.ingest_message(
+                {
+                    "channel": "userFills",
+                    "data": {"user": _OTHER_WALLET, "fills": [_fill(tid=tid, sz="1")]},
+                }
+            )
+            == []
+        )
+
+    assert db.conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
+    assert len(list(tmp_path.glob("fill_parse_error-*.json"))) == 1
+    cases = db.conn.execute(
+        "SELECT COUNT(*) FROM exchange_reconciliation_events WHERE case_type = 'fill_malformed'"
+    ).fetchone()[0]
+    assert cases == 1, "one crossed subscription must not mint one blocking case per message"
+
+
+def test_the_wallet_mismatch_evidence_keeps_the_header_not_the_other_wallets_fills(
+    db, clock, tmp_path
+):
+    # Two reasons the evidence is the header alone: it is what makes the key
+    # stable (above), and another wallet's fill data has no business on our disk.
+    _live_run(db)
+    _live_order(db)
+    proc = _wallet_proc(db, clock, tmp_path)
+    proc.ingest_message(
+        {
+            "channel": "userFills",
+            "data": {"user": _OTHER_WALLET, "fills": [_fill(tid=4242, px="98765.4")]},
+        }
+    )
+    [evidence] = list(tmp_path.glob("fill_parse_error-*.json"))
+    body = evidence.read_text(encoding="utf-8")
+    assert _OTHER_WALLET in body  # the fact itself is recorded
+    assert "98765.4" not in body  # ...but not the stranger's fills
+    assert "4242" not in body
+
+
+def test_a_persistent_shape_drift_records_one_fact_not_one_per_message(db, clock, tmp_path):
+    # The sibling of the wallet-mixup cardinality rule, in the same method: a
+    # channel whose envelopes stop carrying a fills list is ONE schema drift,
+    # and it repeats at message cadence with a different body every time.
+    _live_run(db)
+    _live_order(db)
+    proc = _wallet_proc(db, clock, tmp_path)
+    for i in range(5):
+        assert proc.ingest_message({"channel": "userFills", "data": {"orders": [i]}}) == []
+
+    assert len(list(tmp_path.glob("fill_parse_error-*.json"))) == 1
+    cases = db.conn.execute(
+        "SELECT COUNT(*) FROM exchange_reconciliation_events WHERE case_type = 'fill_malformed'"
+    ).fetchone()[0]
+    assert cases == 1, "one schema drift must not mint one blocking case per message"
+    # Bounding the CARDINALITY must not cost the diagnosis: unlike the wallet
+    # branch (which withholds a stranger's fills on purpose), this is our own
+    # channel's data and the drifted shape is the whole clue, so the one file
+    # kept is the FIRST full message rather than a summary of it.
+    [evidence] = list(tmp_path.glob("fill_parse_error-*.json"))
+    assert '"orders"' in evidence.read_text(encoding="utf-8")

@@ -965,9 +965,11 @@ def test_recovery_refuses_a_wrong_cloid_order_status_answer(env):
     ]
     with pytest.raises(MalformedResponseError, match="answered with cloid"):
         _submit(submitter)
-    # The pre-wire evidence row exists (written before the first send), but
-    # nothing was back-filled off the misrouted answer: no stranger's oid,
-    # no recovered status.
+    # The pre-wire evidence row exists (written before the first send) and is
+    # UNTOUCHED by the misrouted answer: still the pre-wire status, no
+    # stranger's oid back-filled. Asserting the concrete word, not merely
+    # "not open" -- an absence-shaped assertion would also pass if a future
+    # change wrote some other wrong-but-not-open status.
     order = repo.get_order(db.conn, "o1")
     assert order["exchange_order_id"] is None
-    assert order["status"] != "open"
+    assert order["status"] == "submitted"

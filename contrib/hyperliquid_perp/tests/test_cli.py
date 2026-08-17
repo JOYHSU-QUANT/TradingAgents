@@ -3559,6 +3559,49 @@ def test_the_daemon_writes_unmarked_rows(tmp_path, live_seams, monkeypatch):
     assert all(kwargs.get("network_timeout_s") == 8 for kwargs in seen), seen
 
 
+def test_the_daemon_hands_the_fill_processor_the_signed_wallet(tmp_path, live_seams, monkeypatch):
+    """The envelope-identity check is armed by wiring, pinned at the DAEMON site.
+
+    ``LiveFillProcessor.wallet_address`` is optional and skips the check when
+    left at None, so the cli call sites are the load-bearing part. The sibling
+    pin in test_live_smoke_cli.py drives ``live-smoke`` and therefore reaches
+    only the smoke constructor; deleting the kwarg from the DAEMON constructor
+    -- the processor handed to the live loop and to FillBackfiller, the one that
+    ingests real userFills for weeks -- left the whole suite green
+    (2026-08-17 identity-echo mutation probe). Same shape, and same reason, as
+    the suite_authored pin above.
+    """
+    import contextlib
+
+    # cli.py imports the class lazily inside the command function, so the seam
+    # is the SOURCE module, not a cli attribute.
+    from contrib.hyperliquid_perp.live import fills as fills_mod
+
+    seen: list[object] = []
+    real = fills_mod.LiveFillProcessor
+
+    class _Recording(real):  # type: ignore[misc, valid-type]
+        def __init__(self, **kwargs):
+            seen.append(kwargs.get("wallet_address"))
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(fills_mod, "LiveFillProcessor", _Recording)
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg, run_id="r1")
+    # Recovery is not driven to completion, for the reason the sibling pin above
+    # states: the fact under test is settled at construction, and ``assert seen``
+    # fails loudly if construction stops being reached.
+    with contextlib.suppress(Exception):
+        cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    assert seen, "no LiveFillProcessor was constructed - the pin proves nothing"
+    assert all(value == _LIVE_WALLET for value in seen), seen
+
+
 def test_live_refuses_a_timeout_that_cannot_fit_the_kill_switch_budget(
     tmp_path, capsys, live_seams, monkeypatch
 ):

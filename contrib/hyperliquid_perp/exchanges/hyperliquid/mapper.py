@@ -371,10 +371,10 @@ def map_candles(
     ``expected_coin`` / ``expected_interval`` are the request's identity, and
     every bar echoes its own back (``"s"`` / ``"i"``). A bar carrying a
     DIFFERENT identity is a misrouted response — ETH/1m bars read as BTC/4h
-    would feed ATR/RSI/regime six ordinary-looking numbers each — so it raises
-    immediately rather than joining the per-bar drop budget: mis-identity is
-    systematic, not a transient glitch, and one such bar indicts the whole
-    response. A bar MISSING the echo under a requested check is format drift
+    would feed ATR/RSI/regime a full bar of ordinary-looking numbers each — so
+    it raises immediately rather than joining the per-bar drop budget:
+    mis-identity is systematic, not a transient glitch, and one such bar
+    indicts the whole response. A bar MISSING the echo under a requested check is format drift
     and raises the same way (strictness confirmed 2026-08-17). ``None`` (the
     default) skips the check — production callers must pass both; the defaults
     exist so identity-agnostic tests need not decorate every synthetic bar.

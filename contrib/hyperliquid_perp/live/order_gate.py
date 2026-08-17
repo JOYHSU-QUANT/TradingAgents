@@ -1,7 +1,10 @@
 """The §4.1 real order gate — the one authority on "may we send this order?".
 
 Every live exchange mutation flows through :class:`RealOrderGate`, at one of
-three widths — because §4.1's conditions are not all about the same question:
+four widths — because §4.1's conditions are not all about the same question
+(:meth:`RealOrderGate.check_protective_order`, below, is the fourth: a
+:meth:`~RealOrderGate.check_order` additionally exempt from the safe-mode
+lines):
 
 - :meth:`RealOrderGate.check_new_target` is the FULL §4.1 condition list and
   gates the DECISION: may we act on a new AI target at all? PR 5's engine asks
@@ -43,8 +46,9 @@ three widths — because §4.1's conditions are not all about the same question:
   existing position — so the safe-mode exemption the cancel family earns does
   not transfer to it on merit. It stays here because of ONE path: its only
   caller is the §20.2 smoke suite (test 2), and while a full suite run does
-  clear the safe-mode lines first (the pre-flight §19.1 recovery runs whenever
-  an order-placing test is selected, and proves ``state_reconciled``), a
+  clear the safe-mode lines first (on a real, non-dry-run suite the pre-flight
+  §19.1 recovery runs once an order-placing test is selected, and proves
+  ``state_reconciled``), a
   ``--only update_leverage`` rerun after a failed test 2 does NOT run that
   pre-flight — and rerunning a failed test to overwrite its latest-per-key
   verdict is how the §20.2 gate is meant to be repaired. Behind the safe-mode

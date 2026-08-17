@@ -232,9 +232,10 @@ def _context_refusal_error(
     helper exists to prevent.
 
     ``now`` is the wall clock the staleness guard measures against. The daemon
-    passes the reading its own clock gave when this cycle started running (NOT
-    the scheduled slot, which for a retried or recovered cycle is an older and
-    quite different value); the one-shot callers let it default to
+    passes the reading its own clock gave at the start of THIS attempt (NOT the
+    scheduled slot, which for a retried or recovered cycle is an older and quite
+    different value; each retry re-reads the clock); the one-shot callers let it
+    default to
     :func:`datetime.now`. Every caller in the system builds ``ctx``
     from a live REST read (``_build_context`` is ``build_market_context``'s only
     production caller), so there is no historical-replay mode whose lagging
@@ -332,9 +333,11 @@ def _context_refusal_error(
     # its clock reading precedes the market reads, so a boundary closing in
     # between lands slightly ahead of it. (The one-shot callers read after the
     # fetch and expect no negative at all.) Sharing the bound above keeps that
-    # slack comfortably wide at every interval — its 30m floor is many times the
-    # longest that gap can take — instead of inventing a second threshold to
-    # re-derive whenever the timeout changes.
+    # slack comfortably wide at every interval — the gap spans two REST calls,
+    # so its 30m floor is ~30x the default network_timeout_s — instead of
+    # inventing a second threshold to re-derive whenever that timeout changes.
+    # (config validates network_timeout_s as a number but sets no upper bound,
+    # so a deployment choosing minutes-long timeouts would need this revisited.)
     if age_ms < -limit_ms:
         return (
             f"the newest {coin} candle closes at {_utc_stamp(ctx.as_of)}, which is "

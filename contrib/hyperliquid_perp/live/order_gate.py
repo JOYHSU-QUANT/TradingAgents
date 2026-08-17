@@ -32,10 +32,11 @@ three widths — because §4.1's conditions are not all about the same question:
   point would turn exactly those orders into ours-but-uncancellable — §19.3
   records the failure into the reconciliation verdict (safe mode), §18.2
   refuses to disarm the wallet-wide backstop — so a safety check there would
-  manufacture unclearable state. (The live SL/TP manager cancels too, and ITS
-  coin is the configured symbol; it just shares the exempted entry point.)
-  ``updateLeverage`` has one caller and one lineage — its coin IS this run's
-  configured symbol — so it passes it (2026-08-17, issue #28).
+  manufacture unclearable state. (The live SL/TP manager and the smoke suite
+  cancel too, and THEIR coin is the configured symbol; they simply share the
+  exempted entry point.) ``updateLeverage`` has one caller — that same smoke
+  suite — and one lineage: its coin IS this run's configured symbol, so it
+  passes it (2026-08-17, issue #28).
 
   ``updateLeverage`` sits in this subset by a decision, not by §13.1's
   cancel-family wording. It is NOT de-risking — raising leverage magnifies an

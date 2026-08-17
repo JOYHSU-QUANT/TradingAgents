@@ -759,11 +759,12 @@ def test_context_refusal_flags_a_stalled_candle_feed():
     assert "2026-08-16T22:00:00Z" in msg
     assert "14h 0m 0s" in msg
     assert "12h 0m 0s freshness limit (3 x 4h)" in msg
-    # Both causes named, neither asserted: a host clock running AHEAD is
-    # indistinguishable from a feed that stopped, and blaming the exchange
-    # would send an operator down the wrong path half the time. (A clock
-    # BEHIND is distinguishable and gets its own branch — see
-    # test_context_refusal_flags_a_clock_behind_the_exchange.)
+    # Both causes named, neither asserted: a host clock running AHEAD lands
+    # here (the exchange has no future candles to truncate, so the age really
+    # does read large) and is indistinguishable from a feed that stopped —
+    # blaming the exchange would send an operator down the wrong path half the
+    # time. A clock running BEHIND is the one this guard cannot see at all;
+    # issue #51 carries that gap.
     assert "feed stopped advancing" in msg
     assert "host's clock is ahead" in msg
 
@@ -875,11 +876,11 @@ def test_context_refusal_future_bound_is_exclusive():
 
 def test_context_refusal_flags_a_clock_that_jumped():
     # A candle closing far after the caller's clock reading. Deliberately NOT
-    # claimed to detect a clock merely set wrong — get_candles takes its window
-    # end from the same clock, so a uniformly-offset clock truncates the candles
-    # too and the age reads ordinary. What lands here is the clock JUMPING
-    # between the two readings, or a ctx that never came from a live fetch;
-    # either way the timestamps are incomparable.
+    # claimed to detect a clock merely set behind — get_candles takes its window
+    # end from the same clock, so a clock BEHIND truncates the candles by the
+    # same amount and the age reads ordinary (issue #51). What lands here is the
+    # clock JUMPING between the two readings, or a ctx that never came from a
+    # live fetch; either way the timestamps are incomparable.
     future = _ctx_closing_at(_NOW + timedelta(hours=13))
     msg = main_mod._context_refusal_error(future, "BTC", {}, now=_NOW)
     assert msg is not None
@@ -891,7 +892,34 @@ def test_context_refusal_flags_a_clock_that_jumped():
     # one-shot callers AFTER it, so the same branch means a forward jump on one
     # path and a backward jump on the other. Naming either would be wrong half
     # the time — and this message reaches an operator.
-    assert "backwards" not in msg and "forward" not in msg
+    assert "backward" not in msg and "forward" not in msg
+
+
+def test_freshness_guard_is_blind_to_a_clock_that_runs_behind():
+    # The guard's known asymmetry, pinned so it stays a documented gap rather
+    # than an assumption (issue #51). get_candles bounds its window by the SAME
+    # host clock, so simulate both directions the way production would see them:
+    # the newest candle the exchange can return is never later than that bound.
+    indicators = {"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0, "atr_14": 250.0}
+
+    def verdict(offset_hours):
+        host = _NOW + timedelta(hours=offset_hours)
+        newest_candle = min(_NOW, host)  # what `close_time <= end` leaves behind
+        ctx = SimpleNamespace(
+            candle_count=200,
+            indicators=indicators,
+            candle_interval="4h",
+            as_of=newest_candle,
+        )
+        return main_mod._context_refusal_error(ctx, "BTC", {}, now=host)
+
+    # Behind: the candles are truncated by the same amount, so the age reads
+    # ordinary and NOTHING fires — the run trades on a day-old market.
+    assert verdict(-24) is None
+    # Ahead: the exchange has no future candles to truncate, so the age really
+    # is large and the staleness branch catches it. The two directions are not
+    # symmetric, and only this one is covered.
+    assert "freshness limit" in verdict(+24)
 
 
 def test_context_refusal_tolerates_a_candle_closing_during_the_fetch():

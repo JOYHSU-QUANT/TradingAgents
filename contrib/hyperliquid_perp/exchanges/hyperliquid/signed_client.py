@@ -538,10 +538,10 @@ class HyperliquidSignedClient:
 
         Base gate only: §13.1 allows cancelling bot-owned orders in safe mode.
         ``None`` for the gate's symbol although ``coin`` is right there — the
-        cancel entry point is exempt from ``allowed_symbols`` because two of its
-        callers take the coin from outside this run's config, and the allowlist
-        would block the very orders a sweep exists to clear (order_gate module
-        docstring). Nothing calls this method: §8.3 rule 7 keeps every
+        cancel family is exempt from ``allowed_symbols`` because two of
+        :meth:`cancel_by_cloid`'s callers take the coin from outside this run's
+        config, and the allowlist would block the very orders a sweep exists to
+        clear (order_gate module docstring). Nothing calls THIS method: §8.3 rule 7 keeps every
         exchange-facing lookup on the cloid, so both sweeps, the protection
         manager and the smoke suite all go through :meth:`cancel_by_cloid`. It
         stays as the §7 ``cancel`` transport (with its own unit tests), not as a

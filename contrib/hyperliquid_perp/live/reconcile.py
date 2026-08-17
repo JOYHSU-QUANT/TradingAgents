@@ -634,13 +634,14 @@ class LiveReconciler:
             if row["action_taken"] is not None:
                 continue
             key = row["exchange_value"]
+            # Three shapes reach here, and only the first is keyed by a tid. An
+            # ``envelope-`` fact key (a stream-level fault: wrong wallet, no
+            # fills list) is as unkeyable as a digest, but it arrives by the
+            # longer route — it takes the tid branch below, the lookup misses,
+            # and the row counts unresolved all the same. Spelled out because
+            # the fast path below used to read as an exhaustive account.
             if not key or key.startswith("unparsed-"):
                 unresolved_malformed += 1  # digest-keyed: unkeyable, human territory
-                # An ``envelope-`` fact key (a stream-level fault: wrong wallet, no
-                # fills list) is unkeyable too, but it arrives by the longer route —
-                # it takes the tid branch below, the lookup misses, and the row
-                # counts unresolved all the same. Named here because this comment
-                # used to read as an exhaustive account of the non-tid shapes.
                 continue
             try:
                 booked = repo.get_fill_by_exchange_key(conn, exchange_fill_key(tid=key))

@@ -107,11 +107,9 @@ _FEE_TOKEN_USDC = "USDC"
 # condition that repeats at message cadence still records once — mirroring
 # reconcile's _EQUITY_MISMATCH_FACT_KEY, and unlike the per-payload derivation
 # in _malformed_key below, which is right for a single bad fill.
-_ENVELOPE_WRONG_USER_FACT_KEY = "envelope-wrong-user"
-_ENVELOPE_NO_FILLS_FACT_KEY = "envelope-no-fills-list"
-# Reserved: _malformed_key must never DERIVE one of these from an untrusted
-# payload, or the two would silently share one evidence file and one case row.
-_RESERVED_FACT_KEYS = frozenset({_ENVELOPE_WRONG_USER_FACT_KEY, _ENVELOPE_NO_FILLS_FACT_KEY})
+_ENVELOPE_FACT_KEY_PREFIX = "envelope-"
+_ENVELOPE_WRONG_USER_FACT_KEY = f"{_ENVELOPE_FACT_KEY_PREFIX}wrong-user"
+_ENVELOPE_NO_FILLS_FACT_KEY = f"{_ENVELOPE_FACT_KEY_PREFIX}no-fills-list"
 
 
 def _malformed_key(raw: Any) -> str:
@@ -131,14 +129,20 @@ def _malformed_key(raw: Any) -> str:
     if isinstance(raw, dict):
         tid = raw.get("tid")
         # A malformed payload's tid is UNTRUSTED and stringifies to anything at
-        # all, including one of the envelope fact keys above — and that string
-        # collision would silently discard this payload's evidence (``once``
-        # returns the existing file) and suppress its case row (the fact key is
-        # already recorded), which is the precise silent loss the digest exists
-        # to prevent. Reserved keys therefore fall through to the digest; a real
-        # tid is an integer and never reaches this branch.
-        if tid is not None and str(tid) not in ("", *_RESERVED_FACT_KEYS):
-            return str(tid)
+        # all, including an envelope fact key — and that collision would
+        # silently discard this payload's evidence (``once`` hands back the
+        # existing file) and suppress its case row (the fact key is already
+        # recorded), the precise silent loss the digest exists to prevent.
+        #
+        # The whole PREFIX is reserved, not the two literals: ``once`` dedupes
+        # by globbing ``<kind>-<key>-*.json``, so ``envelope-wrong-user-1`` is
+        # a key whose FILE the real fact key's glob matches — an exact-match
+        # guard is one character from being useless. Case-folded because that
+        # glob is case-insensitive on Windows and macOS. A real tid is an
+        # integer and never reaches any of this.
+        derived = "" if tid is None else str(tid)
+        if derived and not derived.lower().startswith(_ENVELOPE_FACT_KEY_PREFIX):
+            return derived
     return f"unparsed-{_payload_digest(raw)}"
 
 

@@ -2015,3 +2015,35 @@ def test_a_fill_whose_tid_spells_a_fact_key_keeps_its_own_evidence(db, clock, tm
     assert len(files) == 2, files
     assert any("envelope-wrong-user" in name for name in files)
     assert any("unparsed-" in name for name in files)
+
+
+@pytest.mark.parametrize("impostor_tid", ["envelope-wrong-user-1", "Envelope-Wrong-User"])
+def test_a_tid_near_a_fact_key_cannot_shadow_its_evidence_file(db, clock, tmp_path, impostor_tid):
+    """The reserved namespace is the PREFIX, because the dedupe is a glob.
+
+    ``once`` dedupes by globbing ``<kind>-<key>-*.json``, so a key of
+    ``envelope-wrong-user-1`` writes a file that the real fact key's own glob
+    then matches -- the envelope fault would find that file, return its path and
+    never write the header evidence at all. An exact-match guard would be one
+    character from useless, and one letter-case from it on the filesystems the
+    developers run (2026-08-17 round-3 review). The impostor arrives FIRST here,
+    which is the order that does the damage.
+    """
+    _live_run(db)
+    _live_order(db)
+    proc = _wallet_proc(db, clock, tmp_path)
+    impostor = _fill(tid=1)
+    impostor["tid"] = impostor_tid
+    del impostor["px"]
+    proc.ingest_message({"channel": "userFills", "data": {"fills": [impostor]}})
+    proc.ingest_message(
+        {"channel": "userFills", "data": {"user": _OTHER_WALLET, "fills": [_fill(tid=9)]}}
+    )
+
+    files = sorted(f.name for f in tmp_path.glob("fill_parse_error-*.json"))
+    assert len(files) == 2, files
+    # The envelope fault kept its OWN evidence: the header, not the fill.
+    wallet_file = next(
+        tmp_path / name for name in files if name.startswith("fill_parse_error-envelope-")
+    )
+    assert '"channel": "userFills"' in wallet_file.read_text(encoding="utf-8")

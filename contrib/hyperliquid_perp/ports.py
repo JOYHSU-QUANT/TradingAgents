@@ -62,7 +62,7 @@ class OrderGate(Protocol):
         """Raise unless the base preconditions every signed mutation shares hold.
 
         The only check for signed actions the gate judges without a symbol
-        (cancel, scheduleCancel, account config) — the call carries none, so
+        (cancel, scheduleCancel, updateLeverage) — the call carries none, so
         ``allowed_symbols`` is not enforced for them — and a strict prefix of
         the two order checks.
         """

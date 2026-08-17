@@ -6,13 +6,13 @@ PR 2 adds the §7 exchange actions this phase needs — IOC limit order with a
 cloid, cancel (by oid and by cloid), orderStatus queries, scheduleCancel — all
 returning structured results (:class:`OrderAck` / :class:`CancelAck`) instead
 of raw SDK dicts. The §4.1 order gate
-(:class:`~contrib.hyperliquid_perp.ports.OrderGate`) is bound at
-construction and judges every signed MUTATION: order placement passes the
-wire-scoped condition list (``require_order``), cancel/scheduleCancel/
-updateLeverage the base subset (§13.1 allows the cancels in safe mode). The
-full §4.1 list is a DECISION
-question, asked once per cycle through ``check_new_target`` by the engine, not
-per order. Queries are read-only and ungated.
+(:class:`~contrib.hyperliquid_perp.ports.OrderGate`) is bound at construction
+and judges every signed MUTATION: order placement passes the wire-scoped
+condition list (``require_order``, or ``require_protective_order`` for a
+protective/de-risking order), cancel/scheduleCancel/updateLeverage the base
+subset (§13.1 allows the cancels in safe mode). The full §4.1 list is a
+DECISION question, asked once per cycle through ``check_new_target`` by the
+engine, not per order. Queries are read-only and ungated.
 
 This layer is transport only: no persistence, no retry policy. The §8.3
 idempotent-retry protocol (registry write before send, query-before-resend on

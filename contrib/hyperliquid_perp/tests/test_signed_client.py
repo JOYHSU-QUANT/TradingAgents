@@ -758,11 +758,11 @@ def test_update_leverage_rides_the_exchange_action_gate(fake_exchange):
 
 
 def test_update_leverage_refuses_a_coin_outside_allowed_symbols(fake_exchange):
-    # updateLeverage is the one base-subset action that names an asset, so it
-    # passes its coin to the gate: a signed leverage change on a coin this run
-    # was never configured to trade is refused before the wire (2026-08-17,
-    # issue #28). The gate is otherwise fully open, so only the symbol line can
-    # produce this rejection.
+    # updateLeverage is the one base-subset action whose coin comes from this
+    # run's own config, so it is the one that passes a symbol to the gate: a
+    # signed leverage change on a coin this run was never configured to trade is
+    # refused before the wire (2026-08-17, issue #28). The gate is otherwise
+    # fully open, so only the symbol line can produce this rejection.
     client = _client()
     with pytest.raises(LiveOrderGateRejected, match="allowed_symbols"):
         client.update_leverage(coin="ETH", leverage=1)

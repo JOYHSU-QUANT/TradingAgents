@@ -805,7 +805,7 @@ def test_context_refusal_freshness_limit_is_capped_at_three_decision_cycles():
     # it, since "12h" alone would read as the ordinary 3 x 4h bound.
     daily = _ctx_closing_at(_NOW - timedelta(hours=13), interval="1d")
     msg = main_mod._context_refusal_error(daily, "BTC", {}, now=_NOW)
-    assert msg is not None and "capped at three 4h decision cycles" in msg
+    assert msg is not None and "capped at 3 x the 4h decision cycle" in msg
     # Just inside the cap still passes: the cap is a bound, not a second guard.
     fresh = _ctx_closing_at(_NOW - timedelta(hours=11), interval="1d")
     assert main_mod._context_refusal_error(fresh, "BTC", {}, now=_NOW) is None
@@ -821,15 +821,70 @@ def test_context_refusal_freshness_limit_has_a_floor():
     assert msg is not None and "raised to the 30m floor" in msg
 
 
-def test_context_refusal_flags_a_clock_behind_the_exchange():
-    # The age comparison is one-sided: a host clock hours BEHIND makes every
-    # context look brand new, and the stale branch can never fire. A candle
-    # closing in the future has only one explanation, so it gets its own
-    # refusal that says so instead of the stale branch's "either/or".
+def test_freshness_ceiling_tracks_the_decision_cycle():
+    # Drift lock. main.py writes the ceiling out instead of importing
+    # CYCLE_INTERVAL (that import drags the paper engine into the keyless
+    # --context-only path), so this test is what keeps "3 x the 4h decision
+    # cycle" — the phrase the refusal message prints at an operator — true.
+    from contrib.hyperliquid_perp.paper.scheduler import CYCLE_INTERVAL
+
+    cycle_ms = int(CYCLE_INTERVAL.total_seconds() * 1000)
+    assert main_mod._MAX_CANDLE_AGE_INTERVALS * cycle_ms == main_mod._MAX_CANDLE_AGE_CEILING_MS
+    assert f"{int(CYCLE_INTERVAL.total_seconds()) // 3600}h" == main_mod._CYCLE_LABEL
+
+
+def test_refusal_age_carries_seconds_past_the_limit():
+    # The whole reason _format_duration_ms grew a seconds field: at minute
+    # resolution every age in the first minute past the limit renders AS the
+    # limit, and the message reads "X is past the X limit". 30 seconds over is
+    # the case that must not collide.
+    ctx = _ctx_closing_at(_NOW - timedelta(hours=12, seconds=30))
+    msg = main_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    assert msg is not None
+    assert "12h 0m 30s before now" in msg
+    assert "12h 0m 0s freshness limit" in msg
+
+
+def test_refusal_age_reads_in_days_once_it_is_long():
+    # A feed down for days renders as days, not a three-figure hour count. The
+    # limit is capped far below this band, so the two can never collide here.
+    ctx = _ctx_closing_at(_NOW - timedelta(days=5, hours=3))
+    msg = main_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    assert msg is not None and "5d 3h before now" in msg
+
+
+def test_refusal_age_stays_in_hours_for_an_overnight_outage():
+    # The day form starts at two days, not one: the most common real outage
+    # length reads better as hours. Pins the readability choice the constant
+    # exists for — a threshold of one day renders this as "1d 6h".
+    ctx = _ctx_closing_at(_NOW - timedelta(hours=30))
+    msg = main_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    assert msg is not None and "30h 0m 0s before now" in msg
+
+
+def test_context_refusal_future_bound_is_exclusive():
+    # The future side mirrors the stale side's strict comparison, so the
+    # tolerance is symmetric: exactly at the bound passes, one second past it
+    # refuses.
+    at_bound = _ctx_closing_at(_NOW + timedelta(hours=12))
+    assert main_mod._context_refusal_error(at_bound, "BTC", {}, now=_NOW) is None
+    past_bound = _ctx_closing_at(_NOW + timedelta(hours=12, seconds=1))
+    msg = main_mod._context_refusal_error(past_bound, "BTC", {}, now=_NOW)
+    assert msg is not None and "AFTER the current time" in msg
+
+
+def test_context_refusal_flags_a_clock_that_moved_backwards():
+    # A candle closing far after the caller's clock reading. Deliberately NOT
+    # claimed to detect a clock merely set behind — get_candles takes its window
+    # end from the same clock, so a uniformly-slow clock truncates the candles
+    # too and the age reads ordinary. What lands here is the clock moving
+    # between the two readings, or a ctx that never came from a live fetch;
+    # either way the timestamps are incomparable.
     future = _ctx_closing_at(_NOW + timedelta(hours=13))
     msg = main_mod._context_refusal_error(future, "BTC", {}, now=_NOW)
     assert msg is not None
-    assert "host's clock is behind" in msg
+    assert "moved backwards between the two readings" in msg
+    assert "did not come from a live market fetch" in msg
     assert "13h 0m 0s AFTER" in msg
     assert "12h 0m 0s tolerance (3 x 4h)" in msg
 

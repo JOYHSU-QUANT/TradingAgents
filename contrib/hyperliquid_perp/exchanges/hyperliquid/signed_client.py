@@ -380,9 +380,10 @@ class HyperliquidSignedClient:
         ``schedule_cancel``: a signed account-config change, not an order that
         opens exposure) — but passes ``coin``, so ``allowed_symbols`` binds it:
         this run may only change the leverage of the coin it was configured to
-        trade. Its coin is the run's own configured symbol, not one read back
-        from the exchange, so the reason the cancels pass ``None`` does not
-        apply here (2026-08-17, issue #28). ``updateLeverage`` is statusless —
+        trade. Its coin is this run's own configured symbol — not a registry row
+        that may predate the config, nor one read back from the exchange — so
+        the reason the cancels pass ``None`` does not apply here (2026-08-17,
+        issue #28). ``updateLeverage`` is statusless —
         the envelope is the
         whole verdict, and ``_response_payload`` raises ``ExchangeRequestError``
         on a top-level ``err`` (a rejected leverage change never half-hides
@@ -536,9 +537,12 @@ class HyperliquidSignedClient:
         """Cancel one order by exchange order id (§7 ``cancel``).
 
         Base gate only: §13.1 allows cancelling bot-owned orders in safe mode.
-        ``None`` for the gate's symbol although ``coin`` is right there — see the
-        order_gate module docstring: the §19.3 sweep must stay able to cancel a
-        bot-owned order whose symbol has since left ``allowed_symbols``.
+        ``None`` for the gate's symbol although ``coin`` is right there — the
+        cancels' coin never comes from this run's config, so the allowlist would
+        block the very orders a sweep exists to clear (order_gate module
+        docstring). No production caller: §8.3 rule 7 keeps every
+        exchange-facing lookup on the cloid, so :meth:`cancel_by_cloid` is what
+        both sweeps use and this is the smoke suite's path.
         """
         self._gate.require_exchange_action(None)
         response = call_sdk(self._exchange.cancel, coin, int(exchange_order_id))
@@ -547,8 +551,10 @@ class HyperliquidSignedClient:
     def cancel_by_cloid(self, *, coin: str, cloid_hex: str) -> CancelAck:
         """Cancel one order by client order id (§7 ``cancelByCloid``).
 
-        §8.3 rule 7: the exchange-facing identifier is always cloid_hex.
-        Account-wide for gate purposes, for the reason on :meth:`cancel_by_oid`.
+        §8.3 rule 7: the exchange-facing identifier is always cloid_hex. The
+        cancel path both sweeps take, and account-wide for gate purposes — see
+        the order_gate module docstring for why the coin it carries does not
+        bind the allowlist.
         """
         self._gate.require_exchange_action(None)
         response = call_sdk(self._exchange.cancel_by_cloid, coin, Cloid.from_str(cloid_hex))

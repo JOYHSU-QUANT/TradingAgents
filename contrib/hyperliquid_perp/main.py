@@ -140,12 +140,17 @@ def _warmup_threshold(config: dict) -> int:
 def _format_duration_ms(ms: int) -> str:
     """``ms`` as ``"45m 0s"`` / ``"14h 12m 30s"`` / ``"153d 4h"``, for refusal text.
 
-    Seconds are carried below the two-day mark because the refusal message prints
-    an age and the limit it exceeded side by side: a minute-resolution format
-    renders every age in the first minute past the limit as the limit itself,
-    and the message then reads "X is past the X limit". Past two days the two
-    can no longer collide (the limit is capped far below), so the coarser form
-    stays readable.
+    Seconds are carried because the refusal message prints an age and the limit
+    it exceeded side by side: a minute-resolution format renders every age in
+    the first MINUTE past the limit as the limit itself, and the message then
+    reads "X is past the X limit". Seconds narrow that window to the first
+    second rather than removing it — sub-second precision would cost more
+    legibility than the residue is worth.
+
+    The day form starts at two days, not one, purely for readability: an outage
+    of thirty-odd hours reads better as ``"30h 0m 0s"`` than as ``"1d 6h"``,
+    and the collision the seconds exist for cannot happen in either band (the
+    limit is capped at three decision cycles, far below a day).
     """
     seconds, minutes = ms // 1000 % 60, ms // 60_000 % 60
     hours, days = ms // 3_600_000, ms // 86_400_000
@@ -169,13 +174,22 @@ def _utc_stamp(moment: datetime) -> str:
 # still the current market?", not a tuning parameter.
 _MAX_CANDLE_AGE_INTERVALS = 3
 # ...but the interval is operator-configurable (1m through 1d) while the decision
-# cycle is fixed at 4h, so the bar width alone would make this guard mean wildly
+# cycle is fixed, so the bar width alone would make this guard mean wildly
 # different things: 3 x 1d would let 18 cycles trade through a three-day outage,
 # 3 x 1m would refuse a cycle over three minutes of feed jitter. Clamp both ends
 # in terms of the DECISION cadence the guard actually protects: at most three
 # cycles of stale data, and never so tight that ordinary jitter refuses a cycle.
-_MAX_CANDLE_AGE_CEILING_MS = 12 * 60 * 60_000  # 3 x the 4h decision cycle
+# The ceiling states three DECISION cycles, but is written out rather than
+# derived from the scheduler's CYCLE_INTERVAL: importing paper.scheduler here
+# would pull the whole paper engine (~25ms measured) into the keyless
+# --context-only path to read one timedelta. A drift-lock test pins the two
+# together instead — the shape indicator_vocab already uses for a cross-module
+# constant — so a changed cycle length fails a test rather than silently
+# leaving this bound, and the operator-facing "3 x the 4h decision cycle" text,
+# lying.
+_MAX_CANDLE_AGE_CEILING_MS = 12 * 60 * 60_000
 _MAX_CANDLE_AGE_FLOOR_MS = 30 * 60_000
+_CYCLE_LABEL = "4h"
 
 
 def _candle_age_limit(interval_ms: int, interval: str) -> tuple[int, str]:
@@ -189,7 +203,8 @@ def _candle_age_limit(interval_ms: int, interval: str) -> tuple[int, str]:
     base = _MAX_CANDLE_AGE_INTERVALS * interval_ms
     if base > _MAX_CANDLE_AGE_CEILING_MS:
         return _MAX_CANDLE_AGE_CEILING_MS, (
-            f"{_MAX_CANDLE_AGE_INTERVALS} x {interval} capped at three 4h decision cycles"
+            f"{_MAX_CANDLE_AGE_INTERVALS} x {interval} capped at "
+            f"{_MAX_CANDLE_AGE_INTERVALS} x the {_CYCLE_LABEL} decision cycle"
         )
     if base < _MAX_CANDLE_AGE_FLOOR_MS:
         return _MAX_CANDLE_AGE_FLOOR_MS, (
@@ -291,26 +306,38 @@ def _context_refusal_error(
         )
     age_ms = int((moment - ctx.as_of).total_seconds() * 1000)
     limit_ms, limit_basis = _candle_age_limit(interval_ms, ctx.candle_interval)
-    # The same bound, applied to a candle closing in the FUTURE. Its own branch
-    # because the age comparison alone is one-sided: a host clock hours BEHIND
-    # makes every context look brand new and the staleness branch can never
-    # fire. And unlike that branch this one is not ambiguous — the exchange
-    # cannot publish a future bar and get_candles drops any bar past its own
-    # clock, so only our clock can explain it. Small negatives are legitimate
-    # and must NOT trip it: the daemon reads its clock before the market fetch,
-    # so a boundary closing during those four REST calls (each riding the full
-    # network_timeout_s) lands a couple of minutes ahead. Sharing the bound
-    # above keeps that slack comfortably wide at every interval — its 30m floor
-    # is an order of magnitude past any fetch — instead of inventing a second
-    # threshold that would have to be re-derived whenever the timeout changes.
+    # The same bound, applied to a candle closing far in the FUTURE. Be precise
+    # about what this can and cannot catch, because the obvious reading is
+    # wrong: it does NOT detect a host clock that is simply set behind.
+    # ``get_candles`` derives its window end from this SAME clock and keeps only
+    # ``close_time <= end``, so a uniformly-slow clock truncates the candles by
+    # the same amount it truncates ``moment`` — the age comes out ordinary and
+    # neither branch fires. (Closing that gap needs a clock we do not own; the
+    # signed client's ``exchange_time`` is the candidate, but ``--context-only``
+    # is keyless and has no signed client — see the follow-up issue.)
+    #
+    # What it DOES catch is the clock moving backwards, or jumping, BETWEEN the
+    # caller's reading and the fetch that produced the candles — a host resuming
+    # from suspend, an NTP step, a container clock resyncing — and a ``ctx``
+    # that did not come from a live fetch at all. Both leave the two timestamps
+    # incomparable, so nothing downstream should be trusted to compare them.
+    #
+    # Small negatives are legitimate and must NOT trip it: the caller reads its
+    # clock before the market reads, so a boundary closing between that reading
+    # and ``get_candles``' own window end lands slightly ahead. Sharing the
+    # bound above keeps the slack comfortably wide at every interval — its 30m
+    # floor is many times the longest that gap can take — instead of inventing a
+    # second threshold to re-derive whenever the timeout changes.
     if age_ms < -limit_ms:
         return (
             f"the newest {coin} candle closes at {_utc_stamp(ctx.as_of)}, which is "
             f"{_format_duration_ms(-age_ms)} AFTER the current time "
             f"({_utc_stamp(moment)}) — more than the {_format_duration_ms(limit_ms)} "
-            f"tolerance ({limit_basis}). A candle cannot close in the future, so "
-            "this host's clock is behind; every freshness check it makes is "
-            "unreliable. Refusing to run the engine against an untrustworthy clock."
+            f"tolerance ({limit_basis}). The candle window is taken from this same "
+            "clock, so a gap this size means the clock moved backwards between the "
+            "two readings, or this context did not come from a live market fetch. "
+            "Either way the two timestamps cannot be compared. Refusing to run the "
+            "engine on a context whose age cannot be established."
         )
     if age_ms > limit_ms:
         return (

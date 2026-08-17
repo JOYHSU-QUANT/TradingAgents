@@ -23,14 +23,17 @@ three widths — because §4.1's conditions are not all about the same question:
 
   Who passes a symbol is a DECISION, not a matter of who has one to pass.
   ``scheduleCancel`` genuinely has none (it arms the whole wallet), but the two
-  cancels do take a coin and put it on the wire. They still pass ``None``: the
-  §19.3 sweep cancels bot-owned orders whose coin comes from the exchange's own
-  open-order response, which can name a symbol an operator has since removed
-  from ``allowed_symbols``. Enforcing the allowlist there would turn those
-  orders into ours-but-uncancellable — the sweep records that as a FAILURE and
-  holds the wallet-wide backstop armed — so a safety check would manufacture
-  unclearable state. ``updateLeverage`` has no such lineage (its coin is the
-  run's own configured symbol) and passes it (2026-08-17, issue #28).
+  cancels do take a coin and put it on the wire. They still pass ``None``,
+  because neither sweep that drives them sources its coin from this run's
+  config: the §19.3 startup sweep reads it from the local cloid registry, whose
+  rows are not run-scoped and can predate the current ``allowed_symbols``, and
+  the §18.2 shutdown sweep reads it from the exchange's own open-order
+  response. Enforcing the allowlist would turn exactly those orders into
+  ours-but-uncancellable — §19.3 records the failure into the reconciliation
+  verdict (safe mode), §18.2 refuses to disarm the wallet-wide backstop — so a
+  safety check there would manufacture unclearable state. ``updateLeverage``
+  has neither lineage: its coin IS this run's configured symbol, so it passes
+  it (2026-08-17, issue #28).
 
   ``updateLeverage`` sits in this subset by a decision, not by §13.1's
   cancel-family wording. It is NOT de-risking — raising leverage magnifies an
@@ -41,10 +44,10 @@ three widths — because §4.1's conditions are not all about the same question:
   an order-placing test is selected, and proves ``state_reconciled``), a
   ``--only update_leverage`` rerun after a failed test 2 does NOT run that
   pre-flight — and rerunning a failed test to overwrite its latest-per-key
-  verdict is exactly how the §20.2 gate is meant to be satisfied. Gating this
-  action on the safe-mode lines would make that rerun impossible and leave the
-  smoke gate permanently unsatisfiable, blocking the live run from starting at
-  all. The containment is on the caller side — no production cycle calls it,
+  verdict is how the §20.2 gate is meant to be repaired. Behind the safe-mode
+  lines that targeted rerun becomes impossible; a full-suite rerun would still
+  repair the gate, so the cost is the narrow path, not the gate itself. The
+  containment is on the caller side — no production cycle calls it,
   and config load hard-rejects any ``live.safety.leverage`` other than 1 —
   plus the ``allowed_symbols`` line above, which stops a signed leverage change
   aimed at any other coin. Should a production caller ever appear, that

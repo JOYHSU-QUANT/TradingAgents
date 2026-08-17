@@ -885,7 +885,8 @@ ws_event_parse_failed
 → do not apply malformed event
 
 ws_envelope_wrong_user / ws_envelope_no_fills_list
-→ 整個 envelope 被拒（它本身是良構的，錯的是身分或形狀）
+→ 整個 envelope 被拒（wrong_user 的 envelope 本身良構，錯的是身分；
+   no_fills_list 則是 envelope 的形狀本身不對）
 → 以固定 fact key 記一次，不是每則訊息一個 digest
    （wrong_user 只留表頭，不留對方的成交明細）
 → 不套用其中任何一筆；drain 繼續

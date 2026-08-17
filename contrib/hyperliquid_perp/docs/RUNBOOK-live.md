@@ -574,7 +574,7 @@ python -m contrib.hyperliquid_perp safe-mode --run-id live-BTC --db live_trading
 
 | `exchange_value` | 意思 | 先做什麼 |
 |---|---|---|
-| `envelope-wrong-user` | `userFills` 訂閱送來的是**別的錢包**的成交。本 run 期間**一筆自己的 fill 都沒收到**，帳本會愈走愈偏（但沒有任何一筆髒資料被寫入）。 | **先停 run**，核對 `live.wallet_address` 與 agent key 是否同一個錢包、SDK 訂閱是否被別處覆寫。修好重啟後 REST backfill 會把漏掉的 fills 補回來。**確認訂閱正確之後**才 stamp。 |
+| `envelope-wrong-user` | `userFills` **這條 WS 串流**送來的是別的錢包的成交，本 run 自己的成交不再從 socket 進來（沒有任何一筆髒資料被寫入）。帳本不會就此漂掉——每一輪對帳的 REST backfill 走的是不帶 `user` 的合成 envelope，不受這個檢查影響，仍照常補記自己的 fills；真正的風險是**落在 backfill 視窗之外**的成交，以及 case 擋住 verdict 期間 run 進 manual safe mode 不再開新曝險。 | **先停 run**，核對 `live.wallet_address` 與 agent key 是否同一個錢包、SDK 訂閱是否被別處覆寫。修好重啟後 backfill 會把視窗內漏掉的補齊。**確認訂閱正確之後**才 stamp。 |
 | `envelope-no-fills-list` | 該 channel 的 envelope 不再帶 `fills` 陣列——交易所 schema 漂移。 | 讀證據檔（**完整保留了第一則訊息**，形狀就是線索），確認新格式後改 parser，再 stamp。 |
 
 證據檔在 `payloads/<run_id>/fill_parse_error-envelope-*.json`。`envelope-wrong-user`

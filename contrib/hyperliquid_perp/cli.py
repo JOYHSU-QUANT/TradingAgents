@@ -1384,7 +1384,12 @@ def _live_startup_recovery(
                 payload_dir=payload_dir,
             )
             safe_mode = SafeModeManager(db=db, run_id=run_id, gate=gate)
-            processor = LiveFillProcessor(db=db, run_id=run_id, payload_dir=payload_dir)
+            processor = LiveFillProcessor(
+                db=db,
+                run_id=run_id,
+                payload_dir=payload_dir,
+                wallet_address=signed.wallet_address,
+            )
 
             # §18.2: both of these block the single-threaded tick for far longer
             # than one round-trip (a paged backfill, a per-order orderStatus
@@ -2907,7 +2912,12 @@ def _smoke_startup_recovery(
         suite_authored=True,
     )
     safe_mode = SafeModeManager(db=db, run_id=run_id, gate=gate)
-    processor = LiveFillProcessor(db=db, run_id=run_id, payload_dir=payload_dir)
+    processor = LiveFillProcessor(
+        db=db,
+        run_id=run_id,
+        payload_dir=payload_dir,
+        wallet_address=signed.wallet_address,
+    )
 
     # §18.2: the same wiring as the live loop's, and for the same reason — this
     # path ARMS the switch (it is handed to run_startup_recovery below) under the

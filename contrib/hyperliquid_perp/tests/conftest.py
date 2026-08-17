@@ -57,6 +57,47 @@ def clearinghouse_state():
     return _load("clearinghouse_state.json")
 
 
+def synthetic_bar(**over):
+    """A minimal well-formed candleSnapshot bar: BTC/1m, t/T in the past."""
+    base = {
+        "t": 1000,
+        "T": 1999,
+        "s": "BTC",
+        "i": "1m",
+        "o": "1",
+        "h": "2",
+        "l": "1",
+        "c": "1",
+        "v": "1",
+    }
+    base.update(over)
+    return base
+
+
+def echo_order_status_cloid(payload, cloid_hex):
+    """Echo the queried cloid into a canned orderStatus payload, like the venue.
+
+    ``parse_order_status`` requires the inner order to echo the cloid it was
+    queried by (identity check, 2026-08-17). The real Info endpoint always
+    echoes it; the fakes' canned payloads predate the check and are often
+    served against cloids the test never sees (a manager-derived hex), so each
+    fake routes its answer through here to model the well-behaved venue. A
+    payload that ALREADY carries a cloid is returned untouched — that is how a
+    test scripts a mismatch. Copies rather than mutates: several canned
+    payloads are shared module constants.
+    """
+    if (
+        isinstance(payload, dict)
+        and payload.get("status") == "order"
+        and isinstance(payload.get("order"), dict)
+        and isinstance(payload["order"].get("order"), dict)
+        and "cloid" not in payload["order"]["order"]
+    ):
+        inner = {**payload["order"]["order"], "cloid": cloid_hex}
+        return {**payload, "order": {**payload["order"], "order": inner}}
+    return payload
+
+
 def insert_decision_attempts(db, statuses, *, run_id="r", start: datetime, mode="paper"):
     """Insert one terminal decision_attempts row per status, on the 4h grid."""
     with db.transaction() as conn:

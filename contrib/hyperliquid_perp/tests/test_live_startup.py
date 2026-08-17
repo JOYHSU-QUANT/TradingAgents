@@ -22,6 +22,8 @@ from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.models import PositionState
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 
+from .conftest import echo_order_status_cloid
+
 _NOW = datetime(2026, 7, 16, 8, 0, tzinfo=timezone.utc)
 _HEX_ENTRY = "0x" + "ab" * 16
 _HEX_CLOSE = "0x" + "cd" * 16
@@ -88,7 +90,7 @@ class _FakeSigned:
         result = self.order_status.get(cloid_hex, {"status": "unknownOid"})
         if isinstance(result, Exception):
             raise result
-        return result
+        return echo_order_status_cloid(result, cloid_hex)
 
     def cancel_by_cloid(self, *, coin, cloid_hex):
         self._gate.require_exchange_action()

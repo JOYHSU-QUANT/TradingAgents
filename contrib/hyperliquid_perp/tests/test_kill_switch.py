@@ -21,6 +21,8 @@ from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.ids import live_order_attempt_id
 
+from .conftest import echo_order_status_cloid
+
 _NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
 _HEX = "0x" + "ab" * 16
 _HEX2 = "0x" + "cd" * 16
@@ -96,7 +98,7 @@ class _FakeClient:
         result = self.order_status_results.get(cloid_hex, {"status": "unknownOid"})
         if isinstance(result, Exception):
             raise result
-        return result
+        return echo_order_status_cloid(result, cloid_hex)
 
     def cancel_by_cloid(self, *, coin, cloid_hex):
         self._gate.require_exchange_action()

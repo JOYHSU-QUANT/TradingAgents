@@ -932,7 +932,7 @@ class LiveReconciler:
         cloid = local["cloid_hex"]
         oid = str(order.get("oid", "?"))
         try:
-            parsed = parse_order_status(self._query_order_by_cloid(cloid))
+            parsed = parse_order_status(self._query_order_by_cloid(cloid), expected_cloid_hex=cloid)
         except Exception as exc:  # noqa: BLE001 — a failed read is a verdict
             # Log-at-origin, same as _settle_absent_order's sibling tiebreaker:
             # the case detail is an in-memory value (and its row write is
@@ -1080,7 +1080,7 @@ class LiveReconciler:
         order_id = row["order_id"]
         try:
             payload = self._query_order_by_cloid(cloid)
-            parsed = parse_order_status(payload)
+            parsed = parse_order_status(payload, expected_cloid_hex=cloid)
         except Exception as exc:  # noqa: BLE001
             logger.warning("orderStatus for cloid %s failed: %s", cloid, exc)
             return False, ReconciliationCase(

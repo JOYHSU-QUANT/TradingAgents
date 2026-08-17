@@ -1052,7 +1052,7 @@ class KillSwitchManager:
         recovery back-fill follows.
         """
         payload = self._client.query_order_by_cloid(cloid_hex)
-        parsed = parse_order_status(payload)
+        parsed = parse_order_status(payload, expected_cloid_hex=cloid_hex)
         if parsed is None:
             if repo.has_exchange_known_cloid(self._db.conn, cloid_hex=cloid_hex):
                 logger.warning(

@@ -16,6 +16,8 @@ from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.models import PositionState
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 
+from .conftest import echo_order_status_cloid
+
 _T0 = datetime(2026, 7, 27, 3, 52, tzinfo=timezone.utc)
 _D = Decimal
 
@@ -124,7 +126,7 @@ class _FakeSigned:
     def query_order_by_cloid(self, h):
         self._log("query_order_by_cloid")
         self.queried_cloid = h
-        return self._query_payload
+        return echo_order_status_cloid(self._query_payload, h)
 
     def schedule_cancel(self, *, cancel_at):
         self._log("schedule_cancel")

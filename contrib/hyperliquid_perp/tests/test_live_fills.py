@@ -1800,3 +1800,73 @@ def test_malformed_sighting_lands_one_case_row(db, clock, tmp_path):
     cases = repo.iter_exchange_reconciliation_events(db.conn, "r", case_type="fill_malformed")
     assert len(cases) == 1
     assert cases[0]["exchange_value"] == "14"  # the bare-tid malformed evidence key
+
+
+# ---------------------------------------------------------------------------
+# envelope identity (2026-08-17): the userFills envelope names its wallet
+# ---------------------------------------------------------------------------
+
+
+_WALLET = "0x" + "aa" * 20
+_OTHER_WALLET = "0x" + "bb" * 20
+
+
+def _wallet_proc(db, clock, tmp_path):
+    return LiveFillProcessor(
+        db=db, run_id="r", payload_dir=tmp_path, clock=clock, wallet_address=_WALLET
+    )
+
+
+def test_envelope_for_another_wallet_applies_nothing_and_keeps_evidence(db, clock, tmp_path):
+    # A mismatched ``user`` means a subscription mix-up: not one of these fills
+    # may touch the books, but the drain must survive — §11.3 record-and-skip,
+    # like the no-fills-list envelope.
+    _live_run(db)
+    _live_order(db)
+    proc = _wallet_proc(db, clock, tmp_path)
+    msg = {
+        "channel": "userFills",
+        "data": {"user": _OTHER_WALLET, "fills": [_fill(tid=1, sz="1")]},
+    }
+    assert proc.ingest_message(msg) == []
+    assert db.conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
+    assert list(tmp_path.glob("fill_parse_error-*.json"))  # evidence kept (§11.3)
+
+
+def test_envelope_user_match_is_case_insensitive(db, clock, tmp_path):
+    # Checksummed vs lowercase hex is the same wallet.
+    _live_run(db)
+    _live_order(db)
+    proc = _wallet_proc(db, clock, tmp_path)
+    msg = {
+        "channel": "userFills",
+        "data": {"user": _WALLET.upper(), "fills": [_fill(tid=1, sz="1")]},
+    }
+    results = proc.ingest_message(msg)
+    assert [r.outcome for r in results] == [IngestOutcome.APPLIED]
+
+
+def test_envelope_without_user_is_ingested_for_the_rest_backfill(db, clock, tmp_path):
+    # The REST backfill reuses ingest_message through a synthetic envelope that
+    # carries no ``user`` — there the identity lives in the by-wallet request
+    # itself, so absence skips the check (decision 2026-08-17).
+    _live_run(db)
+    _live_order(db)
+    proc = _wallet_proc(db, clock, tmp_path)
+    msg = {"channel": "userFills", "data": {"fills": [_fill(tid=1, sz="1")]}}
+    results = proc.ingest_message(msg)
+    assert [r.outcome for r in results] == [IngestOutcome.APPLIED]
+
+
+def test_envelope_user_ignored_when_no_wallet_configured(db, clock, tmp_path):
+    # Without a configured wallet there is nothing to compare against — the
+    # identity-agnostic construction stays valid (tests, tooling).
+    _live_run(db)
+    _live_order(db)
+    proc = LiveFillProcessor(db=db, run_id="r", payload_dir=tmp_path, clock=clock)
+    msg = {
+        "channel": "userFills",
+        "data": {"user": _OTHER_WALLET, "fills": [_fill(tid=1, sz="1")]},
+    }
+    results = proc.ingest_message(msg)
+    assert [r.outcome for r in results] == [IngestOutcome.APPLIED]

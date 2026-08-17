@@ -73,7 +73,8 @@ class HyperliquidMarketData:
         # absorbs the still-forming bar dropped just below).
         start = end - (lookback + 1) * interval_to_ms(interval)
         raw = call_sdk(self._info.candles_snapshot, coin, interval, start, end)
-        candles = mapper.map_candles(raw)
+        # Identity echo (2026-08-17): a misrouted response must never feed indicators.
+        candles = mapper.map_candles(raw, expected_coin=coin, expected_interval=interval)
         # ``candleSnapshot`` is end-inclusive, so the most recent bar is usually the
         # *currently-forming* one (``open_time <= end < close_time``): its OHLCV is
         # partial, which understates ATR and skews RSI/EMA, and its future close_time
@@ -109,4 +110,5 @@ class HyperliquidMarketData:
         end = _now_ms()
         start = end - window_days * _MS_PER_DAY
         raw = call_sdk(self._info.funding_history, coin, start, end)
-        return mapper.map_funding_history(raw)
+        # Identity echo: same discipline as get_candles above.
+        return mapper.map_funding_history(raw, expected_coin=coin)

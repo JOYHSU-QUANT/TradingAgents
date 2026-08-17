@@ -308,7 +308,9 @@ class ProtectionManager:
             # confirmed, so it does not count as evidence.
             return False
         try:
-            parsed = parse_order_status(self._client.query_order_by_cloid(str(hexid)))
+            parsed = parse_order_status(
+                self._client.query_order_by_cloid(str(hexid)), expected_cloid_hex=str(hexid)
+            )
         except Exception:  # noqa: BLE001 — an unresolvable read must not crash the tick
             logger.warning(
                 "orderStatus check for the resting %s (cloid %s) could not resolve — "
@@ -890,7 +892,9 @@ class ProtectionManager:
         eventually emergency-close is the safe fallback) and never crash the tick.
         """
         try:
-            parsed = parse_order_status(self._client.query_order_by_cloid(hexid))
+            parsed = parse_order_status(
+                self._client.query_order_by_cloid(hexid), expected_cloid_hex=hexid
+            )
         except Exception:  # noqa: BLE001 — an unresolvable recovery must not crash the tick
             logger.warning(
                 "orderStatus recovery for %s cloid %s could not resolve", role, hexid, exc_info=True

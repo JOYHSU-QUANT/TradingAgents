@@ -18,6 +18,8 @@ from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.models import PositionState, Side
 
+from .conftest import echo_order_status_cloid
+
 _NOW = datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
 _TICK = Decimal("1")
 _QTY_STEP = Decimal("0.00001")
@@ -87,7 +89,7 @@ class _FakeClient:
             result = self.status_script.pop(0)
             if isinstance(result, Exception):
                 raise result
-            return result
+            return echo_order_status_cloid(result, cloid_hex)
         return {"status": "unknownOid"}
 
 

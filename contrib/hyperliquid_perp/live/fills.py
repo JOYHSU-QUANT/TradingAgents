@@ -53,7 +53,11 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from ..exchanges.hyperliquid.errors import MalformedResponseError
-from ..exchanges.hyperliquid.mapper import HL_SIDE_TO_LOCAL, require_decimal
+from ..exchanges.hyperliquid.mapper import (
+    HL_SIDE_TO_LOCAL,
+    hex_identity_matches,
+    require_decimal,
+)
 from ..paper.accounting import (
     LiveFillEffect,
     adjustment_ledger_delta,
@@ -826,11 +830,17 @@ class LiveFillProcessor:
         run_id: str,
         payload_dir: Path,
         clock: Clock | None = None,
+        wallet_address: str | None = None,
     ) -> None:
+        # ``wallet_address`` arms ingest_message's envelope-identity check (the
+        # WS ``userFills`` envelope names the wallet it is for). ``None`` skips
+        # it — identity-agnostic tests — and production wiring passes the
+        # signed client's wallet (both cli.py sites, 2026-08-17).
         self._db = db
         self._run_id = run_id
         self._payload_dir = payload_dir
         self._clock = clock or WallClock()
+        self._wallet_address = wallet_address
 
     def ingest(self, raw_fill: Any, *, fill: ExchangeFill | None = None) -> IngestResult:
         """Apply one raw fill (parse may raise ``MalformedResponseError`` — §11.3).
@@ -1258,6 +1268,23 @@ class LiveFillProcessor:
         if not isinstance(message, dict) or message.get("channel") != USER_FILLS_CHANNEL:
             return []
         data = message.get("data")
+        # Envelope identity (2026-08-17): the WS envelope names the wallet it is
+        # for, and a mismatch means these are ANOTHER wallet's fills — a
+        # subscription mix-up. Not one of them may be applied, but the drain
+        # must survive, so the whole message is recorded as malformed evidence
+        # and skipped (§11.3), like the no-fills-list envelope below. Checked
+        # only when the key is PRESENT: the REST backfill reuses this path
+        # through a synthetic envelope that carries no ``user`` — there the
+        # identity lives in the by-wallet request itself (decision 2026-08-17).
+        if self._wallet_address is not None and isinstance(data, dict) and "user" in data:
+            envelope_user = data["user"]
+            if not hex_identity_matches(envelope_user, self._wallet_address):
+                self._record_malformed(
+                    message,
+                    f"userFills envelope carries user {envelope_user!r}, expected "
+                    f"{self._wallet_address!r} — refusing another wallet's fills",
+                )
+                return []
         fills = data.get("fills") if isinstance(data, dict) else None
         if not isinstance(fills, list):
             # A userFills envelope whose payload is not a fills list is itself

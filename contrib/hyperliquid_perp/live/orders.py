@@ -48,6 +48,7 @@ from ..exchanges.hyperliquid.errors import (
     MalformedResponseError,
     OrderIdempotencyContradiction,
 )
+from ..exchanges.hyperliquid.mapper import hex_identity_matches
 from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient, OrderAck
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
@@ -738,7 +739,7 @@ class LiveOrderSubmitter:
         NULL as "unknown", never as "not sent".
         """
         status_payload = self._client.query_order_by_cloid(cloid_hex)
-        parsed = parse_order_status(status_payload)
+        parsed = parse_order_status(status_payload, expected_cloid_hex=cloid_hex)
         if parsed is None:
             # unknownOid clears rule 5's resend condition — UNLESS the durable
             # record proves the exchange once TOOK this cloid. Then "absent"
@@ -951,7 +952,7 @@ def is_known_exchange_status(exchange_status: str) -> bool:
     return exchange_status in _EXCHANGE_TO_LOCAL_STATUS
 
 
-def parse_order_status(payload: Any) -> tuple[str, str] | None:
+def parse_order_status(payload: Any, *, expected_cloid_hex: str) -> tuple[str, str] | None:
     """(exchange_order_id, status) from an orderStatus payload; None = unknown.
 
     The Info endpoint answers ``{"status": "unknownOid"}`` for a cloid it has
@@ -959,6 +960,18 @@ def parse_order_status(payload: Any) -> tuple[str, str] | None:
     ...}}`` for a known one. Only the documented unknown marker returns None:
     rule 5 permits a resend solely when the previous send is CONFIRMED absent,
     so a malformed payload must fail loud, never read as "absent".
+
+    ``expected_cloid_hex`` is the cloid the caller queried by, and the inner
+    order must echo it back. Every caller reaches this parser through
+    ``query_order_by_cloid``, and every answer drives an identity-sensitive
+    verdict — a §8.3 resend decision, a protection "is the stop still
+    resting?" check, a kill-switch disarm, a reconciliation settle — so an
+    answer whose identity cannot be confirmed must never be read as one.
+    Bot orders always carry a cloid (§8.3 rule 7) and the venue echoes it on
+    known orders, so a MISSING echo is format drift and fails loud exactly
+    like a mismatched one (strictness confirmed 2026-08-17): the testnet
+    live-smoke gate catches venue drift before mainnet, and a raise here
+    lands in the same recovery lanes as any other malformed payload.
     """
     if isinstance(payload, dict) and payload.get("status") == "unknownOid":
         return None
@@ -971,5 +984,11 @@ def parse_order_status(payload: Any) -> tuple[str, str] | None:
         inner = wrapper.get("order")
         status = wrapper.get("status")
         if isinstance(inner, dict) and "oid" in inner and isinstance(status, str):
+            echoed = inner.get("cloid")
+            if not hex_identity_matches(echoed, expected_cloid_hex):
+                raise MalformedResponseError(
+                    f"orderStatus for cloid {expected_cloid_hex} answered with cloid "
+                    f"{echoed!r} — refusing to read another order's status as this one's"
+                )
             return (str(inner["oid"]), status)
     raise MalformedResponseError(f"orderStatus payload not recognised: {payload!r}")

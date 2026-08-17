@@ -61,8 +61,9 @@ class OrderGate(Protocol):
     def require_exchange_action(self) -> None:
         """Raise unless the base preconditions every signed mutation shares hold.
 
-        The only check for signed actions that carry no symbol (cancel,
-        scheduleCancel, account config) — ``allowed_symbols`` is deliberately
-        not enforced for those — and a strict prefix of the two order checks.
+        The only check for signed actions the gate judges without a symbol
+        (cancel, scheduleCancel, account config) — the call carries none, so
+        ``allowed_symbols`` is not enforced for them — and a strict prefix of
+        the two order checks.
         """
         ...

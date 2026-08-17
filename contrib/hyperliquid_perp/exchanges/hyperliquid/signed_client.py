@@ -8,8 +8,9 @@ returning structured results (:class:`OrderAck` / :class:`CancelAck`) instead
 of raw SDK dicts. The §4.1 order gate
 (:class:`~contrib.hyperliquid_perp.ports.OrderGate`) is bound at
 construction and judges every signed MUTATION: order placement passes the
-wire-scoped condition list (``require_order``), cancel/scheduleCancel the base
-subset (§13.1 allows those in safe mode). The full §4.1 list is a DECISION
+wire-scoped condition list (``require_order``), cancel/scheduleCancel/
+updateLeverage the base subset (§13.1 allows the cancels in safe mode). The
+full §4.1 list is a DECISION
 question, asked once per cycle through ``check_new_target`` by the engine, not
 per order. Queries are read-only and ungated.
 

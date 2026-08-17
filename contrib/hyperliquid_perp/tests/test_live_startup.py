@@ -71,13 +71,13 @@ class _FakeSigned:
         self.order_status: dict[str, object] = {}
 
     def schedule_cancel(self, *, cancel_at):
-        self._gate.require_exchange_action()
+        self._gate.require_exchange_action(None)
         if self.schedule_error is not None:
             raise self.schedule_error
         self.schedule_calls.append(cancel_at)
 
     def clear_scheduled_cancel(self):
-        self._gate.require_exchange_action()
+        self._gate.require_exchange_action(None)
         self.clear_calls += 1
 
     def exchange_time(self):
@@ -93,7 +93,7 @@ class _FakeSigned:
         return echo_order_status_cloid(result, cloid_hex)
 
     def cancel_by_cloid(self, *, coin, cloid_hex):
-        self._gate.require_exchange_action()
+        self._gate.require_exchange_action(None)
         self.cancel_calls.append((coin, cloid_hex))
         result = self.cancel_results.get(cloid_hex, CancelAck(success=True))
         if isinstance(result, Exception):

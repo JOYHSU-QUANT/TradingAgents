@@ -50,7 +50,7 @@ from .domains.perp.target_decision import (
 )
 from .exchanges.hyperliquid.account import HyperliquidAccount
 from .exchanges.hyperliquid.errors import ExchangeError
-from .exchanges.hyperliquid.market_data import HyperliquidMarketData
+from .exchanges.hyperliquid.market_data import HyperliquidMarketData, interval_to_ms
 from .exchanges.hyperliquid.sdk_client import HyperliquidClient
 from .integration.trading_graph import build_graph, inject_perp_context
 from .paper.config import PaperTradingConfig
@@ -137,12 +137,92 @@ def _warmup_threshold(config: dict) -> int:
     return required_candles(_indicator_names(config))
 
 
-def _context_refusal_error(ctx: PerpMarketContext, coin: str, config: dict) -> str | None:
+def _format_duration_ms(ms: int) -> str:
+    """``ms`` as ``"45m 0s"`` / ``"14h 12m 30s"`` / ``"153d 4h"``, for refusal text.
+
+    Seconds are carried because the refusal message prints an age and the limit
+    it exceeded side by side: a minute-resolution format renders every age in
+    the first MINUTE past the limit as the limit itself, and the message then
+    reads "X is past the X limit". Seconds narrow that window to the first
+    second rather than removing it — sub-second precision would cost more
+    legibility than the residue is worth.
+
+    The day form starts at two days, not one, purely for readability: an outage
+    of thirty-odd hours reads better as ``"30h 0m 0s"`` than as ``"1d 6h"``,
+    and the collision the seconds exist for cannot happen in either band (the
+    limit is capped at three decision cycles, far below a day).
+    """
+    seconds, minutes = ms // 1000 % 60, ms // 60_000 % 60
+    hours, days = ms // 3_600_000, ms // 86_400_000
+    if ms < 3_600_000:
+        return f"{minutes}m {seconds}s"
+    if days < 2:
+        return f"{hours}h {minutes}m {seconds}s"
+    return f"{days}d {hours % 24}h"
+
+
+def _utc_stamp(moment: datetime) -> str:
+    """``moment`` as a UTC ISO stamp; the tz is normalized, never assumed."""
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# How old the newest candle may be, counted in candle intervals.
+# ``get_candles`` drops the still-forming bar, so a healthy feed's newest CLOSED
+# candle is under one interval old, and each bar the exchange fails to publish
+# adds another interval: three tolerates two consecutive missing bars and
+# refuses at the third. Not a config knob — a correctness bound on "is this
+# still the current market?", not a tuning parameter.
+_MAX_CANDLE_AGE_INTERVALS = 3
+# ...but the interval is operator-configurable (1m through 1d) while the decision
+# cycle is fixed, so the bar width alone would make this guard mean wildly
+# different things: 3 x 1d would let 18 cycles trade through a three-day outage,
+# 3 x 1m would refuse a cycle over three minutes of feed jitter. Clamp both ends
+# in terms of the DECISION cadence the guard actually protects: at most three
+# cycles of stale data, and never so tight that ordinary jitter refuses a cycle.
+# The ceiling states three DECISION cycles, but is written out rather than
+# derived from the scheduler's CYCLE_INTERVAL: importing paper.scheduler here
+# would pull the whole paper engine into the keyless --context-only path (25ms
+# measured) to read one timedelta. That leaves the value duplicated, so a
+# drift-lock test asserts the two against each other — a changed cycle length
+# fails a test instead of silently leaving this bound, and the operator-facing
+# "3 x the 4h decision cycle" text, lying. (Extracting CYCLE_INTERVAL into a
+# dependency-free module the way indicator_vocab holds REGIME_INDICATORS would
+# remove the duplication outright; it belongs with the scheduler refactor, not
+# here.)
+_MAX_CANDLE_AGE_CEILING_MS = 12 * 60 * 60_000
+_MAX_CANDLE_AGE_FLOOR_MS = 30 * 60_000
+_CYCLE_LABEL = "4h"
+
+
+def _candle_age_limit(interval_ms: int, interval: str) -> tuple[int, str]:
+    """``(limit_ms, how it was derived)`` for this candle interval.
+
+    The derivation travels with the number so a refusal message never states a
+    bound whose origin the operator cannot see — the clamp is invisible in the
+    number alone, and "12h" reads very differently as "3 x 4h" than as "3 x 1d,
+    capped".
+    """
+    base = _MAX_CANDLE_AGE_INTERVALS * interval_ms
+    if base > _MAX_CANDLE_AGE_CEILING_MS:
+        return _MAX_CANDLE_AGE_CEILING_MS, (
+            f"{_MAX_CANDLE_AGE_INTERVALS} x {interval} capped at "
+            f"{_MAX_CANDLE_AGE_INTERVALS} x the {_CYCLE_LABEL} decision cycle"
+        )
+    if base < _MAX_CANDLE_AGE_FLOOR_MS:
+        return _MAX_CANDLE_AGE_FLOOR_MS, (
+            f"{_MAX_CANDLE_AGE_INTERVALS} x {interval} raised to the 30m floor"
+        )
+    return base, f"{_MAX_CANDLE_AGE_INTERVALS} x {interval}"
+
+
+def _context_refusal_error(
+    ctx: PerpMarketContext, coin: str, config: dict, *, now: datetime | None = None
+) -> str | None:
     """Why this context must not be traded on, or ``None`` if usable.
 
-    Single source of truth for the three pre-LLM context guards — warm-up,
+    Single source of truth for the four pre-LLM context guards — warm-up,
     fully-dead indicator set, missing/dead regime indicators
-    (atr_14/ema_20/ema_50), in that order: an
+    (atr_14/ema_20/ema_50), stale feed, in that order: an
     under-warmed context legitimately has all-None indicators, so the dead-set
     diagnosis only means "the indicator engine broke" once the warm-up bar is
     cleared. Shared by the one-shot path (print + exit 1), the daemon
@@ -150,6 +230,17 @@ def _context_refusal_error(ctx: PerpMarketContext, coin: str, config: dict) -> s
     ``--context-only`` (render + warn) so the entry points can't drift apart —
     the daemon missing guards the one-shot had is exactly the drift this
     helper exists to prevent.
+
+    ``now`` is the wall clock the staleness guard measures against. The daemon
+    passes the reading its own clock gave at the start of THIS attempt (NOT the
+    scheduled slot, which for a retried or recovered cycle is an older and quite
+    different value; each retry re-reads the clock); the one-shot callers let it
+    default to
+    :func:`datetime.now`. Every caller in the system builds ``ctx``
+    from a live REST read (``_build_context`` is ``build_market_context``'s only
+    production caller), so there is no historical-replay mode whose lagging
+    ``as_of`` this would misjudge — the parameter exists to make the clock
+    injectable, not to model a second time base.
     """
     # Refuse to reason over under-warmed data: if fewer candles came back than
     # the configured indicators need, every indicator is None and the regime is
@@ -190,6 +281,84 @@ def _context_refusal_error(ctx: PerpMarketContext, coin: str, config: dict) -> s
             f"{ctx.candle_count} candles) — the regime would silently default "
             "to RANGING, hiding a volatile or trending market. Refusing to run "
             "the engine without usable regime indicators."
+        )
+    # Freshness. ``ctx.as_of`` is the newest candle's close (context_builder) and
+    # nothing upstream compares it to a clock: a feed that stalled — or a
+    # snapshot replayed from an earlier run — yields a context whose indicators
+    # all compute cleanly and whose regime reads healthy, so the three guards
+    # above pass it. It merely describes the past. That same ``as_of`` becomes
+    # the engine's ``trade_date`` (cli), so a stale feed also silently moves the
+    # analysts' whole research window to an earlier day.
+    #
+    # Last of the four on purpose: those three say "this context cannot be
+    # reasoned over at all", this one says "it is well-formed but out of date".
+    # It is also vacuous with zero candles by construction (context_builder
+    # falls back to a wall-clock ``as_of``, age zero) — the warm-up guard owns
+    # that case.
+    moment = now if now is not None else datetime.now(tz=timezone.utc)
+    try:
+        interval_ms = interval_to_ms(ctx.candle_interval)
+    except ValueError as exc:
+        # Unreachable via _build_context (get_candles resolves the same interval
+        # before a single candle exists, so an unusable one raises there first).
+        # A context that gets here anyway carries an interval nothing can
+        # measure — refuse rather than skip the age check.
+        return (
+            f"cannot establish the age of {coin}'s market data — {exc}. Refusing "
+            "to run the engine on a context whose freshness cannot be checked."
+        )
+    age_ms = int((moment - ctx.as_of).total_seconds() * 1000)
+    limit_ms, limit_basis = _candle_age_limit(interval_ms, ctx.candle_interval)
+    # The same bound, applied to a candle closing far in the FUTURE. Be precise
+    # about what this can and cannot catch, because the obvious reading is
+    # wrong: it does NOT detect a host clock that is simply set behind.
+    # ``get_candles`` derives its window end from this SAME clock and keeps only
+    # ``close_time <= end``, so a uniformly-slow clock truncates the candles by
+    # the same amount it truncates ``moment`` — the age comes out ordinary and
+    # neither branch fires. (Closing that gap needs a clock we do not own; the
+    # signed client's ``exchange_time`` is the candidate, but ``--context-only``
+    # is keyless and has no signed client — see the follow-up issue.)
+    #
+    # What it DOES catch is the clock JUMPING between the two readings that
+    # produced these timestamps — ``moment`` and ``get_candles``' own window end
+    # — from a host resuming from suspend, an NTP step, a container clock
+    # resyncing; and a ``ctx`` that never came from a live fetch. Do not name a
+    # direction: the two readings happen in opposite orders on the two paths
+    # (the daemon reads its clock first and fetches after; the one-shot callers
+    # let ``now`` default here, AFTER the fetch), so the same branch means a
+    # forward jump on one and a backward jump on the other. What is common to
+    # both is that the readings disagree, which is all the refusal needs to say.
+    #
+    # Small negatives are legitimate on the daemon path and must NOT trip it:
+    # its clock reading precedes the market reads, so a boundary closing in
+    # between lands slightly ahead of it. (The one-shot callers read after the
+    # fetch and expect no negative at all.) Sharing the bound above keeps that
+    # slack comfortably wide at every interval — the gap spans two REST calls,
+    # so its 30m floor is ~30x the default network_timeout_s — instead of
+    # inventing a second threshold to re-derive whenever that timeout changes.
+    # (config validates network_timeout_s as a number but sets no upper bound,
+    # so a deployment choosing minutes-long timeouts would need this revisited.)
+    if age_ms < -limit_ms:
+        return (
+            f"the newest {coin} candle closes at {_utc_stamp(ctx.as_of)}, which is "
+            f"{_format_duration_ms(-age_ms)} AFTER the current time "
+            f"({_utc_stamp(moment)}) — more than the {_format_duration_ms(limit_ms)} "
+            f"tolerance ({limit_basis}). The candle window is taken from this same "
+            "clock, so a gap this size means it jumped between the two readings "
+            "(suspend/resume, an NTP step, a container clock resync), or this "
+            "context did not come from a live market fetch. Either way the two "
+            "timestamps cannot be compared. Refusing to run the engine on a "
+            "context whose age cannot be established."
+        )
+    if age_ms > limit_ms:
+        return (
+            f"the newest {coin} candle closed at {_utc_stamp(ctx.as_of)}, "
+            f"{_format_duration_ms(age_ms)} before now ({_utc_stamp(moment)}) — "
+            f"past the {_format_duration_ms(limit_ms)} freshness limit "
+            f"({limit_basis}). Either the market data feed stopped advancing or "
+            "this host's clock is ahead — the two are indistinguishable from "
+            "here, and both mean this context describes a market other than the "
+            "current one. Refusing to run the engine on market data this old."
         )
     return None
 
@@ -360,7 +529,8 @@ def run_context_only(config: dict, coin: str) -> int:
 
     # Keyless diagnostic loop: render rather than abort, but warn with the same
     # shared guard the trading paths refuse on — a refused context *looks* like
-    # real data (plausible default-"ranging" regime).
+    # real data (a plausible default-"ranging" regime, or prices and indicators
+    # that are internally consistent but describe a market hours or days old).
     refusal = _context_refusal_error(ctx, coin, config)
     if refusal is not None:
         _warn_dual(
@@ -486,9 +656,9 @@ def run_engine(config: dict, coin: str) -> int:
         )
 
     ctx, client = _build_context(config, coin)
-    # All three pre-LLM context guards (warm-up, fully-dead indicator set,
-    # missing/dead regime indicators) live in _context_refusal_error, shared
-    # with the daemon provider.
+    # All four pre-LLM context guards (warm-up, fully-dead indicator set,
+    # missing/dead regime indicators, stale feed) live in
+    # _context_refusal_error, shared with the daemon provider.
     refusal = _context_refusal_error(ctx, coin, config)
     if refusal is not None:
         print(f"error: {refusal}", file=sys.stderr)

@@ -152,13 +152,60 @@ def test_exchange_action_check_is_the_base_subset():
     gate.manual_safe_mode = True
     gate.kill_switch_active = False
     gate.state_reconciled = False
-    assert gate.check_exchange_action() is None
-    gate.require_exchange_action()  # does not raise
+    assert gate.check_exchange_action(None) is None
+    gate.require_exchange_action(None)  # does not raise
     # ...but the base trio still applies.
     gate.agent_authorized = False
-    assert gate.check_exchange_action() is not None
+    assert gate.check_exchange_action(None) is not None
     with pytest.raises(LiveOrderGateRejected):
+        gate.require_exchange_action(None)
+
+
+def test_exchange_action_enforces_allowed_symbols_when_one_is_named():
+    # updateLeverage names a coin, so the base subset checks it — a signed
+    # leverage change aimed at a coin this run never traded is refused.
+    gate = _open_gate()
+    assert gate.check_exchange_action("BTC") is None
+    reason = gate.check_exchange_action("ETH")
+    assert reason is not None and "allowed_symbols" in reason
+    with pytest.raises(LiveOrderGateRejected):
+        gate.require_exchange_action("ETH")
+
+
+def test_exchange_action_with_an_explicit_none_skips_the_allowlist():
+    # An action declared account-wide passes `None` and is NOT allowlisted —
+    # that is how the §19.3 sweep stays able to cancel a bot-owned order whose
+    # symbol has since left allowed_symbols. The allowlist here holds a
+    # DIFFERENT coin, so a check that invented a symbol from the gate's own
+    # config would fail this.
+    gate = _open_gate(allowed_symbols=("ETH",))
+    assert gate.check_exchange_action(None) is None
+    gate.require_exchange_action(None)  # does not raise
+
+
+def test_exchange_action_symbol_argument_is_not_optional():
+    # `None` must be WRITTEN, not omitted: a future signed action that forgets
+    # the argument would otherwise skip the allowlist silently.
+    gate = _open_gate()
+    with pytest.raises(TypeError):
+        gate.check_exchange_action()
+    with pytest.raises(TypeError):
         gate.require_exchange_action()
+
+
+def test_exchange_action_stays_out_of_the_safe_mode_lines():
+    # Locks the 2026-08-17 decision (issue #28): updateLeverage remains in the
+    # base subset — it must pass while a safe mode is active. A full smoke run
+    # does clear the safe-mode lines first (the pre-flight §19.1 recovery), but
+    # a `--only update_leverage` rerun after a failed test 2 does not, and that
+    # rerun is how the §20.2 gate's latest-per-key verdict is meant to be
+    # repaired. Containment is caller-side (no production cycle calls it) plus
+    # the allowed_symbols line above. A future change moving this action behind
+    # the safe-mode lines costs that targeted rerun (a full-suite rerun would
+    # still repair the gate) — this test is what makes that a decision rather
+    # than an accident.
+    gate = _open_gate(state_reconciled=False, manual_safe_mode=True)
+    assert gate.check_exchange_action("BTC") is None
 
 
 def test_mainnet_live_counts_as_a_live_mode_per_spec():

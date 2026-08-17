@@ -229,6 +229,58 @@ def test_build_input_refuses_untradeable_indicators(
     assert expected_msg in exc_info.value.message
 
 
+def test_build_input_refuses_a_stalled_candle_feed(monkeypatch):
+    # A stalled feed clears the other three guards (every indicator computes,
+    # the regime reads healthy), so without this one the daemon would spend a
+    # paid cycle reasoning about a market 20h in the past — and drag the
+    # analysts' research window back with it, since as_of becomes trade_date
+    # (see test_request_decision_drives_engine_with_cycle_as_of_not_now).
+    import contrib.hyperliquid_perp.main as main_mod
+    from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
+    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
+
+    as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
+    ctx = _perp_ctx(as_of - timedelta(hours=20))  # 4h bars: past the 3 x 4h bound
+    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin, **kw: (ctx, None))
+
+    provider = object.__new__(_EngineDecisionProvider)
+    provider._config = {}
+    provider._on_blocking_read = None
+
+    with pytest.raises(RetryableDecisionError) as exc_info:
+        provider.build_input(coin="BTC", as_of=as_of)
+    # server_error, so it rides the §3.1 ladder to an api_failed cycle rather
+    # than tearing the daemon down while SL/TP still need watching.
+    assert exc_info.value.error_type == "server_error"
+    assert "freshness limit" in exc_info.value.message
+    assert "2026-03-14T12:00:00Z" in exc_info.value.message
+
+
+def test_build_input_measures_freshness_against_the_cycle_clock(tmp_path, monkeypatch):
+    # The discriminator for WHICH clock the guard reads: this candle is one
+    # hour old relative to the cycle's own as_of, and months stale against the
+    # real wall clock (the fixture date is fixed, so the gap only grows). A
+    # guard calling datetime.now() itself would refuse it; the daemon's single
+    # time base must not.
+    import contrib.hyperliquid_perp.main as main_mod
+    from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
+
+    as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
+    ctx = _perp_ctx(as_of - timedelta(hours=1))
+    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin, **kw: (ctx, None))
+
+    provider = object.__new__(_EngineDecisionProvider)
+    provider._config = {}
+    provider._on_blocking_read = None
+    provider._risk = RiskConfig(leverage=D(5), max_target_margin_pct=60)
+    provider._decision = DecisionConfig()
+    provider._payload_dir = tmp_path / "payloads"
+    provider._engine_config = {"deep_think_llm": "model-x"}
+
+    decision_input = provider.build_input(coin="BTC", as_of=as_of)
+    assert decision_input.candle_end == ctx.as_of  # built through, not refused
+
+
 def test_validate_exit_codes(tmp_path, capsys):
     path, db = _seed_db(tmp_path)
     db.close()

@@ -1,7 +1,10 @@
 """The §4.1 real order gate — the one authority on "may we send this order?".
 
 Every live exchange mutation flows through :class:`RealOrderGate`, at one of
-three widths — because §4.1's conditions are not all about the same question:
+four widths — because §4.1's conditions are not all about the same question
+(:meth:`RealOrderGate.check_protective_order`, below, is the fourth: a
+:meth:`~RealOrderGate.check_order` additionally exempt from the safe-mode
+lines):
 
 - :meth:`RealOrderGate.check_new_target` is the FULL §4.1 condition list and
   gates the DECISION: may we act on a new AI target at all? PR 5's engine asks
@@ -16,10 +19,46 @@ three widths — because §4.1's conditions are not all about the same question:
   per-order would have the engine block its own slices and its own emergency
   close.
 - :meth:`RealOrderGate.check_exchange_action` is the base subset (real orders
-  enabled, a live mode, agent authorized) and gates the other signed actions
-  (cancel, scheduleCancel, updateLeverage). Smallest on purpose: §13.1
-  explicitly ALLOWS cancelling bot-owned orders and refreshing the kill switch
-  in safe mode.
+  enabled, a live mode, agent authorized, plus ``allowed_symbols`` when the
+  caller names one) and gates the other signed actions (cancel, scheduleCancel,
+  updateLeverage). Smallest on purpose: §13.1 explicitly ALLOWS cancelling
+  bot-owned orders and refreshing the kill switch in safe mode.
+
+  Who passes a symbol is a DECISION, not a matter of who has one to pass.
+  ``scheduleCancel`` genuinely has none (it arms the whole wallet), but the two
+  cancels do take a coin and put it on the wire. They still pass ``None``,
+  because the cancel entry point is SHARED and two of its callers source the
+  coin from outside this run's config: the §19.3 startup sweep reads it from
+  the local cloid registry, whose rows are not run-scoped and can predate the
+  current ``allowed_symbols``, and the §18.2 shutdown sweep reads it from the
+  exchange's own open-order response. Enforcing the allowlist on that entry
+  point would turn exactly those orders into ours-but-uncancellable — §19.3
+  records the failure into the reconciliation verdict (safe mode), §18.2
+  refuses to disarm the wallet-wide backstop — so a safety check there would
+  manufacture unclearable state. (The live SL/TP manager and the smoke suite
+  cancel too, and THEIR coin is the configured symbol; they simply share the
+  exempted entry point.) ``updateLeverage`` has one caller — that same smoke
+  suite — and one lineage: its coin IS this run's configured symbol, so it
+  passes it (2026-08-17, issue #28).
+
+  ``updateLeverage`` sits in this subset by a decision, not by §13.1's
+  cancel-family wording. It is NOT de-risking — raising leverage magnifies an
+  existing position — so the safe-mode exemption the cancel family earns does
+  not transfer to it on merit. It stays here because of ONE path: its only
+  caller is the §20.2 smoke suite (test 2), and while a full suite run does
+  clear the safe-mode lines first (on a real, non-dry-run suite the pre-flight
+  §19.1 recovery runs once an order-placing test is selected, and proves
+  ``state_reconciled``), a
+  ``--only update_leverage`` rerun after a failed test 2 does NOT run that
+  pre-flight — and rerunning a failed test to overwrite its latest-per-key
+  verdict is how the §20.2 gate is meant to be repaired. Behind the safe-mode
+  lines that targeted rerun becomes impossible; a full-suite rerun would still
+  repair the gate, so the cost is the narrow path, not the gate itself. The
+  containment is on the caller side — no production cycle calls it,
+  and config load hard-rejects any ``live.safety.leverage`` other than 1 —
+  plus the ``allowed_symbols`` line above, which stops a signed leverage change
+  aimed at any other coin. Should a production caller ever appear, that
+  containment is gone and this belongs behind the safe-mode lines instead.
 
 The gate is fail-closed: every runtime condition a later startup step proves
 (agent authorization, startup reconciliation, kill switch armed, state
@@ -156,14 +195,26 @@ class RealOrderGate:
             allowed_symbols=config.safety.allowed_symbols,
         )
 
-    def check_exchange_action(self) -> str | None:
-        """The base preconditions for ANY signed mutation; None means allowed."""
+    def check_exchange_action(self, symbol: str | None) -> str | None:
+        """The base preconditions for ANY signed mutation; None means allowed.
+
+        ``symbol`` is required and has no default: passing ``None`` says "this
+        action is account-wide" as a written decision rather than as an
+        omission, so a future signed action cannot slip past the allowlist by
+        forgetting an argument. When a symbol IS given it must be in
+        ``allowed_symbols`` — a signed change aimed at a coin this run was never
+        configured for is a wiring bug. Which callers pass one, and why the
+        cancels deliberately do not despite having a coin, is in the module
+        docstring.
+        """
         if not self.allow_real_orders:
             return "allow_real_orders is false"
         if self.mode not in _LIVE_MODES:
             return f"mode {self.mode.value!r} is not a live mode"
         if not self.agent_authorized:
             return "agent authorization has not passed (§6.1)"
+        if symbol is not None and symbol not in self.allowed_symbols:
+            return f"symbol {symbol!r} is not in allowed_symbols"
         return None
 
     def _first_failed(
@@ -183,7 +234,11 @@ class RealOrderGate:
           §13.1 keeps the run protecting and §17.2's emergency close is the one
           order most needed in safe mode, so ``protective`` orders skip these.
         """
-        base = self.check_exchange_action()
+        # ``None``: the order paths carry the symbol through the ordered
+        # condition table below, at §4.1's own position for it (after startup
+        # reconciliation and the kill switch), so checking it here as well would
+        # report the wrong first-failed line.
+        base = self.check_exchange_action(None)
         if base is not None:
             return base
         # (scope, failed, reason) — §4.1's order, verbatim.
@@ -294,7 +349,7 @@ class RealOrderGate:
         if reason is not None:
             raise LiveOrderGateRejected(reason)
 
-    def require_exchange_action(self) -> None:
-        reason = self.check_exchange_action()
+    def require_exchange_action(self, symbol: str | None) -> None:
+        reason = self.check_exchange_action(symbol)
         if reason is not None:
             raise LiveOrderGateRejected(reason)

@@ -104,11 +104,14 @@ python -m contrib.hyperliquid_perp.main --context-only --coin BTC
 若 `wallet_address` 是真實地址，也會印出目前倉位（或 `flat`）。
 `--context-only` 也會用與完整輪相同的檢查先驗證 `risk:`／`decision:`／`paper_trading:`
 區塊——壞掉的 config 在這個免費 smoke 階段就具名 exit 1，不會等到付費輪才爆。
-它也跑與交易路徑相同的三道 context guard（暖身不足、指標全滅、regime 指標
-`atr_14`／`ema_20`／`ema_50` 不可用）：不中止、照樣渲染，但會在 log＋stderr 印同一句
+它也跑與交易路徑相同的四道 context guard（暖身不足、指標全滅、regime 指標
+`atr_14`／`ema_20`／`ema_50` 不可用、K 線 feed 停止推進或主機時鐘走快／跳動）：不中止、
+照樣渲染，但會在 log＋stderr 印同一句
 refusal 警告，並以 **exit 4** 結束（探針慣例：指令成功、狀態劣化；健康 context 是
 exit 0）——自動化 preflight 可直接 gate exit code，免 key 驗證 indicator 問題修好了沒
-（RUNBOOK §7 的對應列有寫怎麼用）。
+（RUNBOOK §7 的對應列有寫怎麼用）。**注意第四道 guard 讓 exit 4 多了一個成因**：
+一份格式完好、指標齊全、只是過期的 context 現在也是 exit 4（此前是 exit 0），
+所以以 exit code 把關的 preflight 會在 feed 落後時轉黃。
 
 ### B. 完整一輪（需要 key）
 

@@ -181,12 +181,14 @@ _MAX_CANDLE_AGE_INTERVALS = 3
 # cycles of stale data, and never so tight that ordinary jitter refuses a cycle.
 # The ceiling states three DECISION cycles, but is written out rather than
 # derived from the scheduler's CYCLE_INTERVAL: importing paper.scheduler here
-# would pull the whole paper engine (~25ms measured) into the keyless
-# --context-only path to read one timedelta. A drift-lock test pins the two
-# together instead — the shape indicator_vocab already uses for a cross-module
-# constant — so a changed cycle length fails a test rather than silently
-# leaving this bound, and the operator-facing "3 x the 4h decision cycle" text,
-# lying.
+# would pull the whole paper engine into the keyless --context-only path (25ms
+# measured) to read one timedelta. That leaves the value duplicated, so a
+# drift-lock test asserts the two against each other — a changed cycle length
+# fails a test instead of silently leaving this bound, and the operator-facing
+# "3 x the 4h decision cycle" text, lying. (Extracting CYCLE_INTERVAL into a
+# dependency-free module the way indicator_vocab holds REGIME_INDICATORS would
+# remove the duplication outright; it belongs with the scheduler refactor, not
+# here.)
 _MAX_CANDLE_AGE_CEILING_MS = 12 * 60 * 60_000
 _MAX_CANDLE_AGE_FLOOR_MS = 30 * 60_000
 _CYCLE_LABEL = "4h"
@@ -316,28 +318,34 @@ def _context_refusal_error(
     # signed client's ``exchange_time`` is the candidate, but ``--context-only``
     # is keyless and has no signed client — see the follow-up issue.)
     #
-    # What it DOES catch is the clock moving backwards, or jumping, BETWEEN the
-    # caller's reading and the fetch that produced the candles — a host resuming
-    # from suspend, an NTP step, a container clock resyncing — and a ``ctx``
-    # that did not come from a live fetch at all. Both leave the two timestamps
-    # incomparable, so nothing downstream should be trusted to compare them.
+    # What it DOES catch is the clock JUMPING between the two readings that
+    # produced these timestamps — ``moment`` and ``get_candles``' own window end
+    # — from a host resuming from suspend, an NTP step, a container clock
+    # resyncing; and a ``ctx`` that never came from a live fetch. Do not name a
+    # direction: the two readings happen in opposite orders on the two paths
+    # (the daemon reads its clock first and fetches after; the one-shot callers
+    # let ``now`` default here, AFTER the fetch), so the same branch means a
+    # forward jump on one and a backward jump on the other. What is common to
+    # both is that the readings disagree, which is all the refusal needs to say.
     #
-    # Small negatives are legitimate and must NOT trip it: the caller reads its
-    # clock before the market reads, so a boundary closing between that reading
-    # and ``get_candles``' own window end lands slightly ahead. Sharing the
-    # bound above keeps the slack comfortably wide at every interval — its 30m
-    # floor is many times the longest that gap can take — instead of inventing a
-    # second threshold to re-derive whenever the timeout changes.
+    # Small negatives are legitimate on the daemon path and must NOT trip it:
+    # its clock reading precedes the market reads, so a boundary closing in
+    # between lands slightly ahead of it. (The one-shot callers read after the
+    # fetch and expect no negative at all.) Sharing the bound above keeps that
+    # slack comfortably wide at every interval — its 30m floor is many times the
+    # longest that gap can take — instead of inventing a second threshold to
+    # re-derive whenever the timeout changes.
     if age_ms < -limit_ms:
         return (
             f"the newest {coin} candle closes at {_utc_stamp(ctx.as_of)}, which is "
             f"{_format_duration_ms(-age_ms)} AFTER the current time "
             f"({_utc_stamp(moment)}) — more than the {_format_duration_ms(limit_ms)} "
             f"tolerance ({limit_basis}). The candle window is taken from this same "
-            "clock, so a gap this size means the clock moved backwards between the "
-            "two readings, or this context did not come from a live market fetch. "
-            "Either way the two timestamps cannot be compared. Refusing to run the "
-            "engine on a context whose age cannot be established."
+            "clock, so a gap this size means it jumped between the two readings "
+            "(suspend/resume, an NTP step, a container clock resync), or this "
+            "context did not come from a live market fetch. Either way the two "
+            "timestamps cannot be compared. Refusing to run the engine on a "
+            "context whose age cannot be established."
         )
     if age_ms > limit_ms:
         return (

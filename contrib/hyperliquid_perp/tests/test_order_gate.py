@@ -200,9 +200,10 @@ def test_exchange_action_stays_out_of_the_safe_mode_lines():
     # a `--only update_leverage` rerun after a failed test 2 does not, and that
     # rerun is how the §20.2 gate's latest-per-key verdict is meant to be
     # repaired. Containment is caller-side (no production cycle calls it) plus
-    # the allowed_symbols line above. If a future change moves this action
-    # behind the safe-mode lines, that rerun becomes impossible and the smoke
-    # gate permanently unsatisfiable — this test says so.
+    # the allowed_symbols line above. A future change moving this action behind
+    # the safe-mode lines costs that targeted rerun (a full-suite rerun would
+    # still repair the gate) — this test is what makes that a decision rather
+    # than an accident.
     gate = _open_gate(state_reconciled=False, manual_safe_mode=True)
     assert gate.check_exchange_action("BTC") is None
 

@@ -538,11 +538,14 @@ class HyperliquidSignedClient:
 
         Base gate only: §13.1 allows cancelling bot-owned orders in safe mode.
         ``None`` for the gate's symbol although ``coin`` is right there — the
-        cancels' coin never comes from this run's config, so the allowlist would
-        block the very orders a sweep exists to clear (order_gate module
-        docstring). No production caller: §8.3 rule 7 keeps every
-        exchange-facing lookup on the cloid, so :meth:`cancel_by_cloid` is what
-        both sweeps use and this is the smoke suite's path.
+        cancel entry point is exempt from ``allowed_symbols`` because two of its
+        callers take the coin from outside this run's config, and the allowlist
+        would block the very orders a sweep exists to clear (order_gate module
+        docstring). Nothing calls this method: §8.3 rule 7 keeps every
+        exchange-facing lookup on the cloid, so both sweeps, the protection
+        manager and the smoke suite all go through :meth:`cancel_by_cloid`. It
+        stays as the §7 ``cancel`` transport (with its own unit tests), not as a
+        live path.
         """
         self._gate.require_exchange_action(None)
         response = call_sdk(self._exchange.cancel, coin, int(exchange_order_id))
@@ -551,10 +554,10 @@ class HyperliquidSignedClient:
     def cancel_by_cloid(self, *, coin: str, cloid_hex: str) -> CancelAck:
         """Cancel one order by client order id (§7 ``cancelByCloid``).
 
-        §8.3 rule 7: the exchange-facing identifier is always cloid_hex. The
-        cancel path both sweeps take, and account-wide for gate purposes — see
-        the order_gate module docstring for why the coin it carries does not
-        bind the allowlist.
+        §8.3 rule 7: the exchange-facing identifier is always cloid_hex. THE
+        cancel path — both sweeps, the protection manager and the smoke suite —
+        and account-wide for gate purposes: see the order_gate module docstring
+        for why the coin it carries does not bind the allowlist.
         """
         self._gate.require_exchange_action(None)
         response = call_sdk(self._exchange.cancel_by_cloid, coin, Cloid.from_str(cloid_hex))

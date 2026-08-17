@@ -873,20 +873,25 @@ def test_context_refusal_future_bound_is_exclusive():
     assert msg is not None and "AFTER the current time" in msg
 
 
-def test_context_refusal_flags_a_clock_that_moved_backwards():
+def test_context_refusal_flags_a_clock_that_jumped():
     # A candle closing far after the caller's clock reading. Deliberately NOT
-    # claimed to detect a clock merely set behind — get_candles takes its window
-    # end from the same clock, so a uniformly-slow clock truncates the candles
-    # too and the age reads ordinary. What lands here is the clock moving
+    # claimed to detect a clock merely set wrong — get_candles takes its window
+    # end from the same clock, so a uniformly-offset clock truncates the candles
+    # too and the age reads ordinary. What lands here is the clock JUMPING
     # between the two readings, or a ctx that never came from a live fetch;
     # either way the timestamps are incomparable.
     future = _ctx_closing_at(_NOW + timedelta(hours=13))
     msg = main_mod._context_refusal_error(future, "BTC", {}, now=_NOW)
     assert msg is not None
-    assert "moved backwards between the two readings" in msg
+    assert "jumped between the two readings" in msg
     assert "did not come from a live market fetch" in msg
     assert "13h 0m 0s AFTER" in msg
     assert "12h 0m 0s tolerance (3 x 4h)" in msg
+    # No direction claimed: the daemon reads its clock BEFORE the fetch and the
+    # one-shot callers AFTER it, so the same branch means a forward jump on one
+    # path and a backward jump on the other. Naming either would be wrong half
+    # the time — and this message reaches an operator.
+    assert "backwards" not in msg and "forward" not in msg
 
 
 def test_context_refusal_tolerates_a_candle_closing_during_the_fetch():

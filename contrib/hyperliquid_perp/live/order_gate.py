@@ -24,16 +24,18 @@ three widths — because §4.1's conditions are not all about the same question:
   Who passes a symbol is a DECISION, not a matter of who has one to pass.
   ``scheduleCancel`` genuinely has none (it arms the whole wallet), but the two
   cancels do take a coin and put it on the wire. They still pass ``None``,
-  because neither sweep that drives them sources its coin from this run's
-  config: the §19.3 startup sweep reads it from the local cloid registry, whose
-  rows are not run-scoped and can predate the current ``allowed_symbols``, and
-  the §18.2 shutdown sweep reads it from the exchange's own open-order
-  response. Enforcing the allowlist would turn exactly those orders into
-  ours-but-uncancellable — §19.3 records the failure into the reconciliation
-  verdict (safe mode), §18.2 refuses to disarm the wallet-wide backstop — so a
-  safety check there would manufacture unclearable state. ``updateLeverage``
-  has neither lineage: its coin IS this run's configured symbol, so it passes
-  it (2026-08-17, issue #28).
+  because the cancel entry point is SHARED and two of its callers source the
+  coin from outside this run's config: the §19.3 startup sweep reads it from
+  the local cloid registry, whose rows are not run-scoped and can predate the
+  current ``allowed_symbols``, and the §18.2 shutdown sweep reads it from the
+  exchange's own open-order response. Enforcing the allowlist on that entry
+  point would turn exactly those orders into ours-but-uncancellable — §19.3
+  records the failure into the reconciliation verdict (safe mode), §18.2
+  refuses to disarm the wallet-wide backstop — so a safety check there would
+  manufacture unclearable state. (The live SL/TP manager cancels too, and ITS
+  coin is the configured symbol; it just shares the exempted entry point.)
+  ``updateLeverage`` has one caller and one lineage — its coin IS this run's
+  configured symbol — so it passes it (2026-08-17, issue #28).
 
   ``updateLeverage`` sits in this subset by a decision, not by §13.1's
   cancel-family wording. It is NOT de-risking — raising leverage magnifies an

@@ -483,10 +483,10 @@ def test_account_snapshot_long_position(clearinghouse_state):
     assert pos.leverage == Decimal("5")
 
 
-def test_position_helper_and_flat(clearinghouse_state):
-    assert mapper.map_position(clearinghouse_state, "BTC") is not None
-    # A coin with no open position -> None (flat).
-    assert mapper.map_position(clearinghouse_state, "ETH") is None
+def test_position_for_unknown_coin_is_flat(clearinghouse_state):
+    # A coin with no open position -> None (flat); the found-BTC case is
+    # asserted by test_account_snapshot_long_position above.
+    assert mapper.map_account_snapshot(clearinghouse_state).position_for("ETH") is None
 
 
 def test_short_position_is_signed():
@@ -505,7 +505,7 @@ def test_short_position_is_signed():
             }
         ],
     }
-    pos = mapper.map_position(state, "BTC")
+    pos = mapper.map_account_snapshot(state).position_for("BTC")
     assert pos.size == Decimal("-0.1")
     assert pos.is_short and not pos.is_long
 
@@ -531,7 +531,7 @@ def test_present_but_garbage_optional_field_is_dropped_and_warns(caplog):
         ],
     }
     with caplog.at_level(logging.WARNING):
-        pos = mapper.map_position(state, "BTC")
+        pos = mapper.map_account_snapshot(state).position_for("BTC")
     assert pos is not None
     assert pos.liquidation_price is None  # garbage dropped, not raised
     assert any("liquidationPx" in r.message for r in caplog.records)
@@ -557,7 +557,7 @@ def test_blank_optional_field_is_absent_without_warning(caplog):
         ],
     }
     with caplog.at_level(logging.WARNING):
-        pos = mapper.map_position(state, "BTC")
+        pos = mapper.map_account_snapshot(state).position_for("BTC")
     assert pos.liquidation_price is None
     assert not any("liquidationPx" in r.message for r in caplog.records)
 
@@ -578,7 +578,7 @@ def test_zero_size_position_treated_as_flat():
             }
         ],
     }
-    assert mapper.map_position(state, "BTC") is None
+    assert mapper.map_account_snapshot(state).position_for("BTC") is None
 
 
 def test_non_dict_leverage_treated_as_absent_and_warns(caplog):
@@ -601,7 +601,7 @@ def test_non_dict_leverage_treated_as_absent_and_warns(caplog):
         ],
     }
     with caplog.at_level(logging.WARNING):
-        pos = mapper.map_position(state, "BTC")
+        pos = mapper.map_account_snapshot(state).position_for("BTC")
     assert pos is not None
     assert pos.leverage is None
     assert any("leverage" in r.message for r in caplog.records)
@@ -627,7 +627,7 @@ def test_opt_dec_nan_string_is_dropped_and_warns(caplog):
         ],
     }
     with caplog.at_level(logging.WARNING):
-        pos = mapper.map_position(state, "BTC")
+        pos = mapper.map_account_snapshot(state).position_for("BTC")
     assert pos.liquidation_price is None
     assert any("liquidationPx" in r.message for r in caplog.records)
 
@@ -651,7 +651,7 @@ def test_required_field_nan_raises():
         ],
     }
     with pytest.raises(MalformedResponseError, match=r"entryPx"):
-        mapper.map_position(state, "BTC")
+        mapper.map_account_snapshot(state)
 
 
 # --------------------------------------------------------------------------

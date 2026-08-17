@@ -5,13 +5,14 @@ the defensive construction pattern so nothing else builds ``Exchange`` directly.
 PR 2 adds the §7 exchange actions this phase needs — IOC limit order with a
 cloid, cancel (by oid and by cloid), orderStatus queries, scheduleCancel — all
 returning structured results (:class:`OrderAck` / :class:`CancelAck`) instead
-of raw SDK dicts. The §4.1
-:class:`~contrib.hyperliquid_perp.live.order_gate.RealOrderGate` is bound at
-construction and judges every signed MUTATION: order placement passes the
-wire-scoped condition list (``check_order``), cancel/scheduleCancel the base
-subset (§13.1 allows those in safe mode). The full §4.1 list is a DECISION
-question, asked once per cycle through ``check_new_target`` by the engine, not
-per order. Queries are read-only and ungated.
+of raw SDK dicts. The §4.1 order gate
+(:class:`~contrib.hyperliquid_perp.ports.OrderGate`) is bound at construction
+and judges every signed MUTATION: order placement passes the wire-scoped
+condition list (``require_order``, or ``require_protective_order`` for a
+protective/de-risking order), cancel/scheduleCancel/updateLeverage the base
+subset (§13.1 allows the cancels in safe mode). The full §4.1 list is a
+DECISION question, asked once per cycle through ``check_new_target`` by the
+engine, not per order. Queries are read-only and ungated.
 
 This layer is transport only: no persistence, no retry policy. The §8.3
 idempotent-retry protocol (registry write before send, query-before-resend on
@@ -29,11 +30,12 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from hyperliquid.exchange import Exchange
 from hyperliquid.utils.types import Cloid
 
+from ...ports import OrderGate
 from .errors import ExchangeError, ExchangeRequestError, MalformedResponseError
 from .mapper import require_decimal
 from .sdk_client import (
@@ -43,9 +45,6 @@ from .sdk_client import (
     account_from_agent_key,
     call_sdk,
 )
-
-if TYPE_CHECKING:
-    from ...live.order_gate import RealOrderGate
 
 logger = logging.getLogger(__name__)
 
@@ -257,13 +256,13 @@ class HyperliquidSignedClient:
     """Owns the SDK ``Exchange`` instance for the agent wallet.
 
     ``wallet_address`` is the MAIN wallet the agent trades on behalf of (the
-    SDK's ``account_address``); the agent key only signs. The §4.1
-    :class:`RealOrderGate` is bound at construction — one client, one gate —
-    so every mutating method is judged by the same gate whose flags the kill
-    switch manager and (PR 4/5) state machines maintain; a call site cannot
-    substitute a permissive gate of its own. Decimal quantities/prices cross
-    to the SDK's floats only here, at the wire boundary (callers' math stays
-    all-Decimal).
+    SDK's ``account_address``); the agent key only signs. The §4.1 order gate
+    (:class:`~contrib.hyperliquid_perp.ports.OrderGate`) is bound at construction
+    — one client, one gate — so every mutating method is judged by the same gate
+    whose flags the kill switch manager and (PR 4/5) state machines maintain; a
+    call site cannot substitute a permissive gate of its own. Decimal
+    quantities/prices cross to the SDK's floats only here, at the wire boundary
+    (callers' math stays all-Decimal).
     """
 
     # Same bounded timeout default and rationale as HyperliquidClient.__init__
@@ -275,7 +274,7 @@ class HyperliquidSignedClient:
         agent_key: str,
         *,
         wallet_address: str,
-        gate: RealOrderGate,
+        gate: OrderGate,
         timeout: float | None = DEFAULT_NETWORK_TIMEOUT_S,
     ) -> None:
         key = network.strip().lower()
@@ -377,7 +376,7 @@ class HyperliquidSignedClient:
 
         The §4.1 gate bound at construction runs first — a rejection raises
         ``LiveOrderGateRejected`` before any network traffic. It is the
-        WIRE-SCOPED subset (``check_order``), the conditions that must hold for
+        WIRE-SCOPED subset (``require_order``), the conditions that must hold for
         any order to be sent at all; the three decision-scoped ones live on
         ``check_new_target``, which the engine asks once per cycle (§9.3 allows
         SL repair and emergency close while a slice plan runs). The cloid
@@ -391,9 +390,9 @@ class HyperliquidSignedClient:
         the matching engine, so it must not consume the cloid as 'rejected'.
 
         ``protective`` routes the wire-side gate backstop through
-        :meth:`~..order_gate.RealOrderGate.check_protective_order` for a §17.2
+        :meth:`~...ports.OrderGate.require_protective_order` for a §17.2
         emergency close (a de-risking IOC that must clear in safe mode); the
-        caller (:class:`~..live.orders.LiveOrderSubmitter`) sets it from the
+        caller (:class:`~...live.orders.LiveOrderSubmitter`) sets it from the
         order role so this backstop and its own pre-check agree.
         """
         if protective:

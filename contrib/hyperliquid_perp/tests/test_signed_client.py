@@ -29,6 +29,7 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import (
 from contrib.hyperliquid_perp.live.authorization import derive_agent_address
 from contrib.hyperliquid_perp.live.config import ExecutionMode
 from contrib.hyperliquid_perp.live.order_gate import LiveOrderGateRejected, RealOrderGate
+from contrib.hyperliquid_perp.ports import OrderGate
 
 _KEY = "0x" + "11" * 32
 _WALLET = "0x" + "aa" * 20
@@ -55,6 +56,12 @@ def _closed_gate() -> RealOrderGate:
         mode=ExecutionMode.TESTNET_LIVE,
         allowed_symbols=("BTC",),
     )
+
+
+def test_real_order_gate_satisfies_order_gate_port():
+    # Method-presence check only (``runtime_checkable``): a ``require_*`` rename
+    # on either side of the port fails here rather than on the first live order.
+    assert issubclass(RealOrderGate, OrderGate)
 
 
 def _client(network="testnet", *, key=_KEY, gate=None, **kwargs) -> HyperliquidSignedClient:

@@ -17,8 +17,9 @@ three widths — because §4.1's conditions are not all about the same question:
   close.
 - :meth:`RealOrderGate.check_exchange_action` is the base subset (real orders
   enabled, a live mode, agent authorized) and gates the other signed actions
-  (cancel, scheduleCancel). Smallest on purpose: §13.1 explicitly ALLOWS
-  cancelling bot-owned orders and refreshing the kill switch in safe mode.
+  (cancel, scheduleCancel, updateLeverage). Smallest on purpose: §13.1
+  explicitly ALLOWS cancelling bot-owned orders and refreshing the kill switch
+  in safe mode.
 
 The gate is fail-closed: every runtime condition a later startup step proves
 (agent authorization, startup reconciliation, kill switch armed, state

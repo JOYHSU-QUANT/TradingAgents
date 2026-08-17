@@ -96,7 +96,7 @@ the results dir, plus the decision printed to stdout.
 
 ## Phase 1 build order
 
-1. `ports.py` — `ExchangeMarketData` / `ExchangeAccount` interfaces.
+1. `ports.py` — exchange-facing `Protocol` interfaces.
 2. `exchanges/hyperliquid/` — `sdk_client`, `market_data`, `account`, `mapper`, `errors`.
 3. `domains/perp/schema.py` — `PerpMarketContext`, `PerpPosition`, `AccountSnapshot`.
 4. `domains/perp/context_builder.py` — market + account → context; computes indicators + funding z-score.

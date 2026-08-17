@@ -578,8 +578,3 @@ def map_account_snapshot(clearinghouse_state: Any) -> AccountSnapshot:
         ),
         total_position_notional=_opt_dec(margin.get("totalNtlPos"), field="totalNtlPos"),
     )
-
-
-def map_position(clearinghouse_state: Any, coin: str) -> PerpPosition | None:
-    """Extract the open position for ``coin`` from ``clearinghouseState``."""
-    return map_account_snapshot(clearinghouse_state).position_for(coin)

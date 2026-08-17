@@ -1,10 +1,14 @@
-"""Exchange-facing ports (interfaces) the perp domain depends on.
+"""Ports (interfaces) between this package's layers.
 
-These ``Protocol`` classes are the seam between the domain layer and any
-concrete exchange. Phase 1 ships one implementation
-(:mod:`.exchanges.hyperliquid`), but the domain code only ever type-hints
-against these, so a paper/backtest exchange can be dropped in later without
-touching the domain.
+These ``Protocol`` classes are seams that keep concrete layers decoupled.
+``ExchangeMarketData`` faces outward: the paper engine's snapshot provider
+(``paper.market_feed.PortSnapshotProvider``) type-hints against it, so a
+scripted/backtest market feed can be dropped in without touching that
+consumer; the CLI/legacy entry points construct the concrete reader directly
+and may call methods beyond this port (e.g. ``get_asset_meta``). ``OrderGate``
+faces the other way: it is the application-layer contract the exchange
+adapter's signed client judges every mutation against, so the adapter never
+imports the application layer for a type hint.
 
 Structural typing: an implementation does not subclass these — it just needs
 matching method signatures.
@@ -14,13 +18,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from .domains.perp.schema import (
-    AccountSnapshot,
-    Candle,
-    FundingPoint,
-    MarketSnapshot,
-    PerpPosition,
-)
+from .domains.perp.schema import Candle, FundingPoint, MarketSnapshot
 
 
 @runtime_checkable
@@ -41,13 +39,31 @@ class ExchangeMarketData(Protocol):
 
 
 @runtime_checkable
-class ExchangeAccount(Protocol):
-    """Account/position reads. Needs the (public) wallet address."""
+class OrderGate(Protocol):
+    """Wire-side judgement every signed exchange mutation must pass (§4.1).
 
-    def get_account_snapshot(self, wallet_address: str) -> AccountSnapshot:
-        """Margin summary plus all open positions for the wallet."""
+    The three checks the signed client calls; the live implementation is
+    :class:`~contrib.hyperliquid_perp.live.order_gate.RealOrderGate`. Each
+    ``require_*`` raises
+    :class:`~contrib.hyperliquid_perp.live.order_gate.LiveOrderGateRejected`
+    when the action may not proceed — the live call sites catch that concrete
+    type, so any alternative implementation must raise it (or a subclass).
+    """
+
+    def require_order(self, symbol: str) -> None:
+        """Raise unless a regular (risk-adding) order for ``symbol`` may go out."""
         ...
 
-    def get_position(self, wallet_address: str, coin: str) -> PerpPosition | None:
-        """The open position for ``coin``, or ``None`` when flat."""
+    def require_protective_order(self, symbol: str) -> None:
+        """Raise unless a protection / de-risking order for ``symbol`` may go out."""
+        ...
+
+    def require_exchange_action(self) -> None:
+        """Raise unless the base preconditions every signed mutation shares hold.
+
+        The only check for signed actions the gate judges without a symbol
+        (cancel, scheduleCancel, updateLeverage) — the call carries none, so
+        ``allowed_symbols`` is not enforced for them — and a strict prefix of
+        the two order checks.
+        """
         ...

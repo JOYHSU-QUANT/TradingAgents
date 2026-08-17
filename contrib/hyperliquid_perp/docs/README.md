@@ -153,7 +153,7 @@ gate 區塊（mode / allow_real_orders / safety 等，見 phase3-spec §24）—
 
 | 檔案 | 狀態 | 說明 |
 |---|---|---|
-| `ports.py` | ✅ | `ExchangeMarketData` / `ExchangeAccount` 介面定義——最先寫這個。 |
+| `ports.py` | ✅ | `ExchangeMarketData` / `OrderGate` 介面定義——最先寫這個。 |
 | `exchanges/hyperliquid/sdk_client.py` | ✅ | 官方 SDK 初始化、testnet/mainnet 設定載入。 |
 | `exchanges/hyperliquid/market_data.py` | ✅ | SDK Info → market snapshot。 |
 | `exchanges/hyperliquid/account.py` | ✅ | SDK Info → account / position snapshot。 |

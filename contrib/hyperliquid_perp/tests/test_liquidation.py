@@ -23,8 +23,8 @@ import pytest
 
 from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier
 from contrib.hyperliquid_perp.exchanges.hyperliquid.mapper import (
+    map_account_snapshot,
     map_margin_schedule,
-    map_position,
 )
 from contrib.hyperliquid_perp.paper.liquidation import (
     LiquidationEstimate,
@@ -305,7 +305,7 @@ def test_fixture_cross_reconstruction_reports_no_liquidation(
     meta_and_asset_ctxs, clearinghouse_state
 ):
     sched = map_margin_schedule(meta_and_asset_ctxs, "BTC")
-    pos = map_position(clearinghouse_state, "BTC")
+    pos = map_account_snapshot(clearinghouse_state).position_for("BTC")
     assert pos is not None
     account_value = Decimal(clearinghouse_state["marginSummary"]["accountValue"])
     wallet = account_value - pos.unrealized_pnl  # cross wallet backing all positions
@@ -325,7 +325,7 @@ def test_fixture_formula_matches_recorded_liquidation_px_within_tolerance(
     meta_and_asset_ctxs, clearinghouse_state
 ):
     sched = map_margin_schedule(meta_and_asset_ctxs, "BTC")
-    pos = map_position(clearinghouse_state, "BTC")
+    pos = map_account_snapshot(clearinghouse_state).position_for("BTC")
     recorded = Decimal(clearinghouse_state["assetPositions"][0]["position"]["liquidationPx"])
     tolerance = _TICK  # documented allowable error vs the recorded value
     # Equity at which this exact position liquidates (the isolated-equivalent wallet).

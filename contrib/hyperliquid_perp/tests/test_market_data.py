@@ -11,6 +11,7 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.market_data import (
     HyperliquidMarketData,
     interval_to_ms,
 )
+from contrib.hyperliquid_perp.ports import ExchangeMarketData
 
 
 def test_interval_to_ms_known_intervals():
@@ -52,3 +53,9 @@ def test_get_asset_meta_pair_from_one_meta_request(meta_and_asset_ctxs):
     assert sz_decimals == 5  # BTC's szDecimals, not ETH's 4
     # No tier table in the fixture -> single tier from BTC's maxLeverage.
     assert schedule == MarginSchedule(coin="BTC", tiers=(MarginTier(Decimal(0), Decimal(50)),))
+
+
+def test_market_data_satisfies_exchange_market_data_port():
+    # Method-presence check only (``runtime_checkable``): a rename/removal on
+    # either side of the port fails here rather than in a paper run.
+    assert issubclass(HyperliquidMarketData, ExchangeMarketData)

@@ -44,8 +44,10 @@ class OrderGate(Protocol):
 
     The three checks the signed client calls; the live implementation is
     :class:`~contrib.hyperliquid_perp.live.order_gate.RealOrderGate`. Each
-    ``require_*`` raises the implementation's rejection error when the action
-    may not proceed.
+    ``require_*`` raises
+    :class:`~contrib.hyperliquid_perp.live.order_gate.LiveOrderGateRejected`
+    when the action may not proceed — the live call sites catch that concrete
+    type, so any alternative implementation must raise it (or a subclass).
     """
 
     def require_order(self, symbol: str) -> None:
@@ -57,5 +59,10 @@ class OrderGate(Protocol):
         ...
 
     def require_exchange_action(self) -> None:
-        """Raise unless a non-order signed action (cancel, account config) may go out."""
+        """Raise unless the base preconditions every signed mutation shares hold.
+
+        The only check for signed actions that carry no symbol (cancel,
+        scheduleCancel, account config) — ``allowed_symbols`` is deliberately
+        not enforced for those — and a strict prefix of the two order checks.
+        """
         ...

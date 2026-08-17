@@ -391,7 +391,7 @@ class HyperliquidSignedClient:
         ``protective`` routes the wire-side gate backstop through
         :meth:`~...ports.OrderGate.require_protective_order` for a §17.2
         emergency close (a de-risking IOC that must clear in safe mode); the
-        caller (:class:`~..live.orders.LiveOrderSubmitter`) sets it from the
+        caller (:class:`~...live.orders.LiveOrderSubmitter`) sets it from the
         order role so this backstop and its own pre-check agree.
         """
         if protective:

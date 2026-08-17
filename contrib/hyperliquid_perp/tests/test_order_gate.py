@@ -161,6 +161,40 @@ def test_exchange_action_check_is_the_base_subset():
         gate.require_exchange_action()
 
 
+def test_exchange_action_enforces_allowed_symbols_when_one_is_named():
+    # updateLeverage names a coin, so the base subset can check it — a signed
+    # leverage change aimed at a coin this run never traded is refused.
+    gate = _open_gate()
+    assert gate.check_exchange_action("BTC") is None
+    reason = gate.check_exchange_action("ETH")
+    assert reason is not None and "allowed_symbols" in reason
+    with pytest.raises(LiveOrderGateRejected):
+        gate.require_exchange_action("ETH")
+
+
+def test_exchange_action_without_a_symbol_skips_the_allowlist():
+    # The account-wide actions (cancel, scheduleCancel, the §19.3 sweep) carry
+    # no symbol. Omitting one must not be read as an empty/absent symbol and
+    # refused — that would gate the cancels §13.1 explicitly allows. The
+    # allowlist here holds a DIFFERENT coin, so a check that invented a symbol
+    # from the gate's own config would fail this.
+    gate = _open_gate(allowed_symbols=("ETH",))
+    assert gate.check_exchange_action() is None
+    gate.require_exchange_action()  # does not raise
+
+
+def test_exchange_action_stays_out_of_the_safe_mode_lines():
+    # Locks the 2026-08-17 decision (issue #28): updateLeverage remains in the
+    # base subset — it must pass while a safe mode is active, because its only
+    # caller is the §20.2 smoke suite, which runs before the §19.1 recovery
+    # that proves state_reconciled. Containment is caller-side (no production
+    # cycle calls it) plus the allowed_symbols line above. If a future change
+    # moves it behind the safe-mode lines, the smoke gate becomes unsatisfiable
+    # and this test says so.
+    gate = _open_gate(state_reconciled=False, manual_safe_mode=True)
+    assert gate.check_exchange_action("BTC") is None
+
+
 def test_mainnet_live_counts_as_a_live_mode_per_spec():
     # §4.1 lists mainnet_live; config load rejects it long before a gate can
     # exist, but the gate must state the spec's rule, not re-legislate it.

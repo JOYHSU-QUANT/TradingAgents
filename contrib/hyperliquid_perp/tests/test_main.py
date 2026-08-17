@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -376,6 +377,14 @@ def _stub_engine(
         # carries all three.
         indicators = {"rsi_14": 55.0, "ema_20": 100.0, "ema_50": 95.0, "atr_14": 250.0}
         mark_price = Decimal("60000")  # current_position_state values at mark
+        candle_interval = "4h"
+
+        @property
+        def as_of(self):
+            # A live feed, evaluated per call rather than pinned at import: the
+            # staleness guard measures this against the wall clock, and these
+            # tests are about what happens AFTER the context guards pass.
+            return datetime.now(timezone.utc)
 
     monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (_Ctx(), object()))
     monkeypatch.setattr(main_mod, "render_market_context", lambda ctx: "ctx text")
@@ -558,6 +567,8 @@ def test_run_context_only_exits_0_on_healthy_context(monkeypatch, capsys):
     ctx = SimpleNamespace(
         candle_count=200,
         indicators={"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0, "atr_14": 250.0},
+        candle_interval="4h",
+        as_of=datetime.now(timezone.utc),  # a live feed clears the staleness guard
     )
     monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, object()))
     monkeypatch.setattr(main_mod, "render_market_context", lambda c: "ctx text")
@@ -717,6 +728,128 @@ def test_run_engine_refuses_untradeable_regime_indicators(
     assert rc == 1
     assert calls == []  # engine never built — no LLM spend
     assert expected_msg in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# _context_refusal_error — market-data freshness (issue #37)
+# --------------------------------------------------------------------------
+
+_NOW = datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc)
+
+
+def _ctx_closing_at(as_of, *, interval="4h", candle_count=200):
+    """A context that clears the first three guards; only its age varies."""
+    return SimpleNamespace(
+        candle_count=candle_count,
+        indicators={"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0, "atr_14": 250.0},
+        candle_interval=interval,
+        as_of=as_of,
+    )
+
+
+def test_context_refusal_flags_a_stalled_candle_feed():
+    # The whole point of the guard: a feed that stopped advancing yields a
+    # context whose indicators all compute and whose regime reads healthy, so
+    # the three guards above pass it — it just describes 14h ago.
+    ctx = _ctx_closing_at(_NOW - timedelta(hours=14))
+    msg = main_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    assert msg is not None
+    # Named numbers, not a bare "stale": an operator must be able to tell a
+    # 14h-old feed from a 3-day-old one without reading the code.
+    assert "2026-08-16T22:00:00Z" in msg
+    assert "14h 0m" in msg
+    assert "3 x 4h (12h 0m)" in msg
+    # Both causes named, neither asserted: a host clock running fast is
+    # indistinguishable from a feed that stopped, and blaming the exchange
+    # would send an operator down the wrong path half the time.
+    assert "feed stopped advancing" in msg
+    assert "host's clock is wrong" in msg
+
+
+def test_context_refusal_passes_a_live_candle_feed():
+    # The healthy witness. get_candles drops the still-forming bar, so the
+    # newest CLOSED candle being a full interval old is the NORMAL state at a
+    # cycle boundary — refusing it would refuse every cycle.
+    ctx = _ctx_closing_at(_NOW - timedelta(hours=4))
+    assert main_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW) is None
+
+
+def test_context_refusal_freshness_bound_is_exclusive():
+    # Exactly at 3 x 4h is fresh, one minute past it is not: pins the
+    # comparison as a strict `>`. A `>=` would refuse a feed that the
+    # boundary case here calls healthy.
+    at_limit = _ctx_closing_at(_NOW - timedelta(hours=12))
+    assert main_mod._context_refusal_error(at_limit, "BTC", {}, now=_NOW) is None
+    past_limit = _ctx_closing_at(_NOW - timedelta(hours=12, minutes=1))
+    assert "freshness limit" in main_mod._context_refusal_error(past_limit, "BTC", {}, now=_NOW)
+
+
+def test_context_refusal_freshness_limit_tracks_the_candle_interval():
+    # The bound is N x interval, not a fixed span: 5h is a healthy age for 4h
+    # bars and a stalled feed for 1h bars. A hardcoded hour count would pass
+    # one of these two and fail the other.
+    age = _NOW - timedelta(hours=5)
+    assert main_mod._context_refusal_error(_ctx_closing_at(age), "BTC", {}, now=_NOW) is None
+    hourly = _ctx_closing_at(age, interval="1h")
+    assert "freshness limit" in main_mod._context_refusal_error(hourly, "BTC", {}, now=_NOW)
+
+
+def test_context_refusal_defaults_to_the_wall_clock():
+    # The one-shot callers pass no clock. The default must be a real reading,
+    # not a skipped check — this context is months old whenever the suite runs.
+    stale = _ctx_closing_at(datetime(2026, 3, 1, tzinfo=timezone.utc))
+    assert "freshness limit" in main_mod._context_refusal_error(stale, "BTC", {})
+    # ...and the same default does not manufacture a refusal for a live feed.
+    live = _ctx_closing_at(datetime.now(timezone.utc))
+    assert main_mod._context_refusal_error(live, "BTC", {}) is None
+
+
+def test_context_refusal_fails_closed_on_an_unmeasurable_interval():
+    # A mis-cased interval never survives _build_context (get_candles resolves
+    # it first), but a context that reaches the guard with one cannot have its
+    # age established — refuse rather than skip the check.
+    ctx = _ctx_closing_at(_NOW, interval="4H")
+    msg = main_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    assert "freshness cannot be checked" in msg
+    assert "4H" in msg  # the offending value is named
+
+
+def test_context_refusal_reports_warmup_before_staleness():
+    # Guard order is the operator-facing diagnosis. A feed that is both
+    # under-warmed and old reports the warm-up cause: "this coin just listed /
+    # the window is short" is actionable, "the data is old" follows from it.
+    ctx = _ctx_closing_at(_NOW - timedelta(days=30), candle_count=5)
+    ctx.indicators = {"rsi_14": None, "ema_20": None, "ema_50": None, "atr_14": None}
+    assert "under-warmed" in main_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+
+
+def test_run_engine_aborts_on_a_stale_context(monkeypatch, capsys):
+    # End to end through the one-shot path: no engine is built, so a stalled
+    # feed costs nothing and exits 1 with the cause on stderr.
+    _stub_engine(monkeypatch)
+    ctx = _ctx_closing_at(datetime(2026, 3, 1, tzinfo=timezone.utc))
+    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, object()))
+    calls = []
+    monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
+    rc = main_mod.run_engine({}, "BTC")
+    assert rc == 1
+    assert calls == []  # engine never built — no LLM spend
+    assert "freshness limit" in capsys.readouterr().err
+
+
+def test_run_context_only_warns_on_a_stale_context(monkeypatch, capsys):
+    # The diagnostic loop renders it but must not let it read as live signal —
+    # a stale context is the one degraded state whose rendering looks entirely
+    # healthy (real prices, real indicators, a real regime).
+    ctx = _ctx_closing_at(datetime(2026, 3, 1, tzinfo=timezone.utc))
+    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, object()))
+    monkeypatch.setattr(main_mod, "render_market_context", lambda c: "ctx text")
+    monkeypatch.setattr(main_mod, "wallet_address", lambda config: "")
+    rc = main_mod.run_context_only({}, "BTC")
+    assert rc == 4
+    captured = capsys.readouterr()
+    assert "freshness limit" in captured.err
+    assert "do not read it as live signal" in captured.err
 
 
 def test_run_engine_aborts_on_malformed_propagate_shape(monkeypatch, capsys):

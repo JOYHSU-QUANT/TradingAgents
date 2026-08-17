@@ -58,12 +58,16 @@ class OrderGate(Protocol):
         """Raise unless a protection / de-risking order for ``symbol`` may go out."""
         ...
 
-    def require_exchange_action(self) -> None:
+    def require_exchange_action(self, symbol: str | None = None) -> None:
         """Raise unless the base preconditions every signed mutation shares hold.
 
-        The only check for signed actions the gate judges without a symbol
-        (cancel, scheduleCancel, updateLeverage) — the call carries none, so
-        ``allowed_symbols`` is not enforced for them — and a strict prefix of
-        the two order checks.
+        The check for the signed actions that are not orders (cancel,
+        scheduleCancel, updateLeverage), and a strict prefix of the two order
+        checks. Cancel and scheduleCancel are account-wide, carry no symbol and
+        pass ``None`` — ``allowed_symbols`` is not enforceable for them.
+        ``updateLeverage`` does name a coin and passes it, so a signed leverage
+        change aimed outside ``allowed_symbols`` is refused (2026-08-17, issue
+        #28; see :mod:`~contrib.hyperliquid_perp.live.order_gate` for why that
+        action is in the base subset at all).
         """
         ...

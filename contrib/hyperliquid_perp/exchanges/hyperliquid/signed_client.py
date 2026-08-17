@@ -10,7 +10,10 @@ of raw SDK dicts. The §4.1 order gate
 and judges every signed MUTATION: order placement passes the wire-scoped
 condition list (``require_order``, or ``require_protective_order`` for a
 protective/de-risking order), cancel/scheduleCancel/updateLeverage the base
-subset (§13.1 allows the cancels in safe mode). The full §4.1 list is a
+subset (§13.1 allows the cancels in safe mode; updateLeverage additionally
+passes its coin, so the base subset checks ``allowed_symbols`` for it — see
+:mod:`~contrib.hyperliquid_perp.live.order_gate` for why it is in that subset).
+The full §4.1 list is a
 DECISION question, asked once per cycle through ``check_new_target`` by the
 engine, not per order. Queries are read-only and ungated.
 
@@ -373,14 +376,17 @@ class HyperliquidSignedClient:
         action reaches the exchange before the first real cycle — so PR 6 wraps
         it. Rides ``require_exchange_action`` (the same wire gate as
         ``schedule_cancel``: a signed account-config change, not an order that
-        opens exposure). ``updateLeverage`` is statusless — the envelope is the
+        opens exposure) — but unlike the cancels it names an asset, so ``coin``
+        is passed and checked against ``allowed_symbols``: this run may only
+        change the leverage of the coin it was configured to trade (2026-08-17,
+        issue #28). ``updateLeverage`` is statusless — the envelope is the
         whole verdict, and ``_response_payload`` raises ``ExchangeRequestError``
         on a top-level ``err`` (a rejected leverage change never half-hides
         behind a return code).
         """
         if leverage < 1:
             raise ValueError(f"leverage must be >= 1 (§20.1 pins 1), got {leverage!r}")
-        self._gate.require_exchange_action()
+        self._gate.require_exchange_action(coin)
         response = call_sdk(self._exchange.update_leverage, leverage, coin, is_cross)
         _response_payload(response, action="updateLeverage")
 

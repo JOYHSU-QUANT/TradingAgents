@@ -16,10 +16,24 @@ three widths — because §4.1's conditions are not all about the same question:
   per-order would have the engine block its own slices and its own emergency
   close.
 - :meth:`RealOrderGate.check_exchange_action` is the base subset (real orders
-  enabled, a live mode, agent authorized) and gates the other signed actions
-  (cancel, scheduleCancel, updateLeverage). Smallest on purpose: §13.1
-  explicitly ALLOWS cancelling bot-owned orders and refreshing the kill switch
-  in safe mode.
+  enabled, a live mode, agent authorized, plus ``allowed_symbols`` for the one
+  member that names an asset) and gates the other signed actions (cancel,
+  scheduleCancel, updateLeverage). Smallest on purpose: §13.1 explicitly ALLOWS
+  cancelling bot-owned orders and refreshing the kill switch in safe mode.
+
+  ``updateLeverage`` sits here by a decision, not by §13.1's cancel-family
+  wording (2026-08-17, issue #28). It is NOT de-risking — raising leverage
+  magnifies an existing position — so the safe-mode exemption the cancel family
+  earns does not transfer to it on merit. It stays in the base subset because
+  its ONLY caller is the §20.2 smoke suite (test 2), which runs before the
+  first cycle and deliberately without the §19.1 recovery that proves
+  ``state_reconciled``: gating it on the safe-mode lines would make the smoke
+  gate unsatisfiable, and so would block every live run from ever starting. The
+  containment is on the caller side — no production cycle calls it, and both
+  live profiles pin ``leverage: 1`` — plus the ``allowed_symbols`` line above,
+  which stops a signed leverage change aimed at any other coin. Should a
+  production caller ever appear, that containment is gone and this belongs
+  behind the safe-mode lines instead.
 
 The gate is fail-closed: every runtime condition a later startup step proves
 (agent authorization, startup reconciliation, kill switch armed, state
@@ -156,14 +170,25 @@ class RealOrderGate:
             allowed_symbols=config.safety.allowed_symbols,
         )
 
-    def check_exchange_action(self) -> str | None:
-        """The base preconditions for ANY signed mutation; None means allowed."""
+    def check_exchange_action(self, symbol: str | None = None) -> str | None:
+        """The base preconditions for ANY signed mutation; None means allowed.
+
+        ``symbol`` is for the one base-subset action that NAMES an asset:
+        ``updateLeverage`` carries a coin, while cancel / scheduleCancel and the
+        §19.3 sweep are account-wide by construction and pass ``None``. When a
+        symbol is given it must be in ``allowed_symbols`` — a signed change
+        aimed at a coin this run was never configured for is a wiring bug, and
+        the account-wide actions' lack of a symbol must not be read as "no
+        symbol is ever checkable here".
+        """
         if not self.allow_real_orders:
             return "allow_real_orders is false"
         if self.mode not in _LIVE_MODES:
             return f"mode {self.mode.value!r} is not a live mode"
         if not self.agent_authorized:
             return "agent authorization has not passed (§6.1)"
+        if symbol is not None and symbol not in self.allowed_symbols:
+            return f"symbol {symbol!r} is not in allowed_symbols"
         return None
 
     def _first_failed(
@@ -294,7 +319,7 @@ class RealOrderGate:
         if reason is not None:
             raise LiveOrderGateRejected(reason)
 
-    def require_exchange_action(self) -> None:
-        reason = self.check_exchange_action()
+    def require_exchange_action(self, symbol: str | None = None) -> None:
+        reason = self.check_exchange_action(symbol)
         if reason is not None:
             raise LiveOrderGateRejected(reason)

@@ -4050,18 +4050,23 @@ class _EngineDecisionProvider:
             )
         except ExchangeError as exc:
             raise RetryableDecisionError("connection", str(exc)) from exc
-        # All three pre-LLM context guards (under-warm data, fully-dead
-        # indicator set, missing/dead regime indicators atr_14/ema_20/ema_50),
-        # shared with the one-shot path (see main._context_refusal_error) — a
-        # dead or absent regime indicator would otherwise let every cycle
-        # trade on a fabricated-calm RANGING regime.
+        # All four pre-LLM context guards (under-warm data, fully-dead
+        # indicator set, missing/dead regime indicators atr_14/ema_20/ema_50,
+        # a stale candle feed), shared with the one-shot path (see
+        # main._context_refusal_error) — a dead or absent regime indicator
+        # would otherwise let every cycle trade on a fabricated-calm RANGING
+        # regime, and a stalled feed would let it trade on the past.
         # Deliberate (reviewed): they ride the §3.1 ladder as "server_error" →
         # api_failed — the closed §6.2 vocabulary has no data-availability
         # label, and the failure precedes the AI call so nothing is spent. A
-        # gappy feed heals by the next try/cycle; a too-young listing or a
-        # broken indicator engine produces a recurring api_failed cycle every
-        # 4h until it warms up / is fixed.
-        refusal = _context_refusal_error(ctx, coin, self._config)
+        # gappy feed heals by the next try/cycle; a too-young listing, a
+        # broken indicator engine or a feed that stopped advancing produces a
+        # recurring api_failed cycle every 4h until it warms up / is fixed.
+        # The staleness guard measures against ``as_of`` — the scheduler's own
+        # clock reading for this cycle — not a second call to the wall clock,
+        # so the daemon's one time base drives both the schedule and the
+        # freshness verdict.
+        refusal = _context_refusal_error(ctx, coin, self._config, now=as_of)
         if refusal is not None:
             raise RetryableDecisionError("server_error", refusal)
         context_text = render_market_context(ctx)

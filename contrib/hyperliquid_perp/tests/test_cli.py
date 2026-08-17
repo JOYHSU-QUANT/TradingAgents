@@ -258,9 +258,10 @@ def test_build_input_refuses_a_stalled_candle_feed(monkeypatch):
 
 def test_build_input_measures_freshness_against_the_cycle_clock(tmp_path, monkeypatch):
     # The discriminator for WHICH clock the guard reads: this candle is one
-    # hour old relative to the cycle's own as_of and years stale against the
-    # real wall clock. A guard calling datetime.now() itself would refuse it;
-    # the daemon's single time base must not.
+    # hour old relative to the cycle's own as_of, and months stale against the
+    # real wall clock (the fixture date is fixed, so the gap only grows). A
+    # guard calling datetime.now() itself would refuse it; the daemon's single
+    # time base must not.
     import contrib.hyperliquid_perp.main as main_mod
     from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
 

@@ -757,19 +757,23 @@ def test_context_refusal_flags_a_stalled_candle_feed():
     # Named numbers, not a bare "stale": an operator must be able to tell a
     # 14h-old feed from a 3-day-old one without reading the code.
     assert "2026-08-16T22:00:00Z" in msg
-    assert "14h 0m" in msg
-    assert "3 x 4h (12h 0m)" in msg
-    # Both causes named, neither asserted: a host clock running fast is
+    assert "14h 0m 0s" in msg
+    assert "12h 0m 0s freshness limit (3 x 4h)" in msg
+    # Both causes named, neither asserted: a host clock running AHEAD is
     # indistinguishable from a feed that stopped, and blaming the exchange
-    # would send an operator down the wrong path half the time.
+    # would send an operator down the wrong path half the time. (A clock
+    # BEHIND is distinguishable and gets its own branch — see
+    # test_context_refusal_flags_a_clock_behind_the_exchange.)
     assert "feed stopped advancing" in msg
-    assert "host's clock is wrong" in msg
+    assert "host's clock is ahead" in msg
 
 
 def test_context_refusal_passes_a_live_candle_feed():
-    # The healthy witness. get_candles drops the still-forming bar, so the
-    # newest CLOSED candle being a full interval old is the NORMAL state at a
-    # cycle boundary — refusing it would refuse every cycle.
+    # The healthy witness. get_candles drops the still-forming bar, so on a
+    # healthy feed the newest CLOSED candle is under one interval old — and a
+    # full interval, the case here, is what a single unpublished boundary
+    # already looks like. Refusing that would refuse a cycle over ordinary
+    # exchange jitter.
     ctx = _ctx_closing_at(_NOW - timedelta(hours=4))
     assert main_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW) is None
 
@@ -792,6 +796,53 @@ def test_context_refusal_freshness_limit_tracks_the_candle_interval():
     assert main_mod._context_refusal_error(_ctx_closing_at(age), "BTC", {}, now=_NOW) is None
     hourly = _ctx_closing_at(age, interval="1h")
     assert "freshness limit" in main_mod._context_refusal_error(hourly, "BTC", {}, now=_NOW)
+
+
+def test_context_refusal_freshness_limit_is_capped_at_three_decision_cycles():
+    # The candle interval is operator-configurable but the decision cycle is
+    # fixed at 4h, so 3 x 1d would let 18 cycles trade through a three-day
+    # outage. The cap binds instead — and the message says the cap is what bound
+    # it, since "12h" alone would read as the ordinary 3 x 4h bound.
+    daily = _ctx_closing_at(_NOW - timedelta(hours=13), interval="1d")
+    msg = main_mod._context_refusal_error(daily, "BTC", {}, now=_NOW)
+    assert msg is not None and "capped at three 4h decision cycles" in msg
+    # Just inside the cap still passes: the cap is a bound, not a second guard.
+    fresh = _ctx_closing_at(_NOW - timedelta(hours=11), interval="1d")
+    assert main_mod._context_refusal_error(fresh, "BTC", {}, now=_NOW) is None
+
+
+def test_context_refusal_freshness_limit_has_a_floor():
+    # The other end: 3 x 1m would refuse a whole cycle over three minutes of
+    # feed jitter, far tighter than the 4h decision cadence needs.
+    minutely = _ctx_closing_at(_NOW - timedelta(minutes=20), interval="1m")
+    assert main_mod._context_refusal_error(minutely, "BTC", {}, now=_NOW) is None
+    past_floor = _ctx_closing_at(_NOW - timedelta(minutes=31), interval="1m")
+    msg = main_mod._context_refusal_error(past_floor, "BTC", {}, now=_NOW)
+    assert msg is not None and "raised to the 30m floor" in msg
+
+
+def test_context_refusal_flags_a_clock_behind_the_exchange():
+    # The age comparison is one-sided: a host clock hours BEHIND makes every
+    # context look brand new, and the stale branch can never fire. A candle
+    # closing in the future has only one explanation, so it gets its own
+    # refusal that says so instead of the stale branch's "either/or".
+    future = _ctx_closing_at(_NOW + timedelta(hours=13))
+    msg = main_mod._context_refusal_error(future, "BTC", {}, now=_NOW)
+    assert msg is not None
+    assert "host's clock is behind" in msg
+    assert "13h 0m 0s AFTER" in msg
+    assert "12h 0m 0s tolerance (3 x 4h)" in msg
+
+
+def test_context_refusal_tolerates_a_candle_closing_during_the_fetch():
+    # The daemon reads its clock BEFORE the market fetch, so a boundary that
+    # closes while the four REST calls run (each riding the full
+    # network_timeout_s) lands a couple of minutes ahead of it. That is normal,
+    # not a broken clock. Checked at the TIGHTEST interval, where the tolerance
+    # is the 30m floor rather than 3 x interval — 1m bars would otherwise give
+    # a 3-minute tolerance, inside the reach of a slow fetch.
+    just_ahead = _ctx_closing_at(_NOW + timedelta(minutes=4), interval="1m")
+    assert main_mod._context_refusal_error(just_ahead, "BTC", {}, now=_NOW) is None
 
 
 def test_context_refusal_defaults_to_the_wall_clock():

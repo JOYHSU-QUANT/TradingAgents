@@ -770,9 +770,11 @@ def test_update_leverage_refuses_a_coin_outside_allowed_symbols(fake_exchange):
 
 
 def test_update_leverage_passes_during_safe_mode(fake_exchange):
-    # The other half of the issue #28 decision, locked at the call site: the
-    # §20.2 smoke suite runs test 2 before the §19.1 recovery that proves
-    # state_reconciled, so this action must stay out of the safe-mode lines.
+    # The other half of the issue #28 decision, locked at the call site: a
+    # `--only update_leverage` smoke rerun (the supported way to repair a failed
+    # test 2's latest-per-key verdict) skips the pre-flight §19.1 recovery that
+    # proves state_reconciled, so this action must stay out of the safe-mode
+    # lines or the §20.2 gate can never be satisfied again.
     safe_mode_gate = RealOrderGate(
         allow_real_orders=True,
         mode=ExecutionMode.TESTNET_LIVE,

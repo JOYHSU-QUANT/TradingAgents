@@ -138,11 +138,22 @@ def _warmup_threshold(config: dict) -> int:
 
 
 def _format_duration_ms(ms: int) -> str:
-    """``ms`` as ``"45m"`` / ``"14h 12m"`` — minute resolution, for refusal text."""
-    minutes = ms // 60_000
-    if minutes < 60:
-        return f"{minutes}m"
-    return f"{minutes // 60}h {minutes % 60}m"
+    """``ms`` as ``"45m 0s"`` / ``"14h 12m 30s"`` / ``"153d 4h"``, for refusal text.
+
+    Seconds are carried below the two-day mark because the refusal message prints
+    an age and the limit it exceeded side by side: a minute-resolution format
+    renders every age in the first minute past the limit as the limit itself,
+    and the message then reads "X is past the X limit". Past two days the two
+    can no longer collide (the limit is capped far below), so the coarser form
+    stays readable.
+    """
+    seconds, minutes = ms // 1000 % 60, ms // 60_000 % 60
+    hours, days = ms // 3_600_000, ms // 86_400_000
+    if ms < 3_600_000:
+        return f"{minutes}m {seconds}s"
+    if days < 2:
+        return f"{hours}h {minutes}m {seconds}s"
+    return f"{days}d {hours % 24}h"
 
 
 def _utc_stamp(moment: datetime) -> str:
@@ -152,13 +163,39 @@ def _utc_stamp(moment: datetime) -> str:
 
 # How old the newest candle may be, counted in candle intervals.
 # ``get_candles`` drops the still-forming bar, so a healthy feed's newest CLOSED
-# candle is under one interval old. Each bar the exchange fails to publish adds
-# another interval, so three tolerates two consecutive missing bars (plus a
-# boundary published late) and refuses at the third. Not a config knob: this is
-# a correctness bound on "is this still the current market?", not a tuning
-# parameter, and an operator who raises it is only choosing to trade on older
-# data.
+# candle is under one interval old, and each bar the exchange fails to publish
+# adds another interval: three tolerates two consecutive missing bars and
+# refuses at the third. Not a config knob — a correctness bound on "is this
+# still the current market?", not a tuning parameter.
 _MAX_CANDLE_AGE_INTERVALS = 3
+# ...but the interval is operator-configurable (1m through 1d) while the decision
+# cycle is fixed at 4h, so the bar width alone would make this guard mean wildly
+# different things: 3 x 1d would let 18 cycles trade through a three-day outage,
+# 3 x 1m would refuse a cycle over three minutes of feed jitter. Clamp both ends
+# in terms of the DECISION cadence the guard actually protects: at most three
+# cycles of stale data, and never so tight that ordinary jitter refuses a cycle.
+_MAX_CANDLE_AGE_CEILING_MS = 12 * 60 * 60_000  # 3 x the 4h decision cycle
+_MAX_CANDLE_AGE_FLOOR_MS = 30 * 60_000
+
+
+def _candle_age_limit(interval_ms: int, interval: str) -> tuple[int, str]:
+    """``(limit_ms, how it was derived)`` for this candle interval.
+
+    The derivation travels with the number so a refusal message never states a
+    bound whose origin the operator cannot see — the clamp is invisible in the
+    number alone, and "12h" reads very differently as "3 x 4h" than as "3 x 1d,
+    capped".
+    """
+    base = _MAX_CANDLE_AGE_INTERVALS * interval_ms
+    if base > _MAX_CANDLE_AGE_CEILING_MS:
+        return _MAX_CANDLE_AGE_CEILING_MS, (
+            f"{_MAX_CANDLE_AGE_INTERVALS} x {interval} capped at three 4h decision cycles"
+        )
+    if base < _MAX_CANDLE_AGE_FLOOR_MS:
+        return _MAX_CANDLE_AGE_FLOOR_MS, (
+            f"{_MAX_CANDLE_AGE_INTERVALS} x {interval} raised to the 30m floor"
+        )
+    return base, f"{_MAX_CANDLE_AGE_INTERVALS} x {interval}"
 
 
 def _context_refusal_error(
@@ -178,8 +215,10 @@ def _context_refusal_error(
     helper exists to prevent.
 
     ``now`` is the wall clock the staleness guard measures against. The daemon
-    passes the clock its cycle is scheduled on; the one-shot callers let it
-    default to :func:`datetime.now`. Every caller in the system builds ``ctx``
+    passes the reading its own clock gave when this cycle started running (NOT
+    the scheduled slot, which for a retried or recovered cycle is an older and
+    quite different value); the one-shot callers let it default to
+    :func:`datetime.now`. Every caller in the system builds ``ctx``
     from a live REST read (``_build_context`` is ``build_market_context``'s only
     production caller), so there is no historical-replay mode whose lagging
     ``as_of`` this would misjudge — the parameter exists to make the clock
@@ -251,17 +290,37 @@ def _context_refusal_error(
             "to run the engine on a context whose freshness cannot be checked."
         )
     age_ms = int((moment - ctx.as_of).total_seconds() * 1000)
-    limit_ms = _MAX_CANDLE_AGE_INTERVALS * interval_ms
+    limit_ms, limit_basis = _candle_age_limit(interval_ms, ctx.candle_interval)
+    # The same bound, applied to a candle closing in the FUTURE. Its own branch
+    # because the age comparison alone is one-sided: a host clock hours BEHIND
+    # makes every context look brand new and the staleness branch can never
+    # fire. And unlike that branch this one is not ambiguous — the exchange
+    # cannot publish a future bar and get_candles drops any bar past its own
+    # clock, so only our clock can explain it. Small negatives are legitimate
+    # and must NOT trip it: the daemon reads its clock before the market fetch,
+    # so a boundary closing during those four REST calls (each riding the full
+    # network_timeout_s) lands a couple of minutes ahead. Sharing the bound
+    # above keeps that slack comfortably wide at every interval — its 30m floor
+    # is an order of magnitude past any fetch — instead of inventing a second
+    # threshold that would have to be re-derived whenever the timeout changes.
+    if age_ms < -limit_ms:
+        return (
+            f"the newest {coin} candle closes at {_utc_stamp(ctx.as_of)}, which is "
+            f"{_format_duration_ms(-age_ms)} AFTER the current time "
+            f"({_utc_stamp(moment)}) — more than the {_format_duration_ms(limit_ms)} "
+            f"tolerance ({limit_basis}). A candle cannot close in the future, so "
+            "this host's clock is behind; every freshness check it makes is "
+            "unreliable. Refusing to run the engine against an untrustworthy clock."
+        )
     if age_ms > limit_ms:
         return (
             f"the newest {coin} candle closed at {_utc_stamp(ctx.as_of)}, "
             f"{_format_duration_ms(age_ms)} before now ({_utc_stamp(moment)}) — "
-            f"past the {_MAX_CANDLE_AGE_INTERVALS} x {ctx.candle_interval} "
-            f"({_format_duration_ms(limit_ms)}) freshness limit. Either the "
-            "market data feed stopped advancing or this host's clock is wrong — "
-            "the two are indistinguishable from here, and both mean this context "
-            "describes a market other than the current one. Refusing to run the "
-            "engine on market data this old."
+            f"past the {_format_duration_ms(limit_ms)} freshness limit "
+            f"({limit_basis}). Either the market data feed stopped advancing or "
+            "this host's clock is ahead — the two are indistinguishable from "
+            "here, and both mean this context describes a market other than the "
+            "current one. Refusing to run the engine on market data this old."
         )
     return None
 

@@ -10,9 +10,11 @@ of raw SDK dicts. The §4.1 order gate
 and judges every signed MUTATION: order placement passes the wire-scoped
 condition list (``require_order``, or ``require_protective_order`` for a
 protective/de-risking order), cancel/scheduleCancel/updateLeverage the base
-subset (§13.1 allows the cancels in safe mode; updateLeverage additionally
-passes its coin, so the base subset checks ``allowed_symbols`` for it — see
-:mod:`~contrib.hyperliquid_perp.live.order_gate` for why it is in that subset).
+subset (§13.1 allows the cancels in safe mode). Every base-subset call states
+its symbol or explicitly states ``None``: updateLeverage passes its coin, so
+``allowed_symbols`` binds it, while the cancels pass ``None`` by decision
+despite naming a coin — see :mod:`~contrib.hyperliquid_perp.live.order_gate`
+for both that decision and why updateLeverage is in this subset at all.
 The full §4.1 list is a
 DECISION question, asked once per cycle through ``check_new_target`` by the
 engine, not per order. Queries are read-only and ungated.
@@ -376,10 +378,12 @@ class HyperliquidSignedClient:
         action reaches the exchange before the first real cycle — so PR 6 wraps
         it. Rides ``require_exchange_action`` (the same wire gate as
         ``schedule_cancel``: a signed account-config change, not an order that
-        opens exposure) — but unlike the cancels it names an asset, so ``coin``
-        is passed and checked against ``allowed_symbols``: this run may only
-        change the leverage of the coin it was configured to trade (2026-08-17,
-        issue #28). ``updateLeverage`` is statusless — the envelope is the
+        opens exposure) — but passes ``coin``, so ``allowed_symbols`` binds it:
+        this run may only change the leverage of the coin it was configured to
+        trade. Its coin is the run's own configured symbol, not one read back
+        from the exchange, so the reason the cancels pass ``None`` does not
+        apply here (2026-08-17, issue #28). ``updateLeverage`` is statusless —
+        the envelope is the
         whole verdict, and ``_response_payload`` raises ``ExchangeRequestError``
         on a top-level ``err`` (a rejected leverage change never half-hides
         behind a return code).
@@ -532,8 +536,11 @@ class HyperliquidSignedClient:
         """Cancel one order by exchange order id (§7 ``cancel``).
 
         Base gate only: §13.1 allows cancelling bot-owned orders in safe mode.
+        ``None`` for the gate's symbol although ``coin`` is right there — see the
+        order_gate module docstring: the §19.3 sweep must stay able to cancel a
+        bot-owned order whose symbol has since left ``allowed_symbols``.
         """
-        self._gate.require_exchange_action()
+        self._gate.require_exchange_action(None)
         response = call_sdk(self._exchange.cancel, coin, int(exchange_order_id))
         return _parse_cancel_ack(response)
 
@@ -541,8 +548,9 @@ class HyperliquidSignedClient:
         """Cancel one order by client order id (§7 ``cancelByCloid``).
 
         §8.3 rule 7: the exchange-facing identifier is always cloid_hex.
+        Account-wide for gate purposes, for the reason on :meth:`cancel_by_oid`.
         """
-        self._gate.require_exchange_action()
+        self._gate.require_exchange_action(None)
         response = call_sdk(self._exchange.cancel_by_cloid, coin, Cloid.from_str(cloid_hex))
         return _parse_cancel_ack(response)
 
@@ -638,7 +646,7 @@ class HyperliquidSignedClient:
         ``kill_switch_refresh_failed`` event, so this method never half-hides
         an unarmed switch behind a return code.
         """
-        self._gate.require_exchange_action()
+        self._gate.require_exchange_action(None)  # arms the whole wallet
         if cancel_at.tzinfo is None:
             raise ValueError("cancel_at must be timezone-aware (UTC)")
         response = call_sdk(self._exchange.schedule_cancel, int(cancel_at.timestamp() * 1000))
@@ -656,7 +664,7 @@ class HyperliquidSignedClient:
         kill switch manager unsets the trigger. Failure raises — the caller
         records it and leaves the switch armed (the fail-safe direction).
         """
-        self._gate.require_exchange_action()
+        self._gate.require_exchange_action(None)  # wallet-wide, like the arm
         response = call_sdk(self._exchange.schedule_cancel, None)
         _response_payload(response, action="scheduleCancel")
 

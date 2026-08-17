@@ -66,7 +66,7 @@ class _FakeClient:
         self.cancel_results: dict[str, CancelAck | Exception] = {}
 
     def schedule_cancel(self, *, cancel_at):
-        self._gate.require_exchange_action()
+        self._gate.require_exchange_action(None)
         self.schedule_attempts += 1
         if self.schedule_duration_s and self._clock is not None:
             self._clock.advance(self.schedule_duration_s)
@@ -75,7 +75,7 @@ class _FakeClient:
         self.schedule_calls.append(cancel_at)
 
     def clear_scheduled_cancel(self):
-        self._gate.require_exchange_action()
+        self._gate.require_exchange_action(None)
         if self.clear_error is not None:
             raise self.clear_error
         self.clear_calls += 1
@@ -101,7 +101,7 @@ class _FakeClient:
         return echo_order_status_cloid(result, cloid_hex)
 
     def cancel_by_cloid(self, *, coin, cloid_hex):
-        self._gate.require_exchange_action()
+        self._gate.require_exchange_action(None)
         self.cancel_calls.append((coin, cloid_hex))
         result = self.cancel_results.get(cloid_hex, CancelAck(success=True))
         if isinstance(result, Exception):

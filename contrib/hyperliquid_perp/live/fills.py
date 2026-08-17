@@ -107,9 +107,9 @@ _FEE_TOKEN_USDC = "USDC"
 # condition that repeats at message cadence still records once — mirroring
 # reconcile's _EQUITY_MISMATCH_FACT_KEY, and unlike the per-payload derivation
 # in _malformed_key below, which is right for a single bad fill.
-_ENVELOPE_FACT_KEY_PREFIX = "envelope-"
-_ENVELOPE_WRONG_USER_FACT_KEY = f"{_ENVELOPE_FACT_KEY_PREFIX}wrong-user"
-_ENVELOPE_NO_FILLS_FACT_KEY = f"{_ENVELOPE_FACT_KEY_PREFIX}no-fills-list"
+ENVELOPE_FACT_KEY_PREFIX = "envelope-"
+_ENVELOPE_WRONG_USER_FACT_KEY = f"{ENVELOPE_FACT_KEY_PREFIX}wrong-user"
+_ENVELOPE_NO_FILLS_FACT_KEY = f"{ENVELOPE_FACT_KEY_PREFIX}no-fills-list"
 
 
 def _malformed_key(raw: Any) -> str:
@@ -141,7 +141,7 @@ def _malformed_key(raw: Any) -> str:
         # glob is case-insensitive on Windows and macOS. A real tid is an
         # integer and never reaches any of this.
         derived = "" if tid is None else str(tid)
-        if derived and not derived.lower().startswith(_ENVELOPE_FACT_KEY_PREFIX):
+        if derived and not derived.lower().startswith(ENVELOPE_FACT_KEY_PREFIX):
             return derived
     return f"unparsed-{_payload_digest(raw)}"
 

@@ -1,9 +1,11 @@
 """StockTwits fetch degrades (never raises) on transport errors, including the
-http.client chunked-transfer exceptions that are not OSErrors (#1024)."""
+http.client chunked-transfer exceptions that are not OSErrors (#1024); missing
+fields render as explicit markers and a mismatched symbol echo degrades (#31)."""
 
 from __future__ import annotations
 
 import http.client
+import json
 from unittest.mock import patch
 from urllib.error import HTTPError
 
@@ -12,7 +14,9 @@ import pytest
 from tradingagents.dataflows import stocktwits
 
 
-def _raise(exc):
+def _resp(read_fn):
+    """A minimal context-manager response whose read() runs ``read_fn``."""
+
     class _Resp:
         def __enter__(self_inner):
             return self_inner
@@ -21,8 +25,31 @@ def _raise(exc):
             return False
 
         def read(self_inner):
-            raise exc
+            return read_fn()
+
     return _Resp()
+
+
+def _raise(exc):
+    def _r():
+        raise exc
+
+    return _resp(_r)
+
+
+def _json_resp(payload):
+    return _resp(lambda: json.dumps(payload).encode("utf-8"))
+
+
+def _message(**overrides):
+    msg = {
+        "created_at": "2026-05-20T14:30:00Z",
+        "user": {"username": "trader1"},
+        "entities": {"sentiment": {"basic": "Bullish"}},
+        "body": "to the moon",
+    }
+    msg.update(overrides)
+    return msg
 
 
 @pytest.mark.unit
@@ -40,3 +67,122 @@ class StockTwitsResilienceTests:
             out = stocktwits.fetch_stocktwits_messages("NVDA")
         assert "unavailable" in out.lower()
         assert out.startswith("<stocktwits unavailable")
+
+
+@pytest.mark.unit
+class TestPlaceholderMarkers:
+    """Missing message fields render as explicit markers, not values that
+    look like a real timestamp or a user named "?" (#31)."""
+
+    def test_missing_user_and_timestamp_get_markers(self):
+        payload = {"messages": [_message(created_at=None, user=None)]}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("NVDA")
+        assert "[unknown user]" in out
+        assert "[time unknown]" in out
+        assert "@?" not in out
+
+    def test_real_fields_render_normally(self):
+        payload = {"messages": [_message()]}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("NVDA")
+        assert "@trader1" in out
+        assert "2026-05-20T14:30:00Z" in out
+        assert "[unknown user]" not in out
+
+
+@pytest.mark.unit
+class TestSymbolEcho:
+    """A response that names a different symbol than requested must degrade
+    with disclosure, not render another instrument's sentiment (#36)."""
+
+    def test_mismatched_symbol_degrades_with_disclosure(self):
+        payload = {"symbol": {"symbol": "TSLA"}, "messages": [_message()]}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("NVDA")
+        assert out.startswith("<stocktwits unavailable")
+        assert "symbol mismatch" in out
+        assert "NVDA" in out and "TSLA" in out
+        assert "to the moon" not in out  # no content from the wrong symbol
+
+    def test_matching_symbol_is_case_insensitive(self):
+        payload = {"symbol": {"symbol": "NVDA"}, "messages": [_message()]}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("nvda")
+        assert "to the moon" in out
+        assert "symbol mismatch" not in out
+
+    def test_absent_symbol_envelope_does_not_false_alarm(self):
+        payload = {"messages": [_message()]}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("NVDA")
+        assert "to the moon" in out
+        assert "symbol mismatch" not in out
+
+    def test_non_dict_symbol_envelope_degrades_not_crashes(self):
+        # A flat-string symbol field is malformed — the check is skipped and
+        # the function keeps its never-raises contract.
+        payload = {"symbol": "NVDA", "messages": [_message()]}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("NVDA")
+        assert "to the moon" in out
+        assert "symbol mismatch" not in out
+
+    def test_crypto_dot_x_suffix_is_not_a_mismatch(self):
+        # StockTwits echoes crypto cashtags with a .X suffix (BTC -> BTC.X);
+        # that vendor convention must not degrade the whole block.
+        payload = {"symbol": {"symbol": "BTC.X"}, "messages": [_message()]}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("BTC")
+        assert "to the moon" in out
+        assert "symbol mismatch" not in out
+
+    def test_different_crypto_symbol_still_mismatches(self):
+        payload = {"symbol": {"symbol": "ETH.X"}, "messages": [_message()]}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("BTC")
+        assert out.startswith("<stocktwits unavailable")
+        assert "symbol mismatch" in out
+
+    def test_dotted_equity_classes_still_mismatch(self):
+        # The .X tolerance is scoped to that one suffix — BRK.A vs BRK.B is a
+        # genuine different-instrument mismatch.
+        payload = {"symbol": {"symbol": "BRK.A"}, "messages": [_message()]}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("BRK.B")
+        assert out.startswith("<stocktwits unavailable")
+
+
+@pytest.mark.unit
+class TestMalformedMessageShapes:
+    """Truthy-but-wrong-typed fields anywhere in the payload must degrade or
+    be skipped, never raise (the sentiment analyst calls this bare)."""
+
+    def test_non_list_messages_returns_placeholder(self):
+        payload = {"messages": {"weird": "shape"}}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("NVDA")
+        assert out.startswith("<stocktwits unavailable")
+        assert "unexpected response shape" in out
+
+    def test_non_dict_message_entries_are_skipped(self):
+        payload = {"messages": ["garbage", _message(), 42]}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("NVDA")
+        assert "to the moon" in out
+        assert "Total: 1" in out  # only the real message is counted
+
+    def test_non_dict_user_and_entities_degrade_to_markers(self):
+        msg = _message(user="not-a-dict", entities="also-not-a-dict")
+        payload = {"messages": [msg]}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("NVDA")
+        assert "[unknown user]" in out
+        assert "no-label" in out
+
+    def test_non_string_body_renders_empty(self):
+        msg = _message(body={"nested": "dict"})
+        payload = {"messages": [msg]}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("NVDA")
+        assert "Total: 1" in out  # rendered without crashing

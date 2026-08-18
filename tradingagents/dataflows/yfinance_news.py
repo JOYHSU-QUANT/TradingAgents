@@ -10,16 +10,22 @@ from .config import get_config
 from .stockstats_utils import yf_retry
 from .symbol_utils import normalize_symbol
 
+# Clamp the untrusted article count before it sizes an external yf.Search
+# call (#33): an LLM-supplied or misconfigured value must stay bounded.
+MAX_SEARCH_NEWS_COUNT = 100
+
 
 def _extract_article_data(article: dict) -> dict:
     """Extract article data from yfinance news format (handles nested 'content' structure)."""
     # Handle nested content structure
     if "content" in article:
         content = article["content"]
-        title = content.get("title", "No title")
+        # Missing fields get explicit unavailability markers, not values that
+        # could be misread as a real title or a publisher named "Unknown".
+        title = content.get("title") or "(title unavailable)"
         summary = content.get("summary", "")
-        provider = content.get("provider", {})
-        publisher = provider.get("displayName", "Unknown")
+        provider = content.get("provider") or {}
+        publisher = provider.get("displayName") or "(source unavailable)"
 
         # Get URL from canonicalUrl or clickThroughUrl
         url_obj = content.get("canonicalUrl") or content.get("clickThroughUrl") or {}
@@ -49,9 +55,9 @@ def _extract_article_data(article: dict) -> dict:
             with contextlib.suppress(ValueError, OSError, TypeError):
                 pub_date = datetime.fromtimestamp(ts)
         return {
-            "title": article.get("title", "No title"),
+            "title": article.get("title") or "(title unavailable)",
             "summary": article.get("summary", ""),
-            "publisher": article.get("publisher", "Unknown"),
+            "publisher": article.get("publisher") or "(source unavailable)",
             "link": article.get("link", ""),
             "pub_date": pub_date,
         }
@@ -154,6 +160,7 @@ def get_global_news_yfinance(
         look_back_days = config["global_news_lookback_days"]
     if limit is None:
         limit = config["global_news_article_limit"]
+    limit = max(1, min(int(limit), MAX_SEARCH_NEWS_COUNT))
     search_queries = config["global_news_queries"]
 
     all_news = []
@@ -161,11 +168,13 @@ def get_global_news_yfinance(
 
     try:
         for query in search_queries:
-            search = yf_retry(lambda q=query: yf.Search(
-                query=q,
-                news_count=limit,
-                enable_fuzzy_query=True,
-            ))
+            search = yf_retry(
+                lambda q=query: yf.Search(
+                    query=q,
+                    news_count=limit,
+                    enable_fuzzy_query=True,
+                )
+            )
 
             if search.news:
                 for article in search.news:

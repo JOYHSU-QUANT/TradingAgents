@@ -4,12 +4,14 @@ Regressions for #990 (no request timeout -> can hang) and #991 (invalid-key
 responses mislabeled as rate limits and silently treated as transient), plus the
 fundamentals look-ahead filter (curr_date normalization + undated-row handling).
 """
+
 import json
 
 import pytest
 
 import tradingagents.dataflows.alpha_vantage_common as av
 import tradingagents.dataflows.alpha_vantage_fundamentals as avf
+import tradingagents.dataflows.alpha_vantage_indicator as avi
 from tradingagents.dataflows.alpha_vantage_fundamentals import _filter_reports_by_date
 
 
@@ -26,6 +28,7 @@ def _patched_get(body, capture=None):
         if capture is not None:
             capture.update(kwargs)
         return _FakeResponse(body)
+
     return fake_get
 
 
@@ -49,13 +52,19 @@ def test_rate_limit_detected(monkeypatch):
 def test_invalid_key_not_mislabeled_as_rate_limit(monkeypatch):
     # AV's invalid-key notice mentions "API key"; it must NOT be treated as a
     # (transient) rate limit, but surface as a real configuration error (#991).
-    body = ('{"Information": "the parameter apikey is invalid or missing. '
-            'Please claim your free API key on (https://www.alphavantage.co/support/#api-key)."}')
+    body = (
+        '{"Information": "the parameter apikey is invalid or missing. '
+        'Please claim your free API key on (https://www.alphavantage.co/support/#api-key)."}'
+    )
     monkeypatch.setattr(av.requests, "get", _patched_get(body))
     with pytest.raises(av.AlphaVantageNotConfiguredError):
         av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
     with pytest.raises(av.AlphaVantageRateLimitError):  # sanity: rate-limit path still distinct
-        monkeypatch.setattr(av.requests, "get", _patched_get('{"Note": "API call frequency is 5 calls per minute."}'))
+        monkeypatch.setattr(
+            av.requests,
+            "get",
+            _patched_get('{"Note": "API call frequency is 5 calls per minute."}'),
+        )
         av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
 
 
@@ -150,3 +159,94 @@ def test_get_balance_sheet_returns_error_string_on_unparseable_curr_date(monkeyp
     out = avf.get_balance_sheet("AAPL", curr_date="not-a-date")
     assert out.startswith("INVALID_CURR_DATE")
     assert "2099-01-01" not in out  # no future/unfiltered data leaked
+
+
+@pytest.mark.unit
+def test_every_supported_indicator_has_a_csv_column_mapping():
+    # The blind "default to the second column" fallback is gone (#31): adding a
+    # new indicator without a CSV column mapping must turn this red, not
+    # silently render numbers from whatever column happens to be second.
+    exempt = {"vwma"}  # returns early — Alpha Vantage has no VWMA endpoint
+    unmapped = set(avi._SUPPORTED_INDICATORS) - exempt - set(avi._CSV_COLUMN_MAP)
+    assert not unmapped, f"indicators lacking a CSV column mapping: {sorted(unmapped)}"
+
+
+@pytest.mark.unit
+def test_missing_column_mapping_fails_loud_instead_of_guessing(monkeypatch):
+    # With the mapping removed, the old code would render the second CSV column
+    # (here a bogus 999-valued one) as RSI values; now it must return an
+    # explicit error string and no data lines.
+    monkeypatch.delitem(avi._CSV_COLUMN_MAP, "rsi")
+    csv_body = "time,bogus,RSI\n2026-01-02,999.0,55.0\n"
+    monkeypatch.setattr(avi, "_make_api_request", lambda *a, **k: csv_body)
+    out = avi.get_indicator("AAPL", "rsi", "2026-01-05", look_back_days=10)
+    assert "no CSV column mapping" in out
+    assert "999.0" not in out
+    assert "55.0" not in out
+
+
+@pytest.mark.unit
+class TestCsvDateFilterFailsClosed:
+    """_filter_csv_by_date_range must never return the unfiltered body when
+    it cannot filter — that silently served out-of-range/future rows (#33)."""
+
+    _CSV = "timestamp,close\n2026-01-02,1.0\n2099-01-01,2.0\n"
+
+    def test_happy_path_drops_out_of_range_rows(self):
+        out = av._filter_csv_by_date_range(self._CSV, "2026-01-01", "2026-01-05", symbol="AAPL")
+        assert "2026-01-02" in out
+        assert "2099-01-01" not in out
+
+    def test_bad_end_date_raises_instead_of_returning_unfiltered(self):
+        from tradingagents.dataflows.errors import NoMarketDataError
+
+        with pytest.raises(NoMarketDataError):
+            av._filter_csv_by_date_range(self._CSV, "2026-01-01", "not-a-date", symbol="AAPL")
+
+    def test_unparseable_csv_raises_instead_of_returning_unfiltered(self):
+        from tradingagents.dataflows.errors import NoMarketDataError
+
+        with pytest.raises(NoMarketDataError):
+            av._filter_csv_by_date_range(
+                "timestamp,close\ngarbage,1.0\n", "2026-01-01", "2026-01-05", symbol="AAPL"
+            )
+
+    def test_blank_body_passes_through(self):
+        assert av._filter_csv_by_date_range("", "2026-01-01", "2026-01-05", symbol="AAPL") == ""
+
+
+@pytest.mark.unit
+def test_global_news_clamps_untrusted_sizes(monkeypatch):
+    # Oversized limit / lookback must be clamped before parameterizing the
+    # external request (#33).
+    import tradingagents.dataflows.alpha_vantage_news as avn
+
+    captured = {}
+
+    def fake_request(function_name, params):
+        captured.update(params)
+        return "{}"
+
+    monkeypatch.setattr(avn, "_make_api_request", fake_request)
+    avn.get_global_news("2026-06-05", look_back_days=99999, limit=99999)
+    assert captured["limit"] == str(avn.MAX_NEWS_LIMIT)
+    assert captured["time_from"] == "20250605T0000"  # exactly 365 days back
+
+
+@pytest.mark.unit
+def test_global_news_none_optionals_resolve_to_defaults_before_clamp(monkeypatch):
+    # The tool wrapper forwards omitted optionals as explicit None through the
+    # router; they must resolve to the documented defaults instead of crashing
+    # in int(None) (review round 1).
+    import tradingagents.dataflows.alpha_vantage_news as avn
+
+    captured = {}
+
+    def fake_request(function_name, params):
+        captured.update(params)
+        return "{}"
+
+    monkeypatch.setattr(avn, "_make_api_request", fake_request)
+    avn.get_global_news("2026-06-05", look_back_days=None, limit=None)
+    assert captured["limit"] == "50"
+    assert captured["time_from"] == "20260529T0000"  # default 7-day lookback

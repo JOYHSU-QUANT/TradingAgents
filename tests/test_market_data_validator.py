@@ -6,37 +6,54 @@ import pandas as pd
 import pytest
 
 import tradingagents.dataflows.market_data_validator as validator
+from tradingagents.agents.utils.market_data_validation_tools import (
+    get_verified_market_snapshot,
+)
+from tradingagents.dataflows.errors import NoMarketDataError
 
 
 def _sample_ohlcv() -> pd.DataFrame:
     dates = pd.bdate_range("2026-04-01", "2026-05-20")
     closes = [100 + i for i in range(len(dates))]
-    return pd.DataFrame({
-        "Date": dates,
-        "Open": [c - 0.5 for c in closes],
-        "High": [c + 1.0 for c in closes],
-        "Low": [c - 1.0 for c in closes],
-        "Close": closes,
-        "Volume": [1_000_000 + i for i in range(len(dates))],
-    })
+    return pd.DataFrame(
+        {
+            "Date": dates,
+            "Open": [c - 0.5 for c in closes],
+            "High": [c + 1.0 for c in closes],
+            "Low": [c - 1.0 for c in closes],
+            "Close": closes,
+            "Volume": [1_000_000 + i for i in range(len(dates))],
+        }
+    )
 
 
 @pytest.mark.unit
 class TestVerifiedSnapshot:
     def test_excludes_future_rows(self, monkeypatch):
-        data = pd.concat([
-            _sample_ohlcv(),
-            pd.DataFrame({"Date": [pd.Timestamp("2026-06-01")], "Open": [999.0],
-                          "High": [999.0], "Low": [999.0], "Close": [999.0], "Volume": [999]}),
-        ], ignore_index=True)
+        data = pd.concat(
+            [
+                _sample_ohlcv(),
+                pd.DataFrame(
+                    {
+                        "Date": [pd.Timestamp("2026-06-01")],
+                        "Open": [999.0],
+                        "High": [999.0],
+                        "Low": [999.0],
+                        "Close": [999.0],
+                        "Volume": [999],
+                    }
+                ),
+            ],
+            ignore_index=True,
+        )
         monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: data)
 
         snap = validator.build_verified_market_snapshot("COF", "2026-05-13")
         assert "Verified market data snapshot for COF" in snap
         assert "Requested analysis date: 2026-05-13" in snap
         assert "Latest trading row used: 2026-05-13" in snap
-        assert "999.00" not in snap          # future row excluded
-        assert "boll_lb" in snap             # indicators present
+        assert "999.00" not in snap  # future row excluded
+        assert "boll_lb" in snap  # indicators present
 
     def test_uses_previous_trading_day_when_date_is_weekend(self, monkeypatch):
         monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: _sample_ohlcv())
@@ -45,14 +62,16 @@ class TestVerifiedSnapshot:
         assert "Latest trading row used: 2026-05-15" in snap
         assert "Recent verified closes" in snap
 
-    def test_raises_when_no_rows_on_or_before_date(self, monkeypatch):
+    def test_raises_classified_error_when_no_rows_on_or_before_date(self, monkeypatch):
+        # NoMarketDataError, not a bare ValueError, so callers can map it to
+        # the no-data sentinel via the VendorError taxonomy (#32).
         monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: _sample_ohlcv())
-        with pytest.raises(ValueError):
+        with pytest.raises(NoMarketDataError):
             validator.build_verified_market_snapshot("COF", "2020-01-01")
 
-    def test_raises_on_empty_data(self, monkeypatch):
+    def test_raises_classified_error_on_empty_data(self, monkeypatch):
         monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: pd.DataFrame())
-        with pytest.raises(ValueError):
+        with pytest.raises(NoMarketDataError):
             validator.build_verified_market_snapshot("COF", "2026-05-13")
 
     def test_look_back_window_capped_at_30(self, monkeypatch):
@@ -66,11 +85,38 @@ class TestVerifiedSnapshot:
 @pytest.mark.unit
 class TestTool:
     def test_tool_delegates_to_builder(self, monkeypatch):
-        from tradingagents.agents.utils.market_data_validation_tools import (
-            get_verified_market_snapshot,
-        )
         monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: _sample_ohlcv())
-        out = get_verified_market_snapshot.invoke(
-            {"symbol": "COF", "curr_date": "2026-05-20"}
-        )
+        out = get_verified_market_snapshot.invoke({"symbol": "COF", "curr_date": "2026-05-20"})
         assert "Verified market data snapshot for COF" in out
+
+    def test_tool_returns_no_data_sentinel_on_vendor_error(self, monkeypatch):
+        # This tool bypasses route_to_vendor, so the wrapper itself must turn
+        # the VendorError taxonomy into the instructive sentinel — a raise
+        # would surface only as a generic ToolNode error string (#32).
+        monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: pd.DataFrame())
+        out = get_verified_market_snapshot.invoke({"symbol": "COF", "curr_date": "2026-05-20"})
+        assert out.startswith("NO_DATA_AVAILABLE")
+        assert "do not estimate or fabricate" in out.lower()
+
+    def test_tool_rejects_unparseable_curr_date_with_sentinel(self, monkeypatch):
+        # A bad LLM-supplied date raises a bare ValueError deep in load_ohlcv
+        # (outside the VendorError taxonomy), so the wrapper answers with the
+        # INVALID_CURR_DATE sentinel before any data work starts.
+        def _must_not_be_called(s, d):
+            raise AssertionError("load_ohlcv must not be called for a bad date")
+
+        monkeypatch.setattr(validator, "load_ohlcv", _must_not_be_called)
+        out = get_verified_market_snapshot.invoke({"symbol": "COF", "curr_date": "not-a-date"})
+        assert out.startswith("INVALID_CURR_DATE")
+
+    def test_tool_turns_stale_data_raise_into_sentinel(self, monkeypatch):
+        # load_ohlcv's own NoMarketDataError (e.g. the stale-frame guard) must
+        # take the same sentinel path, not escape the tool.
+
+        def _stale(s, d):
+            raise NoMarketDataError(s, detail="latest row is stale")
+
+        monkeypatch.setattr(validator, "load_ohlcv", _stale)
+        out = get_verified_market_snapshot.invoke({"symbol": "COF", "curr_date": "2026-05-20"})
+        assert out.startswith("NO_DATA_AVAILABLE")
+        assert "stale" in out

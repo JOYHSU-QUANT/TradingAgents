@@ -9,6 +9,7 @@ Uses Polymarket's public Gamma API (https://gamma-api.polymarket.com) — no key
 no auth. Each market's ``outcomePrices`` are the implied probabilities of its
 outcomes (a "Yes" at 0.76 means the market prices a 76% chance).
 """
+
 import json
 import logging
 from datetime import datetime, timezone
@@ -27,9 +28,7 @@ DEFAULT_LIMIT = 6
 
 
 def _request(path: str, params: dict) -> dict:
-    response = requests.get(
-        f"{GAMMA_BASE}/{path}", params=params, timeout=REQUEST_TIMEOUT
-    )
+    response = requests.get(f"{GAMMA_BASE}/{path}", params=params, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.json()
 
@@ -115,25 +114,45 @@ def get_prediction_markets(topic: str, limit: int | None = None) -> str:
         )
 
     lines = []
-    for m in candidates[:limit]:
+    omitted = 0
+    # Walk the full volume-ranked candidate list, not just the first `limit`:
+    # when a malformed market is dropped, the next-ranked clean market
+    # backfills its slot so the caller still gets `limit` markets where
+    # available.
+    for m in candidates:
+        if len(lines) >= limit:
+            break
         prices = _parse_json_list(m.get("outcomePrices"))
         outcomes = _parse_json_list(m.get("outcomes"))
+        # A malformed market — mismatched outcome/price lists, an unparsable
+        # or out-of-range probability — is dropped and disclosed below, never
+        # rendered with a fabricated label or an impossible probability.
+        if not outcomes or not prices or len(outcomes) != len(prices):
+            omitted += 1
+            continue
         try:
             prob = float(prices[0])
-        except (ValueError, IndexError):
+        except (TypeError, ValueError):
+            omitted += 1
             continue
-        label = outcomes[0] if outcomes else "Yes"
+        if not 0.0 <= prob <= 1.0:
+            omitted += 1
+            continue
+        label = outcomes[0]
         volume = m.get("volumeNum") or 0
         end_date = (m.get("endDate") or "")[:10]
         wk = m.get("oneWeekPriceChange")
-        wk_str = (
-            f", 1-week {wk * 100:+.1f}pp"
-            if isinstance(wk, (int, float)) and wk
-            else ""
-        )
+        wk_str = f", 1-week {wk * 100:+.1f}pp" if isinstance(wk, (int, float)) and wk else ""
         lines.append(
             f"- **{m.get('question')}** — {label} {prob:.0%} "
             f"(${volume:,.0f} volume, resolves {end_date}{wk_str})"
         )
 
-    return header + "\n".join(lines) + "\n"
+    report = header + "\n".join(lines) + "\n"
+    if omitted:
+        report += (
+            f"\n{omitted} market(s) omitted (malformed vendor data: "
+            f"outcome/price mismatch, unparsable price, or out-of-range "
+            f"probability).\n"
+        )
+    return report

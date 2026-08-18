@@ -15,13 +15,22 @@ from collections.abc import Iterable
 import pandas as pd
 from stockstats import wrap
 
+from tradingagents.dataflows.errors import NoMarketDataError
 from tradingagents.dataflows.stockstats_utils import load_ohlcv
 
 # A fixed, common indicator set so the snapshot is the same shape every run.
 DEFAULT_SNAPSHOT_INDICATORS: tuple[str, ...] = (
-    "close_10_ema", "close_50_sma", "close_200_sma",
-    "rsi", "boll", "boll_ub", "boll_lb",
-    "macd", "macds", "macdh", "atr",
+    "close_10_ema",
+    "close_50_sma",
+    "close_200_sma",
+    "rsi",
+    "boll",
+    "boll_ub",
+    "boll_lb",
+    "macd",
+    "macds",
+    "macdh",
+    "atr",
 )
 
 
@@ -34,14 +43,17 @@ def _verified_rows(symbol: str, curr_date: str) -> pd.DataFrame:
     """
     data = load_ohlcv(symbol, curr_date)
     if data is None or data.empty:
-        raise ValueError(f"No OHLCV data available for {symbol}.")
+        # Defense-in-depth: load_ohlcv now raises on an empty frame itself,
+        # but a verification path must not trust its input — and the raise
+        # stays classified (#32) so callers can map it to the sentinel.
+        raise NoMarketDataError(symbol, detail="no OHLCV data available")
 
     df = data.copy()
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"])
     df = df[df["Date"] <= pd.to_datetime(curr_date)].sort_values("Date")
     if df.empty:
-        raise ValueError(f"No OHLCV rows on or before {curr_date} for {symbol}.")
+        raise NoMarketDataError(symbol, detail=f"no OHLCV rows on or before {curr_date}")
     return df
 
 
@@ -92,6 +104,9 @@ def build_verified_market_snapshot(
         f"- Requested analysis date: {curr_date}",
         f"- Latest trading row used: {latest_date}",
         "- Rows after the requested analysis date are excluded before verification.",
+        "- Verified means: rows with missing OHLC fields, impossible OHLC "
+        "ordering, or non-positive prices are excluded upstream — no "
+        "forward-filled placeholder values.",
         "",
         "### Latest verified OHLCV row",
         "",
@@ -101,13 +116,23 @@ def build_verified_market_snapshot(
     for field in ("Open", "High", "Low", "Close", "Volume"):
         lines.append(f"| {field} | {_fmt(latest.get(field))} |")
 
-    lines += ["", "### Verified technical indicators (latest row)", "",
-              "| Indicator | Value |", "|---|---:|"]
+    lines += [
+        "",
+        "### Verified technical indicators (latest row)",
+        "",
+        "| Indicator | Value |",
+        "|---|---:|",
+    ]
     for name, value in indicator_values.items():
         lines.append(f"| {name} | {value} |")
 
-    lines += ["", f"### Recent verified closes (last {len(recent)} rows)", "",
-              "| Date | Close |", "|---|---:|"]
+    lines += [
+        "",
+        f"### Recent verified closes (last {len(recent)} rows)",
+        "",
+        "| Date | Close |",
+        "|---|---:|",
+    ]
     for _, row in recent.iterrows():
         lines.append(f"| {_fmt(row['Date'])} | {_fmt(row.get('Close'))} |")
 

@@ -310,9 +310,12 @@ def _is_safe_text(x: object, max_len: int, *, min_len: int = 1, stripped: bool =
 def _is_non_negative_int(x: object) -> bool:
     """True only for a real int >= 0 (bool is an int subclass and must not pass).
 
-    The counting fields every cache payload carries (fund/company/calendar
-    tallies) share this check; hand-written, the bool exclusion is the clause
-    a new field's author forgets, letting a JSON ``true`` validate as 1.
+    The plain non-negative count fields the cache payloads carry (fund /
+    calendar / company tallies) share this check — except treasuries'
+    ``companies_total``, whose bound is relational (no smaller than the
+    selection, which subsumes non-negativity) and stays with its validator.
+    Hand-written, the bool exclusion is the clause a new field's author
+    forgets, letting a JSON ``true`` validate as 1.
     """
     return isinstance(x, int) and not isinstance(x, bool) and x >= 0
 
@@ -439,9 +442,10 @@ def _cache_dir() -> str:
 def _cache_rejecter(path: str, *, cache_name: str, log: logging.Logger) -> Callable[[str], None]:
     """Build a module's cache-rejection logger: warn with its cache name, return None.
 
-    The one owner of the rejection log format — each module used to carry a
-    byte-identical closure, so a wording change (or a new diagnostic field)
-    meant three edits, and a missed one left operators grepping for a format
+    The one owner of the rejection log format — each module used to carry its
+    own near-verbatim closure (identical but for its hardcoded cache display
+    name), so a wording change (or a new diagnostic field) meant three edits,
+    and a missed one left operators grepping for a format
     only some caches emit. ``cache_name`` is the same display name the module
     passes to ``load_rolling_snapshot``, so the read and write sides of one
     cache file name it identically; ``log`` keeps per-module attribution.

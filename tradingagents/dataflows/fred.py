@@ -170,6 +170,11 @@ def get_macro_data(
     Returns:
         A markdown report with the series title, units, frequency, the latest
         value, the change over the window, and a recent observation table.
+
+    Raises:
+        VendorError: When the series endpoint's metadata names a different
+            series than requested (identity echo, #36 family) — routed
+            callers turn this into try-next-vendor / DATA_UNAVAILABLE.
     """
     if look_back_days is None:
         look_back_days = DEFAULT_LOOKBACK_DAYS

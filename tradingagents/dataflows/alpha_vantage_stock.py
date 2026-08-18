@@ -29,10 +29,12 @@ def get_stock(symbol: str, start_date: str, end_date: str) -> str:
         CSV string containing the daily adjusted time series data filtered to the date range.
 
     Raises:
-        NoMarketDataError: When every fetched row falls outside the range (the
-            old behavior returned a header-only CSV the agent read as a
-            successful fetch), or when the newest surviving row trails
-            end_date by more than MAX_STOCK_LAG_DAYS. Both raises let the
+        NoMarketDataError: When the vendor returns a blank body, when every
+            fetched row falls outside the range (the old behavior returned a
+            header-only CSV the agent read as a successful fetch), when the
+            newest surviving row trails end_date by more than
+            MAX_STOCK_LAG_DAYS, or (propagated from the range filter) when
+            the CSV or date range cannot be parsed. Every raise lets the
             router fall back to the next vendor and otherwise emit one honest
             no-data sentinel, mirroring the yfinance path's empty-frame and
             stale-frame raises (#30).

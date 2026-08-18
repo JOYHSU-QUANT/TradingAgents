@@ -80,7 +80,15 @@ def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.
     if not isinstance(messages, list):
         logger.warning("StockTwits returned a non-list messages field for %s", ticker.upper())
         return f"<stocktwits unavailable: unexpected response shape for ${ticker.upper()}>"
-    messages = [m for m in messages if isinstance(m, dict)]
+    dict_messages = [m for m in messages if isinstance(m, dict)]
+    if len(dict_messages) != len(messages):
+        # Same operator-visibility as every other malformed-shape branch.
+        logger.warning(
+            "StockTwits returned %d non-dict message entrie(s) for %s — skipped",
+            len(messages) - len(dict_messages),
+            ticker.upper(),
+        )
+    messages = dict_messages
     if not messages:
         return f"<no StockTwits messages found for ${ticker.upper()}>"
 

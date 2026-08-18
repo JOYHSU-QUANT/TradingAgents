@@ -43,8 +43,9 @@ def _verified_rows(symbol: str, curr_date: str) -> pd.DataFrame:
     """
     data = load_ohlcv(symbol, curr_date)
     if data is None or data.empty:
-        # Classified (#32): a bare ValueError bypasses the VendorError
-        # taxonomy, so no caller could turn it into the no-data sentinel.
+        # Defense-in-depth: load_ohlcv now raises on an empty frame itself,
+        # but a verification path must not trust its input — and the raise
+        # stays classified (#32) so callers can map it to the sentinel.
         raise NoMarketDataError(symbol, detail="no OHLCV data available")
 
     df = data.copy()

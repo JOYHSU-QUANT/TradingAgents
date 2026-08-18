@@ -36,19 +36,22 @@ MAX_ROWS = 40
 
 # Freshness thresholds (calendar days) for the data-lag note, keyed by FRED's
 # frequency_short code: how far the newest observation may trail curr_date
-# before the report flags it. Each bound covers the cadence's normal
-# publication delay (CPI lands mid-next-month, GDP a quarter later, …), so a
-# note means the series is genuinely behind, not just on its usual schedule.
-# Codes not listed get no note — an annotation must not false-alarm on a
-# cadence it does not understand (#30).
+# before the report flags it. FRED dates observations at the PERIOD START
+# (July CPI is dated 07-01 but releases ~Aug 12), and the lag keeps growing
+# until the *next* release — so each bound must cover roughly two periods plus
+# the publication delay, the worst on-schedule lag. Tighter bounds (e.g. M:45)
+# would flag an on-schedule CPI as stale for about half of every month. A note
+# therefore means the series is genuinely behind, at the cost of detecting a
+# stall about one period later. Codes not listed get no note — an annotation
+# must not false-alarm on a cadence it does not understand (#30).
 _MAX_LAG_DAYS_BY_FREQUENCY = {
     "D": 7,
     "W": 14,
     "BW": 21,
-    "M": 45,
-    "Q": 135,
-    "SA": 250,
-    "A": 400,
+    "M": 80,
+    "Q": 220,
+    "SA": 420,
+    "A": 750,
 }
 
 # Curated human-friendly aliases -> FRED series IDs. Anything not listed is used

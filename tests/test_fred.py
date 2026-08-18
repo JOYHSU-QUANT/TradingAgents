@@ -178,7 +178,8 @@ class FredFreshnessTests(unittest.TestCase):
     publication cadence must not (#30)."""
 
     def test_stalled_series_renders_lag_note(self):
-        # Monthly cadence allows 45 days; latest 2025-09-01 vs 2025-12-31.
+        # Monthly cadence allows 80 days (two periods + publication delay);
+        # latest 2025-09-01 vs 2025-12-31 is 121 days — genuinely stalled.
         with mock.patch.object(fred, "_request", side_effect=_request_stub(meta=_meta_with_id())):
             out = fred.get_macro_data("unemployment", "2025-12-31", 365)
         self.assertIn("Data lag", out)
@@ -189,6 +190,15 @@ class FredFreshnessTests(unittest.TestCase):
         # 29 days behind on a monthly series is on-schedule, not stale.
         with mock.patch.object(fred, "_request", side_effect=_request_stub(meta=_meta_with_id())):
             out = fred.get_macro_data("unemployment", "2025-09-30", 365)
+        self.assertNotIn("Data lag", out)
+
+    def test_peak_of_cycle_on_schedule_lag_has_no_note(self):
+        # FRED dates observations at the period start, so an on-schedule
+        # monthly series legitimately reaches ~74 days of lag the day before
+        # its next release (September row dated 09-01, next release mid-
+        # November). The bound must not flag that (no-false-alarm ceiling).
+        with mock.patch.object(fred, "_request", side_effect=_request_stub(meta=_meta_with_id())):
+            out = fred.get_macro_data("unemployment", "2025-11-10", 365)
         self.assertNotIn("Data lag", out)
 
     def test_unknown_frequency_code_never_notes(self):

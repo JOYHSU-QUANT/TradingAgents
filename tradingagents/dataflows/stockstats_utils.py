@@ -32,8 +32,10 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
             return func()
         except YFRateLimitError:
             if attempt < max_retries:
-                delay = base_delay * (2 ** attempt)
-                logger.warning(f"Yahoo Finance rate limited, retrying in {delay:.0f}s (attempt {attempt + 1}/{max_retries})")
+                delay = base_delay * (2**attempt)
+                logger.warning(
+                    f"Yahoo Finance rate limited, retrying in {delay:.0f}s (attempt {attempt + 1}/{max_retries})"
+                )
                 time.sleep(delay)
             else:
                 raise
@@ -55,15 +57,45 @@ def _ensure_date_column(data: pd.DataFrame) -> pd.DataFrame:
 
 
 def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
-    """Normalize a stock DataFrame for stockstats: parse dates, drop invalid rows, fill price gaps."""
+    """Normalize a stock DataFrame for stockstats: parse dates, drop invalid rows.
+
+    Honesty guard (#38): a row missing any of Open/High/Low/Close is DROPPED,
+    never forward/back-filled — the old fill fabricated prices that fed
+    indicators and were then rendered as "verified". Rows with an impossible
+    OHLC ordering (low must bound the open/close body from below, high from
+    above) or non-positive prices are dropped for the same reason; a missing
+    Volume stays NaN so downstream rendering shows N/A instead of a made-up
+    number.
+    """
     data = _ensure_date_column(data)
     data["Date"] = pd.to_datetime(data["Date"], errors="coerce")
     data = data.dropna(subset=["Date"])
 
     price_cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in data.columns]
     data[price_cols] = data[price_cols].apply(pd.to_numeric, errors="coerce")
-    data = data.dropna(subset=["Close"])
-    data[price_cols] = data[price_cols].ffill().bfill()
+
+    ohlc = [c for c in ("Open", "High", "Low", "Close") if c in data.columns]
+    complete = data.dropna(subset=ohlc)
+    dropped_incomplete = len(data) - len(complete)
+    data = complete
+
+    dropped_disordered = 0
+    if len(ohlc) == 4 and not data.empty:
+        body_low = data[["Open", "Close"]].min(axis=1)
+        body_high = data[["Open", "Close"]].max(axis=1)
+        ordered = (
+            (data["Low"] <= body_low) & (body_high <= data["High"]) & (data[ohlc] > 0).all(axis=1)
+        )
+        dropped_disordered = int((~ordered).sum())
+        data = data[ordered]
+
+    if dropped_incomplete or dropped_disordered:
+        logger.warning(
+            "Dropped %d OHLCV row(s) with missing fields and %d with impossible "
+            "OHLC ordering or non-positive prices instead of fabricating values",
+            dropped_incomplete,
+            dropped_disordered,
+        )
 
     return data
 
@@ -163,20 +195,20 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
             data = cached
 
     if data is None:
-        downloaded = yf_retry(lambda: yf.download(
-            canonical,
-            start=start_str,
-            end=end_str,
-            multi_level_index=False,
-            progress=False,
-            auto_adjust=True,
-        ))
+        downloaded = yf_retry(
+            lambda: yf.download(
+                canonical,
+                start=start_str,
+                end=end_str,
+                multi_level_index=False,
+                progress=False,
+                auto_adjust=True,
+            )
+        )
         downloaded = _ensure_date_column(downloaded.reset_index())
         # Only cache real data — never persist an empty frame.
         if downloaded.empty or "Close" not in downloaded.columns:
-            raise NoMarketDataError(
-                symbol, canonical, "Yahoo Finance returned no rows"
-            )
+            raise NoMarketDataError(symbol, canonical, "Yahoo Finance returned no rows")
         downloaded.to_csv(data_file, index=False, encoding="utf-8")
         data = downloaded
 
@@ -213,9 +245,7 @@ class StockstatsUtils:
         indicator: Annotated[
             str, "quantitative indicators based off of the stock data for the company"
         ],
-        curr_date: Annotated[
-            str, "curr date for retrieving stock price data, YYYY-mm-dd"
-        ],
+        curr_date: Annotated[str, "curr date for retrieving stock price data, YYYY-mm-dd"],
     ):
         data = load_ohlcv(symbol, curr_date)
         df = wrap(data)

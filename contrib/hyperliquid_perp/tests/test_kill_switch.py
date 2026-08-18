@@ -1913,7 +1913,7 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
     #    themselves, or they — not the submit chain — become the longest run and
     #    this constant is understated. Asserted by counting the hook's calls
     #    against the reads, not by reading the source.
-    from contrib.hyperliquid_perp import main as main_mod
+    from contrib.hyperliquid_perp import engine_bridge as bridge_mod
 
     reads: list[str] = []
 
@@ -1943,10 +1943,10 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
 
     monkeypatch = pytest.MonkeyPatch()
     try:
-        monkeypatch.setattr(main_mod, "HyperliquidClient", _Client)
-        monkeypatch.setattr(main_mod, "HyperliquidMarketData", _Market)
-        monkeypatch.setattr(main_mod, "build_market_context", lambda *a, **k: object())
-        main_mod._build_context({}, "BTC", on_blocking_read=lambda: reads.append("refresh"))
+        monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+        monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
+        monkeypatch.setattr(bridge_mod, "build_market_context", lambda *a, **k: object())
+        bridge_mod._build_context({}, "BTC", on_blocking_read=lambda: reads.append("refresh"))
     finally:
         monkeypatch.undo()
 

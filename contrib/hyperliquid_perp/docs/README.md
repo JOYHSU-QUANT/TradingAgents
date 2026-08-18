@@ -135,6 +135,7 @@ TradingAgents/
         │   └── hyperliquid.local.yaml     🔒 gitignored
         ├── docs/
         ├── ports.py
+        ├── engine_bridge.py               # main/cli 共用的組裝層（context/guards/engine config）
         ├── main.py
         ├── .gitignore
         └── README.md

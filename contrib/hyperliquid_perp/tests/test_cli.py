@@ -127,7 +127,7 @@ def test_build_input_payload_write_failure_rides_retry_ladder(tmp_path, monkeypa
     # build_input classifies it into the §3.1 ladder like its sibling
     # environmental failures, so the worst case is an api_failed cycle whose
     # error_message names the cause.
-    import contrib.hyperliquid_perp.main as main_mod
+    import contrib.hyperliquid_perp.engine_bridge as bridge_mod
     from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
     from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
 
@@ -135,8 +135,8 @@ def test_build_input_payload_write_failure_rides_retry_ladder(tmp_path, monkeypa
     ctx = _perp_ctx(as_of)
     # **kw absorbs on_blocking_read: the live provider passes the kill-switch
     # refresh so _build_context's market reads do not form one unrefreshed chain.
-    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin, **kw: (ctx, None))
-    monkeypatch.setattr(main_mod, "_warmup_threshold", lambda config: 1)
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **kw: (ctx, None))
+    monkeypatch.setattr(bridge_mod, "_warmup_threshold", lambda config: 1)
 
     provider = object.__new__(_EngineDecisionProvider)
     provider._config = {}
@@ -200,10 +200,10 @@ def test_build_input_refuses_untradeable_indicators(
     monkeypatch, candle_count, indicators, expected_msg
 ):
     # The daemon shares the one-shot path's pre-LLM context guards (see
-    # main._context_refusal_error) and rides them down the retry ladder.
+    # engine_bridge._context_refusal_error) and rides them down the retry ladder.
     from types import SimpleNamespace
 
-    import contrib.hyperliquid_perp.main as main_mod
+    import contrib.hyperliquid_perp.engine_bridge as bridge_mod
     from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
     from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
 
@@ -214,9 +214,9 @@ def test_build_input_refuses_untradeable_indicators(
     # Keyword-only `on_blocking_read` included: the provider always passes it,
     # so a two-arg stand-in raises TypeError before the guard under test runs.
     monkeypatch.setattr(
-        main_mod, "_build_context", lambda config, coin, on_blocking_read=None: (ctx, None)
+        bridge_mod, "_build_context", lambda config, coin, on_blocking_read=None: (ctx, None)
     )
-    monkeypatch.setattr(main_mod, "_warmup_threshold", lambda config: 150)
+    monkeypatch.setattr(bridge_mod, "_warmup_threshold", lambda config: 150)
 
     # Only _config is needed: the guard fires before the risk/decision/payload
     # attributes are ever read.
@@ -235,13 +235,13 @@ def test_build_input_refuses_a_stalled_candle_feed(monkeypatch):
     # paid cycle reasoning about a market 20h in the past — and drag the
     # analysts' research window back with it, since as_of becomes trade_date
     # (see test_request_decision_drives_engine_with_cycle_as_of_not_now).
-    import contrib.hyperliquid_perp.main as main_mod
+    import contrib.hyperliquid_perp.engine_bridge as bridge_mod
     from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
     from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
 
     as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
     ctx = _perp_ctx(as_of - timedelta(hours=20))  # 4h bars: past the 3 x 4h bound
-    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin, **kw: (ctx, None))
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **kw: (ctx, None))
 
     provider = object.__new__(_EngineDecisionProvider)
     provider._config = {}
@@ -262,12 +262,12 @@ def test_build_input_measures_freshness_against_the_cycle_clock(tmp_path, monkey
     # real wall clock (the fixture date is fixed, so the gap only grows). A
     # guard calling datetime.now() itself would refuse it; the daemon's single
     # time base must not.
-    import contrib.hyperliquid_perp.main as main_mod
+    import contrib.hyperliquid_perp.engine_bridge as bridge_mod
     from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
 
     as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
     ctx = _perp_ctx(as_of - timedelta(hours=1))
-    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin, **kw: (ctx, None))
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **kw: (ctx, None))
 
     provider = object.__new__(_EngineDecisionProvider)
     provider._config = {}
@@ -742,7 +742,7 @@ def test_paper_provider_import_failure_exits_1_named(tmp_path, capsys, monkeypat
     # .env as UTF-8) lets the SAME --create succeed instead of bouncing off
     # "already exists".
     import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.main import EngineImportError
+    from contrib.hyperliquid_perp.engine_bridge import EngineImportError
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
 
@@ -787,7 +787,7 @@ def test_paper_restart_provider_import_failure_exits_1_named(
     # nothing to protect, so the abort stands; a restart holding live work
     # degrades to protection-only instead (companion test below).
     import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.main import EngineImportError
+    from contrib.hyperliquid_perp.engine_bridge import EngineImportError
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
 
@@ -832,7 +832,7 @@ def test_paper_restart_import_failure_with_live_work_enters_protection_only(
     other halted forks: no scheduler, and the loop messaging carries the
     import-error reason."""
     import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.main import EngineImportError
+    from contrib.hyperliquid_perp.engine_bridge import EngineImportError
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
 

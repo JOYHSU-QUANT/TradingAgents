@@ -41,7 +41,7 @@ CONFIG_LOAD_ERRORS = (ValueError, OSError, yaml.YAMLError)
 _DOTENV_FILE_NAMES = (".env", ".env.enterprise")
 
 # Everything reading a found dotenv file can raise (e.g. saved as UTF-16 by a
-# bare PowerShell ``>>``). Shared with main._build_engine_config's import guard
+# bare PowerShell ``>>``). Shared with engine_bridge._build_engine_config's import guard
 # so the loader's warn-and-continue set and the guard's named-error set never
 # fork.
 DOTENV_READ_ERRORS = (OSError, UnicodeDecodeError)
@@ -273,7 +273,7 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     if addr is not None and not isinstance(addr, str):
         raise ValueError(f"'wallet_address' must be a string, got {addr!r}")
     # The engine: block's string keys stay lenient (``or`` fallbacks in
-    # main._build_engine_config); these are its two deliberate exceptions.
+    # engine_bridge._build_engine_config); these are its two deliberate exceptions.
     eng = config.get("engine")
     if eng is not None:
         # Its one *bool* key: a quoted "false" would read truthy and silently

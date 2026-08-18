@@ -73,7 +73,7 @@ from decimal import Decimal
 from functools import partial
 from pathlib import Path
 
-from .config import CONFIG_LOAD_ERRORS, dotenv_diagnosis, load_config, load_dotenv_files
+from .config import dotenv_diagnosis, load_dotenv_files
 from .persistence.db import Database, SchemaVersionError, apply_migrations
 
 logger = logging.getLogger(__name__)
@@ -765,6 +765,7 @@ def _cmd_live(argv: list[str]) -> int:
 
     from .config import wallet_address
     from .domains.perp.risk_gate import RiskConfig
+    from .engine_bridge import load_config_or_exit
     from .exchanges.hyperliquid.account import HyperliquidAccount
     from .exchanges.hyperliquid.errors import ExchangeError
     from .exchanges.hyperliquid.sdk_client import HyperliquidClient
@@ -783,10 +784,8 @@ def _cmd_live(argv: list[str]) -> int:
     )
     from .live.secrets import agent_key_env_var, load_agent_key
 
-    try:
-        config = load_config(args.config)
-    except CONFIG_LOAD_ERRORS as exc:
-        print(f"error: invalid config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
+    config = load_config_or_exit(args.config)
+    if config is None:
         return 1
     raw_live = config.get("live")
     if raw_live is None:
@@ -838,7 +837,7 @@ def _cmd_live(argv: list[str]) -> int:
     # supervisor. (_cmd_paper makes the same up-front check.)
     loop_cfgs = None
     if args.loop:
-        from .main import _load_risk_decision
+        from .engine_bridge import _load_risk_decision
 
         loop_cfgs = _load_risk_decision(config)
         if loop_cfgs is None:
@@ -2625,14 +2624,13 @@ def _build_smoke_session(args, db):
     from decimal import Decimal
 
     from .domains.perp.risk_gate import RiskConfig
+    from .engine_bridge import load_config_or_exit
     from .live.config import ExecutionMode, LiveConfig, validate_live_risk_consistency
     from .live.smoke import SmokeContext
     from .paper.clock import WallClock
 
-    try:
-        config = load_config(args.config)
-    except CONFIG_LOAD_ERRORS as exc:
-        print(f"error: invalid config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
+    config = load_config_or_exit(args.config)
+    if config is None:
         return 1
     raw_live = config.get("live")
     if raw_live is None:
@@ -3191,23 +3189,22 @@ def _cmd_paper(argv: list[str]) -> int:
 
     import signal
 
+    from .engine_bridge import _load_risk_decision, _resolve_coin, load_config_or_exit
+
     # Heavy/engine imports deferred so `export`/`validate` stay light (the
     # engine/scheduler stack is imported by _run_locked once the lease is in
     # hand).
     from .exchanges.hyperliquid.errors import ExchangeError
     from .exchanges.hyperliquid.market_data import HyperliquidMarketData
     from .exchanges.hyperliquid.sdk_client import HyperliquidClient
-    from .main import _load_risk_decision, _resolve_coin
     from .paper.clock import WallClock
     from .paper.config import PaperTradingConfig
     from .paper.engine import AssetSpec
     from .paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
     from .persistence import repository as repo
 
-    try:
-        config = load_config(args.config)
-    except CONFIG_LOAD_ERRORS as exc:
-        print(f"error: invalid config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
+    config = load_config_or_exit(args.config)
+    if config is None:
         return 1
     coin = _resolve_coin(args, config)
     cfgs = _load_risk_decision(config)
@@ -3283,7 +3280,7 @@ def _cmd_paper(argv: list[str]) -> int:
 
         def _run_locked() -> int:
             """The lease-holding tail of ``paper``: create/reconcile, then the loop."""
-            from .main import EngineImportError
+            from .engine_bridge import EngineImportError
             from .paper import accounting
             from .paper.engine import PaperExecutionEngine
             from .paper.market_feed import PortSnapshotProvider
@@ -4022,7 +4019,7 @@ class _EngineDecisionProvider:
         payload_dir: Path,
         on_blocking_read=None,
     ) -> None:
-        from .main import _build_engine_config
+        from .engine_bridge import _build_engine_config
 
         self._config = config
         self._risk = risk_cfg
@@ -4039,9 +4036,9 @@ class _EngineDecisionProvider:
         from .domains.perp import risk_gate
         from .domains.perp.prompt_context import render_market_context
         from .domains.perp.target_decision import decision_format_instructions
+        from .engine_bridge import _build_context, _context_refusal_error
         from .exchanges.hyperliquid.errors import ExchangeError
         from .exchanges.hyperliquid.market_data import interval_to_ms
-        from .main import _build_context, _context_refusal_error
         from .paper.scheduler import DecisionInput, RetryableDecisionError
 
         try:
@@ -4053,7 +4050,7 @@ class _EngineDecisionProvider:
         # All four pre-LLM context guards (under-warm data, fully-dead
         # indicator set, missing/dead regime indicators atr_14/ema_20/ema_50,
         # a stale candle feed), shared with the one-shot path (see
-        # main._context_refusal_error) — a dead or absent regime indicator
+        # engine_bridge._context_refusal_error) — a dead or absent regime indicator
         # would otherwise let every cycle trade on a fabricated-calm RANGING
         # regime, and a stalled feed would let it trade on the past.
         # Deliberate (reviewed): they ride the §3.1 ladder as "server_error" →

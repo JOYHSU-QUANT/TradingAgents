@@ -1,9 +1,14 @@
-"""Tests for the orchestration glue in ``main.py``.
+"""Tests for the orchestration glue in ``main.py`` and ``engine_bridge.py``.
 
-Covers the two deterministic seams that do not need a live engine or network:
-``_build_engine_config`` (config overlay onto the engine DEFAULT_CONFIG) and
-``_load_position`` (wallet/​error/​success branches). The full ``run_engine``
-path needs a key + network and is left to integration testing.
+Covers the deterministic seams that do not need a live engine or network:
+``_build_engine_config`` (config overlay onto the engine DEFAULT_CONFIG),
+``_load_position`` (wallet/​error/​success branches) and the pre-LLM context
+guards — all defined in ``engine_bridge`` and exercised as ``bridge_mod`` —
+plus ``main.py``'s entry-point shells (``run_engine`` / ``run_context_only`` /
+``main``), exercised as ``main_mod``. Patch targets follow the DEFINING module:
+stubbing a collaborator of a bridge function on ``main_mod`` would silently
+miss it (from-import copies the binding). The full ``run_engine`` path needs a
+key + network and is left to integration testing.
 """
 
 from __future__ import annotations
@@ -16,7 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from contrib.hyperliquid_perp import main as main_mod
+from contrib.hyperliquid_perp import engine_bridge as bridge_mod, main as main_mod
 from contrib.hyperliquid_perp.domains.perp.schema import AccountSnapshot, PerpPosition
 from contrib.hyperliquid_perp.exchanges.hyperliquid.account import HyperliquidAccount
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
@@ -32,10 +37,10 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
 def test_indicator_names_handles_null_and_empty():
     # A bare `indicators:` in YAML parses to None — it must fall back to the
     # defaults, not crash the downstream iteration; an explicit [] is honoured.
-    assert main_mod._indicator_names({}) == main_mod._DEFAULT_INDICATORS
-    assert main_mod._indicator_names({"indicators": None}) == main_mod._DEFAULT_INDICATORS
-    assert main_mod._indicator_names({"indicators": []}) == []
-    assert main_mod._indicator_names({"indicators": ["rsi_14"]}) == ["rsi_14"]
+    assert bridge_mod._indicator_names({}) == bridge_mod._DEFAULT_INDICATORS
+    assert bridge_mod._indicator_names({"indicators": None}) == bridge_mod._DEFAULT_INDICATORS
+    assert bridge_mod._indicator_names({"indicators": []}) == []
+    assert bridge_mod._indicator_names({"indicators": ["rsi_14"]}) == ["rsi_14"]
 
 
 def test_resolve_coin_warns_when_multiple_configured(capsys):
@@ -43,7 +48,7 @@ def test_resolve_coin_warns_when_multiple_configured(capsys):
     # ignored coins are not a silent selection (pass --coin to choose explicitly).
     import argparse
 
-    coin = main_mod._resolve_coin(argparse.Namespace(coin=None), {"coins": ["btc", "eth", "sol"]})
+    coin = bridge_mod._resolve_coin(argparse.Namespace(coin=None), {"coins": ["btc", "eth", "sol"]})
     assert coin == "BTC"
     err = capsys.readouterr().err
     assert "3 coins configured" in err
@@ -53,13 +58,13 @@ def test_resolve_coin_warns_when_multiple_configured(capsys):
 def test_resolve_coin_silent_for_single_coin(capsys):
     import argparse
 
-    coin = main_mod._resolve_coin(argparse.Namespace(coin=None), {"coins": ["btc"]})
+    coin = bridge_mod._resolve_coin(argparse.Namespace(coin=None), {"coins": ["btc"]})
     assert coin == "BTC"
     assert capsys.readouterr().err == ""
 
 
 def test_build_engine_config_defaults():
-    engine_config, selected = main_mod._build_engine_config({})
+    engine_config, selected = bridge_mod._build_engine_config({})
 
     assert engine_config["llm_provider"] == "openrouter"
     # backend_url is forced to None so the OpenRouter client uses its own default.
@@ -78,12 +83,12 @@ def test_build_engine_config_defaults():
 def test_build_engine_config_structured_output_escape_hatch(capsys):
     # Arming the escape hatch must be loud (dual-channel warning): with the
     # prompt-injected contract it fail-closes every cycle as invalid_output.
-    engine_config, _ = main_mod._build_engine_config({"engine": {"structured_output": True}})
+    engine_config, _ = bridge_mod._build_engine_config({"engine": {"structured_output": True}})
     assert engine_config["structured_output"] is True
     assert "engine.structured_output: true" in capsys.readouterr().err
     # An explicit false is preserved (same value as the perp default; this
     # pins the passthrough accepting False) — and stays signal-free.
-    engine_config, _ = main_mod._build_engine_config({"engine": {"structured_output": False}})
+    engine_config, _ = bridge_mod._build_engine_config({"engine": {"structured_output": False}})
     assert engine_config["structured_output"] is False
     assert capsys.readouterr().err == ""
 
@@ -97,7 +102,7 @@ def test_build_engine_config_overrides():
             "selected_analysts": ["market"],
         }
     }
-    engine_config, selected = main_mod._build_engine_config(config)
+    engine_config, selected = bridge_mod._build_engine_config(config)
 
     assert engine_config["llm_provider"] == "custom"
     assert engine_config["deep_think_llm"] == "deep-x"
@@ -110,7 +115,7 @@ def test_build_engine_config_does_not_mutate_default_config():
     from tradingagents.default_config import DEFAULT_CONFIG
 
     before = DEFAULT_CONFIG["llm_provider"]
-    main_mod._build_engine_config({"engine": {"llm_provider": "openrouter"}})
+    bridge_mod._build_engine_config({"engine": {"llm_provider": "openrouter"}})
     assert DEFAULT_CONFIG["llm_provider"] == before  # overlay is on a copy
 
 
@@ -128,7 +133,7 @@ def test_build_engine_config_null_values_fall_back_to_defaults():
             "structured_output": None,
         }
     }
-    engine_config, selected = main_mod._build_engine_config(config)
+    engine_config, selected = bridge_mod._build_engine_config(config)
     assert engine_config["structured_output"] is False  # blank -> perp default
     assert engine_config["llm_provider"] == "openrouter"
     assert engine_config["deep_think_llm"] == DEFAULT_CONFIG["deep_think_llm"]
@@ -139,7 +144,9 @@ def test_build_engine_config_null_values_fall_back_to_defaults():
 def test_build_engine_config_preserves_explicit_empty_analysts():
     # An explicit empty list is a deliberate "no analysts" choice — it must be
     # preserved, not silently replaced by the default suite (None still falls back).
-    _engine_config, selected = main_mod._build_engine_config({"engine": {"selected_analysts": []}})
+    _engine_config, selected = bridge_mod._build_engine_config(
+        {"engine": {"selected_analysts": []}}
+    )
     assert selected == []
 
 
@@ -173,8 +180,8 @@ def test_build_engine_config_names_corrupt_dotenv_read(monkeypatch):
     _block_tradingagents_import(
         monkeypatch, UnicodeDecodeError("utf-8", b"\xff\xfe", 0, 1, "invalid start byte")
     )
-    with pytest.raises(main_mod.EngineImportError, match="UTF-8"):
-        main_mod._build_engine_config({})
+    with pytest.raises(bridge_mod.EngineImportError, match="UTF-8"):
+        bridge_mod._build_engine_config({})
 
 
 def test_build_engine_config_oserror_read_maps_to_named_error(monkeypatch):
@@ -183,8 +190,8 @@ def test_build_engine_config_oserror_read_maps_to_named_error(monkeypatch):
     # take the same named-EngineImportError lane, not fall through to exit 2.
     # Guards a refactor narrowing this except to UnicodeDecodeError only.
     _block_tradingagents_import(monkeypatch, OSError("[Errno 13] Permission denied: '.env'"))
-    with pytest.raises(main_mod.EngineImportError, match="Permission denied"):
-        main_mod._build_engine_config({})
+    with pytest.raises(bridge_mod.EngineImportError, match="Permission denied"):
+        bridge_mod._build_engine_config({})
 
 
 def test_build_engine_config_import_error_names_the_missing_module(monkeypatch):
@@ -193,8 +200,8 @@ def test_build_engine_config_import_error_names_the_missing_module(monkeypatch):
     # dependency must ride in the message itself, or the operator gets a
     # misdirecting "is tradingagents installed?" with no module name.
     _block_tradingagents_import(monkeypatch, ModuleNotFoundError("No module named 'langchain'"))
-    with pytest.raises(main_mod.EngineImportError, match="langchain"):
-        main_mod._build_engine_config({})
+    with pytest.raises(bridge_mod.EngineImportError, match="langchain"):
+        bridge_mod._build_engine_config({})
 
 
 # --------------------------------------------------------------------------
@@ -219,15 +226,15 @@ class _FakeAccount:
 
 def test_load_position_empty_addr_is_flat_and_ok():
     # No wallet address -> cleanly flat (ok=True), no account lookup attempted.
-    position, account_value, ok = main_mod._load_position(client=None, addr=None, coin="BTC")
+    position, account_value, ok = bridge_mod._load_position(client=None, addr=None, coin="BTC")
     assert position is None
     assert account_value == Decimal(0)
     assert ok is True
 
 
 def test_load_position_exchange_error_returns_not_ok(monkeypatch, capsys):
-    monkeypatch.setattr(main_mod, "HyperliquidAccount", _FakeAccount(ExchangeError("boom")))
-    position, account_value, ok = main_mod._load_position(
+    monkeypatch.setattr(bridge_mod, "HyperliquidAccount", _FakeAccount(ExchangeError("boom")))
+    position, account_value, ok = bridge_mod._load_position(
         client=object(), addr="0xReadOnlyAddress", coin="BTC"
     )
     assert position is None
@@ -242,11 +249,11 @@ def test_load_position_schema_value_error_returns_not_ok(monkeypatch, capsys):
     # clean failed lookup (ok=False -> exit 1), not escape to main's last-resort handler
     # and surface as exit 2 "unexpected error".
     monkeypatch.setattr(
-        main_mod,
+        bridge_mod,
         "HyperliquidAccount",
         _FakeAccount(ValueError("AccountSnapshot.account_value must be > 0, got 0")),
     )
-    position, account_value, ok = main_mod._load_position(
+    position, account_value, ok = bridge_mod._load_position(
         client=object(), addr="0xReadOnlyAddress", coin="BTC"
     )
     assert position is None
@@ -304,9 +311,9 @@ def test_load_position_success_returns_position_and_value(monkeypatch):
         total_margin_used=Decimal("6000"),
         positions=(pos,),
     )
-    monkeypatch.setattr(main_mod, "HyperliquidAccount", _FakeAccount(snapshot))
+    monkeypatch.setattr(bridge_mod, "HyperliquidAccount", _FakeAccount(snapshot))
 
-    position, account_value, ok = main_mod._load_position(
+    position, account_value, ok = bridge_mod._load_position(
         client=object(), addr="0xReadOnlyAddress", coin="BTC"
     )
     assert position is pos
@@ -321,9 +328,9 @@ def test_load_position_success_flat_when_coin_absent(monkeypatch):
         total_margin_used=Decimal("0"),
         positions=(),
     )
-    monkeypatch.setattr(main_mod, "HyperliquidAccount", _FakeAccount(snapshot))
+    monkeypatch.setattr(bridge_mod, "HyperliquidAccount", _FakeAccount(snapshot))
 
-    position, account_value, ok = main_mod._load_position(
+    position, account_value, ok = bridge_mod._load_position(
         client=object(), addr="0xReadOnlyAddress", coin="BTC"
     )
     assert position is None  # position_for("BTC") finds nothing -> flat
@@ -752,7 +759,7 @@ def test_context_refusal_flags_a_stalled_candle_feed():
     # context whose indicators all compute and whose regime reads healthy, so
     # the three guards above pass it — it just describes 14h ago.
     ctx = _ctx_closing_at(_NOW - timedelta(hours=14))
-    msg = main_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     # Named numbers, not a bare "stale": an operator must be able to tell a
     # 14h-old feed from a 3-day-old one without reading the code.
@@ -776,7 +783,7 @@ def test_context_refusal_passes_a_live_candle_feed():
     # already looks like. Refusing that would refuse a cycle over ordinary
     # exchange jitter.
     ctx = _ctx_closing_at(_NOW - timedelta(hours=4))
-    assert main_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW) is None
+    assert bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW) is None
 
 
 def test_context_refusal_freshness_bound_is_exclusive():
@@ -784,9 +791,9 @@ def test_context_refusal_freshness_bound_is_exclusive():
     # comparison as a strict `>`. A `>=` would refuse a feed that the
     # boundary case here calls healthy.
     at_limit = _ctx_closing_at(_NOW - timedelta(hours=12))
-    assert main_mod._context_refusal_error(at_limit, "BTC", {}, now=_NOW) is None
+    assert bridge_mod._context_refusal_error(at_limit, "BTC", {}, now=_NOW) is None
     past_limit = _ctx_closing_at(_NOW - timedelta(hours=12, minutes=1))
-    assert "freshness limit" in main_mod._context_refusal_error(past_limit, "BTC", {}, now=_NOW)
+    assert "freshness limit" in bridge_mod._context_refusal_error(past_limit, "BTC", {}, now=_NOW)
 
 
 def test_context_refusal_freshness_limit_tracks_the_candle_interval():
@@ -794,9 +801,9 @@ def test_context_refusal_freshness_limit_tracks_the_candle_interval():
     # bars and a stalled feed for 1h bars. A hardcoded hour count would pass
     # one of these two and fail the other.
     age = _NOW - timedelta(hours=5)
-    assert main_mod._context_refusal_error(_ctx_closing_at(age), "BTC", {}, now=_NOW) is None
+    assert bridge_mod._context_refusal_error(_ctx_closing_at(age), "BTC", {}, now=_NOW) is None
     hourly = _ctx_closing_at(age, interval="1h")
-    assert "freshness limit" in main_mod._context_refusal_error(hourly, "BTC", {}, now=_NOW)
+    assert "freshness limit" in bridge_mod._context_refusal_error(hourly, "BTC", {}, now=_NOW)
 
 
 def test_context_refusal_freshness_limit_is_capped_at_three_decision_cycles():
@@ -805,20 +812,20 @@ def test_context_refusal_freshness_limit_is_capped_at_three_decision_cycles():
     # outage. The cap binds instead — and the message says the cap is what bound
     # it, since "12h" alone would read as the ordinary 3 x 4h bound.
     daily = _ctx_closing_at(_NOW - timedelta(hours=13), interval="1d")
-    msg = main_mod._context_refusal_error(daily, "BTC", {}, now=_NOW)
+    msg = bridge_mod._context_refusal_error(daily, "BTC", {}, now=_NOW)
     assert msg is not None and "capped at 3 x the 4h decision cycle" in msg
     # Just inside the cap still passes: the cap is a bound, not a second guard.
     fresh = _ctx_closing_at(_NOW - timedelta(hours=11), interval="1d")
-    assert main_mod._context_refusal_error(fresh, "BTC", {}, now=_NOW) is None
+    assert bridge_mod._context_refusal_error(fresh, "BTC", {}, now=_NOW) is None
 
 
 def test_context_refusal_freshness_limit_has_a_floor():
     # The other end: 3 x 1m would refuse a whole cycle over three minutes of
     # feed jitter, far tighter than the 4h decision cadence needs.
     minutely = _ctx_closing_at(_NOW - timedelta(minutes=20), interval="1m")
-    assert main_mod._context_refusal_error(minutely, "BTC", {}, now=_NOW) is None
+    assert bridge_mod._context_refusal_error(minutely, "BTC", {}, now=_NOW) is None
     past_floor = _ctx_closing_at(_NOW - timedelta(minutes=31), interval="1m")
-    msg = main_mod._context_refusal_error(past_floor, "BTC", {}, now=_NOW)
+    msg = bridge_mod._context_refusal_error(past_floor, "BTC", {}, now=_NOW)
     assert msg is not None and "raised to the 30m floor" in msg
 
 
@@ -830,8 +837,8 @@ def test_freshness_ceiling_tracks_the_decision_cycle():
     from contrib.hyperliquid_perp.paper.scheduler import CYCLE_INTERVAL
 
     cycle_ms = int(CYCLE_INTERVAL.total_seconds() * 1000)
-    assert main_mod._MAX_CANDLE_AGE_INTERVALS * cycle_ms == main_mod._MAX_CANDLE_AGE_CEILING_MS
-    assert f"{int(CYCLE_INTERVAL.total_seconds()) // 3600}h" == main_mod._CYCLE_LABEL
+    assert bridge_mod._MAX_CANDLE_AGE_INTERVALS * cycle_ms == bridge_mod._MAX_CANDLE_AGE_CEILING_MS
+    assert f"{int(CYCLE_INTERVAL.total_seconds()) // 3600}h" == bridge_mod._CYCLE_LABEL
 
 
 def test_refusal_age_carries_seconds_past_the_limit():
@@ -840,7 +847,7 @@ def test_refusal_age_carries_seconds_past_the_limit():
     # limit, and the message reads "X is past the X limit". 30 seconds over is
     # the case that must not collide.
     ctx = _ctx_closing_at(_NOW - timedelta(hours=12, seconds=30))
-    msg = main_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "12h 0m 30s before now" in msg
     assert "12h 0m 0s freshness limit" in msg
@@ -850,7 +857,7 @@ def test_refusal_age_reads_in_days_once_it_is_long():
     # A feed down for days renders as days, not a three-figure hour count. The
     # limit is capped far below this band, so the two can never collide here.
     ctx = _ctx_closing_at(_NOW - timedelta(days=5, hours=3))
-    msg = main_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
     assert msg is not None and "5d 3h before now" in msg
 
 
@@ -859,7 +866,7 @@ def test_refusal_age_stays_in_hours_for_an_overnight_outage():
     # length reads better as hours. Pins the readability choice the constant
     # exists for — a threshold of one day renders this as "1d 6h".
     ctx = _ctx_closing_at(_NOW - timedelta(hours=30))
-    msg = main_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
     assert msg is not None and "30h 0m 0s before now" in msg
 
 
@@ -868,9 +875,9 @@ def test_context_refusal_future_bound_is_exclusive():
     # tolerance is symmetric: exactly at the bound passes, one second past it
     # refuses.
     at_bound = _ctx_closing_at(_NOW + timedelta(hours=12))
-    assert main_mod._context_refusal_error(at_bound, "BTC", {}, now=_NOW) is None
+    assert bridge_mod._context_refusal_error(at_bound, "BTC", {}, now=_NOW) is None
     past_bound = _ctx_closing_at(_NOW + timedelta(hours=12, seconds=1))
-    msg = main_mod._context_refusal_error(past_bound, "BTC", {}, now=_NOW)
+    msg = bridge_mod._context_refusal_error(past_bound, "BTC", {}, now=_NOW)
     assert msg is not None and "AFTER the current time" in msg
 
 
@@ -882,7 +889,7 @@ def test_context_refusal_flags_a_clock_that_jumped():
     # clock JUMPING between the two readings, or a ctx that never came from a
     # live fetch; either way the timestamps are incomparable.
     future = _ctx_closing_at(_NOW + timedelta(hours=13))
-    msg = main_mod._context_refusal_error(future, "BTC", {}, now=_NOW)
+    msg = bridge_mod._context_refusal_error(future, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "jumped between the two readings" in msg
     assert "did not come from a live market fetch" in msg
@@ -911,7 +918,7 @@ def test_freshness_guard_is_blind_to_a_clock_that_runs_behind():
             candle_interval="4h",
             as_of=newest_candle,
         )
-        return main_mod._context_refusal_error(ctx, "BTC", {}, now=host)
+        return bridge_mod._context_refusal_error(ctx, "BTC", {}, now=host)
 
     # Behind: the candles are truncated by the same amount, so the age reads
     # ordinary and NOTHING fires — the run trades on a day-old market.
@@ -930,17 +937,17 @@ def test_context_refusal_tolerates_a_candle_closing_during_the_fetch():
     # is the 30m floor rather than 3 x interval — 1m bars would otherwise give
     # a 3-minute tolerance, inside the reach of a slow fetch.
     just_ahead = _ctx_closing_at(_NOW + timedelta(minutes=4), interval="1m")
-    assert main_mod._context_refusal_error(just_ahead, "BTC", {}, now=_NOW) is None
+    assert bridge_mod._context_refusal_error(just_ahead, "BTC", {}, now=_NOW) is None
 
 
 def test_context_refusal_defaults_to_the_wall_clock():
     # The one-shot callers pass no clock. The default must be a real reading,
     # not a skipped check — this context is months old whenever the suite runs.
     stale = _ctx_closing_at(datetime(2026, 3, 1, tzinfo=timezone.utc))
-    assert "freshness limit" in main_mod._context_refusal_error(stale, "BTC", {})
+    assert "freshness limit" in bridge_mod._context_refusal_error(stale, "BTC", {})
     # ...and the same default does not manufacture a refusal for a live feed.
     live = _ctx_closing_at(datetime.now(timezone.utc))
-    assert main_mod._context_refusal_error(live, "BTC", {}) is None
+    assert bridge_mod._context_refusal_error(live, "BTC", {}) is None
 
 
 def test_context_refusal_fails_closed_on_an_unmeasurable_interval():
@@ -948,7 +955,7 @@ def test_context_refusal_fails_closed_on_an_unmeasurable_interval():
     # it first), but a context that reaches the guard with one cannot have its
     # age established — refuse rather than skip the check.
     ctx = _ctx_closing_at(_NOW, interval="4H")
-    msg = main_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
     assert "freshness cannot be checked" in msg
     assert "4H" in msg  # the offending value is named
 
@@ -959,7 +966,7 @@ def test_context_refusal_reports_warmup_before_staleness():
     # the window is short" is actionable, "the data is old" follows from it.
     ctx = _ctx_closing_at(_NOW - timedelta(days=30), candle_count=5)
     ctx.indicators = {"rsi_14": None, "ema_20": None, "ema_50": None, "atr_14": None}
-    assert "under-warmed" in main_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    assert "under-warmed" in bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
 
 
 def test_run_engine_aborts_on_a_stale_context(monkeypatch, capsys):

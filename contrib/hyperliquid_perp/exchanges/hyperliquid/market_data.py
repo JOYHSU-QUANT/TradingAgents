@@ -94,7 +94,7 @@ class HyperliquidMarketData:
         trimmed = candles[-lookback:] if lookback and len(candles) > lookback else candles
         if lookback and len(trimmed) < lookback:
             # A short return (newly listed coin, too-recent startTime, or SDK-side
-            # truncation) looks identical to a full window in the logs. main.py's
+            # truncation) looks identical to a full window in the logs. engine_bridge's
             # warm-up gate stops a bad run, but without this an operator can't tell
             # "asked 200, got 45 because new coin" from a normal read — surface it.
             logger.warning(

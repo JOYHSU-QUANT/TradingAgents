@@ -838,7 +838,7 @@ def _cmd_live(argv: list[str]) -> int:
     # supervisor. (_cmd_paper makes the same up-front check.)
     loop_cfgs = None
     if args.loop:
-        from .main import _load_risk_decision
+        from .engine_bridge import _load_risk_decision
 
         loop_cfgs = _load_risk_decision(config)
         if loop_cfgs is None:
@@ -3191,13 +3191,14 @@ def _cmd_paper(argv: list[str]) -> int:
 
     import signal
 
+    from .engine_bridge import _load_risk_decision, _resolve_coin
+
     # Heavy/engine imports deferred so `export`/`validate` stay light (the
     # engine/scheduler stack is imported by _run_locked once the lease is in
     # hand).
     from .exchanges.hyperliquid.errors import ExchangeError
     from .exchanges.hyperliquid.market_data import HyperliquidMarketData
     from .exchanges.hyperliquid.sdk_client import HyperliquidClient
-    from .main import _load_risk_decision, _resolve_coin
     from .paper.clock import WallClock
     from .paper.config import PaperTradingConfig
     from .paper.engine import AssetSpec
@@ -3283,7 +3284,7 @@ def _cmd_paper(argv: list[str]) -> int:
 
         def _run_locked() -> int:
             """The lease-holding tail of ``paper``: create/reconcile, then the loop."""
-            from .main import EngineImportError
+            from .engine_bridge import EngineImportError
             from .paper import accounting
             from .paper.engine import PaperExecutionEngine
             from .paper.market_feed import PortSnapshotProvider
@@ -4022,7 +4023,7 @@ class _EngineDecisionProvider:
         payload_dir: Path,
         on_blocking_read=None,
     ) -> None:
-        from .main import _build_engine_config
+        from .engine_bridge import _build_engine_config
 
         self._config = config
         self._risk = risk_cfg
@@ -4039,9 +4040,9 @@ class _EngineDecisionProvider:
         from .domains.perp import risk_gate
         from .domains.perp.prompt_context import render_market_context
         from .domains.perp.target_decision import decision_format_instructions
+        from .engine_bridge import _build_context, _context_refusal_error
         from .exchanges.hyperliquid.errors import ExchangeError
         from .exchanges.hyperliquid.market_data import interval_to_ms
-        from .main import _build_context, _context_refusal_error
         from .paper.scheduler import DecisionInput, RetryableDecisionError
 
         try:
@@ -4053,7 +4054,7 @@ class _EngineDecisionProvider:
         # All four pre-LLM context guards (under-warm data, fully-dead
         # indicator set, missing/dead regime indicators atr_14/ema_20/ema_50,
         # a stale candle feed), shared with the one-shot path (see
-        # main._context_refusal_error) — a dead or absent regime indicator
+        # engine_bridge._context_refusal_error) — a dead or absent regime indicator
         # would otherwise let every cycle trade on a fabricated-calm RANGING
         # regime, and a stalled feed would let it trade on the past.
         # Deliberate (reviewed): they ride the §3.1 ladder as "server_error" →

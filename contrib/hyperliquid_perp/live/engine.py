@@ -1308,18 +1308,8 @@ class LiveExecutionEngine:
     def _current_position_state(
         self, position: PositionState, mark: Decimal, equity: Decimal
     ) -> CurrentPositionState:
-        if position.is_flat:
-            return CurrentPositionState.flat()
-        with localcontext(DECIMAL_CONTEXT):
-            signed = position.size * mark
-            notional = abs(signed)
-            margin_used = notional / self._risk.leverage
-            margin_pct = margin_used / equity * 100 if equity > 0 else None
-        return CurrentPositionState(
-            side=TargetSide.LONG if position.size > 0 else TargetSide.SHORT,
-            signed_notional=signed,
-            margin_pct=margin_pct,
-            leverage=self._risk.leverage,
+        return CurrentPositionState.from_signed_size(
+            position.size, mark=mark, equity=equity, leverage=self._risk.leverage
         )
 
     def _safe_fetch_open_orders(self):

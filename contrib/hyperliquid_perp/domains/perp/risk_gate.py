@@ -24,11 +24,12 @@ trusting the parse seam.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import ROUND_FLOOR, Decimal
+from decimal import ROUND_FLOOR, Decimal, localcontext
 from enum import Enum
 from typing import Any
 
 from .config_coercion import config_overrides, decimal_from_yaml, int_from_yaml, str_from_yaml
+from .margin import DECIMAL_CONTEXT
 from .schema import PerpPosition
 from .target_decision import (
     DecisionConfig,
@@ -184,6 +185,32 @@ class CurrentPositionState:
     @classmethod
     def flat(cls) -> CurrentPositionState:
         return cls(side=None, signed_notional=Decimal(0), margin_pct=None)
+
+    @classmethod
+    def from_signed_size(
+        cls, size: Decimal, *, mark: Decimal, equity: Decimal, leverage: Decimal
+    ) -> CurrentPositionState:
+        """The gate inputs derived from the local books (paper ledger / live store).
+
+        ``size`` is the signed position size — ``0`` means flat. Unlike
+        :func:`current_position_state`, which reads an exchange position that
+        reports its own ``margin_used`` and leverage, the local books carry
+        neither: committed margin is imputed from the *configured* leverage
+        (``notional / leverage``), one derivation shared by both engines.
+        """
+        if size == 0:
+            return cls.flat()
+        with localcontext(DECIMAL_CONTEXT):
+            signed = size * mark
+            notional = abs(signed)
+            margin_used = notional / leverage
+            margin_pct = margin_used / equity * 100 if equity > 0 else None
+        return cls(
+            side=TargetSide.LONG if size > 0 else TargetSide.SHORT,
+            signed_notional=signed,
+            margin_pct=margin_pct,
+            leverage=leverage,
+        )
 
 
 def current_position_state(

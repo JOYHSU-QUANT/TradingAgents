@@ -24,15 +24,12 @@ cycle) runs exactly where its DB writes belong.
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal, localcontext
 from typing import TYPE_CHECKING
 
-from ..domains.perp.margin import DECIMAL_CONTEXT
 from ..domains.perp.risk_gate import RiskConfig
 from ..domains.perp.target_decision import (
     DecisionConfig,
@@ -49,7 +46,7 @@ from ..paper.scheduler import (
     RetryableDecisionError,
     parse_instant,
 )
-from ..persistence import ids, repository as repo
+from ..persistence import audit_rows, ids, repository as repo
 from ..persistence.db import Database
 from ..persistence.models import PositionState
 
@@ -674,7 +671,12 @@ class LiveDecisionDriver:
                 updated_at=now,
             )
 
-    # -- audit rows (phase2-data §5 / §7) — mirror of PaperScheduler ----------
+    # -- audit rows (phase2-data §5 / §7) — assembly shared with PaperScheduler
+    # via persistence.audit_rows; the deliberate live/paper differences stay at
+    # these call sites (ledger acquisition, remaining_twap_qty, and the output
+    # row's mark/equity source), alongside a prologue that is deliberately kept
+    # duplicated with the paper side (folding it in would need a runtime
+    # persistence → paper import). -------------------------------------------
 
     def _persist_ai_input(
         self, now: datetime, input_id: str, attempt_id: str, decision_input: DecisionInput
@@ -693,102 +695,50 @@ class LiveDecisionDriver:
             ]
         )
         metrics = accounting.summarize_account(ledger, valuations, leverage=self._risk.leverage)
-        protection = repo.get_position_protection(conn, self._run_id, self._coin)
-        stop_loss, take_profit = protection if protection is not None else (None, None)
         active_plans = repo.iter_execution_plans(
             conn, self._run_id, statuses=repo.LIVE_PLAN_STATUSES
         )
-        with localcontext(DECIMAL_CONTEXT):
-            notional = abs(position.size * ctx.mark_price)
-            margin_pct = (
-                notional / self._risk.leverage / metrics.account_equity * 100
-                if not position.is_flat and metrics.account_equity > 0
-                else None
-            )
+        # The same estimate the engine trades on (one derivation, engine-owned).
         liq_price = self._engine.liquidation_price(position, ctx.mark_price)
-        last_fill = conn.execute(
-            "SELECT MAX(timestamp) FROM fills WHERE run_id = ?", (self._run_id,)
-        ).fetchone()[0]
-        side = "flat" if position.is_flat else ("long" if position.is_long else "short")
-        with self._db.transaction() as txn:
-            repo.insert_ai_input(
-                txn,
-                input_id=input_id,
-                timestamp=now,
-                mode=self._mode,
-                run_id=self._run_id,
-                symbol=self._coin,
-                candle_start=decision_input.candle_start,
-                candle_end=decision_input.candle_end,
-                mark_price=ctx.mark_price,
-                mid_price=ctx.mid_price,
-                funding_rate=ctx.funding_rate,
-                wallet_balance=ledger.wallet_balance,
-                account_equity=metrics.account_equity,
-                available_balance=metrics.available_balance,
-                realized_pnl=ledger.realized_pnl,
-                unrealized_pnl=metrics.unrealized_pnl,
-                total_fees=ledger.total_fees,
-                net_funding_pnl=ledger.net_funding_pnl,
-                effective_leverage=metrics.effective_leverage,
-                margin_ratio=metrics.margin_ratio,
-                current_position_side=side,
-                current_position_size=position.size,
-                entry_price=position.entry_price,
-                position_notional=notional,
-                current_margin_pct=margin_pct,
-                configured_leverage=self._risk.leverage,
-                estimated_liquidation_price=liq_price,
-                stop_loss_price=stop_loss,
-                take_profit_price=take_profit,
-                active_twap=bool(active_plans),
-                # v1 does not yet attribute live fills to their plan, so a running
-                # plan's remaining quantity is not truthfully known here; report it as
-                # unknown (None) rather than the plan's frozen original total, which
-                # would over-state outstanding TWAP exposure to the AI every cycle.
-                # Authoritative tracking lands with the PR 6 WS/fill routing.
-                remaining_twap_qty=None,
-                last_fill_time=last_fill,
-                max_target_margin_pct=Decimal(self._risk.max_target_margin_pct),
-                input_payload_path=decision_input.input_payload_path,
-                input_payload_hash=decision_input.input_payload_hash,
-                prompt_version=decision_input.prompt_version,
-                model=decision_input.model,
-            )
-            repo.update_decision_attempt(txn, attempt_id, input_id=input_id, timestamp=now)
+        audit_rows.write_ai_input(
+            self._db,
+            now=now,
+            input_id=input_id,
+            attempt_id=attempt_id,
+            decision_input=decision_input,
+            mode=self._mode,
+            run_id=self._run_id,
+            symbol=self._coin,
+            ledger=ledger,
+            position=position,
+            metrics=metrics,
+            leverage=self._risk.leverage,
+            max_target_margin_pct=self._risk.max_target_margin_pct,
+            liquidation_price=liq_price,
+            active_twap=bool(active_plans),
+            # v1 does not yet attribute live fills to their plan, so a running
+            # plan's remaining quantity is not truthfully known here; report it as
+            # unknown (None) rather than the plan's frozen original total, which
+            # would over-state outstanding TWAP exposure to the AI every cycle.
+            # Authoritative tracking lands with the PR 6 WS/fill routing.
+            remaining_twap_qty=None,
+        )
 
     def _persist_ai_output(self, conn, now: datetime, inflight: _InFlight, reg) -> None:
         gate = reg.gate
         assert gate is not None
         assert inflight.parsed is not None  # _gate only reaches here with a parsed decision
-        decision = inflight.parsed.decision
-        reason = decision.rationale or inflight.parsed.invalid_reason or "(no rationale)"
-        repo.insert_ai_output(
+        audit_rows.write_ai_output(
             conn,
+            now=now,
             output_id=inflight.output_id,
-            timestamp=now,
-            mode=self._mode,
-            run_id=self._run_id,
             input_id=inflight.input_id,
             decision_attempt_id=inflight.attempt_id,
+            mode=self._mode,
+            run_id=self._run_id,
             symbol=self._coin,
-            decision_mode=gate.decision_mode.value,
-            target_side=None if gate.target_side is None else gate.target_side.value,
-            requested_target_margin_pct=gate.requested_target_margin_pct,
-            approved_target_margin_pct=gate.approved_target_margin_pct,
-            risk_action=gate.risk_action.value,
-            risk_reason=gate.risk_reason,
-            target_margin=gate.target_margin,
-            configured_leverage=gate.configured_leverage,
-            target_notional=gate.target_notional,
-            target_signed_notional=gate.target_signed_notional,
-            current_signed_notional=gate.current_signed_notional,
-            delta_notional=gate.delta_notional,
+            gate=gate,
+            parsed=inflight.parsed,
             mark_price=reg.mark_price,
             account_equity=reg.account_equity,
-            confidence=gate.confidence,
-            decision_reason=reason,
-            key_risks=json.dumps(list(decision.key_risks), ensure_ascii=False),
-            order_created=gate.order_created,
-            no_order_reason=gate.no_order_reason,
         )

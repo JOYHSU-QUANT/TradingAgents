@@ -45,7 +45,6 @@ way, so nothing trades on it twice.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -53,10 +52,10 @@ from decimal import Decimal, localcontext
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from ..domains.perp.risk_gate import DecisionConfig, RiskConfig
+from ..domains.perp.risk_gate import RiskConfig
 from ..domains.perp.schema import PerpMarketContext
-from ..domains.perp.target_decision import ParsedDecision, parse_target_decision
-from ..persistence import repository as repo
+from ..domains.perp.target_decision import DecisionConfig, ParsedDecision, parse_target_decision
+from ..persistence import audit_rows, repository as repo
 from ..persistence.db import Database
 from ..persistence.ids import decision_attempt_id as derive_attempt_id
 from ..persistence.models import DECIMAL_CONTEXT, PositionState
@@ -669,8 +668,6 @@ class PaperScheduler:
             ]
         )
         metrics = accounting.summarize_account(ledger, valuations, leverage=self._risk.leverage)
-        protection = repo.get_position_protection(conn, self._run_id, self._coin)
-        stop_loss, take_profit = protection if protection is not None else (None, None)
         active_plans = repo.iter_execution_plans(
             conn, self._run_id, statuses=repo.LIVE_PLAN_STATUSES
         )
@@ -679,60 +676,26 @@ class PaperScheduler:
                 (Decimal(p["remaining_qty"]) for p in active_plans if p["remaining_qty"]),
                 Decimal(0),
             )
-            signed_notional = position.size * ctx.mark_price
-            notional = abs(signed_notional)
-            margin_pct = (
-                notional / self._risk.leverage / metrics.account_equity * 100
-                if not position.is_flat and metrics.account_equity > 0
-                else None
-            )
         # The same estimate the engine trades on (one derivation, engine-owned).
         liq_price = self._engine.liquidation_price(position, ctx.mark_price)
-        last_fill = conn.execute(
-            "SELECT MAX(timestamp) FROM fills WHERE run_id = ?", (self._run_id,)
-        ).fetchone()[0]
-        side = "flat" if position.is_flat else ("long" if position.is_long else "short")
-        with self._db.transaction() as txn:
-            repo.insert_ai_input(
-                txn,
-                input_id=input_id,
-                timestamp=now,
-                mode=self._mode,
-                run_id=self._run_id,
-                symbol=self._coin,
-                candle_start=decision_input.candle_start,
-                candle_end=decision_input.candle_end,
-                mark_price=ctx.mark_price,
-                mid_price=ctx.mid_price,
-                funding_rate=ctx.funding_rate,
-                wallet_balance=ledger.wallet_balance,
-                account_equity=metrics.account_equity,
-                available_balance=metrics.available_balance,
-                realized_pnl=ledger.realized_pnl,
-                unrealized_pnl=metrics.unrealized_pnl,
-                total_fees=ledger.total_fees,
-                net_funding_pnl=ledger.net_funding_pnl,
-                effective_leverage=metrics.effective_leverage,
-                margin_ratio=metrics.margin_ratio,
-                current_position_side=side,
-                current_position_size=position.size,
-                entry_price=position.entry_price,
-                position_notional=notional,
-                current_margin_pct=margin_pct,
-                configured_leverage=self._risk.leverage,
-                estimated_liquidation_price=liq_price,
-                stop_loss_price=stop_loss,
-                take_profit_price=take_profit,
-                active_twap=bool(active_plans),
-                remaining_twap_qty=remaining_twap if active_plans else None,
-                last_fill_time=last_fill,
-                max_target_margin_pct=Decimal(self._risk.max_target_margin_pct),
-                input_payload_path=decision_input.input_payload_path,
-                input_payload_hash=decision_input.input_payload_hash,
-                prompt_version=decision_input.prompt_version,
-                model=decision_input.model,
-            )
-            repo.update_decision_attempt(txn, attempt_id, input_id=input_id, timestamp=now)
+        audit_rows.write_ai_input(
+            self._db,
+            now=now,
+            input_id=input_id,
+            attempt_id=attempt_id,
+            decision_input=decision_input,
+            mode=self._mode,
+            run_id=self._run_id,
+            symbol=self._coin,
+            ledger=ledger,
+            position=position,
+            metrics=metrics,
+            leverage=self._risk.leverage,
+            max_target_margin_pct=self._risk.max_target_margin_pct,
+            liquidation_price=liq_price,
+            active_twap=bool(active_plans),
+            remaining_twap_qty=remaining_twap if active_plans else None,
+        )
 
     def _insert_ai_output(
         self, conn, now: datetime, pending: _PendingDecision, result: PlanStartResult
@@ -740,36 +703,17 @@ class PaperScheduler:
         """One §7 ``ai_outputs`` row from the gate's outcome (its own sizing inputs)."""
         gate = result.gate
         assert gate is not None  # _finalize only reaches here with a gated result
-        decision = pending.parsed.decision
-        # §7: decision_reason must never be empty — a fail-closed decision may
-        # carry no rationale, in which case the contract violation is the reason.
-        reason = decision.rationale or pending.parsed.invalid_reason or "(no rationale)"
-        repo.insert_ai_output(
+        audit_rows.write_ai_output(
             conn,
+            now=now,
             output_id=pending.output_id,
-            timestamp=now,
-            mode=self._mode,
-            run_id=self._run_id,
             input_id=pending.input_id,
             decision_attempt_id=pending.attempt_id,
+            mode=self._mode,
+            run_id=self._run_id,
             symbol=self._coin,
-            decision_mode=gate.decision_mode.value,
-            target_side=None if gate.target_side is None else gate.target_side.value,
-            requested_target_margin_pct=gate.requested_target_margin_pct,
-            approved_target_margin_pct=gate.approved_target_margin_pct,
-            risk_action=gate.risk_action.value,
-            risk_reason=gate.risk_reason,
-            target_margin=gate.target_margin,
-            configured_leverage=gate.configured_leverage,
-            target_notional=gate.target_notional,
-            target_signed_notional=gate.target_signed_notional,
-            current_signed_notional=gate.current_signed_notional,
-            delta_notional=gate.delta_notional,
+            gate=gate,
+            parsed=pending.parsed,
             mark_price=result.mark_price,
             account_equity=result.account_equity,
-            confidence=gate.confidence,
-            decision_reason=reason,
-            key_risks=json.dumps(list(decision.key_risks), ensure_ascii=False),
-            order_created=gate.order_created,
-            no_order_reason=gate.no_order_reason,
         )

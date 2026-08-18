@@ -18,6 +18,7 @@ __all__ = [
     "insert_live_fill",
     "iter_fills",
     "iter_live_fills",
+    "last_fill_time",
     "last_live_fill_time",
     "newest_live_fill_order_key",
     "posted_exchange_fee",
@@ -148,6 +149,18 @@ def iter_fills(
         params.append(symbol)
     order = "exchange_fill_time, exchange_fill_key, rowid" if chronological else "rowid"
     return conn.execute(f"SELECT * FROM fills WHERE {where} ORDER BY {order}", params).fetchall()
+
+
+def last_fill_time(conn: sqlite3.Connection, run_id: str) -> str | None:
+    """The storage-form timestamp of the run's newest fill (any mode), or ``None``.
+
+    Feeds ``ai_inputs.last_fill_time`` verbatim: returned as stored (ISO-8601
+    TEXT), never decoded, so the audit row carries the identical bytes the fill
+    was booked with.
+    """
+    return conn.execute("SELECT MAX(timestamp) FROM fills WHERE run_id = ?", (run_id,)).fetchone()[
+        0
+    ]
 
 
 def last_live_fill_time(conn: sqlite3.Connection, run_id: str) -> datetime | None:

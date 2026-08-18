@@ -17,13 +17,15 @@ LLM-graph wiring seam (trading_graph), while this module composes exchange
 reads + config into engine inputs — filing it there would blur that boundary.
 
 Patch-target note: names are looked up in THIS module's globals at call time,
-and both entry points reach the functions here through module-attribute access
-(``engine_bridge.X``), never a from-import — a from-import would copy each
-binding into the consuming module and give the same seam a second patch
-surface, where a stub applied to the wrong one is silently invisible to the
-other side's callers. One lookup site means one patch surface: a test stubbing
-a function here, or a collaborator of one (``HyperliquidClient``,
-``_warmup_threshold``, …), always patches ``engine_bridge`` itself.
+and neither entry point holds a module-lifetime copy of them — ``main.py``
+uses module-attribute access (``engine_bridge.X``); ``cli.py`` uses
+function-local from-imports that re-fetch the attribute on every call. A
+TOP-LEVEL from-import would break that: it copies the binding once at import
+time, giving the same seam a second patch surface where a stub applied to the
+wrong one is silently invisible to the other side's callers. One lookup site
+means one patch surface: a test stubbing a function here, or a collaborator of
+one (``HyperliquidClient``, ``_warmup_threshold``, …), always patches
+``engine_bridge`` itself.
 """
 
 from __future__ import annotations
@@ -66,9 +68,11 @@ def _warn_dual(log_msg: str, *args: object, stderr: str) -> None:
     An operator scraping only the log stream (or only capturing stderr) must
     still see the condition — the dual-channel warnings in this module and in
     ``main.py``'s entry shells all route through here so the two channels
-    cannot silently drift apart. (Log-only warnings, like the swallowed
-    ``on_blocking_read`` failure in :func:`_build_context`, are deliberate
-    exceptions: mid-read there is no operator moment to interrupt.)
+    cannot silently drift apart. Single-channel warnings exist and are each a
+    deliberate exception, not a missed migration: the ``on_blocking_read``
+    failure in :func:`_build_context` is log-only (mid-read, no operator
+    moment to interrupt), and :func:`_resolve_coin`'s multi-coin notice is
+    stderr-only (interactive CLI feedback, not an operational event).
     """
     logger.warning(log_msg, *args)
     print(stderr, file=sys.stderr)

@@ -27,12 +27,14 @@ import os
 import sys
 from datetime import datetime, timezone
 
-# Module import + attribute access, NOT a from-import: a from-import copies
-# each binding into this module, giving every shared seam a second patch
-# surface — a test stubbing engine_bridge._build_context would silently miss
-# the copy run_engine calls (and vice versa). Attribute access keeps ONE
-# lookup site, so patches on the defining module are seen by every caller.
-# (The same prescription the cli decomposition plan applies to cli.py.)
+# Module import + attribute access, NOT a top-level from-import: a top-level
+# from-import copies each binding into this module, giving every shared seam a
+# second patch surface — a test stubbing engine_bridge._build_context would
+# silently miss the copy run_engine calls (and vice versa). Attribute access
+# keeps ONE lookup site, so patches on the defining module are seen by every
+# caller. (cli.py gets the same property from its function-local from-imports,
+# which re-fetch on every call; the cli decomposition plan prescribes the same
+# deferred-lookup rule for the split modules.)
 from . import engine_bridge
 from .audit.decision_log import log_target_decision
 from .config import dotenv_diagnosis, load_dotenv_files, wallet_address

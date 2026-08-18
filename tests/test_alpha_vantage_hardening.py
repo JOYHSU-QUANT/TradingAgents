@@ -183,3 +183,51 @@ def test_missing_column_mapping_fails_loud_instead_of_guessing(monkeypatch):
     assert "no CSV column mapping" in out
     assert "999.0" not in out
     assert "55.0" not in out
+
+
+@pytest.mark.unit
+class TestCsvDateFilterFailsClosed:
+    """_filter_csv_by_date_range must never return the unfiltered body when
+    it cannot filter — that silently served out-of-range/future rows (#33)."""
+
+    _CSV = "timestamp,close\n2026-01-02,1.0\n2099-01-01,2.0\n"
+
+    def test_happy_path_drops_out_of_range_rows(self):
+        out = av._filter_csv_by_date_range(self._CSV, "2026-01-01", "2026-01-05", symbol="AAPL")
+        assert "2026-01-02" in out
+        assert "2099-01-01" not in out
+
+    def test_bad_end_date_raises_instead_of_returning_unfiltered(self):
+        from tradingagents.dataflows.errors import NoMarketDataError
+
+        with pytest.raises(NoMarketDataError):
+            av._filter_csv_by_date_range(self._CSV, "2026-01-01", "not-a-date", symbol="AAPL")
+
+    def test_unparseable_csv_raises_instead_of_returning_unfiltered(self):
+        from tradingagents.dataflows.errors import NoMarketDataError
+
+        with pytest.raises(NoMarketDataError):
+            av._filter_csv_by_date_range(
+                "timestamp,close\ngarbage,1.0\n", "2026-01-01", "2026-01-05", symbol="AAPL"
+            )
+
+    def test_blank_body_passes_through(self):
+        assert av._filter_csv_by_date_range("", "2026-01-01", "2026-01-05", symbol="AAPL") == ""
+
+
+@pytest.mark.unit
+def test_global_news_clamps_untrusted_sizes(monkeypatch):
+    # Oversized limit / lookback must be clamped before parameterizing the
+    # external request (#33).
+    import tradingagents.dataflows.alpha_vantage_news as avn
+
+    captured = {}
+
+    def fake_request(function_name, params):
+        captured.update(params)
+        return "{}"
+
+    monkeypatch.setattr(avn, "_make_api_request", fake_request)
+    avn.get_global_news("2026-06-05", look_back_days=99999, limit=99999)
+    assert captured["limit"] == str(avn.MAX_NEWS_LIMIT)
+    assert captured["time_from"] == "20250605T0000"  # exactly 365 days back

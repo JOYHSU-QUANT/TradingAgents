@@ -10,6 +10,10 @@ from .config import get_config
 from .stockstats_utils import yf_retry
 from .symbol_utils import normalize_symbol
 
+# Clamp the untrusted article count before it sizes an external yf.Search
+# call (#33): an LLM-supplied or misconfigured value must stay bounded.
+MAX_SEARCH_NEWS_COUNT = 100
+
 
 def _extract_article_data(article: dict) -> dict:
     """Extract article data from yfinance news format (handles nested 'content' structure)."""
@@ -156,6 +160,7 @@ def get_global_news_yfinance(
         look_back_days = config["global_news_lookback_days"]
     if limit is None:
         limit = config["global_news_article_limit"]
+    limit = max(1, min(int(limit), MAX_SEARCH_NEWS_COUNT))
     search_queries = config["global_news_queries"]
 
     all_news = []

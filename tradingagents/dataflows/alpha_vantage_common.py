@@ -6,7 +6,7 @@ from io import StringIO
 import pandas as pd
 import requests
 
-from .errors import VendorNotConfiguredError, VendorRateLimitError
+from .errors import NoMarketDataError, VendorNotConfiguredError, VendorRateLimitError
 
 API_BASE_URL = "https://www.alphavantage.co/query"
 
@@ -22,6 +22,7 @@ class AlphaVantageNotConfiguredError(VendorNotConfiguredError):
     layer's "vendor unavailable" handling and existing ValueError callers both
     keep working.
     """
+
     pass
 
 
@@ -34,11 +35,12 @@ def get_api_key() -> str:
         )
     return api_key
 
+
 def format_datetime_for_api(date_input) -> str:
     """Convert various date formats to YYYYMMDDTHHMM format required by Alpha Vantage API."""
     if isinstance(date_input, str):
         # If already in correct format, return as-is
-        if len(date_input) == 13 and 'T' in date_input:
+        if len(date_input) == 13 and "T" in date_input:
             return date_input
         # Try to parse common date formats
         try:
@@ -55,9 +57,12 @@ def format_datetime_for_api(date_input) -> str:
     else:
         raise ValueError(f"Date must be string or datetime object, got {type(date_input)}")
 
+
 class AlphaVantageRateLimitError(VendorRateLimitError):
     """Raised when the Alpha Vantage API rate limit is exceeded."""
+
     pass
+
 
 def _make_api_request(function_name: str, params: dict) -> dict | str:
     """Helper function to make API requests and handle responses.
@@ -67,14 +72,16 @@ def _make_api_request(function_name: str, params: dict) -> dict | str:
     """
     # Create a copy of params to avoid modifying the original
     api_params = params.copy()
-    api_params.update({
-        "function": function_name,
-        "apikey": get_api_key(),
-        "source": "trading_agents",
-    })
+    api_params.update(
+        {
+            "function": function_name,
+            "apikey": get_api_key(),
+            "source": "trading_agents",
+        }
+    )
 
     # Handle entitlement parameter if present in params or global variable
-    current_entitlement = globals().get('_current_entitlement')
+    current_entitlement = globals().get("_current_entitlement")
     entitlement = api_params.get("entitlement") or current_entitlement
 
     if entitlement:
@@ -107,13 +114,16 @@ def _make_api_request(function_name: str, params: dict) -> dict | str:
         if "api key" in low or "apikey" in low:
             # Reuse the existing "not configured" error so a bad key surfaces as
             # a real, actionable failure rather than a mislabeled rate limit (#991).
-            raise AlphaVantageNotConfiguredError(f"Alpha Vantage API key invalid or missing: {notice}")
+            raise AlphaVantageNotConfiguredError(
+                f"Alpha Vantage API key invalid or missing: {notice}"
+            )
 
     return response_text
 
 
-
-def _filter_csv_by_date_range(csv_data: str, start_date: str, end_date: str) -> str:
+def _filter_csv_by_date_range(
+    csv_data: str, start_date: str, end_date: str, symbol: str | None = None
+) -> str:
     """
     Filter CSV data to include only rows within the specified date range.
 
@@ -121,31 +131,42 @@ def _filter_csv_by_date_range(csv_data: str, start_date: str, end_date: str) -> 
         csv_data: CSV string from Alpha Vantage API
         start_date: Start date in yyyy-mm-dd format
         end_date: End date in yyyy-mm-dd format
+        symbol: Requested symbol, used to build a classified error
 
     Returns:
         Filtered CSV string
+
+    Raises:
+        NoMarketDataError: When the date range or the CSV body cannot be
+            parsed. This filter backs a core (non-optional) data path, so it
+            must fail closed: the old fallback returned the UNFILTERED body,
+            silently serving out-of-range/future rows to a backtest (#33).
     """
     if not csv_data or csv_data.strip() == "":
         return csv_data
 
     try:
-        # Parse CSV data
-        df = pd.read_csv(StringIO(csv_data))
-
-        # Assume the first column is the date column (timestamp)
-        date_col = df.columns[0]
-        df[date_col] = pd.to_datetime(df[date_col])
-
-        # Filter by date range
         start_dt = pd.to_datetime(start_date)
         end_dt = pd.to_datetime(end_date)
+        if pd.isna(start_dt) or pd.isna(end_dt):
+            raise ValueError(f"unparseable date range {start_date}..{end_date}")
+    except (TypeError, ValueError) as e:
+        raise NoMarketDataError(
+            symbol or "<unknown>",
+            detail=f"unusable date range for the CSV date filter: {e}",
+        ) from e
 
-        filtered_df = df[(df[date_col] >= start_dt) & (df[date_col] <= end_dt)]
-
-        # Convert back to CSV string
-        return filtered_df.to_csv(index=False)
-
+    try:
+        df = pd.read_csv(StringIO(csv_data))
+        # The first column is the date column (timestamp) on every CSV
+        # endpoint this filter backs.
+        date_col = df.columns[0]
+        df[date_col] = pd.to_datetime(df[date_col])
     except Exception as e:
-        # If filtering fails, return original data with a warning
-        print(f"Warning: Failed to filter CSV data by date range: {e}")
-        return csv_data
+        raise NoMarketDataError(
+            symbol or "<unknown>",
+            detail=f"unparseable CSV response; refusing to serve it unfiltered: {e}",
+        ) from e
+
+    filtered_df = df[(df[date_col] >= start_dt) & (df[date_col] <= end_dt)]
+    return filtered_df.to_csv(index=False)

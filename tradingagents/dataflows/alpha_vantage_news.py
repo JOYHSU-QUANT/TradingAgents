@@ -1,5 +1,11 @@
 from .alpha_vantage_common import _make_api_request, format_datetime_for_api
 
+# Clamp untrusted request sizes before they parameterize an external call
+# (#33): an LLM-supplied or misconfigured value must not turn into an
+# unbounded lookback window or article count.
+MAX_NEWS_LIMIT = 1000  # Alpha Vantage NEWS_SENTIMENT hard maximum
+MAX_NEWS_LOOKBACK_DAYS = 365
+
 
 def get_news(ticker, start_date, end_date) -> dict[str, str] | str:
     """Returns live and historical market news & sentiment data from premier news outlets worldwide.
@@ -23,6 +29,7 @@ def get_news(ticker, start_date, end_date) -> dict[str, str] | str:
 
     return _make_api_request("NEWS_SENTIMENT", params)
 
+
 def get_global_news(curr_date, look_back_days: int = 7, limit: int = 50) -> dict[str, str] | str:
     """Returns global market news & sentiment data without ticker-specific filtering.
 
@@ -37,6 +44,9 @@ def get_global_news(curr_date, look_back_days: int = 7, limit: int = 50) -> dict
         Dictionary containing global news sentiment data or JSON string.
     """
     from datetime import datetime, timedelta
+
+    look_back_days = max(1, min(int(look_back_days), MAX_NEWS_LOOKBACK_DAYS))
+    limit = max(1, min(int(limit), MAX_NEWS_LIMIT))
 
     # Calculate start date
     curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")

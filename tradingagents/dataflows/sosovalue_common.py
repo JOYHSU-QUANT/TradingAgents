@@ -500,6 +500,23 @@ def _read_cache_preamble(path: str, *, reject: Callable[[str], None]) -> dict | 
     return payload
 
 
+def _concentration_share_str(share: float) -> str:
+    """Render a concentration share where "100" may only mean "the whole".
+
+    Any rounding format breaks that on its own boundary — ``.0f`` fails from
+    99.5 and ``.1f`` fails again from 99.95 — so the near-100 band is
+    truncated toward zero instead, which can never round up into the claim
+    that one contributor is the entire multi-contributor total. (The
+    treasuries module's decided fix, shared so the ETF breadth shares get
+    the same guarantee.)
+    """
+    if share >= 100:
+        return "100%"
+    if round(share) >= 100:
+        return f"{math.floor(share * 10) / 10:.1f}%"
+    return f"{share:.0f}%"
+
+
 def _sign(value: float) -> int:
     return (value > 0) - (value < 0)
 
@@ -752,8 +769,15 @@ def load_rolling_snapshot(
     cache_name: str,
     max_stale_days: int,
     log: logging.Logger,
-) -> tuple[dict, str, bool]:
-    """The family's cache/TTL/stale discipline; returns (payload, fetched_at, stale).
+) -> tuple[dict, str, bool, bool]:
+    """The family's cache/TTL/stale discipline; returns (payload, fetched_at, stale, refetched).
+
+    ``refetched`` is True only when THIS call ran ``fetch_all``: both cache
+    serves — the TTL-fresh hit and the stale fallback — replay a payload
+    computed at some earlier real fetch, so anything derived-at-fetch-time it
+    carries (the ETF module's refresh-diff disclosures) describes that fetch,
+    not this call, and ``stale`` alone cannot say so (it is only the subset
+    of cache serves whose refresh attempt failed).
 
     ``log`` is the calling module's logger — the stale-serve warnings and
     errors keep their per-module attribution, so operators (and the tests)
@@ -786,7 +810,7 @@ def load_rolling_snapshot(
         age_h = _cache_age_hours(cached["fetched_at"])
         # 0 <= age guards against a future-dated stamp being treated as fresh.
         if age_h is not None and 0 <= age_h < ttl_hours(cached):
-            return cached, cached["fetched_at"], False
+            return cached, cached["fetched_at"], False, False
 
     try:
         payload = fetch_all(cached)
@@ -830,7 +854,7 @@ def load_rolling_snapshot(
                     e,
                     age_str,
                 )
-            return cached, fetched_at, True
+            return cached, fetched_at, True, False
         # "usable": the file may exist but have failed read-side validation.
         # Not capped, only flattened: most of this string is the module's own
         # diagnostic, and a foreign requests.RequestException can carry a
@@ -852,4 +876,4 @@ def load_rolling_snapshot(
             path,
             e,
         )
-    return payload, fetched_at, False
+    return payload, fetched_at, False, True

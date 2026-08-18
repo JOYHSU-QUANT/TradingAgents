@@ -635,7 +635,7 @@ class TestCacheAndLoad:
     def test_cache_write_failure_is_non_fatal(self, tmp_path, monkeypatch, caplog):
         self._setup(tmp_path, monkeypatch)
         with (
-            mock.patch.object(sosovalue_treasuries.json, "dump", side_effect=OSError("disk full")),
+            mock.patch.object(sosovalue_common.json, "dump", side_effect=OSError("disk full")),
             caplog.at_level("WARNING"),
         ):
             snapshot = sosovalue_treasuries._load_snapshot()

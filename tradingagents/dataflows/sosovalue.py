@@ -72,7 +72,6 @@ A historical curr_date returns real rows only as deep as that window still
 reaches — the report says so instead of pretending the history is complete.
 """
 
-import json
 import logging
 import os
 from datetime import datetime, timedelta
@@ -90,11 +89,14 @@ from .sosovalue_common import (
     SoSoValueNotConfiguredError as SoSoValueNotConfiguredError,
     SoSoValueRateLimitError,
     _cache_dir,
+    _cache_rejecter,
     _is_finite_number,
     _is_iso_date,
+    _is_non_negative_int,
     _is_valid_ticker,
     _plural,
     _plural_days,
+    _read_cache_preamble,
     _request,
     _sanitize,
     _sign,
@@ -436,19 +438,11 @@ def _read_cache(path: str, asset: str) -> dict | None:
     with the table, another asset's flows under this asset's heading).
     """
 
-    def _reject(reason: str) -> None:
-        logger.warning("Ignoring SoSoValue cache %s: %s", path, reason)
-        return None
+    _reject = _cache_rejecter(path, cache_name="SoSoValue cache", log=logger)
 
-    try:
-        with open(path, encoding="utf-8") as f:
-            payload = json.load(f)
-    except FileNotFoundError:
+    payload = _read_cache_preamble(path, reject=_reject)
+    if payload is None:
         return None
-    except (OSError, ValueError) as e:
-        return _reject(f"unreadable ({e})")
-    if not isinstance(payload, dict):
-        return _reject(f"top-level JSON is a {type(payload).__name__}, expected an object")
     if payload.get("asset") != asset:
         # A copied/renamed cache file would otherwise serve another asset's
         # flows under this asset's heading with no caveat anywhere.
@@ -464,13 +458,13 @@ def _read_cache(path: str, asset: str) -> dict | None:
     if not _valid_funds(payload.get("funds")):
         return _reject("'funds' is missing or contains a malformed fund entry")
     funds_total = payload.get("funds_total")
-    if not isinstance(funds_total, int) or isinstance(funds_total, bool) or funds_total < 0:
+    if not _is_non_negative_int(funds_total):
         return _reject("'funds_total' is missing or not a non-negative integer")
     failed = payload.get("funds_failed")
     if not isinstance(failed, list) or not all(_is_valid_ticker(t) for t in failed):
         return _reject("'funds_failed' is missing or not a list of plausible tickers")
     unusable = payload.get("funds_unusable")
-    if not isinstance(unusable, int) or isinstance(unusable, bool) or unusable < 0:
+    if not _is_non_negative_int(unusable):
         return _reject("'funds_unusable' is missing or not a non-negative integer")
     if not isinstance(payload.get("list_fetched"), bool):
         return _reject("'list_fetched' is missing or not a boolean")

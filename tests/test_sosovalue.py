@@ -1961,7 +1961,7 @@ class TestCacheAndLoad:
         self._setup(tmp_path, monkeypatch)
         _stub_requests(monkeypatch)
         with (
-            mock.patch.object(sosovalue.json, "dump", side_effect=OSError("disk full")),
+            mock.patch.object(sosovalue_common.json, "dump", side_effect=OSError("disk full")),
             caplog.at_level(logging.WARNING, logger=SOSOVALUE_LOGGER),
         ):
             out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
@@ -2390,9 +2390,7 @@ class TestRaisedMessagesAreFlattened:
 
     def test_a_non_finite_fund_value_cannot_forge_markdown(self):
         with pytest.raises(sosovalue.SoSoValueError) as exc:
-            sosovalue._parse_fund_rows(
-                [{"date": "2026-08-01", "net_inflow": self.POISON}], "AAAA"
-            )
+            sosovalue._parse_fund_rows([{"date": "2026-08-01", "net_inflow": self.POISON}], "AAAA")
         assert "#" not in str(exc.value)
         assert "|" not in str(exc.value)
         assert "999.9" in str(exc.value)

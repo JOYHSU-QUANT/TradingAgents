@@ -84,7 +84,6 @@ much of the scheduled window the snapshot's age has eaten rather than letting
 an age-shortened schedule read as a quiet fortnight.
 """
 
-import json
 import logging
 import os
 import re
@@ -97,15 +96,19 @@ import requests
 from .sosovalue_common import (
     SoSoValueError,
     _cache_dir,
+    _cache_rejecter,
     _coverage_gap_note,
     _days_unobserved,
     _is_iso_date,
+    _is_non_negative_int,
     _is_safe_text,
     _plural,
     _plural_days,
+    _read_cache_preamble,
     _request,
     _sanitize,
     _stale_caveat,
+    _valid_dated_rows,
     fetch_each,
     load_rolling_snapshot,
     raise_all_failed,
@@ -528,23 +531,17 @@ def _cache_path() -> str:
     return os.path.join(_cache_dir(), "sosovalue_macro.json")
 
 
+def _history_row_fields_ok(r: dict) -> bool:
+    # The per-field rules behind the family's shared _valid_dated_rows
+    # skeleton (which already checked the dict shape and the date).
+    return all(_is_valid_value(r.get(k)) for k in ("actual", "forecast", "previous"))
+
+
 def _valid_history_rows(rows: object) -> bool:
-    # The row-count bound is mirrored read-side like every other parse-boundary
-    # bound: a file written before it existed (or by hand) must cost one
-    # refetch rather than be re-validated in full on every read forever.
-    if not (isinstance(rows, list) and rows and len(rows) <= MAX_HISTORY_ROWS_HARD):
-        return False
-    if not all(
-        isinstance(r, dict)
-        and _is_iso_date(r.get("date"))
-        and all(_is_valid_value(r.get(k)) for k in ("actual", "forecast", "previous"))
-        for r in rows
-    ):
-        return False
-    dates = [r["date"] for r in rows]
-    # Non-descending, not strictly ascending: duplicate dates are legal (two
-    # prints released on one day) and preserved by the parser.
-    return all(a <= b for a, b in zip(dates, dates[1:], strict=False))
+    # The list/cap/date/ordering skeleton is the family's shared one (see
+    # _valid_dated_rows for why the bound is mirrored read-side and duplicate
+    # dates are legal); only the per-field rules are this module's.
+    return _valid_dated_rows(rows, max_rows=MAX_HISTORY_ROWS_HARD, row_ok=_history_row_fields_ok)
 
 
 def _read_cache(path: str) -> dict | None:
@@ -558,19 +555,11 @@ def _read_cache(path: str) -> dict | None:
     edit) is refetched rather than rendered with missing or orphaned events.
     """
 
-    def _reject(reason: str) -> None:
-        logger.warning("Ignoring SoSoValue macro cache %s: %s", path, reason)
-        return None
+    _reject = _cache_rejecter(path, cache_name="SoSoValue macro cache", log=logger)
 
-    try:
-        with open(path, encoding="utf-8") as f:
-            payload = json.load(f)
-    except FileNotFoundError:
+    payload = _read_cache_preamble(path, reject=_reject)
+    if payload is None:
         return None
-    except (OSError, ValueError) as e:
-        return _reject(f"unreadable ({e})")
-    if not isinstance(payload, dict):
-        return _reject(f"top-level JSON is a {type(payload).__name__}, expected an object")
     calendar = payload.get("calendar")
     if not (
         isinstance(calendar, list)
@@ -608,7 +597,7 @@ def _read_cache(path: str) -> dict | None:
         "calendar_malformed",
     ):
         count = payload.get(key)
-        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        if not _is_non_negative_int(count):
             return _reject(f"'{key}' is missing or not a non-negative integer")
     # Mirror the parse-side relationship, not just the type: the dates are the
     # subset of dropped day-rows that still had a readable date, so more dates

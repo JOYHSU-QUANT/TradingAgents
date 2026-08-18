@@ -68,7 +68,6 @@ and a cache that fails read-side validation discarded. All numeric strings
 are normalized to floats at the parse boundary, so the cache stores numbers.
 """
 
-import json
 import logging
 import math
 import os
@@ -82,17 +81,21 @@ import requests
 from .sosovalue_common import (
     SoSoValueError,
     _cache_dir,
+    _cache_rejecter,
     _coverage_gap_note,
     _days_unobserved,
     _is_finite_number,
     _is_iso_date,
+    _is_non_negative_int,
     _is_safe_text,
     _is_valid_ticker,
     _plural,
     _plural_days,
+    _read_cache_preamble,
     _request,
     _sanitize,
     _stale_caveat,
+    _valid_dated_rows,
     fetch_each,
     load_rolling_snapshot,
     raise_all_failed,
@@ -350,16 +353,11 @@ def _cache_path() -> str:
     return os.path.join(_cache_dir(), "sosovalue_treasuries.json")
 
 
-def _valid_rows(rows: object) -> bool:
-    # Row-count bound mirrored read-side, like every other parse-boundary bound
-    # in this family: a snapshot written before it existed must cost one
-    # refetch rather than be re-walked in full on every read forever.
-    if not (isinstance(rows, list) and rows and len(rows) <= MAX_HISTORY_ROWS_HARD):
-        return False
-    if not all(
-        isinstance(r, dict)
-        and _is_iso_date(r.get("date"))
-        and _is_finite_number(r.get("btc_holding"))
+def _row_fields_ok(r: dict) -> bool:
+    # The per-field rules behind the family's shared _valid_dated_rows
+    # skeleton (which already checked the dict shape and the date).
+    return (
+        _is_finite_number(r.get("btc_holding"))
         # Non-negative, mirroring the parse boundary exactly. The cache is the
         # lower trust tier of the two, so an invariant the parser enforces must
         # not be reachable by hand-editing the snapshot or by a file an older
@@ -377,13 +375,14 @@ def _valid_rows(rows: object) -> bool:
         and (r["btc_acq"] is None or _is_finite_number(r["btc_acq"]))
         and "acq_cost" in r
         and (r["acq_cost"] is None or _is_finite_number(r["acq_cost"]))
-        for r in rows
-    ):
-        return False
-    dates = [r["date"] for r in rows]
-    # Non-descending, not strictly ascending: duplicate dates are legal
-    # (two same-day disclosures) and preserved by the parser.
-    return all(a <= b for a, b in zip(dates, dates[1:], strict=False))
+    )
+
+
+def _valid_rows(rows: object) -> bool:
+    # The list/cap/date/ordering skeleton is the family's shared one (see
+    # _valid_dated_rows for why the bound is mirrored read-side and duplicate
+    # dates are legal); only the per-field rules are this module's.
+    return _valid_dated_rows(rows, max_rows=MAX_HISTORY_ROWS_HARD, row_ok=_row_fields_ok)
 
 
 _ORDER_DESCENDING = "descending"
@@ -434,19 +433,11 @@ def _read_cache(path: str) -> dict | None:
     lines or a holdings section the caveats say cannot exist.
     """
 
-    def _reject(reason: str) -> None:
-        logger.warning("Ignoring SoSoValue treasuries cache %s: %s", path, reason)
-        return None
+    _reject = _cache_rejecter(path, cache_name="SoSoValue treasuries cache", log=logger)
 
-    try:
-        with open(path, encoding="utf-8") as f:
-            payload = json.load(f)
-    except FileNotFoundError:
+    payload = _read_cache_preamble(path, reject=_reject)
+    if payload is None:
         return None
-    except (OSError, ValueError) as e:
-        return _reject(f"unreadable ({e})")
-    if not isinstance(payload, dict):
-        return _reject(f"top-level JSON is a {type(payload).__name__}, expected an object")
     companies = payload.get("companies")
     if not (
         isinstance(companies, dict)
@@ -503,7 +494,7 @@ def _read_cache(path: str) -> dict | None:
     if not isinstance(total, int) or isinstance(total, bool) or total < selected:
         return _reject("'companies_total' is missing or smaller than the selection")
     unusable = payload.get("companies_unusable")
-    if not isinstance(unusable, int) or isinstance(unusable, bool) or unusable < 0:
+    if not _is_non_negative_int(unusable):
         return _reject("'companies_unusable' is missing or not a non-negative integer")
     if not isinstance(payload.get("order_unverified"), bool):
         return _reject("'order_unverified' is missing or not a boolean")

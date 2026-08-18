@@ -486,6 +486,20 @@ class TestRender:
         out = self._render("2026-07-02", snapshot=_snapshot(recs))
         assert '"not yet posted":' not in out
 
+    def test_latest_only_unposted_table_has_no_legend(self):
+        # The Latest line already explains the latest row's tag via the same
+        # predicate; re-triggering the legend there would repeat the sentence
+        # nearly verbatim in every routine today-not-yet-populated report
+        # (user decision: suppress).
+        recs = [
+            {"date": "2026-07-01", "issuers": {"IBIT": 5.0}, "total": 5.0},
+            {"date": "2026-07-02", "issuers": {"IBIT": 0.0}, "total": 0.0},
+        ]
+        out = self._render("2026-07-02", snapshot=_snapshot(recs))
+        assert "**Latest (2026-07-02):** no flow reported" in out
+        assert "| 2026-07-02 | not yet posted |" in out
+        assert '_"not yet posted":' not in out
+
     def test_data_lag_is_flagged_even_when_the_fetch_succeeded(self):
         # farside.co.uk can serve a parseable page that simply has not been
         # updated. The stale-cache machinery never sees this, so without the lag

@@ -1006,11 +1006,14 @@ def get_etf_flow_data(
         + "\n".join(f"| {r['date']} | {_net_cell(r)} |" for r in shown)
         + "\n"
     )
-    # The Latest line explains the placeholder ambiguity only for the latest
-    # day, but _net_cell tags EVERY unposted row and the table has no legend —
-    # an older "not yet posted" cell (a mid-history publishing gap) would
-    # otherwise be the one unexplained label in the rows agents most re-quote.
-    if any(_is_unposted_row(r) for r in shown):
+    # _net_cell tags every unposted row, but the Latest line explains the
+    # ambiguity only for the latest day — an older "not yet posted" cell (a
+    # mid-history publishing gap) would otherwise be the one unexplained
+    # label in the rows agents most re-quote. The latest row is excluded from
+    # the trigger (user decision): its tag is explained by the Latest line
+    # via the same predicate, and a legend there would repeat that sentence
+    # nearly verbatim in the routine today-not-yet-populated report.
+    if any(_is_unposted_row(r) for r in shown if r["date"] != latest["date"]):
         table += (
             '\n_"not yet posted": every issuer cell for that day is blank or zero, '
             "which Farside shows both for a row it has not populated yet and for a "

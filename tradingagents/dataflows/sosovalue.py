@@ -1279,7 +1279,12 @@ def get_etf_flow_data(
     if directional:
         leaders = sorted(directional.items(), key=lambda kv: abs(kv[1]), reverse=True)
         leaders_str = ", ".join(f"{t} {_usd_m(f):+.1f}" for t, f in leaders[:TOP_ISSUERS])
-        gross = sum(abs(f) for f in directional.values())
+        # Gross is summed in the leaders' order: the top-3 numerator below is
+        # a prefix of this same sequence, so a day with <=3 movers yields
+        # exactly 100.0 — summing the same multiset in dict order can fall a
+        # ulp short, which the near-100 band would print as "99.9%" for a
+        # share that IS the whole.
+        gross = sum(abs(f) for _, f in leaders)
         inflow_count = sum(1 for f in directional.values() if f > 0)
         top3_share = sum(abs(f) for _, f in leaders[:3]) / gross * 100
         top_ticker, top_flow = leaders[0]
@@ -1413,14 +1418,16 @@ def get_etf_flow_data(
         + "\n".join(f"| {date} | {cell} |" for date, cell in rendered_rows)
         + "\n"
     )
-    # The Latest line explains the placeholder ambiguity only when the LATEST
-    # day is unreported, but _net_cell tags every such row and the table has
-    # no legend — an older "not yet posted" cell (a mid-history publishing
-    # gap, or a retracted day) would otherwise be the one unexplained label
-    # in the rows downstream agents most often re-quote. Reuses fund_scope so
-    # the legend cannot claim fund knowledge the failed/skipped breakdown
-    # never delivered.
-    if any(cell == "not yet posted" for _, cell in rendered_rows):
+    # _net_cell tags every unreported row, but the Latest line explains the
+    # ambiguity only for the latest day — an older "not yet posted" cell (a
+    # mid-history publishing gap, or a retracted day) would otherwise be the
+    # one unexplained label in the rows downstream agents most often
+    # re-quote. The latest row is excluded from the trigger (user decision):
+    # its tag is explained by the Latest line via the same predicate, and a
+    # legend there would repeat that sentence nearly verbatim in the routine
+    # today-not-yet-filed report. Reuses fund_scope so the legend cannot
+    # claim fund knowledge the failed/skipped breakdown never delivered.
+    if any(cell == "not yet posted" for date, cell in rendered_rows if date != latest["date"]):
         table += (
             f'\n_"not yet posted": the aggregate for that day is zero with '
             f"{fund_scope} reporting a flow, which this API publishes both for a "

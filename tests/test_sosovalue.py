@@ -825,6 +825,18 @@ class TestRender:
         out = self._render("2026-07-02", snapshot=_snapshot(summary=recs))
         assert '"not yet posted":' not in out
 
+    def test_latest_only_unposted_table_has_no_legend(self):
+        # The Latest line already explains the latest row's tag via the same
+        # predicate; re-triggering the legend there would repeat the sentence
+        # nearly verbatim in every routine today-not-yet-filed report (user
+        # decision: suppress).
+        recs = [_srow("2026-07-01", 5.0), _srow("2026-07-02", 0.0)]
+        funds = {"AAA": {"name": "A", "rows": [_frow("2026-07-01", 5.0)]}}
+        out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds=funds))
+        assert "**Latest (2026-07-02):** no flow reported yet" in out
+        assert "| 2026-07-02 | not yet posted |" in out
+        assert '_"not yet posted":' not in out
+
     def test_breadth_shares_never_round_to_a_false_100(self):
         # A 99.5% top-3 share under .0f rounds to "100%" right next to a
         # four-fund breadth count and a TOP_ISSUERS leaders line that show

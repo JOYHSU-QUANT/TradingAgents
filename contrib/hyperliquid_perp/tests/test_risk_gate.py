@@ -683,6 +683,42 @@ def test_current_position_state_flat():
     assert state.signed_notional == Decimal("0")
 
 
+def test_from_signed_size_imputes_margin_from_configured_leverage():
+    state = CurrentPositionState.from_signed_size(
+        Decimal("0.01"), mark=Decimal("60000"), equity=_EQUITY, leverage=Decimal(3)
+    )
+    assert state.side is TargetSide.LONG
+    assert state.signed_notional == Decimal("600")
+    assert state.margin_pct == Decimal("20")  # 600 / 3 / 1000 * 100
+    assert state.leverage == Decimal(3)  # configured, echoed for the deadband guard
+
+
+def test_from_signed_size_short_carries_negative_notional():
+    state = CurrentPositionState.from_signed_size(
+        Decimal("-0.01"), mark=Decimal("60000"), equity=_EQUITY, leverage=Decimal(3)
+    )
+    assert state.side is TargetSide.SHORT
+    assert state.signed_notional == Decimal("-600")
+    assert state.margin_pct == Decimal("20")
+
+
+def test_from_signed_size_flat():
+    state = CurrentPositionState.from_signed_size(
+        Decimal(0), mark=Decimal("60000"), equity=_EQUITY, leverage=Decimal(3)
+    )
+    assert state.side is None
+    assert state.signed_notional == Decimal("0")
+    assert state.margin_pct is None
+
+
+def test_from_signed_size_no_equity_skips_margin_pct():
+    state = CurrentPositionState.from_signed_size(
+        Decimal("0.01"), mark=Decimal("60000"), equity=Decimal(0), leverage=Decimal(3)
+    )
+    assert state.signed_notional == Decimal("600")
+    assert state.margin_pct is None  # deadband skipped, never a guessed 0
+
+
 def test_risk_config_rejects_bad_values():
     with pytest.raises(ValueError, match="leverage"):
         RiskConfig(leverage=Decimal(0))

@@ -1,11 +1,11 @@
 """One definition of the §5 / §7 audit-row assembly (phase2-data).
 
-``ai_inputs`` (30 columns) and ``ai_outputs`` (24 columns) are written from two
+``ai_inputs`` (36 columns) and ``ai_outputs`` (26 columns) are written from two
 call sites — the paper scheduler and the live decision driver — that previously
 each carried a full copy of the field mapping ("mirror of PaperScheduler",
 live/decision.py). A schema column added to one copy but not the other would
-export silent NULLs and trip the mode-agnostic validate on a healthy run, so
-the mapping lives here exactly once.
+export silent NULLs that nothing downstream detects (neither validator reads
+these columns' values), so the mapping lives here exactly once.
 
 These are pure adapters: no policy of their own. The deliberate paper/live
 differences stay visible at the call sites and arrive as parameters:

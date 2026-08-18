@@ -672,8 +672,11 @@ class LiveDecisionDriver:
             )
 
     # -- audit rows (phase2-data §5 / §7) — assembly shared with PaperScheduler
-    # via persistence.audit_rows; only the deliberate live/paper differences
-    # (ledger acquisition, remaining_twap_qty) live here. ----------------------
+    # via persistence.audit_rows; the deliberate live/paper differences stay at
+    # these call sites (ledger acquisition, remaining_twap_qty, and the output
+    # row's mark/equity source), alongside a prologue that is deliberately kept
+    # duplicated with the paper side (folding it in would need a runtime
+    # persistence → paper import). -------------------------------------------
 
     def _persist_ai_input(
         self, now: datetime, input_id: str, attempt_id: str, decision_input: DecisionInput

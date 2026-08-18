@@ -181,7 +181,7 @@ gate 區塊（mode / allow_real_orders / safety 等，見 phase3-spec §24）—
 | `domains/perp/config_coercion.py` | ✅ | 共用 YAML-coercion helpers（`config_overrides` · `decimal_from_yaml` · `int_from_yaml`），供 `RiskConfig` / `DecisionConfig` / `PaperTradingConfig` 三方使用。 |
 | `domains/perp/margin.py` | ✅ | Hyperliquid maintenance-margin tier model（rate · continuity deduction · tier 選擇；phase2-execution §6.6.1）。 |
 | `persistence/` | ✅ | SQLite source of truth · transaction · migrations · dedup 去重鍵 · typed repository（phase2-data §1／§5–§12）。 |
-| `persistence/audit_rows.py` | ✅ | §5／§7 audit-row 組裝的單一定義（`ai_inputs` 30 欄／`ai_outputs` 24 欄），paper scheduler 與 live decision driver 共用；刻意的 paper/live 差異（ledger 取得、`remaining_twap_qty`）由呼叫端傳參保留。 |
+| `persistence/audit_rows.py` | ✅ | §5／§7 audit-row 組裝的單一定義（`ai_inputs` 36 欄／`ai_outputs` 26 欄），paper scheduler 與 live decision driver 共用；刻意的 paper/live 差異（ledger 取得、`remaining_twap_qty`、輸出列 mark/equity 來源）由呼叫端傳參保留。 |
 | `persistence/export.py` | ✅ | 每 cycle／shutdown／手動的 per-run 全量 CSV export · 欄位依 phase2-data §5–§12 · `.tmp` → atomic replace · 末尾 `manifest.json` 整組一致性標記 · `export_failed` 不回滾交易 state（phase2-data §1.1）。 |
 | `paper/accounting.py` | ✅ | fills · fees（taker 0.045%）· funding exactly-once · account 公式 · accounting replay（**依 run mode 分流**：paper 用模型 fee/realized；live 用交易所 closedPnl/fee、依交易所時間排序、並折算 accounting adjustments）· live fill effect（`compute_live_fill_effect` / `adjustment_ledger_delta`）（phase2-execution §6、phase3-spec §15）。 |
 | `paper/liquidation.py` | ✅ | paper estimated liquidation price · margin tier bisection（phase2-execution §6.6.1）。 |

@@ -48,6 +48,7 @@ from parsel import Selector
 
 from .config import get_config
 from .errors import VendorError
+from .sosovalue_common import _cache_rejecter, _read_cache_preamble, _stale_caveat
 from .symbol_utils import classify_crypto_asset
 
 logger = logging.getLogger(__name__)
@@ -539,31 +540,32 @@ def _is_iso_date(x: object) -> bool:
         return False
 
 
-def _read_cache(path: str) -> dict | None:
-    """Return a fully-validated cached payload, or None if it cannot be trusted.
+def _read_cache(path: str, asset: str) -> dict | None:
+    """Return a fully-validated cached payload for asset, or None if untrusted.
 
     Every rejection is logged: a silently-disabled cache (say a future rename of
     a payload key) should be diagnosable rather than showing up as an unexplained
     permanent miss. A rejected cache is simply re-fetched, so refusing to serve a
-    questionable file costs one request and never bad data.
+    questionable file costs one request and never bad data. Beyond per-field
+    shape, the invariants ``_parse_flow_table`` enforces live are re-checked at
+    this boundary too — the cache is the lower trust tier of the two, so a
+    hand-edited file (or one an older code version wrote) must not reach the
+    renderer carrying guarantees only the live parse ever made: the asset echo
+    (a copied/renamed cache file would serve another asset's flows under this
+    asset's heading with no caveat), strictly-ascending unique dates
+    (``visible[-1]`` is "the latest day" and the cumulative is a plain sum, so
+    a newest-first file mis-dates the report and a duplicated date double-
+    counts a day), and the per-row Total cross-check (the headline figure and
+    the leaders line read different fields of one row, so a file where they
+    disagree renders a self-contradictory report).
     """
-    def _reject(reason: str) -> None:
-        # One uniform format, but each rejection keeps its own distinct reason:
-        # a permanently-missing cache should say *why* it is being skipped.
-        logger.warning("Ignoring Farside cache %s: %s", path, reason)
-        return None
+    _reject = _cache_rejecter(path, cache_name="Farside cache", log=logger)
 
-    try:
-        with open(path, encoding="utf-8") as f:
-            payload = json.load(f)
-    except FileNotFoundError:
+    payload = _read_cache_preamble(path, reject=_reject)
+    if payload is None:
         return None
-    except (OSError, ValueError) as e:
-        # A corrupt/unreadable cache is treated as a miss (never serve it), but
-        # logged so a disk/writer fault is distinguishable from "no cache yet".
-        return _reject(f"unreadable ({e})")
-    if not isinstance(payload, dict):
-        return _reject(f"top-level JSON is a {type(payload).__name__}, expected an object")
+    if payload.get("asset") != asset:
+        return _reject(f"'asset' is {str(payload.get('asset'))[:40]!r}, expected {asset!r}")
     rows = payload.get("rows")
     if not isinstance(rows, list) or not rows:
         return _reject("'rows' is missing, not a list, or empty")
@@ -583,6 +585,25 @@ def _read_cache(path: str) -> dict | None:
         for r in rows
     ):
         return _reject("'rows' contains a malformed record")
+    dates = [r["date"] for r in rows]
+    if any(a >= b for a, b in zip(dates, dates[1:], strict=False)):
+        # The parser sorts ascending and refuses duplicate dates; the render
+        # trusts that producer-side ordering, so a cache violating it would
+        # mis-date the report or double-count exactly what _parse_flow_table
+        # refuses live. (Strict ascension covers order and uniqueness in one
+        # check, mirroring the SoSoValue ETF cache validator.)
+        return _reject("'rows' dates are not strictly ascending")
+    for r in rows:
+        # Mirror the parser's Total cross-check, same tolerances: the headline
+        # net flow reads "total" while the leaders line reads "issuers", so a
+        # row where the two disagree renders mutually contradictory figures
+        # with no caveat anywhere.
+        issuer_sum = sum(r["issuers"].values())
+        if abs(r["total"] - issuer_sum) > max(_TOTAL_ABS_TOL, _TOTAL_REL_TOL * abs(issuer_sum)):
+            return _reject(
+                f"row {r['date']} 'total' ({r['total']:+.1f}) does not match its "
+                f"issuer sum ({issuer_sum:+.1f})"
+            )
     # fetched_at drives both the within-TTL hit and the staleness cap, and
     # issuers_named drives a report caveat, so neither may be absent or the wrong
     # type — a missing fetched_at would otherwise read as "age unknown" forever.
@@ -603,7 +624,7 @@ def _load_flows(asset: str) -> _FlowSnapshot:
     degrades. A failed fetch is never written to cache.
     """
     path = _cache_path(asset)
-    cached = _read_cache(path)
+    cached = _read_cache(path, asset)
     if cached:
         age_h = _cache_age_hours(cached["fetched_at"])
         # 0 <= age guards against a future-dated stamp (clock skew / a tampered
@@ -630,7 +651,9 @@ def _load_flows(asset: str) -> _FlowSnapshot:
             # than served with an "age unknown" / negative-age caveat.
             if age is None or age > MAX_STALE_DAYS:
                 stale_desc = (
-                    "has an unparseable fetch date" if age is None else f"is {age} days stale"
+                    "has an unparseable or future-dated fetch date"
+                    if age is None
+                    else f"is {age} days stale"
                 )
                 raise FarsideError(
                     f"Farside {asset} fetch failed and the newest cache {stale_desc} "
@@ -806,27 +829,30 @@ def get_etf_flow_data(
         # / risk agents, and a heading byte-identical to a real BTC report is
         # exactly what survives that hop with the proxy framing stripped off.
         header_lines = [
-            f"## Spot ETF Flows — {asset_key} (market-wide proxy for '{asset}', Farside, "
-            f"net US$m)",
+            f"## Spot ETF Flows — {asset_key} (market-wide proxy for '{asset}', Farside, net US$m)",
             f"_No spot ETF exists for '{asset}'; showing {asset_key} spot-ETF flows as a "
             f"market-wide crypto risk-on/off proxy, not an '{asset}'-specific signal._",
         ]
     else:
         header_lines = [f"## Spot ETF Flows — {asset_key} (Farside, net US$m)"]
     if snapshot.stale:
-        # Hour-granular under a day: the hourly TTL can serve a stale cache after
-        # a same-UTC-day refresh failure, where a plain day count would render a
-        # misleading "STALE by 0 days" for a snapshot up to ~24h old.
-        age_str = _humanize_age(snapshot.fetched_at)
-        # "refresh failed", not "fetch failed": stale=True is reached on BOTH a
-        # network error (fetch really failed) and a structural parse break (the
-        # fetch SUCCEEDED but the page could not be parsed). Asserting the fetch
-        # failed would be false in the parse case — the mirror of the data-lag
-        # honesty fix below.
+        # The family's shared STALE template (one shape whichever vendor served
+        # the call), with this vendor's own cause set: "refresh failed", not
+        # "fetch failed", because stale=True is reached on BOTH a network error
+        # (fetch really failed) and a structural parse break (the fetch
+        # SUCCEEDED but the page could not be parsed) — and farside is a
+        # keyless scraper, so the SoSoValue default's rate-limit/API-contract
+        # causes do not apply here.
         header_lines.append(
-            f"_STALE by {age_str}: live refresh failed (network error or a parser break); "
-            f"showing the last cached snapshot (fetched {snapshot.fetched_at}). "
-            f"Treat with caution._"
+            _stale_caveat(
+                snapshot.fetched_at,
+                "Treat with caution.",
+                causes="network error or a parser break",
+                # This vendor's own age formatter: it reads farside's _utc_now
+                # (the clock the TTL and stale cap read, and the one the tests
+                # patch), not the SoSoValue family's.
+                humanize=_humanize_age,
+            )
         )
     if not snapshot.issuers_named:
         header_lines.append(
@@ -842,15 +868,18 @@ def get_etf_flow_data(
         # without this the report would present week-old flows as current.
         lag_days = (curr_dt - datetime.strptime(latest["date"], "%Y-%m-%d")).days
         if lag_days > MAX_DATA_LAG_DAYS:
-            # Why the data is behind depends on whether *this* call reached the
-            # site. A stale serve already said "live refresh failed" above, so
-            # asserting "the fetch succeeded" here would make the report
-            # contradict itself — and MAX_STALE_DAYS > MAX_DATA_LAG_DAYS means
-            # both caveats co-occur for any ordinary multi-day outage.
+            # Neither clause claims what it cannot know (the SoSoValue vendor's
+            # decided wording, ported): the stale branch does not equate
+            # snapshot age with row lag — the snapshot is hours-to-days old
+            # (the STALE line above) while the row lag is measured in days, and
+            # the two are independent quantities — and the fresh branch claims
+            # visibility as of curr_date, not the site's frontier (a backtest
+            # date in a mid-window gap has newer rows that the lookahead
+            # filter hides).
             cause = (
-                "the cached snapshot above is itself that old"
+                "the stale snapshot above may itself be missing newer filings"
                 if snapshot.stale
-                else "the fetch succeeded — farside.co.uk itself has posted nothing since"
+                else f"the fetch succeeded — no newer filing is visible as of {curr_date}"
             )
             header_lines.append(
                 f"_Data lag: the newest published row is {latest['date']}, {lag_days} "
@@ -961,6 +990,7 @@ def get_etf_flow_data(
         # names the latest available date; repeating it here just said the same
         # sentence twice. Keep only what the table itself needs to explain.
         note = "\n_(table shows the latest available row)_\n"
+
     # Keep the table's Net Flow cell consistent with the Latest line above: an
     # unpopulated row must not appear as a confident "+0.0" in the densest part of
     # the report (the rows downstream agents most often re-quote). Applied to every
@@ -976,5 +1006,15 @@ def get_etf_flow_data(
         + "\n".join(f"| {r['date']} | {_net_cell(r)} |" for r in shown)
         + "\n"
     )
+    # The Latest line explains the placeholder ambiguity only for the latest
+    # day, but _net_cell tags EVERY unposted row and the table has no legend —
+    # an older "not yet posted" cell (a mid-history publishing gap) would
+    # otherwise be the one unexplained label in the rows agents most re-quote.
+    if any(_is_unposted_row(r) for r in shown):
+        table += (
+            '\n_"not yet posted": every issuer cell for that day is blank or zero, '
+            "which Farside shows both for a row it has not populated yet and for a "
+            "genuine zero-flow day._\n"
+        )
 
     return header + summary + note + table

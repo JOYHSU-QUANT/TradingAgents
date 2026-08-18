@@ -11,7 +11,10 @@ helper with its redaction discipline, the value/date/ticker trust-boundary
 predicates (including the dated-history-row shape skeleton
 ``_valid_dated_rows``, macro and treasuries), the clock and cache-age helpers
 every rolling-snapshot cache shares, the cache-file read preamble every
-``_read_cache`` opens with (``_read_cache_preamble``, all three), and the two
+``_read_cache`` opens with (``_read_cache_preamble``, all three — plus the
+Farside vendor, which adopts the read preamble, the rejecter factory, and
+the parameterized STALE template while keeping its own fetch/cache
+discipline), and the two
 orchestration skeletons the modules used to carry as near-verbatim copies —
 the cache/TTL/stale-fallback discipline (``load_rolling_snapshot``, all
 three) and the per-item sweep with its 429 drain and
@@ -417,18 +420,30 @@ def _humanize_age(fetched_at: str) -> str:
     return f"{days} {_plural_days(days)}"
 
 
-def _stale_caveat(fetched_at: str, closing: str) -> str:
+def _stale_caveat(
+    fetched_at: str,
+    closing: str,
+    *,
+    causes: str = "network error, rate limit, or an API contract break",
+    humanize: Callable[[str], str] | None = None,
+) -> str:
     """The family's STALE header line: age, cause set, provenance, ``closing``.
 
-    One template so the modules cannot drift on the cause enumeration —
-    network error, rate limit, and an API contract break are the causes
-    ``load_rolling_snapshot``'s fallback absorbs for this family — while
-    each module supplies the closing warning its own reader needs (what,
-    concretely, may be outdated).
+    One template so the vendors cannot drift on the sentence shape. The
+    default ``causes`` enumeration is what ``load_rolling_snapshot``'s
+    fallback absorbs for the SoSoValue modules; a vendor whose failure modes
+    differ (Farside is a keyless scraper — no rate limit, no API contract)
+    passes its own set, and each module supplies the closing warning its own
+    reader needs (what, concretely, may be outdated). ``humanize`` exists for
+    the same reason: the displayed age must read the SAME clock the vendor's
+    TTL/staleness decisions read (tests patch each vendor's ``_utc_now``), so
+    a vendor with its own clock passes its own age formatter instead of
+    silently getting this module's.
     """
+    age = (humanize or _humanize_age)(fetched_at)
     return (
-        f"_STALE by {_humanize_age(fetched_at)}: live refresh failed (network error, "
-        f"rate limit, or an API contract break); showing the last cached snapshot "
+        f"_STALE by {age}: live refresh failed ({causes}); "
+        f"showing the last cached snapshot "
         f"(fetched {fetched_at}). {closing}_"
     )
 
@@ -446,9 +461,10 @@ def _cache_rejecter(path: str, *, cache_name: str, log: logging.Logger) -> Calla
     own near-verbatim closure (identical but for its hardcoded cache display
     name), so a wording change (or a new diagnostic field) meant three edits,
     and a missed one left operators grepping for a format
-    only some caches emit. ``cache_name`` is the same display name the module
-    passes to ``load_rolling_snapshot``, so the read and write sides of one
-    cache file name it identically; ``log`` keeps per-module attribution.
+    only some caches emit. ``cache_name`` is the module's display name for
+    this cache — for the SoSoValue modules, the same name they pass to
+    ``load_rolling_snapshot``, so the read and write sides of one cache file
+    name it identically; ``log`` keeps per-module attribution.
     """
 
     def reject(reason: str) -> None:
@@ -461,8 +477,8 @@ def _cache_rejecter(path: str, *, cache_name: str, log: logging.Logger) -> Calla
 def _read_cache_preamble(path: str, *, reject: Callable[[str], None]) -> dict | None:
     """Open/parse ``path`` and hand back the payload dict, or None if unusable.
 
-    The preamble the family's three ``_read_cache`` validators open with,
-    before their module-specific field validation: a missing file is an
+    The preamble every ``_read_cache`` validator (the family's three, and the
+    Farside vendor's) opens with, before its module-specific field validation: a missing file is an
     ordinary miss (no cache yet, nothing to log), an unreadable or non-JSON
     file is rejected through the module's ``reject`` (see ``_cache_rejecter``),
     and a top-level value that is not a JSON object is rejected the same way —

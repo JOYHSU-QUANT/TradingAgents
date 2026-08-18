@@ -472,6 +472,19 @@ class TestRender:
         assert "| 2026-07-02 | +0.0 |" not in out
         # The latest, populated row still renders its real net figure.
         assert "**Latest (2026-07-03):** +7.0 net" in out
+        # The Latest line explains the placeholder only for the latest day, so
+        # the older tagged cell relies on the legend under the table.
+        assert '_"not yet posted": every issuer cell for that day is blank or zero' in out
+
+    def test_table_without_unposted_cells_has_no_legend(self):
+        # The legend must not render as boilerplate under a table that has no
+        # tagged cell to explain.
+        recs = [
+            {"date": "2026-07-01", "issuers": {"IBIT": 5.0}, "total": 5.0},
+            {"date": "2026-07-02", "issuers": {"IBIT": 7.0}, "total": 7.0},
+        ]
+        out = self._render("2026-07-02", snapshot=_snapshot(recs))
+        assert '"not yet posted":' not in out
 
     def test_data_lag_is_flagged_even_when_the_fetch_succeeded(self):
         # farside.co.uk can serve a parseable page that simply has not been
@@ -495,14 +508,18 @@ class TestRender:
         assert "STALE by 6 days" in out  # fetched 07-14, now 07-20
         assert "Data lag" in out  # newest row 07-09, curr_date 07-20
         assert "the fetch succeeded" not in out
-        assert "the cached snapshot above is itself that old" in out
+        # The stale branch must not equate snapshot age (hours-to-days, the
+        # STALE line) with row lag (days): it owns what it cannot know instead.
+        assert "the stale snapshot above may itself be missing newer filings" in out
 
     def test_fresh_serve_attributes_lag_to_the_source(self):
-        # The counterpart: with a successful fetch the lag really is the source
-        # not publishing, and the report should say so.
+        # The counterpart: with a successful fetch the report may say so, but
+        # claims only visibility as of curr_date, not the site's frontier (a
+        # backtest date in a mid-window gap has newer rows the lookahead
+        # filter hides).
         out = self._render("2026-07-20")
         assert "STALE" not in out
-        assert "the fetch succeeded" in out
+        assert "the fetch succeeded — no newer filing is visible as of 2026-07-20" in out
 
     def test_no_data_lag_caveat_within_tolerance(self):
         # A weekend/holiday publishing gap is normal and must not be flagged.
@@ -563,28 +580,28 @@ class TestCache:
         self._use_tmp_cache(tmp_path)
         path = tmp_path / "farside_btc.json"
         path.write_text("[1, 2, 3]", encoding="utf-8")
-        assert farside._read_cache(str(path)) is None
+        assert farside._read_cache(str(path), "BTC") is None
 
     def test_non_list_rows_cache_is_ignored(self, tmp_path):
         # "rows" present but not a list (truthy) must still be a miss, not served
         # and then blow up downstream on r["date"].
         self._use_tmp_cache(tmp_path)
         path = self._write_cache(tmp_path, rows="oops")
-        assert farside._read_cache(str(path)) is None
+        assert farside._read_cache(str(path), "BTC") is None
 
     def test_list_of_non_dict_rows_cache_is_ignored(self, tmp_path):
         # "rows" is a non-empty list but its elements are not records: still a
         # miss, else the served payload crashes later on r["date"].
         self._use_tmp_cache(tmp_path)
         path = self._write_cache(tmp_path, rows=[1, 2, 3])
-        assert farside._read_cache(str(path)) is None
+        assert farside._read_cache(str(path), "BTC") is None
 
     def test_row_missing_field_cache_is_ignored(self, tmp_path):
         # A row dict missing a required field ("total") is malformed: a miss, so
         # a future record-schema change reading an old cache degrades cleanly.
         self._use_tmp_cache(tmp_path)
         path = self._write_cache(tmp_path, rows=[{"date": "2026-07-01", "issuers": {}}])
-        assert farside._read_cache(str(path)) is None
+        assert farside._read_cache(str(path), "BTC") is None
 
     def test_row_with_wrong_value_type_is_ignored(self, tmp_path):
         # Key presence is not enough: a non-numeric "total" would pass a
@@ -593,7 +610,7 @@ class TestCache:
         path = self._write_cache(
             tmp_path, rows=[{"date": "2026-07-01", "issuers": {}, "total": "N/A"}]
         )
-        assert farside._read_cache(str(path)) is None
+        assert farside._read_cache(str(path), "BTC") is None
 
     def test_row_with_nonfinite_total_is_ignored(self, tmp_path):
         # json.load parses NaN/Infinity to non-finite floats, which pass a plain
@@ -604,7 +621,7 @@ class TestCache:
             path = self._write_cache(
                 tmp_path, rows=[{"date": "2026-07-01", "issuers": {}, "total": bad}]
             )
-            assert farside._read_cache(str(path)) is None
+            assert farside._read_cache(str(path), "BTC") is None
 
     def test_row_with_non_numeric_issuer_value_is_ignored(self, tmp_path):
         # issuers values must be finite numbers too: a non-numeric or non-finite
@@ -615,7 +632,7 @@ class TestCache:
             tmp_path,
             rows=[{"date": "2026-07-01", "issuers": {"IBIT": "N/A"}, "total": 0.0}],
         )
-        assert farside._read_cache(str(path)) is None
+        assert farside._read_cache(str(path), "BTC") is None
 
     def test_row_with_non_iso_date_is_ignored(self, tmp_path):
         # The date is validated for canonical-ISO parseability, not just str: a
@@ -628,7 +645,7 @@ class TestCache:
             tmp_path,
             rows=[{"date": "2026-07-19zzz", "issuers": {"IBIT": 1.0}, "total": 1.0}],
         )
-        assert farside._read_cache(str(path)) is None
+        assert farside._read_cache(str(path), "BTC") is None
 
     def test_row_with_non_zero_padded_date_is_ignored(self, tmp_path):
         # A non-zero-padded "2026-7-1" parses but is NOT canonical: it sorts after
@@ -640,7 +657,53 @@ class TestCache:
             tmp_path,
             rows=[{"date": "2026-7-1", "issuers": {"IBIT": 1.0}, "total": 1.0}],
         )
-        assert farside._read_cache(str(path)) is None
+        assert farside._read_cache(str(path), "BTC") is None
+
+    def test_cache_for_another_asset_is_ignored(self, tmp_path):
+        # farside_eth.json copied over farside_btc.json would serve ETH's flows
+        # under a BTC heading with no caveat anywhere; the asset echo catches it.
+        self._use_tmp_cache(tmp_path)
+        path = self._write_cache(tmp_path, asset="ETH")
+        assert farside._read_cache(str(path), "BTC") is None
+
+    def test_cache_with_descending_dates_is_ignored(self, tmp_path):
+        # visible[-1] is "the latest day": a newest-first file would date the
+        # whole report by its OLDEST row and reverse the streak span.
+        self._use_tmp_cache(tmp_path)
+        rows = [
+            {"date": "2026-07-02", "issuers": {"IBIT": 1.0}, "total": 1.0},
+            {"date": "2026-07-01", "issuers": {"IBIT": 2.0}, "total": 2.0},
+        ]
+        path = self._write_cache(tmp_path, rows=rows)
+        assert farside._read_cache(str(path), "BTC") is None
+
+    def test_cache_with_duplicate_date_is_ignored(self, tmp_path):
+        # The parser refuses to double-count a day; unmirrored, a duplicated
+        # cached row inflates the cumulative and the flow-session count.
+        self._use_tmp_cache(tmp_path)
+        rows = [
+            {"date": "2026-07-01", "issuers": {"IBIT": 1.0}, "total": 1.0},
+            {"date": "2026-07-01", "issuers": {"IBIT": 2.0}, "total": 2.0},
+        ]
+        path = self._write_cache(tmp_path, rows=rows)
+        assert farside._read_cache(str(path), "BTC") is None
+
+    def test_cache_row_failing_the_total_cross_check_is_ignored(self, tmp_path):
+        # Parse-side invariant mirrored at the cache boundary: a total that
+        # disagrees with its issuer columns renders a headline figure the
+        # leaders line contradicts, with no caveat anywhere.
+        self._use_tmp_cache(tmp_path)
+        rows = [{"date": "2026-07-01", "issuers": {"IBIT": 10.0, "FBTC": 5.0}, "total": 9999.0}]
+        path = self._write_cache(tmp_path, rows=rows)
+        assert farside._read_cache(str(path), "BTC") is None
+
+    def test_cache_total_within_tolerance_is_accepted(self, tmp_path):
+        # Farside rounds every cell to 0.1, so a small residual is rounding
+        # noise, not a layout change — the same tolerance the parser applies.
+        self._use_tmp_cache(tmp_path)
+        rows = [{"date": "2026-07-01", "issuers": {"IBIT": 10.0, "FBTC": 5.0}, "total": 16.0}]
+        path = self._write_cache(tmp_path, rows=rows)
+        assert farside._read_cache(str(path), "BTC") is not None
 
     def test_cache_without_fetched_at_is_ignored(self, tmp_path):
         # fetched_at now drives both the within-TTL hit and the staleness cap, so a
@@ -651,7 +714,7 @@ class TestCache:
             json.dumps({"asset": "BTC", "issuers_named": True, "rows": RECORDS}),
             encoding="utf-8",
         )
-        assert farside._read_cache(str(path)) is None
+        assert farside._read_cache(str(path), "BTC") is None
 
     def test_cache_without_issuers_named_is_ignored(self, tmp_path):
         self._use_tmp_cache(tmp_path)
@@ -660,7 +723,7 @@ class TestCache:
             json.dumps({"asset": "BTC", "fetched_at": "2026-07-20", "rows": RECORDS}),
             encoding="utf-8",
         )
-        assert farside._read_cache(str(path)) is None
+        assert farside._read_cache(str(path), "BTC") is None
 
     def test_unparseable_fetched_at_degrades(self, tmp_path, monkeypatch):
         # A stale cache whose fetched_at is not a date has an unknown age; on a
@@ -672,7 +735,10 @@ class TestCache:
         monkeypatch.setattr(
             farside, "_request_html", mock.Mock(side_effect=requests.RequestException("boom"))
         )
-        with pytest.raises(farside.FarsideError, match="cap"):
+        # The message names BOTH causes _days_stale collapses to None
+        # (unparseable AND future-dated) — asserting only "cap" would let the
+        # wording drift back to blaming just one of them.
+        with pytest.raises(farside.FarsideError, match="unparseable or future-dated fetch date"):
             farside.get_etf_flow_data("BTC", "2026-07-09")
 
     def test_malformed_timestamp_fetched_at_degrades(self, tmp_path, monkeypatch):
@@ -765,6 +831,9 @@ class TestCache:
         )
         out = farside.get_etf_flow_data("BTC", "2026-07-09")
         assert "STALE by 1 day:" in out  # singular; 2026-07-24 minus fetched 2026-07-23
+        # This vendor's own cause set rides the family's shared template: a
+        # keyless scraper has no rate limit or API contract to blame.
+        assert "live refresh failed (network error or a parser break)" in out
         assert "+1214.9" in out  # still shows the cached data
 
     def test_same_day_stale_serve_shows_hours_not_zero_days(self, tmp_path, monkeypatch):

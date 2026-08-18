@@ -150,7 +150,7 @@ def test_disabled_base_category_is_neither_bound_nor_advertised():
         assert "get_macro_indicators" not in {t.name for t in llm.bound_tools}
         assert "get_macro_indicators(indicator, curr_date, look_back_days)" not in llm.prompt
         # its sibling in the opening sentence is untouched
-        assert "get_prediction_markets(topic, limit)" in llm.prompt
+        assert "get_prediction_markets(topic, limit, curr_date)" in llm.prompt
     finally:
         set_config({"data_vendors": {"macro_data": "fred"}})
     # Positive control on the same needles: with the category back on, the

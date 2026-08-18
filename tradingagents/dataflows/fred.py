@@ -8,13 +8,15 @@ A free API key (https://fred.stlouisfed.org/docs/api/api_key.html) is read from
 ``FRED_API_KEY``; if it is unset the vendor raises ``FredNotConfiguredError`` so
 the routing layer treats it as "unavailable" rather than a hard crash.
 """
+
 import logging
 import os
 from datetime import datetime, timedelta
 
 import requests
 
-from .errors import VendorNotConfiguredError
+from .errors import VendorError, VendorNotConfiguredError
+from .utils import data_lag_note
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,26 @@ DEFAULT_LOOKBACK_DAYS = 365
 # Rows cap for the rendered table: recent values matter most for a decision, and
 # daily series (yields, VIX) over a long window would otherwise flood context.
 MAX_ROWS = 40
+
+# Freshness thresholds (calendar days) for the data-lag note, keyed by FRED's
+# frequency_short code: how far the newest observation may trail curr_date
+# before the report flags it. FRED dates observations at the PERIOD START
+# (July CPI is dated 07-01 but releases ~Aug 12), and the lag keeps growing
+# until the *next* release — so each bound must cover roughly two periods plus
+# the publication delay, the worst on-schedule lag. Tighter bounds (e.g. M:45)
+# would flag an on-schedule CPI as stale for about half of every month. A note
+# therefore means the series is genuinely behind, at the cost of detecting a
+# stall about one period later. Codes not listed get no note — an annotation
+# must not false-alarm on a cadence it does not understand (#30).
+_MAX_LAG_DAYS_BY_FREQUENCY = {
+    "D": 7,
+    "W": 14,
+    "BW": 21,
+    "M": 80,
+    "Q": 220,
+    "SA": 420,
+    "A": 750,
+}
 
 # Curated human-friendly aliases -> FRED series IDs. Anything not listed is used
 # verbatim as a raw FRED series ID, so power users are never limited to this set.
@@ -118,9 +140,7 @@ def _resolve_series_id(indicator: str) -> str:
 def _request(path: str, params: dict) -> dict:
     """GET a FRED endpoint, surfacing FRED's JSON error body on a bad request."""
     api_params = {**params, "api_key": get_api_key(), "file_type": "json"}
-    response = requests.get(
-        f"{FRED_API_BASE}/{path}", params=api_params, timeout=REQUEST_TIMEOUT
-    )
+    response = requests.get(f"{FRED_API_BASE}/{path}", params=api_params, timeout=REQUEST_TIMEOUT)
     # FRED returns 400 with a JSON {"error_message": ...} for unknown series IDs
     # or malformed params; turn that into a clear, actionable error.
     if response.status_code == 400:
@@ -150,6 +170,11 @@ def get_macro_data(
     Returns:
         A markdown report with the series title, units, frequency, the latest
         value, the change over the window, and a recent observation table.
+
+    Raises:
+        VendorError: When the series endpoint's metadata names a different
+            series than requested (identity echo, #36 family) — routed
+            callers turn this into try-next-vendor / DATA_UNAVAILABLE.
     """
     if look_back_days is None:
         look_back_days = DEFAULT_LOOKBACK_DAYS
@@ -172,6 +197,21 @@ def get_macro_data(
             f"(e.g. 'cpi', 'unemployment') or a valid FRED series ID."
         )
     info = meta[0]
+    # Identity echo: the series endpoint names the series it is answering for;
+    # a mismatch means FRED responded for a different instrument — refuse to
+    # render another series' numbers (#36 family). Raised as a typed
+    # VendorError (not returned as prose) because this vendor is routed:
+    # route_to_vendor turns the raise into a vendor failure — try the next
+    # vendor, else the DATA_UNAVAILABLE sentinel — whereas a returned string
+    # would count as a *successful* fetch and short-circuit the chain. A
+    # missing/malformed id just skips the check: this is a guard, not a new
+    # failure mode.
+    echoed_id = info.get("id")
+    if isinstance(echoed_id, str) and echoed_id.strip().upper() != series_id.upper():
+        raise VendorError(
+            f"FRED series identity mismatch: requested '{series_id}', response "
+            f"is for '{echoed_id.strip()}'; refusing to render another series' data"
+        )
     title = info.get("title", series_id)
     units = info.get("units_short") or info.get("units", "")
     frequency = info.get("frequency", "")
@@ -189,9 +229,7 @@ def get_macro_data(
 
     # FRED encodes a missing observation as ".".
     points = [
-        (o["date"], o["value"])
-        for o in observations
-        if o.get("value") not in (".", None, "")
+        (o["date"], o["value"]) for o in observations if o.get("value") not in (".", None, "")
     ]
 
     header = (
@@ -222,16 +260,29 @@ def get_macro_data(
     except ValueError:
         summary = f"\n**Latest:** {last_val} ({last_date})\n"
 
+    # Freshness: a successful fetch says nothing about whether FRED has a
+    # recent observation — the window header above even advertises coverage
+    # "to {curr_date}". Compare the newest observation against curr_date with
+    # a cadence-aware bound so a genuinely behind series is disclosed (#30).
+    max_lag = _MAX_LAG_DAYS_BY_FREQUENCY.get(str(info.get("frequency_short") or "").strip().upper())
+    lag_note = ""
+    if max_lag is not None:
+        lag_note = data_lag_note(last_date, curr_date, max_lag, f"{series_id} observation")
+        if lag_note:
+            # Leading blank line so the note renders as its own markdown
+            # paragraph instead of a soft continuation of the Latest line.
+            lag_note = "\n" + lag_note + "\n"
+
     shown = points
-    note = ""
+    truncation_note = ""
     if len(points) > MAX_ROWS:
         shown = points[-MAX_ROWS:]
-        note = f"\n_(showing the most recent {MAX_ROWS} of {len(points)} observations)_\n"
+        truncation_note = (
+            f"\n_(showing the most recent {MAX_ROWS} of {len(points)} observations)_\n"
+        )
 
     table = (
-        "\n| Date | Value |\n| --- | --- |\n"
-        + "\n".join(f"| {d} | {v} |" for d, v in shown)
-        + "\n"
+        "\n| Date | Value |\n| --- | --- |\n" + "\n".join(f"| {d} | {v} |" for d, v in shown) + "\n"
     )
 
-    return header + summary + note + table
+    return header + summary + lag_note + truncation_note + table

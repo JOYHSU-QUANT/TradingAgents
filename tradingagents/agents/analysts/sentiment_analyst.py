@@ -69,7 +69,7 @@ def create_sentiment_analyst(llm):
         # returns a string (no exceptions surface from here), so the LLM
         # always sees something — either real data or a clear placeholder.
         news_block = get_news.func(ticker, start_date, end_date)
-        stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
+        stocktwits_block = fetch_stocktwits_messages(ticker, limit=30, curr_date=end_date)
         reddit_block = fetch_reddit_posts(ticker)
 
         system_message = _build_system_message(

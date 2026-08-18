@@ -1,4 +1,16 @@
 from .alpha_vantage_common import AlphaVantageNotConfiguredError, _make_api_request
+from .utils import data_lag_note
+
+# Maximum age (calendar days) of the newest indicator row relative to
+# curr_date before the report carries a data-lag note, keyed by the requested
+# interval — a monthly bar is legitimately ~30 days old, so a flat bound would
+# permanently false-alarm on non-daily cadences. Unknown intervals get no note
+# (same must-not-false-alarm rule as fred's frequency map, #30).
+_MAX_LAG_DAYS_BY_INTERVAL = {
+    "daily": 7,
+    "weekly": 14,
+    "monthly": 45,
+}
 
 # Indicator registry: display name + required series_type. Module-level so the
 # mapping invariant (every entry has a CSV column mapping below) is testable.
@@ -235,9 +247,22 @@ def get_indicator(
         if not ind_string:
             ind_string = "No data available for the specified date range.\n"
 
+        # Freshness: the header above claims coverage "to {curr_date}" but the
+        # rows are whatever survived the range filter — a stalled upstream can
+        # leave the newest value behind the date being analysed. The bound is
+        # keyed by the requested interval so a normal bar gap (weekend,
+        # month-boundary) is not flagged, only a genuinely behind series (#30).
+        lag_note = ""
+        max_lag = _MAX_LAG_DAYS_BY_INTERVAL.get(interval)
+        if result_data and max_lag is not None:
+            note = data_lag_note(result_data[-1][0], curr_date, max_lag, f"{indicator} value")
+            if note:
+                lag_note = "\n" + note + "\n"
+
         result_str = (
             f"## {indicator.upper()} values from {before.strftime('%Y-%m-%d')} to {curr_date}:\n\n"
             + ind_string
+            + lag_note
             + "\n\n"
             + indicator_descriptions.get(indicator, "No description available.")
         )

@@ -13,6 +13,12 @@ def get_prediction_markets(
         "'US election', or a sector/company event.",
     ],
     limit: Annotated[int | None, "Max markets to return; omit for a default of 6"] = None,
+    curr_date: Annotated[
+        str | None,
+        "The date you are analysing, yyyy-mm-dd (today's date from your "
+        "context). Prices are always live; this only lets the report disclose "
+        "when they are newer than the analysis date.",
+    ] = None,
 ) -> str:
     """
     Retrieve live, market-implied probabilities for forward-looking events from
@@ -24,8 +30,10 @@ def get_prediction_markets(
     Args:
         topic (str): Event keyword(s) to search
         limit (int): Max markets to return; omit for a default of 6
+        curr_date (str): Analysis date yyyy-mm-dd; enables the live-price
+            disclosure when it trails the fetch date
 
     Returns:
         str: A formatted markdown report of matching prediction markets
     """
-    return route_to_vendor("get_prediction_markets", topic, limit)
+    return route_to_vendor("get_prediction_markets", topic, limit, curr_date)

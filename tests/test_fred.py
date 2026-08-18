@@ -3,6 +3,7 @@ missing-value handling, lookahead-safe windowing, and router integration.
 
 All API access is mocked, so these run without a network connection or a key.
 """
+
 import copy
 import unittest
 from unittest import mock
@@ -13,6 +14,7 @@ import tradingagents.dataflows.config as config_module
 import tradingagents.default_config as default_config
 from tradingagents.dataflows import fred, interface
 from tradingagents.dataflows.config import set_config
+from tradingagents.dataflows.errors import VendorError
 
 # A small, stable set of observations to format against.
 _META = {
@@ -29,7 +31,7 @@ _OBS = {
     "observations": [
         {"date": "2025-06-01", "value": "4.1"},
         {"date": "2025-07-01", "value": "4.3"},
-        {"date": "2025-08-01", "value": "."},   # missing -> skipped
+        {"date": "2025-08-01", "value": "."},  # missing -> skipped
         {"date": "2025-09-01", "value": "4.4"},
     ]
 }
@@ -37,12 +39,14 @@ _OBS = {
 
 def _request_stub(meta=_META, obs=_OBS):
     """Build a _request replacement that dispatches on the endpoint path."""
+
     def _impl(path, params):
         if path == "series":
             return meta
         if path == "series/observations":
             return obs
         raise AssertionError(f"unexpected FRED path: {path}")
+
     return _impl
 
 
@@ -78,8 +82,10 @@ class FredResolutionTests(unittest.TestCase):
 @pytest.mark.unit
 class FredConfigTests(unittest.TestCase):
     def test_missing_key_raises_not_configured(self):
-        with mock.patch.dict("os.environ", {}, clear=True), \
-                self.assertRaises(fred.FredNotConfiguredError):
+        with (
+            mock.patch.dict("os.environ", {}, clear=True),
+            self.assertRaises(fred.FredNotConfiguredError),
+        ):
             fred.get_api_key()
 
     def test_not_configured_is_a_value_error(self):
@@ -151,6 +157,124 @@ class FredFormattingTests(unittest.TestCase):
         self.assertEqual(obs_params["observation_start"], "2025-07-02")  # 90d back
 
 
+def _meta_with_id(freq_short="M", series_id="UNRATE"):
+    return {
+        "seriess": [
+            {
+                "id": series_id,
+                "title": "Unemployment Rate",
+                "units_short": "%",
+                "frequency": "Monthly",
+                "frequency_short": freq_short,
+                "seasonal_adjustment_short": "SA",
+            }
+        ]
+    }
+
+
+@pytest.mark.unit
+class FredFreshnessTests(unittest.TestCase):
+    """A stalled series must carry a data-lag note; a series on its normal
+    publication cadence must not (#30)."""
+
+    def test_stalled_series_renders_lag_note(self):
+        # Monthly cadence allows 80 days (two periods + publication delay);
+        # latest 2025-09-01 vs 2025-12-31 is 121 days — genuinely stalled.
+        with mock.patch.object(fred, "_request", side_effect=_request_stub(meta=_meta_with_id())):
+            out = fred.get_macro_data("unemployment", "2025-12-31", 365)
+        self.assertIn("Data lag", out)
+        self.assertIn("2025-09-01", out)
+        self.assertIn("stale", out)
+
+    def test_normal_cadence_has_no_note(self):
+        # 29 days behind on a monthly series is on-schedule, not stale.
+        with mock.patch.object(fred, "_request", side_effect=_request_stub(meta=_meta_with_id())):
+            out = fred.get_macro_data("unemployment", "2025-09-30", 365)
+        self.assertNotIn("Data lag", out)
+
+    def test_peak_of_cycle_on_schedule_lag_has_no_note(self):
+        # FRED dates observations at the period start, so an on-schedule
+        # monthly series legitimately reaches ~74 days of lag the day before
+        # its next release (September row dated 09-01, next release mid-
+        # November). The bound must not flag that (no-false-alarm ceiling).
+        with mock.patch.object(fred, "_request", side_effect=_request_stub(meta=_meta_with_id())):
+            out = fred.get_macro_data("unemployment", "2025-11-10", 365)
+        self.assertNotIn("Data lag", out)
+
+    def test_unknown_frequency_code_never_notes(self):
+        # An unmapped cadence must not false-alarm — no note even when old.
+        with mock.patch.object(
+            fred, "_request", side_effect=_request_stub(meta=_meta_with_id("5Y"))
+        ):
+            out = fred.get_macro_data("unemployment", "2025-12-31", 365)
+        self.assertNotIn("Data lag", out)
+
+    def test_missing_frequency_short_never_notes(self):
+        # Legacy meta without frequency_short skips the check entirely.
+        with mock.patch.object(fred, "_request", side_effect=_request_stub()):
+            out = fred.get_macro_data("unemployment", "2025-12-31", 365)
+        self.assertNotIn("Data lag", out)
+
+
+@pytest.mark.unit
+class FredIdentityEchoTests(unittest.TestCase):
+    """The series endpoint names the series it answers for; a mismatch must
+    raise a typed VendorError, never render another series' numbers (#36
+    family). Raised — not returned as prose — because fred is routed: the
+    router turns the raise into try-next-vendor / DATA_UNAVAILABLE, whereas a
+    returned string would count as a successful fetch."""
+
+    def setUp(self):
+        config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+
+    def tearDown(self):
+        config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+
+    def test_mismatched_series_id_raises_vendor_error(self):
+        meta = _meta_with_id(series_id="DGS10")
+        with (
+            mock.patch.object(fred, "_request", side_effect=_request_stub(meta=meta)),
+            self.assertRaises(VendorError) as ctx,
+        ):
+            fred.get_macro_data("unemployment", "2025-09-30", 365)
+        self.assertIn("UNRATE", str(ctx.exception))
+        self.assertIn("DGS10", str(ctx.exception))
+
+    def test_mismatch_degrades_to_sentinel_through_the_router(self):
+        # End-to-end: the optional macro category must degrade to the
+        # DATA_UNAVAILABLE sentinel, not surface prose as a successful fetch.
+        set_config({"data_vendors": {"macro_data": "fred"}})
+
+        def _mismatch(*a, **k):
+            raise VendorError("FRED series identity mismatch: ...")
+
+        with mock.patch.dict(
+            interface.VENDOR_METHODS,
+            {"get_macro_indicators": {"fred": _mismatch}},
+            clear=False,
+        ):
+            out = interface.route_to_vendor("get_macro_indicators", "cpi", "2026-06-01", 365)
+        self.assertIn("DATA_UNAVAILABLE", out)
+
+    def test_matching_id_renders_normally(self):
+        with mock.patch.object(fred, "_request", side_effect=_request_stub(meta=_meta_with_id())):
+            out = fred.get_macro_data("unemployment", "2025-09-30", 365)
+        self.assertIn("**Latest:** 4.4 (2025-09-01)", out)
+
+    def test_id_match_is_case_insensitive(self):
+        meta = _meta_with_id(series_id="unrate")
+        with mock.patch.object(fred, "_request", side_effect=_request_stub(meta=meta)):
+            out = fred.get_macro_data("unemployment", "2025-09-30", 365)
+        self.assertNotIn("refusing", out)
+
+    def test_missing_id_skips_check(self):
+        # The legacy meta shape (no "id") must keep rendering — the echo check
+        # is a guard, not a new failure mode.
+        with mock.patch.object(fred, "_request", side_effect=_request_stub()):
+            out = fred.get_macro_data("unemployment", "2025-09-30", 365)
+        self.assertIn("**Latest:**", out)
+
+
 @pytest.mark.unit
 class FredRoutingTests(unittest.TestCase):
     def setUp(self):
@@ -160,9 +284,7 @@ class FredRoutingTests(unittest.TestCase):
         config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
 
     def test_macro_category_routes_to_fred(self):
-        self.assertEqual(
-            interface.get_category_for_method("get_macro_indicators"), "macro_data"
-        )
+        self.assertEqual(interface.get_category_for_method("get_macro_indicators"), "macro_data")
         set_config({"data_vendors": {"macro_data": "fred"}})
         with mock.patch.dict(
             interface.VENDOR_METHODS,

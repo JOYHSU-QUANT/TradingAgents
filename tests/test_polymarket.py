@@ -77,6 +77,42 @@ class PolymarketFilterTests(unittest.TestCase):
 
 
 @pytest.mark.unit
+class PolymarketSnapshotDisclosureTests(unittest.TestCase):
+    """Gamma serves only live prices; when the analysis date sits behind the
+    wall clock the report must lead with a disclosure so today's odds are not
+    read as that date's odds (#30)."""
+
+    def test_backtest_curr_date_leads_with_disclosure(self):
+        with mock.patch.object(polymarket, "_request", return_value=_SEARCH):
+            out = polymarket.get_prediction_markets("anything", limit=10, curr_date="2020-01-05")
+        self.assertIn("live values", out)
+        self.assertIn("2020-01-05", out)
+        self.assertIn("Open big?", out)  # markets still rendered
+
+    def test_current_curr_date_has_no_disclosure(self):
+        from datetime import datetime as _dt
+
+        today = _dt.now().strftime("%Y-%m-%d")
+        with mock.patch.object(polymarket, "_request", return_value=_SEARCH):
+            out = polymarket.get_prediction_markets("anything", limit=10, curr_date=today)
+        self.assertNotIn("live values", out)
+
+    def test_no_curr_date_keeps_legacy_output(self):
+        with mock.patch.object(polymarket, "_request", return_value=_SEARCH):
+            out = polymarket.get_prediction_markets("anything", limit=10)
+        self.assertNotIn("live values", out)
+
+    def test_disclosure_also_covers_the_no_match_report(self):
+        # The disclosure sits in the header, so even a no-markets report says
+        # when its (absent) prices would have been fetched.
+        empty = {"events": []}
+        with mock.patch.object(polymarket, "_request", return_value=empty):
+            out = polymarket.get_prediction_markets("anything", limit=10, curr_date="2020-01-05")
+        self.assertIn("live values", out)
+        self.assertIn("No open prediction markets", out)
+
+
+@pytest.mark.unit
 class PolymarketFormatTests(unittest.TestCase):
     def test_probability_volume_and_weekly_change_render(self):
         with mock.patch.object(polymarket, "_request", return_value=_SEARCH):

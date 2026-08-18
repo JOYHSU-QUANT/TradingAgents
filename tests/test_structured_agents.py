@@ -428,6 +428,21 @@ class TestSentimentAnalystAgent:
         create_sentiment_analyst(_structured_sentiment_llm(captured))(_make_sentiment_state())
         assert any("NVDA" in str(m) for m in captured["prompt"])
 
+    def test_stocktwits_prefetch_passes_trade_date_as_curr_date(self, monkeypatch):
+        # Positive wiring check for the freshness note (#30): the node must
+        # hand its trade_date to the fetcher, or the lag check silently never
+        # runs (the parameter defaults to None).
+        calls = {}
+
+        def _capture(*args, **kwargs):
+            calls.update(kwargs)
+            return "STOCKTWITS BLOCK"
+
+        monkeypatch.setattr(sentiment_analyst_mod, "fetch_stocktwits_messages", _capture)
+        captured = {}
+        create_sentiment_analyst(_structured_sentiment_llm(captured))(_make_sentiment_state())
+        assert calls.get("curr_date") == "2026-01-15"
+
     def test_falls_back_to_freetext_when_structured_unavailable(self):
         plain = "**Overall Sentiment:** **Bearish** (Score: 3.0/10)\n**Confidence:** Low\n\nLimited data."
         llm = MagicMock()

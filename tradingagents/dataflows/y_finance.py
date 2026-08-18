@@ -13,6 +13,57 @@ from .stockstats_utils import (
     yf_retry,
 )
 from .symbol_utils import NoMarketDataError, normalize_symbol
+from .utils import data_lag_note, live_snapshot_note
+
+# Maximum age (calendar days) of the newest financial-statement column
+# relative to curr_date before the report carries a data-lag note, keyed by
+# the requested freq. Statements file with a delay, so a period plus a filing
+# window is normal cadence — a quarter+~90d for quarterlies, a year+filing
+# window for annuals; beyond that the newest statement is genuinely old (#30).
+_MAX_STATEMENT_LAG_DAYS = {"quarterly": 180, "annual": 550}
+
+# Maximum age (calendar days) of the newest insider filing before the report
+# carries a lag note. Insider activity is legitimately sparse, so the bound is
+# generous — the note flags a long-dead filing stream, not a quiet quarter.
+# Relative to the wall clock: no curr_date reaches this call path, and the
+# filings are fetched live either way (#30).
+MAX_INSIDER_LAG_DAYS = 90
+
+
+def _dates_lag_note(values, curr_date: str | None, max_lag_days: int, what: str) -> str:
+    """Data-lag note line (``"# …\\n"`` or ``""``) for a set of date-ish values.
+
+    Shared by the statement and insider paths: coerce, take the newest, and
+    compare it against the reference date. The coercion itself is guarded —
+    ``errors="coerce"`` still raises on some inputs (e.g. mixed tz-aware and
+    naive timestamps on pandas >= 2) and an annotation must degrade, never
+    replace the report it decorates with an error string.
+    """
+    if not curr_date:
+        return ""
+    try:
+        dates = pd.to_datetime(values, errors="coerce").dropna()
+    except (TypeError, ValueError):
+        return ""
+    if not len(dates):
+        return ""
+    note = data_lag_note(dates.max(), curr_date, max_lag_days, what)
+    return f"# {note}\n" if note else ""
+
+
+def _statement_lag_note(data: pd.DataFrame, curr_date: str | None, freq: str, what: str) -> str:
+    """Data-lag note line for a financial-statement frame, or ``""``.
+
+    The newest column left after :func:`filter_financials_by_date` is the
+    newest fiscal period the agent will see; compare it against the date being
+    analysed with a freq-appropriate bound (an annual statement is ~a year old
+    by definition). Unknown freq values fall back to the annual bound — the
+    looser one, because an annotation must not false-alarm.
+    """
+    if data.empty:
+        return ""
+    bound = _MAX_STATEMENT_LAG_DAYS.get(freq.lower(), _MAX_STATEMENT_LAG_DAYS["annual"])
+    return _dates_lag_note(data.columns, curr_date, bound, what)
 
 
 def get_YFin_data_online(
@@ -38,9 +89,7 @@ def get_YFin_data_online(
     # instead of returning prose: the routing layer turns it into a single
     # unambiguous "no data" signal so the agent never fabricates a price.
     if data.empty:
-        raise NoMarketDataError(
-            symbol, canonical, f"no rows between {start_date} and {end_date}"
-        )
+        raise NoMarketDataError(symbol, canonical, f"no rows between {start_date} and {end_date}")
 
     # Remove timezone info from index for cleaner output
     if data.index.tz is not None:
@@ -69,12 +118,11 @@ def get_YFin_data_online(
 
     return header + csv_string
 
+
 def get_stock_stats_indicators_window(
     symbol: Annotated[str, "ticker symbol of the company"],
     indicator: Annotated[str, "technical indicator to get the analysis and report of"],
-    curr_date: Annotated[
-        str, "The current trading date you are trading on, YYYY-mm-dd"
-    ],
+    curr_date: Annotated[str, "The current trading date you are trading on, YYYY-mm-dd"],
     look_back_days: Annotated[int, "how many days to look back"],
 ) -> str:
 
@@ -169,7 +217,7 @@ def get_stock_stats_indicators_window(
         date_values = []
 
         while current_dt >= before:
-            date_str = current_dt.strftime('%Y-%m-%d')
+            date_str = current_dt.strftime("%Y-%m-%d")
 
             # Look up the indicator value for this date
             if date_str in indicator_data:
@@ -214,7 +262,7 @@ def get_stock_stats_indicators_window(
 def _get_stock_stats_bulk(
     symbol: Annotated[str, "ticker symbol of the company"],
     indicator: Annotated[str, "technical indicator to calculate"],
-    curr_date: Annotated[str, "current date for reference"]
+    curr_date: Annotated[str, "current date for reference"],
 ) -> dict:
     """
     Optimized bulk calculation of stock stats indicators.
@@ -248,9 +296,7 @@ def _get_stock_stats_bulk(
 def get_stockstats_indicator(
     symbol: Annotated[str, "ticker symbol of the company"],
     indicator: Annotated[str, "technical indicator to get the analysis and report of"],
-    curr_date: Annotated[
-        str, "The current trading date you are trading on, YYYY-mm-dd"
-    ],
+    curr_date: Annotated[str, "The current trading date you are trading on, YYYY-mm-dd"],
 ) -> str:
 
     curr_date_dt = datetime.strptime(curr_date, "%Y-%m-%d")
@@ -275,7 +321,11 @@ def get_stockstats_indicator(
 
 def get_fundamentals(
     ticker: Annotated[str, "ticker symbol of the company"],
-    curr_date: Annotated[str, "current date (not used for yfinance)"] = None
+    curr_date: Annotated[
+        str | None,
+        "analysis date in yyyy-mm-dd format; yfinance serves only live values, "
+        "so this triggers a disclosure when it trails today",
+    ] = None,
 ):
     """Get company fundamentals overview from yfinance."""
     canonical = normalize_symbol(ticker)
@@ -330,6 +380,13 @@ def get_fundamentals(
             raise NoMarketDataError(ticker, canonical, "no fundamental fields returned")
 
         header = f"# Company Fundamentals for {canonical}\n"
+        # yfinance ``info`` is a live current-state snapshot with no
+        # historical form; when the analysis date sits behind the wall clock
+        # (a backtest), say so or today's ratios read as that date's (#30).
+        if curr_date:
+            snapshot_note = live_snapshot_note(curr_date, "these fundamentals are")
+            if snapshot_note:
+                header += f"# {snapshot_note}\n"
         header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
         return header + "\n".join(lines)
@@ -343,7 +400,7 @@ def get_fundamentals(
 def get_balance_sheet(
     ticker: Annotated[str, "ticker symbol of the company"],
     freq: Annotated[str, "frequency of data: 'annual' or 'quarterly'"] = "quarterly",
-    curr_date: Annotated[str, "current date in YYYY-MM-DD format"] = None
+    curr_date: Annotated[str | None, "current date in YYYY-MM-DD format"] = None,
 ):
     """Get balance sheet data from yfinance."""
     canonical = normalize_symbol(ticker)
@@ -365,6 +422,7 @@ def get_balance_sheet(
 
         # Add header information
         header = f"# Balance Sheet data for {canonical} ({freq})\n"
+        header += _statement_lag_note(data, curr_date, freq, "balance sheet period")
         header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
         return header + csv_string
@@ -378,7 +436,7 @@ def get_balance_sheet(
 def get_cashflow(
     ticker: Annotated[str, "ticker symbol of the company"],
     freq: Annotated[str, "frequency of data: 'annual' or 'quarterly'"] = "quarterly",
-    curr_date: Annotated[str, "current date in YYYY-MM-DD format"] = None
+    curr_date: Annotated[str | None, "current date in YYYY-MM-DD format"] = None,
 ):
     """Get cash flow data from yfinance."""
     canonical = normalize_symbol(ticker)
@@ -400,6 +458,7 @@ def get_cashflow(
 
         # Add header information
         header = f"# Cash Flow data for {canonical} ({freq})\n"
+        header += _statement_lag_note(data, curr_date, freq, "cash flow period")
         header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
         return header + csv_string
@@ -413,7 +472,7 @@ def get_cashflow(
 def get_income_statement(
     ticker: Annotated[str, "ticker symbol of the company"],
     freq: Annotated[str, "frequency of data: 'annual' or 'quarterly'"] = "quarterly",
-    curr_date: Annotated[str, "current date in YYYY-MM-DD format"] = None
+    curr_date: Annotated[str | None, "current date in YYYY-MM-DD format"] = None,
 ):
     """Get income statement data from yfinance."""
     canonical = normalize_symbol(ticker)
@@ -435,6 +494,7 @@ def get_income_statement(
 
         # Add header information
         header = f"# Income Statement data for {canonical} ({freq})\n"
+        header += _statement_lag_note(data, curr_date, freq, "income statement period")
         header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
         return header + csv_string
@@ -445,9 +505,7 @@ def get_income_statement(
         return f"Error retrieving income statement for {ticker}: {str(e)}"
 
 
-def get_insider_transactions(
-    ticker: Annotated[str, "ticker symbol of the company"]
-):
+def get_insider_transactions(ticker: Annotated[str, "ticker symbol of the company"]):
     """Get insider transactions data from yfinance."""
     canonical = normalize_symbol(ticker)
     try:
@@ -462,8 +520,29 @@ def get_insider_transactions(
         # Convert to CSV string for consistency with other functions
         csv_string = data.to_csv()
 
+        # Freshness: relative to the wall clock (no curr_date reaches this
+        # path). The bound is generous because sparse filings are normal —
+        # this flags a long-dead stream, not a quiet quarter (#30). No
+        # recognizable date column just skips the note (degrade, never raise);
+        # a duplicated column label would select a DataFrame, so only a
+        # genuine Series is inspected.
+        lag_line = ""
+        date_col = next(
+            (c for c in data.columns if isinstance(c, str) and "date" in c.lower()), None
+        )
+        if date_col is not None:
+            col = data[date_col]
+            if isinstance(col, pd.Series):
+                lag_line = _dates_lag_note(
+                    col,
+                    datetime.now().strftime("%Y-%m-%d"),
+                    MAX_INSIDER_LAG_DAYS,
+                    "insider filing",
+                )
+
         # Add header information
         header = f"# Insider Transactions data for {canonical}\n"
+        header += lag_line
         header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
         return header + csv_string

@@ -72,9 +72,11 @@ OPTIONAL_NEWS_TOOLS = (
         category="prediction_markets",
         scope="base",
         hint=(
-            "get_prediction_markets(topic, limit) for live market-implied probabilities "
-            "of forward-looking events (e.g. 'Fed rate cut', 'recession 2026', "
-            "geopolitical or sector events)"
+            "get_prediction_markets(topic, limit, curr_date) for live market-implied "
+            "probabilities of forward-looking events (e.g. 'Fed rate cut', "
+            "'recession 2026', geopolitical or sector events); always pass today's "
+            "date as curr_date so the report can flag prices newer than the "
+            "analysis date"
         ),
     ),
     # The macro calendar is asset-agnostic and bound on BOTH paths: it takes
@@ -130,6 +132,7 @@ OPTIONAL_NEWS_TOOLS = (
         ),
     ),
 )
+
 
 def _validate_table(table):
     """Reject a mis-authored table row at import time.

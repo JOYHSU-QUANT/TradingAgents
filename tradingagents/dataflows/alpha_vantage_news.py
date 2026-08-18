@@ -45,6 +45,14 @@ def get_global_news(curr_date, look_back_days: int = 7, limit: int = 50) -> dict
     """
     from datetime import datetime, timedelta
 
+    # The tool wrapper forwards omitted optionals as explicit None through the
+    # router (see news_data_tools), so resolve them to the documented defaults
+    # BEFORE the int() clamp — mirroring the yfinance sibling. Without this,
+    # int(None) raises a bare TypeError outside the vendor-error taxonomy.
+    if look_back_days is None:
+        look_back_days = 7
+    if limit is None:
+        limit = 50
     look_back_days = max(1, min(int(look_back_days), MAX_NEWS_LOOKBACK_DAYS))
     limit = max(1, min(int(limit), MAX_NEWS_LIMIT))
 

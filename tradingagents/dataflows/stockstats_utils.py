@@ -80,14 +80,16 @@ def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     data = complete
 
     dropped_disordered = 0
-    if len(ohlc) == 4 and not data.empty:
-        body_low = data[["Open", "Close"]].min(axis=1)
-        body_high = data[["Open", "Close"]].max(axis=1)
-        ordered = (
-            (data["Low"] <= body_low) & (body_high <= data["High"]) & (data[ohlc] > 0).all(axis=1)
-        )
-        dropped_disordered = int((~ordered).sum())
-        data = data[ordered]
+    if ohlc and not data.empty:
+        # Positivity applies to whichever OHLC columns exist; the body/range
+        # ordering check additionally needs all four columns present.
+        valid = (data[ohlc] > 0).all(axis=1)
+        if len(ohlc) == 4:
+            body_low = data[["Open", "Close"]].min(axis=1)
+            body_high = data[["Open", "Close"]].max(axis=1)
+            valid &= (data["Low"] <= body_low) & (body_high <= data["High"])
+        dropped_disordered = int((~valid).sum())
+        data = data[valid]
 
     if dropped_incomplete or dropped_disordered:
         logger.warning(
@@ -217,6 +219,16 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     # Filter to curr_date to prevent look-ahead bias in backtesting
     data = data[data["Date"] <= curr_date_dt]
 
+    # Integrity cleaning plus the look-ahead cutoff can leave nothing usable.
+    # Raise the classified error instead of returning an empty frame that
+    # downstream date loops would mislabel as "not a trading day" (#38).
+    if data.empty:
+        raise NoMarketDataError(
+            symbol,
+            canonical,
+            "no usable OHLCV rows on or before the requested date after integrity cleaning",
+        )
+
     # Reject a stale frame (latest row far older than curr_date) rather than
     # feeding year-old prices into indicators (#1021).
     _assert_ohlcv_not_stale(data, curr_date, symbol, canonical)
@@ -259,4 +271,7 @@ class StockstatsUtils:
             indicator_value = matching_rows[indicator].values[0]
             return indicator_value
         else:
-            return "N/A: Not a trading day (weekend or holiday)"
+            # Honest wording: the date may be a weekend/holiday, but it may
+            # also be a trading day whose row failed integrity cleaning —
+            # don't assert "not a trading day" as fact (#38).
+            return "N/A: no usable OHLCV row for this date (non-trading day, or the vendor row failed integrity checks)"

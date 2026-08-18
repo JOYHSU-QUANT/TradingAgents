@@ -172,8 +172,15 @@ def _fetch_subreddit_json(
     try:
         with urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read())
-        children = (payload.get("data") or {}).get("children") or []
-        return [c.get("data", {}) for c in children if isinstance(c, dict)]
+        # isinstance-guarded: a truthy non-dict/list at any level of the
+        # envelope means malformed data, not a license to crash (#31).
+        data_env = payload.get("data") if isinstance(payload, dict) else None
+        children = data_env.get("children") if isinstance(data_env, dict) else []
+        if not isinstance(children, list):
+            children = []
+        return [
+            c["data"] for c in children if isinstance(c, dict) and isinstance(c.get("data"), dict)
+        ]
     except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
         logger.warning(
             "Reddit JSON fetch failed for r/%s · %s: %s — falling back to RSS feed.",

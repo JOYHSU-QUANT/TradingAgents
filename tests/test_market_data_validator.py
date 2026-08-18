@@ -98,6 +98,17 @@ class TestTool:
         assert out.startswith("NO_DATA_AVAILABLE")
         assert "do not estimate or fabricate" in out.lower()
 
+    def test_tool_rejects_unparseable_curr_date_with_sentinel(self, monkeypatch):
+        # A bad LLM-supplied date raises a bare ValueError deep in load_ohlcv
+        # (outside the VendorError taxonomy), so the wrapper answers with the
+        # INVALID_CURR_DATE sentinel before any data work starts.
+        def _must_not_be_called(s, d):
+            raise AssertionError("load_ohlcv must not be called for a bad date")
+
+        monkeypatch.setattr(validator, "load_ohlcv", _must_not_be_called)
+        out = get_verified_market_snapshot.invoke({"symbol": "COF", "curr_date": "not-a-date"})
+        assert out.startswith("INVALID_CURR_DATE")
+
     def test_tool_turns_stale_data_raise_into_sentinel(self, monkeypatch):
         # load_ohlcv's own NoMarketDataError (e.g. the stale-frame guard) must
         # take the same sentinel path, not escape the tool.

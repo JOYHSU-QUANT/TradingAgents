@@ -111,3 +111,57 @@ class TestVerifiedWordingIsBacked:
         snap = validator.build_verified_market_snapshot("COF", "2026-05-20")
         assert "Latest trading row used: 2026-05-18" in snap
         assert "11.50" not in snap  # the incomplete row's Close is gone
+
+
+@pytest.mark.unit
+class TestGuardCoverageEdges:
+    def test_positivity_checked_even_when_an_ohlc_column_is_missing(self):
+        # The ordering check needs all four columns, but positivity must
+        # still run on whichever OHLC columns exist (review round 1).
+        df = pd.DataFrame(
+            [
+                {"Date": "2026-05-01", "Open": 10.0, "High": 11.0, "Close": 10.5},
+                {"Date": "2026-05-02", "Open": -1.0, "High": 11.5, "Close": 11.0},
+            ]
+        )
+        out = _clean_dataframe(df)
+        kept = out["Date"].dt.strftime("%Y-%m-%d").tolist()
+        assert kept == ["2026-05-01"]
+
+
+@pytest.mark.unit
+class TestLoadOhlcvEmptyAfterCleaning:
+    def test_all_rows_dropped_raises_classified_error(self, tmp_path):
+        # Every cached row is missing OHLC fields, so cleaning empties the
+        # frame. load_ohlcv must raise the classified error instead of
+        # returning an empty frame that downstream date loops would mislabel
+        # as "not a trading day" (review round 1 Critical).
+        import copy
+
+        import tradingagents.dataflows.config as config_module
+        import tradingagents.default_config as default_config
+        from tradingagents.dataflows import stockstats_utils as su
+        from tradingagents.dataflows.config import set_config
+        from tradingagents.dataflows.errors import NoMarketDataError
+
+        today = pd.Timestamp.today()
+        start_str = (today - pd.DateOffset(years=5)).strftime("%Y-%m-%d")
+        end_str = (today + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        cache = tmp_path / f"NVDA-YFin-data-{start_str}-{end_str}.csv"
+        pd.DataFrame(
+            {
+                "Date": [(today - pd.Timedelta(days=1)).strftime("%Y-%m-%d")],
+                "Open": [None],
+                "High": [None],
+                "Low": [None],
+                "Close": [100.0],
+                "Volume": [1],
+            }
+        ).to_csv(cache, index=False)
+
+        set_config({"data_cache_dir": str(tmp_path)})
+        try:
+            with pytest.raises(NoMarketDataError, match="integrity cleaning"):
+                su.load_ohlcv("NVDA", today.strftime("%Y-%m-%d"))
+        finally:
+            config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)

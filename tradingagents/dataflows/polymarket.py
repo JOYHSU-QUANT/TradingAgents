@@ -115,7 +115,13 @@ def get_prediction_markets(topic: str, limit: int | None = None) -> str:
 
     lines = []
     omitted = 0
-    for m in candidates[:limit]:
+    # Walk the full volume-ranked candidate list, not just the first `limit`:
+    # when a malformed market is dropped, the next-ranked clean market
+    # backfills its slot so the caller still gets `limit` markets where
+    # available.
+    for m in candidates:
+        if len(lines) >= limit:
+            break
         prices = _parse_json_list(m.get("outcomePrices"))
         outcomes = _parse_json_list(m.get("outcomes"))
         # A malformed market — mismatched outcome/price lists, an unparsable
@@ -146,6 +152,7 @@ def get_prediction_markets(topic: str, limit: int | None = None) -> str:
     if omitted:
         report += (
             f"\n{omitted} market(s) omitted (malformed vendor data: "
-            f"outcome/price mismatch or out-of-range probability).\n"
+            f"outcome/price mismatch, unparsable price, or out-of-range "
+            f"probability).\n"
         )
     return report

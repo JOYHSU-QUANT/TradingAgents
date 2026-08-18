@@ -175,7 +175,9 @@ def get_stock_stats_indicators_window(
             if date_str in indicator_data:
                 indicator_value = indicator_data[date_str]
             else:
-                indicator_value = "N/A: Not a trading day (weekend or holiday)"
+                # Honest wording: a missing date may be a weekend/holiday OR a
+                # trading day whose row failed integrity cleaning (#38).
+                indicator_value = "N/A: no usable OHLCV row for this date (non-trading day, or the vendor row failed integrity checks)"
 
             date_values.append((date_str, indicator_value))
             current_dt = current_dt - relativedelta(days=1)

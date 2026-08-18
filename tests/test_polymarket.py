@@ -154,6 +154,21 @@ class TestMalformedMarketsOmitted:
             out = polymarket.get_prediction_markets("anything", limit=10)
         assert "omitted" not in out
 
+    def test_malformed_slot_is_backfilled_from_lower_ranked_market(self):
+        # A malformed market inside the top-`limit` must not shrink the
+        # result: the next-ranked clean market backfills its slot.
+        bad = _market("Bad top?", 0.5, volume=9_000_000, end_date="2030-12-31T00:00:00Z")
+        bad["outcomePrices"] = '["9.99", "-8.99"]'
+        good1 = _market("Good one?", 0.6, volume=5_000_000, end_date="2030-12-31T00:00:00Z")
+        good2 = _market("Good two?", 0.4, volume=1_000, end_date="2030-12-31T00:00:00Z")
+        search = {"events": [{"markets": [bad, good1, good2]}]}
+        with mock.patch.object(polymarket, "_request", return_value=search):
+            out = polymarket.get_prediction_markets("anything", limit=2)
+        assert "Good one?" in out
+        assert "Good two?" in out  # backfilled into the malformed slot
+        assert "Bad top?" not in out
+        assert "1 market(s) omitted" in out
+
 
 @pytest.mark.unit
 class PolymarketRoutingTests(unittest.TestCase):

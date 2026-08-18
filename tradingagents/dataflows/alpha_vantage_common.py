@@ -121,9 +121,7 @@ def _make_api_request(function_name: str, params: dict) -> dict | str:
     return response_text
 
 
-def _filter_csv_by_date_range(
-    csv_data: str, start_date: str, end_date: str, symbol: str | None = None
-) -> str:
+def _filter_csv_by_date_range(csv_data: str, start_date: str, end_date: str, symbol: str) -> str:
     """
     Filter CSV data to include only rows within the specified date range.
 
@@ -131,7 +129,8 @@ def _filter_csv_by_date_range(
         csv_data: CSV string from Alpha Vantage API
         start_date: Start date in yyyy-mm-dd format
         end_date: End date in yyyy-mm-dd format
-        symbol: Requested symbol, used to build a classified error
+        symbol: Requested symbol; required so the classified error is always
+            attributed to a real symbol (the router renders it to the agent)
 
     Returns:
         Filtered CSV string
@@ -152,19 +151,19 @@ def _filter_csv_by_date_range(
             raise ValueError(f"unparseable date range {start_date}..{end_date}")
     except (TypeError, ValueError) as e:
         raise NoMarketDataError(
-            symbol or "<unknown>",
+            symbol,
             detail=f"unusable date range for the CSV date filter: {e}",
         ) from e
 
     try:
         df = pd.read_csv(StringIO(csv_data))
-        # The first column is the date column (timestamp) on every CSV
-        # endpoint this filter backs.
+        # The first column is the date column (timestamp) on the CSV shape
+        # this filter's caller requests (TIME_SERIES_DAILY_ADJUSTED).
         date_col = df.columns[0]
         df[date_col] = pd.to_datetime(df[date_col])
     except Exception as e:
         raise NoMarketDataError(
-            symbol or "<unknown>",
+            symbol,
             detail=f"unparseable CSV response; refusing to serve it unfiltered: {e}",
         ) from e
 

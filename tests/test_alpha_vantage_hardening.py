@@ -231,3 +231,22 @@ def test_global_news_clamps_untrusted_sizes(monkeypatch):
     avn.get_global_news("2026-06-05", look_back_days=99999, limit=99999)
     assert captured["limit"] == str(avn.MAX_NEWS_LIMIT)
     assert captured["time_from"] == "20250605T0000"  # exactly 365 days back
+
+
+@pytest.mark.unit
+def test_global_news_none_optionals_resolve_to_defaults_before_clamp(monkeypatch):
+    # The tool wrapper forwards omitted optionals as explicit None through the
+    # router; they must resolve to the documented defaults instead of crashing
+    # in int(None) (review round 1).
+    import tradingagents.dataflows.alpha_vantage_news as avn
+
+    captured = {}
+
+    def fake_request(function_name, params):
+        captured.update(params)
+        return "{}"
+
+    monkeypatch.setattr(avn, "_make_api_request", fake_request)
+    avn.get_global_news("2026-06-05", look_back_days=None, limit=None)
+    assert captured["limit"] == "50"
+    assert captured["time_from"] == "20260529T0000"  # default 7-day lookback

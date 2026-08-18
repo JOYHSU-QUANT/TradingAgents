@@ -742,7 +742,7 @@ def test_paper_provider_import_failure_exits_1_named(tmp_path, capsys, monkeypat
     # .env as UTF-8) lets the SAME --create succeed instead of bouncing off
     # "already exists".
     import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.main import EngineImportError
+    from contrib.hyperliquid_perp.engine_bridge import EngineImportError
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
 
@@ -787,7 +787,7 @@ def test_paper_restart_provider_import_failure_exits_1_named(
     # nothing to protect, so the abort stands; a restart holding live work
     # degrades to protection-only instead (companion test below).
     import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.main import EngineImportError
+    from contrib.hyperliquid_perp.engine_bridge import EngineImportError
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
 
@@ -832,7 +832,7 @@ def test_paper_restart_import_failure_with_live_work_enters_protection_only(
     other halted forks: no scheduler, and the loop messaging carries the
     import-error reason."""
     import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.main import EngineImportError
+    from contrib.hyperliquid_perp.engine_bridge import EngineImportError
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
 

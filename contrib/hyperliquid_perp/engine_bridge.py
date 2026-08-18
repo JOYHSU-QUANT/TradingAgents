@@ -4,22 +4,26 @@ Extracted verbatim from ``main.py`` (2026-08-18): the symbols ``cli.py`` had
 been lazy-importing from the legacy entry point — market-context assembly
 (:func:`_build_context`), the pre-LLM context guards
 (:func:`_context_refusal_error`), the engine-config overlay
-(:func:`_build_engine_config`), risk/decision config parsing
-(:func:`_load_risk_decision`), position reads (:func:`_load_position`) and
-coin resolution (:func:`_resolve_coin`) — plus their private helpers.
-``main.py`` keeps only the Phase-1 CLI shell (arg parsing,
-``run_context_only`` / ``run_engine``, ``main``) and imports these names back,
-so neither entry point reaches into the other for the plumbing both share.
+(:func:`_build_engine_config` with :class:`EngineImportError`), risk/decision
+config parsing (:func:`_load_risk_decision`) and coin resolution
+(:func:`_resolve_coin`) — plus what the call graph drags along: their private
+helpers, and the position reads (:func:`_load_position`) both of ``main.py``'s
+paths share. ``main.py`` keeps only the Phase-1 CLI shell (arg parsing,
+``run_context_only`` / ``run_engine``, ``main``), so neither entry point
+reaches into the other for the plumbing both share.
 
 Top level rather than ``integration/`` on purpose: ``integration/`` is the
 LLM-graph wiring seam (trading_graph), while this module composes exchange
 reads + config into engine inputs — filing it there would blur that boundary.
 
-Patch-target note: names are looked up in THIS module's globals at call time.
-A test stubbing a collaborator of a function defined here
-(``HyperliquidClient``, ``_warmup_threshold``, …) must patch it on
-``engine_bridge`` — a from-import copies the binding, so patching the copy in
-``main`` silently misses these functions.
+Patch-target note: names are looked up in THIS module's globals at call time,
+and both entry points reach the functions here through module-attribute access
+(``engine_bridge.X``), never a from-import — a from-import would copy each
+binding into the consuming module and give the same seam a second patch
+surface, where a stub applied to the wrong one is silently invisible to the
+other side's callers. One lookup site means one patch surface: a test stubbing
+a function here, or a collaborator of one (``HyperliquidClient``,
+``_warmup_threshold``, …), always patches ``engine_bridge`` itself.
 """
 
 from __future__ import annotations
@@ -60,8 +64,11 @@ def _warn_dual(log_msg: str, *args: object, stderr: str) -> None:
     """One warning, both channels: the structured log and stderr.
 
     An operator scraping only the log stream (or only capturing stderr) must
-    still see the condition — every warning site in this file goes through
-    here so the two channels cannot silently drift apart.
+    still see the condition — the dual-channel warnings in this module and in
+    ``main.py``'s entry shells all route through here so the two channels
+    cannot silently drift apart. (Log-only warnings, like the swallowed
+    ``on_blocking_read`` failure in :func:`_build_context`, are deliberate
+    exceptions: mid-read there is no operator moment to interrupt.)
     """
     logger.warning(log_msg, *args)
     print(stderr, file=sys.stderr)

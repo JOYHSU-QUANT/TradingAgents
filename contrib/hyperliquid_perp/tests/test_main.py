@@ -6,9 +6,12 @@ Covers the deterministic seams that do not need a live engine or network:
 guards — all defined in ``engine_bridge`` and exercised as ``bridge_mod`` —
 plus ``main.py``'s entry-point shells (``run_engine`` / ``run_context_only`` /
 ``main``), exercised as ``main_mod``. Patch targets follow the DEFINING module:
-stubbing a collaborator of a bridge function on ``main_mod`` would silently
-miss it (from-import copies the binding). The full ``run_engine`` path needs a
-key + network and is left to integration testing.
+main reaches every bridge symbol through ``engine_bridge.X`` attribute access,
+so bridge functions and their collaborators are ALWAYS patched on
+``bridge_mod`` — even when the test drives a main entry point — while main's
+own imports (``build_graph``, ``wallet_address``, …) are patched on
+``main_mod``. The full ``run_engine`` path needs a key + network and is left
+to integration testing.
 """
 
 from __future__ import annotations
@@ -393,11 +396,11 @@ def _stub_engine(
             # tests are about what happens AFTER the context guards pass.
             return datetime.now(timezone.utc)
 
-    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (_Ctx(), object()))
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (_Ctx(), object()))
     monkeypatch.setattr(main_mod, "render_market_context", lambda ctx: "ctx text")
     monkeypatch.setattr(main_mod, "wallet_address", lambda config: "0xReadOnly")
     monkeypatch.setattr(
-        main_mod,
+        bridge_mod,
         "_load_position",
         lambda *a, **k: (None, account_value, position_ok),
     )
@@ -466,12 +469,12 @@ def test_run_engine_reports_engine_import_failure_as_named_error(monkeypatch, ca
     monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
 
     def _boom(config):
-        raise main_mod.EngineImportError(
+        raise bridge_mod.EngineImportError(
             "importing tradingagents failed, most likely while its package init "
             "read a repo .env file"
         )
 
-    monkeypatch.setattr(main_mod, "_build_engine_config", _boom)
+    monkeypatch.setattr(bridge_mod, "_build_engine_config", _boom)
     rc = main_mod.run_engine({}, "BTC")
     assert rc == 1
     assert calls == []  # engine never built
@@ -505,7 +508,7 @@ def test_run_engine_aborts_on_insufficient_candles(monkeypatch, capsys):
         # operator-facing diagnosis: "wait for warm-up" vs "engine broken").
         indicators = {"rsi_14": None, "ema_20": None, "ema_50": None, "atr_14": None}
 
-    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (_ThinCtx(), object()))
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (_ThinCtx(), object()))
     calls = []
     monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine({}, "BTC")
@@ -557,7 +560,7 @@ def test_run_context_only_warns_and_exits_4_on_degraded_context(
     # RUNBOOK refusal will look. The degraded verdict also exits 4 (the repo's
     # probe convention) so a preflight can gate on the code, not stderr text.
     ctx = SimpleNamespace(candle_count=candle_count, indicators=indicators)
-    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, object()))
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (ctx, object()))
     monkeypatch.setattr(main_mod, "render_market_context", lambda c: "ctx text")
     monkeypatch.setattr(main_mod, "wallet_address", lambda config: "")  # skip position block
     rc = main_mod.run_context_only({}, "BTC")
@@ -577,7 +580,7 @@ def test_run_context_only_exits_0_on_healthy_context(monkeypatch, capsys):
         candle_interval="4h",
         as_of=datetime.now(timezone.utc),  # a live feed clears the staleness guard
     )
-    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, object()))
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (ctx, object()))
     monkeypatch.setattr(main_mod, "render_market_context", lambda c: "ctx text")
     monkeypatch.setattr(main_mod, "wallet_address", lambda config: "")  # skip position block
     rc = main_mod.run_context_only({}, "BTC")
@@ -591,7 +594,7 @@ def test_run_context_only_rejects_bad_risk_decision_config(monkeypatch, capsys):
     # fetch) instead of surfacing only on the next paid cycle.
     fetched = []
     monkeypatch.setattr(
-        main_mod,
+        bridge_mod,
         "_build_context",
         lambda config, coin: fetched.append("fetched") or (object(), object()),
     )
@@ -649,7 +652,7 @@ def test_run_engine_aborts_when_all_indicators_fail(monkeypatch, capsys):
         candle_count = 200  # past the warm-up gate -> not under-warm
         indicators = {"rsi_14": None, "ema_20": None, "ema_50": None, "atr_14": None}
 
-    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (_DeadCtx(), object()))
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (_DeadCtx(), object()))
     calls = []
     monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine({}, "BTC")
@@ -669,7 +672,9 @@ def test_run_engine_aborts_when_only_atr_fails(monkeypatch, capsys):
         candle_count = 200  # past the warm-up gate
         indicators = {"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0, "atr_14": None}
 
-    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (_AtrDeadCtx(), object()))
+    monkeypatch.setattr(
+        bridge_mod, "_build_context", lambda config, coin: (_AtrDeadCtx(), object())
+    )
     calls = []
     monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine({}, "BTC")
@@ -689,7 +694,7 @@ def test_run_engine_aborts_when_atr_not_configured(monkeypatch, capsys):
         candle_count = 200
         indicators = {"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0}  # no atr_14 key
 
-    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (_NoAtrCtx(), object()))
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (_NoAtrCtx(), object()))
     calls = []
     monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine({}, "BTC")
@@ -728,7 +733,7 @@ def test_run_engine_refuses_untradeable_regime_indicators(
 ):
     _stub_engine(monkeypatch)
     ctx = SimpleNamespace(candle_count=candle_count, indicators=ctx_indicators)
-    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, object()))
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (ctx, object()))
     calls = []
     monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine(config, "BTC")
@@ -830,7 +835,7 @@ def test_context_refusal_freshness_limit_has_a_floor():
 
 
 def test_freshness_ceiling_tracks_the_decision_cycle():
-    # Drift lock. main.py writes the ceiling out instead of importing
+    # Drift lock. engine_bridge writes the ceiling out instead of importing
     # CYCLE_INTERVAL (that import drags the paper engine into the keyless
     # --context-only path), so this test is what keeps "3 x the 4h decision
     # cycle" — the phrase the refusal message prints at an operator — true.
@@ -974,7 +979,7 @@ def test_run_engine_aborts_on_a_stale_context(monkeypatch, capsys):
     # feed costs nothing and exits 1 with the cause on stderr.
     _stub_engine(monkeypatch)
     ctx = _ctx_closing_at(datetime(2026, 3, 1, tzinfo=timezone.utc))
-    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, object()))
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (ctx, object()))
     calls = []
     monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine({}, "BTC")
@@ -988,7 +993,7 @@ def test_run_context_only_warns_on_a_stale_context(monkeypatch, capsys):
     # a stale context is the one degraded state whose rendering looks entirely
     # healthy (real prices, real indicators, a real regime).
     ctx = _ctx_closing_at(datetime(2026, 3, 1, tzinfo=timezone.utc))
-    monkeypatch.setattr(main_mod, "_build_context", lambda config, coin: (ctx, object()))
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (ctx, object()))
     monkeypatch.setattr(main_mod, "render_market_context", lambda c: "ctx text")
     monkeypatch.setattr(main_mod, "wallet_address", lambda config: "")
     rc = main_mod.run_context_only({}, "BTC")
@@ -1162,7 +1167,7 @@ def test_run_engine_warns_on_position_leverage_mismatch(monkeypatch, capsys):
         leverage=Decimal(5),
     )
     monkeypatch.setattr(
-        main_mod, "_load_position", lambda *a, **k: (position, Decimal("10000"), True)
+        bridge_mod, "_load_position", lambda *a, **k: (position, Decimal("10000"), True)
     )
     monkeypatch.setattr(
         main_mod,
@@ -1196,7 +1201,7 @@ def test_run_engine_warns_on_unusable_position_margin(monkeypatch, capsys):
         leverage=None,
     )
     monkeypatch.setattr(
-        main_mod, "_load_position", lambda *a, **k: (position, Decimal("10000"), True)
+        bridge_mod, "_load_position", lambda *a, **k: (position, Decimal("10000"), True)
     )
     monkeypatch.setattr(
         main_mod,
@@ -1329,7 +1334,7 @@ def test_main_loads_dotenv_before_key_check(tmp_path, monkeypatch):
     def _stop(config, coin):
         raise ExchangeError("stop before any network call")
 
-    monkeypatch.setattr(main_mod, "_build_context", _stop)
+    monkeypatch.setattr(bridge_mod, "_build_context", _stop)
     rc = main_mod.main(["--coin", "BTC"])
 
     # Reaching the patched _build_context proves the key check passed on the

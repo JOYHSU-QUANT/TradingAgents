@@ -27,6 +27,13 @@ import os
 import sys
 from datetime import datetime, timezone
 
+# Module import + attribute access, NOT a from-import: a from-import copies
+# each binding into this module, giving every shared seam a second patch
+# surface — a test stubbing engine_bridge._build_context would silently miss
+# the copy run_engine calls (and vice versa). Attribute access keeps ONE
+# lookup site, so patches on the defining module are seen by every caller.
+# (The same prescription the cli decomposition plan applies to cli.py.)
+from . import engine_bridge
 from .audit.decision_log import log_target_decision
 from .config import dotenv_diagnosis, load_dotenv_files, wallet_address
 from .domains.perp import risk_gate
@@ -34,17 +41,6 @@ from .domains.perp.prompt_context import render_market_context
 from .domains.perp.target_decision import (
     decision_format_instructions,
     parse_target_decision,
-)
-from .engine_bridge import (
-    EngineImportError,
-    _build_context,
-    _build_engine_config,
-    _context_refusal_error,
-    _load_position,
-    _load_risk_decision,
-    _resolve_coin,
-    _warn_dual,
-    load_config_or_exit,
 )
 from .exchanges.hyperliquid.errors import ExchangeError
 from .integration.trading_graph import build_graph, inject_perp_context
@@ -91,9 +87,9 @@ def run_context_only(config: dict, coin: str) -> int:
     # The parsed configs aren't consumed here — the validation runs purely for
     # its named exit-1 side effect, before any network fetch (see the docstring
     # for why the smoke run validates at all).
-    if _load_risk_decision(config) is None:
+    if engine_bridge._load_risk_decision(config) is None:
         return 1
-    ctx, client = _build_context(config, coin)
+    ctx, client = engine_bridge._build_context(config, coin)
 
     print("\n" + "=" * 64)
     print(f"PerpMarketContext - {coin}")
@@ -105,9 +101,9 @@ def run_context_only(config: dict, coin: str) -> int:
     # shared guard the trading paths refuse on — a refused context *looks* like
     # real data (a plausible default-"ranging" regime, or prices and indicators
     # that are internally consistent but describe a market hours or days old).
-    refusal = _context_refusal_error(ctx, coin, config)
+    refusal = engine_bridge._context_refusal_error(ctx, coin, config)
     if refusal is not None:
-        _warn_dual(
+        engine_bridge._warn_dual(
             "degraded context: %s",
             refusal,
             stderr=(
@@ -119,7 +115,7 @@ def run_context_only(config: dict, coin: str) -> int:
     # Optional: if a real wallet is configured, also report the current position.
     # Only print when the lookup actually succeeded — a failed read is not a "flat".
     addr = wallet_address(config)
-    position, _account_value, ok = _load_position(client, addr, coin)
+    position, _account_value, ok = engine_bridge._load_position(client, addr, coin)
     if addr and ok:
         if position is None:
             print(f"\nCurrent position: flat ({coin})")
@@ -143,11 +139,11 @@ def run_engine(config: dict, coin: str) -> int:
             f"({dotenv_diagnosis('OPENROUTER_API_KEY')}.)"
         )
 
-    ctx, client = _build_context(config, coin)
+    ctx, client = engine_bridge._build_context(config, coin)
     # All four pre-LLM context guards (warm-up, fully-dead indicator set,
     # missing/dead regime indicators, stale feed) live in
     # _context_refusal_error, shared with the daemon provider.
-    refusal = _context_refusal_error(ctx, coin, config)
+    refusal = engine_bridge._context_refusal_error(ctx, coin, config)
     if refusal is not None:
         print(f"error: {refusal}", file=sys.stderr)
         return 1
@@ -155,7 +151,7 @@ def run_engine(config: dict, coin: str) -> int:
     # A configured-wallet lookup that fails leaves the real exposure unknown. Refuse
     # to rebalance against a guessed-flat account — and abort here, before the engine
     # run, so we don't spend an LLM call on state we can't trust.
-    position, account_value, ok = _load_position(client, wallet_address(config), coin)
+    position, account_value, ok = engine_bridge._load_position(client, wallet_address(config), coin)
     if not ok:
         print(
             "error: position lookup failed — refusing to run the engine on unknown "
@@ -186,7 +182,7 @@ def run_engine(config: dict, coin: str) -> int:
     # Named config error (exit 1, like the API-key and warm-up checks), not
     # main's exit-2 "unexpected error" bucket — an operator typo is expected,
     # not a bug; and it must abort here, before any LLM spend.
-    cfgs = _load_risk_decision(config)
+    cfgs = engine_bridge._load_risk_decision(config)
     if cfgs is None:
         return 1
     risk_cfg, decision_cfg = cfgs
@@ -200,8 +196,8 @@ def run_engine(config: dict, coin: str) -> int:
         max_pct=risk_gate.effective_max_target_margin_pct(risk_cfg, decision_cfg),
     )
     try:
-        engine_config, selected_analysts = _build_engine_config(config)
-    except EngineImportError as exc:
+        engine_config, selected_analysts = engine_bridge._build_engine_config(config)
+    except engine_bridge.EngineImportError as exc:
         # Operator-fixable environment error — named exit 1, not main's exit-2
         # "unexpected error" bucket; see _build_engine_config for the causes.
         print(f"error: {exc}", file=sys.stderr)
@@ -269,7 +265,7 @@ def run_engine(config: dict, coin: str) -> int:
         # see: the cycle still completes fail-closed (gate + audit record
         # below), but the run exits 3 at the end so a naive scheduler can
         # alert on the exit code instead of log-scraping.
-        _warn_dual(
+        engine_bridge._warn_dual(
             "engine output failed the structured-target contract for %s: %s",
             coin,
             parsed.invalid_reason,
@@ -291,7 +287,7 @@ def run_engine(config: dict, coin: str) -> int:
         # target — make the condition visible to the operator here. (Warned on
         # every mismatched cycle, even when the decision ends up producing no
         # order — the mismatch itself is the operator-actionable state.)
-        _warn_dual(
+        engine_bridge._warn_dual(
             "position leverage %s differs from configured risk.leverage %s for %s — "
             "rebalance deadband disabled for this cycle",
             current.leverage,
@@ -310,7 +306,7 @@ def run_engine(config: dict, coin: str) -> int:
         # confidence bar still apply). Same operator-visibility
         # contract as the leverage-mismatch warning above — warned every cycle
         # the degraded read persists.
-        _warn_dual(
+        engine_bridge._warn_dual(
             "position margin_used unusable for %s — rebalance deadband skipped this cycle",
             coin,
             stderr=(
@@ -385,10 +381,10 @@ def main(argv: list[str] | None = None) -> int:
     # check. Idempotent when already called by the subcommand CLI's main().
     load_dotenv_files()
     args = _parse_args(argv)
-    config = load_config_or_exit(args.config)
+    config = engine_bridge.load_config_or_exit(args.config)
     if config is None:
         return 1
-    coin = _resolve_coin(args, config)
+    coin = engine_bridge._resolve_coin(args, config)
 
     try:
         if args.context_only:

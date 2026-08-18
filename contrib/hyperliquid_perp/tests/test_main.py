@@ -1239,7 +1239,7 @@ def test_run_engine_fails_closed_on_unparseable_engine_output(monkeypatch, capsy
 
 
 def test_main_exchange_error_returns_exit_code_1(monkeypatch, capsys):
-    monkeypatch.setattr(main_mod, "load_config", lambda path: {})
+    monkeypatch.setattr(bridge_mod, "load_config", lambda path: {})
 
     def _boom(config, coin):
         raise ExchangeError("bad read")
@@ -1256,7 +1256,7 @@ def test_main_invalid_config_returns_exit_code_1(monkeypatch, capsys):
     def _bad(path):
         raise ValueError("unknown top-level config key(s): 'riks'.")
 
-    monkeypatch.setattr(main_mod, "load_config", _bad)
+    monkeypatch.setattr(bridge_mod, "load_config", _bad)
     rc = main_mod.main(["--coin", "BTC"])
     assert rc == 1
     assert "invalid config" in capsys.readouterr().err
@@ -1298,7 +1298,7 @@ def test_main_bad_phase1_config_value_returns_exit_code_1(tmp_path, capsys):
 
 
 def test_main_unexpected_error_returns_exit_code_2(monkeypatch, capsys, caplog):
-    monkeypatch.setattr(main_mod, "load_config", lambda path: {})
+    monkeypatch.setattr(bridge_mod, "load_config", lambda path: {})
 
     def _boom(config, coin):
         raise RuntimeError("kaboom")

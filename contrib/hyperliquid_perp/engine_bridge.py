@@ -31,7 +31,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from .config import DOTENV_READ_ERRORS
+from .config import CONFIG_LOAD_ERRORS, DOTENV_READ_ERRORS, load_config
 from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context
 from .domains.perp.indicator_vocab import (
@@ -554,3 +554,19 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     raw_analysts = eng_cfg.get("selected_analysts")
     selected = list(raw_analysts if raw_analysts is not None else _DEFAULT_ANALYSTS)
     return engine_config, selected
+
+
+def load_config_or_exit(path: str | None) -> dict | None:
+    """Parse the YAML config; on failure print the named error and return None.
+
+    Missing/unreadable path, YAML syntax error, or failed validation — all
+    operator config mistakes, all the same named exit 1 (callers translate
+    ``None`` into theirs), never a traceback. The one home for the message the
+    four entry points (legacy main, ``live``, ``live-smoke``, ``paper``) used
+    to carry as verbatim copies, so the wording cannot drift between them.
+    """
+    try:
+        return load_config(path)
+    except CONFIG_LOAD_ERRORS as exc:
+        print(f"error: invalid config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
+        return None

@@ -73,7 +73,7 @@ from decimal import Decimal
 from functools import partial
 from pathlib import Path
 
-from .config import CONFIG_LOAD_ERRORS, dotenv_diagnosis, load_config, load_dotenv_files
+from .config import dotenv_diagnosis, load_dotenv_files
 from .persistence.db import Database, SchemaVersionError, apply_migrations
 
 logger = logging.getLogger(__name__)
@@ -765,6 +765,7 @@ def _cmd_live(argv: list[str]) -> int:
 
     from .config import wallet_address
     from .domains.perp.risk_gate import RiskConfig
+    from .engine_bridge import load_config_or_exit
     from .exchanges.hyperliquid.account import HyperliquidAccount
     from .exchanges.hyperliquid.errors import ExchangeError
     from .exchanges.hyperliquid.sdk_client import HyperliquidClient
@@ -783,10 +784,8 @@ def _cmd_live(argv: list[str]) -> int:
     )
     from .live.secrets import agent_key_env_var, load_agent_key
 
-    try:
-        config = load_config(args.config)
-    except CONFIG_LOAD_ERRORS as exc:
-        print(f"error: invalid config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
+    config = load_config_or_exit(args.config)
+    if config is None:
         return 1
     raw_live = config.get("live")
     if raw_live is None:
@@ -2625,14 +2624,13 @@ def _build_smoke_session(args, db):
     from decimal import Decimal
 
     from .domains.perp.risk_gate import RiskConfig
+    from .engine_bridge import load_config_or_exit
     from .live.config import ExecutionMode, LiveConfig, validate_live_risk_consistency
     from .live.smoke import SmokeContext
     from .paper.clock import WallClock
 
-    try:
-        config = load_config(args.config)
-    except CONFIG_LOAD_ERRORS as exc:
-        print(f"error: invalid config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
+    config = load_config_or_exit(args.config)
+    if config is None:
         return 1
     raw_live = config.get("live")
     if raw_live is None:
@@ -3191,7 +3189,7 @@ def _cmd_paper(argv: list[str]) -> int:
 
     import signal
 
-    from .engine_bridge import _load_risk_decision, _resolve_coin
+    from .engine_bridge import _load_risk_decision, _resolve_coin, load_config_or_exit
 
     # Heavy/engine imports deferred so `export`/`validate` stay light (the
     # engine/scheduler stack is imported by _run_locked once the lease is in
@@ -3205,10 +3203,8 @@ def _cmd_paper(argv: list[str]) -> int:
     from .paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
     from .persistence import repository as repo
 
-    try:
-        config = load_config(args.config)
-    except CONFIG_LOAD_ERRORS as exc:
-        print(f"error: invalid config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
+    config = load_config_or_exit(args.config)
+    if config is None:
         return 1
     coin = _resolve_coin(args, config)
     cfgs = _load_risk_decision(config)

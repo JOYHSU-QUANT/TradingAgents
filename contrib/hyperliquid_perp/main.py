@@ -28,13 +28,7 @@ import sys
 from datetime import datetime, timezone
 
 from .audit.decision_log import log_target_decision
-from .config import (
-    CONFIG_LOAD_ERRORS,
-    dotenv_diagnosis,
-    load_config,
-    load_dotenv_files,
-    wallet_address,
-)
+from .config import dotenv_diagnosis, load_dotenv_files, wallet_address
 from .domains.perp import risk_gate
 from .domains.perp.prompt_context import render_market_context
 from .domains.perp.target_decision import (
@@ -50,6 +44,7 @@ from .engine_bridge import (
     _load_risk_decision,
     _resolve_coin,
     _warn_dual,
+    load_config_or_exit,
 )
 from .exchanges.hyperliquid.errors import ExchangeError
 from .integration.trading_graph import build_graph, inject_perp_context
@@ -390,12 +385,8 @@ def main(argv: list[str] | None = None) -> int:
     # check. Idempotent when already called by the subcommand CLI's main().
     load_dotenv_files()
     args = _parse_args(argv)
-    try:
-        config = load_config(args.config)
-    except CONFIG_LOAD_ERRORS as exc:
-        # Missing/unreadable path, YAML syntax error, or failed validation — all
-        # operator config mistakes, all the same named exit 1, never a traceback.
-        print(f"error: invalid config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
+    config = load_config_or_exit(args.config)
+    if config is None:
         return 1
     coin = _resolve_coin(args, config)
 

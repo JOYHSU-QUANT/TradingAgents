@@ -515,6 +515,40 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **Farside catch-up: cache boundary and caveats aligned with the family's
+  decided semantics.** The Farside cache validator now mirrors the invariants
+  its parser enforces live (an `asset` echo so a copied/renamed cache file
+  cannot serve another asset's flows; strictly-ascending unique dates so a
+  newest-first or duplicated-date file cannot mis-date the report or
+  double-count a day; the per-row Total-vs-issuer-sum cross-check, same
+  tolerances as the parser). Its wording adopts the SoSoValue-side decided
+  fixes: the over-cap message names both causes an unknown age collapses to
+  ("unparseable **or future-dated** fetch date"), the data-lag cause no
+  longer equates snapshot age with row lag on a stale serve ("the stale
+  snapshot above may itself be missing newer filings") nor overclaims the
+  site's frontier on a fresh one ("no newer filing is visible as of
+  curr_date"), the STALE header rides the family's shared template with
+  Farside's own cause set, and a table carrying a "not yet posted" cell now
+  explains the label in a legend (previously only an unposted *latest* day
+  was explained). Farside also adopts the shared cache-read preamble and
+  rejecter factory.
+
+- **SoSoValue ETF disclosure gates widened to the facts they hedge.** Four
+  disclosures were gated on conditions narrower than what makes them true:
+  the revision/restatement caveats now carry a provenance note on **every**
+  cache serve (a TTL-fresh serve replays the last fetch's diff — previously
+  only a stale serve said so, so repeat calls within one TTL window read as
+  repeated revision events); the "no fund reported a flow" scope word hedges
+  to "no fetched fund" for **all three** coverage gaps (failed histories,
+  a failed fund list, dropped listing entries — previously only failed
+  histories); the all-flat-but-material-aggregate breadth verdict hedges on
+  dropped listing entries like it already did on failed histories; and a
+  table carrying "not yet posted" cells now has a legend for rows the
+  Latest-line explanation does not cover. The breadth concentration shares
+  ride the treasuries module's near-100 truncation band (now shared as
+  `_concentration_share_str`), so a 99.5% top-3 share can no longer print
+  as "100%" beside a leaders line showing more funds.
+
 - **The daemon's pre-LLM context guards have a working test again.** When the
   live loop's `on_blocking_read` callback was added to `main._build_context`,
   `test_build_input_refuses_untradeable_indicators`'s two-argument stand-in was

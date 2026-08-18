@@ -2,6 +2,7 @@ from typing import Annotated
 
 from langchain_core.tools import tool
 
+from tradingagents.dataflows.errors import VendorError
 from tradingagents.dataflows.market_data_validator import build_verified_market_snapshot
 
 
@@ -20,4 +21,15 @@ def get_verified_market_snapshot(
     price levels, Bollinger bands, RSI, MACD, moving averages, support /
     resistance, or historical comparisons, and treat it as the source of truth.
     """
-    return build_verified_market_snapshot(symbol, curr_date, look_back_days)
+    # This tool calls the builder directly (it does not go through
+    # route_to_vendor), so the vendor-error taxonomy must be turned into the
+    # instructive no-data sentinel here — otherwise a typed raise surfaces as
+    # a generic ToolNode error string instead (#32).
+    try:
+        return build_verified_market_snapshot(symbol, curr_date, look_back_days)
+    except VendorError as e:
+        return (
+            f"NO_DATA_AVAILABLE: could not build a verified market snapshot "
+            f"for '{symbol}' ({e}). Do not estimate or fabricate values — "
+            f"report that verified data is unavailable for this symbol."
+        )

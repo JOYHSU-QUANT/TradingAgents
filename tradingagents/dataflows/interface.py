@@ -393,4 +393,7 @@ def route_to_vendor(method: str, *args, **kwargs):
             )
         raise first_error
 
-    raise RuntimeError(f"No available vendor for '{method}'")
+    # An empty vendor registry for a known method is a configuration/registry
+    # problem — classify it (#32) so callers see the taxonomy, not a bare
+    # RuntimeError that bypasses every vendor-error handler.
+    raise VendorNotConfiguredError(f"No available vendor for '{method}'")

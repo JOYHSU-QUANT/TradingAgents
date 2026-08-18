@@ -3,6 +3,7 @@ ranking, formatting, graceful degradation, and router integration.
 
 All API access is mocked, so these run without a network connection.
 """
+
 import copy
 import unittest
 from unittest import mock
@@ -35,8 +36,16 @@ _SEARCH = {
     "events": [
         {
             "markets": [
-                _market("Open big?", 0.76, volume=5_000_000, end_date="2030-12-31T00:00:00Z", wk=-0.045),
-                _market("Resolved already?", 1.0, volume=9_000_000, end_date="2030-12-31T00:00:00Z", closed=True),
+                _market(
+                    "Open big?", 0.76, volume=5_000_000, end_date="2030-12-31T00:00:00Z", wk=-0.045
+                ),
+                _market(
+                    "Resolved already?",
+                    1.0,
+                    volume=9_000_000,
+                    end_date="2030-12-31T00:00:00Z",
+                    closed=True,
+                ),
                 _market("Past event?", 0.5, volume=8_000_000, end_date="2020-01-01T00:00:00Z"),
                 _market("Open small?", 0.30, volume=1_000, end_date="2030-06-30T00:00:00Z"),
             ]
@@ -53,7 +62,7 @@ class PolymarketFilterTests(unittest.TestCase):
         self.assertIn("Open big?", out)
         self.assertIn("Open small?", out)
         self.assertNotIn("Resolved already?", out)  # closed
-        self.assertNotIn("Past event?", out)         # endDate in the past
+        self.assertNotIn("Past event?", out)  # endDate in the past
 
     def test_ranked_by_volume(self):
         with mock.patch.object(polymarket, "_request", return_value=_SEARCH):
@@ -100,6 +109,50 @@ class PolymarketResilienceTests(unittest.TestCase):
             out = polymarket.get_prediction_markets("Fed rate cut")
         self.assertIn("unavailable", out.lower())
         self.assertIn("Fed rate cut", out)
+
+
+@pytest.mark.unit
+class TestMalformedMarketsOmitted:
+    """Malformed vendor data must be omitted and disclosed, never rendered
+    with a fabricated label or an impossible probability (#29)."""
+
+    @staticmethod
+    def _fetch(market):
+        search = {"events": [{"markets": [market]}]}
+        with mock.patch.object(polymarket, "_request", return_value=search):
+            return polymarket.get_prediction_markets("anything", limit=10)
+
+    @pytest.mark.parametrize(
+        "field, value",
+        [
+            ("outcomes", '["No"]'),  # two prices, one outcome
+            ("outcomePrices", '["1.30", "-0.30"]'),  # probability outside [0, 1]
+            ("outcomePrices", '["abc", "def"]'),  # unparsable price strings
+        ],
+    )
+    def test_malformed_market_omitted_with_disclosure(self, field, value):
+        market = _market("Malformed?", 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
+        market[field] = value
+        out = self._fetch(market)
+        assert "Malformed?" not in out
+        assert "1 market(s) omitted" in out
+
+    def test_unparseable_outcomes_never_fabricates_yes(self):
+        # Force the market past the forward-looking filter so the render loop
+        # itself is exercised: it must not invent a "Yes" label when the
+        # outcomes list failed to parse (the first outcome could be "No").
+        market = _market("Broken outcomes?", 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
+        market["outcomes"] = "not-json"
+        with mock.patch.object(polymarket, "_is_forward_looking", return_value=True):
+            out = self._fetch(market)
+        assert "Yes" not in out.split("Live, market-implied")[1]
+        assert "Broken outcomes?" not in out
+        assert "1 market(s) omitted" in out
+
+    def test_no_disclosure_when_all_markets_clean(self):
+        with mock.patch.object(polymarket, "_request", return_value=_SEARCH):
+            out = polymarket.get_prediction_markets("anything", limit=10)
+        assert "omitted" not in out
 
 
 @pytest.mark.unit

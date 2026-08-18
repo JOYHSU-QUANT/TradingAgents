@@ -16,10 +16,12 @@ def _extract_article_data(article: dict) -> dict:
     # Handle nested content structure
     if "content" in article:
         content = article["content"]
-        title = content.get("title", "No title")
+        # Missing fields get explicit unavailability markers, not values that
+        # could be misread as a real title or a publisher named "Unknown".
+        title = content.get("title") or "(title unavailable)"
         summary = content.get("summary", "")
-        provider = content.get("provider", {})
-        publisher = provider.get("displayName", "Unknown")
+        provider = content.get("provider") or {}
+        publisher = provider.get("displayName") or "(source unavailable)"
 
         # Get URL from canonicalUrl or clickThroughUrl
         url_obj = content.get("canonicalUrl") or content.get("clickThroughUrl") or {}
@@ -49,9 +51,9 @@ def _extract_article_data(article: dict) -> dict:
             with contextlib.suppress(ValueError, OSError, TypeError):
                 pub_date = datetime.fromtimestamp(ts)
         return {
-            "title": article.get("title", "No title"),
+            "title": article.get("title") or "(title unavailable)",
             "summary": article.get("summary", ""),
-            "publisher": article.get("publisher", "Unknown"),
+            "publisher": article.get("publisher") or "(source unavailable)",
             "link": article.get("link", ""),
             "pub_date": pub_date,
         }
@@ -161,11 +163,13 @@ def get_global_news_yfinance(
 
     try:
         for query in search_queries:
-            search = yf_retry(lambda q=query: yf.Search(
-                query=q,
-                news_count=limit,
-                enable_fuzzy_query=True,
-            ))
+            search = yf_retry(
+                lambda q=query: yf.Search(
+                    query=q,
+                    news_count=limit,
+                    enable_fuzzy_query=True,
+                )
+            )
 
             if search.news:
                 for article in search.news:

@@ -44,15 +44,36 @@ def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.
         logger.warning("StockTwits fetch failed for %s: %s", ticker, exc)
         return f"<stocktwits unavailable: {type(exc).__name__}>"
 
-    messages = data.get("messages", []) if isinstance(data, dict) else []
+    if not isinstance(data, dict):
+        data = {}
+
+    # Identity echo: when the response names the symbol it is streaming, a
+    # mismatch means the vendor answered for a different instrument — degrade
+    # and disclose rather than render another symbol's sentiment (#36).
+    echoed = (data.get("symbol") or {}).get("symbol")
+    if isinstance(echoed, str) and echoed.upper() != ticker.upper():
+        logger.warning(
+            "StockTwits symbol mismatch: requested %s, response is for %s",
+            ticker.upper(),
+            echoed.upper(),
+        )
+        return (
+            f"<stocktwits unavailable: symbol mismatch "
+            f"(requested {ticker.upper()}, response is for {echoed.upper()})>"
+        )
+
+    messages = data.get("messages", [])
     if not messages:
         return f"<no StockTwits messages found for ${ticker.upper()}>"
 
     lines = []
     bullish = bearish = unlabeled = 0
     for m in messages[:limit]:
-        created = m.get("created_at", "")
-        user = (m.get("user") or {}).get("username", "?")
+        # Missing fields get explicit unavailability markers, not values that
+        # render like a real timestamp or a user named "?".
+        created = m.get("created_at") or "[time unknown]"
+        username = (m.get("user") or {}).get("username")
+        user = f"@{username}" if username else "[unknown user]"
         entities = m.get("entities") or {}
         sentiment_obj = entities.get("sentiment") or {}
         sentiment = sentiment_obj.get("basic") if isinstance(sentiment_obj, dict) else None
@@ -69,7 +90,7 @@ def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.
         else:
             unlabeled += 1
             tag = "no-label"
-        lines.append(f"[{created} · @{user} · {tag}] {body}")
+        lines.append(f"[{created} · {user} · {tag}] {body}")
 
     total = bullish + bearish + unlabeled
     bull_pct = round(100 * bullish / total) if total else 0

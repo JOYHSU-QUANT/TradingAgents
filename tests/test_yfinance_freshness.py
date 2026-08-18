@@ -42,9 +42,12 @@ class TestStatementLagNote:
         # Newest period 2025-01-31 vs analysis date 2026-08-18 (> 180 days).
         _patch_ticker(monkeypatch, **{attr: _statement("2025-01-31")})
         out = method("AAPL", "quarterly", "2026-08-18")
-        assert "Data lag" in out
-        assert phrase in out
-        assert "2025-01-31" in out
+        # Pin the date inside the note line itself — the CSV header also
+        # contains it, so a bare substring check could pass vacuously.
+        note_line = next((line for line in out.splitlines() if "Data lag" in line), "")
+        assert note_line, out
+        assert phrase in note_line
+        assert "2025-01-31" in note_line
 
     def test_normal_cadence_has_no_note(self, monkeypatch):
         # 49 days behind is a freshly filed quarter, not a stall.

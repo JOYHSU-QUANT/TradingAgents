@@ -171,8 +171,9 @@ class TestFreshness:
         payload = {"messages": [_message(created_at=f"{_day(30)}T14:30:00Z")]}
         with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
             out = stocktwits.fetch_stocktwits_messages("NVDA", curr_date=_day(0))
+        # The message line also carries the date, so pin it to the note line.
         assert out.startswith("_Data lag")
-        assert _day(30) in out
+        assert _day(30) in out.splitlines()[0]
         assert "to the moon" in out  # content still rendered below the note
 
     def test_fresh_stream_has_no_note(self):

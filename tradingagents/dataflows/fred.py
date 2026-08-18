@@ -261,7 +261,9 @@ def get_macro_data(
     if max_lag is not None:
         lag_note = data_lag_note(last_date, curr_date, max_lag, f"{series_id} observation")
         if lag_note:
-            lag_note += "\n"
+            # Leading blank line so the note renders as its own markdown
+            # paragraph instead of a soft continuation of the Latest line.
+            lag_note = "\n" + lag_note + "\n"
 
     shown = points
     truncation_note = ""

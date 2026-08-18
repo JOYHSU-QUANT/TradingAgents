@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 
 import requests
 
+from .utils import live_snapshot_note
+
 logger = logging.getLogger(__name__)
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
@@ -64,7 +66,9 @@ def _is_forward_looking(market: dict, now: datetime) -> bool:
     )
 
 
-def get_prediction_markets(topic: str, limit: int | None = None) -> str:
+def get_prediction_markets(
+    topic: str, limit: int | None = None, curr_date: str | None = None
+) -> str:
     """Return live prediction-market probabilities for an event topic.
 
     Args:
@@ -72,6 +76,12 @@ def get_prediction_markets(topic: str, limit: int | None = None) -> str:
             "US election", or a sector/company event.
         limit: Max markets to return (ranked by traded volume); ``None`` uses
             DEFAULT_LIMIT.
+        curr_date: The date being analysed (yyyy-mm-dd). Prices are always
+            fetched live; when curr_date sits behind the wall clock (beyond
+            the shared live-snapshot bound) the report leads with a
+            disclosure so today's odds are not read as that date's odds.
+            ``None`` skips the check. The open/forward-looking filter stays
+            on the wall clock either way — the prices are today's regardless.
 
     Returns:
         A markdown report of the most-traded open markets matching the topic,
@@ -105,6 +115,10 @@ def get_prediction_markets(topic: str, limit: int | None = None) -> str:
         f"more reliable). A probability is the crowd's priced odds of the event, "
         f"not a forecast you should take as certain.\n\n"
     )
+    if curr_date:
+        snapshot_note = live_snapshot_note(curr_date, "prediction-market probabilities are")
+        if snapshot_note:
+            header += snapshot_note + "\n\n"
 
     if not candidates:
         return header + (

@@ -255,14 +255,23 @@ class TestOptionalCategoryWrappers:
             prediction_markets_tools,
             prediction_markets_tools.get_prediction_markets,
             {"topic": "fed rate", "limit": 3},
-        ) == ("get_prediction_markets", "fed rate", 3)
+        ) == ("get_prediction_markets", "fed rate", 3, None)
 
     def test_get_prediction_markets_leaves_the_limit_default_to_the_router(self):
         assert _forwarded(
             prediction_markets_tools,
             prediction_markets_tools.get_prediction_markets,
             {"topic": "fed rate"},
-        ) == ("get_prediction_markets", "fed rate", None)
+        ) == ("get_prediction_markets", "fed rate", None, None)
+
+    def test_get_prediction_markets_forwards_curr_date_last(self):
+        # curr_date drives the live-price disclosure (#30); a swap with limit
+        # would silently disable it, so pin the position.
+        assert _forwarded(
+            prediction_markets_tools,
+            prediction_markets_tools.get_prediction_markets,
+            {"topic": "fed rate", "limit": 3, "curr_date": DATE},
+        ) == ("get_prediction_markets", "fed rate", 3, DATE)
 
 
 @pytest.mark.unit

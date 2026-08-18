@@ -19,10 +19,18 @@ import json
 import logging
 from urllib.request import Request, urlopen
 
+from .utils import data_lag_note, live_snapshot_note
+
 logger = logging.getLogger(__name__)
 
 _API = "https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
 _UA = "tradingagents/0.2 (+https://github.com/TauricResearch/TradingAgents)"
+
+# Maximum age (calendar days) of the newest rendered message relative to the
+# analysis date before the block carries a data-lag disclosure. Active symbols
+# see posts daily; when even the newest message is a week old the stream is
+# effectively stalled and the summary percentages describe stale chatter (#30).
+MAX_MESSAGE_LAG_DAYS = 7
 
 
 def _symbols_match(requested: str, echoed: str) -> bool:
@@ -33,9 +41,23 @@ def _symbols_match(requested: str, echoed: str) -> bool:
     return r == e or e == f"{r}.X" or r == f"{e}.X"
 
 
-def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.0) -> str:
+def fetch_stocktwits_messages(
+    ticker: str,
+    limit: int = 30,
+    timeout: float = 10.0,
+    curr_date: str | None = None,
+) -> str:
     """Fetch recent StockTwits messages for ``ticker`` and return them as a
     formatted plaintext block ready for prompt injection.
+
+    ``curr_date`` (yyyy-mm-dd) is the date being analysed. The stream is
+    live-only (no historical query), so when curr_date sits behind the wall
+    clock (a backtest) the block leads with a live-snapshot disclosure —
+    today's chatter must not read as that date's sentiment. Otherwise, when
+    the newest rendered message trails curr_date by more than
+    MAX_MESSAGE_LAG_DAYS, it leads with a data-lag disclosure so a stalled
+    stream cannot read as current sentiment (#30). ``None`` skips both checks
+    (legacy callers).
 
     Returns a placeholder string when the endpoint is unreachable, the
     symbol has no messages, or the response shape is unexpected — the
@@ -92,6 +114,20 @@ def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.
     if not messages:
         return f"<no StockTwits messages found for ${ticker.upper()}>"
 
+    # Newest rendered-message date, for the freshness note below. Computed
+    # over the same slice the loop renders, but outside it so the render loop
+    # stays pure formatting. ISO date prefixes compare lexicographically, so
+    # max() needs no parsing; data_lag_note degrades to no note if the prefix
+    # isn't a real date.
+    newest_date = max(
+        (
+            c[:10]
+            for m in messages[:limit]
+            if isinstance(c := m.get("created_at"), str) and len(c) >= 10
+        ),
+        default=None,
+    )
+
     lines = []
     bullish = bearish = unlabeled = 0
     for m in messages[:limit]:
@@ -131,4 +167,16 @@ def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.
         f"Unlabeled: {unlabeled} · "
         f"Total: {total} most-recent messages"
     )
-    return summary + "\n\n" + "\n".join(lines)
+    note = ""
+    if curr_date:
+        # Backtest first: the stream is live-only, so an analysis date behind
+        # the wall clock means these are *today's* messages — disclose that,
+        # and skip the lag check (a historical date cannot meaningfully trail
+        # a live stream). Otherwise flag a stalled stream via the newest
+        # rendered message's age.
+        note = live_snapshot_note(curr_date, "these StockTwits messages are")
+        if not note and newest_date:
+            note = data_lag_note(newest_date, curr_date, MAX_MESSAGE_LAG_DAYS, "StockTwits message")
+        if note:
+            note += "\n\n"
+    return note + summary + "\n\n" + "\n".join(lines)

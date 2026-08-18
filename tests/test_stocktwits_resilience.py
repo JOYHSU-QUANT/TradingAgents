@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import http.client
 import json
+from datetime import datetime, timedelta
 from unittest.mock import patch
 from urllib.error import HTTPError
 
@@ -151,6 +152,73 @@ class TestSymbolEcho:
         with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
             out = stocktwits.fetch_stocktwits_messages("BRK.B")
         assert out.startswith("<stocktwits unavailable")
+
+
+def _day(days_back: int) -> str:
+    """yyyy-mm-dd for ``days_back`` calendar days before the real today.
+
+    The stream is live-only, so the freshness checks are anchored on the wall
+    clock — fixed literal dates would drift as the suite ages."""
+    return (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+
+
+@pytest.mark.unit
+class TestFreshness:
+    """Live-only stream (#30): a backtest date gets a live-snapshot
+    disclosure; a stalled stream at the current date gets a data-lag note."""
+
+    def test_stalled_stream_leads_with_lag_note(self):
+        payload = {"messages": [_message(created_at=f"{_day(30)}T14:30:00Z")]}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("NVDA", curr_date=_day(0))
+        assert out.startswith("_Data lag")
+        assert _day(30) in out
+        assert "to the moon" in out  # content still rendered below the note
+
+    def test_fresh_stream_has_no_note(self):
+        payload = {"messages": [_message(created_at=f"{_day(1)}T09:00:00Z")]}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("NVDA", curr_date=_day(0))
+        assert "Data lag" not in out
+        assert "live values" not in out
+
+    def test_backtest_date_gets_live_snapshot_disclosure_not_lag_note(self):
+        # Messages postdate a historical analysis date: that is look-ahead,
+        # not staleness — the block must say these are today's messages.
+        payload = {"messages": [_message(created_at=f"{_day(0)}T09:00:00Z")]}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("NVDA", curr_date="2020-03-16")
+        assert out.startswith("_Note:")
+        assert "live values" in out
+        assert "Data lag" not in out
+        assert "to the moon" in out
+
+    def test_no_curr_date_skips_both_checks(self):
+        # Legacy call shape: an old stream without curr_date renders as before.
+        payload = {"messages": [_message(created_at="2026-01-01T00:00:00Z")]}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("NVDA")
+        assert "Data lag" not in out
+        assert "live values" not in out
+
+    def test_newest_message_governs_not_oldest(self):
+        # One fresh message among old ones means the stream is alive.
+        payload = {
+            "messages": [
+                _message(created_at=f"{_day(200)}T00:00:00Z"),
+                _message(created_at=f"{_day(1)}T09:00:00Z"),
+            ]
+        }
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("NVDA", curr_date=_day(0))
+        assert "Data lag" not in out
+
+    def test_unparseable_timestamps_degrade_to_no_note(self):
+        payload = {"messages": [_message(created_at="???"), _message(created_at=None)]}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("NVDA", curr_date=_day(0))
+        assert "Data lag" not in out
+        assert "Total: 2" in out  # never-raises contract intact
 
 
 @pytest.mark.unit

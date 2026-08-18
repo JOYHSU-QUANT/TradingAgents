@@ -250,3 +250,118 @@ def test_global_news_none_optionals_resolve_to_defaults_before_clamp(monkeypatch
     avn.get_global_news("2026-06-05", look_back_days=None, limit=None)
     assert captured["limit"] == "50"
     assert captured["time_from"] == "20260529T0000"  # default 7-day lookback
+
+
+# ---------------------------------------------------------------------------
+# Freshness annotations (#30)
+
+
+@pytest.mark.unit
+def test_indicator_lag_note_when_series_stalls(monkeypatch):
+    # Newest surviving row 2026-05-02 vs curr_date 2026-06-01 (> 7 days).
+    csv = "time,RSI\n2026-05-01,55.0\n2026-05-02,56.0"
+    monkeypatch.setattr(avi, "_make_api_request", lambda *a, **k: csv)
+    out = avi.get_indicator("AAPL", "rsi", "2026-06-01", 60)
+    assert "Data lag" in out
+    assert "2026-05-02" in out
+
+
+@pytest.mark.unit
+def test_indicator_no_note_on_fresh_series(monkeypatch):
+    csv = "time,RSI\n2026-05-29,55.0\n2026-05-30,56.0"
+    monkeypatch.setattr(avi, "_make_api_request", lambda *a, **k: csv)
+    out = avi.get_indicator("AAPL", "rsi", "2026-06-01", 30)
+    assert "Data lag" not in out
+
+
+@pytest.mark.unit
+def test_indicator_bound_is_interval_aware(monkeypatch):
+    # A monthly bar ~31 days back is on-cadence, not stale; the same gap on
+    # the daily interval must note. Flat 7-day bound would false-alarm every
+    # monthly call.
+    csv = "time,RSI\n2026-04-01,55.0\n2026-05-01,56.0"
+    monkeypatch.setattr(avi, "_make_api_request", lambda *a, **k: csv)
+    monthly = avi.get_indicator("AAPL", "rsi", "2026-06-01", 180, interval="monthly")
+    assert "Data lag" not in monthly
+    daily = avi.get_indicator("AAPL", "rsi", "2026-06-01", 180, interval="daily")
+    assert "Data lag" in daily
+
+
+@pytest.mark.unit
+def test_indicator_unknown_interval_never_notes(monkeypatch):
+    # Same must-not-false-alarm rule as fred's frequency map: an unmapped
+    # cadence gets no note even when the newest row is far back.
+    csv = "time,RSI\n2026-01-01,55.0"
+    monkeypatch.setattr(avi, "_make_api_request", lambda *a, **k: csv)
+    out = avi.get_indicator("AAPL", "rsi", "2026-06-01", 365, interval="60min")
+    assert "Data lag" not in out
+
+
+_DAILY_CSV = (
+    "timestamp,open,high,low,close,adjusted_close,volume\n"
+    "2026-05-01,10,11,9,10.5,10.5,1000\n"
+    "2026-05-02,10.5,12,10,11.0,11.0,1200"
+)
+
+
+@pytest.mark.unit
+def test_stock_all_rows_filtered_out_raises_no_market_data(monkeypatch):
+    # A header-only CSV read as a successful fetch is the dishonest legacy
+    # behavior; the router needs a typed error to fall back / emit the
+    # sentinel (#30, mirroring the yfinance empty-frame raise).
+    import tradingagents.dataflows.alpha_vantage_stock as avs
+    from tradingagents.dataflows.errors import NoMarketDataError
+
+    monkeypatch.setattr(avs, "_make_api_request", lambda *a, **k: _DAILY_CSV)
+    with pytest.raises(NoMarketDataError):
+        avs.get_stock("AAPL", "2026-07-01", "2026-07-31")
+
+
+@pytest.mark.unit
+def test_stock_blank_body_raises_no_market_data(monkeypatch):
+    # An empty body passes through the range filter untouched; it must surface
+    # as no data, not render as an empty success.
+    import tradingagents.dataflows.alpha_vantage_stock as avs
+    from tradingagents.dataflows.errors import NoMarketDataError
+
+    monkeypatch.setattr(avs, "_make_api_request", lambda *a, **k: "")
+    with pytest.raises(NoMarketDataError):
+        avs.get_stock("AAPL", "2026-07-01", "2026-07-31")
+
+
+@pytest.mark.unit
+def test_stock_stale_rows_raise_like_the_yfinance_path(monkeypatch):
+    # Rows exist in range but the newest (2026-05-02) trails end_date by more
+    # than MAX_STOCK_LAG_DAYS. The yfinance path raises on this exact gap
+    # (_assert_ohlcv_not_stale); an annotated success here would let a stalled
+    # Alpha Vantage feed short-circuit the vendor chain, so this path must
+    # raise too.
+    import tradingagents.dataflows.alpha_vantage_stock as avs
+    from tradingagents.dataflows.errors import NoMarketDataError
+
+    monkeypatch.setattr(avs, "_make_api_request", lambda *a, **k: _DAILY_CSV)
+    with pytest.raises(NoMarketDataError) as exc:
+        avs.get_stock("AAPL", "2026-04-25", "2026-05-30")
+    assert "stale" in str(exc.value)
+    assert "2026-05-02" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_stock_fresh_rows_pass_through_unchanged(monkeypatch):
+    import tradingagents.dataflows.alpha_vantage_stock as avs
+
+    monkeypatch.setattr(avs, "_make_api_request", lambda *a, **k: _DAILY_CSV)
+    out = avs.get_stock("AAPL", "2026-04-25", "2026-05-05")
+    assert "2026-05-01" in out and "2026-05-02" in out
+    assert "Data lag" not in out
+
+
+@pytest.mark.unit
+def test_stock_staleness_bound_matches_yfinance_bound():
+    # The two market-data paths must reject the same gap. Pinned by test
+    # instead of an import because stockstats_utils drags yfinance/stockstats
+    # into what is otherwise a pure-requests vendor module.
+    import tradingagents.dataflows.alpha_vantage_stock as avs
+    import tradingagents.dataflows.stockstats_utils as ssu
+
+    assert avs.MAX_STOCK_LAG_DAYS == ssu.MAX_OHLCV_STALE_DAYS

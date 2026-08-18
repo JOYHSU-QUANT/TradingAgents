@@ -90,6 +90,7 @@ from .sosovalue_common import (
     SoSoValueRateLimitError,
     _cache_dir,
     _cache_rejecter,
+    _concentration_share_str,
     _is_finite_number,
     _is_iso_date,
     _is_non_negative_int,
@@ -354,7 +355,9 @@ class _FlowSnapshot(NamedTuple):
     restatement marker: ``None``, or ``{"date", "old", "new"}`` when the
     earliest overlapping day's cumulative moved (US$m) beyond what that
     day's own flow change explains — history older than the visible window
-    changed.
+    changed. ``refetched`` is True only when this call ran the fetch itself:
+    a cache serve (TTL-fresh or stale) replays revisions/cum_restated
+    computed at the last real fetch, and the disclosures have to say so.
     """
 
     summary_rows: list[dict]
@@ -367,6 +370,7 @@ class _FlowSnapshot(NamedTuple):
     cum_restated: dict | None
     fetched_at: str
     stale: bool
+    refetched: bool
 
 
 def _cache_path(asset: str) -> str:
@@ -773,7 +777,7 @@ def _fetch_all(asset: str, cached: dict | None) -> dict:
     }
 
 
-def _snapshot_from(payload: dict, fetched_at: str, stale: bool) -> _FlowSnapshot:
+def _snapshot_from(payload: dict, fetched_at: str, stale: bool, refetched: bool) -> _FlowSnapshot:
     return _FlowSnapshot(
         summary_rows=payload["summary_rows"],
         funds=payload["funds"],
@@ -785,6 +789,7 @@ def _snapshot_from(payload: dict, fetched_at: str, stale: bool) -> _FlowSnapshot
         cum_restated=payload["cum_restated"],
         fetched_at=fetched_at,
         stale=stale,
+        refetched=refetched,
     )
 
 
@@ -820,7 +825,7 @@ def _load_snapshot(asset: str) -> _FlowSnapshot:
     breakage never absorbed); this module supplies the TTL policy
     (``_cache_ttl_hours``) and the payload shape.
     """
-    payload, fetched_at, stale = load_rolling_snapshot(
+    payload, fetched_at, stale, refetched = load_rolling_snapshot(
         path=_cache_path(asset),
         read_cache=lambda path: _read_cache(path, asset),
         fetch_all=lambda cached: _fetch_all(asset, cached),
@@ -830,7 +835,7 @@ def _load_snapshot(asset: str) -> _FlowSnapshot:
         max_stale_days=MAX_STALE_DAYS,
         log=logger,
     )
-    return _snapshot_from(payload, fetched_at, stale)
+    return _snapshot_from(payload, fetched_at, stale, refetched)
 
 
 def _classify_asset(asset: str) -> tuple[str | None, bool]:
@@ -1013,15 +1018,25 @@ def get_etf_flow_data(
     # the visible dates keeps a revised not-yet-visible row from leaking
     # through the lookahead guard.
     visible_dates = {r["date"] for r in visible}
-    # On a stale serve either refresh-diff disclosure below is as old as the
-    # snapshot itself and would otherwise be restated verbatim on every call
-    # of an outage (up to the 14-day cap), reading as recurring activity.
-    stale_note = (
-        " This disclosure dates from when the stale snapshot above was last "
-        "refreshed, not from this call."
-        if snapshot.stale
-        else ""
-    )
+    # ANY cache serve — TTL-fresh or stale — replays refresh-diff disclosures
+    # computed at the last real fetch: without a provenance note, repeat calls
+    # inside one TTL window (or across an outage, up to the 14-day cap) read
+    # the same revision as that many independent revision events. ``stale``
+    # is only the subset served under the STALE header, so its note may point
+    # at "the stale snapshot above"; a TTL-fresh serve has no such line to
+    # point at and names the fetch stamp instead.
+    if snapshot.refetched:
+        stale_note = ""
+    elif snapshot.stale:
+        stale_note = (
+            " This disclosure dates from when the stale snapshot above was last "
+            "refreshed, not from this call."
+        )
+    else:
+        stale_note = (
+            f" This disclosure dates from when the snapshot was last refreshed "
+            f"(fetched {snapshot.fetched_at}), not from this call."
+        )
     revised = sorted((d, pair) for d, pair in snapshot.revisions.items() if d in visible_dates)
     if revised:
         rows_by_date = {r["date"]: r for r in visible}
@@ -1215,9 +1230,16 @@ def get_etf_flow_data(
             )
 
     # With failed histories in the mix, "no fund" would claim knowledge of
-    # filings those histories never delivered. The Latest and leaders lines
-    # share this one scope word so the two co-rendered claims cannot drift.
-    fund_scope = "no fetched fund" if snapshot.funds_failed else "no fund"
+    # filings those histories never delivered — and an unfetched listing or
+    # dropped listing entries leave the same gap: part (or all) of the
+    # universe was never enumerated, so "no fund" would assert over funds
+    # this client has never seen. The Latest and leaders lines share this one
+    # scope word so the two co-rendered claims cannot drift.
+    fund_scope = (
+        "no fetched fund"
+        if snapshot.funds_failed or snapshot.funds_unusable or not snapshot.list_fetched
+        else "no fund"
+    )
     if latest_unreported:
         latest_line = (
             f"\n**Latest ({latest['date']}):** no flow reported yet — the aggregate for "
@@ -1257,17 +1279,27 @@ def get_etf_flow_data(
     if directional:
         leaders = sorted(directional.items(), key=lambda kv: abs(kv[1]), reverse=True)
         leaders_str = ", ".join(f"{t} {_usd_m(f):+.1f}" for t, f in leaders[:TOP_ISSUERS])
-        gross = sum(abs(f) for f in directional.values())
+        # Gross is summed in the leaders' order: the top-3 numerator below is
+        # a prefix of this same sequence, so a day with <=3 movers yields
+        # exactly 100.0 — summing the same multiset in dict order can fall a
+        # ulp short, which the near-100 band would print as "99.9%" for a
+        # share that IS the whole.
+        gross = sum(abs(f) for _, f in leaders)
         inflow_count = sum(1 for f in directional.values() if f > 0)
         top3_share = sum(abs(f) for _, f in leaders[:3]) / gross * 100
         top_ticker, top_flow = leaders[0]
         flat = reported - len(directional)
         flat_note = f" ({flat} flat)" if flat else ""
+        # Both shares ride the family's near-100 truncation band: "100%" may
+        # only be printed for a share that IS the whole, or a 99.5% top-3
+        # share would round into contradicting the breadth count and the
+        # TOP_ISSUERS leaders line next to it.
         breadth_line = (
             f"**Breadth ({latest['date']}):** {inflow_count} of {reported} "
-            f"reporting funds saw inflows{flat_note}; top-3 funds = {top3_share:.0f}% of "
+            f"reporting funds saw inflows{flat_note}; top-3 funds = "
+            f"{_concentration_share_str(top3_share)} of "
             f"gross flow, largest single fund {top_ticker} = "
-            f"{abs(top_flow) / gross * 100:.0f}% "
+            f"{_concentration_share_str(abs(top_flow) / gross * 100)} "
             f"— distinguishes broad moves from single-fund totals\n"
         )
         leaders_line = f"**Latest-day leaders:** {leaders_str}\n"
@@ -1312,17 +1344,19 @@ def get_etf_flow_data(
                     f"tolerance, so treat it as endpoint noise, not filings still "
                     f"posting\n"
                 )
-            elif snapshot.funds_failed:
-                # With failed histories in the mix, "still posting" is not the
-                # only (or likeliest) explanation — the flow may simply sit
-                # with the funds the breakdown could not fetch, which the
-                # header caveat already discloses.
+            elif snapshot.funds_failed or snapshot.funds_unusable:
+                # With failed histories OR dropped listing entries in the mix,
+                # "still posting" is not the only (or likeliest) explanation —
+                # the flow may simply sit with the funds the breakdown could
+                # not cover, which the header caveat already discloses
+                # (unfetched histories and unusable listing entries have the
+                # same consequence here: filings this client never saw).
                 breadth_line = (
                     f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds "
                     f"saw inflows ({reported} flat) — the aggregate above shows a "
                     f"material net flow that no fetched fund's filing reflects; it "
-                    f"may sit with the unfetched funds flagged above or in filings "
-                    f"still posting\n"
+                    f"may sit with the funds the breakdown could not cover (flagged "
+                    f"above) or in filings still posting\n"
                 )
             else:
                 breadth_line = (
@@ -1378,10 +1412,26 @@ def get_etf_flow_data(
             return "not yet posted"
         return f"{_usd_m(r['total_net_inflow']):+.1f}"
 
+    rendered_rows = [(r["date"], _net_cell(r)) for r in shown]
     table = (
         "\n| Date | Net Flow |\n| --- | --- |\n"
-        + "\n".join(f"| {r['date']} | {_net_cell(r)} |" for r in shown)
+        + "\n".join(f"| {date} | {cell} |" for date, cell in rendered_rows)
         + "\n"
     )
+    # _net_cell tags every unreported row, but the Latest line explains the
+    # ambiguity only for the latest day — an older "not yet posted" cell (a
+    # mid-history publishing gap, or a retracted day) would otherwise be the
+    # one unexplained label in the rows downstream agents most often
+    # re-quote. The latest row is excluded from the trigger (user decision):
+    # its tag is explained by the Latest line via the same predicate, and a
+    # legend there would repeat that sentence nearly verbatim in the routine
+    # today-not-yet-filed report. Reuses fund_scope so the legend cannot
+    # claim fund knowledge the failed/skipped breakdown never delivered.
+    if any(cell == "not yet posted" for date, cell in rendered_rows if date != latest["date"]):
+        table += (
+            f'\n_"not yet posted": the aggregate for that day is zero with '
+            f"{fund_scope} reporting a flow, which this API publishes both for a "
+            f"day issuers have not filed yet and for a genuine zero-flow day._\n"
+        )
 
     return header + summary + note + table

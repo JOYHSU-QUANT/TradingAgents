@@ -864,7 +864,7 @@ def _load_snapshot() -> _MacroSnapshot:
     breakage never absorbed); this module supplies the three-tier TTL policy
     (``_cache_ttl_hours``) and the payload shape.
     """
-    payload, fetched_at, stale = load_rolling_snapshot(
+    payload, fetched_at, stale, _refetched = load_rolling_snapshot(
         path=_cache_path(),
         read_cache=_read_cache,
         fetch_all=lambda cached: _fetch_all(),

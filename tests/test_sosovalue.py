@@ -93,8 +93,12 @@ def _snapshot(
     cum_restated=None,
     fetched_at="2026-07-09T00:00:00Z",
     stale=False,
+    refetched=None,
 ):
     funds = FUNDS if funds is None else funds
+    # Default refetched to "this call fetched live" unless the snapshot is a
+    # stale serve (stale is a subset of cache-served); a test exercising the
+    # TTL-fresh replay note passes refetched=False explicitly.
     return sosovalue._FlowSnapshot(
         summary_rows=SUMMARY_RECS if summary is None else summary,
         funds=funds,
@@ -106,6 +110,7 @@ def _snapshot(
         cum_restated=cum_restated,
         fetched_at=fetched_at,
         stale=stale,
+        refetched=not stale if refetched is None else refetched,
     )
 
 
@@ -698,9 +703,155 @@ class TestRender:
             snapshot=_snapshot(summary=recs, funds=funds, funds_total=2, funds_failed=["BBB"]),
         )
         assert "no fetched fund's filing reflects" in out
-        assert "may sit with the unfetched funds flagged above or in filings still posting" in out
+        assert (
+            "may sit with the funds the breakdown could not cover (flagged above) "
+            "or in filings still posting" in out
+        )
         assert "likely still posting" not in out
         assert "cover only the 1 fetched fund" in out
+
+    def test_material_aggregate_with_flat_filings_and_unusable_entries_names_both_causes(self):
+        # Dropped listing entries leave the same gap as failed histories: the
+        # flow may sit with funds this client never enumerated, so the verdict
+        # must not single out "still posting" — previously only funds_failed
+        # was hedged and this state fell into the unconditional claim.
+        recs = [_srow("2026-07-01", 5.0), _srow("2026-07-02", 250.0)]
+        funds = {"AAA": {"name": "A", "rows": [_frow("2026-07-02", 0.0)]}}
+        out = self._render(
+            "2026-07-02",
+            snapshot=_snapshot(summary=recs, funds=funds, funds_total=1, funds_unusable=1),
+        )
+        assert (
+            "may sit with the funds the breakdown could not cover (flagged above) "
+            "or in filings still posting" in out
+        )
+        assert "likely still posting" not in out
+
+    def test_unreported_latest_with_unfetched_listing_hedges_the_scope(self):
+        # list_fetched=False leaves the fund universe unenumerated: "no fund
+        # reporting a flow" would assert over funds this client never saw.
+        recs = [_srow("2026-07-01", 5.0), _srow("2026-07-02", 0.0)]
+        out = self._render(
+            "2026-07-02",
+            snapshot=_snapshot(summary=recs, funds={}, funds_total=0, list_fetched=False),
+        )
+        assert "with no fetched fund reporting a flow" in out
+
+    def test_unreported_latest_with_unusable_entries_hedges_the_scope(self):
+        # Same hedge for dropped listing entries: part of the universe was
+        # never enumerated, so the unreported-day claim scopes to fetched funds.
+        recs = [_srow("2026-07-01", 5.0), _srow("2026-07-02", 0.0)]
+        funds = {"AAA": {"name": "A", "rows": [_frow("2026-07-01", 5.0)]}}
+        out = self._render(
+            "2026-07-02",
+            snapshot=_snapshot(summary=recs, funds=funds, funds_total=1, funds_unusable=1),
+        )
+        assert "with no fetched fund reporting a flow" in out
+
+    def test_cache_served_revision_note_names_the_fetch_stamp(self):
+        # A TTL-fresh serve replays the revision computed at the last real
+        # fetch: without a provenance note, repeat calls in one TTL window
+        # read the same revision as that many independent revision events.
+        # No STALE line exists to point at, so the note names the fetch stamp.
+        recs = [_srow("2026-07-01", 5.0), _srow("2026-07-02", 100.0)]
+        out = self._render(
+            "2026-07-02",
+            snapshot=_snapshot(
+                summary=recs, revisions={"2026-07-02": [50.0, 100.0]}, refetched=False
+            ),
+        )
+        assert "_Revision:" in out
+        assert (
+            "This disclosure dates from when the snapshot was last refreshed "
+            "(fetched 2026-07-09T00:00:00Z), not from this call." in out
+        )
+
+    def test_live_fetch_revision_carries_no_provenance_note(self):
+        # The counterpart: a revision computed by THIS call's fetch really is
+        # news of this call, and a boilerplate note would dilute the real one.
+        recs = [_srow("2026-07-01", 5.0), _srow("2026-07-02", 100.0)]
+        out = self._render(
+            "2026-07-02",
+            snapshot=_snapshot(summary=recs, revisions={"2026-07-02": [50.0, 100.0]}),
+        )
+        assert "_Revision:" in out
+        assert "This disclosure dates from" not in out
+
+    def test_stale_served_revision_note_still_points_at_the_stale_line(self):
+        # The stale serve keeps its own wording: its report carries a STALE
+        # header line the note can (and should) point at.
+        recs = [_srow("2026-07-01", 5.0), _srow("2026-07-02", 100.0)]
+        out = self._render(
+            "2026-07-02",
+            snapshot=_snapshot(summary=recs, revisions={"2026-07-02": [50.0, 100.0]}, stale=True),
+        )
+        assert "This disclosure dates from when the stale snapshot above was last refreshed" in out
+
+    def test_cache_served_restatement_note_names_the_fetch_stamp(self):
+        # The cum_restated caveat rides the same provenance note as the
+        # revision caveat — the two must not diverge on cache-serve replays.
+        recs = [_srow("2026-07-01", 5.0), _srow("2026-07-02", 100.0)]
+        out = self._render(
+            "2026-07-02",
+            snapshot=_snapshot(
+                summary=recs,
+                cum_restated={"date": "2026-07-02", "old": 1.0, "new": 2.0},
+                refetched=False,
+            ),
+        )
+        assert "_Restatement:" in out
+        assert (
+            "This disclosure dates from when the snapshot was last refreshed "
+            "(fetched 2026-07-09T00:00:00Z), not from this call." in out
+        )
+
+    def test_unposted_cell_gets_a_table_legend(self):
+        # _net_cell tags every unreported row but the Latest line explains the
+        # ambiguity only when the LATEST day is unreported: an older tagged
+        # cell relies on the legend under the table.
+        recs = [_srow("2026-07-01", 5.0), _srow("2026-07-02", 0.0), _srow("2026-07-03", 7.0)]
+        funds = {"AAA": {"name": "A", "rows": [_frow("2026-07-01", 5.0), _frow("2026-07-03", 7.0)]}}
+        out = self._render("2026-07-03", snapshot=_snapshot(summary=recs, funds=funds))
+        assert "| 2026-07-02 | not yet posted |" in out
+        assert (
+            '_"not yet posted": the aggregate for that day is zero with no fund '
+            "reporting a flow" in out
+        )
+
+    def test_table_without_unposted_cells_has_no_legend(self):
+        # The legend must not render as boilerplate under a table with no
+        # tagged cell to explain.
+        recs = [_srow("2026-07-01", 5.0), _srow("2026-07-02", 7.0)]
+        out = self._render("2026-07-02", snapshot=_snapshot(summary=recs))
+        assert '"not yet posted":' not in out
+
+    def test_latest_only_unposted_table_has_no_legend(self):
+        # The Latest line already explains the latest row's tag via the same
+        # predicate; re-triggering the legend there would repeat the sentence
+        # nearly verbatim in every routine today-not-yet-filed report (user
+        # decision: suppress).
+        recs = [_srow("2026-07-01", 5.0), _srow("2026-07-02", 0.0)]
+        funds = {"AAA": {"name": "A", "rows": [_frow("2026-07-01", 5.0)]}}
+        out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds=funds))
+        assert "**Latest (2026-07-02):** no flow reported yet" in out
+        assert "| 2026-07-02 | not yet posted |" in out
+        assert '_"not yet posted":' not in out
+
+    def test_breadth_shares_never_round_to_a_false_100(self):
+        # A 99.5% top-3 share under .0f rounds to "100%" right next to a
+        # four-fund breadth count and a TOP_ISSUERS leaders line that show
+        # otherwise. The near-100 band is truncated instead (the treasuries
+        # module's decided fix, now shared).
+        recs = [_srow("2026-07-01", 5.0), _srow("2026-07-02", 995.0)]
+        funds = {
+            "AAA": {"name": "A", "rows": [_frow("2026-07-02", 500.0)]},
+            "BBB": {"name": "B", "rows": [_frow("2026-07-02", 300.0)]},
+            "CCC": {"name": "C", "rows": [_frow("2026-07-02", 195.0)]},
+            "DDD": {"name": "D", "rows": [_frow("2026-07-02", 5.0)]},
+        }
+        out = self._render("2026-07-02", snapshot=_snapshot(summary=recs, funds=funds))
+        assert "top-3 funds = 99.5% of" in out
+        assert "top-3 funds = 100% of" not in out
 
     def test_leaders_truncation_and_top3_slice_are_pinned(self):
         # Six directional funds with distinct magnitudes: the leaders line

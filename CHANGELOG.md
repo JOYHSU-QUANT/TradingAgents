@@ -377,6 +377,17 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **SoSoValue cache-read plumbing deduplicated.** The remaining two
+  near-verbatim copies the earlier extraction left behind now live once in
+  `sosovalue_common.py`: the cache-file read preamble every `_read_cache`
+  opens with (`_read_cache_preamble`, with `_cache_rejecter` owning the
+  rejection-log format) and the macro/treasuries dated-history-row shape
+  skeleton (`_valid_dated_rows`; the ETF module's `summary_rows` deliberately
+  stay on their own strictly-ascending check), plus the shared
+  non-negative-count predicate (`_is_non_negative_int`). Behaviour, log
+  wording, and rendered reports are unchanged (verified byte-identical
+  against fixed cache fixtures).
+
 - **Vendor plumbing deduplicated; a disabled news category is no longer
   advertised.** The SoSoValue vendor family's three near-verbatim copies of the
   cache/TTL/stale-fallback discipline and the two twin per-item sweep loops

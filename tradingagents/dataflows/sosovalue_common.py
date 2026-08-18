@@ -8,12 +8,15 @@ several product modules off one base URL, one ``x-soso-api-key`` header, one
 BTC corporate treasuries (``sosovalue_treasuries.py``) — share that plumbing
 here: the error taxonomy, API-key retrieval and sanitization, the request
 helper with its redaction discipline, the value/date/ticker trust-boundary
-predicates, the clock and cache-age helpers every rolling-snapshot cache
-shares, and the two orchestration skeletons the modules used to carry as
-near-verbatim copies — the cache/TTL/stale-fallback discipline
-(``load_rolling_snapshot``, all three) and the per-item sweep with its 429
-drain and consecutive-network-failure breaker (``fetch_each``, macro and
-treasuries only; the ETF fund loop keeps its older semantics). Anything
+predicates (including the dated-history-row shape skeleton
+``_valid_dated_rows``, macro and treasuries), the clock and cache-age helpers
+every rolling-snapshot cache shares, the cache-file read preamble every
+``_read_cache`` opens with (``_read_cache_preamble``, all three), and the two
+orchestration skeletons the modules used to carry as near-verbatim copies —
+the cache/TTL/stale-fallback discipline (``load_rolling_snapshot``, all
+three) and the per-item sweep with its 429 drain and
+consecutive-network-failure breaker (``fetch_each``, macro and treasuries
+only; the ETF fund loop keeps its older semantics). Anything
 module-specific (parsers, snapshot shapes, cache payloads, TTL policy,
 report rendering, the vendor-success threshold) stays in the vendor modules.
 
@@ -304,6 +307,47 @@ def _is_safe_text(x: object, max_len: int, *, min_len: int = 1, stripped: bool =
     )
 
 
+def _is_non_negative_int(x: object) -> bool:
+    """True only for a real int >= 0 (bool is an int subclass and must not pass).
+
+    The plain non-negative count fields the cache payloads carry (fund /
+    calendar / company tallies) share this check — except treasuries'
+    ``companies_total``, whose bound is relational (no smaller than the
+    selection, which subsumes non-negativity) and stays with its validator.
+    Hand-written, the bool exclusion is the clause a new field's author
+    forgets, letting a JSON ``true`` validate as 1.
+    """
+    return isinstance(x, int) and not isinstance(x, bool) and x >= 0
+
+
+def _valid_dated_rows(rows: object, *, max_rows: int, row_ok: Callable[[dict], bool]) -> bool:
+    """The family's dated-history-row shape check; ``row_ok`` holds the fields.
+
+    The skeleton the macro and treasuries cache validators used to carry as
+    near-verbatim copies: a non-empty list within the module's read-side row
+    cap (a file written before the cap existed, or by hand, must cost one
+    refetch rather than be re-validated in full on every read forever), each
+    row a dict with a canonical ISO ``date``, and the dates non-descending —
+    NOT strictly ascending: duplicate dates are legal (two prints or
+    disclosures released on one day) and preserved by the parsers. The ETF
+    module's ``summary_rows`` are deliberately NOT on this skeleton: its
+    render sums rows and reads ``visible[-1]`` as the latest day, so its
+    validator demands strictly-ascending dates — folding it in here would
+    re-admit the duplicate-date double-count that check exists to reject.
+    Only the per-field rules differ between the callers, so they arrive as
+    ``row_ok``, which runs after the dict and date checks — it may assume a
+    dict carrying a valid ``date`` and nothing more: probe every other field
+    with ``.get()`` or a presence check, or a cache file missing that field
+    would raise a raw KeyError here instead of costing one refetch.
+    """
+    if not (isinstance(rows, list) and rows and len(rows) <= max_rows):
+        return False
+    if not all(isinstance(r, dict) and _is_iso_date(r.get("date")) and row_ok(r) for r in rows):
+        return False
+    dates = [r["date"] for r in rows]
+    return all(a <= b for a, b in zip(dates, dates[1:], strict=False))
+
+
 def _utc_now() -> datetime:
     """The single UTC clock source (tests patch this one function)."""
     return datetime.now(timezone.utc)
@@ -393,6 +437,51 @@ def _cache_dir() -> str:
     cache_dir = get_config()["data_cache_dir"]
     os.makedirs(cache_dir, exist_ok=True)
     return cache_dir
+
+
+def _cache_rejecter(path: str, *, cache_name: str, log: logging.Logger) -> Callable[[str], None]:
+    """Build a module's cache-rejection logger: warn with its cache name, return None.
+
+    The one owner of the rejection log format — each module used to carry its
+    own near-verbatim closure (identical but for its hardcoded cache display
+    name), so a wording change (or a new diagnostic field) meant three edits,
+    and a missed one left operators grepping for a format
+    only some caches emit. ``cache_name`` is the same display name the module
+    passes to ``load_rolling_snapshot``, so the read and write sides of one
+    cache file name it identically; ``log`` keeps per-module attribution.
+    """
+
+    def reject(reason: str) -> None:
+        log.warning("Ignoring %s %s: %s", cache_name, path, reason)
+        return None
+
+    return reject
+
+
+def _read_cache_preamble(path: str, *, reject: Callable[[str], None]) -> dict | None:
+    """Open/parse ``path`` and hand back the payload dict, or None if unusable.
+
+    The preamble the family's three ``_read_cache`` validators open with,
+    before their module-specific field validation: a missing file is an
+    ordinary miss (no cache yet, nothing to log), an unreadable or non-JSON
+    file is rejected through the module's ``reject`` (see ``_cache_rejecter``),
+    and a top-level value that is not a JSON object is rejected the same way —
+    every later field check subscripts a dict. Both rejection paths return
+    None structurally rather than trusting ``reject``'s return value, so a
+    rejected file can never come back as a payload.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        reject(f"unreadable ({e})")
+        return None
+    if not isinstance(payload, dict):
+        reject(f"top-level JSON is a {type(payload).__name__}, expected an object")
+        return None
+    return payload
 
 
 def _sign(value: float) -> int:

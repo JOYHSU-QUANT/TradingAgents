@@ -776,6 +776,18 @@ class TestCacheAndLoad:
         assert snapshot.stale is False
         assert impl.calls == []
 
+    def test_cache_write_failure_is_non_fatal(self, tmp_path, monkeypatch, caplog):
+        # Mirrors the ETF and treasuries suites: a full disk must degrade to a
+        # logged warning and a served (uncached) snapshot, not a vendor failure.
+        self._setup(tmp_path, monkeypatch)
+        with (
+            mock.patch.object(sosovalue_common.json, "dump", side_effect=OSError("disk full")),
+            caplog.at_level("WARNING"),
+        ):
+            snapshot = sosovalue_macro._load_snapshot()
+        assert snapshot.stale is False
+        assert "Could not write SoSoValue macro cache" in caplog.text
+
     def test_a_truncation_count_without_a_full_calendar_rejects_the_cache(
         self, tmp_path, monkeypatch
     ):

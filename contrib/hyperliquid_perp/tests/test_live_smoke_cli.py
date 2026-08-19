@@ -38,7 +38,12 @@ from contrib.hyperliquid_perp.live.smoke import SMOKE_TEST_KEYS
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 
-from .conftest import echo_order_status_cloid
+from .conftest import (
+    assert_paired_sweep_refreshes,
+    assert_payload_dir,
+    echo_order_status_cloid,
+    record_reconciliation_sweep_wiring,
+)
 from .test_cli import _seed_live_run_with_genesis_subset as _seed_genesis_run
 from .test_live_startup import _clearinghouse
 from .test_live_validation import _healthy
@@ -50,6 +55,9 @@ _SMOKE_WALLET = "0x" + "aa" * 20
 _SMOKE_KEY = "0x" + "11" * 32
 _SMOKE_ENV = "HYPERLIQUID_AGENT_KEY_TESTNET"
 _AGENT_ADDR = "0x" + "cc" * 20
+# One real suite runs this many §19.1 recoveries: the per-invocation
+# pre-flight (smoke.py's order-placing selection) plus restart tests 15-17.
+_SMOKE_RECOVERIES = 4
 
 
 def _smoke_yaml(
@@ -370,6 +378,50 @@ def test_the_cli_hands_the_fill_processor_the_signed_wallet(tmp_path, monkeypatc
     assert cli_main(["live-smoke", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)]) == 0
     assert seen, "no LiveFillProcessor was constructed - the pin proves nothing"
     assert all(value == _SMOKE_WALLET for value in seen), seen
+
+
+def _drive_the_smoke_recoveries(tmp_path):
+    """Run the whole real live-smoke suite; return the store path it used.
+
+    Four recoveries land in one run — the per-invocation pre-flight plus restart
+    tests 15-17 — and the count is asserted so that a suite which quietly stops
+    running three of them cannot leave the "paired per recovery" claim below
+    standing on a single construction.
+    """
+    cfg = _smoke_yaml(tmp_path)
+    dbp = _seed_genesis_run(tmp_path, cfg)
+    assert cli_main(["live-smoke", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)]) == 0
+    return dbp
+
+
+def test_the_smoke_recovery_wires_the_reconciliation_sweeps_switch_refresh(
+    tmp_path, monkeypatch, smoke_seams
+):
+    """The daemon pin's sibling, at the OTHER construction site (issue #45).
+
+    ``_smoke_startup_recovery`` builds the same sweep components ``live`` does,
+    against a switch it ARMS under the same recovery tick budget — so the same
+    two optional kwargs decide whether a paged backfill or an orderStatus sweep
+    can let the scheduled cancel lapse and wipe the resting probe mid-suite.
+    Wiring only the live lane was the actual 2026-07-31 finding, and nothing
+    since then observed either site.
+    """
+    record = record_reconciliation_sweep_wiring(monkeypatch)
+    _drive_the_smoke_recoveries(tmp_path)
+
+    assert len(record.switches) == _SMOKE_RECOVERIES, record.switches
+    assert_paired_sweep_refreshes(record, owner="smoke recovery")
+
+
+def test_the_smoke_recovery_gives_the_reconciler_a_payload_dir(tmp_path, monkeypatch, smoke_seams):
+    """The evidence term at the smoke site, split out for the reason its daemon
+    sibling is: a failure here is about the §19.1 audit trail, not §18.2."""
+    record = record_reconciliation_sweep_wiring(monkeypatch)
+    dbp = _drive_the_smoke_recoveries(tmp_path)
+
+    assert len(record.reconcilers) == _SMOKE_RECOVERIES, record.reconcilers
+    for reconciler in record.reconcilers:
+        assert_payload_dir(reconciler, dbp, run_id="r1")
 
 
 def test_every_row_a_smoke_run_writes_is_marked_including_the_managers(tmp_path, smoke_seams):

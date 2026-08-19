@@ -39,7 +39,13 @@ from contrib.hyperliquid_perp.persistence.db import Database, connect
 from contrib.hyperliquid_perp.persistence.models import PositionState
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 
-from .conftest import insert_decision_attempts
+from .conftest import (
+    assert_paired_sweep_refreshes,
+    assert_payload_dir,
+    insert_decision_attempts,
+    record_reconciliation_sweep_wiring,
+)
+from .test_live_startup import _clearinghouse
 
 D = Decimal
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
@@ -2573,6 +2579,7 @@ def live_seams(monkeypatch):
         client_networks=[],
         snapshot_requests=[],
         signed_gates=[],
+        rest_calls=[],
     )
 
     from contrib.hyperliquid_perp.exchanges.hyperliquid.sdk_client import (
@@ -2648,6 +2655,23 @@ def live_seams(monkeypatch):
             state.health_calls.append(self.network)
             if state.signed_error is not None:
                 raise state.signed_error
+
+        # The recovery components BIND these three at construction (the sweep
+        # pin below is what needs them). The real client has all three; this
+        # double deliberately has no REST behaviour, so reaching one is a
+        # broken test rather than a scenario — recorded, so that claim is
+        # checkable instead of being a comment (2026-08-19 review).
+        def _no_rest(name):
+            def _call(*_args, **_kwargs):
+                state.rest_calls.append(name)
+                raise NotImplementedError(f"the signed double has no {name}")
+
+            return _call
+
+        user_fills_by_time = _no_rest("user_fills_by_time")
+        open_orders = _no_rest("open_orders")
+        query_order_by_cloid = _no_rest("query_order_by_cloid")
+        del _no_rest
 
         def __repr__(self):
             return f"FakeSigned(network={self.network!r})"
@@ -3573,7 +3597,6 @@ def test_the_daemon_writes_unmarked_rows(tmp_path, live_seams, monkeypatch):
     never be true — and the operator is told the run's refreshes "were written
     during live-smoke" (2026-08-01 round-17 mutation probe).
     """
-    import contextlib
 
     from contrib.hyperliquid_perp.live import kill_switch as ks_mod
 
@@ -3593,13 +3616,14 @@ def test_the_daemon_writes_unmarked_rows(tmp_path, live_seams, monkeypatch):
         live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
     )
     dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg, run_id="r1")
-    # The recovery is NOT driven to completion, and that is deliberate rather than
-    # papered over: ``live_seams``' signed double stops short of the fill-backfill
-    # surface a full §19.1 pass needs. The fact under test is settled before then
-    # — what the CLI hands the constructor — and ``assert seen`` fails loudly if
-    # construction ever stops being reached.
-    with contextlib.suppress(Exception):
-        cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    # The recovery is NOT driven to completion, and that is deliberate rather
+    # than papered over: ``live_seams``' signed double has no ``schedule_cancel``,
+    # so arming the switch fails and the command reports the exit-1 "startup
+    # recovery failed" path. The fact under test is settled long before that —
+    # what the CLI hands the constructor. Asserted rather than suppressed:
+    # swallowing every exception here would also swallow a regression anywhere
+    # in the recovery this drive now reaches (2026-08-19 exit check).
+    assert cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)]) == 1
     assert seen, "no KillSwitchManager was constructed — the pin proves nothing"
     assert all(kwargs.get("suite_authored", False) is False for kwargs in seen), seen
     # The other term this call site carries, and the reason round 17 had to make
@@ -3623,7 +3647,6 @@ def test_the_daemon_hands_the_fill_processor_the_signed_wallet(tmp_path, live_se
     (2026-08-17 identity-echo mutation probe). Same shape, and same reason, as
     the suite_authored pin above.
     """
-    import contextlib
 
     # cli.py imports the class lazily inside the command function, so the seam
     # is the SOURCE module, not a cli attribute.
@@ -3645,13 +3668,296 @@ def test_the_daemon_hands_the_fill_processor_the_signed_wallet(tmp_path, live_se
         live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
     )
     dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg, run_id="r1")
-    # Recovery is not driven to completion, for the reason the sibling pin above
-    # states: the fact under test is settled at construction, and ``assert seen``
-    # fails loudly if construction stops being reached.
-    with contextlib.suppress(Exception):
-        cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    # Recovery is not driven to completion, and the exit code is asserted, for
+    # the reasons the sibling pin above states.
+    assert cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)]) == 1
     assert seen, "no LiveFillProcessor was constructed - the pin proves nothing"
     assert all(value == _LIVE_WALLET for value in seen), seen
+
+
+def _drive_the_daemon_recovery(tmp_path, monkeypatch):
+    """Run ``live --run-id`` far enough to build the recovery components.
+
+    Stops inside ``run_startup_recovery``: arming the switch calls
+    ``schedule_cancel``, which the ``live_seams`` double does not have, and
+    ``_live_startup_recovery`` reports that as the exit-1 "startup recovery
+    failed" path. Everything these pins assert is settled before then — and the
+    exit code is asserted rather than suppressed so that "the drive still gets
+    there" stays observable rather than assumed.
+    """
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg, run_id="r1")
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    assert rc == 1  # the un-armable switch, well past the constructions under test
+    return dbp
+
+
+def test_the_daemon_wires_the_reconciliation_sweeps_switch_refresh(
+    tmp_path, live_seams, monkeypatch
+):
+    """§18.2: the daemon's two sweep components refresh the dead man's switch.
+
+    ``FillBackfiller.refresh_kill_switch`` and ``LiveReconciler.refresh_kill_switch``
+    both default to None, and None makes the reconciler's ``_refresh_deadline()``
+    and the backfiller's per-page refresh no-ops — so a paged backfill or a
+    per-order orderStatus sweep holds the single-threaded tick for its whole
+    length with no refresh, the scheduled cancel lapses, and every resting SL/TP
+    on the wallet is cancelled with the process still alive and mid-reconcile.
+
+    Both are passed HERE and were pinned nowhere: the constructors' own comments
+    ("both real construction sites pass this") were the only thing asserting it,
+    and a comment of that exact shape was already wrong once (2026-07-31). Same
+    wiring-pin shape as the two siblings above (issue #45).
+    """
+    record = record_reconciliation_sweep_wiring(monkeypatch)
+    _drive_the_daemon_recovery(tmp_path, monkeypatch)
+
+    # One boot, one recovery: the count is part of the shape, as it is at the
+    # smoke site, so a second recovery appearing on this path has to be noticed
+    # rather than silently halving what the pairing below covers.
+    assert len(record.switches) == 1, record.switches
+    assert_paired_sweep_refreshes(record, owner="daemon")
+    # The double has no REST behaviour; reaching it would mean the drive ran
+    # past the constructions under test into work these pins do not model.
+    assert live_seams.rest_calls == []
+
+
+def test_the_daemon_gives_the_reconciler_a_payload_dir(tmp_path, live_seams, monkeypatch):
+    """``LiveReconciler.payload_dir`` defaults to None, which drops the evidence.
+
+    Not a §18.2 safety check but the §19.1 audit trail: without it the raw
+    clearinghouse payload behind every reconciliation verdict is never written,
+    silently, so an operator reconstructing a disputed sweep has the verdict and
+    nothing under it. Separate from the refresh pin above because it is a
+    separate fact about the same call site — a failure should name the evidence,
+    not the dead man's switch.
+    """
+    record = record_reconciliation_sweep_wiring(monkeypatch)
+    dbp = _drive_the_daemon_recovery(tmp_path, monkeypatch)
+
+    assert len(record.reconcilers) == 1, record.reconcilers
+    for reconciler in record.reconcilers:
+        assert_payload_dir(reconciler, dbp, run_id="r1")
+    assert live_seams.rest_calls == []  # as in the sibling pin above
+
+
+class _StopBeforeTheLoop(Exception):
+    """Sentinel: every kwarg the pins below assert is already decided."""
+
+
+def _drive_live_loop_construction(tmp_path, monkeypatch, *, fetch_clearinghouse):
+    """Build ``_run_live_loop``'s components and stop; return what it built with.
+
+    The loop BODY needs a whole live session — a real §19.1 pass the offline
+    doubles cannot produce — which is why its sibling invariant in
+    test_kill_switch.py is checked against the SOURCE. The construction block is
+    a different matter: it is straight-line, it is where the three safety kwargs
+    below are decided, and it can simply be driven. The drive stops at
+    ``_EngineDecisionProvider``, the last of the three. It is not pure
+    construction by then: the block reads the store from the ledger lookup
+    onwards, runs ``ensure_settlement_anchor``, and builds the real
+    ``LiveExecutionEngine`` (whose own ``__init__`` reads the position) before
+    running its ``settle_offline_flat()`` pass — which is why the drive needs a
+    real store rather than a double. Only the worker, the driver and the
+    driver's ``resume_startup()`` come after; none of them is modelled here.
+
+    The recorders subclass the real classes and construct THROUGH them wherever
+    the real constructor runs offline, so a call site that drifts from a
+    signature dies here instead of being recorded as fine. The exception is
+    ``_EngineDecisionProvider``, whose ``__init__`` builds a whole engine
+    config: its arguments are bound against the real signature instead.
+    """
+    import inspect
+
+    from contrib.hyperliquid_perp import cli as cli_mod
+    from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier
+    from contrib.hyperliquid_perp.exchanges.hyperliquid import market_data as md_mod
+    from contrib.hyperliquid_perp.live import loss_guards as lg_mod, protection as prot_mod
+    from contrib.hyperliquid_perp.live.config import LiveConfig
+    from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
+    from contrib.hyperliquid_perp.live.safe_mode import SafeModeManager
+
+    class _FakeMarket:
+        def __init__(self, _client):
+            pass
+
+        def get_asset_meta(self, coin):
+            return 3, MarginSchedule(coin=coin, tiers=(MarginTier(D(0), D(50)),))
+
+    class _FakeSwitch:
+        """The refresh surface ``refresh_across_blocking_work`` reaches for."""
+
+        def __init__(self):
+            self.ticks = 0
+
+        def tick(self):
+            self.ticks += 1
+
+    built = SimpleNamespace(protection=None, guards=None, provider=None, kill_switch=_FakeSwitch())
+
+    def _recorder(module, name, field):
+        real = getattr(module, name)
+
+        class _Recording(real):  # type: ignore[misc, valid-type]
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                setattr(built, field, kwargs)
+
+        monkeypatch.setattr(module, name, _Recording)
+
+    real_provider = cli_mod._EngineDecisionProvider
+
+    class _RecordingProvider:
+        def __init__(self, *args, **kwargs):
+            # Bound, not constructed: the real __init__ builds a whole engine
+            # config. Binding still fails a call site that drifts from the
+            # signature, which is the failure the other recorders get from
+            # constructing through the real class.
+            inspect.signature(real_provider).bind(*args, **kwargs)
+            built.provider = kwargs
+            raise _StopBeforeTheLoop
+
+    monkeypatch.setattr(md_mod, "HyperliquidMarketData", _FakeMarket)
+    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _RecordingProvider)
+    _recorder(prot_mod, "ProtectionManager", "protection")
+    _recorder(lg_mod, "LossGuards", "guards")
+
+    dbp = tmp_path / "live.db"
+    db = Database(dbp)
+    accounting.initialize_run(
+        db, run_id="r1", mode="live", initial_balance_usdc=D(200), schema_version=SCHEMA_VERSION
+    )
+    live_cfg = LiveConfig.from_dict(
+        {
+            "mode": "testnet_live",
+            "network": "testnet",
+            "safety": {
+                "allowed_symbols": ["BTC"],
+                "leverage": 1,
+                "max_target_margin_pct": 60,
+                "max_notional_usdc": "500",
+                "absolute_notional_ceiling": "1000",
+            },
+        }
+    )
+    gate = RealOrderGate(
+        allow_real_orders=True,
+        mode=ExecutionMode.TESTNET_LIVE,
+        allowed_symbols=("BTC",),
+        agent_authorized=True,
+        startup_reconciliation_passed=True,
+        kill_switch_active=True,
+        state_reconciled=True,
+    )
+    try:
+        with pytest.raises(_StopBeforeTheLoop):
+            cli_mod._run_live_loop(
+                cfgs=(RiskConfig(leverage=D(1), max_target_margin_pct=60), DecisionConfig()),
+                db=db,
+                run_id="r1",
+                coin="BTC",
+                config={},
+                live_cfg=live_cfg,
+                client=SimpleNamespace(),
+                signed=SimpleNamespace(open_orders=lambda: []),
+                gate=gate,
+                kill_switch=built.kill_switch,
+                safe_mode=SafeModeManager(db=db, run_id="r1", gate=gate),
+                reconciler=SimpleNamespace(),
+                processor=SimpleNamespace(),
+                payload_dir=tmp_path / "payloads",
+                fetch_clearinghouse=fetch_clearinghouse,
+            )
+    finally:
+        db.close()
+    for field in ("protection", "guards", "provider"):
+        assert getattr(built, field) is not None, f"no {field} built — the pin proves nothing"
+    return built
+
+
+def test_the_live_loop_hands_protection_the_kill_switch(tmp_path, monkeypatch):
+    """§18.2: SL/TP repair refreshes the switch across its own retry delays.
+
+    ``ProtectionManager.kill_switch`` defaults to None, and None turns all six
+    ``refresh_across_blocking_work`` calls in the manager into no-ops — the four
+    on the repair ladder plus the orderStatus confirmation read and the
+    protection cancel — and disables the firing latch with them. Every one of
+    those episodes can then let the dead man's switch self-trip; the repair
+    ladder is the place where it does so onto the very SL it is repairing, with
+    synchronous delays between attempts holding the tick open while it happens.
+    Only this call site wires it, and nothing observed this call site
+    (2026-08-17 issue #45).
+    """
+    built = _drive_live_loop_construction(
+        tmp_path, monkeypatch, fetch_clearinghouse=lambda: _clearinghouse()
+    )
+    assert built.protection.get("kill_switch") is built.kill_switch
+
+
+def test_the_live_loop_takes_the_day_baseline_from_the_clearinghouse(tmp_path, monkeypatch):
+    """§10.3 rule 1: the UTC-day baseline is READ, not taken from the ledger.
+
+    ``LossGuards.day_baseline_source`` defaults to None, which silently swaps the
+    baseline for the LOCAL ledger's equity — no error, no log — and every
+    drawdown and daily-loss judgement for that whole day is anchored to the wrong
+    number. The comment at the call site records the last time this path died
+    quietly (an arity mismatch its own except-Exception ate, 2026-08-01); what it
+    could not record is that the wiring was still unpinned.
+
+    Asserted by CALLING it, for the reason that history gives: a source-level or
+    not-None check passes on a source that returns the ledger. The pin covers the
+    hop it can see — the source is bound to the ``fetch_clearinghouse`` this
+    function was handed; that THAT callable reads the exchange is a fact about
+    the caller, pinned where the caller is.
+    """
+    reads: list[str] = []
+
+    def _fetch():
+        reads.append("clearinghouse")
+        return _clearinghouse(account_value="4242")
+
+    built = _drive_live_loop_construction(tmp_path, monkeypatch, fetch_clearinghouse=_fetch)
+    source = built.guards.get("day_baseline_source")
+    assert source is not None, "the day baseline silently fell back to the local ledger"
+    # 4242 is what the handed-in read returns; the seeded ledger is 200, so a
+    # source bound to the local ledger cannot produce it.
+    before = built.kill_switch.ticks
+    assert source() == D("4242")
+    assert reads == ["clearinghouse"]
+    # The same call is a bare full-timeout REST read on the single-threaded tick,
+    # so it refreshes across itself. A delta rather than a floor: the drive is
+    # free to grow refreshes of its own without quietly retiring this one.
+    assert built.kill_switch.ticks == before + 1
+
+
+def test_the_live_loop_refreshes_across_the_decision_cycles_market_reads(tmp_path, monkeypatch):
+    """§18.2: the longest REST chain in the system refreshes between its reads.
+
+    ``_EngineDecisionProvider.on_blocking_read`` defaults to None, and
+    ``_build_context``'s ``_between_reads`` simply returns when it is — so the
+    four back-to-back full-timeout reads of a decision cycle run entirely
+    unrefreshed. That chain is what ``_MAX_UNREFRESHED_REST_CALLS`` is reasoned
+    about against; unwired, the switch's real exposure is the chain's length
+    while the operator advisory is still computed from the submit chain's 3.
+
+    Same shape as the four kwargs issue #45 lists, and found by scanning for that
+    shape — the issue does not name this site. ``_build_context``'s own refresh
+    behaviour is driven in test_kill_switch.py; pinned here is that the live loop
+    hands it a hook at all, and that the hook drives THIS run's switch.
+    """
+    built = _drive_live_loop_construction(
+        tmp_path, monkeypatch, fetch_clearinghouse=lambda: _clearinghouse()
+    )
+    hook = built.provider.get("on_blocking_read")
+    assert hook is not None, "a whole decision cycle of market reads refreshes nothing (§18.2)"
+    before = built.kill_switch.ticks
+    hook()
+    assert built.kill_switch.ticks == before + 1
 
 
 def test_live_refuses_a_timeout_that_cannot_fit_the_kill_switch_budget(

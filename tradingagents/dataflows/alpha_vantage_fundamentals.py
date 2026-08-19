@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 
 from .alpha_vantage_common import _make_api_request
+from .errors import NoMarketDataError
 from .utils import data_lag_note, live_snapshot_note, statement_lag_bound
 
 logger = logging.getLogger(__name__)
@@ -10,8 +11,11 @@ logger = logging.getLogger(__name__)
 # Where a freshness disclosure lives in an Alpha Vantage payload. This vendor
 # answers in JSON (yfinance answers in CSV with "# " header lines), so the note
 # is carried as a key rather than a prefixed line: the body stays parseable, and
-# a leading underscore cannot collide with an Alpha Vantage field name. Written
-# first so a disclosure is not buried under a long report list (#58).
+# an underscore-prefixed name is not part of any Alpha Vantage schema this repo
+# has seen. That last part is a convention, not a guarantee, so the renderer
+# drops a same-named key from the vendor body instead of trusting it to be
+# absent. Written first so a disclosure is not buried under a long report list
+# (#58).
 _FRESHNESS_NOTE_KEY = "_freshness_note"
 
 # Keys Alpha Vantage answers with when it is reporting a problem rather than
@@ -23,24 +27,29 @@ _FRESHNESS_NOTE_KEY = "_freshness_note"
 # fundamentals to disclose about.
 _AV_ENVELOPE_KEYS = {"Error Message", "Information", "Note"}
 
-# The statement tools Alpha Vantage serves, mapped to the phrase a freshness
-# note uses for that statement's fiscal period. One table so an endpoint and
-# its wording cannot drift apart across the three getters below.
-_STATEMENT_PERIOD_PHRASES = {
-    "BALANCE_SHEET": "balance sheet period",
-    "CASH_FLOW": "cash flow period",
-    "INCOME_STATEMENT": "income statement period",
+# The statement tools Alpha Vantage serves, mapped to the name a freshness note
+# or a no-data reason calls that statement. One table so an endpoint and its
+# wording cannot drift apart across the three getters below.
+_STATEMENT_LABELS = {
+    "BALANCE_SHEET": "balance sheet",
+    "CASH_FLOW": "cash flow",
+    "INCOME_STATEMENT": "income statement",
 }
+
+# Every report list a statement response can carry. The served body keeps only
+# the requested cadence's list, so these are stripped before it is rebuilt.
+_REPORT_LIST_KEYS = ("annualReports", "quarterlyReports")
 
 
 def _parsed_payload(result) -> dict | None:
     """The response body as a JSON object, or ``None`` when it is not one.
 
     One decoder for both annotation paths: ``_make_api_request`` returns response
-    *text*, which is a JSON object for every fundamentals endpoint but plain
-    prose for a rejection page. Whatever "decodable as a payload" means has to
-    mean the same thing to the look-ahead filter and to the freshness
-    disclosures, so it is decided here rather than restated in each.
+    *text*, and a fundamentals endpoint answers with a JSON object only when it
+    served data — a rejection can arrive as prose instead. Whatever "decodable
+    as a payload" means has to mean the same thing to the look-ahead filter and
+    to the freshness disclosures, so it is decided here rather than restated in
+    each.
     """
     if not isinstance(result, str):
         return None
@@ -52,8 +61,15 @@ def _parsed_payload(result) -> dict | None:
 
 
 def _with_freshness_note(payload: dict, note: str) -> str:
-    """Render ``payload`` with its freshness note first, as JSON text."""
-    return json.dumps({_FRESHNESS_NOTE_KEY: note, **payload}, indent=2)
+    """Render ``payload`` with its freshness note first, as JSON text.
+
+    Any same-named key already in the vendor body is dropped rather than merged
+    over: a plain ``{key: note, **payload}`` would let the body win, silently
+    replacing our disclosure with text the vendor wrote — which the agent would
+    then read as a system-issued freshness statement.
+    """
+    body = {k: v for k, v in payload.items() if k != _FRESHNESS_NOTE_KEY}
+    return json.dumps({_FRESHNESS_NOTE_KEY: note, **body}, indent=2)
 
 
 def _normalize_iso_date(value) -> str | None:
@@ -91,40 +107,44 @@ def _filter_reports_by_date(result: dict, curr_date: str) -> dict:
             f"YYYY-MM-DD date; refusing to serve reports unfiltered (look-ahead guard)"
         )
     for key in ("annualReports", "quarterlyReports"):
-        if key in result:
+        rows = result.get(key)
+        if isinstance(rows, list):
+            # Row-shape guard, not defensive noise: a scalar or string row makes
+            # ``r.get`` raise AttributeError, which no caller catches — the
+            # router logs it and falls back, leaving this vendor quietly broken.
+            # A row that is not a mapping cannot be dated, so it is dropped by
+            # the same rule as an undated one.
             result[key] = [
                 r
-                for r in result[key]
-                if (ending := _normalize_iso_date(r.get("fiscalDateEnding"))) is not None
+                for r in rows
+                if isinstance(r, dict)
+                and (ending := _normalize_iso_date(r.get("fiscalDateEnding"))) is not None
                 and ending <= cutoff
             ]
     return result
 
 
-def _statement_lag_note(payload: dict, curr_date: str, freq, what: str) -> str:
-    """Data-lag note for the report list this call's ``freq`` selects, or ``""``.
+def _statement_cadence(freq) -> str:
+    """``"quarterly"`` or ``"annual"`` — the cadence a ``freq`` argument asks for.
 
-    Alpha Vantage returns BOTH ``annualReports`` and ``quarterlyReports`` on
-    every statement call, so the note has to pick one: the quarterly list for a
-    quarterly request, the annual list otherwise — which is exactly the frame
-    the yfinance path fetches for the same freq, and it is bounded by the same
-    shared :func:`statement_lag_bound` (#58). The newest ``fiscalDateEnding``
-    left after the look-ahead filter is the newest period the agent will see,
-    so the note describes that row, not the raw response's.
-
-    The phrase names the cadence it judged ("the newest annual balance sheet
-    period ..."). Unlike the yfinance path, which renders only the frame it
-    fetched, this payload still carries the OTHER list — an unqualified note
-    would read as a verdict on a statement it never looked at, e.g. calling a
-    freshly filed quarterly stale because the annual list is old.
-
-    Returns ``""`` when the selected list is missing, empty, or has no parseable
-    period — an annotation degrades to silence rather than guessing.
+    One normalization decides which report list is served AND which bound judges
+    it (via :func:`statement_lag_bound`), so the two cannot answer a future freq
+    spelling differently. Anything but an explicit "quarterly" resolves to
+    annual, matching which frame the yfinance path fetches for the same freq.
     """
-    cadence = "quarterly" if isinstance(freq, str) and freq.lower() == "quarterly" else "annual"
-    reports = payload.get(f"{cadence}Reports")
-    if not isinstance(reports, list):
-        return ""
+    return "quarterly" if isinstance(freq, str) and freq.lower() == "quarterly" else "annual"
+
+
+def _statement_lag_note(reports: list, curr_date: str, cadence: str, label: str) -> str:
+    """Data-lag note for the served report list, or ``""``.
+
+    The newest ``fiscalDateEnding`` left after the look-ahead filter is the
+    newest period the agent will see, so the note describes that row rather than
+    the raw response's, and it is bounded by the same shared
+    :func:`statement_lag_bound` the yfinance path uses (#58). Returns ``""``
+    when no row carries a parseable period — an annotation degrades to silence
+    rather than guessing.
+    """
     endings = [
         ending
         for r in reports
@@ -132,13 +152,26 @@ def _statement_lag_note(payload: dict, curr_date: str, freq, what: str) -> str:
     ]
     if not endings:
         return ""
-    # Bound looked up from the resolved cadence, not the raw freq: one
-    # normalization decides both which list is read and which bound applies, so
-    # they cannot answer a future freq spelling differently.
-    return data_lag_note(max(endings), curr_date, statement_lag_bound(cadence), f"{cadence} {what}")
+    return data_lag_note(max(endings), curr_date, statement_lag_bound(cadence), f"{label} period")
 
 
-def _filter_response_json(result, curr_date, freq, what):
+def _invalid_curr_date(curr_date) -> str:
+    """The sentinel served when a supplied curr_date is not a usable date.
+
+    Loud to the LLM (it can retry with a valid date), leaks no data, and never
+    raises: fundamental_data is a NON-optional category, so a ValueError escaping
+    ``route_to_vendor`` (``raise first_error``) would crash the ToolNode-wrapped
+    graph run, unlike the optional farside/F&G vendors whose raise degrades to a
+    sentinel.
+    """
+    return (
+        f"INVALID_CURR_DATE: curr_date {curr_date!r} is not a valid yyyy-mm-dd "
+        f"date, so fundamentals cannot be bounded to a point in time. No data "
+        f"returned; retry with a valid yyyy-mm-dd date. Do not fabricate values."
+    )
+
+
+def _filter_response_json(result, curr_date, freq, label, symbol):
     """Look-ahead-filter a raw ``_make_api_request`` fundamentals response.
 
     ``_make_api_request`` returns the response *text* (a JSON string), never a
@@ -148,34 +181,48 @@ def _filter_response_json(result, curr_date, freq, what):
     (no point-in-time bound) or a non-JSON body (an error/notice page) is returned
     untouched.
 
-    ``freq`` and ``what`` are the caller's statement identity; the surviving
-    reports carry a freshness note built from them (see
-    :func:`_statement_lag_note`).
+    ``freq`` and ``label`` are the caller's statement identity; the served reports
+    carry a freshness note built from them (see :func:`_statement_lag_note`).
 
-    A present-but-unparseable curr_date makes ``_filter_reports_by_date`` raise;
-    that is caught here and turned into a tool-friendly ``INVALID_CURR_DATE``
-    string rather than propagated. fundamental_data is a NON-optional category, so
-    a raised ValueError would escape ``route_to_vendor`` (``raise first_error``)
-    and crash the ToolNode-wrapped graph run — unlike the optional farside/F&G
-    vendors, whose raise degrades to a sentinel. The string is loud to the LLM (it
-    can retry with a valid date), leaks no future data, and never aborts the run.
+    Alpha Vantage answers every statement call with BOTH ``annualReports`` and
+    ``quarterlyReports``, so the requested cadence's list is the one served and
+    the other is dropped: the yfinance path fetches only the requested frame, and
+    shipping a second, unjudged list would hand the agent (say) a seven-year-old
+    annual balance sheet with no disclosure attached to it.
+
+    Raises:
+        NoMarketDataError: when the vendor has no fundamentals for the symbol at
+            all (an empty payload) or none of the requested cadence within the
+            point-in-time bound. The yfinance path raises on the same inputs, so
+            the router opens its no-data lane for either vendor rather than
+            serving an empty body as a successful report.
     """
-    parsed = _parsed_payload(result) if curr_date else None
-    if parsed is None:
+    parsed = _parsed_payload(result)
+    if parsed is not None and not parsed:
+        # Alpha Vantage answers an unknown symbol with "{}".
+        raise NoMarketDataError(symbol, detail="Alpha Vantage returned an empty payload")
+    if not curr_date or parsed is None or not parsed.keys() - _AV_ENVELOPE_KEYS:
+        # No point-in-time bound (legacy passthrough), a prose body, or a failure
+        # envelope this module does not classify (see #68) — served unchanged.
         return result
-    try:
-        filtered = _filter_reports_by_date(parsed, curr_date)
-    except ValueError:
-        return (
-            f"INVALID_CURR_DATE: curr_date {curr_date!r} is not a valid yyyy-mm-dd "
-            f"date, so fundamentals cannot be bounded to a point in time. No data "
-            f"returned; retry with a valid yyyy-mm-dd date. Do not fabricate values."
+    if _normalize_iso_date(curr_date) is None:
+        return _invalid_curr_date(curr_date)
+    filtered = _filter_reports_by_date(parsed, curr_date)
+    cadence = _statement_cadence(freq)
+    reports = filtered.get(f"{cadence}Reports")
+    reports = reports if isinstance(reports, list) else []
+    if not reports:
+        raise NoMarketDataError(
+            symbol,
+            detail=f"no {cadence} {label} reports on or before {curr_date}",
         )
-    note = _statement_lag_note(filtered, curr_date, freq, what)
-    return _with_freshness_note(filtered, note) if note else json.dumps(filtered, indent=2)
+    body = {k: v for k, v in filtered.items() if k not in _REPORT_LIST_KEYS}
+    body[f"{cadence}Reports"] = reports
+    note = _statement_lag_note(reports, curr_date, cadence, label)
+    return _with_freshness_note(body, note) if note else json.dumps(body, indent=2)
 
 
-def _annotate_live_snapshot(result, curr_date):
+def _annotate_live_snapshot(result, curr_date, symbol):
     """Disclose that an OVERVIEW payload is today's state, not ``curr_date``'s.
 
     OVERVIEW carries current-state ratios with no historical form — the same
@@ -185,19 +232,32 @@ def _annotate_live_snapshot(result, curr_date):
     so the disclosure cannot depend on which one ``data_vendors`` picked (#58).
 
     Returns the body untouched when there is nothing to disclose, when it is not
-    a JSON object, or when the object carries no fundamentals to disclose about:
-    an unknown symbol answers ``{}`` and a rejected call answers an envelope of
-    nothing but ``Error Message`` / ``Information`` / ``Note`` (the notices
-    ``_make_api_request`` does not already classify into the taxonomy).
-    Annotating either would assert that fundamentals were fetched when none
-    were.
+    a JSON object, or when the object is a rejection envelope of nothing but
+    ``Error Message`` / ``Information`` / ``Note`` (the notices
+    ``_make_api_request`` does not already classify into the taxonomy; see #68).
+    Annotating one of those would assert that fundamentals were fetched when
+    none were.
+
+    An unparseable curr_date takes the same ``INVALID_CURR_DATE`` route as the
+    statement tools: with no usable analysis date this path cannot tell a
+    backtest from live trading, and staying silent would serve today's ratios
+    undisclosed — the exact failure the disclosure exists to prevent.
+
+    Raises:
+        NoMarketDataError: on an empty payload, which is how Alpha Vantage
+            answers an unknown symbol (the yfinance path raises on its own
+            equivalent, so the router's no-data lane opens for either vendor).
     """
+    parsed = _parsed_payload(result)
+    if parsed is not None and not parsed:
+        raise NoMarketDataError(symbol, detail="Alpha Vantage returned an empty OVERVIEW payload")
     if not curr_date:
         return result
+    if _normalize_iso_date(curr_date) is None:
+        return _invalid_curr_date(curr_date)
     note = live_snapshot_note(curr_date, "these fundamentals are")
     if not note:
         return result
-    parsed = _parsed_payload(result)
     if parsed is None or not parsed.keys() - _AV_ENVELOPE_KEYS:
         return result
     return _with_freshness_note(parsed, note)
@@ -221,13 +281,18 @@ def get_fundamentals(ticker: str, curr_date: str = None) -> str:
         "symbol": ticker,
     }
 
-    return _annotate_live_snapshot(_make_api_request("OVERVIEW", params), curr_date)
+    return _annotate_live_snapshot(_make_api_request("OVERVIEW", params), curr_date, ticker)
 
 
 def _get_statement(function_name: str, ticker: str, freq: str, curr_date: str | None) -> str:
-    """Fetch one financial statement, look-ahead-filtered and freshness-noted."""
+    """Fetch one financial statement.
+
+    With a curr_date it is look-ahead-filtered, narrowed to the requested
+    cadence, and freshness-noted; without one the vendor body is served
+    unchanged — the pre-existing no-point-in-time-bound passthrough.
+    """
     result = _make_api_request(function_name, {"symbol": ticker})
-    return _filter_response_json(result, curr_date, freq, _STATEMENT_PERIOD_PHRASES[function_name])
+    return _filter_response_json(result, curr_date, freq, _STATEMENT_LABELS[function_name], ticker)
 
 
 def get_balance_sheet(ticker: str, freq: str = "quarterly", curr_date: str = None):

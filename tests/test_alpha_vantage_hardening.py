@@ -457,11 +457,28 @@ def test_overview_non_json_body_is_untouched(monkeypatch):
 
 
 @pytest.mark.unit
-def test_overview_empty_payload_is_not_dressed_with_a_note(monkeypatch):
-    # AV answers an unknown symbol with "{}"; a lone disclosure key would imply
-    # data that is not there.
+@pytest.mark.parametrize("curr_date", ["2020-01-01", None])
+def test_overview_empty_payload_raises_no_market_data(monkeypatch, curr_date):
+    # AV answers an unknown symbol with "{}". Serving that as a successful
+    # (optionally note-dressed) fundamentals report is what let a routed call
+    # differ by vendor — the yfinance path raises here, which is what opens the
+    # router's no-data lane.
+    from tradingagents.dataflows.errors import NoMarketDataError
+
     _patch_av_request(monkeypatch, "{}")
-    assert avf.get_fundamentals("AAPL", "2020-01-01") == "{}"
+    with pytest.raises(NoMarketDataError):
+        avf.get_fundamentals("AAPL", curr_date)
+
+
+@pytest.mark.unit
+def test_overview_unparseable_curr_date_returns_the_shared_sentinel(monkeypatch):
+    # The statement tools already answer INVALID_CURR_DATE here. Staying silent
+    # on this path would serve today's ratios with no disclosure, because
+    # live_snapshot_note degrades to "" on a date it cannot parse.
+    _patch_av_request(monkeypatch, _OVERVIEW)
+    out = avf.get_fundamentals("AAPL", "not-a-date")
+    assert out.startswith("INVALID_CURR_DATE")
+    assert "MarketCapitalization" not in out
 
 
 @pytest.mark.unit
@@ -483,6 +500,23 @@ def test_overview_notice_beside_real_fields_is_still_disclosed(monkeypatch):
     body = json.dumps({"Note": "delayed", "Symbol": "AAPL", "MarketCapitalization": "1"})
     _patch_av_request(monkeypatch, body)
     assert "live values" in _note_of(avf.get_fundamentals("AAPL", "2020-01-01"))
+
+
+@pytest.mark.unit
+def test_a_vendor_supplied_note_key_cannot_shadow_the_real_disclosure(monkeypatch):
+    # `{key: note, **payload}` lets the body win on a collision: the computed
+    # disclosure disappears with no log line, and whatever the vendor put under
+    # that key is read by the agent as a system-issued freshness statement.
+    body = json.dumps(
+        {
+            "_freshness_note": "vendor supplied text",
+            "quarterlyReports": [{"fiscalDateEnding": "2020-03-31"}],
+        }
+    )
+    _patch_av_request(monkeypatch, body)
+    note = _note_of(avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18"))
+    assert "Data lag" in note
+    assert "vendor supplied text" not in note
 
 
 def _statement_body(*, quarterly=(), annual=()):
@@ -508,7 +542,7 @@ def test_statement_stale_quarterly_carries_note(monkeypatch, getter, phrase):
     # Newest surviving period 2025-01-31 vs analysis date 2026-08-18 (> 180d).
     _patch_av_request(monkeypatch, _statement_body(quarterly=["2025-01-31"]))
     note = _note_of(getattr(avf, getter)("AAPL", "quarterly", "2026-08-18"))
-    assert f"quarterly {phrase}" in note
+    assert phrase in note
     assert "2025-01-31" in note
 
 
@@ -538,26 +572,67 @@ def test_statement_note_reflects_newest_surviving_period(monkeypatch):
 
 
 @pytest.mark.unit
-def test_statement_note_follows_the_requested_freq(monkeypatch):
-    # Alpha Vantage returns BOTH lists on every call, so the note has to pick
-    # the one the caller's freq selects — reading the wrong list here would
-    # flag a healthy quarterly filer (or stay silent on a dead annual one).
+def test_statement_serves_only_the_requested_cadence(monkeypatch):
+    # Alpha Vantage returns BOTH lists on every call. Only the requested one is
+    # served: the freshness note judges that list, so shipping the other would
+    # hand the agent a 2.6-year-old annual balance sheet with no disclosure
+    # attached to it (the yfinance path fetches one frame and has no such gap).
     body = _statement_body(quarterly=["2026-06-30"], annual=["2023-12-31"])
     _patch_av_request(monkeypatch, body)
-    assert _note_of(avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")) == ""
-    annual_note = _note_of(avf.get_balance_sheet("AAPL", "annual", "2026-08-18"))
-    assert "2023-12-31" in annual_note
-    # Both lists ride along in the payload, so the note must name the cadence it
-    # judged — unqualified, it reads as a verdict on the 49-day-old quarterly
-    # balance sheet sitting in the same JSON.
-    assert "annual balance sheet period" in annual_note
+
+    quarterly = json.loads(avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18"))
+    assert [r["fiscalDateEnding"] for r in quarterly["quarterlyReports"]] == ["2026-06-30"]
+    assert "annualReports" not in quarterly
+    assert avf._FRESHNESS_NOTE_KEY not in quarterly  # a 49-day-old quarter is on cadence
+
+    annual = json.loads(avf.get_balance_sheet("AAPL", "annual", "2026-08-18"))
+    assert [r["fiscalDateEnding"] for r in annual["annualReports"]] == ["2023-12-31"]
+    assert "quarterlyReports" not in annual
+    assert "2023-12-31" in annual[avf._FRESHNESS_NOTE_KEY]
 
 
 @pytest.mark.unit
-def test_statement_unparseable_periods_degrade_to_no_note(monkeypatch):
-    # Undated rows are dropped by the look-ahead filter; with nothing datable
-    # left the annotation stays silent instead of guessing.
+def test_statement_with_nothing_left_after_filtering_raises_no_market_data(monkeypatch):
+    # Undated rows are dropped by the look-ahead filter. An empty list rendered
+    # as a successful report is the dishonest outcome: yfinance raises on an
+    # empty frame, and only a raise opens the router's no-data lane.
+    from tradingagents.dataflows.errors import NoMarketDataError
+
     _patch_av_request(monkeypatch, _statement_body(quarterly=["not-a-date"]))
-    out = avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
-    assert _note_of(out) == ""
-    assert json.loads(out)["quarterlyReports"] == []
+    with pytest.raises(NoMarketDataError) as exc:
+        avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+    assert "quarterly balance sheet" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_statement_with_only_the_other_cadence_raises_instead_of_serving_it(monkeypatch):
+    # An annual-only filer under the tool's default quarterly freq: the old
+    # shape returned the annual reports with the note silent, so a seven-year-old
+    # balance sheet reached the agent undisclosed.
+    from tradingagents.dataflows.errors import NoMarketDataError
+
+    _patch_av_request(monkeypatch, _statement_body(annual=["2019-12-31"]))
+    with pytest.raises(NoMarketDataError):
+        avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+
+
+@pytest.mark.unit
+def test_statement_malformed_report_rows_are_dropped_not_crashed(monkeypatch):
+    # A scalar row makes r.get() raise AttributeError, which no caller catches:
+    # the router logs it and falls back, leaving this vendor quietly broken.
+    from tradingagents.dataflows.errors import NoMarketDataError
+
+    body = json.dumps({"symbol": "AAPL", "quarterlyReports": ["2025-01-31", {"x": 1}]})
+    _patch_av_request(monkeypatch, body)
+    with pytest.raises(NoMarketDataError):
+        avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+
+
+@pytest.mark.unit
+def test_statement_error_envelope_is_served_unchanged(monkeypatch):
+    # Classifying AV's error envelopes belongs at the request boundary (#68);
+    # until then this path must not mistake one for a payload to filter, narrow,
+    # or annotate.
+    body = json.dumps({"Error Message": "Invalid API call."})
+    _patch_av_request(monkeypatch, body)
+    assert avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18") == body

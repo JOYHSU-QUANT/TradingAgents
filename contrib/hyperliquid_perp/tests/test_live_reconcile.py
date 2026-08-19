@@ -1934,11 +1934,18 @@ def test_the_persisted_diff_clips_the_strings_it_does_not_author(env):
 
     db, seams, reconciler = env
     _insert_local_order(db)
-    seams.order_status[_HEX] = RuntimeError("x" * 5000)
-    # A leg that raised — the fill cross-check, deliberately not the open-orders
-    # read, which would abort the very loop that mints the case above.
-    seams.fills = RuntimeError("y" * 5000)
-    reconciler.run("heartbeat")
+    seams.order_status[_HEX] = RuntimeError("x" * 5000)  # → a case detail
+    # A leg that recorded a failed read: the fill cross-check, deliberately not
+    # the open-orders read, which would abort the very loop that mints the case.
+    seams.fills = RuntimeError("y" * 5000)  # → an errors entry
+    safe_mode = SafeModeManager(db=db, run_id="r", gate=_gate(), clock=ManualClock(_NOW))
+    reconciler.reconcile_and_apply(
+        "heartbeat",
+        safe_mode=safe_mode,
+        ws_restored=True,
+        kill_switch_active=True,
+        sweep_failures=("z" * 5000,),  # → a sweep_failures entry (one per order)
+    )
     (raw,) = [
         r["reconciliation_diff"]
         for r in db.conn.execute(
@@ -1950,6 +1957,7 @@ def test_the_persisted_diff_clips_the_strings_it_does_not_author(env):
     assert len(case["detail"]) == _DIFF_STRING_MAX_CHARS
     assert "x" * 100 in case["detail"]  # the head is the diagnosis and survives
     assert [len(e) for e in diff["errors"] if "y" in e] == [_DIFF_STRING_MAX_CHARS]
+    assert [len(f) for f in diff["sweep_failures"]] == [_DIFF_STRING_MAX_CHARS]
     (row,) = _cases(db, "order_missing_on_exchange")
     assert row["detail"].count("x") == 5000  # untruncated where it was observed
 

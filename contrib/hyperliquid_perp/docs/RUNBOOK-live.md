@@ -593,7 +593,7 @@ python -m contrib.hyperliquid_perp safe-mode --run-id live-BTC --db live_trading
 | `<幣別>\|unknown_coin` | 錢包持有本 run 不交易的幣種（manual safe mode） | 首列的 `detail`（第一次看到時的大小）、每 pass 的 warning log、每 pass 的 `reconciliation_diff` |
 | `<幣別>\|sl_missing` | 這個實倉沒有足量的 reduce-only SL 覆蓋 | 同左三處，另加每 pass 的 `position_snapshots.position_size` |
 | `equity_out_of_tolerance` | equity 超出容差 | 首列的 `detail`、每 pass 的 warning log、每 pass 的 `reconciliation_diff`（`position_snapshots` 那欄是倉位大小，與 equity 無關） |
-| `<cloid>\|read_failed` | 這張單的 orderStatus 讀不到 | 首列的 `detail`（第一次的**完整**例外訊息）、每 pass 的 warning log、每 pass 的 `reconciliation_diff`（**這份 detail 截到 300 字元**，交易所的錯誤內文可能被切掉尾巴） |
+| `<cloid>\|read_failed` | 這張單的 orderStatus 讀不到 | 首列的 `detail`（第一次的**完整**例外訊息）、每 pass 的 warning log、每 pass 的 `reconciliation_diff`（那份 detail **截到 `_DIFF_STRING_MAX_CHARS`（目前 300 字元）**，交易所的錯誤內文可能被切掉尾巴） |
 
 （「每 pass」是指有寫出 snapshot 的那些 pass。snapshot 腿是 fail-soft 的：clearinghouse 讀
 失敗時整輪不寫 snapshot 列，沒有本地 ledger 列、缺 `crossMaintenanceMarginUsed`／
@@ -611,10 +611,12 @@ python -m contrib.hyperliquid_perp safe-mode --run-id live-BTC --db live_trading
    新列。不要用「open case 清單是空的」推論「現在沒有這個問題」。
 3. **`resolved_read_succeeded` 是機器蓋的處置**（同 `resolved_fill_booked`）：意思是
    **「本輪已了結那張單，而且了結它的那次 orderStatus 讀取是成功的」**。它**不**保證之後
-   都沒事——該單若日後被 §8.3 rule-5 重送或被 reopen 而復活、orderStatus 又讀不到，那個
-   **同一個「讀不到」事實**會被去重吞掉（issue #65；同一個 cloid 的**別的**事實，例如
-   unknownOid 對上 rule-10 證據，是不同的 key，仍會有自己的列）。所以要判「現在有沒有
-   問題」一律看該輪的 pass 判決與 safe mode，不要看這個處置。
+   都沒事——該單若日後被 §8.3 rule-5 重送或被 reopen 而復活，之後**這個 cloid 的
+   `order_missing_on_exchange` 事實一律進不了清單**：「讀不到」撞的是已 stamp 的
+   `<cloid>|read_failed`，而 unknownOid 對上 rule-10 證據那種（這一族裡最嚴重的一種）撞的
+   是了結它時寫的**裸 cloid** 那一列——兩個 key 都已被佔住（issue #65）。唯一還會另開列的
+   是 `<cloid>|local_terminal`（issue #66）。所以要判「現在有沒有問題」一律看該輪的 pass
+   判決與 safe mode，不要看這個處置、也不要看清單是不是空的。
 
 （升級注意：這三個 key 的形狀在本版改過（`ETH:2.5`→`ETH|unknown_coin`、
 `0.001`→`BTC|sl_missing`、裸 cloid→`<cloid>|read_failed`）。跨版沿用同一個 `run_id`

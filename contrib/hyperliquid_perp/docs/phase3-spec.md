@@ -1001,6 +1001,42 @@ resolution 不改寫 case rows（它們是 log），且**「已解決」的定�
   fill 其 fee 有更正」（fee drift，見 §15.1 rule 8）的審計線索，解決路徑是人工核對後
   以 `action_taken` 標記。
 
+**（v13 新增，2026-08-19）PR 4 sweep 端的 fact key 形狀**：上面四型是 ingest 端、形狀由
+§14.2／§11.3 決定；sweep 端（order／position 那幾型）自己挑 key，規則是**先問這個事實是
+不變量還是 episode**：
+
+- **不變量**——「錢包持有本 run 不交易的幣種」（`<coin>|unknown_coin`）、「這個實倉沒有
+  足量 SL 覆蓋」（`<coin>|sl_missing`）、「這張單的 orderStatus 讀不到」
+  （`<cloid>|read_failed`）、equity 超容差（`equity_out_of_tolerance`）：以**主體本身**為
+  key，一個未癒事實一列。會變動的量值（size、equity 差額）**不得入 key**——它一變就多
+  一列、每列都要人工 `--stamp-case`，而事實從頭到尾是同一個；量值改由該列的 `detail`、
+  每 pass 的 `reconciliation_diff`、以及每 pass 的 warning log 承載。
+- **episode**——倉位大小不符（`<coin>:<local>-><exchange>`）：以「什麼讓這次不同」為
+  key，因為一段漂移被人工了結後，稍後發生的**獨立**不符是另一個事實，該有自己的列。
+
+凡帶主體的 key 都把主體（幣別／cloid）留在 key 裡：去重鍵 `(run_id, case_type,
+exchange_value)` **不含 symbol 欄**，裸值會讓 off-coin ETH 2.5 與同幣 exch_size 2.5 互撞而
+靜默丟掉第二列。（`equity_out_of_tolerance` 是帳戶級事實、`symbol` 本來就是 NULL，不適用。）
+
+推論（操作面看得到，見 RUNBOOK §6）：去重的存在檢查**不看 `action_taken`**，所以一個已
+了結的 key 不會被復發重開——復發顯示在該輪的 pass 判決與 safe mode，不是新列。因此規則
+是**自動（機器蓋的）處置只該蓋在事實已了結、且不會再被觀察到之處**。
+
+今天**符合的有兩個**：`resolved_fill_booked`（fill 一旦入帳就沒有任何退帳路徑，package 內
+沒有 `DELETE FROM fills`）與 `local_row_backfilled`（事實是「這張交易所單沒有本地 orders
+列」，補寫後就不可能再成立，同樣沒有 `DELETE FROM orders`）。
+
+**其餘四個都落在同一個殘餘窗口裡**——`settled_never_sent` 與 `settled_{local_status}`
+（裸 cloid 鍵）、`resolved_read_succeeded`（`<cloid>|read_failed` 鍵）、`local_row_reopened`
+（`<cloid>|local_terminal` 鍵）：該單可經 §8.3 rule-5 重送或 `_maybe_reopen_terminal_order`
+復活而重回 `iter_open_live_orders`，之後同鍵的未解事實就會被吞掉，差別只在事實要怎麼回來
+才撞得上。`resolved_read_succeeded` 的鍵最窄（只有「又讀不到」會再撞上它；裸 cloid 那個鍵
+則是**其餘三種** `order_missing_on_exchange` 事實都會撞上，包含最嚴重的 rule-10 那種），
+但不是零風險，**新增自動 stamp 時不要拿它當合規範本**。收斂方向見 issue #65／#66。
+
+（第七個機器處置 `backfilled`（`exchange_fill_missing_local`）不吃這條規則：它寫入時**不帶
+`exchange_value`**，本來就不進 dedupe、每 pass 各自一列，不會佔住任何事實鍵。）
+
 ## 13. Safe Mode
 
 safe mode 不是整個程式停掉，而是系統還活著、繼續監控與保護倉位，

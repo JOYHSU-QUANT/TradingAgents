@@ -126,6 +126,61 @@ _MANUAL_CASE_REASONS = {
 # the first row's detail and in every pass's warning log.
 _EQUITY_MISMATCH_FACT_KEY = "equity_out_of_tolerance"
 
+# How much of any ONE string the per-pass reconciliation_diff carries (the blob
+# itself is not bounded — it holds one entry per case, error and sweep failure
+# the pass found). Every
+# string this module composes itself fits well inside it; the cap is for the
+# parts it does NOT author — the ``{exc}`` interpolated into case details, leg
+# errors and sweep failures, whose length is the venue's (or a client library's)
+# choice, not this code's. The blob is written twice per pass for as long as the
+# fault lasts, so an unbounded error body would be persisted at that rate; the
+# untruncated text stays on the case row it was first observed under.
+_DIFF_STRING_MAX_CHARS = 300
+
+
+def _clip(text: str | None) -> str | None:
+    """One string as the per-pass diff carries it: a bounded head."""
+    return None if text is None else text[:_DIFF_STRING_MAX_CHARS]
+
+
+# Choosing an exchange_value for a NEW order/position fact below (the fill-side
+# keys are §14.2's and §11.3's, and answer to those specs, not to this note):
+# ask whether the fact is an INVARIANT that stands until someone disposes of it
+# — an off-coin holding, an uncovered position, an equity gap — or an EPISODE
+# that recurs as distinct occurrences.
+#   Invariant → key it on the subject alone (``BTC|sl_missing``,
+#     ``equity_out_of_tolerance``). Whatever varies while it stands belongs in
+#     the row's detail, the per-pass reconciliation_diff, and a warning log —
+#     never in the key, or every change of it mints a row and a manual stamp.
+#   Episode   → key it on what makes the occurrence distinct (the position-size
+#     transition below): an independent later mismatch of a different magnitude
+#     is its own fact, not a repeat of the first.
+# The dedupe carries no symbol column, so either way the coin/cloid stays IN the
+# key. Note the asymmetry this buys: a disposed-of invariant row is never
+# re-opened by a recurrence (the dedupe ignores action_taken), so the recurrence
+# is visible in the pass verdict and the log, not in a new row — which is why an
+# AUTOMATIC disposition belongs only where the fact is settled, not merely quiet
+# (see ``_clear_read_failure_case``'s caller, and issue #65 for the sibling
+# stamps that are looser than that).
+
+
+def _read_failure_fact_key(cloid: str) -> str:
+    """The once-per-fact key for "orderStatus could not be read for this cloid".
+
+    A DIFFERENT fact from the order's real disposition, so a different key (the
+    same reasoning, and the same ``|`` suffix shape, as
+    ``_maybe_reopen_terminal_order``'s ``local_terminal``): both land under
+    case_type ``order_missing_on_exchange``, and while they shared the bare
+    cloid the first sighting to arrive owned the key — a later genuine absence
+    of that cloid was swallowed by the dedupe and never recorded, which is
+    exactly the pairing a venue misroute produces every tick.
+
+    ONE function so the write site and the disposition lookup cannot drift: a
+    key written one way and looked up another would leave the row open forever
+    with no error anywhere.
+    """
+    return f"{cloid}|read_failed"
+
 
 @dataclass(frozen=True)
 class ReconciliationCase:
@@ -928,6 +983,24 @@ class LiveReconciler:
             settled, case = self._settle_absent_order(row, now)
             if case is not None:
                 cases.append(case)
+                if case.action_taken is not None:
+                    # ONLY when this pass DISPOSED of the order. The stamp is
+                    # one the store cannot take back: the once-per-fact dedupe
+                    # ignores action_taken, so a later re-observation of the
+                    # same key writes NOTHING, and a row stamped early would go
+                    # on asserting "resolved" while §21.4's unresolved count and
+                    # `safe-mode --status` read clean through a live outage.
+                    #
+                    # The other outcomes leave the row in THIS cursor, where the
+                    # next pass's read is free to fail again — that is the case
+                    # the gate exists for. Disposal does not make recurrence
+                    # impossible (a §8.3 rule-5 resend re-stamps the same
+                    # order_id 'submitted' — live/orders.py — and
+                    # _maybe_reopen_terminal_order revives a terminal row), it
+                    # makes it require a deliberate new send or a contradicting
+                    # exchange answer. That residual window is issue #65, shared
+                    # with the sibling settled_* stamps below.
+                    self._clear_read_failure_case(cloid)
             if not settled:
                 ok = False
         return ok
@@ -1103,7 +1176,7 @@ class LiveReconciler:
                 case_type="order_missing_on_exchange",
                 symbol=row["symbol"],
                 local_value=order_id,
-                exchange_value=cloid,
+                exchange_value=_read_failure_fact_key(cloid),
                 detail=f"absent from open_orders and orderStatus failed: {exc}",
             )
         if parsed is None:
@@ -1164,6 +1237,71 @@ class LiveReconciler:
             resolved=True,
         )
 
+    def _clear_read_failure_case(self, cloid: str) -> None:
+        """Dispose of a past unreadable-orderStatus row for a SETTLED order.
+
+        ``_record``'s restamp reaches only rows under the SAME fact key, and a
+        read failure deliberately has its own (see ``_read_failure_fact_key``)
+        — so nothing else would ever close this row. Left open, one transient
+        API error would hold the §21.4 ``unresolved_reconciliation_mismatch``
+        count above zero for the rest of the run, stampable only by hand, for a
+        fact a later pass disproved.
+
+        The caller's guard is the load-bearing half: this may only run once the
+        order is settled, because the stamp is irreversible (see there). It
+        deliberately covers LESS than "the read worked" — TWO successful-read
+        outcomes leave the row open, and they cost differently:
+
+        * unknownOid against §8.3 rule-10 evidence: the order stays in the
+          cursor and the fault can return, and that order already needs a human,
+          so the extra row sits on a §12.3 case someone is reading anyway.
+        * still live per orderStatus: the pass can be entirely clean, and the
+          order may then be retired by a writer that is not this sweep (a §19.3
+          cancel, the kill switch, the protection manager), so no later pass
+          ever disposes of it. That row then holds §21.4's unresolved count
+          above zero, with nothing else reporting a problem — the one case where
+          this guard's conservatism has a real cost, accepted because the
+          alternative (stamping on a read that proves nothing about the order)
+          is the audit-trail lie the guard exists to prevent (issue #66).
+
+        Fail-soft, like the liquidation mirror: this is the audit trail's
+        disposition, not a verdict input — a store that refuses the stamp must
+        not fail the orders leg. The cost of losing it is one stale open row,
+        the same shape the caller's guard deliberately leaves behind elsewhere.
+        """
+        key = _read_failure_fact_key(cloid)
+        try:
+            existing = repo.get_exchange_reconciliation_case(
+                self._db.conn,
+                self._run_id,
+                case_type="order_missing_on_exchange",
+                exchange_value=key,
+            )
+            # Pre-checked outside the write unit deliberately: a successful read
+            # is the common case and almost never has a row to close, and
+            # opening a BEGIN IMMEDIATE per absent order to discover that would
+            # be the expensive way to do nothing.
+            if existing is None or existing["action_taken"] is not None:
+                return
+            with self._db.transaction() as tx:
+                # Which is exactly why the write has to be the if-unset one
+                # rather than _record's set_reconciliation_action: the check
+                # above is a separate step, so an operator (or a `--stamp-case`
+                # racing this pass) may have disposed of the row in between, and
+                # THEIR disposition is the one a human will look for
+                # (2026-07-30 concurrency review).
+                repo.stamp_reconciliation_action_if_unset(
+                    tx, existing["event_id"], "resolved_read_succeeded"
+                )
+        except Exception as exc:  # noqa: BLE001 — audit disposition, see above
+            logger.warning(
+                "could not stamp the resolved orderStatus read failure for cloid %s "
+                "(%s: %s); the row stays open for a later pass or a human",
+                cloid,
+                type(exc).__name__,
+                exc,
+            )
+
     # ---------------------------------------------------------- position leg
 
     def _reconcile_positions(
@@ -1183,23 +1321,33 @@ class LiveReconciler:
         for pos in snapshot.positions:
             if pos.coin != self._coin:
                 ok = False
+                off_coin_detail = (
+                    f"exchange holds a {pos.coin} position of {pos.size} but this "
+                    f"run trades only {self._coin} — unknown position (§13.5), "
+                    "manual safe mode"
+                )
+                # ONE sentence, logged and recorded: the row below is written
+                # once (see its key), so this log is where later passes of the
+                # same unhealed holding report their live size.
+                logger.warning("%s", off_coin_detail)
                 cases.append(
                     ReconciliationCase(
                         case_type="exchange_position_mismatch",
                         symbol=pos.coin,
                         local_value=None,
-                        # The once-per-fact dedupe key is (run_id, case_type,
-                        # exchange_value) — NO symbol. A bare size would let an
-                        # off-coin ETH 2.5 and a same-coin BTC exch_size 2.5
-                        # (or two different off-coins of equal size) collide and
-                        # silently drop the second audit row, losing a manual
-                        # safe-mode fact. Prefix the coin so distinct positions
-                        # never share a key.
-                        exchange_value=f"{pos.coin}:{pos.size}",
-                        detail=(
-                            f"exchange holds a {pos.coin} position but this run trades "
-                            f"only {self._coin} — unknown position (§13.5), manual safe mode"
-                        ),
+                        # The fact is "the wallet holds a coin this run does not
+                        # trade" — ONE fact per coin, and a manual case so it
+                        # persists until a human disposes of it. The size is not
+                        # part of it: keying on it minted a fresh audit row (and
+                        # a fresh manual stamp chore) for every partial fill, and
+                        # even for a re-stringified Decimal("0.10") vs "0.1".
+                        #
+                        # The coin STAYS in the key: the dedupe key is (run_id,
+                        # case_type, exchange_value) with NO symbol column, so a
+                        # bare qualifier would collide two different off-coins
+                        # and silently drop the second manual safe-mode fact.
+                        exchange_value=f"{pos.coin}|unknown_coin",
+                        detail=off_coin_detail,
                         manual=True,
                     )
                 )
@@ -1304,17 +1452,29 @@ class LiveReconciler:
             # tell a post-mortem reader protection had lapsed when it may not
             # have (and occupy the fact's once-per-fact dedupe slot).
             if not protected and open_orders is not None:
+                sl_detail = (
+                    f"live position of {exch_size} has no valid reduce-only SL "
+                    "covering its size — repair is the PR 5 protection manager; "
+                    "until then the run stays in safe mode (§17.1 rule 1)"
+                )
+                # Same shape as the off-coin fact above: recorded once, logged
+                # with the live size every pass.
+                logger.warning("%s %s", self._coin, sl_detail)
                 cases.append(
                     ReconciliationCase(
                         case_type="position_sl_missing",
                         symbol=self._coin,
                         local_value=None if local is None else str(local_size),
-                        exchange_value=str(exch_size),
-                        detail=(
-                            "live position has no valid reduce-only SL covering its size "
-                            "— repair is the PR 5 protection manager; until then the run "
-                            "stays in safe mode (§17.1 rule 1)"
-                        ),
+                        # The fact is "this coin's live position is uncovered",
+                        # not the size it happened to have when first observed:
+                        # the gap stays open until the §17 protection manager
+                        # heals it, and every partial fill or partial close in
+                        # between used to mint another row — one more manual
+                        # stamp for the operator, all describing one lapse.
+                        # Coin-qualified for the same reason the off-coin key is
+                        # (the dedupe key carries no symbol).
+                        exchange_value=f"{self._coin}|sl_missing",
+                        detail=sl_detail,
                     )
                 )
         return ok, protected
@@ -1437,6 +1597,21 @@ class LiveReconciler:
                         "symbol": c.symbol,
                         "local": c.local_value,
                         "exchange": c.exchange_value,
+                        # The pass's own account of the fact, and the only
+                        # DURABLE home for what varies while an invariant-keyed
+                        # fact stands: the case row is written once (its first
+                        # detail), `safe-mode --status` prints no detail at all,
+                        # and the warning log rotates. Without this, an off-coin
+                        # holding that grew all week would be a post-mortem with
+                        # one number in it — the one from Monday.
+                        #
+                        # Clipped like every other string here: two details
+                        # carry a venue exception (a failed orderStatus read, a
+                        # failed reopen tiebreaker), and iter_open_live_orders
+                        # spans runs — so one outage mints one per still-live
+                        # order the store carries, twice per pass, every pass it
+                        # lasts. The head carries the diagnosis.
+                        "detail": _clip(c.detail),
                         "resolved": c.resolved,
                         # Severity survives into the durable record: two cases
                         # can share a case_type (position mismatch on our coin
@@ -1446,12 +1621,17 @@ class LiveReconciler:
                     }
                     for c in report.cases
                 ],
-                "errors": list(report.errors),
+                # Both channels also end in ``{exc}`` (a leg that raised, an
+                # order that would not cancel — the latter one entry per order),
+                # so both are clipped for the same reason the details are. The
+                # full text reaches the operator through the log and the
+                # safe-mode entry detail, which are not written per pass.
+                "errors": [_clip(e) for e in report.errors],
                 # A verdict input like any other (see the field's comment): the
                 # durable diff is what a post-mortem reads, and a row marked
                 # "mismatch" whose diff named no cause would send that reader
                 # hunting through a CLI transcript they no longer have.
-                "sweep_failures": list(report.sweep_failures),
+                "sweep_failures": [_clip(f) for f in report.sweep_failures],
                 "backfill": None
                 if backfill_summary is None
                 else {

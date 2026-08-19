@@ -923,9 +923,11 @@ def test_case_rows_are_deduped_once_per_fact_across_passes(env):
 
 def test_a_retry_that_resolves_a_deduped_case_stamps_the_existing_row(env):
     db, seams, reconciler = env
-    _insert_local_order(db)
-    # Pass 1: orderStatus read fails → case recorded, unresolved (action NULL).
-    seams.order_status[_HEX] = RuntimeError("api down")
+    # Pass 1: unknownOid against durable §8.3 rule-10 proof of receipt → a case
+    # under the plain-cloid fact key, unresolved (action NULL). Deliberately NOT
+    # the read-failure path, which now owns a fact key of its own — the restamp
+    # this test covers only ever fires on a SECOND sighting of the SAME key.
+    _insert_local_order(db, exchange_order_id="55")
     reconciler.run("heartbeat")
     (row,) = _cases(db, "order_missing_on_exchange")
     assert row["action_taken"] is None
@@ -1685,9 +1687,11 @@ def test_a_live_snapshot_satisfies_the_validator_identities_with_a_position(env)
 
 def test_an_off_coin_and_a_same_coin_position_fact_never_collide(env):
     # The dedupe key is (run_id, case_type, exchange_value) — there is NO symbol
-    # column in it. Both facts below are exchange_position_mismatch and shared a
-    # bare size of "2.5" before the fix, so the second insert was swallowed and
-    # its audit row lost — possibly the MANUAL off-coin one that fires safe mode.
+    # column in it, and BOTH facts below are exchange_position_mismatch. They are
+    # also the two key shapes the module writes (an invariant "the wallet holds
+    # ETH" and a value-bearing size transition), so this pins that the shapes
+    # stay disjoint: a collision silently drops the second audit row — possibly
+    # the MANUAL off-coin one that fires safe mode.
     db, seams, reconciler = env
     seams.clearinghouse = _clearinghouse(
         account_value="101",
@@ -1707,7 +1711,7 @@ def test_an_off_coin_and_a_same_coin_position_fact_never_collide(env):
     reconciler.run("heartbeat")
     rows = _cases(db, "exchange_position_mismatch")
     assert len(rows) == 2  # both facts survived
-    assert {r["exchange_value"] for r in rows} == {"ETH:2.5", "BTC:0->2.5"}
+    assert {r["exchange_value"] for r in rows} == {"ETH|unknown_coin", "BTC:0->2.5"}
 
 
 def test_two_phantoms_of_different_sizes_each_get_their_own_row(env):
@@ -1736,6 +1740,226 @@ def test_two_phantoms_of_different_sizes_each_get_their_own_row(env):
     # The SAME unhealed phantom re-observed still dedupes to its one row.
     reconciler.run("heartbeat")
     assert len(_cases(db, "local_position_phantom")) == 2
+
+
+def test_an_unreadable_order_status_and_a_genuine_absence_each_get_a_row(env):
+    # Two OPPOSITE facts about one cloid — "we could not ask" and "the exchange
+    # says it never had it" — that shared the bare cloid as their dedupe key, so
+    # whichever arrived second was swallowed and never recorded. A venue
+    # misroute serves exactly this pairing on consecutive passes.
+    db, seams, reconciler = env
+    _insert_local_order(db, exchange_order_id="55")  # §8.3 rule-10 proof of receipt
+    seams.order_status[_HEX] = RuntimeError("api down")
+    reconciler.run("heartbeat")
+    del seams.order_status[_HEX]  # the read works now — and answers unknownOid
+    reconciler.run("heartbeat")
+    rows = {r["exchange_value"]: r for r in _cases(db, "order_missing_on_exchange")}
+    assert set(rows) == {f"{_HEX}|read_failed", _HEX}
+    assert "orderStatus failed" in (rows[f"{_HEX}|read_failed"]["detail"] or "")
+    assert "rule 10" in (rows[_HEX]["detail"] or "")
+
+
+def test_a_repeatedly_unreadable_order_status_still_dedupes_to_one_row(env):
+    # The split key must not undo the once-per-fact guard on its own side: an
+    # exchange that stays unreachable is one fact, not one per pass.
+    db, seams, reconciler = env
+    _insert_local_order(db, exchange_order_id="55")
+    seams.order_status[_HEX] = RuntimeError("api down")
+    for _ in range(3):
+        reconciler.run("heartbeat")
+    (row,) = _cases(db, "order_missing_on_exchange")
+    assert row["exchange_value"] == f"{_HEX}|read_failed"
+    assert row["action_taken"] is None  # nothing disproved it yet
+
+
+def test_a_successful_read_disposes_of_the_earlier_read_failure_row(env):
+    # Splitting the key cost the read-failure row the same-key restamp that used
+    # to close it; _clear_read_failure_case is what replaces that, and nothing
+    # else in the module would notice if it stopped firing (see its docstring
+    # for what an un-disposed row costs the operator).
+    db, seams, reconciler = env
+    _insert_local_order(db)
+    seams.order_status[_HEX] = RuntimeError("api down")
+    reconciler.run("heartbeat")
+    seams.order_status[_HEX] = {
+        "status": "order",
+        "order": {"order": {"oid": 77}, "status": "canceled"},
+    }
+    reconciler.run("heartbeat")
+    rows = {r["exchange_value"]: r for r in _cases(db, "order_missing_on_exchange")}
+    assert rows[f"{_HEX}|read_failed"]["action_taken"] == "resolved_read_succeeded"
+    assert rows[_HEX]["action_taken"] == "settled_canceled"  # its own fact, its own row
+
+
+def test_a_read_that_succeeds_without_settling_the_order_stamps_nothing(env):
+    # The stamp is IRREVERSIBLE — the once-per-fact dedupe ignores action_taken,
+    # so a stamped key can never be re-opened by a later sighting. An order that
+    # is merely proven live stays in the locally-live cursor, so the very next
+    # pass can fail to read it again: stamping here would leave the row reading
+    # "resolved" while §21.4's unresolved count and `safe-mode --status` show
+    # clean through an outage that is still going on.
+    db, seams, reconciler = env
+    _insert_local_order(db)
+    seams.order_status[_HEX] = RuntimeError("api down")
+    reconciler.run("heartbeat")
+    seams.order_status[_HEX] = {  # reads again, and the order is simply still live
+        "status": "order",
+        "order": {"order": {"oid": 77}, "status": "open"},
+    }
+    reconciler.run("heartbeat")
+    seams.order_status[_HEX] = RuntimeError("api down again")
+    report = reconciler.run("heartbeat")
+    assert not report.orders_reconciled
+    (row,) = _cases(db, "order_missing_on_exchange")
+    assert row["exchange_value"] == f"{_HEX}|read_failed"
+    assert row["action_taken"] is None  # still open, as the live outage requires
+
+
+def test_a_failed_disposition_stamp_does_not_fail_the_orders_leg(env, monkeypatch, caplog):
+    # The disposition is the audit trail's, not the verdict's: a store that
+    # refuses it must cost one stale open row, never the settlement itself. But
+    # it must not vanish either — the row is invisible to the verdict, so this
+    # log line is the only trace that the stamp did not land.
+    from contrib.hyperliquid_perp.live import reconcile as reconcile_mod
+
+    db, seams, reconciler = env
+    _insert_local_order(db)
+    seams.order_status[_HEX] = RuntimeError("api down")
+    reconciler.run("heartbeat")
+    seams.order_status[_HEX] = {
+        "status": "order",
+        "order": {"order": {"oid": 77}, "status": "canceled"},
+    }
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("store busy")
+
+    monkeypatch.setattr(reconcile_mod.repo, "get_exchange_reconciliation_case", _boom)
+    with caplog.at_level("WARNING"):
+        reconciler.run("heartbeat")
+    assert repo.get_order(db.conn, "o1")["status"] == "canceled"  # the settle stood
+    assert any("could not stamp" in r.getMessage() for r in caplog.records)
+
+
+def test_an_off_coin_position_that_moves_still_dedupes_to_one_row(env, caplog):
+    # The third size below is the one a size-keyed fix would still get wrong:
+    # 2.50 and 2.5 are the same holding, and re-stringifying a Decimal is enough
+    # to mint another row (another manual stamp) for it.
+    db, seams, reconciler = env
+    with caplog.at_level("WARNING"):
+        for szi in ("2.5", "2.50", "3.5"):
+            seams.clearinghouse = _clearinghouse(
+                account_value="101",
+                maintenance="1",
+                positions=[dict(_btc_position(), coin="ETH", szi=szi)],
+            )
+            reconciler.run("heartbeat")
+    (row,) = _cases(db, "exchange_position_mismatch")
+    assert row["exchange_value"] == "ETH|unknown_coin"
+    assert "2.5" in (row["detail"] or "")  # the first sighting's magnitude, in the row
+    # ...and the LATER magnitudes, which no row will ever carry, in the log the
+    # key change made load-bearing.
+    assert any("3.5" in r.getMessage() for r in caplog.records)
+
+
+def test_two_off_coins_of_equal_size_never_share_a_fact_key(env):
+    # Negative control for the key above: the dedupe key has no symbol column,
+    # so the coin must stay IN the key — a bare qualifier would silently drop
+    # the second wallet-holds-an-unknown-coin fact.
+    db, seams, reconciler = env
+    seams.clearinghouse = _clearinghouse(
+        account_value="102",
+        maintenance="1",
+        positions=[
+            dict(_btc_position(), coin="ETH", szi="2.5"),
+            dict(_btc_position(), coin="SOL", szi="2.5"),
+        ],
+    )
+    reconciler.run("heartbeat")
+    rows = _cases(db, "exchange_position_mismatch")
+    assert {r["exchange_value"] for r in rows} == {"ETH|unknown_coin", "SOL|unknown_coin"}
+
+
+def test_an_unprotected_position_that_moves_still_dedupes_to_one_row(env, caplog):
+    # The sizes are one lapse in §17.1 coverage seen through two partial fills
+    # and a re-stringified Decimal — the shape that used to mint three rows, and
+    # three manual stamps, for one uncovered position.
+    db, seams, reconciler = env
+    with caplog.at_level("WARNING"):
+        for szi in ("0.001", "0.002", "0.0020"):
+            seams.clearinghouse = _clearinghouse(
+                account_value="101", maintenance="1", positions=[_btc_position(szi=szi)]
+            )
+            report = reconciler.run("heartbeat")
+            assert not report.position_protected
+    (row,) = _cases(db, "position_sl_missing")
+    assert row["exchange_value"] == "BTC|sl_missing"
+    assert "0.001" in (row["detail"] or "")  # the first sighting's magnitude, in the row
+    assert any("0.002" in r.getMessage() for r in caplog.records)  # the later ones, logged
+
+
+def test_the_persisted_diff_carries_each_passs_own_magnitude(env):
+    # An invariant-keyed row is written once, `safe-mode --status` prints no
+    # detail, and the log rotates — so the per-pass reconciliation_diff is the
+    # only DURABLE place a post-mortem can read what the fact measured on the
+    # day it is reading about.
+    db, seams, reconciler = env
+    for szi in ("2.5", "3.5"):
+        seams.clearinghouse = _clearinghouse(
+            account_value="101",
+            maintenance="1",
+            positions=[dict(_btc_position(), coin="ETH", szi=szi)],
+        )
+        reconciler.run("heartbeat")
+    diffs = [
+        r["reconciliation_diff"]
+        for r in db.conn.execute(
+            "SELECT reconciliation_diff FROM account_snapshots WHERE run_id='r' "
+            "ORDER BY snapshot_id"
+        ).fetchall()
+    ]
+    # The fact key is size-free, so 3.5 can only be there via the case detail.
+    assert "2.5" in diffs[0]
+    assert "3.5" in diffs[-1]
+
+
+def test_the_persisted_diff_clips_the_strings_it_does_not_author(env):
+    # Every string this module composes is short; the ones it does not are the
+    # venue exceptions it interpolates. The absent-order cursor spans runs, so
+    # one outage writes such a detail per still-live order, into two snapshot
+    # rows, every pass it lasts — and the leg errors beside it end in {exc} too.
+    import json
+
+    from contrib.hyperliquid_perp.live.reconcile import _DIFF_STRING_MAX_CHARS
+
+    db, seams, reconciler = env
+    _insert_local_order(db)
+    seams.order_status[_HEX] = RuntimeError("x" * 5000)  # → a case detail
+    # A leg that recorded a failed read: the fill cross-check, deliberately not
+    # the open-orders read, which would abort the very loop that mints the case.
+    seams.fills = RuntimeError("y" * 5000)  # → an errors entry
+    safe_mode = SafeModeManager(db=db, run_id="r", gate=_gate(), clock=ManualClock(_NOW))
+    reconciler.reconcile_and_apply(
+        "heartbeat",
+        safe_mode=safe_mode,
+        ws_restored=True,
+        kill_switch_active=True,
+        sweep_failures=("z" * 5000,),  # → a sweep_failures entry (one per order)
+    )
+    (raw,) = [
+        r["reconciliation_diff"]
+        for r in db.conn.execute(
+            "SELECT reconciliation_diff FROM account_snapshots WHERE run_id='r'"
+        ).fetchall()
+    ]
+    diff = json.loads(raw)
+    (case,) = [c for c in diff["cases"] if c["case_type"] == "order_missing_on_exchange"]
+    assert len(case["detail"]) == _DIFF_STRING_MAX_CHARS
+    assert "x" * 100 in case["detail"]  # the head is the diagnosis and survives
+    assert [len(e) for e in diff["errors"] if "y" in e] == [_DIFF_STRING_MAX_CHARS]
+    assert [len(f) for f in diff["sweep_failures"]] == [_DIFF_STRING_MAX_CHARS]
+    (row,) = _cases(db, "order_missing_on_exchange")
+    assert row["detail"].count("x") == 5000  # untruncated where it was observed
 
 
 # -- the verdict's reason reaches the operator --------------------------------

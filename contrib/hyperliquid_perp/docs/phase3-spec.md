@@ -1014,15 +1014,18 @@ resolution 不改寫 case rows（它們是 log），且**「已解決」的定�
 - **episode**——倉位大小不符（`<coin>:<local>-><exchange>`）：以「什麼讓這次不同」為
   key，因為一段漂移被人工了結後，稍後發生的**獨立**不符是另一個事實，該有自己的列。
 
-兩型都把幣別／cloid 留在 key 裡：去重鍵 `(run_id, case_type, exchange_value)` **不含
-symbol 欄**，裸值會讓 off-coin ETH 2.5 與同幣 exch_size 2.5 互撞而靜默丟掉第二列。
+凡帶主體的 key 都把主體（幣別／cloid）留在 key 裡：去重鍵 `(run_id, case_type,
+exchange_value)` **不含 symbol 欄**，裸值會讓 off-coin ETH 2.5 與同幣 exch_size 2.5 互撞而
+靜默丟掉第二列。（`equity_out_of_tolerance` 是帳戶級事實、`symbol` 本來就是 NULL，不適用。）
 
 推論（操作面看得到，見 RUNBOOK §6）：去重的存在檢查**不看 `action_taken`**，所以一個已
-了結的 key 不會被復發重開——復發顯示在該輪的 pass 判決與 safe mode，不是新列。因此
-**自動（機器蓋的）處置只能蓋在事實已了結處**：`resolved_fill_booked`（fill 已入帳）與
-`resolved_read_succeeded`（該單已被本輪了結，且 orderStatus 讀得到了；**它的意思是「讀得
-到了」而不是「那張單沒事」**——同一 pass 仍可能為同一個 cloid 另開一列未解的 mismatch）。
-比這更寬的自動 stamp 會讓稽核列在故障仍活著時宣稱已了結（issue #65）。
+了結的 key 不會被復發重開——復發顯示在該輪的 pass 判決與 safe mode，不是新列。因此規則
+是**自動（機器蓋的）處置只該蓋在事實已了結、且不會再被觀察到之處**：
+`resolved_fill_booked`（fill 已入帳，且沒有任何路徑會把它退帳）與 `resolved_read_succeeded`
+（該單已被本輪了結，且了結它的那次 orderStatus 讀取是成功的）。**今天還有兩個站點比這條
+規則寬**——`settled_never_sent` 與 `settled_{local_status}` 蓋在裸 cloid 鍵上，而該單可經
+§8.3 rule-5 重送或 `_maybe_reopen_terminal_order` 復活、再度產生同鍵的未解事實並被吞掉；
+`resolved_read_succeeded` 也共用這個殘餘窗口。收斂方向見 issue #65。
 
 ## 13. Safe Mode
 

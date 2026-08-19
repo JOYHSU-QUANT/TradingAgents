@@ -588,12 +588,15 @@ python -m contrib.hyperliquid_perp safe-mode --run-id live-BTC --db live_trading
 **「一個 run 一列」的 case 不只 envelope 那兩種。** 交易所倉位與訂單那邊也有幾個 case 的
 `exchange_value` 是**不帶量值的固定 key**，語義與上面一樣——一個未癒的事實只寫一列：
 
-| `exchange_value` | 事實 | 現在多大要去哪裡看 |
+| `exchange_value` | 事實 | 現在多大／現在怎樣，去哪裡看 |
 |---|---|---|
-| `<幣別>\|unknown_coin` | 錢包持有本 run 不交易的幣種（manual safe mode） | 首列的 `detail`、每 pass 的 warning log、每 pass 的 `reconciliation_diff` |
-| `<幣別>\|sl_missing` | 這個實倉沒有足量的 reduce-only SL 覆蓋 | 同上，另加每 pass 的 `position_snapshots.position_size` |
-| `equity_out_of_tolerance` | equity 超出容差 | 同上 |
-| `<cloid>\|read_failed` | 這張單的 orderStatus 讀不到 | 首列的 `detail` |
+| `<幣別>\|unknown_coin` | 錢包持有本 run 不交易的幣種（manual safe mode） | 首列的 `detail`（第一次看到時的大小）、每 pass 的 warning log、每 pass 的 `reconciliation_diff` |
+| `<幣別>\|sl_missing` | 這個實倉沒有足量的 reduce-only SL 覆蓋 | 同左三處，另加每 pass 的 `position_snapshots.position_size` |
+| `equity_out_of_tolerance` | equity 超出容差 | 首列的 `detail`、每 pass 的 warning log、每 pass 的 `reconciliation_diff`（`position_snapshots` 那欄是倉位大小，與 equity 無關） |
+| `<cloid>\|read_failed` | 這張單的 orderStatus 讀不到 | 首列的 `detail`（第一次的例外訊息）、每 pass 的 warning log、每 pass 的 `reconciliation_diff` |
+
+（「每 pass」是指有寫出 snapshot 的 pass。snapshot 腿是 fail-soft 的，缺 `positionValue`／
+`crossMaintenanceMarginUsed`／寫入失敗時會跳過並留 warning，那一輪就只剩 log。）
 
 三件事要記住：
 
@@ -604,13 +607,15 @@ python -m contrib.hyperliquid_perp safe-mode --run-id live-BTC --db live_trading
    `position_sl_missing` 進 recoverable safe mode）與 warning log，**不會**是清單上的
    新列。不要用「open case 清單是空的」推論「現在沒有這個問題」。
 3. **`resolved_read_succeeded` 是機器蓋的處置**（同 `resolved_fill_booked`）：意思是
-   「後來讀得到了」，**不是**「那張單沒事」——同一 pass 完全可能為同一個 cloid 另開一列
-   未解的 mismatch。
+   **「本輪已了結那張單，而且了結它的那次 orderStatus 讀取是成功的」**。它**不**保證之後
+   都沒事——該單若日後被 §8.3 rule-5 重送或被 reopen 而復活，後續同一個 cloid 的未解事實
+   會被去重吞掉（issue #65），所以要判「現在有沒有問題」一律看該輪的 pass 判決與 safe
+   mode，不要看這個處置。
 
 （升級注意：這三個 key 的形狀在本版改過（`ETH:2.5`→`ETH|unknown_coin`、
 `0.001`→`BTC|sl_missing`、裸 cloid→`<cloid>|read_failed`）。跨版沿用同一個 `run_id`
-resume 的 run，若舊 key 那列還沒 stamp，會再多一列新 key 的同型事實——兩列都要 stamp，
-沒有證據遺失。）
+resume 的 run，同一個未癒事實會再多一列新 key 的（去重是精確比對，舊列擋不住新 key）；
+舊列若還沒 stamp，就是兩列都要 stamp。沒有證據遺失。）
 
 ---
 

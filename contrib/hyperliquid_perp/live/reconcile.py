@@ -126,6 +126,12 @@ _MANUAL_CASE_REASONS = {
 # the first row's detail and in every pass's warning log.
 _EQUITY_MISMATCH_FACT_KEY = "equity_out_of_tolerance"
 
+# How much of a case's detail the per-pass reconciliation_diff carries. Every
+# detail this module writes itself fits well inside it; the cap is for the one
+# the VENUE writes (an exception string interpolated into a read-failure
+# detail), which has no bound this code controls.
+_DIFF_DETAIL_CHARS = 300
+
 # Choosing an exchange_value for a NEW order/position fact below (the fill-side
 # keys are §14.2's and §11.3's, and answer to those specs, not to this note):
 # ask whether the fact is an INVARIANT that stands until someone disposes of it
@@ -1231,7 +1237,13 @@ class LiveReconciler:
         fact a later pass disproved.
 
         The caller's guard is the load-bearing half: this may only run once the
-        order is settled, because the stamp is irreversible (see there).
+        order is settled, because the stamp is irreversible (see there). It
+        deliberately covers LESS than "the read worked" — an order left
+        unresolved by a successful read (unknownOid against §8.3 rule-10
+        evidence) keeps its read-failure row open even though that read
+        disproved it, because the order is still in the cursor and the fault
+        can return. That order already needs a human, so the cost is one extra
+        row on a §12.3 case a human is reading anyway.
 
         Fail-soft, like the liquidation mirror: this is the audit trail's
         disposition, not a verdict input — a store that refuses the stamp must
@@ -1573,7 +1585,15 @@ class LiveReconciler:
                         # and the warning log rotates. Without this, an off-coin
                         # holding that grew all week would be a post-mortem with
                         # one number in it — the one from Monday.
-                        "detail": c.detail,
+                        #
+                        # Capped, because the widest detail here is an exception
+                        # string the venue chose (an HTTP body, a stack of
+                        # them). iter_open_live_orders spans runs, so one outage
+                        # can mint that detail once per historical live order,
+                        # twice per pass, every pass it lasts. The head carries
+                        # the diagnosis; the untruncated first sighting is on
+                        # the case row.
+                        "detail": None if c.detail is None else c.detail[:_DIFF_DETAIL_CHARS],
                         "resolved": c.resolved,
                         # Severity survives into the durable record: two cases
                         # can share a case_type (position mismatch on our coin

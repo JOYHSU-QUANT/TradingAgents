@@ -1923,6 +1923,27 @@ def test_the_persisted_diff_carries_each_passs_own_magnitude(env):
     assert "3.5" in diffs[-1]
 
 
+def test_the_persisted_diff_caps_a_venue_written_detail(env):
+    # Every detail this module authors is short; the one it does not is an
+    # exception string the venue chose, and the absent-order cursor spans runs —
+    # so an outage can interpolate it once per historical live order, into two
+    # snapshot rows, every pass it lasts.
+    db, seams, reconciler = env
+    _insert_local_order(db)
+    seams.order_status[_HEX] = RuntimeError("x" * 5000)
+    reconciler.run("heartbeat")
+    (diff,) = [
+        r["reconciliation_diff"]
+        for r in db.conn.execute(
+            "SELECT reconciliation_diff FROM account_snapshots WHERE run_id='r'"
+        ).fetchall()
+    ]
+    assert "x" * 200 in diff  # the head is the diagnosis and survives
+    assert "x" * 400 not in diff
+    (row,) = _cases(db, "order_missing_on_exchange")
+    assert row["detail"].count("x") == 5000  # untruncated where it was observed
+
+
 # -- the verdict's reason reaches the operator --------------------------------
 
 

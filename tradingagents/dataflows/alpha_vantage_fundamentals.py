@@ -8,6 +8,27 @@ from .utils import data_lag_note, live_snapshot_note, statement_lag_bound
 
 logger = logging.getLogger(__name__)
 
+# Error contract shared by all four public getters in this module. None of them
+# answers only with data:
+#
+#   raises  NoMarketDataError            the vendor served nothing usable for the
+#                                        symbol (empty payload, no report of the
+#                                        requested cadence within the
+#                                        point-in-time bound, or a report list of
+#                                        the wrong shape). route_to_vendor turns
+#                                        this into its NO_DATA_AVAILABLE sentinel
+#                                        after trying the rest of the chain.
+#   raises  AlphaVantageRateLimitError / AlphaVantageNotConfiguredError
+#                                        propagated from _make_api_request, which
+#                                        also lets requests' own HTTP errors out.
+#   returns INVALID_CURR_DATE            a curr_date was supplied but is not a
+#                                        usable date, so nothing can be bounded
+#                                        to a point in time (a string, not a
+#                                        raise: fundamental_data is a core
+#                                        category, and the LLM can retry).
+#   returns the vendor body              a prose rejection or a failure envelope
+#                                        this module does not classify (#68).
+
 # Where a freshness disclosure lives in an Alpha Vantage payload. This vendor
 # answers in JSON (yfinance answers in CSV with "# " header lines), so the note
 # is carried as a key rather than a prefixed line: the body stays parseable, and
@@ -27,6 +48,16 @@ _FRESHNESS_NOTE_KEY = "_freshness_note"
 # whether it is a *classified* failure has no bearing on whether it contains
 # fundamentals to disclose about.
 _AV_ENVELOPE_KEYS = {"Error Message", "Information", "Note"}
+
+
+def _carries_anything(parsed: dict) -> bool:
+    """True when a parsed body has content of its own.
+
+    The freshness key does not count: a body whose only key is one this module
+    writes carries nothing the vendor served, and serving it would render as an
+    empty object once the key is stripped.
+    """
+    return bool(parsed.keys() - {_FRESHNESS_NOTE_KEY})
 
 
 def _has_fundamentals(parsed: dict) -> bool:
@@ -226,16 +257,18 @@ def _filter_response_json(result, curr_date, freq, label, symbol):
 
     Raises:
         NoMarketDataError: when the vendor has no fundamentals for the symbol at
-            all (an empty payload) or none of the requested cadence within the
-            point-in-time bound. The yfinance path raises on the same inputs, so
+            all (an empty payload), none of the requested cadence within the
+            point-in-time bound, or a report list of the wrong shape. The yfinance path raises on the same inputs, so
             the router opens its no-data lane for either vendor rather than
             serving an empty body as a successful report.
     """
     parsed = _parsed_payload(result)
-    if parsed is not None and not parsed:
-        # Alpha Vantage answers an unknown symbol with "{}".
+    if parsed is not None and not _carries_anything(parsed):
+        # Alpha Vantage answers an unknown symbol with "{}"; a body of nothing
+        # but a vendor-written freshness key is the same emptiness wearing our
+        # disclosure's name, and the strip would serve it as "{}".
         raise NoMarketDataError(symbol, detail="Alpha Vantage returned an empty payload")
-    if not curr_date or parsed is None or not _has_fundamentals(parsed):
+    if curr_date is None or parsed is None or not _has_fundamentals(parsed):
         # No point-in-time bound (legacy passthrough), a prose body, or a failure
         # envelope this module does not classify (see #68) — served as it
         # arrived, bar a vendor-supplied freshness key.
@@ -267,33 +300,39 @@ def _filter_response_json(result, curr_date, freq, label, symbol):
     if not reports:
         # Three different situations reach the agent as the same
         # NO_DATA_AVAILABLE sentinel, so the reason has to separate them.
-        # Undatable rows are the only one that indicates a fault: a schema
-        # rename or a nulled date field would otherwise report every ticker as
-        # an uncovered symbol, with the analyst writing its report around that
-        # verdict — so that case, and only that case, is also logged. Reports
-        # that merely postdate curr_date are correct point-in-time behaviour on
-        # any backtest older than the vendor's coverage window, and must not
-        # page anyone.
+        # A wholly undatable list is the only one that indicates a fault: a
+        # schema rename or a nulled date field would otherwise report every
+        # ticker as an uncovered symbol, with the analyst writing its report
+        # around that verdict — so that case, and only that case, is also
+        # logged. If even one row was datable, coverage explains the outcome:
+        # dropping rows that postdate curr_date is correct point-in-time
+        # behaviour on any backtest older than the vendor's window, and must
+        # not page anyone.
         notices = sorted(_AV_ENVELOPE_KEYS & parsed.keys())
         because = f"; vendor body also carried {', '.join(notices)}" if notices else ""
-        if undatable:
+        if supplied and undatable == len(supplied):
             detail = (
-                f"{undatable} of {len(supplied)} {cadence} {label} reports carried no "
-                f"usable fiscalDateEnding, leaving nothing on or before {curr_date}{because}"
+                f"all {undatable} {cadence} {label} reports carried no usable "
+                f"fiscalDateEnding{because}"
             )
             logger.warning(
-                "Alpha Vantage %s: %d of %d %s reports for %s were undatable at %s",
+                "Alpha Vantage %s: all %d %s reports for %s were undatable at %s",
                 label,
                 undatable,
-                len(supplied),
                 cadence,
                 symbol,
                 curr_date,
             )
         elif supplied:
+            # Some rows WERE datable and still did not survive, so coverage — not
+            # a fault — explains the outcome; any undatable minority is reported
+            # without being blamed, and without paging anyone.
+            partly = (
+                f" ({undatable} of them carried no usable fiscalDateEnding)" if undatable else ""
+            )
             detail = (
-                f"{len(supplied)} {cadence} {label} reports returned, all later than "
-                f"{curr_date}{because}"
+                f"{len(supplied)} {cadence} {label} reports returned, none on or before "
+                f"{curr_date}{partly}{because}"
             )
         else:
             detail = f"no {cadence} {label} reports on or before {curr_date}{because}"
@@ -335,9 +374,9 @@ def _annotate_live_snapshot(result, curr_date, symbol):
             equivalent, so the router's no-data lane opens for either vendor).
     """
     parsed = _parsed_payload(result)
-    if parsed is not None and not parsed:
+    if parsed is not None and not _carries_anything(parsed):
         raise NoMarketDataError(symbol, detail="Alpha Vantage returned an empty OVERVIEW payload")
-    if not curr_date or parsed is None or not _has_fundamentals(parsed):
+    if curr_date is None or parsed is None or not _has_fundamentals(parsed):
         # Same order as the statement path: a prose body or a failure envelope is
         # served as-is even when curr_date is unusable, because the vendor's
         # reason for having no data outranks ours for not being able to bound it.
@@ -362,7 +401,12 @@ def get_fundamentals(ticker: str, curr_date: str = None) -> str:
             live as of the fetch.
 
     Returns:
-        str: Company overview data including financial ratios and key metrics
+        str: Company overview data including financial ratios and key metrics,
+            carrying a live-snapshot disclosure when curr_date sits behind the
+            wall clock. In place of that it may return the vendor's own prose or
+            failure-envelope body, or the ``INVALID_CURR_DATE`` sentinel when a
+            supplied curr_date is not a usable date. See the module's error
+            contract note for what every fundamentals getter can raise.
     """
     params = {
         "symbol": ticker,
@@ -385,15 +429,27 @@ def _get_statement(function_name: str, ticker: str, freq: str, curr_date: str | 
 
 
 def get_balance_sheet(ticker: str, freq: str = "quarterly", curr_date: str = None):
-    """Retrieve balance sheet data for a given ticker symbol using Alpha Vantage."""
+    """Retrieve balance sheet data for a given ticker symbol using Alpha Vantage.
+
+    Serves the requested cadence's reports; see the module's error contract note
+    for what it raises and what it returns in place of data.
+    """
     return _get_statement("BALANCE_SHEET", ticker, freq, curr_date)
 
 
 def get_cashflow(ticker: str, freq: str = "quarterly", curr_date: str = None):
-    """Retrieve cash flow statement data for a given ticker symbol using Alpha Vantage."""
+    """Retrieve cash flow data for a given ticker symbol using Alpha Vantage.
+
+    Serves the requested cadence's reports; see the module's error contract note
+    for what it raises and what it returns in place of data.
+    """
     return _get_statement("CASH_FLOW", ticker, freq, curr_date)
 
 
 def get_income_statement(ticker: str, freq: str = "quarterly", curr_date: str = None):
-    """Retrieve income statement data for a given ticker symbol using Alpha Vantage."""
+    """Retrieve income statement data for a given ticker symbol using Alpha Vantage.
+
+    Serves the requested cadence's reports; see the module's error contract note
+    for what it raises and what it returns in place of data.
+    """
     return _get_statement("INCOME_STATEMENT", ticker, freq, curr_date)

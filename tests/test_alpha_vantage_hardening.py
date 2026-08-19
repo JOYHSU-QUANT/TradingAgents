@@ -525,8 +525,9 @@ def test_a_vendor_supplied_note_key_cannot_shadow_the_real_disclosure(monkeypatc
     "call",
     [
         # Fresh data: our own note is empty, so nothing overwrites the vendor's
-        # key. Each parameter reaches a different stripper — the first is
-        # rebuilt by the served-cadence path, the second never rebuilt at all.
+        # key. Each parameter reaches a different stripper — the first through
+        # the served-cadence rebuild, the second through the passthrough exit
+        # (which re-serializes only because there is a key to remove).
         lambda: avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18"),
         lambda: avf.get_balance_sheet("AAPL", "quarterly", None),
     ],
@@ -642,7 +643,9 @@ def test_statement_with_nothing_left_after_filtering_raises_no_market_data(monke
     # "rows arrived but none were usable" must not read as "this symbol has no
     # filings": a vendor schema rename would otherwise report every ticker as
     # uncovered, and the router's sentinel says exactly that.
-    assert "carried no usable fiscalDateEnding" in str(exc.value)
+    assert "all 1 quarterly balance sheet reports carried no usable fiscalDateEnding" in str(
+        exc.value
+    )
 
 
 @pytest.mark.unit
@@ -653,6 +656,27 @@ def test_statement_with_no_reports_at_all_says_so_distinctly(monkeypatch):
     with pytest.raises(NoMarketDataError) as exc:
         avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
     assert "no quarterly balance sheet reports on or before" in str(exc.value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "getter",
+    [
+        lambda: avf.get_balance_sheet("AAPL", "quarterly", ""),
+        lambda: avf.get_fundamentals("AAPL", ""),
+    ],
+    ids=["statement", "overview"],
+)
+def test_an_empty_curr_date_is_treated_as_supplied_and_unusable(monkeypatch, getter):
+    # `if not curr_date` lumps "no bound requested" together with "a bound was
+    # supplied and is unusable", so an empty string used to take the passthrough
+    # lane: unfiltered reports, no disclosure, no sentinel — silently the most
+    # permissive answer of the three.
+    body = json.dumps({"symbol": "AAPL", "quarterlyReports": [{"fiscalDateEnding": "2099-03-31"}]})
+    _patch_av_request(monkeypatch, body)
+    out = getter()
+    assert out.startswith("INVALID_CURR_DATE")
+    assert "2099-03-31" not in out
 
 
 @pytest.mark.unit
@@ -678,10 +702,12 @@ def test_statement_reports_that_only_postdate_curr_date_are_not_reported_as_a_fa
     from tradingagents.dataflows.errors import NoMarketDataError
 
     _patch_av_request(monkeypatch, _statement_body(quarterly=["2019-03-31", "2019-06-30"]))
-    with caplog.at_level(logging.WARNING, logger=avf.__name__):
-        with pytest.raises(NoMarketDataError) as exc:
-            avf.get_balance_sheet("AAPL", "quarterly", "2015-01-01")
-    assert "all later than 2015-01-01" in str(exc.value)
+    with (
+        caplog.at_level(logging.WARNING, logger=avf.__name__),
+        pytest.raises(NoMarketDataError) as exc,
+    ):
+        avf.get_balance_sheet("AAPL", "quarterly", "2015-01-01")
+    assert "none on or before 2015-01-01" in str(exc.value)
     assert "usable fiscalDateEnding" not in str(exc.value)
     assert caplog.records == []
 
@@ -697,10 +723,12 @@ def test_statement_undatable_rows_are_reported_and_logged_as_a_fault(monkeypatch
         {"symbol": "AAPL", "quarterlyReports": [{"fiscal_date_ending": "2026-06-30"}]}
     )
     _patch_av_request(monkeypatch, body)
-    with caplog.at_level(logging.WARNING, logger=avf.__name__):
-        with pytest.raises(NoMarketDataError) as exc:
-            avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
-    assert "1 of 1 quarterly balance sheet reports carried no usable fiscalDateEnding" in str(
+    with (
+        caplog.at_level(logging.WARNING, logger=avf.__name__),
+        pytest.raises(NoMarketDataError) as exc,
+    ):
+        avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+    assert "all 1 quarterly balance sheet reports carried no usable fiscalDateEnding" in str(
         exc.value
     )
     assert any("undatable" in r.getMessage() for r in caplog.records)

@@ -614,9 +614,11 @@ python -m contrib.hyperliquid_perp safe-mode --run-id live-BTC --db live_trading
    都沒事——該單若日後被 §8.3 rule-5 重送或被 reopen 而復活，之後**這個 cloid 的
    `order_missing_on_exchange` 事實一律進不了清單**：「讀不到」撞的是已 stamp 的
    `<cloid>|read_failed`，而 unknownOid 對上 rule-10 證據那種（這一族裡最嚴重的一種）撞的
-   是了結它時寫的**裸 cloid** 那一列——兩個 key 都已被佔住（issue #65）。唯一還會另開列的
-   是 `<cloid>|local_terminal`（issue #66）。所以要判「現在有沒有問題」一律看該輪的 pass
-   判決與 safe mode，不要看這個處置、也不要看清單是不是空的。
+   是了結它時寫的**裸 cloid** 那一列——兩個 key 都已被佔住（issue #65）。剩下的
+   `<cloid>|local_terminal`（那是 `orphan_exchange_order` 型別）只在 rule-5 重送那條路徑上
+   還會另開列；若該單是被 **reopen** 復活的，那一列在 reopen 當下就已經寫掉並蓋上
+   `local_row_reopened`，等於這個 cloid 的每個 key 都滿了（issue #66）。所以要判「現在有沒
+   有問題」一律看該輪的 pass 判決與 safe mode，不要看這個處置、也不要看清單是不是空的。
 
 （升級注意：這三個 key 的形狀在本版改過（`ETH:2.5`→`ETH|unknown_coin`、
 `0.001`→`BTC|sl_missing`、裸 cloid→`<cloid>|read_failed`）。跨版沿用同一個 `run_id`

@@ -332,6 +332,125 @@ def test_duplicate_decision_attempt_rejected(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# audit-family mode vocabulary (issue #62)
+# --------------------------------------------------------------------------
+
+
+def _ai_input_kwargs(mode):
+    return {
+        "input_id": f"i-{mode}",
+        "timestamp": _TS,
+        "mode": mode,
+        "run_id": "r1",
+        "symbol": "BTC",
+    }
+
+
+def _ai_output_kwargs(mode):
+    return {
+        "output_id": f"o-{mode}",
+        "timestamp": _TS,
+        "mode": mode,
+        "run_id": "r1",
+        "symbol": "BTC",
+        "decision_mode": "maintain_current",
+        "risk_action": "approved",
+        "order_created": False,
+    }
+
+
+def _decision_attempt_kwargs(mode):
+    # scheduled_at varies with mode so the two legal inserts don't trip the
+    # UNIQUE (run_id, scheduled_at) constraint.
+    return {
+        "decision_attempt_id": f"a-{mode}",
+        "timestamp": _TS,
+        "mode": mode,
+        "run_id": "r1",
+        "scheduled_at": _TS.replace(hour=1 if mode == "paper" else 2),
+        "status": "in_progress",
+    }
+
+
+def _account_snapshot_kwargs(mode):
+    return {
+        "timestamp": _TS,
+        "mode": mode,
+        "run_id": "r1",
+        "wallet_balance": Decimal("1000"),
+        "account_equity": Decimal("1000"),
+        "available_balance": Decimal("1000"),
+        "realized_pnl": Decimal("0"),
+        "unrealized_pnl": Decimal("0"),
+        "total_pnl": Decimal("0"),
+        "total_fees": Decimal("0"),
+        "net_funding_pnl": Decimal("0"),
+        "total_position_notional": Decimal("0"),
+        "used_initial_margin": Decimal("0"),
+        "total_maintenance_margin": Decimal("0"),
+    }
+
+
+def _position_snapshot_kwargs(mode):
+    return {
+        "timestamp": _TS,
+        "mode": mode,
+        "run_id": "r1",
+        "symbol": "BTC",
+        "position_size": Decimal("0.01"),
+        "side": "long",
+        "mark_price": Decimal("60000"),
+        "position_notional": Decimal("600"),
+        "unrealized_pnl": Decimal("0"),
+        "realized_pnl": Decimal("0"),
+        "maintenance_margin": Decimal("6"),
+    }
+
+
+_AUDIT_MODE_INSERTS = [
+    ("ai_inputs", repo.insert_ai_input, _ai_input_kwargs),
+    ("ai_outputs", repo.insert_ai_output, _ai_output_kwargs),
+    ("decision_attempts", repo.insert_decision_attempt, _decision_attempt_kwargs),
+    ("account_snapshots", repo.insert_account_snapshot, _account_snapshot_kwargs),
+    ("position_snapshots", repo.insert_position_snapshot, _position_snapshot_kwargs),
+]
+
+
+@pytest.mark.parametrize(("table", "insert", "kwargs_for"), _AUDIT_MODE_INSERTS)
+def test_audit_inserts_reject_an_out_of_vocabulary_mode(tmp_path, table, insert, kwargs_for):
+    # Same write-boundary rule as insert_fill / insert_order / insert_run /
+    # insert_funding_event: a future third assembly caller passing e.g.
+    # mode="replay" must raise here, not be silently written where a reader
+    # that splits these tables by mode would drop or misfile it.
+    db = Database(tmp_path / "p.db")
+    with pytest.raises(ValueError, match="mode must be one of"), db.transaction() as conn:
+        insert(conn, **kwargs_for("replay"))
+    assert db.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+    db.close()
+
+
+@pytest.mark.parametrize(("table", "insert", "kwargs_for"), _AUDIT_MODE_INSERTS)
+def test_audit_inserts_accept_both_legal_modes(tmp_path, table, insert, kwargs_for):
+    db = Database(tmp_path / "p.db")
+    with db.transaction() as conn:
+        insert(conn, **kwargs_for("paper"))
+        insert(conn, **kwargs_for("live"))
+    modes = {r[0] for r in db.conn.execute(f"SELECT mode FROM {table}")}
+    assert modes == {"paper", "live"}
+    db.close()
+
+
+def test_audit_insert_missing_mode_keeps_its_not_null_failure_shape(tmp_path):
+    # The guard validates mode only when present — an omitted mode still fails
+    # on the column's NOT NULL constraint exactly as it did before the guard
+    # existed, not with a KeyError from the guard itself.
+    db = Database(tmp_path / "p.db")
+    with pytest.raises(sqlite3.IntegrityError), db.transaction() as conn:
+        repo.insert_ai_input(conn, input_id="i1", timestamp=_TS, run_id="r1", symbol="BTC")
+    db.close()
+
+
+# --------------------------------------------------------------------------
 # current_* round-trips
 # --------------------------------------------------------------------------
 
@@ -378,20 +497,8 @@ def test_thin_inserts_align_with_schema_columns(tmp_path):
     # locks the column names against the DDL so a typo raises here, not in PR3/PR4.
     db = Database(tmp_path / "p.db")
     with db.transaction() as conn:
-        repo.insert_ai_input(
-            conn, input_id="i1", timestamp=_TS, mode="paper", run_id="r1", symbol="BTC"
-        )
-        repo.insert_ai_output(
-            conn,
-            output_id="o1",
-            timestamp=_TS,
-            mode="paper",
-            run_id="r1",
-            symbol="BTC",
-            decision_mode="maintain_current",
-            risk_action="approved",
-            order_created=False,
-        )
+        repo.insert_ai_input(conn, **_ai_input_kwargs("paper"))
+        repo.insert_ai_output(conn, **_ai_output_kwargs("paper"))
         repo.insert_order(
             conn,
             order_id="ord1",
@@ -406,38 +513,12 @@ def test_thin_inserts_align_with_schema_columns(tmp_path):
             status="filled",
             updated_at=_TS,
         )
+        # effective_leverage is nullable and not part of the minimal row — pass
+        # it here explicitly so its column name stays locked against the DDL.
         repo.insert_account_snapshot(
-            conn,
-            timestamp=_TS,
-            mode="paper",
-            run_id="r1",
-            wallet_balance=Decimal("1000"),
-            account_equity=Decimal("1000"),
-            available_balance=Decimal("1000"),
-            realized_pnl=Decimal("0"),
-            unrealized_pnl=Decimal("0"),
-            total_pnl=Decimal("0"),
-            total_fees=Decimal("0"),
-            net_funding_pnl=Decimal("0"),
-            total_position_notional=Decimal("0"),
-            effective_leverage=Decimal("0"),
-            used_initial_margin=Decimal("0"),
-            total_maintenance_margin=Decimal("0"),
+            conn, **_account_snapshot_kwargs("paper"), effective_leverage=Decimal("0")
         )
-        repo.insert_position_snapshot(
-            conn,
-            timestamp=_TS,
-            mode="paper",
-            run_id="r1",
-            symbol="BTC",
-            position_size=Decimal("0.01"),
-            side="long",
-            mark_price=Decimal("60000"),
-            position_notional=Decimal("600"),
-            unrealized_pnl=Decimal("0"),
-            realized_pnl=Decimal("0"),
-            maintenance_margin=Decimal("6"),
-        )
+        repo.insert_position_snapshot(conn, **_position_snapshot_kwargs("paper"))
         repo.insert_execution_plan(
             conn,
             plan_id="p1",

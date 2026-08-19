@@ -1020,12 +1020,15 @@ exchange_value)` **不含 symbol 欄**，裸值會讓 off-coin ETH 2.5 與同幣
 
 推論（操作面看得到，見 RUNBOOK §6）：去重的存在檢查**不看 `action_taken`**，所以一個已
 了結的 key 不會被復發重開——復發顯示在該輪的 pass 判決與 safe mode，不是新列。因此規則
-是**自動（機器蓋的）處置只該蓋在事實已了結、且不會再被觀察到之處**：
-`resolved_fill_booked`（fill 已入帳，且沒有任何路徑會把它退帳）與 `resolved_read_succeeded`
-（該單已被本輪了結，且了結它的那次 orderStatus 讀取是成功的）。**今天還有兩個站點比這條
-規則寬**——`settled_never_sent` 與 `settled_{local_status}` 蓋在裸 cloid 鍵上，而該單可經
-§8.3 rule-5 重送或 `_maybe_reopen_terminal_order` 復活、再度產生同鍵的未解事實並被吞掉；
-`resolved_read_succeeded` 也共用這個殘餘窗口。收斂方向見 issue #65。
+是**自動（機器蓋的）處置只該蓋在事實已了結、且不會再被觀察到之處**。
+
+今天**只有 `resolved_fill_booked` 完全符合**：fill 一旦入帳就沒有任何退帳路徑（package
+內沒有任何 `DELETE FROM fills`）。訂單那三個都落在同一個殘餘窗口裡——`settled_never_sent`
+與 `settled_{local_status}`（裸 cloid 鍵）、以及 `resolved_read_succeeded`
+（`<cloid>|read_failed` 鍵）：該單可經 §8.3 rule-5 重送或 `_maybe_reopen_terminal_order`
+復活而重回 `iter_open_live_orders`，之後同鍵的未解事實就會被吞掉，差別只在事實怎麼回來。
+`resolved_read_succeeded` 是這三個裡最窄的（它要求該單本輪已被了結），但不是零風險，**新增
+自動 stamp 時不要拿它當合規範本**。收斂方向見 issue #65。
 
 ## 13. Safe Mode
 

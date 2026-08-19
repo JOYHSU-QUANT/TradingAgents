@@ -126,11 +126,20 @@ _MANUAL_CASE_REASONS = {
 # the first row's detail and in every pass's warning log.
 _EQUITY_MISMATCH_FACT_KEY = "equity_out_of_tolerance"
 
-# How much of a case's detail the per-pass reconciliation_diff carries. Every
-# detail this module writes itself fits well inside it; the cap is for the one
-# the VENUE writes (an exception string interpolated into a read-failure
-# detail), which has no bound this code controls.
-_DIFF_DETAIL_CHARS = 300
+# How much of any one string the per-pass reconciliation_diff carries. Every
+# string this module composes itself fits well inside it; the cap is for the
+# parts it does NOT author — the ``{exc}`` interpolated into case details, leg
+# errors and sweep failures, whose length is the venue's (or a client library's)
+# choice, not this code's. The blob is written twice per pass for as long as the
+# fault lasts, so an unbounded error body would be persisted at that rate; the
+# untruncated text stays on the case row it was first observed under.
+_DIFF_STRING_MAX_CHARS = 300
+
+
+def _clip(text: str | None) -> str | None:
+    """One string as the per-pass diff carries it: a bounded head."""
+    return None if text is None else text[:_DIFF_STRING_MAX_CHARS]
+
 
 # Choosing an exchange_value for a NEW order/position fact below (the fill-side
 # keys are §14.2's and §11.3's, and answer to those specs, not to this note):
@@ -1586,14 +1595,13 @@ class LiveReconciler:
                         # holding that grew all week would be a post-mortem with
                         # one number in it — the one from Monday.
                         #
-                        # Capped, because the widest detail here is an exception
-                        # string the venue chose (an HTTP body, a stack of
-                        # them). iter_open_live_orders spans runs, so one outage
-                        # can mint that detail once per historical live order,
-                        # twice per pass, every pass it lasts. The head carries
-                        # the diagnosis; the untruncated first sighting is on
-                        # the case row.
-                        "detail": None if c.detail is None else c.detail[:_DIFF_DETAIL_CHARS],
+                        # Clipped like every other string here: two details
+                        # carry a venue exception (a failed orderStatus read, a
+                        # failed reopen tiebreaker), and iter_open_live_orders
+                        # spans runs — so one outage mints one per still-live
+                        # order the store carries, twice per pass, every pass it
+                        # lasts. The head carries the diagnosis.
+                        "detail": _clip(c.detail),
                         "resolved": c.resolved,
                         # Severity survives into the durable record: two cases
                         # can share a case_type (position mismatch on our coin
@@ -1603,12 +1611,17 @@ class LiveReconciler:
                     }
                     for c in report.cases
                 ],
-                "errors": list(report.errors),
+                # Both channels also end in ``{exc}`` (a leg that raised, an
+                # order that would not cancel — the latter one entry per order),
+                # so both are clipped for the same reason the details are. The
+                # full text reaches the operator through the log and the
+                # safe-mode entry detail, which are not written per pass.
+                "errors": [_clip(e) for e in report.errors],
                 # A verdict input like any other (see the field's comment): the
                 # durable diff is what a post-mortem reads, and a row marked
                 # "mismatch" whose diff named no cause would send that reader
                 # hunting through a CLI transcript they no longer have.
-                "sweep_failures": list(report.sweep_failures),
+                "sweep_failures": [_clip(f) for f in report.sweep_failures],
                 "backfill": None
                 if backfill_summary is None
                 else {

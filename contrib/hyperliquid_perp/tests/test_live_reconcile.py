@@ -1923,23 +1923,33 @@ def test_the_persisted_diff_carries_each_passs_own_magnitude(env):
     assert "3.5" in diffs[-1]
 
 
-def test_the_persisted_diff_caps_a_venue_written_detail(env):
-    # Every detail this module authors is short; the one it does not is an
-    # exception string the venue chose, and the absent-order cursor spans runs —
-    # so an outage can interpolate it once per historical live order, into two
-    # snapshot rows, every pass it lasts.
+def test_the_persisted_diff_clips_the_strings_it_does_not_author(env):
+    # Every string this module composes is short; the ones it does not are the
+    # venue exceptions it interpolates. The absent-order cursor spans runs, so
+    # one outage writes such a detail per still-live order, into two snapshot
+    # rows, every pass it lasts — and the leg errors beside it end in {exc} too.
+    import json
+
+    from contrib.hyperliquid_perp.live.reconcile import _DIFF_STRING_MAX_CHARS
+
     db, seams, reconciler = env
     _insert_local_order(db)
     seams.order_status[_HEX] = RuntimeError("x" * 5000)
+    # A leg that raised — the fill cross-check, deliberately not the open-orders
+    # read, which would abort the very loop that mints the case above.
+    seams.fills = RuntimeError("y" * 5000)
     reconciler.run("heartbeat")
-    (diff,) = [
+    (raw,) = [
         r["reconciliation_diff"]
         for r in db.conn.execute(
             "SELECT reconciliation_diff FROM account_snapshots WHERE run_id='r'"
         ).fetchall()
     ]
-    assert "x" * 200 in diff  # the head is the diagnosis and survives
-    assert "x" * 400 not in diff
+    diff = json.loads(raw)
+    (case,) = [c for c in diff["cases"] if c["case_type"] == "order_missing_on_exchange"]
+    assert len(case["detail"]) == _DIFF_STRING_MAX_CHARS
+    assert "x" * 100 in case["detail"]  # the head is the diagnosis and survives
+    assert [len(e) for e in diff["errors"] if "y" in e] == [_DIFF_STRING_MAX_CHARS]
     (row,) = _cases(db, "order_missing_on_exchange")
     assert row["detail"].count("x") == 5000  # untruncated where it was observed
 

@@ -923,9 +923,11 @@ def test_case_rows_are_deduped_once_per_fact_across_passes(env):
 
 def test_a_retry_that_resolves_a_deduped_case_stamps_the_existing_row(env):
     db, seams, reconciler = env
-    _insert_local_order(db)
-    # Pass 1: orderStatus read fails → case recorded, unresolved (action NULL).
-    seams.order_status[_HEX] = RuntimeError("api down")
+    # Pass 1: unknownOid against durable §8.3 rule-10 proof of receipt → a case
+    # under the plain-cloid fact key, unresolved (action NULL). Deliberately NOT
+    # the read-failure path, which now owns a fact key of its own — the restamp
+    # this test covers only ever fires on a SECOND sighting of the SAME key.
+    _insert_local_order(db, exchange_order_id="55")
     reconciler.run("heartbeat")
     (row,) = _cases(db, "order_missing_on_exchange")
     assert row["action_taken"] is None
@@ -1685,9 +1687,11 @@ def test_a_live_snapshot_satisfies_the_validator_identities_with_a_position(env)
 
 def test_an_off_coin_and_a_same_coin_position_fact_never_collide(env):
     # The dedupe key is (run_id, case_type, exchange_value) — there is NO symbol
-    # column in it. Both facts below are exchange_position_mismatch and shared a
-    # bare size of "2.5" before the fix, so the second insert was swallowed and
-    # its audit row lost — possibly the MANUAL off-coin one that fires safe mode.
+    # column in it, and BOTH facts below are exchange_position_mismatch. They are
+    # also the two key shapes the module writes (an invariant "the wallet holds
+    # ETH" and a value-bearing size transition), so this pins that the shapes
+    # stay disjoint: a collision silently drops the second audit row — possibly
+    # the MANUAL off-coin one that fires safe mode.
     db, seams, reconciler = env
     seams.clearinghouse = _clearinghouse(
         account_value="101",
@@ -1707,7 +1711,7 @@ def test_an_off_coin_and_a_same_coin_position_fact_never_collide(env):
     reconciler.run("heartbeat")
     rows = _cases(db, "exchange_position_mismatch")
     assert len(rows) == 2  # both facts survived
-    assert {r["exchange_value"] for r in rows} == {"ETH:2.5", "BTC:0->2.5"}
+    assert {r["exchange_value"] for r in rows} == {"ETH|unknown_coin", "BTC:0->2.5"}
 
 
 def test_two_phantoms_of_different_sizes_each_get_their_own_row(env):
@@ -1736,6 +1740,106 @@ def test_two_phantoms_of_different_sizes_each_get_their_own_row(env):
     # The SAME unhealed phantom re-observed still dedupes to its one row.
     reconciler.run("heartbeat")
     assert len(_cases(db, "local_position_phantom")) == 2
+
+
+def test_an_unreadable_order_status_and_a_genuine_absence_each_get_a_row(env):
+    # Two OPPOSITE facts about one cloid — "we could not ask" and "the exchange
+    # says it never had it" — that shared the bare cloid as their dedupe key, so
+    # whichever arrived second was swallowed and never recorded. A venue
+    # misroute serves exactly this pairing on consecutive passes.
+    db, seams, reconciler = env
+    _insert_local_order(db, exchange_order_id="55")  # §8.3 rule-10 proof of receipt
+    seams.order_status[_HEX] = RuntimeError("api down")
+    reconciler.run("heartbeat")
+    del seams.order_status[_HEX]  # the read works now — and answers unknownOid
+    reconciler.run("heartbeat")
+    rows = {r["exchange_value"]: r for r in _cases(db, "order_missing_on_exchange")}
+    assert set(rows) == {f"{_HEX}|read_failed", _HEX}
+    assert "orderStatus failed" in (rows[f"{_HEX}|read_failed"]["detail"] or "")
+    assert "rule 10" in (rows[_HEX]["detail"] or "")
+
+
+def test_a_repeatedly_unreadable_order_status_still_dedupes_to_one_row(env):
+    # The split key must not undo the once-per-fact guard on its own side: an
+    # exchange that stays unreachable is one fact, not one per pass.
+    db, seams, reconciler = env
+    _insert_local_order(db, exchange_order_id="55")
+    seams.order_status[_HEX] = RuntimeError("api down")
+    for _ in range(3):
+        reconciler.run("heartbeat")
+    (row,) = _cases(db, "order_missing_on_exchange")
+    assert row["exchange_value"] == f"{_HEX}|read_failed"
+    assert row["action_taken"] is None  # nothing disproved it yet
+
+
+def test_a_successful_read_disposes_of_the_earlier_read_failure_row(env):
+    # Splitting the key cost the read-failure row the same-key restamp that used
+    # to close it; _clear_read_failure_case is what replaces that, and nothing
+    # else in the module would notice if it stopped firing (see its docstring
+    # for what an un-disposed row costs the operator).
+    db, seams, reconciler = env
+    _insert_local_order(db)
+    seams.order_status[_HEX] = RuntimeError("api down")
+    reconciler.run("heartbeat")
+    seams.order_status[_HEX] = {
+        "status": "order",
+        "order": {"order": {"oid": 77}, "status": "canceled"},
+    }
+    reconciler.run("heartbeat")
+    rows = {r["exchange_value"]: r for r in _cases(db, "order_missing_on_exchange")}
+    assert rows[f"{_HEX}|read_failed"]["action_taken"] == "resolved_read_succeeded"
+    assert rows[_HEX]["action_taken"] == "settled_canceled"  # its own fact, its own row
+
+
+def test_an_off_coin_position_that_moves_still_dedupes_to_one_row(env):
+    # The third size below is the one a size-keyed fix would still get wrong:
+    # 2.50 and 2.5 are the same holding, and re-stringifying a Decimal is enough
+    # to mint another row (another manual stamp) for it.
+    db, seams, reconciler = env
+    for szi in ("2.5", "2.50", "3.5"):
+        seams.clearinghouse = _clearinghouse(
+            account_value="101",
+            maintenance="1",
+            positions=[dict(_btc_position(), coin="ETH", szi=szi)],
+        )
+        reconciler.run("heartbeat")
+    (row,) = _cases(db, "exchange_position_mismatch")
+    assert row["exchange_value"] == "ETH|unknown_coin"
+    assert "2.5" in (row["detail"] or "")  # the magnitude survives in the detail
+
+
+def test_two_off_coins_of_equal_size_never_share_a_fact_key(env):
+    # Negative control for the key above: the dedupe key has no symbol column,
+    # so the coin must stay IN the key — a bare qualifier would silently drop
+    # the second wallet-holds-an-unknown-coin fact.
+    db, seams, reconciler = env
+    seams.clearinghouse = _clearinghouse(
+        account_value="102",
+        maintenance="1",
+        positions=[
+            dict(_btc_position(), coin="ETH", szi="2.5"),
+            dict(_btc_position(), coin="SOL", szi="2.5"),
+        ],
+    )
+    reconciler.run("heartbeat")
+    rows = _cases(db, "exchange_position_mismatch")
+    assert {r["exchange_value"] for r in rows} == {"ETH|unknown_coin", "SOL|unknown_coin"}
+
+
+def test_an_unprotected_position_that_moves_still_dedupes_to_one_row(env):
+    # The sizes are one lapse in §17.1 coverage seen through two partial fills
+    # and a re-stringified Decimal — the shape that used to mint three rows, and
+    # three manual stamps, for one uncovered position.
+    db, seams, reconciler = env
+    for szi in ("0.001", "0.002", "0.0020"):
+        seams.clearinghouse = _clearinghouse(
+            account_value="101", maintenance="1", positions=[_btc_position(szi=szi)]
+        )
+        report = reconciler.run("heartbeat")
+        assert not report.position_protected
+    (row,) = _cases(db, "position_sl_missing")
+    assert row["exchange_value"] == "BTC|sl_missing"
+    assert "0.001" in (row["detail"] or "")  # the magnitude survives in the detail
 
 
 # -- the verdict's reason reaches the operator --------------------------------

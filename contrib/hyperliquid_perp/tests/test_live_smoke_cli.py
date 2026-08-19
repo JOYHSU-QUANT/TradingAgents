@@ -39,7 +39,8 @@ from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 
 from .conftest import (
-    assert_sweep_refreshes,
+    _assert_paired_sweep_refreshes,
+    _assert_payload_dir,
     echo_order_status_cloid,
     record_reconciliation_sweep_wiring,
 )
@@ -54,6 +55,9 @@ _SMOKE_WALLET = "0x" + "aa" * 20
 _SMOKE_KEY = "0x" + "11" * 32
 _SMOKE_ENV = "HYPERLIQUID_AGENT_KEY_TESTNET"
 _AGENT_ADDR = "0x" + "cc" * 20
+# One real suite runs this many §19.1 recoveries: the per-invocation
+# pre-flight (smoke.py's order-placing selection) plus restart tests 15-17.
+_SMOKE_RECOVERIES = 4
 
 
 def _smoke_yaml(
@@ -376,6 +380,20 @@ def test_the_cli_hands_the_fill_processor_the_signed_wallet(tmp_path, monkeypatc
     assert all(value == _SMOKE_WALLET for value in seen), seen
 
 
+def _drive_the_smoke_recoveries(tmp_path):
+    """Run the whole real live-smoke suite; return the store path it used.
+
+    Four recoveries land in one run — the per-invocation pre-flight plus restart
+    tests 15-17 — and the count is asserted so that a suite which quietly stops
+    running three of them cannot leave the "paired per recovery" claim below
+    standing on a single construction.
+    """
+    cfg = _smoke_yaml(tmp_path)
+    dbp = _seed_genesis_run(tmp_path, cfg)
+    assert cli_main(["live-smoke", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)]) == 0
+    return dbp
+
+
 def test_the_smoke_recovery_wires_the_reconciliation_sweeps_switch_refresh(
     tmp_path, monkeypatch, smoke_seams
 ):
@@ -387,27 +405,23 @@ def test_the_smoke_recovery_wires_the_reconciliation_sweeps_switch_refresh(
     can let the scheduled cancel lapse and wipe the resting probe mid-suite.
     Wiring only the live lane was the actual 2026-07-31 finding, and nothing
     since then observed either site.
-
-    Paired per recovery: restart tests 15-17 each run one, so a hook that is
-    right on the first and dropped on a later rebuild has nowhere to hide.
     """
     record = record_reconciliation_sweep_wiring(monkeypatch)
+    _drive_the_smoke_recoveries(tmp_path)
 
-    cfg = _smoke_yaml(tmp_path)
-    dbp = _seed_genesis_run(tmp_path, cfg)
-    assert cli_main(["live-smoke", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)]) == 0
-    assert record.switches, "no recovery ran — the pin proves nothing"
-    counts = (len(record.switches), len(record.backfillers), len(record.reconcilers))
-    assert len(set(counts)) == 1, counts
-    for switch, backfiller, reconciler in zip(
-        record.switches, record.backfillers, record.reconcilers, strict=True
-    ):
-        for label, kwargs in (
-            ("smoke recovery's backfiller", backfiller),
-            ("smoke recovery's reconciler", reconciler),
-        ):
-            assert_sweep_refreshes(record, switch, kwargs, label=label)
-        assert reconciler.get("payload_dir") == dbp.resolve().parent / "payloads" / "r1"
+    assert len(record.switches) == _SMOKE_RECOVERIES, record.switches
+    _assert_paired_sweep_refreshes(record, owner="smoke recovery")
+
+
+def test_the_smoke_recovery_gives_the_reconciler_a_payload_dir(tmp_path, monkeypatch, smoke_seams):
+    """The evidence term at the smoke site, split out for the reason its daemon
+    sibling is: a failure here is about the §19.1 audit trail, not §18.2."""
+    record = record_reconciliation_sweep_wiring(monkeypatch)
+    dbp = _drive_the_smoke_recoveries(tmp_path)
+
+    assert len(record.reconcilers) == _SMOKE_RECOVERIES, record.reconcilers
+    for reconciler in record.reconcilers:
+        _assert_payload_dir(reconciler, dbp, run_id="r1")
 
 
 def test_every_row_a_smoke_run_writes_is_marked_including_the_managers(tmp_path, smoke_seams):

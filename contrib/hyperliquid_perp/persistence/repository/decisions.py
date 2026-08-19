@@ -32,9 +32,10 @@ def _check_mode(fields: dict[str, Any]) -> None:
 
     An absent ``mode`` still falls through to the column's NOT NULL constraint
     (``sqlite3.IntegrityError``), same as before the check existed — this guard
-    only closes the split-miscount lane ``_vocab._MODES`` warns about, where an
-    out-of-vocabulary mode would be written silently and every per-mode split
-    (export, validate, paper-review) would drop or misfile the row.
+    only closes the silent-persistence lane: an out-of-vocabulary mode would be
+    written verbatim (``_vocab._MODES``'s fail-loud-on-typo rule never fires),
+    and a reader that splits these tables by mode would then drop or misfile
+    the row.
     """
     if "mode" in fields:
         check_enum(fields["mode"], _MODES, name="mode")

@@ -420,8 +420,8 @@ _AUDIT_MODE_INSERTS = [
 def test_audit_inserts_reject_an_out_of_vocabulary_mode(tmp_path, table, insert, kwargs_for):
     # Same write-boundary rule as insert_fill / insert_order / insert_run /
     # insert_funding_event: a future third assembly caller passing e.g.
-    # mode="replay" must raise here, not be silently written and then dropped
-    # or misfiled by every per-mode split (_vocab.py's split-miscount warning).
+    # mode="replay" must raise here, not be silently written where a reader
+    # that splits these tables by mode would drop or misfile it.
     db = Database(tmp_path / "p.db")
     with pytest.raises(ValueError, match="mode must be one of"), db.transaction() as conn:
         insert(conn, **kwargs_for("replay"))

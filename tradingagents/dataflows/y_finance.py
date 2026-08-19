@@ -13,14 +13,7 @@ from .stockstats_utils import (
     yf_retry,
 )
 from .symbol_utils import NoMarketDataError, normalize_symbol
-from .utils import data_lag_note, live_snapshot_note
-
-# Maximum age (calendar days) of the newest financial-statement column
-# relative to curr_date before the report carries a data-lag note, keyed by
-# the requested freq. Statements file with a delay, so a period plus a filing
-# window is normal cadence — a quarter+~90d for quarterlies, a year+filing
-# window for annuals; beyond that the newest statement is genuinely old (#30).
-_MAX_STATEMENT_LAG_DAYS = {"quarterly": 180, "annual": 550}
+from .utils import data_lag_note, live_snapshot_note, statement_lag_bound
 
 # Maximum age (calendar days) of the newest insider filing before the report
 # carries a lag note. Insider activity is legitimately sparse, so the bound is
@@ -57,13 +50,13 @@ def _statement_lag_note(data: pd.DataFrame, curr_date: str | None, freq: str, wh
     The newest column left after :func:`filter_financials_by_date` is the
     newest fiscal period the agent will see; compare it against the date being
     analysed with a freq-appropriate bound (an annual statement is ~a year old
-    by definition). Unknown freq values fall back to the annual bound — the
-    looser one, because an annotation must not false-alarm.
+    by definition). The bound — and the unknown-freq fallback — come from
+    :func:`statement_lag_bound` so the Alpha Vantage statement path flags the
+    same gap (#58).
     """
     if data.empty:
         return ""
-    bound = _MAX_STATEMENT_LAG_DAYS.get(freq.lower(), _MAX_STATEMENT_LAG_DAYS["annual"])
-    return _dates_lag_note(data.columns, curr_date, bound, what)
+    return _dates_lag_note(data.columns, curr_date, statement_lag_bound(freq), what)
 
 
 def get_YFin_data_online(

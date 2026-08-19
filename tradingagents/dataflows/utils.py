@@ -52,6 +52,26 @@ def safe_ticker_component(value: str, *, max_len: int = 32) -> str:
 # agrees on what counts as "a backtest" within the same run (#30).
 MAX_LIVE_SNAPSHOT_BEHIND_DAYS = 2
 
+# Maximum age (calendar days) of the newest financial-statement period relative
+# to curr_date before the report carries a data-lag note, keyed by the requested
+# freq. Statements file with a delay, so a period plus a filing window is normal
+# cadence — a quarter+~90d for quarterlies, a year+filing window for annuals;
+# beyond that the newest statement is genuinely old (#30). Shared rather than
+# per-vendor so a statement tool's honesty does not depend on which vendor
+# ``data_vendors`` happened to select (#58).
+MAX_STATEMENT_LAG_DAYS = {"quarterly": 180, "annual": 550}
+
+
+def statement_lag_bound(freq) -> int:
+    """Days the newest fiscal period may lag curr_date before it is flagged.
+
+    An unknown or missing freq falls back to the annual bound — the looser one,
+    because an annotation must not false-alarm. Shared by every vendor serving
+    the statement tools so that fallback rule cannot drift between them (#58).
+    """
+    key = freq.lower() if isinstance(freq, str) else ""
+    return MAX_STATEMENT_LAG_DAYS.get(key, MAX_STATEMENT_LAG_DAYS["annual"])
+
 
 def _plural_days(n: int) -> str:
     return "day" if n == 1 else "days"

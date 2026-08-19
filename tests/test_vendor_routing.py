@@ -132,6 +132,29 @@ class VendorRoutingTests(unittest.TestCase):
         self.assertIn("DATA_UNAVAILABLE", result)
         self.assertIn("macro_data", result)
 
+    def test_alpha_vantage_indicator_rate_limit_reaches_the_fallback_vendor(self):
+        # #60 end-to-end, through the REAL Alpha Vantage indicator getter: a 429
+        # used to come back as an "Error retrieving ..." string, which the router
+        # reads as a successful answer — the chain stopped at the exhausted
+        # vendor and the agent got prose where indicator values belonged.
+        import tradingagents.dataflows.alpha_vantage_indicator as avi
+        from tradingagents.dataflows.alpha_vantage_common import AlphaVantageRateLimitError
+
+        set_config({"data_vendors": {"technical_indicators": "alpha_vantage,yfinance"}})
+        with (
+            mock.patch.object(
+                avi,
+                "_make_api_request",
+                side_effect=AlphaVantageRateLimitError("25 requests per day"),
+            ),
+            self._route_method(
+                "get_indicators",
+                {"alpha_vantage": avi.get_indicator, "yfinance": _returns("YF_INDICATORS")},
+            ),
+        ):
+            result = interface.route_to_vendor("get_indicators", "AAPL", "rsi", "2026-06-01", 30)
+        self.assertEqual(result, "YF_INDICATORS")
+
     def test_core_category_still_raises_on_error(self):
         # A core category (single configured vendor) propagates the error so a
         # broken primary is loud, not silently degraded.

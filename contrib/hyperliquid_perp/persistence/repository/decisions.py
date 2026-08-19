@@ -8,7 +8,7 @@ from typing import Any
 
 from ...domains.perp.enum_guard import check_enum
 from ._base import _UNSET, _encode, _insert, _iso_utc, _Unset
-from ._vocab import _ATTEMPT_STATUSES, _ERROR_TYPES
+from ._vocab import _ATTEMPT_STATUSES, _ERROR_TYPES, _MODES
 
 __all__ = [
     "find_in_progress_attempt",
@@ -27,19 +27,36 @@ __all__ = [
 # --------------------------------------------------------------------------
 
 
+def _check_mode(fields: dict[str, Any]) -> None:
+    """Vocabulary-check ``fields["mode"]`` when present, like the fill/order writers.
+
+    An absent ``mode`` still falls through to the column's NOT NULL constraint
+    (``sqlite3.IntegrityError``), same as before the check existed — this guard
+    only closes the split-miscount lane ``_vocab._MODES`` warns about, where an
+    out-of-vocabulary mode would be written silently and every per-mode split
+    (export, validate, paper-review) would drop or misfile the row.
+    """
+    if "mode" in fields:
+        check_enum(fields["mode"], _MODES, name="mode")
+
+
 def insert_account_snapshot(conn: sqlite3.Connection, **fields: Any) -> None:
+    _check_mode(fields)
     _insert(conn, "account_snapshots", fields)
 
 
 def insert_position_snapshot(conn: sqlite3.Connection, **fields: Any) -> None:
+    _check_mode(fields)
     _insert(conn, "position_snapshots", fields)
 
 
 def insert_ai_input(conn: sqlite3.Connection, **fields: Any) -> None:
+    _check_mode(fields)
     _insert(conn, "ai_inputs", fields)
 
 
 def insert_ai_output(conn: sqlite3.Connection, **fields: Any) -> None:
+    _check_mode(fields)
     _insert(conn, "ai_outputs", fields)
 
 
@@ -50,6 +67,7 @@ def insert_decision_attempt(conn: sqlite3.Connection, **fields: Any) -> None:
     scheduled_at)`` keep one scheduled cycle to one attempt row across restarts
     (phase2-spec §3.1).
     """
+    _check_mode(fields)
     if "status" in fields:
         check_enum(fields["status"], _ATTEMPT_STATUSES, name="status")
     if fields.get("error_type") is not None:

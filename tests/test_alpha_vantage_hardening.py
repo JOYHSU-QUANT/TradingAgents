@@ -519,6 +519,38 @@ def test_a_vendor_supplied_note_key_cannot_shadow_the_real_disclosure(monkeypatc
     assert "vendor supplied text" not in note
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "call",
+    [
+        # Fresh data: our own note is empty, so nothing overwrites the vendor's
+        # key — it has to be dropped by the serving path itself.
+        lambda: avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18"),
+        lambda: avf.get_balance_sheet("AAPL", "quarterly", None),
+    ],
+)
+def test_a_vendor_note_key_is_dropped_even_when_we_add_no_note(monkeypatch, call):
+    body = json.dumps(
+        {
+            "_freshness_note": "vendor supplied text",
+            "quarterlyReports": [{"fiscalDateEnding": "2026-06-30"}],
+        }
+    )
+    _patch_av_request(monkeypatch, body)
+    assert "vendor supplied text" not in call()
+
+
+@pytest.mark.unit
+def test_overview_vendor_note_key_is_dropped_on_the_live_path(monkeypatch):
+    from datetime import date
+
+    body = json.dumps({"_freshness_note": "vendor supplied text", "Symbol": "AAPL"})
+    _patch_av_request(monkeypatch, body)
+    out = avf.get_fundamentals("AAPL", date.today().strftime("%Y-%m-%d"))
+    assert "vendor supplied text" not in out
+    assert json.loads(out)["Symbol"] == "AAPL"
+
+
 def _statement_body(*, quarterly=(), annual=()):
     return json.dumps(
         {
@@ -583,6 +615,7 @@ def test_statement_serves_only_the_requested_cadence(monkeypatch):
     quarterly = json.loads(avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18"))
     assert [r["fiscalDateEnding"] for r in quarterly["quarterlyReports"]] == ["2026-06-30"]
     assert "annualReports" not in quarterly
+    assert quarterly["symbol"] == "AAPL"  # the rebuild keeps what the body says it describes
     assert avf._FRESHNESS_NOTE_KEY not in quarterly  # a 49-day-old quarter is on cadence
 
     annual = json.loads(avf.get_balance_sheet("AAPL", "annual", "2026-08-18"))
@@ -601,7 +634,33 @@ def test_statement_with_nothing_left_after_filtering_raises_no_market_data(monke
     _patch_av_request(monkeypatch, _statement_body(quarterly=["not-a-date"]))
     with pytest.raises(NoMarketDataError) as exc:
         avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
-    assert "quarterly balance sheet" in str(exc.value)
+    # "rows arrived but none were usable" must not read as "this symbol has no
+    # filings": a vendor schema rename would otherwise report every ticker as
+    # uncovered, and the router's sentinel says exactly that.
+    assert "1 quarterly balance sheet reports returned, none usable" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_statement_with_no_reports_at_all_says_so_distinctly(monkeypatch):
+    from tradingagents.dataflows.errors import NoMarketDataError
+
+    _patch_av_request(monkeypatch, _statement_body(annual=["2025-12-31"]))
+    with pytest.raises(NoMarketDataError) as exc:
+        avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+    assert "no quarterly balance sheet reports on or before" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_statement_no_data_reason_carries_a_vendor_notice_when_one_rode_along(monkeypatch):
+    # A notice beside real keys escapes the whole-body envelope test and lands
+    # here; without this the vendor's stated reason is destroyed by the rebuild.
+    from tradingagents.dataflows.errors import NoMarketDataError
+
+    body = json.dumps({"symbol": "AAPL", "Information": "our standard API rate limit is 25/day"})
+    _patch_av_request(monkeypatch, body)
+    with pytest.raises(NoMarketDataError) as exc:
+        avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+    assert "Information" in str(exc.value)
 
 
 @pytest.mark.unit
@@ -626,6 +685,19 @@ def test_statement_malformed_report_rows_are_dropped_not_crashed(monkeypatch):
     _patch_av_request(monkeypatch, body)
     with pytest.raises(NoMarketDataError):
         avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+
+
+@pytest.mark.unit
+def test_statement_wrong_shaped_report_list_is_named_as_a_schema_break(monkeypatch):
+    # A list replaced by an object is a vendor schema change; reporting it as
+    # "no data" would make an incident look like an uncovered symbol.
+    from tradingagents.dataflows.errors import NoMarketDataError
+
+    body = json.dumps({"symbol": "AAPL", "quarterlyReports": {"fiscalDateEnding": "2026-06-30"}})
+    _patch_av_request(monkeypatch, body)
+    with pytest.raises(NoMarketDataError) as exc:
+        avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+    assert "not a list of reports" in str(exc.value)
 
 
 @pytest.mark.unit

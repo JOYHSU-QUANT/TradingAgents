@@ -12,10 +12,11 @@ logger = logging.getLogger(__name__)
 # answers in JSON (yfinance answers in CSV with "# " header lines), so the note
 # is carried as a key rather than a prefixed line: the body stays parseable, and
 # an underscore-prefixed name is not part of any Alpha Vantage schema this repo
-# has seen. That last part is a convention, not a guarantee, so the renderer
-# drops a same-named key from the vendor body instead of trusting it to be
-# absent. Written first so a disclosure is not buried under a long report list
-# (#58).
+# has seen. That last part is a convention, not a guarantee, so every path that
+# serves a body drops a same-named key from it instead of trusting it to be
+# absent — including the paths that attach no disclosure of their own, where a
+# vendor-written note would stand unopposed. Written first so a disclosure is
+# not buried under a long report list (#58).
 _FRESHNESS_NOTE_KEY = "_freshness_note"
 
 # Keys Alpha Vantage answers with when it is reporting a problem rather than
@@ -60,6 +61,21 @@ def _parsed_payload(result) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _served_body(result, parsed: dict | None) -> str:
+    """The vendor body as served, minus any freshness key the vendor supplied.
+
+    Every exit that hands the body over without a disclosure comes through here,
+    because a vendor-written ``_freshness_note`` reaches the agent looking like a
+    system-issued freshness statement — and on these paths there is no real note
+    beside it to contradict it. Returns ``result`` untouched when there is
+    nothing to strip, so the ordinary no-disclosure answer stays byte-identical
+    to the vendor's own text.
+    """
+    if parsed is None or _FRESHNESS_NOTE_KEY not in parsed:
+        return result
+    return json.dumps({k: v for k, v in parsed.items() if k != _FRESHNESS_NOTE_KEY}, indent=2)
+
+
 def _with_freshness_note(payload: dict, note: str) -> str:
     """Render ``payload`` with its freshness note first, as JSON text.
 
@@ -97,8 +113,10 @@ def _filter_reports_by_date(result: dict, curr_date: str) -> dict:
     A present-but-unparseable ``curr_date`` RAISES rather than returning the data
     unfiltered: this backs a core fundamentals tool, so a broken point-in-time
     bound must fail loud (like farside/fear_greed) instead of silently leaking
-    future data. ``None``-curr_date and non-JSON bodies are handled by
-    ``_filter_response_json`` before it delegates here with a parsed dict.
+    future data. In production that raise is unreachable — ``_filter_response_json``
+    validates curr_date and answers ``INVALID_CURR_DATE`` before delegating here,
+    and it also handles ``None``-curr_date and non-JSON bodies — so the raise
+    stands as the invariant for anything calling this helper directly.
     """
     cutoff = _normalize_iso_date(curr_date)
     if cutoff is None:
@@ -106,7 +124,7 @@ def _filter_reports_by_date(result: dict, curr_date: str) -> dict:
             f"Alpha Vantage fundamentals: curr_date {curr_date!r} is not a valid "
             f"YYYY-MM-DD date; refusing to serve reports unfiltered (look-ahead guard)"
         )
-    for key in ("annualReports", "quarterlyReports"):
+    for key in _REPORT_LIST_KEYS:
         rows = result.get(key)
         if isinstance(rows, list):
             # Row-shape guard, not defensive noise: a scalar or string row makes
@@ -178,8 +196,10 @@ def _filter_response_json(result, curr_date, freq, label, symbol):
     parsed dict, so the reports must be parsed before the filter can see them — an
     earlier version type-checked ``isinstance(result, dict)`` on this always-str
     value, so the guard silently never fired in production. A ``None`` curr_date
-    (no point-in-time bound) or a non-JSON body (an error/notice page) is returned
-    untouched.
+    (no point-in-time bound) or a non-JSON body (an error/notice page) is served
+    as it arrived — bar the empty-payload raise below, which fires before any of
+    those checks because "this symbol has nothing" is true regardless of the
+    analysis date.
 
     ``freq`` and ``label`` are the caller's statement identity; the served reports
     carry a freshness note built from them (see :func:`_statement_lag_note`).
@@ -204,19 +224,54 @@ def _filter_response_json(result, curr_date, freq, label, symbol):
     if not curr_date or parsed is None or not parsed.keys() - _AV_ENVELOPE_KEYS:
         # No point-in-time bound (legacy passthrough), a prose body, or a failure
         # envelope this module does not classify (see #68) — served unchanged.
-        return result
+        return _served_body(result, parsed)
     if _normalize_iso_date(curr_date) is None:
         return _invalid_curr_date(curr_date)
-    filtered = _filter_reports_by_date(parsed, curr_date)
     cadence = _statement_cadence(freq)
+    supplied = parsed.get(f"{cadence}Reports")
+    supplied_count = len(supplied) if isinstance(supplied, list) else 0
+    filtered = _filter_reports_by_date(parsed, curr_date)
     reports = filtered.get(f"{cadence}Reports")
-    reports = reports if isinstance(reports, list) else []
-    if not reports:
+    if reports is not None and not isinstance(reports, list):
+        # Present but wrong-shaped is a vendor schema break, not an uncovered
+        # symbol; say so rather than letting the two look identical in the log
+        # and in the router's no-data sentinel. An ABSENT key is not this case —
+        # it means the vendor served no such list, which the no-reports branch
+        # below reports (together with any notice that rode along).
         raise NoMarketDataError(
             symbol,
-            detail=f"no {cadence} {label} reports on or before {curr_date}",
+            detail=f"{cadence}Reports is {type(reports).__name__}, not a list of reports",
         )
-    body = {k: v for k, v in filtered.items() if k not in _REPORT_LIST_KEYS}
+    reports = reports or []
+    if not reports:
+        # "The vendor sent rows we could not use" and "the vendor covers nothing
+        # here" reach the agent as the same NO_DATA_AVAILABLE sentinel, so the
+        # count has to separate them: a schema rename or a nulled date field
+        # would otherwise report every ticker as an uncovered symbol, with the
+        # analyst writing its report around that verdict. Also logged, because
+        # the sentinel is the only other trace and it names the symbol, not the
+        # cause.
+        notices = sorted(_AV_ENVELOPE_KEYS & parsed.keys())
+        because = f"; vendor body also carried {', '.join(notices)}" if notices else ""
+        if supplied_count:
+            detail = (
+                f"{supplied_count} {cadence} {label} reports returned, none usable on or "
+                f"before {curr_date} (undated, malformed, or later than that date){because}"
+            )
+            logger.warning(
+                "Alpha Vantage %s: dropped all %d %s reports for %s at %s",
+                label,
+                supplied_count,
+                cadence,
+                symbol,
+                curr_date,
+            )
+        else:
+            detail = f"no {cadence} {label} reports on or before {curr_date}{because}"
+        raise NoMarketDataError(symbol, detail=detail)
+    body = {
+        k: v for k, v in filtered.items() if k not in _REPORT_LIST_KEYS and k != _FRESHNESS_NOTE_KEY
+    }
     body[f"{cadence}Reports"] = reports
     note = _statement_lag_note(reports, curr_date, cadence, label)
     return _with_freshness_note(body, note) if note else json.dumps(body, indent=2)
@@ -231,17 +286,19 @@ def _annotate_live_snapshot(result, curr_date, symbol):
     otherwise read as that date's (#30). The same tool routes to either vendor,
     so the disclosure cannot depend on which one ``data_vendors`` picked (#58).
 
-    Returns the body untouched when there is nothing to disclose, when it is not
-    a JSON object, or when the object is a rejection envelope of nothing but
+    Serves the body as it arrived when there is nothing to disclose, when it is
+    not a JSON object, or when the object is a rejection envelope of nothing but
     ``Error Message`` / ``Information`` / ``Note`` (the notices
     ``_make_api_request`` does not already classify into the taxonomy; see #68).
     Annotating one of those would assert that fundamentals were fetched when
     none were.
 
     An unparseable curr_date takes the same ``INVALID_CURR_DATE`` route as the
-    statement tools: with no usable analysis date this path cannot tell a
-    backtest from live trading, and staying silent would serve today's ratios
-    undisclosed — the exact failure the disclosure exists to prevent.
+    statement tools, and at the same depth: with no usable analysis date this
+    path cannot tell a backtest from live trading, and staying silent would serve
+    today's ratios undisclosed — the exact failure the disclosure exists to
+    prevent. A body the vendor refused to fill still outranks it, so a prose or
+    envelope answer is served rather than replaced by the date complaint.
 
     Raises:
         NoMarketDataError: on an empty payload, which is how Alpha Vantage
@@ -251,15 +308,16 @@ def _annotate_live_snapshot(result, curr_date, symbol):
     parsed = _parsed_payload(result)
     if parsed is not None and not parsed:
         raise NoMarketDataError(symbol, detail="Alpha Vantage returned an empty OVERVIEW payload")
-    if not curr_date:
-        return result
+    if not curr_date or parsed is None or not parsed.keys() - _AV_ENVELOPE_KEYS:
+        # Same order as the statement path: a prose body or a failure envelope is
+        # served as-is even when curr_date is unusable, because the vendor's
+        # reason for having no data outranks ours for not being able to bound it.
+        return _served_body(result, parsed)
     if _normalize_iso_date(curr_date) is None:
         return _invalid_curr_date(curr_date)
     note = live_snapshot_note(curr_date, "these fundamentals are")
     if not note:
-        return result
-    if parsed is None or not parsed.keys() - _AV_ENVELOPE_KEYS:
-        return result
+        return _served_body(result, parsed)
     return _with_freshness_note(parsed, note)
 
 
@@ -288,8 +346,10 @@ def _get_statement(function_name: str, ticker: str, freq: str, curr_date: str | 
     """Fetch one financial statement.
 
     With a curr_date it is look-ahead-filtered, narrowed to the requested
-    cadence, and freshness-noted; without one the vendor body is served
-    unchanged — the pre-existing no-point-in-time-bound passthrough.
+    cadence, and freshness-noted; without one the vendor body is served as it
+    arrived — the pre-existing no-point-in-time-bound passthrough. An empty
+    payload raises either way, since an unknown symbol is unknown with or
+    without an analysis date.
     """
     result = _make_api_request(function_name, {"symbol": ticker})
     return _filter_response_json(result, curr_date, freq, _STATEMENT_LABELS[function_name], ticker)

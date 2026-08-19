@@ -126,7 +126,9 @@ _MANUAL_CASE_REASONS = {
 # the first row's detail and in every pass's warning log.
 _EQUITY_MISMATCH_FACT_KEY = "equity_out_of_tolerance"
 
-# How much of any one string the per-pass reconciliation_diff carries. Every
+# How much of any ONE string the per-pass reconciliation_diff carries (the blob
+# itself is not bounded — it holds one entry per case, error and sweep failure
+# the pass found). Every
 # string this module composes itself fits well inside it; the cap is for the
 # parts it does NOT author — the ``{exc}`` interpolated into case details, leg
 # errors and sweep failures, whose length is the venue's (or a client library's)
@@ -1247,12 +1249,20 @@ class LiveReconciler:
 
         The caller's guard is the load-bearing half: this may only run once the
         order is settled, because the stamp is irreversible (see there). It
-        deliberately covers LESS than "the read worked" — an order left
-        unresolved by a successful read (unknownOid against §8.3 rule-10
-        evidence) keeps its read-failure row open even though that read
-        disproved it, because the order is still in the cursor and the fault
-        can return. That order already needs a human, so the cost is one extra
-        row on a §12.3 case a human is reading anyway.
+        deliberately covers LESS than "the read worked" — TWO successful-read
+        outcomes leave the row open, and they cost differently:
+
+        * unknownOid against §8.3 rule-10 evidence: the order stays in the
+          cursor and the fault can return, and that order already needs a human,
+          so the extra row sits on a §12.3 case someone is reading anyway.
+        * still live per orderStatus: the pass can be entirely clean, and the
+          order may then be retired by a writer that is not this sweep (a §19.3
+          cancel, the kill switch, the protection manager), so no later pass
+          ever disposes of it. That row then holds §21.4's unresolved count
+          above zero, with nothing else reporting a problem — the one case where
+          this guard's conservatism has a real cost, accepted because the
+          alternative (stamping on a read that proves nothing about the order)
+          is the audit-trail lie the guard exists to prevent (issue #66).
 
         Fail-soft, like the liquidation mirror: this is the audit trail's
         disposition, not a verdict input — a store that refuses the stamp must

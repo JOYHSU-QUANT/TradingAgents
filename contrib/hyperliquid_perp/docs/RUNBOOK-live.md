@@ -617,8 +617,14 @@ python -m contrib.hyperliquid_perp safe-mode --run-id live-BTC --db live_trading
    是了結它時寫的**裸 cloid** 那一列——兩個 key 都已被佔住（issue #65）。剩下的
    `<cloid>|local_terminal`（那是 `orphan_exchange_order` 型別）只在 rule-5 重送那條路徑上
    還會另開列；若該單是被 **reopen** 復活的，那一列在 reopen 當下就已經寫掉並蓋上
-   `local_row_reopened`，等於這個 cloid 的每個 key 都滿了（issue #66）。所以要判「現在有沒
-   有問題」一律看該輪的 pass 判決與 safe mode，不要看這個處置、也不要看清單是不是空的。
+   `local_row_reopened`，等於這個 cloid **每個還可能被寫出的 key 都被佔住了**（issue #66）。
+   所以要判「現在有沒有問題」一律看該輪的 pass 判決與 safe mode，不要看這個處置、也不要看
+   清單是不是空的。
+
+   反過來也有一種「該關卻沒關」：讀取失敗之後那張單只是**還掛在交易所上**（open_orders 慢
+   了一拍），本 sweep 不會蓋處置；若它接著被 §19.3 撤單、kill switch 或 protection manager
+   收掉，就再也沒有哪一輪會了結它，`<cloid>|read_failed` 那一列會**整個 run 停在未解**、把
+   §21.4 計數壓在非零，而每一輪都報乾淨。看到這種孤兒列，人工 `--stamp-case` 掉即可。
 
 （升級注意：這三個 key 的形狀在本版改過（`ETH:2.5`→`ETH|unknown_coin`、
 `0.001`→`BTC|sl_missing`、裸 cloid→`<cloid>|read_failed`）。跨版沿用同一個 `run_id`

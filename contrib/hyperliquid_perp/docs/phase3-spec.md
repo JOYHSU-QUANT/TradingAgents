@@ -1034,6 +1034,9 @@ exchange_value)` **不含 symbol 欄**，裸值會讓 off-coin ETH 2.5 與同幣
 則是**其餘三種** `order_missing_on_exchange` 事實都會撞上，包含最嚴重的 rule-10 那種），
 但不是零風險，**新增自動 stamp 時不要拿它當合規範本**。收斂方向見 issue #65／#66。
 
+（第七個機器處置 `backfilled`（`exchange_fill_missing_local`）不吃這條規則：它寫入時**不帶
+`exchange_value`**，本來就不進 dedupe、每 pass 各自一列，不會佔住任何事實鍵。）
+
 ## 13. Safe Mode
 
 safe mode 不是整個程式停掉，而是系統還活著、繼續監控與保護倉位，

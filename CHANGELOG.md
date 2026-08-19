@@ -545,9 +545,11 @@ Breaking changes within the 0.x line are called out explicitly.
   than a header line. Both disclosures need the analysis date, so they fire only
   when the caller supplies `curr_date` — which also remains what turns on the
   look-ahead filter. An Alpha Vantage statement response carries the annual and
-  quarterly lists together; only the requested cadence is now served, so the
-  agent can no longer receive an unjudged second list (a years-old annual
-  balance sheet alongside a current quarterly one) with no disclosure attached.
+  quarterly lists together; whenever a `curr_date` is supplied, only the
+  requested cadence is served, so the agent does not receive an unjudged second
+  list (a years-old annual balance sheet alongside a current quarterly one) with
+  no disclosure attached. Without a `curr_date` the vendor body still passes
+  through whole and unfiltered, as it always has.
   A payload with no fundamentals in it — an unknown symbol's `{}`, or no report
   of the requested cadence within the point-in-time bound — now raises
   `NoMarketDataError` like the yfinance path instead of rendering as a

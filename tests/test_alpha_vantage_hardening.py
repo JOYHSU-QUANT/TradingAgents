@@ -6,6 +6,7 @@ fundamentals look-ahead filter (curr_date normalization + undated-row handling).
 """
 
 import json
+import logging
 
 import pytest
 
@@ -524,10 +525,12 @@ def test_a_vendor_supplied_note_key_cannot_shadow_the_real_disclosure(monkeypatc
     "call",
     [
         # Fresh data: our own note is empty, so nothing overwrites the vendor's
-        # key — it has to be dropped by the serving path itself.
+        # key. Each parameter reaches a different stripper — the first is
+        # rebuilt by the served-cadence path, the second never rebuilt at all.
         lambda: avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18"),
         lambda: avf.get_balance_sheet("AAPL", "quarterly", None),
     ],
+    ids=["rebuilt-body", "passthrough-body"],
 )
 def test_a_vendor_note_key_is_dropped_even_when_we_add_no_note(monkeypatch, call):
     body = json.dumps(
@@ -541,13 +544,15 @@ def test_a_vendor_note_key_is_dropped_even_when_we_add_no_note(monkeypatch, call
 
 
 @pytest.mark.unit
-def test_overview_vendor_note_key_is_dropped_on_the_live_path(monkeypatch):
+def test_overview_vendor_note_key_is_dropped_when_no_disclosure_is_due(monkeypatch):
+    # curr_date is today, so live_snapshot_note is empty and no note of ours is
+    # written — this pins the exit that serves the body with nothing attached.
     from datetime import date
 
     body = json.dumps({"_freshness_note": "vendor supplied text", "Symbol": "AAPL"})
     _patch_av_request(monkeypatch, body)
     out = avf.get_fundamentals("AAPL", date.today().strftime("%Y-%m-%d"))
-    assert "vendor supplied text" not in out
+    assert avf._FRESHNESS_NOTE_KEY not in json.loads(out)
     assert json.loads(out)["Symbol"] == "AAPL"
 
 
@@ -637,7 +642,7 @@ def test_statement_with_nothing_left_after_filtering_raises_no_market_data(monke
     # "rows arrived but none were usable" must not read as "this symbol has no
     # filings": a vendor schema rename would otherwise report every ticker as
     # uncovered, and the router's sentinel says exactly that.
-    assert "1 quarterly balance sheet reports returned, none usable" in str(exc.value)
+    assert "carried no usable fiscalDateEnding" in str(exc.value)
 
 
 @pytest.mark.unit
@@ -651,12 +656,78 @@ def test_statement_with_no_reports_at_all_says_so_distinctly(monkeypatch):
 
 
 @pytest.mark.unit
-def test_statement_no_data_reason_carries_a_vendor_notice_when_one_rode_along(monkeypatch):
-    # A notice beside real keys escapes the whole-body envelope test and lands
-    # here; without this the vendor's stated reason is destroyed by the rebuild.
+def test_a_vendor_note_key_does_not_make_an_envelope_look_like_data(monkeypatch):
+    # The envelope test asks whether anything BUT a notice is present. A
+    # vendor-supplied `_freshness_note` is an extra key, so counting it as
+    # content dresses a rate-limit notice in our own live-snapshot disclosure.
+    body = json.dumps({"Information": "rate limit reached", "_freshness_note": "vendor text"})
+    _patch_av_request(monkeypatch, body)
+    out = avf.get_fundamentals("AAPL", "2020-01-01")
+    assert "live values" not in out
+    assert "vendor text" not in out
+    assert json.loads(out) == {"Information": "rate limit reached"}
+
+
+@pytest.mark.unit
+def test_statement_reports_that_only_postdate_curr_date_are_not_reported_as_a_fault(
+    monkeypatch, caplog
+):
+    # A backtest older than the vendor's coverage window drops every row for an
+    # entirely correct reason. Calling that "undatable" — or logging a warning
+    # for it — would page an operator on every ticker of every early backtest.
     from tradingagents.dataflows.errors import NoMarketDataError
 
-    body = json.dumps({"symbol": "AAPL", "Information": "our standard API rate limit is 25/day"})
+    _patch_av_request(monkeypatch, _statement_body(quarterly=["2019-03-31", "2019-06-30"]))
+    with caplog.at_level(logging.WARNING, logger=avf.__name__):
+        with pytest.raises(NoMarketDataError) as exc:
+            avf.get_balance_sheet("AAPL", "quarterly", "2015-01-01")
+    assert "all later than 2015-01-01" in str(exc.value)
+    assert "usable fiscalDateEnding" not in str(exc.value)
+    assert caplog.records == []
+
+
+@pytest.mark.unit
+def test_statement_undatable_rows_are_reported_and_logged_as_a_fault(monkeypatch, caplog):
+    # A schema rename nulls every fiscalDateEnding. Reported as "no coverage"
+    # this reads as an uncovered symbol on every ticker at once, so it must name
+    # the real cause and leave a log line — the sentinel names only the symbol.
+    from tradingagents.dataflows.errors import NoMarketDataError
+
+    body = json.dumps(
+        {"symbol": "AAPL", "quarterlyReports": [{"fiscal_date_ending": "2026-06-30"}]}
+    )
+    _patch_av_request(monkeypatch, body)
+    with caplog.at_level(logging.WARNING, logger=avf.__name__):
+        with pytest.raises(NoMarketDataError) as exc:
+            avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+    assert "1 of 1 quarterly balance sheet reports carried no usable fiscalDateEnding" in str(
+        exc.value
+    )
+    assert any("undatable" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "reports",
+    [
+        [],  # nothing arrived at all
+        [{"fiscalDateEnding": "not-a-date"}],  # rows arrived but none were usable
+    ],
+    ids=["no-reports", "undatable-reports"],
+)
+def test_statement_no_data_reason_carries_a_vendor_notice_when_one_rode_along(monkeypatch, reports):
+    # A notice beside real keys escapes the whole-body envelope test and lands
+    # here; without this the vendor's stated reason is destroyed by the rebuild.
+    # Both no-data branches interpolate it, so both are pinned.
+    from tradingagents.dataflows.errors import NoMarketDataError
+
+    body = json.dumps(
+        {
+            "symbol": "AAPL",
+            "Information": "our standard API rate limit is 25/day",
+            "quarterlyReports": reports,
+        }
+    )
     _patch_av_request(monkeypatch, body)
     with pytest.raises(NoMarketDataError) as exc:
         avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")

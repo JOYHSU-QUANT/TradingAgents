@@ -585,6 +585,33 @@ python -m contrib.hyperliquid_perp safe-mode --run-id live-BTC --db live_trading
 既有 run 若已有那種列，本版第一次再遇到同一故障會另外寫一列新 key 的——多 stamp 一次，
 沒有證據遺失。）
 
+**「一個 run 一列」的 case 不只 envelope 那兩種。** 交易所倉位與訂單那邊也有幾個 case 的
+`exchange_value` 是**不帶量值的固定 key**，語義與上面一樣——一個未癒的事實只寫一列：
+
+| `exchange_value` | 事實 | 現在多大要去哪裡看 |
+|---|---|---|
+| `<幣別>\|unknown_coin` | 錢包持有本 run 不交易的幣種（manual safe mode） | 首列的 `detail`、每 pass 的 warning log、每 pass 的 `reconciliation_diff` |
+| `<幣別>\|sl_missing` | 這個實倉沒有足量的 reduce-only SL 覆蓋 | 同上，另加每 pass 的 `position_snapshots.position_size` |
+| `equity_out_of_tolerance` | equity 超出容差 | 同上 |
+| `<cloid>\|read_failed` | 這張單的 orderStatus 讀不到 | 首列的 `detail` |
+
+三件事要記住：
+
+1. **量值不在 key 裡，所以列不會隨倉位變動增生**——反過來說，`--status` 那一行看不到
+   現在多大，要去看上表右欄。
+2. **stamp 過就不會再寫第二列**（去重不看 `action_taken`）。同一個 run 之後又發生一次
+   **獨立的**同型事件時，它會出現在**該輪的 pass 判決與 safe mode**（例如
+   `position_sl_missing` 進 recoverable safe mode）與 warning log，**不會**是清單上的
+   新列。不要用「open case 清單是空的」推論「現在沒有這個問題」。
+3. **`resolved_read_succeeded` 是機器蓋的處置**（同 `resolved_fill_booked`）：意思是
+   「後來讀得到了」，**不是**「那張單沒事」——同一 pass 完全可能為同一個 cloid 另開一列
+   未解的 mismatch。
+
+（升級注意：這三個 key 的形狀在本版改過（`ETH:2.5`→`ETH|unknown_coin`、
+`0.001`→`BTC|sl_missing`、裸 cloid→`<cloid>|read_failed`）。跨版沿用同一個 `run_id`
+resume 的 run，若舊 key 那列還沒 stamp，會再多一列新 key 的同型事實——兩列都要 stamp，
+沒有證據遺失。）
+
 ---
 
 ## 7. mainnet_tiny（§21）——真錢，最嚴 gate

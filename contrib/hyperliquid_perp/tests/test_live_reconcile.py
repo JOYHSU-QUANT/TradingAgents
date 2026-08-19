@@ -1791,21 +1791,75 @@ def test_a_successful_read_disposes_of_the_earlier_read_failure_row(env):
     assert rows[_HEX]["action_taken"] == "settled_canceled"  # its own fact, its own row
 
 
-def test_an_off_coin_position_that_moves_still_dedupes_to_one_row(env):
+def test_a_read_that_succeeds_without_settling_the_order_stamps_nothing(env):
+    # The stamp is IRREVERSIBLE — the once-per-fact dedupe ignores action_taken,
+    # so a stamped key can never be re-opened by a later sighting. An order that
+    # is merely proven live stays in the locally-live cursor, so the very next
+    # pass can fail to read it again: stamping here would leave the row reading
+    # "resolved" while §21.4's unresolved count and `safe-mode --status` show
+    # clean through an outage that is still going on.
+    db, seams, reconciler = env
+    _insert_local_order(db)
+    seams.order_status[_HEX] = RuntimeError("api down")
+    reconciler.run("heartbeat")
+    seams.order_status[_HEX] = {  # reads again, and the order is simply still live
+        "status": "order",
+        "order": {"order": {"oid": 77}, "status": "open"},
+    }
+    reconciler.run("heartbeat")
+    seams.order_status[_HEX] = RuntimeError("api down again")
+    report = reconciler.run("heartbeat")
+    assert not report.orders_reconciled
+    (row,) = _cases(db, "order_missing_on_exchange")
+    assert row["exchange_value"] == f"{_HEX}|read_failed"
+    assert row["action_taken"] is None  # still open, as the live outage requires
+
+
+def test_a_failed_disposition_stamp_does_not_fail_the_orders_leg(env, monkeypatch, caplog):
+    # The disposition is the audit trail's, not the verdict's: a store that
+    # refuses it must cost one stale open row, never the settlement itself. But
+    # it must not vanish either — the row is invisible to the verdict, so this
+    # log line is the only trace that the stamp did not land.
+    from contrib.hyperliquid_perp.live import reconcile as reconcile_mod
+
+    db, seams, reconciler = env
+    _insert_local_order(db)
+    seams.order_status[_HEX] = RuntimeError("api down")
+    reconciler.run("heartbeat")
+    seams.order_status[_HEX] = {
+        "status": "order",
+        "order": {"order": {"oid": 77}, "status": "canceled"},
+    }
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("store busy")
+
+    monkeypatch.setattr(reconcile_mod.repo, "get_exchange_reconciliation_case", _boom)
+    with caplog.at_level("WARNING"):
+        reconciler.run("heartbeat")
+    assert repo.get_order(db.conn, "o1")["status"] == "canceled"  # the settle stood
+    assert any("could not stamp" in r.getMessage() for r in caplog.records)
+
+
+def test_an_off_coin_position_that_moves_still_dedupes_to_one_row(env, caplog):
     # The third size below is the one a size-keyed fix would still get wrong:
     # 2.50 and 2.5 are the same holding, and re-stringifying a Decimal is enough
     # to mint another row (another manual stamp) for it.
     db, seams, reconciler = env
-    for szi in ("2.5", "2.50", "3.5"):
-        seams.clearinghouse = _clearinghouse(
-            account_value="101",
-            maintenance="1",
-            positions=[dict(_btc_position(), coin="ETH", szi=szi)],
-        )
-        reconciler.run("heartbeat")
+    with caplog.at_level("WARNING"):
+        for szi in ("2.5", "2.50", "3.5"):
+            seams.clearinghouse = _clearinghouse(
+                account_value="101",
+                maintenance="1",
+                positions=[dict(_btc_position(), coin="ETH", szi=szi)],
+            )
+            reconciler.run("heartbeat")
     (row,) = _cases(db, "exchange_position_mismatch")
     assert row["exchange_value"] == "ETH|unknown_coin"
-    assert "2.5" in (row["detail"] or "")  # the magnitude survives in the detail
+    assert "2.5" in (row["detail"] or "")  # the first sighting's magnitude, in the row
+    # ...and the LATER magnitudes, which no row will ever carry, in the log the
+    # key change made load-bearing.
+    assert any("3.5" in r.getMessage() for r in caplog.records)
 
 
 def test_two_off_coins_of_equal_size_never_share_a_fact_key(env):
@@ -1826,20 +1880,47 @@ def test_two_off_coins_of_equal_size_never_share_a_fact_key(env):
     assert {r["exchange_value"] for r in rows} == {"ETH|unknown_coin", "SOL|unknown_coin"}
 
 
-def test_an_unprotected_position_that_moves_still_dedupes_to_one_row(env):
+def test_an_unprotected_position_that_moves_still_dedupes_to_one_row(env, caplog):
     # The sizes are one lapse in §17.1 coverage seen through two partial fills
     # and a re-stringified Decimal — the shape that used to mint three rows, and
     # three manual stamps, for one uncovered position.
     db, seams, reconciler = env
-    for szi in ("0.001", "0.002", "0.0020"):
-        seams.clearinghouse = _clearinghouse(
-            account_value="101", maintenance="1", positions=[_btc_position(szi=szi)]
-        )
-        report = reconciler.run("heartbeat")
-        assert not report.position_protected
+    with caplog.at_level("WARNING"):
+        for szi in ("0.001", "0.002", "0.0020"):
+            seams.clearinghouse = _clearinghouse(
+                account_value="101", maintenance="1", positions=[_btc_position(szi=szi)]
+            )
+            report = reconciler.run("heartbeat")
+            assert not report.position_protected
     (row,) = _cases(db, "position_sl_missing")
     assert row["exchange_value"] == "BTC|sl_missing"
-    assert "0.001" in (row["detail"] or "")  # the magnitude survives in the detail
+    assert "0.001" in (row["detail"] or "")  # the first sighting's magnitude, in the row
+    assert any("0.002" in r.getMessage() for r in caplog.records)  # the later ones, logged
+
+
+def test_the_persisted_diff_carries_each_passs_own_magnitude(env):
+    # An invariant-keyed row is written once, `safe-mode --status` prints no
+    # detail, and the log rotates — so the per-pass reconciliation_diff is the
+    # only DURABLE place a post-mortem can read what the fact measured on the
+    # day it is reading about.
+    db, seams, reconciler = env
+    for szi in ("2.5", "3.5"):
+        seams.clearinghouse = _clearinghouse(
+            account_value="101",
+            maintenance="1",
+            positions=[dict(_btc_position(), coin="ETH", szi=szi)],
+        )
+        reconciler.run("heartbeat")
+    diffs = [
+        r["reconciliation_diff"]
+        for r in db.conn.execute(
+            "SELECT reconciliation_diff FROM account_snapshots WHERE run_id='r' "
+            "ORDER BY snapshot_id"
+        ).fetchall()
+    ]
+    # The fact key is size-free, so 3.5 can only be there via the case detail.
+    assert "2.5" in diffs[0]
+    assert "3.5" in diffs[-1]
 
 
 # -- the verdict's reason reaches the operator --------------------------------

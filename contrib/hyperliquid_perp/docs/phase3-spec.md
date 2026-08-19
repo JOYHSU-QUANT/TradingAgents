@@ -1001,6 +1001,29 @@ resolution 不改寫 case rows（它們是 log），且**「已解決」的定�
   fill 其 fee 有更正」（fee drift，見 §15.1 rule 8）的審計線索，解決路徑是人工核對後
   以 `action_taken` 標記。
 
+**（v13 新增，2026-08-19）PR 4 sweep 端的 fact key 形狀**：上面四型是 ingest 端、形狀由
+§14.2／§11.3 決定；sweep 端（order／position 那幾型）自己挑 key，規則是**先問這個事實是
+不變量還是 episode**：
+
+- **不變量**——「錢包持有本 run 不交易的幣種」（`<coin>|unknown_coin`）、「這個實倉沒有
+  足量 SL 覆蓋」（`<coin>|sl_missing`）、「這張單的 orderStatus 讀不到」
+  （`<cloid>|read_failed`）、equity 超容差（`equity_out_of_tolerance`）：以**主體本身**為
+  key，一個未癒事實一列。會變動的量值（size、equity 差額）**不得入 key**——它一變就多
+  一列、每列都要人工 `--stamp-case`，而事實從頭到尾是同一個；量值改由該列的 `detail`、
+  每 pass 的 `reconciliation_diff`、以及每 pass 的 warning log 承載。
+- **episode**——倉位大小不符（`<coin>:<local>-><exchange>`）：以「什麼讓這次不同」為
+  key，因為一段漂移被人工了結後，稍後發生的**獨立**不符是另一個事實，該有自己的列。
+
+兩型都把幣別／cloid 留在 key 裡：去重鍵 `(run_id, case_type, exchange_value)` **不含
+symbol 欄**，裸值會讓 off-coin ETH 2.5 與同幣 exch_size 2.5 互撞而靜默丟掉第二列。
+
+推論（操作面看得到，見 RUNBOOK §6）：去重的存在檢查**不看 `action_taken`**，所以一個已
+了結的 key 不會被復發重開——復發顯示在該輪的 pass 判決與 safe mode，不是新列。因此
+**自動（機器蓋的）處置只能蓋在事實已了結處**：`resolved_fill_booked`（fill 已入帳）與
+`resolved_read_succeeded`（該單已被本輪了結，且 orderStatus 讀得到了；**它的意思是「讀得
+到了」而不是「那張單沒事」**——同一 pass 仍可能為同一個 cloid 另開一列未解的 mismatch）。
+比這更寬的自動 stamp 會讓稽核列在故障仍活著時宣稱已了結（issue #65）。
+
 ## 13. Safe Mode
 
 safe mode 不是整個程式停掉，而是系統還活著、繼續監控與保護倉位，

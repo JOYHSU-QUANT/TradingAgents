@@ -126,16 +126,25 @@ _MANUAL_CASE_REASONS = {
 # the first row's detail and in every pass's warning log.
 _EQUITY_MISMATCH_FACT_KEY = "equity_out_of_tolerance"
 
-# The two key SHAPES this module writes, stated once so a fifth fact added
-# under an existing case_type has a rule instead of four examples to guess from:
-#   ``subject|fact``  — an INVARIANT: one row that stands until a later pass or
-#                       a human disposes of it. Whatever varies while it stands
-#                       (a size, an equity gap) lives in the row's detail and in
-#                       a per-pass warning log, never in the key.
-#   ``subject:value`` — VALUE-BEARING: deliberately one row per distinct
-#                       episode. The position-size transition below is the only
-#                       one left — an independent later mismatch of a different
-#                       magnitude is its own fact, not a repeat of the first.
+# Choosing an exchange_value for a NEW order/position fact below (the fill-side
+# keys are §14.2's and §11.3's, and answer to those specs, not to this note):
+# ask whether the fact is an INVARIANT that stands until someone disposes of it
+# — an off-coin holding, an uncovered position, an equity gap — or an EPISODE
+# that recurs as distinct occurrences.
+#   Invariant → key it on the subject alone (``BTC|sl_missing``,
+#     ``equity_out_of_tolerance``). Whatever varies while it stands belongs in
+#     the row's detail, the per-pass reconciliation_diff, and a warning log —
+#     never in the key, or every change of it mints a row and a manual stamp.
+#   Episode   → key it on what makes the occurrence distinct (the position-size
+#     transition below): an independent later mismatch of a different magnitude
+#     is its own fact, not a repeat of the first.
+# The dedupe carries no symbol column, so either way the coin/cloid stays IN the
+# key. Note the asymmetry this buys: a disposed-of invariant row is never
+# re-opened by a recurrence (the dedupe ignores action_taken), so the recurrence
+# is visible in the pass verdict and the log, not in a new row — which is why an
+# AUTOMATIC disposition belongs only where the fact is settled, not merely quiet
+# (see ``_clear_read_failure_case``'s caller, and issue #65 for the sibling
+# stamps that are looser than that).
 
 
 def _read_failure_fact_key(cloid: str) -> str:
@@ -957,6 +966,24 @@ class LiveReconciler:
             settled, case = self._settle_absent_order(row, now)
             if case is not None:
                 cases.append(case)
+                if case.action_taken is not None:
+                    # ONLY when this pass DISPOSED of the order. The stamp is
+                    # one the store cannot take back: the once-per-fact dedupe
+                    # ignores action_taken, so a later re-observation of the
+                    # same key writes NOTHING, and a row stamped early would go
+                    # on asserting "resolved" while §21.4's unresolved count and
+                    # `safe-mode --status` read clean through a live outage.
+                    #
+                    # The other outcomes leave the row in THIS cursor, where the
+                    # next pass's read is free to fail again — that is the case
+                    # the gate exists for. Disposal does not make recurrence
+                    # impossible (a §8.3 rule-5 resend re-stamps the same
+                    # order_id 'submitted' — live/orders.py — and
+                    # _maybe_reopen_terminal_order revives a terminal row), it
+                    # makes it require a deliberate new send or a contradicting
+                    # exchange answer. That residual window is issue #65, shared
+                    # with the sibling settled_* stamps below.
+                    self._clear_read_failure_case(cloid)
             if not settled:
                 ok = False
         return ok
@@ -1135,9 +1162,6 @@ class LiveReconciler:
                 exchange_value=_read_failure_fact_key(cloid),
                 detail=f"absent from open_orders and orderStatus failed: {exc}",
             )
-        # The read worked, whatever it answered: any earlier "could not read"
-        # row for this cloid describes a fact this pass just disproved.
-        self._clear_read_failure_case(cloid)
         if parsed is None:
             if repo.has_exchange_known_cloid(self._db.conn, cloid_hex=cloid):
                 return False, ReconciliationCase(
@@ -1197,18 +1221,22 @@ class LiveReconciler:
         )
 
     def _clear_read_failure_case(self, cloid: str) -> None:
-        """Dispose of a past unreadable-orderStatus row once a read succeeds.
+        """Dispose of a past unreadable-orderStatus row for a SETTLED order.
 
         ``_record``'s restamp reaches only rows under the SAME fact key, and a
         read failure deliberately has its own (see ``_read_failure_fact_key``)
         — so nothing else would ever close this row. Left open, one transient
         API error would hold the §21.4 ``unresolved_reconciliation_mismatch``
         count above zero for the rest of the run, stampable only by hand, for a
-        fact the very next pass disproved.
+        fact a later pass disproved.
+
+        The caller's guard is the load-bearing half: this may only run once the
+        order is settled, because the stamp is irreversible (see there).
 
         Fail-soft, like the liquidation mirror: this is the audit trail's
         disposition, not a verdict input — a store that refuses the stamp must
-        not fail the orders leg (the next successful read retries it anyway).
+        not fail the orders leg. The cost of losing it is one stale open row,
+        the same shape the caller's guard deliberately leaves behind elsewhere.
         """
         key = _read_failure_fact_key(cloid)
         try:
@@ -1538,6 +1566,14 @@ class LiveReconciler:
                         "symbol": c.symbol,
                         "local": c.local_value,
                         "exchange": c.exchange_value,
+                        # The pass's own account of the fact, and the only
+                        # DURABLE home for what varies while an invariant-keyed
+                        # fact stands: the case row is written once (its first
+                        # detail), `safe-mode --status` prints no detail at all,
+                        # and the warning log rotates. Without this, an off-coin
+                        # holding that grew all week would be a post-mortem with
+                        # one number in it — the one from Monday.
+                        "detail": c.detail,
                         "resolved": c.resolved,
                         # Severity survives into the durable record: two cases
                         # can share a case_type (position mismatch on our coin

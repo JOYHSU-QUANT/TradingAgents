@@ -40,8 +40,8 @@ from contrib.hyperliquid_perp.persistence.models import PositionState
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 
 from .conftest import (
-    _assert_paired_sweep_refreshes,
-    _assert_payload_dir,
+    assert_paired_sweep_refreshes,
+    assert_payload_dir,
     insert_decision_attempts,
     record_reconciliation_sweep_wiring,
 )
@@ -3597,7 +3597,6 @@ def test_the_daemon_writes_unmarked_rows(tmp_path, live_seams, monkeypatch):
     never be true — and the operator is told the run's refreshes "were written
     during live-smoke" (2026-08-01 round-17 mutation probe).
     """
-    import contextlib
 
     from contrib.hyperliquid_perp.live import kill_switch as ks_mod
 
@@ -3617,13 +3616,14 @@ def test_the_daemon_writes_unmarked_rows(tmp_path, live_seams, monkeypatch):
         live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
     )
     dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg, run_id="r1")
-    # The recovery is NOT driven to completion, and that is deliberate rather than
-    # papered over: ``live_seams``' signed double stops short of the fill-backfill
-    # surface a full §19.1 pass needs. The fact under test is settled before then
-    # — what the CLI hands the constructor — and ``assert seen`` fails loudly if
-    # construction ever stops being reached.
-    with contextlib.suppress(Exception):
-        cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    # The recovery is NOT driven to completion, and that is deliberate rather
+    # than papered over: ``live_seams``' signed double has no ``schedule_cancel``,
+    # so arming the switch fails and the command reports the exit-1 "startup
+    # recovery failed" path. The fact under test is settled long before that —
+    # what the CLI hands the constructor. Asserted rather than suppressed:
+    # swallowing every exception here would also swallow a regression anywhere
+    # in the recovery this drive now reaches (2026-08-19 exit check).
+    assert cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)]) == 1
     assert seen, "no KillSwitchManager was constructed — the pin proves nothing"
     assert all(kwargs.get("suite_authored", False) is False for kwargs in seen), seen
     # The other term this call site carries, and the reason round 17 had to make
@@ -3647,7 +3647,6 @@ def test_the_daemon_hands_the_fill_processor_the_signed_wallet(tmp_path, live_se
     (2026-08-17 identity-echo mutation probe). Same shape, and same reason, as
     the suite_authored pin above.
     """
-    import contextlib
 
     # cli.py imports the class lazily inside the command function, so the seam
     # is the SOURCE module, not a cli attribute.
@@ -3669,11 +3668,9 @@ def test_the_daemon_hands_the_fill_processor_the_signed_wallet(tmp_path, live_se
         live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
     )
     dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg, run_id="r1")
-    # Recovery is not driven to completion, for the reason the sibling pin above
-    # states: the fact under test is settled at construction, and ``assert seen``
-    # fails loudly if construction stops being reached.
-    with contextlib.suppress(Exception):
-        cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    # Recovery is not driven to completion, and the exit code is asserted, for
+    # the reasons the sibling pin above states.
+    assert cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)]) == 1
     assert seen, "no LiveFillProcessor was constructed - the pin proves nothing"
     assert all(value == _LIVE_WALLET for value in seen), seen
 
@@ -3720,8 +3717,11 @@ def test_the_daemon_wires_the_reconciliation_sweeps_switch_refresh(
     record = record_reconciliation_sweep_wiring(monkeypatch)
     _drive_the_daemon_recovery(tmp_path, monkeypatch)
 
-    assert record.switches, "no recovery ran — the pin proves nothing"
-    _assert_paired_sweep_refreshes(record, owner="daemon")
+    # One boot, one recovery: the count is part of the shape, as it is at the
+    # smoke site, so a second recovery appearing on this path has to be noticed
+    # rather than silently halving what the pairing below covers.
+    assert len(record.switches) == 1, record.switches
+    assert_paired_sweep_refreshes(record, owner="daemon")
     # The double has no REST behaviour; reaching it would mean the drive ran
     # past the constructions under test into work these pins do not model.
     assert live_seams.rest_calls == []
@@ -3740,9 +3740,9 @@ def test_the_daemon_gives_the_reconciler_a_payload_dir(tmp_path, live_seams, mon
     record = record_reconciliation_sweep_wiring(monkeypatch)
     dbp = _drive_the_daemon_recovery(tmp_path, monkeypatch)
 
-    assert record.reconcilers, "no LiveReconciler was constructed — the pin proves nothing"
+    assert len(record.reconcilers) == 1, record.reconcilers
     for reconciler in record.reconcilers:
-        _assert_payload_dir(reconciler, dbp, run_id="r1")
+        assert_payload_dir(reconciler, dbp, run_id="r1")
     assert live_seams.rest_calls == []  # as in the sibling pin above
 
 
@@ -3759,11 +3759,12 @@ def _drive_live_loop_construction(tmp_path, monkeypatch, *, fetch_clearinghouse)
     a different matter: it is straight-line, it is where the three safety kwargs
     below are decided, and it can simply be driven. The drive stops at
     ``_EngineDecisionProvider``, the last of the three. It is not pure
-    construction by then: the real ``LiveExecutionEngine`` is built before the
-    provider and its ``settle_offline_flat()`` pass runs, as does
-    ``ensure_settlement_anchor`` — both touch the store, which is why the drive
-    needs a real one. Only the worker and driver come after, and neither is
-    modelled here.
+    construction by then: the block reads the store from the ledger lookup
+    onwards, runs ``ensure_settlement_anchor``, and builds the real
+    ``LiveExecutionEngine`` (whose own ``__init__`` reads the position) before
+    running its ``settle_offline_flat()`` pass — which is why the drive needs a
+    real store rather than a double. Only the worker, the driver and the
+    driver's ``resume_startup()`` come after; none of them is modelled here.
 
     The recorders subclass the real classes and construct THROUGH them wherever
     the real constructor runs offline, so a call site that drifts from a

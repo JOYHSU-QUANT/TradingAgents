@@ -67,9 +67,9 @@ def record_reconciliation_sweep_wiring(monkeypatch):
     the kwargs that arm the refresh are optional on both components. The pins
     live in two modules because only one command reaches each site; the
     plumbing is identical, so it lives here together with the shared
-    assertions; only what differs — the recovery COUNT, the daemon's one against
-    the smoke suite's four (a pre-flight plus restart tests 15–17) — stays with
-    the tests.
+    assertions. What stays with the tests is what each site does NOT share: the
+    recovery count (the daemon's one against the smoke suite's four — a
+    pre-flight plus restart tests 15–17) and the daemon's own no-REST guard.
 
     Returns a namespace of ``switches`` / ``refreshes`` / ``backfillers`` /
     ``reconcilers``, in construction order.
@@ -97,7 +97,6 @@ def record_reconciliation_sweep_wiring(monkeypatch):
             record.switches.append(self)
 
     def _recording_refresh(switch, *, what):
-        record.refreshes.append((switch, what))
         # Delegate rather than replace. The seam is narrower than it looks —
         # ``live/engine.py`` and ``live/protection.py`` bind this name at MODULE
         # level and never see the patch, and ``live/smoke.py`` does not use it at
@@ -106,6 +105,9 @@ def record_reconciliation_sweep_wiring(monkeypatch):
         # refreshes (the daemon drive dies at the arm, before any sweep runs).
         # Swallowing those would change what the drive proves.
         real_refresh(switch, what=what)
+        # Recorded after the delegate, for the reason ``_RecordingSwitch`` above
+        # argues at length. (The helper never raises, so nothing is lost.)
+        record.refreshes.append((switch, what))
 
     def _record_kwargs(module, name, sink):
         real = getattr(module, name)
@@ -126,17 +128,18 @@ def record_reconciliation_sweep_wiring(monkeypatch):
     return record
 
 
-def assert_sweep_refreshes(record, switch, kwargs, *, label):
+def _assert_sweep_refreshes(record, switch, kwargs, *, label):
     """The recorded hook must route THAT switch to the §18.2 refresh helper.
 
-    Routing, not a completed refresh: the helper swallows everything (a refresh
-    miss must never abort the work it protects), and ``tick()`` reaches the wire
-    only when ``refresh_due()`` says so — which a call made milliseconds after
-    the drive is not. In the daemon pin the switch never armed either, so
-    ``refresh()`` would refuse outright; the smoke pin's four are armed and live,
-    and it is the refresh interval alone that keeps the post-drive call off the
-    wire. Identity is still the fact that matters, because it is what
-    ``lambda: None`` and a hook closed over the WRONG switch both fail.
+    Routing, not a completed refresh, and for a different reason on each side.
+    The daemon pin's switch never armed — its drive dies in ``arm()`` — so a
+    refresh IS due and ``refresh()`` refuses outright. The smoke pin's four are
+    armed and live, and what keeps the post-drive call off the wire is only that
+    ``refresh_due()`` is false so soon after the suite's own refresh; that is
+    wall-clock, not structure. Either way the helper swallows the outcome (a
+    refresh miss must never abort the work it protects), so identity is the fact
+    left to assert — and it is what ``lambda: None`` and a hook closed over the
+    WRONG switch both fail.
 
     ``what=`` is deliberately not asserted: it feeds one ``logger.warning`` and
     nothing else, so pinning it would turn a pure wording change into a red
@@ -149,7 +152,7 @@ def assert_sweep_refreshes(record, switch, kwargs, *, label):
     assert [s for s, _what in record.refreshes] == [switch], (label, record.refreshes)
 
 
-def _assert_paired_sweep_refreshes(record, *, owner):
+def assert_paired_sweep_refreshes(record, *, owner):
     """Every recovery the drive ran armed BOTH of its sweep components.
 
     Paired per recovery rather than checked once: a hook that is right on the
@@ -160,18 +163,19 @@ def _assert_paired_sweep_refreshes(record, *, owner):
     for switch, backfiller, reconciler in zip(
         record.switches, record.backfillers, record.reconcilers, strict=True
     ):
-        assert_sweep_refreshes(record, switch, backfiller, label=f"{owner}'s backfiller")
-        assert_sweep_refreshes(record, switch, reconciler, label=f"{owner}'s reconciler")
+        _assert_sweep_refreshes(record, switch, backfiller, label=f"{owner}'s backfiller")
+        _assert_sweep_refreshes(record, switch, reconciler, label=f"{owner}'s reconciler")
 
 
-def _assert_payload_dir(reconciler_kwargs, db_path, *, run_id):
+def assert_payload_dir(reconciler_kwargs, db_path, *, run_id):
     """The reconciler was given somewhere to write its raw payload evidence.
 
-    Shape rather than one exact string, because the ``<db parent>/payloads/<run
-    id>`` recipe is hand-copied at four cli.py sites and this pin owns only the
-    two it drives — but every segment of the shape is checked. Dropping the
-    middle one left a rename of the production literal invisible to all four
-    pins (2026-08-19 mutation probe).
+    Segment by segment rather than one path comparison — the same claim either
+    way, but a failure names which part of ``<db parent>/payloads/<run id>``
+    moved. Every segment IS checked: dropping the middle one left a rename of
+    the production literal invisible to both payload-dir pins (2026-08-19
+    mutation probe). The recipe is hand-copied at four cli.py sites and these
+    pins drive two of them; the other two are nobody's here.
     """
     payload_dir = reconciler_kwargs.get("payload_dir")
     assert payload_dir is not None, "the reconciler writes no clearinghouse evidence"

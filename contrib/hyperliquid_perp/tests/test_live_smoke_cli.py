@@ -39,8 +39,8 @@ from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 
 from .conftest import (
-    _assert_paired_sweep_refreshes,
-    _assert_payload_dir,
+    assert_paired_sweep_refreshes,
+    assert_payload_dir,
     echo_order_status_cloid,
     record_reconciliation_sweep_wiring,
 )
@@ -410,7 +410,7 @@ def test_the_smoke_recovery_wires_the_reconciliation_sweeps_switch_refresh(
     _drive_the_smoke_recoveries(tmp_path)
 
     assert len(record.switches) == _SMOKE_RECOVERIES, record.switches
-    _assert_paired_sweep_refreshes(record, owner="smoke recovery")
+    assert_paired_sweep_refreshes(record, owner="smoke recovery")
 
 
 def test_the_smoke_recovery_gives_the_reconciler_a_payload_dir(tmp_path, monkeypatch, smoke_seams):
@@ -421,7 +421,7 @@ def test_the_smoke_recovery_gives_the_reconciler_a_payload_dir(tmp_path, monkeyp
 
     assert len(record.reconcilers) == _SMOKE_RECOVERIES, record.reconcilers
     for reconciler in record.reconcilers:
-        _assert_payload_dir(reconciler, dbp, run_id="r1")
+        assert_payload_dir(reconciler, dbp, run_id="r1")
 
 
 def test_every_row_a_smoke_run_writes_is_marked_including_the_managers(tmp_path, smoke_seams):

@@ -515,6 +515,30 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **An Alpha Vantage rate limit no longer reads as a successful indicator
+  report.** The indicator getter caught every exception and returned
+  `"Error retrieving <indicator> data: ..."`, which the router reads as a
+  successful answer — so once the free tier's daily quota was spent, the
+  rate-limit lane never opened and a configured fallback vendor never got its
+  turn; the market analyst was handed that prose instead of indicator values.
+  The whole vendor-error taxonomy now propagates from that path (caught as the
+  base type rather than one leaf at a time), so a chain falls back and a
+  single-vendor chain fails loudly the way any other core-category failure
+  does. Unexpected, untyped failures still degrade to the error string.
+- **Alpha Vantage fundamentals now carry the same freshness disclosures as the
+  yfinance ones.** `get_fundamentals` (the OVERVIEW snapshot) discloses that
+  its values are live as of the fetch when the analysis date sits behind the
+  wall clock, and the three statement tools disclose a stalled filing stream —
+  previously the honesty of a routed fundamentals tool depended on which vendor
+  `data_vendors` happened to select, and an Alpha Vantage deployment ran a
+  backtest with today's market cap and P/E presented as that date's. The lag
+  bound (a quarter plus a filing window, a year plus one for annuals) is now
+  shared by both vendors instead of living in one of them. Alpha Vantage
+  answers in JSON, so the disclosure rides in a `_freshness_note` key rather
+  than a header line; because that payload carries the annual and quarterly
+  lists together, the note names the cadence it judged. A body with no
+  fundamentals in it (an unknown symbol's `{}`, an error/notice envelope) is
+  left alone rather than dressed in a note.
 - **Farside catch-up: cache boundary and caveats aligned with the family's
   decided semantics.** The Farside cache validator now mirrors the invariants
   its parser enforces live (an `asset` echo so a copied/renamed cache file

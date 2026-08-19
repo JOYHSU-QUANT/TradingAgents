@@ -1,4 +1,5 @@
-from .alpha_vantage_common import AlphaVantageNotConfiguredError, _make_api_request
+from .alpha_vantage_common import _make_api_request
+from .errors import VendorError
 from .utils import data_lag_note
 
 # Maximum age (calendar days) of the newest indicator row relative to
@@ -269,10 +270,17 @@ def get_indicator(
 
         return result_str
 
-    except AlphaVantageNotConfiguredError:
-        # Vendor unavailable (no API key). Let it propagate so the router can
-        # fall back / emit the no-data sentinel instead of returning this as a
-        # successful-looking error string.
+    except VendorError:
+        # Every typed vendor failure propagates so the router can react by
+        # behavior: a missing key takes the "vendor unavailable" lane and a 429
+        # takes the rate-limit lane, both of which hand the next vendor in the
+        # chain its turn. On a chain with no other vendor the router raises
+        # instead — technical_indicators is a core category, and a loud failure
+        # is the decided outcome there. Caught as the taxonomy's base type, not
+        # one leaf at a time: the rate-limit case used to reach the broad
+        # handler below and come back as a successful-looking "Error retrieving
+        # ..." string, so the router saw a successful answer and never fell
+        # back once Alpha Vantage's daily quota was spent (#60).
         raise
     except Exception as e:
         print(f"Error getting Alpha Vantage indicator data for {indicator}: {e}")

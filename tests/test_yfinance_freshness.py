@@ -107,6 +107,39 @@ class TestFundamentalsLiveSnapshotNote:
 
 
 @pytest.mark.unit
+class TestStatementBoundIsVendorAgnostic:
+    """The same routed statement tool must flag the same gap through either
+    vendor: honesty may not depend on which one ``data_vendors`` selected (#58).
+    Exercised at the 180-day quarterly boundary, where an off-by-one bound or a
+    drifted per-vendor copy shows up immediately."""
+
+    _CURR_DATE = "2026-08-18"
+
+    @pytest.mark.parametrize(
+        "period,expect_note",
+        [
+            ("2026-02-19", False),  # exactly 180 days behind — on cadence
+            ("2026-02-18", True),  # 181 days — genuinely stalled
+        ],
+    )
+    def test_both_vendors_agree_at_the_bound(self, monkeypatch, period, expect_note):
+        import json
+
+        import tradingagents.dataflows.alpha_vantage_fundamentals as avf
+
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement(period))
+        yf_out = yfin.get_balance_sheet("AAPL", "quarterly", self._CURR_DATE)
+
+        body = json.dumps({"quarterlyReports": [{"fiscalDateEnding": period}]})
+        monkeypatch.setattr(avf, "_make_api_request", lambda function_name, params: body)
+        av_out = avf.get_balance_sheet("AAPL", "quarterly", self._CURR_DATE)
+        av_note = json.loads(av_out).get(avf._FRESHNESS_NOTE_KEY, "")
+
+        assert ("Data lag" in yf_out) is expect_note
+        assert ("Data lag" in av_note) is expect_note
+
+
+@pytest.mark.unit
 class TestInsiderLagNote:
     def test_dead_filing_stream_carries_note(self, monkeypatch):
         df = pd.DataFrame({"Start Date": ["2020-01-01"], "Shares": [100]})

@@ -66,9 +66,10 @@ def record_reconciliation_sweep_wiring(monkeypatch):
     ``FillBackfiller`` and a ``LiveReconciler`` over one refresh closure, and
     the kwargs that arm the refresh are optional on both components. The pins
     live in two modules because only one command reaches each site; the
-    plumbing is identical, so it lives here and the assertions — which differ,
-    the daemon's one recovery against the smoke suite's four (a pre-flight
-    plus restart tests 15–17) — stay with the tests.
+    plumbing is identical, so it lives here together with the shared
+    assertions; only what differs — the recovery COUNT, the daemon's one against
+    the smoke suite's four (a pre-flight plus restart tests 15–17) — stays with
+    the tests.
 
     Returns a namespace of ``switches`` / ``refreshes`` / ``backfillers`` /
     ``reconcilers``, in construction order.
@@ -85,11 +86,12 @@ def record_reconciliation_sweep_wiring(monkeypatch):
 
     class _RecordingSwitch(real_switch):  # type: ignore[misc, valid-type]
         def __init__(self, **kwargs):
-            # Record AFTER the real constructor accepts them. Recording first
-            # made every pin blind to the failure mode they exist for: a call
-            # site that drifts from the signature (an extra or renamed kwarg)
-            # dies on EVERY start-up, and the kwargs were already in the sink,
-            # so the drive's own suppression swallowed the TypeError and the
+            # Record AFTER the real constructor accepts them. Recording
+            # first made every pin blind to the failure mode they exist for: a
+            # call site that drifts from the signature (an extra or renamed
+            # kwarg) dies on EVERY start-up, but the recorder had already banked
+            # its evidence — the instance here, the kwargs in ``_record_kwargs``
+            # — so the drive's own suppression swallowed the TypeError and the
             # assertions still passed (2026-08-19 mutation probe).
             super().__init__(**kwargs)
             record.switches.append(self)
@@ -100,8 +102,9 @@ def record_reconciliation_sweep_wiring(monkeypatch):
         # ``live/engine.py`` and ``live/protection.py`` bind this name at MODULE
         # level and never see the patch, and ``live/smoke.py`` does not use it at
         # all — so what actually flows through here is cli.py's function-local
-        # callers, which during a driven run means the recovery's OWN in-sweep
-        # refreshes. Swallowing those would change what the drive proves.
+        # callers, which in the smoke drive means the recovery's OWN in-sweep
+        # refreshes (the daemon drive dies at the arm, before any sweep runs).
+        # Swallowing those would change what the drive proves.
         real_refresh(switch, what=what)
 
     def _record_kwargs(module, name, sink):
@@ -127,9 +130,12 @@ def assert_sweep_refreshes(record, switch, kwargs, *, label):
     """The recorded hook must route THAT switch to the §18.2 refresh helper.
 
     Routing, not a completed refresh: the helper swallows everything (a refresh
-    miss must never abort the work it protects), and a switch that was never
-    armed refuses ``refresh()`` — so a post-drive call reaches the wire in
-    neither pin. Identity is still the fact that matters, because it is what
+    miss must never abort the work it protects), and ``tick()`` reaches the wire
+    only when ``refresh_due()`` says so — which a call made milliseconds after
+    the drive is not. In the daemon pin the switch never armed either, so
+    ``refresh()`` would refuse outright; the smoke pin's four are armed and live,
+    and it is the refresh interval alone that keeps the post-drive call off the
+    wire. Identity is still the fact that matters, because it is what
     ``lambda: None`` and a hook closed over the WRONG switch both fail.
 
     ``what=`` is deliberately not asserted: it feeds one ``logger.warning`` and
@@ -161,13 +167,16 @@ def _assert_paired_sweep_refreshes(record, *, owner):
 def _assert_payload_dir(reconciler_kwargs, db_path, *, run_id):
     """The reconciler was given somewhere to write its raw payload evidence.
 
-    Shape, not the exact path: the ``<db parent>/payloads/<run id>`` recipe is
-    hand-copied at four cli.py sites, and pinning the whole string here would
-    make this pin fail for a drift in a rule it does not own.
+    Shape rather than one exact string, because the ``<db parent>/payloads/<run
+    id>`` recipe is hand-copied at four cli.py sites and this pin owns only the
+    two it drives — but every segment of the shape is checked. Dropping the
+    middle one left a rename of the production literal invisible to all four
+    pins (2026-08-19 mutation probe).
     """
     payload_dir = reconciler_kwargs.get("payload_dir")
     assert payload_dir is not None, "the reconciler writes no clearinghouse evidence"
     assert payload_dir.name == run_id, payload_dir
+    assert payload_dir.parent.name == "payloads", payload_dir
     assert payload_dir.parent.parent == db_path.resolve().parent, payload_dir
 
 

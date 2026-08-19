@@ -3743,6 +3743,7 @@ def test_the_daemon_gives_the_reconciler_a_payload_dir(tmp_path, live_seams, mon
     assert record.reconcilers, "no LiveReconciler was constructed — the pin proves nothing"
     for reconciler in record.reconcilers:
         _assert_payload_dir(reconciler, dbp, run_id="r1")
+    assert live_seams.rest_calls == []  # as in the sibling pin above
 
 
 class _StopBeforeTheLoop(Exception):
@@ -3757,9 +3758,12 @@ def _drive_live_loop_construction(tmp_path, monkeypatch, *, fetch_clearinghouse)
     test_kill_switch.py is checked against the SOURCE. The construction block is
     a different matter: it is straight-line, it is where the three safety kwargs
     below are decided, and it can simply be driven. The drive stops at
-    ``_EngineDecisionProvider``, the last of the three; the engine, worker and
-    driver built around it are the loop's own machinery and are not modelled
-    here.
+    ``_EngineDecisionProvider``, the last of the three. It is not pure
+    construction by then: the real ``LiveExecutionEngine`` is built before the
+    provider and its ``settle_offline_flat()`` pass runs, as does
+    ``ensure_settlement_anchor`` — both touch the store, which is why the drive
+    needs a real one. Only the worker and driver come after, and neither is
+    modelled here.
 
     The recorders subclass the real classes and construct THROUGH them wherever
     the real constructor runs offline, so a call site that drifts from a
@@ -3881,11 +3885,12 @@ def test_the_live_loop_hands_protection_the_kill_switch(tmp_path, monkeypatch):
     ``ProtectionManager.kill_switch`` defaults to None, and None turns all six
     ``refresh_across_blocking_work`` calls in the manager into no-ops — the four
     on the repair ladder plus the orderStatus confirmation read and the
-    protection cancel — and disables the firing latch with them. That leaves one
-    of the longest blocking episodes on the tick (a repair with synchronous
-    delays between attempts) as the one place the dead man's switch can self-trip
-    and cancel the very SL being repaired. Only this call site wires it, and
-    nothing observed this call site (2026-08-17 issue #45).
+    protection cancel — and disables the firing latch with them. Every one of
+    those episodes can then let the dead man's switch self-trip; the repair
+    ladder is the place where it does so onto the very SL it is repairing, with
+    synchronous delays between attempts holding the tick open while it happens.
+    Only this call site wires it, and nothing observed this call site
+    (2026-08-17 issue #45).
     """
     built = _drive_live_loop_construction(
         tmp_path, monkeypatch, fetch_clearinghouse=lambda: _clearinghouse()
@@ -3920,12 +3925,13 @@ def test_the_live_loop_takes_the_day_baseline_from_the_clearinghouse(tmp_path, m
     assert source is not None, "the day baseline silently fell back to the local ledger"
     # 4242 is what the handed-in read returns; the seeded ledger is 200, so a
     # source bound to the local ledger cannot produce it.
+    before = built.kill_switch.ticks
     assert source() == D("4242")
     assert reads == ["clearinghouse"]
     # The same call is a bare full-timeout REST read on the single-threaded tick,
-    # so it refreshes across itself. Counted loosely: refreshing MORE than once
-    # would be a safer loop, not a regression.
-    assert built.kill_switch.ticks >= 1
+    # so it refreshes across itself. A delta rather than a floor: the drive is
+    # free to grow refreshes of its own without quietly retiring this one.
+    assert built.kill_switch.ticks == before + 1
 
 
 def test_the_live_loop_refreshes_across_the_decision_cycles_market_reads(tmp_path, monkeypatch):

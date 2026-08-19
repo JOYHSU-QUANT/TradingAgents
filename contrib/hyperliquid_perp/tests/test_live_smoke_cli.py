@@ -38,7 +38,11 @@ from contrib.hyperliquid_perp.live.smoke import SMOKE_TEST_KEYS
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 
-from .conftest import echo_order_status_cloid
+from .conftest import (
+    assert_sweep_refreshes,
+    echo_order_status_cloid,
+    record_reconciliation_sweep_wiring,
+)
 from .test_cli import _seed_live_run_with_genesis_subset as _seed_genesis_run
 from .test_live_startup import _clearinghouse
 from .test_live_validation import _healthy
@@ -370,6 +374,40 @@ def test_the_cli_hands_the_fill_processor_the_signed_wallet(tmp_path, monkeypatc
     assert cli_main(["live-smoke", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)]) == 0
     assert seen, "no LiveFillProcessor was constructed - the pin proves nothing"
     assert all(value == _SMOKE_WALLET for value in seen), seen
+
+
+def test_the_smoke_recovery_wires_the_reconciliation_sweeps_switch_refresh(
+    tmp_path, monkeypatch, smoke_seams
+):
+    """The daemon pin's sibling, at the OTHER construction site (issue #45).
+
+    ``_smoke_startup_recovery`` builds the same sweep components ``live`` does,
+    against a switch it ARMS under the same recovery tick budget — so the same
+    two optional kwargs decide whether a paged backfill or an orderStatus sweep
+    can let the scheduled cancel lapse and wipe the resting probe mid-suite.
+    Wiring only the live lane was the actual 2026-07-31 finding, and nothing
+    since then observed either site.
+
+    Paired per recovery: restart tests 15-17 each run one, so a hook that is
+    right on the first and dropped on a later rebuild has nowhere to hide.
+    """
+    record = record_reconciliation_sweep_wiring(monkeypatch)
+
+    cfg = _smoke_yaml(tmp_path)
+    dbp = _seed_genesis_run(tmp_path, cfg)
+    assert cli_main(["live-smoke", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)]) == 0
+    assert record.switches, "no recovery ran — the pin proves nothing"
+    counts = (len(record.switches), len(record.backfillers), len(record.reconcilers))
+    assert len(set(counts)) == 1, counts
+    for switch, backfiller, reconciler in zip(
+        record.switches, record.backfillers, record.reconcilers, strict=True
+    ):
+        for label, kwargs in (
+            ("smoke recovery's backfiller", backfiller),
+            ("smoke recovery's reconciler", reconciler),
+        ):
+            assert_sweep_refreshes(record, switch, kwargs, label=label)
+        assert reconciler.get("payload_dir") == dbp.resolve().parent / "payloads" / "r1"
 
 
 def test_every_row_a_smoke_run_writes_is_marked_including_the_managers(tmp_path, smoke_seams):

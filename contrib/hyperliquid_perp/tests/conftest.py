@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -55,6 +56,74 @@ def funding_history():
 @pytest.fixture
 def clearinghouse_state():
     return _load("clearinghouse_state.json")
+
+
+def record_reconciliation_sweep_wiring(monkeypatch):
+    """Record what a recovery site builds its §18.2 sweep components with.
+
+    Both production sites — ``_live_startup_recovery`` (the daemon) and
+    ``_smoke_startup_recovery`` — build a ``KillSwitchManager``, a
+    ``FillBackfiller`` and a ``LiveReconciler`` over one refresh closure, and
+    the kwargs that arm the refresh are optional on both components. The pins
+    live in two modules because only one command reaches each site; the
+    plumbing is identical, so it lives here and the assertions — which differ,
+    one recovery against one per restart test — stay with the tests.
+
+    Returns a namespace of ``switches`` / ``refreshes`` / ``backfillers`` /
+    ``reconcilers``, in construction order.
+    """
+    from contrib.hyperliquid_perp.live import (
+        fill_backfill as fb_mod,
+        kill_switch as ks_mod,
+        reconcile as rec_mod,
+    )
+
+    record = SimpleNamespace(switches=[], refreshes=[], backfillers=[], reconcilers=[])
+    real_switch = ks_mod.KillSwitchManager
+    real_refresh = ks_mod.refresh_across_blocking_work
+
+    class _RecordingSwitch(real_switch):  # type: ignore[misc, valid-type]
+        def __init__(self, **kwargs):
+            record.switches.append(self)
+            super().__init__(**kwargs)
+
+    def _recording_refresh(switch, *, what):
+        record.refreshes.append((switch, what))
+        # Delegate rather than replace: the smoke suite's own refreshes run
+        # through this name too, and swallowing them would change what the
+        # drive proves.
+        real_refresh(switch, what=what)
+
+    def _record_kwargs(module, name, sink):
+        real = getattr(module, name)
+
+        class _Recording(real):  # type: ignore[misc, valid-type]
+            def __init__(self, **kwargs):
+                sink.append(kwargs)
+                super().__init__(**kwargs)
+
+        monkeypatch.setattr(module, name, _Recording)
+
+    # cli.py imports all of these inside the command functions, so the seam is
+    # the SOURCE module — the closures the CLI builds pick the patched ones up.
+    monkeypatch.setattr(ks_mod, "KillSwitchManager", _RecordingSwitch)
+    monkeypatch.setattr(ks_mod, "refresh_across_blocking_work", _recording_refresh)
+    _record_kwargs(fb_mod, "FillBackfiller", record.backfillers)
+    _record_kwargs(rec_mod, "LiveReconciler", record.reconcilers)
+    return record
+
+
+def assert_sweep_refreshes(record, switch, kwargs, *, label):
+    """The recorded hook must refresh THAT switch — not merely exist.
+
+    ``lambda: None`` satisfies a not-None assertion while refreshing nothing,
+    which is the same no-op the missing kwarg produces.
+    """
+    hook = kwargs.get("refresh_kill_switch")
+    assert hook is not None, f"the {label} sweep refreshes nothing (§18.2)"
+    record.refreshes.clear()
+    hook()
+    assert record.refreshes == [(switch, "reconciliation")], (label, record.refreshes)
 
 
 def synthetic_bar(**over):

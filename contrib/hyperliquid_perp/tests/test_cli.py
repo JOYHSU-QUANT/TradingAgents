@@ -4008,7 +4008,7 @@ def test_live_smoke_real_run_requires_the_run_lease(tmp_path, capsys, monkeypatc
     acquire_run_lock(db, "live-BTC", pid=999999, now=datetime.now(timezone.utc))
     db.close()
     monkeypatch.setattr(
-        cli_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+        cli_mod.smoke, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
     )
     rc = cli_main(
         ["live-smoke", "--config", "unused.yaml", "--run-id", "live-BTC", "--db", str(dbp)]
@@ -4026,7 +4026,7 @@ def test_live_smoke_preflight_failure_exits_4_and_releases_the_lease(tmp_path, c
 
     dbp = _make_live_run(tmp_path)
     monkeypatch.setattr(
-        cli_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+        cli_mod.smoke, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
     )
 
     def _fail_preflight(self, *, only=None):
@@ -4054,7 +4054,7 @@ def test_live_smoke_superseded_lease_exits_1_by_name(tmp_path, capsys, monkeypat
 
     dbp = _make_live_run(tmp_path)
     monkeypatch.setattr(
-        cli_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+        cli_mod.smoke, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
     )
 
     def _superseded(self, *, only=None):
@@ -4079,7 +4079,7 @@ def test_live_smoke_disarm_warning_survives_an_unexpected_crash(tmp_path, capsys
 
     dbp = _make_live_run(tmp_path)
     monkeypatch.setattr(
-        cli_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+        cli_mod.smoke, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
     )
 
     def _crash(self, *, only=None):
@@ -4105,7 +4105,7 @@ def test_live_smoke_staged_long_residual_warns_on_stderr(tmp_path, capsys, monke
 
     dbp = _make_live_run(tmp_path)
     monkeypatch.setattr(
-        cli_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+        cli_mod.smoke, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
     )
     note = "cleanup: reduce-only close of 0.001 refused (no liquidity)"
 
@@ -4132,7 +4132,7 @@ def test_live_smoke_flat_staged_long_prints_no_residual_warning(tmp_path, capsys
 
     dbp = _make_live_run(tmp_path)
     monkeypatch.setattr(
-        cli_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+        cli_mod.smoke, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
     )
     monkeypatch.setattr(smoke_mod.SmokeTestRunner, "run", lambda self, *, only=None: [])
     rc = cli_main(

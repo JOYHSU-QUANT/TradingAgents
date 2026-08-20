@@ -9,7 +9,7 @@ from typing import Any
 
 from ...common.enum_guard import check_enum
 from ..models import DECIMAL_CONTEXT
-from ._base import _dec, _encode, _insert, _iso_utc
+from ._base import _dec_or_none, _encode, _insert, _iso_utc
 from ._vocab import _FUNDING_SOURCES, _FUNDING_STATUSES, _MODES
 
 __all__ = ["get_funding_event", "insert_funding_event", "iter_funding_events", "set_funding_status"]
@@ -232,7 +232,7 @@ def set_funding_status(
     # settlement history (loop-1 decision #3: backfill uses ONLY the stored
     # pending-row basis). record_funding already never supplies a divergent mark;
     # this makes the guarantee live at the boundary, not just in that convention.
-    stored_mark = _dec(row["mark_price"])
+    stored_mark = _dec_or_none(row["mark_price"])
     if mark_price is not None and mark_price != stored_mark:
         raise ValueError(
             f"funding event {funding_event_id!r}: supplied mark_price {mark_price} "

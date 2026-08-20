@@ -61,7 +61,7 @@ def _insert(conn: sqlite3.Connection, table: str, values: dict[str, Any]) -> Non
     )
 
 
-def _dec(value: Any) -> Decimal | None:
+def _dec_or_none(value: Any) -> Decimal | None:
     """Decode a stored TEXT value back to Decimal; ``None`` stays ``None``."""
     return None if value is None else Decimal(value)
 

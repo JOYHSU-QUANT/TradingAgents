@@ -718,7 +718,7 @@ def test_paper_keyless_healthy_restart_with_live_work_enters_protection_only(
     monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _forbid_provider)
     # Sentinel pins the dotenv_diagnosis wiring in the protection-only message
     # (same contract as the fresh-run abort's sentinel above).
-    monkeypatch.setattr(cli_mod, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
+    monkeypatch.setattr(cli_mod.paper, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
     seen: dict[str, object] = {}
 
     def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
@@ -728,7 +728,7 @@ def test_paper_keyless_healthy_restart_with_live_work_enters_protection_only(
         seen["halt_reason"] = kwargs["halt_reason"]
         return 0
 
-    monkeypatch.setattr(cli_mod, "_paper_loop", fake_loop)
+    monkeypatch.setattr(cli_mod.paper, "_paper_loop", fake_loop)
     assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 0
     assert seen["scheduler"] is None
     assert seen["engine_active"] is True  # the seeded live position
@@ -777,7 +777,7 @@ def test_paper_provider_import_failure_exits_1_named(tmp_path, capsys, monkeypat
         seen["run_id"] = run_id
         return 0
 
-    monkeypatch.setattr(cli_mod, "_paper_loop", fake_loop)
+    monkeypatch.setattr(cli_mod.paper, "_paper_loop", fake_loop)
     rc = cli_main(_paper_argv(path, run_id="fresh", config=paper_seams, create=True))
     assert rc == 0
     assert seen["run_id"] == "fresh"
@@ -885,7 +885,7 @@ def test_paper_restart_import_failure_with_live_work_enters_protection_only(
         seen["halt_reason"] = kwargs["halt_reason"]
         return 0
 
-    monkeypatch.setattr(cli_mod, "_paper_loop", fake_loop)
+    monkeypatch.setattr(cli_mod.paper, "_paper_loop", fake_loop)
     assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 0
     assert seen["scheduler"] is None
     assert seen["engine_active"] is True  # the seeded live position
@@ -1485,7 +1485,7 @@ def test_paper_resume_stamps_drift_breadcrumb(tmp_path, monkeypatch, capsys, pap
     def stop_loop(*args, **kwargs):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli_mod, "_paper_loop", stop_loop)
+    monkeypatch.setattr(cli_mod.paper, "_paper_loop", stop_loop)
     assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 0
     assert "config drift on resume" in capsys.readouterr().err
 
@@ -1508,7 +1508,7 @@ def test_paper_resume_clean_stamps_ok_breadcrumb(tmp_path, monkeypatch, paper_se
     def stop_loop(*args, **kwargs):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli_mod, "_paper_loop", stop_loop)
+    monkeypatch.setattr(cli_mod.paper, "_paper_loop", stop_loop)
     assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 0
 
     db = Database(path)
@@ -1594,7 +1594,7 @@ def test_paper_loop_wiring_and_halt_latch(tmp_path, monkeypatch):
         if len(sleeps) >= 2:
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli_mod.time, "sleep", fake_sleep)
+    monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
 
     with pytest.raises(KeyboardInterrupt):
         cli_mod._paper_loop(
@@ -1662,7 +1662,7 @@ def test_paper_loop_tick_throttled_to_interval_above_heartbeat_cap(tmp_path, mon
         if len(sleeps) >= 4:
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli_mod.time, "sleep", fake_sleep)
+    monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
 
     with pytest.raises(KeyboardInterrupt):
         cli_mod._paper_loop(
@@ -1709,7 +1709,7 @@ def test_paper_loop_halted_with_nothing_to_protect_exits_1(tmp_path, monkeypatch
         raise AssertionError("must exit before sleeping")
 
     monkeypatch.setattr(cli_mod.paper_export, "_post_cycle_export", record_export)
-    monkeypatch.setattr(cli_mod.time, "sleep", forbid_sleep)
+    monkeypatch.setattr(cli_mod.paper.time, "sleep", forbid_sleep)
 
     class _Engine:
         def __init__(self):
@@ -1753,7 +1753,7 @@ def test_paper_loop_missing_key_settle_exit_names_the_key(tmp_path, monkeypatch,
         cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, export_dir: True
     )
     monkeypatch.setattr(
-        cli_mod.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
+        cli_mod.paper.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
     )
 
     class _Engine:
@@ -1799,7 +1799,7 @@ def test_paper_loop_import_error_settle_exit_names_the_cause(tmp_path, monkeypat
         cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, export_dir: True
     )
     monkeypatch.setattr(
-        cli_mod.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
+        cli_mod.paper.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
     )
 
     class _Engine:
@@ -1870,7 +1870,7 @@ def test_paper_loop_halted_retries_pending_funding_hourly(tmp_path, monkeypatch)
         if len(sleeps) >= 250:  # ~2h05m of 30s (interval) wakes — two retry periods
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli_mod.time, "sleep", fake_sleep)
+    monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
 
     with pytest.raises(KeyboardInterrupt):
         cli_mod._paper_loop(
@@ -1947,7 +1947,7 @@ def test_paper_loop_mid_run_halt_arms_hourly_funding_retry(tmp_path, monkeypatch
         if len(sleeps) >= 125:  # ~1h02m of 30s (interval) wakes — one retry period
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli_mod.time, "sleep", fake_sleep)
+    monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
 
     with pytest.raises(KeyboardInterrupt):
         cli_mod._paper_loop(
@@ -1989,7 +1989,7 @@ def test_paper_loop_settle_exit_retries_pending_funding_before_final_export(tmp_
         lambda db_, run_id, export_dir: (calls.append("export"), True)[1],
     )
     monkeypatch.setattr(
-        cli_mod.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
+        cli_mod.paper.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
     )
 
     class _Engine:
@@ -2041,7 +2041,7 @@ def test_paper_loop_shutdown_funding_retry_is_best_effort(tmp_path, monkeypatch)
         lambda db_, run_id, export_dir: exports.append(run_id) or True,
     )
     monkeypatch.setattr(
-        cli_mod.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
+        cli_mod.paper.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
     )
 
     class _Engine:
@@ -2119,7 +2119,7 @@ def test_paper_ctrl_c_shutdown_retries_pending_funding_before_final_export(
         "_post_cycle_export",
         lambda db_, run_id, export_dir: (calls.append("export"), True)[1],
     )
-    monkeypatch.setattr(cli_mod.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
+    monkeypatch.setattr(cli_mod.paper.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
 
     rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
     assert rc == 0
@@ -2171,7 +2171,7 @@ def test_paper_protection_only_startup_notes_stranded_in_progress_attempt(
     monkeypatch.setattr(
         cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, export_dir: True
     )
-    monkeypatch.setattr(cli_mod.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
+    monkeypatch.setattr(cli_mod.paper.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
 
     rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
     assert rc == 0
@@ -2241,7 +2241,7 @@ def test_paper_lease_takeover_exits_1_without_export_and_preserves_successor(
         "_post_cycle_export",
         lambda db_, run_id, export_dir: exports.append(run_id) or True,
     )
-    monkeypatch.setattr(cli_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cli_mod.paper.time, "sleep", lambda s: None)
 
     real_heartbeat = run_lock_mod.heartbeat_run_lock
     our_pid = os.getpid()
@@ -2460,7 +2460,7 @@ def test_paper_protection_only_restart_skips_provider_and_stamps_failed(
         seen["scheduler"] = scheduler
         return 0
 
-    monkeypatch.setattr(cli_mod, "_paper_loop", fake_loop)
+    monkeypatch.setattr(cli_mod.paper, "_paper_loop", fake_loop)
     assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 0
     assert seen["scheduler"] is None
 
@@ -2487,7 +2487,7 @@ def test_paper_corrupt_genesis_config_json_resumes_with_drift_warning(
     def stop_loop(*args, **kwargs):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli_mod, "_paper_loop", stop_loop)
+    monkeypatch.setattr(cli_mod.paper, "_paper_loop", stop_loop)
     assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 0
     assert "could not verify config drift" in capsys.readouterr().err
 

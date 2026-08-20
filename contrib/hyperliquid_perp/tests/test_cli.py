@@ -1224,7 +1224,7 @@ def test_history_funding_source_escalates_after_consecutive_failures(caplog):
     source = _HistoryFundingSource(_BrokenMarket())
     threshold = source._FAILURE_ESCALATION_THRESHOLD
     when = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
-    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.cli"):
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.cli._provider"):
         for _ in range(threshold):
             assert source.rate_at("BTC", when) is None
     levels = [r.levelno for r in caplog.records if "funding history fetch failed" in r.getMessage()]

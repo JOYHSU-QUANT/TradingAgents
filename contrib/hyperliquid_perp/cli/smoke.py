@@ -226,7 +226,7 @@ def _cmd_live_smoke(argv: list[str]) -> int:
                 )
                 return 1
             lock_pid = os.getpid()
-            # The same handler `live` (cli.py) and `paper` install right after
+            # The same handler `live` (cli/live.py) and `paper` (cli/paper.py) install right after
             # their own lock. Without it, `kill <pid>` — systemd's and docker's
             # default, and what a `timeout` wrapper sends — kills this process
             # outright: runner.run()'s finally never runs, so the staged long is

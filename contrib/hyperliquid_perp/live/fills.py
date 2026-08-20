@@ -859,7 +859,7 @@ class LiveFillProcessor:
         # ``wallet_address`` arms ingest_message's envelope-identity check (the
         # WS ``userFills`` envelope names the wallet it is for). ``None`` skips
         # it — identity-agnostic tests — and production wiring passes the
-        # signed client's wallet (both cli.py sites, 2026-08-17).
+        # signed client's wallet (both CLI sites — cli/live.py and cli/smoke.py; 2026-08-17).
         self._db = db
         self._run_id = run_id
         self._payload_dir = payload_dir

@@ -118,13 +118,13 @@ pending funding、accounting replay 驗證、gap SL 檢查；若這次重啟真�
 警告只比對 YAML——**code 內建預設值的變更**（例如新增的
 `resize_min_confidence` 預設 0.7、prompt 文字改版）不會觸發警告，但一樣改變
 行為，所以調參 code 的部署必須與新 run-id 同批上線，不要讓舊段跨過部署點。
-prompt 的 context／format 契約改 shape 時，另要 bump `cli.py` 的
+prompt 的 context／format 契約改 shape 時，另要 bump `cli/_provider.py` 的
 `PROMPT_VERSION`，讓 `ai_inputs.prompt_version` 在資料裡標出改版點。
 **凡是跨越量測邊界的部署都要 bump，回滾也算**：回滾到舊 prompt 不算「改 shape」，
 但沿用已退役的舊值會讓 `GROUP BY prompt_version` 把 v3 之前與回滾之後併成同一桶，
 正好污染要拿來比的基線。退役過的值一律不得重用（回滾就給 `phase2-target-v4`，
 內容等不等於 v2 無所謂）。另注意 `decision_format_instructions` 的文字與這個常數不在同一個
-模組——`cli.py` 確實 import 了它，但 import 不會讓常數跟著文字動——所以有一個測試把
+模組——`cli/_provider.py` 確實 import 了它，但 import 不會讓常數跟著文字動——所以有一個測試把
 版本戳釘在渲染出來的區塊指紋上：改了 prompt 文字卻忘了改戳就會紅。
 
 **例外：只改 prompt 的 A/B 驗證**。上面那條規則是為了讓**績效指標**跨段可比。若這次

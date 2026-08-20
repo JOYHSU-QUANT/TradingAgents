@@ -18,8 +18,9 @@ reads + config into engine inputs — filing it there would blur that boundary.
 
 Patch-target note: names are looked up in THIS module's globals at call time,
 and neither entry point holds a module-lifetime copy of them — ``main.py``
-uses module-attribute access (``engine_bridge.X``); ``cli.py`` uses
-function-local from-imports that re-fetch the attribute on every call. A
+uses module-attribute access (``engine_bridge.X``); the ``cli`` package's
+modules use function-local from-imports that re-fetch the attribute on every
+call. A
 TOP-LEVEL from-import would break that: it copies the binding once at import
 time, giving the same seam a second patch surface where a stub applied to the
 wrong one is silently invisible to the other side's callers. One lookup site

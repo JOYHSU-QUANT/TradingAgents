@@ -1653,7 +1653,7 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    跨阻塞工作 refresh，所以筆數再多，無 refresh 的連續段仍是 1 筆。
 
    **`max_tick_gap_seconds` 的語意要照字面讀：兩次 tick() 之間的最壞牆鐘時間，不是
-   sleep 間隔**（v7 新增，2026-07-13）。既有 `_paper_loop`（cli.py）的一輪是
+   sleep 間隔**（v7 新增，2026-07-13）。既有 `_paper_loop`（cli/paper.py）的一輪是
    `engine.tick()` → `scheduler.poll()` → `sleep(min(delay, 60))` **同步**執行，而
    `poll()` 會跑完整的多 agent AI 決策——**數分鐘**，不是數秒。若 PR 5 傳入 sleep 上限
    （60s）卻讓一輪 block 三分鐘，這道檢查會放行，然後在決策途中被交易所掃單。

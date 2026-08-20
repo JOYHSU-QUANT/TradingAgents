@@ -28,8 +28,13 @@ from decimal import ROUND_FLOOR, Decimal, localcontext
 from enum import Enum
 from typing import Any
 
-from .config_coercion import config_overrides, decimal_from_yaml, int_from_yaml, str_from_yaml
-from .margin import DECIMAL_CONTEXT
+from ...common.config_coercion import (
+    config_overrides,
+    decimal_from_yaml,
+    int_from_yaml,
+    str_from_yaml,
+)
+from ...common.decimal_context import DECIMAL_CONTEXT
 from .schema import PerpPosition
 from .target_decision import (
     DecisionConfig,

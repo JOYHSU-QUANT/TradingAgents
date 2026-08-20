@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 from typing import Any
 
-from ...domains.perp.enum_guard import check_enum
+from ...common.enum_guard import check_enum
 from ..models import DECIMAL_CONTEXT
 from ._base import _dec, _encode, _insert, _iso_utc
 from ._vocab import _FUNDING_SOURCES, _FUNDING_STATUSES, _MODES

@@ -47,7 +47,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol
 
-from ..domains.perp.margin import DECIMAL_CONTEXT
+from ..common.decimal_context import DECIMAL_CONTEXT
 from ..paper.run_lock import RunLockError
 from ..paper.stops import round_to_tick
 from ..paper.twap import floor_to_step

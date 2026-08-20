@@ -25,7 +25,14 @@ The mapper (:mod:`...exchanges.hyperliquid.mapper`) builds a schedule from the
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from decimal import Context, Decimal, localcontext
+from decimal import Decimal, localcontext
+
+# The one decimal context for money math now lives in the dependency-free
+# common layer (see its module docstring for the pin rationale). Re-exported
+# from its original home for importers deliberately left on this path:
+# paper/engine stays untouched under the phase3-spec §2.1 freeze, and
+# out-of-tree consumers may still read it from here.
+from ...common.decimal_context import DECIMAL_CONTEXT
 
 __all__ = [
     "DECIMAL_CONTEXT",
@@ -35,15 +42,6 @@ __all__ = [
     "position_notional",
     "unrealized_pnl",
 ]
-
-# The one decimal context for money math and its consistency checks, defined in
-# this base domain module so every layer (margin tiers, accounting, liquidation,
-# repository identity checks) pins the *same* arithmetic. Replay's "same
-# committed events -> bit-for-bit same state" guarantee — and the §12.2
-# reproducibility fields recorded on snapshots — must not depend on the ambient
-# (mutable, global) decimal context. 28 significant digits — the decimal
-# default — with default traps.
-DECIMAL_CONTEXT = Context(prec=28)
 
 
 # Base pure formulas (execution §6), defined here — not in ``paper/accounting``

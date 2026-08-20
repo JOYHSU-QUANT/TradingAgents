@@ -33,7 +33,7 @@ from decimal import Decimal, localcontext
 from pathlib import Path
 from typing import Any
 
-from ..domains.perp.enum_guard import check_enum
+from ..common.enum_guard import check_enum
 from ..domains.perp.schema import AccountSnapshot, PerpPosition
 from ..exchanges.hyperliquid.mapper import (
     HL_SIDE_TO_LOCAL,

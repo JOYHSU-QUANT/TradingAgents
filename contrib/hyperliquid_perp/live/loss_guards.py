@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 from typing import Any
 
-from ..domains.perp.margin import DECIMAL_CONTEXT
+from ..common.decimal_context import DECIMAL_CONTEXT
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from .config import LiveSafetyConfig

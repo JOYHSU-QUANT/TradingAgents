@@ -44,7 +44,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, localcontext
 from enum import Enum
 
-from ..domains.perp.margin import DECIMAL_CONTEXT
+from ..common.decimal_context import DECIMAL_CONTEXT
 from ..domains.perp.risk_gate import (
     NO_ORDER_ZERO_DELTA,
     CurrentPositionState,

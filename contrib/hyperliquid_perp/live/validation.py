@@ -100,8 +100,8 @@ from decimal import Decimal, localcontext
 from operator import itemgetter
 from typing import NamedTuple
 
-from ..domains.perp.config_coercion import int_from_yaml
-from ..domains.perp.margin import DECIMAL_CONTEXT
+from ..common.config_coercion import int_from_yaml
+from ..common.decimal_context import DECIMAL_CONTEXT
 from ..paper import accounting
 from ..paper.scheduler import parse_instant
 from ..persistence import repository as repo

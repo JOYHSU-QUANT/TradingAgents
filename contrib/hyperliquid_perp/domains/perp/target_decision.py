@@ -28,7 +28,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
-from .config_coercion import config_overrides, decimal_from_yaml, int_from_yaml
+from ...common.config_coercion import config_overrides, decimal_from_yaml, int_from_yaml
 
 __all__ = [
     "DecisionConfig",

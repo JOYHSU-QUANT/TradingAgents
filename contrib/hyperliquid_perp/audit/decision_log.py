@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..common.atomic_io import atomic_write_text
+
 if TYPE_CHECKING:
     # Type-only imports (annotations are strings under ``from __future__``) so the
     # audit layer documents the value shapes without a runtime dependency on the
@@ -173,24 +175,17 @@ def write_decision_log(
     # Atomically claim the final path (an empty placeholder) so a concurrent writer can
     # never overwrite this record — see _claim_unique_path.
     path = _claim_unique_path(directory, coin, timestamp)
-    # Write to a sibling temp file then atomically rename over our own placeholder. A
-    # crash or a serialization error mid-write (e.g. a non-JSON-able value in ``record``)
-    # would otherwise leave a truncated/zero-length file at ``path``, silently corrupting
-    # the audit trail; the rename only happens once the full record is on disk. On failure
-    # remove both the temp file and the empty placeholder we claimed, so the audit
-    # directory never holds a partial or zero-length record.
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    # atomic_write_text owns the tmp-then-replace dance (and tmp cleanup); the
+    # site-specific delta is the empty placeholder claimed above — on failure it
+    # must go too, so the audit directory never holds a zero-length record.
     try:
-        with tmp.open("w", encoding="utf-8") as fh:
-            json.dump(record, fh, indent=2, ensure_ascii=False)
-        tmp.replace(path)
+        atomic_write_text(path, lambda fh: json.dump(record, fh, indent=2, ensure_ascii=False))
     except BaseException:
         # Best-effort cleanup: a secondary unlink failure (e.g. a Windows file
-        # lock on the temp file, or a read-only filesystem) must not replace the
-        # original write error — that is the one the caller needs to see.
-        for leftover in (tmp, path):
-            with contextlib.suppress(OSError):
-                leftover.unlink(missing_ok=True)
+        # lock, or a read-only filesystem) must not replace the original write
+        # error — that is the one the caller needs to see.
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
         raise
     return path
 

@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from contrib.hyperliquid_perp.common import atomic_io
 from contrib.hyperliquid_perp.paper import accounting
-from contrib.hyperliquid_perp.persistence import export as export_mod
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.export import (
     EXPORT_SPECS,
@@ -122,14 +122,14 @@ def test_failed_manifest_write_leaves_no_tmp(tmp_path, monkeypatch):
     db = _init(tmp_path)
     _post_one_fill(db)
     out = tmp_path / "exports"
-    real_replace = export_mod.os.replace
+    real_replace = atomic_io.os.replace
 
     def _boom_on_manifest(src, dst):
         if Path(dst).name == MANIFEST_NAME:
             raise OSError("disk full")
         real_replace(src, dst)
 
-    monkeypatch.setattr(export_mod.os, "replace", _boom_on_manifest)
+    monkeypatch.setattr(atomic_io.os, "replace", _boom_on_manifest)
     with pytest.raises(ExportError, match="disk full"):
         export_run(db, run_id="r", output_dir=out)
     # The eight CSVs landed; the torn set has no manifest and no stray .tmp.
@@ -156,7 +156,7 @@ def test_failed_replace_leaves_no_half_written_csv(tmp_path, monkeypatch):
     def _boom(src, dst):
         raise OSError("disk full")
 
-    monkeypatch.setattr(export_mod.os, "replace", _boom)
+    monkeypatch.setattr(atomic_io.os, "replace", _boom)
     with pytest.raises(ExportError, match="disk full"):
         export_run(db, run_id="r", output_dir=out)
     # §1.1: readers can never observe a partial official CSV — and the failed
@@ -170,7 +170,7 @@ def test_export_failure_does_not_touch_db_state(tmp_path, monkeypatch):
     db = _init(tmp_path)
     _post_one_fill(db)
     before = db.conn.execute("SELECT wallet_balance FROM current_account_state").fetchone()[0]
-    monkeypatch.setattr(export_mod.os, "replace", lambda s, d: (_ for _ in ()).throw(OSError()))
+    monkeypatch.setattr(atomic_io.os, "replace", lambda s, d: (_ for _ in ()).throw(OSError()))
     with pytest.raises(ExportError):
         export_run(db, run_id="r", output_dir=tmp_path / "exports")
     after = db.conn.execute("SELECT wallet_balance FROM current_account_state").fetchone()[0]

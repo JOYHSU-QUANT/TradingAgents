@@ -27,11 +27,10 @@ from __future__ import annotations
 import csv
 import json
 import logging
-import os
-from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..common.atomic_io import atomic_write_text
 from .db import Database
 from .repository import get_run
 
@@ -279,32 +278,15 @@ for _table, _spec, _extra in EXPORT_SPECS:
 del _table, _spec, _extra, _cols
 
 
-def _write_atomic(path: Path, write_body) -> None:
-    """The §1.1 tmp-then-replace dance; clean the tmp on failure.
-
-    ``write_body(fh)`` writes the whole payload to the open tmp handle.
-    """
-    tmp = path.with_name(path.name + ".tmp")
-    try:
-        with tmp.open("w", encoding="utf-8", newline="") as fh:
-            write_body(fh)
-            fh.flush()
-        os.replace(tmp, path)
-    except BaseException:
-        # Never leave a stray .tmp behind on a failed export; the official file
-        # (if any) is untouched either way — os.replace is all-or-nothing.
-        with suppress(OSError):  # best-effort cleanup
-            tmp.unlink(missing_ok=True)
-        raise
-
-
 def _write_csv_atomic(path: Path, header: tuple[str, ...], rows: list[tuple]) -> None:
     def body(fh) -> None:
         writer = csv.writer(fh)
         writer.writerow(header)
         writer.writerows(rows)
 
-    _write_atomic(path, body)
+    # The §1.1 tmp-then-replace dance lives in common.atomic_io; ``newline=""``
+    # so the csv module owns the line endings.
+    atomic_write_text(path, body, newline="")
 
 
 def export_run(db: Database, *, run_id: str, output_dir: str | Path) -> list[Path]:
@@ -345,8 +327,10 @@ def export_run(db: Database, *, run_id: str, output_dir: str | Path) -> list[Pat
             "exported_at": datetime.now(timezone.utc).isoformat(),
             "files": row_counts,
         }
-        _write_atomic(
-            manifest_path, lambda fh: fh.write(json.dumps(manifest, ensure_ascii=False, indent=2))
+        atomic_write_text(
+            manifest_path,
+            lambda fh: fh.write(json.dumps(manifest, ensure_ascii=False, indent=2)),
+            newline="",
         )
         written.append(manifest_path)
         return written

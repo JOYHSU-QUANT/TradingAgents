@@ -22,7 +22,7 @@ from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 
-from .conftest import insert_decision_attempts
+from ..conftest import insert_decision_attempts
 
 _T0 = datetime(2026, 7, 27, 0, 0, tzinfo=timezone.utc)
 _D = Decimal
@@ -469,7 +469,7 @@ def _post_live_fill(db: Database, *, run_id: str = "r") -> None:
     The replay-mismatch/-raise tests below need a run whose books actually
     moved before they corrupt something — corrupting an untouched, all-zero
     ledger would exercise nothing about the replay arithmetic itself. Mirrors
-    ``tests/test_live_fills.py``'s own fill-construction pattern (an
+    ``tests/live/test_fills.py``'s own fill-construction pattern (an
     ``ExchangeFill`` posted through :func:`post_live_fill`), which is also what
     makes ``accounting.replay_within`` take the ``live=True`` fold (§15) this
     file's ``account_replay_mismatch_count`` derivation is documented against.

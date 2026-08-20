@@ -36,7 +36,7 @@ from decimal import Decimal, localcontext
 from types import MappingProxyType
 from typing import NamedTuple
 
-from ..domains.perp.enum_guard import check_enum
+from ..common.enum_guard import check_enum
 from ..domains.perp.margin import (
     MarginSchedule,
     account_equity,
@@ -86,7 +86,7 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _dec(value: object) -> Decimal | None:
+def _dec_or_none(value: object) -> Decimal | None:
     """Decode a stored TEXT value back to Decimal; ``None`` stays ``None``.
 
     A local twin of the repository's decoder, used by the live-replay branch to
@@ -1022,7 +1022,7 @@ def _fold_adjustments(
     net_funding = ledger.net_funding_pnl
     for adj in repo.iter_accounting_adjustment_events(conn, run_id):
         deltas = adjustment_ledger_delta(
-            adj["adjustment_type"], _dec(adj["old_value"]), _dec(adj["new_value"])
+            adj["adjustment_type"], _dec_or_none(adj["old_value"]), _dec_or_none(adj["new_value"])
         )
         wallet += deltas.wallet
         realized += deltas.realized
@@ -1145,7 +1145,7 @@ def replay_within(conn: sqlite3.Connection, *, run_id: str) -> ReplayResult:
                     side=fill["side"],
                     qty=Decimal(fill["fill_qty"]),
                     price=Decimal(fill["fill_price"]),
-                    exchange_fee=repo.posted_exchange_fee(_dec(fill["exchange_fee"])),
+                    exchange_fee=repo.posted_exchange_fee(_dec_or_none(fill["exchange_fee"])),
                     exchange_closed_pnl=repo.require_live_fill_basis(fill),
                 )
             else:

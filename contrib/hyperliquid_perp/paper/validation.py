@@ -199,7 +199,7 @@ class ValidationReport:
         return lines
 
 
-def _dec(value) -> Decimal | None:
+def _dec_or_none(value) -> Decimal | None:
     return None if value is None else Decimal(str(value))
 
 
@@ -272,8 +272,8 @@ def _account_row_identities_ok(row: sqlite3.Row) -> bool:
         - Decimal(row["total_fees"])
         + Decimal(row["net_funding_pnl"])
     )
-    leverage = _dec(row["effective_leverage"])
-    ratio = _dec(row["margin_ratio"])
+    leverage = _dec_or_none(row["effective_leverage"])
+    ratio = _dec_or_none(row["margin_ratio"])
     return (
         equity == wallet + unrealized
         and available == equity - used_im
@@ -295,12 +295,12 @@ def _position_row_identities_ok(
     """One position_snapshots row's identities, incl. the exposure companion."""
     size = Decimal(row["position_size"])
     mark = Decimal(row["mark_price"])
-    entry = _dec(row["entry_price"])
+    entry = _dec_or_none(row["entry_price"])
     notional = Decimal(row["position_notional"])
     unrealized = Decimal(row["unrealized_pnl"])
     maint = Decimal(row["maintenance_margin"])
-    rate = _dec(row["maintenance_margin_rate"])
-    deduction = _dec(row["maintenance_deduction"])
+    rate = _dec_or_none(row["maintenance_margin_rate"])
+    deduction = _dec_or_none(row["maintenance_deduction"])
     side = row["side"]
     ok = notional == abs(size * mark) and side == (
         "long" if size > 0 else ("short" if size < 0 else "flat")
@@ -310,7 +310,7 @@ def _position_row_identities_ok(
     if rate is not None and deduction is not None:
         ok = ok and maint == notional * rate - deduction
     # exposure_pct references the same-instant account equity.
-    exposure = _dec(row["exposure_pct"])
+    exposure = _dec_or_none(row["exposure_pct"])
     if exposure is not None:
         matches = conn.execute(
             "SELECT account_equity FROM account_snapshots WHERE run_id = ? AND timestamp = ?",

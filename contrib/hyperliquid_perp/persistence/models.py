@@ -20,10 +20,9 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
 
-# Re-exported so the persistence layer's writers/consumers can pin the same
-# money-math context without each reaching into the domain layer; the canonical
-# definition (and rationale) lives with the base money math in margin.py.
-from ..domains.perp.margin import DECIMAL_CONTEXT
+# Long-standing re-export point for the persistence layer's writers/consumers;
+# the canonical definition (and rationale) lives in common/decimal_context.py.
+from ..common.decimal_context import DECIMAL_CONTEXT
 
 __all__ = ["AccountLedger", "DECIMAL_CONTEXT", "PositionState", "Side"]
 

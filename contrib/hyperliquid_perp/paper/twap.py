@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, localcontext
 from enum import Enum
 
-from ..domains.perp.margin import DECIMAL_CONTEXT
+from ..common.decimal_context import DECIMAL_CONTEXT
 from ..persistence.models import Side
 
 __all__ = [

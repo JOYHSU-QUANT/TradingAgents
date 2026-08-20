@@ -13,7 +13,8 @@ from typing import Any
 
 import yaml
 
-from .domains.perp.config_coercion import bool_from_yaml
+from .common.config_coercion import bool_from_yaml
+from .common.constants import LEGAL_NETWORKS
 from .domains.perp.indicator_vocab import REGIME_INDICATORS, supported_indicators
 
 _CONFIG_DIR = Path(__file__).parent / "configs"
@@ -22,12 +23,6 @@ _EXAMPLE = _CONFIG_DIR / "hyperliquid.example.yaml"
 
 # Sentinel placeholder in the example file — treated as "no wallet configured".
 _WALLET_PLACEHOLDER = "0xYOUR..."
-
-# The legal network vocabulary, shared with live/config.py's ``live.network``
-# validation. Deliberately duplicated from sdk_client._BASE_URLS (not imported)
-# to keep this module free of the heavy SDK import that --context-only relies
-# on being cheap.
-LEGAL_NETWORKS = ("mainnet", "testnet")
 
 # Everything load_config can raise for an operator config mistake — a missing or
 # unreadable path (OSError), a YAML syntax error, or a failed validation below.
@@ -254,7 +249,7 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     # surfaces as an exit-2 traceback instead of a named config error. Validate
     # up front so an operator typo stays in the CONFIG_LOAD_ERRORS lane —
     # sdk_client's own ValueError remains the standalone defense. The legal
-    # network set lives on LEGAL_NETWORKS above (see its comment for why it is
+    # network set lives in common.constants (see its comment for why it is
     # not imported from sdk_client).
     network = config.get("network")
     if network is not None and (
@@ -301,8 +296,8 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     if live_raw is not None:
         # Lazy import: live.config pulls in the risk-gate domain module, which
         # --context-only smoke runs should not pay for unless a live: block
-        # exists. (No cycle: live.config imports LEGAL_NETWORKS from this
-        # module at import time, which is fine inside a function body here.)
+        # exists. (Purely an import-cost choice — live.config imports nothing
+        # from this module, so there is no cycle to avoid.)
         from .domains.perp.risk_gate import RiskConfig
         from .live.config import LiveConfig, validate_live_risk_consistency
 

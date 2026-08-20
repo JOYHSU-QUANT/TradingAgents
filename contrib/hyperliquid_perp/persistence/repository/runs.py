@@ -6,9 +6,9 @@ import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from ...domains.perp.enum_guard import check_enum
+from ...common.enum_guard import check_enum
 from ..models import PositionState
-from ._base import _dec, _insert
+from ._base import _dec_or_none, _insert
 from ._vocab import _MODES
 
 __all__ = ["get_run", "get_run_seed_positions", "insert_run", "insert_run_seed_position"]
@@ -78,7 +78,7 @@ def get_run_seed_positions(conn: sqlite3.Connection, run_id: str) -> list[Positi
         PositionState(
             coin=r["symbol"],
             size=Decimal(r["size"]),
-            entry_price=_dec(r["entry_price"]),
+            entry_price=_dec_or_none(r["entry_price"]),
             realized_pnl=Decimal(r["realized_pnl"]),
         )
         for r in rows

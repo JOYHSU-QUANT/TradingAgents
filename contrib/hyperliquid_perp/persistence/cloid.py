@@ -27,7 +27,7 @@ from __future__ import annotations
 import hashlib
 import re
 
-from ..domains.perp.enum_guard import check_enum
+from ..common.enum_guard import check_enum
 
 __all__ = ["LIVE_ORDER_ROLES", "assert_cloid_provenance", "cloid_hex", "cloid_logical"]
 

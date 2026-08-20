@@ -40,7 +40,7 @@ from contrib.hyperliquid_perp.persistence.cloid import (
 )
 from contrib.hyperliquid_perp.persistence.db import Database
 
-from .conftest import echo_order_status_cloid
+from ..conftest import echo_order_status_cloid
 
 _NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
 _LOGICAL = "hta_r_BTC_out1_plan1_open_000_entry"

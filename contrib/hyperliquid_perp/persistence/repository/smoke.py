@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-from ...domains.perp.enum_guard import check_enum
+from ...common.enum_guard import check_enum
 from ._base import _insert
 from ._vocab import LIVE_SMOKE_TEST_STATUSES
 

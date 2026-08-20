@@ -23,7 +23,7 @@ from contrib.hyperliquid_perp.persistence.ids import exchange_fill_key
 from contrib.hyperliquid_perp.persistence.models import PositionState
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 
-from .conftest import echo_order_status_cloid
+from ..conftest import echo_order_status_cloid
 
 _NOW = datetime(2026, 7, 16, 8, 0, tzinfo=timezone.utc)
 _HEX = "0x" + "ab" * 16

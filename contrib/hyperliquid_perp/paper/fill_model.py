@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from decimal import Decimal, localcontext
 
-from ..domains.perp.margin import DECIMAL_CONTEXT
+from ..common.decimal_context import DECIMAL_CONTEXT
 from ..persistence.models import Side
 
 __all__ = ["fill_price"]

@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
-from ...domains.perp.enum_guard import check_enum
+from ...common.enum_guard import check_enum
 from ._base import _UNSET, _encode, _insert, _iso_utc, _Unset
 from ._vocab import _ATTEMPT_STATUSES, _ERROR_TYPES, _MODES
 

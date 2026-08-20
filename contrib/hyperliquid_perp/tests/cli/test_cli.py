@@ -39,13 +39,13 @@ from contrib.hyperliquid_perp.persistence.db import Database, connect
 from contrib.hyperliquid_perp.persistence.models import PositionState
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 
-from .conftest import (
+from ..conftest import (
     assert_paired_sweep_refreshes,
     assert_payload_dir,
     insert_decision_attempts,
     record_reconciliation_sweep_wiring,
 )
-from .test_live_startup import _clearinghouse
+from ..live.test_startup import _clearinghouse
 
 D = Decimal
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
@@ -2612,7 +2612,7 @@ def live_seams(monkeypatch):
             # kill switch's timing invariant: `_cmd_live`'s preflight then passed
             # configs that exit 1 in production, so the exit-4 smoke-gate contract
             # these tests assert was never reachable there. The sibling double in
-            # test_live_smoke_cli.py was fixed one round earlier; this one was
+            # cli/test_smoke.py was fixed one round earlier; this one was
             # missed (2026-08-01 round-16 review).
             if timeout is None:
                 raw = config.get("network_timeout_s")
@@ -3649,7 +3649,7 @@ def test_the_daemon_hands_the_fill_processor_the_signed_wallet(tmp_path, live_se
 
     ``LiveFillProcessor.wallet_address`` is optional and skips the check when
     left at None, so the cli call sites are the load-bearing part. The sibling
-    pin in test_live_smoke_cli.py drives ``live-smoke`` and therefore reaches
+    pin in cli/test_smoke.py drives ``live-smoke`` and therefore reaches
     only the smoke constructor; deleting the kwarg from the DAEMON constructor
     — the processor handed to the live loop and to FillBackfiller, the one that
     ingests real userFills for weeks — left the whole suite green

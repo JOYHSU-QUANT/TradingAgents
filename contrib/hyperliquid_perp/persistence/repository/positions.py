@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from ..models import PositionState
-from ._base import _dec, _encode, _iso_utc
+from ._base import _dec_or_none, _encode, _iso_utc
 
 __all__ = [
     "get_all_current_positions",
@@ -89,9 +89,9 @@ def _row_to_position(row: sqlite3.Row) -> PositionState:
     return PositionState(
         coin=row["symbol"],
         size=Decimal(row["size"]),
-        entry_price=_dec(row["entry_price"]),
+        entry_price=_dec_or_none(row["entry_price"]),
         realized_pnl=Decimal(row["realized_pnl"]),
-        liquidation_price=_dec(row["exchange_liquidation_price"]),
+        liquidation_price=_dec_or_none(row["exchange_liquidation_price"]),
     )
 
 
@@ -130,7 +130,7 @@ def get_position_protection(
     ).fetchone()
     if row is None:
         return None
-    return _dec(row["stop_loss_price"]), _dec(row["take_profit_price"])
+    return _dec_or_none(row["stop_loss_price"]), _dec_or_none(row["take_profit_price"])
 
 
 def set_position_protection(

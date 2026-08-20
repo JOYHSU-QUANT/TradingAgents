@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
-from ...domains.perp.enum_guard import check_enum
+from ...common.enum_guard import check_enum
 from ._base import _UNSET, _encode, _iso_utc, _Unset
 from ._vocab import (
     _CONFIG_DRIFT_STATUSES,

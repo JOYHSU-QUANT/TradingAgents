@@ -14,7 +14,7 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.market_data import (
 )
 from contrib.hyperliquid_perp.ports import ExchangeMarketData
 
-from .conftest import synthetic_bar as _settled_bar
+from ..conftest import synthetic_bar as _settled_bar
 
 
 def test_interval_to_ms_known_intervals():

@@ -26,7 +26,7 @@ from contrib.hyperliquid_perp.paper.validation import validate_run
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 
-from .conftest import insert_decision_attempts
+from ..conftest import insert_decision_attempts
 
 D = Decimal
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)

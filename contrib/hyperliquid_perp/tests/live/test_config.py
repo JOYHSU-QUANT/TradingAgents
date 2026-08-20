@@ -12,8 +12,8 @@ from decimal import Decimal as D
 
 import pytest
 
+from contrib.hyperliquid_perp.common.config_coercion import bool_from_yaml
 from contrib.hyperliquid_perp.config import load_config
-from contrib.hyperliquid_perp.domains.perp.config_coercion import bool_from_yaml
 from contrib.hyperliquid_perp.domains.perp.risk_gate import RiskConfig
 from contrib.hyperliquid_perp.live.config import (
     EXCHANGE_MIN_ORDER_NOTIONAL_USDC,

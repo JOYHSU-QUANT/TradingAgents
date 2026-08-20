@@ -14,7 +14,7 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
     UnknownCoinError,
 )
 
-from .conftest import synthetic_bar as _bar
+from ..conftest import synthetic_bar as _bar
 
 
 def test_market_snapshot_picks_correct_coin(meta_and_asset_ctxs):

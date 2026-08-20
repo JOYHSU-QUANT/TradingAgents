@@ -12,7 +12,7 @@ SmokeTestRunner, RealOrderGate, KillSwitchManager, LiveReconciler and
 run_startup_recovery machinery offline, end to end through ``cli_main``.
 
 Also covered: the ``validate`` live exit mapping (0 when ``live_ready``, 5 on
-an integrity failure) at the CLI layer, over test_live_validation's ``_healthy``
+an integrity failure) at the CLI layer, over live/test_validation.py's ``_healthy``
 store builder.
 """
 
@@ -38,15 +38,15 @@ from contrib.hyperliquid_perp.live.smoke import SMOKE_TEST_KEYS
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 
-from .conftest import (
+from ..conftest import (
     assert_paired_sweep_refreshes,
     assert_payload_dir,
     echo_order_status_cloid,
     record_reconciliation_sweep_wiring,
 )
+from ..live.test_startup import _clearinghouse
+from ..live.test_validation import _healthy
 from .test_cli import _seed_live_run_with_genesis_subset as _seed_genesis_run
-from .test_live_startup import _clearinghouse
-from .test_live_validation import _healthy
 
 _D = Decimal
 _T0 = datetime(2026, 7, 27, 0, 0, tzinfo=timezone.utc)
@@ -461,7 +461,8 @@ def test_the_runbook_quotes_the_literals_the_code_prints(tmp_path):
     # Resolved from __file__, not the cwd: this is the only test in the suite
     # that reads a doc, and a cwd-relative path fails whenever pytest is
     # invoked from anywhere but the repo root (2026-08-01 round-17 probe).
-    docs = _Path(__file__).resolve().parents[1] / "docs" / "RUNBOOK-live.md"
+    # parents[2] = the package root (this file lives in tests/cli/).
+    docs = _Path(__file__).resolve().parents[2] / "docs" / "RUNBOOK-live.md"
     runbook = docs.read_text(encoding="utf-8")
     assert _SUITE_AUTHORED_TOKEN in runbook
     # Same tie for the other literal §20.3 quotes: the summary's clean-shutdown

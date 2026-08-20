@@ -21,7 +21,7 @@ from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.ids import live_order_attempt_id
 
-from .conftest import echo_order_status_cloid
+from ..conftest import echo_order_status_cloid
 
 _NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
 _HEX = "0x" + "ab" * 16
@@ -1825,7 +1825,7 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
     #    (mutation-verified, 2026-08-01 round-13 review). ``_run_live_loop`` needs
     #    a whole live session to drive, so this checks the wiring structurally
     #    instead; its sibling seam in engine.tick() IS driven, in
-    #    test_live_engine.test_the_market_snapshot_read_refreshes_the_switch_across_itself.
+    #    live/test_engine.py::test_the_market_snapshot_read_refreshes_the_switch_across_itself.
     import ast
     import textwrap
 
@@ -1957,7 +1957,7 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
 
     # 4. The market snapshot inside engine.tick() is the other full-timeout read
     #    that used to chain into the submit ladder. Covered by DRIVING the engine,
-    #    in test_live_engine.test_the_market_snapshot_read_refreshes_the_switch_
+    #    in live/test_engine.py::test_the_market_snapshot_read_refreshes_the_switch_
     #    across_itself — the source-slice assertion that used to live here stayed
     #    green with the switch argument mutated to None (mutation-verified,
     #    2026-08-01 round-13 review), which is the whole failure it existed to

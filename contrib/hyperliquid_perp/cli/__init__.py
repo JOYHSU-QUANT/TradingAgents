@@ -61,7 +61,6 @@ Legacy delegated invocations keep
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import os
@@ -73,23 +72,39 @@ from decimal import Decimal
 from functools import partial
 from pathlib import Path
 
-from .config import dotenv_diagnosis, load_dotenv_files
-from .persistence.db import Database, SchemaVersionError, apply_migrations
+from ..config import dotenv_diagnosis, load_dotenv_files
+from ..persistence.db import Database, SchemaVersionError, apply_migrations
+from . import _provider, paper_export
+from ._common import (
+    _existing_run_row,
+    _open_existing_db,
+    _raise_keyboard_interrupt,
+    _require_api_key,
+    _require_live_run_mode,
+)
+from ._drift import (
+    _HARD_DRIFT_KINDS,
+    _config_drift_report,
+    _norm_network,
+    _run_config_subset,
+)
+from ._provider import (
+    PROMPT_VERSION,
+    _classify_engine_error,
+    _EngineDecisionProvider,
+    _HistoryFundingSource,
+)
+from .paper_export import (
+    _UNVERIFIED_MARKER,
+    _mark_export_verification,
+    _post_cycle_export,
+    _retry_pending_funding,
+    _stamp_breadcrumb,
+)
 
 logger = logging.getLogger(__name__)
 
 _SUBCOMMANDS = ("paper", "export", "validate", "live", "live-smoke", "safe-mode")
-
-# Version stamp for the ai_inputs.prompt_version column: bump when the injected
-# context/format contract changes shape (the payload hash tracks content).
-PROMPT_VERSION = "phase2-target-v3"
-
-
-def _raise_keyboard_interrupt(signum, frame) -> None:
-    """SIGTERM → the SIGINT path: systemd/docker/``kill`` stop with the default
-    TERM signal, and phase2-data §1.1's shutdown export must fire for them
-    exactly as it does for Ctrl-C."""
-    raise KeyboardInterrupt
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -101,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     if not argv or argv[0].startswith("-"):
         # Phase 1/2 compatibility path: identical flags, identical behaviour.
         # Legacy accepts no positionals, so flag-shaped/empty argv is lossless.
-        from .main import main as legacy_main
+        from ..main import main as legacy_main
 
         return legacy_main(argv)
     if argv[0] not in _SUBCOMMANDS:
@@ -142,80 +157,6 @@ def main(argv: list[str] | None = None) -> int:
 # --------------------------------------------------------------------------
 
 
-def _open_existing_db(
-    path: str, *, migrate: bool = False, defer_migration: bool = False
-) -> Database | None:
-    """Open an existing store, or report why not (never CREATE one implicitly).
-
-    ``Database(path)`` would happily create an empty schema — and an offline
-    command against a typo'd path would then "succeed" with zero rows.
-
-    ``migrate`` splits the callers by what they actually do:
-
-    * ``False`` (default) for the genuinely REPORT-ONLY commands — ``validate``,
-      ``export``, ``live-smoke --gate-status``. They take no run lease, so
-      migrating would silently upgrade a store a running daemon owns, leaving
-      that daemon writing through a schema it does not know. They refuse with
-      instructions instead (2026-07-30 migration review).
-    * ``True`` for ``safe-mode``, which legitimately CHANGES the run
-      (``--release`` / ``--stamp-case`` write, and ``--status`` is how an
-      operator diagnoses a latched run). Refusing it would disable exactly the
-      diagnostic tool an upgrade is most likely to need: the exit check found
-      ``safe-mode`` blocked by the very condition it exists to investigate
-      (2026-07-31). It takes no lease, so this remains a deliberate exception.
-    * ``defer_migration=True`` for the real ``live-smoke`` run, which owns the
-      store but cannot prove it until it holds the lease — it migrates itself
-      once it does. See :class:`Database` for why that ordering matters.
-    """
-    if not Path(path).exists():
-        print(f"error: database {path!r} does not exist.", file=sys.stderr)
-        return None
-    try:
-        return Database(path, migrate=migrate, defer_migration=defer_migration)
-    except SchemaVersionError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return None
-
-
-def _existing_run_row(conn, run_id: str, db_label: str, *, not_found_hint: str = ""):
-    """The run's row, or ``None`` after printing the standard missing-run error.
-
-    The one encoding of the "does this run exist" refusal, shared by every
-    read-style command (``validate``, ``live-smoke --gate-status``, and
-    ``live-smoke``'s real-run build) so a wording tweak cannot land on one
-    surface and not the other. ``not_found_hint`` lets a caller that can offer
-    a concrete remedy (e.g. "create it first with ...") append one without
-    forking the base message (2026-07-30 simplify pass).
-    """
-    from .persistence import repository as repo
-
-    row = repo.get_run(conn, run_id)
-    if row is None:
-        suffix = not_found_hint or "."
-        print(f"error: run {run_id!r} does not exist in {db_label}{suffix}", file=sys.stderr)
-    return row
-
-
-def _require_live_run_mode(run_row, run_id: str, db_label: str, *, extra: str = "") -> bool:
-    """True if ``run_row`` is a ``live``-mode run, else prints the refusal.
-
-    Shared by every command that only makes sense against a live run
-    (``live-smoke --gate-status``, ``live-smoke``'s real-run build) so the
-    "wrong run mode" wording can't drift between them (2026-07-30 simplify
-    pass). ``extra`` lets a caller insert a clause before the closing
-    "Fix --run-id / --db." sentence.
-    """
-    if run_row["mode"] != "live":
-        detail = f" — {extra}" if extra else ""
-        print(
-            f"error: run {run_id!r} in {db_label} is a {run_row['mode']} run{detail}. "
-            "Fix --run-id / --db.",
-            file=sys.stderr,
-        )
-        return False
-    return True
-
-
 def _cmd_export(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m contrib.hyperliquid_perp export",
@@ -226,7 +167,7 @@ def _cmd_export(argv: list[str]) -> int:
     parser.add_argument("--db", default="paper_trading.db", help="SQLite store path.")
     args = parser.parse_args(argv)
 
-    from .persistence.export import ExportError, export_run
+    from ..persistence.export import ExportError, export_run
 
     db = _open_existing_db(args.db)
     if db is None:
@@ -271,7 +212,7 @@ def _cmd_validate(argv: list[str]) -> int:
                 return 1
             if run_row["mode"] == "live":
                 return _validate_live(db, args.run_id)
-            from .paper.validation import validate_run
+            from ..paper.validation import validate_run
 
             report = validate_run(db, run_id=args.run_id)
     except ValueError as exc:
@@ -304,7 +245,7 @@ def _validate_live(db: Database, run_id: str) -> int:
     re-run, so it is a shortfall, not an integrity verdict; decision
     2026-07-29). Called inside the caller's ``with db:`` block.
     """
-    from .live.validation import validate_live_run
+    from ..live.validation import validate_live_run
 
     report = validate_live_run(db, run_id=run_id)
     for line in report.summary_lines():
@@ -386,8 +327,8 @@ def _cmd_safe_mode(argv: list[str]) -> int:
 
     import getpass
 
-    from .live.safe_mode import SafeModeManager
-    from .persistence import repository as repo
+    from ..live.safe_mode import SafeModeManager
+    from ..persistence import repository as repo
 
     # migrate=True: safe-mode WRITES (--release / --stamp-case), and --status is
     # how an operator diagnoses a latched run. Refusing it on a store that needs
@@ -763,26 +704,26 @@ def _cmd_live(argv: list[str]) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    from .config import wallet_address
-    from .domains.perp.risk_gate import RiskConfig
-    from .engine_bridge import load_config_or_exit
-    from .exchanges.hyperliquid.account import HyperliquidAccount
-    from .exchanges.hyperliquid.errors import ExchangeError
-    from .exchanges.hyperliquid.sdk_client import HyperliquidClient
-    from .exchanges.hyperliquid.signed_client import HyperliquidSignedClient
-    from .live.authorization import (
+    from ..config import wallet_address
+    from ..domains.perp.risk_gate import RiskConfig
+    from ..engine_bridge import load_config_or_exit
+    from ..exchanges.hyperliquid.account import HyperliquidAccount
+    from ..exchanges.hyperliquid.errors import ExchangeError
+    from ..exchanges.hyperliquid.sdk_client import HyperliquidClient
+    from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
+    from ..live.authorization import (
         EXPIRY_WARNING_HORIZON,
         AgentAuthorizationError,
         verify_agent_authorization,
     )
-    from .live.config import (
+    from ..live.config import (
         EXCHANGE_MIN_ORDER_NOTIONAL_USDC,
         ExecutionMode,
         LiveConfig,
         compute_notional_caps,
         validate_live_risk_consistency,
     )
-    from .live.secrets import agent_key_env_var, load_agent_key
+    from ..live.secrets import agent_key_env_var, load_agent_key
 
     config = load_config_or_exit(args.config)
     if config is None:
@@ -837,7 +778,7 @@ def _cmd_live(argv: list[str]) -> int:
     # supervisor. (_cmd_paper makes the same up-front check.)
     loop_cfgs = None
     if args.loop:
-        from .engine_bridge import _load_risk_decision
+        from ..engine_bridge import _load_risk_decision
 
         loop_cfgs = _load_risk_decision(config)
         if loop_cfgs is None:
@@ -945,7 +886,7 @@ def _cmd_live(argv: list[str]) -> int:
         # fail-closed: no runtime condition is proven in this config-only
         # command, so the client could not place an order even if asked.
         try:
-            from .live.order_gate import RealOrderGate
+            from ..live.order_gate import RealOrderGate
 
             signed = HyperliquidSignedClient(
                 live_cfg.network,
@@ -1066,21 +1007,21 @@ def _live_startup_recovery(
     import signal
     from decimal import Decimal
 
-    from .exchanges.hyperliquid.mapper import map_account_snapshot
-    from .exchanges.hyperliquid.sdk_client import call_sdk
-    from .exchanges.hyperliquid.signed_client import HyperliquidSignedClient
-    from .live.fill_backfill import FillBackfiller
-    from .live.fills import LiveFillProcessor
-    from .live.kill_switch import KillSwitchManager, refresh_across_blocking_work
-    from .live.order_gate import RealOrderGate
-    from .live.reconcile import LiveReconciler
-    from .live.safe_mode import SafeModeManager
-    from .live.startup import run_startup_recovery
-    from .paper import accounting
-    from .paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
-    from .persistence import repository as repo
-    from .persistence.models import PositionState
-    from .persistence.schema import SCHEMA_VERSION
+    from ..exchanges.hyperliquid.mapper import map_account_snapshot
+    from ..exchanges.hyperliquid.sdk_client import call_sdk
+    from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
+    from ..live.fill_backfill import FillBackfiller
+    from ..live.fills import LiveFillProcessor
+    from ..live.kill_switch import KillSwitchManager, refresh_across_blocking_work
+    from ..live.order_gate import RealOrderGate
+    from ..live.reconcile import LiveReconciler
+    from ..live.safe_mode import SafeModeManager
+    from ..live.startup import run_startup_recovery
+    from ..paper import accounting
+    from ..paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
+    from ..persistence import repository as repo
+    from ..persistence.models import PositionState
+    from ..persistence.schema import SCHEMA_VERSION
 
     if agent_key is None:
         print(
@@ -1312,10 +1253,10 @@ def _live_startup_recovery(
         # the one-shot recovery check, without --loop, never trades and so is not
         # gated.) Checked here, before arming: a fresh --create run has no smoke
         # results, so --loop on it is refused with the create → smoke → loop path.
-        from .live.config import ExecutionMode
+        from ..live.config import ExecutionMode
 
         if args.loop and live_cfg.mode is ExecutionMode.TESTNET_LIVE:
-            from .live.smoke import smoke_gate_report
+            from ..live.smoke import smoke_gate_report
 
             gate_ok, gate_missing, gate_failed, gate_errored = smoke_gate_report(db.conn, run_id)
             if not gate_ok:
@@ -1769,8 +1710,8 @@ def _day_baseline_from_exchange(fetch_clearinghouse, kill_switch) -> Decimal:
     landing between the protection sync and the slice submits, and the call that
     TIMES OUT is both the expensive one and the one that leaves by exception.
     """
-    from .exchanges.hyperliquid.mapper import map_account_snapshot
-    from .live.kill_switch import refresh_across_blocking_work
+    from ..exchanges.hyperliquid.mapper import map_account_snapshot
+    from ..live.kill_switch import refresh_across_blocking_work
 
     try:
         return map_account_snapshot(fetch_clearinghouse()).account_value
@@ -1788,7 +1729,7 @@ def _contain_as_recoverable_safe_mode(safe_mode, *, log_message: str, detail: st
     nothing here may end the loop, because the caller's teardown would sweep
     the resting SL/TP off a live position.
     """
-    from .live.safe_mode import REASON_LIVE_TICK_ERROR
+    from ..live.safe_mode import REASON_LIVE_TICK_ERROR
 
     logger.exception(log_message)
     try:
@@ -1808,7 +1749,7 @@ def _live_heartbeat(db, run_id: str, *, pid: int, now, safe_mode) -> None:
     heartbeat blip. Contain it exactly like a tick error instead: log, enter
     recoverable safe mode, retry on the next tick's heartbeat.
     """
-    from .paper import run_lock
+    from ..paper import run_lock
 
     try:
         run_lock.heartbeat_run_lock(db, run_id, pid=pid, now=now)
@@ -1841,7 +1782,7 @@ def _timing_preflight(live_cfg, client) -> int:
     point of a preflight; ``kill_switch_timing_violation``'s docstring owns the
     invariant itself.
     """
-    from .live.kill_switch import (
+    from ..live.kill_switch import (
         kill_switch_timing_violation,
         network_timeout_warning,
         sl_repair_delay_warning,
@@ -1934,9 +1875,9 @@ def _conflicting_run_lease(
     message, while the cost of a false pass is a stripped dead-man switch on a
     live wallet.
     """
-    from .paper.run_lock import LOCK_STALE_SECONDS
-    from .paper.scheduler import parse_instant
-    from .persistence import repository as repo
+    from ..paper.run_lock import LOCK_STALE_SECONDS
+    from ..paper.scheduler import parse_instant
+    from ..persistence import repository as repo
 
     if own_network is None:
         own = repo.get_run(db.conn, run_id)
@@ -1986,7 +1927,7 @@ def _still_owns_run(db, run_id: str, *, pid: int, now) -> bool:
     so it is logged and treated as owned. Only ``RunLockError`` gives the run
     away.
     """
-    from .paper import run_lock
+    from ..paper import run_lock
 
     try:
         run_lock.heartbeat_run_lock(db, run_id, pid=pid, now=now)
@@ -2039,19 +1980,19 @@ def _run_live_loop(
     owns the run's orders — see the caller's ``except RunLockError``).
     """
 
-    from .exchanges.hyperliquid.market_data import HyperliquidMarketData
-    from .live.decision import LiveDecisionDriver, LiveDecisionWorker
-    from .live.engine import LiveExecutionEngine
-    from .live.kill_switch import refresh_across_blocking_work
-    from .live.loss_guards import LossGuards
-    from .live.orders import LiveOrderSubmitter
-    from .live.protection import ProtectionManager
-    from .live.ws_stream import LiveWsStream
-    from .paper.clock import WallClock
-    from .paper.engine import AssetSpec
-    from .paper.market_feed import PortSnapshotProvider
-    from .paper.stops import StopConfig
-    from .persistence import repository as repo
+    from ..exchanges.hyperliquid.market_data import HyperliquidMarketData
+    from ..live.decision import LiveDecisionDriver, LiveDecisionWorker
+    from ..live.engine import LiveExecutionEngine
+    from ..live.kill_switch import refresh_across_blocking_work
+    from ..live.loss_guards import LossGuards
+    from ..live.orders import LiveOrderSubmitter
+    from ..live.protection import ProtectionManager
+    from ..live.ws_stream import LiveWsStream
+    from ..paper.clock import WallClock
+    from ..paper.engine import AssetSpec
+    from ..paper.market_feed import PortSnapshotProvider
+    from ..paper.stops import StopConfig
+    from ..persistence import repository as repo
 
     # ``cfgs`` was validated by _cmd_live's front gate (decided 2026-07-22): a
     # bad risk:/decision:/paper_trading: block is an exit-1 up front, so this
@@ -2133,7 +2074,7 @@ def _run_live_loop(
     # that segment now, before the first tick, so the loss counter cannot merge
     # it into the next one.
     engine.settle_offline_flat()
-    decision_provider = _EngineDecisionProvider(
+    decision_provider = _provider._EngineDecisionProvider(
         config,
         risk_cfg=risk_cfg,
         decision_cfg=decision_cfg,
@@ -2332,7 +2273,7 @@ def _cmd_live_smoke(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
-    from .live.smoke import (
+    from ..live.smoke import (
         SmokePreflightError,
         SmokeTestRunner,
         smoke_gate_report,
@@ -2383,7 +2324,7 @@ def _cmd_live_smoke(argv: list[str]) -> int:
             # mainnet" — the exact misreading `validate` renders as "n/a
             # (§21.3)". Refuse, mirroring the real-run testnet-only guard
             # (decision 2026-07-28).
-            from .live.validation import execution_mode
+            from ..live.validation import execution_mode
 
             genesis_mode = execution_mode(run_row["config_json"])
             if genesis_mode != "testnet_live":
@@ -2422,7 +2363,7 @@ def _cmd_live_smoke(argv: list[str]) -> int:
     preflight_error: str | None = None
     import signal
 
-    from .paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
+    from ..paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
 
     try:
         session = _build_smoke_session(args, db)
@@ -2623,11 +2564,11 @@ def _build_smoke_session(args, db):
     """
     from decimal import Decimal
 
-    from .domains.perp.risk_gate import RiskConfig
-    from .engine_bridge import load_config_or_exit
-    from .live.config import ExecutionMode, LiveConfig, validate_live_risk_consistency
-    from .live.smoke import SmokeContext
-    from .paper.clock import WallClock
+    from ..domains.perp.risk_gate import RiskConfig
+    from ..engine_bridge import load_config_or_exit
+    from ..live.config import ExecutionMode, LiveConfig, validate_live_risk_consistency
+    from ..live.smoke import SmokeContext
+    from ..paper.clock import WallClock
 
     config = load_config_or_exit(args.config)
     if config is None:
@@ -2734,16 +2675,16 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
     ``int`` exit code.
     """
 
-    from .config import wallet_address
-    from .exchanges.hyperliquid.errors import ExchangeError
-    from .exchanges.hyperliquid.market_data import HyperliquidMarketData
-    from .exchanges.hyperliquid.sdk_client import HyperliquidClient
-    from .exchanges.hyperliquid.signed_client import HyperliquidSignedClient
-    from .live.authorization import AgentAuthorizationError, verify_agent_authorization
-    from .live.order_gate import RealOrderGate
-    from .live.secrets import agent_key_env_var, load_agent_key
-    from .live.smoke import SmokeContext
-    from .paper.engine import AssetSpec
+    from ..config import wallet_address
+    from ..exchanges.hyperliquid.errors import ExchangeError
+    from ..exchanges.hyperliquid.market_data import HyperliquidMarketData
+    from ..exchanges.hyperliquid.sdk_client import HyperliquidClient
+    from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
+    from ..live.authorization import AgentAuthorizationError, verify_agent_authorization
+    from ..live.order_gate import RealOrderGate
+    from ..live.secrets import agent_key_env_var, load_agent_key
+    from ..live.smoke import SmokeContext
+    from ..paper.engine import AssetSpec
 
     if not live_cfg.allow_real_orders:
         print(
@@ -2823,7 +2764,7 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
     def _heartbeat() -> None:
         # Keeps the lease _cmd_live_smoke acquired fresh across the suite;
         # raises RunLockError once superseded (the runner aborts on it).
-        from .paper.run_lock import heartbeat_run_lock
+        from ..paper.run_lock import heartbeat_run_lock
 
         heartbeat_run_lock(db, args.run_id, pid=os.getpid(), now=datetime.now(timezone.utc))
 
@@ -2882,13 +2823,13 @@ def _smoke_startup_recovery(
     the run against the exchange — exactly the restart-reconciliation the smoke
     tests assert is clean given the operator-staged preconditions.
     """
-    from .exchanges.hyperliquid.sdk_client import call_sdk
-    from .live.fill_backfill import FillBackfiller
-    from .live.fills import LiveFillProcessor
-    from .live.kill_switch import KillSwitchManager, refresh_across_blocking_work
-    from .live.reconcile import LiveReconciler
-    from .live.safe_mode import SafeModeManager
-    from .live.startup import run_startup_recovery
+    from ..exchanges.hyperliquid.sdk_client import call_sdk
+    from ..live.fill_backfill import FillBackfiller
+    from ..live.fills import LiveFillProcessor
+    from ..live.kill_switch import KillSwitchManager, refresh_across_blocking_work
+    from ..live.reconcile import LiveReconciler
+    from ..live.safe_mode import SafeModeManager
+    from ..live.startup import run_startup_recovery
 
     def fetch_clearinghouse():
         return call_sdk(client.info.user_state, wallet)
@@ -2962,177 +2903,6 @@ def _smoke_startup_recovery(
 # --------------------------------------------------------------------------
 
 
-# Every behaviour-defining block the resume drift check compares — the single
-# source shared by the genesis record and the comparison loop, so a new key
-# can't be recorded but silently never drift-checked (or vice versa).
-_DRIFT_COMPARED_KEYS = ("risk", "decision", "paper_trading", "engine", "market_data", "indicators")
-
-
-def _run_config_subset(config: dict, coin: str) -> dict:
-    """The behaviour-defining blocks recorded at run genesis (never network/wallet).
-
-    ``engine`` (model/analysts), ``market_data`` (candle window feeding the
-    context), and ``indicators`` (signal set + warm-up gate) are here because
-    each redefines every subsequent decision at least as much as a
-    risk-parameter tweak does; ``paper_trading`` is stored whole for the audit
-    record even though only its ``execution`` sub-block is compared on resume
-    (``account`` is genesis-only).
-    """
-    subset: dict = {key: config.get(key) for key in _DRIFT_COMPARED_KEYS}
-    subset["coin"] = coin
-    return subset
-
-
-# Genesis records written before these keys joined the subset lack them;
-# absence there means "unknown", not "was empty" — skip the comparison rather
-# than false-flag every pre-upgrade run whose config carries the block today.
-_DRIFT_KEYS_ADDED_LATER = frozenset({"engine", "market_data", "indicators"})
-
-
-def _resume_effective(key: str, block: object) -> object:
-    """Project a stored/current config block onto what actually applies on resume.
-
-    ``paper_trading.account`` (initial balance, seed positions) is consumed
-    only at run genesis — a resume-time edit there changes nothing, so it must
-    not trip the "behaviour changes from here on" warning. Everything else
-    applies as-is.
-    """
-    if key == "paper_trading" and isinstance(block, dict):
-        return block.get("execution")
-    return block
-
-
-def _norm_network(live_block: dict) -> object:
-    """``live.network`` normalised the way LiveConfig reads it (case-insensitive)."""
-    net = live_block.get("network")
-    return net.strip().lower() if isinstance(net, str) else net
-
-
-# The drift kinds that are run IDENTITY (a different instrument or a different
-# exchange). Every entry point that resumes/targets an existing run refuses
-# these with exit 1; any other kind is parameter drift and only warns. One
-# shared datum so the three call sites (paper resume, live resume, live-smoke)
-# can never diverge on what counts as hard.
-_HARD_DRIFT_KINDS = frozenset({"coin", "network"})
-
-
-def _config_drift_report(
-    stored_json: str | None, config: dict, coin: str
-) -> tuple[str, str] | None:
-    """Compare today's config against the run's genesis record.
-
-    Returns ``("coin", msg)`` for a coin mismatch or ``("network", msg)`` for a
-    ``live.network`` mismatch (both hard errors — a different instrument or a
-    different exchange is a different run, not a resumption), ``("params",
-    msg)`` for risk/decision/paper_trading(execution)/engine/market_data/
-    indicators / non-network ``live:`` drift (warning — behaviour changes
-    mid-run but the operator may intend it; genesis-only
-    ``paper_trading.account`` edits are inert on resume and don't warn, and a
-    genesis record predating a key in ``_DRIFT_KEYS_ADDED_LATER`` skips that
-    comparison rather than false-flagging), or ``None`` when nothing drifted or
-    no record exists (a pre-drift-check store). A genesis record this process
-    cannot parse also reports as ``("params", ...)``: the homogeneity check
-    became impossible, which is breadcrumb-grade — never a startup abort (that
-    would fire before the protection-only fork, leaving a live position
-    unwatched). The ``live:`` checks fire only for records that stored the
-    block (a live run's genesis — a paper run never stores it), so paper
-    resumes reach neither the network hard-fail nor the live-block warning.
-    """
-    if not stored_json:
-        return None
-    try:
-        stored = json.loads(stored_json)
-    except ValueError as exc:
-        return ("params", f"could not verify config drift (corrupt stored config_json: {exc})")
-    if not isinstance(stored, dict):
-        return (
-            "params",
-            "could not verify config drift (corrupt stored config_json: not an object)",
-        )
-    # Round-trip today's subset through JSON so both sides compare in the same
-    # serialized shape (default=str stringifies any non-JSON scalar).
-    current = json.loads(json.dumps(_run_config_subset(config, coin), default=str))
-    if stored.get("coin") != current.get("coin"):
-        return (
-            "coin",
-            f"run was created for coin {stored.get('coin')!r} but this resume "
-            f"targets {coin!r} — refusing to continue a run on a different "
-            "instrument (use a new --run-id).",
-        )
-    # live.network is run IDENTITY, like coin (decided 2026-07-17): a
-    # testnet↔mainnet swap on resume would arm the wallet-wide kill switch and
-    # reconcile the WRONG exchange against this ledger — every position/equity
-    # leg mismatches and the operator sees "reconciliation mismatch" instead of
-    # the true cause. The live create path stores the whole ``live:`` block; a
-    # paper run never does, so ``stored_live`` is absent there and the check
-    # is skipped. current_live is round-tripped through JSON to match the
-    # stored block's serialized shape.
-    stored_live = stored.get("live")
-    raw_current_live = config.get("live")
-    current_live = (
-        json.loads(json.dumps(raw_current_live, default=str))
-        if isinstance(raw_current_live, dict)
-        else None
-    )
-    both_have_live_block = isinstance(stored_live, dict) and isinstance(current_live, dict)
-    if both_have_live_block and _norm_network(stored_live) != _norm_network(current_live):
-        return (
-            "network",
-            f"run was created against live.network {_norm_network(stored_live)!r} "
-            f"but this resume targets {_norm_network(current_live)!r} — refusing to "
-            "arm the kill switch and reconcile a different exchange (use a new "
-            "--run-id).",
-        )
-    drifted = sorted(
-        key
-        for key in _DRIFT_COMPARED_KEYS
-        if not (key in _DRIFT_KEYS_ADDED_LATER and key not in stored)
-        and _resume_effective(key, stored.get(key)) != _resume_effective(key, current.get(key))
-    )
-    # Non-network ``live:`` drift is a warning (network already hard-failed
-    # above): safety caps, kill-switch timings, allow_real_orders wiring etc.
-    # redefine behaviour mid-run and the operator should be told, even though
-    # they may intend it. Compared with network excluded so an equal-network
-    # block that changed elsewhere still surfaces.
-    if both_have_live_block:
-        stored_live_rest = {k: v for k, v in stored_live.items() if k != "network"}
-        current_live_rest = {k: v for k, v in current_live.items() if k != "network"}
-        if stored_live_rest != current_live_rest:
-            drifted = sorted([*drifted, "live"])
-    if drifted:
-        return (
-            "params",
-            f"config drift on resume: {', '.join(drifted)} differ from the values "
-            "recorded at run creation — this run's behaviour changes from here on.",
-        )
-    return None
-
-
-def _require_api_key() -> bool:
-    """True when OPENROUTER_API_KEY is set; else print the abort message.
-
-    Checked only on paths that will actually drive the AI engine — a fresh paper
-    run (always, before the run row is written), a healthy paper restart with
-    nothing live to protect, and ``live --loop`` (up front, alongside its config
-    validation). A paper restart into protection-only mode never polls the AI,
-    so it runs keyless — and a keyless healthy restart holding live work falls
-    back to that same mode rather than exiting (the caller owns that fork:
-    reconcile has already canceled the plans, so exiting would leave the
-    position with nobody watching its SL/TP). ``live`` WITHOUT ``--loop`` is the
-    same keyless case: it arms, sweeps and exits without ever polling the AI.
-    """
-    if os.environ.get("OPENROUTER_API_KEY"):
-        return True
-    print(
-        "error: OPENROUTER_API_KEY is not set — the run drives the AI engine every "
-        "4h, and without a key every cycle records api_failed (which never counts "
-        "toward the §20.3 cycle gate). Use --context-only (legacy CLI) for a "
-        f"keyless dev loop. ({dotenv_diagnosis('OPENROUTER_API_KEY')}.)",
-        file=sys.stderr,
-    )
-    return False
-
-
 def _cmd_paper(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m contrib.hyperliquid_perp paper",
@@ -3189,19 +2959,19 @@ def _cmd_paper(argv: list[str]) -> int:
 
     import signal
 
-    from .engine_bridge import _load_risk_decision, _resolve_coin, load_config_or_exit
+    from ..engine_bridge import _load_risk_decision, _resolve_coin, load_config_or_exit
 
     # Heavy/engine imports deferred so `export`/`validate` stay light (the
     # engine/scheduler stack is imported by _run_locked once the lease is in
     # hand).
-    from .exchanges.hyperliquid.errors import ExchangeError
-    from .exchanges.hyperliquid.market_data import HyperliquidMarketData
-    from .exchanges.hyperliquid.sdk_client import HyperliquidClient
-    from .paper.clock import WallClock
-    from .paper.config import PaperTradingConfig
-    from .paper.engine import AssetSpec
-    from .paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
-    from .persistence import repository as repo
+    from ..exchanges.hyperliquid.errors import ExchangeError
+    from ..exchanges.hyperliquid.market_data import HyperliquidMarketData
+    from ..exchanges.hyperliquid.sdk_client import HyperliquidClient
+    from ..paper.clock import WallClock
+    from ..paper.config import PaperTradingConfig
+    from ..paper.engine import AssetSpec
+    from ..paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
+    from ..persistence import repository as repo
 
     config = load_config_or_exit(args.config)
     if config is None:
@@ -3229,7 +2999,7 @@ def _cmd_paper(argv: list[str]) -> int:
     export_dir = (
         Path(args.export_dir) if args.export_dir else db_path.resolve().parent / "exports" / run_id
     )
-    funding_source = _HistoryFundingSource(market)
+    funding_source = _provider._HistoryFundingSource(market)
 
     with Database(db_path) as db:
         existing_run = repo.get_run(db.conn, run_id)
@@ -3280,15 +3050,15 @@ def _cmd_paper(argv: list[str]) -> int:
 
         def _run_locked() -> int:
             """The lease-holding tail of ``paper``: create/reconcile, then the loop."""
-            from .engine_bridge import EngineImportError
-            from .paper import accounting
-            from .paper.engine import PaperExecutionEngine
-            from .paper.market_feed import PortSnapshotProvider
-            from .paper.reconcile import ReconciliationError, reconcile_on_restart
-            from .paper.scheduler import PaperScheduler
-            from .persistence import repository as repo
-            from .persistence.models import PositionState
-            from .persistence.schema import SCHEMA_VERSION
+            from ..engine_bridge import EngineImportError
+            from ..paper import accounting
+            from ..paper.engine import PaperExecutionEngine
+            from ..paper.market_feed import PortSnapshotProvider
+            from ..paper.reconcile import ReconciliationError, reconcile_on_restart
+            from ..paper.scheduler import PaperScheduler
+            from ..persistence import repository as repo
+            from ..persistence.models import PositionState
+            from ..persistence.schema import SCHEMA_VERSION
 
             trading_halted = False
             # Built pre-flight on a fresh run (before the run row exists);
@@ -3296,7 +3066,7 @@ def _cmd_paper(argv: list[str]) -> int:
             provider = None
 
             def _build_provider():
-                return _EngineDecisionProvider(
+                return _provider._EngineDecisionProvider(
                     config,
                     risk_cfg=risk_cfg,
                     decision_cfg=decision_cfg,
@@ -3367,7 +3137,7 @@ def _cmd_paper(argv: list[str]) -> int:
                 if drift is None:
                     # Stamp clean resumes too, so a reverted config doesn't
                     # leave a stale "drift" as the last word in the store.
-                    _stamp_breadcrumb(db, run_id, "config_drift", "ok", None)
+                    paper_export._stamp_breadcrumb(db, run_id, "config_drift", "ok", None)
                 else:
                     kind, message = drift
                     if kind in _HARD_DRIFT_KINDS:
@@ -3375,7 +3145,7 @@ def _cmd_paper(argv: list[str]) -> int:
                         return 1
                     logger.warning("config drift on resume for %s: %s", run_id, message)
                     print(f"WARNING: {message}", file=sys.stderr)
-                    _stamp_breadcrumb(db, run_id, "config_drift", "drift", message)
+                    paper_export._stamp_breadcrumb(db, run_id, "config_drift", "drift", message)
                 # The same single-coin invariant as the fresh-run seed guard,
                 # enforced at the other daemon entry point: a store created by
                 # direct initialize_run (or an older build) may hold off-coin
@@ -3406,10 +3176,14 @@ def _cmd_paper(argv: list[str]) -> int:
                     # — but leave the durable breadcrumb first ("mismatch" or
                     # "failed" per the refusal's lane), so the refusal is
                     # visible to a post-mortem even when stderr wasn't captured.
-                    _stamp_breadcrumb(db, run_id, "replay", exc.replay_status, str(exc))
+                    paper_export._stamp_breadcrumb(
+                        db, run_id, "replay", exc.replay_status, str(exc)
+                    )
                     print(f"error: {exc}", file=sys.stderr)
                     return 1
-                _stamp_breadcrumb(db, run_id, "replay", report.replay_status, report.replay_error)
+                paper_export._stamp_breadcrumb(
+                    db, run_id, "replay", report.replay_status, report.replay_error
+                )
                 trading_halted = report.replay_mismatch
                 if report.replay_mismatch:
                     logger.error("restart over unverifiable books: %s", report.replay_error)
@@ -3565,8 +3339,10 @@ def _cmd_paper(argv: list[str]) -> int:
                 print("\nshutting down — final export...", file=sys.stderr)
                 # Same last-resolution pass as the settle-exit lane: pending
                 # funding posted now is funding the final CSVs won't be missing.
-                _retry_pending_funding(db, run_id, now=clock.now(), funding_source=funding_source)
-                _post_cycle_export(db, run_id, export_dir)
+                paper_export._retry_pending_funding(
+                    db, run_id, now=clock.now(), funding_source=funding_source
+                )
+                paper_export._post_cycle_export(db, run_id, export_dir)
                 return 0
             except RunLockError as exc:
                 # The lease was taken over while this process stalled: the
@@ -3639,9 +3415,9 @@ def _paper_loop(
     :class:`~.paper.run_lock.RunLockError` out of the loop (see
     :func:`~.paper.run_lock.heartbeat_run_lock`).
     """
-    from .paper.reconcile import backfill_pending_funding
-    from .paper.run_lock import heartbeat_run_lock
-    from .paper.scheduler import CycleEvent
+    from ..paper.reconcile import backfill_pending_funding
+    from ..paper.run_lock import heartbeat_run_lock
+    from ..paper.scheduler import CycleEvent
 
     pid = os.getpid()
     next_tick_at: datetime | None = None  # None → the first tick fires immediately
@@ -3653,7 +3429,9 @@ def _paper_loop(
     # iteration that halts mid-run), so the first in-loop retry waits a full
     # period.
     next_funding_retry_at: datetime | None = (
-        clock.now() + timedelta(seconds=_HALTED_FUNDING_RETRY_SECONDS) if trading_halted else None
+        clock.now() + timedelta(seconds=paper_export._HALTED_FUNDING_RETRY_SECONDS)
+        if trading_halted
+        else None
     )
     while True:
         now = clock.now()
@@ -3668,8 +3446,10 @@ def _paper_loop(
             engine.tick()
             next_tick_at = now + timedelta(seconds=interval)
         if trading_halted and next_funding_retry_at is not None and now >= next_funding_retry_at:
-            _retry_pending_funding(db, run_id, now=now, funding_source=funding_source)
-            next_funding_retry_at = now + timedelta(seconds=_HALTED_FUNDING_RETRY_SECONDS)
+            paper_export._retry_pending_funding(db, run_id, now=now, funding_source=funding_source)
+            next_funding_retry_at = now + timedelta(
+                seconds=paper_export._HALTED_FUNDING_RETRY_SECONDS
+            )
         result = scheduler.poll() if not trading_halted else None
         if result is not None:
             print(
@@ -3683,13 +3463,13 @@ def _paper_loop(
                 backfill_pending_funding(
                     db, run_id=run_id, now=clock.now(), funding_source=funding_source
                 )
-                if not _post_cycle_export(db, run_id, export_dir):
+                if not paper_export._post_cycle_export(db, run_id, export_dir):
                     trading_halted = True
                     halt_reason = "replay"
                     # The cycle-terminal backfill above just ran; start the
                     # halted-mode funding-retry timer one full period out.
                     next_funding_retry_at = clock.now() + timedelta(
-                        seconds=_HALTED_FUNDING_RETRY_SECONDS
+                        seconds=paper_export._HALTED_FUNDING_RETRY_SECONDS
                     )
                     # Mirror the restart lane's cancel sweep: the halting cycle
                     # may have just started a plan (zero slices consumed), and
@@ -3765,8 +3545,10 @@ def _paper_loop(
                 )
             # The final CSVs should be as complete as the store allows: give
             # any still-pending funding one last resolution pass first.
-            _retry_pending_funding(db, run_id, now=clock.now(), funding_source=funding_source)
-            _post_cycle_export(db, run_id, export_dir)
+            paper_export._retry_pending_funding(
+                db, run_id, now=clock.now(), funding_source=funding_source
+            )
+            paper_export._post_cycle_export(db, run_id, export_dir)
             return 1
         now = clock.now()
         due = scheduler.next_due_at() if not trading_halted else None
@@ -3778,393 +3560,3 @@ def _paper_loop(
         # SQLite poll — engine.tick() above is throttled to the configured
         # interval, so an early wake never issues extra market-data requests.
         time.sleep(min(delay, 60.0))
-
-
-def _stamp_breadcrumb(db, run_id: str, kind: str, status: str, error: str | None) -> None:
-    """Durably stamp a ``scheduler_state`` breadcrumb trio (``last_<kind>_*``).
-
-    Export failures, replay outcomes, and config drift on resume are
-    warn-and-carry-on (the mid-run replay halt only lives in process memory) —
-    without this record none would leave any trace once the process exits.
-    ``kind`` is a code-owned literal ("export" / "replay" / "config_drift");
-    the column vocabulary stays validated by ``upsert_scheduler_state``'s
-    fixed keyword signature.
-    """
-    from .persistence import repository as repo
-
-    stamp = datetime.now(timezone.utc)
-    with db.transaction() as conn:
-        repo.upsert_scheduler_state(
-            conn,
-            run_id,
-            updated_at=stamp,
-            **{
-                f"last_{kind}_status": status,
-                f"last_{kind}_error": error,
-                f"last_{kind}_at": stamp,
-            },
-        )
-
-
-_UNVERIFIED_MARKER = "REPLAY_UNVERIFIED.json"
-
-
-def _mark_export_verification(
-    export_dir: Path, run_id: str, replay_ok: bool, reason: str | None
-) -> None:
-    """Record, in-band next to the CSVs, whether the exported set passed replay.
-
-    ``scheduler_state`` (which carries the ``last_replay_*`` breadcrumb) is NOT
-    one of the exported tables, so a consumer reading the CSVs alone cannot tell
-    a mismatch cycle's export from a healthy one. When replay did not verify we
-    drop ``REPLAY_UNVERIFIED.json`` beside the CSVs; when it verifies we remove
-    any stale marker a previous bad cycle left behind (the export dir is reused
-    every cycle). Best-effort: a marker failure is logged, never raised — the
-    loop must survive, and the ``last_replay_*`` breadcrumb remains authoritative.
-    """
-    marker = Path(export_dir) / _UNVERIFIED_MARKER
-    try:
-        if replay_ok:
-            marker.unlink(missing_ok=True)
-        else:
-            marker.write_text(
-                json.dumps(
-                    {"run_id": run_id, "replay_verified": False, "reason": reason},
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-    except OSError as exc:
-        logger.error("failed to update replay-verification marker for %s: %s", run_id, exc)
-
-
-def _post_cycle_export(db, run_id: str, export_dir: Path) -> bool:
-    """Replay-verify then export (phase2-data §1.1); returns whether the books verified.
-
-    An export failure never stops trading (spec: record ``export_failed`` and
-    carry on) — but it IS durably recorded on ``scheduler_state``
-    (``last_export_status`` / ``last_export_error`` / ``last_export_at``), so a
-    post-mortem can tell how long the CSV view had been stale even when stderr
-    was not captured. A replay mismatch or replay *failure* returns ``False``
-    so the caller can stop opening new positions on unverifiable books; both
-    outcomes (and healthy verifications) stamp the ``last_replay_*`` breadcrumb.
-    """
-    from .paper.reconcile import classify_replay
-    from .persistence.export import ExportError, export_run
-
-    # classify_replay contains a raising replay ("failed" — unverifiable books
-    # are treated like inconsistent ones), so this lane cannot kill the loop.
-    replay_status, replay_detail, _cause = classify_replay(db, run_id=run_id)
-    replay_ok = replay_status == "ok"
-    if replay_status == "mismatch":
-        logger.error("accounting replay mismatch for %s: %s", run_id, replay_detail)
-        print(
-            f"WARNING: accounting replay mismatch for {run_id!r}: {replay_detail} — "
-            "investigate before trusting this run's results.",
-            file=sys.stderr,
-        )
-    elif replay_status == "failed":
-        logger.error("accounting replay failed for %s: %s", run_id, replay_detail)
-        print(f"WARNING: accounting replay failed: {replay_detail}", file=sys.stderr)
-    _stamp_breadcrumb(db, run_id, "replay", replay_status, replay_detail)
-    export_ok = False
-    try:
-        export_run(db, run_id=run_id, output_dir=export_dir)
-        export_ok = True
-        _stamp_breadcrumb(db, run_id, "export", "ok", None)
-        print(f"exported CSVs to {export_dir}", file=sys.stderr)
-    except ExportError as exc:
-        # §1.1: record export_failed, keep the monitor and protections running.
-        logger.error("export_failed for %s: %s", run_id, exc)
-        print(f"WARNING: export_failed — {exc}", file=sys.stderr)
-        _stamp_breadcrumb(db, run_id, "export", "failed", str(exc))
-    # Mark the freshly written set as unverified when replay didn't pass, so a
-    # consumer reading the CSVs alone isn't misled (see _mark_export_verification).
-    # Only when a full set was actually (re)written — a failed export leaves the
-    # previous set and its marker untouched.
-    if export_ok:
-        _mark_export_verification(export_dir, run_id, replay_ok, replay_detail)
-    return replay_ok
-
-
-# Protection-only mode never reaches the cycle-terminal funding retry (the
-# scheduler is never polled), so the loop retries on this wall-clock cadence
-# instead. Hour-grained to match funding's own settlement granularity; when
-# nothing is pending the pass is a single cheap SQLite query.
-_HALTED_FUNDING_RETRY_SECONDS = 3600
-
-
-def _retry_pending_funding(db, run_id: str, *, now: datetime, funding_source) -> None:
-    """Best-effort pending-funding retry for the protection and shutdown lanes.
-
-    The cycle-terminal lane calls :func:`backfill_pending_funding` directly and
-    stays fail-loud (a store-level error there must kill the loop — pinned by
-    test). These lanes exist to keep SL/TP alive (the halted-mode timer) or to
-    flush the most complete final CSVs the store allows (settle-exit and
-    Ctrl-C/SIGTERM exports) — a raising retry must not take either down, so any
-    failure is contained to an ERROR log and the hourly timer (or the export
-    itself) carries on. ``record_funding`` posts exactly-once, so repeated
-    passes are safe.
-    """
-    from .paper.reconcile import backfill_pending_funding
-
-    try:
-        backfill_pending_funding(db, run_id=run_id, now=now, funding_source=funding_source)
-    except Exception:
-        logger.exception("pending-funding retry failed for %s (best-effort lane)", run_id)
-
-
-# --------------------------------------------------------------------------
-# production seams: funding-rate history + the AI decision provider
-# --------------------------------------------------------------------------
-
-
-class _HistoryFundingSource:
-    """Funding rates from the public fundingHistory endpoint (execution §6.5).
-
-    Serves the engine's hourly settlements and the pending-event backfill
-    (restart + every cycle boundary). Responses are cached briefly so a
-    backfill loop over many pending hours does not re-fetch per event; the
-    fetch window widens to cover however old the requested settlement is, so a
-    long-pending event can always resolve. A missing hour returns ``None``
-    (the caller records/keeps a ``pending`` event — never a fabricated rate).
-    """
-
-    _MIN_WINDOW_DAYS = 7
-    _CACHE_TTL_SECONDS = 900
-    # After this many consecutive fetch failures the log escalates to ERROR: a
-    # chronic integration break (auth, endpoint drift) must read differently
-    # from the ordinary "rate not published yet" warning it otherwise mimics —
-    # events would pile up pending forever behind an easy-to-miss line.
-    _FAILURE_ESCALATION_THRESHOLD = 3
-
-    def __init__(self, market) -> None:
-        self._market = market
-        # coin -> (fetched_at_monotonic, window_days_fetched, {hour: rate})
-        self._cache: dict[str, tuple[float, int, dict[datetime, object]]] = {}
-        self._consecutive_failures: dict[str, int] = {}
-
-    def rate_at(self, coin: str, funding_timestamp: datetime):
-        hour = funding_timestamp.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
-        age = datetime.now(timezone.utc) - hour
-        needed_days = max(self._MIN_WINDOW_DAYS, age.days + 2)
-        cached = self._cache.get(coin)
-        if (
-            cached is None
-            or time.monotonic() - cached[0] > self._CACHE_TTL_SECONDS
-            or cached[1] < needed_days
-        ):
-            try:
-                points = self._market.get_funding_history(coin, needed_days)
-            except Exception as exc:  # noqa: BLE001 — a rate fetch failure means "pending"
-                failures = self._consecutive_failures.get(coin, 0) + 1
-                self._consecutive_failures[coin] = failures
-                log = (
-                    logger.error
-                    if failures >= self._FAILURE_ESCALATION_THRESHOLD
-                    else logger.warning
-                )
-                log(
-                    "funding history fetch failed for %s (%d consecutive): %s",
-                    coin,
-                    failures,
-                    exc,
-                )
-                return None
-            self._consecutive_failures.pop(coin, None)
-            by_hour = {}
-            for point in points:
-                stamp = datetime.fromtimestamp(point.time / 1000, tz=timezone.utc)
-                by_hour[stamp.replace(minute=0, second=0, microsecond=0)] = point.rate
-            cached = (time.monotonic(), needed_days, by_hour)
-            self._cache[coin] = cached
-        return cached[2].get(hour)
-
-
-class _EngineDecisionProvider:
-    """Production :class:`~.paper.scheduler.DecisionProvider`: the TradingAgents engine.
-
-    ``build_input`` fetches market data and persists the full payload JSON
-    (phase2-data §5: SQLite keeps summary + path + hash); ``request_decision``
-    drives the unmodified engine and parses the structured target. External
-    failures are classified into the §6.2 retry vocabulary and raised as
-    :class:`RetryableDecisionError`; contract violations are NOT errors — they
-    come back as an invalid ``ParsedDecision`` (fail-closed downstream).
-
-    NOT a pure function of its argument (PR 6 hazard): ``request_decision``
-    reads ``_context_text`` / ``_format_text`` that the LAST ``build_input``
-    call stashed on the instance, not fields of ``decision_input`` — and the
-    one shared instance is handed to both the background worker thread and the
-    main-thread driver. Today this is safe only because the driver's busy-gate
-    serializes ``build_input() → submit()`` strictly. Any future re-send path
-    (a within-cycle retry ladder, a replay harness) MUST re-run ``build_input``
-    immediately before each ``request_decision`` — or first fold the prompt
-    texts into the decision-input type — else it sends a STALE cycle's prompt
-    while the audit trail records the fresh input.
-    """
-
-    # Class-level default so an instance built without __init__ (the tests use
-    # object.__new__ to skip the engine import) still answers the attribute —
-    # a missing hook must degrade to "no refresh", never to AttributeError
-    # inside build_input, which the §6.2 classifier would relabel as an API
-    # failure.
-    _on_blocking_read = None
-
-    def __init__(
-        self,
-        config: dict,
-        *,
-        risk_cfg,
-        decision_cfg,
-        payload_dir: Path,
-        on_blocking_read=None,
-    ) -> None:
-        from .engine_bridge import _build_engine_config
-
-        self._config = config
-        self._risk = risk_cfg
-        self._decision = decision_cfg
-        self._payload_dir = payload_dir
-        # Live only: ``build_input`` runs on the single-threaded tick and makes
-        # the longest unrefreshed REST chain in the system, so the live wiring
-        # passes a kill-switch refresh here. ``None`` for paper and the one-shot
-        # CLI paths, which hold no dead man's switch (2026-08-01 lifecycle review).
-        self._on_blocking_read = on_blocking_read
-        self._engine_config, self._analysts = _build_engine_config(config)
-
-    def build_input(self, *, coin: str, as_of: datetime):
-        from .domains.perp import risk_gate
-        from .domains.perp.prompt_context import render_market_context
-        from .domains.perp.target_decision import decision_format_instructions
-        from .engine_bridge import _build_context, _context_refusal_error
-        from .exchanges.hyperliquid.errors import ExchangeError
-        from .exchanges.hyperliquid.market_data import interval_to_ms
-        from .paper.scheduler import DecisionInput, RetryableDecisionError
-
-        try:
-            ctx, _client = _build_context(
-                self._config, coin, on_blocking_read=self._on_blocking_read
-            )
-        except ExchangeError as exc:
-            raise RetryableDecisionError("connection", str(exc)) from exc
-        # All four pre-LLM context guards (under-warm data, fully-dead
-        # indicator set, missing/dead regime indicators atr_14/ema_20/ema_50,
-        # a stale candle feed), shared with the one-shot path (see
-        # engine_bridge._context_refusal_error) — a dead or absent regime indicator
-        # would otherwise let every cycle trade on a fabricated-calm RANGING
-        # regime, and a stalled feed would let it trade on the past.
-        # Deliberate (reviewed): they ride the §3.1 ladder as "server_error" →
-        # api_failed — the closed §6.2 vocabulary has no data-availability
-        # label, and the failure precedes the AI call so nothing is spent. A
-        # gappy feed heals by the next try/cycle; a too-young listing, a
-        # broken indicator engine or a feed that stopped advancing produces a
-        # recurring api_failed cycle every 4h until it warms up / is fixed.
-        # The staleness guard measures against ``as_of`` — the scheduler's own
-        # clock reading for this cycle — not a second call to the wall clock,
-        # so the daemon's one time base drives both the schedule and the
-        # freshness verdict.
-        refusal = _context_refusal_error(ctx, coin, self._config, now=as_of)
-        if refusal is not None:
-            raise RetryableDecisionError("server_error", refusal)
-        context_text = render_market_context(ctx)
-        format_text = decision_format_instructions(
-            self._decision,
-            max_pct=risk_gate.effective_max_target_margin_pct(self._risk, self._decision),
-        )
-        payload = {
-            "coin": coin,
-            "as_of": as_of.isoformat(),
-            "prompt_version": PROMPT_VERSION,
-            "context_text": context_text,
-            "format_instructions": format_text,
-        }
-        raw = json.dumps(payload, ensure_ascii=False, indent=2)
-        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-        # Microsecond-stamped: each retry try builds its own payload, and two
-        # tries landing in the same wall-clock second must not overwrite each
-        # other (the earlier try's stored hash would falsely alias the later
-        # file) — same per-try-distinctness rule as input_id/output_id.
-        path = self._payload_dir / f"{coin}-{as_of.strftime('%Y%m%dT%H%M%S_%fZ')}.json"
-        try:
-            self._payload_dir.mkdir(parents=True, exist_ok=True)
-            path.write_text(raw, encoding="utf-8")
-        except OSError as exc:
-            # An audit-artifact filesystem failure (disk full, permissions)
-            # must not tear down the daemon and strand the live SL/TP monitor:
-            # nothing is in the store yet and the AI has not been called, so
-            # ride the §3.1 ladder like the sibling environmental failures —
-            # worst case a recurring api_failed cycle whose error_message
-            # names the cause, with the position held and protection alive.
-            raise RetryableDecisionError("server_error", f"payload write failed: {exc}") from exc
-        candle_end = ctx.as_of
-        candle_start = candle_end - timedelta(milliseconds=interval_to_ms(ctx.candle_interval))
-        self._context_text = context_text
-        self._format_text = format_text
-        return DecisionInput(
-            context=ctx,
-            candle_start=candle_start,
-            candle_end=candle_end,
-            input_payload_path=str(path),
-            input_payload_hash=f"sha256:{digest}",
-            prompt_version=PROMPT_VERSION,
-            model=self._engine_config["deep_think_llm"],
-        )
-
-    def request_decision(self, decision_input):
-        from .domains.perp.target_decision import parse_target_decision
-        from .integration.trading_graph import build_graph
-        from .paper.scheduler import RetryableDecisionError
-
-        graph = build_graph(
-            perp_context_text=self._context_text,
-            config=self._engine_config,
-            selected_analysts=self._analysts,
-            output_format_text=self._format_text,
-        )
-        coin = decision_input.context.coin
-        # Drive the base engine off the cycle's own as_of, not wall-clock now:
-        # a late/recovery cycle (process was down across schedule points) must
-        # feed the base news/sentiment analysts the same time base as the perp
-        # market context they reason alongside, and a single read can't straddle
-        # a UTC midnight between the two.
-        trade_date = decision_input.context.as_of.strftime("%Y-%m-%d")
-        try:
-            propagated = graph.propagate(coin, trade_date, asset_type="crypto")
-        except Exception as exc:  # noqa: BLE001 — engine-run failures are external (§3.1)
-            raise RetryableDecisionError(_classify_engine_error(exc), str(exc)) from exc
-        if (
-            not isinstance(propagated, (tuple, list))
-            or len(propagated) < 2
-            or not isinstance(propagated[0], dict)
-        ):
-            # A drifted return contract is indistinguishable from a broken
-            # response — retryable server_error, and api_failed after 3 tries.
-            raise RetryableDecisionError(
-                "server_error",
-                f"engine.propagate returned an unexpected shape ({type(propagated).__name__})",
-            )
-        return parse_target_decision(propagated[0].get("final_trade_decision"), self._decision)
-
-
-def _classify_engine_error(exc: Exception) -> str:
-    """Map an engine-run exception onto the §6.2 error-type vocabulary."""
-    text = f"{type(exc).__name__}: {exc}".lower()
-    if "timeout" in text or "timed out" in text:
-        return "timeout"
-    # No bare "429": those three digits match any larger number that contains
-    # them — an oid, an epoch-ms timestamp, a price — so "run 1429 failed" filed
-    # as a rate limit. The sibling classifier in exchanges/hyperliquid/
-    # sdk_client.py deleted exactly this marker for exactly this reason and kept
-    # the phrases; this copy was missed. A real rate limit still lands here
-    # through the SDK's exception CLASS name (``RateLimitError`` → "ratelimit")
-    # or the phrase itself (2026-08-01 round-18 concept scan). The two lists are
-    # deliberately NOT identical and must not be merged: that one gates retry
-    # and §17.2 escalation on VENUE errors and carries the SDK-ism "slow down",
-    # while this one only labels an LLM-engine failure for the audit trail
-    # (``decision_attempts.error_type``, a closed vocabulary the scheduler
-    # retries identically whatever it says).
-    if "rate limit" in text or "ratelimit" in text or "too many requests" in text:
-        return "rate_limit"
-    if "connection" in text or "connect" in text or "network" in text:
-        return "connection"
-    return "server_error"

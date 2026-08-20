@@ -509,7 +509,8 @@ def test_paper_fresh_run_missing_api_key_exits_1(tmp_path, capsys, monkeypatch, 
     # Sentinel pins the dotenv_diagnosis wiring: the abort message must embed
     # the diagnosis for the actual variable — dropping the interpolation (or
     # diagnosing the wrong var) is invisible to the substring check alone.
-    monkeypatch.setattr(cli_mod, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
+    # (The message is printed by _common._require_api_key — patch its module.)
+    monkeypatch.setattr(cli_mod._common, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
     path = tmp_path / "new.db"
     rc = cli_main(_paper_argv(path, run_id="fresh", config=paper_seams, create=True))
     assert rc == 1
@@ -543,7 +544,7 @@ def test_paper_key_check_satisfied_by_dotenv(tmp_path, monkeypatch, paper_seams)
     monkeypatch.setattr(accounting, "initialize_run", _stop)
     # The provider pre-flight sits between the key check and initialize_run;
     # stub it so this test stays off the real tradingagents import.
-    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", lambda *a, **kw: object())
+    monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", lambda *a, **kw: object())
     rc = cli_main(_paper_argv(tmp_path / "new.db", run_id="fresh", config=paper_seams, create=True))
 
     # Reaching initialize_run proves the key check passed on the .env value;
@@ -714,7 +715,7 @@ def test_paper_keyless_healthy_restart_with_live_work_enters_protection_only(
     def _forbid_provider(*args, **kwargs):
         raise AssertionError("keyless protection-only must not build the decision provider")
 
-    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _forbid_provider)
+    monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _forbid_provider)
     # Sentinel pins the dotenv_diagnosis wiring in the protection-only message
     # (same contract as the fresh-run abort's sentinel above).
     monkeypatch.setattr(cli_mod, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
@@ -758,7 +759,7 @@ def test_paper_provider_import_failure_exits_1_named(tmp_path, capsys, monkeypat
             "read a repo .env file"
         )
 
-    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _boom)
+    monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _boom)
     path = tmp_path / "new.db"
     rc = cli_main(_paper_argv(path, run_id="fresh", config=paper_seams, create=True))
     assert rc == 1
@@ -769,7 +770,7 @@ def test_paper_provider_import_failure_exits_1_named(tmp_path, capsys, monkeypat
 
     # The operator fixes the environment and retries the SAME command: the
     # provider now builds and --create must not hit "already exists".
-    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", lambda *a, **kw: object())
+    monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", lambda *a, **kw: object())
     seen: dict[str, object] = {}
 
     def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
@@ -820,7 +821,7 @@ def test_paper_restart_provider_import_failure_exits_1_named(
             "read a repo .env file"
         )
 
-    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _boom)
+    monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _boom)
     rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
     assert rc == 1
     assert "error: importing tradingagents failed" in capsys.readouterr().err
@@ -874,7 +875,7 @@ def test_paper_restart_import_failure_with_live_work_enters_protection_only(
             "read a repo .env file"
         )
 
-    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _boom)
+    monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _boom)
     seen: dict[str, object] = {}
 
     def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
@@ -1553,7 +1554,7 @@ def test_paper_loop_wiring_and_halt_latch(tmp_path, monkeypatch):
         lambda db_, *, run_id, now, funding_source: calls.append("backfill"),
     )
     monkeypatch.setattr(
-        cli_mod,
+        cli_mod.paper_export,
         "_post_cycle_export",
         lambda db_, run_id, export_dir: (calls.append("export"), False)[1],
     )
@@ -1707,7 +1708,7 @@ def test_paper_loop_halted_with_nothing_to_protect_exits_1(tmp_path, monkeypatch
     def forbid_sleep(seconds):
         raise AssertionError("must exit before sleeping")
 
-    monkeypatch.setattr(cli_mod, "_post_cycle_export", record_export)
+    monkeypatch.setattr(cli_mod.paper_export, "_post_cycle_export", record_export)
     monkeypatch.setattr(cli_mod.time, "sleep", forbid_sleep)
 
     class _Engine:
@@ -1748,7 +1749,9 @@ def test_paper_loop_missing_key_settle_exit_names_the_key(tmp_path, monkeypatch,
 
     path, db = _seed_db(tmp_path)
     monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
-    monkeypatch.setattr(cli_mod, "_post_cycle_export", lambda db_, run_id, export_dir: True)
+    monkeypatch.setattr(
+        cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, export_dir: True
+    )
     monkeypatch.setattr(
         cli_mod.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
     )
@@ -1792,7 +1795,9 @@ def test_paper_loop_import_error_settle_exit_names_the_cause(tmp_path, monkeypat
 
     path, db = _seed_db(tmp_path)
     monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
-    monkeypatch.setattr(cli_mod, "_post_cycle_export", lambda db_, run_id, export_dir: True)
+    monkeypatch.setattr(
+        cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, export_dir: True
+    )
     monkeypatch.setattr(
         cli_mod.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
     )
@@ -1908,7 +1913,9 @@ def test_paper_loop_mid_run_halt_arms_hourly_funding_retry(tmp_path, monkeypatch
         ),
     )
     # The failing verification flips the loop into halted mode on iteration 1.
-    monkeypatch.setattr(cli_mod, "_post_cycle_export", lambda db_, run_id, export_dir: False)
+    monkeypatch.setattr(
+        cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, export_dir: False
+    )
 
     terminal = PollResult(
         event=CycleEvent.API_FAILED,
@@ -1977,7 +1984,7 @@ def test_paper_loop_settle_exit_retries_pending_funding_before_final_export(tmp_
         lambda db_, *, run_id, now, funding_source: calls.append("backfill"),
     )
     monkeypatch.setattr(
-        cli_mod,
+        cli_mod.paper_export,
         "_post_cycle_export",
         lambda db_, run_id, export_dir: (calls.append("export"), True)[1],
     )
@@ -2029,7 +2036,7 @@ def test_paper_loop_shutdown_funding_retry_is_best_effort(tmp_path, monkeypatch)
     monkeypatch.setattr(reconcile_mod, "backfill_pending_funding", raising_backfill)
     exports: list[str] = []
     monkeypatch.setattr(
-        cli_mod,
+        cli_mod.paper_export,
         "_post_cycle_export",
         lambda db_, run_id, export_dir: exports.append(run_id) or True,
     )
@@ -2108,7 +2115,7 @@ def test_paper_ctrl_c_shutdown_retries_pending_funding_before_final_export(
         lambda db_, *, run_id, now, funding_source: calls.append("backfill"),
     )
     monkeypatch.setattr(
-        cli_mod,
+        cli_mod.paper_export,
         "_post_cycle_export",
         lambda db_, run_id, export_dir: (calls.append("export"), True)[1],
     )
@@ -2161,7 +2168,9 @@ def test_paper_protection_only_startup_notes_stranded_in_progress_attempt(
         ),
     )
     monkeypatch.setattr(PaperExecutionEngine, "tick", lambda self: None)
-    monkeypatch.setattr(cli_mod, "_post_cycle_export", lambda db_, run_id, export_dir: True)
+    monkeypatch.setattr(
+        cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, export_dir: True
+    )
     monkeypatch.setattr(cli_mod.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
 
     rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
@@ -2228,7 +2237,7 @@ def test_paper_lease_takeover_exits_1_without_export_and_preserves_successor(
     monkeypatch.setattr(PaperExecutionEngine, "tick", lambda self: None)
     exports: list[str] = []
     monkeypatch.setattr(
-        cli_mod,
+        cli_mod.paper_export,
         "_post_cycle_export",
         lambda db_, run_id, export_dir: exports.append(run_id) or True,
     )
@@ -2307,7 +2316,7 @@ def test_paper_loop_does_not_swallow_backfill_runtime_error(tmp_path, monkeypatc
     monkeypatch.setattr(reconcile_mod, "backfill_pending_funding", raising_backfill)
     exports: list[str] = []
     monkeypatch.setattr(
-        cli_mod,
+        cli_mod.paper_export,
         "_post_cycle_export",
         lambda db_, run_id, export_dir: exports.append(run_id) or True,
     )
@@ -2360,7 +2369,7 @@ def test_post_cycle_export_breadcrumb_write_failure_is_fail_loud(tmp_path, monke
     def raising_stamp(db_, run_id, kind, status, error):
         raise sqlite3.OperationalError("disk I/O error")
 
-    monkeypatch.setattr(cli_mod, "_stamp_breadcrumb", raising_stamp)
+    monkeypatch.setattr(cli_mod.paper_export, "_stamp_breadcrumb", raising_stamp)
     with pytest.raises(sqlite3.OperationalError):
         _post_cycle_export(db, "r", tmp_path / "exp")
     db.close()
@@ -2444,7 +2453,7 @@ def test_paper_protection_only_restart_skips_provider_and_stamps_failed(
     def _forbid_provider(*args, **kwargs):
         raise AssertionError("protection-only must not build the decision provider")
 
-    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _forbid_provider)
+    monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _forbid_provider)
     seen: dict[str, object] = {}
 
     def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
@@ -3823,7 +3832,7 @@ def _drive_live_loop_construction(tmp_path, monkeypatch, *, fetch_clearinghouse)
             raise _StopBeforeTheLoop
 
     monkeypatch.setattr(md_mod, "HyperliquidMarketData", _FakeMarket)
-    monkeypatch.setattr(cli_mod, "_EngineDecisionProvider", _RecordingProvider)
+    monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _RecordingProvider)
     _recorder(prot_mod, "ProtectionManager", "protection")
     _recorder(lg_mod, "LossGuards", "guards")
 

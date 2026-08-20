@@ -1,0 +1,268 @@
+"""Production seams: funding-rate history + the AI decision provider."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+# Version stamp for the ai_inputs.prompt_version column: bump when the injected
+# context/format contract changes shape (the payload hash tracks content).
+PROMPT_VERSION = "phase2-target-v3"
+
+
+class _HistoryFundingSource:
+    """Funding rates from the public fundingHistory endpoint (execution §6.5).
+
+    Serves the engine's hourly settlements and the pending-event backfill
+    (restart + every cycle boundary). Responses are cached briefly so a
+    backfill loop over many pending hours does not re-fetch per event; the
+    fetch window widens to cover however old the requested settlement is, so a
+    long-pending event can always resolve. A missing hour returns ``None``
+    (the caller records/keeps a ``pending`` event — never a fabricated rate).
+    """
+
+    _MIN_WINDOW_DAYS = 7
+    _CACHE_TTL_SECONDS = 900
+    # After this many consecutive fetch failures the log escalates to ERROR: a
+    # chronic integration break (auth, endpoint drift) must read differently
+    # from the ordinary "rate not published yet" warning it otherwise mimics —
+    # events would pile up pending forever behind an easy-to-miss line.
+    _FAILURE_ESCALATION_THRESHOLD = 3
+
+    def __init__(self, market) -> None:
+        self._market = market
+        # coin -> (fetched_at_monotonic, window_days_fetched, {hour: rate})
+        self._cache: dict[str, tuple[float, int, dict[datetime, object]]] = {}
+        self._consecutive_failures: dict[str, int] = {}
+
+    def rate_at(self, coin: str, funding_timestamp: datetime):
+        hour = funding_timestamp.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        age = datetime.now(timezone.utc) - hour
+        needed_days = max(self._MIN_WINDOW_DAYS, age.days + 2)
+        cached = self._cache.get(coin)
+        if (
+            cached is None
+            or time.monotonic() - cached[0] > self._CACHE_TTL_SECONDS
+            or cached[1] < needed_days
+        ):
+            try:
+                points = self._market.get_funding_history(coin, needed_days)
+            except Exception as exc:  # noqa: BLE001 — a rate fetch failure means "pending"
+                failures = self._consecutive_failures.get(coin, 0) + 1
+                self._consecutive_failures[coin] = failures
+                log = (
+                    logger.error
+                    if failures >= self._FAILURE_ESCALATION_THRESHOLD
+                    else logger.warning
+                )
+                log(
+                    "funding history fetch failed for %s (%d consecutive): %s",
+                    coin,
+                    failures,
+                    exc,
+                )
+                return None
+            self._consecutive_failures.pop(coin, None)
+            by_hour = {}
+            for point in points:
+                stamp = datetime.fromtimestamp(point.time / 1000, tz=timezone.utc)
+                by_hour[stamp.replace(minute=0, second=0, microsecond=0)] = point.rate
+            cached = (time.monotonic(), needed_days, by_hour)
+            self._cache[coin] = cached
+        return cached[2].get(hour)
+
+
+class _EngineDecisionProvider:
+    """Production :class:`~.paper.scheduler.DecisionProvider`: the TradingAgents engine.
+
+    ``build_input`` fetches market data and persists the full payload JSON
+    (phase2-data §5: SQLite keeps summary + path + hash); ``request_decision``
+    drives the unmodified engine and parses the structured target. External
+    failures are classified into the §6.2 retry vocabulary and raised as
+    :class:`RetryableDecisionError`; contract violations are NOT errors — they
+    come back as an invalid ``ParsedDecision`` (fail-closed downstream).
+
+    NOT a pure function of its argument (PR 6 hazard): ``request_decision``
+    reads ``_context_text`` / ``_format_text`` that the LAST ``build_input``
+    call stashed on the instance, not fields of ``decision_input`` — and the
+    one shared instance is handed to both the background worker thread and the
+    main-thread driver. Today this is safe only because the driver's busy-gate
+    serializes ``build_input() → submit()`` strictly. Any future re-send path
+    (a within-cycle retry ladder, a replay harness) MUST re-run ``build_input``
+    immediately before each ``request_decision`` — or first fold the prompt
+    texts into the decision-input type — else it sends a STALE cycle's prompt
+    while the audit trail records the fresh input.
+    """
+
+    # Class-level default so an instance built without __init__ (the tests use
+    # object.__new__ to skip the engine import) still answers the attribute —
+    # a missing hook must degrade to "no refresh", never to AttributeError
+    # inside build_input, which the §6.2 classifier would relabel as an API
+    # failure.
+    _on_blocking_read = None
+
+    def __init__(
+        self,
+        config: dict,
+        *,
+        risk_cfg,
+        decision_cfg,
+        payload_dir: Path,
+        on_blocking_read=None,
+    ) -> None:
+        from ..engine_bridge import _build_engine_config
+
+        self._config = config
+        self._risk = risk_cfg
+        self._decision = decision_cfg
+        self._payload_dir = payload_dir
+        # Live only: ``build_input`` runs on the single-threaded tick and makes
+        # the longest unrefreshed REST chain in the system, so the live wiring
+        # passes a kill-switch refresh here. ``None`` for paper and the one-shot
+        # CLI paths, which hold no dead man's switch (2026-08-01 lifecycle review).
+        self._on_blocking_read = on_blocking_read
+        self._engine_config, self._analysts = _build_engine_config(config)
+
+    def build_input(self, *, coin: str, as_of: datetime):
+        from ..domains.perp import risk_gate
+        from ..domains.perp.prompt_context import render_market_context
+        from ..domains.perp.target_decision import decision_format_instructions
+        from ..engine_bridge import _build_context, _context_refusal_error
+        from ..exchanges.hyperliquid.errors import ExchangeError
+        from ..exchanges.hyperliquid.market_data import interval_to_ms
+        from ..paper.scheduler import DecisionInput, RetryableDecisionError
+
+        try:
+            ctx, _client = _build_context(
+                self._config, coin, on_blocking_read=self._on_blocking_read
+            )
+        except ExchangeError as exc:
+            raise RetryableDecisionError("connection", str(exc)) from exc
+        # All four pre-LLM context guards (under-warm data, fully-dead
+        # indicator set, missing/dead regime indicators atr_14/ema_20/ema_50,
+        # a stale candle feed), shared with the one-shot path (see
+        # engine_bridge._context_refusal_error) — a dead or absent regime indicator
+        # would otherwise let every cycle trade on a fabricated-calm RANGING
+        # regime, and a stalled feed would let it trade on the past.
+        # Deliberate (reviewed): they ride the §3.1 ladder as "server_error" →
+        # api_failed — the closed §6.2 vocabulary has no data-availability
+        # label, and the failure precedes the AI call so nothing is spent. A
+        # gappy feed heals by the next try/cycle; a too-young listing, a
+        # broken indicator engine or a feed that stopped advancing produces a
+        # recurring api_failed cycle every 4h until it warms up / is fixed.
+        # The staleness guard measures against ``as_of`` — the scheduler's own
+        # clock reading for this cycle — not a second call to the wall clock,
+        # so the daemon's one time base drives both the schedule and the
+        # freshness verdict.
+        refusal = _context_refusal_error(ctx, coin, self._config, now=as_of)
+        if refusal is not None:
+            raise RetryableDecisionError("server_error", refusal)
+        context_text = render_market_context(ctx)
+        format_text = decision_format_instructions(
+            self._decision,
+            max_pct=risk_gate.effective_max_target_margin_pct(self._risk, self._decision),
+        )
+        payload = {
+            "coin": coin,
+            "as_of": as_of.isoformat(),
+            "prompt_version": PROMPT_VERSION,
+            "context_text": context_text,
+            "format_instructions": format_text,
+        }
+        raw = json.dumps(payload, ensure_ascii=False, indent=2)
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        # Microsecond-stamped: each retry try builds its own payload, and two
+        # tries landing in the same wall-clock second must not overwrite each
+        # other (the earlier try's stored hash would falsely alias the later
+        # file) — same per-try-distinctness rule as input_id/output_id.
+        path = self._payload_dir / f"{coin}-{as_of.strftime('%Y%m%dT%H%M%S_%fZ')}.json"
+        try:
+            self._payload_dir.mkdir(parents=True, exist_ok=True)
+            path.write_text(raw, encoding="utf-8")
+        except OSError as exc:
+            # An audit-artifact filesystem failure (disk full, permissions)
+            # must not tear down the daemon and strand the live SL/TP monitor:
+            # nothing is in the store yet and the AI has not been called, so
+            # ride the §3.1 ladder like the sibling environmental failures —
+            # worst case a recurring api_failed cycle whose error_message
+            # names the cause, with the position held and protection alive.
+            raise RetryableDecisionError("server_error", f"payload write failed: {exc}") from exc
+        candle_end = ctx.as_of
+        candle_start = candle_end - timedelta(milliseconds=interval_to_ms(ctx.candle_interval))
+        self._context_text = context_text
+        self._format_text = format_text
+        return DecisionInput(
+            context=ctx,
+            candle_start=candle_start,
+            candle_end=candle_end,
+            input_payload_path=str(path),
+            input_payload_hash=f"sha256:{digest}",
+            prompt_version=PROMPT_VERSION,
+            model=self._engine_config["deep_think_llm"],
+        )
+
+    def request_decision(self, decision_input):
+        from ..domains.perp.target_decision import parse_target_decision
+        from ..integration.trading_graph import build_graph
+        from ..paper.scheduler import RetryableDecisionError
+
+        graph = build_graph(
+            perp_context_text=self._context_text,
+            config=self._engine_config,
+            selected_analysts=self._analysts,
+            output_format_text=self._format_text,
+        )
+        coin = decision_input.context.coin
+        # Drive the base engine off the cycle's own as_of, not wall-clock now:
+        # a late/recovery cycle (process was down across schedule points) must
+        # feed the base news/sentiment analysts the same time base as the perp
+        # market context they reason alongside, and a single read can't straddle
+        # a UTC midnight between the two.
+        trade_date = decision_input.context.as_of.strftime("%Y-%m-%d")
+        try:
+            propagated = graph.propagate(coin, trade_date, asset_type="crypto")
+        except Exception as exc:  # noqa: BLE001 — engine-run failures are external (§3.1)
+            raise RetryableDecisionError(_classify_engine_error(exc), str(exc)) from exc
+        if (
+            not isinstance(propagated, (tuple, list))
+            or len(propagated) < 2
+            or not isinstance(propagated[0], dict)
+        ):
+            # A drifted return contract is indistinguishable from a broken
+            # response — retryable server_error, and api_failed after 3 tries.
+            raise RetryableDecisionError(
+                "server_error",
+                f"engine.propagate returned an unexpected shape ({type(propagated).__name__})",
+            )
+        return parse_target_decision(propagated[0].get("final_trade_decision"), self._decision)
+
+
+def _classify_engine_error(exc: Exception) -> str:
+    """Map an engine-run exception onto the §6.2 error-type vocabulary."""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    # No bare "429": those three digits match any larger number that contains
+    # them — an oid, an epoch-ms timestamp, a price — so "run 1429 failed" filed
+    # as a rate limit. The sibling classifier in exchanges/hyperliquid/
+    # sdk_client.py deleted exactly this marker for exactly this reason and kept
+    # the phrases; this copy was missed. A real rate limit still lands here
+    # through the SDK's exception CLASS name (``RateLimitError`` → "ratelimit")
+    # or the phrase itself (2026-08-01 round-18 concept scan). The two lists are
+    # deliberately NOT identical and must not be merged: that one gates retry
+    # and §17.2 escalation on VENUE errors and carries the SDK-ism "slow down",
+    # while this one only labels an LLM-engine failure for the audit trail
+    # (``decision_attempts.error_type``, a closed vocabulary the scheduler
+    # retries identically whatever it says).
+    if "rate limit" in text or "ratelimit" in text or "too many requests" in text:
+        return "rate_limit"
+    if "connection" in text or "connect" in text or "network" in text:
+        return "connection"
+    return "server_error"

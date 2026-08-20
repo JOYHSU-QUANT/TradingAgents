@@ -42,17 +42,20 @@ def test_common_imports_nothing_from_the_rest_of_the_package():
     # reaching above common/ (level >= 2) or an absolute import of the contrib
     # package both violate the bottom-of-the-import-graph rule. Sibling
     # imports inside common/ (level 1) stay legal.
+    def is_contrib(name: str | None) -> bool:
+        return name == "contrib" or (name or "").startswith("contrib.")
+
     offenders = []
-    for source in Path(common_pkg.__path__[0]).glob("*.py"):
+    for source in Path(common_pkg.__path__[0]).rglob("*.py"):
         tree = ast.parse(source.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
-                if node.level >= 2 or (node.module or "").startswith("contrib."):
+                if node.level >= 2 or is_contrib(node.module):
                     offenders.append(f"{source.name}: from {'.' * node.level}{node.module or ''}")
             elif isinstance(node, ast.Import):
                 offenders.extend(
                     f"{source.name}: import {alias.name}"
                     for alias in node.names
-                    if alias.name.startswith("contrib.")
+                    if is_contrib(alias.name)
                 )
     assert not offenders, offenders

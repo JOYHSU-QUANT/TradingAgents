@@ -626,7 +626,7 @@ gate 線是豁免的（`order_gate.py` 有 import-time 保證），所以 latch 
 | `equity_out_of_tolerance` | equity 超出容差 | 首列的 `detail`、每 pass 的 warning log、每 pass 的 `reconciliation_diff`（`position_snapshots` 那欄是倉位大小，與 equity 無關） |
 | `<cloid>\|read_failed` | 這張單（本地 live、交易所沒列）的 orderStatus 讀不到 | **目前這一段**首列的 `detail`（該段第一次的**完整**例外訊息；早先已了結的段各有自己的列）、每 pass 的 warning log、每 pass 的 `reconciliation_diff`（那份 detail **截到 `_DIFF_STRING_MAX_CHARS`（目前 300 字元）**，交易所的錯誤內文可能被切掉尾巴） |
 | `<cloid>\|local_terminal_read_failed` | 這張單（本地終態、交易所仍列 open）的 orderStatus 讀不到 | 同上一列；讀得到之後自動了結，再讀不到就是新的一段、新的一列 |
-| `<cloid>\|local_terminal` | 上一列那張單的 orderStatus **答了**，而答案與本地終態列衝突（reopen／unknownOid 矛盾） | 該列的 `detail`、每 pass 的 warning log、每 pass 的 `reconciliation_diff` |
+| `<cloid>\|local_terminal` | 上一列那張單的 orderStatus **答了**，而答案與本地終態列衝突（reopen／unknownOid 矛盾） | 該列的 `detail`、每 pass 的 `reconciliation_diff`（**這兩支沒有自己的 warning log**，run log 裡只有那一輪 `reconciliation … UNCLEAN` 的 `cases=N` 計數；grep cloid 找不到不代表 sweep 沒在看它） |
 
 （「每 pass」是指有寫出 snapshot 的那些 pass。snapshot 腿是 fail-soft 的：clearinghouse 讀
 失敗時整輪不寫 snapshot 列，沒有本地 ledger 列、缺 `crossMaintenanceMarginUsed`／
@@ -646,8 +646,9 @@ gate 線是豁免的（`order_gate.py` 有 import-time 保證），所以 latch 
    與 warning log。**不要用「open case 清單是空的」推論「現在沒有這個問題」。**
 3. **哪些是機器蓋的「暫定」處置**（清單就這四個，其餘機器處置與你寫的字都是終局）：
    `settled_never_sent`、`settled_filled`／`settled_canceled`／`settled_rejected`、
-   `resolved_read_succeeded`、`local_row_reopened`。終局的兩個是 `resolved_fill_booked`
-   與 `local_row_backfilled`（fill 已入帳、本地 order 列已補寫，都不可能再不成立）。
+   `resolved_read_succeeded`、`local_row_reopened`。終局的機器處置有三個：
+   `resolved_fill_booked` 與 `local_row_backfilled`（fill 已入帳、本地 order 列已補寫，
+   都不可能再不成立），以及 `backfilled`（它的列本來就不帶 key、從來不進去重）。
    暫定的意思是**「本輪把這件事了結了，但同一件事還可能再發生」**——再發生時**會另開一列、
    回到清單上**，例如該單被 §8.3 rule-5 重送或被 reopen 而復活之後又缺席，unknownOid 對上
    rule-10 證據那種（這一族裡最嚴重的一種）就會落在**裸 cloid** 那一列。
@@ -668,8 +669,9 @@ gate 線是豁免的（`order_gate.py` 有 import-time 保證），所以 latch 
 
    兩者的差別是**同一件事會多常回來**：`read_failed` 那張單留在 sweep 的游標裡、每一輪都會
    再讀，改成「讀得到就蓋章」的話，交易所讀取一好一壞地抖動就會**每輪**生一列；
-   `local_terminal_read_failed` 要回到那個處境得由交易所自己的兩個視角互相矛盾，抖動生的列
-   也都是已了結的（`--status` 與 §21.4 只看得到目前那一列），所以那邊划算、這邊不划算。
+   `local_terminal_read_failed` 要回到那個處境得由交易所自己的兩個視角互相矛盾，而且同一把
+   key 底下**只有最新那一列會是未了結的**（每一段都被結束它的那次讀取蓋掉），`--status` 與
+   §21.4 看到的仍是一個活的故障，所以那邊划算、這邊不划算。
 
 （升級注意：本版新增了 `<cloid>|local_terminal_read_failed`，把「讀不到」從
 `<cloid>|local_terminal` 拆出來（先前這兩個事實共用一把 key，先到的那個佔住它）；更早之前

@@ -1985,10 +1985,12 @@ def test_the_sweeps_order_dispositions_are_classified_as_the_set_intends(env):
     # would catch a stamp renamed at its write site (each asserts the literal
     # string it expects). What this pins is the CLASSIFICATION — that the four
     # order dispositions are provisional and the two "cannot come back" ones are
-    # not — including the `settled_{status}` members, which are derived from the
-    # terminal-status vocabulary rather than spelled out and so have no other
-    # test naming them. `backfilled` appears in neither list on purpose: its
-    # case carries no exchange_value, so it never meets the dedupe.
+    # not. It is the only place `settled_filled` and `settled_rejected` are
+    # named at all: those two are derived from the terminal-status vocabulary
+    # rather than written at a call site, so no behavioural test reaches them
+    # (`settled_canceled`, which several do, is the derivation's witness).
+    # `backfilled` appears in neither list on purpose: its case carries no
+    # exchange_value, so it never meets the dedupe.
     for stamp in (
         "settled_never_sent",
         "settled_canceled",
@@ -2121,10 +2123,11 @@ def test_a_read_failure_after_a_disposal_gets_its_own_row(env):
 
 
 def test_a_row_settled_again_after_a_reopen_can_still_report_a_contradiction(env):
-    # local_row_reopened is the provisional stamp on the |local_terminal key,
-    # and the most obviously re-observable of the four: reopening is itself the
-    # revive. The situation comes back the moment a later pass settles the row
-    # again while the exchange goes on listing the order — and this time the
+    # local_row_reopened is the provisional stamp on the |local_terminal key.
+    # Its recurrence needs the most steps of the four (a reopen, then a later
+    # re-settle) — but no resend, because the sweep does both itself. The
+    # situation comes back the moment a later pass settles the row again while
+    # the exchange goes on listing the order — and this time the
     # venue contradicts its own listing, which is the graver fault and the one
     # the stamp used to swallow.
     db, seams, reconciler = env

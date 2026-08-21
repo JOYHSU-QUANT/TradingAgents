@@ -337,9 +337,11 @@ RECONCILIATION_CASE_TYPES = frozenset(
 #
 # Adding a member is a claim about how OFTEN the fact can come back — and
 # "only after a deliberate revive" is NOT true of every member below; see each
-# one. What a member must be is a fact whose recurrence earns its own row: the
-# rows a recurrence mints are closed ones, so the operator surfaces still show
-# just the current occurrence, but the events table grows by one each time.
+# one. What a member must be is a fact whose recurrence earns its own row. Only
+# the NEWEST row under a key is ever unresolved (each recurrence is closed by
+# whatever ends it before the next one opens), so the operator surfaces keep
+# showing one live fault however often it comes back — what grows is the events
+# table, by one row per recurrence.
 PROVISIONAL_DISPOSITIONS = frozenset(
     {
         # _settle_absent_order: unknownOid with no §8.3 rule-10 evidence — the

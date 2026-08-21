@@ -172,22 +172,22 @@ def _clip(text: str | None) -> str | None:
 # Then ask, for a fact this module DISPOSES of automatically, whether the
 # episode can start over — because a stamped key is normally shut for good, and
 # a recurrence under it would reach neither `safe-mode --status` nor §21.4's
-# unresolved count. Every stamp this module writes about an ORDER is one the
-# sweep can find itself facing again (a §8.3 rule-5 resend or a reopen puts the
-# cloid back; the reopen tiebreaker's read failure needs only the venue's next
-# answer), so those are declared PROVISIONAL (repo.PROVISIONAL_DISPOSITIONS)
-# and the next occurrence gets its own row. Two things do NOT get that
-# treatment, and the difference is the point: a human's `--stamp-case`
+# unresolved count. Ask it PER STAMP — being about an order does not settle it.
+# Most of this module's order stamps dispose of a fact the sweep can find itself
+# facing again (a §8.3 rule-5 resend or a reopen puts the cloid back; the reopen
+# tiebreaker's read failure needs only the venue's next answer), and those are
+# declared PROVISIONAL (repo.PROVISIONAL_DISPOSITIONS) so the next occurrence
+# gets its own row. What is NOT provisional: a human's `--stamp-case`
 # disposition (their answer must not be re-asked on every pass thereafter), and
-# a fact whose subject cannot return at all (``local_row_backfilled`` — this
-# package contains no `DELETE FROM orders`).
+# a fact whose subject cannot return — ``local_row_backfilled`` is an order
+# stamp and stays out, because once the local row exists it cannot go missing
+# again (this package contains no `DELETE FROM orders`).
 #
-# Reopenability is not a licence to stamp early, though, and how often the fact
+# Reopenability is not a licence to stamp early, either, and how often the fact
 # can return is the thing to weigh: a key the sweep re-observes EVERY pass would
 # mint a row per pass once provisionally stamped, which is the flood the dedupe
-# exists to stop. Where the recurrence needs a revive, or the venue to
-# contradict itself, the rows are worth having. ``_clear_read_failure_case``
-# carries that comparison for its two callers, which land on opposite sides.
+# exists to stop. ``_clear_read_failure_case`` carries that comparison for its
+# two callers, which land on opposite sides of it.
 
 
 def _read_failure_fact_key(cloid: str) -> str:
@@ -1344,11 +1344,13 @@ class LiveReconciler:
           it answered. It can therefore be re-observed without any revive: the
           local row stays terminal and the exchange goes on listing it, so an
           orderStatus that alternates unreadable/readable mints a row per flap.
-          Accepted, because those rows are CLOSED ones — `safe-mode --status`
-          and the §21.4 count read only the current occurrence, and the exit-5
-          ``orphan_exchange_order_count`` gate already fails at one row. What is
-          bought is the common case: "orderStatus says terminal too" produces no
-          case at all, so nothing else would ever close this row (issue #66).
+          Accepted, because only the NEWEST of them is ever unresolved — every
+          superseded one was closed by the read that ended it, so `safe-mode
+          --status` and the §21.4 count still show one live fault, and the
+          exit-5 ``orphan_exchange_order_count`` gate already fails at one row.
+          What is bought is the common case: "orderStatus says terminal too"
+          produces no case at all, so nothing else would ever close this row
+          (issue #66).
         * The absent-order tiebreaker stamps only once the pass SETTLED the
           order, which is what takes it out of a cursor that would otherwise
           re-observe it every pass (see there). Two successful-read outcomes

@@ -1048,9 +1048,9 @@ orders 列已補寫）補完後不可能再成立——package 內既沒有 `DEL
 了結了那張單**時才蓋，因為那張單留在游標裡、每輪都會再讀（代價見 RUNBOOK §6 的「該關卻沒
 關」）；`<cloid>|local_terminal_read_failed`（本地終態、交易所仍列 open）只要 orderStatus
 這次**答了**就蓋，不論答案是終態、live 還是 unknownOid——那一列的事實只是「問不到」。後者
-確實可能隨交易所讀取抖動每次抖動生一列，接受，因為那些列都是已了結的（`--status` 與 §21.4
-只看得到目前那一列），換到的是最常見的那支答案（「orderStatus 說終態」不產生 case）能自動
-了結它。
+確實可能隨交易所讀取抖動每次抖動生一列，接受，因為同一把 key 底下**只有最新那一列會是未了結
+的**（每一段都被結束它的那次讀取蓋掉了），`--status` 與 §21.4 看到的仍是一個活的故障；換到的
+是最常見的那支答案（「orderStatus 說終態」不產生 case）能自動了結它。
 
 **（v14 同批）`<cloid>|local_terminal` 拆鍵**：讀取失敗自此有自己的 key
 （`<cloid>|local_terminal_read_failed`），與 reopen／unknownOid 矛盾分開，理由與 v13 把

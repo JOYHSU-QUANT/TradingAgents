@@ -163,7 +163,10 @@ def _cmd_safe_mode(argv: list[str]) -> int:
             # listing (the operator's only enumeration of the backlog):
             #   - fill_unmapped  → open until the fill BOOKS (an anti-join that
             #     never reads action_taken); resolved by §8.3 re-ingest.
-            #   - everything else → open until a human stamps action_taken.
+            #   - everything else → open until action_taken is stamped, by a
+            #     human here or by the sweep for the dispositions it can
+            #     establish (which is why a disposed-of row can be gone from
+            #     this listing with nobody having touched it).
             unmapped_open = repo.iter_unresolved_fill_sightings(db.conn, args.run_id)
             unmapped_ids = {row["event_id"] for row in unmapped_open}
             open_cases = [

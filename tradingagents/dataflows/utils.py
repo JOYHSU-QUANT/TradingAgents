@@ -52,6 +52,23 @@ def safe_ticker_component(value: str, *, max_len: int = 32) -> str:
 # agrees on what counts as "a backtest" within the same run (#30).
 MAX_LIVE_SNAPSHOT_BEHIND_DAYS = 2
 
+# A vendor's latest OHLCV row this many calendar days before the requested date
+# is treated as stale. Generous enough to span long holiday weekends, tight
+# enough to catch the year-old frames yfinance occasionally returns (#1021).
+# One definition for both market-data paths — the stockstats/yfinance loader and
+# the Alpha Vantage daily getter reject the same gap, so a stalled feed cannot
+# short-circuit the vendor chain that could have served fresh bars (#30, #70).
+MAX_OHLCV_STALE_DAYS = 10
+
+# Maximum age (calendar days) of the newest insider filing before the report
+# carries a lag note. Insider activity is legitimately sparse, so the bound is
+# generous — the note flags a long-dead filing stream, not a quiet quarter.
+# Relative to the wall clock: no curr_date reaches the insider call path, and
+# the filings are fetched live either way (#30). Shared by both vendors serving
+# the insider tool so its honesty does not depend on which one ``data_vendors``
+# selected (#69).
+MAX_INSIDER_LAG_DAYS = 90
+
 # Maximum age (calendar days) of the newest financial-statement period relative
 # to curr_date before the report carries a data-lag note, keyed by the requested
 # freq. Statements file with a delay, so a period plus a filing window is normal
@@ -90,7 +107,10 @@ def _parse_day(value, label: str) -> datetime | None:
         return datetime.strptime(str(value)[:10], "%Y-%m-%d")
     except (TypeError, ValueError):
         if value:
-            logger.warning("freshness note: unparseable %s %r; note suppressed", label, value)
+            # Context-neutral wording: single-value callers suppress their
+            # note on this, but row-reduction callers may still note from the
+            # other rows — so the log claims only what is true everywhere.
+            logger.warning("freshness note: unparseable %s %r; ignored", label, value)
         return None
 
 

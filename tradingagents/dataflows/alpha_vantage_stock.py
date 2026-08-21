@@ -6,13 +6,13 @@ import pandas as pd
 from .alpha_vantage_common import _filter_csv_by_date_range, _make_api_request
 from .errors import NoMarketDataError
 
-# Maximum age (calendar days) of the newest daily row relative to end_date
-# before the frame is rejected as stale. Mirrors the stockstats OHLCV bound
-# (MAX_OHLCV_STALE_DAYS = 10, pinned equal by a test) so both market-data
-# paths reject the same gap — the yfinance path raises on it, and an
-# annotated success here would let a stalled Alpha Vantage feed short-circuit
-# the vendor chain that could have served fresh bars (#30).
-MAX_STOCK_LAG_DAYS = 10
+# The single OHLCV staleness bound, shared with the stockstats/yfinance path so
+# both market-data paths reject the same gap — the yfinance path raises on it,
+# and an annotated success here would let a stalled Alpha Vantage feed
+# short-circuit the vendor chain that could have served fresh bars (#30). It
+# lives in utils (stdlib-only), so importing it does not drag yfinance or
+# stockstats into this pure-requests vendor module (#70).
+from .utils import MAX_OHLCV_STALE_DAYS
 
 
 def get_stock(symbol: str, start_date: str, end_date: str) -> str:
@@ -35,7 +35,7 @@ def get_stock(symbol: str, start_date: str, end_date: str) -> str:
             #68), when the vendor returns a blank body, when every fetched row
             falls outside the range (the old behavior returned a header-only
             CSV the agent read as a successful fetch), when the newest
-            surviving row trails end_date by more than MAX_STOCK_LAG_DAYS, or
+            surviving row trails end_date by more than MAX_OHLCV_STALE_DAYS, or
             (propagated from the range filter) when the CSV or date range
             cannot be parsed. Every raise lets the router fall back to the
             next vendor and otherwise emit one honest no-data sentinel,
@@ -88,7 +88,7 @@ def get_stock(symbol: str, start_date: str, end_date: str) -> str:
     # on the TIME_SERIES_DAILY_ADJUSTED shape — parses cleanly here.
     latest = pd.to_datetime(pd.read_csv(StringIO(filtered)).iloc[:, 0]).max()
     stale_days = (pd.to_datetime(end_date) - latest).days
-    if stale_days > MAX_STOCK_LAG_DAYS:
+    if stale_days > MAX_OHLCV_STALE_DAYS:
         raise NoMarketDataError(
             symbol,
             detail=(

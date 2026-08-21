@@ -14,6 +14,7 @@ import requests
 import tradingagents.dataflows.alpha_vantage_common as av
 import tradingagents.dataflows.alpha_vantage_fundamentals as avf
 import tradingagents.dataflows.alpha_vantage_indicator as avi
+import tradingagents.dataflows.alpha_vantage_news as avn
 from tradingagents.dataflows.alpha_vantage_fundamentals import _filter_reports_by_date
 
 
@@ -297,9 +298,58 @@ def test_get_balance_sheet_filters_future_reports_through_the_real_path(monkeypa
 
 @pytest.mark.unit
 def test_get_balance_sheet_without_curr_date_is_unfiltered(monkeypatch):
-    # No point-in-time bound: the raw response text is returned untouched (not even
-    # re-serialized), preserving the pre-filter behaviour for date-less callers.
+    # No point-in-time bound means no look-ahead filtering — deliberately (#73):
+    # with no bound there is nothing to filter against, and dropping rows anyway
+    # would fake a protection this call cannot have. The freshness disclosure is
+    # handled separately by the wall-clock fallback (next test); this fixture's
+    # period postdates today, so no note is due and the raw response text is
+    # returned untouched (not even re-serialized).
     body = '{"symbol": "AAPL", "quarterlyReports": [{"fiscalDateEnding": "2099-01-01"}]}'
+    monkeypatch.setattr(avf, "_make_api_request", lambda function_name, params: body)
+    assert avf.get_balance_sheet("AAPL") == body
+
+
+@pytest.mark.unit
+def test_statement_without_curr_date_still_discloses_staleness(monkeypatch, caplog):
+    # The model omitting curr_date used to switch off BOTH protections silently
+    # (#73). Filtering stays off (see above), but the lag note survives on a
+    # wall-clock reference — the insider path's design — and the degraded mode
+    # is logged. The body keeps both report lists: unfiltered means unfiltered.
+    body = json.dumps(
+        {
+            "symbol": "AAPL",
+            "quarterlyReports": [{"fiscalDateEnding": "2020-03-31"}],
+            "annualReports": [{"fiscalDateEnding": "2019-12-31"}],
+        }
+    )
+    monkeypatch.setattr(avf, "_make_api_request", lambda function_name, params: body)
+    with caplog.at_level(logging.WARNING, logger=avf.__name__):
+        out = avf.get_balance_sheet("AAPL")
+    parsed = json.loads(out)
+    assert "Data lag" in parsed[avf._FRESHNESS_NOTE_KEY]
+    assert "2020-03-31" in parsed[avf._FRESHNESS_NOTE_KEY]
+    assert "annualReports" in parsed  # unfiltered: both lists survive
+    assert any("without curr_date" in r.message for r in caplog.records)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("key", ["Error Message", "Information", "Note"])
+def test_statement_envelope_without_curr_date_is_not_dressed(monkeypatch, key):
+    # Ordering pin: the envelope exit outranks the date-less fallback. An
+    # envelope that slips past the request boundary (#68) with no curr_date
+    # must be served as the failure body it is — not judged against the wall
+    # clock and dressed in a freshness disclosure.
+    body = json.dumps({key: "Invalid API call."})
+    monkeypatch.setattr(avf, "_make_api_request", lambda function_name, params: body)
+    assert avf.get_balance_sheet("AAPL") == body
+
+
+@pytest.mark.unit
+def test_statement_without_curr_date_tolerates_malformed_rows(monkeypatch):
+    # The date-less fallback judges RAW vendor rows — no look-ahead filter has
+    # vetted them as mappings. A scalar row must degrade to no note, not crash
+    # the getter into the router's broad handler.
+    body = json.dumps({"symbol": "AAPL", "quarterlyReports": ["2020-03-31", {"x": 1}]})
     monkeypatch.setattr(avf, "_make_api_request", lambda function_name, params: body)
     assert avf.get_balance_sheet("AAPL") == body
 
@@ -525,7 +575,7 @@ def test_stock_blank_body_raises_no_market_data(monkeypatch):
 @pytest.mark.unit
 def test_stock_stale_rows_raise_like_the_yfinance_path(monkeypatch):
     # Rows exist in range but the newest (2026-05-02) trails end_date by more
-    # than MAX_STOCK_LAG_DAYS. The yfinance path raises on this exact gap
+    # than MAX_OHLCV_STALE_DAYS. The yfinance path raises on this exact gap
     # (_assert_ohlcv_not_stale); an annotated success here would let a stalled
     # Alpha Vantage feed short-circuit the vendor chain, so this path must
     # raise too.
@@ -550,14 +600,18 @@ def test_stock_fresh_rows_pass_through_unchanged(monkeypatch):
 
 
 @pytest.mark.unit
-def test_stock_staleness_bound_matches_yfinance_bound():
-    # The two market-data paths must reject the same gap. Pinned by test
-    # instead of an import because stockstats_utils drags yfinance/stockstats
-    # into what is otherwise a pure-requests vendor module.
+def test_stock_staleness_bound_is_the_single_shared_definition():
+    # The two market-data paths must reject the same gap. Since #70 they both
+    # import the one definition from utils (stdlib-only, so yfinance/stockstats
+    # are not dragged into the pure-requests vendor module); this pins the
+    # value and that the three bounds agree — a re-grown local copy shows up
+    # here once it drifts.
     import tradingagents.dataflows.alpha_vantage_stock as avs
     import tradingagents.dataflows.stockstats_utils as ssu
+    from tradingagents.dataflows import utils
 
-    assert avs.MAX_STOCK_LAG_DAYS == ssu.MAX_OHLCV_STALE_DAYS
+    assert utils.MAX_OHLCV_STALE_DAYS == 10
+    assert avs.MAX_OHLCV_STALE_DAYS == ssu.MAX_OHLCV_STALE_DAYS == utils.MAX_OHLCV_STALE_DAYS
 
 
 # ---------------------------------------------------------------------------
@@ -964,3 +1018,124 @@ def test_statement_error_envelope_is_served_unchanged(monkeypatch):
     body = json.dumps({"Error Message": "Invalid API call."})
     _patch_av_request(monkeypatch, body)
     assert avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18") == body
+
+
+# ---------------------------------------------------------------------------
+# Insider transactions freshness (#69): the same routed tool must flag a
+# long-dead filing stream through Alpha Vantage as it does through yfinance.
+# The reference date is the wall clock — no curr_date reaches an insider call.
+
+
+def _insider_body(*dates):
+    return json.dumps({"data": [{"transaction_date": d, "ticker": "AAPL"} for d in dates]})
+
+
+def _patch_insider_request(monkeypatch, body):
+    monkeypatch.setattr(avn, "_make_api_request", lambda function_name, params: body)
+
+
+def _insider_note_of(out: str) -> str:
+    return json.loads(out).get(avf._FRESHNESS_NOTE_KEY, "")
+
+
+@pytest.mark.unit
+def test_insider_dead_filing_stream_carries_note(monkeypatch):
+    _patch_insider_request(monkeypatch, _insider_body("2020-01-01"))
+    note = _insider_note_of(avn.get_insider_transactions("AAPL"))
+    assert "Data lag" in note
+    assert "insider filing" in note
+    assert "2020-01-01" in note
+
+
+@pytest.mark.unit
+def test_insider_recent_filing_is_untouched(monkeypatch):
+    from datetime import datetime
+
+    body = _insider_body(datetime.now().strftime("%Y-%m-%d"))
+    _patch_insider_request(monkeypatch, body)
+    assert avn.get_insider_transactions("AAPL") == body  # not even re-serialized
+
+
+@pytest.mark.unit
+def test_insider_note_reflects_newest_filing(monkeypatch):
+    # Order must not matter: the vendor serves newest-first today, but the note
+    # judges the maximum, not the first row.
+    _patch_insider_request(monkeypatch, _insider_body("2019-06-01", "2020-01-01"))
+    note = _insider_note_of(avn.get_insider_transactions("AAPL"))
+    assert "2020-01-01" in note
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("key", ["Error Message", "Information", "Note"])
+def test_insider_error_envelope_is_not_dressed_with_a_note(monkeypatch, key):
+    # An envelope that slips past the request boundary (#68) is a failure body:
+    # attaching a freshness note would assert that filings were fetched.
+    body = json.dumps({key: "Invalid API call."})
+    _patch_insider_request(monkeypatch, body)
+    assert avn.get_insider_transactions("AAPL") == body
+
+
+@pytest.mark.unit
+def test_insider_empty_list_beside_a_notice_is_not_flattened_to_prose(monkeypatch):
+    # An empty list riding next to an unclassified Information/Note may be the
+    # notice's side effect, not an affirmed "no filings" — the prose exit would
+    # discard the vendor's own explanation, so the body passes through.
+    body = json.dumps({"Information": "unclassified advisory", "data": []})
+    _patch_insider_request(monkeypatch, body)
+    out = avn.get_insider_transactions("AAPL")
+    assert out == body
+    assert "No insider transactions" not in out
+
+
+@pytest.mark.unit
+def test_insider_non_json_body_is_untouched(monkeypatch):
+    body = "Thank you for using Alpha Vantage!"
+    _patch_insider_request(monkeypatch, body)
+    assert avn.get_insider_transactions("AAPL") == body
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "body",
+    [
+        json.dumps({"data": "not-a-list"}),
+        json.dumps({"data": [{"ticker": "AAPL"}, "scalar-row"]}),
+    ],
+    ids=["wrong-shaped-data", "rows-without-dates"],
+)
+def test_insider_body_without_parseable_dates_degrades_to_no_note(monkeypatch, body):
+    _patch_insider_request(monkeypatch, body)
+    out = avn.get_insider_transactions("AAPL")
+    assert out == body
+
+
+@pytest.mark.unit
+def test_insider_vendor_note_key_is_dropped_even_without_our_note(monkeypatch):
+    # Family guard: a vendor-written _freshness_note must not reach the agent
+    # looking like a system-issued freshness statement, on any served path.
+    from datetime import datetime
+
+    body = json.dumps(
+        {
+            "_freshness_note": "vendor supplied text",
+            "data": [{"transaction_date": datetime.now().strftime("%Y-%m-%d")}],
+        }
+    )
+    _patch_insider_request(monkeypatch, body)
+    out = avn.get_insider_transactions("AAPL")
+    assert "vendor supplied text" not in out
+    assert avf._FRESHNESS_NOTE_KEY not in json.loads(out)
+
+
+@pytest.mark.unit
+def test_insider_vendor_note_key_cannot_shadow_the_real_disclosure(monkeypatch):
+    body = json.dumps(
+        {
+            "_freshness_note": "vendor supplied text",
+            "data": [{"transaction_date": "2020-01-01"}],
+        }
+    )
+    _patch_insider_request(monkeypatch, body)
+    note = _insider_note_of(avn.get_insider_transactions("AAPL"))
+    assert "Data lag" in note
+    assert "vendor supplied text" not in note

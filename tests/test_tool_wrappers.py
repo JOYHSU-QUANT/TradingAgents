@@ -20,7 +20,8 @@ failures are silent rather than loud, which is why nothing surfaced them:
   rather than an error.
 * For the three financial-statement tools, *dropping* ``curr_date`` from the
   forward turns off future-report filtering entirely — a look-ahead-bias leak
-  with no symptom at all.
+  whose only symptoms, since #73, are the vendors' date-less warning log and a
+  wall-clock freshness note (before that, none at all).
 * ``get_indicators`` catches ``ValueError`` and pastes the message into the
   report text, so even a loud failure degrades to prose inside the market report.
 
@@ -203,8 +204,9 @@ class TestFundamentalWrappers:
     @pytest.mark.parametrize("attr,method", TOOLS)
     def test_statement_tools_forward_ticker_freq_then_curr_date(self, attr, method):
         # Dropping curr_date from the forward disables future-report filtering
-        # entirely — a look-ahead-bias leak that produces no error, no sentinel
-        # and no log line. Swapping freq with curr_date is nearly as quiet: the
+        # entirely — a look-ahead-bias leak that produces no error and no
+        # sentinel; since #73 its only symptoms are the vendors' warning log
+        # and a wall-clock freshness note. Swapping freq with curr_date is nearly as quiet: the
         # vendor returns an error STRING, which lands in the LLM's context as
         # text rather than raising.
         assert _forwarded(

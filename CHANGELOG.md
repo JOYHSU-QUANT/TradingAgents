@@ -515,6 +515,32 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **Freshness disclosure now covers the rest of the dataflows family.** Three
+  same-family gaps left after the fundamentals disclosures below: (1) the
+  Alpha Vantage insider-transactions getter served the API body with no
+  staleness note, while the yfinance vendor behind the same routed tool flags
+  a long-dead filing stream — it now attaches the family's `_freshness_note`
+  when the newest `transaction_date` trails the wall clock by more than the
+  insider bound, which both vendors now import from a single definition in
+  `utils` (the note carrier and its guards — envelope bodies and non-JSON
+  bodies are never dressed in a disclosure, vendor-written note keys are
+  always stripped on the annotated paths — moved to `alpha_vantage_common`
+  for every Alpha Vantage module to share). An empty insider stream also
+  answers in one voice now: the Alpha Vantage getter returns the same
+  "no insider transactions reported" prose the yfinance vendor uses instead
+  of raw `{"data": []}` JSON — unless an unclassified vendor notice rides
+  beside the empty list, in which case the body passes through so the
+  vendor's own explanation is not discarded. (2) When the model omitted `curr_date` on a statement
+  tool, both vendors switched off look-ahead filtering *and* the staleness
+  note together, silently; the filter stays off — with no point-in-time bound
+  there is nothing to filter against, and pretending otherwise would fake a
+  protection — but the note now falls back to judging against the wall clock
+  (the insider path's design), the degraded mode is logged, and the
+  fundamentals analyst's prompt now tells the model to always pass
+  `curr_date`. (3) The OHLCV staleness bound existed as two per-vendor copies
+  pinned equal by a test; it now has a single definition in `utils` (stdlib-
+  only, so the pure-requests Alpha Vantage module imports it without dragging
+  in yfinance/stockstats), with the bounds' values pinned by test.
 - **Vendor throttles and rejections now reach the router instead of reading as
   successful answers.** Three same-family gaps around the indicator fix below:
   (1) an exhausted Yahoo Finance 429 re-raised yfinance's own

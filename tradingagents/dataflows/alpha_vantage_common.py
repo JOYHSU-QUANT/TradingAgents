@@ -7,6 +7,7 @@ import pandas as pd
 import requests
 
 from .errors import NoMarketDataError, VendorNotConfiguredError, VendorRateLimitError
+from .utils import _parse_day
 
 API_BASE_URL = "https://www.alphavantage.co/query"
 
@@ -73,6 +74,100 @@ class AlphaVantageRateLimitError(VendorRateLimitError):
 # that still reached it — an unmatched Information/Note — carries anything
 # worth a freshness disclosure.
 _AV_ENVELOPE_KEYS = {"Error Message", "Information", "Note"}
+
+# Where a freshness disclosure lives in an Alpha Vantage payload. This vendor
+# answers in JSON (yfinance answers in CSV with "# " header lines), so the note
+# is carried as a key rather than a prefixed line: the body stays parseable, and
+# an underscore-prefixed name is not part of any Alpha Vantage schema this repo
+# has seen. That last part is a convention, not a guarantee, so every serve
+# path in the annotated getters drops a same-named key from the body instead of
+# trusting it to be absent — including the paths that attach no disclosure of
+# their own, where a vendor-written note would stand unopposed. (Getters that
+# do not annotate, e.g. the news feeds, serve their bodies raw.) Written first
+# so a disclosure is not buried under a long report list (#58). Shared here so
+# every Alpha Vantage module that annotates goes through the same carrier
+# (#69).
+_FRESHNESS_NOTE_KEY = "_freshness_note"
+
+
+def _carries_payload(parsed: dict) -> bool:
+    """True when a parsed body carries something other than a failure envelope.
+
+    ``_AV_ENVELOPE_KEYS`` is this module's single definition of the failure
+    keys (#68); whether the request boundary would have raised on a body has no
+    bearing on whether it contains data to disclose about. The freshness key is
+    discounted alongside the envelope keys: a body of nothing but a notice plus
+    a vendor-written ``_freshness_note`` is still a failure envelope, and
+    counting that key as content would let a rate-limit notice be dressed in
+    our own freshness disclosure.
+    """
+    return bool(parsed.keys() - _AV_ENVELOPE_KEYS - {_FRESHNESS_NOTE_KEY})
+
+
+def _parsed_payload(result) -> dict | None:
+    """The response body as a JSON object, or ``None`` when it is not one.
+
+    One decoder for every annotation path: ``_make_api_request`` returns
+    response *text*, and an Alpha Vantage endpoint does not always answer
+    JSON — a rejection can arrive as prose instead.
+    Whatever "decodable as a payload" means has to mean the same thing to every
+    caller judging one, so it is decided here rather than restated in each.
+    """
+    if not isinstance(result, str):
+        return None
+    try:
+        parsed = json.loads(result)
+    except ValueError:
+        return None  # not JSON (an error/plain-text body)
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _served_body(result, parsed: dict | None) -> str:
+    """The vendor body as served, minus any freshness key the vendor supplied.
+
+    Used by the exits that hand a body over WITHOUT rebuilding it, because a
+    vendor-written ``_freshness_note`` reaches the agent looking like a
+    system-issued freshness statement — and on these paths there is no real note
+    beside it to contradict it. (The statement path rebuilds its body and drops
+    the key there instead.) Returns ``result`` untouched when there is nothing to
+    strip, so the ordinary no-disclosure answer stays byte-identical to the
+    vendor's own text; stripping necessarily re-serializes.
+    """
+    if parsed is None or _FRESHNESS_NOTE_KEY not in parsed:
+        return result
+    return json.dumps({k: v for k, v in parsed.items() if k != _FRESHNESS_NOTE_KEY}, indent=2)
+
+
+def _newest_row_date(rows, field: str):
+    """The newest date carried under ``field`` across dict rows, or ``None``.
+
+    One "newest date among rows" reduction for every annotation path (the
+    statement and insider notes both need it), so the family cannot grow a
+    third parsing style that drifts from the others (#69). Non-dict rows and
+    rows whose field is missing or falsy are skipped silently — the
+    annotations this feeds degrade to silence rather than guess — but a
+    truthy, unparseable date goes through ``utils._parse_day``, which logs it
+    (once per such row): a vendor date-format drift leaves a trace instead of
+    switching every disclosure off invisibly.
+    """
+    dates = [
+        parsed
+        for row in rows
+        if isinstance(row, dict) and (parsed := _parse_day(row.get(field), field)) is not None
+    ]
+    return max(dates) if dates else None
+
+
+def _with_freshness_note(payload: dict, note: str) -> str:
+    """Render ``payload`` with its freshness note first, as JSON text.
+
+    Any same-named key already in the vendor body is dropped rather than merged
+    over: a plain ``{key: note, **payload}`` would let the body win, silently
+    replacing our disclosure with text the vendor wrote — which the agent would
+    then read as a system-issued freshness statement.
+    """
+    body = {k: v for k, v in payload.items() if k != _FRESHNESS_NOTE_KEY}
+    return json.dumps({_FRESHNESS_NOTE_KEY: note, **body}, indent=2)
 
 
 def _make_api_request(function_name: str, params: dict, subject: str | None = None) -> dict | str:

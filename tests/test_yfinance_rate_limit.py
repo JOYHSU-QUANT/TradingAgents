@@ -107,17 +107,26 @@ def test_yf_fetch_statement_is_safe_under_parallel_tool_execution():
     from yfinance.config import YfConfig
 
     seen = []
+    entered = threading.Event()
 
     def probe():
+        entered.set()
         seen.append(YfConfig.debug.hide_exceptions)
-        _time.sleep(0.05)  # long enough that unsynchronized calls overlap
+        _time.sleep(0.05)
         raise ValueError("boom")
 
-    threads = [threading.Thread(target=lambda: su.yf_fetch_statement(probe)) for _ in range(2)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    # Deterministic sequencing, not a timing coin-flip: the second call is
+    # started only once the first is provably inside its fetch window. With
+    # the lock it blocks until the first restores; without it, it is
+    # guaranteed to capture backup=False and restore that stale value last,
+    # so the final-flag assertion fails on every run.
+    first = threading.Thread(target=lambda: su.yf_fetch_statement(probe))
+    second = threading.Thread(target=lambda: su.yf_fetch_statement(probe))
+    first.start()
+    assert entered.wait(timeout=5)
+    second.start()
+    first.join()
+    second.join()
     assert seen == [False, False]  # each fetch ran inside its own window
     assert YfConfig.debug.hide_exceptions is True  # and the default came back
 

@@ -7,6 +7,7 @@ import yfinance as yf
 from dateutil.relativedelta import relativedelta
 
 from .config import get_config
+from .errors import VendorError
 from .stockstats_utils import yf_retry
 from .symbol_utils import normalize_symbol
 
@@ -133,6 +134,8 @@ def get_news_yfinance(
 
         return f"## {ticker}{resolved} News, from {start_date} to {end_date}:\n\n{news_str}"
 
+    except VendorError:
+        raise  # Typed vendor failures take their router lanes (#67)
     except Exception as e:
         return f"Error fetching news for {ticker}: {str(e)}"
 
@@ -224,5 +227,7 @@ def get_global_news_yfinance(
 
         return f"## Global Market News, from {start_date} to {curr_date}:\n\n{news_str}"
 
+    except VendorError:
+        raise  # Typed vendor failures take their router lanes (#67)
     except Exception as e:
         return f"Error fetching global news: {str(e)}"

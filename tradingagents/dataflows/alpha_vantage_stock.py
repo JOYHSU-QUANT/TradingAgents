@@ -29,15 +29,21 @@ def get_stock(symbol: str, start_date: str, end_date: str) -> str:
         CSV string containing the daily adjusted time series data filtered to the date range.
 
     Raises:
-        NoMarketDataError: When the vendor returns a blank body, when every
-            fetched row falls outside the range (the old behavior returned a
-            header-only CSV the agent read as a successful fetch), when the
-            newest surviving row trails end_date by more than
-            MAX_STOCK_LAG_DAYS, or (propagated from the range filter) when
-            the CSV or date range cannot be parsed. Every raise lets the
-            router fall back to the next vendor and otherwise emit one honest
-            no-data sentinel, mirroring the yfinance path's empty-frame and
-            stale-frame raises (#30).
+        NoMarketDataError: When the request boundary recognises an
+            ``Error Message`` rejection envelope (e.g. an invalid symbol —
+            raised in ``_make_api_request`` before any body handling here,
+            #68), when the vendor returns a blank body, when every fetched row
+            falls outside the range (the old behavior returned a header-only
+            CSV the agent read as a successful fetch), when the newest
+            surviving row trails end_date by more than MAX_STOCK_LAG_DAYS, or
+            (propagated from the range filter) when the CSV or date range
+            cannot be parsed. Every raise lets the router fall back to the
+            next vendor and otherwise emit one honest no-data sentinel,
+            mirroring the yfinance path's empty-frame and stale-frame raises
+            (#30).
+        AlphaVantageRateLimitError: Propagated from ``_make_api_request`` on
+            an HTTP 429 or a throttle notice (#72), keeping the router's
+            rate-limit lane open for this getter too.
     """
     # Parse dates to determine the range
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")

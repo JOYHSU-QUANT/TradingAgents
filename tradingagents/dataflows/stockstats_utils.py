@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 import time
 from typing import Annotated
 
@@ -9,6 +10,7 @@ from stockstats import wrap
 from yfinance.exceptions import YFRateLimitError
 
 from .config import get_config
+from .errors import VendorRateLimitError
 from .symbol_utils import NoMarketDataError, normalize_symbol
 from .utils import safe_ticker_component
 
@@ -26,11 +28,18 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
     yfinance raises YFRateLimitError on HTTP 429 responses but does not
     retry them internally. This wrapper adds retry logic specifically
     for rate limits. Other exceptions propagate immediately.
+
+    A throttle that survives every retry is re-raised as the taxonomy's
+    ``VendorRateLimitError``: this wrapper is the one boundary every yfinance
+    network call goes through, and yfinance's own ``YFRateLimitError`` is not a
+    type the routing layer knows, so leaving it unmapped sent a 429 into each
+    caller's broad ``except`` and came back as a successful-looking error
+    string the router never fell back on (#67).
     """
     for attempt in range(max_retries + 1):
         try:
             return func()
-        except YFRateLimitError:
+        except YFRateLimitError as e:
             if attempt < max_retries:
                 delay = base_delay * (2**attempt)
                 logger.warning(
@@ -38,7 +47,58 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
                 )
                 time.sleep(delay)
             else:
+                raise VendorRateLimitError(
+                    f"Yahoo Finance rate limited the request and {max_retries} "
+                    f"retries did not clear it: {e}"
+                ) from e
+
+
+# Serializes yf_fetch_statement's flip/fetch/restore of the process-global
+# hidden-exceptions flag. ToolNode runs the tool calls of one model message on
+# a thread pool, and the fundamentals analyst binds the three statement tools
+# together — unsynchronized, an interleaved backup capture could restore the
+# flag mid-fetch (re-swallowing the very throttle this exists to surface) or
+# leave it stuck False process-wide. The retry sleeps in yf_retry sit outside
+# the locked window, so a throttled statement does not hold the lock while
+# backing off.
+_STATEMENT_FLAG_LOCK = threading.Lock()
+
+
+def yf_fetch_statement(func):
+    """Fetch a yfinance statement frame with throttles made visible.
+
+    The statement properties (``balance_sheet``/``cashflow``/``income_stmt``
+    and their quarterly forms) swallow ``YFRateLimitError`` inside yfinance's
+    fundamentals scraper while ``YfConfig.debug.hide_exceptions`` is on (the
+    default), answering with an empty frame — so a throttle would read as
+    "no data" and never reach :func:`yf_retry`'s mapping (#67; verified
+    empirically on yfinance 1.4.1, the pinned floor). The backup/restore shape
+    mirrors the library's own ``multi._download_one`` — but NOT its flag:
+    that code flips ``network.hide_exceptions``, which nothing in yfinance
+    1.4.1 reads; ``debug.hide_exceptions`` is the one the scrapers consult,
+    so flipping the network one would silently reinstate the swallow. Hidden
+    mode is switched off for the call, ONLY the rate limit is re-raised, and
+    every other exception is restored to the swallowed-empty frame the
+    library would have answered with (logged here, since the library's own
+    error log line is skipped once its swallow no longer runs).
+    """
+    from yfinance.config import YfConfig
+
+    def _call():
+        with _STATEMENT_FLAG_LOCK:
+            backup = YfConfig.debug.hide_exceptions
+            YfConfig.debug.hide_exceptions = False
+            try:
+                return func()
+            except YFRateLimitError:
                 raise
+            except Exception as e:
+                logger.warning("yfinance statement fetch failed: %s", e, exc_info=True)
+                return pd.DataFrame()
+            finally:
+                YfConfig.debug.hide_exceptions = backup
+
+    return yf_retry(_call)
 
 
 def _ensure_date_column(data: pd.DataFrame) -> pd.DataFrame:
@@ -197,16 +257,22 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
             data = cached
 
     if data is None:
+        # Fetched through Ticker.history, NOT yf.download: download's
+        # per-ticker worker swallows YFRateLimitError and answers with an
+        # empty frame (verified empirically on yfinance 1.4.1, the pinned
+        # floor), so a throttle would read as "no rows" and yf_retry's
+        # rate-limit mapping would never fire (#67). history re-raises the
+        # throttle, and is the fetch get_YFin_data_online already uses.
+        ticker_obj = yf.Ticker(canonical)
         downloaded = yf_retry(
-            lambda: yf.download(
-                canonical,
-                start=start_str,
-                end=end_str,
-                multi_level_index=False,
-                progress=False,
-                auto_adjust=True,
+            lambda: ticker_obj.history(
+                start=start_str, end=end_str, auto_adjust=True, actions=False
             )
         )
+        # history keeps a tz-aware index; strip it (like get_YFin_data_online)
+        # so the Date column compares cleanly against the naive curr_date cutoff.
+        if isinstance(downloaded.index, pd.DatetimeIndex) and downloaded.index.tz is not None:
+            downloaded.index = downloaded.index.tz_localize(None)
         downloaded = _ensure_date_column(downloaded.reset_index())
         # Only cache real data — never persist an empty frame.
         if downloaded.empty or "Close" not in downloaded.columns:

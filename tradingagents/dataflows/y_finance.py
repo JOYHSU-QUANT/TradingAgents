@@ -5,11 +5,13 @@ import pandas as pd
 import yfinance as yf
 from dateutil.relativedelta import relativedelta
 
+from .errors import VendorError
 from .stockstats_utils import (
     StockstatsUtils,
     _assert_ohlcv_not_stale,
     filter_financials_by_date,
     load_ohlcv,
+    yf_fetch_statement,
     yf_retry,
 )
 from .symbol_utils import NoMarketDataError, normalize_symbol
@@ -228,8 +230,13 @@ def get_stock_stats_indicators_window(
         for date_str, value in date_values:
             ind_string += f"{date_str}: {value}\n"
 
-    except NoMarketDataError:
-        raise  # Unknown/delisted symbol — let the router emit the sentinel
+    except VendorError:
+        # Caught as the taxonomy's base type, not one leaf at a time (#67):
+        # no-data keeps its sentinel lane, and a rate limit now reaches the
+        # router's rate-limit lane instead of the broad handler below — whose
+        # per-day fallback loop re-runs the same throttled fetch and then
+        # renders prose the router reads as a successful answer.
+        raise
     except Exception as e:
         print(f"Error getting bulk stockstats data: {e}")
         # Fallback to original implementation if bulk method fails
@@ -301,8 +308,8 @@ def get_stockstats_indicator(
             indicator,
             curr_date,
         )
-    except NoMarketDataError:
-        raise  # Unknown/delisted symbol — let the router emit the sentinel
+    except VendorError:
+        raise  # Typed vendor failures take their router lanes (#67)
     except Exception as e:
         print(
             f"Error getting stockstats indicator data for indicator {indicator} on {curr_date}: {e}"
@@ -384,8 +391,8 @@ def get_fundamentals(
 
         return header + "\n".join(lines)
 
-    except NoMarketDataError:
-        raise
+    except VendorError:
+        raise  # Typed vendor failures take their router lanes (#67)
     except Exception as e:
         return f"Error retrieving fundamentals for {ticker}: {str(e)}"
 
@@ -400,10 +407,13 @@ def get_balance_sheet(
     try:
         ticker_obj = yf.Ticker(canonical)
 
+        # yf_fetch_statement, not plain yf_retry: the statement properties
+        # swallow a 429 into an empty frame under yfinance's default hidden-
+        # exception mode, and "no data" must not be the verdict for a throttle (#67).
         if freq.lower() == "quarterly":
-            data = yf_retry(lambda: ticker_obj.quarterly_balance_sheet)
+            data = yf_fetch_statement(lambda: ticker_obj.quarterly_balance_sheet)
         else:
-            data = yf_retry(lambda: ticker_obj.balance_sheet)
+            data = yf_fetch_statement(lambda: ticker_obj.balance_sheet)
 
         data = filter_financials_by_date(data, curr_date)
 
@@ -420,8 +430,8 @@ def get_balance_sheet(
 
         return header + csv_string
 
-    except NoMarketDataError:
-        raise
+    except VendorError:
+        raise  # Typed vendor failures take their router lanes (#67)
     except Exception as e:
         return f"Error retrieving balance sheet for {ticker}: {str(e)}"
 
@@ -436,10 +446,11 @@ def get_cashflow(
     try:
         ticker_obj = yf.Ticker(canonical)
 
+        # See get_balance_sheet for why these go through yf_fetch_statement.
         if freq.lower() == "quarterly":
-            data = yf_retry(lambda: ticker_obj.quarterly_cashflow)
+            data = yf_fetch_statement(lambda: ticker_obj.quarterly_cashflow)
         else:
-            data = yf_retry(lambda: ticker_obj.cashflow)
+            data = yf_fetch_statement(lambda: ticker_obj.cashflow)
 
         data = filter_financials_by_date(data, curr_date)
 
@@ -456,8 +467,8 @@ def get_cashflow(
 
         return header + csv_string
 
-    except NoMarketDataError:
-        raise
+    except VendorError:
+        raise  # Typed vendor failures take their router lanes (#67)
     except Exception as e:
         return f"Error retrieving cash flow for {ticker}: {str(e)}"
 
@@ -472,10 +483,11 @@ def get_income_statement(
     try:
         ticker_obj = yf.Ticker(canonical)
 
+        # See get_balance_sheet for why these go through yf_fetch_statement.
         if freq.lower() == "quarterly":
-            data = yf_retry(lambda: ticker_obj.quarterly_income_stmt)
+            data = yf_fetch_statement(lambda: ticker_obj.quarterly_income_stmt)
         else:
-            data = yf_retry(lambda: ticker_obj.income_stmt)
+            data = yf_fetch_statement(lambda: ticker_obj.income_stmt)
 
         data = filter_financials_by_date(data, curr_date)
 
@@ -492,8 +504,8 @@ def get_income_statement(
 
         return header + csv_string
 
-    except NoMarketDataError:
-        raise
+    except VendorError:
+        raise  # Typed vendor failures take their router lanes (#67)
     except Exception as e:
         return f"Error retrieving income statement for {ticker}: {str(e)}"
 
@@ -540,5 +552,7 @@ def get_insider_transactions(ticker: Annotated[str, "ticker symbol of the compan
 
         return header + csv_string
 
+    except VendorError:
+        raise  # Typed vendor failures take their router lanes (#67)
     except Exception as e:
         return f"Error retrieving insider transactions for {ticker}: {str(e)}"

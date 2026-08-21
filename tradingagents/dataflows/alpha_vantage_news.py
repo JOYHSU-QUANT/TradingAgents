@@ -68,7 +68,10 @@ def get_global_news(curr_date, look_back_days: int = 7, limit: int = 50) -> dict
         "limit": str(limit),
     }
 
-    return _make_api_request("NEWS_SENTIMENT", params)
+    # This request carries no symbol/tickers, so name the subject a rejection
+    # is attributed to — the fallback would present the function name as a
+    # tradable symbol in the router's no-data sentinel.
+    return _make_api_request("NEWS_SENTIMENT", params, subject="global market news")
 
 
 def get_insider_transactions(symbol: str) -> dict[str, str] | str:

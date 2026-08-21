@@ -515,6 +515,42 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **Vendor throttles and rejections now reach the router instead of reading as
+  successful answers.** Three same-family gaps around the indicator fix below:
+  (1) an exhausted Yahoo Finance 429 re-raised yfinance's own
+  `YFRateLimitError` — a type outside the vendor-error taxonomy — so every
+  yfinance leaf's broad `except` turned it into `"Error retrieving ..."` prose
+  and the router never opened its rate-limit lane; `yf_retry` (the one boundary
+  every yfinance network call goes through) now maps exhaustion to
+  `VendorRateLimitError`, and all nine yfinance leaves re-raise the taxonomy
+  (`except VendorError: raise`, the same shape as the indicator fix) — this is
+  the default vendor for every category it serves, so the gap was on the
+  every-day path. Two of those leaves needed more than the mapping, because
+  yfinance itself swallows the 429 before our boundary can see it (verified on
+  1.4.1, the pinned floor): the OHLCV cache now fetches through
+  `Ticker.history` (which re-raises throttles) instead of `yf.download` (whose
+  per-ticker worker stores the error and answers an empty frame — a throttle
+  that read as "no rows"), and the three statement getters go through a
+  wrapper that briefly un-hides yfinance's hidden-exception mode — under a
+  lock, since parallel tool execution shares the process-global flag — re-
+  raising only the throttle and restoring every other failure to the
+  swallowed-empty answer the library gives today. (2) An Alpha Vantage HTTP
+  429 became a bare
+  `requests.HTTPError` at `raise_for_status()` before the body-notice
+  classification could see it; a 429 status now raises
+  `AlphaVantageRateLimitError` (naming any `Retry-After` the response carried),
+  while other 4xx/5xx keep their `HTTPError` behaviour. (3) An Alpha Vantage
+  `{"Error Message": ...}` rejection envelope was returned to callers as if it
+  were data — news and insider tools served it verbatim and the statement
+  filter re-serialized it — so the router never fell back; the shared request
+  boundary now raises `NoMarketDataError` with the vendor's wording in the
+  detail (so a parameter mistake stays distinguishable in the no-data
+  sentinel), a non-object JSON body — no shape this vendor serves data in —
+  is classified the same way, and the envelope key list has a single
+  definition in `alpha_vantage_common`. The direct-call verification snapshot
+  tool keeps a
+  throttle transient rather than flattening the newly-typed error into its
+  permanent-sounding no-data sentinel.
 - **An Alpha Vantage rate limit no longer reads as a successful indicator
   report.** The indicator getter re-raised only the missing-key error and
   caught everything else, returning

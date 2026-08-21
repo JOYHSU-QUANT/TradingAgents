@@ -7,11 +7,13 @@ were swallowed without a trace).
 """
 
 import copy
+import json
 import unittest
 from unittest import mock
 
 import pytest
 
+import tradingagents.dataflows.alpha_vantage_news as avn
 import tradingagents.dataflows.config as config_module
 import tradingagents.default_config as default_config
 from tradingagents.dataflows import interface
@@ -154,6 +156,51 @@ class VendorRoutingTests(unittest.TestCase):
         ):
             result = interface.route_to_vendor("get_indicators", "AAPL", "rsi", "2026-06-01", 30)
         self.assertEqual(result, "YF_INDICATORS")
+
+    def _av_answers(self, body_dict):
+        # The strict fake from the hardening tests, not a mock.Mock: Mock
+        # auto-creates attributes, so a new response read in _make_api_request
+        # would silently pass here instead of failing the fake.
+        import tradingagents.dataflows.alpha_vantage_common as av
+        from tests.test_alpha_vantage_hardening import _patched_get
+
+        return (
+            mock.patch.object(av, "get_api_key", return_value="k"),
+            mock.patch.object(av.requests, "get", _patched_get(json.dumps(body_dict))),
+        )
+
+    def test_alpha_vantage_error_envelope_reaches_the_fallback_vendor(self):
+        # #68 end-to-end through the REAL Alpha Vantage news getter: an
+        # "Error Message" body used to return as JSON the router read as a
+        # successful answer, so the chain stopped at a vendor that had just
+        # rejected the call.
+        set_config({"data_vendors": {"news_data": "alpha_vantage,yfinance"}})
+        patch_key, patch_get = self._av_answers({"Error Message": "Invalid API call."})
+        with (
+            patch_key,
+            patch_get,
+            self._route_method(
+                "get_news",
+                {"alpha_vantage": avn.get_news, "yfinance": _returns("YF_NEWS")},
+            ),
+        ):
+            result = interface.route_to_vendor("get_news", "AAPL", "2026-06-01", "2026-06-05")
+        self.assertEqual(result, "YF_NEWS")
+
+    def test_alpha_vantage_error_envelope_alone_yields_the_no_data_sentinel(self):
+        # A single-vendor chain answers the honest sentinel, and the vendor's
+        # own wording rides along so a parameter mistake is not flattened into
+        # a bare "no data".
+        set_config({"data_vendors": {"news_data": "alpha_vantage"}})
+        patch_key, patch_get = self._av_answers({"Error Message": "Invalid API call."})
+        with (
+            patch_key,
+            patch_get,
+            self._route_method("get_news", {"alpha_vantage": avn.get_news}),
+        ):
+            result = interface.route_to_vendor("get_news", "AAPL", "2026-06-01", "2026-06-05")
+        self.assertIn("NO_DATA_AVAILABLE", result)
+        self.assertIn("Invalid API call", result)
 
     def test_core_category_still_raises_on_error(self):
         # A core category (single configured vendor) propagates the error so a

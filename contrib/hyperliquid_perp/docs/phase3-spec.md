@@ -1018,21 +1018,29 @@ resolution 不改寫 case rows（它們是 log），且**「已解決」的定�
 exchange_value)` **不含 symbol 欄**，裸值會讓 off-coin ETH 2.5 與同幣 exch_size 2.5 互撞而
 靜默丟掉第二列。（`equity_out_of_tolerance` 是帳戶級事實、`symbol` 本來就是 NULL，不適用。）
 
-推論（操作面看得到，見 RUNBOOK §6）：去重的存在檢查**不看 `action_taken`**，所以一個已
-了結的 key 不會被復發重開——復發顯示在該輪的 pass 判決與 safe mode，不是新列。因此規則
-是**自動（機器蓋的）處置只該蓋在事實已了結、且不會再被觀察到之處**。
+**（v14 修訂，2026-08-21，issue #65／#66）處置的暫定性與去重的關係**：去重的存在檢查看
+的是同一個 key 的**最新一列**，並且**只有該列帶「暫定處置」時才放行新列**
+（`_vocab.PROVISIONAL_DISPOSITIONS`）。三種情形：
 
-今天**符合的有兩個**：`resolved_fill_booked`（fill 一旦入帳就沒有任何退帳路徑，package 內
-沒有 `DELETE FROM fills`）與 `local_row_backfilled`（事實是「這張交易所單沒有本地 orders
-列」，補寫後就不可能再成立，同樣沒有 `DELETE FROM orders`）。
+- **未了結的列照擋**——一個未癒事實每輪重見仍是同一列（去重原本的職責，不變）。
+- **人工 `--stamp-case` 的處置照擋**——操作者的答案不該被之後每一輪再問一次。rule-10
+  那種單（交易所收了 cloid 卻否認）會一直留在 sweep 的游標裡、每輪都重見，人工 stamp 是
+  唯一的了結手段；若把它當暫定，之後每一輪都會再生一列，正是去重要擋的洗版。
+- **機器蓋的暫定處置放行新列**——這四個處置都代表「本輪把這張單移出了 sweep 的游標」，
+  而 §8.3 rule-5 重送與 `_maybe_reopen_terminal_order` 可以把它放回去；放回去之後的再觀察
+  是**新的一次**，該有自己的列（未修正前它會被吞掉，`safe-mode --status` 與 §21.4 計數兩
+  個面都看不到，包含最嚴重的 rule-10 那種）。
 
-**其餘四個都落在同一個殘餘窗口裡**——`settled_never_sent` 與 `settled_{local_status}`
-（裸 cloid 鍵）、`resolved_read_succeeded`（`<cloid>|read_failed` 鍵）、`local_row_reopened`
-（`<cloid>|local_terminal` 鍵）：該單可經 §8.3 rule-5 重送或 `_maybe_reopen_terminal_order`
-復活而重回 `iter_open_live_orders`，之後同鍵的未解事實就會被吞掉，差別只在事實要怎麼回來
-才撞得上。`resolved_read_succeeded` 的鍵最窄（只有「又讀不到」會再撞上它；裸 cloid 那個鍵
-則是**其餘三種** `order_missing_on_exchange` 事實都會撞上，包含最嚴重的 rule-10 那種），
-但不是零風險，**新增自動 stamp 時不要拿它當合規範本**。收斂方向見 issue #65／#66。
+暫定集合＝`settled_never_sent`、`settled_{terminal_status}`（由終態 order status 推導，
+不逐一寫死）、`resolved_read_succeeded`、`local_row_reopened`。**不在集合內**的兩個機器處置
+是 `resolved_fill_booked` 與 `local_row_backfilled`：它們的事實（fill 已入帳、orders 列已補
+寫）補完後不可能再成立——package 內沒有任何 `DELETE FROM`——放行只會製造每輪重複的洗版列。
+
+因為「回來」需要一次刻意的重送或 reopen，列的成長綁在 **revive 次數**上，不是 pass 次數。
+可重開**不等於**可以提早蓋章：自動處置仍不該蓋在 sweep 每輪都會重見的鍵上。所以
+`<cloid>|read_failed` 只在**本輪了結了那張單**時才蓋（代價見 RUNBOOK §6 的「該關卻沒關」），
+而 `<cloid>|local_terminal` 只要 orderStatus 這次讀得到就蓋——回到它的處境需要交易所自己
+的兩個視角互相矛盾（open_orders 列著、orderStatus 說終態），不是再跑一輪就會有。
 
 （第七個機器處置 `backfilled`（`exchange_fill_missing_local`）不吃這條規則：它寫入時**不帶
 `exchange_value`**，本來就不進 dedupe、每 pass 各自一列，不會佔住任何事實鍵。）

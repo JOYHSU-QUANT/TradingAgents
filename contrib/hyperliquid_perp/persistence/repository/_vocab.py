@@ -13,6 +13,7 @@ __all__ = [
     "LIVE_PLAN_STATUSES",
     "LIVE_SMOKE_TEST_STATUSES",
     "PROTECTION_ORDER_EVENT_TYPES",
+    "PROVISIONAL_DISPOSITIONS",
     "RECONCILIATION_CASE_TYPES",
     "RECONCILIATION_TRIGGERS",
     "RESTING_ORDER_STATUSES",
@@ -307,6 +308,52 @@ RECONCILIATION_CASE_TYPES = frozenset(
         "equity_mismatch",
         "position_sl_missing",
     }
+)
+
+# The machine dispositions that end an EPISODE rather than an invariant: each
+# one is written by the §12 sweep about an order that this pass took OUT of its
+# cursor (settled to a terminal status, or reopened to a live one), and every
+# one of those exits can be undone — a §8.3 rule-5 resend re-stamps the same
+# orders row 'submitted', and _maybe_reopen_terminal_order revives a terminal
+# one. So the fact they dispose of is quiet, not impossible, and the
+# once-per-fact dedupe treats them as PROVISIONAL: a later sighting under the
+# same key is a NEW occurrence and gets its own row (see
+# insert_exchange_reconciliation_event).
+#
+# Membership is the load-bearing part, and the reason it is a closed set rather
+# than "any machine stamp":
+#   * A disposition NOT listed here keeps the key shut forever. That is right
+#     for a fact that cannot come back (``local_row_backfilled`` — nothing
+#     DELETEs orders rows; ``resolved_fill_booked`` — nothing DELETEs fills)
+#     and right for a human's ``--stamp-case`` text: the operator disposing of
+#     an ``order_missing_on_exchange`` row whose order STAYS in the cursor
+#     (§8.3 rule 10: the exchange took the cloid and denies it) must not have
+#     their stamp answered by a fresh row on every pass thereafter — that
+#     re-sighting flood is what the dedupe exists to stop.
+#   * Every member above implies the order LEFT the cursor, so a re-sighting
+#     needs a deliberate resend or reopen first. Bounded by those, not by the
+#     pass cadence.
+# Adding a member is therefore a claim that the sweep cannot re-observe the
+# fact without an intervening revive.
+PROVISIONAL_DISPOSITIONS = frozenset(
+    {
+        # _settle_absent_order: unknownOid with no §8.3 rule-10 evidence — the
+        # send never landed, the local row goes 'rejected' (a rule-5 resend can
+        # put it back).
+        "settled_never_sent",
+        # _clear_read_failure_case: an orderStatus read that failed on an
+        # earlier pass now works. Its caller only reaches it for an order the
+        # pass DISPOSED of, so the order is out of the cursor.
+        "resolved_read_succeeded",
+        # _maybe_reopen_terminal_order: the terminal local row was wrong and is
+        # now live again — the most re-observable of the four, by construction.
+        "local_row_reopened",
+    }
+    # _settle_absent_order's other disposal: orderStatus answered with a
+    # terminal status and the local row was written to match. Derived from the
+    # status vocabulary rather than spelled out, so a new terminal status
+    # cannot land a stamp this set does not know about.
+    | {f"settled_{status}" for status in _TERMINAL_ORDER_STATUSES}
 )
 
 # Which code path observed the case: the PR 3 ingest sighting, or one of the

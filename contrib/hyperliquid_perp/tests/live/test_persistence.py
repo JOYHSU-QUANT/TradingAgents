@@ -962,3 +962,107 @@ def test_stamping_with_a_blank_action_is_refused(db):
         with db.transaction() as conn, pytest.raises(ValueError, match="non-empty"):
             repo.stamp_reconciliation_action_if_unset(conn, event_id, blank)
     assert _action_of(db, event_id) is None  # and the case stays open, not half-stamped
+
+
+# ---------------------------------------------------------------------------
+# the once-per-fact guard vs a fact that recurs (issue #65)
+# ---------------------------------------------------------------------------
+
+_ORDER_KEY = "0x" + "ab" * 16
+
+
+def _sight_order_case(db, *, action_taken=None, detail=None) -> bool:
+    """One sweep sighting under a fixed order fact key; True iff a row was written."""
+    with db.transaction() as conn:
+        return repo.insert_exchange_reconciliation_event(
+            conn,
+            run_id="r",
+            trigger="pre_cycle",
+            case_type="order_missing_on_exchange",
+            exchange_value=_ORDER_KEY,
+            action_taken=action_taken,
+            detail=detail,
+            timestamp=_NOW,
+        )
+
+
+def _order_cases(db):
+    return repo.iter_exchange_reconciliation_events(
+        db.conn, "r", case_type="order_missing_on_exchange"
+    )
+
+
+def test_a_provisionally_disposed_key_records_its_next_occurrence(db):
+    # The sweep's own dispositions all mean "this pass took the order out of my
+    # cursor", and a resend or a reopen puts it back — after which the next
+    # sighting is a NEW occurrence, and a possibly far worse one (settled as
+    # never-sent, then re-sent, then answered with the §8.3 rule-10 fault). While
+    # a stamped key stayed shut, that occurrence was written NOWHERE: neither
+    # `safe-mode --status` nor §21.4's unresolved count would show it.
+    assert _sight_order_case(db, action_taken="settled_never_sent", detail="first episode")
+    assert not repo.has_exchange_reconciliation_case(
+        db.conn, "r", case_type="order_missing_on_exchange", exchange_value=_ORDER_KEY
+    )
+    assert _sight_order_case(db, detail="rule 10: the exchange took the cloid and denies it")
+    rows = _order_cases(db)
+    assert len(rows) == 2
+    assert rows[-1]["action_taken"] is None  # and the new one is OPEN, which is the point
+    assert "rule 10" in rows[-1]["detail"]
+
+    # Reopening the key does not disarm the guard: the new occurrence is
+    # unresolved, so the fact is back to one row however often it is re-observed.
+    # This is why the guard weighs the LATEST row — weighing the settled first
+    # one would answer every later pass with another row.
+    for _ in range(3):
+        assert not _sight_order_case(db, detail="still unresolved")
+    assert len(_order_cases(db)) == 2
+
+
+def test_an_unresolved_key_still_swallows_its_re_sighting(db):
+    # The guard's original job, untouched: an unhealed fact re-observed pass
+    # after pass is one row, not one per pass.
+    assert _sight_order_case(db, detail="first")
+    for _ in range(3):
+        assert not _sight_order_case(db, detail="again")
+    assert len(_order_cases(db)) == 1
+
+
+def test_a_human_disposition_shuts_the_key_for_good(db):
+    # THE reason the line is drawn at the disposition rather than at the
+    # case_type: a §8.3 rule-10 order stays in the sweep's cursor indefinitely,
+    # so it is re-observed every pass, and `--stamp-case` is the operator's only
+    # way to clear it. Were their answer treated as provisional, every pass
+    # thereafter would answer it with a fresh row — the re-sighting flood the
+    # guard exists to stop.
+    assert _sight_order_case(db, detail="rule 10, unresolvable here")
+    event_id = _order_cases(db)[0]["event_id"]
+    with db.transaction() as conn:
+        repo.stamp_reconciliation_action_if_unset(conn, event_id, "human: venue ticket 4471")
+    for _ in range(3):
+        assert not _sight_order_case(db, detail="still the same fault")
+    assert len(_order_cases(db)) == 1
+
+
+@pytest.mark.parametrize("disposition", ["resolved_fill_booked", "local_row_backfilled"])
+def test_a_machine_disposition_for_a_fact_that_cannot_return_shuts_the_key(db, disposition):
+    # Not every machine stamp is provisional, and these two are the negative
+    # control: nothing DELETEs a fills row or an orders row, so the facts they
+    # dispose of ("the ledger lacks this fill", "there is no local row") cannot
+    # come back. A re-sighting of one is the SAME fact, and minting a row for it
+    # on every backfill pass is exactly the flood.
+    assert _sight_order_case(db, action_taken=disposition)
+    assert not _sight_order_case(db, detail="re-observed")
+    assert len(_order_cases(db)) == 1
+
+
+def test_the_case_lookup_answers_with_the_live_occurrence_not_the_settled_one(db):
+    # Every disposition stamp goes through this lookup, and once a key can hold
+    # more than one row, aiming it at the FIRST would re-close a finished
+    # episode and leave the live one open — silently, both rows being genuine.
+    assert _sight_order_case(db, action_taken="settled_never_sent")
+    assert _sight_order_case(db, detail="the occurrence after the resend")
+    latest = repo.get_exchange_reconciliation_case(
+        db.conn, "r", case_type="order_missing_on_exchange", exchange_value=_ORDER_KEY
+    )
+    assert latest["action_taken"] is None
+    assert latest["event_id"] == max(row["event_id"] for row in _order_cases(db))

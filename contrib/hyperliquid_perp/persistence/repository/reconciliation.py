@@ -7,7 +7,11 @@ from datetime import datetime, timezone
 
 from ...common.enum_guard import check_enum
 from ._base import _insert
-from ._vocab import _RECONCILIATION_TRIGGERS, RECONCILIATION_CASE_TYPES
+from ._vocab import (
+    _RECONCILIATION_TRIGGERS,
+    PROVISIONAL_DISPOSITIONS,
+    RECONCILIATION_CASE_TYPES,
+)
 
 __all__ = [
     "get_exchange_reconciliation_case",
@@ -48,6 +52,21 @@ def insert_exchange_reconciliation_event(
     writes nothing and returns ``False``. Rows with no ``exchange_value`` (a PR 4
     sweep case with no per-fill key) are not deduped — each is its own event.
 
+    ONE exception, and it turns on the DISPOSITION rather than on the fact: a
+    key whose latest row carries a :data:`PROVISIONAL_DISPOSITIONS` stamp is
+    open again, and a fresh sighting writes its own row. Those stamps are the
+    §12 sweep's own, and each means "this pass took the order out of my cursor"
+    — which a §8.3 rule-5 resend or a reopen can undo, after which the next
+    sighting is a NEW occurrence (an order re-sent following
+    ``settled_never_sent`` can come back as the rule-10 fault "the exchange took
+    this cloid and denies it"). While every stamp shut its key permanently, that
+    occurrence was recorded NOWHERE: the dedupe swallowed it and the stamped row
+    went on asserting a disposition, so ``safe-mode --status`` and §21.4's
+    unresolved count both read clean over a live fault (issue #65). Unresolved
+    keys and human ``--stamp-case`` dispositions still shut the key — the set's
+    own comment says why the line is drawn exactly there and not at the
+    case_type.
+
     ``action_taken`` stays NULL from the PR 3 ingest writers (no ingest path acts
     on a case); the PR 4 sweep passes it when the disposition is known at write
     time (an orphan it back-filled, a stuck row it settled), and stamps it later
@@ -80,26 +99,32 @@ def insert_exchange_reconciliation_event(
 def has_exchange_reconciliation_case(
     conn: sqlite3.Connection, run_id: str, *, case_type: str, exchange_value: str
 ) -> bool:
-    """Whether this exact case was already recorded (the once-per-fact guard).
+    """Whether the once-per-fact guard would SWALLOW a fresh sighting of this key.
 
     Keyed on ``(run_id, case_type, exchange_value)`` — the fill key for an
     unmapped fill, the malformed evidence key for one that would not parse, the
     key + drift digest for a money-drift sighting. Resolution does NOT delete or
     flip these rows (they are a log); staying recorded after the fill is booked
     is what keeps a later re-sighting from re-inserting.
+
+    "Would be swallowed", not "was ever recorded": a key whose latest row bears
+    a :data:`PROVISIONAL_DISPOSITIONS` stamp is open to its next occurrence (see
+    :func:`insert_exchange_reconciliation_event`), and this answers ``False``
+    for it. The insert itself asks THIS function, and the live-fill ingest
+    recorder asks it as a lock-free fast path before opening its write
+    transaction — one function, so the fast path can never disagree with the
+    guarantee it is a fast path for.
     """
-    return (
-        get_exchange_reconciliation_case(
-            conn, run_id, case_type=case_type, exchange_value=exchange_value
-        )
-        is not None
+    latest = get_exchange_reconciliation_case(
+        conn, run_id, case_type=case_type, exchange_value=exchange_value
     )
+    return latest is not None and latest["action_taken"] not in PROVISIONAL_DISPOSITIONS
 
 
 def get_exchange_reconciliation_case(
     conn: sqlite3.Connection, run_id: str, *, case_type: str, exchange_value: str
 ) -> sqlite3.Row | None:
-    """The earliest recorded row for one deduped fact, or ``None``.
+    """The LATEST recorded row for one deduped fact, or ``None``.
 
     The lookup side of the once-per-fact guard: when a later pass RESOLVES a
     fact whose sighting was already recorded (the dedupe swallows the fresh
@@ -107,11 +132,19 @@ def get_exchange_reconciliation_case(
     :func:`set_reconciliation_action` instead of losing it — otherwise the
     backlog would permanently show as unresolved a case that was in fact
     settled on a retry.
+
+    Latest, not earliest: a provisionally-disposed key can hold more than one
+    row (the settle, then the occurrence a resend brought back), and the guard
+    above and every disposition stamp all mean the CURRENT occurrence. Pointed
+    at the first row instead, a stamp would re-close a finished episode and
+    leave the live one open — silently, both rows being genuine. On the
+    one-row-per-key shape every other key has, the two orderings name the same
+    row.
     """
     return conn.execute(
         "SELECT * FROM exchange_reconciliation_events "
         "WHERE run_id = ? AND case_type = ? AND exchange_value = ? "
-        "ORDER BY event_id LIMIT 1",
+        "ORDER BY event_id DESC LIMIT 1",
         (run_id, case_type, exchange_value),
     ).fetchone()
 

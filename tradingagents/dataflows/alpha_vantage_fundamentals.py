@@ -44,9 +44,9 @@ logger = logging.getLogger(__name__)
 #                                        classification patterns.
 
 # The freshness-note carrier and its shared helpers (_FRESHNESS_NOTE_KEY,
-# _parsed_payload, _served_body, _with_freshness_note, _carries_payload) live
-# in alpha_vantage_common so every Alpha Vantage module annotates the same way
-# (#69); this module re-imports them above.
+# _parsed_payload, _served_body, _with_freshness_note, _carries_payload,
+# _newest_row_date) live in alpha_vantage_common so every Alpha Vantage module
+# annotates the same way (#69); this module re-imports them above.
 
 
 def _carries_anything(parsed: dict) -> bool:

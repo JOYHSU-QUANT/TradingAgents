@@ -602,8 +602,8 @@ def test_stock_fresh_rows_pass_through_unchanged(monkeypatch):
 @pytest.mark.unit
 def test_stock_staleness_bound_is_the_single_shared_definition():
     # The two market-data paths must reject the same gap. Since #70 they both
-    # import the one definition from utils (stdlib-only, so the pure-requests
-    # vendor module is not dragged into yfinance/stockstats); this pins the
+    # import the one definition from utils (stdlib-only, so yfinance/stockstats
+    # are not dragged into the pure-requests vendor module); this pins the
     # value and that the three bounds agree — a re-grown local copy shows up
     # here once it drifts.
     import tradingagents.dataflows.alpha_vantage_stock as avs

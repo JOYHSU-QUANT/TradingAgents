@@ -149,7 +149,8 @@ def get_insider_transactions(symbol: str) -> str:
         JSON string of insider transaction data, carrying the family's
         ``_freshness_note`` key when the newest filing trails the wall clock
         by more than ``MAX_INSIDER_LAG_DAYS`` (#69) — or the shared
-        no-transactions prose when the vendor answers an empty list.
+        no-transactions prose when the vendor answers an empty list with no
+        notice key beside it.
     """
 
     params = {

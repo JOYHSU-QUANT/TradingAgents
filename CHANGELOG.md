@@ -524,8 +524,13 @@ Breaking changes within the 0.x line are called out explicitly.
   insider bound, which both vendors now import from a single definition in
   `utils` (the note carrier and its guards — envelope bodies and non-JSON
   bodies are never dressed in a disclosure, vendor-written note keys are
-  always stripped — moved to `alpha_vantage_common` for every Alpha Vantage
-  module to share). (2) When the model omitted `curr_date` on a statement
+  always stripped on the annotated paths — moved to `alpha_vantage_common`
+  for every Alpha Vantage module to share). An empty insider stream also
+  answers in one voice now: the Alpha Vantage getter returns the same
+  "no insider transactions reported" prose the yfinance vendor uses instead
+  of raw `{"data": []}` JSON — unless an unclassified vendor notice rides
+  beside the empty list, in which case the body passes through so the
+  vendor's own explanation is not discarded. (2) When the model omitted `curr_date` on a statement
   tool, both vendors switched off look-ahead filtering *and* the staleness
   note together, silently; the filter stays off — with no point-in-time bound
   there is nothing to filter against, and pretending otherwise would fake a

@@ -60,11 +60,15 @@ def yf_fetch_statement(func):
     fundamentals scraper while ``YfConfig.debug.hide_exceptions`` is on (the
     default), answering with an empty frame — so a throttle would read as
     "no data" and never reach :func:`yf_retry`'s mapping (#67; verified
-    empirically on yfinance 1.4.1, the pinned floor). Mirroring the library's
-    own backup/restore dance in ``multi._download_one``: hidden mode is
-    switched off for the call, ONLY the rate limit is re-raised, and every
-    other exception is restored to the swallowed-empty answer the library
-    would have given, so no non-throttle path changes behavior.
+    empirically on yfinance 1.4.1, the pinned floor). The backup/restore shape
+    mirrors the library's own ``multi._download_one`` — but NOT its flag:
+    that code flips ``network.hide_exceptions``, which nothing in yfinance
+    1.4.1 reads; ``debug.hide_exceptions`` is the one the scrapers consult,
+    so flipping the network one would silently reinstate the swallow. Hidden
+    mode is switched off for the call, ONLY the rate limit is re-raised, and
+    every other exception is restored to the swallowed-empty frame the
+    library would have answered with (logged here, since the library's own
+    error log line is skipped once its swallow no longer runs).
     """
     from yfinance.config import YfConfig
 
@@ -75,7 +79,8 @@ def yf_fetch_statement(func):
             return func()
         except YFRateLimitError:
             raise
-        except Exception:
+        except Exception as e:
+            logger.warning("yfinance statement fetch failed: %s", e, exc_info=True)
             return pd.DataFrame()
         finally:
             YfConfig.debug.hide_exceptions = backup

@@ -18,7 +18,13 @@ Where the metrics come from (all from persisted PR 2–5 event logs):
 - ``exchange_fill_dedupe_error_count`` — ``exchange_reconciliation_events``
   ``fill_money_drift`` (a redelivered fill whose identity fields disagreed).
 - ``orphan_exchange_order_count`` / ``local_exchange_position_mismatch_count`` —
-  the ``orphan_exchange_order`` / ``exchange_position_mismatch`` §12.3 cases.
+  the ``orphan_exchange_order`` / ``exchange_position_mismatch`` §12.3 case ROWS
+  the run ever recorded, disposed of or not. Rows, not distinct orders: a
+  ``|local_terminal_read_failed`` key records one row per unreadable→readable
+  flap of the venue (see ``repo.PROVISIONAL_DISPOSITIONS``), so one order whose
+  orderStatus flapped all morning can be most of this number. The gate is
+  unaffected — it fails at one row either way — but read the count as episodes
+  before going to look for that many orders.
 - ``duplicate_fill_apply_count`` — live ``fills`` sharing an ``exchange_fill_key``
   (structurally impossible under the UNIQUE index — a store-integrity assertion).
 - ``account_replay_mismatch_count`` — the §14/§15 accounting replay (reused
@@ -1219,10 +1225,17 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
 def _unresolved_reconciliation_mismatches(conn, run_id: str) -> int:
     """Count §12.3 cases still open — the §21.4 "no unresolved mismatch" metric.
 
-    Mirrors the ``safe-mode --status`` open-case logic: every mismatch case is
-    open until a human stamps ``action_taken``. A ``fill_unmapped`` sighting is a
-    backlog (resolved by booking the fill, not by stamping), not a mismatch, so
-    it is excluded from the count.
+    Mirrors the ``safe-mode --status`` open-case logic: a mismatch case is open
+    until something stamps ``action_taken`` — an operator's ``--stamp-case``, or
+    the sweep itself for the dispositions it can establish. A ``fill_unmapped``
+    sighting is a backlog (resolved by booking the fill, not by stamping), not a
+    mismatch, so it is excluded from the count.
+
+    Rows, not distinct facts: a fact whose sweep disposition is provisional
+    (``repo.PROVISIONAL_DISPOSITIONS``) records each recurrence as its own row,
+    and only the newest of them is ever unresolved — so this still counts one
+    per LIVE fault, which is what §21.4 asks, while the run's history keeps the
+    episodes that were disposed of.
     """
     count = 0
     for row in repo.iter_exchange_reconciliation_events(conn, run_id):

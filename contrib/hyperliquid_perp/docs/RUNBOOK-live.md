@@ -615,15 +615,18 @@ gate 線是豁免的（`order_gate.py` 有 import-time 保證），所以 latch 
 既有 run 若已有那種列，本版第一次再遇到同一故障會另外寫一列新 key 的——多 stamp 一次，
 沒有證據遺失。）
 
-**「一個 run 一列」的 case 不只 envelope 那兩種。** 交易所倉位與訂單那邊也有幾個 case 的
-`exchange_value` 是**不帶量值的固定 key**，語義與上面一樣——一個未癒的事實只寫一列：
+**「一個未癒事實一列」的 case 不只 envelope 那兩種。** 交易所倉位與訂單那邊也有幾個 case 的
+`exchange_value` 是**不帶量值的固定 key**，語義與上面一樣——一個未癒的事實只寫一列
+（訂單那三種另有一層：一段被了結之後又復發時會另開一列，見下面第 2–4 點）：
 
 | `exchange_value` | 事實 | 現在多大／現在怎樣，去哪裡看 |
 |---|---|---|
 | `<幣別>\|unknown_coin` | 錢包持有本 run 不交易的幣種（manual safe mode） | 首列的 `detail`（第一次看到時的大小）、每 pass 的 warning log、每 pass 的 `reconciliation_diff` |
 | `<幣別>\|sl_missing` | 這個實倉沒有足量的 reduce-only SL 覆蓋 | 同左三處，另加每 pass 的 `position_snapshots.position_size` |
 | `equity_out_of_tolerance` | equity 超出容差 | 首列的 `detail`、每 pass 的 warning log、每 pass 的 `reconciliation_diff`（`position_snapshots` 那欄是倉位大小，與 equity 無關） |
-| `<cloid>\|read_failed` | 這張單的 orderStatus 讀不到 | 首列的 `detail`（第一次的**完整**例外訊息）、每 pass 的 warning log、每 pass 的 `reconciliation_diff`（那份 detail **截到 `_DIFF_STRING_MAX_CHARS`（目前 300 字元）**，交易所的錯誤內文可能被切掉尾巴） |
+| `<cloid>\|read_failed` | 這張單（本地 live、交易所沒列）的 orderStatus 讀不到 | **目前這一段**首列的 `detail`（該段第一次的**完整**例外訊息；早先已了結的段各有自己的列）、每 pass 的 warning log、每 pass 的 `reconciliation_diff`（那份 detail **截到 `_DIFF_STRING_MAX_CHARS`（目前 300 字元）**，交易所的錯誤內文可能被切掉尾巴） |
+| `<cloid>\|local_terminal_read_failed` | 這張單（本地終態、交易所仍列 open）的 orderStatus 讀不到 | 同上一列；讀得到之後自動了結，再讀不到就是新的一段、新的一列 |
+| `<cloid>\|local_terminal` | 上一列那張單的 orderStatus **答了**，而答案與本地終態列衝突（reopen／unknownOid 矛盾） | 該列的 `detail`、每 pass 的 `reconciliation_diff`（**reopen 與 unknownOid 這兩支沒有自己的 warning log**，run log 裡只有那一輪 `reconciliation … UNCLEAN` 的 `cases=N` 計數；grep cloid 找不到不代表 sweep 沒在看它） |
 
 （「每 pass」是指有寫出 snapshot 的那些 pass。snapshot 腿是 fail-soft 的：clearinghouse 讀
 失敗時整輪不寫 snapshot 列，沒有本地 ledger 列、缺 `crossMaintenanceMarginUsed`／
@@ -631,35 +634,54 @@ gate 線是豁免的（`order_gate.py` 有 import-time 保證），所以 latch 
 `read_failed` 那一列最常發生：會打斷 orderStatus 的 API 故障通常也讀不到 clearinghouse，
 整段故障期間可能一列 diff 都沒有。）
 
-三件事要記住：
+四件事要記住：
 
 1. **量值不在 key 裡，所以列不會隨倉位變動增生**——反過來說，`--status` 那一行看不到
    現在多大，要去看上表右欄。
-2. **stamp 過就不會再寫第二列**（去重不看 `action_taken`）。同一個 run 之後又發生一次
-   **獨立的**同型事件時，它會出現在**該輪的 pass 判決與 safe mode**（例如
-   `position_sl_missing` 進 recoverable safe mode）與 warning log，**不會**是清單上的
-   新列。不要用「open case 清單是空的」推論「現在沒有這個問題」。
-3. **`resolved_read_succeeded` 是機器蓋的處置**（同 `resolved_fill_booked`）：意思是
-   **「本輪已了結那張單，而且了結它的那次 orderStatus 讀取是成功的」**。它**不**保證之後
-   都沒事——該單若日後被 §8.3 rule-5 重送或被 reopen 而復活，之後**這個 cloid 的
-   `order_missing_on_exchange` 事實一律進不了清單**：「讀不到」撞的是已 stamp 的
-   `<cloid>|read_failed`，而 unknownOid 對上 rule-10 證據那種（這一族裡最嚴重的一種）撞的
-   是了結它時寫的**裸 cloid** 那一列——兩個 key 都已被佔住（issue #65）。剩下的
-   `<cloid>|local_terminal`（那是 `orphan_exchange_order` 型別）只在 rule-5 重送那條路徑上
-   還會另開列；若該單是被 **reopen** 復活的，那一列在 reopen 當下就已經寫掉並蓋上
-   `local_row_reopened`，等於這個 cloid **每個還可能被寫出的 key 都被佔住了**（issue #66）。
-   所以要判「現在有沒有問題」一律看該輪的 pass 判決與 safe mode，不要看這個處置、也不要看
-   清單是不是空的。
+2. **同一個未了結的事實不會寫第二列**——它每輪重見仍是那一列。已了結的列則要看處置是誰
+   蓋的（2026-08-21 起，issue #65）：**你自己 `--stamp-case` 蓋的是終局**，同鍵之後的重見
+   一律不再寫列（你的答案不該被每一輪再問一次）；**機器蓋的「暫定」處置**（下一點）之後，
+   同鍵的新事實**會**另開一列並回到清單上。所以人工 stamp 過的那型復發時，只會出現在
+   **該輪的 pass 判決與 safe mode**（例如 `position_sl_missing` 進 recoverable safe mode）
+   與 warning log。**不要用「open case 清單是空的」推論「現在沒有這個問題」。**
+3. **哪些是機器蓋的「暫定」處置**（就這四類、六個字串，其餘機器處置與你寫的字都是終局）：
+   `settled_never_sent`、`settled_filled`／`settled_canceled`／`settled_rejected`、
+   `resolved_read_succeeded`、`local_row_reopened`。終局的機器處置有三個：
+   `resolved_fill_booked` 與 `local_row_backfilled`（fill 已入帳、本地 order 列已補寫，
+   都不可能再不成立），以及 `backfilled`（它的列本來就不帶 key、從來不進去重）。
+   暫定的意思是**「本輪把這件事了結了，但同一件事還可能再發生」**——再發生時**會另開一列、
+   回到清單上**，例如該單被 §8.3 rule-5 重送或被 reopen 而復活之後又缺席，unknownOid 對上
+   rule-10 證據那種（這一族裡最嚴重的一種）就會落在**裸 cloid** 那一列。
+   （2026-08-21 之前這四個處置一旦蓋章就把 key 永久關閉，上述復發只進 pass 判決，既不進
+   清單也不進 §21.4 計數——issue #65／#66。判「現在有沒有問題」仍以該輪的 pass 判決與
+   safe mode 為準：清單是 backlog，不是即時健康指標。）
+   **`--action` 不要用上面這六個字串**：去重看的是字串本身、不看是誰寫的，所以拿它們當你的
+   處置會把 key 重新打開；`--stamp-case` 會具名拒絕，改用你自己的話寫即可。
+4. **兩個「讀不到」的 key，自動了結的條件不一樣**（issue #66）：
+   - `<cloid>|local_terminal_read_failed`（本地終態、交易所仍列 open，那一輪 orderStatus
+     讀失敗）——**之後任何一輪讀得到就蓋上 `resolved_read_succeeded`**，不管答案是終態、
+     live 還是 unknownOid：這一列的事實就只是「問不到」。
+   - `<cloid>|read_failed`（本地 live、交易所沒列，那一輪讀失敗）——**只有在本輪順便把那張
+     單了結掉時才蓋**。所以有一種「該關卻沒關」：讀取失敗之後那張單只是**還掛在交易所上**
+     （open_orders 慢了一拍），本 sweep 不蓋處置；若它接著被 §19.3 撤單、kill switch 或
+     protection manager 收掉，就再也沒有哪一輪會了結它，那一列會**整個 run 停在未解**、把
+     §21.4 計數壓在非零，而每一輪都報乾淨。看到這種孤兒列，人工 `--stamp-case` 掉即可。
 
-   反過來也有一種「該關卻沒關」：讀取失敗之後那張單只是**還掛在交易所上**（open_orders 慢
-   了一拍），本 sweep 不會蓋處置；若它接著被 §19.3 撤單、kill switch 或 protection manager
-   收掉，就再也沒有哪一輪會了結它，`<cloid>|read_failed` 那一列會**整個 run 停在未解**、把
-   §21.4 計數壓在非零，而每一輪都報乾淨。看到這種孤兒列，人工 `--stamp-case` 掉即可。
+   兩者的差別**不是**哪邊比較會生列——生一列要先讀失敗、讓 key 重開的那次蓋章要先讀成功，
+   所以兩邊的**上限**都是「交易所讀取一好一壞抖動一次、生一列」，都不會每輪一列。實際上
+   `read_failed` 連這個上限都到不了：它只在了結該單時才蓋章，所以純抖動一列都不會多生，要有
+   一次重送或 reopen 才會。真正的差別是**還有沒有別的東西會關掉那一列**：`read_failed` 那張
+   單留在 sweep 的游標裡，之後某一輪本來就會把它了結並順手蓋章，所以不必急（代價就是上面那種
+   被別人收掉的孤兒列）；`local_terminal_read_failed` 最常見的那支答案（orderStatus 說終態）
+   **不產生 case**，不在讀得到的當下蓋，就沒有任何後續會替它蓋——它抖動生的列可以接受，因為
+   同一把 key 底下**只有最新那一列會是未了結的**（每一段都被結束它的那次讀取蓋掉），
+   `--status` 與 §21.4 看到的仍是一個活的故障。
 
-（升級注意：這三個 key 的形狀在本版改過（`ETH:2.5`→`ETH|unknown_coin`、
-`0.001`→`BTC|sl_missing`、裸 cloid→`<cloid>|read_failed`）。跨版沿用同一個 `run_id`
-resume 的 run，同一個未癒事實會再多一列新 key 的列（去重是精確比對，舊列擋不住新 key）；
-舊列若還沒 stamp，就是兩列都要 stamp。沒有證據遺失。）
+（升級注意：本版新增了 `<cloid>|local_terminal_read_failed`，把「讀不到」從
+`<cloid>|local_terminal` 拆出來（先前這兩個事實共用一把 key，先到的那個佔住它）；更早之前
+還改過 `ETH:2.5`→`ETH|unknown_coin`、`0.001`→`BTC|sl_missing`、裸 cloid→`<cloid>|read_failed`。
+跨版沿用同一個 `run_id` resume 的 run，同一個未癒事實會再多一列新 key 的列（去重是精確比對，
+舊列擋不住新 key）；舊列若還沒 stamp，就是兩列都要 stamp。沒有證據遺失。）
 
 ---
 

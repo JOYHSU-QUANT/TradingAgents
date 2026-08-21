@@ -942,6 +942,29 @@ def test_a_retry_that_resolves_a_deduped_case_stamps_the_existing_row(env):
     assert row["action_taken"] == "settled_canceled"
 
 
+def test_a_retry_never_overwrites_a_disposition_the_operator_already_wrote(env):
+    # The other half of that restamp: the dedupe also shuts a key a HUMAN
+    # stamped (their answer must not be re-asked every pass), so the same branch
+    # is reached with the operator's text on the row. Overwriting it would erase
+    # what a person attested, silently and with no audit row — and `--stamp-case`
+    # takes no run lease, so the daemon is the writer that would do it.
+    db, seams, reconciler = env
+    _insert_local_order(db, exchange_order_id="55")
+    reconciler.run("heartbeat")
+    (row,) = _cases(db, "order_missing_on_exchange")
+    with db.transaction() as conn:
+        repo.stamp_reconciliation_action_if_unset(conn, row["event_id"], "human: venue ticket 4471")
+
+    seams.order_status[_HEX] = {
+        "status": "order",
+        "order": {"order": {"oid": 77}, "status": "canceled"},
+    }
+    reconciler.run("heartbeat")
+    (row,) = _cases(db, "order_missing_on_exchange")
+    assert row["action_taken"] == "human: venue ticket 4471"
+    assert repo.get_order(db.conn, "o1")["status"] == "canceled"  # the settle still stood
+
+
 def test_an_exchange_open_order_with_a_terminal_local_row_is_reopened(env):
     db, seams, reconciler = env
     _insert_local_order(db, status="rejected")
@@ -1792,12 +1815,14 @@ def test_a_successful_read_disposes_of_the_earlier_read_failure_row(env):
 
 
 def test_a_read_that_succeeds_without_settling_the_order_stamps_nothing(env):
-    # The stamp is IRREVERSIBLE — the once-per-fact dedupe ignores action_taken,
-    # so a stamped key can never be re-opened by a later sighting. An order that
-    # is merely proven live stays in the locally-live cursor, so the very next
-    # pass can fail to read it again: stamping here would leave the row reading
-    # "resolved" while §21.4's unresolved count and `safe-mode --status` show
-    # clean through an outage that is still going on.
+    # An order merely proven live stays in the locally-live cursor, so the very
+    # next pass is free to fail to read it again — and the stamp is provisional,
+    # so that next failure would mint a row, and a venue flapping
+    # unreadable/readable would answer every flap with another one. The sibling
+    # key accepts exactly that, having nothing else that would ever close its
+    # row; this side does not need to, because a later pass settles the order
+    # and stamps then — so waiting bounds the rows per revive instead (what that
+    # conservatism costs is named in _clear_read_failure_case's docstring).
     db, seams, reconciler = env
     _insert_local_order(db)
     seams.order_status[_HEX] = RuntimeError("api down")
@@ -1813,6 +1838,343 @@ def test_a_read_that_succeeds_without_settling_the_order_stamps_nothing(env):
     (row,) = _cases(db, "order_missing_on_exchange")
     assert row["exchange_value"] == f"{_HEX}|read_failed"
     assert row["action_taken"] is None  # still open, as the live outage requires
+
+
+# -- an auto-stamped key vs the fact coming back (issue #65) ------------------
+
+
+def _unresolved_mismatches(db) -> int:
+    """§21.4's own count — with `safe-mode --status`, the pair issue #65 names.
+
+    Both read ``action_taken IS NULL``, and both are the point of the tests
+    below: a recurrence the dedupe swallows is visible in the pass verdict and
+    the log, but a run carrying it reports CLEAN to the acceptance gate and
+    lists nothing for the operator to work through.
+    """
+    from contrib.hyperliquid_perp.live.validation import _unresolved_reconciliation_mismatches
+
+    return _unresolved_reconciliation_mismatches(db.conn, "r")
+
+
+def _revive_by_resend(db, **exchange_order_id):
+    """Stand in for §8.3 rule 5 re-stamping the SAME orders row 'submitted'.
+
+    live/orders.py owns that write and test_orders.py pins its shape
+    (``test_a_resent_order_does_not_keep_its_old_rejection_reason``: same row,
+    status_reason cleared); reproduced here rather than driven through a
+    submitter because what these tests are about is what the SWEEP does once
+    the cloid is back in its cursor.
+
+    ``exchange_order_id`` is passed through only when given, never as an
+    explicit ``None``: that would CLEAR the column (``_UNSET`` is update_order's
+    leave-alone sentinel), which the real resend never does — and clearing it
+    would silently delete the §8.3 rule-10 evidence these tests turn on.
+    """
+    with db.transaction() as conn:
+        repo.update_order(
+            conn,
+            "o1",
+            status="submitted",
+            status_reason=None,
+            updated_at=_NOW,
+            **exchange_order_id,
+        )
+
+
+def test_a_resend_after_a_never_sent_settle_can_still_report_the_rule_10_fault(env):
+    # settled_never_sent is written on "unknownOid and no proof the exchange
+    # ever saw it". A rule-5 resend of that cloid may then be RECEIVED — and the
+    # next absence answers unknownOid against durable proof of receipt, which is
+    # §8.3 rule 10: the exchange took this cloid and denies it, one of the worst
+    # faults the sweep can find. While the stamp shut the key, that fault
+    # reached neither §21.4's count nor the operator's list.
+    db, seams, reconciler = env
+    _insert_local_order(db)
+    reconciler.run("heartbeat")
+    (settled,) = _cases(db, "order_missing_on_exchange")
+    assert settled["action_taken"] == "settled_never_sent"
+    assert _unresolved_mismatches(db) == 0  # the settle really did dispose of it
+
+    _revive_by_resend(db, exchange_order_id="55")  # ... and this time it landed
+    report = reconciler.run("heartbeat")
+    assert not report.orders_reconciled
+    rows = _cases(db, "order_missing_on_exchange")
+    assert len(rows) == 2
+    assert rows[-1]["action_taken"] is None
+    assert "rule 10" in rows[-1]["detail"]
+    assert _unresolved_mismatches(db) == 1
+
+    # And the reopened key goes back to one row per fact: a rule-10 order stays
+    # in the sweep's cursor indefinitely, so every later pass re-observes it. The
+    # guard has to weigh the LATEST row — weighing the settled one instead would
+    # answer each of those passes with another row.
+    reconciler.run("heartbeat")
+    reconciler.run("heartbeat")
+    assert len(_cases(db, "order_missing_on_exchange")) == 2
+
+
+def test_a_reopen_after_a_settle_can_still_report_the_next_absence(env):
+    # The sibling stamp, and the revive the module's own comments call a real
+    # situation: a past pass settled the row from orderStatus, a later pass
+    # finds the exchange listing it open and reopens it — same cloid, same fact
+    # key, and the order is back in the locally-live cursor it was settled out
+    # of.
+    db, seams, reconciler = env
+    _insert_local_order(db)
+    seams.order_status[_HEX] = {
+        "status": "order",
+        "order": {"order": {"oid": 77}, "status": "canceled"},
+    }
+    reconciler.run("heartbeat")
+    (settled,) = _cases(db, "order_missing_on_exchange")
+    assert settled["action_taken"] == "settled_canceled"
+
+    seams.open_orders = [
+        {"oid": 77, "coin": "BTC", "cloid": _HEX, "side": "B", "sz": "0.001", "origSz": "0.001"}
+    ]
+    seams.order_status[_HEX] = {
+        "status": "order",
+        "order": {"order": {"oid": 77}, "status": "open"},
+    }
+    reconciler.run("heartbeat")
+    assert repo.get_order(db.conn, "o1")["status"] == "open"  # reopened, live again
+
+    seams.open_orders = []
+    del seams.order_status[_HEX]  # absent again, and now denied outright
+    report = reconciler.run("heartbeat")
+    assert not report.orders_reconciled
+    rows = _cases(db, "order_missing_on_exchange")
+    assert len(rows) == 2
+    assert rows[-1]["action_taken"] is None
+    assert "rule 10" in rows[-1]["detail"]
+    assert _unresolved_mismatches(db) == 1
+
+
+def test_a_revived_order_that_cannot_be_read_again_gets_its_own_row(env):
+    # The third sibling: resolved_read_succeeded on the read-failure key. PR #64
+    # narrowed it to "this pass settled the order", which is what keeps a flap
+    # from minting rows — but settling is not the same as unrepeatable, and
+    # after a resend the very same outage is a new fact under the same key.
+    db, seams, reconciler = env
+    _insert_local_order(db)
+    seams.order_status[_HEX] = RuntimeError("api down")
+    reconciler.run("heartbeat")
+    seams.order_status[_HEX] = {
+        "status": "order",
+        "order": {"order": {"oid": 77}, "status": "canceled"},
+    }
+    reconciler.run("heartbeat")
+    read_rows = [
+        r for r in _cases(db, "order_missing_on_exchange") if "read_failed" in r["exchange_value"]
+    ]
+    assert [r["action_taken"] for r in read_rows] == ["resolved_read_succeeded"]
+
+    _revive_by_resend(db)
+    seams.order_status[_HEX] = RuntimeError("api down again")
+    report = reconciler.run("heartbeat")
+    assert not report.orders_reconciled
+    read_rows = [
+        r for r in _cases(db, "order_missing_on_exchange") if "read_failed" in r["exchange_value"]
+    ]
+    assert len(read_rows) == 2
+    assert read_rows[-1]["action_taken"] is None
+    assert _unresolved_mismatches(db) == 1
+
+
+def test_the_sweeps_order_dispositions_are_classified_as_the_set_intends(env):
+    # A membership table, not a guard: the behavioural tests above are what
+    # would catch a stamp renamed at its write site (each asserts the literal
+    # string it expects). What this pins is the CLASSIFICATION — that the four
+    # families of order disposition below (six strings, `settled_{status}` being
+    # three of them) are provisional and the "cannot come back" ones are not.
+    # It is the only place `settled_filled` and `settled_rejected` are
+    # named at all: those two are derived from the terminal-status vocabulary
+    # rather than written at a call site, so no behavioural test reaches them
+    # (`settled_canceled`, which several do, is the derivation's witness).
+    # `backfilled` appears in neither list on purpose: its case carries no
+    # exchange_value, so it never meets the dedupe.
+    for stamp in (
+        "settled_never_sent",
+        "settled_canceled",
+        "settled_filled",
+        "settled_rejected",
+        "resolved_read_succeeded",
+        "local_row_reopened",
+    ):
+        assert stamp in repo.PROVISIONAL_DISPOSITIONS, stamp
+    for final in ("resolved_fill_booked", "local_row_backfilled"):
+        assert final not in repo.PROVISIONAL_DISPOSITIONS, final
+
+
+# -- the reopen tiebreaker's read-failure row (issue #66) ---------------------
+
+
+def _list_the_order(seams):
+    """The exchange listing oid=42 open — the reopen tiebreaker's precondition."""
+    seams.open_orders = [
+        {"oid": 42, "coin": "BTC", "cloid": _HEX, "side": "B", "sz": "0.001", "origSz": "0.001"}
+    ]
+
+
+def test_a_later_readable_order_status_disposes_of_the_reopen_read_failure(env):
+    # Of the outcomes the reopen tiebreaker can reach, only the reopen carries
+    # an action_taken — and the COMMON answer is "orderStatus says terminal
+    # too", which produces no case at all and so no restamp. The row recording
+    # "we could not ask" therefore had no automatic way to close, and sat on
+    # `safe-mode --status` as a stale item until someone stamped it by hand (the
+    # very cost PR #64 removed for the sibling key).
+    db, seams, reconciler = env
+    _insert_local_order(db, status="rejected")
+    _list_the_order(seams)
+    seams.order_status[_HEX] = RuntimeError("api down")
+    reconciler.run("heartbeat")
+    (row,) = _cases(db, "orphan_exchange_order")
+    assert row["exchange_value"] == f"{_HEX}|local_terminal_read_failed"
+    assert row["action_taken"] is None
+    assert _unresolved_mismatches(db) == 1
+
+    seams.order_status[_HEX] = {  # the read works, and the open-orders view was behind
+        "status": "order",
+        "order": {"order": {"oid": 42}, "status": "canceled"},
+    }
+    report = reconciler.run("heartbeat")
+    assert report.orders_reconciled  # no case: two eventually-consistent reads
+    (row,) = _cases(db, "orphan_exchange_order")
+    assert row["action_taken"] == "resolved_read_succeeded"
+    assert _unresolved_mismatches(db) == 0
+    assert repo.get_order(db.conn, "o1")["status"] == "rejected"  # nothing was touched
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected_status"),
+    [
+        ({"status": "order", "order": {"order": {"oid": 42}, "status": "open"}}, "open"),
+        (None, "rejected"),  # unknownOid — the venue contradicting its own listing
+    ],
+    ids=["live-answer-reopens", "unknown-oid-contradiction"],
+)
+def test_any_answered_read_disposes_of_the_reopen_read_failure(env, answer, expected_status):
+    # "Read succeeded" is the whole fact that row records, so every answer
+    # disproves it — not only the terminal one the common case produces. The
+    # live answer reopens the row and the unknownOid answer records a fresh
+    # fault, and neither of those would otherwise close the read-failure row:
+    # they land under a DIFFERENT key (see _local_terminal_read_failure_fact_key),
+    # so _record's same-key restamp cannot reach it.
+    db, seams, reconciler = env
+    _insert_local_order(db, status="rejected")
+    _list_the_order(seams)
+    seams.order_status[_HEX] = RuntimeError("api down")
+    reconciler.run("heartbeat")
+
+    if answer is None:
+        del seams.order_status[_HEX]
+    else:
+        seams.order_status[_HEX] = answer
+    reconciler.run("heartbeat")
+    rows = {r["exchange_value"]: r for r in _cases(db, "orphan_exchange_order")}
+    assert rows[f"{_HEX}|local_terminal_read_failed"]["action_taken"] == "resolved_read_succeeded"
+    assert repo.get_order(db.conn, "o1")["status"] == expected_status
+
+
+def test_a_contradiction_is_recorded_beside_the_read_failure_not_swallowed_by_it(env):
+    # The two facts are OPPOSITE — "we could not ask" and "the venue answered,
+    # and its answer contradicts its own listing" — and the second is the graver
+    # one. Sharing a key gave the first sighting to arrive the key, so whichever
+    # came second reached no durable row at all; and the automatic disposition
+    # would have stamped "the read succeeded" onto whichever row it found,
+    # including the contradiction's (PR #64 split the absent-order side for
+    # exactly this pairing; this is its mirror).
+    db, seams, reconciler = env
+    _insert_local_order(db, status="rejected")
+    _list_the_order(seams)
+    seams.order_status[_HEX] = RuntimeError("api down")
+    reconciler.run("heartbeat")
+
+    del seams.order_status[_HEX]  # unknownOid, while the exchange still lists it open
+    report = reconciler.run("heartbeat")
+    assert not report.orders_reconciled
+    rows = {r["exchange_value"]: r for r in _cases(db, "orphan_exchange_order")}
+    assert set(rows) == {f"{_HEX}|local_terminal", f"{_HEX}|local_terminal_read_failed"}
+    assert "contradictory" in rows[f"{_HEX}|local_terminal"]["detail"]
+    assert rows[f"{_HEX}|local_terminal"]["action_taken"] is None
+    # ... and the read-failure row is closed by its own fact, not by that one.
+    assert rows[f"{_HEX}|local_terminal_read_failed"]["action_taken"] == "resolved_read_succeeded"
+    assert _unresolved_mismatches(db) == 1
+
+
+def test_a_read_failure_after_a_disposal_gets_its_own_row(env):
+    # The #65 half on this key: the disposal is provisional because the local
+    # row stays terminal and the exchange goes on listing the order, so the very
+    # next pass can fail to read again — and that failure is a new occurrence.
+    db, seams, reconciler = env
+    _insert_local_order(db, status="rejected")
+    _list_the_order(seams)
+    seams.order_status[_HEX] = RuntimeError("api down")
+    reconciler.run("heartbeat")
+    seams.order_status[_HEX] = {
+        "status": "order",
+        "order": {"order": {"oid": 42}, "status": "canceled"},
+    }
+    reconciler.run("heartbeat")
+    seams.order_status[_HEX] = RuntimeError("api down again")
+    reconciler.run("heartbeat")
+    rows = [r for r in _cases(db, "orphan_exchange_order") if "read_failed" in r["exchange_value"]]
+    assert len(rows) == 2
+    assert rows[-1]["action_taken"] is None
+    assert _unresolved_mismatches(db) == 1
+
+
+def test_a_row_settled_again_after_a_reopen_can_still_report_a_contradiction(env):
+    # local_row_reopened is the provisional stamp on the |local_terminal key.
+    # Its recurrence needs the most steps of the four (a reopen, then a later
+    # re-settle) — but no resend, because the sweep does both itself. The
+    # situation comes back the moment a later pass settles the row again while
+    # the exchange goes on listing the order — and this time the
+    # venue contradicts its own listing, which is the graver fault and the one
+    # the stamp used to swallow.
+    db, seams, reconciler = env
+    _insert_local_order(db, status="rejected")
+    _list_the_order(seams)
+    seams.order_status[_HEX] = {
+        "status": "order",
+        "order": {"order": {"oid": 42}, "status": "open"},
+    }
+    reconciler.run("heartbeat")
+    (reopened,) = _cases(db, "orphan_exchange_order")
+    assert reopened["action_taken"] == "local_row_reopened"
+
+    seams.open_orders = []  # settled back to terminal by a later pass
+    seams.order_status[_HEX] = {
+        "status": "order",
+        "order": {"order": {"oid": 42}, "status": "canceled"},
+    }
+    reconciler.run("heartbeat")
+    assert repo.get_order(db.conn, "o1")["status"] == "canceled"
+
+    _list_the_order(seams)  # listed open again, and now denied outright
+    del seams.order_status[_HEX]
+    report = reconciler.run("heartbeat")
+    assert not report.orders_reconciled
+    rows = _cases(db, "orphan_exchange_order")
+    assert len(rows) == 2
+    assert rows[-1]["exchange_value"] == f"{_HEX}|local_terminal"  # the SAME key
+    assert rows[-1]["action_taken"] is None
+    assert "contradictory" in rows[-1]["detail"]
+    assert _unresolved_mismatches(db) == 1
+
+
+def test_a_reopen_tiebreaker_that_keeps_failing_still_dedupes_to_one_row(env):
+    # The other half of the #66 stamp: it must not turn a persistent outage into
+    # a row per pass. Nothing disproved the fact, so nothing stamps it, so the
+    # once-per-fact guard holds exactly as before.
+    db, seams, reconciler = env
+    _insert_local_order(db, status="rejected")
+    _list_the_order(seams)
+    seams.order_status[_HEX] = RuntimeError("api down")
+    for _ in range(3):
+        reconciler.run("heartbeat")
+    (row,) = _cases(db, "orphan_exchange_order")
+    assert row["action_taken"] is None
 
 
 def test_a_failed_disposition_stamp_does_not_fail_the_orders_leg(env, monkeypatch, caplog):

@@ -435,6 +435,73 @@ def test_stamping_cannot_reach_another_runs_case(store, capsys):
         assert row["action_taken"] is None  # run "r"'s case survived untouched
 
 
+def test_status_lists_the_reopened_occurrence_of_a_disposed_of_key(store, capsys):
+    # The operator half of issue #65. This listing is their ONLY enumeration of
+    # the backlog, and it keys on action_taken — so while a provisionally
+    # disposed-of key swallowed its next occurrence, the worse fault that
+    # followed a resend appeared here not at all, under a row still reading
+    # "settled". The settled row must stay off the list (it IS disposed of) and
+    # the occurrence after it must be on it, with the id --stamp-case needs.
+    path, db = store
+    cloid = "0x" + "ab" * 16
+    for action, detail in (
+        ("settled_never_sent", "the send never landed"),
+        (None, "rule 10: the exchange took the cloid and denies it"),
+    ):
+        with db.transaction() as conn:
+            assert repo.insert_exchange_reconciliation_event(
+                conn,
+                run_id="r",
+                trigger="pre_cycle",
+                case_type="order_missing_on_exchange",
+                exchange_value=cloid,
+                action_taken=action,
+                detail=detail,
+                timestamp=_NOW,
+            )
+    open_id = repo.iter_exchange_reconciliation_events(db.conn, "r")[-1]["event_id"]
+    db.close()
+
+    assert main(["safe-mode", "--run-id", "r", "--db", str(path), "--status"]) == 0
+    out = capsys.readouterr().out
+    assert "open reconciliation cases (1;" in out
+    assert f"[{open_id}]" in out
+
+
+@pytest.mark.parametrize("word", ["settled_never_sent", "settled_canceled", "local_row_reopened"])
+def test_stamping_with_one_of_the_sweeps_own_dispositions_is_refused(store, capsys, word):
+    # The once-per-fact guard reads the STRING, not who wrote it: these words
+    # mean "an episode that can recur", so they RE-OPEN the key. An operator
+    # reaching for the vocabulary the RUNBOOK prints at them would get a stamp
+    # the CLI called successful and the next pass answered with a fresh
+    # unresolved row — every pass, for a fault that stays in the sweep's cursor.
+    path, db = store
+    event_id = _open_case(db, case_type="order_missing_on_exchange", exchange_value="0xabab")
+    db.close()
+    rc = main(
+        [
+            "safe-mode",
+            "--run-id",
+            "r",
+            "--db",
+            str(path),
+            "--stamp-case",
+            str(event_id),
+            "--action",
+            word,
+        ]
+    )
+    assert rc == 1
+    assert "PROVISIONAL" in capsys.readouterr().err
+    with Database(path) as db2:
+        (row,) = [
+            r
+            for r in repo.iter_exchange_reconciliation_events(db2.conn, "r")
+            if r["event_id"] == event_id
+        ]
+        assert row["action_taken"] is None  # refused BEFORE the write, not after
+
+
 def test_stamping_an_unknown_case_id_is_named_not_silent(store, capsys):
     path, _ = store
     rc = main(

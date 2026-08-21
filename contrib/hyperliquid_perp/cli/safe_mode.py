@@ -163,7 +163,10 @@ def _cmd_safe_mode(argv: list[str]) -> int:
             # listing (the operator's only enumeration of the backlog):
             #   - fill_unmapped  → open until the fill BOOKS (an anti-join that
             #     never reads action_taken); resolved by §8.3 re-ingest.
-            #   - everything else → open until a human stamps action_taken.
+            #   - everything else → open until action_taken is stamped, by a
+            #     human here or by the sweep for the dispositions it can
+            #     establish (which is why a disposed-of row can be gone from
+            #     this listing with nobody having touched it).
             unmapped_open = repo.iter_unresolved_fill_sightings(db.conn, args.run_id)
             unmapped_ids = {row["event_id"] for row in unmapped_open}
             open_cases = [
@@ -291,6 +294,24 @@ def _stamp_reconciliation_case(db, repo, args) -> int:
         print(
             'error: --stamp-case requires --action "<disposition>" — the audit row '
             "must record what the human decided about this case (§12.3).",
+            file=sys.stderr,
+        )
+        return 1
+    if args.action.strip() in repo.PROVISIONAL_DISPOSITIONS:
+        # The once-per-fact guard reads the STRING, not who wrote it: these
+        # words mean "the sweep disposed of an episode that can recur", so one
+        # of them REOPENS the key for the next sighting. Right for the daemon,
+        # wrong for a human — a case whose fault is still live (a §8.3 rule-10
+        # order never leaves the sweep's cursor) would answer this stamp with a
+        # fresh unresolved row on every pass, holding §21.4's count above zero
+        # for the rest of the run while this command reported success each
+        # time. Named here rather than left to the operator's word choice,
+        # because the RUNBOOK publishes this vocabulary and invites imitation.
+        print(
+            f"error: --action {args.action.strip()!r} is one of the sweep's own "
+            "dispositions, which the once-per-fact guard treats as PROVISIONAL — "
+            "stamping it would re-open this case on the next sighting instead of "
+            "disposing of it. Describe the disposition in your own words.",
             file=sys.stderr,
         )
         return 1

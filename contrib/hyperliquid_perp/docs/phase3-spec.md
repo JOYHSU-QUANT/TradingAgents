@@ -1018,24 +1018,55 @@ resolution 不改寫 case rows（它們是 log），且**「已解決」的定�
 exchange_value)` **不含 symbol 欄**，裸值會讓 off-coin ETH 2.5 與同幣 exch_size 2.5 互撞而
 靜默丟掉第二列。（`equity_out_of_tolerance` 是帳戶級事實、`symbol` 本來就是 NULL，不適用。）
 
-推論（操作面看得到，見 RUNBOOK §6）：去重的存在檢查**不看 `action_taken`**，所以一個已
-了結的 key 不會被復發重開——復發顯示在該輪的 pass 判決與 safe mode，不是新列。因此規則
-是**自動（機器蓋的）處置只該蓋在事實已了結、且不會再被觀察到之處**。
+**（v14 修訂，2026-08-21，issue #65／#66）處置的暫定性與去重的關係**：去重的存在檢查看
+的是同一個 key 的**最新一列**，並且**只有該列帶「暫定處置」時才放行新列**
+（`_vocab.PROVISIONAL_DISPOSITIONS`）。三種情形：
 
-今天**符合的有兩個**：`resolved_fill_booked`（fill 一旦入帳就沒有任何退帳路徑，package 內
-沒有 `DELETE FROM fills`）與 `local_row_backfilled`（事實是「這張交易所單沒有本地 orders
-列」，補寫後就不可能再成立，同樣沒有 `DELETE FROM orders`）。
+- **未了結的列照擋**——一個未癒事實每輪重見仍是同一列（去重原本的職責，不變）。
+- **人工 `--stamp-case` 的處置照擋**——操作者的答案不該被之後每一輪再問一次。rule-10
+  那種單（交易所收了 cloid 卻否認）會一直留在 sweep 的游標裡、每輪都重見，人工 stamp 是
+  唯一的了結手段；若把它當暫定，之後每一輪都會再生一列，正是去重要擋的洗版。
+- **機器蓋的暫定處置放行新列**——這四類處置了結的都是**還可能再發生**的事實，再發生時的
+  觀察是**新的一次**，該有自己的列（未修正前它會被吞掉，`safe-mode --status` 與 §21.4 計數
+  兩個面都看不到，包含最嚴重的 rule-10 那種）。**怎麼再發生逐個成員不同**，不要一律套
+  「要先有一次重送或 reopen」（`settled_*` 是，`local_row_reopened` 只需 sweep 自己再 settle
+  一次，`resolved_read_succeeded` 在 `|local_terminal_read_failed` 上只需交易所下次答案翻面）
+  ——下面逐條列。
 
-**其餘四個都落在同一個殘餘窗口裡**——`settled_never_sent` 與 `settled_{local_status}`
-（裸 cloid 鍵）、`resolved_read_succeeded`（`<cloid>|read_failed` 鍵）、`local_row_reopened`
-（`<cloid>|local_terminal` 鍵）：該單可經 §8.3 rule-5 重送或 `_maybe_reopen_terminal_order`
-復活而重回 `iter_open_live_orders`，之後同鍵的未解事實就會被吞掉，差別只在事實要怎麼回來
-才撞得上。`resolved_read_succeeded` 的鍵最窄（只有「又讀不到」會再撞上它；裸 cloid 那個鍵
-則是**其餘三種** `order_missing_on_exchange` 事實都會撞上，包含最嚴重的 rule-10 那種），
-但不是零風險，**新增自動 stamp 時不要拿它當合規範本**。收斂方向見 issue #65／#66。
+暫定集合＝`settled_never_sent`、`settled_{terminal_status}`（由終態 order status 推導，
+不逐一寫死）、`resolved_read_succeeded`、`local_row_reopened`。**不在集合內**的機器處置有
+三個，理由分兩種：`resolved_fill_booked` 與 `local_row_backfilled` 的事實（fill 已入帳、
+orders 列已補寫）補完後不可能再成立——package 內既沒有 `DELETE FROM fills` 也沒有
+`DELETE FROM orders`——放行只會製造每輪重複的洗版列；`backfilled` 則是它的 case 根本不帶
+`exchange_value`，從來不進去重。
 
-（第七個機器處置 `backfilled`（`exchange_fill_missing_local`）不吃這條規則：它寫入時**不帶
-`exchange_value`**，本來就不進 dedupe、每 pass 各自一列，不會佔住任何事實鍵。）
+「回來」要多久回來一次，**逐個成員不同**，這是加新成員時要先回答的問題：`settled_*` 與
+`local_row_reopened` 需要一次重送或 reopen（注意 `local_row_reopened` 與 `settled_{status}`
+可以互相 revive，不必經過重送）；`resolved_read_succeeded` 在兩把讀取失敗鍵上則不對稱——
+見下。可重開**不等於**可以提早蓋章：一個 sweep 每輪都會重見、而且中間不需要交易所改變任何
+狀態的故障（rule-10 那種永遠不離開游標的單），處置若是暫定的就會**每 pass 一列**——那正是
+洗版，也正是人工 stamp 必須是終局的原因。
+
+兩把「讀不到」的鍵**不是**那個形狀：生一列要先有一次讀取失敗，而讓 key 重開的那個 stamp 要先
+有一次讀取成功，所以**兩邊的上限都是「一次 unreadable→readable 抖動一列」，都不會每 pass 一
+列**。它們規則不同的原因不是頻率，是**還有沒有別的東西會關掉那一列**：
+
+- `<cloid>|read_failed`（本地 live、交易所沒列）只在**本輪了結了那張單**時才蓋——那張單留在
+  游標裡，之後的某一輪本來就會把它了結並順手蓋章，所以不急著在只是「讀得到」時就蓋。因此它
+  連上面那個上限都到不了：**純抖動一列都不會多生，要有一次重送或 reopen 才會**（這就是上一段
+  說的「不對稱」）。代價是被別的寫入者（§19.3 撤單、kill switch、protection manager）收掉的
+  單沒人再了結它，見 RUNBOOK §6 的「該關卻沒關」。
+- `<cloid>|local_terminal_read_failed`（本地終態、交易所仍列 open）只要 orderStatus 這次
+  **答了**就蓋，不論答案是終態、live 還是 unknownOid——那一列的事實只是「問不到」，而且它
+  最常見的那支答案（「orderStatus 說終態」）**不產生 case**，沒有任何後續會替它蓋章。抖動
+  生的列可以接受，因為同一把 key 底下**只有最新那一列會是未了結的**（每一段都被結束它的那次
+  讀取蓋掉了），`--status` 與 §21.4 看到的仍是一個活的故障。
+
+**（v14 同批）`<cloid>|local_terminal` 拆鍵**：讀取失敗自此有自己的 key
+（`<cloid>|local_terminal_read_failed`），與 reopen／unknownOid 矛盾分開，理由與 v13 把
+`<cloid>|read_failed` 從裸 cloid 拆出來完全相同——兩個相反的事實共用一把 key 時，先到的那個
+佔住它，後到的（這裡是「交易所自打嘴巴」，較嚴重的那個）不會留下任何列；而自動了結也會蓋錯
+列，把「讀取成功」蓋在一列 detail 寫著「讀到了但答 unknownOid」的紀錄上。
 
 ## 13. Safe Mode
 

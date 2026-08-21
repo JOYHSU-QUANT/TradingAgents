@@ -167,22 +167,41 @@ def _clip(text: str | None) -> str | None:
 #     transition below): an independent later mismatch of a different magnitude
 #     is its own fact, not a repeat of the first.
 # The dedupe carries no symbol column, so either way the coin/cloid stays IN the
-# key. Note the asymmetry this buys: a disposed-of invariant row is never
-# re-opened by a recurrence (the dedupe ignores action_taken), so the recurrence
-# is visible in the pass verdict and the log, not in a new row — which is why an
-# AUTOMATIC disposition belongs only where the fact is settled, not merely quiet
-# (see ``_clear_read_failure_case``'s caller, and issue #65 for the sibling
-# stamps that are looser than that).
+# key.
+#
+# Then ask, for a fact this module DISPOSES of automatically, whether the
+# episode can start over — because a stamped key is normally shut for good, and
+# a recurrence under it would reach neither `safe-mode --status` nor §21.4's
+# unresolved count. Ask it PER STAMP — being about an order does not settle it.
+# Most of this module's order stamps dispose of a fact the sweep can find itself
+# facing again (a §8.3 rule-5 resend or a reopen puts the cloid back; the reopen
+# tiebreaker's read failure needs only the venue's next answer to flip), so those are
+# declared PROVISIONAL (repo.PROVISIONAL_DISPOSITIONS) so the next occurrence
+# gets its own row. What is NOT provisional: a human's `--stamp-case`
+# disposition (their answer must not be re-asked on every pass thereafter), and
+# a fact whose subject cannot return — ``local_row_backfilled`` is an order
+# stamp and stays out, because once the local row exists it cannot go missing
+# again (this package contains no `DELETE FROM orders`).
+#
+# Reopenability is not a licence to stamp early, either. How often the fact can
+# return is one thing to weigh — a fault the sweep re-observes every pass with
+# no venue state change in between (the §8.3 rule-10 order that never leaves the
+# cursor) would mint a row per pass if its disposition were provisional, which
+# is why the human stamp that disposes of one is final. The read-failure keys
+# are not that shape: minting needs a failed read and the stamp before it a
+# successful one, so on EITHER of them the ceiling is a row per
+# unreadable→readable flap. What separates their two guards is whether anything
+# else would ever close the row — see ``_clear_read_failure_case``.
 
 
 def _read_failure_fact_key(cloid: str) -> str:
     """The once-per-fact key for "orderStatus could not be read for this cloid".
 
     A DIFFERENT fact from the order's real disposition, so a different key (the
-    same reasoning, and the same ``|`` suffix shape, as
-    ``_maybe_reopen_terminal_order``'s ``local_terminal``): both land under
-    case_type ``order_missing_on_exchange``, and while they shared the bare
-    cloid the first sighting to arrive owned the key — a later genuine absence
+    same reasoning, and the same ``|`` suffix shape, as its mirror on the reopen
+    side — ``_local_terminal_read_failure_fact_key``). This key and the bare
+    cloid both land under case_type ``order_missing_on_exchange``, and while
+    they WERE one key the first sighting to arrive owned it — a later genuine absence
     of that cloid was swallowed by the dedupe and never recorded, which is
     exactly the pairing a venue misroute produces every tick.
 
@@ -191,6 +210,45 @@ def _read_failure_fact_key(cloid: str) -> str:
     with no error anywhere.
     """
     return f"{cloid}|read_failed"
+
+
+def _local_terminal_fact_key(cloid: str) -> str:
+    """The reopen tiebreaker's once-per-fact key: what orderStatus ANSWERED.
+
+    "The exchange lists this cloid open while our row is terminal" — a fact of
+    its own, so a later re-settle of the same cloid must not dedupe against a
+    plain-orphan sighting, and vice versa.
+
+    Shared by the two outcomes that are readings of one situation: the reopen
+    (answer LIVE, the terminal row was wrong) and the unknownOid contradiction
+    (the venue's two views disagree). NOT by the read failure, which has its
+    own key below — see there.
+    """
+    return f"{cloid}|local_terminal"
+
+
+def _local_terminal_read_failure_fact_key(cloid: str) -> str:
+    """The once-per-fact key for "orderStatus could not be read" HERE.
+
+    The reopen tiebreaker's read failure is a different fact from what a
+    successful read then says, and it splits off for exactly the reasons
+    ``_read_failure_fact_key`` splits off the absent-order tiebreaker's — the
+    two directions are mirror images and now have mirror-image keys:
+
+    * A recorded read failure would otherwise swallow the unknownOid
+      contradiction that a later pass finds under the same key: the venue
+      contradicting itself is the graver fault and it would reach no durable
+      row at all.
+    * And the disposal would run the other way: "a later read answered" is what
+      disproves the read failure, but stamping that onto a CONTRADICTION row
+      would assert a read that never failed, over a detail saying it answered
+      unknownOid.
+
+    ONE function, same as its sibling: this key is looked up as well as
+    written, and a lookup spelled differently from the write would leave the
+    row open forever with no error anywhere.
+    """
+    return f"{cloid}|local_terminal_read_failed"
 
 
 @dataclass(frozen=True)
@@ -995,23 +1053,30 @@ class LiveReconciler:
             if case is not None:
                 cases.append(case)
                 if case.action_taken is not None:
-                    # ONLY when this pass DISPOSED of the order. The stamp is
-                    # one the store cannot take back: the once-per-fact dedupe
-                    # ignores action_taken, so a later re-observation of the
-                    # same key writes NOTHING, and a row stamped early would go
-                    # on asserting "resolved" while §21.4's unresolved count and
-                    # `safe-mode --status` read clean through a live outage.
+                    # ONLY when this pass DISPOSED of the order, which is what
+                    # takes it out of THIS cursor. The other outcomes leave it
+                    # here, in a cursor that keeps probing it (while the
+                    # exchange does not list it — a pass that finds it listed
+                    # skips this loop for it), so a later pass gets to settle it
+                    # and stamp then. Waiting costs one row that stays open a
+                    # while; stamping on any answered read would cost a fresh
+                    # row per unreadable→readable flap of the venue, for a fault
+                    # the sweep has not finished with. The sibling caller has no
+                    # later pass to wait for and takes the other trade — see
+                    # _clear_read_failure_case for the pair.
                     #
-                    # The other outcomes leave the row in THIS cursor, where the
-                    # next pass's read is free to fail again — that is the case
-                    # the gate exists for. Disposal does not make recurrence
-                    # impossible (a §8.3 rule-5 resend re-stamps the same
-                    # order_id 'submitted' — live/orders.py — and
-                    # _maybe_reopen_terminal_order revives a terminal row), it
-                    # makes it require a deliberate new send or a contradicting
-                    # exchange answer. That residual window is issue #65, shared
-                    # with the sibling settled_* stamps below.
-                    self._clear_read_failure_case(cloid)
+                    # Disposal does not make recurrence impossible — a §8.3
+                    # rule-5 resend re-stamps the same order_id 'submitted'
+                    # (live/orders.py) and _maybe_reopen_terminal_order revives a
+                    # terminal row — it makes it need a deliberate new send or a
+                    # contradicting exchange answer first. That is the bound
+                    # this key relies on: on THIS side, rows come back per
+                    # revive rather than per flap.
+                    self._clear_read_failure_case(
+                        cloid,
+                        case_type="order_missing_on_exchange",
+                        fact_key=_read_failure_fact_key(cloid),
+                    )
             if not settled:
                 ok = False
         return ok
@@ -1043,12 +1108,23 @@ class LiveReconciler:
                 case_type="orphan_exchange_order",
                 symbol=registry["symbol"],
                 local_value=f"{local['order_id']}:{local['status']}",
-                exchange_value=f"{cloid}|local_terminal",
+                exchange_value=_local_terminal_read_failure_fact_key(cloid),
                 detail=(
                     f"exchange lists oid={oid} open but the local row is terminal "
                     f"({local['status']}) and orderStatus failed: {exc}"
                 ),
             )
+        # The read ANSWERED, whatever it answered — so the fact "we could not
+        # ask this cloid" is disproved, for all three outcomes below. Disposing
+        # of it here rather than per branch is the whole reason that fact has a
+        # key of its own: the unknownOid branch below records a DIFFERENT fault
+        # (the venue contradicting itself), and stamping "the read succeeded"
+        # onto that row would say something that never happened (issue #66).
+        self._clear_read_failure_case(
+            cloid,
+            case_type="orphan_exchange_order",
+            fact_key=_local_terminal_read_failure_fact_key(cloid),
+        )
         if parsed is not None:
             exchange_order_id, raw_status = parsed
             local_status = local_status_for_exchange_status(raw_status)
@@ -1077,7 +1153,7 @@ class LiveReconciler:
                     local_value=f"{local['order_id']}:{local['status']}",
                     # Distinct fact key: a later re-settle of the same cloid
                     # must not dedupe against a plain-orphan sighting.
-                    exchange_value=f"{cloid}|local_terminal",
+                    exchange_value=_local_terminal_fact_key(cloid),
                     detail=(
                         f"exchange lists oid={oid} open, orderStatus confirms "
                         f"{raw_status!r}, but the local row was terminal "
@@ -1090,6 +1166,10 @@ class LiveReconciler:
             # (a cancel this startup just landed is the common cause). Two
             # eventually-consistent reads disagreeing for a moment is not a
             # local/exchange conflict — same reading as the mirror direction.
+            # No case, therefore no ``_record`` restamp: the read failure this
+            # pass disproved was disposed of above, where every answered read
+            # is treated alike (issue #66 — before that, this outcome, which is
+            # the COMMON one, left the read-failure row open forever).
             return True, None
         # unknownOid while open_orders LISTS the order: contradictory exchange
         # answers — unproven either way, never guessed.
@@ -1097,7 +1177,7 @@ class LiveReconciler:
             case_type="orphan_exchange_order",
             symbol=registry["symbol"],
             local_value=f"{local['order_id']}:{local['status']}",
-            exchange_value=f"{cloid}|local_terminal",
+            exchange_value=_local_terminal_fact_key(cloid),
             detail=(
                 f"exchange lists oid={oid} open but orderStatus answers unknownOid "
                 f"and the local row is terminal ({local['status']}) — contradictory "
@@ -1248,45 +1328,65 @@ class LiveReconciler:
             resolved=True,
         )
 
-    def _clear_read_failure_case(self, cloid: str) -> None:
-        """Dispose of a past unreadable-orderStatus row for a SETTLED order.
+    def _clear_read_failure_case(self, cloid: str, *, case_type: str, fact_key: str) -> None:
+        """Dispose of a past unreadable-orderStatus row that a later read disproved.
 
-        ``_record``'s restamp reaches only rows under the SAME fact key, and a
-        read failure deliberately has its own (see ``_read_failure_fact_key``)
-        — so nothing else would ever close this row. Left open, one transient
+        ``_record``'s restamp reaches only rows under the SAME fact key, and
+        each tiebreaker's read failure deliberately has one of its own (see
+        ``_read_failure_fact_key`` and ``_local_terminal_read_failure_fact_key``)
+        — so nothing else would ever close these rows. Left open, one transient
         API error would hold the §21.4 ``unresolved_reconciliation_mismatch``
         count above zero for the rest of the run, stampable only by hand, for a
         fact a later pass disproved.
 
-        The caller's guard is the load-bearing half: this may only run once the
-        order is settled, because the stamp is irreversible (see there). It
-        deliberately covers LESS than "the read worked" — TWO successful-read
-        outcomes leave the row open, and they cost differently:
+        Both callers pass their own ``case_type``/``fact_key`` pair; the two
+        keys land under DIFFERENT case types (the absent-order tiebreaker files
+        ``order_missing_on_exchange``, the reopen tiebreaker
+        ``orphan_exchange_order``), which is why neither is derived here.
 
-        * unknownOid against §8.3 rule-10 evidence: the order stays in the
-          cursor and the fault can return, and that order already needs a human,
-          so the extra row sits on a §12.3 case someone is reading anyway.
-        * still live per orderStatus: the pass can be entirely clean, and the
-          order may then be retired by a writer that is not this sweep (a §19.3
-          cancel, the kill switch, the protection manager), so no later pass
-          ever disposes of it. That row then holds §21.4's unresolved count
-          above zero, with nothing else reporting a problem — the one case where
-          this guard's conservatism has a real cost, accepted because the
-          alternative (stamping on a read that proves nothing about the order)
-          is the audit-trail lie the guard exists to prevent (issue #66).
+        What "disproved" means differs by caller, and the difference is
+        deliberate rather than an oversight in either:
+
+        * The reopen tiebreaker stamps on the successful read itself, whatever
+          it answered. It can therefore be re-observed without any revive: the
+          local row stays terminal and the exchange goes on listing it, so an
+          orderStatus that alternates unreadable/readable mints a row per flap.
+          Accepted, because only the NEWEST of them is ever unresolved — every
+          superseded one was closed by the read that ended it, so `safe-mode
+          --status` and the §21.4 count still show one live fault, and the
+          exit-5 ``orphan_exchange_order_count`` gate already fails at one row.
+          What is bought is the common case: "orderStatus says terminal too"
+          produces no case at all, so nothing else would ever close this row
+          (issue #66).
+        * The absent-order tiebreaker stamps only once the pass SETTLED the
+          order, which is what takes it out of a cursor that would otherwise
+          re-observe it every pass (see there). Two successful-read outcomes
+          therefore leave its row open: unknownOid against §8.3 rule-10 evidence
+          (that order already needs a human, so the extra row sits on a §12.3
+          case someone is reading anyway), and "still live per orderStatus" —
+          where the order may then be retired by a writer that is not this sweep
+          (a §19.3 cancel, the kill switch, the protection manager), and the row
+          holds §21.4's unresolved count above zero with nothing else reporting
+          a problem. Accepted because this side does not NEED the wider rule:
+          the order stays in a cursor that keeps probing it, so a later pass can
+          settle it and stamp then — what orphans the row is another writer
+          retiring the order first. The reopen side has no such second chance
+          (its common outcome makes no case at all), which is the asymmetry.
+          Not frequency: stamped on any answered read, BOTH sides would mint a
+          row per unreadable→readable flap and neither per pass, since minting
+          needs a failed read and the stamp before it a successful one.
 
         Fail-soft, like the liquidation mirror: this is the audit trail's
         disposition, not a verdict input — a store that refuses the stamp must
         not fail the orders leg. The cost of losing it is one stale open row,
-        the same shape the caller's guard deliberately leaves behind elsewhere.
+        the same shape the callers' guards deliberately leave behind elsewhere.
         """
-        key = _read_failure_fact_key(cloid)
         try:
             existing = repo.get_exchange_reconciliation_case(
                 self._db.conn,
                 self._run_id,
-                case_type="order_missing_on_exchange",
-                exchange_value=key,
+                case_type=case_type,
+                exchange_value=fact_key,
             )
             # Pre-checked outside the write unit deliberately: a successful read
             # is the common case and almost never has a row to close, and
@@ -1307,8 +1407,9 @@ class LiveReconciler:
         except Exception as exc:  # noqa: BLE001 — audit disposition, see above
             logger.warning(
                 "could not stamp the resolved orderStatus read failure for cloid %s "
-                "(%s: %s); the row stays open for a later pass or a human",
+                "(fact %s; %s: %s); the row stays open for a later pass or a human",
                 cloid,
+                fact_key,
                 type(exc).__name__,
                 exc,
             )
@@ -1690,6 +1791,16 @@ class LiveReconciler:
                         # disposition on the existing row, or the backlog
                         # permanently shows as unresolved a case that was in
                         # fact settled.
+                        #
+                        # Reached only for a key the dedupe still shuts, so its
+                        # latest row is unresolved, or bears a disposition that
+                        # is not provisional — a HUMAN's, or one of the machine
+                        # stamps for a fact that cannot return. The test below
+                        # tells them apart, and it is not redundant: a
+                        # provisionally disposed-of key took the insert above
+                        # instead (carrying its own disposition), while an
+                        # operator's `--stamp-case` answer is not the daemon's
+                        # to overwrite.
                         existing = repo.get_exchange_reconciliation_case(
                             conn,
                             self._run_id,

@@ -1986,6 +1986,11 @@ def test_a_sync_whose_repair_ladder_also_misroutes_can_latch_within_that_sync(en
         plan_active=False,
     )
 
+    # EXACTLY six, the number the threshold's comment cites: pinned rather than
+    # bounded so the prose and the code cannot drift apart — a change to the
+    # guard call sites or the ladder length should fail here and send whoever
+    # made it back to that comment.
+    assert mgr._unreadable_probes == 6
     assert mgr._unreadable_probes >= K
     assert mgr.identity_fault_latched is True
     assert len(_latch_rows(db)) == 1

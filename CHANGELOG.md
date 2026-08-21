@@ -525,7 +525,17 @@ Breaking changes within the 0.x line are called out explicitly.
   `VendorRateLimitError`, and all nine yfinance leaves re-raise the taxonomy
   (`except VendorError: raise`, the same shape as the indicator fix) — this is
   the default vendor for every category it serves, so the gap was on the
-  every-day path. (2) An Alpha Vantage HTTP 429 became a bare
+  every-day path. Two of those leaves needed more than the mapping, because
+  yfinance itself swallows the 429 before our boundary can see it (verified on
+  1.4.1, the pinned floor): the OHLCV cache now fetches through
+  `Ticker.history` (which re-raises throttles) instead of `yf.download` (whose
+  per-ticker worker stores the error and answers an empty frame — a throttle
+  that read as "no rows"), and the three statement getters go through a
+  wrapper that briefly un-hides yfinance's hidden-exception mode — under a
+  lock, since parallel tool execution shares the process-global flag — re-
+  raising only the throttle and restoring every other failure to the
+  swallowed-empty answer the library gives today. (2) An Alpha Vantage HTTP
+  429 became a bare
   `requests.HTTPError` at `raise_for_status()` before the body-notice
   classification could see it; a 429 status now raises
   `AlphaVantageRateLimitError` (naming any `Retry-After` the response carried),
@@ -535,8 +545,10 @@ Breaking changes within the 0.x line are called out explicitly.
   filter re-serialized it — so the router never fell back; the shared request
   boundary now raises `NoMarketDataError` with the vendor's wording in the
   detail (so a parameter mistake stays distinguishable in the no-data
-  sentinel), and the envelope key list has a single definition in
-  `alpha_vantage_common`. The direct-call verification snapshot tool keeps a
+  sentinel), a non-object JSON body — no shape this vendor serves data in —
+  is classified the same way, and the envelope key list has a single
+  definition in `alpha_vantage_common`. The direct-call verification snapshot
+  tool keeps a
   throttle transient rather than flattening the newly-typed error into its
   permanent-sounding no-data sentinel.
 - **An Alpha Vantage rate limit no longer reads as a successful indicator

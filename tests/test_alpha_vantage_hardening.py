@@ -1076,6 +1076,18 @@ def test_insider_error_envelope_is_not_dressed_with_a_note(monkeypatch, key):
 
 
 @pytest.mark.unit
+def test_insider_empty_list_beside_a_notice_is_not_flattened_to_prose(monkeypatch):
+    # An empty list riding next to an unclassified Information/Note may be the
+    # notice's side effect, not an affirmed "no filings" — the prose exit would
+    # discard the vendor's own explanation, so the body passes through.
+    body = json.dumps({"Information": "unclassified advisory", "data": []})
+    _patch_insider_request(monkeypatch, body)
+    out = avn.get_insider_transactions("AAPL")
+    assert out == body
+    assert "No insider transactions" not in out
+
+
+@pytest.mark.unit
 def test_insider_non_json_body_is_untouched(monkeypatch):
     body = "Thank you for using Alpha Vantage!"
     _patch_insider_request(monkeypatch, body)

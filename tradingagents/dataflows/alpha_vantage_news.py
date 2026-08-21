@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from .alpha_vantage_common import (
+    _AV_ENVELOPE_KEYS,
     _carries_payload,
     _make_api_request,
     _newest_row_date,
@@ -99,9 +100,12 @@ def _annotate_insider_freshness(result, symbol: str) -> str:
 
     An empty ``data`` list answers in the yfinance vendor's voice — the same
     "no insider transactions reported" prose — because an empty stream is
-    normal for insiders and the two vendors must say so the same way. Only the
-    empty *list* takes that exit: an empty ``{}`` or an envelope body keeps
-    its own passthrough, since the vendor never affirmed "no filings" there.
+    normal for insiders and the two vendors must say so the same way. Only an
+    empty list with no notice key beside it takes that exit: an empty ``{}``
+    or an envelope body keeps its own passthrough, and so does an empty list
+    riding next to an unclassified Information/Note — there the emptiness may
+    be the notice's side effect, and the prose would discard the vendor's own
+    explanation.
 
     A non-JSON body, a failure envelope, or a body without a parseable filing
     date is served as it arrived, bar a vendor-supplied freshness key — an
@@ -114,9 +118,12 @@ def _annotate_insider_freshness(result, symbol: str) -> str:
     rows = parsed.get("data")
     if not isinstance(rows, list):
         return _served_body(result, parsed)
-    if not rows:
+    if not rows and not (_AV_ENVELOPE_KEYS & parsed.keys()):
         # Keep this sentence in lockstep with the yfinance getter's empty-frame
-        # answer — a cross-vendor test pins the two equal.
+        # answer — a cross-vendor test pins the two equal for the canonical
+        # spelling. This vendor names the symbol it actually queried (raw, not
+        # normalized): echoing a spelling it never sent would misattribute the
+        # emptiness.
         return f"No insider transactions reported for symbol '{symbol}'"
     latest = _newest_row_date(rows, "transaction_date")
     if latest is None:

@@ -142,11 +142,11 @@ def _newest_row_date(rows, field: str):
     One "newest date among rows" reduction for every annotation path (the
     statement and insider notes both need it), so the family cannot grow a
     third parsing style that drifts from the others (#69). Non-dict rows and
-    rows whose field is missing or empty are skipped silently — the
+    rows whose field is missing or falsy are skipped silently — the
     annotations this feeds degrade to silence rather than guess — but a
-    present, non-empty, unparseable date goes through ``utils._parse_day``,
-    which logs it (once per such row): a vendor date-format drift leaves a
-    trace instead of switching every disclosure off invisibly.
+    truthy, unparseable date goes through ``utils._parse_day``, which logs it
+    (once per such row): a vendor date-format drift leaves a trace instead of
+    switching every disclosure off invisibly.
     """
     dates = [
         parsed

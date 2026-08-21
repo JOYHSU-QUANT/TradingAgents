@@ -1817,10 +1817,11 @@ def test_a_successful_read_disposes_of_the_earlier_read_failure_row(env):
 def test_a_read_that_succeeds_without_settling_the_order_stamps_nothing(env):
     # An order merely proven live stays in the locally-live cursor, so the very
     # next pass is free to fail to read it again — and the stamp is provisional,
-    # so that next failure would mint a row. A venue flapping
-    # unreadable/readable would answer every flap with another one: the
-    # re-sighting flood the once-per-fact guard exists to stop. Waiting until
-    # the order is SETTLED bounds the rows per revive instead (what that
+    # so that next failure would mint a row, and a venue flapping
+    # unreadable/readable would answer every flap with another one. The sibling
+    # key accepts exactly that, having nothing else that would ever close its
+    # row; this side does not need to, because a later pass settles the order
+    # and stamps then — so waiting bounds the rows per revive instead (what that
     # conservatism costs is named in _clear_read_failure_case's docstring).
     db, seams, reconciler = env
     _insert_local_order(db)

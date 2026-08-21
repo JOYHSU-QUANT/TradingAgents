@@ -9,6 +9,7 @@ from stockstats import wrap
 from yfinance.exceptions import YFRateLimitError
 
 from .config import get_config
+from .errors import VendorRateLimitError
 from .symbol_utils import NoMarketDataError, normalize_symbol
 from .utils import safe_ticker_component
 
@@ -26,11 +27,18 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
     yfinance raises YFRateLimitError on HTTP 429 responses but does not
     retry them internally. This wrapper adds retry logic specifically
     for rate limits. Other exceptions propagate immediately.
+
+    A throttle that survives every retry is re-raised as the taxonomy's
+    ``VendorRateLimitError``: this wrapper is the one boundary every yfinance
+    network call goes through, and yfinance's own ``YFRateLimitError`` is not a
+    type the routing layer knows, so leaving it unmapped sent a 429 into each
+    caller's broad ``except`` and came back as a successful-looking error
+    string the router never fell back on (#67).
     """
     for attempt in range(max_retries + 1):
         try:
             return func()
-        except YFRateLimitError:
+        except YFRateLimitError as e:
             if attempt < max_retries:
                 delay = base_delay * (2**attempt)
                 logger.warning(
@@ -38,7 +46,10 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
                 )
                 time.sleep(delay)
             else:
-                raise
+                raise VendorRateLimitError(
+                    f"Yahoo Finance rate limited the request and {max_retries} "
+                    f"retries did not clear it: {e}"
+                ) from e
 
 
 def _ensure_date_column(data: pd.DataFrame) -> pd.DataFrame:

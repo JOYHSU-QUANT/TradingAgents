@@ -2,7 +2,7 @@ import json
 import logging
 from datetime import datetime
 
-from .alpha_vantage_common import _make_api_request
+from .alpha_vantage_common import _AV_ENVELOPE_KEYS, _make_api_request
 from .errors import NoMarketDataError
 from .utils import data_lag_note, live_snapshot_note, statement_lag_bound
 
@@ -18,16 +18,21 @@ logger = logging.getLogger(__name__)
 #                                        the wrong shape). route_to_vendor turns
 #                                        this into its NO_DATA_AVAILABLE sentinel
 #                                        after trying the rest of the chain.
-#   raises  AlphaVantageRateLimitError / AlphaVantageNotConfiguredError
-#                                        propagated from _make_api_request, which
-#                                        also lets requests' own HTTP errors out.
+#   raises  AlphaVantageRateLimitError / AlphaVantageNotConfiguredError /
+#           NoMarketDataError            propagated from _make_api_request (an
+#                                        HTTP 429 or throttle notice, a bad key,
+#                                        or an "Error Message" rejection
+#                                        envelope, #68/#72), which also lets
+#                                        requests' own HTTP errors out.
 #   returns INVALID_CURR_DATE            a curr_date was supplied but is not a
 #                                        usable date, so nothing can be bounded
 #                                        to a point in time (a string, not a
 #                                        raise: fundamental_data is a core
 #                                        category, and the LLM can retry).
-#   returns the vendor body              a prose rejection or a failure envelope
-#                                        this module does not classify (#68).
+#   returns the vendor body              a prose rejection, or an
+#                                        Information/Note body whose text
+#                                        matched none of _make_api_request's
+#                                        classification patterns.
 
 # Where a freshness disclosure lives in an Alpha Vantage payload. This vendor
 # answers in JSON (yfinance answers in CSV with "# " header lines), so the note
@@ -39,15 +44,6 @@ logger = logging.getLogger(__name__)
 # vendor-written note would stand unopposed. Written first so a disclosure is
 # not buried under a long report list (#58).
 _FRESHNESS_NOTE_KEY = "_freshness_note"
-
-# Keys Alpha Vantage answers with when it is reporting a problem rather than
-# serving data. A body made only of these is a failure envelope, not a payload.
-# Deliberately wider than the notices ``_make_api_request`` classifies into the
-# error taxonomy (it reads only Information/Note, and only to recognise a rate
-# limit or a bad key): anything left here reached this module as a body, and
-# whether it is a *classified* failure has no bearing on whether it contains
-# fundamentals to disclose about.
-_AV_ENVELOPE_KEYS = {"Error Message", "Information", "Note"}
 
 
 def _carries_anything(parsed: dict) -> bool:
@@ -63,7 +59,10 @@ def _carries_anything(parsed: dict) -> bool:
 def _has_fundamentals(parsed: dict) -> bool:
     """True when a parsed body carries something other than a failure envelope.
 
-    The freshness key is discounted alongside the envelope keys: a body of
+    ``_AV_ENVELOPE_KEYS`` is the shared list from ``alpha_vantage_common`` (its
+    single definition, #68); whether the boundary would have raised on a body
+    has no bearing on whether it contains fundamentals to disclose about. The
+    freshness key is discounted alongside the envelope keys: a body of
     nothing but a notice plus a vendor-written ``_freshness_note`` is still a
     failure envelope, and counting that key as content would let a rate-limit
     notice be dressed in our live-snapshot disclosure.
@@ -269,9 +268,10 @@ def _filter_response_json(result, curr_date, freq, label, symbol):
         # disclosure's name, and the strip would serve it as "{}".
         raise NoMarketDataError(symbol, detail="Alpha Vantage returned an empty payload")
     if curr_date is None or parsed is None or not _has_fundamentals(parsed):
-        # No point-in-time bound (legacy passthrough), a prose body, or a failure
-        # envelope this module does not classify (see #68) — served as it
-        # arrived, bar a vendor-supplied freshness key.
+        # No point-in-time bound (legacy passthrough), a prose body, or an
+        # envelope the request boundary classifies but does not raise on (an
+        # unmatched Information/Note, see #68) — served as it arrived, bar a
+        # vendor-supplied freshness key.
         return _served_body(result, parsed)
     if _normalize_iso_date(curr_date) is None:
         return _invalid_curr_date(curr_date)
@@ -355,11 +355,12 @@ def _annotate_live_snapshot(result, curr_date, symbol):
     so the disclosure cannot depend on which one ``data_vendors`` picked (#58).
 
     Serves the body as it arrived (bar a vendor-supplied freshness key) when
-    there is nothing to disclose, when it is not a JSON object, or when the object is a rejection envelope of nothing but
-    ``Error Message`` / ``Information`` / ``Note`` (the notices
-    ``_make_api_request`` does not already classify into the taxonomy; see #68).
-    Annotating one of those would assert that fundamentals were fetched when
-    none were.
+    there is nothing to disclose, when it is not a JSON object, or when the
+    object is an envelope of nothing but notice keys — since #68 the request
+    boundary raises on an ``Error Message`` body, so what still reaches here is
+    an Information/Note whose text ``_make_api_request`` classified but did not
+    raise on. Annotating one of those would assert that fundamentals were
+    fetched when none were.
 
     An unparseable curr_date takes the same ``INVALID_CURR_DATE`` route as the
     statement tools, and at the same depth: with no usable analysis date this

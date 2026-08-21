@@ -64,11 +64,39 @@ class AlphaVantageRateLimitError(VendorRateLimitError):
     pass
 
 
-def _make_api_request(function_name: str, params: dict) -> dict | str:
+# Keys Alpha Vantage answers with when it is reporting a problem rather than
+# serving data. A body made only of these is a failure envelope, not a payload.
+# The single definition of that key list (#68). ``_make_api_request`` handles
+# each key's raise-worthy case itself ("Error Message" always raises;
+# Information/Note raise only when their text matches a rate-limit or API-key
+# pattern); the fundamentals module imports the set to decide whether a body
+# that still reached it — an unmatched Information/Note — carries anything
+# worth a freshness disclosure.
+_AV_ENVELOPE_KEYS = {"Error Message", "Information", "Note"}
+
+
+def _make_api_request(function_name: str, params: dict, subject: str | None = None) -> dict | str:
     """Helper function to make API requests and handle responses.
 
+    ``subject`` is what a rejection is attributed to (the caller knows which of
+    its params is the instrument); unset, it falls back to the params'
+    ``symbol``/``tickers`` and then to the function name — a last resort that
+    reads oddly in the router's no-data sentinel, so callers whose requests
+    carry neither key should name their subject.
+
     Raises:
-        AlphaVantageRateLimitError: When API rate limit is exceeded
+        AlphaVantageRateLimitError: When API rate limit is exceeded — whether
+            reported as an HTTP 429 or as a notice in an HTTP 200 body (#72)
+        NoMarketDataError: When the body is an ``Error Message`` rejection
+            envelope — Alpha Vantage's "Invalid API call" answer for a symbol
+            or parameter it cannot serve. Raised here, at the one boundary
+            every Alpha Vantage request goes through, because the envelope
+            otherwise returns to callers looking like a successful body and
+            the router never gets to fall back (#68). The no-data type is the
+            decided one: the router tries the next vendor, then answers with
+            its no-data sentinel — and the vendor's wording rides along in
+            ``detail``, so a parameter mistake stays visible there rather
+            than flattened into a bare "no data".
     """
     # Create a copy of params to avoid modifying the original
     api_params = params.copy()
@@ -91,23 +119,37 @@ def _make_api_request(function_name: str, params: dict) -> dict | str:
         api_params.pop("entitlement", None)
 
     response = requests.get(API_BASE_URL, params=api_params, timeout=REQUEST_TIMEOUT)
+    # Classify an HTTP 429 before raise_for_status() turns it into a bare
+    # requests.HTTPError outside the taxonomy: the notice check below reads
+    # only HTTP 200 bodies, so a status-code throttle would otherwise fall
+    # into each caller's broad except and never reach the router's rate-limit
+    # lane (#72). Other 4xx/5xx keep their HTTPError behaviour.
+    if response.status_code == 429:
+        retry_after = response.headers.get("Retry-After")
+        after = f" (Retry-After: {retry_after})" if retry_after else ""
+        raise AlphaVantageRateLimitError(f"Alpha Vantage rate limit exceeded: HTTP 429{after}")
     response.raise_for_status()
 
     response_text = response.text
 
     # Error responses are JSON; data responses are usually CSV (or data-keyed
-    # JSON). A non-JSON body is normal data.
+    # JSON). A non-JSON body is normal data — and so is a JSON body that is not
+    # an object (the classification below reads keys, and calling .get on a
+    # list/scalar would crash into each caller's broad except as prose).
     try:
         response_json = json.loads(response_text)
     except json.JSONDecodeError:
+        return response_text
+    if not isinstance(response_json, dict):
         return response_text
 
     # Alpha Vantage reports problems via "Information" / "Note". Classify so a
     # genuine rate limit and an invalid/missing key aren't conflated (#991):
     # rate-limit phrasing is checked first because those notices also mention
-    # "API key" ("your API key ... 25 requests per day").
+    # "API key" ("your API key ... 25 requests per day"). A non-string notice
+    # (no such shape has been observed) is unclassifiable and falls through.
     notice = response_json.get("Information") or response_json.get("Note")
-    if notice:
+    if isinstance(notice, str) and notice:
         low = notice.lower()
         if any(m in low for m in ("rate limit", "requests per day", "call frequency", "premium")):
             raise AlphaVantageRateLimitError(f"Alpha Vantage rate limit exceeded: {notice}")
@@ -117,6 +159,19 @@ def _make_api_request(function_name: str, params: dict) -> dict | str:
             raise AlphaVantageNotConfiguredError(
                 f"Alpha Vantage API key invalid or missing: {notice}"
             )
+
+    # See the Raises: section for why an "Error Message" body raises the
+    # no-data type. Checked after the notice classification so a body carrying
+    # both keys keeps its more actionable rate-limit/bad-key verdict. Keyed on
+    # presence, not truthiness: a rejection with blank wording is still a
+    # rejection, not data.
+    if "Error Message" in response_json:
+        error_message = response_json["Error Message"] or "(no reason given)"
+        attributed = subject or params.get("symbol") or params.get("tickers") or function_name
+        raise NoMarketDataError(
+            attributed,
+            detail=f"Alpha Vantage rejected the {function_name} request: {error_message}",
+        )
 
     return response_text
 

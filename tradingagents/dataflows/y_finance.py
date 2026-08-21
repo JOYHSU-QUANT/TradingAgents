@@ -5,6 +5,7 @@ import pandas as pd
 import yfinance as yf
 from dateutil.relativedelta import relativedelta
 
+from .errors import VendorError
 from .stockstats_utils import (
     StockstatsUtils,
     _assert_ohlcv_not_stale,
@@ -228,8 +229,13 @@ def get_stock_stats_indicators_window(
         for date_str, value in date_values:
             ind_string += f"{date_str}: {value}\n"
 
-    except NoMarketDataError:
-        raise  # Unknown/delisted symbol — let the router emit the sentinel
+    except VendorError:
+        # Caught as the taxonomy's base type, not one leaf at a time (#67):
+        # no-data keeps its sentinel lane, and a rate limit now reaches the
+        # router's rate-limit lane instead of the broad handler below — whose
+        # per-day fallback loop re-runs the same throttled fetch and then
+        # renders prose the router reads as a successful answer.
+        raise
     except Exception as e:
         print(f"Error getting bulk stockstats data: {e}")
         # Fallback to original implementation if bulk method fails
@@ -301,8 +307,8 @@ def get_stockstats_indicator(
             indicator,
             curr_date,
         )
-    except NoMarketDataError:
-        raise  # Unknown/delisted symbol — let the router emit the sentinel
+    except VendorError:
+        raise  # Typed vendor failures take their router lanes (#67)
     except Exception as e:
         print(
             f"Error getting stockstats indicator data for indicator {indicator} on {curr_date}: {e}"
@@ -384,8 +390,8 @@ def get_fundamentals(
 
         return header + "\n".join(lines)
 
-    except NoMarketDataError:
-        raise
+    except VendorError:
+        raise  # Typed vendor failures take their router lanes (#67)
     except Exception as e:
         return f"Error retrieving fundamentals for {ticker}: {str(e)}"
 
@@ -420,8 +426,8 @@ def get_balance_sheet(
 
         return header + csv_string
 
-    except NoMarketDataError:
-        raise
+    except VendorError:
+        raise  # Typed vendor failures take their router lanes (#67)
     except Exception as e:
         return f"Error retrieving balance sheet for {ticker}: {str(e)}"
 
@@ -456,8 +462,8 @@ def get_cashflow(
 
         return header + csv_string
 
-    except NoMarketDataError:
-        raise
+    except VendorError:
+        raise  # Typed vendor failures take their router lanes (#67)
     except Exception as e:
         return f"Error retrieving cash flow for {ticker}: {str(e)}"
 
@@ -492,8 +498,8 @@ def get_income_statement(
 
         return header + csv_string
 
-    except NoMarketDataError:
-        raise
+    except VendorError:
+        raise  # Typed vendor failures take their router lanes (#67)
     except Exception as e:
         return f"Error retrieving income statement for {ticker}: {str(e)}"
 
@@ -540,5 +546,7 @@ def get_insider_transactions(ticker: Annotated[str, "ticker symbol of the compan
 
         return header + csv_string
 
+    except VendorError:
+        raise  # Typed vendor failures take their router lanes (#67)
     except Exception as e:
         return f"Error retrieving insider transactions for {ticker}: {str(e)}"

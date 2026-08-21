@@ -9,6 +9,7 @@ import json
 import logging
 
 import pytest
+import requests
 
 import tradingagents.dataflows.alpha_vantage_common as av
 import tradingagents.dataflows.alpha_vantage_fundamentals as avf
@@ -17,18 +18,21 @@ from tradingagents.dataflows.alpha_vantage_fundamentals import _filter_reports_b
 
 
 class _FakeResponse:
-    def __init__(self, text):
+    def __init__(self, text, status_code=200, headers=None):
         self.text = text
+        self.status_code = status_code
+        self.headers = headers or {}
 
     def raise_for_status(self):
-        pass
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"{self.status_code} error")
 
 
-def _patched_get(body, capture=None):
+def _patched_get(body, capture=None, status_code=200, headers=None):
     def fake_get(url, params=None, **kwargs):
         if capture is not None:
             capture.update(kwargs)
-        return _FakeResponse(body)
+        return _FakeResponse(body, status_code, headers)
 
     return fake_get
 
@@ -67,6 +71,135 @@ def test_invalid_key_not_mislabeled_as_rate_limit(monkeypatch):
             _patched_get('{"Note": "API call frequency is 5 calls per minute."}'),
         )
         av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+
+
+@pytest.mark.unit
+def test_http_429_is_classified_as_a_rate_limit(monkeypatch):
+    # #72: a status-code throttle used to become a bare requests.HTTPError via
+    # raise_for_status() — outside the taxonomy, so it fell into each caller's
+    # broad except and never reached the router's rate-limit lane. The body
+    # notice checks read only HTTP 200 answers, so this is the only place an
+    # HTTP 429 can be classified.
+    monkeypatch.setattr(av.requests, "get", _patched_get("", status_code=429))
+    with pytest.raises(av.AlphaVantageRateLimitError) as exc:
+        av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+    assert "HTTP 429" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_http_429_reports_retry_after_when_present(monkeypatch):
+    monkeypatch.setattr(
+        av.requests, "get", _patched_get("", status_code=429, headers={"Retry-After": "42"})
+    )
+    with pytest.raises(av.AlphaVantageRateLimitError) as exc:
+        av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+    assert "Retry-After: 42" in str(exc.value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status", [404, 500])
+def test_other_http_errors_keep_their_requests_behaviour(monkeypatch, status):
+    # #72 deliberately narrows to 429: any other 4xx/5xx keeps raising the
+    # requests.HTTPError callers already handle.
+    monkeypatch.setattr(av.requests, "get", _patched_get("", status_code=status))
+    with pytest.raises(requests.HTTPError):
+        av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+
+
+@pytest.mark.unit
+def test_error_message_envelope_raises_no_market_data(monkeypatch):
+    # #68: an "Error Message" body used to return to callers as text that read
+    # like a successful answer, so the router never fell back. It now raises
+    # the no-data type at the request boundary, with the vendor's own wording
+    # riding along so a parameter mistake stays distinguishable in the sentinel.
+    from tradingagents.dataflows.errors import NoMarketDataError
+
+    body = json.dumps({"Error Message": "Invalid API call. Please retry."})
+    monkeypatch.setattr(av.requests, "get", _patched_get(body))
+    with pytest.raises(NoMarketDataError) as exc:
+        av._make_api_request("OVERVIEW", {"symbol": "AAPL"})
+    msg = str(exc.value)
+    assert "AAPL" in msg
+    assert "Invalid API call" in msg
+
+
+@pytest.mark.unit
+def test_error_message_envelope_names_the_tickers_param_when_no_symbol(monkeypatch):
+    # The news endpoints address instruments through "tickers"; the raise must
+    # still be attributed to a real subject rather than a blank.
+    from tradingagents.dataflows.errors import NoMarketDataError
+
+    body = json.dumps({"Error Message": "Invalid API call."})
+    monkeypatch.setattr(av.requests, "get", _patched_get(body))
+    with pytest.raises(NoMarketDataError) as exc:
+        av._make_api_request("NEWS_SENTIMENT", {"tickers": "AAPL"})
+    assert "AAPL" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_error_message_envelope_uses_the_callers_subject_when_named(monkeypatch):
+    # A request addressed by neither symbol nor tickers (global news uses
+    # topics) would fall back to the function name — prose the router's
+    # sentinel then presents as a tradable symbol. The caller names the
+    # subject instead.
+    from tradingagents.dataflows.errors import NoMarketDataError
+
+    body = json.dumps({"Error Message": "Invalid API call."})
+    monkeypatch.setattr(av.requests, "get", _patched_get(body))
+    with pytest.raises(NoMarketDataError) as exc:
+        av._make_api_request(
+            "NEWS_SENTIMENT", {"topics": "economy_macro"}, subject="global market news"
+        )
+    assert "global market news" in str(exc.value)
+
+
+@pytest.mark.unit
+def test_rate_limit_notice_outranks_an_error_message_rider(monkeypatch):
+    # Order pin: a body carrying both a throttle notice and an "Error Message"
+    # keeps the more actionable rate-limit verdict.
+    body = json.dumps(
+        {"Note": "API call frequency is 5 calls per minute.", "Error Message": "Invalid API call."}
+    )
+    monkeypatch.setattr(av.requests, "get", _patched_get(body))
+    with pytest.raises(av.AlphaVantageRateLimitError):
+        av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+
+
+@pytest.mark.unit
+def test_blank_error_message_still_raises(monkeypatch):
+    # Keyed on presence, not truthiness: a rejection with blank wording is
+    # still a rejection, not data.
+    from tradingagents.dataflows.errors import NoMarketDataError
+
+    monkeypatch.setattr(av.requests, "get", _patched_get(json.dumps({"Error Message": ""})))
+    with pytest.raises(NoMarketDataError):
+        av._make_api_request("OVERVIEW", {"symbol": "AAPL"})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("body", ["null", "[]", '"throttled"'])
+def test_non_object_json_bodies_are_served_as_data(monkeypatch, body):
+    # The classification reads keys; a JSON body that is not an object must be
+    # handed to the caller like any other data body, not crash into the
+    # caller's broad except as prose.
+    monkeypatch.setattr(av.requests, "get", _patched_get(body))
+    assert av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"}) == body
+
+
+@pytest.mark.unit
+def test_non_string_notice_does_not_crash_classification(monkeypatch):
+    # No such shape has been observed; the pin is that an unclassifiable
+    # notice degrades to a served body rather than an AttributeError.
+    body = json.dumps({"Information": {"code": 429}})
+    monkeypatch.setattr(av.requests, "get", _patched_get(body))
+    assert av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"}) == body
+
+
+@pytest.mark.unit
+def test_envelope_key_list_has_one_definition():
+    # #68: the AV problem-key vocabulary must not fork between the request
+    # boundary and the fundamentals disclosure guard.
+    assert avf._AV_ENVELOPE_KEYS is av._AV_ENVELOPE_KEYS
 
 
 @pytest.mark.unit
@@ -224,7 +357,7 @@ def test_global_news_clamps_untrusted_sizes(monkeypatch):
 
     captured = {}
 
-    def fake_request(function_name, params):
+    def fake_request(function_name, params, subject=None):
         captured.update(params)
         return "{}"
 
@@ -243,7 +376,7 @@ def test_global_news_none_optionals_resolve_to_defaults_before_clamp(monkeypatch
 
     captured = {}
 
-    def fake_request(function_name, params):
+    def fake_request(function_name, params, subject=None):
         captured.update(params)
         return "{}"
 
@@ -801,9 +934,11 @@ def test_statement_wrong_shaped_report_list_is_named_as_a_schema_break(monkeypat
 
 @pytest.mark.unit
 def test_statement_error_envelope_is_served_unchanged(monkeypatch):
-    # Classifying AV's error envelopes belongs at the request boundary (#68);
-    # until then this path must not mistake one for a payload to filter, narrow,
-    # or annotate.
+    # The request boundary now raises on an "Error Message" body (#68), so in
+    # production one never reaches this module. This pins the defence in depth:
+    # should a body slip past the boundary (a future refactor, a new caller),
+    # this path must still not mistake it for a payload to filter, narrow, or
+    # annotate.
     body = json.dumps({"Error Message": "Invalid API call."})
     _patch_av_request(monkeypatch, body)
     assert avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18") == body

@@ -98,6 +98,23 @@ class TestTool:
         assert out.startswith("NO_DATA_AVAILABLE")
         assert "do not estimate or fabricate" in out.lower()
 
+    def test_tool_reports_a_rate_limit_as_transient_not_as_no_data(self, monkeypatch):
+        # A throttle must not be flattened into the permanent-sounding no-data
+        # verdict: this tool is the agents' source of truth, and "verified data
+        # is unavailable for this symbol" over a 429 would have the analyst
+        # reporting a coverage fact for a condition that clears in minutes (#67).
+        from tradingagents.dataflows.errors import VendorRateLimitError
+
+        def _throttled(s, d):
+            raise VendorRateLimitError("Yahoo Finance rate limited the request")
+
+        monkeypatch.setattr(validator, "load_ohlcv", _throttled)
+        out = get_verified_market_snapshot.invoke({"symbol": "COF", "curr_date": "2026-05-20"})
+        assert out.startswith("DATA_UNAVAILABLE")
+        assert "transient" in out
+        assert not out.startswith("NO_DATA_AVAILABLE")
+        assert "report that verified data is unavailable" not in out
+
     def test_tool_rejects_unparseable_curr_date_with_sentinel(self, monkeypatch):
         # A bad LLM-supplied date raises a bare ValueError deep in load_ohlcv
         # (outside the VendorError taxonomy), so the wrapper answers with the

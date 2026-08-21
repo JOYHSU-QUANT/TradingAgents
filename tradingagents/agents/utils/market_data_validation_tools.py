@@ -3,7 +3,7 @@ from typing import Annotated
 import pandas as pd
 from langchain_core.tools import tool
 
-from tradingagents.dataflows.errors import VendorError
+from tradingagents.dataflows.errors import VendorError, VendorRateLimitError
 from tradingagents.dataflows.market_data_validator import build_verified_market_snapshot
 
 
@@ -37,6 +37,19 @@ def get_verified_market_snapshot(
     # a generic ToolNode error string instead (#32).
     try:
         return build_verified_market_snapshot(symbol, curr_date, look_back_days)
+    except VendorRateLimitError as e:
+        # Before the exhausted-throttle raise was typed (#67) this escaped as a
+        # generic ToolNode error; the broad clause below would now flatten it
+        # into the permanent-sounding no-data verdict — the agent would assert
+        # that verified data does not exist when the vendor was merely
+        # throttling. Say "transient" instead.
+        return (
+            f"DATA_UNAVAILABLE: the market data vendor rate-limited the "
+            f"verification snapshot for '{symbol}' ({e}). This is transient — "
+            f"do not report it as proof that data is unavailable, and do not "
+            f"estimate or fabricate values; avoid exact numeric claims you "
+            f"cannot verify."
+        )
     except VendorError as e:
         return (
             f"NO_DATA_AVAILABLE: could not build a verified market snapshot "

@@ -1043,23 +1043,29 @@ orders 列已補寫）補完後不可能再成立——package 內既沒有 `DEL
 「回來」要多久回來一次，**逐個成員不同**，這是加新成員時要先回答的問題：`settled_*` 與
 `local_row_reopened` 需要一次重送或 reopen（注意 `local_row_reopened` 與 `settled_{status}`
 可以互相 revive，不必經過重送）；`resolved_read_succeeded` 在兩把讀取失敗鍵上則不對稱——
-見下。可重開**不等於**可以提早蓋章：自動處置不該蓋在 sweep 每輪都會重見的鍵上，那會變成
-每 pass 一列。
+見下。可重開**不等於**可以提早蓋章：一個 sweep 每輪都會重見、而且中間不需要交易所改變任何
+狀態的故障（rule-10 那種永遠不離開游標的單），處置若是暫定的就會**每 pass 一列**——那正是
+洗版，也正是人工 stamp 必須是終局的原因。
 
-兩把「讀不到」的鍵因此規則不同：`<cloid>|read_failed`（本地 live、交易所沒列）只在**本輪
-了結了那張單**時才蓋，因為那張單留在游標裡、每輪都會再讀（代價見 RUNBOOK §6 的「該關卻沒
-關」）；`<cloid>|local_terminal_read_failed`（本地終態、交易所仍列 open）只要 orderStatus
-這次**答了**就蓋，不論答案是終態、live 還是 unknownOid——那一列的事實只是「問不到」。後者
-確實可能隨交易所讀取抖動每次抖動生一列，接受，因為同一把 key 底下**只有最新那一列會是未了結
-的**（每一段都被結束它的那次讀取蓋掉了），`--status` 與 §21.4 看到的仍是一個活的故障；換到的
-是最常見的那支答案（「orderStatus 說終態」不產生 case）能自動了結它。
+兩把「讀不到」的鍵**不是**那個形狀：生一列要先有一次讀取失敗，而讓 key 重開的那個 stamp 要先
+有一次讀取成功，所以**兩邊的上限都是「一次 unreadable→readable 抖動一列」，都不會每 pass 一
+列**。它們規則不同的原因不是頻率，是**還有沒有別的東西會關掉那一列**：
+
+- `<cloid>|read_failed`（本地 live、交易所沒列）只在**本輪了結了那張單**時才蓋——那張單留在
+  游標裡，之後的某一輪本來就會把它了結並順手蓋章，所以不急著在只是「讀得到」時就蓋。代價是
+  被別的寫入者（§19.3 撤單、kill switch、protection manager）收掉的單沒人再了結它，見
+  RUNBOOK §6 的「該關卻沒關」。
+- `<cloid>|local_terminal_read_failed`（本地終態、交易所仍列 open）只要 orderStatus 這次
+  **答了**就蓋，不論答案是終態、live 還是 unknownOid——那一列的事實只是「問不到」，而且它
+  最常見的那支答案（「orderStatus 說終態」）**不產生 case**，沒有任何後續會替它蓋章。抖動
+  生的列可以接受，因為同一把 key 底下**只有最新那一列會是未了結的**（每一段都被結束它的那次
+  讀取蓋掉了），`--status` 與 §21.4 看到的仍是一個活的故障。
 
 **（v14 同批）`<cloid>|local_terminal` 拆鍵**：讀取失敗自此有自己的 key
 （`<cloid>|local_terminal_read_failed`），與 reopen／unknownOid 矛盾分開，理由與 v13 把
 `<cloid>|read_failed` 從裸 cloid 拆出來完全相同——兩個相反的事實共用一把 key 時，先到的那個
 佔住它，後到的（這裡是「交易所自打嘴巴」，較嚴重的那個）不會留下任何列；而自動了結也會蓋錯
 列，把「讀取成功」蓋在一列 detail 寫著「讀到了但答 unknownOid」的紀錄上。
-
 
 ## 13. Safe Mode
 

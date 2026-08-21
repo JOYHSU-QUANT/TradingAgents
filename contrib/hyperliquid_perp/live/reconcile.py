@@ -183,11 +183,15 @@ def _clip(text: str | None) -> str | None:
 # stamp and stays out, because once the local row exists it cannot go missing
 # again (this package contains no `DELETE FROM orders`).
 #
-# Reopenability is not a licence to stamp early, either, and how often the fact
-# can return is the thing to weigh: a key the sweep re-observes EVERY pass would
-# mint a row per pass once provisionally stamped, which is the flood the dedupe
-# exists to stop. ``_clear_read_failure_case`` carries that comparison for its
-# two callers, which land on opposite sides of it.
+# Reopenability is not a licence to stamp early, either. How often the fact can
+# return is one thing to weigh — a fault the sweep re-observes every pass with
+# no venue state change in between (the §8.3 rule-10 order that never leaves the
+# cursor) would mint a row per pass if its disposition were provisional, which
+# is why the human stamp that disposes of one is final. The read-failure keys
+# are not that shape: minting needs a failed read and the stamp before it a
+# successful one, so on EITHER of them the ceiling is a row per
+# unreadable→readable flap. What separates their two guards is whether anything
+# else would ever close the row — see ``_clear_read_failure_case``.
 
 
 def _read_failure_fact_key(cloid: str) -> str:
@@ -1051,12 +1055,13 @@ class LiveReconciler:
                 if case.action_taken is not None:
                     # ONLY when this pass DISPOSED of the order, which is what
                     # takes it out of THIS cursor. The other outcomes leave it
-                    # here — and this cursor probes every order in it on every
-                    # pass, so a later pass gets to settle it and stamp then.
-                    # Waiting costs one row that stays open a while; stamping on
-                    # any answered read would cost a fresh row per
-                    # unreadable→readable flap of the venue, for a fault the
-                    # sweep has not finished with. The sibling caller has no
+                    # here, in a cursor that keeps probing it (while the
+                    # exchange does not list it — a pass that finds it listed
+                    # skips this loop for it), so a later pass gets to settle it
+                    # and stamp then. Waiting costs one row that stays open a
+                    # while; stamping on any answered read would cost a fresh
+                    # row per unreadable→readable flap of the venue, for a fault
+                    # the sweep has not finished with. The sibling caller has no
                     # later pass to wait for and takes the other trade — see
                     # _clear_read_failure_case for the pair.
                     #
@@ -1363,9 +1368,9 @@ class LiveReconciler:
           (a §19.3 cancel, the kill switch, the protection manager), and the row
           holds §21.4's unresolved count above zero with nothing else reporting
           a problem. Accepted because this side does not NEED the wider rule:
-          the order stays in a cursor that probes it every pass, so a later
-          pass can settle it and stamp then — only an order some other writer
-          retires first is orphaned. The reopen side has no such second chance
+          the order stays in a cursor that keeps probing it, so a later pass can
+          settle it and stamp then — what orphans the row is another writer
+          retiring the order first. The reopen side has no such second chance
           (its common outcome makes no case at all), which is the asymmetry.
           Not frequency: stamped on any answered read, BOTH sides would mint a
           row per unreadable→readable flap and neither per pass, since minting

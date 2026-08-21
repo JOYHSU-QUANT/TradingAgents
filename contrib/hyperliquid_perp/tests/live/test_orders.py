@@ -843,6 +843,71 @@ def test_a_busy_db_does_not_replace_the_exchange_error_that_caused_it(env, monke
         _submit(submitter)
 
 
+# The foreign cloid a misrouted venue answer carries. Shared with the identity
+# -echo tests further down this file (they read it off the SAME constant), so
+# "the stranger" means one value everywhere in here rather than two literals
+# that a later edit could drift apart.
+_OTHER_CLOID = "0x" + "cd" * 16
+_STRANGER_ACK_BODY = {
+    "status": "ok",
+    "response": {
+        "type": "order",
+        "data": {"statuses": [{"resting": {"oid": 4242, "cloid": _OTHER_CLOID}}]},
+    },
+}
+
+
+def test_a_misrouted_ack_leaves_its_payload_on_disk_and_on_the_attempt_row(env):
+    """The other half of issue #47's evidence gap.
+
+    ``signed_client`` attaches the refused round-trip to the exception; THIS is
+    the layer that owns ``payload_dir``, so it has to persist it. The
+    accepted-ack write further down ``submit_ioc_limit`` is unreachable here —
+    the raise happens inside the ``place_ioc_limit`` call above it — so without
+    this the stranger's oid and the rest of the body were simply gone, and the
+    durable trail held only the two cloids ``str(exc)`` names.
+    """
+    db, client, _, submitter = env
+    refusal = MalformedResponseError(
+        f"Hyperliquid resting order status for cloid {_HEX} answered with cloid "
+        f"{_OTHER_CLOID!r} — refusing to book another order's ack"
+    )
+    refusal.attach_payload(_STRANGER_ACK_BODY)
+    client.place_results = [refusal]
+
+    with pytest.raises(MalformedResponseError, match="refusing to book"):
+        _submit(submitter)
+
+    attempts = repo.iter_live_order_attempts(db.conn, "r", cloid_hex=_HEX)
+    assert [a["status"] for a in attempts] == ["failed"]  # outcome unknown, unchanged
+    raw_path = attempts[0]["raw_exchange_payload_path"]
+    assert raw_path is not None, "the refused ack's payload path must be on the row"
+    written = json.loads(Path(raw_path).read_text(encoding="utf-8"))
+    assert written == _STRANGER_ACK_BODY
+    # The one fact str(exc) could never carry: WHOSE order the venue answered
+    # with. That is what makes keeping the body worth anything.
+    assert written["response"]["data"]["statuses"][0]["resting"]["oid"] == 4242
+
+
+def test_a_wire_failure_with_no_payload_records_no_evidence_path(env):
+    """Narrowness: only a refusal that CARRIES a body writes one.
+
+    A timeout has no payload to keep, and inventing an evidence file for it —
+    or clearing the column with an explicit NULL — would make the pointer
+    meaningless on exactly the rows that do have one.
+    """
+    db, client, _, submitter = env
+    client.place_results = [ExchangeRequestError("read timed out")]
+
+    with pytest.raises(ExchangeRequestError, match="read timed out"):
+        _submit(submitter)
+
+    attempts = repo.iter_live_order_attempts(db.conn, "r", cloid_hex=_HEX)
+    assert [a["status"] for a in attempts] == ["failed"]
+    assert attempts[0]["raw_exchange_payload_path"] is None
+    assert list(submitter._payload_dir.glob("*.json")) == []
+
+
 def test_the_two_contradiction_cases_escape_a_transport_retry_lane(env):
     # Both mean "an order MAY be live under this cloid; a human must look".
     # ExchangeError is the BASE of ExchangeRequestError, so raising it bare let

@@ -7,6 +7,8 @@ translated here and in :mod:`mapper`.
 
 from __future__ import annotations
 
+from typing import Any
+
 
 class ExchangeError(Exception):
     """Base class for every error this exchange layer raises."""
@@ -58,4 +60,33 @@ class OrderIdempotencyContradiction(ExchangeError):
 
 
 class MalformedResponseError(ExchangeError):
-    """Hyperliquid returned a response missing fields the mapper requires."""
+    """Hyperliquid returned a response missing fields the mapper requires.
+
+    Optionally CARRIES the offending round-trip in :attr:`payload`, so the
+    layer that owns evidence storage can persist it even though the layer that
+    detected the malformation does not know where evidence goes. The rejecting
+    parsers sit under :mod:`signed_client`, which has no ``payload_dir``; the
+    caller that does (``live.orders``) only ever saw the exception. So a
+    misrouted order ack — the one case where the response names a STRANGER's
+    oid — left nothing behind but ``str(exc)`` on the attempt row, while the
+    fills and mapper paths both keep the payload they refuse.
+
+    A class-level default rather than an ``__init__`` parameter: every raise
+    site constructs this with a bare message, and none of them should have to
+    change to gain the attribute. ``None`` means "no evidence attached", which
+    is also all a ``None`` payload would be worth.
+    """
+
+    payload: Any = None
+
+    def attach_payload(self, payload: Any) -> None:
+        """Record the whole round-trip this error was raised inside of.
+
+        Called on the way OUT, by the frame that holds the complete response —
+        so if nested frames ever both attach, the outermost (largest) scope
+        wins, which is the one worth keeping as evidence. Never raises and
+        never inspects the payload: this runs on a failure path, and an
+        evidence-gathering step that can itself fail would replace a
+        diagnosable venue fault with a serialisation bug.
+        """
+        self.payload = payload

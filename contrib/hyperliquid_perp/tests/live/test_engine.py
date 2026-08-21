@@ -123,6 +123,13 @@ class _FakeProtection:
         # What the engine handed the SL band each sync (§3.6): the reconciler's
         # mirrored exchange estimate, or None before the first mirror.
         self.liquidation_prices: list[Decimal | None] = []
+        # Mirrors ProtectionManager.identity_fault_latched (§13.5): the venue
+        # answered the §8.3 identity probe unusably too many times running.
+        # A plain attribute rather than a getattr default on the engine side —
+        # a double missing it must fail loudly right here instead of letting
+        # the engine read "no fault" off every production client (the same
+        # reasoning as protection's explicit kill-switch None check).
+        self.identity_fault_latched = False
 
     def sync(self, *, position, liquidation_price, mark, plan_active):
         self.calls += 1
@@ -1297,6 +1304,60 @@ def test_blocked_protection_tick_emits_visible_event(tmp_path):
     _script(engine, [_snap()])
     res = engine.tick()
     assert "protection_blocked" in res.events
+
+
+def test_a_latched_venue_identity_fault_enters_manual_safe_mode(tmp_path):
+    """§13.5: the protection manager's latch must reach a state a human sees.
+
+    The manager can only detect and record; the safe-mode machine is the
+    engine's. Without this wiring the whole #46 detector would be a log line
+    and one audit row that nothing acts on — the run would keep re-repairing a
+    stop that is already resting, exactly as before.
+
+    MANUAL, not recoverable: a venue that misroutes one identity lookup
+    misroutes the next, so a recoverable latch would auto-release straight back
+    into the treadmill on the first clean reconciliation pass.
+    """
+    from contrib.hyperliquid_perp.live.safe_mode import REASON_IDENTITY_FAULT
+
+    prot = _FakeProtection()
+    db, clock, engine, gate, sub = _build(tmp_path, protection=prot)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.05"), entry_price=D(50000)),
+            updated_at=_T0,
+        )
+    engine._was_flat = False
+
+    # An unlatched manager escalates nothing — the fault is what does it, not
+    # merely having a protection sync run.
+    _script(engine, [_snap()])
+    res = engine.tick()
+    assert "venue_identity_fault" not in res.events
+    assert engine._safe_mode.current() is None
+
+    prot.identity_fault_latched = True
+    clock.advance(10)
+    _script(engine, [_snap()])
+    res = engine.tick()
+    assert "venue_identity_fault" in res.events  # visible in the per-tick log
+    state = engine._safe_mode.current()
+    assert state is not None
+    assert state.reason == REASON_IDENTITY_FAULT
+    assert state.safe_mode_type == "manual"
+
+    # Still latched next tick: re-entering the same reason is idempotent, so the
+    # §13.6 history keeps ONE entry rather than one per tick for as long as the
+    # venue stays broken.
+    clock.advance(10)
+    _script(engine, [_snap()])
+    engine.tick()
+    entered = [
+        e for e in repo.iter_safe_mode_events(db.conn, "r") if e["reason"] == REASON_IDENTITY_FAULT
+    ]
+    assert len(entered) == 1, [dict(e) for e in entered]
 
 
 # -- R4 loop: no-market-data visibility / escalation --------------------------

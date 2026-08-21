@@ -131,6 +131,28 @@ _SL_FIRE_BAND_FLOOR_PCT = Decimal("0.03")
 # take two slots, this sleep takes the third (2026-08-01 round-13 concept scan).
 _MAX_REPAIR_SLEEP_S = 10.0
 
+# §17 / §13.5: how many CONSECUTIVE unreadable orderStatus answers latch the
+# venue-identity fault (see _note_unreadable_probe). Both probe sites fail
+# CLOSED on an unusable answer, and that verdict's cost model assumes the fault
+# heals next tick — "a false 'gone' costs one redundant re-place". A venue that
+# answers with another order's identity does NOT heal: it misroutes every time,
+# so the no-op guard re-repairs a stop that is already resting forever, and the
+# recovery probe can burn a whole repair ladder into a §17.2 emergency close of
+# a position that was healthy and protected all along.
+#
+# FIVE, deliberately more than the three probes ONE sync can make (the SL no-op
+# guard, the SL covering check on a gate-blocked repair, the TP no-op guard —
+# see _row_still_rests): the latch must not be reachable from a burst confined
+# to a single sync, because that burst is the self-healing case the fail-closed
+# verdict already handles correctly. Crossing this threshold therefore proves
+# the fault outlived a sync boundary. Five is still tiny against the unbounded
+# treadmill it replaces — at the 30s max_tick_gap the latch lands within a
+# minute or two of onset. (The sibling thresholds both use 3 —
+# safe_mode._REPEATED_MISMATCH_THRESHOLD and the funding source's log
+# escalation — but neither counts events that can repeat WITHIN one
+# observation.)
+_UNREADABLE_PROBE_LATCH_THRESHOLD = 5
+
 
 class _EstablishResult(Enum):
     """How one §17.4 place/modify ladder ended (internal to the manager)."""
@@ -252,6 +274,18 @@ class ProtectionManager:
         # from _recover_placed_order to the attempt-failed row the caller writes
         # (see _log_attempt_failed, which consumes and clears it).
         self._last_recovery_error: str | None = None
+        # CONSECUTIVE unreadable orderStatus answers across BOTH probe sites.
+        # One shared counter, not one per site: the fault being counted is a
+        # property of the venue (or of this build's reading of it), not of which
+        # question we happened to ask — and sharing it is what lets a fault
+        # that alternates between the no-op guard and the recovery probe be
+        # seen as the one persistent fault it is. Reset by any READABLE answer
+        # (see _note_readable_probe), so "consecutive" means what it says.
+        #
+        # The latch is DERIVED from this number rather than stored beside it
+        # (see identity_fault_latched) — two fields kept in lockstep by hand is
+        # a desync waiting for the next probe site to be added.
+        self._unreadable_probes = 0
 
     @property
     def orders_changed_last_sync(self) -> bool:
@@ -287,6 +321,84 @@ class ProtectionManager:
             # scheduleCancel just cancelled.
             self._confirmed_cloid.clear()
 
+    @property
+    def identity_fault_latched(self) -> bool:
+        """Whether consecutive unreadable orderStatus answers crossed the latch.
+
+        The engine's escalation signal (§13.5). A LATCH, not an edge: it stays
+        up until a probe reads an answer again, so an escalation whose durable
+        write failed is retried on the next tick rather than lost — the same
+        reason ``engine._emergency_close_pending`` survives a failed write.
+        Re-entering the same safe mode is idempotent, so a raised latch cannot
+        spam the §13.6 history either.
+
+        DERIVED from the streak rather than stored alongside it: a stored copy
+        would be a second fact to keep in lockstep, and the next probe site
+        added to this class is exactly where the two would drift apart.
+        """
+        return self._unreadable_probes >= _UNREADABLE_PROBE_LATCH_THRESHOLD
+
+    def _note_unreadable_probe(self, *, role: str, hexid: str, reason: str, now: datetime) -> None:
+        """Count one unusable orderStatus answer; latch at the threshold.
+
+        The venue ANSWERED and the answer could not be read as this order's —
+        a misrouted identity, or a shape this build cannot parse. Both are
+        counted together because both share the property the fail-closed
+        verdict does not model: they do not heal on their own, so the caller's
+        ``False`` repeats forever with no bound and no operator-visible state.
+
+        The ``False`` verdicts themselves are untouched (this only observes).
+        The audit row is written ONCE per episode, at the crossing: a row per
+        occurrence would bill an unbounded fault an unbounded number of rows,
+        which is the very failure mode being fixed.
+        """
+        self._unreadable_probes += 1
+        # EQUALITY, which is what makes the row once-per-episode: below the
+        # threshold there is nothing to report, above it the episode is already
+        # reported. Sound only because this counter moves by exactly one — a
+        # future site that incremented by more would step over the crossing and
+        # skip the row (the latch itself would still rise, so the escalation
+        # would survive; only the audit line would be lost).
+        if self._unreadable_probes != _UNREADABLE_PROBE_LATCH_THRESHOLD:
+            return
+        logger.error(
+            "orderStatus answered unusably %d times in a row (latest: the %s, cloid "
+            "%s — %s). A venue that cannot identify our orders does not heal on its "
+            "own, so this is escalated instead of retried indefinitely",
+            self._unreadable_probes,
+            role,
+            hexid,
+            reason,
+        )
+        self._record_event(
+            "identity_fault_latched",
+            cloid_hex=hexid,
+            detail=(
+                f"{self._unreadable_probes} consecutive unreadable orderStatus answers "
+                f"(threshold {_UNREADABLE_PROBE_LATCH_THRESHOLD}); latest on the {role}: {reason}"
+            ),
+            now=now,
+        )
+
+    def _note_readable_probe(self) -> None:
+        """A probe read its answer: the streak (and any latch) is over.
+
+        Called on EVERY readable answer, including the documented ``unknownOid``
+        marker and a status word this build cannot classify — both are the venue
+        answering coherently about the cloid we asked for, which is exactly what
+        the latched fault says is not happening. Lowering the latch does not
+        release the safe mode it caused (only §13.6 does, by design); it lets a
+        LATER recurrence latch again and leave its own audit row.
+
+        A probe that never got an answer at all (a timeout, a throttle — the
+        broad lane at both sites) is deliberately NEUTRAL: it neither counts
+        nor resets. Counting it would let an ordinary outage latch a fault it
+        is no evidence for; resetting on it would let one blip inside a
+        persistent misroute restart the streak forever, so the bound this
+        threshold exists to impose would never be reached.
+        """
+        self._unreadable_probes = 0
+
     def _row_still_rests(self, row, *, role: str) -> bool:
         """Whether ``row``'s order is CONFIRMED still resting on the exchange.
 
@@ -319,6 +431,23 @@ class ProtectionManager:
             parsed = parse_order_status(
                 self._client.query_order_by_cloid(str(hexid)), expected_cloid_hex=str(hexid)
             )
+        except MalformedResponseError as exc:
+            # Split out of the broad lane below, and BEFORE it: the venue
+            # answered, and the answer was not about the order we asked about.
+            # A transport failure heals; this does not (see
+            # _UNREADABLE_PROBE_LATCH_THRESHOLD), so it is the one that needs a
+            # bound. Verdict unchanged — still fail-closed, still no crash.
+            logger.warning(
+                "orderStatus check for the resting %s (cloid %s) answered unusably: %s "
+                "— treating it as NOT resting (fail-closed)",
+                role,
+                hexid,
+                exc,
+            )
+            self._note_unreadable_probe(
+                role=role, hexid=str(hexid), reason=str(exc), now=self._clock.now()
+            )
+            return False
         except Exception:  # noqa: BLE001 — an unresolvable read must not crash the tick
             logger.warning(
                 "orderStatus check for the resting %s (cloid %s) could not resolve — "
@@ -338,6 +467,10 @@ class ProtectionManager:
             # that costs the most and the one that returns early
             # (2026-07-31 deadline review).
             refresh_across_blocking_work(self._kill_switch, what="orderStatus confirmation")
+        # Read, whatever it said. Before the verdict branches below, because the
+        # streak measures whether the venue can ANSWER about our cloids, not
+        # whether the answer was the one we hoped for.
+        self._note_readable_probe()
         if parsed is None:
             # The documented unknownOid marker: the exchange has never seen it,
             # or no longer carries it. Either way nothing of ours rests.
@@ -927,12 +1060,15 @@ class ProtectionManager:
                 "orderStatus recovery for %s cloid %s answered unusably: %s", role, hexid, exc
             )
             self._last_recovery_error = str(exc)
+            self._note_unreadable_probe(role=role, hexid=hexid, reason=str(exc), now=now)
             return False
         except Exception:  # noqa: BLE001 — an unresolvable recovery must not crash the tick
             logger.warning(
                 "orderStatus recovery for %s cloid %s could not resolve", role, hexid, exc_info=True
             )
             return False
+        # Read, whatever it said (see the sibling call in _row_still_rests).
+        self._note_readable_probe()
         if parsed is None:
             return False  # the exchange does not know this cloid — nothing landed
         exchange_oid, exchange_status = parsed

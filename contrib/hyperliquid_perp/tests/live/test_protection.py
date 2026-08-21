@@ -1707,3 +1707,228 @@ def test_an_unreadable_recovery_reason_does_not_leak_into_later_attempt_rows(env
     carrying = [d for d in details if "answered with cloid" in d]
     assert len(carrying) == 1, details
     assert carrying[0].startswith("attempt 1:"), carrying[0]
+
+
+# -- §13.5 venue-identity fault: bounding the non-self-healing misroute -----
+#
+# The fail-closed verdicts at both orderStatus probe sites are correct and stay
+# put (issue #46 is explicit about that). What these cover is the premise those
+# verdicts rest on: "a false 'gone' costs one redundant re-place". That holds
+# only while the fault heals. A venue answering with another order's identity
+# answers that way every time, so the no-op guard re-repairs a stop that IS
+# resting for as long as the run lives, and the recovery probe can burn a whole
+# ladder into a §17.2 emergency close of a healthy, protected position — with
+# nothing but a logger.warning to show for it.
+
+_STRANGER_CLOID = "0x" + "cd" * 16
+_OUR_ROW = {"cloid_hex": "0x" + "a" * 32}
+
+
+def _misrouted_status(oid: str = "4242") -> dict:
+    """An orderStatus answer about SOMEONE ELSE's order.
+
+    Carries its own ``cloid``, so ``echo_order_status_cloid`` leaves it alone
+    and ``parse_order_status`` raises rather than handing back a stranger's
+    status — the shape of a venue that misroutes identity lookups.
+    """
+    return {
+        "status": "order",
+        "order": {"order": {"oid": oid, "cloid": _STRANGER_CLOID}, "status": "open"},
+    }
+
+
+def _latch_rows(db) -> list:
+    return [
+        e
+        for e in repo.iter_protection_order_events(db.conn, "r")
+        if e["event_type"] == "identity_fault_latched"
+    ]
+
+
+def test_the_identity_fault_latches_on_the_kth_consecutive_unreadable_answer(env):
+    """The bound: k-1 unreadable answers change nothing, the k-th latches.
+
+    Both halves matter. Latching EARLY would turn an ordinary burst — which the
+    fail-closed verdict already handles at the cost of one redundant re-place —
+    into a run halted for a human. Never latching is the treadmill.
+    """
+    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    client.status_script = [_misrouted_status() for _ in range(K)]
+    # fired_total=1 latches row-suspicion, which is what makes the no-op guard
+    # ask the exchange at all; an unreadable answer never caches, so every one
+    # of these calls really does probe.
+    mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
+
+    for _ in range(K - 1):
+        assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
+    assert mgr.identity_fault_latched is False
+    assert _latch_rows(db) == []
+
+    assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
+    assert mgr.identity_fault_latched is True
+    rows = _latch_rows(db)
+    assert len(rows) == 1
+    assert f"{K} consecutive" in rows[0]["detail"], rows[0]["detail"]
+    # The row names the probe's own verdict, so triage does not have to guess
+    # which of the two probe sites, or which fault, produced the latch.
+    assert "answered with cloid" in rows[0]["detail"], rows[0]["detail"]
+
+
+def test_the_latched_identity_fault_writes_one_audit_row_per_episode(env):
+    """Bounded output, not just a bounded verdict.
+
+    A row per unreadable ANSWER would bill an unbounded fault an unbounded
+    number of rows — the same unboundedness, moved from the repair ladder into
+    the audit trail.
+    """
+    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    client.status_script = [_misrouted_status() for _ in range(K + 6)]
+    mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
+
+    for _ in range(K + 6):
+        assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
+    assert mgr.identity_fault_latched is True
+    assert len(_latch_rows(db)) == 1
+
+
+def test_a_readable_answer_ends_the_unreadable_streak(env):
+    """ "Consecutive" means what it says.
+
+    ``unknownOid`` is the venue answering coherently about the cloid we asked
+    about — the exact thing the latch says is not happening — so it resets even
+    though its verdict is still "nothing of ours rests". It also caches nothing,
+    which is what keeps the probes after it real probes.
+    """
+    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    client.status_script = [
+        *[_misrouted_status() for _ in range(K - 1)],
+        {"status": "unknownOid"},
+        *[_misrouted_status() for _ in range(K - 1)],
+    ]
+    mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
+
+    for _ in range(2 * K - 1):
+        assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
+    # 2K-1 probes, but never K unreadable ones IN A ROW.
+    assert mgr.identity_fault_latched is False
+    assert _latch_rows(db) == []
+
+
+def test_a_transport_failure_neither_counts_toward_nor_resets_the_identity_fault(env):
+    """A probe that got no answer at all is evidence of nothing.
+
+    Counting it would let an ordinary outage latch a fault it says nothing
+    about. Resetting on it would let one blip inside a persistent misroute
+    restart the streak — and since the misrouting venue is just as capable of
+    timing out occasionally, the bound would never be reached. Both directions
+    are pinned here because both were plausible readings of "consecutive".
+    """
+    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    client.status_script = [
+        *[_misrouted_status() for _ in range(K - 1)],
+        ExchangeRequestError("status endpoint down"),
+        _misrouted_status(),
+    ]
+    mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
+
+    for _ in range(K - 1):
+        assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
+    assert mgr.identity_fault_latched is False
+
+    # The timeout: did NOT push the streak over the line on its own.
+    assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
+    assert mgr.identity_fault_latched is False
+    assert _latch_rows(db) == []
+
+    # ...and did not wipe the K-1 unreadable answers before it either.
+    assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
+    assert mgr.identity_fault_latched is True
+
+
+def test_the_two_probe_sites_share_one_identity_fault_counter(env):
+    """One venue, one fault — not one per question we happen to ask.
+
+    A counter per site would let a fault that alternates between the no-op
+    guard and the lost-ack recovery probe stay below both thresholds forever,
+    which is precisely the persistent misroute this bound exists for.
+    """
+    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    client.status_script = [_misrouted_status() for _ in range(K)]
+    mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
+
+    # K-1 from the no-op guard...
+    for _ in range(K - 1):
+        assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
+    assert mgr.identity_fault_latched is False
+
+    # ...and the K-th from the OTHER site, the lost-ack recovery probe.
+    assert (
+        mgr._recover_placed_order(
+            role="stop_loss",
+            order_id="ord-1",
+            logical="log-1",
+            hexid="0x" + "b" * 32,
+            size=Decimal("0.01"),
+            side=Side.SELL,
+            trigger_price=Decimal(45000),
+            limit_price=Decimal(44900),
+            replaced=None,
+            now=_NOW,
+        )
+        is False
+    )
+    assert mgr.identity_fault_latched is True
+    assert len(_latch_rows(db)) == 1
+
+
+def test_a_recovered_venue_lowers_the_latch_so_a_recurrence_is_visible_again(env):
+    """The latch is not one-shot for the process lifetime.
+
+    Lowering it does not release the safe mode it caused (§13.6 owns that). It
+    makes a LATER episode observable: without the reset, a second outbreak
+    weeks later would leave no audit row and no fresh escalation signal.
+    """
+    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    client.status_script = [
+        *[_misrouted_status() for _ in range(K)],
+        {"status": "unknownOid"},
+        *[_misrouted_status() for _ in range(K)],
+    ]
+    mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
+
+    for _ in range(K):
+        mgr._row_still_rests(_OUR_ROW, role="stop_loss")
+    assert mgr.identity_fault_latched is True
+
+    assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False  # readable again
+    assert mgr.identity_fault_latched is False
+
+    for _ in range(K):
+        mgr._row_still_rests(_OUR_ROW, role="stop_loss")
+    assert mgr.identity_fault_latched is True
+    # A second episode, a second row — the two are distinguishable in the trail.
+    assert len(_latch_rows(db)) == 2

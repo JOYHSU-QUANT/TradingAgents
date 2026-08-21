@@ -76,6 +76,17 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+# WIRE VOCABULARY OWNED HERE, not in the mapper: the frontendOpenOrders listing
+# fields (oid, coin, cloid, side, origSz/sz, limitPx, reduceOnly) and the fills
+# fields (tid, time) this file reads directly. The mapper owns the info-endpoint
+# SNAPSHOT vocabulary — and §12.3 reconciliation plus §19.3 bot-ownership are
+# decided off THIS file's reading of the wire, so an upstream schema change has
+# to be answered in both places. What the mapper does own on this side is
+# imported above: the side alphabet and the closing-side rule (so this file and
+# the startup sweep can never disagree on which side acts against a position),
+# plus map_account_snapshot for payloads this file hands over uninspected. The
+# whole division of labour is in mapper's module docstring.
+
 # §12.3 "equity difference beyond tolerance". The spec names the rule but not
 # the number; these are PROVISIONAL tuning constants (same convention as the
 # PR 2 deadband constants) sized for the §21 mainnet-tiny account: pending

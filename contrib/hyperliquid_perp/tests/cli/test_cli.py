@@ -160,6 +160,65 @@ def test_build_input_payload_write_failure_rides_retry_ladder(tmp_path, monkeypa
     assert "payload write failed" in exc_info.value.message
 
 
+def test_build_input_files_an_unreadable_answer_apart_from_a_disconnect(monkeypatch):
+    """§6.2: ``error_type`` is the machine-readable half of the record.
+
+    ``MalformedResponseError`` is a SUBCLASS of ``ExchangeError``, so the ORDER
+    of build_input's two except clauses is the entire mechanism — reversing them
+    silently restores the old collapsed behaviour. That is why the transport
+    cases are pinned right beside the new one instead of left implicit: the
+    claim under test is the SPLIT, and a one-sided test cannot see it close.
+
+    All three still ride the §3.1 ladder identically (its delays index on
+    attempt count, not on class), so what changes is only what the durable trail
+    says about which fault happened.
+    """
+    import contrib.hyperliquid_perp.engine_bridge as bridge_mod
+    from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
+    from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
+        ExchangeRequestError,
+        ExchangeThrottledError,
+        MalformedResponseError,
+    )
+    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
+    from contrib.hyperliquid_perp.persistence.repository._vocab import _ERROR_TYPES
+
+    as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
+    cases = [
+        # Could not REACH the venue — self-healing, and retry is the whole
+        # answer. Unpinned until now (issue #47's premise is that both halves
+        # landed on one label), so both directions of the split are covered.
+        (ExchangeRequestError("read timed out"), "connection"),
+        (ExchangeThrottledError("429 slow down"), "connection"),
+        # The venue ANSWERED and the answer was unusable. Not self-healing: a
+        # feed that misroutes one read misroutes the next, so filing it as a
+        # disconnect made per-class readings of decision_attempts count a
+        # systematically broken feed as one transient blip.
+        (MalformedResponseError("candleSnapshot payload not recognised: {}"), "malformed_response"),
+    ]
+    for raised, expected_class in cases:
+
+        def _raise(config, coin, _exc=raised, **kw):
+            raise _exc
+
+        monkeypatch.setattr(bridge_mod, "_build_context", _raise)
+        provider = object.__new__(_EngineDecisionProvider)
+        provider._config = {}
+        provider._on_blocking_read = None
+
+        with pytest.raises(RetryableDecisionError) as exc_info:
+            provider.build_input(coin="BTC", as_of=as_of)
+        assert exc_info.value.error_type == expected_class, (
+            f"{type(raised).__name__} was filed as {exc_info.value.error_type!r}"
+        )
+        # The label has to be one the write boundary accepts: a class the
+        # vocabulary does not carry raises at insert time instead, turning a
+        # recorded api_failed cycle into an unhandled crash.
+        assert exc_info.value.error_type in _ERROR_TYPES
+        # The free-text half still carries the venue's own words either way.
+        assert str(raised) in exc_info.value.message
+
+
 @pytest.mark.parametrize(
     ("candle_count", "indicators", "expected_msg"),
     [
@@ -2903,6 +2962,44 @@ def test_live_mainnet_tiny_missing_mainnet_key_names_mainnet_var(
     assert rc == 1
     assert "HYPERLIQUID_AGENT_KEY_MAINNET" in capsys.readouterr().err
     assert live_seams.auth_calls == []
+
+
+def test_live_agent_key_error_diagnoses_the_networks_own_env_var(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    """The ``dotenv_diagnosis`` interpolation on the live agent-key refusal.
+
+    Two sibling paths already pin this with a sentinel (``_require_api_key`` and
+    the paper protection-only message); the live one did not, and its plain
+    substring assertions cannot see the gap: the message's own
+    ``f"error: {env_var} is not set"`` prefix already satisfies "the env var
+    appears in stderr", so dropping the diagnosis call — or diagnosing the WRONG
+    variable — stayed invisible (issue #76).
+
+    Run on MAINNET_TINY deliberately: the diagnosis argument is a variable, so
+    the failure worth catching is it being computed for the other network. A
+    testnet run cannot distinguish that from correct behaviour.
+    """
+    import contrib.hyperliquid_perp.cli as cli_mod
+
+    mainnet_env = "HYPERLIQUID_AGENT_KEY_MAINNET"
+    monkeypatch.delenv(mainnet_env, raising=False)
+    # The message is printed by cli/live.py, so patch THAT module's binding
+    # (each importer holds its own module-global, per the from-import style).
+    monkeypatch.setattr(cli_mod.live, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
+    cfg = _live_yaml(tmp_path, live_lines="  mode: mainnet_tiny\n  network: mainnet\n")
+
+    rc = cli_main(["live", "--config", str(cfg)])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert mainnet_env in err
+    # The interpolation exists AND was handed the right variable. _LIVE_ENV is
+    # the testnet one, still exported by the fixture — so a diagnosis computed
+    # off the wrong network would show up as DIAG[...TESTNET] here.
+    assert f"DIAG[{mainnet_env}]" in err
+    assert f"DIAG[{_LIVE_ENV}]" not in err
+    assert live_seams.auth_calls == []  # refused before any network work
 
 
 def test_live_mainnet_tiny_collects_all_gate_failures(tmp_path, capsys, live_seams, monkeypatch):

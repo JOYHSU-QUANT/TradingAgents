@@ -75,7 +75,7 @@ from .loss_guards import LossGuards
 from .order_gate import LiveOrderGateRejected, RealOrderGate
 from .orders import LiveOrderPreSubmitError, LiveOrderSubmitter
 from .protection import ProtectionManager, ProtectionOutcome
-from .safe_mode import REASON_EMERGENCY_CLOSE, REASON_NO_MARKET_DATA
+from .safe_mode import REASON_EMERGENCY_CLOSE, REASON_IDENTITY_FAULT, REASON_NO_MARKET_DATA
 
 __all__ = ["LiveExecutionEngine", "LiveTickResult", "PlanRegistration", "TickStatus"]
 
@@ -677,6 +677,31 @@ class LiveExecutionEngine:
             mark=snap.mark_price,
             plan_active=self._leg is not None,
         )
+        if self._protection.identity_fault_latched:
+            # §13.5: the venue answered the §8.3 identity probe unusably too many
+            # times running. Escalated HERE rather than inside the manager for the
+            # same reason the emergency-close escalation lives in this file: the
+            # safe-mode machine is the engine's to drive, and the protective roles
+            # are gate-exempt from the manual line, so latching cannot strip the
+            # SL or block the close.
+            #
+            # Unconditional on the latch, not on an edge: ``enter`` is idempotent
+            # for a repeated (severity, reason), so a re-latch writes no second
+            # row — while a first call whose write DIED on a busy DB is retried
+            # next tick instead of being lost (the manager keeps the latch up
+            # until a probe reads an answer again).
+            self._safe_mode.enter(
+                "manual",
+                REASON_IDENTITY_FAULT,
+                detail=(
+                    "orderStatus answered unusably on consecutive §8.3 identity "
+                    "probes (§17 protection sync)"
+                ),
+            )
+            # The CLI's per-tick log only fires when a tick DID something, and a
+            # latched run whose every tick is otherwise a no-op must not go
+            # console-silent (same reasoning as protection_blocked below).
+            events.append("venue_identity_fault")
         if outcome is ProtectionOutcome.NEEDS_EMERGENCY_CLOSE:
             # The close is an order sent to the BOOK, so it prices off MID, not
             # mark (market_feed contract: triggers watch mark, fills reference

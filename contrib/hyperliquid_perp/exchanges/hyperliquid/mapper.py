@@ -1,8 +1,9 @@
-"""Translate raw Hyperliquid JSON into the clean domain schema.
+"""Translate raw Hyperliquid INFO-ENDPOINT SNAPSHOTS into the domain schema.
 
-**This is the only module allowed to know Hyperliquid's raw field names.**
-Everything downstream works with the :mod:`...domains.perp.schema` dataclasses
-and :class:`~decimal.Decimal`. Keep all ``"markPx"``-style string keys here.
+This module owns the wire vocabulary of the four snapshot shapes below;
+everything downstream of it works with the :mod:`...domains.perp.schema`
+dataclasses and :class:`~decimal.Decimal`. Keep ``"markPx"``-style snapshot
+keys here.
 
 The shapes handled:
 
@@ -11,6 +12,41 @@ The shapes handled:
 - ``candleSnapshot`` -> ``[{t,T,o,h,l,c,v}, ...]``.
 - ``fundingHistory`` -> ``[{fundingRate, premium, time}, ...]``.
 - ``clearinghouseState`` (a.k.a. ``user_state``) -> margin summary + positions.
+
+**Snapshots, not every wire field in the system.** This docstring used to claim
+to be "the only module allowed to know Hyperliquid's raw field names". That was
+false in both directions, and dangerous in one: a reader who believed it would
+answer an upstream schema change by editing this file alone and miss
+``signed_client._parse_order_ack``, ``live.orders.parse_order_status``,
+``live.fills.ExchangeFill.parse``, and the open-order sweeps in
+``live.reconcile`` / ``live.startup`` / ``live.kill_switch`` — the last three
+being what §19.3 bot-ownership and §12.3 reconciliation are decided from. The
+real division of labour, which a grep can check:
+
+- **this module** — the four info-endpoint snapshots above, plus the venue's
+  bid/ask side alphabet (:data:`HL_SIDE_TO_LOCAL`, :func:`hl_closing_side`),
+  which is centralised here deliberately even though it is only ever read off
+  fills and open-order payloads (see the comment on that constant);
+- **:mod:`.signed_client`** — signed-action requests and their acks: the
+  ``status`` / ``response`` envelope, ``statuses``, ``resting`` / ``filled`` /
+  ``error``, ``oid``, ``cloid``, ``totalSz``, ``avgPx``, and the ``limit`` /
+  ``trigger`` order bodies;
+- **``live/``** — the order-status query, the open-orders listing and the fills
+  stream: ``orders.py``'s exchange-status word table and ``parse_order_status``,
+  plus ``fills.py``, ``fill_backfill.py``, ``reconcile.py``, ``startup.py``,
+  ``kill_switch.py`` and ``loss_guards.py``. The WS channel names (``userFills``,
+  ``orderUpdates``, ``webData2``) live in ``ws_stream.py``.
+
+The two sides align through four exports of this module —
+:data:`HL_SIDE_TO_LOCAL` and :func:`hl_closing_side` into ``live/``,
+:func:`hex_identity_matches` and :func:`require_decimal` into ``signed_client``
+and ``live/`` — plus :func:`map_account_snapshot`, which the live modules and
+CLI entrypoints call on raw payloads they never inspect themselves.
+
+One deliberate exception to the snapshot split: ``signed_client.exchange_time``
+reads ``clearinghouseState``'s ``"time"`` field directly, because that is the
+only exchange-side clock reachable without a new endpoint and no mapper here
+consumes it.
 """
 
 from __future__ import annotations

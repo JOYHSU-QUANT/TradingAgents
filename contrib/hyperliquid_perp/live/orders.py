@@ -230,7 +230,29 @@ class LiveOrderSubmitter:
             now=self._clock.now(),
         )
 
-    def _record_attempt_failure(self, attempt_id: str, exc: BaseException) -> None:
+    def _refused_ack_evidence(self, exc: BaseException, cloid_hex: str) -> str | None:
+        """Persist the payload of a REFUSED ack, if the refusal carried one.
+
+        The accepted-ack path writes its payload unconditionally; the refused
+        one could not, because ``signed_client`` raises before handing back
+        anything to hold. ``MalformedResponseError`` now carries the round-trip
+        (see ``errors.MalformedResponseError.attach_payload``), so a misrouted
+        ack leaves the same class of evidence the fills and mapper paths leave
+        when THEY refuse a payload — the stranger's whole body on disk, not
+        just the two cloids ``str(exc)`` can name.
+
+        ``isinstance`` rather than ``getattr(exc, "payload", None)``: this runs
+        under a bare ``except Exception``, so a duck-typed probe would read
+        "no evidence" off a typo in the attribute name just as quietly as off
+        an error that genuinely has none.
+        """
+        if not isinstance(exc, MalformedResponseError) or exc.payload is None:
+            return None
+        return self._write_raw_payload("order", cloid_hex, exc.payload)
+
+    def _record_attempt_failure(
+        self, attempt_id: str, exc: BaseException, *, raw_path: str | None = None
+    ) -> None:
         """Patch the attempt to 'failed' without letting the patch replace ``exc``.
 
         ``exc`` — why a real order failed on the wire — is the diagnosis. A DB
@@ -245,12 +267,22 @@ class LiveOrderSubmitter:
         "outcome unknown" (see ``update_live_order_attempt``) — the same
         conclusion 'failed' leads to. The §8.3 pre-check is status-blind, so the
         retry resolves the order's fate through orderStatus either way.
+
+        ``raw_path`` rides THIS patch rather than a second one, because an
+        attempt row is patched exactly once (§16.5 append-only evidence): a
+        follow-up write to add the pointer would be rewriting a settled
+        attempt. ``payload_column`` turns a failed evidence write into "leave
+        the column alone" rather than an explicit NULL that would clear it.
         """
         logger.warning("live order attempt %s failed on the wire: %s", attempt_id, exc)
         try:
             with self._db.transaction() as conn:
                 repo.update_live_order_attempt(
-                    conn, attempt_id, status="failed", error_message=str(exc)
+                    conn,
+                    attempt_id,
+                    status="failed",
+                    error_message=str(exc),
+                    raw_exchange_payload_path=payload_column(raw_path),
                 )
         except Exception:
             logger.exception(
@@ -555,8 +587,12 @@ class LiveOrderSubmitter:
             )
         except Exception as exc:
             # Records 'failed' WITHOUT letting a busy DB replace `exc` — the
-            # exchange failure is the diagnosis, not the sqlite error.
-            self._record_attempt_failure(attempt_id, exc)
+            # exchange failure is the diagnosis, not the sqlite error. A refusal
+            # that carried its round-trip (a misrouted ack) leaves that body on
+            # disk too, folded into the same single patch.
+            self._record_attempt_failure(
+                attempt_id, exc, raw_path=self._refused_ack_evidence(exc, hex_id)
+            )
             raise
 
         raw_path = self._write_raw_payload("order", hex_id, ack.raw)

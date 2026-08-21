@@ -468,6 +468,40 @@ def test_status_lists_the_reopened_occurrence_of_a_disposed_of_key(store, capsys
     assert f"[{open_id}]" in out
 
 
+@pytest.mark.parametrize("word", ["settled_never_sent", "settled_canceled", "local_row_reopened"])
+def test_stamping_with_one_of_the_sweeps_own_dispositions_is_refused(store, capsys, word):
+    # The once-per-fact guard reads the STRING, not who wrote it: these words
+    # mean "an episode that can recur", so they RE-OPEN the key. An operator
+    # reaching for the vocabulary the RUNBOOK prints at them would get a stamp
+    # the CLI called successful and the next pass answered with a fresh
+    # unresolved row — every pass, for a fault that stays in the sweep's cursor.
+    path, db = store
+    event_id = _open_case(db, case_type="order_missing_on_exchange", exchange_value="0xabab")
+    db.close()
+    rc = main(
+        [
+            "safe-mode",
+            "--run-id",
+            "r",
+            "--db",
+            str(path),
+            "--stamp-case",
+            str(event_id),
+            "--action",
+            word,
+        ]
+    )
+    assert rc == 1
+    assert "PROVISIONAL" in capsys.readouterr().err
+    with Database(path) as db2:
+        (row,) = [
+            r
+            for r in repo.iter_exchange_reconciliation_events(db2.conn, "r")
+            if r["event_id"] == event_id
+        ]
+        assert row["action_taken"] is None  # refused BEFORE the write, not after
+
+
 def test_stamping_an_unknown_case_id_is_named_not_silent(store, capsys):
     path, _ = store
     rc = main(

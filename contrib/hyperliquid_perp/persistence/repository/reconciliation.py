@@ -55,17 +55,18 @@ def insert_exchange_reconciliation_event(
     ONE exception, and it turns on the DISPOSITION rather than on the fact: a
     key whose latest row carries a :data:`PROVISIONAL_DISPOSITIONS` stamp is
     open again, and a fresh sighting writes its own row. Those stamps are the
-    §12 sweep's own, and each means "this pass took the order out of my cursor"
-    — which a §8.3 rule-5 resend or a reopen can undo, after which the next
-    sighting is a NEW occurrence (an order re-sent following
-    ``settled_never_sent`` can come back as the rule-10 fault "the exchange took
-    this cloid and denies it"). While every stamp shut its key permanently, that
-    occurrence was recorded NOWHERE: the dedupe swallowed it and the stamped row
-    went on asserting a disposition, so ``safe-mode --status`` and §21.4's
-    unresolved count both read clean over a live fault (issue #65). Unresolved
-    keys and human ``--stamp-case`` dispositions still shut the key — the set's
-    own comment says why the line is drawn exactly there and not at the
-    case_type.
+    §12 sweep's own, and each disposes of a fact the sweep can end up facing
+    again — after a §8.3 rule-5 resend, after a reopen, or (for one member) as
+    soon as the venue's next answer flips — at which point that sighting is a
+    NEW occurrence, sometimes a graver one than the first (an order re-sent
+    following ``settled_never_sent`` can come back as the rule-10 fault "the
+    exchange took this cloid and denies it"). Back when every stamp shut its key
+    permanently, such an occurrence was recorded NOWHERE: the dedupe swallowed
+    it and the stamped row went on asserting a disposition, so
+    ``safe-mode --status`` and §21.4's unresolved count both read clean over a
+    live fault (issue #65). Unresolved keys and human ``--stamp-case``
+    dispositions still shut the key — the set's own comment says why the line is
+    drawn exactly there and not at the case_type.
 
     ``action_taken`` stays NULL from the PR 3 ingest writers (no ingest path acts
     on a case); the PR 4 sweep passes it when the disposition is known at write

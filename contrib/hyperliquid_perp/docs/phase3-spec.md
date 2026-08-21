@@ -1032,15 +1032,31 @@ exchange_value)` **不含 symbol 欄**，裸值會讓 off-coin ETH 2.5 與同幣
   個面都看不到，包含最嚴重的 rule-10 那種）。
 
 暫定集合＝`settled_never_sent`、`settled_{terminal_status}`（由終態 order status 推導，
-不逐一寫死）、`resolved_read_succeeded`、`local_row_reopened`。**不在集合內**的兩個機器處置
-是 `resolved_fill_booked` 與 `local_row_backfilled`：它們的事實（fill 已入帳、orders 列已補
-寫）補完後不可能再成立——package 內沒有任何 `DELETE FROM`——放行只會製造每輪重複的洗版列。
+不逐一寫死）、`resolved_read_succeeded`、`local_row_reopened`。**不在集合內**的機器處置有
+三個，理由分兩種：`resolved_fill_booked` 與 `local_row_backfilled` 的事實（fill 已入帳、
+orders 列已補寫）補完後不可能再成立——package 內既沒有 `DELETE FROM fills` 也沒有
+`DELETE FROM orders`——放行只會製造每輪重複的洗版列；`backfilled` 則是它的 case 根本不帶
+`exchange_value`，從來不進去重。
 
-因為「回來」需要一次刻意的重送或 reopen，列的成長綁在 **revive 次數**上，不是 pass 次數。
-可重開**不等於**可以提早蓋章：自動處置仍不該蓋在 sweep 每輪都會重見的鍵上。所以
-`<cloid>|read_failed` 只在**本輪了結了那張單**時才蓋（代價見 RUNBOOK §6 的「該關卻沒關」），
-而 `<cloid>|local_terminal` 只要 orderStatus 這次讀得到就蓋——回到它的處境需要交易所自己
-的兩個視角互相矛盾（open_orders 列著、orderStatus 說終態），不是再跑一輪就會有。
+「回來」要多久回來一次，**逐個成員不同**，這是加新成員時要先回答的問題：`settled_*` 與
+`local_row_reopened` 需要一次重送或 reopen（注意 `local_row_reopened` 與 `settled_{status}`
+可以互相 revive，不必經過重送）；`resolved_read_succeeded` 在兩把讀取失敗鍵上則不對稱——
+見下。可重開**不等於**可以提早蓋章：自動處置不該蓋在 sweep 每輪都會重見的鍵上，那會變成
+每 pass 一列。
+
+兩把「讀不到」的鍵因此規則不同：`<cloid>|read_failed`（本地 live、交易所沒列）只在**本輪
+了結了那張單**時才蓋，因為那張單留在游標裡、每輪都會再讀（代價見 RUNBOOK §6 的「該關卻沒
+關」）；`<cloid>|local_terminal_read_failed`（本地終態、交易所仍列 open）只要 orderStatus
+這次**答了**就蓋，不論答案是終態、live 還是 unknownOid——那一列的事實只是「問不到」。後者
+確實可能隨交易所讀取抖動每次抖動生一列，接受，因為那些列都是已了結的（`--status` 與 §21.4
+只看得到目前那一列），換到的是最常見的那支答案（「orderStatus 說終態」不產生 case）能自動
+了結它。
+
+**（v14 同批）`<cloid>|local_terminal` 拆鍵**：讀取失敗自此有自己的 key
+（`<cloid>|local_terminal_read_failed`），與 reopen／unknownOid 矛盾分開，理由與 v13 把
+`<cloid>|read_failed` 從裸 cloid 拆出來完全相同——兩個相反的事實共用一把 key 時，先到的那個
+佔住它，後到的（這裡是「交易所自打嘴巴」，較嚴重的那個）不會留下任何列；而自動了結也會蓋錯
+列，把「讀取成功」蓋在一列 detail 寫著「讀到了但答 unknownOid」的紀錄上。
 
 （第七個機器處置 `backfilled`（`exchange_fill_missing_local`）不吃這條規則：它寫入時**不帶
 `exchange_value`**，本來就不進 dedupe、每 pass 各自一列，不會佔住任何事實鍵。）

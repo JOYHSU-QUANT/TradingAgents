@@ -1219,10 +1219,17 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
 def _unresolved_reconciliation_mismatches(conn, run_id: str) -> int:
     """Count §12.3 cases still open — the §21.4 "no unresolved mismatch" metric.
 
-    Mirrors the ``safe-mode --status`` open-case logic: every mismatch case is
-    open until a human stamps ``action_taken``. A ``fill_unmapped`` sighting is a
-    backlog (resolved by booking the fill, not by stamping), not a mismatch, so
-    it is excluded from the count.
+    Mirrors the ``safe-mode --status`` open-case logic: a mismatch case is open
+    until something stamps ``action_taken`` — an operator's ``--stamp-case``, or
+    the sweep itself for the dispositions it can establish. A ``fill_unmapped``
+    sighting is a backlog (resolved by booking the fill, not by stamping), not a
+    mismatch, so it is excluded from the count.
+
+    Rows, not distinct facts: a fact whose sweep disposition is provisional
+    (``repo.PROVISIONAL_DISPOSITIONS``) records each recurrence as its own row,
+    and only the newest of them is ever unresolved — so this still counts one
+    per LIVE fault, which is what §21.4 asks, while the run's history keeps the
+    episodes that were disposed of.
     """
     count = 0
     for row in repo.iter_exchange_reconciliation_events(conn, run_id):

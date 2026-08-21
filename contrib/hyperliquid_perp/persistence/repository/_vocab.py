@@ -310,43 +310,53 @@ RECONCILIATION_CASE_TYPES = frozenset(
     }
 )
 
-# The machine dispositions that end an EPISODE rather than an invariant: each
-# one is written by the §12 sweep about an order that this pass took OUT of its
-# cursor (settled to a terminal status, or reopened to a live one), and every
-# one of those exits can be undone — a §8.3 rule-5 resend re-stamps the same
-# orders row 'submitted', and _maybe_reopen_terminal_order revives a terminal
-# one. So the fact they dispose of is quiet, not impossible, and the
-# once-per-fact dedupe treats them as PROVISIONAL: a later sighting under the
-# same key is a NEW occurrence and gets its own row (see
+# The machine dispositions the §12 sweep writes for facts that can COME BACK:
+# each ends an episode in one order's life, and the sweep can find itself
+# looking at that same fact again — after a §8.3 rule-5 resend re-stamps the
+# same orders row 'submitted', after _maybe_reopen_terminal_order revives a
+# terminal one, or (for the reopen tiebreaker's read failure) simply after the
+# venue's next answer flips. So the fact they dispose of is quiet, not
+# impossible, and the once-per-fact dedupe treats them as PROVISIONAL: a later
+# sighting under the same key is a NEW occurrence and gets its own row (see
 # insert_exchange_reconciliation_event).
 #
 # Membership is the load-bearing part, and the reason it is a closed set rather
-# than "any machine stamp":
-#   * A disposition NOT listed here keeps the key shut forever. That is right
-#     for a fact that cannot come back (``local_row_backfilled`` — nothing
-#     DELETEs orders rows; ``resolved_fill_booked`` — nothing DELETEs fills)
-#     and right for a human's ``--stamp-case`` text: the operator disposing of
-#     an ``order_missing_on_exchange`` row whose order STAYS in the cursor
-#     (§8.3 rule 10: the exchange took the cloid and denies it) must not have
-#     their stamp answered by a fresh row on every pass thereafter — that
-#     re-sighting flood is what the dedupe exists to stop.
-#   * Every member above implies the order LEFT the cursor, so a re-sighting
-#     needs a deliberate resend or reopen first. Bounded by those, not by the
-#     pass cadence.
-# Adding a member is therefore a claim that the sweep cannot re-observe the
-# fact without an intervening revive.
+# than "any machine stamp": a disposition NOT listed here keeps its key shut
+# forever, which is right for two quite different things —
+#   * A fact that cannot come back: ``local_row_backfilled`` (this package
+#     contains no `DELETE FROM orders`) and ``resolved_fill_booked`` (nor
+#     `DELETE FROM fills`). ``backfilled`` is outside for a third reason — its
+#     sweep case carries no ``exchange_value``, so it never meets the dedupe.
+#   * A human's ``--stamp-case`` text: the operator disposing of an
+#     ``order_missing_on_exchange`` row whose order STAYS in the cursor (§8.3
+#     rule 10: the exchange took the cloid and denies it) must not have their
+#     stamp answered by a fresh row on every pass thereafter — that re-sighting
+#     flood is what the dedupe exists to stop. Enforced at the operator's end
+#     as well: ``safe-mode --stamp-case`` refuses an ``--action`` drawn from
+#     this set, because the guard reads the STRING, not who wrote it.
+#
+# Adding a member is a claim about how OFTEN the fact can come back — and
+# "only after a deliberate revive" is NOT true of every member below; see each
+# one. What a member must be is a fact whose recurrence earns its own row: the
+# rows a recurrence mints are closed ones, so the operator surfaces still show
+# just the current occurrence, but the events table grows by one each time.
 PROVISIONAL_DISPOSITIONS = frozenset(
     {
         # _settle_absent_order: unknownOid with no §8.3 rule-10 evidence — the
-        # send never landed, the local row goes 'rejected' (a rule-5 resend can
-        # put it back).
+        # send never landed, the local row goes 'rejected'. Back only after a
+        # deliberate rule-5 resend.
         "settled_never_sent",
-        # _clear_read_failure_case: an orderStatus read that failed on an
-        # earlier pass now works. Its caller only reaches it for an order the
-        # pass DISPOSED of, so the order is out of the cursor.
+        # _clear_read_failure_case, for BOTH tiebreakers' read-failure keys.
+        # Absent-order side: stamped only once the pass settled the order, so
+        # back only after a revive. Reopen side: stamped on any answered read
+        # while the local row stays terminal, so back on the venue's next flap
+        # — the one member whose recurrence is not revive-bounded (the cost is
+        # argued at that call site).
         "resolved_read_succeeded",
         # _maybe_reopen_terminal_order: the terminal local row was wrong and is
-        # now live again — the most re-observable of the four, by construction.
+        # now live again. Back once some pass settles that row again — which
+        # _settle_absent_order does on its own, so this member and
+        # ``settled_{status}`` can revive each other with no resend involved.
         "local_row_reopened",
     }
     # _settle_absent_order's other disposal: orderStatus answered with a

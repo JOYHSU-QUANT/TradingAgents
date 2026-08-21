@@ -96,6 +96,33 @@ def test_yf_fetch_statement_restores_other_errors_to_an_empty_frame():
 
 
 @pytest.mark.unit
+def test_yf_fetch_statement_is_safe_under_parallel_tool_execution():
+    # ToolNode runs one message's tool calls on a thread pool, and the
+    # fundamentals analyst binds the three statement tools together. Without
+    # the lock, an interleaved backup capture restores the global flag
+    # mid-fetch (re-swallowing a throttle) or leaves it stuck False.
+    import threading
+    import time as _time
+
+    from yfinance.config import YfConfig
+
+    seen = []
+
+    def probe():
+        seen.append(YfConfig.debug.hide_exceptions)
+        _time.sleep(0.05)  # long enough that unsynchronized calls overlap
+        raise ValueError("boom")
+
+    threads = [threading.Thread(target=lambda: su.yf_fetch_statement(probe)) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert seen == [False, False]  # each fetch ran inside its own window
+    assert YfConfig.debug.hide_exceptions is True  # and the default came back
+
+
+@pytest.mark.unit
 def test_statement_throttle_survives_yfinance_internal_swallowing(monkeypatch):
     # Through the REAL yfinance property: the fundamentals scraper swallows
     # YFRateLimitError into an empty frame under the default hidden-exception

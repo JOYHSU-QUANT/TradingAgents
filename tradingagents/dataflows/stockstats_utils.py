@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 import time
 from typing import Annotated
 
@@ -52,6 +53,17 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
                 ) from e
 
 
+# Serializes yf_fetch_statement's flip/fetch/restore of the process-global
+# hidden-exceptions flag. ToolNode runs the tool calls of one model message on
+# a thread pool, and the fundamentals analyst binds the three statement tools
+# together — unsynchronized, an interleaved backup capture could restore the
+# flag mid-fetch (re-swallowing the very throttle this exists to surface) or
+# leave it stuck False process-wide. The retry sleeps in yf_retry sit outside
+# the locked window, so a throttled statement does not hold the lock while
+# backing off.
+_STATEMENT_FLAG_LOCK = threading.Lock()
+
+
 def yf_fetch_statement(func):
     """Fetch a yfinance statement frame with throttles made visible.
 
@@ -73,17 +85,18 @@ def yf_fetch_statement(func):
     from yfinance.config import YfConfig
 
     def _call():
-        backup = YfConfig.debug.hide_exceptions
-        YfConfig.debug.hide_exceptions = False
-        try:
-            return func()
-        except YFRateLimitError:
-            raise
-        except Exception as e:
-            logger.warning("yfinance statement fetch failed: %s", e, exc_info=True)
-            return pd.DataFrame()
-        finally:
-            YfConfig.debug.hide_exceptions = backup
+        with _STATEMENT_FLAG_LOCK:
+            backup = YfConfig.debug.hide_exceptions
+            YfConfig.debug.hide_exceptions = False
+            try:
+                return func()
+            except YFRateLimitError:
+                raise
+            except Exception as e:
+                logger.warning("yfinance statement fetch failed: %s", e, exc_info=True)
+                return pd.DataFrame()
+            finally:
+                YfConfig.debug.hide_exceptions = backup
 
     return yf_retry(_call)
 

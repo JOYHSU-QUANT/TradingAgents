@@ -154,6 +154,23 @@ def test_error_message_envelope_uses_the_callers_subject_when_named(monkeypatch)
 
 
 @pytest.mark.unit
+def test_global_news_rejection_is_attributed_to_its_named_subject(monkeypatch):
+    # Through the REAL get_global_news call site: it must pass its subject to
+    # the boundary. The direct _make_api_request test above proves the kwarg
+    # works, not that the caller wires it — dropping the argument would fall
+    # back to "NEWS_SENTIMENT" with every other test still green.
+    import tradingagents.dataflows.alpha_vantage_news as avn
+    from tradingagents.dataflows.errors import NoMarketDataError
+
+    body = json.dumps({"Error Message": "Invalid API call."})
+    monkeypatch.setattr(av.requests, "get", _patched_get(body))
+    with pytest.raises(NoMarketDataError) as exc:
+        avn.get_global_news("2026-06-01")
+    assert "global market news" in str(exc.value)
+    assert "NEWS_SENTIMENT'" not in str(exc.value).split(":", 1)[0]
+
+
+@pytest.mark.unit
 def test_rate_limit_notice_outranks_an_error_message_rider(monkeypatch):
     # Order pin: a body carrying both a throttle notice and an "Error Message"
     # keeps the more actionable rate-limit verdict.

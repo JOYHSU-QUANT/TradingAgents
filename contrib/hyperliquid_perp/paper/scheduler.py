@@ -97,8 +97,11 @@ class RetryableDecisionError(Exception):
     """A market-data / AI API failure worth retrying (spec §3.1).
 
     ``error_type`` uses the §6.2 vocabulary (``timeout`` / ``rate_limit`` /
-    ``connection`` / ``server_error``); anything the provider does not classify
-    should propagate as a normal exception (a bug, not a retry).
+    ``connection`` / ``malformed_response`` / ``server_error``); anything the
+    provider does not classify should propagate as a normal exception (a bug,
+    not a retry). The authoritative list is ``repository._vocab._ERROR_TYPES``,
+    which ``check_enum`` enforces at the write boundary — this sentence is a
+    convenience copy, so extend the two together.
     """
 
     def __init__(self, error_type: str, message: str) -> None:

@@ -140,20 +140,28 @@ _MAX_REPAIR_SLEEP_S = 10.0
 # recovery probe can burn a whole repair ladder into a §17.2 emergency close of
 # a position that was healthy and protected all along.
 #
-# FIVE, deliberately more than the three probes the no-op guards make in one
-# sync (the SL guard, the SL covering check on a gate-blocked repair, the TP
-# guard — see _row_still_rests), so a burst confined to those guards cannot
-# latch on its own: that burst is the self-healing case the fail-closed verdict
-# already handles correctly at the price of one redundant re-place.
+# FIVE, chosen against the NO-OP GUARDS' worth of probes in one sync: at most
+# three (the SL guard, the SL covering check on a gate-blocked repair, the TP
+# guard — see _row_still_rests), so the guards alone can never latch, whatever
+# the venue does to them in a single sync. That is the case worth protecting: a
+# guard reading "not resting" costs one redundant re-place of an order we want
+# resting anyway, and the fail-closed verdict already handles it correctly.
 #
-# The repair ladder probes too, once per attempt, so it is NOT true that a
-# single sync can never reach five — at the default sl_repair_max_attempts of 3
-# a whole sync tops out at three unreadable answers (measured), but the setting
-# is an operator's to raise, and a longer ladder could cross the line inside one
-# sync. That is accepted rather than worked around: a ladder whose every answer
-# is unreadable is already walking toward the §17.2 emergency close of a healthy
-# position, which is precisely the outcome this bound exists to pre-empt, so
-# latching there is early rather than wrong.
+# A sync can still cross the line when the REPAIR LADDER also probes — it does
+# so once per failed attempt, so guards plus ladder reach six at the default
+# sl_repair_max_attempts of 3 (measured; both cases are pinned below). That is
+# intended, not a hole to plug: six consecutive answers that cannot be read as
+# being about the cloid we asked for IS the fault this bound exists for, and the
+# number of ticks it took to collect them does not make it less true. A ladder
+# getting unreadable answers on every attempt is already walking toward the
+# §17.2 emergency close of a healthy position — latching there is early rather
+# than wrong.
+#
+# Earlier drafts of this comment claimed a per-sync ceiling three separate
+# times, each time slightly less wrong; the claim it actually supports is only
+# the guards-alone one above. See
+# test_the_no_op_guards_alone_cannot_latch_within_one_sync and
+# test_a_sync_whose_repair_ladder_also_misroutes_can_latch_within_that_sync.
 #
 # Five is tiny against the unbounded treadmill it replaces — at the 30s
 # max_tick_gap the latch lands within a minute or two of onset. (The sibling

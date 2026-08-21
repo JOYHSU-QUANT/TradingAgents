@@ -1902,24 +1902,9 @@ def test_the_two_probe_sites_share_one_identity_fault_counter(env):
     assert len(_latch_rows(db)) == 1
 
 
-def test_one_sync_of_unreadable_answers_does_not_latch_at_the_default_ladder(env):
-    """The scenario the threshold's own comment argues from, pinned.
-
-    The comment justifies k=5 by "more than the three probes one sync's no-op
-    guards make". A test that only drives ``_row_still_rests`` in a loop never
-    exercises that claim — a real ``sync`` also runs the repair ladder, which
-    probes once per attempt. This drives the whole thing: an established SL/TP,
-    a fired kill switch (so the no-op guards really ask), every orderStatus
-    misrouted, and every re-place raising, at the DEFAULT
-    ``sl_repair_max_attempts``. One sync must stay under the line.
-    """
-    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
-
-    db = env
-    _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+def _established(db, client, gate):
+    """A manager whose first sync really put an SL and a TP on the book."""
     mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch())
-    # A clean sync first, so there are real SL/TP rows for the guards to doubt.
     mgr.sync(
         position=_long_position(),
         liquidation_price=Decimal(40000),
@@ -1927,24 +1912,83 @@ def test_one_sync_of_unreadable_answers_does_not_latch_at_the_default_ladder(env
         plan_active=False,
     )
     assert repo.active_protection_order(db.conn, "r", "BTC", "stop_loss") is not None
+    assert repo.active_protection_order(db.conn, "r", "BTC", "take_profit") is not None
+    return mgr
 
+
+def test_the_no_op_guards_alone_cannot_latch_within_one_sync(env):
+    """The one per-sync claim the threshold actually rests on.
+
+    k=5 is chosen to sit above the at-most-three probes the no-op guards make in
+    a sync, so no single sync's worth of GUARD answers can latch however badly
+    the venue behaves. That is the case worth protecting: a guard reading "not
+    resting" costs one redundant re-place, which the fail-closed verdict already
+    handles correctly.
+
+    Driven through the real ``sync`` at the same position size, so the guards'
+    qty/trigger no-op chain does not short-circuit before they ask (an earlier
+    version of this test resized the position and silently exercised only the
+    repair ladder). Every re-place SUCCEEDS, so the ladder never reaches its own
+    probe and what is counted here is guards only.
+    """
+    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    mgr = _established(db, client, gate)
+
+    before = len(client.status_queries)
     client.status_script = [_misrouted_status() for _ in range(50)]
-    client.place_script = ["raise"] * 20
-    client.modify_script = ["raise"] * 20
-    mgr._kill_switch.fired_total = 1  # rows are suspect: the guards must probe
+    client.place_script = ["ok"] * 20
+    client.modify_script = ["ok"] * 20
+    mgr._kill_switch.fired_total = 1  # rows are suspect: the guards must ask
     mgr.sync(
-        position=_long_position(size=Decimal("0.2")),
+        position=_long_position(),
         liquidation_price=Decimal(40000),
         mark=Decimal(50000),
         plan_active=False,
     )
 
-    assert 0 < mgr._unreadable_probes < K, (
-        f"one sync made {mgr._unreadable_probes} unreadable probes; the threshold "
-        f"{K} is chosen to sit above a single sync's worth at the default ladder"
-    )
+    guard_probes = len(client.status_queries) - before
+    assert guard_probes > 0, "the guards never asked — this test would be vacuous"
+    assert guard_probes < K, f"guards alone made {guard_probes} probes, threshold is {K}"
     assert mgr.identity_fault_latched is False
     assert _latch_rows(db) == []
+
+
+def test_a_sync_whose_repair_ladder_also_misroutes_can_latch_within_that_sync(env):
+    """The other half, pinned as INTENDED rather than left to be rediscovered.
+
+    Guards plus ladder can cross the line inside one sync — six probes here, at
+    the default ``sl_repair_max_attempts``, with the SL's re-place healing on its
+    second attempt while the TP keeps getting answers about somebody else's
+    order. That is not a false positive to engineer away: six consecutive
+    answers that cannot be read as being about the cloid we asked for IS the
+    fault, and how few ticks it took to collect them does not make it less true.
+    Pinned so a later reader does not "fix" it back into an unbounded treadmill.
+    """
+    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    mgr = _established(db, client, gate)
+
+    client.status_script = [_misrouted_status() for _ in range(50)]
+    client.place_script = ["raise", "ok"] + ["raise"] * 20
+    client.modify_script = ["raise", "ok"] + ["raise"] * 20
+    mgr._kill_switch.fired_total = 1
+    mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+
+    assert mgr._unreadable_probes >= K
+    assert mgr.identity_fault_latched is True
+    assert len(_latch_rows(db)) == 1
 
 
 def test_a_failed_latch_audit_write_neither_crashes_the_tick_nor_drops_the_latch(env):

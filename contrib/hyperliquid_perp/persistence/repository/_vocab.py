@@ -46,7 +46,15 @@ _FUNDING_SOURCES = frozenset(
     {"live_public_data", "funding_history_backfill", "exchange_user_funding"}
 )
 # The §6.2 retry vocabulary plus the scheduler's restart-interrupted marker.
-_ERROR_TYPES = frozenset({"timeout", "rate_limit", "connection", "server_error", "interrupted"})
+# ``malformed_response``: the venue ANSWERED and the answer was unusable (a
+# misrouted read, wire-schema drift). Distinct from ``connection`` on purpose —
+# a disconnect heals by itself and this does not, so collapsing the two made
+# every per-class reading of the trail file a systematically wrong feed as one
+# transient blip. The §3.1 ladder treats all of these alike (its delays index
+# on attempt count), so a new member here changes records, never behaviour.
+_ERROR_TYPES = frozenset(
+    {"timeout", "rate_limit", "connection", "malformed_response", "server_error", "interrupted"}
+)
 # scheduler_state CSV-export breadcrumb states (schema v3).
 _EXPORT_STATUSES = frozenset({"ok", "failed"})
 # Replay breadcrumb vocabulary: "mismatch" = replay ran and contradicted the
@@ -238,7 +246,19 @@ del _split, _rest, _whole, _name, _union
 # §17 protection lifecycle audit vocabulary. Placement / in-place modify
 # (§17.4 modify-before-cancel) / repair failures / the two escalations
 # (§17.2 SL repair exhausted → emergency close; §17.3 TP failure → degraded
-# protection) / clearing a zeroed position's residual (§17.1 rule 4).
+# protection) / clearing a zeroed position's residual (§17.1 rule 4) / the
+# §13.5 venue-identity latch (consecutive orderStatus answers this build could
+# not read as being about the cloid it asked for — see
+# protection._note_unreadable_probe; written once per episode, not per answer).
+#
+# On that last member vs the 2026-08-17 decision that this vocabulary is CLOSED:
+# that decision refused a PER-ATTEMPT ``*_recovery_unreadable`` event, because
+# the recovery probe's caller already writes a ``*_repair_failed`` row and the
+# cause belonged in it. It still holds. The latch is a different fact: the OTHER
+# probe site — the no-op guard in ``_row_still_rests`` — writes no row at all,
+# so for it there is no existing row to fold into, and what is recorded here is
+# one per EPISODE rather than one per answer. Fold-into-the-existing-row remains
+# the rule for anything the repair ladder already reports.
 PROTECTION_ORDER_EVENT_TYPES = frozenset(
     {
         "stop_loss_placed",
@@ -253,6 +273,7 @@ PROTECTION_ORDER_EVENT_TYPES = frozenset(
         "emergency_close_triggered",
         "degraded_protection_entered",
         "degraded_protection_cleared",
+        "identity_fault_latched",
     }
 )
 

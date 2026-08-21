@@ -47,6 +47,7 @@ __all__ = [
     "REASON_CONSECUTIVE_LOSS",
     "REASON_DAILY_LOSS",
     "REASON_EMERGENCY_CLOSE",
+    "REASON_IDENTITY_FAULT",
     "REASON_INVALID_LOCAL_FILL",
     "REASON_KILL_SWITCH_REFRESH_FAILED",
     "REASON_LIVE_TICK_ERROR",
@@ -101,6 +102,16 @@ REASON_CONSECUTIVE_LOSS = "consecutive_loss"  # §10.4: manual
 # already de-risked), so the gate's manual-safe-mode block never blocks the
 # emergency-close order itself.
 REASON_EMERGENCY_CLOSE = "emergency_close"  # §13.5 / §17.2: manual
+# §13.5 / §17: the venue keeps answering orderStatus with something this build
+# cannot read as being about the cloid it asked for. MANUAL, for the same reason
+# REASON_EMERGENCY_CLOSE is: the fault does not heal on its own (a venue that
+# misroutes one identity lookup misroutes the next), so a recoverable latch
+# would auto-release straight back into the unbounded repair treadmill it was
+# raised to stop. Latching it is safe for protection specifically because
+# PROTECTIVE_ORDER_ROLES are exempt from the manual-safe-mode gate line, so the
+# SL repair and the §17.2 emergency close both stay sendable (order_gate.py).
+REASON_IDENTITY_FAULT = "venue_identity_fault"  # §13.5 / §17: manual
+
 # §13.4 live tick raised an unexpected error: RECOVERABLE. The loop keeps ticking
 # and re-attempts protection; a clean reconciliation pass auto-releases. Keeps a
 # single transient tick failure from tearing down the run and stripping SL/TP.

@@ -1153,7 +1153,19 @@ SL repair failed and triggered emergency close
 consecutive loss cap 觸發（§10.4）
 account equity / margin abnormal drop
 authentication / permission error
+venue identity fault（連續多次 orderStatus 答非所問，見下）
 ```
+
+**venue identity fault**（issue #46，2026-08-21 補）：交易所連續
+`protection._UNREADABLE_PROBE_LATCH_THRESHOLD` 次對 orderStatus 回出讀不出是本 cloid
+的答案（誤路由的身分，或這個 build 認不得的形狀）時，protection 於跨越門檻的那一次寫
+一列 `identity_fault_latched`（每個 episode 一列，不是每次），engine 據此進 manual
+safe mode（reason `venue_identity_fault`）。列為 manual 而非 recoverable 的理由與
+「SL repair failed → emergency close」同一條：這種故障不自癒，recoverable 會在第一次
+乾淨對帳就把 run 放回 §17 那個無界的重修迴圈。§17 兩個探測點的 fail-closed 判決不因此
+改變——本機制只觀測與升級，且 `PROTECTIVE_ORDER_ROLES` 對 manual 這條 gate 線的既有
+豁免（§13.1）確保 latch 期間 SL 修復與 §17.2 緊急平倉照常可送。latch 於任何一次讀得懂
+的答案落下（含 `unknownOid`），但落下**不**解除 safe mode——§13.6 的人工解除仍是唯一出口。
 
 Manual latch 掛住期間，AI 決策 cadence 本身**暫停**（PR 5 定案，2026-07-22）：
 每個目標反正都會被 §4.1 `manual_safe_mode` 擋下，live decision driver 於

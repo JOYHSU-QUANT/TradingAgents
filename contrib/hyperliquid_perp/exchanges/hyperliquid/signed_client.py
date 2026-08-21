@@ -176,6 +176,14 @@ def _response_payload(response: Any, *, action: str) -> Any:
     return response.get("response")
 
 
+# Wire vocabulary OWNED HERE, not in the mapper: this module holds the
+# signed-action request and ack shapes (the status/response envelope, statuses,
+# resting/filled/error, oid, cloid, totalSz, avgPx, and the limit/trigger order
+# bodies). The mapper owns the info-endpoint SNAPSHOT vocabulary and the shared
+# side alphabet; see its module docstring for the whole division of labour, and
+# change both sides together when the venue's schema moves.
+
+
 def _single_status(response: Any, *, action: str) -> Any:
     """The one per-order status out of a single-order action's response.
 
@@ -247,6 +255,29 @@ def _check_ack_cloid(body: Any, *, expected_cloid_hex: str, kind: str) -> None:
 
 
 def _parse_order_ack(response: Any, *, expected_cloid_hex: str) -> OrderAck:
+    """Read one order ack, attaching the raw round-trip to any refusal.
+
+    The attach happens HERE, once, rather than at each raise site: this is the
+    innermost frame holding the WHOLE response, so every malformation on this
+    path (a misrouted cloid echo, a missing ``oid``, an unrecognised status
+    body, a non-finite ``avgPx``) becomes evidence the caller can persist —
+    without the leaf parsers, which are shared with the cancel and status
+    paths, having to know anything about order evidence.
+    """
+    try:
+        return _parse_order_ack_body(response, expected_cloid_hex=expected_cloid_hex)
+    except MalformedResponseError as exc:
+        # ``live.orders`` writes this to the run's payload dir and records the
+        # path on the attempt row. Without it, a venue answering an order
+        # submission with a STRANGER's oid left only ``str(exc)`` behind — which
+        # names the two cloids but neither the stranger's oid nor the rest of
+        # the body, on the one failure whose entire diagnosis is "what exactly
+        # did the venue send us?" (issue #47).
+        exc.attach_payload(response)
+        raise
+
+
+def _parse_order_ack_body(response: Any, *, expected_cloid_hex: str) -> OrderAck:
     status = _single_status(response, action="order")
     if isinstance(status, dict) and "resting" in status:
         resting = status["resting"]

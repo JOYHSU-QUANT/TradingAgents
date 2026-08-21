@@ -75,7 +75,7 @@ from .loss_guards import LossGuards
 from .order_gate import LiveOrderGateRejected, RealOrderGate
 from .orders import LiveOrderPreSubmitError, LiveOrderSubmitter
 from .protection import ProtectionManager, ProtectionOutcome
-from .safe_mode import REASON_EMERGENCY_CLOSE, REASON_NO_MARKET_DATA
+from .safe_mode import REASON_EMERGENCY_CLOSE, REASON_IDENTITY_FAULT, REASON_NO_MARKET_DATA
 
 __all__ = ["LiveExecutionEngine", "LiveTickResult", "PlanRegistration", "TickStatus"]
 
@@ -706,6 +706,37 @@ class LiveExecutionEngine:
             # the episode is merely suspended behind the gate, not recovered.
             self._emergency_close_pending = False
             events.append("emergency_close_pending_cleared")
+        if self._protection.identity_fault_latched:
+            # §13.5: the venue answered the §8.3 identity probe unusably too many
+            # times running. Escalated HERE rather than inside the manager for the
+            # same reason the emergency-close escalation lives in this file: the
+            # safe-mode machine is the engine's to drive, and the protective roles
+            # are gate-exempt from the manual line, so latching cannot strip the
+            # SL or block the close.
+            #
+            # LAST, after every outcome branch above, because ``enter`` writes to
+            # SQLite and can raise on a busy DB: ordered before them, that raise
+            # would skip the §17.2 emergency close this very tick — trading a
+            # bookkeeping failure for an unclosed position. The latch is not lost
+            # by deferring, since it stays up until a probe reads an answer again.
+            #
+            # Unconditional on the latch rather than on its rising edge: ``enter``
+            # is idempotent for a repeated (severity, reason), so re-entering
+            # writes no second history row — while a first call whose write DIED
+            # is simply retried next tick. Same shape as the ``_no_data_streak``
+            # escalation above, which also re-enters on the level.
+            self._safe_mode.enter(
+                "manual",
+                REASON_IDENTITY_FAULT,
+                detail=(
+                    "orderStatus answered unusably on consecutive §8.3 identity "
+                    "probes (§17 protection sync)"
+                ),
+            )
+            # The CLI's per-tick log only fires when a tick DID something, and a
+            # latched run whose every tick is otherwise a no-op must not go
+            # console-silent (same reasoning as protection_blocked above).
+            events.append("venue_identity_fault")
         return outcome
 
     def _submit_due_slices(self, mid: Decimal, now: datetime, events: list[str]) -> int:

@@ -135,7 +135,7 @@ class _EngineDecisionProvider:
         from ..domains.perp.prompt_context import render_market_context
         from ..domains.perp.target_decision import decision_format_instructions
         from ..engine_bridge import _build_context, _context_refusal_error
-        from ..exchanges.hyperliquid.errors import ExchangeError
+        from ..exchanges.hyperliquid.errors import ExchangeError, MalformedResponseError
         from ..exchanges.hyperliquid.market_data import interval_to_ms
         from ..paper.scheduler import DecisionInput, RetryableDecisionError
 
@@ -143,6 +143,21 @@ class _EngineDecisionProvider:
             ctx, _client = _build_context(
                 self._config, coin, on_blocking_read=self._on_blocking_read
             )
+        except MalformedResponseError as exc:
+            # BEFORE the ExchangeError clause below — that is this error's BASE
+            # class, so the order is what makes this branch reachable at all.
+            #
+            # The venue answered and the answer was unusable: a misrouted candle
+            # or funding read, or wire-schema drift. Filed as "connection", a
+            # feed that is systematically wrong shared its §6.2 class with an
+            # ordinary network blip, so ``error_type`` — the machine-readable
+            # half of the record, and the column ``decision_attempts.csv``
+            # carries — said "one transient disconnect" about a fault that
+            # recurs every cycle until a human fixes it. The §3.1 ladder is
+            # class-blind (its delays index on attempt COUNT), so this changes
+            # only what the durable trail says: still retried, still terminal as
+            # api_failed, now honest about which fault it was (issue #47).
+            raise RetryableDecisionError("malformed_response", str(exc)) from exc
         except ExchangeError as exc:
             raise RetryableDecisionError("connection", str(exc)) from exc
         # All four pre-LLM context guards (under-warm data, fully-dead

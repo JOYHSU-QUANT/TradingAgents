@@ -883,3 +883,59 @@ def test_error_ack_needs_no_cloid_echo():
     }
     ack = _parse_order_ack(response, expected_cloid_hex=_CLOID)
     assert ack.status == "error"
+
+
+@pytest.mark.parametrize(
+    ("statuses", "match"),
+    [
+        # A misrouted ack: the venue answers our submission with a STRANGER's
+        # order. The whole diagnosis is "what exactly did it send us?", and
+        # str(exc) can name the two cloids but not the stranger's oid.
+        ([{"resting": {"oid": 4242, "cloid": _OTHER_CLOID}}], "refusing to book"),
+        # A missing echo (format drift) — same lane, same need for the body.
+        ([{"resting": {"oid": 111}}], "answered with cloid None"),
+        # A shape this build does not recognise at all: str(exc) carries only a
+        # repr of the inner status, so the envelope is the only real evidence.
+        ([{"somethingNew": {"oid": 111}}], "not recognised"),
+    ],
+    ids=["misrouted-cloid", "missing-echo", "unrecognised-shape"],
+)
+def test_a_refused_order_ack_carries_the_whole_round_trip_as_evidence(statuses, match):
+    """§8.3 evidence: the refusal must hand the caller the payload it refused.
+
+    ``signed_client`` has no ``payload_dir`` and ``live.orders`` never saw the
+    response, so the ONLY durable trace of a misrouted ack used to be
+    ``str(exc)`` on the attempt row — while the fills and mapper paths both
+    keep the payload THEY reject. Attached in ``_parse_order_ack``'s wrapper
+    rather than at each raise site, so one choke point covers all three of
+    these malformations (issue #47).
+    """
+    response = {
+        "status": "ok",
+        "response": {"type": "order", "data": {"statuses": statuses}},
+    }
+    with pytest.raises(MalformedResponseError, match=match) as caught:
+        _parse_order_ack(response, expected_cloid_hex=_CLOID)
+    # The WHOLE round-trip, not just the inner status body: a reader needs the
+    # envelope to tell a misrouted answer from a mis-parsed one.
+    assert caught.value.payload == response
+
+
+def test_an_accepted_order_ack_leaves_the_evidence_attribute_alone():
+    """Narrowness: nothing is attached on the path that does not need it.
+
+    The accepted path writes ``ack.raw`` itself, so a payload riding the
+    exception attribute as well would be a second, competing source of the
+    same evidence — and the class default must stay clean for the isinstance
+    check in ``live.orders`` to mean anything.
+    """
+    response = {
+        "status": "ok",
+        "response": {
+            "type": "order",
+            "data": {"statuses": [{"resting": {"oid": 111, "cloid": _CLOID}}]},
+        },
+    }
+    ack = _parse_order_ack(response, expected_cloid_hex=_CLOID)
+    assert ack.status == "resting"
+    assert MalformedResponseError.payload is None  # the class default, untouched

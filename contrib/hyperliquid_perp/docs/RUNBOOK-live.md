@@ -544,11 +544,12 @@ close 落在同一個時鐘刻度）照樣 exit 5，不會讀成「從來沒有�
 |---|---|---|---|
 | kill switch 刷新 | stderr log／`kill_switch_events` | 每 30s 一次 `kill_switch_refreshed` | outage 有**兩種**開頭：一列 `kill_switch_refresh_failed`（同一次中斷只寫一列，不論重試幾次），**或是沉默超過當下 deadline**——進程被砍／卡死時它連失敗都寫不出來，所以**表裡可能一列 `refresh_failed` 都沒有卻仍記到 outage**（這種的長度從**前一列**算起，不是從 deadline 到期那一刻算起）。長度算到下一列 `kill_switch_armed`／`_refreshed`／`_disarmed` 為止（`fired`、`disarm_failed`、撤單 sweep 那幾列**不**結束 outage）。進 safe mode、擋新單，查網路。`validate` 的 refresh 可用率就是用這個時間長度算的，不是用列數 |
 | reconciliation | `exchange_reconciliation_events` | 無 open case | 有 mismatch → safe mode（見下）。**`fill_malformed` 且 `exchange_value` 以 `envelope-` 開頭＝串流層故障**（訂閱錯錢包／channel schema 漂移），不是單筆 fill 壞掉——先修接線，別急著 stamp（見下方 envelope 專節） |
-| protection | `protection_order_events` | 有部位時 SL 在書上 | `stop_loss_repair_exhausted` → unprotected，可能 emergency close。`*_repair_failed` 的 detail 若帶 `orderStatus recovery answered unusably:`，代表修復梯是被**交易所答非所問**耗盡的（誤路由），不是網路中斷——查的方向完全不同 |
+| protection | `protection_order_events` | 有部位時 SL 在書上 | `stop_loss_repair_exhausted` → unprotected，可能 emergency close。`*_repair_failed` 的 detail 若帶 `orderStatus recovery answered unusably:`，代表修復梯是被**交易所答非所問**耗盡的（誤路由），不是網路中斷——查的方向完全不同。**連續**答非所問還會另寫一列 `identity_fault_latched` 並把 run 升上 manual safe mode（見下方 `venue_identity_fault`） |
 | 中途健檢 | `validate --run-id live-BTC --db live_trading.db` | exit 4（一致、未滿） | exit 5 → 停下來調查 |
 
 **Safe mode**（§13）：進入來源有 WS 斷線 > 5min、kill switch 刷新失敗、
-reconciliation mismatch、非 bot-owned 單、daily/consecutive loss。分兩型：
+reconciliation mismatch、非 bot-owned 單、daily/consecutive loss、
+`venue_identity_fault`（見下）。分兩型：
 
 - **recoverable**（§13.4）：下一輪乾淨 reconciliation 自動解除；SL/TP 仍在看管。
 - **manual**（§13.5）：需人工介入。查狀態與解除：
@@ -565,6 +566,35 @@ python -m contrib.hyperliquid_perp safe-mode --run-id live-BTC --db live_trading
 python -m contrib.hyperliquid_perp safe-mode --run-id live-BTC --db live_trading.db \
   --stamp-case <event_id> --action "已確認為交易所延遲、無需動作"
 ```
+
+### `venue_identity_fault`（manual）
+
+**意思**：交易所連續多次對 orderStatus 給出「讀不出來是我們這張單」的答案——回的是**別人**
+的 cloid，或是這個 build 認不得的形狀。門檻與當下計數寫在 `protection_order_events`
+那列 `identity_fault_latched` 的 `detail` 裡。
+
+**為什麼是 manual**：這種故障不會自癒。會把一次身分查詢誤路由的 venue，下一次照樣誤路由，
+所以 recoverable（下一輪乾淨對帳就自動解除）等於把 run 放回原本那個無限迴圈：
+no-op 守衛會對一張**其實還掛在簿上**的停損無限重修，而失蹤 ack 的復原探測可以把一整條
+修復梯燒成 §17.2 緊急平倉——平掉的是本來健康且有保護的倉位。
+
+**期間仍然安全**：SL/TP 與緊急平倉屬 `PROTECTIVE_ORDER_ROLES`，對 manual safe mode 這條
+gate 線是豁免的（`order_gate.py` 有 import-time 保證），所以 latch 期間保護照常運作、
+照常修復；被擋住的只有**加曝險**的新單。
+
+**怎麼查**：
+
+1. 先看 `identity_fault_latched` 那列的 `detail`——它會指出最後一次是哪個 role、哪個
+   cloid、以及交易所實際回了什麼。
+2. 這是**交易所或接線**的問題，不是策略問題：核對 `live.wallet_address` 與 agent key
+   是否同一個錢包（同 `envelope-wrong-user` 的核對方向）、SDK 是否被別處覆寫、
+   以及 Hyperliquid 是否改了 orderStatus 的回應格式（後者會讓這個 build 的解析全面失效，
+   `live-smoke` 在 testnet 會先撞到）。
+3. 確認交易所已能正確回答我們的 cloid 之後才解除；解除用上面的 `--release --reason`。
+
+**自己會退掉的部分**：只要有**任何一次**探測讀得懂答案，latch 就會落下，之後若再度連續
+故障會重新 latch 並留下**新的一列**（所以兩次發作在紀錄上分得開）。但 latch 落下**不會**
+自動解除 safe mode——§13.6 規定 manual 只能人工解除。
 
 **⚠️ envelope-* 的 case 不適用上面那個範例。** `fill_malformed` 有一類 case 的
 `exchange_value` 是 **`envelope-` 開頭的固定字串**，它記的不是「某一筆 fill 壞掉」，

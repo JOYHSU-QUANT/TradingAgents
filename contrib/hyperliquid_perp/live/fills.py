@@ -96,6 +96,14 @@ logger = logging.getLogger(__name__)
 # mapped to the persistence Side words at the boundary, failing loud on
 # anything else — a third code would otherwise be coerced by Side.parse into
 # an opaque error far from here.
+#
+# The REST of the userFills vocabulary (tid, coin, px, sz, closedPnl, oid, time,
+# crossed, fee/feeToken, and the channel envelope) is owned HERE, not in the
+# mapper: the mapper owns the info-endpoint SNAPSHOT shapes. What it does own on
+# this side is what this module imports from it — the side alphabet above, the
+# identity-echo check, and the non-finite-guarded numeric parse. An upstream
+# schema change therefore has to be answered in both places; the whole division
+# of labour is written out in mapper's module docstring.
 
 # Perp fees settle in USDC. A fee reported in any other token cannot be posted
 # to the USDC ledger as-is, so it is treated as PENDING (§15.1) and left for a

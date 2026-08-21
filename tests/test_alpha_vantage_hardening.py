@@ -178,12 +178,17 @@ def test_blank_error_message_still_raises(monkeypatch):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("body", ["null", "[]", '"throttled"'])
-def test_non_object_json_bodies_are_served_as_data(monkeypatch, body):
-    # The classification reads keys; a JSON body that is not an object must be
-    # handed to the caller like any other data body, not crash into the
-    # caller's broad except as prose.
+def test_non_object_json_bodies_are_classified_as_no_data(monkeypatch, body):
+    # No AV data path serves a non-object JSON body, and the classification
+    # reads keys. Classifying keeps the router's fallback (the pre-#68
+    # behavior here was an AttributeError into the router's broad handler)
+    # without serving 'null' to the agent as a report, and without crashing.
+    from tradingagents.dataflows.errors import NoMarketDataError
+
     monkeypatch.setattr(av.requests, "get", _patched_get(body))
-    assert av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"}) == body
+    with pytest.raises(NoMarketDataError) as exc:
+        av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+    assert "non-object JSON" in str(exc.value)
 
 
 @pytest.mark.unit

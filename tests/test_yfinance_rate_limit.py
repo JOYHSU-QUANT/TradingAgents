@@ -73,18 +73,62 @@ def test_yf_retry_lets_other_errors_out_immediately(monkeypatch):
     assert sleeps == []  # no retry burned on a non-throttle failure
 
 
+# --- the statement boundary: throttles un-hidden, everything else unchanged ---
+
+
+@pytest.mark.unit
+def test_yf_fetch_statement_maps_a_throttle(monkeypatch):
+    from yfinance.config import YfConfig
+
+    monkeypatch.setattr(su.time, "sleep", lambda s: None)
+    with pytest.raises(VendorRateLimitError):
+        su.yf_fetch_statement(mock.Mock(side_effect=YFRateLimitError()))
+    assert YfConfig.debug.hide_exceptions is True  # backup/restore held
+
+
+@pytest.mark.unit
+def test_yf_fetch_statement_restores_other_errors_to_an_empty_frame():
+    from yfinance.config import YfConfig
+
+    out = su.yf_fetch_statement(mock.Mock(side_effect=ValueError("boom")))
+    assert out.empty  # the library's swallowed-empty answer, preserved
+    assert YfConfig.debug.hide_exceptions is True
+
+
+@pytest.mark.unit
+def test_statement_throttle_survives_yfinance_internal_swallowing(monkeypatch):
+    # Through the REAL yfinance property: the fundamentals scraper swallows
+    # YFRateLimitError into an empty frame under the default hidden-exception
+    # mode (verified on yfinance 1.4.1), which would read as "no data". The
+    # un-hidden window in yf_fetch_statement is what lets the throttle out —
+    # a test that patches our own yf_retry cannot see this layer.
+    import yfinance.data as yfdata
+
+    monkeypatch.setattr(su.time, "sleep", lambda s: None)
+    monkeypatch.setattr(yfdata.YfData, "get", mock.Mock(side_effect=YFRateLimitError()))
+    monkeypatch.setattr(yfdata.YfData, "cache_get", mock.Mock(side_effect=YFRateLimitError()))
+    with pytest.raises(VendorRateLimitError):
+        yfin.get_balance_sheet("AAPL", "quarterly", "2026-06-01")
+
+
 # --- the leaves: a taxonomy error propagates instead of degrading to prose ---
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "call",
+    ("attr", "call"),
     [
-        lambda: yfin.get_fundamentals("AAPL", "2026-06-01"),
-        lambda: yfin.get_balance_sheet("AAPL", "quarterly", "2026-06-01"),
-        lambda: yfin.get_cashflow("AAPL", "quarterly", "2026-06-01"),
-        lambda: yfin.get_income_statement("AAPL", "quarterly", "2026-06-01"),
-        lambda: yfin.get_insider_transactions("AAPL"),
+        # attr is the boundary each leaf actually fetches through: the
+        # statement getters go through yf_fetch_statement, the rest through
+        # yf_retry — patching the wrong one leaves the real fetch running.
+        ("yf_retry", lambda: yfin.get_fundamentals("AAPL", "2026-06-01")),
+        ("yf_fetch_statement", lambda: yfin.get_balance_sheet("AAPL", "quarterly", "2026-06-01")),
+        ("yf_fetch_statement", lambda: yfin.get_cashflow("AAPL", "quarterly", "2026-06-01")),
+        (
+            "yf_fetch_statement",
+            lambda: yfin.get_income_statement("AAPL", "quarterly", "2026-06-01"),
+        ),
+        ("yf_retry", lambda: yfin.get_insider_transactions("AAPL")),
     ],
     ids=[
         "fundamentals",
@@ -94,8 +138,8 @@ def test_yf_retry_lets_other_errors_out_immediately(monkeypatch):
         "insider-transactions",
     ],
 )
-def test_y_finance_leaves_let_the_rate_limit_propagate(monkeypatch, call):
-    monkeypatch.setattr(yfin, "yf_retry", _throttled)
+def test_y_finance_leaves_let_the_rate_limit_propagate(monkeypatch, attr, call):
+    monkeypatch.setattr(yfin, attr, _throttled)
     with pytest.raises(VendorRateLimitError):
         call()
 
@@ -153,9 +197,14 @@ def test_untyped_failures_still_degrade_to_prose(monkeypatch):
 
 
 def _rate_limited_yahoo(monkeypatch, tmp_path):
-    """Point the real OHLCV path at an empty cache and an always-429 Yahoo."""
+    """Point the real OHLCV path at an empty cache and an always-429 Yahoo.
+
+    Patched at Ticker.history — the call load_ohlcv actually makes, and one
+    that genuinely re-raises YFRateLimitError (yf.download swallows it into an
+    empty frame, which is why load_ohlcv does not use it, #67).
+    """
     monkeypatch.setattr(su.time, "sleep", lambda s: None)
-    monkeypatch.setattr(su.yf, "download", mock.Mock(side_effect=YFRateLimitError()))
+    monkeypatch.setattr(su.yf.Ticker, "history", mock.Mock(side_effect=YFRateLimitError()))
     set_config({"data_cache_dir": str(tmp_path)})
 
 

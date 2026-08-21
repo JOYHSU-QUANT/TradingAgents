@@ -89,14 +89,15 @@ def _make_api_request(function_name: str, params: dict, subject: str | None = No
             reported as an HTTP 429 or as a notice in an HTTP 200 body (#72)
         NoMarketDataError: When the body is an ``Error Message`` rejection
             envelope — Alpha Vantage's "Invalid API call" answer for a symbol
-            or parameter it cannot serve. Raised here, at the one boundary
-            every Alpha Vantage request goes through, because the envelope
-            otherwise returns to callers looking like a successful body and
-            the router never gets to fall back (#68). The no-data type is the
-            decided one: the router tries the next vendor, then answers with
-            its no-data sentinel — and the vendor's wording rides along in
-            ``detail``, so a parameter mistake stays visible there rather
-            than flattened into a bare "no data".
+            or parameter it cannot serve — or a JSON body that is not an
+            object (no shape this vendor serves data in). Raised here, at the
+            one boundary every Alpha Vantage request goes through, because
+            such a body otherwise returns to callers looking like a
+            successful answer and the router never gets to fall back (#68).
+            The no-data type is the decided one: the router tries the next
+            vendor, then answers with its no-data sentinel — and the vendor's
+            wording rides along in ``detail``, so a parameter mistake stays
+            visible there rather than flattened into a bare "no data".
     """
     # Create a copy of params to avoid modifying the original
     api_params = params.copy()
@@ -133,15 +134,31 @@ def _make_api_request(function_name: str, params: dict, subject: str | None = No
     response_text = response.text
 
     # Error responses are JSON; data responses are usually CSV (or data-keyed
-    # JSON). A non-JSON body is normal data — and so is a JSON body that is not
-    # an object (the classification below reads keys, and calling .get on a
-    # list/scalar would crash into each caller's broad except as prose).
+    # JSON). A non-JSON body is normal data.
     try:
         response_json = json.loads(response_text)
     except json.JSONDecodeError:
         return response_text
+
+    # What a rejection is attributed to; see the ``subject`` docstring note.
+    rejected_subject = subject or params.get("symbol") or params.get("tickers") or function_name
+
+    # A JSON body that is not an object is no shape Alpha Vantage serves data
+    # in (data is CSV text or a keyed JSON object), and the classification
+    # below reads keys — so classify it as no-data rather than serving 'null'
+    # or '[]' to the agent as a report body. Raising (not returning) keeps the
+    # pre-#68 outcome of the router trying the next vendor, minus the crash:
+    # calling .get on a list/scalar used to AttributeError into the router's
+    # broad handler (or the indicator caller's prose lane).
     if not isinstance(response_json, dict):
-        return response_text
+        raise NoMarketDataError(
+            rejected_subject,
+            detail=(
+                f"Alpha Vantage answered the {function_name} request with a "
+                f"non-object JSON body ({type(response_json).__name__}); "
+                f"refusing to serve it as data"
+            ),
+        )
 
     # Alpha Vantage reports problems via "Information" / "Note". Classify so a
     # genuine rate limit and an invalid/missing key aren't conflated (#991):
@@ -167,9 +184,8 @@ def _make_api_request(function_name: str, params: dict, subject: str | None = No
     # rejection, not data.
     if "Error Message" in response_json:
         error_message = response_json["Error Message"] or "(no reason given)"
-        attributed = subject or params.get("symbol") or params.get("tickers") or function_name
         raise NoMarketDataError(
-            attributed,
+            rejected_subject,
             detail=f"Alpha Vantage rejected the {function_name} request: {error_message}",
         )
 

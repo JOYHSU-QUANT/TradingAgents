@@ -11,6 +11,7 @@ from .stockstats_utils import (
     _assert_ohlcv_not_stale,
     filter_financials_by_date,
     load_ohlcv,
+    yf_fetch_statement,
     yf_retry,
 )
 from .symbol_utils import NoMarketDataError, normalize_symbol
@@ -406,10 +407,13 @@ def get_balance_sheet(
     try:
         ticker_obj = yf.Ticker(canonical)
 
+        # yf_fetch_statement, not plain yf_retry: the statement properties
+        # swallow a 429 into an empty frame under yfinance's default hidden-
+        # exception mode, and "no data" must not be the verdict for a throttle (#67).
         if freq.lower() == "quarterly":
-            data = yf_retry(lambda: ticker_obj.quarterly_balance_sheet)
+            data = yf_fetch_statement(lambda: ticker_obj.quarterly_balance_sheet)
         else:
-            data = yf_retry(lambda: ticker_obj.balance_sheet)
+            data = yf_fetch_statement(lambda: ticker_obj.balance_sheet)
 
         data = filter_financials_by_date(data, curr_date)
 
@@ -442,10 +446,11 @@ def get_cashflow(
     try:
         ticker_obj = yf.Ticker(canonical)
 
+        # See get_balance_sheet for why these go through yf_fetch_statement.
         if freq.lower() == "quarterly":
-            data = yf_retry(lambda: ticker_obj.quarterly_cashflow)
+            data = yf_fetch_statement(lambda: ticker_obj.quarterly_cashflow)
         else:
-            data = yf_retry(lambda: ticker_obj.cashflow)
+            data = yf_fetch_statement(lambda: ticker_obj.cashflow)
 
         data = filter_financials_by_date(data, curr_date)
 
@@ -478,10 +483,11 @@ def get_income_statement(
     try:
         ticker_obj = yf.Ticker(canonical)
 
+        # See get_balance_sheet for why these go through yf_fetch_statement.
         if freq.lower() == "quarterly":
-            data = yf_retry(lambda: ticker_obj.quarterly_income_stmt)
+            data = yf_fetch_statement(lambda: ticker_obj.quarterly_income_stmt)
         else:
-            data = yf_retry(lambda: ticker_obj.income_stmt)
+            data = yf_fetch_statement(lambda: ticker_obj.income_stmt)
 
         data = filter_financials_by_date(data, curr_date)
 

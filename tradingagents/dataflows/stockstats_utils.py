@@ -52,6 +52,37 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
                 ) from e
 
 
+def yf_fetch_statement(func):
+    """Fetch a yfinance statement frame with throttles made visible.
+
+    The statement properties (``balance_sheet``/``cashflow``/``income_stmt``
+    and their quarterly forms) swallow ``YFRateLimitError`` inside yfinance's
+    fundamentals scraper while ``YfConfig.debug.hide_exceptions`` is on (the
+    default), answering with an empty frame — so a throttle would read as
+    "no data" and never reach :func:`yf_retry`'s mapping (#67; verified
+    empirically on yfinance 1.4.1, the pinned floor). Mirroring the library's
+    own backup/restore dance in ``multi._download_one``: hidden mode is
+    switched off for the call, ONLY the rate limit is re-raised, and every
+    other exception is restored to the swallowed-empty answer the library
+    would have given, so no non-throttle path changes behavior.
+    """
+    from yfinance.config import YfConfig
+
+    def _call():
+        backup = YfConfig.debug.hide_exceptions
+        YfConfig.debug.hide_exceptions = False
+        try:
+            return func()
+        except YFRateLimitError:
+            raise
+        except Exception:
+            return pd.DataFrame()
+        finally:
+            YfConfig.debug.hide_exceptions = backup
+
+    return yf_retry(_call)
+
+
 def _ensure_date_column(data: pd.DataFrame) -> pd.DataFrame:
     """Normalize the date column to ``Date``.
 
@@ -208,16 +239,22 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
             data = cached
 
     if data is None:
+        # Fetched through Ticker.history, NOT yf.download: download's
+        # per-ticker worker swallows YFRateLimitError and answers with an
+        # empty frame (verified empirically on yfinance 1.4.1, the pinned
+        # floor), so a throttle would read as "no rows" and yf_retry's
+        # rate-limit mapping would never fire (#67). history re-raises the
+        # throttle, and is the fetch get_YFin_data_online already uses.
+        ticker_obj = yf.Ticker(canonical)
         downloaded = yf_retry(
-            lambda: yf.download(
-                canonical,
-                start=start_str,
-                end=end_str,
-                multi_level_index=False,
-                progress=False,
-                auto_adjust=True,
+            lambda: ticker_obj.history(
+                start=start_str, end=end_str, auto_adjust=True, actions=False
             )
         )
+        # history keeps a tz-aware index; strip it (like get_YFin_data_online)
+        # so the Date column compares cleanly against the naive curr_date cutoff.
+        if isinstance(downloaded.index, pd.DatetimeIndex) and downloaded.index.tz is not None:
+            downloaded.index = downloaded.index.tz_localize(None)
         downloaded = _ensure_date_column(downloaded.reset_index())
         # Only cache real data — never persist an empty frame.
         if downloaded.empty or "Close" not in downloaded.columns:

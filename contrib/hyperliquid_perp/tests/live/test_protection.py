@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -1899,6 +1900,81 @@ def test_the_two_probe_sites_share_one_identity_fault_counter(env):
     )
     assert mgr.identity_fault_latched is True
     assert len(_latch_rows(db)) == 1
+
+
+def test_one_sync_of_unreadable_answers_does_not_latch_at_the_default_ladder(env):
+    """The scenario the threshold's own comment argues from, pinned.
+
+    The comment justifies k=5 by "more than the three probes one sync's no-op
+    guards make". A test that only drives ``_row_still_rests`` in a loop never
+    exercises that claim — a real ``sync`` also runs the repair ladder, which
+    probes once per attempt. This drives the whole thing: an established SL/TP,
+    a fired kill switch (so the no-op guards really ask), every orderStatus
+    misrouted, and every re-place raising, at the DEFAULT
+    ``sl_repair_max_attempts``. One sync must stay under the line.
+    """
+    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch())
+    # A clean sync first, so there are real SL/TP rows for the guards to doubt.
+    mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+    assert repo.active_protection_order(db.conn, "r", "BTC", "stop_loss") is not None
+
+    client.status_script = [_misrouted_status() for _ in range(50)]
+    client.place_script = ["raise"] * 20
+    client.modify_script = ["raise"] * 20
+    mgr._kill_switch.fired_total = 1  # rows are suspect: the guards must probe
+    mgr.sync(
+        position=_long_position(size=Decimal("0.2")),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=False,
+    )
+
+    assert 0 < mgr._unreadable_probes < K, (
+        f"one sync made {mgr._unreadable_probes} unreadable probes; the threshold "
+        f"{K} is chosen to sit above a single sync's worth at the default ladder"
+    )
+    assert mgr.identity_fault_latched is False
+    assert _latch_rows(db) == []
+
+
+def test_a_failed_latch_audit_write_neither_crashes_the_tick_nor_drops_the_latch(env):
+    """The audit row is best-effort; the latch is not.
+
+    Both probe sites call this from inside an ``except`` handler whose contract
+    is that an unresolvable read must not crash the tick. An unguarded
+    transaction would break that promise on a busy DB — and would do it by
+    aborting the whole §17 sync, including the SL repair, in order to fail at
+    writing one audit line.
+    """
+    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), _gate()
+    client.status_script = [_misrouted_status() for _ in range(K)]
+    mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
+
+    def _busy(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    mgr._record_event = _busy  # type: ignore[method-assign]
+
+    for _ in range(K):
+        # The verdict still comes back — fail-closed, no crash.
+        assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
+    # ...and the escalation the engine reads is still up, even though its
+    # durable line could not be written.
+    assert mgr.identity_fault_latched is True
 
 
 def test_a_recovered_venue_lowers_the_latch_so_a_recurrence_is_visible_again(env):

@@ -250,6 +250,15 @@ del _split, _rest, _whole, _name, _union
 # §13.5 venue-identity latch (consecutive orderStatus answers this build could
 # not read as being about the cloid it asked for — see
 # protection._note_unreadable_probe; written once per episode, not per answer).
+#
+# On that last member vs the 2026-08-17 decision that this vocabulary is CLOSED:
+# that decision refused a PER-ATTEMPT ``*_recovery_unreadable`` event, because
+# the recovery probe's caller already writes a ``*_repair_failed`` row and the
+# cause belonged in it. It still holds. The latch is a different fact: the OTHER
+# probe site — the no-op guard in ``_row_still_rests`` — writes no row at all,
+# so for it there is no existing row to fold into, and what is recorded here is
+# one per EPISODE rather than one per answer. Fold-into-the-existing-row remains
+# the rule for anything the repair ladder already reports.
 PROTECTION_ORDER_EVENT_TYPES = frozenset(
     {
         "stop_loss_placed",

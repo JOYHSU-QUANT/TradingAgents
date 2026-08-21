@@ -140,17 +140,26 @@ _MAX_REPAIR_SLEEP_S = 10.0
 # recovery probe can burn a whole repair ladder into a §17.2 emergency close of
 # a position that was healthy and protected all along.
 #
-# FIVE, deliberately more than the three probes ONE sync can make (the SL no-op
-# guard, the SL covering check on a gate-blocked repair, the TP no-op guard —
-# see _row_still_rests): the latch must not be reachable from a burst confined
-# to a single sync, because that burst is the self-healing case the fail-closed
-# verdict already handles correctly. Crossing this threshold therefore proves
-# the fault outlived a sync boundary. Five is still tiny against the unbounded
-# treadmill it replaces — at the 30s max_tick_gap the latch lands within a
-# minute or two of onset. (The sibling thresholds both use 3 —
-# safe_mode._REPEATED_MISMATCH_THRESHOLD and the funding source's log
-# escalation — but neither counts events that can repeat WITHIN one
-# observation.)
+# FIVE, deliberately more than the three probes the no-op guards make in one
+# sync (the SL guard, the SL covering check on a gate-blocked repair, the TP
+# guard — see _row_still_rests), so a burst confined to those guards cannot
+# latch on its own: that burst is the self-healing case the fail-closed verdict
+# already handles correctly at the price of one redundant re-place.
+#
+# The repair ladder probes too, once per attempt, so it is NOT true that a
+# single sync can never reach five — at the default sl_repair_max_attempts of 3
+# a whole sync tops out at three unreadable answers (measured), but the setting
+# is an operator's to raise, and a longer ladder could cross the line inside one
+# sync. That is accepted rather than worked around: a ladder whose every answer
+# is unreadable is already walking toward the §17.2 emergency close of a healthy
+# position, which is precisely the outcome this bound exists to pre-empt, so
+# latching there is early rather than wrong.
+#
+# Five is tiny against the unbounded treadmill it replaces — at the 30s
+# max_tick_gap the latch lands within a minute or two of onset. (The sibling
+# thresholds both use 3 — safe_mode._REPEATED_MISMATCH_THRESHOLD and the funding
+# source's log escalation — but neither counts events that can repeat WITHIN one
+# observation, which is why this one is not simply 3 as well.)
 _UNREADABLE_PROBE_LATCH_THRESHOLD = 5
 
 
@@ -370,15 +379,33 @@ class ProtectionManager:
             hexid,
             reason,
         )
-        self._record_event(
-            "identity_fault_latched",
-            cloid_hex=hexid,
-            detail=(
-                f"{self._unreadable_probes} consecutive unreadable orderStatus answers "
-                f"(threshold {_UNREADABLE_PROBE_LATCH_THRESHOLD}); latest on the {role}: {reason}"
-            ),
-            now=now,
-        )
+        # BEST-EFFORT, and last: the latch is already up (it is derived from the
+        # counter incremented above), so the escalation cannot be lost here. Both
+        # callers run this from inside an ``except`` handler whose contract is
+        # that an unresolvable read must NOT crash the tick — an unguarded
+        # transaction would break that promise on a busy DB, aborting the whole
+        # §17 sync (and with it the SL repair that tick) to fail at writing an
+        # audit line. Same ordering rule the §13.5 emergency-close escalation
+        # follows: set the state first, record it after, and never let the
+        # recording swallow the state (2026-07-22 PR 5 round-5 decision).
+        try:
+            self._record_event(
+                "identity_fault_latched",
+                cloid_hex=hexid,
+                detail=(
+                    f"{self._unreadable_probes} consecutive unreadable orderStatus answers "
+                    f"(threshold {_UNREADABLE_PROBE_LATCH_THRESHOLD}); "
+                    f"latest on the {role}: {reason}"
+                ),
+                now=now,
+            )
+        except Exception:
+            logger.exception(
+                "could not record the venue-identity latch for the %s (cloid %s); "
+                "the latch itself stands and the engine still escalates",
+                role,
+                hexid,
+            )
 
     def _note_readable_probe(self) -> None:
         """A probe read its answer: the streak (and any latch) is over.

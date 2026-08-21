@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -1358,6 +1359,41 @@ def test_a_latched_venue_identity_fault_enters_manual_safe_mode(tmp_path):
         e for e in repo.iter_safe_mode_events(db.conn, "r") if e["reason"] == REASON_IDENTITY_FAULT
     ]
     assert len(entered) == 1, [dict(e) for e in entered]
+
+
+def test_a_failing_identity_escalation_still_lets_the_emergency_close_run(tmp_path):
+    """Bookkeeping must never cost a close.
+
+    ``safe_mode.enter`` writes to SQLite and can raise on a busy DB. Ordered
+    BEFORE the outcome branches, that raise would skip the §17.2 emergency close
+    for this tick — a position left open because a history row could not be
+    written. Running the escalation last costs nothing: the manager holds the
+    latch up until a probe reads an answer again, so the next tick retries it.
+    """
+    prot = _FakeProtection(outcome=ProtectionOutcome.NEEDS_EMERGENCY_CLOSE)
+    prot.identity_fault_latched = True
+    db, clock, engine, gate, sub = _build(tmp_path, protection=prot)
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.05"), entry_price=D(50000)),
+            updated_at=_T0,
+        )
+    engine._was_flat = False
+
+    def _busy(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    engine._safe_mode.enter = _busy  # type: ignore[method-assign]
+    _script(engine, [_snap()])
+
+    with pytest.raises(sqlite3.OperationalError):
+        engine.tick()
+
+    # The close reached the submitter before the escalation could fail.
+    roles = [c.get("order_role") for c in sub.calls]
+    assert "emergency_close" in roles, roles
 
 
 # -- R4 loop: no-market-data visibility / escalation --------------------------

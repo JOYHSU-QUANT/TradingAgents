@@ -1026,10 +1026,12 @@ exchange_value)` **不含 symbol 欄**，裸值會讓 off-coin ETH 2.5 與同幣
 - **人工 `--stamp-case` 的處置照擋**——操作者的答案不該被之後每一輪再問一次。rule-10
   那種單（交易所收了 cloid 卻否認）會一直留在 sweep 的游標裡、每輪都重見，人工 stamp 是
   唯一的了結手段；若把它當暫定，之後每一輪都會再生一列，正是去重要擋的洗版。
-- **機器蓋的暫定處置放行新列**——這四個處置都代表「本輪把這張單移出了 sweep 的游標」，
-  而 §8.3 rule-5 重送與 `_maybe_reopen_terminal_order` 可以把它放回去；放回去之後的再觀察
-  是**新的一次**，該有自己的列（未修正前它會被吞掉，`safe-mode --status` 與 §21.4 計數兩
-  個面都看不到，包含最嚴重的 rule-10 那種）。
+- **機器蓋的暫定處置放行新列**——這四類處置了結的都是**還可能再發生**的事實，再發生時的
+  觀察是**新的一次**，該有自己的列（未修正前它會被吞掉，`safe-mode --status` 與 §21.4 計數
+  兩個面都看不到，包含最嚴重的 rule-10 那種）。**怎麼再發生逐個成員不同**，不要一律套
+  「要先有一次重送或 reopen」（`settled_*` 是，`local_row_reopened` 只需 sweep 自己再 settle
+  一次，`resolved_read_succeeded` 在 `|local_terminal_read_failed` 上只需交易所下次答案翻面）
+  ——下面逐條列。
 
 暫定集合＝`settled_never_sent`、`settled_{terminal_status}`（由終態 order status 推導，
 不逐一寫死）、`resolved_read_succeeded`、`local_row_reopened`。**不在集合內**的機器處置有
@@ -1058,8 +1060,6 @@ orders 列已補寫）補完後不可能再成立——package 內既沒有 `DEL
 佔住它，後到的（這裡是「交易所自打嘴巴」，較嚴重的那個）不會留下任何列；而自動了結也會蓋錯
 列，把「讀取成功」蓋在一列 detail 寫著「讀到了但答 unknownOid」的紀錄上。
 
-（第七個機器處置 `backfilled`（`exchange_fill_missing_local`）不吃這條規則：它寫入時**不帶
-`exchange_value`**，本來就不進 dedupe、每 pass 各自一列，不會佔住任何事實鍵。）
 
 ## 13. Safe Mode
 

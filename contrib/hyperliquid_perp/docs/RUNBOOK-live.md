@@ -617,7 +617,7 @@ gate 線是豁免的（`order_gate.py` 有 import-time 保證），所以 latch 
 
 **「一個未癒事實一列」的 case 不只 envelope 那兩種。** 交易所倉位與訂單那邊也有幾個 case 的
 `exchange_value` 是**不帶量值的固定 key**，語義與上面一樣——一個未癒的事實只寫一列
-（訂單那兩種另有一層：一段被了結之後又復發時會另開一列，見下面第 2–4 點）：
+（訂單那三種另有一層：一段被了結之後又復發時會另開一列，見下面第 2–4 點）：
 
 | `exchange_value` | 事實 | 現在多大／現在怎樣，去哪裡看 |
 |---|---|---|
@@ -626,7 +626,7 @@ gate 線是豁免的（`order_gate.py` 有 import-time 保證），所以 latch 
 | `equity_out_of_tolerance` | equity 超出容差 | 首列的 `detail`、每 pass 的 warning log、每 pass 的 `reconciliation_diff`（`position_snapshots` 那欄是倉位大小，與 equity 無關） |
 | `<cloid>\|read_failed` | 這張單（本地 live、交易所沒列）的 orderStatus 讀不到 | **目前這一段**首列的 `detail`（該段第一次的**完整**例外訊息；早先已了結的段各有自己的列）、每 pass 的 warning log、每 pass 的 `reconciliation_diff`（那份 detail **截到 `_DIFF_STRING_MAX_CHARS`（目前 300 字元）**，交易所的錯誤內文可能被切掉尾巴） |
 | `<cloid>\|local_terminal_read_failed` | 這張單（本地終態、交易所仍列 open）的 orderStatus 讀不到 | 同上一列；讀得到之後自動了結，再讀不到就是新的一段、新的一列 |
-| `<cloid>\|local_terminal` | 上一列那張單的 orderStatus **答了**，而答案與本地終態列衝突（reopen／unknownOid 矛盾） | 該列的 `detail`、每 pass 的 `reconciliation_diff`（**這兩支沒有自己的 warning log**，run log 裡只有那一輪 `reconciliation … UNCLEAN` 的 `cases=N` 計數；grep cloid 找不到不代表 sweep 沒在看它） |
+| `<cloid>\|local_terminal` | 上一列那張單的 orderStatus **答了**，而答案與本地終態列衝突（reopen／unknownOid 矛盾） | 該列的 `detail`、每 pass 的 `reconciliation_diff`（**reopen 與 unknownOid 這兩支沒有自己的 warning log**，run log 裡只有那一輪 `reconciliation … UNCLEAN` 的 `cases=N` 計數；grep cloid 找不到不代表 sweep 沒在看它） |
 
 （「每 pass」是指有寫出 snapshot 的那些 pass。snapshot 腿是 fail-soft 的：clearinghouse 讀
 失敗時整輪不寫 snapshot 列，沒有本地 ledger 列、缺 `crossMaintenanceMarginUsed`／
@@ -644,7 +644,7 @@ gate 線是豁免的（`order_gate.py` 有 import-time 保證），所以 latch 
    同鍵的新事實**會**另開一列並回到清單上。所以人工 stamp 過的那型復發時，只會出現在
    **該輪的 pass 判決與 safe mode**（例如 `position_sl_missing` 進 recoverable safe mode）
    與 warning log。**不要用「open case 清單是空的」推論「現在沒有這個問題」。**
-3. **哪些是機器蓋的「暫定」處置**（清單就這四個，其餘機器處置與你寫的字都是終局）：
+3. **哪些是機器蓋的「暫定」處置**（就這四類、六個字串，其餘機器處置與你寫的字都是終局）：
    `settled_never_sent`、`settled_filled`／`settled_canceled`／`settled_rejected`、
    `resolved_read_succeeded`、`local_row_reopened`。終局的機器處置有三個：
    `resolved_fill_booked` 與 `local_row_backfilled`（fill 已入帳、本地 order 列已補寫，

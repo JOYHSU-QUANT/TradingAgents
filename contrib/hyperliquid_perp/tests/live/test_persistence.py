@@ -993,12 +993,13 @@ def _order_cases(db):
 
 
 def test_a_provisionally_disposed_key_records_its_next_occurrence(db):
-    # The sweep's own dispositions all mean "this pass took the order out of my
-    # cursor", and a resend or a reopen puts it back — after which the next
-    # sighting is a NEW occurrence, and a possibly far worse one (settled as
-    # never-sent, then re-sent, then answered with the §8.3 rule-10 fault). While
-    # a stamped key stayed shut, that occurrence was written NOWHERE: neither
-    # `safe-mode --status` nor §21.4's unresolved count would show it.
+    # A disposition in PROVISIONAL_DISPOSITIONS ends an episode the sweep can
+    # find itself facing again — how it comes back differs per member, and the
+    # one below is the plainest: settled as never-sent, then re-sent under §8.3
+    # rule 5, then answered with the rule-10 fault, which is far worse than the
+    # first sighting. While a stamped key stayed shut, that occurrence was
+    # written NOWHERE: neither `safe-mode --status` nor §21.4's unresolved count
+    # would show it.
     assert _sight_order_case(db, action_taken="settled_never_sent", detail="first episode")
     assert not repo.has_exchange_reconciliation_case(
         db.conn, "r", case_type="order_missing_on_exchange", exchange_value=_ORDER_KEY

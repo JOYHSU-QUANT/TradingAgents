@@ -1984,8 +1984,9 @@ def test_the_sweeps_order_dispositions_are_classified_as_the_set_intends(env):
     # A membership table, not a guard: the behavioural tests above are what
     # would catch a stamp renamed at its write site (each asserts the literal
     # string it expects). What this pins is the CLASSIFICATION — that the four
-    # order dispositions are provisional and the two "cannot come back" ones are
-    # not. It is the only place `settled_filled` and `settled_rejected` are
+    # families of order disposition below (six strings, `settled_{status}` being
+    # three of them) are provisional and the "cannot come back" ones are not.
+    # It is the only place `settled_filled` and `settled_rejected` are
     # named at all: those two are derived from the terminal-status vocabulary
     # rather than written at a call site, so no behavioural test reaches them
     # (`settled_canceled`, which several do, is the derivation's witness).

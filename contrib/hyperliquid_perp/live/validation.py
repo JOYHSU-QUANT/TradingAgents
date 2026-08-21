@@ -18,7 +18,13 @@ Where the metrics come from (all from persisted PR 2–5 event logs):
 - ``exchange_fill_dedupe_error_count`` — ``exchange_reconciliation_events``
   ``fill_money_drift`` (a redelivered fill whose identity fields disagreed).
 - ``orphan_exchange_order_count`` / ``local_exchange_position_mismatch_count`` —
-  the ``orphan_exchange_order`` / ``exchange_position_mismatch`` §12.3 cases.
+  the ``orphan_exchange_order`` / ``exchange_position_mismatch`` §12.3 case ROWS
+  the run ever recorded, disposed of or not. Rows, not distinct orders: a
+  ``|local_terminal_read_failed`` key records one row per unreadable→readable
+  flap of the venue (see ``repo.PROVISIONAL_DISPOSITIONS``), so one order whose
+  orderStatus flapped all morning can be most of this number. The gate is
+  unaffected — it fails at one row either way — but read the count as episodes
+  before going to look for that many orders.
 - ``duplicate_fill_apply_count`` — live ``fills`` sharing an ``exchange_fill_key``
   (structurally impossible under the UNIQUE index — a store-integrity assertion).
 - ``account_replay_mismatch_count`` — the §14/§15 accounting replay (reused

@@ -175,7 +175,7 @@ def _clip(text: str | None) -> str | None:
 # unresolved count. Ask it PER STAMP — being about an order does not settle it.
 # Most of this module's order stamps dispose of a fact the sweep can find itself
 # facing again (a §8.3 rule-5 resend or a reopen puts the cloid back; the reopen
-# tiebreaker's read failure needs only the venue's next answer), and those are
+# tiebreaker's read failure needs only the venue's next answer to flip), so those are
 # declared PROVISIONAL (repo.PROVISIONAL_DISPOSITIONS) so the next occurrence
 # gets its own row. What is NOT provisional: a human's `--stamp-case`
 # disposition (their answer must not be re-asked on every pass thereafter), and
@@ -195,9 +195,9 @@ def _read_failure_fact_key(cloid: str) -> str:
 
     A DIFFERENT fact from the order's real disposition, so a different key (the
     same reasoning, and the same ``|`` suffix shape, as its mirror on the reopen
-    side — ``_local_terminal_read_failure_fact_key``): both land under
-    case_type ``order_missing_on_exchange``, and while they shared the bare
-    cloid the first sighting to arrive owned the key — a later genuine absence
+    side — ``_local_terminal_read_failure_fact_key``). This key and the bare
+    cloid both land under case_type ``order_missing_on_exchange``, and while
+    they WERE one key the first sighting to arrive owned it — a later genuine absence
     of that cloid was swallowed by the dedupe and never recorded, which is
     exactly the pairing a venue misroute produces every tick.
 
@@ -1051,12 +1051,14 @@ class LiveReconciler:
                 if case.action_taken is not None:
                     # ONLY when this pass DISPOSED of the order, which is what
                     # takes it out of THIS cursor. The other outcomes leave it
-                    # here, where the next pass's read is free to fail again —
-                    # and a key the sweep keeps re-observing is the one shape
-                    # that must not carry an automatic stamp: the stamp is
-                    # provisional, so a venue flapping unreadable/readable would
-                    # answer each flap with a fresh row, which is the re-sighting
-                    # flood the once-per-fact dedupe exists to stop.
+                    # here — and this cursor probes every order in it on every
+                    # pass, so a later pass gets to settle it and stamp then.
+                    # Waiting costs one row that stays open a while; stamping on
+                    # any answered read would cost a fresh row per
+                    # unreadable→readable flap of the venue, for a fault the
+                    # sweep has not finished with. The sibling caller has no
+                    # later pass to wait for and takes the other trade — see
+                    # _clear_read_failure_case for the pair.
                     #
                     # Disposal does not make recurrence impossible — a §8.3
                     # rule-5 resend re-stamps the same order_id 'submitted'
@@ -1064,7 +1066,7 @@ class LiveReconciler:
                     # terminal row — it makes it need a deliberate new send or a
                     # contradicting exchange answer first. That is the bound
                     # this key relies on: on THIS side, rows come back per
-                    # revive rather than per pass.
+                    # revive rather than per flap.
                     self._clear_read_failure_case(
                         cloid,
                         case_type="order_missing_on_exchange",
@@ -1360,8 +1362,14 @@ class LiveReconciler:
           where the order may then be retired by a writer that is not this sweep
           (a §19.3 cancel, the kill switch, the protection manager), and the row
           holds §21.4's unresolved count above zero with nothing else reporting
-          a problem. Accepted for the opposite reason: here the flap WOULD be
-          per pass, and the open row is the cheaper of the two costs.
+          a problem. Accepted because this side does not NEED the wider rule:
+          the order stays in a cursor that probes it every pass, so a later
+          pass can settle it and stamp then — only an order some other writer
+          retires first is orphaned. The reopen side has no such second chance
+          (its common outcome makes no case at all), which is the asymmetry.
+          Not frequency: stamped on any answered read, BOTH sides would mint a
+          row per unreadable→readable flap and neither per pass, since minting
+          needs a failed read and the stamp before it a successful one.
 
         Fail-soft, like the liquidation mirror: this is the audit trail's
         disposition, not a verdict input — a store that refuses the stamp must

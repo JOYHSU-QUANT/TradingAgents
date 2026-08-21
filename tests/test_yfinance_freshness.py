@@ -4,7 +4,8 @@ live-only fundamentals snapshot discloses when the analysis date trails the
 wall clock; insider filings flag a long-dead stream. All yfinance access is
 mocked — no network."""
 
-from datetime import datetime
+import logging
+from datetime import datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -79,8 +80,22 @@ class TestStatementLagNote:
         assert "Data lag" in out
         assert "2025-01-31" in out
 
-    def test_no_curr_date_skips_note(self, monkeypatch):
+    def test_no_curr_date_falls_back_to_the_wall_clock(self, monkeypatch, caplog):
+        # The model omitting curr_date used to switch off the note together
+        # with the look-ahead filter, silently (#73). The filter genuinely
+        # needs a bound; the note only needs a reference date, so it now
+        # judges against today — and the degraded mode is logged.
         _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement("2025-01-31"))
+        with caplog.at_level(logging.WARNING, logger=yfin.__name__):
+            out = yfin.get_balance_sheet("AAPL", "quarterly", None)
+        assert "Data lag" in out
+        assert any("without curr_date" in r.message for r in caplog.records)
+
+    def test_no_curr_date_fresh_statement_has_no_note(self, monkeypatch):
+        # The wall-clock fallback must not false-alarm on a freshly filed
+        # quarter just because the date was omitted.
+        recent = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement(recent))
         out = yfin.get_balance_sheet("AAPL", "quarterly", None)
         assert "Data lag" not in out
 
@@ -161,3 +176,47 @@ class TestInsiderLagNote:
         out = yfin.get_insider_transactions("AAPL")
         assert "Data lag" not in out
         assert "Insider Transactions" in out  # still renders
+
+
+@pytest.mark.unit
+class TestInsiderBoundIsVendorAgnostic:
+    """The same routed insider tool must flag the same dead filing stream
+    through either vendor (#69). Both import the single wall-clock bound from
+    utils; the behavioral check runs both paths at the 90-day boundary, where
+    an off-by-one or a drifted local copy shows up immediately."""
+
+    def test_the_bound_is_the_single_shared_definition(self):
+        import tradingagents.dataflows.alpha_vantage_news as avn
+        from tradingagents.dataflows import utils
+
+        assert utils.MAX_INSIDER_LAG_DAYS == 90
+        assert yfin.MAX_INSIDER_LAG_DAYS == utils.MAX_INSIDER_LAG_DAYS
+        assert avn.MAX_INSIDER_LAG_DAYS == utils.MAX_INSIDER_LAG_DAYS
+
+    @pytest.mark.parametrize(
+        "lag_days,expect_note",
+        [
+            (90, False),  # exactly at the bound — a sparse but living stream
+            (91, True),  # one day beyond — flagged by both vendors
+        ],
+    )
+    def test_both_vendors_agree_at_the_bound(self, monkeypatch, lag_days, expect_note):
+        import json
+
+        import tradingagents.dataflows.alpha_vantage_fundamentals as avf
+        import tradingagents.dataflows.alpha_vantage_news as avn
+
+        filed = (datetime.now() - timedelta(days=lag_days)).strftime("%Y-%m-%d")
+
+        _patch_ticker(
+            monkeypatch,
+            insider_transactions=pd.DataFrame({"Start Date": [filed], "Shares": [100]}),
+        )
+        yf_out = yfin.get_insider_transactions("AAPL")
+
+        body = json.dumps({"data": [{"transaction_date": filed}]})
+        monkeypatch.setattr(avn, "_make_api_request", lambda function_name, params: body)
+        av_note = json.loads(avn.get_insider_transactions("AAPL")).get(avf._FRESHNESS_NOTE_KEY, "")
+
+        assert ("Data lag" in yf_out) is expect_note
+        assert ("Data lag" in av_note) is expect_note

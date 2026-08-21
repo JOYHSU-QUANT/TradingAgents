@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from typing import Annotated
 
@@ -15,14 +16,12 @@ from .stockstats_utils import (
     yf_retry,
 )
 from .symbol_utils import NoMarketDataError, normalize_symbol
-from .utils import data_lag_note, live_snapshot_note, statement_lag_bound
 
-# Maximum age (calendar days) of the newest insider filing before the report
-# carries a lag note. Insider activity is legitimately sparse, so the bound is
-# generous — the note flags a long-dead filing stream, not a quiet quarter.
-# Relative to the wall clock: no curr_date reaches this call path, and the
-# filings are fetched live either way (#30).
-MAX_INSIDER_LAG_DAYS = 90
+# The insider-filing bound lives in utils so the Alpha Vantage vendor serving
+# the same routed tool shares the single definition (#69).
+from .utils import MAX_INSIDER_LAG_DAYS, data_lag_note, live_snapshot_note, statement_lag_bound
+
+logger = logging.getLogger(__name__)
 
 
 def _dates_lag_note(values, curr_date: str | None, max_lag_days: int, what: str) -> str:
@@ -55,9 +54,22 @@ def _statement_lag_note(data: pd.DataFrame, curr_date: str | None, freq: str, wh
     by definition). The bound — and the unknown-freq fallback — come from
     :func:`statement_lag_bound` so the Alpha Vantage statement path flags the
     same gap (#58).
+
+    A missing curr_date (the model omitted it) falls back to the wall clock
+    rather than switching the note off with the look-ahead filter (#73): the
+    filter genuinely needs a point-in-time bound, but the disclosure only needs
+    a reference date. The degraded, unfiltered mode is logged because both
+    protections used to vanish silently.
     """
     if data.empty:
         return ""
+    if not curr_date:
+        logger.warning(
+            "yfinance %s served without curr_date: look-ahead filtering is "
+            "off; freshness is judged against today instead",
+            what,
+        )
+        curr_date = datetime.now().strftime("%Y-%m-%d")
     return _dates_lag_note(data.columns, curr_date, statement_lag_bound(freq), what)
 
 

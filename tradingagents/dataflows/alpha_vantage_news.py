@@ -1,4 +1,15 @@
-from .alpha_vantage_common import _make_api_request, format_datetime_for_api
+from datetime import datetime
+
+from .alpha_vantage_common import (
+    _carries_payload,
+    _make_api_request,
+    _newest_row_date,
+    _parsed_payload,
+    _served_body,
+    _with_freshness_note,
+    format_datetime_for_api,
+)
+from .utils import MAX_INSIDER_LAG_DAYS, data_lag_note
 
 # Clamp untrusted request sizes before they parameterize an external call
 # (#33): an LLM-supplied or misconfigured value must not turn into an
@@ -74,6 +85,41 @@ def get_global_news(curr_date, look_back_days: int = 7, limit: int = 50) -> dict
     return _make_api_request("NEWS_SENTIMENT", params, subject="global market news")
 
 
+def _annotate_insider_freshness(result) -> str:
+    """Attach a data-lag note when the newest insider filing is stale (#69).
+
+    The yfinance vendor serving the same routed tool flags a long-dead filing
+    stream; without this, the tool's honesty depended on which vendor
+    ``data_vendors`` selected. Same design as that path: the reference date is
+    the wall clock (no curr_date reaches an insider call) and the bound is the
+    shared ``MAX_INSIDER_LAG_DAYS``. The response body is
+    ``{"data": [{"transaction_date": "yyyy-mm-dd", ...}, ...]}`` (confirmed
+    against the live endpoint); the note rides in the family's
+    ``_freshness_note`` key so the body stays parseable JSON.
+
+    A non-JSON body, a failure envelope, or a body without a parseable filing
+    date is served as it arrived, bar a vendor-supplied freshness key — an
+    annotation degrades to silence rather than guessing (and rather than
+    dressing an error body in a freshness disclosure, #68).
+    """
+    parsed = _parsed_payload(result)
+    if parsed is None or not _carries_payload(parsed):
+        return _served_body(result, parsed)
+    rows = parsed.get("data")
+    if not isinstance(rows, list):
+        return _served_body(result, parsed)
+    latest = _newest_row_date(rows, "transaction_date")
+    if latest is None:
+        return _served_body(result, parsed)
+    note = data_lag_note(
+        latest,
+        datetime.now().strftime("%Y-%m-%d"),
+        MAX_INSIDER_LAG_DAYS,
+        "insider filing",
+    )
+    return _with_freshness_note(parsed, note) if note else _served_body(result, parsed)
+
+
 def get_insider_transactions(symbol: str) -> dict[str, str] | str:
     """Returns latest and historical insider transactions by key stakeholders.
 
@@ -83,11 +129,13 @@ def get_insider_transactions(symbol: str) -> dict[str, str] | str:
         symbol: Ticker symbol. Example: "IBM".
 
     Returns:
-        Dictionary containing insider transaction data or JSON string.
+        JSON string of insider transaction data, carrying the family's
+        ``_freshness_note`` key when the newest filing trails the wall clock
+        by more than ``MAX_INSIDER_LAG_DAYS`` (#69).
     """
 
     params = {
         "symbol": symbol,
     }
 
-    return _make_api_request("INSIDER_TRANSACTIONS", params)
+    return _annotate_insider_freshness(_make_api_request("INSIDER_TRANSACTIONS", params))

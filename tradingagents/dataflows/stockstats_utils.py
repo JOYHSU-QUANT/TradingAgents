@@ -12,14 +12,12 @@ from yfinance.exceptions import YFRateLimitError
 from .config import get_config
 from .errors import VendorRateLimitError
 from .symbol_utils import NoMarketDataError, normalize_symbol
-from .utils import safe_ticker_component
+
+# The staleness bound lives in utils (stdlib-only) so the pure-requests Alpha
+# Vantage vendor shares the same single definition (#70).
+from .utils import MAX_OHLCV_STALE_DAYS, safe_ticker_component
 
 logger = logging.getLogger(__name__)
-
-# A vendor's latest OHLCV row this many calendar days before the requested date
-# is treated as stale. Generous enough to span long holiday weekends, tight
-# enough to catch the year-old frames yfinance occasionally returns (#1021).
-MAX_OHLCV_STALE_DAYS = 10
 
 
 def yf_retry(func, max_retries=3, base_delay=2.0):

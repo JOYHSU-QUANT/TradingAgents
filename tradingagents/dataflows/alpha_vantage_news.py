@@ -85,7 +85,7 @@ def get_global_news(curr_date, look_back_days: int = 7, limit: int = 50) -> dict
     return _make_api_request("NEWS_SENTIMENT", params, subject="global market news")
 
 
-def _annotate_insider_freshness(result) -> str:
+def _annotate_insider_freshness(result, symbol: str) -> str:
     """Attach a data-lag note when the newest insider filing is stale (#69).
 
     The yfinance vendor serving the same routed tool flags a long-dead filing
@@ -96,6 +96,12 @@ def _annotate_insider_freshness(result) -> str:
     ``{"data": [{"transaction_date": "yyyy-mm-dd", ...}, ...]}`` (confirmed
     against the live endpoint); the note rides in the family's
     ``_freshness_note`` key so the body stays parseable JSON.
+
+    An empty ``data`` list answers in the yfinance vendor's voice — the same
+    "no insider transactions reported" prose — because an empty stream is
+    normal for insiders and the two vendors must say so the same way. Only the
+    empty *list* takes that exit: an empty ``{}`` or an envelope body keeps
+    its own passthrough, since the vendor never affirmed "no filings" there.
 
     A non-JSON body, a failure envelope, or a body without a parseable filing
     date is served as it arrived, bar a vendor-supplied freshness key — an
@@ -108,6 +114,10 @@ def _annotate_insider_freshness(result) -> str:
     rows = parsed.get("data")
     if not isinstance(rows, list):
         return _served_body(result, parsed)
+    if not rows:
+        # Keep this sentence in lockstep with the yfinance getter's empty-frame
+        # answer — a cross-vendor test pins the two equal.
+        return f"No insider transactions reported for symbol '{symbol}'"
     latest = _newest_row_date(rows, "transaction_date")
     if latest is None:
         return _served_body(result, parsed)
@@ -120,7 +130,7 @@ def _annotate_insider_freshness(result) -> str:
     return _with_freshness_note(parsed, note) if note else _served_body(result, parsed)
 
 
-def get_insider_transactions(symbol: str) -> dict[str, str] | str:
+def get_insider_transactions(symbol: str) -> str:
     """Returns latest and historical insider transactions by key stakeholders.
 
     Covers transactions by founders, executives, board members, etc.
@@ -131,11 +141,12 @@ def get_insider_transactions(symbol: str) -> dict[str, str] | str:
     Returns:
         JSON string of insider transaction data, carrying the family's
         ``_freshness_note`` key when the newest filing trails the wall clock
-        by more than ``MAX_INSIDER_LAG_DAYS`` (#69).
+        by more than ``MAX_INSIDER_LAG_DAYS`` (#69) — or the shared
+        no-transactions prose when the vendor answers an empty list.
     """
 
     params = {
         "symbol": symbol,
     }
 
-    return _annotate_insider_freshness(_make_api_request("INSIDER_TRANSACTIONS", params))
+    return _annotate_insider_freshness(_make_api_request("INSIDER_TRANSACTIONS", params), symbol)

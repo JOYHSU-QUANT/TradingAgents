@@ -107,7 +107,10 @@ def _parse_day(value, label: str) -> datetime | None:
         return datetime.strptime(str(value)[:10], "%Y-%m-%d")
     except (TypeError, ValueError):
         if value:
-            logger.warning("freshness note: unparseable %s %r; note suppressed", label, value)
+            # Context-neutral wording: single-value callers suppress their
+            # note on this, but row-reduction callers may still note from the
+            # other rows — so the log claims only what is true everywhere.
+            logger.warning("freshness note: unparseable %s %r; ignored", label, value)
         return None
 
 

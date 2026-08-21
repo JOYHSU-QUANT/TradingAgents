@@ -604,7 +604,8 @@ def test_stock_staleness_bound_is_the_single_shared_definition():
     # The two market-data paths must reject the same gap. Since #70 they both
     # import the one definition from utils (stdlib-only, so the pure-requests
     # vendor module is not dragged into yfinance/stockstats); this pins the
-    # value and that neither module has grown a local copy again.
+    # value and that the three bounds agree — a re-grown local copy shows up
+    # here once it drifts.
     import tradingagents.dataflows.alpha_vantage_stock as avs
     import tradingagents.dataflows.stockstats_utils as ssu
     from tradingagents.dataflows import utils

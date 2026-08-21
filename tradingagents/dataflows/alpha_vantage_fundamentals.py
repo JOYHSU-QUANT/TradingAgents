@@ -224,7 +224,11 @@ def _filter_response_json(result, curr_date, freq, label, symbol):
     if curr_date is None:
         # Date-less fallback (#73): no filtering (see the docstring), but the
         # requested cadence's newest period is still judged — against today,
-        # the only reference date left.
+        # the only reference date left. Only the requested list is judged; the
+        # other cadence's list rides along unfiltered and undisclosed. The
+        # filtered path refuses exactly that, but here "unfiltered means
+        # unfiltered" wins (user-decided), and the analyst prompt steers the
+        # model out of this date-less mode entirely.
         logger.warning(
             "Alpha Vantage %s for %s called without curr_date: look-ahead "
             "filtering is off; freshness is judged against today instead",

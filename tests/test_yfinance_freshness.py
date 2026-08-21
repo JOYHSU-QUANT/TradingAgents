@@ -220,3 +220,21 @@ class TestInsiderBoundIsVendorAgnostic:
 
         assert ("Data lag" in yf_out) is expect_note
         assert ("Data lag" in av_note) is expect_note
+
+    def test_both_vendors_use_the_same_voice_for_an_empty_stream(self, monkeypatch):
+        # An empty stream is normal for insiders; both vendors must say so in
+        # the same sentence rather than one answering prose and the other raw
+        # empty JSON the agent might hedge over.
+        import json
+
+        import tradingagents.dataflows.alpha_vantage_news as avn
+
+        _patch_ticker(monkeypatch, insider_transactions=pd.DataFrame())
+        yf_out = yfin.get_insider_transactions("AAPL")
+
+        monkeypatch.setattr(
+            avn, "_make_api_request", lambda function_name, params: json.dumps({"data": []})
+        )
+        av_out = avn.get_insider_transactions("AAPL")
+
+        assert yf_out == av_out == "No insider transactions reported for symbol 'AAPL'"

@@ -14,8 +14,9 @@ must be traceable, entirely from the SQLite store —
   equality is exact, not approximate);
 - accounting replay consistency (:func:`accounting.replay`).
 
-The Phase-3 gate (§5 可以進 Phase 3 的條件): ``cycle_count >= 30`` and zero
-orphans / snapshot mismatches / replay mismatches. ``total_pnl > 0`` is
+The Phase-3 gate (§5 可以進 Phase 3 的條件): ``cycle_count >= 30``, zero
+orphans / snapshot mismatches / replay mismatches, and no CURRENT run of
+cycles that all failed to decide (issue #50). ``total_pnl > 0`` is
 explicitly *not* a criterion.
 
 A checker that *raises* on a corrupt store (a cell ``Decimal()`` cannot read,
@@ -46,7 +47,6 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
-from typing import NamedTuple
 
 from ..common.constants import STALE_MARKET_DATA_ERROR
 from ..persistence import repository as repo
@@ -89,31 +89,63 @@ MIN_CYCLES_FOR_PHASE3 = 30
 # feed was before this mechanism existed.
 NO_DECISION_STREAK_THRESHOLD = 3
 
-# How recent the newest terminal cycle must be for a streak to still describe
-# the run's CURRENT state. Past this the run is stopped or archived, and the
-# streak is a fact about its last hours, not a reason it "cannot decide now" —
-# without this an acceptance run that happened to end during an exchange
-# maintenance window would report exit 4 forever, with "start it again and get
-# one more decided cycle" as the only remedy. Two cycles: one is inside the
-# ordinary jitter of a live run's next boundary.
+# How recently the newest terminal cycle must have CHANGED STATE for a streak
+# to still describe the run's current state. Past this the run is stopped or
+# archived, and the streak is a fact about its last hours, not a reason it
+# "cannot decide now" — without this an acceptance run that happened to end
+# during an exchange maintenance window would report exit 4 forever, with
+# "start it again and get one more decided cycle" as the only remedy. Two
+# cycles: one is inside the ordinary jitter of a live run's next boundary.
 _STREAK_RECENCY_WINDOW = 2 * CYCLE_INTERVAL
 
 
-class TrailingFailureStreaks(NamedTuple):
+@dataclass(frozen=True)
+class TrailingFailureStreaks:
     """How long the run has been failing to decide, counted back from the newest.
+
+    A frozen dataclass rather than a ``NamedTuple`` for one reason: the
+    invariants below have to be ENFORCED. ``NamedTuple`` builds through
+    ``__new__`` and never calls ``__post_init__``, so the same guard written on
+    a NamedTuple is decoration — it was, until a test tried to trip it.
 
     ``no_decision`` is the run of trailing ``api_failed`` cycles whatever their
     class; ``stale_feed`` is the leading (newest-first) part of that run whose
     class is ``stale_market_data``, so it is always <= ``no_decision`` and is
     reported separately only to earn its more specific operator wording.
-    ``latest_terminal_at`` is the newest terminal cycle's ``scheduled_at``,
-    which is what decides whether these numbers still describe the run's
-    CURRENT state (see :data:`_STREAK_RECENCY_WINDOW`).
+
+    ``latest_terminal_at`` is when the newest terminal cycle last CHANGED STATE
+    (its ``timestamp``), which is what decides whether these numbers still
+    describe the run's current state (see :data:`_STREAK_RECENCY_WINDOW`).
+    Deliberately not ``scheduled_at``: a cycle stranded by a crash is
+    terminalized on restart carrying its ORIGINAL slot, hours or days old, so
+    dating the streak by the slot would read a run that just came back as
+    stopped — and suppress the shortfall on exactly the run that has been
+    unable to decide the longest. ``None`` when the newest row's stamp cannot
+    be parsed at all; the caller then withholds a verdict rather than guessing.
     """
 
     no_decision: int
     stale_feed: int
     latest_terminal_at: datetime | None
+
+    def __post_init__(self) -> None:
+        # Both reports print these on every run, so a nonsensical pair would
+        # render raw into the summary; and ``no_decision_shortfall`` picks its
+        # wording from ``stale_feed >= no_decision``, which a violated
+        # ordering would turn into "all refused as stale market data" over a
+        # streak that was mostly something else. The query cannot produce
+        # either, but this type is also built by hand (tests, any future
+        # caller) — the same reason the sibling reports guard their counts.
+        if self.no_decision < 0 or self.stale_feed < 0:
+            raise ValueError(
+                f"TrailingFailureStreaks counts must be >= 0, got "
+                f"no_decision={self.no_decision}, stale_feed={self.stale_feed}"
+            )
+        if self.stale_feed > self.no_decision:
+            raise ValueError(
+                f"stale_feed ({self.stale_feed}) is a subset of no_decision "
+                f"({self.no_decision}) and cannot exceed it"
+            )
 
 
 # Cycles that actually produced (or fail-closed) a decision. api_failed is
@@ -315,22 +347,24 @@ def trailing_failure_streaks(conn: sqlite3.Connection, run_id: str) -> TrailingF
     a full sort of the run's history.
     """
     rows = conn.execute(
-        "SELECT status, error_type, scheduled_at FROM decision_attempts"
+        "SELECT status, error_type, timestamp FROM decision_attempts"
         " WHERE run_id = ? AND status != 'in_progress'"
         " ORDER BY scheduled_at DESC, rowid DESC",
         (run_id,),
     )
     no_decision = stale_feed = 0
     latest_at: datetime | None = None
+    dated = False
     still_stale = True
     for row in rows:
-        if latest_at is None:
+        if not dated:
+            # The NEWEST row only, whatever it says: a corrupt stamp leaves the
+            # run undated rather than silently dating it from an older cycle,
+            # which would withhold the shortfall a whole cycle early.
+            dated = True
             try:
-                latest_at = parse_instant(row["scheduled_at"])
+                latest_at = parse_instant(row["timestamp"])
             except ValueError:
-                # A corrupt stamp cannot date the streak; treat the run as
-                # undatable rather than guess (the caller then withholds the
-                # shortfall, never fabricates one).
                 latest_at = None
         if row["status"] != "api_failed":
             break
@@ -380,12 +414,16 @@ def note_cycle_outcome(streak: int, status: str, error_type: str | None, *, run_
     if status != "api_failed":
         return 0
     streak += 1
+    # ``error_type`` is None for a non-retryable bug and for a restart-
+    # interrupted cycle — no §6.2 word applies. Name that rather than
+    # interpolating a bare ``None`` into a line an operator reads.
+    named_class = error_type or "unclassified"
     if streak < NO_DECISION_STREAK_THRESHOLD:
         logger.warning(
             "decision cycle for %s failed (%s) — %d consecutive with no decision "
             "(escalates to ERROR and a validate shortfall at %d)",
             run_id,
-            error_type,
+            named_class,
             streak,
             NO_DECISION_STREAK_THRESHOLD,
         )
@@ -393,8 +431,9 @@ def note_cycle_outcome(streak: int, status: str, error_type: str | None, *, run_
         logger.error(
             "decision cycle for %s refused as stale market data — %d consecutive "
             "(~%dh with no decision): the candle feed stopped advancing or this "
-            "host's clock is off (the refusal message says which); `validate` "
-            "reports this as a shortfall until a cycle decides again",
+            "host's clock is off (the refusal message says which); any open "
+            "position is riding SL/TP alone, and `validate` reports this as a "
+            "shortfall until a cycle decides again",
             run_id,
             streak,
             _streak_hours(streak),
@@ -402,10 +441,10 @@ def note_cycle_outcome(streak: int, status: str, error_type: str | None, *, run_
     else:
         logger.error(
             "decision cycle for %s failed (%s) — %d consecutive with no decision "
-            "(~%dh): the position is riding SL/TP alone; `validate` reports this "
-            "as a shortfall until a cycle decides again",
+            "(~%dh): any open position is riding SL/TP alone; `validate` reports "
+            "this as a shortfall until a cycle decides again",
             run_id,
-            error_type,
+            named_class,
             streak,
             _streak_hours(streak),
         )
@@ -443,14 +482,14 @@ def no_decision_shortfall(streaks: TrailingFailureStreaks, *, now: datetime) -> 
         )
     else:
         cause = (
-            f"none of them reached a decision ({streaks.stale_feed} of them refused as "
-            "stale market data, the rest other failures — see error_type in "
-            "decision_attempts)"
+            f"mixed causes — {streaks.stale_feed} refused as stale market data, "
+            f"{count - streaks.stale_feed} other failures; see error_type in "
+            "decision_attempts"
         )
     return (
         f"no_decision_streak = {count} (the last {count} cycles, ~{hours}h, {cause}. "
-        f"The position is riding SL/TP alone; the streak clears by itself at the next "
-        f"decided cycle (need < {NO_DECISION_STREAK_THRESHOLD}))"
+        f"Any open position is riding SL/TP alone; the streak clears by itself at the "
+        f"next decided cycle (need < {NO_DECISION_STREAK_THRESHOLD}))"
     )
 
 
@@ -636,9 +675,12 @@ def _snapshot_mismatches(conn: sqlite3.Connection, run_id: str) -> tuple[list[st
 def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> ValidationReport:
     """Compute the §5 acceptance report for ``run_id`` (read-only).
 
-    ``now`` (default: wall clock) is used only to age still-pending funding
-    events for the non-gating staleness warning — every gating metric is
-    derived purely from the store, so the report's verdict stays reproducible.
+    ``now`` (default: wall clock) ages still-pending funding events for the
+    non-gating staleness warning, and dates the no-decision streak against
+    :data:`_STREAK_RECENCY_WINDOW`. That second use makes ``now`` a GATING
+    input: the same store validated hours apart can move from exit 4 to exit
+    0 as a stopped run ages out of the window. The verdict is reproducible
+    given the same ``now``, not from the store alone.
     """
     with db.read_transaction() as conn:
         if repo.get_run(conn, run_id) is None:

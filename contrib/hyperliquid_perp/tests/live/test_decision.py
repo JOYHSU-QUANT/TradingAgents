@@ -360,6 +360,38 @@ def test_driver_escalates_consecutive_stale_feed_refusals(tmp_path, caplog):
     db.close()
 
 
+def test_driver_streak_is_reset_by_a_cycle_that_decided(tmp_path, caplog):
+    # The counter must be fed on the SUCCESS path too, not only from
+    # `_fail_closed`: the store query it mirrors breaks on any decided cycle,
+    # so a driver that only counted failures would log "3 consecutive, ~12h
+    # with no decision" over a run that decided in between — and `validate`,
+    # which that same ERROR tells the operator to check, would show nothing.
+    import logging
+
+    db, clock, driver, engine, worker, provider = _driver(tmp_path, build_error=_stale_refusal())
+
+    def _advance():
+        state = repo.get_scheduler_state(db.conn, "r")
+        clock.set(parse_instant(state["next_decision_at"]))
+
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.validation"):
+        assert driver.pump() == "api_failed"  # streak 1
+        _advance()
+        assert driver.pump() == "api_failed"  # streak 2
+        _advance()
+        provider._build_error = None
+        assert driver.pump() == "cycle_started"
+        _await(worker)
+        assert driver.pump() == "completed"  # resets
+        _advance()
+        provider._build_error = _stale_refusal()
+        assert driver.pump() == "api_failed"  # streak 1 again, not 3
+    notes = [r for r in caplog.records if "decision cycle for r" in r.getMessage()]
+    assert [r.levelno for r in notes] == [logging.WARNING] * 3
+    assert "1 consecutive" in notes[-1].getMessage()
+    db.close()
+
+
 def test_driver_counts_a_refused_cycle_once_even_when_its_write_keeps_failing(tmp_path, caplog):
     # The counter is advanced where the fail record is ARMED, not where it is
     # written: ``_flush_pending_fail`` re-enters ``_fail_cycle`` on every pump

@@ -60,10 +60,10 @@ _FUNDING_SOURCES = frozenset(
 # is the only writer). Added for the same reason as ``malformed_response`` and
 # by the same argument: it does not heal on its own, so filing it as
 # ``server_error`` made a fault that recurs every cycle until a human fixes the
-# feed or the host clock read as one transient blip — and the acceptance
-# validators, which must tell "this run cannot decide right now" from RUNBOOK
-# §7's expected occasional ``api_failed``, had nothing machine-readable to key
-# on but the operator-facing sentence (issue #50).
+# feed or the host clock read as one transient blip. The acceptance validators
+# tell "this run cannot decide right now" from RUNBOOK §7's expected
+# occasional ``api_failed`` by trailing CONSECUTIVENESS, not by this class;
+# what the class earns is the specific wording and a reported subset (#50).
 _ERROR_TYPES = frozenset(
     {
         "timeout",

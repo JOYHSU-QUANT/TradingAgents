@@ -1168,6 +1168,7 @@ def test_build_context_reads_the_exchange_clock_and_hands_it_to_the_builder(monk
     # the one read in THIS fetch, not a default.
     exchange_clock = datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
     handed = {}
+    stamps = {}
 
     class _Market:
         def __init__(self, _client):
@@ -1180,10 +1181,12 @@ def test_build_context_reads_the_exchange_clock_and_hands_it_to_the_builder(monk
             return []
 
         def get_funding_history(self, coin, window_days):
+            stamps["funding_entered"] = datetime.now(timezone.utc)
             return []
 
         def get_exchange_time(self, coin):
             handed["coin"] = coin
+            stamps["clock_returned"] = datetime.now(timezone.utc)
             return exchange_clock
 
     class _Client:
@@ -1201,13 +1204,16 @@ def test_build_context_reads_the_exchange_clock_and_hands_it_to_the_builder(monk
     monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
     monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
     monkeypatch.setattr(bridge_mod, "build_market_context", _builder)
-    before = datetime.now(timezone.utc)
     bridge_mod._build_context({}, "BTC")
     assert handed["coin"] == "BTC"
     assert handed["exchange_time"] == exchange_clock
-    # ...and the host reading is taken AT that read, not left for the guard to
-    # take later against a clock separated from it by the rest of the fetch.
-    assert before <= handed["host_at_read"] <= datetime.now(timezone.utc)
+    # ...and the host reading is taken ADJACENT to that read — between the
+    # clock call returning and the next REST call starting. Bracketing it that
+    # way, rather than merely "some time during the build", is what makes this
+    # discriminating: moving the capture down to the builder call would still
+    # sit inside the build but would fold the funding read's latency into the
+    # skew, which is the whole defect the pairing exists to avoid.
+    assert stamps["clock_returned"] <= handed["host_at_read"] <= stamps["funding_entered"]
 
 
 def test_context_refusal_tolerates_a_candle_closing_during_the_fetch():

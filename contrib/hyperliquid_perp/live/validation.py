@@ -1264,9 +1264,12 @@ def validate_live_run(
 ) -> LiveValidationReport:
     """Compute the §20.3 / §21.4 acceptance report for a live ``run_id`` (read-only).
 
-    ``now`` (default: wall clock) is used only to bound an unprotected window
-    still open at the end of the log — every gating count is otherwise derived
-    purely from the store, so the verdict is reproducible.
+    ``now`` (default: wall clock) bounds an unprotected window still open at
+    the end of the log, and dates the no-decision streak against the shared
+    recency window (issue #50). That second use makes ``now`` a GATING input:
+    the same store validated hours apart can move from exit 4 to exit 0 as a
+    stopped run ages out of the window. The verdict is reproducible given the
+    same ``now``, not from the store alone.
     """
     if now is None:
         now = datetime.now(timezone.utc)

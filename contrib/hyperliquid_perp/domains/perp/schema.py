@@ -321,11 +321,15 @@ class PerpMarketContext:
     exchange_time: datetime | None = None
     # This host's clock as read at the SAME INSTANT as ``exchange_time`` (UTC).
     # The two are only ever subtracted from each other, and that difference is
-    # only meaningful if the readings are adjacent: the daemon's ``as_of`` is
-    # taken before the fetch, so measuring skew against it would fold three
-    # REST calls of elapsed time in as apparent clock error — enough, on a slow
-    # network, to warn about NTP on a correctly-synced host and to blame the
-    # clock for a stalled feed. ``None`` exactly when ``exchange_time`` is.
+    # only meaningful if the readings are adjacent: the daemon's own clock
+    # reading (the guard's ``now``) is taken before the fetch, so measuring
+    # skew against THAT would fold three REST calls of elapsed time in as
+    # apparent clock error — enough, on a slow network, to warn about NTP on
+    # a correctly-synced host and to blame the clock for a stalled feed.
+    # ``None`` whenever there is no paired reading; never populated without
+    # ``exchange_time`` (enforced below), though the reverse IS legal — a
+    # hand-built context may carry an exchange clock and no pairing, and the
+    # guard then reports no skew rather than inventing one.
     host_time_at_exchange_read: datetime | None = None
 
     def __post_init__(self) -> None:

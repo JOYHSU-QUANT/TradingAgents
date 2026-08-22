@@ -174,12 +174,14 @@ class _EngineDecisionProvider:
         # The refusal carries its own §6.2 class: the three "cannot be reasoned
         # over" guards file as ``server_error``, the freshness ones as
         # ``stale_market_data`` — a fault that does not heal on its own must
-        # not read like a transient blip in the durable trail, and the
-        # acceptance validators count consecutive ones (issue #50).
+        # not read like a transient blip in the durable trail. The acceptance
+        # validators count consecutive cycles that reached NO decision, of
+        # any class; this class earns the specific wording (issue #50).
         # ``as_of`` is the scheduler's own clock reading for THIS cycle, not a
-        # second call to the wall clock — the daemon keeps one time base. What
-        # the guard does with it (skew reporting; the fallback measuring clock
-        # a live fetch never needs) is in its docstring.
+        # second call to the wall clock — the daemon keeps one time base. The
+        # guard uses it ONLY as the fallback measuring clock a live fetch never
+        # needs; the host-vs-exchange skew comes from the context's own paired
+        # host reading, taken adjacent to the exchange one.
         refusal = _context_refusal(ctx, coin, self._config, now=as_of)
         if refusal is not None:
             raise RetryableDecisionError(refusal.error_type, refusal.message)

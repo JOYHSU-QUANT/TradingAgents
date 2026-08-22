@@ -211,8 +211,9 @@ class ContextRefusal(NamedTuple):
     (``decision_attempts.error_type``, which the acceptance validators query);
     the sentence is what an operator reads. They are split because the four
     guards fail for very different reasons and only the freshness ones recur
-    until a human acts — filing those as ``server_error`` left the validators
-    with nothing to key on but the operator-facing prose (issue #50).
+    until a human acts. The acceptance validators gate on trailing
+    CONSECUTIVENESS, not on the class; what the class earns is the specific
+    operator wording and the reported stale-feed subset (issue #50).
     """
 
     error_type: str
@@ -256,19 +257,20 @@ def _context_refusal(
     the age is the real one, and the existing limit refuses it; no second
     threshold is involved.
 
-    ``now`` is then the HOST clock, used for two things: the fallback
-    measuring clock when ``ctx.exchange_time`` is ``None`` (a context that did
-    not come from a live fetch — fixtures, replays; the fallback keeps the
-    blind spot and says so in its message), and the host-vs-exchange skew the
-    messages and the skew warning report. The daemon passes the reading its
-    own clock gave at the start of THIS attempt (NOT the scheduled slot, which
-    for a retried or recovered cycle is an older and quite different value;
-    each retry re-reads the clock); the one-shot callers let it default to
-    :func:`datetime.now`. Every caller in the system builds ``ctx`` from a
-    live REST read (``_build_context`` is ``build_market_context``'s only
-    production caller), so there is no historical-replay mode whose lagging
-    ``as_of`` this would misjudge — the parameter exists to make the clock
-    injectable, not to model a second time base.
+    ``now`` is the HOST clock, and it has exactly ONE use: the fallback
+    measuring clock for a context with no ``exchange_time`` (fixtures,
+    replays; that fallback keeps the blind spot and says so in its message).
+    It is NOT what the skew is measured from — that comes from
+    ``ctx.host_time_at_exchange_read``, the host reading ``_build_context``
+    took adjacent to the exchange one, because ``now`` on the daemon path is
+    a reading from BEFORE the fetch and subtracting it would report the
+    fetch's elapsed time as clock drift. The daemon passes the reading its
+    own clock gave at the start of THIS attempt; the one-shot callers let it
+    default to :func:`datetime.now`. Every production caller builds ``ctx``
+    from a live REST read (``_build_context`` is ``build_market_context``'s
+    only production caller), so the fallback is a fixture path — the
+    parameter exists to make the clock injectable, not to model a second
+    time base.
     """
     # Refuse to reason over under-warmed data: if fewer candles came back than
     # the configured indicators need, every indicator is None and the regime is

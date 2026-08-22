@@ -242,7 +242,7 @@ _FAILURE_BACKOFF_FRACTION = 0.5
 #     (DEFAULT_MAX_PAGES) while this said 3;
 #   - the second left ``engine.tick()`` and ``driver.pump()`` adjacent with
 #     nothing between them, so the submit chain and the build_context chain ran
-#     back to back for a real maximum of 7 (2026-08-01 lifecycle review).
+#     back to back for a real maximum of 7 (the build_context chain was four reads then) (2026-08-01 lifecycle review).
 # Any new REST loop MUST refresh per iteration, and any new pair of blocking
 # calls MUST refresh between them, or this number is a lie.
 _MAX_UNREFRESHED_REST_CALLS = 3

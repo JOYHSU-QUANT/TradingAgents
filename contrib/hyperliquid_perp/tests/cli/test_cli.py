@@ -1775,6 +1775,101 @@ def test_paper_loop_escalates_consecutive_stale_feed_refusals(tmp_path, monkeypa
     db.close()
 
 
+def test_paper_loop_streak_is_reset_by_a_cycle_that_decided(tmp_path, monkeypatch, caplog):
+    """The loop feeds EVERY terminal outcome to the counter, not just failures.
+
+    Discriminating by construction: two failures, a COMPLETED cycle, then two
+    more failures. With the call inside the api_failed branch (where it started)
+    the streak reaches 3 and logs ERROR over a run that decided in between —
+    and `validate`, which that ERROR points the operator at, would show nothing.
+    """
+    import logging
+    from datetime import timedelta
+
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.common.constants import STALE_MARKET_DATA_ERROR
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
+
+    path, db = _seed_db(tmp_path)
+    clock = ManualClock(_T0)
+
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
+    monkeypatch.setattr(
+        reconcile_mod, "backfill_pending_funding", lambda db_, *, run_id, now, funding_source: None
+    )
+    monkeypatch.setattr(
+        cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, export_dir: True
+    )
+
+    def _failed():
+        return PollResult(
+            event=CycleEvent.API_FAILED,
+            decision_attempt_id="r#f",
+            scheduled_at=_T0,
+            attempt_count=3,
+            next_decision_at=_T0 + timedelta(hours=4),
+            error_type=STALE_MARKET_DATA_ERROR,
+        )
+
+    def _decided():
+        return PollResult(
+            event=CycleEvent.COMPLETED,
+            decision_attempt_id="r#c",
+            scheduled_at=_T0,
+            attempt_count=1,
+            output_id="o",
+            plan=object(),
+            next_decision_at=_T0 + timedelta(hours=4),
+        )
+
+    outcomes = [_failed(), _failed(), _decided(), _failed(), _failed()]
+
+    class _Engine:
+        def has_active_work(self):
+            return True
+
+        def tick(self):
+            pass
+
+    class _Scheduler:
+        def poll(self):
+            return outcomes.pop(0) if outcomes else None
+
+        def next_due_at(self):
+            return None
+
+    def fake_sleep(seconds):
+        clock.advance(seconds)
+        if not outcomes:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
+
+    with (
+        caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.validation"),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        cli_mod._paper_loop(
+            db,
+            "r",
+            _Engine(),
+            _Scheduler(),
+            clock,
+            30,
+            tmp_path / "exports",
+            funding_source=None,
+            trading_halted=False,
+        )
+
+    notes = [r for r in caplog.records if "decision cycle for r" in r.getMessage()]
+    # Four failures observed, never three in a row: all WARNING, none ERROR.
+    assert [r.levelno for r in notes] == [logging.WARNING] * 4
+    assert "1 consecutive" in notes[2].getMessage()  # the one right after the decided cycle
+    db.close()
+
+
 def test_paper_loop_tick_throttled_to_interval_above_heartbeat_cap(tmp_path, monkeypatch):
     """The wake cadence and the tick cadence must stay decoupled: the loop
     wakes every <=60s for the lease heartbeat, but the tick (the market-data

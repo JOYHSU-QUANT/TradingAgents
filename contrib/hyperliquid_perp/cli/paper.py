@@ -585,8 +585,10 @@ def _paper_loop(
                 # Every terminal outcome, not just the failures: the store
                 # query this mirrors breaks on any cycle that decided, so
                 # feeding it only api_failed would let the log claim a streak
-                # `validate` does not see (issue #50). ``CycleEvent`` values ARE
-                # the attempt statuses, so the two predicates cannot drift.
+                # `validate` does not see (issue #50). The terminal
+                # ``CycleEvent`` values are spelled the same as the statuses
+                # ``_terminalize_api_failed`` / ``_finalize`` write, which is
+                # what makes the in-process and store-side predicates agree.
                 no_decision_streak = note_cycle_outcome(
                     no_decision_streak, result.event.value, result.error_type, run_id=run_id
                 )

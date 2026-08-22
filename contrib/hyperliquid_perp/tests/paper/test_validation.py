@@ -704,8 +704,26 @@ def test_no_decision_streak_counts_the_l2book_outage_the_stale_one_cannot(tmp_pa
     assert len(report.shortfalls) == 1
     # ...and it says what it can rather than blaming a feed it has no evidence
     # about.
-    assert "0 of them refused as stale market data" in report.shortfalls[0]
+    assert "0 refused as stale market data, 3 other failures" in report.shortfalls[0]
+    assert "all refused as stale" not in report.shortfalls[0]
     db.close()
+
+
+def test_stale_subset_stops_at_the_first_failure_of_another_class(tmp_path):
+    # The latch: `stale_feed` is the NEWEST RUN of stale refusals, not a tally
+    # over the whole streak. Without it an older stale cycle behind a
+    # `connection` failure would count, `stale_feed` could equal `no_decision`,
+    # and the shortfall would say "all refused as stale market data" over a
+    # streak that was mostly something else entirely.
+    db = _bare_run(tmp_path)
+    last = _insert_outcomes(db, [_OK, _STALE, _BLIP, _STALE])
+    streaks = trailing_failure_streaks(db.conn, "r")
+    assert streaks.no_decision == 3
+    assert streaks.stale_feed == 1  # 2 without the latch
+    line = no_decision_shortfall(streaks, now=last + timedelta(hours=1))
+    assert line is not None
+    assert "mixed causes — 1 refused as stale market data, 2 other failures" in line
+    assert "all refused as stale" not in line
 
 
 def test_streak_ignores_a_completed_cycle_carrying_a_stale_class(tmp_path):
@@ -793,6 +811,57 @@ def test_a_stopped_run_is_not_permanently_disqualified_by_its_last_hours(tmp_pat
     assert later.shortfalls == ()
     assert later.phase3_ready
     db.close()
+
+
+def test_streak_is_dated_by_when_the_cycle_terminalized_not_by_its_slot(tmp_path):
+    # A cycle stranded by a crash is terminalized on RESTART carrying its
+    # original slot, hours or days old. Dating the streak by `scheduled_at`
+    # would read a run that just came back as "stopped or archived" and
+    # suppress the shortfall on exactly the run that has been unable to decide
+    # the longest — so the window is measured from `timestamp`, when the row
+    # last changed state.
+    db = _bare_run(tmp_path)
+    _insert_outcomes(db, [_STALE] * NO_DECISION_STREAK_THRESHOLD)
+    adopted_at = _T0 + timedelta(days=3)  # the restart that terminalized it
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE decision_attempts SET timestamp = ? WHERE run_id = 'r'"
+            " AND scheduled_at = (SELECT MAX(scheduled_at) FROM decision_attempts"
+            " WHERE run_id = 'r')",
+            (adopted_at.isoformat(),),
+        )
+    streaks = trailing_failure_streaks(db.conn, "r")
+    assert streaks.latest_terminal_at == adopted_at
+    # Judged just after the restart: still blocked, even though the newest
+    # slot is three days old.
+    assert no_decision_shortfall(streaks, now=adopted_at + timedelta(hours=1)) is not None
+    db.close()
+
+
+def test_streak_recency_window_boundary_is_exclusive(tmp_path):
+    # Pins the comparison direction: exactly at the window the streak still
+    # describes the run, one second past it does not.
+    from contrib.hyperliquid_perp.paper.validation import _STREAK_RECENCY_WINDOW
+
+    db = _bare_run(tmp_path)
+    last = _insert_outcomes(db, [_STALE] * NO_DECISION_STREAK_THRESHOLD)
+    streaks = trailing_failure_streaks(db.conn, "r")
+    assert no_decision_shortfall(streaks, now=last + _STREAK_RECENCY_WINDOW) is not None
+    just_past = last + _STREAK_RECENCY_WINDOW + timedelta(seconds=1)
+    assert no_decision_shortfall(streaks, now=just_past) is None
+    db.close()
+
+
+def test_streaks_reject_an_impossible_pair():
+    # The query cannot build these, but the type is also constructed by hand.
+    # A stale subset larger than its superset would make the shortfall claim
+    # "all refused as stale market data" over a mixed streak.
+    from contrib.hyperliquid_perp.paper.validation import TrailingFailureStreaks
+
+    with pytest.raises(ValueError, match="cannot exceed"):
+        TrailingFailureStreaks(1, 2, None)
+    with pytest.raises(ValueError, match="must be >= 0"):
+        TrailingFailureStreaks(-1, 0, None)
 
 
 def test_shortfall_helper_withholds_a_verdict_it_cannot_date():

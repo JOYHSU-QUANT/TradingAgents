@@ -21,6 +21,7 @@ LEGAL_NETWORKS = ("mainnet", "testnet")
 # importing each other: ``engine_bridge`` produces it (and drags the exchange
 # SDK, so no validator may import it), ``repository._vocab`` admits it at the
 # write boundary, and the paper/live acceptance validators query on it (issue
-# #50). A copy in any of the three would be a silent no-op the day it drifts —
-# the streak would simply always read zero.
+# #50). A copy in any of the three would be a silent no-op the day it drifts:
+# the reported stale-feed SUBSET would read zero forever, while the gating
+# no-decision streak — which is class-blind — would not notice at all.
 STALE_MARKET_DATA_ERROR = "stale_market_data"

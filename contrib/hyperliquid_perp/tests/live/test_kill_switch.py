@@ -1909,7 +1909,7 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
     finally:
         patch.undo()
 
-    # 3. The decision cycle's four market-data reads must refresh BETWEEN
+    # 3. The decision cycle's five market-data reads must refresh BETWEEN
     #    themselves, or they — not the submit chain — become the longest run and
     #    this constant is understated. Asserted by counting the hook's calls
     #    against the reads, not by reading the source.
@@ -1932,6 +1932,10 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
         def get_funding_history(self, coin, window_days):
             reads.append("funding")
             return []
+
+        def get_exchange_time(self, coin):
+            reads.append("clock")  # the issue #51 l2Book read — a REST call too
+            return object()
 
     class _Client:
         network = "testnet"

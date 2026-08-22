@@ -98,7 +98,7 @@ def _cmd_paper(argv: list[str]) -> int:
     config = load_config_or_exit(args.config)
     if config is None:
         return 1
-    coin = _resolve_coin(args, config)
+    coin = _resolve_coin(args.coin, config)
     cfgs = _load_risk_decision(config)
     if cfgs is None:
         return 1
@@ -540,9 +540,11 @@ def _paper_loop(
     from ..paper.reconcile import backfill_pending_funding
     from ..paper.run_lock import heartbeat_run_lock
     from ..paper.scheduler import CycleEvent
+    from ..paper.validation import note_stale_feed_refusal
 
     pid = os.getpid()
     next_tick_at: datetime | None = None  # None → the first tick fires immediately
+    stale_refusals = 0  # issue #50: consecutive api_failed cycles refused as stale
     # Halted mode never polls the scheduler, so it never reaches the
     # cycle-terminal funding retry below — without its own timer, pending
     # funding would stay unposted for the run's whole halted lifetime
@@ -615,6 +617,12 @@ def _paper_loop(
                         file=sys.stderr,
                     )
             if result.event is CycleEvent.API_FAILED:
+                # Keyed on the same §6.2 class the terminal row was written
+                # with, which ``validate`` will later count in the store —
+                # one classification, two readers (issue #50).
+                stale_refusals = note_stale_feed_refusal(
+                    stale_refusals, result.error_type, run_id=run_id
+                )
                 logger.warning(
                     "decision API failed %s times for %s — holding position until the next cycle",
                     result.attempt_count,

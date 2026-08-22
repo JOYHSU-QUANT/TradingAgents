@@ -207,6 +207,7 @@ def test_build_market_context_end_to_end(meta_and_asset_ctxs, candle_snapshot, f
         candle_interval="4h",
         funding_window_days=30,
         indicator_names=["rsi_14", "ema_20", "ema_50", "atr_14", "macd"],
+        exchange_time=None,
     )
 
     assert ctx.coin == "BTC"
@@ -221,6 +222,30 @@ def test_build_market_context_end_to_end(meta_and_asset_ctxs, candle_snapshot, f
     assert ctx.funding_zscore_30d is not None
     assert ctx.funding_sample_count >= MIN_FUNDING_SAMPLES
     assert ctx.market_regime in {"trending", "ranging", "volatile"}
+
+
+def test_build_market_context_carries_the_exchange_clock_through(
+    meta_and_asset_ctxs, candle_snapshot, funding_history
+):
+    # Issue #51: the builder neither measures against nor alters the exchange
+    # clock — it rides the context to the freshness guard untouched, and is
+    # absent (not fabricated from the wall clock) when the caller has none.
+    from datetime import datetime, timezone
+
+    snapshot = mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC")
+    candles = mapper.map_candles(candle_snapshot)
+    funding = mapper.map_funding_history(funding_history)
+    kwargs = {"candle_interval": "4h", "funding_window_days": 30, "indicator_names": ["rsi_14"]}
+    stamp = datetime(2026, 8, 22, 4, 0, tzinfo=timezone.utc)
+    with_clock = build_market_context(
+        "BTC", snapshot, candles, funding, exchange_time=stamp, **kwargs
+    )
+    assert with_clock.exchange_time == stamp
+    without = build_market_context("BTC", snapshot, candles, funding, exchange_time=None, **kwargs)
+    assert without.exchange_time is None
+    # ...and it has no default: a caller with no exchange clock must say so.
+    with pytest.raises(TypeError, match="exchange_time"):
+        build_market_context("BTC", snapshot, candles, funding, **kwargs)
 
 
 def test_build_market_context_with_zero_candles(meta_and_asset_ctxs, funding_history):
@@ -238,6 +263,7 @@ def test_build_market_context_with_zero_candles(meta_and_asset_ctxs, funding_his
         candle_interval="4h",
         funding_window_days=30,
         indicator_names=["rsi_14", "atr_14"],
+        exchange_time=None,
     )
 
     assert ctx.candle_count == 0
@@ -271,6 +297,7 @@ def test_build_market_context_funding_window_days_plumbs_to_zscore(
             candle_interval="4h",
             funding_window_days=days,
             indicator_names=["rsi_14"],
+            exchange_time=None,
         )
 
     wide = _ctx_with_window(30)
@@ -297,6 +324,7 @@ def test_context_indicators_are_read_only(meta_and_asset_ctxs, candle_snapshot, 
         candle_interval="4h",
         funding_window_days=30,
         indicator_names=["rsi_14"],
+        exchange_time=None,
     )
     with pytest.raises(TypeError):
         ctx.indicators["rsi_14"] = 99.9

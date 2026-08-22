@@ -263,7 +263,7 @@ AI input
 | `first_attempt_at` | 第一次嘗試時間 |
 | `last_attempt_at` | 最後一次嘗試時間 |
 | `status` | `in_progress` / `completed` / `api_failed` / `invalid_output` |
-| `error_type` | `timeout` / `rate_limit` / `connection` / `malformed_response` / `server_error` 等；成功可留空。`malformed_response`＝交易所有回答、但回答無法解讀（誤路由的讀取、wire schema 漂移）；與 `connection` 分開記是因為連線中斷會自癒、這個不會，混在一起會讓按 class 的判讀把系統性壞掉的 feed 記成一次連線抖動 |
+| `error_type` | `timeout` / `rate_limit` / `connection` / `malformed_response` / `stale_market_data` / `server_error` 等；成功可留空。`stale_market_data`＝交易所回答了、context 結構也完好，但它的**年齡**不可用（K 線 feed 停止推進，或量測年齡的兩個時鐘無法比對）——同樣不會自癒，`validate` 靠這個 class 數「最近連續幾個 cycle 出不了決策」（issue #50），記成 `server_error` 會讓它與暖機不足、指標引擎壞掉這類會自癒的環境失敗混為一談。`malformed_response`＝交易所有回答、但回答無法解讀（誤路由的讀取、wire schema 漂移）；與 `connection` 分開記是因為連線中斷會自癒、這個不會，混在一起會讓按 class 的判讀把系統性壞掉的 feed 記成一次連線抖動 |
 | `error_message` | 最後一次錯誤摘要；成功可留空 |
 | `next_decision_at` | 本 attempt 終結後排定的下一個 cycle 時間 |
 

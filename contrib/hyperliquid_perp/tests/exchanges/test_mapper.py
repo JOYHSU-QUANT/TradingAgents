@@ -762,3 +762,37 @@ def test_funding_history_missing_coin_under_check_raises():
 def test_funding_history_matching_coin_passes():
     raw = [{"coin": "BTC", "time": 1000, "fundingRate": "0.00001", "premium": "0"}]
     assert len(mapper.map_funding_history(raw, expected_coin="BTC")) == 1
+
+
+# ---------------------------------------------------------------------------
+# l2Book -> the exchange's clock (issue #51)
+# ---------------------------------------------------------------------------
+
+
+def test_map_exchange_time_parses_the_epoch_ms_stamp_as_aware_utc():
+    from datetime import datetime, timezone
+
+    raw = {"coin": "BTC", "time": 1787369175468, "levels": [[], []]}
+    when = mapper.map_exchange_time(raw, expected_coin="BTC")
+    assert when == datetime(2026, 8, 22, 3, 26, 15, 468000, tzinfo=timezone.utc)
+    # A string stamp (the venue renders most numbers as strings) parses too.
+    assert mapper.map_exchange_time({"coin": "BTC", "time": "1787369175468"}) == when
+
+
+@pytest.mark.parametrize("bad", [None, "", "soon", -1e30, 1e30])
+def test_map_exchange_time_fails_closed_on_an_unusable_stamp(bad):
+    # Unlike signed_client.exchange_time (where the field is not load-bearing
+    # and absence degrades a check), this stamp is the freshness guard's only
+    # clock: absent, blank, non-numeric or out of range is a malformed answer.
+    with pytest.raises(MalformedResponseError, match="'time' is unusable"):
+        mapper.map_exchange_time({"coin": "BTC", "time": bad})
+
+
+def test_map_exchange_time_rejects_a_non_dict_and_a_misrouted_coin():
+    with pytest.raises(MalformedResponseError, match="expected dict"):
+        mapper.map_exchange_time([{"coin": "BTC", "time": 1}])
+    with pytest.raises(MalformedResponseError, match="carries coin 'ETH'"):
+        mapper.map_exchange_time({"coin": "ETH", "time": 1}, expected_coin="BTC")
+    # ``None`` skips the identity check (identity-agnostic fixtures), like the
+    # candle and funding mappers.
+    assert mapper.map_exchange_time({"coin": "ETH", "time": 1000}) is not None

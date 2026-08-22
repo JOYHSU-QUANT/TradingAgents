@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ...common.constants import STALE_MARKET_DATA_ERROR
 from ..cloid import LIVE_ORDER_ROLES
 
 __all__ = [
@@ -53,8 +54,26 @@ _FUNDING_SOURCES = frozenset(
 # every per-class reading of the trail file a systematically wrong feed as one
 # transient blip. The §3.1 ladder treats all of these alike (its delays index
 # on attempt count), so a new member here changes records, never behaviour.
+# ``stale_market_data``: the venue answered with a well-formed context whose
+# AGE is unusable — the candle feed stopped advancing, or the two clocks the
+# age is measured between cannot be compared (``engine_bridge._context_refusal``
+# is the only writer). Added for the same reason as ``malformed_response`` and
+# by the same argument: it does not heal on its own, so filing it as
+# ``server_error`` made a fault that recurs every cycle until a human fixes the
+# feed or the host clock read as one transient blip — and the acceptance
+# validators, which must tell "this run cannot decide right now" from RUNBOOK
+# §7's expected occasional ``api_failed``, had nothing machine-readable to key
+# on but the operator-facing sentence (issue #50).
 _ERROR_TYPES = frozenset(
-    {"timeout", "rate_limit", "connection", "malformed_response", "server_error", "interrupted"}
+    {
+        "timeout",
+        "rate_limit",
+        "connection",
+        "malformed_response",
+        STALE_MARKET_DATA_ERROR,
+        "server_error",
+        "interrupted",
+    }
 )
 # scheduler_state CSV-export breadcrumb states (schema v3).
 _EXPORT_STATUSES = frozenset({"ok", "failed"})

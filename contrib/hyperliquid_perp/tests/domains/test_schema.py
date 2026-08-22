@@ -259,6 +259,16 @@ def test_perp_market_context_rejects_naive_as_of():
         PerpMarketContext(**_context(as_of=datetime(2026, 6, 29, 12, 0)))
 
 
+def test_perp_market_context_exchange_time_defaults_absent_and_must_be_aware():
+    # Issue #51: the exchange clock is optional (fixtures/replays carry none)
+    # but, like as_of, never naive — the guard subtracts the two.
+    assert PerpMarketContext(**_context()).exchange_time is None
+    aware = datetime(2026, 6, 29, 12, 0, tzinfo=timezone.utc)
+    assert PerpMarketContext(**_context(), exchange_time=aware).exchange_time == aware
+    with pytest.raises(ValueError, match="exchange_time must be timezone-aware"):
+        PerpMarketContext(**_context(), exchange_time=datetime(2026, 6, 29, 12, 0))
+
+
 def test_perp_market_context_coerces_enum_interval_to_value():
     # A caller passing the CandleInterval *member* (not the "4h" string) must be stored
     # as the plain ".value" string — otherwise a (str, Enum) member renders as

@@ -7,6 +7,7 @@ from decimal import Decimal
 
 import pytest
 
+from contrib.hyperliquid_perp.common.constants import STALE_MARKET_DATA_ERROR
 from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier
 from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, RiskConfig
 from contrib.hyperliquid_perp.domains.perp.schema import PerpMarketContext
@@ -22,7 +23,12 @@ from contrib.hyperliquid_perp.paper.config import PaperTradingConfig
 from contrib.hyperliquid_perp.paper.engine import AssetSpec, PaperExecutionEngine
 from contrib.hyperliquid_perp.paper.market_feed import ScriptedSnapshotProvider
 from contrib.hyperliquid_perp.paper.scheduler import DecisionInput, PaperScheduler
-from contrib.hyperliquid_perp.paper.validation import validate_run
+from contrib.hyperliquid_perp.paper.validation import (
+    STALE_FEED_STREAK_THRESHOLD,
+    note_stale_feed_refusal,
+    stale_feed_refusal_streak,
+    validate_run,
+)
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 
@@ -630,3 +636,129 @@ def test_corrupted_account_state_reports_replay_mismatch(tmp_path):
     assert "replay ledger mismatch: current_account_state disagrees" in report.failures
     assert not report.phase3_ready
     db.close()
+
+
+# --------------------------------------------------------------------------
+# stale-feed refusal streak (issue #50)
+# --------------------------------------------------------------------------
+
+# The §6.2 class engine_bridge's freshness guard writes when the candle feed
+# has stopped advancing (or the clocks cannot be compared)...
+_STALE = ("api_failed", STALE_MARKET_DATA_ERROR)
+# ...and the ordinary api_failed RUNBOOK §7 calls expected.
+_BLIP = ("api_failed", "connection")
+_OK = "completed"
+
+
+def _insert_outcomes(db, outcomes, *, start=_T0, run_id="r"):
+    return insert_decision_attempts(db, outcomes, run_id=run_id, start=start)
+
+
+def test_stale_feed_streak_counts_trailing_refusals_only(tmp_path):
+    # The measure is "how long has the feed been blocking decisions NOW", not
+    # a lifetime tally: an older refusal before a decided cycle does not count.
+    db = _bare_run(tmp_path)
+    _insert_outcomes(db, [_STALE, _OK, _STALE, _STALE, _STALE])
+    assert stale_feed_refusal_streak(db.conn, "r") == 3
+    db.close()
+
+
+def test_stale_feed_streak_is_broken_by_an_ordinary_api_failed(tmp_path):
+    # RUNBOOK §7: an occasional api_failed from a network blip is EXPECTED. It
+    # must neither join the streak nor let the refusals behind it keep counting
+    # — otherwise the escalation fires on exactly the condition the issue says
+    # it must ignore.
+    db = _bare_run(tmp_path)
+    _insert_outcomes(db, [_STALE, _STALE, _STALE, _BLIP, _STALE])
+    assert stale_feed_refusal_streak(db.conn, "r") == 1
+    report = validate_run(db, run_id="r")
+    assert report.stale_feed_refusal_streak == 1
+    assert report.shortfalls == ()
+    db.close()
+
+
+def test_stale_feed_streak_ignores_a_completed_cycle_carrying_a_stale_first_try(tmp_path):
+    # The §3.1 ladder patches the attempt row rather than clearing it, so a
+    # cycle whose first try was refused as stale and whose retry then SUCCEEDED
+    # keeps `error_type = stale_market_data` next to `status = completed`.
+    # Keying on the class alone would count a cycle that did produce a decision.
+    db = _bare_run(tmp_path)
+    _insert_outcomes(db, [_STALE, _STALE, ("completed", STALE_MARKET_DATA_ERROR)])
+    assert stale_feed_refusal_streak(db.conn, "r") == 0
+    db.close()
+
+
+def test_stale_feed_streak_skips_an_in_progress_attempt(tmp_path):
+    # The newest row is usually the cycle running right now; it has said
+    # nothing yet, so it neither counts nor breaks the streak behind it.
+    db = _bare_run(tmp_path)
+    _insert_outcomes(db, [_STALE, _STALE, _STALE, "in_progress"])
+    assert stale_feed_refusal_streak(db.conn, "r") == 3
+    db.close()
+
+
+def test_stale_feed_streak_at_threshold_blocks_phase3_ready_as_a_shortfall(tmp_path):
+    # Thirty clean cycles then three stale refusals: every integrity count is
+    # clean (so not exit 5), the cycle gate is met — and the run still is not
+    # ready, because nothing is reaching a decision (issue #50).
+    db = _bare_run(tmp_path)
+    _insert_outcomes(db, [_OK] * 30 + [_STALE] * STALE_FEED_STREAK_THRESHOLD)
+    report = validate_run(db, run_id="r")
+    assert report.cycle_count == 30
+    assert report.failures == ()
+    assert report.stale_feed_refusal_streak == STALE_FEED_STREAK_THRESHOLD
+    assert not report.phase3_ready
+    assert len(report.shortfalls) == 1
+    assert "stale_feed_refusal_streak = 3" in report.shortfalls[0]
+    assert "~12h" in report.shortfalls[0]  # the count in the operator's units
+    lines = report.summary_lines()
+    assert "stale_feed_refusal_streak: 3" in lines
+    assert any(line.startswith("shortfall: ") for line in lines)
+    db.close()
+
+
+def test_stale_feed_streak_below_threshold_does_not_gate(tmp_path):
+    # Two refusals (8h) still looks like a feed hiccup: the comparison is
+    # strict at the threshold, and the streak prints either way.
+    db = _bare_run(tmp_path)
+    _insert_outcomes(db, [_OK] * 30 + [_STALE] * (STALE_FEED_STREAK_THRESHOLD - 1))
+    report = validate_run(db, run_id="r")
+    assert report.phase3_ready
+    assert report.shortfalls == ()
+    assert "stale_feed_refusal_streak: 2" in report.summary_lines()
+    db.close()
+
+
+def test_stale_feed_streak_clears_once_a_cycle_decides_again(tmp_path):
+    # The misfire exit the issue demands: an exchange maintenance window ends,
+    # one cycle decides, and validate stops reporting it — no operator action,
+    # no latch to release.
+    db = _bare_run(tmp_path)
+    _insert_outcomes(db, [_OK] * 30 + [_STALE] * 5)
+    assert not validate_run(db, run_id="r").phase3_ready
+    _insert_outcomes(db, [_OK], start=_T0 + timedelta(hours=4 * 35))
+    report = validate_run(db, run_id="r")
+    assert report.stale_feed_refusal_streak == 0
+    assert report.phase3_ready
+    db.close()
+
+
+def test_note_stale_feed_refusal_escalates_to_error_at_the_threshold(caplog):
+    # The loops' in-process half: WARNING for the first two, ERROR from the
+    # third on (the funding source's 3-strike shape). A non-stale api_failed
+    # resets the count, and so does a None class (a non-retryable bug).
+    import logging
+
+    streak = 0
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.validation"):
+        for _ in range(STALE_FEED_STREAK_THRESHOLD + 1):
+            streak = note_stale_feed_refusal(streak, STALE_MARKET_DATA_ERROR, run_id="r")
+        assert streak == STALE_FEED_STREAK_THRESHOLD + 1
+        assert note_stale_feed_refusal(streak, "connection", run_id="r") == 0
+        assert note_stale_feed_refusal(2, None, run_id="r") == 0
+    levels = [r.levelno for r in caplog.records if "refused as stale market data" in r.getMessage()]
+    assert levels == [logging.WARNING] * (STALE_FEED_STREAK_THRESHOLD - 1) + [logging.ERROR] * 2
+    # The ERROR names where the operator sees it next, so the log line is
+    # actionable on its own.
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert "validate" in errors[0]

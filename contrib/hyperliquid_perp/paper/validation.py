@@ -29,25 +29,58 @@ Non-gating ``warnings`` also surface store-persisted completeness signals the
 operator would otherwise only find in a dead process's log: funding events
 still pending long past settlement (their P&L is uncounted by design) and a
 config drift recorded at the last resume.
+
+One deliberate exception to "read-only": this module also owns the shared
+stale-feed escalation policy (issue #50) — the streak threshold, the store
+query behind it, the shortfall wording, and the per-cycle log escalation the
+two RUNNING loops call (:func:`note_stale_feed_refusal`). It lives here
+because the paper and live *validators* are its other two consumers and this
+is the module they already share; a reader should not take the "read-only"
+sentence above as covering that one function.
 """
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
 
+from ..common.constants import STALE_MARKET_DATA_ERROR
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.models import DECIMAL_CONTEXT
 from . import accounting
 from .reconcile import STALE_PENDING_FUNDING
-from .scheduler import parse_instant
+from .scheduler import CYCLE_INTERVAL, parse_instant
 
-__all__ = ["MIN_CYCLES_FOR_PHASE3", "ValidationReport", "validate_run"]
+__all__ = [
+    "MIN_CYCLES_FOR_PHASE3",
+    "STALE_FEED_STREAK_THRESHOLD",
+    "ValidationReport",
+    "note_stale_feed_refusal",
+    "stale_feed_refusal_streak",
+    "stale_feed_shortfall",
+    "validate_run",
+]
+
+logger = logging.getLogger(__name__)
 
 MIN_CYCLES_FOR_PHASE3 = 30
+
+# Consecutive trailing stale-feed refusals (api_failed whose message carries
+# STALE_CONTEXT_MARKER) at or past which the run is "not at the gate": its
+# decisions have been blocked by a stalled candle feed or a slow host clock for
+# this many cycles with nothing but a per-cycle log warning to show for it
+# (issue #50). Three = 12h of the 4h cadence, the same "three decision cycles"
+# the freshness guard itself bounds candle age at, and the count the repo's
+# other escalations use (funding-source ERROR, repeated-mismatch manual safe
+# mode). A shortfall (exit 4), never an integrity failure: the store is sound,
+# the FEED is not, and the streak clears by itself the moment a cycle reaches
+# a decision again — so an exchange maintenance window reads as "not yet", not
+# as a verdict that survives it.
+STALE_FEED_STREAK_THRESHOLD = 3
 
 # Cycles that actually produced (or fail-closed) a decision. api_failed is
 # deliberately NOT counted toward cycle_count / the ≥30 gate: spec §3.1 grants
@@ -106,6 +139,11 @@ class ValidationReport:
     # made its companion ambiguous). Kept apart from ``failures`` so the
     # count/failure identity below stays exact.
     warnings: tuple[str, ...] = ()
+    # How many of the run's most recent terminal cycles — counted back from
+    # the newest, stopping at the first that is not one — were api_failed with
+    # a stale-feed refusal (issue #50). At or past STALE_FEED_STREAK_THRESHOLD
+    # it blocks ``phase3_ready`` and prints as a ``shortfall:`` line.
+    stale_feed_refusal_streak: int = 0
 
     def __post_init__(self) -> None:
         # Every gating count must have exactly one printed failure line and
@@ -156,14 +194,35 @@ class ValidationReport:
             )
 
     @property
+    def shortfalls(self) -> tuple[str, ...]:
+        """Not-yet-at-the-gate reasons that get a printed cause (exit 4).
+
+        Derived, not stored: today the stale-feed streak is the only one, and
+        a second field holding what ``phase3_ready`` already computes from
+        ``stale_feed_refusal_streak`` could only ever disagree with it. (The
+        other exit-4 cause, ``cycle_count < 30``, is legible from its own
+        summary line and has never carried a reason line.) The live report's
+        field is stored because six independent conditions feed it.
+        """
+        if self.stale_feed_refusal_streak >= STALE_FEED_STREAK_THRESHOLD:
+            return (stale_feed_shortfall(self.stale_feed_refusal_streak),)
+        return ()
+
+    @property
     def phase3_ready(self) -> bool:
-        """Spec §5: enough cycles and a fully consistent, traceable store."""
+        """Spec §5: enough cycles and a fully consistent, traceable store.
+
+        ...and a feed that is currently delivering decisions: a run whose last
+        three cycles were all refused as stale is not ready however many
+        cycles it accumulated before the feed (or the host clock) went wrong.
+        """
         return (
             self.cycle_count >= MIN_CYCLES_FOR_PHASE3
             and self.orphan_order_count == 0
             and self.orphan_fill_count == 0
             and self.snapshot_mismatch_count == 0
             and self.accounting_replay_mismatch_count == 0
+            and self.stale_feed_refusal_streak < STALE_FEED_STREAK_THRESHOLD
         )
 
     def summary_lines(self) -> list[str]:
@@ -192,11 +251,113 @@ class ValidationReport:
             f"total_pnl: {_fmt(self.total_pnl)}",
             f"total_fees: {_fmt(self.total_fees)}",
             f"net_funding_pnl: {_fmt(self.net_funding_pnl)}",
+            f"stale_feed_refusal_streak: {self.stale_feed_refusal_streak}",
             f"phase3_ready: {'yes' if self.phase3_ready else 'no'}",
         ]
         lines.extend(f"failure: {reason}" for reason in self.failures)
+        lines.extend(f"shortfall: {reason}" for reason in self.shortfalls)
         lines.extend(f"warning: {reason}" for reason in self.warnings)
         return lines
+
+
+def stale_feed_refusal_streak(conn: sqlite3.Connection, run_id: str) -> int:
+    """Trailing consecutive stale-feed refusals, newest cycle first (issue #50).
+
+    Walks the run's TERMINAL attempts from the most recent backwards and counts
+    while each is an ``api_failed`` classed
+    :data:`~...common.constants.STALE_MARKET_DATA_ERROR`; the first cycle that
+    is anything else — a decision, an unparseable output, an api_failed from a
+    network blip or an LLM timeout — ends the streak. So it measures "how long
+    has the feed been blocking decisions RIGHT NOW", not "how often has it
+    ever": a feed that recovers clears it at the next decided cycle, and
+    RUNBOOK §7's expected occasional ``api_failed`` never counts. An
+    ``in_progress`` attempt is skipped, not a break — it has not said anything
+    yet. Shared by the paper and live validators.
+
+    ``status`` is checked as well as ``error_type``, and not merely for
+    belt-and-braces: a cycle whose FIRST try was refused as stale and whose
+    retry then succeeded keeps the ``error_type`` from that try (the §3.1
+    ladder patches the row, it never clears the column), so keying on the
+    class alone would count a cycle that did produce a decision.
+
+    The reverse scan is index-driven, not a sort: ``decision_attempts`` has
+    ``UNIQUE (run_id, scheduled_at)``, whose implicit index satisfies this
+    ORDER BY directly, so the cursor stays lazy and the early ``break`` really
+    does stop reading. Dropping that constraint would silently turn this into
+    a full sort of the run's history.
+    """
+    rows = conn.execute(
+        "SELECT status, error_type FROM decision_attempts"
+        " WHERE run_id = ? AND status != 'in_progress'"
+        " ORDER BY scheduled_at DESC, rowid DESC",
+        (run_id,),
+    )
+    streak = 0
+    for row in rows:
+        if row["status"] != "api_failed" or row["error_type"] != STALE_MARKET_DATA_ERROR:
+            break
+        streak += 1
+    return streak
+
+
+def _streak_hours(streak: int) -> int:
+    """How long ``streak`` refused cycles have left the run without a decision.
+
+    Derived from the scheduler's own cadence rather than a literal 4: the live
+    driver already accepts a non-default ``cycle_interval``, and an operator
+    reading "~12h with no decision" must not be told a number the schedule
+    stopped agreeing with.
+    """
+    return int(streak * CYCLE_INTERVAL.total_seconds() // 3600)
+
+
+def note_stale_feed_refusal(streak: int, error_type: str | None, *, run_id: str) -> int:
+    """Advance (or reset) a loop's in-process stale-refusal streak and log it.
+
+    The running half of the issue #50 escalation: ``validate`` judges by the
+    durable streak in the store; this keeps the live one and turns the
+    per-cycle WARNING into an ERROR from the threshold on — the same 3-strike
+    log escalation the funding source uses — so a log scraper sees the change
+    without a store query. Any api_failed that is NOT classed
+    ``stale_market_data`` (a network blip, an LLM timeout, a non-retryable bug
+    whose type is ``None``) resets it, exactly as it breaks the store-derived
+    streak. Returns the new streak; the caller keeps it. In-process only: a
+    restart starts the count over, and the store's streak is the one the
+    verdict reads.
+    """
+    if error_type != STALE_MARKET_DATA_ERROR:
+        return 0
+    streak += 1
+    if streak >= STALE_FEED_STREAK_THRESHOLD:
+        logger.error(
+            "decision cycle for %s refused as stale market data — %d consecutive "
+            "(~%dh with no decision): the candle feed stopped advancing or this "
+            "host's clock is off (the refusal message says which); `validate` "
+            "reports this as a shortfall until a cycle decides again",
+            run_id,
+            streak,
+            _streak_hours(streak),
+        )
+    else:
+        logger.warning(
+            "decision cycle for %s refused as stale market data (%d consecutive; "
+            "escalates to ERROR and a validate shortfall at %d)",
+            run_id,
+            streak,
+            STALE_FEED_STREAK_THRESHOLD,
+        )
+    return streak
+
+
+def stale_feed_shortfall(streak: int) -> str:
+    """The ``shortfall:`` line for a streak at or past the threshold (shared wording)."""
+    return (
+        f"stale_feed_refusal_streak = {streak} (the last {streak} cycles, "
+        f"~{_streak_hours(streak)}h, were all refused as stale market data — the candle "
+        f"feed stopped advancing or this host's clock is off; the refusal messages say "
+        f"which. Decisions are blocked until the feed advances; the streak clears by "
+        f"itself at the next decided cycle (need < {STALE_FEED_STREAK_THRESHOLD}))"
+    )
 
 
 def _dec_or_none(value) -> Decimal | None:
@@ -401,6 +562,7 @@ def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> V
             "SELECT COUNT(*) FROM decision_attempts WHERE run_id = ? AND status = 'api_failed'",
             (run_id,),
         )
+        stale_streak = stale_feed_refusal_streak(conn, run_id)
         order_count = _count(conn, "SELECT COUNT(*) FROM orders WHERE run_id = ?", (run_id,))
         fill_count = _count(conn, "SELECT COUNT(*) FROM fills WHERE run_id = ?", (run_id,))
         rejected_order_count = _count(
@@ -562,4 +724,5 @@ def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> V
         net_funding_pnl=funding,
         failures=tuple(failures),
         warnings=tuple(warnings),
+        stale_feed_refusal_streak=stale_streak,
     )

@@ -116,8 +116,20 @@ def build_market_context(
     candle_interval: str,
     funding_window_days: int,
     indicator_names: Sequence[str],
+    exchange_time: datetime | None,
 ) -> PerpMarketContext:
-    """Build the full :class:`PerpMarketContext` from raw domain inputs."""
+    """Build the full :class:`PerpMarketContext` from raw domain inputs.
+
+    ``exchange_time`` is the exchange's clock as read during the same fetch
+    (see ``PerpMarketContext.exchange_time``); it is carried through untouched
+    — nothing here measures against it, the freshness guard does.
+
+    REQUIRED, with no default, even though the field it fills is optional: a
+    caller with no exchange clock has to write ``exchange_time=None`` and mean
+    it. The default it would otherwise inherit is precisely the issue-#51 blind
+    spot (the guard falls back to the host clock, which also bounded the candle
+    window), so it must never be reachable by forgetting a kwarg.
+    """
     if candles:
         # Anchor the funding window on the raw epoch-ms integer, not a float
         # round-trip: ``int(datetime.fromtimestamp(close_time/1000).timestamp()*1000)``
@@ -157,4 +169,5 @@ def build_market_context(
         funding_sample_count=sample_count,
         indicators=indicators,
         market_regime=regime,
+        exchange_time=exchange_time,
     )

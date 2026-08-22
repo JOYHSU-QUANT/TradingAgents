@@ -134,7 +134,7 @@ class _EngineDecisionProvider:
         from ..domains.perp import risk_gate
         from ..domains.perp.prompt_context import render_market_context
         from ..domains.perp.target_decision import decision_format_instructions
-        from ..engine_bridge import _build_context, _context_refusal_error
+        from ..engine_bridge import _build_context, _context_refusal
         from ..exchanges.hyperliquid.errors import ExchangeError, MalformedResponseError
         from ..exchanges.hyperliquid.market_data import interval_to_ms
         from ..paper.scheduler import DecisionInput, RetryableDecisionError
@@ -166,19 +166,23 @@ class _EngineDecisionProvider:
         # engine_bridge._context_refusal_error) — a dead or absent regime indicator
         # would otherwise let every cycle trade on a fabricated-calm RANGING
         # regime, and a stalled feed would let it trade on the past.
-        # Deliberate (reviewed): they ride the §3.1 ladder as "server_error" →
-        # api_failed — the closed §6.2 vocabulary has no data-availability
-        # label, and the failure precedes the AI call so nothing is spent. A
+        # Deliberate (reviewed): they ride the §3.1 ladder to an api_failed
+        # cycle — the failure precedes the AI call, so nothing is spent. A
         # gappy feed heals by the next try/cycle; a too-young listing, a
         # broken indicator engine or a feed that stopped advancing produces a
         # recurring api_failed cycle every 4h until it warms up / is fixed.
-        # The staleness guard measures against ``as_of`` — the scheduler's own
-        # clock reading for this cycle — not a second call to the wall clock,
-        # so the daemon's one time base drives both the schedule and the
-        # freshness verdict.
-        refusal = _context_refusal_error(ctx, coin, self._config, now=as_of)
+        # The refusal carries its own §6.2 class: the three "cannot be reasoned
+        # over" guards file as ``server_error``, the freshness ones as
+        # ``stale_market_data`` — a fault that does not heal on its own must
+        # not read like a transient blip in the durable trail, and the
+        # acceptance validators count consecutive ones (issue #50).
+        # ``as_of`` is the scheduler's own clock reading for THIS cycle, not a
+        # second call to the wall clock — the daemon keeps one time base. What
+        # the guard does with it (skew reporting; the fallback measuring clock
+        # a live fetch never needs) is in its docstring.
+        refusal = _context_refusal(ctx, coin, self._config, now=as_of)
         if refusal is not None:
-            raise RetryableDecisionError("server_error", refusal)
+            raise RetryableDecisionError(refusal.error_type, refusal.message)
         context_text = render_market_context(ctx)
         format_text = decision_format_instructions(
             self._decision,

@@ -327,6 +327,38 @@ def test_driver_worker_nonretryable_error_fails_closed_and_recovers(tmp_path):
     assert driver.pump() == "cycle_started"
 
 
+def _stale_refusal() -> RetryableDecisionError:
+    """What build_input raises when engine_bridge refuses a stalled feed."""
+    from contrib.hyperliquid_perp.common.constants import STALE_MARKET_DATA_ERROR
+
+    return RetryableDecisionError(
+        STALE_MARKET_DATA_ERROR, "... past the 12h 0m 0s freshness limit (3 x 4h) ..."
+    )
+
+
+def test_driver_escalates_consecutive_stale_feed_refusals(tmp_path, caplog):
+    # Issue #50: a live run whose every cycle is refused as stale holds its
+    # position on SL/TP alone with only a per-cycle WARNING to show for it.
+    # From the third consecutive refusal the log says so at ERROR. This is the
+    # WIRING pin — that the driver hands the refusal's §6.2 class to the shared
+    # counter at all; the escalation shape itself (and its reset on an ordinary
+    # api_failed) is pinned once, on the shared function in
+    # tests/paper/test_validation.py.
+    import logging
+
+    from contrib.hyperliquid_perp.paper.validation import STALE_FEED_STREAK_THRESHOLD
+
+    db, clock, driver, engine, worker, provider = _driver(tmp_path, build_error=_stale_refusal())
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.validation"):
+        for _ in range(STALE_FEED_STREAK_THRESHOLD):
+            assert driver.pump() == "api_failed"
+            state = repo.get_scheduler_state(db.conn, "r")
+            clock.set(parse_instant(state["next_decision_at"]))
+    levels = [r.levelno for r in caplog.records if "refused as stale market data" in r.getMessage()]
+    assert levels == [logging.WARNING] * (STALE_FEED_STREAK_THRESHOLD - 1) + [logging.ERROR]
+    db.close()
+
+
 def test_driver_worker_retryable_error_is_api_failed(tmp_path):
     """A RETRYABLE worker error surfaced through poll() is handled by pump's in-flight
     guard with its §6.2 error_type preserved (not misrecorded as an internal bug)."""

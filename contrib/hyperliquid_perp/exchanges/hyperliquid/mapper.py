@@ -12,6 +12,7 @@ The shapes handled:
 - ``candleSnapshot`` -> ``[{t,T,o,h,l,c,v}, ...]``.
 - ``fundingHistory`` -> ``[{fundingRate, premium, time}, ...]``.
 - ``clearinghouseState`` (a.k.a. ``user_state``) -> margin summary + positions.
+- ``l2Book`` -> the exchange's clock only (``time``; the levels are unused).
 
 **Snapshots, not every wire field in the system.** This docstring used to claim
 to be "the only module allowed to know Hyperliquid's raw field names". That was
@@ -45,13 +46,16 @@ CLI entrypoints call on raw payloads they never inspect themselves.
 
 One deliberate exception to the snapshot split: ``signed_client.exchange_time``
 reads ``clearinghouseState``'s ``"time"`` field directly, because that is the
-only exchange-side clock reachable without a new endpoint and no mapper here
-consumes it.
+only exchange-side clock reachable on the SIGNED side without a new endpoint
+and :func:`map_account_snapshot` does not consume it. The keyless clock the
+freshness guard uses is the ``l2Book`` stamp, mapped here by
+:func:`map_exchange_time`.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -372,16 +376,19 @@ def hex_identity_matches(value: Any, expected: str) -> bool:
 
 
 def _require_identity_echo(
-    rec: dict, index: int, *, site: str, key: str, label: str, expected: str | None
+    rec: dict, index: int | None = None, *, site: str, key: str, label: str, expected: str | None
 ) -> None:
     """Raise unless ``rec`` echoes the request's identity (``None`` skips).
 
     Exact match, not hex: coins and intervals are the venue's own vocabulary
-    words, compared verbatim.
+    words, compared verbatim. ``index`` is the position within a list-shaped
+    payload and is named in the message; omit it for the payloads that are a
+    single object (``l2Book``), where there is no position to name.
     """
     if expected is not None and rec.get(key) != expected:
+        where = site if index is None else f"{site}[{index}]"
         raise MalformedResponseError(
-            f"{site}[{index}] carries {label} {rec.get(key)!r}, expected "
+            f"{where} carries {label} {rec.get(key)!r}, expected "
             f"{expected!r} — response does not match the request"
         )
 
@@ -570,6 +577,40 @@ def map_funding_history(
         )
     points.sort(key=lambda p: p.time)
     return points
+
+
+# --------------------------------------------------------------------------
+# l2Book -> the exchange's clock
+# --------------------------------------------------------------------------
+
+
+def map_exchange_time(raw: Any, *, expected_coin: str | None = None) -> datetime:
+    """The exchange's clock off an ``l2Book`` snapshot (UTC, millisecond precision).
+
+    ``l2Book`` is the one PUBLIC info endpoint whose answer carries the
+    exchange's own time (``"time"``, epoch ms) — ``metaAndAssetCtxs`` has no
+    timestamp at all, and the candle / funding windows are bounded by the
+    HOST clock on request. It is the clock ``engine_bridge``'s freshness guard
+    measures candle age against, so the stamp IS load-bearing here: unlike
+    ``signed_client.exchange_time``, where an absent field only degrades a
+    check, a missing or unparseable ``time`` raises
+    :class:`MalformedResponseError` — the guard has no other way to establish
+    the context's age, and skipping the measurement is exactly the blindness
+    issue #51 closes (fail-closed, decided 2026-08-22). The book levels are
+    ignored; ``expected_coin`` is the request identity, echoed as ``"coin"``
+    (same discipline as the candle / funding mappers, ``None`` skips).
+    """
+    if not isinstance(raw, dict):
+        raise MalformedResponseError(f"l2Book is {type(raw).__name__}, expected dict")
+    _require_identity_echo(raw, site="l2Book", key="coin", label="coin", expected=expected_coin)
+    stamp = raw.get("time")
+    try:
+        millis = int(_dec(stamp, field="time"))
+        return datetime.fromtimestamp(millis / 1000, tz=timezone.utc)
+    except (MalformedResponseError, ValueError, OverflowError, OSError) as exc:
+        raise MalformedResponseError(
+            f"l2Book 'time' is unusable as epoch ms ({stamp!r}): {exc}"
+        ) from exc
 
 
 # --------------------------------------------------------------------------

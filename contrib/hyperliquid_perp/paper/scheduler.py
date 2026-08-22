@@ -97,7 +97,8 @@ class RetryableDecisionError(Exception):
     """A market-data / AI API failure worth retrying (spec §3.1).
 
     ``error_type`` uses the §6.2 vocabulary (``timeout`` / ``rate_limit`` /
-    ``connection`` / ``malformed_response`` / ``server_error``); anything the
+    ``connection`` / ``malformed_response`` / ``stale_market_data`` /
+    ``server_error``); anything the
     provider does not classify should propagate as a normal exception (a bug,
     not a retry). The authoritative list is ``repository._vocab._ERROR_TYPES``,
     which ``check_enum`` enforces at the write boundary — this sentence is a
@@ -201,12 +202,21 @@ class PollResult:
     plan: PlanStartResult | None = None
     retry_at: datetime | None = None
     next_decision_at: datetime | None = None
+    # The §6.2 class the terminal api_failed row was written with, carried so
+    # the loop does not have to read back a row it just wrote to learn WHY the
+    # cycle failed (``stale_market_data`` gets its own escalation — issue #50).
+    # ``None`` on every other event, and also on an api_failed whose cause was
+    # a non-retryable bug (no §6.2 word applies), so it is "non-None only on
+    # API_FAILED" rather than a present-exactly-when pair.
+    error_type: str | None = None
 
     def __post_init__(self) -> None:
         # Shape guards, mirroring the sibling result dataclasses: each event
         # implies which follow-up fields exist, and a caller branches on them.
         if (self.retry_at is not None) != (self.event is CycleEvent.RETRY_SCHEDULED):
             raise ValueError("retry_at is present exactly on a retry_scheduled result")
+        if self.error_type is not None and self.event is not CycleEvent.API_FAILED:
+            raise ValueError("error_type is only carried on an api_failed result")
         if (self.next_decision_at is None) == self.event.is_cycle_terminal:
             raise ValueError("next_decision_at is present exactly on a cycle-terminal result")
         completed = self.event in (CycleEvent.COMPLETED, CycleEvent.INVALID_OUTPUT)
@@ -564,6 +574,7 @@ class PaperScheduler:
             scheduled_at=scheduled_at,
             attempt_count=attempt_count,
             next_decision_at=next_at,
+            error_type=error_type,
         )
 
     # -- decision finalization (gate + audit rows) ---------------------------

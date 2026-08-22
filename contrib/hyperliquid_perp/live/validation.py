@@ -110,6 +110,11 @@ from ..common.config_coercion import int_from_yaml
 from ..common.decimal_context import DECIMAL_CONTEXT
 from ..paper import accounting
 from ..paper.scheduler import parse_instant
+from ..paper.validation import (
+    STALE_FEED_STREAK_THRESHOLD,
+    stale_feed_refusal_streak,
+    stale_feed_shortfall,
+)
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from .config import ExecutionMode
@@ -362,6 +367,12 @@ class LiveValidationReport:
     # and reported so a run that is "advancing" but producing nothing usable is
     # visible rather than merely absent from the count.
     invalid_output_count: int
+    # Trailing consecutive api_failed cycles refused as stale market data
+    # (issue #50; see paper.validation.stale_feed_refusal_streak). A shortfall
+    # at or past STALE_FEED_STREAK_THRESHOLD: the run is holding a position
+    # on SL/TP alone with no decisions reaching it, which is "not at the gate"
+    # however many cycles came before.
+    stale_feed_refusal_streak: int
     live_order_count: int
     fill_count: int
     exchange_fill_dedupe_error_count: int
@@ -502,6 +513,7 @@ class LiveValidationReport:
             "cycle_count",
             "api_failed_count",
             "invalid_output_count",
+            "stale_feed_refusal_streak",
             "live_order_count",
             "fill_count",
             "exchange_fill_dedupe_error_count",
@@ -562,6 +574,7 @@ class LiveValidationReport:
             f"cycle_count: {self.cycle_count}",
             f"api_failed_count: {self.api_failed_count}",
             f"invalid_output_count: {self.invalid_output_count}",
+            f"stale_feed_refusal_streak: {self.stale_feed_refusal_streak}",
             f"live_order_count: {self.live_order_count}",
             f"fill_count: {self.fill_count}",
             f"exchange_fill_dedupe_error_count: {self.exchange_fill_dedupe_error_count}",
@@ -1285,6 +1298,7 @@ def validate_live_run(
             "SELECT COUNT(*) FROM decision_attempts WHERE run_id = ? AND status = 'invalid_output'",
             (run_id,),
         )
+        stale_streak = stale_feed_refusal_streak(conn, run_id)
         fill_count = _count(conn, "SELECT COUNT(*) FROM fills WHERE run_id = ?", (run_id,))
         # Distinct acknowledged live orders: the exchange confirmed it holds
         # (or already held — a 'duplicate' ack) each cloid.
@@ -1447,6 +1461,13 @@ def validate_live_run(
     # -- shortfalls (exit 4): not yet at the gate --------------------------
     if cycle_count < MIN_LIVE_CYCLES:
         shortfalls.append(f"cycle_count = {cycle_count} (need >= {MIN_LIVE_CYCLES})")
+    # The feed has refused the last N cycles (issue #50): the accumulated
+    # cycle count says nothing about a run that cannot decide RIGHT NOW. A
+    # shortfall, not a failure — the store is sound and the streak clears by
+    # itself at the next decided cycle (an exchange maintenance window must
+    # not become a permanent verdict). Same wording as the paper report.
+    if stale_streak >= STALE_FEED_STREAK_THRESHOLD:
+        shortfalls.append(stale_feed_shortfall(stale_streak))
 
     # The §20.2 smoke suite (and the four §20.3 *_test_passed booleans it feeds)
     # is a TESTNET_LIVE acceptance condition only: §21.4 omits it, and a
@@ -1554,6 +1575,7 @@ def validate_live_run(
         cycle_count=cycle_count,
         api_failed_count=api_failed_count,
         invalid_output_count=invalid_output_count,
+        stale_feed_refusal_streak=stale_streak,
         live_order_count=live_order_count,
         fill_count=fill_count,
         exchange_fill_dedupe_error_count=dedupe_error_count,

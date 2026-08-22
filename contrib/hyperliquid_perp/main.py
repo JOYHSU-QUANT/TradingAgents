@@ -385,7 +385,7 @@ def main(argv: list[str] | None = None) -> int:
     config = engine_bridge.load_config_or_exit(args.config)
     if config is None:
         return 1
-    coin = engine_bridge._resolve_coin(args, config)
+    coin = engine_bridge._resolve_coin(args.coin, config)
 
     try:
         if args.context_only:

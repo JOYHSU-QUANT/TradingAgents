@@ -291,6 +291,10 @@ def test_retry_ladder_then_api_failed(tmp_path):
     assert row["status"] == "api_failed"
     assert row["attempt_count"] == 3
     assert row["error_type"] == "server_error"
+    # The result carries the same §6.2 class the row was written with, so the
+    # loop can escalate on it (issue #50) without reading back the row it just
+    # wrote. Compared to the row, not to a literal: the point is that they agree.
+    assert r3.error_type == row["error_type"]
     assert row["output_id"] is None
     # No target, no order, no AI output — position untouched (spec §3.1).
     assert db.conn.execute("SELECT COUNT(*) FROM ai_outputs").fetchone()[0] == 0

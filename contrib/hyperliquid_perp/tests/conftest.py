@@ -225,10 +225,17 @@ def echo_order_status_cloid(payload, cloid_hex):
     return payload
 
 
-def insert_decision_attempts(db, statuses, *, run_id="r", start: datetime, mode="paper"):
-    """Insert one terminal decision_attempts row per status, on the 4h grid."""
+def insert_decision_attempts(db, outcomes, *, run_id="r", start: datetime, mode="paper"):
+    """Insert one decision_attempts row per outcome, on the 4h grid.
+
+    Each outcome is a bare status string, or a ``(status, error_type)`` pair
+    when the test needs the §6.2 class the row carries — the acceptance
+    validators key on it (``paper.validation.stale_feed_refusal_streak``), so
+    tests about those verdicts have to be able to set it.
+    """
     with db.transaction() as conn:
-        for i, status in enumerate(statuses):
+        for i, outcome in enumerate(outcomes):
+            status, error_type = outcome if isinstance(outcome, tuple) else (outcome, None)
             scheduled = start + timedelta(hours=4 * i)
             repo.insert_decision_attempt(
                 conn,
@@ -239,4 +246,5 @@ def insert_decision_attempts(db, statuses, *, run_id="r", start: datetime, mode=
                 scheduled_at=scheduled,
                 attempt_count=1,
                 status=status,
+                error_type=error_type,
             )

@@ -314,9 +314,12 @@ def test_build_input_refuses_a_stalled_candle_feed(monkeypatch):
 
     with pytest.raises(RetryableDecisionError) as exc_info:
         provider.build_input(coin="BTC", as_of=as_of)
-    # server_error, so it rides the §3.1 ladder to an api_failed cycle rather
-    # than tearing the daemon down while SL/TP still need watching.
-    assert exc_info.value.error_type == "server_error"
+    # A §6.2 class, so it rides the §3.1 ladder to an api_failed cycle rather
+    # than tearing the daemon down while SL/TP still need watching — and
+    # specifically ``stale_market_data``, not the ``server_error`` that every
+    # environmental failure shares: this one does not heal on its own, and the
+    # acceptance validators count consecutive ones (issue #50).
+    assert exc_info.value.error_type == "stale_market_data"
     assert "freshness limit" in exc_info.value.message
     assert "2026-03-14T12:00:00Z" in exc_info.value.message
 
@@ -1686,6 +1689,90 @@ def test_paper_loop_wiring_and_halt_latch(tmp_path, monkeypatch):
     db.close()
 
 
+def test_paper_loop_escalates_consecutive_stale_feed_refusals(tmp_path, monkeypatch, caplog):
+    """Issue #50: the loop counts stale-feed refusals and escalates the log.
+
+    The wiring pin for the paper half — that the loop passes the terminal
+    result's §6.2 class to the shared counter. The escalation shape itself is
+    pinned once, on that function, in tests/paper/test_validation.py.
+    """
+    import logging
+    from datetime import timedelta
+
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.common.constants import STALE_MARKET_DATA_ERROR
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
+    from contrib.hyperliquid_perp.paper.validation import STALE_FEED_STREAK_THRESHOLD
+
+    path, db = _seed_db(tmp_path)
+    clock = ManualClock(_T0)
+
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
+    monkeypatch.setattr(
+        reconcile_mod, "backfill_pending_funding", lambda db_, *, run_id, now, funding_source: None
+    )
+    # Verification passes, so the loop keeps polling instead of latching halt.
+    monkeypatch.setattr(
+        cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, export_dir: True
+    )
+
+    terminal = PollResult(
+        event=CycleEvent.API_FAILED,
+        decision_attempt_id="r#stale",
+        scheduled_at=_T0,
+        attempt_count=3,
+        next_decision_at=_T0 + timedelta(hours=4),
+        error_type=STALE_MARKET_DATA_ERROR,
+    )
+
+    class _Engine:
+        def has_active_work(self):
+            return True
+
+        def tick(self):
+            pass
+
+    class _Scheduler:
+        def poll(self):
+            return terminal
+
+        def next_due_at(self):
+            return None
+
+    iterations = 0
+
+    def fake_sleep(seconds):
+        nonlocal iterations
+        iterations += 1
+        clock.advance(seconds)
+        if iterations >= STALE_FEED_STREAK_THRESHOLD:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
+
+    with (
+        caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.validation"),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        cli_mod._paper_loop(
+            db,
+            "r",
+            _Engine(),
+            _Scheduler(),
+            clock,
+            30,
+            tmp_path / "exports",
+            funding_source=None,
+            trading_halted=False,
+        )
+
+    levels = [r.levelno for r in caplog.records if "refused as stale market data" in r.getMessage()]
+    assert levels == [logging.WARNING] * (STALE_FEED_STREAK_THRESHOLD - 1) + [logging.ERROR]
+    db.close()
+
+
 def test_paper_loop_tick_throttled_to_interval_above_heartbeat_cap(tmp_path, monkeypatch):
     """The wake cadence and the tick cadence must stay decoupled: the loop
     wakes every <=60s for the lease heartbeat, but the tick (the market-data
@@ -1812,7 +1899,9 @@ def test_paper_loop_missing_key_settle_exit_names_the_key(tmp_path, monkeypatch,
         cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, export_dir: True
     )
     monkeypatch.setattr(
-        cli_mod.paper.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
+        cli_mod.paper.time,
+        "sleep",
+        lambda s: (_ for _ in ()).throw(AssertionError("must exit first")),
     )
 
     class _Engine:
@@ -1858,7 +1947,9 @@ def test_paper_loop_import_error_settle_exit_names_the_cause(tmp_path, monkeypat
         cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, export_dir: True
     )
     monkeypatch.setattr(
-        cli_mod.paper.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
+        cli_mod.paper.time,
+        "sleep",
+        lambda s: (_ for _ in ()).throw(AssertionError("must exit first")),
     )
 
     class _Engine:
@@ -2048,7 +2139,9 @@ def test_paper_loop_settle_exit_retries_pending_funding_before_final_export(tmp_
         lambda db_, run_id, export_dir: (calls.append("export"), True)[1],
     )
     monkeypatch.setattr(
-        cli_mod.paper.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
+        cli_mod.paper.time,
+        "sleep",
+        lambda s: (_ for _ in ()).throw(AssertionError("must exit first")),
     )
 
     class _Engine:
@@ -2100,7 +2193,9 @@ def test_paper_loop_shutdown_funding_retry_is_best_effort(tmp_path, monkeypatch)
         lambda db_, run_id, export_dir: exports.append(run_id) or True,
     )
     monkeypatch.setattr(
-        cli_mod.paper.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must exit first"))
+        cli_mod.paper.time,
+        "sleep",
+        lambda s: (_ for _ in ()).throw(AssertionError("must exit first")),
     )
 
     class _Engine:
@@ -2178,7 +2273,9 @@ def test_paper_ctrl_c_shutdown_retries_pending_funding_before_final_export(
         "_post_cycle_export",
         lambda db_, run_id, export_dir: (calls.append("export"), True)[1],
     )
-    monkeypatch.setattr(cli_mod.paper.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
+    monkeypatch.setattr(
+        cli_mod.paper.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt())
+    )
 
     rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
     assert rc == 0
@@ -2230,7 +2327,9 @@ def test_paper_protection_only_startup_notes_stranded_in_progress_attempt(
     monkeypatch.setattr(
         cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, export_dir: True
     )
-    monkeypatch.setattr(cli_mod.paper.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
+    monkeypatch.setattr(
+        cli_mod.paper.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt())
+    )
 
     rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
     assert rc == 0

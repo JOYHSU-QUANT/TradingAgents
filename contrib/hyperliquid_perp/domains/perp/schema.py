@@ -311,6 +311,14 @@ class PerpMarketContext:
 
     indicators: Mapping[str, float | None] = field(default_factory=dict)
     market_regime: MarketRegime = MarketRegime.RANGING
+    # The exchange's own clock, read during the same fetch that produced
+    # ``as_of`` (UTC). The freshness guard measures candle age against THIS
+    # when present, not the host clock: ``as_of`` is cut from a window the
+    # host clock bounded, so a host that runs behind makes a stale window
+    # look current (issue #51). ``None`` only for contexts that did not come
+    # from a live ``_build_context`` fetch (fixtures, replays) — the guard
+    # then falls back to the caller's clock, blind spot and all.
+    exchange_time: datetime | None = None
 
     def __post_init__(self) -> None:
         # Mirror the boundary invariants the source ``MarketSnapshot`` already enforces,
@@ -348,6 +356,10 @@ class PerpMarketContext:
         # construction.
         if self.as_of.tzinfo is None:
             raise ValueError("PerpMarketContext.as_of must be timezone-aware (UTC)")
+        # Same rule for the exchange clock: the guard subtracts the two, and a
+        # naive/aware pair raises deep inside the freshness check instead of here.
+        if self.exchange_time is not None and self.exchange_time.tzinfo is None:
+            raise ValueError("PerpMarketContext.exchange_time must be timezone-aware (UTC)")
         # Validate ``candle_interval`` against the single source of truth
         # (:class:`CandleInterval`) so an unsupported value fails here at
         # construction — cheap to spot — rather than later inside ``interval_to_ms``.

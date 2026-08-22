@@ -46,6 +46,7 @@ from ..paper.scheduler import (
     RetryableDecisionError,
     parse_instant,
 )
+from ..paper.validation import note_stale_feed_refusal
 from ..persistence import audit_rows, ids, repository as repo
 from ..persistence.db import Database
 from ..persistence.models import PositionState
@@ -253,6 +254,7 @@ class LiveDecisionDriver:
         self._mode = mode
         self._inflight: _InFlight | None = None
         self._paused_for_latch = False  # one log line per manual-latch pause episode
+        self._stale_refusals = 0  # issue #50: consecutive cycles refused as stale
 
     def pump(self) -> str | None:
         """Advance the decision cycle one non-blocking step; return an event tag."""
@@ -652,6 +654,12 @@ class LiveDecisionDriver:
             error_type,
             error_message,
             next_at.isoformat(),
+        )
+        # Before the write: the escalation is a log line either way, and an
+        # operator reading a log that then shows the write failing still needs
+        # to see the feed has been refusing for N cycles.
+        self._stale_refusals = note_stale_feed_refusal(
+            self._stale_refusals, error_type, run_id=self._run_id
         )
         with self._db.transaction() as conn:
             repo.update_decision_attempt(

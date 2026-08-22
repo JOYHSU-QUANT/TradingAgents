@@ -264,7 +264,7 @@ def _run_live_loop(
         risk_cfg=risk_cfg,
         decision_cfg=decision_cfg,
         payload_dir=payload_dir,
-        # build_input runs on THIS thread inside driver.pump(); its four market
+        # build_input runs on THIS thread inside driver.pump(); its five market
         # reads are the longest back-to-back REST chain in the system. Refreshing
         # between them keeps the unrefreshed run at the submit chain's 3 instead
         # of 4, which is what lets the operator advisory stay at a ~10s timeout
@@ -308,7 +308,8 @@ def _run_live_loop(
                 # engine.tick() refreshes at its top and across its own blocking
                 # work, but driver.pump() then runs _build_context ON THIS THREAD:
                 # constructing the SDK client fetches perp meta, then snapshot,
-                # candles and funding — four back-to-back REST calls on the same
+                # candles, the exchange clock and funding — five back-to-back
+                # REST calls on the same
                 # network_timeout_s, with no refresh of their own. Without this
                 # line the two chains are consecutive, so the run of unrefreshed
                 # calls is their SUM, not the max the budget constant assumes

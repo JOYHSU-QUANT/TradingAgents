@@ -311,6 +311,26 @@ class PerpMarketContext:
 
     indicators: Mapping[str, float | None] = field(default_factory=dict)
     market_regime: MarketRegime = MarketRegime.RANGING
+    # The exchange's own clock, read during the same fetch that produced
+    # ``as_of`` (UTC). The freshness guard measures candle age against THIS
+    # when present, not the host clock: ``as_of`` is cut from a window the
+    # host clock bounded, so a host that runs behind makes a stale window
+    # look current (issue #51). ``None`` only for contexts that did not come
+    # from a live ``_build_context`` fetch (fixtures, replays) — the guard
+    # then falls back to the caller's clock, blind spot and all.
+    exchange_time: datetime | None = None
+    # This host's clock as read at the SAME INSTANT as ``exchange_time`` (UTC).
+    # The two are only ever subtracted from each other, and that difference is
+    # only meaningful if the readings are adjacent: the daemon's own clock
+    # reading (the guard's ``now``) is taken before the fetch, so measuring
+    # skew against THAT would fold three REST calls of elapsed time in as
+    # apparent clock error — enough, on a slow network, to warn about NTP on
+    # a correctly-synced host and to blame the clock for a stalled feed.
+    # ``None`` whenever there is no paired reading; never populated without
+    # ``exchange_time`` (enforced below), though the reverse IS legal — a
+    # hand-built context may carry an exchange clock and no pairing, and the
+    # guard then reports no skew rather than inventing one.
+    host_time_at_exchange_read: datetime | None = None
 
     def __post_init__(self) -> None:
         # Mirror the boundary invariants the source ``MarketSnapshot`` already enforces,
@@ -348,6 +368,22 @@ class PerpMarketContext:
         # construction.
         if self.as_of.tzinfo is None:
             raise ValueError("PerpMarketContext.as_of must be timezone-aware (UTC)")
+        # Same rule for the exchange clock: the guard subtracts the two, and a
+        # naive/aware pair raises deep inside the freshness check instead of here.
+        if self.exchange_time is not None and self.exchange_time.tzinfo is None:
+            raise ValueError("PerpMarketContext.exchange_time must be timezone-aware (UTC)")
+        if self.host_time_at_exchange_read is not None:
+            if self.host_time_at_exchange_read.tzinfo is None:
+                raise ValueError(
+                    "PerpMarketContext.host_time_at_exchange_read must be timezone-aware (UTC)"
+                )
+            if self.exchange_time is None:
+                # The field exists only to be subtracted from ``exchange_time``;
+                # one without the other is a half-built context, not a degraded
+                # one, and would read as "skew unknown" while looking populated.
+                raise ValueError(
+                    "PerpMarketContext.host_time_at_exchange_read requires exchange_time"
+                )
         # Validate ``candle_interval`` against the single source of truth
         # (:class:`CandleInterval`) so an unsupported value fails here at
         # construction — cheap to spot — rather than later inside ``interval_to_ms``.

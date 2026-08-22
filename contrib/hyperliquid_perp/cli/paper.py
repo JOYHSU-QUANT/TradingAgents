@@ -98,7 +98,7 @@ def _cmd_paper(argv: list[str]) -> int:
     config = load_config_or_exit(args.config)
     if config is None:
         return 1
-    coin = _resolve_coin(args, config)
+    coin = _resolve_coin(args.coin, config)
     cfgs = _load_risk_decision(config)
     if cfgs is None:
         return 1
@@ -540,9 +540,11 @@ def _paper_loop(
     from ..paper.reconcile import backfill_pending_funding
     from ..paper.run_lock import heartbeat_run_lock
     from ..paper.scheduler import CycleEvent
+    from ..paper.validation import note_cycle_outcome
 
     pid = os.getpid()
     next_tick_at: datetime | None = None  # None → the first tick fires immediately
+    no_decision_streak = 0  # issue #50: consecutive cycles that reached no decision
     # Halted mode never polls the scheduler, so it never reaches the
     # cycle-terminal funding retry below — without its own timer, pending
     # funding would stay unposted for the run's whole halted lifetime
@@ -580,6 +582,16 @@ def _paper_loop(
                 file=sys.stderr,
             )
             if result.event.is_cycle_terminal:
+                # Every terminal outcome, not just the failures: the store
+                # query this mirrors breaks on any cycle that decided, so
+                # feeding it only api_failed would let the log claim a streak
+                # `validate` does not see (issue #50). The terminal
+                # ``CycleEvent`` values are spelled the same as the statuses
+                # ``_terminalize_api_failed`` / ``_finalize`` write, which is
+                # what makes the in-process and store-side predicates agree.
+                no_decision_streak = note_cycle_outcome(
+                    no_decision_streak, result.event.value, result.error_type, run_id=run_id
+                )
                 # Retry any backfillable pending funding at every cycle
                 # boundary (execution §6.5's 稍後補帳 — not restart-only).
                 backfill_pending_funding(

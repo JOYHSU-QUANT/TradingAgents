@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 
 from ...domains.perp.margin import MarginSchedule
 from ...domains.perp.schema import Candle, CandleInterval, FundingPoint, MarketSnapshot
@@ -112,3 +113,18 @@ class HyperliquidMarketData:
         raw = call_sdk(self._info.funding_history, coin, start, end)
         # Identity echo: same discipline as get_candles above.
         return mapper.map_funding_history(raw, expected_coin=coin)
+
+    def get_exchange_time(self, coin: str) -> datetime:
+        """The exchange's clock, from the public ``l2Book`` snapshot for ``coin``.
+
+        The one timestamp in this class the HOST clock does not bound: the two
+        windows above are cut at ``_now_ms()``, so a host clock that runs
+        behind truncates them by the same amount and the newest candle looks
+        ordinary (issue #51). Keyless, so the daemon and ``--context-only``
+        read the same clock. ``coin`` only gives the answer an identity to
+        echo-check; the book itself is not used. Like ``get_asset_meta``, not
+        on the ``ExchangeMarketData`` port: the paper engine's snapshot
+        provider has no use for it — ``engine_bridge._build_context`` does.
+        """
+        raw = call_sdk(self._info.l2_snapshot, coin)
+        return mapper.map_exchange_time(raw, expected_coin=coin)

@@ -122,6 +122,46 @@ def test_get_funding_history_accepts_the_matching_identity():
     assert len(HyperliquidMarketData(client).get_funding_history("BTC", 7)) == 1
 
 
+class _BookInfo:
+    def __init__(self, book):
+        self._book = book
+        self.asked = []
+
+    def l2_snapshot(self, coin):
+        self.asked.append(coin)
+        return self._book
+
+
+def test_get_exchange_time_reads_the_l2book_stamp_for_the_coin():
+    # Issue #51: the exchange clock comes off the public l2Book snapshot —
+    # requested for the coin (so the answer carries an identity to check) and
+    # mapped to an aware UTC datetime at ms precision.
+    client = _FakeClient(None)
+    client.info = _BookInfo({"coin": "BTC", "time": 1787369175468, "levels": [[], []]})
+    when = HyperliquidMarketData(client).get_exchange_time("BTC")
+    assert client.info.asked == ["BTC"]
+    assert when.tzinfo is not None
+    assert int(when.timestamp() * 1000) == 1787369175468
+
+
+def test_get_exchange_time_rejects_a_misrouted_response():
+    # Same identity-echo discipline as the other two reads, and the same
+    # mutation-probed wiring: the mapper only checks when the reader asks.
+    client = _FakeClient(None)
+    client.info = _BookInfo({"coin": "ETH", "time": 1787369175468, "levels": [[], []]})
+    with pytest.raises(MalformedResponseError, match="carries coin 'ETH'"):
+        HyperliquidMarketData(client).get_exchange_time("BTC")
+
+
+def test_get_exchange_time_fails_closed_without_a_stamp():
+    # Fail-closed (decided 2026-08-22): the stamp is the guard's only clock, so
+    # a book without one is a malformed answer, not a skipped check.
+    client = _FakeClient(None)
+    client.info = _BookInfo({"coin": "BTC", "levels": [[], []]})
+    with pytest.raises(MalformedResponseError, match="'time' is unusable"):
+        HyperliquidMarketData(client).get_exchange_time("BTC")
+
+
 def test_get_candles_rejects_a_response_for_the_wrong_interval():
     # The interval half of the wiring, pinned separately: the coin test's bar
     # carries the RIGHT interval, so its raise proves nothing about ``i``.

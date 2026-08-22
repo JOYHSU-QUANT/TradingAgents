@@ -110,6 +110,11 @@ from ..common.config_coercion import int_from_yaml
 from ..common.decimal_context import DECIMAL_CONTEXT
 from ..paper import accounting
 from ..paper.scheduler import parse_instant
+from ..paper.validation import (
+    TrailingFailureStreaks,
+    no_decision_shortfall,
+    trailing_failure_streaks,
+)
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from .config import ExecutionMode
@@ -362,6 +367,13 @@ class LiveValidationReport:
     # and reported so a run that is "advancing" but producing nothing usable is
     # visible rather than merely absent from the count.
     invalid_output_count: int
+    # Trailing cycles that reached no decision, and the stale-feed subset of
+    # them (issue #50; see paper.validation.trailing_failure_streaks). Past the
+    # threshold — and while still recent — the run is holding a position on
+    # SL/TP alone with nothing deciding for it, which is "not at the gate"
+    # however many cycles came before; the validator turns that into a
+    # ``shortfalls`` line, so this pair is reported, not gating on its own.
+    streaks: TrailingFailureStreaks
     live_order_count: int
     fill_count: int
     exchange_fill_dedupe_error_count: int
@@ -562,6 +574,8 @@ class LiveValidationReport:
             f"cycle_count: {self.cycle_count}",
             f"api_failed_count: {self.api_failed_count}",
             f"invalid_output_count: {self.invalid_output_count}",
+            f"no_decision_streak: {self.streaks.no_decision}",
+            f"stale_feed_refusal_streak: {self.streaks.stale_feed}",
             f"live_order_count: {self.live_order_count}",
             f"fill_count: {self.fill_count}",
             f"exchange_fill_dedupe_error_count: {self.exchange_fill_dedupe_error_count}",
@@ -1250,9 +1264,12 @@ def validate_live_run(
 ) -> LiveValidationReport:
     """Compute the §20.3 / §21.4 acceptance report for a live ``run_id`` (read-only).
 
-    ``now`` (default: wall clock) is used only to bound an unprotected window
-    still open at the end of the log — every gating count is otherwise derived
-    purely from the store, so the verdict is reproducible.
+    ``now`` (default: wall clock) bounds an unprotected window still open at
+    the end of the log, and dates the no-decision streak against the shared
+    recency window (issue #50). That second use makes ``now`` a GATING input:
+    the same store validated hours apart can move from exit 4 to exit 0 as a
+    stopped run ages out of the window. The verdict is reproducible given the
+    same ``now``, not from the store alone.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -1285,6 +1302,7 @@ def validate_live_run(
             "SELECT COUNT(*) FROM decision_attempts WHERE run_id = ? AND status = 'invalid_output'",
             (run_id,),
         )
+        streaks = trailing_failure_streaks(conn, run_id)
         fill_count = _count(conn, "SELECT COUNT(*) FROM fills WHERE run_id = ?", (run_id,))
         # Distinct acknowledged live orders: the exchange confirmed it holds
         # (or already held — a 'duplicate' ack) each cloid.
@@ -1447,6 +1465,15 @@ def validate_live_run(
     # -- shortfalls (exit 4): not yet at the gate --------------------------
     if cycle_count < MIN_LIVE_CYCLES:
         shortfalls.append(f"cycle_count = {cycle_count} (need >= {MIN_LIVE_CYCLES})")
+    # The last N cycles reached no decision (issue #50): the accumulated cycle
+    # count says nothing about a run that cannot decide RIGHT NOW. A shortfall,
+    # not a failure — the store is sound and the streak clears by itself at the
+    # next decided cycle (an exchange maintenance window must not become a
+    # permanent verdict). Same wording and same recency window as the paper
+    # report, which is why both call the shared helper rather than re-deriving.
+    no_decision_line = no_decision_shortfall(streaks, now=now)
+    if no_decision_line is not None:
+        shortfalls.append(no_decision_line)
 
     # The §20.2 smoke suite (and the four §20.3 *_test_passed booleans it feeds)
     # is a TESTNET_LIVE acceptance condition only: §21.4 omits it, and a
@@ -1554,6 +1581,7 @@ def validate_live_run(
         cycle_count=cycle_count,
         api_failed_count=api_failed_count,
         invalid_output_count=invalid_output_count,
+        streaks=streaks,
         live_order_count=live_order_count,
         fill_count=fill_count,
         exchange_fill_dedupe_error_count=dedupe_error_count,

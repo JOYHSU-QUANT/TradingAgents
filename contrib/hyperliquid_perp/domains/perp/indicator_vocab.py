@@ -22,7 +22,7 @@ _STOCKSTATS_COLUMN = {
 # The indicators classify_regime reads. Any of them being None (or absent) makes
 # the regime silently default to RANGING — hiding a volatile or trending market —
 # so the config loader requires all three in a non-empty ``indicators:`` list and
-# engine_bridge._context_refusal_error refuses a context where any of them is unusable.
+# engine_bridge._context_refusal refuses a context where any of them is unusable.
 # One tuple feeds both so the load-time rule and the runtime guard cannot drift.
 REGIME_INDICATORS = ("atr_14", "ema_20", "ema_50")
 

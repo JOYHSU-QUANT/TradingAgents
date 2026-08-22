@@ -291,6 +291,10 @@ def test_retry_ladder_then_api_failed(tmp_path):
     assert row["status"] == "api_failed"
     assert row["attempt_count"] == 3
     assert row["error_type"] == "server_error"
+    # The result carries the same §6.2 class the row was written with, so the
+    # loop can escalate on it (issue #50) without reading back the row it just
+    # wrote. Compared to the row, not to a literal: the point is that they agree.
+    assert r3.error_type == row["error_type"]
     assert row["output_id"] is None
     # No target, no order, no AI output — position untouched (spec §3.1).
     assert db.conn.execute("SELECT COUNT(*) FROM ai_outputs").fetchone()[0] == 0
@@ -552,6 +556,30 @@ def test_poll_result_shape_guards():
             scheduled_at=datetime(2026, 7, 6, 12, 0),  # noqa: DTZ001 — naive on purpose
             attempt_count=1,
             next_decision_at=_T0,
+            error_type="server_error",
+        )
+    # ``error_type`` is present exactly on an api_failed result — the loop
+    # escalates on it (issue #50), so a failed cycle that carried none would
+    # silently reset the streak, and a decided one that carried a class would
+    # advance it.
+    with pytest.raises(ValueError, match="error_type"):
+        PollResult(
+            event=CycleEvent.API_FAILED,
+            decision_attempt_id="a",
+            scheduled_at=_T0,
+            attempt_count=1,
+            next_decision_at=_T0,
+        )
+    with pytest.raises(ValueError, match="error_type"):
+        PollResult(
+            event=CycleEvent.COMPLETED,
+            decision_attempt_id="a",
+            scheduled_at=_T0,
+            attempt_count=1,
+            output_id="o",
+            plan=None,
+            next_decision_at=None,
+            error_type="server_error",
         )
 
 

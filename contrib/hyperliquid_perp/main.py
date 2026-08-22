@@ -143,7 +143,7 @@ def run_engine(config: dict, coin: str) -> int:
     ctx, client = engine_bridge._build_context(config, coin)
     # All four pre-LLM context guards (warm-up, fully-dead indicator set,
     # missing/dead regime indicators, stale feed) live in
-    # _context_refusal_error, shared with the daemon provider.
+    # _context_refusal, shared with the daemon provider.
     refusal = engine_bridge._context_refusal_error(ctx, coin, config)
     if refusal is not None:
         print(f"error: {refusal}", file=sys.stderr)
@@ -385,7 +385,7 @@ def main(argv: list[str] | None = None) -> int:
     config = engine_bridge.load_config_or_exit(args.config)
     if config is None:
         return 1
-    coin = engine_bridge._resolve_coin(args, config)
+    coin = engine_bridge._resolve_coin(args.coin, config)
 
     try:
         if args.context_only:

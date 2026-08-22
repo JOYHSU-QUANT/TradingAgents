@@ -540,11 +540,11 @@ def _paper_loop(
     from ..paper.reconcile import backfill_pending_funding
     from ..paper.run_lock import heartbeat_run_lock
     from ..paper.scheduler import CycleEvent
-    from ..paper.validation import note_stale_feed_refusal
+    from ..paper.validation import note_cycle_outcome
 
     pid = os.getpid()
     next_tick_at: datetime | None = None  # None → the first tick fires immediately
-    stale_refusals = 0  # issue #50: consecutive api_failed cycles refused as stale
+    no_decision_streak = 0  # issue #50: consecutive cycles that reached no decision
     # Halted mode never polls the scheduler, so it never reaches the
     # cycle-terminal funding retry below — without its own timer, pending
     # funding would stay unposted for the run's whole halted lifetime
@@ -582,6 +582,14 @@ def _paper_loop(
                 file=sys.stderr,
             )
             if result.event.is_cycle_terminal:
+                # Every terminal outcome, not just the failures: the store
+                # query this mirrors breaks on any cycle that decided, so
+                # feeding it only api_failed would let the log claim a streak
+                # `validate` does not see (issue #50). ``CycleEvent`` values ARE
+                # the attempt statuses, so the two predicates cannot drift.
+                no_decision_streak = note_cycle_outcome(
+                    no_decision_streak, result.event.value, result.error_type, run_id=run_id
+                )
                 # Retry any backfillable pending funding at every cycle
                 # boundary (execution §6.5's 稍後補帳 — not restart-only).
                 backfill_pending_funding(
@@ -617,12 +625,6 @@ def _paper_loop(
                         file=sys.stderr,
                     )
             if result.event is CycleEvent.API_FAILED:
-                # Keyed on the same §6.2 class the terminal row was written
-                # with, which ``validate`` will later count in the store —
-                # one classification, two readers (issue #50).
-                stale_refusals = note_stale_feed_refusal(
-                    stale_refusals, result.error_type, run_id=run_id
-                )
                 logger.warning(
                     "decision API failed %s times for %s — holding position until the next cycle",
                     result.attempt_count,

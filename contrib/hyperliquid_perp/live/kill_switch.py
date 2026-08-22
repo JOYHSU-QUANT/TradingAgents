@@ -221,11 +221,12 @@ _FAILURE_BACKOFF_FRACTION = 0.5
 # ONE however many calls it makes: protection's repair ladder and its orderStatus
 # confirmations, the reconcile legs and their per-order loops, BOTH page ladders
 # (the fill backfill's and the reconcile fill cross-check's own inline one), the
-# day-roll baseline read, and — since 2026-08-01 — the decision cycle's four
-# market-data reads in ``engine_bridge._build_context``, which ``driver.pump()`` runs on
+# day-roll baseline read, and — since 2026-08-01 — the decision cycle's five
+# market-data reads in ``engine_bridge._build_context`` (perp meta, snapshot,
+# candles, the exchange clock, funding), which ``driver.pump()`` runs on
 # this same thread.
 #
-# That last one is why this is 3 rather than 4. Those reads share
+# That last one is why this is 3 rather than 5. Those reads share
 # ``network_timeout_s`` (``HyperliquidClient.from_config`` resolves from that key
 # and Info() fetches perp meta at construction), so unrefreshed they were the
 # longest chain and forced the advisory to demand <7.5s. But a live decision

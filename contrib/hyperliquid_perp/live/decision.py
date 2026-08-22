@@ -46,7 +46,7 @@ from ..paper.scheduler import (
     RetryableDecisionError,
     parse_instant,
 )
-from ..paper.validation import note_stale_feed_refusal
+from ..paper.validation import note_cycle_outcome
 from ..persistence import audit_rows, ids, repository as repo
 from ..persistence.db import Database
 from ..persistence.models import PositionState
@@ -254,7 +254,7 @@ class LiveDecisionDriver:
         self._mode = mode
         self._inflight: _InFlight | None = None
         self._paused_for_latch = False  # one log line per manual-latch pause episode
-        self._stale_refusals = 0  # issue #50: consecutive cycles refused as stale
+        self._no_decision_streak = 0  # issue #50: consecutive cycles with no decision
 
     def pump(self) -> str | None:
         """Advance the decision cycle one non-blocking step; return an event tag."""
@@ -362,6 +362,9 @@ class LiveDecisionDriver:
             error_type=None,
             error_message="process restart interrupted this cycle before the AI answered",
         )
+        # This process's first terminal outcome: the counter is per-process and
+        # starts at zero anyway, so this is the honest 1 rather than a reset.
+        self._note_cycle_outcome("api_failed", None)
         return "api_failed"
 
     def salvage_shutdown(self) -> bool:
@@ -596,7 +599,18 @@ class LiveDecisionDriver:
                 f"(plan_id={reg.plan_id}); retrying the persist next pump"
             ) from exc
         self._inflight = None
+        # A decided cycle — target or unparseable answer — breaks the streak,
+        # exactly as it breaks the store query the escalation mirrors. Fed on
+        # the success path too, or the log would keep counting across cycles
+        # that did decide and claim a blackout ``validate`` cannot see.
+        self._note_cycle_outcome(status, None)
         return status
+
+    def _note_cycle_outcome(self, status: str, error_type: str | None) -> None:
+        """Feed this cycle's terminal outcome to the issue #50 streak counter."""
+        self._no_decision_streak = note_cycle_outcome(
+            self._no_decision_streak, status, error_type, run_id=self._run_id
+        )
 
     def _fail_closed(self, error_type: str | None, message: str) -> str:
         """§10.2 fail-closed: record the in-flight cycle as ``api_failed``.
@@ -618,6 +632,13 @@ class LiveDecisionDriver:
                 "live decision cycle %s hit a non-retryable error — failing closed",
                 self._inflight.attempt_id,
             )
+        # Counted HERE, where the fail record is ARMED — once per cycle —
+        # rather than in ``_fail_cycle``, which ``_flush_pending_fail``
+        # re-enters on every pump while a failing write keeps it armed. Counted
+        # there, one refused cycle whose write kept hitting a locked store
+        # would have reached the ERROR threshold within three ticks and claimed
+        # "3 consecutive (~12h with no decision)" about a single cycle.
+        self._note_cycle_outcome("api_failed", error_type)
         self._inflight.pending_fail = (error_type, message)
         return self._flush_pending_fail()
 
@@ -654,12 +675,6 @@ class LiveDecisionDriver:
             error_type,
             error_message,
             next_at.isoformat(),
-        )
-        # Before the write: the escalation is a log line either way, and an
-        # operator reading a log that then shows the write failing still needs
-        # to see the feed has been refusing for N cycles.
-        self._stale_refusals = note_stale_feed_refusal(
-            self._stale_refusals, error_type, run_id=self._run_id
         )
         with self._db.transaction() as conn:
             repo.update_decision_attempt(

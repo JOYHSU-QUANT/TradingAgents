@@ -166,7 +166,7 @@ class DecisionProvider(Protocol):
     每次呼叫 AI 前記錄一次 — the record must exist before the paid call).
     Both raise :class:`RetryableDecisionError` for §3.1-retryable failures.
     ``build_input`` must return a context that already passed the pre-LLM
-    guards (``engine_bridge._context_refusal_error``); drivers do not re-check before
+    guards (``engine_bridge._context_refusal``); drivers do not re-check before
     spending the paid call.
     """
 
@@ -204,10 +204,11 @@ class PollResult:
     next_decision_at: datetime | None = None
     # The §6.2 class the terminal api_failed row was written with, carried so
     # the loop does not have to read back a row it just wrote to learn WHY the
-    # cycle failed (``stale_market_data`` gets its own escalation — issue #50).
-    # ``None`` on every other event, and also on an api_failed whose cause was
-    # a non-retryable bug (no §6.2 word applies), so it is "non-None only on
-    # API_FAILED" rather than a present-exactly-when pair.
+    # cycle failed (issue #50's escalation words its message from it). Present
+    # exactly on an api_failed result: ``_terminalize_api_failed`` is the only
+    # producer and its own ``error_type`` is non-optional. (The live driver's
+    # untyped fail — a non-retryable bug — writes its row directly and builds
+    # no PollResult, so that case never reaches this type.)
     error_type: str | None = None
 
     def __post_init__(self) -> None:
@@ -215,8 +216,8 @@ class PollResult:
         # implies which follow-up fields exist, and a caller branches on them.
         if (self.retry_at is not None) != (self.event is CycleEvent.RETRY_SCHEDULED):
             raise ValueError("retry_at is present exactly on a retry_scheduled result")
-        if self.error_type is not None and self.event is not CycleEvent.API_FAILED:
-            raise ValueError("error_type is only carried on an api_failed result")
+        if (self.error_type is None) == (self.event is CycleEvent.API_FAILED):
+            raise ValueError("error_type is present exactly on an api_failed result")
         if (self.next_decision_at is None) == self.event.is_cycle_terminal:
             raise ValueError("next_decision_at is present exactly on a cycle-terminal result")
         completed = self.event in (CycleEvent.COMPLETED, CycleEvent.INVALID_OUTPUT)

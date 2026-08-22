@@ -99,9 +99,10 @@ def _validate_live(db: Database, run_id: str) -> int:
     unprotected window, a low kill-switch refresh rate, or — mainnet_tiny — an
     unresolved reconciliation case / breached daily-loss cap); 4 = internally
     consistent but short of the gate (< 30 cycles / orders, smoke tests not yet
-    run, or a failed/errored smoke test — curable by a ``live-smoke --only``
+    run, a failed/errored smoke test — curable by a ``live-smoke --only``
     re-run, so it is a shortfall, not an integrity verdict; decision
-    2026-07-29). Called inside the caller's ``with db:`` block.
+    2026-07-29 — or a recent run of cycles that all reached no decision, issue
+    #50). Called inside the caller's ``with db:`` block.
     """
     from ..live.validation import validate_live_run
 

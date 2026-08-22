@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
@@ -346,16 +347,48 @@ def test_driver_escalates_consecutive_stale_feed_refusals(tmp_path, caplog):
     # tests/paper/test_validation.py.
     import logging
 
-    from contrib.hyperliquid_perp.paper.validation import STALE_FEED_STREAK_THRESHOLD
+    from contrib.hyperliquid_perp.paper.validation import NO_DECISION_STREAK_THRESHOLD
 
     db, clock, driver, engine, worker, provider = _driver(tmp_path, build_error=_stale_refusal())
     with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.validation"):
-        for _ in range(STALE_FEED_STREAK_THRESHOLD):
+        for _ in range(NO_DECISION_STREAK_THRESHOLD):
             assert driver.pump() == "api_failed"
             state = repo.get_scheduler_state(db.conn, "r")
             clock.set(parse_instant(state["next_decision_at"]))
-    levels = [r.levelno for r in caplog.records if "refused as stale market data" in r.getMessage()]
-    assert levels == [logging.WARNING] * (STALE_FEED_STREAK_THRESHOLD - 1) + [logging.ERROR]
+    levels = [r.levelno for r in caplog.records if "decision cycle for r" in r.getMessage()]
+    assert levels == [logging.WARNING] * (NO_DECISION_STREAK_THRESHOLD - 1) + [logging.ERROR]
+    db.close()
+
+
+def test_driver_counts_a_refused_cycle_once_even_when_its_write_keeps_failing(tmp_path, caplog):
+    # The counter is advanced where the fail record is ARMED, not where it is
+    # written: ``_flush_pending_fail`` re-enters ``_fail_cycle`` on every pump
+    # while a failing write keeps it armed, so counting there would let ONE
+    # refused cycle reach the ERROR threshold within three ~10s ticks and claim
+    # "3 consecutive (~12h with no decision)".
+    import logging
+
+    db, clock, driver, engine, worker, provider = _driver(tmp_path, build_error=_stale_refusal())
+
+    calls = {"n": 0}
+    real_fail_cycle = driver._fail_cycle
+
+    def _flaky_fail_cycle(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return real_fail_cycle(*args, **kwargs)
+
+    driver._fail_cycle = _flaky_fail_cycle
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.validation"):
+        for _ in range(2):
+            with pytest.raises(sqlite3.OperationalError):
+                driver.pump()
+        assert driver.pump() == "api_failed"
+    assert calls["n"] == 3  # three write attempts...
+    notes = [r for r in caplog.records if "decision cycle for r" in r.getMessage()]
+    assert len(notes) == 1  # ...one counted cycle
+    assert notes[0].levelno == logging.WARNING
     db.close()
 
 

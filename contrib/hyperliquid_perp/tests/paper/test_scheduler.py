@@ -556,6 +556,30 @@ def test_poll_result_shape_guards():
             scheduled_at=datetime(2026, 7, 6, 12, 0),  # noqa: DTZ001 — naive on purpose
             attempt_count=1,
             next_decision_at=_T0,
+            error_type="server_error",
+        )
+    # ``error_type`` is present exactly on an api_failed result — the loop
+    # escalates on it (issue #50), so a failed cycle that carried none would
+    # silently reset the streak, and a decided one that carried a class would
+    # advance it.
+    with pytest.raises(ValueError, match="error_type"):
+        PollResult(
+            event=CycleEvent.API_FAILED,
+            decision_attempt_id="a",
+            scheduled_at=_T0,
+            attempt_count=1,
+            next_decision_at=_T0,
+        )
+    with pytest.raises(ValueError, match="error_type"):
+        PollResult(
+            event=CycleEvent.COMPLETED,
+            decision_attempt_id="a",
+            scheduled_at=_T0,
+            attempt_count=1,
+            output_id="o",
+            plan=None,
+            next_decision_at=None,
+            error_type="server_error",
         )
 
 

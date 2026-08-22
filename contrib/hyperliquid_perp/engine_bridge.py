@@ -3,7 +3,7 @@
 Extracted verbatim from ``main.py`` (2026-08-18): the symbols ``cli.py`` had
 been lazy-importing from the legacy entry point — market-context assembly
 (:func:`_build_context`), the pre-LLM context guards
-(:func:`_context_refusal_error`), the engine-config overlay
+(:func:`_context_refusal`), the engine-config overlay
 (:func:`_build_engine_config` with :class:`EngineImportError`), risk/decision
 config parsing (:func:`_load_risk_decision`) and coin resolution
 (:func:`_resolve_coin`) — plus what the call graph drags along: their private
@@ -73,8 +73,12 @@ def _warn_dual(log_msg: str, *args: object, stderr: str) -> None:
     cannot silently drift apart. Single-channel warnings exist and are each a
     deliberate exception, not a missed migration: the ``on_blocking_read``
     failure in :func:`_build_context` is log-only (mid-read, no operator
-    moment to interrupt), and :func:`_resolve_coin`'s multi-coin notice is
-    stderr-only (interactive CLI feedback, not an operational event).
+    moment to interrupt), :func:`_resolve_coin`'s multi-coin notice is
+    stderr-only (interactive CLI feedback, not an operational event), and the
+    host-vs-exchange clock-skew notice in :func:`_context_refusal` is log-only
+    (it fires mid-guard on every path including the daemon's, where stderr has
+    no reader; the refusal message an operator does see carries the same skew
+    sentence when it matters).
     """
     logger.warning(log_msg, *args)
     print(stderr, file=sys.stderr)
@@ -340,29 +344,49 @@ def _context_refusal(
     if exchange_now is None:
         return _host_clock_freshness_refusal(ctx, coin, host_now, limit_ms, limit_basis)
     age_ms = int((exchange_now - ctx.as_of).total_seconds() * 1000)
-    skew_ms = int((host_now - exchange_now).total_seconds() * 1000)
-    skew_note = _host_clock_skew_note(skew_ms, host_now)
-    if abs(skew_ms) >= _CLOCK_SKEW_WARN_MS:
+    # Skew is measured between the two readings ``_build_context`` took
+    # ADJACENTLY, never against ``now``: the daemon's ``now`` is its own clock
+    # reading from before the fetch, so subtracting it would report the fetch's
+    # elapsed time as clock error. A context that carries an exchange clock but
+    # no paired host reading (hand-built) simply has no skew to report.
+    host_at_read = ctx.host_time_at_exchange_read
+    skew_ms = (
+        None if host_at_read is None else int((host_at_read - exchange_now).total_seconds() * 1000)
+    )
+    skew_note = _host_clock_skew_note(skew_ms, host_at_read)
+    if skew_ms is not None and abs(skew_ms) >= _CLOCK_SKEW_WARN_MS:
         # Log-only, never a gate: the age check below is what decides, and it
         # is measured entirely between exchange-side values. This is the
         # operator's early notice — a 2h-slow host still PASSES with 4h bars
         # (the data is 6h old, inside the 12h limit) but is one outage away
         # from not passing, and "fix NTP" is cheaper before that. Built from
         # the same ``skew_note`` the refusals carry so the two cannot drift.
+        #
+        # It does NOT say the decision is unaffected, because for a host
+        # running AHEAD it can be: ``get_candles`` cuts its window at this
+        # host's clock and keeps ``close_time <= end``, so a lead admits the
+        # still-forming bar, whose partial OHLCV understates ATR and skews
+        # RSI/EMA. The age check tolerates that up to the shared bound; see the
+        # follow-up issue for tightening the future side now that there is a
+        # real clock to tighten it against.
         logger.warning(
-            "%s Fix time sync (NTP): the freshness guard measures against the "
-            "exchange's clock (%s), so decisions stay correct, but the candle "
-            "window this host asks for is offset by the same amount",
+            "%s Fix time sync (NTP): the candle window this host asks for is "
+            "offset from the exchange's clock (%s) by the same amount, and a "
+            "host running AHEAD can pull in a bar the exchange has not closed",
             skew_note,
             _utc_stamp(exchange_now),
         )
-    # A candle closing AFTER the exchange's clock by more than the tolerance
-    # can only come from the host clock running far enough AHEAD that the
-    # still-forming bar survived get_candles' ``close_time <= end`` filter (a
-    # bar the exchange has not closed yet — partial OHLCV), or from a ctx that
-    # never came from a live fetch. The tolerance is shared with the stale
-    # side so a boundary closing during the fetch (exchange read first, then
-    # the forming bar closes) never trips it.
+    # A candle closing AFTER the exchange's clock by more than the tolerance.
+    # Be exact about what can reach it, because the tolerance is wide: the
+    # still-forming bar a host running AHEAD pulls through get_candles'
+    # ``close_time <= end`` filter sits at most ONE interval past the
+    # exchange's clock, while the tolerance is 3 x interval — so at 1m–4h bars
+    # no host lead can trip this branch, and what lands here is a ctx that did
+    # not come from a live fetch. Only 1d bars, where the 12h ceiling clamps
+    # the tolerance below one interval, can reach it from a host lead. (The
+    # partial bar a smaller lead admits is NOT caught here — that is the
+    # follow-up issue on tightening the future side.) The tolerance is shared
+    # with the stale side so a boundary closing during the fetch never trips it.
     if age_ms < -limit_ms:
         return ContextRefusal(
             _STALE_CONTEXT_ERROR,
@@ -384,7 +408,9 @@ def _context_refusal(
         # either cause outright in that middle band would send half the
         # investigations down the wrong path — the same coin-flip the
         # host-clock-only fallback below still has to live with.
-        if skew_ms <= -limit_ms:
+        if skew_ms is None:
+            cause = f"{skew_note} The cause cannot be narrowed further from here."
+        elif skew_ms < -limit_ms:
             cause = (
                 f"{skew_note} An offset that large by itself puts the newest "
                 "candle this host can ask for past the limit — fix time sync "
@@ -419,10 +445,10 @@ def _context_refusal_error(
 ) -> str | None:
     """:func:`_context_refusal`'s sentence alone, or ``None`` if usable.
 
-    The view for callers that only report: ``main.py``'s two entry shells
-    print it and exit, ``--context-only`` renders it as a warning. Only the
-    daemon provider, which writes the durable attempt row, needs the §6.2
-    class alongside it.
+    The view for the two callers that only report it: ``main.run_engine``
+    prints it and exits 1, ``main.run_context_only`` (the ``--context-only``
+    path) renders it as a warning and exits 4. Only the daemon provider, which
+    writes the durable attempt row, needs the §6.2 class alongside it.
     """
     refusal = _context_refusal(ctx, coin, config, now=now)
     return None if refusal is None else refusal.message
@@ -440,13 +466,15 @@ def _context_refusal_error(
 _CLOCK_SKEW_WARN_MS = 60_000
 
 
-def _host_clock_skew_note(skew_ms: int, host_now: datetime) -> str:
+def _host_clock_skew_note(skew_ms: int | None, host_at_read: datetime | None) -> str:
     """One sentence on how this host's clock sits against the exchange's."""
+    if skew_ms is None or host_at_read is None:
+        return "This context carries no paired host-clock reading, so the skew is unknown."
     if abs(skew_ms) < _CLOCK_SKEW_WARN_MS:
-        return f"This host's clock ({_utc_stamp(host_now)}) agrees with the exchange's."
+        return f"This host's clock ({_utc_stamp(host_at_read)}) agrees with the exchange's."
     direction = "ahead of" if skew_ms > 0 else "behind"
     return (
-        f"This host's clock reads {_utc_stamp(host_now)}, "
+        f"This host's clock reads {_utc_stamp(host_at_read)}, "
         f"{_format_duration_ms(abs(skew_ms))} {direction} the exchange's."
     )
 
@@ -605,6 +633,12 @@ def _build_context(
     # A read that fails or answers without a timestamp propagates like the
     # other reads — fail-closed, the guard cannot measure without it.
     exchange_time = market.get_exchange_time(coin)
+    # Adjacent to the read above — that adjacency is the whole point. A host
+    # reading taken anywhere else (the scheduler's ``as_of``, the guard's own
+    # ``datetime.now()``) is separated from the exchange's by however long the
+    # surrounding REST calls took, and the difference would report that elapsed
+    # time as clock skew.
+    host_time_at_exchange_read = datetime.now(tz=timezone.utc)
     _between_reads()
     funding = market.get_funding_history(coin, window_days)
     _between_reads()
@@ -618,6 +652,7 @@ def _build_context(
         funding_window_days=window_days,
         indicator_names=indicator_names,
         exchange_time=exchange_time,
+        host_time_at_exchange_read=host_time_at_exchange_read,
     )
     return ctx, client
 

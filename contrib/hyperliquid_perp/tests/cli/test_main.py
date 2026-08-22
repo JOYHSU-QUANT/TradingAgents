@@ -755,19 +755,26 @@ def test_run_engine_refuses_untradeable_regime_indicators(
 _NOW = datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc)
 
 
-def _ctx_closing_at(as_of, *, interval="4h", candle_count=200, exchange_time=None):
+def _ctx_closing_at(as_of, *, interval="4h", candle_count=200, exchange_time=None, host_skew=None):
     """A context that clears the first three guards; only its age varies.
 
     ``exchange_time=None`` is the fixture/replay shape — no exchange clock, so
     the guard measures against ``now`` (the pre-#51 behaviour these tests pin
     as the fallback). Pass one to exercise the exchange-clock path.
+
+    ``host_skew`` is how far this host's clock sat from the exchange's AT THE
+    MOMENT the exchange clock was read — the only pairing the guard will
+    measure skew from, precisely because ``now`` on the daemon path is a
+    reading from before the fetch and would report elapsed time as drift.
     """
+    host_at_read = None if exchange_time is None else exchange_time + (host_skew or timedelta(0))
     return SimpleNamespace(
         candle_count=candle_count,
         indicators={"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0, "atr_14": 250.0},
         candle_interval=interval,
         as_of=as_of,
         exchange_time=exchange_time,
+        host_time_at_exchange_read=host_at_read,
     )
 
 
@@ -979,7 +986,11 @@ def _host_clock_offset_ctx(offset_hours, *, exchange_clock):
     """
     host = _NOW + timedelta(hours=offset_hours)
     newest_candle = min(_NOW, host)  # what `close_time <= end` leaves behind
-    ctx = _ctx_closing_at(newest_candle, exchange_time=_NOW if exchange_clock else None)
+    ctx = _ctx_closing_at(
+        newest_candle,
+        exchange_time=_NOW if exchange_clock else None,
+        host_skew=timedelta(hours=offset_hours) if exchange_clock else None,
+    )
     return ctx, host
 
 
@@ -1004,8 +1015,8 @@ def test_freshness_guard_catches_a_clock_that_runs_behind_via_the_exchange_clock
     # window IS a day old, whatever the host clock says. Same fixture shape as
     # the blind test above, differing only in the exchange clock being present
     # — that difference is the whole fix.
-    ctx, host = _host_clock_offset_ctx(-24, exchange_clock=True)
-    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=host)
+    ctx, _host = _host_clock_offset_ctx(-24, exchange_clock=True)
+    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "24h 0m 0s before the exchange's clock" in msg
     assert "12h 0m 0s freshness limit (3 x 4h)" in msg
@@ -1021,8 +1032,10 @@ def test_freshness_guard_splits_the_blame_when_the_skew_is_only_part_of_the_age(
     # 20h age but cannot account for all of it. Naming EITHER cause outright
     # here would send half the investigations down the wrong path, so the
     # message must name the offset's SIZE and point at both.
-    ctx = _ctx_closing_at(_NOW - timedelta(hours=20), exchange_time=_NOW)
-    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW - timedelta(hours=6))
+    ctx = _ctx_closing_at(
+        _NOW - timedelta(hours=20), exchange_time=_NOW, host_skew=-timedelta(hours=6)
+    )
+    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "accounts for 6h 0m 0s of this age but not all of it" in msg
     assert "check time sync (NTP) AND the exchange's candle feed" in msg
@@ -1034,56 +1047,72 @@ def test_freshness_guard_splits_the_blame_when_the_skew_is_only_part_of_the_age(
 def test_freshness_guard_names_the_feed_when_the_host_clock_agrees():
     # The other half of telling the causes apart: a healthy host clock and a
     # 14h-old newest candle means the EXCHANGE published nothing newer.
-    ctx = _ctx_closing_at(_NOW - timedelta(hours=14), exchange_time=_NOW)
-    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW + timedelta(seconds=3))
+    ctx = _ctx_closing_at(
+        _NOW - timedelta(hours=14), exchange_time=_NOW, host_skew=timedelta(seconds=3)
+    )
+    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "agrees with the exchange's" in msg
     assert "feed itself stopped advancing" in msg
     assert "fix time sync" not in msg
 
 
-def test_freshness_guard_measures_against_the_exchange_clock_not_now(caplog):
-    # Precedence pin: a host 10h AHEAD sees a 14h age against its own clock
-    # (which the fallback would refuse), but the candle is 4h old to the
-    # exchange — current. The exchange clock decides; the skew is a warning.
+def test_freshness_guard_measures_skew_between_the_paired_readings_not_now(caplog):
+    # The pairing that makes the skew honest: ``now`` on the daemon path is the
+    # scheduler's clock reading from BEFORE the fetch, so subtracting it would
+    # report the fetch's elapsed time as drift — a slow-but-healthy network
+    # would warn about NTP on a correctly-synced host, and then misattribute a
+    # stalled feed to the clock. Here ``now`` is 10h off and the paired reading
+    # says the clocks agree: no warning, and the verdict is unaffected.
     ctx = _ctx_closing_at(_NOW - timedelta(hours=4), exchange_time=_NOW)
     with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.engine_bridge"):
         verdict = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW + timedelta(hours=10))
     assert verdict is None
+    assert not [r for r in caplog.records if "This host's clock" in r.getMessage()]
+    # ...and a genuine 10h lead, recorded in the pair, does warn.
+    ahead = _ctx_closing_at(
+        _NOW - timedelta(hours=4), exchange_time=_NOW, host_skew=timedelta(hours=10)
+    )
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.engine_bridge"):
+        assert bridge_mod._context_refusal_error(ahead, "BTC", {}, now=_NOW) is None
     warned = [r.getMessage() for r in caplog.records if "This host's clock" in r.getMessage()]
     assert len(warned) == 1
     assert "10h 0m 0s ahead of the exchange's" in warned[0]
     assert "Fix time sync (NTP)" in warned[0]
+    # It must NOT tell the operator the decision is unaffected: a host ahead
+    # pulls the still-forming bar through get_candles' filter.
+    assert "decisions stay correct" not in warned[0]
+    assert "has not closed" in warned[0]
 
 
 def test_freshness_guard_skew_warning_has_a_floor(caplog):
-    # The daemon reads its clock BEFORE the fetch, so a few seconds of skew is
-    # fetch latency, not a broken clock. Below the warn floor: quiet, and the
-    # message (were one needed) says the clocks agree.
-    ctx = _ctx_closing_at(_NOW - timedelta(hours=4), exchange_time=_NOW)
+    # A few seconds between the two paired readings is measurement noise, not a
+    # broken clock. Below the warn floor: quiet, and the message (were one
+    # needed) says the clocks agree.
     just_under = timedelta(milliseconds=bridge_mod._CLOCK_SKEW_WARN_MS - 1)
+    ctx = _ctx_closing_at(_NOW - timedelta(hours=4), exchange_time=_NOW, host_skew=-just_under)
     with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.engine_bridge"):
-        assert bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW - just_under) is None
+        assert bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW) is None
     assert not [r for r in caplog.records if "Fix time sync" in r.getMessage()]
     # Exactly at the floor fires (>=): pins the comparison direction.
     at_floor = timedelta(milliseconds=bridge_mod._CLOCK_SKEW_WARN_MS)
+    ctx = _ctx_closing_at(_NOW - timedelta(hours=4), exchange_time=_NOW, host_skew=-at_floor)
     with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.engine_bridge"):
-        assert bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW - at_floor) is None
+        assert bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW) is None
     assert [r for r in caplog.records if "1m 0s behind the exchange's" in r.getMessage()]
 
 
-def test_freshness_guard_flags_a_clock_far_enough_ahead_to_leak_the_forming_bar():
-    # A host AHEAD by more than the limit lets get_candles keep the still-
-    # forming bar (its close is <= the host's window end), so the newest
-    # candle closes in the EXCHANGE's future. Against the exchange clock that
-    # is measurable; the host clock is named as the cause.
-    forming_close = _NOW + timedelta(hours=13)
-    ctx = _ctx_closing_at(forming_close, exchange_time=_NOW)
-    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW + timedelta(hours=14))
+def test_freshness_guard_flags_a_candle_closing_past_the_exchanges_clock():
+    # The future side. With 4h bars a host lead CANNOT reach it — the forming
+    # bar sits at most one interval past the exchange while the tolerance is
+    # 3 x interval — so what lands here is a context that did not come from a
+    # live fetch. Only 1d bars, where the 12h ceiling clamps the tolerance
+    # below one interval, can reach it from a host lead.
+    ctx = _ctx_closing_at(_NOW + timedelta(hours=13), exchange_time=_NOW)
+    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "13h 0m 0s AFTER the exchange's clock" in msg
-    assert "14h 0m 0s ahead of the exchange's" in msg
-    assert "ends in the exchange's future" in msg
+    assert "did not come from a live market fetch" in msg
     # Inside the tolerance (a boundary closing during the fetch) passes.
     ctx = _ctx_closing_at(_NOW + timedelta(minutes=4), interval="1m", exchange_time=_NOW)
     assert bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW) is None
@@ -1166,13 +1195,19 @@ def test_build_context_reads_the_exchange_clock_and_hands_it_to_the_builder(monk
 
     def _builder(*args, **kwargs):
         handed["exchange_time"] = kwargs.get("exchange_time")
+        handed["host_at_read"] = kwargs.get("host_time_at_exchange_read")
         return object()
 
     monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
     monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
     monkeypatch.setattr(bridge_mod, "build_market_context", _builder)
+    before = datetime.now(timezone.utc)
     bridge_mod._build_context({}, "BTC")
-    assert handed == {"coin": "BTC", "exchange_time": exchange_clock}
+    assert handed["coin"] == "BTC"
+    assert handed["exchange_time"] == exchange_clock
+    # ...and the host reading is taken AT that read, not left for the guard to
+    # take later against a clock separated from it by the rest of the fetch.
+    assert before <= handed["host_at_read"] <= datetime.now(timezone.utc)
 
 
 def test_context_refusal_tolerates_a_candle_closing_during_the_fetch():

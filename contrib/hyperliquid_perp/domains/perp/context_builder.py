@@ -117,6 +117,7 @@ def build_market_context(
     funding_window_days: int,
     indicator_names: Sequence[str],
     exchange_time: datetime | None,
+    host_time_at_exchange_read: datetime | None = None,
 ) -> PerpMarketContext:
     """Build the full :class:`PerpMarketContext` from raw domain inputs.
 
@@ -170,4 +171,5 @@ def build_market_context(
         indicators=indicators,
         market_regime=regime,
         exchange_time=exchange_time,
+        host_time_at_exchange_read=host_time_at_exchange_read,
     )

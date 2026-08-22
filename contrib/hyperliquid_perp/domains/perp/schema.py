@@ -319,6 +319,14 @@ class PerpMarketContext:
     # from a live ``_build_context`` fetch (fixtures, replays) — the guard
     # then falls back to the caller's clock, blind spot and all.
     exchange_time: datetime | None = None
+    # This host's clock as read at the SAME INSTANT as ``exchange_time`` (UTC).
+    # The two are only ever subtracted from each other, and that difference is
+    # only meaningful if the readings are adjacent: the daemon's ``as_of`` is
+    # taken before the fetch, so measuring skew against it would fold three
+    # REST calls of elapsed time in as apparent clock error — enough, on a slow
+    # network, to warn about NTP on a correctly-synced host and to blame the
+    # clock for a stalled feed. ``None`` exactly when ``exchange_time`` is.
+    host_time_at_exchange_read: datetime | None = None
 
     def __post_init__(self) -> None:
         # Mirror the boundary invariants the source ``MarketSnapshot`` already enforces,
@@ -360,6 +368,18 @@ class PerpMarketContext:
         # naive/aware pair raises deep inside the freshness check instead of here.
         if self.exchange_time is not None and self.exchange_time.tzinfo is None:
             raise ValueError("PerpMarketContext.exchange_time must be timezone-aware (UTC)")
+        if self.host_time_at_exchange_read is not None:
+            if self.host_time_at_exchange_read.tzinfo is None:
+                raise ValueError(
+                    "PerpMarketContext.host_time_at_exchange_read must be timezone-aware (UTC)"
+                )
+            if self.exchange_time is None:
+                # The field exists only to be subtracted from ``exchange_time``;
+                # one without the other is a half-built context, not a degraded
+                # one, and would read as "skew unknown" while looking populated.
+                raise ValueError(
+                    "PerpMarketContext.host_time_at_exchange_read requires exchange_time"
+                )
         # Validate ``candle_interval`` against the single source of truth
         # (:class:`CandleInterval`) so an unsupported value fails here at
         # construction — cheap to spot — rather than later inside ``interval_to_ms``.

@@ -234,9 +234,10 @@ regime 指標（`atr_14`／`ema_20`／`ema_50`）任一不可用，都會走 §3
 4h 產生一筆屬預期行為，後兩者見 RUNBOOK §7 的對應列。
 
 `validate` 的 exit code：`0` = 可進 Phase 3（`cycle_count >= 30` 且 orphan／
-snapshot／replay mismatch 全為 0、且 `stale_feed_refusal_streak < 3`）；`4` = 資料
-一致但尚未達標（繼續累積 cycles；或最近連續 ≥3 個 cycle 因 K 線 feed 停滯／主機時鐘
-偏移被拒——報告印 `shortfall:` 行，feed 恢復後自動歸零，見 RUNBOOK §7）；
+snapshot／replay mismatch 全為 0、且 `no_decision_streak < 3`）；`4` = 資料
+一致但尚未達標（繼續累積 cycles；或最近連續 ≥3 個 cycle 都沒出決策——報告印
+`shortfall:` 行，另印 `stale_feed_refusal_streak` 供分辨成因，下一個決策 cycle
+自動歸零，見 RUNBOOK §7）；
 `5` = 有 integrity failures（orphan／mismatch，或 store 壞到檢查器本身跑不完——
 replay／snapshot 重算 raise、甚至檔案根本不是 SQLite，都算「先調查再相信結果」，
 不會落成籠統的 exit 2；raise 之前算得出的指標照印，算不出的印 `n/a` 不捏 0）；

@@ -163,7 +163,7 @@ class _EngineDecisionProvider:
         # All four pre-LLM context guards (under-warm data, fully-dead
         # indicator set, missing/dead regime indicators atr_14/ema_20/ema_50,
         # a stale candle feed), shared with the one-shot path (see
-        # engine_bridge._context_refusal_error) — a dead or absent regime indicator
+        # engine_bridge._context_refusal) — a dead or absent regime indicator
         # would otherwise let every cycle trade on a fabricated-calm RANGING
         # regime, and a stalled feed would let it trade on the past.
         # Deliberate (reviewed): they ride the §3.1 ladder to an api_failed

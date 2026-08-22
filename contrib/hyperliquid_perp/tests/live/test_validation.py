@@ -18,6 +18,7 @@ from contrib.hyperliquid_perp.live.validation import (
     validate_live_run,
 )
 from contrib.hyperliquid_perp.paper import accounting
+from contrib.hyperliquid_perp.paper.validation import TrailingFailureStreaks
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
@@ -2371,7 +2372,7 @@ def _make_report(**overrides) -> LiveValidationReport:
         "cycle_count": 30,
         "api_failed_count": 0,
         "invalid_output_count": 0,
-        "stale_feed_refusal_streak": 0,
+        "streaks": TrailingFailureStreaks(0, 0, None),
         "live_order_count": 30,
         "fill_count": 0,
         "exchange_fill_dedupe_error_count": 0,
@@ -2580,7 +2581,6 @@ def test_post_init_rejects_a_negative_suite_attempt_count():
         "cycle_count",
         "api_failed_count",
         "invalid_output_count",
-        "stale_feed_refusal_streak",
         "live_order_count",
         "fill_count",
         "exchange_fill_dedupe_error_count",
@@ -2762,37 +2762,41 @@ def test_mainnet_report_always_reminds_manual_shutdown_item(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def _add_stale_refusals(db: Database, n: int, *, after: int, run_id: str = "r") -> None:
-    """``n`` api_failed cycles refused as stale, scheduled after ``after`` cycles."""
+def _add_stale_refusals(db: Database, n: int, *, after: int, run_id: str = "r") -> datetime:
+    """``n`` stale refusals after ``after`` cycles; returns the last one's instant."""
     from contrib.hyperliquid_perp.common.constants import STALE_MARKET_DATA_ERROR
 
+    start = _T0 + timedelta(hours=4 * after)
     insert_decision_attempts(
         db,
         [("api_failed", STALE_MARKET_DATA_ERROR)] * n,
         run_id=run_id,
         mode="live",
-        start=_T0 + timedelta(hours=4 * after),
+        start=start,
     )
+    return start + timedelta(hours=4 * (n - 1))
 
 
-def test_live_stale_feed_streak_is_a_shortfall_not_a_failure(tmp_path):
-    # A live run holding a position on SL/TP alone while every cycle is refused
-    # as stale: the store is intact (never exit 5), but the accumulated cycle
+def test_live_no_decision_streak_is_a_shortfall_not_a_failure(tmp_path):
+    # A live run holding a position on SL/TP alone while no cycle reaches a
+    # decision: the store is intact (never exit 5), but the accumulated cycle
     # count says nothing about a run that cannot decide right now — exit 4,
-    # with the cause printed. The strict-comparison half of the threshold is
-    # pinned once, on the paper side (they share the constant and the query);
-    # what is live-specific, and only testable here, is that the streak reaches
-    # ``shortfalls``/``live_ready`` rather than ``failures``.
-    from contrib.hyperliquid_perp.paper.validation import STALE_FEED_STREAK_THRESHOLD
+    # with the cause printed. The threshold comparison, the recency window and
+    # the wording are pinned once on the paper side (both validators share the
+    # constant, the query and the helper); what is live-specific, and only
+    # testable here, is that it reaches ``shortfalls``/``live_ready`` rather
+    # than ``failures``.
+    from contrib.hyperliquid_perp.paper.validation import NO_DECISION_STREAK_THRESHOLD
 
     db = Database(tmp_path / "live.db")
     _init_live_run(db)
     _add_cycles(db, MIN_LIVE_CYCLES)
-    _add_stale_refusals(db, STALE_FEED_STREAK_THRESHOLD, after=MIN_LIVE_CYCLES)
-    report = validate_live_run(db, run_id="r")
-    assert report.stale_feed_refusal_streak == STALE_FEED_STREAK_THRESHOLD
+    last = _add_stale_refusals(db, NO_DECISION_STREAK_THRESHOLD, after=MIN_LIVE_CYCLES)
+    report = validate_live_run(db, run_id="r", now=last + timedelta(hours=1))
+    assert report.streaks.no_decision == NO_DECISION_STREAK_THRESHOLD
     assert report.failures == ()
-    assert any("stale_feed_refusal_streak = 3" in s for s in report.shortfalls)
+    assert any("no_decision_streak = 3" in s for s in report.shortfalls)
     assert not report.live_ready
+    assert "no_decision_streak: 3" in report.summary_lines()
     assert "stale_feed_refusal_streak: 3" in report.summary_lines()
     db.close()

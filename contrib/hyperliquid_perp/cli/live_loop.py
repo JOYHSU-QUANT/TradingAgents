@@ -267,7 +267,7 @@ def _run_live_loop(
         # build_input runs on THIS thread inside driver.pump(); its five market
         # reads are the longest back-to-back REST chain in the system. Refreshing
         # between them keeps the unrefreshed run at the submit chain's 3 instead
-        # of 4, which is what lets the operator advisory stay at a ~10s timeout
+        # of 5, which is what lets the operator advisory stay at a ~10s timeout
         # rather than demanding 7.5s from a cycle that cannot retry.
         on_blocking_read=partial(
             refresh_across_blocking_work, kill_switch, what="decision market data"

@@ -46,8 +46,8 @@ CLI entrypoints call on raw payloads they never inspect themselves.
 
 One deliberate exception to the snapshot split: ``signed_client.exchange_time``
 reads ``clearinghouseState``'s ``"time"`` field directly, because that is the
-only exchange-side clock reachable on the SIGNED side without a new endpoint
-and :func:`map_account_snapshot` does not consume it. The keyless clock the
+exchange-side clock the signed transport already has an endpoint for and
+:func:`map_account_snapshot` does not consume it. The address-free clock the
 freshness guard uses is the ``l2Book`` stamp, mapped here by
 :func:`map_exchange_time`.
 """
@@ -587,10 +587,12 @@ def map_funding_history(
 def map_exchange_time(raw: Any, *, expected_coin: str | None = None) -> datetime:
     """The exchange's clock off an ``l2Book`` snapshot (UTC, millisecond precision).
 
-    ``l2Book`` is the one PUBLIC info endpoint whose answer carries the
-    exchange's own time (``"time"``, epoch ms) — ``metaAndAssetCtxs`` has no
-    timestamp at all, and the candle / funding windows are bounded by the
-    HOST clock on request. It is the clock ``engine_bridge``'s freshness guard
+    ``l2Book`` is the info endpoint whose answer carries the exchange's own
+    time (``"time"``, epoch ms) without needing a wallet address —
+    ``metaAndAssetCtxs`` has no timestamp at all, the candle / funding windows
+    are bounded by the HOST clock on request, and ``clearinghouseState``
+    carries one but only for a configured address, which the keyless
+    ``--context-only`` path does not have. It is the clock ``engine_bridge``'s freshness guard
     measures candle age against, so the stamp IS load-bearing here: unlike
     ``signed_client.exchange_time``, where an absent field only degrades a
     check, a missing or unparseable ``time`` raises

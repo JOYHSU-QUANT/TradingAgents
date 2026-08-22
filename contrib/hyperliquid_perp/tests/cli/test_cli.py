@@ -1627,6 +1627,7 @@ def test_paper_loop_wiring_and_halt_latch(tmp_path, monkeypatch):
         scheduled_at=_T0,
         attempt_count=3,
         next_decision_at=_T0 + timedelta(hours=4),
+        error_type="server_error",
     )
 
     class _Engine:
@@ -1690,11 +1691,12 @@ def test_paper_loop_wiring_and_halt_latch(tmp_path, monkeypatch):
 
 
 def test_paper_loop_escalates_consecutive_stale_feed_refusals(tmp_path, monkeypatch, caplog):
-    """Issue #50: the loop counts stale-feed refusals and escalates the log.
+    """Issue #50: the loop counts cycles that reach no decision, and escalates.
 
-    The wiring pin for the paper half — that the loop passes the terminal
-    result's §6.2 class to the shared counter. The escalation shape itself is
-    pinned once, on that function, in tests/paper/test_validation.py.
+    The wiring pin for the paper half — that the loop feeds every terminal
+    result's status and §6.2 class to the shared counter. The escalation shape
+    itself (and its reset on a decided cycle) is pinned once, on that function,
+    in tests/paper/test_validation.py.
     """
     import logging
     from datetime import timedelta
@@ -1704,7 +1706,7 @@ def test_paper_loop_escalates_consecutive_stale_feed_refusals(tmp_path, monkeypa
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
     from contrib.hyperliquid_perp.paper.clock import ManualClock
     from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
-    from contrib.hyperliquid_perp.paper.validation import STALE_FEED_STREAK_THRESHOLD
+    from contrib.hyperliquid_perp.paper.validation import NO_DECISION_STREAK_THRESHOLD
 
     path, db = _seed_db(tmp_path)
     clock = ManualClock(_T0)
@@ -1747,7 +1749,7 @@ def test_paper_loop_escalates_consecutive_stale_feed_refusals(tmp_path, monkeypa
         nonlocal iterations
         iterations += 1
         clock.advance(seconds)
-        if iterations >= STALE_FEED_STREAK_THRESHOLD:
+        if iterations >= NO_DECISION_STREAK_THRESHOLD:
             raise KeyboardInterrupt
 
     monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
@@ -1768,8 +1770,8 @@ def test_paper_loop_escalates_consecutive_stale_feed_refusals(tmp_path, monkeypa
             trading_halted=False,
         )
 
-    levels = [r.levelno for r in caplog.records if "refused as stale market data" in r.getMessage()]
-    assert levels == [logging.WARNING] * (STALE_FEED_STREAK_THRESHOLD - 1) + [logging.ERROR]
+    levels = [r.levelno for r in caplog.records if "decision cycle for r" in r.getMessage()]
+    assert levels == [logging.WARNING] * (NO_DECISION_STREAK_THRESHOLD - 1) + [logging.ERROR]
     db.close()
 
 
@@ -2073,6 +2075,7 @@ def test_paper_loop_mid_run_halt_arms_hourly_funding_retry(tmp_path, monkeypatch
         scheduled_at=_T0,
         attempt_count=3,
         next_decision_at=_T0 + timedelta(hours=4),
+        error_type="server_error",
     )
 
     class _Engine:
@@ -2485,6 +2488,7 @@ def test_paper_loop_does_not_swallow_backfill_runtime_error(tmp_path, monkeypatc
         scheduled_at=_T0,
         attempt_count=3,
         next_decision_at=_T0 + timedelta(hours=4),
+        error_type="server_error",
     )
 
     class _Engine:

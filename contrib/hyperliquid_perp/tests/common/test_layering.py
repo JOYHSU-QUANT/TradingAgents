@@ -24,6 +24,23 @@ from contrib.hyperliquid_perp.domains.perp import (
     margin,
 )
 
+_PACKAGE = "contrib.hyperliquid_perp"
+
+
+def _package_tail(name: str | None) -> str | None:
+    """The in-package dotted tail ``name`` refers to, or ``None`` if it is not ours.
+
+    ``"contrib.hyperliquid_perp.domains.perp.x"`` -> ``"domains.perp.x"``, so an
+    absolute import can be tested against the same allowlist as a relative one.
+    The bare package itself maps to ``""``, which no allowlist contains — a
+    ``from contrib.hyperliquid_perp import <compute module>`` is an offender too.
+    """
+    if not name:
+        return None
+    if name == _PACKAGE:
+        return ""
+    return name[len(_PACKAGE) + 1 :] if name.startswith(_PACKAGE + ".") else None
+
 
 def test_the_old_domains_paths_still_reexport_the_common_objects():
     # Identity, not equality: a shim that re-declared its own copy would keep
@@ -56,13 +73,30 @@ def test_the_config_loader_imports_no_compute_module():
     # pay for the risk-gate domain unless a ``live:`` block exists.
     allowed = {"common.config_coercion", "common.constants", "domains.perp.indicator_vocab"}
     source = Path(__file__).resolve().parents[2] / "config.py"
-    offenders = [
-        f"from .{node.module}"
-        for node in ast.parse(source.read_text(encoding="utf-8")).body
-        # Relative imports only; config.py sits at the package root, so every
-        # in-package import is level 1 and ``node.module`` is the dotted path.
-        if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module not in allowed
-    ]
+
+    # Relative level-1 imports are today's style, but the guard must not depend
+    # on the style holding: an ABSOLUTE
+    # ``from contrib.hyperliquid_perp.domains.perp.volume_profile import ...``
+    # (level 0), or a plain ``import contrib.hyperliquid_perp...``, drags in
+    # exactly the same compute module while passing a level-1-only filter. The
+    # sibling check below already walks both node kinds; this one was narrower
+    # than the regression it was written for. Absolute forms are normalised to
+    # the same dotted tail so ``allowed`` stays written one way.
+    def offender(kind: str, name: str | None, level: int) -> str | None:
+        # level >= 1 is relative and ``name`` is already the tail; level 0 is
+        # absolute and only counts when it names THIS package.
+        tail = name if level >= 1 else _package_tail(name)
+        if tail is None or tail in allowed:
+            return None
+        return f"{kind} {'.' * level}{name or ''}"
+
+    offenders = []
+    for node in ast.parse(source.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.ImportFrom):
+            offenders.append(offender("from", node.module, node.level))
+        elif isinstance(node, ast.Import):
+            offenders.extend(offender("import", alias.name, 0) for alias in node.names)
+    offenders = [o for o in offenders if o]
     assert not offenders, (
         f"config.py gained an in-package import outside {sorted(allowed)}: {offenders}"
     )
@@ -74,6 +108,11 @@ def test_common_imports_nothing_from_the_rest_of_the_package():
     # reaching above common/ (level >= 2) or an absolute import of the contrib
     # package both violate the bottom-of-the-import-graph rule. Sibling
     # imports inside common/ (level 1) stay legal.
+    #
+    # NOTE the predicate here is deliberately WIDER than _package_tail above:
+    # common/ may import no contrib package at all, while config.py may import
+    # an allowlisted few from THIS package. Sharing _PACKAGE keeps the root
+    # spelled once without pretending the two rules are the same rule.
     def is_contrib(name: str | None) -> bool:
         return name == "contrib" or (name or "").startswith("contrib.")
 

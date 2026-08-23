@@ -108,6 +108,45 @@ def test_window_of_zero_disables_the_profile_without_a_log_line():
     assert records == []
 
 
+@pytest.mark.parametrize(
+    ("candles", "window", "fragment"),
+    [
+        pytest.param(_d_shape(), 5, "below the 12-candle minimum", id="window-under-floor"),
+        pytest.param(
+            _d_shape()[:10], 12, "asks for 12 candles but only 10 are available", id="short-history"
+        ),
+        pytest.param(
+            [_candle(i, 100, 100, 100, 5) for i in range(12)],
+            12,
+            "zero price width",
+            id="zero-width",
+        ),
+        pytest.param(
+            [_candle(i, 100, 110, 105, 0) for i in range(12)],
+            12,
+            "traded zero volume",
+            id="zero-volume",
+        ),
+    ],
+)
+def test_every_runtime_skip_says_why_on_the_log(candles, window, fragment, caplog):
+    # The mirror of the window-of-zero test above: 0 is the OFF switch and must
+    # stay silent, but every skip that is NOT the off switch must say why. This
+    # matters beyond tidiness — SETUP.md names the short-history line as the
+    # operator's ONLY diagnostic for the one failure mode config load cannot
+    # catch (a legal window with too little history), and until now deleting any
+    # of these four ``logger.warning`` calls left the suite green while breaking
+    # that documented path.
+    with caplog.at_level(
+        logging.WARNING, logger="contrib.hyperliquid_perp.domains.perp.volume_profile"
+    ):
+        assert build_profile(candles, window) is None
+    assert fragment in caplog.text
+    # And the reason names the profile, so a reader grepping the daemon log can
+    # tell which feature went quiet.
+    assert "volume-profile" in caplog.text or "volume profile" in caplog.text
+
+
 @pytest.mark.parametrize("window", [-5, 1, MIN_WINDOW_CANDLES - 1])
 def test_window_below_the_minimum_returns_none(window):
     # The literal "rolling 24h" window at this project's 4h candles is 6 bars,
@@ -143,26 +182,6 @@ def test_window_wider_than_the_available_history_is_refused_not_narrowed():
     assert build_profile(candles, DEFAULT_WINDOW_CANDLES) is None
     # ...and the boundary itself is inclusive: exactly enough history works.
     assert build_profile(candles, 16) is not None
-
-
-def test_zero_width_window_returns_none():
-    flat = [
-        Candle(
-            open_time=_START_MS + i * _INTERVAL_MS,
-            close_time=_START_MS + (i + 1) * _INTERVAL_MS,
-            open=Decimal("100"),
-            high=Decimal("100"),
-            low=Decimal("100"),
-            close=Decimal("100"),
-            volume=Decimal("7"),
-        )
-        for i in range(16)
-    ]
-    assert build_profile(flat, 16) is None
-
-
-def test_zero_volume_window_returns_none():
-    assert build_profile([_candle(i, 100, 110, 105, 0) for i in range(16)], 16) is None
 
 
 def test_empty_candles_returns_none():
@@ -372,15 +391,82 @@ def test_value_area_brackets_the_poc_and_sits_inside_the_range():
 
 
 def test_value_area_grows_toward_the_heavier_neighbour():
-    # Volume stacked immediately BELOW the POC and nothing above it: the walk
-    # must extend downward. Extending upward (or symmetrically) would report a
-    # value area sitting over empty price.
+    # The 104-105 node (240 volume) is the heavy neighbour, so the value area
+    # must extend BELOW the POC to reach it. Note what this fixture is NOT: an
+    # earlier comment here claimed there was "nothing above" the POC, which the
+    # fixture contradicts — the four wide bars put volume across the whole
+    # 100-110 range, and the walk does step upward before turning down. The
+    # invariant is "the band reaches the heavy side", not "the band never grows
+    # upward".
     candles = [_candle(i, 100, 110, 105, 1) for i in range(4)]
     candles += [_candle(i, 104, 105, 105, 40) for i in range(4, 10)]  # just below
     candles += [_candle(i, 105, 106, 105, 90) for i in range(10, 16)]  # the POC node
     profile = _classify(candles)
     assert profile.value_area_low < Decimal("105")
-    assert profile.value_area_high <= Decimal("106.5")
+    # Tightened from the old ``<= 106.5``: the real edge is ~105.83 (two
+    # buckets of 10/24 above the POC bucket's floor), and the range reaches
+    # 110, so 106.5 also admitted a band that had sprawled upward. Left as a
+    # bound rather than an equality — the edge carries 28 significant digits
+    # and pinning them would pin rounding luck, not the invariant.
+    assert profile.value_area_high < Decimal("106")
+
+
+def test_value_area_ties_resolve_upward_for_reproducibility():
+    # The documented "(ties go upward)" rule had no test: mutating the walk's
+    # ``above >= below`` to ``above > below`` left the whole suite green,
+    # because no other fixture reaches that comparison with two EQUAL
+    # neighbours and a non-None ``below``.
+    #
+    # 24 buckets of width 1 over [100, 124]. The POC bucket holds 68 of 100
+    # volume and both neighbours hold 16, so the walk needs exactly ONE step to
+    # clear the 70 target — and that step lands on a tie. Ties up puts the band
+    # at buckets 12-13; ties down would put it at 11-12, which is what the
+    # assertions below discriminate.
+    #
+    # Volume is placed with zero-range bars (dropped whole into one bucket) and
+    # the range is fixed by a zero-VOLUME bar: build_profile skips a bar with no
+    # volume when bucketing but still takes it into the window's min/max, so it
+    # sets the range without smearing volume across it.
+    candles = [
+        _candle(0, 100, 124, 112.5, 0),  # sets the range, contributes no volume
+        _candle(1, 112.5, 112.5, 112.5, 68),  # bucket 12 — the POC
+        _candle(2, 111.5, 111.5, 111.5, 16),  # bucket 11
+        _candle(3, 113.5, 113.5, 113.5, 16),  # bucket 13
+        *[_candle(i, 112.5, 112.5, 112.5, 0) for i in range(4, 12)],
+    ]
+    profile = _classify(candles)
+    assert profile.poc == Decimal("112.5")
+    # The band is the POC bucket plus the one ABOVE it, not the one below.
+    assert profile.value_area_low == Decimal("112")
+    assert profile.value_area_high == Decimal("114")
+
+
+def test_the_poc_band_thresholds_are_pinned_to_their_values():
+    # ``_POC_UPPER``/``_POC_LOWER`` (0.60/0.40) had no pinning test at all:
+    # widening either to 0.50 changed real classifications while the suite
+    # stayed green, because every other fixture sits far from both edges.
+    #
+    # A POC one bucket above centre (bucket 12, poc_position 25/48 = 0.52) with
+    # a CONFIRMING close is the discriminating case: a D at 0.60, but a P at
+    # 0.50. Its mirror (bucket 11, 23/48 = 0.479, close below the midpoint) is
+    # a D at 0.40 and would become a b at 0.50.
+    def _one_bucket(bucket: int, close) -> list[Candle]:
+        price = Decimal(100) + Decimal(bucket) + Decimal("0.5")
+        return [
+            _candle(0, 100, 124, close, 0),
+            *[_candle(i, price, price, price, 10) for i in range(1, 11)],
+            _candle(11, close, close, close, 1),
+        ]
+
+    # Close 96% up the range confirms an upward skew — still not a P.
+    above_centre = _classify(_one_bucket(12, Decimal("123")))
+    assert above_centre.poc_position == pytest.approx(25 / 48)
+    assert above_centre.shape is ProfileShape.D
+
+    # Close 4% up the range confirms a downward skew — still not a b.
+    below_centre = _classify(_one_bucket(11, Decimal("101")))
+    assert below_centre.poc_position == pytest.approx(23 / 48)
+    assert below_centre.shape is ProfileShape.D
 
 
 def test_poc_ties_resolve_to_the_lowest_bucket_for_reproducibility():

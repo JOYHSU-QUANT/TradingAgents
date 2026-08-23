@@ -147,14 +147,28 @@ def test_an_uncoercible_lookback_skips_the_cross_check_rather_than_misreporting(
     assert load_config(path)["market_data"]["volume_profile_window_candles"] == 30
 
 
-def test_volume_profile_window_is_checked_against_the_same_lookback_default(tmp_path):
+@pytest.mark.parametrize("lookback_line", ("  candle_lookback:\n", ""))
+def test_volume_profile_window_is_checked_against_the_same_lookback_default(
+    tmp_path, lookback_line
+):
     # ``candle_lookback`` absent or blank means 200 in engine_bridge; the
     # cross-check has to resolve it the same way or the two disagree about
     # which windows are legal. 200 must pass, 201 must not.
+    #
+    # BOTH forms, because they take different branches of one line:
+    #
+    #     raw = md_block.get("candle_lookback", DEFAULT_CANDLE_LOOKBACK)
+    #     lookback = DEFAULT_CANDLE_LOOKBACK if raw is None else int(raw)
+    #
+    # A BLANK key is present, so ``.get`` returns None and the ``is None``
+    # branch supplies the default — the ``.get`` default is never read. Only the
+    # ABSENT key exercises it. Covering blank alone let the mutation
+    # ``.get("candle_lookback", 500)`` pass the whole suite, which is precisely
+    # the two-sides-disagree drift this test claims to catch.
     for window, ok in ((200, True), (201, False)):
-        path = tmp_path / f"vp-default-{window}.yaml"
+        path = tmp_path / f"vp-default-{window}-{len(lookback_line)}.yaml"
         path.write_text(
-            f"market_data:\n  candle_lookback:\n  volume_profile_window_candles: {window}\n",
+            f"market_data:\n{lookback_line}  volume_profile_window_candles: {window}\n",
             encoding="utf-8",
         )
         if ok:

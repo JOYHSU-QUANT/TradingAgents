@@ -75,17 +75,30 @@ _SHAPE_NOTE = {
         "latest close did not confirm the skew, so read the POC position above "
         "rather than this letter. Does not test symmetry."
     ),
+    # Same discipline as D, for the same reason: each note may state only what
+    # its rule TESTED. P and b are decided by where the single heaviest BUCKET
+    # sits, which is not a claim about where the bulk of the volume sat — a
+    # window can put its heaviest bucket at 60% of the range with most of the
+    # volume below the midpoint, and the value-area line rendered directly above
+    # would then contradict a note saying "volume built up in the upper part".
+    # thin is decided by the value area being WIDE, which a two-cluster window
+    # with a quiet middle also achieves while its volume is in fact highly
+    # concentrated. Both cases are pinned by tests in test_prompt_context.
     ProfileShape.P: (
-        "volume built up in the upper part of the range and the latest close "
-        "is above the window's midpoint."
+        "the heaviest single price bucket sits in the upper part of the range "
+        "and the latest close is above the window's midpoint. Says nothing "
+        "about where the bulk of the volume sat — read the value area for that."
     ),
     ProfileShape.B: (
-        "volume built up in the lower part of the range and the latest close "
-        "is below the window's midpoint."
+        "the heaviest single price bucket sits in the lower part of the range "
+        "and the latest close is below the window's midpoint. Says nothing "
+        "about where the bulk of the volume sat — read the value area for that."
     ),
     ProfileShape.THIN: (
-        "volume is spread thinly across the range — the value area covers most "
-        "of it, so no price level held the activity."
+        "the value area spans most of the range — the walk out from the POC had "
+        "to cross most of the range to reach the value-area share. Says nothing "
+        "about how evenly volume is spread: a window holding two separate "
+        "clusters with a quiet middle also lands here."
     ),
 }
 
@@ -127,14 +140,27 @@ def _volume_profile_lines(profile: VolumeProfile, candle_interval: str) -> list[
         f"Volume profile (rolling window of {profile.candle_count} x {candle_interval} "
         f"candles, as of the last closed candle):",
         f"  Range: {_num(profile.range_low)} - {_num(profile.range_high)}",
-        f"  POC (most-traded price): {_num(profile.poc)} "
+        # NOT "most-traded price". The POC is the MIDPOINT of the heaviest
+        # bucket, and that midpoint can be a price the window never traded: a
+        # window whose heavy bars are all zero-range prints at 112.05 still
+        # reports the bucket [112, 113)'s midpoint, 112.50. Naming it the
+        # most-traded price states a measurement that was never made — the
+        # bucket is what was measured.
+        f"  POC (midpoint of the heaviest price bucket): {_num(profile.poc)} "
         f"({_whole_pct(profile.poc_position)} up the range)",
         # The share is taken from VALUE_AREA_FRACTION, never written out here:
         # a literal would keep saying "70%" after the convention moved, and it
         # is the prompt — the model would be told a threshold the code no longer
         # uses. Only one test would notice, and it exists for exactly that:
         # test_the_value_area_share_is_taken_from_the_constant_not_written_out.
-        f"  Value area ({_whole_pct(float(VALUE_AREA_FRACTION))} of volume): "
+        # "at least" is load-bearing, not hedging: the walk stops on the FIRST
+        # bucket that crosses the target, so the band holds >= the share, never
+        # == it except by coincidence. A one-bucket value area holding 99% of
+        # the window would otherwise be labelled "70% of volume", telling the
+        # model the other 30% sits outside a band that in truth excludes 1% —
+        # inverting the concentration reading this block exists to convey.
+        f"  Value area (band holding at least "
+        f"{_whole_pct(float(VALUE_AREA_FRACTION))} of volume): "
         f"{_num(profile.value_area_low)} - "
         f"{_num(profile.value_area_high)} "
         f"({_whole_pct(profile.value_area_width_ratio)} of the range width)",

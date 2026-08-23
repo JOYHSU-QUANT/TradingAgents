@@ -311,6 +311,20 @@ def classify_shape(profile: PriceDistribution, latest_close: Decimal) -> VolumeP
     bucket, so the result is reproducible on a symmetric distribution instead
     of depending on iteration luck.
 
+    The two tie-breaks therefore point in OPPOSITE directions — POC ties resolve
+    downward, value-area ties upward. Neither direction means anything: a tie
+    says the buckets are indistinguishable on volume, so there is no better
+    answer to pick. Each was fixed only to make the output reproducible, and
+    they were fixed independently rather than to a shared convention. Do not
+    read a signal into either one.
+
+    This single-bucket greedy walk is also not the Market Profile literature's
+    rule, which compares the SUM OF THE NEXT TWO rows on each side. The two
+    disagree when an isolated spike sits next to a light bucket, and because the
+    value area's width feeds the ``thin`` test, a disagreement can change the
+    letter, not just the edges. The simpler walk is deliberate; the difference is
+    recorded so nobody reads "value area" here as the literature's quantity.
+
     Alongside the geometry, the result carries how much VOLUME those levels
     hold (``poc_volume_share`` / ``value_area_volume_share``). Nothing here
     classifies on them — they exist because the ``*_position`` fields alone

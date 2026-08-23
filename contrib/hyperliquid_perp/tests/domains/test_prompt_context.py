@@ -20,6 +20,16 @@ from contrib.hyperliquid_perp.domains.perp.schema import (
     ProfileShape,
     VolumeProfile,
 )
+from contrib.hyperliquid_perp.domains.perp.volume_profile import compute_volume_profile
+
+from .test_volume_profile import (
+    _b_shape,
+    _candle,
+    _classify,
+    _d_shape,
+    _p_shape,
+    _thin_shape,
+)
 
 _AS_OF = datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
@@ -221,8 +231,15 @@ def test_volume_profile_section_reports_every_level_and_the_window():
         text
     )
     assert "Range: 60,000.00 - 66,000.00" in text
-    assert "POC (most-traded price): 63,625.00 (60% up the range)" in text
-    assert "Value area (70% of volume): 62,250.00 - 65,000.00 (46% of the range width)" in text
+    # Both labels name what was MEASURED — a bucket, and a band that holds "at
+    # least" the share. Neither may promote itself back into "most-traded
+    # price" (a price the window may never have traded) or a bare "70% of
+    # volume" (which the walk overshoots by construction).
+    assert "POC (midpoint of the heaviest price bucket): 63,625.00 (60% up the range)" in text
+    assert (
+        "Value area (band holding at least 70% of volume): "
+        "62,250.00 - 65,000.00 (46% of the range width)" in text
+    )
     assert "Latest close sits 71% up the range" in text
     assert "NaN" not in text
 
@@ -248,7 +265,7 @@ def test_the_value_area_share_is_taken_from_the_constant_not_written_out(monkeyp
 
     monkeypatch.setattr(pc, "VALUE_AREA_FRACTION", Decimal("0.55"))
     text = render_market_context(_ctx(volume_profile=_profile()))
-    assert "Value area (55% of volume):" in text
+    assert "Value area (band holding at least 55% of volume):" in text
     assert "70% of volume" not in text
 
 
@@ -272,9 +289,43 @@ def test_volume_profile_window_label_follows_the_contexts_candle_interval():
     assert "rolling window of 48 x 1h candles" in text
 
 
+# Fixtures whose letter comes from the PRODUCTION classifier, not from a
+# hand-set ``shape=`` field. The candle builders live next door in
+# test_volume_profile and already produce exactly these four letters.
+#
+# The earlier version of this block wrote the geometry out by hand and then
+# needed a second copy of classify_shape's rule LADDER here to check itself.
+# That mirror would drift silently the first time the production rules were
+# reordered, leaving the guard certifying fixtures the classifier no longer
+# agrees with — the very defect it was written to catch. Going through
+# ``_classify`` removes the mirror entirely.
+_SHAPE_CANDLES = {
+    ProfileShape.D: _d_shape,
+    ProfileShape.P: _p_shape,
+    ProfileShape.B: _b_shape,
+    ProfileShape.THIN: _thin_shape,
+}
+
+
+def _shaped(shape: ProfileShape) -> VolumeProfile:
+    """A profile the production classifier really labels ``shape``.
+
+    Every parametrized case below reads only the rendered NOTE, so the
+    builders' own 100-110 price range (rather than ``_profile``'s
+    60,000-66,000) is immaterial here.
+    """
+    profile = _classify(_SHAPE_CANDLES[shape]())
+    # A builder that stopped producing its letter would otherwise let every
+    # test below assert against a block contradicting its own label.
+    assert profile.shape is shape, f"{shape} builder now classifies as {profile.shape}"
+    return profile
+
+
 @pytest.mark.parametrize("shape", list(ProfileShape))
 def test_every_shape_renders_its_letter_and_a_note(shape):
-    text = render_market_context(_ctx(volume_profile=_profile(shape=shape)))
+    # Asserts on the WHOLE render, not just the Shape line: the enum-leak check
+    # below has to cover every line the profile contributes, not one of them.
+    text = render_market_context(_ctx(volume_profile=_shaped(shape)))
     line = next(line for line in text.splitlines() if line.strip().startswith("Shape:"))
     # ``.value``, never the (str, Enum) member — an f-string on the member
     # renders "ProfileShape.P" under 3.12 and corrupts the prompt.
@@ -292,15 +343,34 @@ _SHAPE_MARKER = {
     ProfileShape.D: "near the middle of the range",
     ProfileShape.P: "upper part of the range",
     ProfileShape.B: "lower part of the range",
-    ProfileShape.THIN: "spread thinly across the range",
+    ProfileShape.THIN: "value area spans most of the range",
 }
 
 
 @pytest.mark.parametrize("shape", list(ProfileShape))
 def test_each_shape_renders_its_own_note(shape):
-    text = render_market_context(_ctx(volume_profile=_profile(shape=shape)))
-    line = next(line for line in text.splitlines() if line.strip().startswith("Shape:"))
+    line = _shape_line(_shaped(shape))
     assert _SHAPE_MARKER[shape] in line
+
+
+# Wordings retired because each asserted something its rule never measured.
+# Swept over EVERY shape rather than asserted inside the one test whose fixture
+# happens to produce that letter: "volume built up" was reworded out of the P
+# AND b notes in the same change, so a per-case assertion would let b's wording
+# be reverted alone with the suite still green.
+_RETIRED_CLAIMS = (
+    "volume built up",  # P/b test the heaviest BUCKET, not where the bulk sat
+    "spread thinly",  # thin tests value-area WIDTH, not flatness
+    "no price level held",  # thin: a two-cluster window lands here too
+    "most-traded price",  # the POC is a bucket midpoint, possibly never traded
+)
+
+
+@pytest.mark.parametrize("shape", list(ProfileShape))
+def test_no_retired_overclaim_comes_back(shape):
+    text = render_market_context(_ctx(volume_profile=_shaped(shape)))
+    for claim in _RETIRED_CLAIMS:
+        assert claim not in text, f"{shape}: retired wording {claim!r} is back"
 
 
 @pytest.mark.parametrize("shape", list(ProfileShape))
@@ -312,8 +382,7 @@ def test_no_shape_note_attributes_the_volume_to_buyers_or_sellers(shape):
     # may name one. Without this test the phrasing drifts back the moment
     # someone finds the geometric wording dry: every other assertion in this
     # file passes with "— buyers absorbed the move up" appended.
-    text = render_market_context(_ctx(volume_profile=_profile(shape=shape)))
-    line = next(line for line in text.splitlines() if line.strip().startswith("Shape:"))
+    line = _shape_line(_shaped(shape))
     for attribution in ("buyer", "seller", "absorb", "covering", "liquidation", "bull", "bear"):
         assert attribution not in line.lower()
 
@@ -348,7 +417,7 @@ def test_the_d_note_asserts_nothing_positive_about_the_distribution():
         )
     )
     line = next(line for line in text.splitlines() if line.strip().startswith("Shape:"))
-    assert "POC (most-traded price): 65,700.00 (95% up the range)" in text
+    assert "POC (midpoint of the heaviest price bucket): 65,700.00 (95% up the range)" in text
     # No positive claim about where the volume sat...
     assert "volume is concentrated" not in line
     # ...it names itself as the catch-all, admits the skewed case, and points
@@ -357,3 +426,79 @@ def test_the_d_note_asserts_nothing_positive_about_the_distribution():
     assert "skewed" in line
     assert "read the POC position above" in line
     assert "Does not test symmetry" in line
+
+
+# --- The notes may claim only what their rule tested. -----------------------
+#
+# The two cases below are NOT hand-built VolumeProfile fixtures: they are real
+# candles pushed through the real ``compute_volume_profile``, because the claim
+# under test is precisely that the production classifier assigns these letters
+# to these windows. A fixture with ``shape=`` set by hand would assert nothing
+# about the classifier and would be free to violate the very rule it illustrates
+# — the defect already caught once in the D fixture above.
+
+
+def _shape_line(profile) -> str:
+    text = render_market_context(_ctx(volume_profile=profile))
+    return next(line for line in text.splitlines() if line.strip().startswith("Shape:"))
+
+
+def test_the_thin_note_does_not_claim_volume_is_evenly_spread():
+    # ``thin`` fires on value_area_width_ratio >= _THIN_VA_RATIO, which measures
+    # how WIDE the outward walk got — not how flat the distribution is. A
+    # two-cluster window (price ranges at one level, traverses, ranges at
+    # another — ordinary over five days of 4h bars) makes the walk cross a
+    # near-empty middle and come out wide while the volume is in fact extremely
+    # concentrated. The old note said "volume is spread thinly across the range
+    # ... so no price level held the activity"; both halves are false here.
+    candles = (
+        [_candle(i, 100, 102, 101, 50) for i in range(14)]
+        + [_candle(14 + i, 102, 122, 112, 1) for i in range(2)]
+        + [_candle(16 + i, 122, 124, 123, 50) for i in range(14)]
+    )
+    profile = compute_volume_profile(candles, 30)
+    assert profile is not None
+    # The label really is thin...
+    assert profile.shape is ProfileShape.THIN
+    # ...while a single bucket holds several times the uniform 1/24 share, which
+    # is what makes "spread thinly" a false description of this window.
+    assert profile.poc_volume_share > 4 * (1 / profile.bucket_count)
+
+    line = _shape_line(profile)
+    # It states the geometry it tested, and names this exact counterexample so
+    # the model is not left to infer flatness from the letter.
+    assert "value area spans most of the range" in line
+    assert "two separate clusters" in line
+
+
+def test_the_p_note_does_not_claim_where_the_bulk_of_the_volume_sat():
+    # ``P`` fires on poc_position >= _POC_UPPER, i.e. on where the single
+    # heaviest BUCKET sits. That is not a claim about where the bulk of the
+    # volume sat, and the two can point opposite ways: below, the POC bucket is
+    # 60% up the range while most of the window's volume sat BELOW the midpoint,
+    # and the value-area line rendered one row above the note spans the lower
+    # part of the range. The old note ("volume built up in the upper part of the
+    # range") contradicted the line directly above it.
+    candles = (
+        [_candle(i, 100.0, 100.9, 100.45, 0.75) for i in range(12)]
+        + [_candle(12 + i, 100 + i + 1, 100 + i + 1.9, 100 + i + 1.45, 1) for i in range(13)]
+        + [_candle(25, 114.1, 114.9, 114.5, 10)]
+        + [_candle(26 + i, 123.0, 124.0, 123.5, 0.0001) for i in range(4)]
+    )
+    profile = compute_volume_profile(candles, 30)
+    assert profile is not None
+    assert profile.shape is ProfileShape.P
+
+    midpoint = (profile.range_low + profile.range_high) / 2
+    total = sum(c.volume for c in candles)
+    below = sum(c.volume for c in candles if (c.low + c.high) / 2 < midpoint)
+    # The premise of the case: most of the volume sat below the midpoint even
+    # though the profile is labelled P. Without this the test would still pass
+    # against a window where the old wording happened to be true.
+    assert below / total > Decimal("0.5")
+    # And the value area printed above the note reaches into the lower half.
+    assert profile.value_area_low < midpoint
+
+    line = _shape_line(profile)
+    assert "heaviest single price bucket" in line
+    assert "where the bulk of the volume sat" in line

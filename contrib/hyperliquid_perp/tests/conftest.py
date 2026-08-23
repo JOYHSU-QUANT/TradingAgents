@@ -42,13 +42,14 @@ def doc_text(name: str) -> str:
     """Read one of the package's docs, for the tests that pin a doc to a constant.
 
     The plumbing lives here because the pins themselves do not: each sits beside
-    the constant it guards, in whichever module reaches that subsystem. That left
-    three copies of ``__file__``-anchored path arithmetic whose ``parents`` index
-    differed with the caller's own directory depth, each re-explaining the index
-    — the shape of duplication those very pins exist to close. Anchored on
-    conftest the depth is fixed, and stated once.
+    the constant it guards, in whichever module reaches that subsystem. Without
+    a shared reader every pin re-derives a ``parents`` index that differs with
+    its own directory depth, and re-explains it — the shape of duplication those
+    pins exist to close. Anchored on conftest the depth is fixed, and stated
+    once.
 
-    Never cwd-relative: pytest is invoked from more than one directory here.
+    Never cwd-relative: a cwd-relative path breaks the moment pytest is invoked
+    from anywhere but the repo root (2026-08-01 round-17 probe).
     """
     return (Path(__file__).parent.parent / "docs" / name).read_text(encoding="utf-8")
 

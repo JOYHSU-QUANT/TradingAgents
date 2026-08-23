@@ -679,9 +679,10 @@ def test_the_aggressive_band_reaches_all_three_consumers_as_one_object():
     """§9.4's band is one value, not three literals that agree today.
 
     The emergency close, the stop-loss fire floor, and smoke test 18 all price
-    off it, and they used to spell it out separately under a "keep in sync"
-    comment with nothing enforcing it — while ``tests/`` never named either
-    constant, so a changed copy was invisible in both directions (issue #99).
+    off it, and each used to spell it out separately — with only one of the
+    three carrying a "keep in sync" comment, and nothing enforcing it. Meanwhile
+    ``tests/`` named neither constant, so a changed copy was invisible in both
+    directions (issue #99).
     The two module names survive because each states what its own path calls the
     band; this pins THOSE TWO to the shared object. Smoke test 18 holds no
     constant of its own — it reads the band inline, and

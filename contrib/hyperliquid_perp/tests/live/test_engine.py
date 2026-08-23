@@ -820,8 +820,11 @@ def test_emergency_close_prices_off_mid_not_mark(tmp_path):
     band = D(1) - AGGRESSIVE_FILL_BAND_PCT
     expected = round_to_tick(D(99_000) * band, engine._asset.tick_size, up=False)
     off_mark = round_to_tick(D(100_000) * band, engine._asset.tick_size, up=False)
+    # The two bases must actually differ at this band, or the equality below
+    # would pass just as happily against a mark-priced close and the test would
+    # be asserting nothing about WHICH price it used.
+    assert expected != off_mark
     assert close["limit_price"] == expected
-    assert close["limit_price"] < off_mark
 
 
 def test_fill_ingest_failure_propagates_out_of_tick(tmp_path):

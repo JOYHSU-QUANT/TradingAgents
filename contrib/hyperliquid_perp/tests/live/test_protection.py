@@ -825,7 +825,7 @@ def test_no_safe_sl_band_needs_emergency_close(env):
     assert gate.unresolved_protection_failure is True
 
 
-def test_sl_fire_band_floored_at_3pct_while_tp_keeps_routine_band(env):
+def test_sl_fire_band_floored_at_the_aggressive_band_while_tp_keeps_routine(env):
     """§9.4 aggressive family: the SL only fires in the violent move it protects
     against, so its fire-time limit band is floored at 3% even when the routine
     max_slippage_pct (0.005 here) is tighter; the TP keeps the routine band — a

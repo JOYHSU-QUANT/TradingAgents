@@ -387,8 +387,13 @@ def _drive_a_full_smoke_suite(tmp_path):
     Named for what it does rather than for its first caller: several tests need
     one full seamed run to assert over — the four recoveries it lands (pre-flight
     plus restart tests 15-17), every kill-switch row it writes, how many of those
-    are refreshes — and each of them re-typing the same three lines is how the
-    argv and the run-id came to be spelled out in three places.
+    are refreshes — and each of them re-typing the same three lines is how that
+    argv came to be spelled out again and again in this file.
+
+    Callers assert the recovery COUNT (``_SMOKE_RECOVERIES``) rather than merely
+    that a recovery happened, so that a suite which quietly stops running three
+    of the four cannot leave a "paired per recovery" claim standing on a single
+    construction.
     """
     cfg = _smoke_yaml(tmp_path)
     dbp = _seed_genesis_run(tmp_path, cfg)
@@ -450,7 +455,7 @@ def test_every_row_a_smoke_run_writes_is_marked_including_the_managers(tmp_path,
 
 
 def test_a_full_suite_writes_the_refresh_count_the_runbook_reasons_from(tmp_path, smoke_seams):
-    """The six-suite figure §20.3 quotes is MEASURED here, not hand-counted.
+    """The per-suite count §20.3's six-suite figure is built from, MEASURED here.
 
     Nothing in the repo produced it: it sat as prose in four places, so growing
     SMOKE_TESTS would have left all four wrong at once (issue #100). This drives
@@ -477,7 +482,13 @@ def test_the_runbook_quotes_the_literals_the_code_prints():
     # left the suite green and the runbook quietly wrong (round-16 probe).
     from contrib.hyperliquid_perp.live.kill_switch import _SUITE_AUTHORED_TOKEN
     from contrib.hyperliquid_perp.live.smoke import REFRESHES_PER_FULL_SUITE
-    from contrib.hyperliquid_perp.live.validation import _NO_DAEMON_ROWS_RENDER, _REFRESH_BAR
+    from contrib.hyperliquid_perp.live.validation import (
+        _NO_DAEMON_ROWS_RENDER,
+        _REFRESH_BAR,
+        MIN_KILL_SWITCH_REFRESH_SAMPLES,
+        MIN_LIVE_CYCLES,
+        MIN_LIVE_ORDERS,
+    )
 
     runbook = doc_text("RUNBOOK-live.md")
     assert _SUITE_AUTHORED_TOKEN in runbook
@@ -499,12 +510,22 @@ def test_the_runbook_quotes_the_literals_the_code_prints():
     assert f"每輪至少 {REFRESHES_PER_FULL_SUITE} 筆" in runbook
     assert f"就能湊到 {rounds * REFRESHES_PER_FULL_SUITE} 筆" in runbook
     assert f"{len(SMOKE_TEST_KEYS)} 個 test 各一次 pre-test refresh" in runbook
-    # The §20.3 bar itself, stated twice in the runbook and tied to nothing —
-    # the same gap on the same page.
-    assert f"`kill_switch_refresh_success_rate ≥ {_REFRESH_BAR}`" in runbook
-    # The §20.3 bar itself, which the runbook states twice and nothing tied to
-    # the constant either — the same gap on the same page (issue #100).
-    assert f"`kill_switch_refresh_success_rate ≥ {_REFRESH_BAR}`" in runbook
+    # The §20.3 threshold sentence the paragraph above reasons from. All four
+    # values are constants the code enforces as hard gates, and the doc restated
+    # every one of them as a bare literal — the criterion for what gets pinned
+    # here is exactly that pairing, not "whichever line we happened to edit".
+    #
+    # COUNT, not ``in``: the bar is stated twice (§20.3 and the §21.3 mainnet
+    # pre-flight), and ``in`` is satisfied by either. Loosening only the
+    # real-money copy would leave the page an operator reads before committing
+    # funds contradicting the gate, with the suite green.
+    assert runbook.count(f"`kill_switch_refresh_success_rate ≥ {_REFRESH_BAR}`") == 2
+    assert f"`cycle_count ≥ {MIN_LIVE_CYCLES}`" in runbook
+    assert f"`live_order_count ≥ {MIN_LIVE_ORDERS}`" in runbook
+    assert runbook.count(f"樣本數 < {MIN_KILL_SWITCH_REFRESH_SAMPLES}") == 2
+    # The same floor again, in the two sentences of the six-suite paragraph
+    # whose whole point is that suites clear it with the daemon never started.
+    assert runbook.count(f"{MIN_KILL_SWITCH_REFRESH_SAMPLES} 筆") == 2
 
 
 def test_live_smoke_full_real_suite_passes_gate_and_releases_lock(tmp_path, capsys, smoke_seams):

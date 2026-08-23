@@ -136,13 +136,15 @@ MIN_LIVE_ORDERS = 30
 # §20.3: kill_switch_refresh_success_rate >= 99%.
 MIN_KILL_SWITCH_REFRESH_RATE = Decimal("0.99")
 # The bar as the operator reads it, rendered once for every branch that quotes
-# it. Rounding it away is the failure mode this file already knows about from
-# the other side (see the measured rate below, printed at two decimals so a
-# genuine 0.98998 does not render as "99.00%"): at ``:.0f`` a 0.995 bar prints
-# as "100%", so the gate would refuse at 99.5% while telling the operator it
-# needed a hundred. ``normalize`` drops the trailing zeros the Decimal multiply
-# leaves without ever rounding, and ``:f`` spells out the exponent form it can
-# return (100% normalizes to 1E+2).
+# it. A rounded threshold is the failure this file already names one screen
+# below, from the other side: there two decimals turn a genuine 0.98998 into
+# "99.00% (need >= 99%)", a go/no-go line reading as a self-contradiction, and
+# that branch is rescued by printing the outage time beside it. Here the hazard
+# is the BAR: at ``:.0f`` a 0.995 bar prints as "100%", so the gate would refuse
+# at 99.5% while telling the operator it needed a hundred. ``normalize`` drops
+# the trailing zeros the Decimal multiply leaves — it is context-sensitive, but
+# rounds nothing a rate constant could carry at prec 28 — and ``:f`` spells out
+# the exponent form it can return (100% normalizes to 1E+2).
 _REFRESH_BAR = f"{(MIN_KILL_SWITCH_REFRESH_RATE * 100).normalize():f}%"
 # Below this many refresh events the RATE carries no information and is not
 # allowed to fail the run — it is reported as a shortfall (keep running) instead.

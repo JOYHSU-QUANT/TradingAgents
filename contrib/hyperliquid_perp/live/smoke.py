@@ -142,11 +142,12 @@ SMOKE_TEST_KEYS: tuple[str, ...] = tuple(t.key for t in SMOKE_TESTS)
 # since that is the run §20.3 reasons about.
 #
 # A FLOOR for a real testnet suite, not the exact figure: the real
-# KillSwitchManager the pre-flight and tests 15-17 build emits its own refresh
-# rows as wall clock elapses (see test_every_row_a_smoke_run_writes_is_marked
-# _including_the_managers), which an offline clock never produces. That only
-# strengthens what §20.3 uses the number for — "even the runner alone clears the
-# 100-sample floor" — so a floor is the honest thing to quote.
+# KillSwitchManager the pre-flight and tests 15-17 build refreshes from its own
+# ``tick()`` as wall clock elapses (see the _SUITE_AUTHORED_TOKEN note in
+# kill_switch.py), which an offline clock never produces — which is also why no
+# test can measure that half. That only strengthens what §20.3 uses the number
+# for — "even the runner alone clears the 100-sample floor" — so a floor is the
+# honest thing to quote.
 #
 # Derived rather than hand-counted because the RUNBOOK quotes the six-suite
 # total to explain WHY suite rows are barred from the floor, and that figure

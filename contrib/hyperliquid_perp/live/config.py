@@ -28,6 +28,7 @@ from ..common.decimal_context import DECIMAL_CONTEXT
 from ..domains.perp.risk_gate import MarginMode, RiskConfig
 
 __all__ = [
+    "AGGRESSIVE_FILL_BAND_PCT",
     "EXCHANGE_MIN_ORDER_NOTIONAL_USDC",
     "MAINNET_TINY_MAX_NOTIONAL_USDC",
     "MAINNET_TINY_MAX_TARGET_MARGIN_PCT",
@@ -51,6 +52,27 @@ __all__ = [
 # this means no order can ever be placed — startup must fail (or enter safe
 # mode) rather than run a bot that is structurally unable to trade.
 EXCHANGE_MIN_ORDER_NOTIONAL_USDC = Decimal("10")
+
+# The §9.4 AGGRESSIVE band, in one place because three modules price off the
+# same number and none of them can see the others' copy. It is the width a
+# protective order needs to stay marketable in the violent move that triggered
+# it while remaining price-bounded (§9.2 rule 1 forbids an unbounded market
+# order); 3% matches the exchange's own market-order slippage (§9.5).
+#
+# Not configurable, and here rather than on LiveExecutionConfig for that reason:
+# a band the operator can widen is a band that can be widened past the point
+# where "bounded" means anything, and §9.4 is a safety property, not a taste.
+#
+# Its consumers fail in DIFFERENT directions, which is why one name beats a
+# literal per site under a "keep in sync" comment (issue #99): engine's
+# emergency close would accept a different slippage on a risk-cutting IOC;
+# protection's stop-loss fire band would narrow until the fired stop rests
+# unfilled while the position keeps losing — silent, no exception and no error
+# log, the symptom is an uncapped loss; and smoke test 18 would stop proving the
+# wire shape the production emergency close actually sends. The tests asserting
+# those three widths derive from this too, so none of them can keep agreeing
+# with a width the code no longer uses.
+AGGRESSIVE_FILL_BAND_PCT = Decimal("0.03")
 
 # Hyperliquid rejects a scheduleCancel whose trigger is less than 5 seconds in
 # the future, so a window at or under this could never arm — and §18.2 rule 1

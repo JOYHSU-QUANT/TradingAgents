@@ -38,6 +38,21 @@ def _load(name: str):
         return json.load(fh)
 
 
+def doc_text(name: str) -> str:
+    """Read one of the package's docs, for the tests that pin a doc to a constant.
+
+    The plumbing lives here because the pins themselves do not: each sits beside
+    the constant it guards, in whichever module reaches that subsystem. That left
+    three copies of ``__file__``-anchored path arithmetic whose ``parents`` index
+    differed with the caller's own directory depth, each re-explaining the index
+    — the shape of duplication those very pins exist to close. Anchored on
+    conftest the depth is fixed, and stated once.
+
+    Never cwd-relative: pytest is invoked from more than one directory here.
+    """
+    return (Path(__file__).parent.parent / "docs" / name).read_text(encoding="utf-8")
+
+
 @pytest.fixture
 def meta_and_asset_ctxs():
     return _load("meta_and_asset_ctxs.json")

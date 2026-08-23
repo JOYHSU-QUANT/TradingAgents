@@ -54,6 +54,7 @@ from ..paper.twap import floor_to_step
 from ..persistence import repository as repo
 from ..persistence.cloid import cloid_hex, cloid_logical
 from ..persistence.db import Database
+from .config import AGGRESSIVE_FILL_BAND_PCT
 from .kill_switch import deadline_detail, record_kill_switch_event
 from .orders import local_status_for_exchange_status, parse_order_status
 
@@ -63,6 +64,7 @@ if TYPE_CHECKING:  # import cost only under type checking; runtime stays lazy
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "REFRESHES_PER_FULL_SUITE",
     "SMOKE_TESTS",
     "SMOKE_TEST_KEYS",
     "RecoveryResult",
@@ -129,6 +131,28 @@ SMOKE_TESTS: tuple[SmokeTest, ...] = (
 # The stable identities, in one place: the gate iterates them, the validator
 # maps §20.3 booleans through a subset of them, and --only validates against them.
 SMOKE_TEST_KEYS: tuple[str, ...] = tuple(t.key for t in SMOKE_TESTS)
+
+# ``kill_switch_refreshed`` rows THIS RUNNER writes across a full REAL suite:
+# ``run()`` refreshes once before each test, and test 14 writes one more of its
+# own while proving the arm/refresh round-trip. (The pre-flight recovery ARMS —
+# a ``kill_switch_armed`` row, which §20.3's sample floor deliberately does not
+# count.) A full real suite only: the pre-test refresh is gated on
+# ``needs_preflight``, so a dry run, or an ``--only`` selection that places no
+# orders, writes fewer — which is the whole point of naming the FULL suite here,
+# since that is the run §20.3 reasons about.
+#
+# A FLOOR for a real testnet suite, not the exact figure: the real
+# KillSwitchManager the pre-flight and tests 15-17 build emits its own refresh
+# rows as wall clock elapses (see test_every_row_a_smoke_run_writes_is_marked
+# _including_the_managers), which an offline clock never produces. That only
+# strengthens what §20.3 uses the number for — "even the runner alone clears the
+# 100-sample floor" — so a floor is the honest thing to quote.
+#
+# Derived rather than hand-counted because the RUNBOOK quotes the six-suite
+# total to explain WHY suite rows are barred from the floor, and that figure
+# moves the day this table grows while nothing else notices (issue #100). One
+# test measures this against a driven suite; a doc-pin ties the RUNBOOK to it.
+REFRESHES_PER_FULL_SUITE = len(SMOKE_TESTS) + 1
 _BY_KEY: dict[str, SmokeTest] = {t.key: t for t in SMOKE_TESTS}
 # ``key`` is the identity the gate, the validator, and ``--only`` all key off of;
 # a silent collision (a future item copy-pasted from an existing one) would drop
@@ -2003,7 +2027,11 @@ class SmokeTestRunner:
             no_fill="entry did not fill — nothing to emergency-close",
         )
         mark = self.ctx.mark_price()
-        close_price = self._round_price(mark * Decimal("0.97"), up=False)
+        # The SAME band the production emergency close prices off (§9.4). A
+        # literal here would let this test keep passing against a width the
+        # engine no longer sends, which is the one thing test 18 exists to deny
+        # (issue #99).
+        close_price = self._round_price(mark * (1 - AGGRESSIVE_FILL_BAND_PCT), up=False)
         _logical, _cloid, close_ack = self._place_and_record_ioc(
             role="emergency_close",
             tag=f"emrg-{self._tag()}",

@@ -444,7 +444,11 @@ refresh），**也包含 suite 為 pre-flight recovery 與 test 15-17 建的那�
 但**不計入 §20.3 的 100 筆樣本下限**（排除只作用在**樣本下限**與 `clean_shutdown` 的
 daemon 判準這兩處；`kill_switch_fired_count`／`disarm_failed_count` **不分寫入者**，
 所以 smoke 階段真的燒掉一次 dead man's switch 一樣會讓這個 run-id 報廢——見 §5 該列）——樣本下限問的是「這個 run 有沒有把 switch 操練到
-足以判定可用率」，而連跑六輪 smoke 就能湊到 114 筆、100%、daemon 卻一秒都沒跑過。
+足以判定可用率」，而連跑六輪 smoke 就能湊到 114 筆、100%、daemon 卻一秒都沒跑過
+（每輪至少 19 筆＝18 個 test 各一次 pre-test refresh ＋ test 14 自己那次；pre-flight
+recovery 寫的是 `kill_switch_armed`，本來就不計入樣本下限。說「至少」是因為真 testnet
+上 pre-flight 與 test 15-17 建的那個真 `KillSwitchManager` 還會隨時間再寫幾筆——見下
+一段——所以 114 是下限，這只讓「daemon 沒跑過也早就湊滿 100 筆」的論證更保守）。
 （suite 自己打的那幾筆走的是 signed client 而不是 `KillSwitchManager`，所以沒有別人會
 補那些列。）沒有這些列的話，整個 smoke 期間、以及跑完 smoke
 到啟動 `live --loop` 之間那段由操作者決定長度的空窗，都會被算成 outage——一個完全乾淨的

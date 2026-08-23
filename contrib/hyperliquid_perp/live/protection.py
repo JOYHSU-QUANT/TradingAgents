@@ -62,7 +62,7 @@ from ..persistence import repository as repo
 from ..persistence.cloid import LIVE_ORDER_ROLES, cloid_hex as derive_cloid_hex, cloid_logical
 from ..persistence.db import Database
 from ..persistence.models import PositionState, Side
-from .config import LiveProtectionConfig
+from .config import AGGRESSIVE_FILL_BAND_PCT, LiveProtectionConfig
 from .kill_switch import refresh_across_blocking_work
 from .order_gate import LiveOrderGateRejected, RealOrderGate
 from .orders import is_known_exchange_status, local_status_for_exchange_status, parse_order_status
@@ -105,9 +105,10 @@ _RESTING_ORDER_STATUSES = frozenset(repo.RESTING_ORDER_STATUSES)
 # resting unfilled while the position keeps losing (and the next sync reading
 # PROTECTED off the untouched trigger/qty row). Floor, not override: a routine
 # band configured wider than this wins. The take-profit keeps the routine band —
-# a missed TP is opportunity cost, a missed SL is an uncapped loss. Keep in sync
-# with engine._EMERGENCY_SLIPPAGE_PCT (same §9.4 rationale, same 3%).
-_SL_FIRE_BAND_FLOOR_PCT = Decimal("0.03")
+# a missed TP is opportunity cost, a missed SL is an uncapped loss. The width is
+# config's shared §9.4 band — see there for why it is not spelled out per site
+# (issue #99); the local name is what this file's fire path calls the floor.
+_SL_FIRE_BAND_FLOOR_PCT = AGGRESSIVE_FILL_BAND_PCT
 
 # Ceiling on ONE backoff sleep inside the repair ladder. The ladder blocks the
 # single-threaded tick, and the §18.2 invariant every entry point preflights is

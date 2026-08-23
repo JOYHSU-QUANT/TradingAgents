@@ -384,10 +384,11 @@ def deadline_detail(seconds: int, note: str) -> str:
 # the suite genuinely arms and renews the wallet-wide trigger. What suite rows
 # must NOT do is satisfy the §20.3 SAMPLE FLOOR, which asks a different question:
 # "has this run exercised the switch enough for its availability number to mean
-# anything?" Six back-to-back suites on one run-id reach 114 refreshes at 100%
-# with the daemon never started, so the floor would be answered entirely by
+# anything?" A handful of back-to-back suites on one run-id clear that floor at
+# 100% with the daemon never started, so it would be answered entirely by
 # evidence from a phase that cannot speak to hours of unattended running
-# (2026-08-01 round-15 review; user decision: exclude from the count only).
+# (2026-08-01 round-15 review; user decision: exclude from the count only). The
+# concrete figure is quoted once, in RUNBOOK §20.3.
 #
 # It has a SECOND consumer since round 17, and weakening the marker moves that
 # one too: ``validation.py`` derives the DAEMON subsequence from it, and the

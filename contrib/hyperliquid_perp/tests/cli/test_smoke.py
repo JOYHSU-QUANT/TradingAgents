@@ -41,6 +41,7 @@ from contrib.hyperliquid_perp.persistence.db import Database
 from ..conftest import (
     assert_paired_sweep_refreshes,
     assert_payload_dir,
+    doc_text,
     echo_order_status_cloid,
     record_reconciliation_sweep_wiring,
 )
@@ -380,13 +381,14 @@ def test_the_cli_hands_the_fill_processor_the_signed_wallet(tmp_path, monkeypatc
     assert all(value == _SMOKE_WALLET for value in seen), seen
 
 
-def _drive_the_smoke_recoveries(tmp_path):
+def _drive_a_full_smoke_suite(tmp_path):
     """Run the whole real live-smoke suite; return the store path it used.
 
-    Four recoveries land in one run — the per-invocation pre-flight plus restart
-    tests 15-17 — and the count is asserted so that a suite which quietly stops
-    running three of them cannot leave the "paired per recovery" claim below
-    standing on a single construction.
+    Named for what it does rather than for its first caller: several tests need
+    one full seamed run to assert over — the four recoveries it lands (pre-flight
+    plus restart tests 15-17), every kill-switch row it writes, how many of those
+    are refreshes — and each of them re-typing the same three lines is how the
+    argv and the run-id came to be spelled out in three places.
     """
     cfg = _smoke_yaml(tmp_path)
     dbp = _seed_genesis_run(tmp_path, cfg)
@@ -407,7 +409,7 @@ def test_the_smoke_recovery_wires_the_reconciliation_sweeps_switch_refresh(
     since then observed either site.
     """
     record = record_reconciliation_sweep_wiring(monkeypatch)
-    _drive_the_smoke_recoveries(tmp_path)
+    _drive_a_full_smoke_suite(tmp_path)
 
     assert len(record.switches) == _SMOKE_RECOVERIES, record.switches
     assert_paired_sweep_refreshes(record, owner="smoke recovery")
@@ -417,7 +419,7 @@ def test_the_smoke_recovery_gives_the_reconciler_a_payload_dir(tmp_path, monkeyp
     """The evidence term at the smoke site, split out for the reason its daemon
     sibling is: a failure here is about the §19.1 audit trail, not §18.2."""
     record = record_reconciliation_sweep_wiring(monkeypatch)
-    dbp = _drive_the_smoke_recoveries(tmp_path)
+    dbp = _drive_a_full_smoke_suite(tmp_path)
 
     assert len(record.reconcilers) == _SMOKE_RECOVERIES, record.reconcilers
     for reconciler in record.reconcilers:
@@ -439,9 +441,7 @@ def test_every_row_a_smoke_run_writes_is_marked_including_the_managers(tmp_path,
     """
     from contrib.hyperliquid_perp.live.kill_switch import is_suite_authored
 
-    cfg = _smoke_yaml(tmp_path)
-    dbp = _seed_genesis_run(tmp_path, cfg)
-    assert cli_main(["live-smoke", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)]) == 0
+    dbp = _drive_a_full_smoke_suite(tmp_path)
     with Database(dbp) as db:
         rows = [(r["event_type"], r["detail"]) for r in repo.iter_kill_switch_events(db.conn, "r1")]
     assert rows, "the suite wrote no kill-switch rows at all"
@@ -449,26 +449,62 @@ def test_every_row_a_smoke_run_writes_is_marked_including_the_managers(tmp_path,
     assert not unmarked, f"rows written during live-smoke but not marked: {unmarked}"
 
 
-def test_the_runbook_quotes_the_literals_the_code_prints(tmp_path):
+def test_a_full_suite_writes_the_refresh_count_the_runbook_reasons_from(tmp_path, smoke_seams):
+    """The six-suite figure §20.3 quotes is MEASURED here, not hand-counted.
+
+    Nothing in the repo produced it: it sat as prose in four places, so growing
+    SMOKE_TESTS would have left all four wrong at once (issue #100). This drives
+    one full suite and counts what it actually wrote, which is what makes
+    REFRESHES_PER_FULL_SUITE — and the runbook pinned to it — a claim rather
+    than an assertion. Refresh rows only: the pre-flight and tests 15-17 ARM,
+    and §20.3's sample floor deliberately does not count arming.
+
+    Exact here because this harness's clock never elapses, so the real
+    KillSwitchManager those recoveries build emits nothing of its own; on real
+    testnet it does, which is why the constant is documented as a floor.
+    """
+    from contrib.hyperliquid_perp.live.smoke import REFRESHES_PER_FULL_SUITE
+
+    dbp = _drive_a_full_smoke_suite(tmp_path)
+    with Database(dbp) as db:
+        events = [r["event_type"] for r in repo.iter_kill_switch_events(db.conn, "r1")]
+    assert events.count("kill_switch_refreshed") == REFRESHES_PER_FULL_SUITE
+
+
+def test_the_runbook_quotes_the_literals_the_code_prints():
     # RUNBOOK §20.3 shows operators the literal token so they can read the event
     # log by hand. Nothing tied the doc to the constant, so renaming the constant
     # left the suite green and the runbook quietly wrong (round-16 probe).
-    from pathlib import Path as _Path
-
     from contrib.hyperliquid_perp.live.kill_switch import _SUITE_AUTHORED_TOKEN
-    from contrib.hyperliquid_perp.live.validation import _NO_DAEMON_ROWS_RENDER
+    from contrib.hyperliquid_perp.live.smoke import REFRESHES_PER_FULL_SUITE
+    from contrib.hyperliquid_perp.live.validation import _NO_DAEMON_ROWS_RENDER, _REFRESH_BAR
 
-    # Resolved from __file__, not the cwd: this is the only test in the suite
-    # that reads a doc, and a cwd-relative path fails whenever pytest is
-    # invoked from anywhere but the repo root (2026-08-01 round-17 probe).
-    # parents[2] = the package root (this file lives in tests/cli/).
-    docs = _Path(__file__).resolve().parents[2] / "docs" / "RUNBOOK-live.md"
-    runbook = docs.read_text(encoding="utf-8")
+    runbook = doc_text("RUNBOOK-live.md")
     assert _SUITE_AUTHORED_TOKEN in runbook
     # Same tie for the other literal §20.3 quotes: the summary's clean-shutdown
     # value for a run with no daemon rows. It could drift in either place with
     # the suite green (2026-08-01 round-18 mutation probe).
     assert _NO_DAEMON_ROWS_RENDER in runbook
+    # And every figure in the six-suite sentence §20.3 uses to explain WHY suite
+    # rows are barred from the sample floor. Nothing produced that number: it sat
+    # hand-counted in four places, so growing SMOKE_TESTS left all four wrong at
+    # once with the suite green (issue #100).
+    #
+    # The scenario's own "six" is pinned too, on the doc side. Without it,
+    # editing 六輪 to 五輪 and leaving the total keeps this green over a sentence
+    # that now contradicts itself — the one figure on the line this test would
+    # otherwise be assuming rather than checking.
+    rounds = 6
+    assert "連跑六輪 smoke" in runbook
+    assert f"每輪至少 {REFRESHES_PER_FULL_SUITE} 筆" in runbook
+    assert f"就能湊到 {rounds * REFRESHES_PER_FULL_SUITE} 筆" in runbook
+    assert f"{len(SMOKE_TEST_KEYS)} 個 test 各一次 pre-test refresh" in runbook
+    # The §20.3 bar itself, stated twice in the runbook and tied to nothing —
+    # the same gap on the same page.
+    assert f"`kill_switch_refresh_success_rate ≥ {_REFRESH_BAR}`" in runbook
+    # The §20.3 bar itself, which the runbook states twice and nothing tied to
+    # the constant either — the same gap on the same page (issue #100).
+    assert f"`kill_switch_refresh_success_rate ≥ {_REFRESH_BAR}`" in runbook
 
 
 def test_live_smoke_full_real_suite_passes_gate_and_releases_lock(tmp_path, capsys, smoke_seams):

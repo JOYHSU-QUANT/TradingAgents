@@ -16,7 +16,10 @@ from contrib.hyperliquid_perp.common.config_coercion import bool_from_yaml
 from contrib.hyperliquid_perp.config import load_config
 from contrib.hyperliquid_perp.domains.perp.risk_gate import RiskConfig
 from contrib.hyperliquid_perp.live.config import (
+    AGGRESSIVE_FILL_BAND_PCT,
     EXCHANGE_MIN_ORDER_NOTIONAL_USDC,
+    MAINNET_TINY_MAX_NOTIONAL_USDC,
+    MAINNET_TINY_MAX_TARGET_MARGIN_PCT,
     ExecutionMode,
     ExecutionStyle,
     LiveConfig,
@@ -28,6 +31,8 @@ from contrib.hyperliquid_perp.live.config import (
     compute_notional_caps,
     validate_live_risk_consistency,
 )
+
+from ..conftest import doc_text
 
 
 def _live_block(**overrides) -> dict:
@@ -668,3 +673,41 @@ def test_load_config_live_block_cross_checks_risk(tmp_path):
     )
     with pytest.raises(ValueError, match="exceeds risk.max_target_margin_pct"):
         load_config(path)
+
+
+def test_the_aggressive_band_reaches_all_three_consumers_as_one_object():
+    """§9.4's band is one value, not three literals that agree today.
+
+    The emergency close, the stop-loss fire floor, and smoke test 18 all price
+    off it, and they used to spell it out separately under a "keep in sync"
+    comment with nothing enforcing it — while ``tests/`` never named either
+    constant, so a changed copy was invisible in both directions (issue #99).
+    The two module names survive because each states what its own path calls the
+    band; this pins THOSE TWO to the shared object. Smoke test 18 holds no
+    constant of its own — it reads the band inline, and
+    ``test_the_emergency_close_probe_prices_off_the_shared_band`` covers it.
+
+    ``is``, not ``==``: an equal-but-separate ``Decimal("0.03")`` is exactly the
+    drift being closed, and it compares equal.
+    """
+    from contrib.hyperliquid_perp.live import engine as engine_mod, protection as protection_mod
+
+    assert engine_mod._EMERGENCY_SLIPPAGE_PCT is AGGRESSIVE_FILL_BAND_PCT
+    assert protection_mod._SL_FIRE_BAND_FLOOR_PCT is AGGRESSIVE_FILL_BAND_PCT
+
+
+def test_the_runbook_quotes_the_mainnet_tiny_caps_the_gate_enforces():
+    """RUNBOOK §24's two numbers are the config gate's, derived not retyped.
+
+    They are what an operator reads before committing real money, and both sat
+    in the doc as bare literals with nothing tying them to the constants the
+    hard gate actually enforces — loosening either would have left the runbook
+    quoting the old limit with the suite green (issue #100). Same shape as the
+    §20.3 token pin in ``tests/cli/test_smoke.py``.
+    """
+    runbook = doc_text("RUNBOOK-live.md")
+    assert f"`max_notional_usdc <= {MAINNET_TINY_MAX_NOTIONAL_USDC}`" in runbook
+    assert f"`max_target_margin_pct <= {MAINNET_TINY_MAX_TARGET_MARGIN_PCT}`" in runbook
+    # The same cap restated in the doc's opening warning, which is the first
+    # thing an operator reads and the last place a stale number would be noticed.
+    assert f"上限 {MAINNET_TINY_MAX_NOTIONAL_USDC} USDC 名目" in runbook

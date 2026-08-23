@@ -1128,6 +1128,30 @@ def test_reduce_only_close_partial_fill_fails_and_closes_residual(live_db):
     assert closes[-1]["size"] == _D("0.0006")  # the residual
 
 
+def test_the_emergency_close_probe_prices_off_the_shared_band(live_db):
+    """Test 18 proves the §17.2 wire shape, and the BAND is part of that shape.
+
+    The price was a bare ``0.97`` here, free to go on "proving" a width the
+    engine no longer sends the day the band moved. It derives from
+    config.AGGRESSIVE_FILL_BAND_PCT now, so the probe and the production
+    escalation path cannot disagree about what is being proven (issue #99).
+    """
+    from contrib.hyperliquid_perp.live.config import AGGRESSIVE_FILL_BAND_PCT
+    from contrib.hyperliquid_perp.paper.stops import round_to_tick
+
+    signed = _FakeSigned()
+    with live_db:
+        smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run(
+            only=["emergency_close"]
+        )
+    close = [c for c in signed.place_calls if c.get("reduce_only")][-1]
+    # The 60000 mark and tick of 1 come from _ctx, not from the band, so only
+    # the band's width is under test here.
+    assert close["limit_price"] == round_to_tick(
+        _D(60000) * (1 - AGGRESSIVE_FILL_BAND_PCT), _D(1), up=False
+    )
+
+
 def test_emergency_close_partial_fill_fails_and_closes_residual(live_db):
     partial = _Ack("filled", filled_size=_D("0.0004"))
     signed = _FakeSigned(place_acks=[_Ack("filled"), partial])

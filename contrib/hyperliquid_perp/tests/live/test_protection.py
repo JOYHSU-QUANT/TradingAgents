@@ -10,7 +10,11 @@ import pytest
 
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeRequestError
 from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import CancelAck, OrderAck
-from contrib.hyperliquid_perp.live.config import ExecutionMode, LiveProtectionConfig
+from contrib.hyperliquid_perp.live.config import (
+    AGGRESSIVE_FILL_BAND_PCT,
+    ExecutionMode,
+    LiveProtectionConfig,
+)
 from contrib.hyperliquid_perp.live.order_gate import LiveOrderGateRejected, RealOrderGate
 from contrib.hyperliquid_perp.live.protection import ProtectionManager, ProtectionOutcome
 from contrib.hyperliquid_perp.paper.clock import ManualClock
@@ -840,9 +844,16 @@ def test_sl_fire_band_floored_at_3pct_while_tp_keeps_routine_band(env):
     sl = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
     tp = repo.active_protection_order(db.conn, "r", "BTC", "take_profit")
     # Long: SL and TP both fire as a SELL, so each limit sits BELOW its trigger.
+    # The SL's width derives from config.AGGRESSIVE_FILL_BAND_PCT rather than
+    # being re-typed — this is precisely the test that would otherwise go on
+    # asserting the old width after the band moved (issue #99). The TP keeps its
+    # literal on purpose: 0.995 is the routine max_slippage_pct this fixture
+    # configures (0.005), a different value that merely looks similar.
     sl_trigger = Decimal(sl["trigger_price"])
     tp_trigger = Decimal(tp["trigger_price"])
-    assert Decimal(sl["price"]) == round_to_tick(sl_trigger * Decimal("0.97"), _TICK, up=False)
+    assert Decimal(sl["price"]) == round_to_tick(
+        sl_trigger * (1 - AGGRESSIVE_FILL_BAND_PCT), _TICK, up=False
+    )
     assert Decimal(tp["price"]) == round_to_tick(tp_trigger * Decimal("0.995"), _TICK, up=False)
 
 

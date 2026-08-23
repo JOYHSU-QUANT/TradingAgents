@@ -175,13 +175,19 @@ def _bucket_edges(
     Sweeps of 50k synthetic windows each, comparing ``dist_low + width * 24``
     to ``dist_high`` under this module's own 28-digit context:
 
-    - Hold the grid at BTC's whole dollars and vary only how WIDE the window
-      is: a realistic 30-candle high-low ($100-$12k) misses on 0% of windows,
-      an implausible $1k-$100k spread on 7.6%, an absurd $10k-$500k one on 37%.
-      One grid throughout — only the magnitude moved.
-    - Hold the window at 3-8% of each sample's own price and vary only the
-      grid — 1, 0.1, 0.01, 0.001 and 1e-8 ticks: every one comes out at 0%,
-      the sub-cent coin included. The tick grid is not the variable.
+    - Hold the grid at BTC's whole dollars, ``range_low`` in $30k-$120k, and
+      vary only how WIDE the window is: a realistic 30-candle high-low
+      ($100-$12k) misses on 0% of windows, an implausible $1k-$100k spread on
+      ~8%, an absurd $10k-$500k one on ~37%. One grid throughout — only the
+      width moved. The middle figure is the sensitive one and the price band
+      is why it has to be stated: the same $1k-$100k spread drops to ~1.5%
+      with ``range_low`` in $60k-$120k and to 0% in $100k-$200k. The absurd
+      case is the steady one, staying in the mid-30s across all three bands.
+    - Hold the window's width at 3-8% of each sample's own price — so the
+      RELATIVE window is fixed — and vary the grid: 1, 0.1, 0.01, 0.001 and
+      1e-8 ticks all come out at 0%, the sub-cent coin included. Put that same
+      sub-cent grid on an absurdly wide window instead and it misses on ~39%.
+      The tick grid is not the variable; the width is.
 
     So no window this project can currently produce reaches it. Pinning is
     still worth its zero cost, because the overshoot half is a crash: when the

@@ -303,13 +303,14 @@ def _check_derived_fraction(label: str, claimed: float, numerator: Decimal, span
     contradiction only shows up in whatever renders them side by side. This is
     the one shared statement of that invariant.
 
-    Tolerance rather than equality, because three effects make exact agreement
-    the wrong bar: the ratio is a ``float`` while its sources are ``Decimal``,
-    a producer may quantize the sources to a grid (see
-    ``volume_profile._bucket_edges``, which pins its outermost edges), and a
-    DTO rebuilt from rounded values would otherwise be unconstructible. 1e-6 is
-    orders of magnitude above all three and orders below any contradiction
-    worth catching.
+    Tolerance rather than equality. Two of the reasons turn out to cost
+    nothing in practice: over 4000 fuzzed producer outputs spanning six price
+    magnitudes, the float-vs-Decimal gap and the grid quantization (see
+    ``volume_profile._bucket_edges``, which pins its outermost edges) came out
+    at EXACTLY zero, every time. What the tolerance actually buys is the third
+    reason — a DTO rebuilt from a ratio someone rounded on the way in. 1e-6
+    admits anything recorded to six decimal places or better, and is orders of
+    magnitude below any disagreement worth calling a contradiction.
 
     Only ``VolumeProfile`` calls this today. ``PerpMarketContext.day_change_pct``
     has the same shape — a float ratio stored beside the two Decimal prices it
@@ -341,9 +342,15 @@ class VolumeProfile:
 
     The two ``*_volume_share`` fields are fractions of the window's VOLUME, not
     of its price range: how much of the traded volume the POC bucket alone held,
-    and how much the whole value area held. They are the only thing separating a
-    profile whose POC owned 30% of the window from one whose POC owned 4% —
-    geometry cannot tell those apart, and today they render identically.
+    and how much the whole value area held. They say how DOMINANT the levels
+    are, which the geometry only sometimes implies — the rendered block usually
+    differs between a heavy POC and a marginal one (the value-area walk stops
+    on different buckets), but not always: when the walk stops on the SAME
+    buckets, two profiles whose POC held 78% and 99% of the window render
+    identically. ``poc_volume_share`` also has a floor the geometry hides —
+    the heaviest bucket is at least the average, so it can never be below
+    ``1 / bucket_count``.
+
     Carried but deliberately NOT rendered: the prompt block's wording is fixed
     by the rulings on this PR, and these exist so the frozen DTO already carries
     them when a gate or sizing consumer needs to ask "is this level real?".
@@ -377,11 +384,17 @@ class VolumeProfile:
         # bounds contradict each other — which would print as a confident,
         # nonsensical support/resistance level in the prompt.
         #
-        # ONE field is deliberately outside that guarantee: ``close_position``.
-        # It is a fraction of a ``latest_close`` this class never stores, so
-        # there is nothing here to check it against — not a gap that could be
-        # closed by a stricter check, but by carrying the close, which no
-        # consumer needs.
+        # THREE fields sit outside that guarantee, all for the same reason:
+        # ``close_position``, ``poc_volume_share`` and ``value_area_volume_share``
+        # are each a fraction of something this class never stores — the latest
+        # close, and the window's total volume. There is nothing here to check
+        # them against. That is not a gap a stricter check could close; it would
+        # take carrying the close and the bucket volumes, which no consumer
+        # needs. (Two narrower checks ARE available and deliberately skipped:
+        # the producer's walk guarantees ``value_area_volume_share`` reaches
+        # VALUE_AREA_FRACTION, and ``poc_volume_share >= 1 / bucket_count``
+        # follows from a stored field. Both belong with the volume-share
+        # consumer that does not exist yet.)
         #
         # Be precise about what the rest gets, rather than claiming "everything
         # else is checked": ``poc_position`` and ``value_area_width_ratio`` are

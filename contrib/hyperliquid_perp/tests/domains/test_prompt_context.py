@@ -321,9 +321,12 @@ def test_no_shape_note_attributes_the_volume_to_buyers_or_sellers(shape):
 def test_the_d_note_asserts_nothing_positive_about_the_distribution():
     # D is classify_shape's catch-all: it fires both for a centred POC and for
     # a POC skewed to one end whose close did not confirm it. So the note must
-    # not claim centrality — a skewed-POC D is the MAJORITY case, and the claim
-    # would sit one line under a POC reading that contradicts it. Rendered here
-    # with a POC at 95% of the range, which is a legal D.
+    # not claim centrality — a skewed POC whose close failed to confirm it is a
+    # legal D, so the claim can sit one line under a POC reading that
+    # contradicts it. (By inspection of the rule, not a measured frequency: the
+    # production comment this mirrors was downgraded from a frequency claim for
+    # exactly that reason, and the two must not drift apart.) Rendered here with
+    # a POC at 95% of the range, which is such a D.
     #
     # The POC price and the value area move WITH poc_position: the fixture is
     # cross-checked, and a 95% POC left at the default 63,625 would be the very

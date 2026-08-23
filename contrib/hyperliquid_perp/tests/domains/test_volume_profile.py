@@ -510,6 +510,27 @@ def test_the_volume_shares_separate_a_dominant_poc_from_a_marginal_one():
     assert cool.poc_volume_share < 0.4
 
 
+def test_two_profiles_can_render_identically_yet_hold_very_different_volume():
+    # The justification for carrying the share fields at all, as an executable
+    # fact rather than a sentence. Both windows put the node in the same single
+    # bucket and both let the value area collapse onto it, so every rendered
+    # line matches to the character — while one POC holds ~99% of the window's
+    # volume and the other ~79%. Geometry alone cannot report that difference.
+    from contrib.hyperliquid_perp.domains.perp.prompt_context import _volume_profile_lines
+
+    def _window(tail_volume, node_volume):
+        return [_candle(i, 100, 110, "105.2", tail_volume) for i in range(4)] + [
+            _candle(i, "105.05", "105.35", "105.2", node_volume) for i in range(4, 16)
+        ]
+
+    dominant = compute_volume_profile(_window(1, 400), 16)
+    merely_winning = compute_volume_profile(_window(300, 350), 16)
+    assert dominant is not None and merely_winning is not None
+    assert _volume_profile_lines(dominant, "4h") == _volume_profile_lines(merely_winning, "4h")
+    assert dominant.poc_volume_share > 0.99
+    assert merely_winning.poc_volume_share < 0.80
+
+
 def test_the_value_area_share_is_what_the_walk_reached_not_the_target():
     # It must be the volume the walk ACTUALLY holds, not VALUE_AREA_FRACTION
     # echoed back: the walk stops on the first bucket that crosses the target,

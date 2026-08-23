@@ -115,10 +115,11 @@ def _volume_profile_lines(profile: VolumeProfile, candle_interval: str) -> list[
     return [
         # "as of the last closed candle" is not decoration. Every level below is
         # cut from CLOSED candles, so on a 4h interval the whole block can be up
-        # to one interval behind the live mark printed further up — and it is
-        # not rare: the mark sits outside this Range often enough that a model
-        # silently treating the two as contemporaneous would be wrong regularly.
-        # Same house rule as the freshness disclosures elsewhere in the context:
+        # to one interval behind the live mark printed further up. Whenever the
+        # forming interval has moved past the window's own high-low, the mark
+        # falls OUTSIDE the Range printed here — that much follows from the
+        # definitions, without needing a frequency this file cannot cite. Same
+        # house rule as the freshness disclosures elsewhere in the context:
         # state the vintage rather than let it be inferred.
         f"Volume profile (rolling window of {profile.candle_count} x {candle_interval} "
         f"candles, as of the last closed candle):",
@@ -127,8 +128,9 @@ def _volume_profile_lines(profile: VolumeProfile, candle_interval: str) -> list[
         f"({_whole_pct(profile.poc_position)} up the range)",
         # The share is taken from VALUE_AREA_FRACTION, never written out here:
         # a literal would keep saying "70%" after the convention moved, and it
-        # is the prompt — the model would be told a threshold the code no
-        # longer uses, with no test able to notice.
+        # is the prompt — the model would be told a threshold the code no longer
+        # uses. Only one test would notice, and it exists for exactly that:
+        # test_the_value_area_share_is_taken_from_the_constant_not_written_out.
         f"  Value area ({_whole_pct(float(VALUE_AREA_FRACTION))} of volume): "
         f"{_num(profile.value_area_low)} - "
         f"{_num(profile.value_area_high)} "

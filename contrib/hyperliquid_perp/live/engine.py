@@ -69,7 +69,7 @@ from ..persistence import repository as repo
 from ..persistence.cloid import cloid_logical
 from ..persistence.db import Database
 from ..persistence.models import PositionState
-from .config import EXCHANGE_MIN_ORDER_NOTIONAL_USDC, LiveConfig
+from .config import AGGRESSIVE_FILL_BAND_PCT, EXCHANGE_MIN_ORDER_NOTIONAL_USDC, LiveConfig
 from .kill_switch import refresh_across_blocking_work
 from .loss_guards import LossGuards
 from .order_gate import LiveOrderGateRejected, RealOrderGate
@@ -95,11 +95,11 @@ _NO_MARKET_DATA_SAFE_MODE_TICKS = 12
 # §9.4: emergency_close is an AGGRESSIVE reduce-only IOC — its whole
 # purpose is to cut risk immediately, so it must actually clear in the violent
 # move that triggered it. A routine slice's ±0.5% band can fail to fill exactly
-# then, leaving the position open and (post no-safe-SL) unprotected. This wider
-# band keeps the order marketable while still price-bounded (§9.2 rule 1 forbids
-# an UNbounded market order); 3% matches the exchange's own market-order slippage
-# (§9.5). Never tighter than the routine band.
-_EMERGENCY_SLIPPAGE_PCT = Decimal("0.03")
+# then, leaving the position open and (post no-safe-SL) unprotected. Never
+# tighter than the routine band. The width is config's shared §9.4 band — see
+# there for why it is not spelled out per site (issue #99); the local name is
+# what this file's escalation path calls it.
+_EMERGENCY_SLIPPAGE_PCT = AGGRESSIVE_FILL_BAND_PCT
 
 # Per-request market-data timeout. Bounded (never None) so a hung fetch cannot
 # stall the tick thread and starve the §18.2 kill-switch refresh.

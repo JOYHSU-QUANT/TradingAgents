@@ -135,6 +135,17 @@ MIN_LIVE_CYCLES = 30
 MIN_LIVE_ORDERS = 30
 # §20.3: kill_switch_refresh_success_rate >= 99%.
 MIN_KILL_SWITCH_REFRESH_RATE = Decimal("0.99")
+# The bar as the operator reads it, rendered once for every branch that quotes
+# it. A rounded threshold is the failure this file already names one screen
+# below, from the other side: there two decimals turn a genuine 0.98998 into
+# "99.00% (need >= 99%)", a go/no-go line reading as a self-contradiction, and
+# that branch is rescued by printing the outage time beside it. Here the hazard
+# is the BAR: at ``:.0f`` a 0.995 bar prints as "100%", so the gate would refuse
+# at 99.5% while telling the operator it needed a hundred. ``normalize`` drops
+# the trailing zeros the Decimal multiply leaves — it is context-sensitive, but
+# rounds nothing a rate constant could carry at prec 28 — and ``:f`` spells out
+# the exponent form it can return (100% normalizes to 1E+2).
+_REFRESH_BAR = f"{(MIN_KILL_SWITCH_REFRESH_RATE * 100).normalize():f}%"
 # Below this many refresh events the RATE carries no information and is not
 # allowed to fail the run — it is reported as a shortfall (keep running) instead.
 # Set at the point where one blip can no longer cross the bar: with a 99% bar,
@@ -1142,10 +1153,12 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
             # And only the DAEMON'S refreshes. Suite-authored rows are real cover —
             # they count in full toward outage seconds and toward the deadline
             # above — but the floor asks whether this run exercised the switch
-            # enough for its availability figure to mean anything, and six
-            # back-to-back smoke suites answer it at 114 refreshes and 100% with
-            # the daemon never started. That figure would describe the smoke phase,
-            # not the thing §20.3 certifies for real money (2026-08-01 round-15).
+            # enough for its availability figure to mean anything, and a few
+            # back-to-back smoke suites answer it at 100% with the daemon never
+            # started. That figure would describe the smoke phase, not the thing
+            # §20.3 certifies for real money (2026-08-01 round-15). The concrete
+            # figure is quoted once, in RUNBOOK §20.3, where a doc-pin test
+            # derives it from ``smoke.REFRESHES_PER_FULL_SUITE`` (issue #100).
             if event == _KILL_SWITCH_REFRESH_OK:
                 if is_suite_authored(detail):
                     suite_refreshed += 1
@@ -1683,11 +1696,11 @@ def _apply_refresh_gate(
             shortfalls.append(
                 f"no DAEMON kill-switch refresh events yet — the {suite_attempts} "
                 "refresh attempt(s) on record were written during live-smoke and do "
-                "not count toward the §20.3 sample floor (need a rate >= 99% over "
-                "daemon evidence)"
+                f"not count toward the §20.3 sample floor (need a rate >= {_REFRESH_BAR} "
+                "over daemon evidence)"
             )
         else:
-            shortfalls.append("no kill-switch refresh events yet (need a rate >= 99%)")
+            shortfalls.append(f"no kill-switch refresh events yet (need a rate >= {_REFRESH_BAR})")
     elif refresh_total < MIN_KILL_SWITCH_REFRESH_SAMPLES:
         # Some evidence, but not enough to judge availability. Zero was always
         # handled above; 1..N-1 was not, and at a 30s cadence a run five minutes
@@ -1722,7 +1735,7 @@ def _apply_refresh_gate(
             f"({kill_switch.outage_seconds:.0f}s unrefreshed across "
             f"{kill_switch.outage_episodes} outage(s), of "
             f"{kill_switch.covered_seconds:.0f}s covered) "
-            f"(need >= {MIN_KILL_SWITCH_REFRESH_RATE * 100:.0f}%)"
+            f"(need >= {_REFRESH_BAR})"
         )
 
 

@@ -18,7 +18,11 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
     TargetDecision,
     TargetSide,
 )
-from contrib.hyperliquid_perp.live.config import ExecutionMode, LiveConfig
+from contrib.hyperliquid_perp.live.config import (
+    AGGRESSIVE_FILL_BAND_PCT,
+    ExecutionMode,
+    LiveConfig,
+)
 from contrib.hyperliquid_perp.live.engine import LiveExecutionEngine
 from contrib.hyperliquid_perp.live.loss_guards import LossGuards
 from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
@@ -809,10 +813,18 @@ def test_emergency_close_prices_off_mid_not_mark(tmp_path):
     _script(engine, [_snap(mark=100_000, mid=99_000)])
     engine.tick()
     close = next(c for c in sub.calls if c["order_role"] == "emergency_close")
-    # SELL close: mid × (1 − 3%) tick-rounded = 96030 — NOT mark-based 97000.
-    expected = round_to_tick(D(99_000) * (1 - D("0.03")), engine._asset.tick_size, up=False)
+    # SELL close: mid × (1 − the §9.4 band) tick-rounded — NOT the same band off
+    # mark. Both sides derive from config.AGGRESSIVE_FILL_BAND_PCT rather than
+    # re-typing it, so this cannot go on asserting a width the engine no longer
+    # sends (issue #99).
+    band = D(1) - AGGRESSIVE_FILL_BAND_PCT
+    expected = round_to_tick(D(99_000) * band, engine._asset.tick_size, up=False)
+    off_mark = round_to_tick(D(100_000) * band, engine._asset.tick_size, up=False)
+    # The two bases must actually differ at this band, or the equality below
+    # would pass just as happily against a mark-priced close and the test would
+    # be asserting nothing about WHICH price it used.
+    assert expected != off_mark
     assert close["limit_price"] == expected
-    assert close["limit_price"] < D(97_000)
 
 
 def test_fill_ingest_failure_propagates_out_of_tick(tmp_path):

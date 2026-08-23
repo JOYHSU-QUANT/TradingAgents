@@ -11,6 +11,8 @@ import pytest
 from contrib.hyperliquid_perp.live import smoke
 from contrib.hyperliquid_perp.live.fills import ExchangeFill, post_live_fill
 from contrib.hyperliquid_perp.live.validation import (
+    _REFRESH_BAR,
+    MIN_KILL_SWITCH_REFRESH_RATE,
     MIN_KILL_SWITCH_REFRESH_SAMPLES,
     MIN_LIVE_CYCLES,
     MIN_LIVE_ORDERS,
@@ -586,9 +588,26 @@ def test_no_refresh_events_is_a_shortfall(tmp_path):
     # The WHOLE sentence: the tail naming the bar is what tells the operator this
     # is a shortfall and not a 0% failure, and it could drift into nonsense with
     # the suite green (2026-08-01 round-19 mutation probe).
-    assert (
-        _zero_evidence_shortfall(report) == "no kill-switch refresh events yet (need a rate >= 99%)"
+    #
+    # The bar is DERIVED, not quoted. Spelling "99%" here pinned the production
+    # constant from the wrong side: raising MIN_KILL_SWITCH_REFRESH_RATE left
+    # this green while the branch went on telling the operator the old number —
+    # which is what this assertion exists to prevent (issue #100).
+    assert _zero_evidence_shortfall(report) == (
+        f"no kill-switch refresh events yet (need a rate >= {_REFRESH_BAR})"
     )
+
+
+def test_the_rendered_bar_states_the_bar_it_was_rendered_from():
+    """Deriving the expected sentence cannot catch a bad renderer — this can.
+
+    Every branch quoting the bar now interpolates ``_REFRESH_BAR``, and so does
+    the assertion above, so a mis-rendered bar would satisfy both. Reading the
+    rendered string back is independent of how it was produced: at ``:.0f`` a
+    0.995 bar printed as "100%", and the gate would have refused at 99.5% while
+    telling the operator it needed a hundred (issue #100).
+    """
+    assert Decimal(_REFRESH_BAR.rstrip("%")) / 100 == MIN_KILL_SWITCH_REFRESH_RATE
 
 
 def test_unprotected_window_from_protection_events(tmp_path):
@@ -1615,10 +1634,13 @@ def test_only_a_row_that_installs_cover_may_state_the_deadline(tmp_path):
 def test_suite_authored_refreshes_are_cover_but_not_sample_credit(tmp_path):
     """live-smoke's rows count for exposure and for the deadline, never for the floor.
 
-    Six back-to-back suites reach 114 refreshes at 100% with the daemon never
+    A few back-to-back suites clear the floor at 100% with the daemon never
     started, so counting them would let the availability figure describe the smoke
     phase rather than the thing §20.3 certifies for real money (user decision,
-    2026-08-01 round-15).
+    2026-08-01 round-15). This docstring used to name a six-suite total of 114
+    while the body below writes 120 rows and asserts on that — a summary that did
+    not match its own test (issue #100). The concrete figure is quoted once, in
+    RUNBOOK §20.3, pinned to ``smoke.REFRESHES_PER_FULL_SUITE``.
     """
     from contrib.hyperliquid_perp.live.kill_switch import (
         _stamp_suite_authored,

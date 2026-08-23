@@ -25,6 +25,8 @@ from contrib.hyperliquid_perp.domains.perp.risk_gate import (
 )
 from contrib.hyperliquid_perp.domains.perp.target_decision import DecisionConfig
 
+from .conftest import doc_text
+
 
 @pytest.mark.parametrize(
     "value",
@@ -575,3 +577,25 @@ def test_dotenv_diagnosis_blames_earlier_empty_file_not_export(tmp_path, monkeyp
     assert ".env.enterprise sets OPENROUTER_API_KEY" in diagnosis  # the real key…
     assert "sets it to an empty value" in diagnosis  # …lost to the blank line
     assert "exported" not in diagnosis  # and the export is not blamed
+
+
+def test_the_setup_doc_quotes_the_volume_profile_floor_the_loader_enforces():
+    """SETUP.md's ``12`` is the loader's floor, derived rather than retyped.
+
+    The doc states the legal range, the too-short band, and the loader's own
+    refusal message — four spellings of one constant, none of them tied to it.
+    Lowering MIN_VOLUME_PROFILE_WINDOW would have left every one wrong with the
+    suite green, and the only symptom is a config the operator was told is legal
+    being refused at load (issue #100). Same shape as the §20.3 pins in
+    ``tests/cli/test_smoke.py``.
+    """
+    from contrib.hyperliquid_perp.common.constants import MIN_VOLUME_PROFILE_WINDOW
+
+    setup = doc_text("SETUP.md")
+    # The legal range, and the band below it the loader names as too short.
+    assert f"`{MIN_VOLUME_PROFILE_WINDOW}`–`candle_lookback`" in setup
+    assert f"1–{MIN_VOLUME_PROFILE_WINDOW - 1}" in setup
+    # The loader's refusal message, quoted verbatim in the troubleshooting table.
+    assert f"or at least {MIN_VOLUME_PROFILE_WINDOW}" in setup
+    # And the "it is on" side of the same threshold, one row further down.
+    assert f"視窗 ≥ {MIN_VOLUME_PROFILE_WINDOW}" in setup

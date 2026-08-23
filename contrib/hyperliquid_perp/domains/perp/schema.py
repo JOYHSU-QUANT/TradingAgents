@@ -346,8 +346,8 @@ class VolumeProfile:
     are, which the geometry only sometimes implies — the rendered block usually
     differs between a heavy POC and a marginal one (the value-area walk stops
     on different buckets), but not always: when the walk stops on the SAME
-    buckets, two profiles whose POC held 79% and 99% of the window render
-    identically — pinned by
+    buckets, two profiles whose POC held 79% and 99.9% of the window render
+    identically. Pinned by
     ``test_two_profiles_can_render_identically_yet_hold_very_different_volume``. ``poc_volume_share`` also has a floor the geometry hides —
     the heaviest bucket is at least the average, so it can never be below
     ``1 / bucket_count``.
@@ -385,36 +385,33 @@ class VolumeProfile:
         # bounds contradict each other — which would print as a confident,
         # nonsensical support/resistance level in the prompt.
         #
-        # What is NOT covered, in two groups — the distinction matters because
-        # only one of them is closeable here.
+        # Field by field, because a summary sentence about this has been wrong
+        # twice: the prices below get mutual containment and ordering;
+        # ``poc_position`` and ``value_area_width_ratio`` get cross-checked
+        # against those prices at the bottom of this method. EVERYTHING ELSE
+        # gets bounds only, and is listed here rather than summarized.
         #
-        # Unclosable at this layer: ``close_position``, ``poc_volume_share`` and
-        # ``value_area_volume_share`` are each a fraction of something this class
-        # never stores — the latest close, and the window's total volume. No
-        # stricter check helps; it would take carrying the close and the bucket
-        # volumes, which no consumer needs.
+        # ``close_position`` is the one nothing here could ever check: it is a
+        # fraction of a ``latest_close`` this class does not store, and adding
+        # the field to store it serves no consumer.
         #
-        # Closeable but deferred: ``shape`` is fully determined by three fields
-        # stored right here (``value_area_width_ratio``, ``poc_position``,
-        # ``close_position``) and is NOT re-derived, so a hand-built profile can
-        # label itself ``P`` while its own numbers say otherwise — the same
-        # self-contradicting line the checks below exist to prevent.
-        # ``bucket_count`` likewise admits values no walk could have produced.
-        # Two narrower volume checks are available for the same reason
-        # (``value_area_volume_share`` reaching VALUE_AREA_FRACTION, and
-        # ``poc_volume_share >= 1 / bucket_count``), though the first needs that
-        # constant moved into ``common/`` first — ``volume_profile`` imports this
-        # module, so this module cannot import it back. All of these belong with
-        # the consumer that reads these fields, which does not exist yet.
-        #
-        # Be precise about what the rest gets, rather than claiming "everything
-        # else is checked": ``poc_position`` and ``value_area_width_ratio`` are
-        # cross-checked against the prices at the bottom of this method;
-        # ``poc_volume_share`` / ``value_area_volume_share`` get bounds and
-        # their ordering against each other, but nothing here can confirm the
-        # value area really holds VALUE_AREA_FRACTION of the volume (this class
-        # never sees the buckets); ``candle_count`` / ``bucket_count`` get
-        # bounds only, having nothing to be checked against either.
+        # The rest are checks that ARE definable and are deliberately not
+        # written, which is a different thing from impossible:
+        #   - ``shape`` is fully determined by ``value_area_width_ratio``,
+        #     ``poc_position`` and ``close_position``, all stored right here, yet
+        #     is never re-derived — so a hand-built profile can label itself
+        #     ``P`` while its own numbers say ``D``.
+        #   - ``candle_count`` admits 1-11, and ``bucket_count`` anything but 24;
+        #     no walk produces either.
+        #   - ``poc_volume_share`` cannot fall below ``1 / bucket_count`` (the
+        #     heaviest bucket is at least the average), and the producer's walk
+        #     always carries ``value_area_volume_share`` to VALUE_AREA_FRACTION.
+        # Most of those need thresholds that live in ``volume_profile``, which
+        # imports THIS module — so at module scope the dependency cannot run
+        # back the other way without moving the constants into ``common/``.
+        # They belong with the consumer that reads these fields, which does not
+        # exist yet; none of them is load-bearing while the producer is the only
+        # caller.
         if self.range_low <= 0:
             raise ValueError(f"VolumeProfile.range_low must be > 0, got {self.range_low}")
         if self.range_high <= self.range_low:

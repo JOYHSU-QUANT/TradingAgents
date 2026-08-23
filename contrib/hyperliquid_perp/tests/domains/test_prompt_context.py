@@ -335,6 +335,12 @@ def test_the_d_note_asserts_nothing_positive_about_the_distribution():
             volume_profile=_profile(
                 shape=ProfileShape.D,
                 poc_position=0.95,
+                # REQUIRED for this to be the case the comment describes. Left
+                # at the default 0.71 the close CONFIRMS the upward skew, and
+                # classify_shape would call this a P — the fixture would only
+                # look like a D because ``shape`` is not re-derived, which is
+                # the very gap VolumeProfile's own comment warns about.
+                close_position=0.29,
                 poc=Decimal("65700.0"),  # 60000 + 0.95 * 6000
                 value_area_low=Decimal("63250.0"),  # keeps the 11/24 width...
                 value_area_high=Decimal("66000.0"),  # ...and contains the POC

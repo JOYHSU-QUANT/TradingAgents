@@ -346,8 +346,9 @@ class VolumeProfile:
     are, which the geometry only sometimes implies — the rendered block usually
     differs between a heavy POC and a marginal one (the value-area walk stops
     on different buckets), but not always: when the walk stops on the SAME
-    buckets, two profiles whose POC held 78% and 99% of the window render
-    identically. ``poc_volume_share`` also has a floor the geometry hides —
+    buckets, two profiles whose POC held 79% and 99% of the window render
+    identically — pinned by
+    ``test_two_profiles_can_render_identically_yet_hold_very_different_volume``. ``poc_volume_share`` also has a floor the geometry hides —
     the heaviest bucket is at least the average, so it can never be below
     ``1 / bucket_count``.
 
@@ -384,17 +385,27 @@ class VolumeProfile:
         # bounds contradict each other — which would print as a confident,
         # nonsensical support/resistance level in the prompt.
         #
-        # THREE fields sit outside that guarantee, all for the same reason:
-        # ``close_position``, ``poc_volume_share`` and ``value_area_volume_share``
-        # are each a fraction of something this class never stores — the latest
-        # close, and the window's total volume. There is nothing here to check
-        # them against. That is not a gap a stricter check could close; it would
-        # take carrying the close and the bucket volumes, which no consumer
-        # needs. (Two narrower checks ARE available and deliberately skipped:
-        # the producer's walk guarantees ``value_area_volume_share`` reaches
-        # VALUE_AREA_FRACTION, and ``poc_volume_share >= 1 / bucket_count``
-        # follows from a stored field. Both belong with the volume-share
-        # consumer that does not exist yet.)
+        # What is NOT covered, in two groups — the distinction matters because
+        # only one of them is closeable here.
+        #
+        # Unclosable at this layer: ``close_position``, ``poc_volume_share`` and
+        # ``value_area_volume_share`` are each a fraction of something this class
+        # never stores — the latest close, and the window's total volume. No
+        # stricter check helps; it would take carrying the close and the bucket
+        # volumes, which no consumer needs.
+        #
+        # Closeable but deferred: ``shape`` is fully determined by three fields
+        # stored right here (``value_area_width_ratio``, ``poc_position``,
+        # ``close_position``) and is NOT re-derived, so a hand-built profile can
+        # label itself ``P`` while its own numbers say otherwise — the same
+        # self-contradicting line the checks below exist to prevent.
+        # ``bucket_count`` likewise admits values no walk could have produced.
+        # Two narrower volume checks are available for the same reason
+        # (``value_area_volume_share`` reaching VALUE_AREA_FRACTION, and
+        # ``poc_volume_share >= 1 / bucket_count``), though the first needs that
+        # constant moved into ``common/`` first — ``volume_profile`` imports this
+        # module, so this module cannot import it back. All of these belong with
+        # the consumer that reads these fields, which does not exist yet.
         #
         # Be precise about what the rest gets, rather than claiming "everything
         # else is checked": ``poc_position`` and ``value_area_width_ratio`` are

@@ -171,16 +171,16 @@ _MAX_CANDLE_AGE_INTERVALS = 3
 # The ceiling states three DECISION cycles, but is written out rather than
 # derived from the scheduler's CYCLE_INTERVAL: importing paper.scheduler here
 # would pull the whole paper engine into the keyless --context-only path to read
-# one timedelta. That costs roughly 25-30ms, measured as the MARGINAL import
-# once engine_bridge itself is loaded — import engine_bridge, then time
-# ``importlib.import_module("contrib.hyperliquid_perp.paper.scheduler")``, over
-# several runs rather than one. (Timing it from a cold interpreter instead
-# reports 105-145ms and answers a different question, since most of that is
-# already paid.) A range, not a point: repeated runs on one machine spread that
-# far, so a single reading would be a number nobody could reproduce. It is
-# quoted
-# because it is the whole reason for the duplication below, so it has to be
-# re-checkable. That leaves the value duplicated, so a
+# one timedelta. That costs tens of milliseconds — enough to be worth avoiding
+# on a path that exists to be cheap, and not worth pinning to a figure: three
+# separate measuring runs on this repo landed on materially different numbers,
+# so any range quoted here would be about the machine, not the import. What
+# stays useful is the RECIPE. Marginal cost (the one that matters): import
+# engine_bridge, then time
+# ``importlib.import_module("contrib.hyperliquid_perp.paper.scheduler")``.
+# Timing it from a cold interpreter instead measures something else — most of
+# that total is already paid by the time this decision is reached.
+# That leaves the value duplicated, so a
 # drift-lock test asserts the two against each other — a changed cycle length
 # fails a test instead of silently leaving this bound, and the operator-facing
 # "3 x the 4h decision cycle" text, lying. (Extracting CYCLE_INTERVAL into a

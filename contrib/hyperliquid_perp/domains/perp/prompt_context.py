@@ -115,12 +115,15 @@ def _volume_profile_lines(profile: VolumeProfile, candle_interval: str) -> list[
     return [
         # "as of the last closed candle" is not decoration. Every level below is
         # cut from CLOSED candles, so on a 4h interval the whole block can be up
-        # to one interval behind the live mark printed further up. Whenever the
-        # forming interval has moved past the window's own high-low, the mark
-        # falls OUTSIDE the Range printed here — that much follows from the
-        # definitions, without needing a frequency this file cannot cite. Same
-        # house rule as the freshness disclosures elsewhere in the context:
-        # state the vintage rather than let it be inferred.
+        # to one interval behind the live mark printed further up. Those two
+        # numbers come from different places and nothing reconciles them: the
+        # Range is the min/max of CLOSED candles, while the mark is read from
+        # the snapshot, so the mark can sit anywhere — including outside the
+        # Range this block prints — and no code here would notice. How often
+        # that happens is not something this file can honestly say; that it CAN
+        # happen is enough reason to date the block. Same house rule as the
+        # freshness disclosures elsewhere in the context: state the vintage
+        # rather than let it be inferred.
         f"Volume profile (rolling window of {profile.candle_count} x {candle_interval} "
         f"candles, as of the last closed candle):",
         f"  Range: {_num(profile.range_low)} - {_num(profile.range_high)}",

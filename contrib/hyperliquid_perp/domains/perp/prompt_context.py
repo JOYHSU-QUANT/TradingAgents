@@ -87,18 +87,19 @@ _SHAPE_NOTE = {
     ProfileShape.P: (
         "the heaviest single price bucket sits in the upper part of the range "
         "and the latest close is above the window's midpoint. Says nothing "
-        "about where the bulk of the volume sat — read the value area for that."
+        "about where the bulk of the volume sat."
     ),
     ProfileShape.B: (
         "the heaviest single price bucket sits in the lower part of the range "
         "and the latest close is below the window's midpoint. Says nothing "
-        "about where the bulk of the volume sat — read the value area for that."
+        "about where the bulk of the volume sat."
     ),
     ProfileShape.THIN: (
-        "the value area spans most of the range — the walk out from the POC had "
-        "to cross most of the range to reach the value-area share. Says nothing "
-        "about how evenly volume is spread: a window holding two separate "
-        "clusters with a quiet middle also lands here."
+        "the value area spans most of the range — the walk out from the POC "
+        "ended up that wide. Width is a property of the walk, not proof the "
+        "volume needed the range: between equal neighbours the walk expands "
+        "upward, so it can cross near-empty buckets, and a window holding two "
+        "separate clusters with a quiet middle also lands here."
     ),
 }
 

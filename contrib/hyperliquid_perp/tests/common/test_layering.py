@@ -85,7 +85,14 @@ def test_the_config_loader_imports_no_compute_module():
     def offender(kind: str, name: str | None, level: int) -> str | None:
         # level >= 1 is relative and ``name`` is already the tail; level 0 is
         # absolute and only counts when it names THIS package.
-        tail = name if level >= 1 else _package_tail(name)
+        #
+        # ``name is None`` on a relative node means ``from . import x`` — the
+        # package ITSELF, so it maps to "" (in no allowlist), exactly as
+        # _package_tail maps the bare absolute package. Letting it fall through
+        # as None would allow ``from . import volume_profile``, one keystroke
+        # from the already-flagged ``from .volume_profile import ...`` and the
+        # ordinary way to reach a sibling top-level module from the package root.
+        tail = (name or "") if level >= 1 else _package_tail(name)
         if tail is None or tail in allowed:
             return None
         return f"{kind} {'.' * level}{name or ''}"

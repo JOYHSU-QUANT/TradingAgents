@@ -458,6 +458,7 @@ def test_the_poc_band_thresholds_are_pinned_to_their_values():
             _candle(11, close, close, close, 1),
         ]
 
+    # --- Not LOOSER than 0.60/0.40: these two must stay D. ------------------
     # Close 96% up the range confirms an upward skew — still not a P.
     above_centre = _classify(_one_bucket(12, Decimal("123")))
     assert above_centre.poc_position == pytest.approx(25 / 48)
@@ -467,6 +468,19 @@ def test_the_poc_band_thresholds_are_pinned_to_their_values():
     below_centre = _classify(_one_bucket(11, Decimal("101")))
     assert below_centre.poc_position == pytest.approx(23 / 48)
     assert below_centre.shape is ProfileShape.D
+
+    # --- Not TIGHTER than 0.60/0.40: the first qualifying bucket each way. ---
+    # Without these the test's name overclaims: it pinned only the loosening
+    # direction, and `_POC_LOWER = 0.40 -> 0.30` survived the whole suite
+    # because every other fixture sits far from the edges (_b_shape at 0.021,
+    # _p_shape at 0.854). These two sit ON the first bucket that qualifies.
+    just_upper = _classify(_one_bucket(14, Decimal("123")))
+    assert just_upper.poc_position == pytest.approx(29 / 48)  # 0.6042, just over
+    assert just_upper.shape is ProfileShape.P
+
+    just_lower = _classify(_one_bucket(9, Decimal("101")))
+    assert just_lower.poc_position == pytest.approx(19 / 48)  # 0.3958, just under
+    assert just_lower.shape is ProfileShape.B
 
 
 def test_poc_ties_resolve_to_the_lowest_bucket_for_reproducibility():

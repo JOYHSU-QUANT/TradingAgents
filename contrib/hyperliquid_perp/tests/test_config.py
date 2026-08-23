@@ -166,7 +166,7 @@ def test_volume_profile_window_is_checked_against_the_same_lookback_default(
     # ``.get("candle_lookback", 500)`` pass the whole suite, which is precisely
     # the two-sides-disagree drift this test claims to catch.
     for window, ok in ((200, True), (201, False)):
-        path = tmp_path / f"vp-default-{window}-{len(lookback_line)}.yaml"
+        path = tmp_path / f"vp-default-{window}.yaml"
         path.write_text(
             f"market_data:\n{lookback_line}  volume_profile_window_candles: {window}\n",
             encoding="utf-8",

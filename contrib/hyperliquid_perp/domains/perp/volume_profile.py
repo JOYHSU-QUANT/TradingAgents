@@ -314,9 +314,16 @@ def classify_shape(profile: PriceDistribution, latest_close: Decimal) -> VolumeP
     The two tie-breaks therefore point in OPPOSITE directions — POC ties resolve
     downward, value-area ties upward. Neither direction means anything: a tie
     says the buckets are indistinguishable on volume, so there is no better
-    answer to pick. Each was fixed only to make the output reproducible, and
-    they were fixed independently rather than to a shared convention. Do not
-    read a signal into either one.
+    answer to pick. Each is pinned only to make the output reproducible, and
+    the two were chosen independently rather than to a shared convention —
+    both arrived in this module's first commit; neither was ever a repair. Do
+    not read a signal into either one.
+
+    The upward value-area tie-break has a visible consequence worth stating:
+    between equal neighbours the walk always climbs, so it can cross a run of
+    near-empty buckets before turning back. A wide value area is therefore
+    evidence about the WALK, not proof that the volume needed the range — see
+    the ``thin`` note in ``prompt_context``, which says so in the prompt.
 
     This single-bucket greedy walk is also not the Market Profile literature's
     rule, which compares the SUM OF THE NEXT TWO rows on each side. The two

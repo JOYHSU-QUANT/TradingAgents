@@ -293,12 +293,11 @@ def test_volume_profile_window_label_follows_the_contexts_candle_interval():
 # hand-set ``shape=`` field. The candle builders live next door in
 # test_volume_profile and already produce exactly these four letters.
 #
-# The earlier version of this block wrote the geometry out by hand and then
-# needed a second copy of classify_shape's rule LADDER here to check itself.
-# That mirror would drift silently the first time the production rules were
-# reordered, leaving the guard certifying fixtures the classifier no longer
-# agrees with — the very defect it was written to catch. Going through
-# ``_classify`` removes the mirror entirely.
+# Writing the geometry out by hand instead would need a second copy of
+# classify_shape's rule LADDER here to check itself, and that mirror would
+# drift silently the first time the production rules were reordered — leaving
+# the guard certifying fixtures the classifier no longer agrees with, the very
+# defect it exists to catch. Going through ``_classify`` avoids the mirror.
 _SHAPE_CANDLES = {
     ProfileShape.D: _d_shape,
     ProfileShape.P: _p_shape,
@@ -469,6 +468,39 @@ def test_the_thin_note_does_not_claim_volume_is_evenly_spread():
     # the model is not left to infer flatness from the letter.
     assert "value area spans most of the range" in line
     assert "two separate clusters" in line
+
+
+def test_the_thin_note_does_not_claim_the_volume_needed_the_range():
+    # The note may describe the WALK; it may not assert the range was required.
+    # Width is partly an artefact of the upward tie-break: between equal
+    # neighbours the walk always climbs, so it can cross a run of near-empty
+    # buckets before turning back to collect the heavy low ones.
+    #
+    # Three wide low-volume bars put a floor of volume in EVERY bucket, so the
+    # POC's two neighbours tie at that floor and the walk climbs to the top
+    # before turning down. Result: a value area covering 100% of the range
+    # while 71% of the volume sits in the bottom 12.5% of it. A note saying the
+    # walk "had to cross most of the range" is false here — which is what the
+    # first version of this reworded note claimed.
+    candles = (
+        [_candle(i, 100, 124, 112, 24) for i in range(3)]
+        + [_candle(3 + i, 100, 101, 100.5, 29) for i in range(10)]
+        + [_candle(13 + i, 102, 103, 102.5, 30) for i in range(11)]
+        + [_candle(24 + i, 114, 115, 114.5, 30) for i in range(6)]
+    )
+    profile = _classify(candles)
+    assert profile.shape is ProfileShape.THIN
+    assert profile.value_area_width_ratio == 1.0
+
+    total = sum(c.volume for c in candles)
+    concentrated = sum(c.volume for c in candles if c.high <= Decimal("103"))
+    # The premise: the range was NOT needed to hold the volume.
+    assert concentrated / total > Decimal("0.7")
+
+    line = _shape_line(profile)
+    assert "had to cross" not in line  # no causal claim...
+    assert "not proof the volume needed the range" in line  # ...an explicit denial
+    assert "property of the walk" in line
 
 
 def test_the_p_note_does_not_claim_where_the_bulk_of_the_volume_sat():

@@ -85,11 +85,17 @@ VALUE_AREA_FRACTION = Decimal("0.70")
 # stand in (design decision 1 in the plan).
 #
 # ``_THIN_VA_RATIO`` is at the uniform-distribution mark on purpose: volume
-# spread perfectly evenly puts ~70% of it inside ~70% of the range, so a value
-# area at or above this is "no price level held the activity" — the elongated
-# trend profile. Checked FIRST because a smeared profile's POC location carries
-# no information to classify on.
-_THIN_VA_RATIO = 0.70
+# spread perfectly evenly puts VALUE_AREA_FRACTION of it inside that same
+# fraction of the range, so a value area at or above this is "no price level
+# held the activity" — the elongated trend profile. Checked FIRST because a
+# smeared profile's POC location carries no information to classify on.
+#
+# DERIVED from VALUE_AREA_FRACTION rather than repeating its value: the
+# sentence above is the whole justification for the number, and it stays true
+# only if the two move together. Written as its own 0.70 they would silently
+# come apart the first time the value-area convention was changed, leaving a
+# threshold whose comment described a mark it no longer sat on.
+_THIN_VA_RATIO = float(VALUE_AREA_FRACTION)
 
 # The POC bands leave a middle zone for D. Deliberately wider than the
 # article's plain "upper half / lower half": a bare 0.5 split makes the label
@@ -161,20 +167,35 @@ def _bucket_edges(
 
     ``width * count`` does not reliably reproduce ``dist_high - dist_low``: at
     28 significant digits it can land a sub-ulp either side of it. WHETHER it
-    does depends on the coin's tick grid, so the rate is not one number.
-    Measured over 100k synthetic windows per grid: never on BTC's whole-dollar
-    ticks, never on ETH's 0.1 ticks, and about 0.5% of windows on a 0.01-tick
-    coin (split evenly between over- and undershoot).
+    does is governed by how many significant digits ``dist_low`` and ``width``
+    demand between them — the residual has to still be representable once the
+    two are added — so it is a property of the numbers' MAGNITUDES, not of the
+    coin's tick grid.
 
-    The overshoot half is the one that matters. When the value area reaches the
-    TOP bucket, an unpinned top edge becomes ``value_area_high`` — and a
-    ``value_area_high`` above ``range_high`` is exactly what
-    :class:`VolumeProfile`'s guard rejects, so the cycle would die on a
-    ValueError raised out of a pure function. On today's BTC-only config that
-    is unreachable; it is a latent crash that arrives with the first
-    finer-ticked coin, not a bug being fixed today. Taking the outer edges from
+    Sweeps of 50k synthetic windows each, comparing ``dist_low + width * 24``
+    to ``dist_high`` under this module's own 28-digit context:
+
+    - Hold the grid at BTC's whole dollars and vary only how WIDE the window
+      is: a realistic 30-candle high-low ($100-$12k) misses on 0% of windows,
+      an implausible $1k-$100k spread on 7.6%, an absurd $10k-$500k one on 37%.
+      One grid throughout — only the magnitude moved.
+    - Hold the window at 3-8% of each sample's own price and vary only the
+      grid — 1, 0.1, 0.01, 0.001 and 1e-8 ticks: every one comes out at 0%,
+      the sub-cent coin included. The tick grid is not the variable.
+
+    So no window this project can currently produce reaches it. Pinning is
+    still worth its zero cost, because the overshoot half is a crash: when the
+    value area reaches the TOP bucket, an unpinned top edge becomes
+    ``value_area_high``, and a ``value_area_high`` above ``range_high`` is
+    exactly what :class:`VolumeProfile`'s guard rejects — the cycle would die
+    on a ValueError raised out of a pure function. Taking the outer edges from
     the range itself makes them correct by definition rather than by rounding
-    luck, which costs nothing.
+    luck.
+
+    The sweeps above are a one-off; what stays checkable is
+    ``test_a_whole_dollar_range_overshoots_once_it_is_large_enough``, which
+    pins one concrete whole-dollar pair that overshoots — the counterexample to
+    reading any of this as "fine ticks overshoot, coarse ticks do not".
 
     (The undershoot half leaves a ~1e-27-wide sliver of price above the last
     bucket. Pinning closes that too, but the volume involved is ~1e-28 of one
@@ -284,6 +305,11 @@ def classify_shape(profile: PriceDistribution, latest_close: Decimal) -> VolumeP
     bucket, so the result is reproducible on a symmetric distribution instead
     of depending on iteration luck.
 
+    Alongside the geometry, the result carries how much VOLUME those levels
+    hold (``poc_volume_share`` / ``value_area_volume_share``). Nothing here
+    classifies on them — they exist because the ``*_position`` fields alone
+    cannot distinguish a dominant POC from a marginal one.
+
     Shape rules, checked in this order:
 
     1. ``thin`` — the value area spans at least :data:`_THIN_VA_RATIO` of the
@@ -319,7 +345,10 @@ def classify_shape(profile: PriceDistribution, latest_close: Decimal) -> VolumeP
     poc_index = volumes.index(max(volumes))
 
     with localcontext(DECIMAL_CONTEXT):
-        target = sum(volumes, Decimal(0)) * VALUE_AREA_FRACTION
+        # ``PriceDistribution`` guarantees a positive total, so both shares
+        # below divide by a non-zero number.
+        total = sum(volumes, Decimal(0))
+        target = total * VALUE_AREA_FRACTION
         low_index = high_index = poc_index
         held = volumes[poc_index]
         while held < target and (low_index > 0 or high_index < count - 1):
@@ -338,6 +367,15 @@ def classify_shape(profile: PriceDistribution, latest_close: Decimal) -> VolumeP
         poc = profile.range_low + width * (Decimal(poc_index) + Decimal("0.5"))
         span = profile.range_high - profile.range_low
         close_fraction = float((latest_close - profile.range_low) / span)
+        # How much volume the levels actually hold, which the geometry above
+        # cannot express: a POC owning 30% of the window and one owning 4% sit
+        # at the same place on the range and produce identical *_position
+        # fields. ``value_area_volume_share`` is the share the walk really
+        # reached, not VALUE_AREA_FRACTION — it stops on the first bucket that
+        # crosses the target, so it lands at or above it, never exactly on it
+        # except by coincidence.
+        poc_volume_share = float(volumes[poc_index] / total)
+        value_area_volume_share = float(held / total)
 
     # Derived from the bucket indices, not from the Decimal prices: the POC is
     # a bucket midpoint and the value-area edges are bucket edges, so integer
@@ -369,6 +407,8 @@ def classify_shape(profile: PriceDistribution, latest_close: Decimal) -> VolumeP
         poc_position=poc_position,
         close_position=close_position,
         value_area_width_ratio=value_area_width_ratio,
+        poc_volume_share=poc_volume_share,
+        value_area_volume_share=value_area_volume_share,
         candle_count=profile.candle_count,
         bucket_count=count,
     )

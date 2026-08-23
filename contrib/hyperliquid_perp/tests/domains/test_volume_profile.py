@@ -20,11 +20,12 @@ fixture with a hand-checkable answer. Three families of invariant:
 from __future__ import annotations
 
 import logging
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import pytest
 
 from contrib.hyperliquid_perp.common.constants import MIN_VOLUME_PROFILE_WINDOW
+from contrib.hyperliquid_perp.common.decimal_context import DECIMAL_CONTEXT
 from contrib.hyperliquid_perp.domains.perp.schema import Candle, ProfileShape, VolumeProfile
 from contrib.hyperliquid_perp.domains.perp.volume_profile import (
     BUCKET_COUNT,
@@ -32,6 +33,8 @@ from contrib.hyperliquid_perp.domains.perp.volume_profile import (
     MIN_WINDOW_CANDLES,
     VALUE_AREA_FRACTION,
     PriceDistribution,
+    _bucket_edges,
+    _bucket_width,
     build_profile,
     classify_shape,
     compute_volume_profile,
@@ -69,7 +72,7 @@ def _d_shape() -> list[Candle]:
 
 
 def _p_shape() -> list[Candle]:
-    """Fat node at the TOP of the range, close high — buyers absorbed the move."""
+    """Fat node at the TOP of the range, close high — the geometry P tests for."""
     return _wide_tails(4, 108, volume=4) + [_candle(i, 108, 110, 109, 60) for i in range(4, 16)]
 
 
@@ -118,6 +121,18 @@ def test_the_runtime_floor_is_the_same_constant_the_config_loader_enforces():
     # symptom is a prompt section that never appears. The name lives in
     # common/constants.py so the loader need not import this compute module.
     assert MIN_WINDOW_CANDLES is MIN_VOLUME_PROFILE_WINDOW
+
+
+def test_the_thin_threshold_tracks_the_value_area_convention():
+    # Same shape of pin as the floor-constant check above. _THIN_VA_RATIO's
+    # whole justification is that it sits at the uniform-distribution mark:
+    # volume spread perfectly evenly puts VALUE_AREA_FRACTION of itself inside
+    # that same fraction of the range. Written out as its own 0.70 the two
+    # would come apart the first time the value-area convention moved, leaving
+    # a threshold whose comment described a mark it no longer sat on.
+    from contrib.hyperliquid_perp.domains.perp import volume_profile as vp
+
+    assert float(VALUE_AREA_FRACTION) == vp._THIN_VA_RATIO
 
 
 def test_window_wider_than_the_available_history_is_refused_not_narrowed():
@@ -245,9 +260,11 @@ def test_a_candle_spanning_the_whole_range_spreads_evenly():
 def test_value_area_can_reach_a_range_whose_width_does_not_divide_evenly():
     # Mutation-checked. ``(range_high - range_low) / 24 * 24`` can overshoot
     # range_high; 452.59-937.7339 is such a range. It is NOT BTC-shaped on
-    # purpose — whole-dollar and 0.1 ticks never overshoot, so a BTC-like
-    # fixture would pass with the pin removed (see _bucket_edges for the
-    # per-tick-grid rates). If the top bucket edge were recomputed from the
+    # purpose: a range of the size this project actually profiles does not
+    # overshoot, so a BTC-like fixture would pass with the pin removed. That is
+    # about the range's MAGNITUDE, not its tick grid — whole-dollar prices
+    # overshoot too once they are large enough, which the test below pins.
+    # If the top bucket edge were recomputed from the
     # width instead of pinned to range_high, a value area reaching that bucket
     # would carry a value_area_high a hair ABOVE range_high — which
     # VolumeProfile's own guard rejects, killing the cycle with a ValueError
@@ -258,6 +275,33 @@ def test_value_area_can_reach_a_range_whose_width_does_not_divide_evenly():
     profile = _classify(candles)  # must not raise
     assert profile.value_area_high == Decimal("937.7339")
     assert profile.value_area_high == profile.range_high
+
+
+def test_a_whole_dollar_range_overshoots_once_it_is_large_enough():
+    """The counterexample to "fine ticks overshoot, coarse ticks do not".
+
+    ``_bucket_edges``'s docstring attributes the ``width * count`` residual to
+    the MAGNITUDES involved, not to the coin's tick grid. This pins the half of
+    that claim a fixture can hold still: a range on BTC's own whole-dollar grid
+    that overshoots anyway, because ``range_low`` and ``width`` together demand
+    more than the context's 28 significant digits.
+
+    Kept as one hand-checked pair rather than a sweep — the rates quoted in
+    that docstring came from a one-off script, and a 50k-window sweep in the
+    suite would trade real seconds for a number nothing depends on.
+    """
+    low, high = Decimal("109618"), Decimal("509273")
+    with localcontext(DECIMAL_CONTEXT):
+        # Production's own width, not a hand-rolled copy of the formula — a
+        # copy would keep passing after _bucket_width changed underneath it.
+        unpinned_top = low + _bucket_width(low, high, BUCKET_COUNT) * BUCKET_COUNT
+    # Both operands are whole dollars, and it still misses.
+    assert low == low.to_integral_value()
+    assert high == high.to_integral_value()
+    assert unpinned_top > high
+    # ...and the pin is what keeps that out of value_area_high, which
+    # VolumeProfile's guard would reject.
+    assert _bucket_edges(low, high, BUCKET_COUNT - 1, BUCKET_COUNT)[1] == high
 
 
 def test_build_profile_is_deterministic():
@@ -441,6 +485,54 @@ def test_classify_accepts_a_close_exactly_on_either_range_edge():
 # --------------------------------------------------------------------------
 # compute_volume_profile — the wrapper the context builder uses.
 # --------------------------------------------------------------------------
+
+
+def test_the_volume_shares_separate_a_dominant_poc_from_a_marginal_one():
+    # The whole reason these two fields exist: geometry cannot tell a POC that
+    # owned most of the window from one that barely won its bucket. Both
+    # fixtures below put the fat node in the SAME place, so every *_position
+    # field matches — only the shares move.
+    # The node sits inside ONE bucket in both, so the POC lands on the same
+    # bucket and poc_position is identical. Only the weight behind it differs.
+    # (value_area_width_ratio is NOT held equal — the outward walk stops at a
+    # different bucket when the weights change, which is correct behaviour.)
+    node = [_candle(i, "105.05", "105.35", "105.2", 400) for i in range(4, 16)]
+    dominant = _wide_tails(4, "105.2", volume=1) + node
+    marginal = _wide_tails(20, "105.2", volume=100) + [
+        _candle(i, "105.05", "105.35", "105.2", 45) for i in range(20, 32)
+    ]
+    hot, cool = _classify(dominant), _classify(marginal)
+
+    assert hot.poc == cool.poc
+    assert hot.poc_position == cool.poc_position
+    # ...and yet they are not the same profile, which is the point.
+    assert hot.poc_volume_share > 0.9
+    assert cool.poc_volume_share < 0.4
+
+
+def test_the_value_area_share_is_what_the_walk_reached_not_the_target():
+    # It must be the volume the walk ACTUALLY holds, not VALUE_AREA_FRACTION
+    # echoed back: the walk stops on the first bucket that crosses the target,
+    # so it lands at or above it. Returning the constant would look right in
+    # every assertion that only checks ">= 0.70".
+    profile = _classify(_d_shape())
+    assert profile.value_area_volume_share >= float(VALUE_AREA_FRACTION)
+    assert profile.value_area_volume_share != float(VALUE_AREA_FRACTION)
+    # The POC bucket is inside the value area, so its share cannot exceed it.
+    assert profile.poc_volume_share <= profile.value_area_volume_share
+
+
+def test_the_shares_are_fractions_of_volume_not_of_the_range():
+    # A concentrated profile pulls the two apart in OPPOSITE directions: its
+    # value area covers a small slice of the RANGE while holding most of the
+    # VOLUME. That is only possible if they measure different things.
+    #
+    # Deliberately not asserted on a thin profile: volume spread perfectly
+    # evenly puts N/24 of the volume in N/24 of the range, so the two numbers
+    # coincide there and the assertion would pass whichever one were returned.
+    profile = _classify(_d_shape())
+    assert profile.value_area_width_ratio < 0.4
+    assert profile.value_area_volume_share > 0.7
 
 
 def test_compute_matches_building_and_classifying_separately():

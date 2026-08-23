@@ -170,8 +170,14 @@ _MAX_CANDLE_AGE_INTERVALS = 3
 # cycles of stale data, and never so tight that ordinary jitter refuses a cycle.
 # The ceiling states three DECISION cycles, but is written out rather than
 # derived from the scheduler's CYCLE_INTERVAL: importing paper.scheduler here
-# would pull the whole paper engine into the keyless --context-only path (25ms
-# measured) to read one timedelta. That leaves the value duplicated, so a
+# would pull the whole paper engine into the keyless --context-only path to read
+# one timedelta. That costs 24-25ms, measured as the MARGINAL import once
+# engine_bridge itself is loaded — import engine_bridge, then time
+# ``importlib.import_module("contrib.hyperliquid_perp.paper.scheduler")``.
+# (Timing it from a cold interpreter instead reports ~105ms and answers a
+# different question, since most of that is already paid.) The number is quoted
+# because it is the whole reason for the duplication below, so it has to be
+# re-checkable. That leaves the value duplicated, so a
 # drift-lock test asserts the two against each other — a changed cycle length
 # fails a test instead of silently leaving this bound, and the operator-facing
 # "3 x the 4h decision cycle" text, lying. (Extracting CYCLE_INTERVAL into a
@@ -198,8 +204,13 @@ def _candle_age_limit(interval_ms: int, interval: str) -> tuple[int, str]:
             f"{_MAX_CANDLE_AGE_INTERVALS} x the {_CYCLE_LABEL} decision cycle"
         )
     if base < _MAX_CANDLE_AGE_FLOOR_MS:
+        # The floor's label is DERIVED, like the ceiling's above. Written out as
+        # "30m" it would keep telling the operator 30m after the constant moved
+        # — the one branch of this function whose derivation did not travel with
+        # its number, which is the property the docstring claims for all of them.
         return _MAX_CANDLE_AGE_FLOOR_MS, (
-            f"{_MAX_CANDLE_AGE_INTERVALS} x {interval} raised to the 30m floor"
+            f"{_MAX_CANDLE_AGE_INTERVALS} x {interval} raised to the "
+            f"{_MAX_CANDLE_AGE_FLOOR_MS // 60_000}m floor"
         )
     return base, f"{_MAX_CANDLE_AGE_INTERVALS} x {interval}"
 

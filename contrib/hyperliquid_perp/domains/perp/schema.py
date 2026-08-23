@@ -295,6 +295,33 @@ class AccountSnapshot:
 # --------------------------------------------------------------------------
 
 
+def _check_derived_fraction(label: str, claimed: float, numerator: Decimal, span: Decimal) -> None:
+    """Raise unless ``claimed`` really is ``numerator / span``.
+
+    A DTO that stores BOTH a ratio and the values it was computed from can be
+    handed the two disagreeing, and every bounds check still passes — the
+    contradiction only shows up in whatever renders them side by side. This is
+    the one shared statement of that invariant.
+
+    Tolerance rather than equality, because three effects make exact agreement
+    the wrong bar: the ratio is a ``float`` while its sources are ``Decimal``,
+    a producer may quantize the sources to a grid (see
+    ``volume_profile._bucket_edges``, which pins its outermost edges), and a
+    DTO rebuilt from rounded values would otherwise be unconstructible. 1e-6 is
+    orders of magnitude above all three and orders below any contradiction
+    worth catching.
+
+    Only ``VolumeProfile`` calls this today. ``PerpMarketContext.day_change_pct``
+    has the same shape and is NOT yet guarded — see the follow-up issue; that
+    DTO is constructed in far more places and tightening it needs its own pass.
+    """
+    expected = float(numerator / span)
+    if abs(claimed - expected) > 1e-6:
+        raise ValueError(
+            f"{label} ({claimed}) contradicts the values it is derived from — those give {expected}"
+        )
+
+
 @dataclass(frozen=True)
 class VolumeProfile:
     """Where traded volume sat in the price range over a rolling candle window.
@@ -307,8 +334,17 @@ class VolumeProfile:
 
     Prices are :class:`~decimal.Decimal` like every other price in this module.
     The three ``*_position`` / ``*_ratio`` fields are derived fractions of the
-    window's own price range, in ``[0, 1]``, and are ``float`` because they are
+    window's own price RANGE, in ``[0, 1]``, and are ``float`` because they are
     ratios the prompt prints as percentages — never money.
+
+    The two ``*_volume_share`` fields are fractions of the window's VOLUME, not
+    of its price range: how much of the traded volume the POC bucket alone held,
+    and how much the whole value area held. They are the only thing separating a
+    profile whose POC owned 30% of the window from one whose POC owned 4% —
+    geometry cannot tell those apart, and today they render identically.
+    Carried but deliberately NOT rendered: the prompt block's wording is fixed
+    by the rulings on this PR, and these exist so the frozen DTO already carries
+    them when a gate or sizing consumer needs to ask "is this level real?".
 
     ``candle_count`` is the number of candles ACTUALLY folded in (which equals
     the configured window — :func:`.volume_profile.build_profile` refuses a
@@ -327,6 +363,8 @@ class VolumeProfile:
     poc_position: float
     close_position: float
     value_area_width_ratio: float
+    poc_volume_share: float
+    value_area_volume_share: float
     candle_count: int
     bucket_count: int
 
@@ -336,6 +374,13 @@ class VolumeProfile:
         # fixture, a future caller) unable to hand the renderer a profile whose
         # bounds contradict each other — which would print as a confident,
         # nonsensical support/resistance level in the prompt.
+        #
+        # ONE field is deliberately outside that guarantee: ``close_position``.
+        # It is a fraction of a ``latest_close`` this class never stores, so
+        # there is nothing here to check it against — not a gap that could be
+        # closed by a stricter check, but by carrying the close, which no
+        # consumer needs. Everything else IS cross-checked, including the
+        # price-vs-fraction agreement at the bottom of this method.
         if self.range_low <= 0:
             raise ValueError(f"VolumeProfile.range_low must be > 0, got {self.range_low}")
         if self.range_high <= self.range_low:
@@ -376,6 +421,40 @@ class VolumeProfile:
             raise ValueError(f"VolumeProfile.candle_count must be >= 1, got {self.candle_count}")
         if self.bucket_count < 1:
             raise ValueError(f"VolumeProfile.bucket_count must be >= 1, got {self.bucket_count}")
+        for name in ("poc_volume_share", "value_area_volume_share"):
+            value = getattr(self, name)
+            if not 0.0 < value <= 1.0:
+                raise ValueError(
+                    f"VolumeProfile.{name} is a share of the window's traded volume and "
+                    f"must be in (0, 1], got {value}"
+                )
+        # The value area is grown outward FROM the POC bucket, so the POC bucket
+        # is always one of the buckets the area holds — its share cannot exceed
+        # the area's. A profile claiming otherwise came from a walk that lost
+        # track of which buckets it had taken.
+        if self.poc_volume_share > self.value_area_volume_share:
+            raise ValueError(
+                f"VolumeProfile.poc_volume_share ({self.poc_volume_share}) cannot exceed "
+                f"value_area_volume_share ({self.value_area_volume_share}) — the POC "
+                f"bucket sits inside the value area"
+            )
+        # Cross-check the derived fractions against the prices they came FROM.
+        # Without this, every guard above constrains the two halves SEPARATELY:
+        # a profile could satisfy all of them while claiming a ``poc_position``
+        # of 0.01 for a ``poc`` sitting mid-range, and the renderer would print
+        # "POC: 105.00 (1% up the range)" — one line contradicting itself. The
+        # producer derives both from the same bucket index, so this can only
+        # fire on a hand-built profile.
+        span = self.range_high - self.range_low
+        _check_derived_fraction(
+            "VolumeProfile.poc_position", self.poc_position, self.poc - self.range_low, span
+        )
+        _check_derived_fraction(
+            "VolumeProfile.value_area_width_ratio",
+            self.value_area_width_ratio,
+            self.value_area_high - self.value_area_low,
+            span,
+        )
         # Coerce like ``market_regime``: a plain string (fixture, recorded row)
         # is accepted, an unknown one raises here rather than at render time.
         object.__setattr__(self, "shape", ProfileShape(self.shape))

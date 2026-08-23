@@ -303,9 +303,14 @@ def _profile(**overrides) -> dict:
         "value_area_high": Decimal("107"),
         "range_low": Decimal("100"),
         "range_high": Decimal("110"),
+        # These agree with the prices above — (105-100)/10 and (107-103)/10 —
+        # because VolumeProfile cross-checks them. Overriding a fraction on its
+        # own now fails construction, which is the guard doing its job.
         "poc_position": 0.5,
         "close_position": 0.5,
         "value_area_width_ratio": 0.4,
+        "poc_volume_share": 0.2,
+        "value_area_volume_share": 0.72,
         "candle_count": 30,
         "bucket_count": 24,
     }
@@ -337,6 +342,21 @@ def test_volume_profile_builds_from_consistent_values():
         ({"value_area_width_ratio": 1.5}, "value_area_width_ratio"),
         ({"candle_count": 0}, "candle_count must be >= 1"),
         ({"bucket_count": 0}, "bucket_count must be >= 1"),
+        # Shares of the window's VOLUME: a share of zero means the POC bucket
+        # traded nothing, which contradicts it being the heaviest bucket.
+        ({"poc_volume_share": 0.0}, "poc_volume_share"),
+        ({"poc_volume_share": 1.5}, "poc_volume_share"),
+        ({"value_area_volume_share": 0.0}, "value_area_volume_share"),
+        ({"value_area_volume_share": 1.5}, "value_area_volume_share"),
+        # The value area is grown outward FROM the POC bucket, so the POC's
+        # share is one of the buckets the area holds and cannot exceed it.
+        ({"poc_volume_share": 0.9}, "cannot exceed"),
+        # The fractions must agree with the prices they claim to come from.
+        # Both of these are individually in-bounds and pass every other guard;
+        # only the cross-check catches them, and without it the renderer would
+        # print "POC: 105.00 (90% up the range)" for a POC sitting mid-range.
+        ({"poc_position": 0.9}, "contradicts the values"),
+        ({"value_area_width_ratio": 0.9}, "contradicts the values"),
     ],
 )
 def test_volume_profile_rejects_self_contradictory_values(overrides, match):

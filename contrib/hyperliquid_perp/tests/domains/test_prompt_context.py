@@ -166,16 +166,31 @@ def test_unknown_market_regime_raises_at_construction():
 
 
 def _profile(**overrides) -> VolumeProfile:
+    """A SELF-CONSISTENT profile: the fractions agree with the prices.
+
+    ``VolumeProfile`` cross-checks ``poc_position`` and
+    ``value_area_width_ratio`` against the prices they claim to be derived
+    from, so a fixture can no longer render "63,450.00 (62% up the range)" for
+    a POC that actually sits at 50% of its range — which the first version of
+    this fixture did, and which is precisely the self-contradicting line the
+    guards exist to keep out of a prompt.
+
+    Range 60,000-66,000 over 24 buckets makes a bucket 250 wide, so every level
+    here is a round number and each percentage is hand-checkable. Overriding a
+    fraction means overriding its price too.
+    """
     base = {
         "shape": ProfileShape.P,
-        "poc": Decimal("63450.0"),
-        "value_area_low": Decimal("61900.0"),
-        "value_area_high": Decimal("65100.0"),
-        "range_low": Decimal("60100.0"),
-        "range_high": Decimal("66800.0"),
-        "poc_position": 0.62,
+        "poc": Decimal("63625.0"),  # bucket 14's midpoint
+        "value_area_low": Decimal("62250.0"),  # bucket 9's lower edge
+        "value_area_high": Decimal("65000.0"),  # bucket 19's upper edge
+        "range_low": Decimal("60000.0"),
+        "range_high": Decimal("66000.0"),
+        "poc_position": 29 / 48,  # == (63625 - 60000) / 6000
         "close_position": 0.71,
-        "value_area_width_ratio": 0.4583333333333333,
+        "value_area_width_ratio": 11 / 24,  # == (65000 - 62250) / 6000
+        "poc_volume_share": 0.18,
+        "value_area_volume_share": 0.74,
         "candle_count": 30,
         "bucket_count": 24,
     }
@@ -202,12 +217,39 @@ def test_adding_a_volume_profile_changes_nothing_else_in_the_render():
 
 def test_volume_profile_section_reports_every_level_and_the_window():
     text = render_market_context(_ctx(volume_profile=_profile()))
-    assert "Volume profile (rolling window of 30 x 4h candles):" in text
-    assert "Range: 60,100.00 - 66,800.00" in text
-    assert "POC (most-traded price): 63,450.00 (62% up the range)" in text
-    assert "Value area (70% of volume): 61,900.00 - 65,100.00 (46% of the range width)" in text
+    assert "Volume profile (rolling window of 30 x 4h candles, as of the last closed candle):" in (
+        text
+    )
+    assert "Range: 60,000.00 - 66,000.00" in text
+    assert "POC (most-traded price): 63,625.00 (60% up the range)" in text
+    assert "Value area (70% of volume): 62,250.00 - 65,000.00 (46% of the range width)" in text
     assert "Latest close sits 71% up the range" in text
     assert "NaN" not in text
+
+
+def test_the_block_states_that_its_levels_come_from_closed_candles():
+    # Every level in the block is cut from CLOSED candles, so on a 4h interval
+    # it can trail the live mark printed further up by a whole interval. The
+    # vintage is stated rather than left to be inferred — same disclosure rule
+    # the rest of the context follows. Pinned separately from the label test
+    # above so deleting the phrase fails on its own reason.
+    text = render_market_context(_ctx(volume_profile=_profile()))
+    header = next(line for line in text.splitlines() if line.startswith("Volume profile"))
+    assert "as of the last closed candle" in header
+
+
+def test_the_value_area_share_is_taken_from_the_constant_not_written_out(monkeypatch):
+    # The rendered "70%" must BE VALUE_AREA_FRACTION, not a literal that agrees
+    # with it today. Written out, it would keep telling the model 70% after the
+    # convention moved, and every other assertion in this file would still pass
+    # — which is the whole failure mode. monkeypatch (not a bare rebind) so the
+    # module is restored even if the assertions below fail.
+    from contrib.hyperliquid_perp.domains.perp import prompt_context as pc
+
+    monkeypatch.setattr(pc, "VALUE_AREA_FRACTION", Decimal("0.55"))
+    text = render_market_context(_ctx(volume_profile=_profile()))
+    assert "Value area (55% of volume):" in text
+    assert "70% of volume" not in text
 
 
 def test_volume_profile_states_the_coarse_candle_basis():
@@ -261,17 +303,44 @@ def test_each_shape_renders_its_own_note(shape):
     assert _SHAPE_MARKER[shape] in line
 
 
+@pytest.mark.parametrize("shape", list(ProfileShape))
+def test_no_shape_note_attributes_the_volume_to_buyers_or_sellers(shape):
+    # The notes state geometry and stop. Two reasons they must: this file keeps
+    # directional framing out of its strings (see _REGIME_NOTE), and the same
+    # geometry carries opposite readings — a P is absorption to one school and
+    # short covering to another. Nothing here measured which, so nothing here
+    # may name one. Without this test the phrasing drifts back the moment
+    # someone finds the geometric wording dry: every other assertion in this
+    # file passes with "— buyers absorbed the move up" appended.
+    text = render_market_context(_ctx(volume_profile=_profile(shape=shape)))
+    line = next(line for line in text.splitlines() if line.strip().startswith("Shape:"))
+    for attribution in ("buyer", "seller", "absorb", "covering", "liquidation", "bull", "bear"):
+        assert attribution not in line.lower()
+
+
 def test_the_d_note_asserts_nothing_positive_about_the_distribution():
     # D is classify_shape's catch-all: it fires both for a centred POC and for
     # a POC skewed to one end whose close did not confirm it. So the note must
     # not claim centrality — a skewed-POC D is the MAJORITY case, and the claim
     # would sit one line under a POC reading that contradicts it. Rendered here
     # with a POC at 95% of the range, which is a legal D.
+    #
+    # The POC price and the value area move WITH poc_position: the fixture is
+    # cross-checked, and a 95% POC left at the default 63,625 would be the very
+    # self-contradicting line this file is trying to keep out.
     text = render_market_context(
-        _ctx(volume_profile=_profile(shape=ProfileShape.D, poc_position=0.95))
+        _ctx(
+            volume_profile=_profile(
+                shape=ProfileShape.D,
+                poc_position=0.95,
+                poc=Decimal("65700.0"),  # 60000 + 0.95 * 6000
+                value_area_low=Decimal("63250.0"),  # keeps the 11/24 width...
+                value_area_high=Decimal("66000.0"),  # ...and contains the POC
+            )
+        )
     )
     line = next(line for line in text.splitlines() if line.strip().startswith("Shape:"))
-    assert "POC (most-traded price): 63,450.00 (95% up the range)" in text
+    assert "POC (most-traded price): 65,700.00 (95% up the range)" in text
     # No positive claim about where the volume sat...
     assert "volume is concentrated" not in line
     # ...it names itself as the catch-all, admits the skewed case, and points

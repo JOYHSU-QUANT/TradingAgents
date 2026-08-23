@@ -915,6 +915,16 @@ def test_freshness_ceiling_tracks_the_decision_cycle():
     assert f"{int(CYCLE_INTERVAL.total_seconds()) // 3600}h" == bridge_mod._CYCLE_LABEL
 
 
+def test_the_freshness_floor_label_is_derived_from_the_floor():
+    # The ceiling's label above is derived and drift-locked; the floor's was
+    # written out as "30m". Both are read by an operator judging whether a
+    # refusal is reasonable, so both have to keep tracking their constant —
+    # which is what _candle_age_limit's docstring claims for every branch.
+    _, how = bridge_mod._candle_age_limit(60_000, "1m")  # 3 x 1m -> under the floor
+    assert how == "3 x 1m raised to the 30m floor"
+    assert f"{bridge_mod._MAX_CANDLE_AGE_FLOOR_MS // 60_000}m floor" in how
+
+
 def test_refusal_age_carries_seconds_past_the_limit():
     # The whole reason _format_duration_ms grew a seconds field: at minute
     # resolution every age in the first minute past the limit renders AS the

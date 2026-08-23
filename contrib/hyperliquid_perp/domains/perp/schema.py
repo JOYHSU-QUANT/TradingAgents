@@ -312,8 +312,10 @@ def _check_derived_fraction(label: str, claimed: float, numerator: Decimal, span
     worth catching.
 
     Only ``VolumeProfile`` calls this today. ``PerpMarketContext.day_change_pct``
-    has the same shape and is NOT yet guarded — see the follow-up issue; that
-    DTO is constructed in far more places and tightening it needs its own pass.
+    has the same shape — a float ratio stored beside the two Decimal prices it
+    comes from — and is NOT guarded. That is a deliberate deferral, not an
+    oversight: that DTO is constructed in far more places, so tightening it
+    needs its own pass rather than riding along with the volume profile.
     """
     expected = float(numerator / span)
     if abs(claimed - expected) > 1e-6:
@@ -379,8 +381,16 @@ class VolumeProfile:
         # It is a fraction of a ``latest_close`` this class never stores, so
         # there is nothing here to check it against — not a gap that could be
         # closed by a stricter check, but by carrying the close, which no
-        # consumer needs. Everything else IS cross-checked, including the
-        # price-vs-fraction agreement at the bottom of this method.
+        # consumer needs.
+        #
+        # Be precise about what the rest gets, rather than claiming "everything
+        # else is checked": ``poc_position`` and ``value_area_width_ratio`` are
+        # cross-checked against the prices at the bottom of this method;
+        # ``poc_volume_share`` / ``value_area_volume_share`` get bounds and
+        # their ordering against each other, but nothing here can confirm the
+        # value area really holds VALUE_AREA_FRACTION of the volume (this class
+        # never sees the buckets); ``candle_count`` / ``bucket_count`` get
+        # bounds only, having nothing to be checked against either.
         if self.range_low <= 0:
             raise ValueError(f"VolumeProfile.range_low must be > 0, got {self.range_low}")
         if self.range_high <= self.range_low:

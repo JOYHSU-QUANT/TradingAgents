@@ -923,6 +923,11 @@ def test_the_freshness_floor_label_is_derived_from_the_floor():
     _, how = bridge_mod._candle_age_limit(60_000, "1m")  # 3 x 1m -> under the floor
     assert how == "3 x 1m raised to the 30m floor"
     assert f"{bridge_mod._MAX_CANDLE_AGE_FLOOR_MS // 60_000}m floor" in how
+    # The label renders whole minutes by floor division, so it is only honest
+    # while the constant IS whole minutes. Left unstated, a floor of 25m30s
+    # would print "25m" and understate the bound actually being enforced —
+    # the same "label drifted from its constant" defect one size smaller.
+    assert bridge_mod._MAX_CANDLE_AGE_FLOOR_MS % 60_000 == 0
 
 
 def test_refusal_age_carries_seconds_past_the_limit():

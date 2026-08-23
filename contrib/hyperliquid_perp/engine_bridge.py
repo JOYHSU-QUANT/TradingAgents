@@ -208,6 +208,9 @@ def _candle_age_limit(interval_ms: int, interval: str) -> tuple[int, str]:
         # "30m" it would keep telling the operator 30m after the constant moved
         # — the one branch of this function whose derivation did not travel with
         # its number, which is the property the docstring claims for all of them.
+        # Whole minutes by floor division, which is honest only while the
+        # constant is whole minutes; a test asserts that rather than leaving the
+        # assumption to be discovered by a truncated label.
         return _MAX_CANDLE_AGE_FLOOR_MS, (
             f"{_MAX_CANDLE_AGE_INTERVALS} x {interval} raised to the "
             f"{_MAX_CANDLE_AGE_FLOOR_MS // 60_000}m floor"
@@ -471,7 +474,9 @@ def _context_refusal_error(
 # names the host clock as the cause in a refusal). Log-only — the age check
 # against the exchange's clock is the gate — so this is an operator nudge, not
 # a correctness bound: one minute is far outside anything NTP leaves behind and
-# far inside the 30m floor of the limit the skew would have to reach to matter.
+# far inside ``_MAX_CANDLE_AGE_FLOOR_MS``, the floor of the limit the skew would
+# have to reach to matter. (Named, not written out as "30m": this is one of the
+# sites that would keep quoting the old number if that constant moved.)
 # Deliberately NOT the kill switch's 5s ``_MAX_CLOCK_SKEW_S``: that bound is
 # about absolute scheduleCancel deadlines, where seconds change the protection
 # window; here seconds change nothing, and importing live.kill_switch would
@@ -517,8 +522,10 @@ def _host_clock_freshness_refusal(
     its clock reading precedes the market reads, so a boundary closing in
     between lands slightly ahead of it. (The one-shot callers read after the
     fetch and expect no negative at all.) Sharing the bound keeps that slack
-    comfortably wide at every interval — the gap spans two REST calls, so its
-    30m floor is ~30x the default network_timeout_s — instead of inventing a
+    comfortably wide at every interval: the gap spans two REST calls, so at the
+    default ``network_timeout_s`` of 30 the worst case it has to cover is 60s,
+    against a floor (``_MAX_CANDLE_AGE_FLOOR_MS``) of 1800s — 30x that gap, or
+    60x a single timeout. Sharing it beats inventing a
     second threshold to re-derive whenever that timeout changes. (config
     validates network_timeout_s as a number but sets no upper bound, so a
     deployment choosing minutes-long timeouts would need this revisited.)

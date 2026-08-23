@@ -248,6 +248,80 @@ def test_build_market_context_carries_the_exchange_clock_through(
         build_market_context("BTC", snapshot, candles, funding, **kwargs)
 
 
+def test_volume_profile_is_absent_unless_a_window_is_configured(
+    meta_and_asset_ctxs, candle_snapshot, funding_history
+):
+    # The feature is OFF by default, and the default is reachable by simply not
+    # passing the kwarg — the opposite of exchange_time above, and deliberately
+    # so: omitting an optional analyst input is the safe direction, whereas
+    # omitting the exchange clock re-opens the issue-#51 blind spot.
+    snapshot = mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC")
+    candles = mapper.map_candles(candle_snapshot)
+    funding = mapper.map_funding_history(funding_history)
+    kwargs = {
+        "candle_interval": "4h",
+        "funding_window_days": 30,
+        "indicator_names": ["rsi_14"],
+        "exchange_time": None,
+    }
+    assert build_market_context("BTC", snapshot, candles, funding, **kwargs).volume_profile is None
+    assert (
+        build_market_context(
+            "BTC", snapshot, candles, funding, volume_profile_window=0, **kwargs
+        ).volume_profile
+        is None
+    )
+
+
+def test_volume_profile_is_cut_from_the_same_candles_as_the_indicators(
+    meta_and_asset_ctxs, candle_snapshot, funding_history
+):
+    # Same series, same window semantics: a profile built from some *other*
+    # slice would describe a different stretch of history than the regime does
+    # while sitting in the same prompt.
+    from contrib.hyperliquid_perp.domains.perp.volume_profile import compute_volume_profile
+
+    snapshot = mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC")
+    candles = mapper.map_candles(candle_snapshot)
+    funding = mapper.map_funding_history(funding_history)
+    ctx = build_market_context(
+        "BTC",
+        snapshot,
+        candles,
+        funding,
+        candle_interval="4h",
+        funding_window_days=30,
+        indicator_names=["rsi_14", "ema_20", "ema_50", "atr_14"],
+        exchange_time=None,
+        volume_profile_window=30,
+    )
+    assert ctx.volume_profile is not None
+    assert ctx.volume_profile == compute_volume_profile(candles, 30)
+    assert ctx.volume_profile.candle_count == 30
+
+
+def test_volume_profile_stays_none_when_the_window_cannot_be_filled(
+    meta_and_asset_ctxs, candle_snapshot, funding_history
+):
+    # Fail-closed all the way to the context: too little history leaves the
+    # field absent rather than producing a narrower profile that claims 30.
+    snapshot = mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC")
+    candles = mapper.map_candles(candle_snapshot)
+    funding = mapper.map_funding_history(funding_history)
+    ctx = build_market_context(
+        "BTC",
+        snapshot,
+        candles[:5],
+        funding,
+        candle_interval="4h",
+        funding_window_days=30,
+        indicator_names=["rsi_14"],
+        exchange_time=None,
+        volume_profile_window=30,
+    )
+    assert ctx.volume_profile is None
+
+
 def test_build_market_context_with_zero_candles(meta_and_asset_ctxs, funding_history):
     # No candles (newly listed coin / too-recent startTime): the context must still
     # build a valid, usable shape rather than raise. Indicators are all None, regime

@@ -36,6 +36,38 @@ def test_the_old_domains_paths_still_reexport_the_common_objects():
     assert margin.DECIMAL_CONTEXT is decimal_context.DECIMAL_CONTEXT
 
 
+def test_the_config_loader_imports_no_compute_module():
+    # The rule ``indicator_vocab`` was split out of ``indicators`` to enforce
+    # (see that module's docstring): ``load_config`` must not drag a compute
+    # module in. Prose alone let it rot once already — the volume-profile floor
+    # was first imported straight from ``domains/perp/volume_profile``, which is
+    # pure stdlib TODAY but is exactly the code someone later reaches for numpy
+    # in, at which point the keyless ``live --config-check`` path would acquire
+    # it silently and nothing would fail. Structural, like the check below.
+    #
+    # To add an import here, put the value in ``common/`` or a ``*_vocab``
+    # module rather than widening this set.
+    #
+    # TOP-LEVEL statements only, unlike the ``common/`` check below which walks
+    # the whole tree. The invariant here is about what merely IMPORTING
+    # config.py costs, and a lazy import inside a branch is this repo's
+    # sanctioned escape hatch — ``load_config`` already uses it for
+    # ``live.config``/``risk_gate``, precisely so ``--context-only`` does not
+    # pay for the risk-gate domain unless a ``live:`` block exists.
+    allowed = {"common.config_coercion", "common.constants", "domains.perp.indicator_vocab"}
+    source = Path(__file__).resolve().parents[2] / "config.py"
+    offenders = [
+        f"from .{node.module}"
+        for node in ast.parse(source.read_text(encoding="utf-8")).body
+        # Relative imports only; config.py sits at the package root, so every
+        # in-package import is level 1 and ``node.module`` is the dotted path.
+        if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module not in allowed
+    ]
+    assert not offenders, (
+        f"config.py gained an in-package import outside {sorted(allowed)}: {offenders}"
+    )
+
+
 def test_common_imports_nothing_from_the_rest_of_the_package():
     # Structural check on the import statements themselves (not runtime state,
     # which depends on what happens to be imported first): a relative import

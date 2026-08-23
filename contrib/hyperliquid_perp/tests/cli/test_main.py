@@ -1216,6 +1216,55 @@ def test_build_context_reads_the_exchange_clock_and_hands_it_to_the_builder(monk
     assert stamps["clock_returned"] <= handed["host_at_read"] <= stamps["funding_entered"]
 
 
+def test_build_context_hands_the_configured_volume_profile_window_to_the_builder(monkeypatch):
+    # Wiring pin: dropping the config read or the volume_profile_window= kwarg
+    # in _build_context fails this. Without it the feature would look complete
+    # (module tested, renderer tested) while never reaching the builder — and
+    # the only symptom would be a prompt section that never appears, which is
+    # indistinguishable from the switch being off.
+    handed = {}
+
+    class _Market:
+        def __init__(self, _client):
+            pass
+
+        def get_market_snapshot(self, coin):
+            return object()
+
+        def get_candles(self, coin, interval, lookback):
+            return []
+
+        def get_funding_history(self, coin, window_days):
+            return []
+
+        def get_exchange_time(self, coin):
+            return datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
+
+    class _Client:
+        network = "testnet"
+
+        @classmethod
+        def from_config(cls, config):
+            return cls()
+
+    def _builder(*args, **kwargs):
+        handed["window"] = kwargs.get("volume_profile_window")
+        return object()
+
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
+    monkeypatch.setattr(bridge_mod, "build_market_context", _builder)
+
+    bridge_mod._build_context({"market_data": {"volume_profile_window_candles": 30}}, "BTC")
+    assert handed["window"] == 30
+    # Absent key -> off, and a blank key (`volume_profile_window_candles:`) is
+    # treated like absent, matching candle_lookback/funding window handling.
+    bridge_mod._build_context({}, "BTC")
+    assert handed["window"] == 0
+    bridge_mod._build_context({"market_data": {"volume_profile_window_candles": None}}, "BTC")
+    assert handed["window"] == 0
+
+
 def test_context_refusal_tolerates_a_candle_closing_during_the_fetch():
     # The daemon reads its clock BEFORE the market fetch, so a boundary that
     # closes while the five REST calls run (each riding the full

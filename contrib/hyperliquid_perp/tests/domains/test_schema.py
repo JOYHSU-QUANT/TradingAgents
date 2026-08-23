@@ -14,6 +14,8 @@ from contrib.hyperliquid_perp.domains.perp.schema import (
     MarketSnapshot,
     PerpMarketContext,
     PerpPosition,
+    ProfileShape,
+    VolumeProfile,
 )
 
 
@@ -291,3 +293,81 @@ def test_funding_point_rejects_nonpositive_time():
     for bad in (0, -1):
         with pytest.raises(ValueError, match="FundingPoint.time must be > 0"):
             FundingPoint(time=bad, rate=Decimal("0.0001"))
+
+
+def _profile(**overrides) -> dict:
+    base = {
+        "shape": ProfileShape.D,
+        "poc": Decimal("105"),
+        "value_area_low": Decimal("103"),
+        "value_area_high": Decimal("107"),
+        "range_low": Decimal("100"),
+        "range_high": Decimal("110"),
+        "poc_position": 0.5,
+        "close_position": 0.5,
+        "value_area_width_ratio": 0.4,
+        "candle_count": 30,
+        "bucket_count": 24,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_volume_profile_builds_from_consistent_values():
+    profile = VolumeProfile(**_profile())
+    assert profile.shape is ProfileShape.D
+    assert profile.poc == Decimal("105")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"range_low": Decimal("0")}, "range_low must be > 0"),
+        ({"range_high": Decimal("100")}, "must be > range_low"),
+        ({"value_area_high": Decimal("103")}, "must be > .*value_area_low"),
+        # A value area escaping the range, on either side.
+        ({"value_area_low": Decimal("99")}, "must sit inside the range"),
+        ({"value_area_high": Decimal("111")}, "must sit inside the range"),
+        # The value area is grown outward FROM the POC bucket, so a POC outside
+        # it means the walk and the POC disagree about which bucket won.
+        ({"poc": Decimal("108")}, "must sit inside the value area"),
+        ({"poc_position": 1.5}, "poc_position"),
+        ({"close_position": -0.1}, "close_position"),
+        ({"value_area_width_ratio": 0.0}, "value_area_width_ratio"),
+        ({"value_area_width_ratio": 1.5}, "value_area_width_ratio"),
+        ({"candle_count": 0}, "candle_count must be >= 1"),
+        ({"bucket_count": 0}, "bucket_count must be >= 1"),
+    ],
+)
+def test_volume_profile_rejects_self_contradictory_values(overrides, match):
+    # The point of the guards: a profile whose bounds contradict each other would
+    # render as a confident, nonsensical price level in the prompt.
+    with pytest.raises(ValueError, match=match):
+        VolumeProfile(**_profile(**overrides))
+
+
+def test_volume_profile_coerces_a_plain_shape_string():
+    assert VolumeProfile(**_profile(shape="thin")).shape is ProfileShape.THIN
+    assert VolumeProfile(**_profile(shape="b")).shape is ProfileShape.B
+
+
+def test_volume_profile_rejects_an_unknown_shape():
+    with pytest.raises(ValueError, match="nonsense"):
+        VolumeProfile(**_profile(shape="nonsense"))
+
+
+def test_profile_shape_values_render_as_the_articles_letters():
+    # (str, Enum) members render as "ProfileShape.P" through an f-string under
+    # 3.12, so the renderer must print .value — pin what .value actually is.
+    assert [s.value for s in ProfileShape] == ["D", "P", "b", "thin"]
+
+
+def test_perp_market_context_volume_profile_defaults_to_absent():
+    # Off by default: merging the feature must not change any existing prompt.
+    assert PerpMarketContext(**_context()).volume_profile is None
+
+
+def test_perp_market_context_carries_a_volume_profile_when_given_one():
+    profile = VolumeProfile(**_profile())
+    ctx = PerpMarketContext(**_context(), volume_profile=profile)
+    assert ctx.volume_profile is profile

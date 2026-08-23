@@ -143,6 +143,20 @@ prompt 的 context／format 契約改 shape 時，另要 bump `cli/_provider.py`
 vendor），這一段量測作廢、bump 到下一個版本戳重來。`paper-BTC` 當初 159 個 cycle 橫跨五個
 制度斷點而無法解讀，就是這條規則不存在的代價。
 
+**第三種情況：改 YAML 就會改 context 形狀。** 上面兩條規則都預設「改形狀 = 改 code =
+會部署 = 有機會 bump `PROMPT_VERSION`」。`market_data.volume_profile_window_candles`
+是第一個打破這個預設的 key：把它從 `0` 調到 `>= 12`，**不用部署任何 code**，
+`render_market_context` 就會多出一整段 `Volume profile (...)` 區塊——形狀變了，
+但沒有 commit、沒有 bump，而釘在 `decision_format_instructions` 指紋上的那個測試
+只看 format 契約、看不到 market-context 的渲染，所以也不會紅。
+（會觸發 config drift 警告——`market_data` 在 drift 清單裡——但那只說「YAML 動過」，
+不說「prompt 形狀變了」。）
+
+所以：**翻動這個 key 等同跨越量測邊界**，比照上面辦理——bump `PROMPT_VERSION`
+或用 `--create` 開新 run-id，並且在 A/B 量測窗內**禁止翻動**，與夾帶 vendor 變更同罪。
+反過來說，這也正是它預設 `0` 的理由：merge 進來不動任何既有 prompt，
+分段點是「你改 config 那一刻」，由你選、而不是被 cherry-pick 順手帶過去。
+
 判讀時**主判準是提案率**（`requested_target_margin_pct` 非 null 的佔比）。**但這一欄
 會低估**：fail-closed 的 cycle 一律把它寫成 NULL，模型實際要求了什麼在 parse 接縫就被
 丟掉了，所以「提了案但格式被擋掉」與「根本沒提案」在這一欄完全同形。量提案率時要把

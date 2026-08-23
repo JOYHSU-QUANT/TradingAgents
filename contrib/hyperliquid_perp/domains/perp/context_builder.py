@@ -21,6 +21,7 @@ from decimal import Decimal
 
 from .indicators import compute_indicators
 from .schema import Candle, FundingPoint, MarketRegime, MarketSnapshot, PerpMarketContext
+from .volume_profile import compute_volume_profile
 
 # A 30-day window of hourly funding holds ~720 points. Require at least a day of
 # samples before a z-score is meaningful; below this -> None (decision: no NaN).
@@ -118,6 +119,7 @@ def build_market_context(
     indicator_names: Sequence[str],
     exchange_time: datetime | None,
     host_time_at_exchange_read: datetime | None = None,
+    volume_profile_window: int = 0,
 ) -> PerpMarketContext:
     """Build the full :class:`PerpMarketContext` from raw domain inputs.
 
@@ -130,6 +132,12 @@ def build_market_context(
     it. The default it would otherwise inherit is precisely the issue-#51 blind
     spot (the guard falls back to the host clock, which also bounded the candle
     window), so it must never be reachable by forgetting a kwarg.
+
+    ``volume_profile_window`` is the number of trailing candles the volume
+    profile is cut from; ``0`` (the default) leaves it off and the context's
+    ``volume_profile`` ``None``. Unlike ``exchange_time`` this one KEEPS its
+    default: forgetting it omits an optional analyst input, which is the safe
+    direction — no guard reads it, and no decision path degrades without it.
     """
     if candles:
         # Anchor the funding window on the raw epoch-ms integer, not a float
@@ -150,6 +158,10 @@ def build_market_context(
     # flip the regime; fall back to mark only when there are no candles at all.
     regime_price = candles[-1].close if candles else snapshot.mark_price
     regime = classify_regime(indicators, regime_price)
+    # Cut from the same candle series as the indicators, so the profile and the
+    # regime describe the same window of history. ``None`` whenever the feature
+    # is off or the window is unusable — the renderer then omits the section.
+    volume_profile = compute_volume_profile(candles, volume_profile_window)
 
     return PerpMarketContext(
         coin=coin,
@@ -172,4 +184,5 @@ def build_market_context(
         market_regime=regime,
         exchange_time=exchange_time,
         host_time_at_exchange_read=host_time_at_exchange_read,
+        volume_profile=volume_profile,
     )

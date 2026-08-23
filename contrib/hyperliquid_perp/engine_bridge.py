@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import NamedTuple
 
-from .common.constants import STALE_MARKET_DATA_ERROR
+from .common.constants import DEFAULT_CANDLE_LOOKBACK, STALE_MARKET_DATA_ERROR
 from .config import CONFIG_LOAD_ERRORS, DOTENV_READ_ERRORS, load_config
 from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context
@@ -596,10 +596,16 @@ def _build_context(
     # ``dict.get(key, default)`` only falls back when the key is absent; a present-
     # but-null value (YAML key left blank) returns None and crashes ``int(None)`` —
     # treat null like absent (matches network_timeout_s handling in from_config).
-    raw_lookback = md_cfg.get("candle_lookback", 200)
-    lookback = int(raw_lookback) if raw_lookback is not None else 200
+    raw_lookback = md_cfg.get("candle_lookback", DEFAULT_CANDLE_LOOKBACK)
+    lookback = int(raw_lookback) if raw_lookback is not None else DEFAULT_CANDLE_LOOKBACK
     raw_window = md_cfg.get("funding_zscore_window_days", 30)
     window_days = int(raw_window) if raw_window is not None else 30
+    # Volume profile is OFF unless an operator sets a window (see the module
+    # docstring of domains/perp/volume_profile.py). Same null-is-absent rule as
+    # the two above; ``load_config`` has already rejected a non-integer or
+    # out-of-band value, so this int() cannot raise on a loaded config.
+    raw_profile_window = md_cfg.get("volume_profile_window_candles", 0)
+    profile_window = int(raw_profile_window) if raw_profile_window is not None else 0
     indicator_names = _indicator_names(config)
 
     def _between_reads() -> None:
@@ -655,6 +661,7 @@ def _build_context(
         indicator_names=indicator_names,
         exchange_time=exchange_time,
         host_time_at_exchange_read=host_time_at_exchange_read,
+        volume_profile_window=profile_window,
     )
     return ctx, client
 

@@ -14,7 +14,12 @@ from decimal import Decimal
 import pytest
 
 from contrib.hyperliquid_perp.domains.perp.prompt_context import render_market_context
-from contrib.hyperliquid_perp.domains.perp.schema import MarketRegime, PerpMarketContext
+from contrib.hyperliquid_perp.domains.perp.schema import (
+    MarketRegime,
+    PerpMarketContext,
+    ProfileShape,
+    VolumeProfile,
+)
 
 _AS_OF = datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
@@ -153,3 +158,125 @@ def test_unknown_market_regime_raises_at_construction():
     # time where it would burn an engine run before raising.
     with pytest.raises(ValueError, match="nonsense"):
         _ctx(market_regime="nonsense")
+
+
+# --------------------------------------------------------------------------
+# Volume profile — an OPTIONAL section that is present in full or not at all.
+# --------------------------------------------------------------------------
+
+
+def _profile(**overrides) -> VolumeProfile:
+    base = {
+        "shape": ProfileShape.P,
+        "poc": Decimal("63450.0"),
+        "value_area_low": Decimal("61900.0"),
+        "value_area_high": Decimal("65100.0"),
+        "range_low": Decimal("60100.0"),
+        "range_high": Decimal("66800.0"),
+        "poc_position": 0.62,
+        "close_position": 0.71,
+        "value_area_width_ratio": 0.4583333333333333,
+        "candle_count": 30,
+        "bucket_count": 24,
+    }
+    base.update(overrides)
+    return VolumeProfile(**base)
+
+
+def test_volume_profile_section_is_absent_when_the_profile_is():
+    text = render_market_context(_ctx())
+    assert _ctx().volume_profile is None
+    # The WHOLE block drops out — not a header with n/a under it, which would
+    # read as a measurement that came back empty rather than one never taken.
+    for marker in ("Volume profile", "POC", "Value area", "Shape:"):
+        assert marker not in text
+
+
+def test_adding_a_volume_profile_changes_nothing_else_in_the_render():
+    # Merging the feature must not perturb any existing line: the section is
+    # appended, and everything above it stays byte-identical.
+    without = render_market_context(_ctx())
+    with_profile = render_market_context(_ctx(volume_profile=_profile()))
+    assert with_profile.startswith(without)
+
+
+def test_volume_profile_section_reports_every_level_and_the_window():
+    text = render_market_context(_ctx(volume_profile=_profile()))
+    assert "Volume profile (rolling window of 30 x 4h candles):" in text
+    assert "Range: 60,100.00 - 66,800.00" in text
+    assert "POC (most-traded price): 63,450.00 (62% up the range)" in text
+    assert "Value area (70% of volume): 61,900.00 - 65,100.00 (46% of the range width)" in text
+    assert "Latest close sits 71% up the range" in text
+    assert "NaN" not in text
+
+
+def test_volume_profile_states_the_coarse_candle_basis():
+    # Design decision 2 in the plan: the levels are inferred from OHLCV bars,
+    # not measured from ticks, and the prompt has to say so or the model will
+    # reasonably read "POC: 63,450" as a measured volume peak.
+    text = render_market_context(_ctx(volume_profile=_profile()))
+    basis = next(line for line in text.splitlines() if line.strip().startswith("Basis:"))
+    assert "spread evenly" in basis
+    assert "24 price levels" in basis
+    assert "not tick data" in basis
+
+
+def test_volume_profile_window_label_follows_the_contexts_candle_interval():
+    # The label must not hard-code "4h": a context built on another interval
+    # would otherwise describe the window as a length it is not.
+    text = render_market_context(
+        _ctx(candle_interval="1h", volume_profile=_profile(candle_count=48))
+    )
+    assert "rolling window of 48 x 1h candles" in text
+
+
+@pytest.mark.parametrize("shape", list(ProfileShape))
+def test_every_shape_renders_its_letter_and_a_note(shape):
+    text = render_market_context(_ctx(volume_profile=_profile(shape=shape)))
+    line = next(line for line in text.splitlines() if line.strip().startswith("Shape:"))
+    # ``.value``, never the (str, Enum) member — an f-string on the member
+    # renders "ProfileShape.P" under 3.12 and corrupts the prompt.
+    assert line.strip().startswith(f"Shape: {shape.value} —")
+    assert "ProfileShape." not in text
+    assert len(line.strip()) > len(f"Shape: {shape.value} —") + 10
+
+
+# One distinctive substring per shape. The shape checks above pass even if two
+# _SHAPE_NOTE entries are swapped (each is individually non-empty), which would
+# feed the model the wrong description of where volume actually sat. Indexing
+# by shape keeps this exhaustive — a new ProfileShape member fails with a
+# KeyError until it gets its own marker.
+_SHAPE_MARKER = {
+    ProfileShape.D: "near the middle of the range",
+    ProfileShape.P: "upper part of the range",
+    ProfileShape.B: "lower part of the range",
+    ProfileShape.THIN: "spread thinly across the range",
+}
+
+
+@pytest.mark.parametrize("shape", list(ProfileShape))
+def test_each_shape_renders_its_own_note(shape):
+    text = render_market_context(_ctx(volume_profile=_profile(shape=shape)))
+    line = next(line for line in text.splitlines() if line.strip().startswith("Shape:"))
+    assert _SHAPE_MARKER[shape] in line
+
+
+def test_the_d_note_asserts_nothing_positive_about_the_distribution():
+    # D is classify_shape's catch-all: it fires both for a centred POC and for
+    # a POC skewed to one end whose close did not confirm it. So the note must
+    # not claim centrality — a skewed-POC D is the MAJORITY case, and the claim
+    # would sit one line under a POC reading that contradicts it. Rendered here
+    # with a POC at 95% of the range, which is a legal D.
+    text = render_market_context(
+        _ctx(volume_profile=_profile(shape=ProfileShape.D, poc_position=0.95))
+    )
+    line = next(line for line in text.splitlines() if line.strip().startswith("Shape:"))
+    assert "POC (most-traded price): 63,450.00 (95% up the range)" in text
+    # No positive claim about where the volume sat...
+    assert "volume is concentrated" not in line
+    # ...it names itself as the catch-all, admits the skewed case, and points
+    # the reader at the numbers rather than the letter.
+    assert "catch-all" in line
+    assert "skewed" in line
+    assert "read the POC position above" in line
+    assert "Does not test symmetry" in line

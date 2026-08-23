@@ -33,6 +33,22 @@ class MarketRegime(str, Enum):
     VOLATILE = "volatile"
 
 
+class ProfileShape(str, Enum):
+    """The volume-profile shape :func:`..perp.volume_profile.classify_shape` assigns.
+
+    Held as an enum for the same reason as :class:`MarketRegime`: an unknown
+    shape fails at construction rather than deep in a render. The values are
+    the source article's letters (``"D"``/``"P"``/``"b"``), so ``.value`` is
+    what the prompt must print — never the member itself, which an f-string
+    renders as ``"ProfileShape.P"``.
+    """
+
+    D = "D"
+    P = "P"
+    B = "b"
+    THIN = "thin"
+
+
 class CandleInterval(str, Enum):
     """The supported candle intervals — the single source of truth for the set.
 
@@ -280,6 +296,92 @@ class AccountSnapshot:
 
 
 @dataclass(frozen=True)
+class VolumeProfile:
+    """Where traded volume sat in the price range over a rolling candle window.
+
+    Built by :mod:`.volume_profile` (see that module for the algorithm and for
+    every threshold behind :attr:`shape`). Carried on
+    :class:`PerpMarketContext` as an OPTIONAL analyst input: ``None`` means the
+    section is omitted from the prompt entirely — there is no half-populated
+    form, and no ``NaN`` ever reaches the renderer.
+
+    Prices are :class:`~decimal.Decimal` like every other price in this module.
+    The three ``*_position`` / ``*_ratio`` fields are derived fractions of the
+    window's own price range, in ``[0, 1]``, and are ``float`` because they are
+    ratios the prompt prints as percentages — never money.
+
+    ``candle_count`` is the number of candles ACTUALLY folded in (which equals
+    the configured window — :func:`.volume_profile.build_profile` refuses a
+    short window rather than quietly narrowing it), and ``bucket_count`` is the
+    price-bucket resolution the POC / value-area edges are quantized to. Both
+    are carried so the rendered text can state the basis instead of implying a
+    precision the coarse candle approximation does not have.
+    """
+
+    shape: ProfileShape
+    poc: Decimal
+    value_area_low: Decimal
+    value_area_high: Decimal
+    range_low: Decimal
+    range_high: Decimal
+    poc_position: float
+    close_position: float
+    value_area_width_ratio: float
+    candle_count: int
+    bucket_count: int
+
+    def __post_init__(self) -> None:
+        # Self-guarding like the other frozen DTOs here: the producer always
+        # emits consistent values, and these checks make any OTHER path (a
+        # fixture, a future caller) unable to hand the renderer a profile whose
+        # bounds contradict each other — which would print as a confident,
+        # nonsensical support/resistance level in the prompt.
+        if self.range_low <= 0:
+            raise ValueError(f"VolumeProfile.range_low must be > 0, got {self.range_low}")
+        if self.range_high <= self.range_low:
+            raise ValueError(
+                f"VolumeProfile.range_high ({self.range_high}) must be > range_low "
+                f"({self.range_low}) — a zero-width window has no profile"
+            )
+        if self.value_area_high <= self.value_area_low:
+            raise ValueError(
+                f"VolumeProfile.value_area_high ({self.value_area_high}) must be > "
+                f"value_area_low ({self.value_area_low})"
+            )
+        if self.value_area_low < self.range_low or self.value_area_high > self.range_high:
+            raise ValueError(
+                f"VolumeProfile value area [{self.value_area_low}, {self.value_area_high}] "
+                f"must sit inside the range [{self.range_low}, {self.range_high}]"
+            )
+        # The value area is grown OUTWARD from the POC bucket, so a POC outside
+        # it means the walk and the POC disagree about which bucket won.
+        if not (self.value_area_low <= self.poc <= self.value_area_high):
+            raise ValueError(
+                f"VolumeProfile.poc ({self.poc}) must sit inside the value area "
+                f"[{self.value_area_low}, {self.value_area_high}]"
+            )
+        for name in ("poc_position", "close_position"):
+            value = getattr(self, name)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(
+                    f"VolumeProfile.{name} is a fraction of the window range and must be "
+                    f"in [0, 1], got {value}"
+                )
+        if not 0.0 < self.value_area_width_ratio <= 1.0:
+            raise ValueError(
+                f"VolumeProfile.value_area_width_ratio must be in (0, 1], "
+                f"got {self.value_area_width_ratio}"
+            )
+        if self.candle_count < 1:
+            raise ValueError(f"VolumeProfile.candle_count must be >= 1, got {self.candle_count}")
+        if self.bucket_count < 1:
+            raise ValueError(f"VolumeProfile.bucket_count must be >= 1, got {self.bucket_count}")
+        # Coerce like ``market_regime``: a plain string (fixture, recorded row)
+        # is accepted, an unknown one raises here rather than at render time.
+        object.__setattr__(self, "shape", ProfileShape(self.shape))
+
+
+@dataclass(frozen=True)
 class PerpMarketContext:
     """The market context the engine reasons over, built by context_builder.
 
@@ -331,6 +433,13 @@ class PerpMarketContext:
     # hand-built context may carry an exchange clock and no pairing, and the
     # guard then reports no skew rather than inventing one.
     host_time_at_exchange_read: datetime | None = None
+    # Where volume sat in the price range over a rolling window of candles
+    # (:mod:`.volume_profile`). Optional and OFF by default: it is populated
+    # only when ``market_data.volume_profile_window_candles`` is configured
+    # above zero, so merging the feature changes no existing prompt until an
+    # operator turns it on. ``None`` means the prompt omits the section
+    # entirely — never a half-filled block (see :class:`VolumeProfile`).
+    volume_profile: VolumeProfile | None = None
 
     def __post_init__(self) -> None:
         # Mirror the boundary invariants the source ``MarketSnapshot`` already enforces,

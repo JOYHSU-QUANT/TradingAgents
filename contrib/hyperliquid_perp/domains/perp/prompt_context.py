@@ -13,7 +13,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from .schema import MarketRegime, PerpMarketContext
+from .schema import MarketRegime, PerpMarketContext, ProfileShape, VolumeProfile
+from .volume_profile import VALUE_AREA_FRACTION
 
 _INDICATOR_LABEL = {
     "rsi_14": "RSI(14)",
@@ -42,6 +43,70 @@ _REGIME_NOTE = {
 }
 
 
+# What each volume-profile shape says about the window, keyed to the computed
+# shape. Exhaustive over ProfileShape — a new member fails loud at render time
+# rather than silently inheriting another shape's description.
+#
+# Each note states what its own rule TESTED, and nothing more. Note what that
+# is NOT: none of them says where the bulk of the volume sat. P and b test
+# where the single heaviest BUCKET sits; thin tests how WIDE the value area
+# came out; D is the catch-all and tests nothing positive at all. The close
+# clause is the one direct observation, and it is only about the close.
+#
+# They also stop short of naming who did it or why.
+#
+# That restraint is the point, for two reasons. First, this file's standing
+# rule (see the module docstring and _REGIME_NOTE) keeps directional framing
+# out of these strings. Second, the causal readings are not even agreed: a P
+# reads as buyers absorbing a move up, and equally as short covering at the end
+# of a decline — opposite trades from identical geometry. Naming one would hand
+# the model a confident story about volume that was never measured at these
+# prices, only smeared across each candle's own high-low.
+_SHAPE_NOTE = {
+    # D is classify_shape's CATCH-ALL, so this note must not assert anything
+    # positive about the distribution. It used to open with "volume is
+    # concentrated near the middle of the range", which is false by inspection
+    # of the rule rather than by any measurement: classify_shape reaches D for
+    # a skewed POC whose close failed to confirm it, so a POC at 95% of the
+    # range is a legal D — and that sentence would then sit one row under a
+    # "POC ... (95% up the range)" line contradicting it. Pinned by
+    # test_the_d_note_asserts_nothing_positive_about_the_distribution, which
+    # renders exactly that case.
+    ProfileShape.D: (
+        "catch-all — neither the P nor the b condition was met. That covers a "
+        "POC near the middle of the range AND a POC skewed to one end whose "
+        "latest close did not confirm the skew, so read the POC position above "
+        "rather than this letter. Does not test symmetry."
+    ),
+    # Same discipline as D, for the same reason: each note may state only what
+    # its rule TESTED. P and b are decided by where the single heaviest BUCKET
+    # sits, which is not a claim about where the bulk of the volume sat — a
+    # window can put its heaviest bucket at 60% of the range with most of the
+    # volume below the midpoint, and the value-area line rendered directly above
+    # would then contradict a note saying "volume built up in the upper part".
+    # thin is decided by the value area being WIDE, which a two-cluster window
+    # with a quiet middle also achieves while its volume is in fact highly
+    # concentrated. Both cases are pinned by tests in test_prompt_context.
+    ProfileShape.P: (
+        "the heaviest single price bucket sits in the upper part of the range "
+        "and the latest close is above the window's midpoint. Says nothing "
+        "about where the bulk of the volume sat."
+    ),
+    ProfileShape.B: (
+        "the heaviest single price bucket sits in the lower part of the range "
+        "and the latest close is below the window's midpoint. Says nothing "
+        "about where the bulk of the volume sat."
+    ),
+    ProfileShape.THIN: (
+        "the value area spans most of the range — the walk out from the POC "
+        "ended up that wide. Width is a property of the walk, not proof the "
+        "volume needed the range: between equal neighbours the walk expands "
+        "upward, so it can cross near-empty buckets, and a window holding two "
+        "separate clusters with a quiet middle also lands here."
+    ),
+}
+
+
 def _num(value, places: int = 2) -> str:
     """Format a number to ``places`` decimals; ``None`` -> ``n/a``."""
     if value is None:
@@ -49,6 +114,72 @@ def _num(value, places: int = 2) -> str:
     if isinstance(value, Decimal):
         value = float(value)
     return f"{value:,.{places}f}"
+
+
+def _whole_pct(fraction: float) -> str:
+    """A 0-1 fraction as a whole-number percentage.
+
+    Deliberately NOT named for the range: the block renders positions within
+    the price range AND shares of the window's volume, and both must come out
+    of the same formatter or the percentages in one block would round two
+    different ways. Each call site says which kind it is printing.
+    """
+    return f"{fraction * 100:.0f}%"
+
+
+def _volume_profile_lines(profile: VolumeProfile, candle_interval: str) -> list[str]:
+    """The volume-profile block. Only called when a profile exists."""
+    return [
+        # "as of the last closed candle" is not decoration. Every level below is
+        # cut from CLOSED candles, so on a 4h interval the whole block can be up
+        # to one interval behind the live mark printed further up. Those two
+        # numbers come from different places and nothing reconciles them: the
+        # Range is the min/max of CLOSED candles, while the mark is read from
+        # the snapshot, so the mark can sit anywhere — including outside the
+        # Range this block prints — and no code here would notice. How often
+        # that happens is not something this file can honestly say; that it CAN
+        # happen is enough reason to date the block. Same house rule as the
+        # freshness disclosures elsewhere in the context: state the vintage
+        # rather than let it be inferred.
+        f"Volume profile (rolling window of {profile.candle_count} x {candle_interval} "
+        f"candles, as of the last closed candle):",
+        f"  Range: {_num(profile.range_low)} - {_num(profile.range_high)}",
+        # NOT "most-traded price". The POC is the MIDPOINT of the heaviest
+        # bucket, and that midpoint can be a price the window never traded: a
+        # window whose heavy bars are all zero-range prints at 112.05 still
+        # reports the bucket [112, 113)'s midpoint, 112.50. Naming it the
+        # most-traded price states a measurement that was never made — the
+        # bucket is what was measured.
+        f"  POC (midpoint of the heaviest price bucket): {_num(profile.poc)} "
+        f"({_whole_pct(profile.poc_position)} up the range)",
+        # The share is taken from VALUE_AREA_FRACTION, never written out here:
+        # a literal would keep saying "70%" after the convention moved, and it
+        # is the prompt — the model would be told a threshold the code no longer
+        # uses. Only one test would notice, and it exists for exactly that:
+        # test_the_value_area_share_is_taken_from_the_constant_not_written_out.
+        # "at least" is load-bearing, not hedging: the walk stops on the FIRST
+        # bucket that crosses the target, so the band holds >= the share, never
+        # == it except by coincidence. A one-bucket value area holding 99% of
+        # the window would otherwise be labelled "70% of volume", telling the
+        # model the other 30% sits outside a band that in truth excludes 1% —
+        # inverting the concentration reading this block exists to convey.
+        f"  Value area (band holding at least "
+        f"{_whole_pct(float(VALUE_AREA_FRACTION))} of volume): "
+        f"{_num(profile.value_area_low)} - "
+        f"{_num(profile.value_area_high)} "
+        f"({_whole_pct(profile.value_area_width_ratio)} of the range width)",
+        f"  Latest close sits {_whole_pct(profile.close_position)} up the range",
+        f"  Shape: {profile.shape.value} — {_SHAPE_NOTE[profile.shape]}",
+        # The approximation is stated in the prompt on purpose: these levels are
+        # derived from OHLCV bars, not from tick or footprint data, and a model
+        # told only "POC: 63,450" would reasonably read it as a traded-volume
+        # peak measured at that price. It was not measured; it was inferred.
+        f"  Basis: each candle's volume is spread evenly across that candle's own "
+        f"high-low range and bucketed into {profile.bucket_count} price levels. "
+        f"This is a coarse approximation of intra-candle volume, not tick data — "
+        f"treat these levels as approximate reference, not precise support or "
+        f"resistance.",
+    ]
 
 
 def _funding_bps(rate: Decimal | None) -> str:
@@ -96,5 +227,13 @@ def render_market_context(ctx: PerpMarketContext) -> str:
     for name, value in ctx.indicators.items():
         label = _INDICATOR_LABEL.get(name, name)
         lines.append(f"  {label}: {_num(value, 4)}")
+
+    # Optional and last: absent whenever the feature is off or the window was
+    # unusable. The WHOLE block drops out — there is no "Volume profile: n/a"
+    # form, because a header with nothing under it reads as a measurement that
+    # came back empty rather than one that was never taken.
+    if ctx.volume_profile is not None:
+        lines.append("")
+        lines.extend(_volume_profile_lines(ctx.volume_profile, ctx.candle_interval))
 
     return "\n".join(lines)

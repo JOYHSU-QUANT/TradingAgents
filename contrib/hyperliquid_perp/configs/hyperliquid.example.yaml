@@ -15,6 +15,14 @@ market_data:
   candle_interval: "4h"
   candle_lookback: 200             # candles for indicator warm-up
   funding_zscore_window_days: 30
+  volume_profile_window_candles: 0 # 0 = OFF (default). Set to the number of trailing candles the
+                                   # volume profile (POC / value area / D-P-b-thin shape) is cut
+                                   # from; 30 is the suggested starting value (~5 days at 4h).
+                                   # Must be 0 or >= 12, and <= candle_lookback — both rejected at
+                                   # config load, because a bad value would just make the prompt
+                                   # section silently never appear. Analyst input only: it feeds no
+                                   # gate and no sizing. Turning it on CHANGES THE PROMPT, so on a
+                                   # paper run treat the flip as a new input-side measurement point.
 
 indicators: [rsi_14, ema_20, ema_50, atr_14, macd]   # computed by context_builder; unknown names rejected at config load; a non-empty list must include atr_14, ema_20 and ema_50 (the regime classifier needs all three)
 

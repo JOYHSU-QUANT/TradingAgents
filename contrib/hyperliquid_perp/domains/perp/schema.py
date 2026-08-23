@@ -33,6 +33,22 @@ class MarketRegime(str, Enum):
     VOLATILE = "volatile"
 
 
+class ProfileShape(str, Enum):
+    """The volume-profile shape :func:`..perp.volume_profile.classify_shape` assigns.
+
+    Held as an enum for the same reason as :class:`MarketRegime`: an unknown
+    shape fails at construction rather than deep in a render. The values are
+    the source article's letters (``"D"``/``"P"``/``"b"``), so ``.value`` is
+    what the prompt must print — never the member itself, which an f-string
+    renders as ``"ProfileShape.P"``.
+    """
+
+    D = "D"
+    P = "P"
+    B = "b"
+    THIN = "thin"
+
+
 class CandleInterval(str, Enum):
     """The supported candle intervals — the single source of truth for the set.
 
@@ -279,6 +295,202 @@ class AccountSnapshot:
 # --------------------------------------------------------------------------
 
 
+def _check_derived_fraction(label: str, claimed: float, numerator: Decimal, span: Decimal) -> None:
+    """Raise unless ``claimed`` really is ``numerator / span``.
+
+    A DTO that stores BOTH a ratio and the values it was computed from can be
+    handed the two disagreeing, and every bounds check still passes — the
+    contradiction only shows up in whatever renders them side by side. This is
+    the one shared statement of that invariant.
+
+    Tolerance rather than equality. Two of the reasons turn out to cost
+    nothing in practice: over 4000 fuzzed producer outputs spanning six price
+    magnitudes, the float-vs-Decimal gap and the grid quantization (see
+    ``volume_profile._bucket_edges``, which pins its outermost edges) came out
+    at EXACTLY zero, every time. What the tolerance actually buys is the third
+    reason — a DTO rebuilt from a ratio someone rounded on the way in. 1e-6
+    admits anything recorded to six decimal places or better, and is orders of
+    magnitude below any disagreement worth calling a contradiction.
+
+    Only ``VolumeProfile`` calls this today. ``PerpMarketContext.day_change_pct``
+    has the same shape — a float ratio stored beside the two Decimal prices it
+    comes from — and is NOT guarded. That is a deliberate deferral, not an
+    oversight: that DTO is constructed in far more places, so tightening it
+    needs its own pass rather than riding along with the volume profile.
+    """
+    expected = float(numerator / span)
+    if abs(claimed - expected) > 1e-6:
+        raise ValueError(
+            f"{label} ({claimed}) contradicts the values it is derived from — those give {expected}"
+        )
+
+
+@dataclass(frozen=True)
+class VolumeProfile:
+    """Where traded volume sat in the price range over a rolling candle window.
+
+    Built by :mod:`.volume_profile` (see that module for the algorithm and for
+    every threshold behind :attr:`shape`). Carried on
+    :class:`PerpMarketContext` as an OPTIONAL analyst input: ``None`` means the
+    section is omitted from the prompt entirely — there is no half-populated
+    form, and no ``NaN`` ever reaches the renderer.
+
+    Prices are :class:`~decimal.Decimal` like every other price in this module.
+    The three ``*_position`` / ``*_ratio`` fields are derived fractions of the
+    window's own price RANGE, in ``[0, 1]``, and are ``float`` because they are
+    ratios the prompt prints as percentages — never money.
+
+    The two ``*_volume_share`` fields are fractions of the window's VOLUME, not
+    of its price range: how much of the traded volume the POC bucket alone held,
+    and how much the whole value area held. They say how DOMINANT the levels
+    are, which the geometry only sometimes implies — the rendered block usually
+    differs between a heavy POC and a marginal one (the value-area walk stops
+    on different buckets), but not always: when the walk stops on the SAME
+    buckets, two profiles whose POC held 79% and 99.9% of the window render
+    identically. Pinned by
+    ``test_two_profiles_can_render_identically_yet_hold_very_different_volume``. ``poc_volume_share`` also has a floor the geometry hides —
+    the heaviest bucket is at least the average, so it can never be below
+    ``1 / bucket_count``.
+
+    Carried but deliberately NOT rendered: the prompt block's wording is fixed
+    by the rulings on this PR, and these exist so the frozen DTO already carries
+    them when a gate or sizing consumer needs to ask "is this level real?".
+
+    ``candle_count`` is the number of candles ACTUALLY folded in (which equals
+    the configured window — :func:`.volume_profile.build_profile` refuses a
+    short window rather than quietly narrowing it), and ``bucket_count`` is the
+    price-bucket resolution the POC / value-area edges are quantized to. Both
+    are carried so the rendered text can state the basis instead of implying a
+    precision the coarse candle approximation does not have.
+    """
+
+    shape: ProfileShape
+    poc: Decimal
+    value_area_low: Decimal
+    value_area_high: Decimal
+    range_low: Decimal
+    range_high: Decimal
+    poc_position: float
+    close_position: float
+    value_area_width_ratio: float
+    poc_volume_share: float
+    value_area_volume_share: float
+    candle_count: int
+    bucket_count: int
+
+    def __post_init__(self) -> None:
+        # Self-guarding like the other frozen DTOs here: the producer always
+        # emits consistent values, and these checks make any OTHER path (a
+        # fixture, a future caller) unable to hand the renderer a profile whose
+        # bounds contradict each other — which would print as a confident,
+        # nonsensical support/resistance level in the prompt.
+        #
+        # Field by field, because a summary sentence about this has been wrong
+        # twice: the prices below get mutual containment and ordering;
+        # ``poc_position`` and ``value_area_width_ratio`` get cross-checked
+        # against those prices at the bottom of this method. EVERYTHING ELSE
+        # gets bounds only, and is listed here rather than summarized.
+        #
+        # ``close_position`` is the one nothing here could ever check: it is a
+        # fraction of a ``latest_close`` this class does not store, and adding
+        # the field to store it serves no consumer.
+        #
+        # The rest are checks that ARE definable and are deliberately not
+        # written, which is a different thing from impossible:
+        #   - ``shape`` is fully determined by ``value_area_width_ratio``,
+        #     ``poc_position`` and ``close_position``, all stored right here, yet
+        #     is never re-derived — so a hand-built profile can label itself
+        #     ``P`` while its own numbers say ``D``.
+        #   - ``candle_count`` admits 1-11, and ``bucket_count`` anything but 24;
+        #     no walk produces either.
+        #   - ``poc_volume_share`` cannot fall below ``1 / bucket_count`` (the
+        #     heaviest bucket is at least the average), and the producer's walk
+        #     always carries ``value_area_volume_share`` to VALUE_AREA_FRACTION.
+        # Most of those need thresholds that live in ``volume_profile``, which
+        # imports THIS module — so at module scope the dependency cannot run
+        # back the other way without moving the constants into ``common/``.
+        # They belong with the consumer that reads these fields, which does not
+        # exist yet; none of them is load-bearing while the producer is the only
+        # caller.
+        if self.range_low <= 0:
+            raise ValueError(f"VolumeProfile.range_low must be > 0, got {self.range_low}")
+        if self.range_high <= self.range_low:
+            raise ValueError(
+                f"VolumeProfile.range_high ({self.range_high}) must be > range_low "
+                f"({self.range_low}) — a zero-width window has no profile"
+            )
+        if self.value_area_high <= self.value_area_low:
+            raise ValueError(
+                f"VolumeProfile.value_area_high ({self.value_area_high}) must be > "
+                f"value_area_low ({self.value_area_low})"
+            )
+        if self.value_area_low < self.range_low or self.value_area_high > self.range_high:
+            raise ValueError(
+                f"VolumeProfile value area [{self.value_area_low}, {self.value_area_high}] "
+                f"must sit inside the range [{self.range_low}, {self.range_high}]"
+            )
+        # The value area is grown OUTWARD from the POC bucket, so a POC outside
+        # it means the walk and the POC disagree about which bucket won.
+        if not (self.value_area_low <= self.poc <= self.value_area_high):
+            raise ValueError(
+                f"VolumeProfile.poc ({self.poc}) must sit inside the value area "
+                f"[{self.value_area_low}, {self.value_area_high}]"
+            )
+        for name in ("poc_position", "close_position"):
+            value = getattr(self, name)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(
+                    f"VolumeProfile.{name} is a fraction of the window range and must be "
+                    f"in [0, 1], got {value}"
+                )
+        if not 0.0 < self.value_area_width_ratio <= 1.0:
+            raise ValueError(
+                f"VolumeProfile.value_area_width_ratio must be in (0, 1], "
+                f"got {self.value_area_width_ratio}"
+            )
+        if self.candle_count < 1:
+            raise ValueError(f"VolumeProfile.candle_count must be >= 1, got {self.candle_count}")
+        if self.bucket_count < 1:
+            raise ValueError(f"VolumeProfile.bucket_count must be >= 1, got {self.bucket_count}")
+        for name in ("poc_volume_share", "value_area_volume_share"):
+            value = getattr(self, name)
+            if not 0.0 < value <= 1.0:
+                raise ValueError(
+                    f"VolumeProfile.{name} is a share of the window's traded volume and "
+                    f"must be in (0, 1], got {value}"
+                )
+        # The value area is grown outward FROM the POC bucket, so the POC bucket
+        # is always one of the buckets the area holds — its share cannot exceed
+        # the area's. A profile claiming otherwise came from a walk that lost
+        # track of which buckets it had taken.
+        if self.poc_volume_share > self.value_area_volume_share:
+            raise ValueError(
+                f"VolumeProfile.poc_volume_share ({self.poc_volume_share}) cannot exceed "
+                f"value_area_volume_share ({self.value_area_volume_share}) — the POC "
+                f"bucket sits inside the value area"
+            )
+        # Cross-check the derived fractions against the prices they came FROM.
+        # Without this, every guard above constrains the two halves SEPARATELY:
+        # a profile could satisfy all of them while claiming a ``poc_position``
+        # of 0.01 for a ``poc`` sitting mid-range, and the renderer would print
+        # "POC: 105.00 (1% up the range)" — one line contradicting itself. The
+        # producer derives both from the same bucket index, so this can only
+        # fire on a hand-built profile.
+        span = self.range_high - self.range_low
+        _check_derived_fraction(
+            "VolumeProfile.poc_position", self.poc_position, self.poc - self.range_low, span
+        )
+        _check_derived_fraction(
+            "VolumeProfile.value_area_width_ratio",
+            self.value_area_width_ratio,
+            self.value_area_high - self.value_area_low,
+            span,
+        )
+        # Coerce like ``market_regime``: a plain string (fixture, recorded row)
+        # is accepted, an unknown one raises here rather than at render time.
+        object.__setattr__(self, "shape", ProfileShape(self.shape))
+
+
 @dataclass(frozen=True)
 class PerpMarketContext:
     """The market context the engine reasons over, built by context_builder.
@@ -331,6 +543,13 @@ class PerpMarketContext:
     # hand-built context may carry an exchange clock and no pairing, and the
     # guard then reports no skew rather than inventing one.
     host_time_at_exchange_read: datetime | None = None
+    # Where volume sat in the price range over a rolling window of candles
+    # (:mod:`.volume_profile`). Optional and OFF by default: it is populated
+    # only when ``market_data.volume_profile_window_candles`` is configured
+    # above zero, so merging the feature changes no existing prompt until an
+    # operator turns it on. ``None`` means the prompt omits the section
+    # entirely — never a half-filled block (see :class:`VolumeProfile`).
+    volume_profile: VolumeProfile | None = None
 
     def __post_init__(self) -> None:
         # Mirror the boundary invariants the source ``MarketSnapshot`` already enforces,

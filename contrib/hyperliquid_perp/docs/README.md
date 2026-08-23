@@ -162,7 +162,8 @@ gate 區塊（mode / allow_real_orders / safety 等，見 phase3-spec §24）—
 | `exchanges/hyperliquid/mapper.py` | ✅ | SDK 原始回應 → 內部 schema。 |
 | `exchanges/hyperliquid/errors.py` | ✅ | SDK error → domain error。 |
 | `domains/perp/schema.py` | ✅ | `PerpMarketContext` · `PerpPosition` · `AccountSnapshot`。 |
-| `domains/perp/context_builder.py` | ✅ | `market_data + account → PerpMarketContext`；計算 indicators 與 funding z-score。 |
+| `domains/perp/context_builder.py` | ✅ | `market_data + account → PerpMarketContext`；計算 indicators 與 funding z-score，並在有設定視窗時掛上 volume profile。 |
+| `domains/perp/volume_profile.py` | ✅ | 滾動 K 線視窗的成交量分布 → POC · value area · D/P/b/細長形狀。純函數、fail-closed（視窗不可用整組回 `None`，該段就不進 prompt）。**預設關閉**，由 `market_data.volume_profile_window_candles` 開啟；只進 analyst 輸入面，不接任何 gate 或 sizing。每根 K 線的量均攤進自己的 high–low，是 OHLCV 粗粒度近似而非逐筆成交，prompt 內會如實標註。 |
 | `domains/perp/prompt_context.py` | ⚠️ | 結構開源；確切措辭私有（funding-rate 的表述方式是你的 alpha）。 |
 | `domains/perp/decision.py` | ~~✅~~ 已刪除 | `PerpTradeDecision` schema（Phase 1 意圖決策）。**Phase 2 起退役刪除**——舊 audit 紀錄（schema_version 2）仍可讀，但寫入路徑由 `target_decision.py` 的 structured target 契約取代。 |
 | `integration/trading_graph.py` | ✅ | `HyperliquidTradingGraph(TradingAgentsGraph)`——override `resolve_instrument_context()`，零核心修改。 |

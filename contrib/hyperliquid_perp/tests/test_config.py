@@ -65,6 +65,119 @@ def test_example_yaml_risk_decision_blocks_validate():
     validate_risk_decision_config(risk_cfg, decision_cfg)
 
 
+def test_example_yaml_ships_the_volume_profile_switched_off():
+    # The switch ships OFF, so pulling the feature into a branch (or onto the
+    # paper box) changes no prompt until an operator writes a window. If this
+    # ever flips to a non-zero default, the flip — not the merge — is the
+    # measurement point, and this test is where that gets noticed.
+    config = load_config(_EXAMPLE)
+    assert config["market_data"]["volume_profile_window_candles"] == 0
+
+
+@pytest.mark.parametrize("window", [0, 12, 30, 200])
+def test_load_config_accepts_a_legal_volume_profile_window(tmp_path, window):
+    good = tmp_path / "vp.yaml"
+    good.write_text(
+        f"market_data:\n  candle_lookback: 200\n  volume_profile_window_candles: {window}\n",
+        encoding="utf-8",
+    )
+    assert load_config(good)["market_data"]["volume_profile_window_candles"] == window
+
+
+@pytest.mark.parametrize(
+    ("value", "match"),
+    [
+        # Every one of these fails SILENTLY without the load-time check: the
+        # prompt section just never appears, which looks exactly like the
+        # feature being off on purpose.
+        ("30.5", "must be an integer"),
+        ('"30"', "must be an integer"),
+        ("true", "must be an integer"),  # bool is an int subclass — catch it explicitly
+        ("-1", "must be >= 0"),
+        ("6", "must be 0 .off. or at least 12"),  # the literal "rolling 24h" at 4h candles
+        ("11", "must be 0 .off. or at least 12"),
+    ],
+)
+def test_load_config_rejects_a_bad_volume_profile_window(tmp_path, value, match):
+    bad = tmp_path / "vp-bad.yaml"
+    bad.write_text(
+        f"market_data:\n  candle_lookback: 200\n  volume_profile_window_candles: {value}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=match):
+        load_config(bad)
+
+
+def test_load_config_rejects_a_window_wider_than_the_candle_lookback(tmp_path):
+    # A window the fetch can never fill would be skipped on every cycle.
+    bad = tmp_path / "vp-wide.yaml"
+    bad.write_text(
+        "market_data:\n  candle_lookback: 20\n  volume_profile_window_candles: 30\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="exceeds 'market_data.candle_lookback'"):
+        load_config(bad)
+
+
+@pytest.mark.parametrize("lookback", ["20.0", '"20"', "20"])
+def test_window_cross_check_coerces_the_lookback_like_its_consumer_does(tmp_path, lookback):
+    # ``candle_lookback`` is left lenient and coerced with int() at its
+    # consumer, so this check must COERCE too, not type-check. A type check
+    # would wave `candle_lookback: 20.0` through — engine_bridge reads that as
+    # 20, and the profile would then be skipped on every cycle in silence,
+    # which is the exact failure the cross-check exists to prevent.
+    bad = tmp_path / f"vp-coerce-{lookback.strip(chr(34))}.yaml"
+    bad.write_text(
+        f"market_data:\n  candle_lookback: {lookback}\n  volume_profile_window_candles: 30\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="exceeds 'market_data.candle_lookback'"):
+        load_config(bad)
+
+
+def test_an_uncoercible_lookback_skips_the_cross_check_rather_than_misreporting(tmp_path):
+    # A lookback that is not a number at all is candle_lookback's own problem
+    # (it fails loudly at its consumer). Complaining about the profile window
+    # here would send the operator to the wrong line.
+    path = tmp_path / "vp-junk-lookback.yaml"
+    path.write_text(
+        "market_data:\n  candle_lookback: not-a-number\n  volume_profile_window_candles: 30\n",
+        encoding="utf-8",
+    )
+    assert load_config(path)["market_data"]["volume_profile_window_candles"] == 30
+
+
+@pytest.mark.parametrize("lookback_line", ("  candle_lookback:\n", ""))
+def test_volume_profile_window_is_checked_against_the_same_lookback_default(
+    tmp_path, lookback_line
+):
+    # ``candle_lookback`` absent or blank means 200 in engine_bridge; the
+    # cross-check has to resolve it the same way or the two disagree about
+    # which windows are legal. 200 must pass, 201 must not.
+    #
+    # BOTH forms, because they take different branches of one line:
+    #
+    #     raw = md_block.get("candle_lookback", DEFAULT_CANDLE_LOOKBACK)
+    #     lookback = DEFAULT_CANDLE_LOOKBACK if raw is None else int(raw)
+    #
+    # A BLANK key is present, so ``.get`` returns None and the ``is None``
+    # branch supplies the default — the ``.get`` default is never read. Only the
+    # ABSENT key exercises it. Covering blank alone let the mutation
+    # ``.get("candle_lookback", 500)`` pass the whole suite, which is precisely
+    # the two-sides-disagree drift this test claims to catch.
+    for window, ok in ((200, True), (201, False)):
+        path = tmp_path / f"vp-default-{window}.yaml"
+        path.write_text(
+            f"market_data:\n{lookback_line}  volume_profile_window_candles: {window}\n",
+            encoding="utf-8",
+        )
+        if ok:
+            assert load_config(path)["market_data"]["volume_profile_window_candles"] == 200
+        else:
+            with pytest.raises(ValueError, match="exceeds 'market_data.candle_lookback'"):
+                load_config(path)
+
+
 def test_load_config_missing_path_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_config(tmp_path / "does-not-exist.yaml")

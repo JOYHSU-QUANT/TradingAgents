@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import NamedTuple
 
-from .common.constants import STALE_MARKET_DATA_ERROR
+from .common.constants import DEFAULT_CANDLE_LOOKBACK, STALE_MARKET_DATA_ERROR
 from .config import CONFIG_LOAD_ERRORS, DOTENV_READ_ERRORS, load_config
 from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context
@@ -170,8 +170,15 @@ _MAX_CANDLE_AGE_INTERVALS = 3
 # cycles of stale data, and never so tight that ordinary jitter refuses a cycle.
 # The ceiling states three DECISION cycles, but is written out rather than
 # derived from the scheduler's CYCLE_INTERVAL: importing paper.scheduler here
-# would pull the whole paper engine into the keyless --context-only path (25ms
-# measured) to read one timedelta. That leaves the value duplicated, so a
+# would pull the whole paper engine into the keyless --context-only path to read
+# one timedelta. That costs about 25ms, and the RECIPE matters more than the
+# figure — re-measure rather than trust it. Time the MARGINAL import, the only
+# one this decision is about: import engine_bridge, then time
+# ``importlib.import_module("contrib.hyperliquid_perp.paper.scheduler")``.
+# Repeated runs land within a few ms of each other. A cold interpreter reports
+# ~100ms instead and answers a different question: roughly three quarters of
+# that is already paid by the time this line is reached.
+# That leaves the value duplicated, so a
 # drift-lock test asserts the two against each other — a changed cycle length
 # fails a test instead of silently leaving this bound, and the operator-facing
 # "3 x the 4h decision cycle" text, lying. (Extracting CYCLE_INTERVAL into a
@@ -198,8 +205,16 @@ def _candle_age_limit(interval_ms: int, interval: str) -> tuple[int, str]:
             f"{_MAX_CANDLE_AGE_INTERVALS} x the {_CYCLE_LABEL} decision cycle"
         )
     if base < _MAX_CANDLE_AGE_FLOOR_MS:
+        # The floor's label is DERIVED, like the ceiling's above. Written out as
+        # "30m" it would keep telling the operator 30m after the constant moved
+        # — the one branch of this function whose derivation did not travel with
+        # its number, which is the property the docstring claims for all of them.
+        # Whole minutes by floor division, which is honest only while the
+        # constant is whole minutes; a test asserts that rather than leaving the
+        # assumption to be discovered by a truncated label.
         return _MAX_CANDLE_AGE_FLOOR_MS, (
-            f"{_MAX_CANDLE_AGE_INTERVALS} x {interval} raised to the 30m floor"
+            f"{_MAX_CANDLE_AGE_INTERVALS} x {interval} raised to the "
+            f"{_MAX_CANDLE_AGE_FLOOR_MS // 60_000}m floor"
         )
     return base, f"{_MAX_CANDLE_AGE_INTERVALS} x {interval}"
 
@@ -460,7 +475,9 @@ def _context_refusal_error(
 # names the host clock as the cause in a refusal). Log-only — the age check
 # against the exchange's clock is the gate — so this is an operator nudge, not
 # a correctness bound: one minute is far outside anything NTP leaves behind and
-# far inside the 30m floor of the limit the skew would have to reach to matter.
+# far inside ``_MAX_CANDLE_AGE_FLOOR_MS``, the floor of the limit the skew would
+# have to reach to matter. (Named, not written out as "30m": this is one of the
+# sites that would keep quoting the old number if that constant moved.)
 # Deliberately NOT the kill switch's 5s ``_MAX_CLOCK_SKEW_S``: that bound is
 # about absolute scheduleCancel deadlines, where seconds change the protection
 # window; here seconds change nothing, and importing live.kill_switch would
@@ -506,8 +523,10 @@ def _host_clock_freshness_refusal(
     its clock reading precedes the market reads, so a boundary closing in
     between lands slightly ahead of it. (The one-shot callers read after the
     fetch and expect no negative at all.) Sharing the bound keeps that slack
-    comfortably wide at every interval — the gap spans two REST calls, so its
-    30m floor is ~30x the default network_timeout_s — instead of inventing a
+    comfortably wide at every interval: the gap spans two REST calls, so at the
+    default ``network_timeout_s`` of 30 the worst case it has to cover is 60s,
+    against a floor (``_MAX_CANDLE_AGE_FLOOR_MS``) of 1800s — 30x that gap, or
+    60x a single timeout. Sharing it beats inventing a
     second threshold to re-derive whenever that timeout changes. (config
     validates network_timeout_s as a number but sets no upper bound, so a
     deployment choosing minutes-long timeouts would need this revisited.)
@@ -596,10 +615,16 @@ def _build_context(
     # ``dict.get(key, default)`` only falls back when the key is absent; a present-
     # but-null value (YAML key left blank) returns None and crashes ``int(None)`` —
     # treat null like absent (matches network_timeout_s handling in from_config).
-    raw_lookback = md_cfg.get("candle_lookback", 200)
-    lookback = int(raw_lookback) if raw_lookback is not None else 200
+    raw_lookback = md_cfg.get("candle_lookback", DEFAULT_CANDLE_LOOKBACK)
+    lookback = int(raw_lookback) if raw_lookback is not None else DEFAULT_CANDLE_LOOKBACK
     raw_window = md_cfg.get("funding_zscore_window_days", 30)
     window_days = int(raw_window) if raw_window is not None else 30
+    # Volume profile is OFF unless an operator sets a window (see the module
+    # docstring of domains/perp/volume_profile.py). Same null-is-absent rule as
+    # the two above; ``load_config`` has already rejected a non-integer or
+    # out-of-band value, so this int() cannot raise on a loaded config.
+    raw_profile_window = md_cfg.get("volume_profile_window_candles", 0)
+    profile_window = int(raw_profile_window) if raw_profile_window is not None else 0
     indicator_names = _indicator_names(config)
 
     def _between_reads() -> None:
@@ -655,6 +680,7 @@ def _build_context(
         indicator_names=indicator_names,
         exchange_time=exchange_time,
         host_time_at_exchange_read=host_time_at_exchange_read,
+        volume_profile_window=profile_window,
     )
     return ctx, client
 

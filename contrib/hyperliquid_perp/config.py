@@ -14,7 +14,11 @@ from typing import Any
 import yaml
 
 from .common.config_coercion import bool_from_yaml
-from .common.constants import LEGAL_NETWORKS
+from .common.constants import (
+    DEFAULT_CANDLE_LOOKBACK,
+    LEGAL_NETWORKS,
+    MIN_VOLUME_PROFILE_WINDOW,
+)
 from .domains.perp.indicator_vocab import REGIME_INDICATORS, supported_indicators
 
 _CONFIG_DIR = Path(__file__).parent / "configs"
@@ -169,6 +173,69 @@ def config_path() -> Path:
     return _LOCAL if _LOCAL.exists() else _EXAMPLE
 
 
+def _validate_volume_profile_window(md_block: Any) -> None:
+    """Validate ``market_data.volume_profile_window_candles``, or do nothing.
+
+    The one ``market_data`` key checked at load time, because every way of
+    getting it wrong fails SILENTLY: the volume-profile section simply never
+    appears in the prompt, which is indistinguishable from the feature being
+    off on purpose (``0``). Stricter than ``candle_lookback``'s lenient
+    ``int(...)``: the key is new, so nothing depends on a loose form, and
+    rejecting a float/string here is what lets engine_bridge's ``int(...)`` be
+    unable to raise on a loaded config.
+
+    Takes the already-shape-checked ``market_data`` block (a dict or ``None``).
+    """
+    if not md_block:
+        return
+    window = md_block.get("volume_profile_window_candles")
+    if window is None:
+        return
+    # ``bool`` is an ``int`` subclass, so ``volume_profile_window_candles: true``
+    # would otherwise pass as the window ``1`` and then be refused at runtime.
+    if isinstance(window, bool) or not isinstance(window, int):
+        raise ValueError(
+            f"'market_data.volume_profile_window_candles' must be an integer "
+            f"number of candles (0 disables the volume profile), got {window!r}"
+        )
+    if window < 0:
+        raise ValueError(
+            f"'market_data.volume_profile_window_candles' must be >= 0 "
+            f"(0 disables the volume profile), got {window}"
+        )
+    if 0 < window < MIN_VOLUME_PROFILE_WINDOW:
+        raise ValueError(
+            f"'market_data.volume_profile_window_candles' must be 0 (off) or at "
+            f"least {MIN_VOLUME_PROFILE_WINDOW}; a window of {window} candle(s) is too "
+            f"short for a meaningful profile and would be skipped on every cycle"
+        )
+    # Cross-check against the history actually fetched: a window wider than the
+    # lookback can never be filled, so the section would be silently absent
+    # forever. Resolved exactly as engine_bridge._build_context does — absent or
+    # null falls back to the SHARED ``DEFAULT_CANDLE_LOOKBACK``, not to a local
+    # literal, so the two sides cannot disagree about the default.
+    #
+    # ``candle_lookback`` is NOT type-validated anywhere (it stays lenient), so
+    # this must COERCE it the way its consumer does rather than demand an
+    # ``int``: a type check would wave through ``candle_lookback: 20.0``, which
+    # engine_bridge reads as 20 — reinstating the exact silent skip this check
+    # exists to prevent. ``int()`` mirrors that coercion, bool included
+    # (``true`` -> 1 is what the fetch would really use). Only a genuinely
+    # un-coercible lookback skips the check, and that one fails loudly at the
+    # fetch; complaining about the profile window would point at the wrong line.
+    raw_lookback = md_block.get("candle_lookback", DEFAULT_CANDLE_LOOKBACK)
+    try:
+        lookback = DEFAULT_CANDLE_LOOKBACK if raw_lookback is None else int(raw_lookback)
+    except (TypeError, ValueError):
+        return
+    if window > lookback:
+        raise ValueError(
+            f"'market_data.volume_profile_window_candles' ({window}) exceeds "
+            f"'market_data.candle_lookback' ({lookback}) — the window could "
+            f"never be filled and the volume profile would be skipped on every cycle"
+        )
+
+
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
     """Parse the YAML config into a dict."""
     resolved = Path(path) if path else config_path()
@@ -206,6 +273,7 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         val = config.get(key)
         if val is not None and not isinstance(val, dict):
             raise ValueError(f"{key!r} must be a mapping, got {val!r}")
+    _validate_volume_profile_window(config.get("market_data"))
     # A scalar here would silently resolve to per-character values downstream
     # (``coins: BTC`` → "B"; ``indicators: rsi_14`` → six unknown names, which
     # zeroes the warm-up threshold and empties the all-dead-indicator guard).

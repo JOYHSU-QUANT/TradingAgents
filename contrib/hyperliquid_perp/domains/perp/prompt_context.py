@@ -47,10 +47,13 @@ _REGIME_NOTE = {
 # shape. Exhaustive over ProfileShape — a new member fails loud at render time
 # rather than silently inheriting another shape's description.
 #
-# These are OBSERVATIONS about where volume sat, and nothing more. They state
-# the geometry — which half of the range the volume built up in, which side of
-# the midpoint the close landed on — and stop there, WITHOUT naming who did it
-# or why.
+# Each note states what its own rule TESTED, and nothing more. Note what that
+# is NOT: none of them says where the bulk of the volume sat. P and b test
+# where the single heaviest BUCKET sits; thin tests how WIDE the value area
+# came out; D is the catch-all and tests nothing positive at all. The close
+# clause is the one direct observation, and it is only about the close.
+#
+# They also stop short of naming who did it or why.
 #
 # That restraint is the point, for two reasons. First, this file's standing
 # rule (see the module docstring and _REGIME_NOTE) keeps directional framing

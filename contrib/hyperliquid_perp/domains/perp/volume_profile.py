@@ -1,10 +1,18 @@
 """Volume profile — where traded volume sat in the price range, and its shape.
 
 Adds the one thing the RSI/EMA/ATR/MACD set cannot express: the *distribution*
-of volume across price. Two levels come out of it — the POC (the price bucket
-that traded the most) and the value area (the band around the POC holding
-:data:`VALUE_AREA_FRACTION` of the window's volume) — plus a coarse one-letter
-shape label taken from the source article's D / P / b / thin taxonomy.
+of volume across price. Two levels come out of it — the POC (the heaviest
+price bucket, reported as that bucket's midpoint) and the value area (the band
+around the POC holding AT LEAST :data:`VALUE_AREA_FRACTION` of the window's
+volume) — plus a coarse one-letter shape label taken from the source article's
+D / P / b / thin taxonomy.
+
+Both parentheticals are deliberately narrow. "The bucket that traded the most"
+would contradict the **Not tick data** bullet below: no volume was measured AT
+any price, only smeared across each bar's high-low, so the POC's midpoint can
+be a price the window never printed. And the value area holds at least — never
+exactly — the fraction, because the walk stops on the first bucket that crosses
+it.
 
 Same discipline as :func:`..context_builder.classify_regime`: pure,
 deterministic, and fail-closed — every degenerate input returns ``None`` for
@@ -306,7 +314,9 @@ def classify_shape(profile: PriceDistribution, latest_close: Decimal) -> VolumeP
 
     The value area grows OUTWARD from the POC bucket, one neighbour at a time,
     always taking the heavier of the two adjacent buckets (ties go upward),
-    until it holds :data:`VALUE_AREA_FRACTION` of the window's volume. The POC
+    until it holds AT LEAST :data:`VALUE_AREA_FRACTION` of the window's volume
+    — it stops on the first bucket that crosses the target, so it lands on the
+    fraction exactly only by coincidence. The POC
     is the midpoint of the heaviest bucket; ties there go to the LOWEST such
     bucket, so the result is reproducible on a symmetric distribution instead
     of depending on iteration luck.

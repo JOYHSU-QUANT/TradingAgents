@@ -89,9 +89,11 @@ def test_the_config_loader_imports_no_compute_module():
         # ``name is None`` on a relative node means ``from . import x`` — the
         # package ITSELF, so it maps to "" (in no allowlist), exactly as
         # _package_tail maps the bare absolute package. Letting it fall through
-        # as None would allow ``from . import volume_profile``, one keystroke
-        # from the already-flagged ``from .volume_profile import ...`` and the
-        # ordinary way to reach a sibling top-level module from the package root.
+        # as None would allow ``from . import domains`` — one keystroke from the
+        # already-flagged ``from .domains import perp``, and the realistic route
+        # to the historical offender this test's docstring cites. (``.`` here is
+        # ``contrib.hyperliquid_perp``, config.py's own package, so the reachable
+        # spellings are its top-level children: domains, ports, engine_bridge.)
         tail = (name or "") if level >= 1 else _package_tail(name)
         if tail is None or tail in allowed:
             return None

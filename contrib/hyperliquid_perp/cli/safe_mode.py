@@ -392,7 +392,10 @@ def _stamp_reconciliation_case(db, repo, args) -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"case {args.stamp_case} ({row['case_type']}) stamped: {args.action}")
+    # Echo what was STORED, not what was typed: the two differ by the strip
+    # above, and an operator reading back their own trailing spaces would be
+    # told the row says something the row does not say.
+    print(f"case {args.stamp_case} ({row['case_type']}) stamped: {action}")
     print(
         "NOTE: trading does not resume yet — the run must pass its next full "
         "reconciliation before new orders are allowed."

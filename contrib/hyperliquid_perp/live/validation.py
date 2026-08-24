@@ -31,7 +31,7 @@ Where the metrics come from (all from persisted PR 2–5 event logs):
   are deliberately distinct so a re-settle does not dedupe against a plain
   orphan sighting, so a fact-key count would still over-state the orders by up
   to 3×. Reported BESIDE the row count rather than replacing it — the row count
-  is what §21.4 accepts on and what the exit-5 gate keys off — and the gap
+  is what the §20.3 threshold list and the exit-5 gate key off — and the gap
   between the two is the venue flapping, not more orders. Non-gating.
 - ``duplicate_fill_apply_count`` — live ``fills`` sharing an ``exchange_fill_key``
   (structurally impossible under the UNIQUE index — a store-integrity assertion).
@@ -507,16 +507,16 @@ class LiveValidationReport:
                 "unresolved_unprotected_window is set but unprotected_window_count is "
                 f"{self.unprotected_window_count} (an open window is a counted window)"
             )
-        # The two orphan numbers count the SAME rows, one of them by distinct
-        # fact key — so neither "more keys than rows" nor "rows but no key" can
-        # be true, and either shape would print a summary telling the operator
-        # to go find a number of orders the audit trail cannot hold. Asserted
-        # because the report is also built by hand (tests, any future caller);
-        # the tally derives both from one row list.
+        # The two orphan numbers count the SAME rows, one of them collapsed to
+        # distinct cloids — so neither "more orders than rows" nor "rows but no
+        # order" can be true, and either shape would print a summary telling
+        # the operator to go find a number of orders the audit trail cannot
+        # hold. Asserted because the report is also built by hand (tests, any
+        # future caller); the tally derives both from one row list.
         # Skipped when the row count is itself negative: that is a fault of one
         # field, not of their relationship, and the shared non-negative sweep
         # below already names it — comparing first would answer "-3 rows" with
-        # a message about keys exceeding rows.
+        # a message about orders exceeding rows.
         if (
             self.orphan_exchange_order_count >= 0
             and self.orphan_exchange_order_distinct_count > self.orphan_exchange_order_count
@@ -1398,7 +1398,9 @@ def validate_live_run(
         # store written by something else; it becomes its own bucket rather
         # than being dropped, which keeps "keys ≤ rows" true and cannot
         # under-state the orders THIS sweep records.
-        orphan_key_count = len({str(row["exchange_value"]).split("|", 1)[0] for row in orphan_rows})
+        orphan_distinct_count = len(
+            {str(row["exchange_value"]).split("|", 1)[0] for row in orphan_rows}
+        )
         position_mismatch_count = len(
             repo.iter_exchange_reconciliation_events(
                 conn, run_id, case_type="exchange_position_mismatch"
@@ -1478,7 +1480,7 @@ def validate_live_run(
         # that many orders (issue #84).
         failures.append(
             f"orphan_exchange_order_count = {orphan_count} (want 0) across "
-            f"{orphan_key_count} distinct order(s)"
+            f"{orphan_distinct_count} distinct order(s)"
         )
     if duplicate_fill_apply_count:
         failures.append(
@@ -1661,7 +1663,7 @@ def validate_live_run(
         fill_count=fill_count,
         exchange_fill_dedupe_error_count=dedupe_error_count,
         orphan_exchange_order_count=orphan_count,
-        orphan_exchange_order_distinct_count=orphan_key_count,
+        orphan_exchange_order_distinct_count=orphan_distinct_count,
         duplicate_fill_apply_count=duplicate_fill_apply_count,
         local_exchange_position_mismatch_count=position_mismatch_count,
         account_replay_mismatch_count=replay_mismatch_count,

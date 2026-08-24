@@ -1049,6 +1049,13 @@ class LiveReconciler:
                 # back-fill the local row from what the exchange reported
                 # (fail-safe direction: once the row exists, every later sweep
                 # — kill-switch shutdown included — sees and manages it).
+                # The one disposition site the sweep CANNOT validate before its
+                # write, and deliberately so: the stamp depends on whether the
+                # back-fill succeeded, so there is nothing to check until it
+                # has run. Harmless where the three settle/reopen sites are
+                # not — a failed back-fill writes no orders row at all, so an
+                # unclassified stamp raising here cannot leave a changed row
+                # behind, only a missing case row on an already-unclean leg.
                 resolved = self._backfill_orphan_order(order, registry, now)
                 cases.append(
                     ReconciliationCase(
@@ -1251,12 +1258,11 @@ class LiveReconciler:
             # protection manager's coverage compare (``live/protection.py``
             # reads this column at both its resting protection-order checks —
             # the SL-coverage one and the role-agnostic _establish one).
-            # Required sizes
-            # fail loud (issue #81); limitPx keeps its optional contract (a
-            # market order legitimately has none), so an unusable one degrades
-            # to None rather than failing the back-fill — refusing the row
-            # would leave a real exchange order with no local row at all, and
-            # so outside the §18.2 disarm cross-check.
+            # Required sizes fail loud (issue #81); limitPx keeps its optional
+            # contract (a market order legitimately has none), so an unusable
+            # one degrades to None rather than failing the back-fill —
+            # refusing the row would leave a real exchange order with no local
+            # row at all, and so outside the §18.2 disarm cross-check.
             #
             # ``field`` names the key the value CAME from, not the column it
             # fills: after the fallback above, a bad ``sz`` must not be
@@ -1273,6 +1279,12 @@ class LiveReconciler:
                 # RESOLVED case row, so without this line "the venue served a
                 # corrupt price for a resting order" reduces to a context-free
                 # WARNING inside an otherwise clean pass.
+                #
+                # ``""`` is excluded on purpose, not overlooked: the mapper's
+                # optional contract treats blank as ABSENT (it does not log
+                # either), and a market order with no price is the ordinary
+                # case, not a corruption. Only a value that was PRESENT and
+                # could not be used is worth an operator's attention.
                 logger.warning(
                     "orphan back-fill for cloid %s (oid %s): limitPx %r is unusable — "
                     "the local row will be written with no price",

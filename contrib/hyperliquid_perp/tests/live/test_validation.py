@@ -535,18 +535,19 @@ def test_distinct_orphan_orders_are_counted_separately(tmp_path):
     assert report.orphan_exchange_order_distinct_count == 2
 
 
-def test_post_init_rejects_more_orphan_keys_than_orphan_rows():
-    # They count the same rows one way or another, so this shape is impossible
-    # from the tally — and from a hand-built report it would print a summary
-    # telling the operator to find more orders than the audit trail holds.
+def test_post_init_rejects_more_orphan_orders_than_orphan_rows():
+    # One counts the rows, the other collapses those same rows to cloids, so
+    # this shape is impossible from the tally — and from a hand-built report it
+    # would print a summary telling the operator to find more orders than the
+    # audit trail holds.
     with pytest.raises(ValueError, match="exceeds orphan_exchange_order_count"):
         _make_report(orphan_exchange_order_count=1, orphan_exchange_order_distinct_count=2)
 
 
-def test_post_init_rejects_orphan_rows_with_no_key():
-    # Every orphan case the sweep constructs carries a fact key, and therefore
-    # an order, so "rows but nothing to look for" is a corrupt read rather than
-    # a quiet zero.
+def test_post_init_rejects_orphan_rows_with_no_order():
+    # Every orphan case the sweep constructs carries a cloid-prefixed fact key,
+    # and therefore an order, so "rows but nothing to look for" is a corrupt
+    # read rather than a quiet zero.
     with pytest.raises(ValueError, match="every recorded orphan row belongs to some order"):
         _make_report(orphan_exchange_order_count=3, orphan_exchange_order_distinct_count=0)
 

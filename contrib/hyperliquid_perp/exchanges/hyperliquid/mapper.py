@@ -40,8 +40,9 @@ real division of labour, which a grep can check:
 
 The two sides align through five exports of this module —
 :data:`HL_SIDE_TO_LOCAL` and :func:`hl_closing_side` into ``live/``,
-:func:`hex_identity_matches`, :func:`require_decimal` and
-:func:`optional_decimal` into ``signed_client`` and ``live/`` — plus
+:func:`hex_identity_matches` and :func:`require_decimal` into ``signed_client``
+and ``live/``, :func:`optional_decimal` into ``live/`` alone (``signed_client``
+parses only REQUIRED fields; see its own note) — plus
 :func:`map_account_snapshot`, which the live modules and CLI entrypoints call
 on raw payloads they never inspect themselves.
 

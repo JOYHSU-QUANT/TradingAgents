@@ -379,7 +379,10 @@ def _stamp_reconciliation_case(db, repo, args) -> int:
         # pass can stamp the machine disposition — and a plain UPDATE would
         # erase what the system recorded it DID, with no error and no audit row
         # (2026-07-30 concurrency review).
-        stamped = repo.stamp_reconciliation_action_if_unset(conn, args.stamp_case, args.action)
+        # The STRIPPED value, the same one the machine-vocabulary fence above
+        # tested: deciding on one string and storing another would let
+        # " backfilled " be refused while "backfilled " was not.
+        stamped = repo.stamp_reconciliation_action_if_unset(conn, args.stamp_case, action)
     if not stamped:
         print(
             f"error: case {args.stamp_case} was disposed of by another writer "

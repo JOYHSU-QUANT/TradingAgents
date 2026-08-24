@@ -24,7 +24,7 @@ Where the metrics come from (all from persisted PR 2–5 event logs):
   flap of the venue (see ``repo.PROVISIONAL_DISPOSITIONS``), so one order whose
   orderStatus flapped all morning can be most of this number. The gate is
   unaffected — it fails at one row either way.
-- ``orphan_exchange_order_key_count`` — those same rows counted by DISTINCT
+- ``orphan_exchange_order_distinct_count`` — those same rows counted by DISTINCT
   CLOID: the number of orders to go looking for at the exchange (issue #84).
   Not by fact key — this case type writes THREE key shapes for one order (a
   bare cloid, ``|local_terminal``, ``|local_terminal_read_failed``), and they
@@ -402,7 +402,7 @@ class LiveValidationReport:
     # has up to three of those). They differ whenever a cloid's orderStatus
     # flapped, or the same order was seen under two fault shapes (issue #84)
     # — see the module docstring.
-    orphan_exchange_order_key_count: int
+    orphan_exchange_order_distinct_count: int
     duplicate_fill_apply_count: int
     local_exchange_position_mismatch_count: int
     account_replay_mismatch_count: int
@@ -519,18 +519,18 @@ class LiveValidationReport:
         # a message about keys exceeding rows.
         if (
             self.orphan_exchange_order_count >= 0
-            and self.orphan_exchange_order_key_count > self.orphan_exchange_order_count
+            and self.orphan_exchange_order_distinct_count > self.orphan_exchange_order_count
         ):
             raise ValueError(
-                "orphan_exchange_order_key_count "
-                f"({self.orphan_exchange_order_key_count}) exceeds "
+                "orphan_exchange_order_distinct_count "
+                f"({self.orphan_exchange_order_distinct_count}) exceeds "
                 f"orphan_exchange_order_count ({self.orphan_exchange_order_count}) — "
                 "they count the same rows"
             )
-        if self.orphan_exchange_order_count > 0 and self.orphan_exchange_order_key_count == 0:
+        if self.orphan_exchange_order_count > 0 and self.orphan_exchange_order_distinct_count == 0:
             raise ValueError(
                 f"orphan_exchange_order_count is {self.orphan_exchange_order_count} but "
-                "orphan_exchange_order_key_count is 0 — every recorded orphan row "
+                "orphan_exchange_order_distinct_count is 0 — every recorded orphan row "
                 "belongs to some order"
             )
         # A reason without a type is a half-read episode: the gate keys on the
@@ -569,7 +569,7 @@ class LiveValidationReport:
             "fill_count",
             "exchange_fill_dedupe_error_count",
             "orphan_exchange_order_count",
-            "orphan_exchange_order_key_count",
+            "orphan_exchange_order_distinct_count",
             "duplicate_fill_apply_count",
             "local_exchange_position_mismatch_count",
             "account_replay_mismatch_count",
@@ -634,9 +634,8 @@ class LiveValidationReport:
             f"orphan_exchange_order_count: {self.orphan_exchange_order_count}",
             # Its own line, and the row-count line above left byte-identical:
             # §21.4 and RUNBOOK-live both quote that line, and an operator
-            # diffing runs greps it. "key" in the name is the fact-key column
-            # it is derived from; the VALUE is orders (see the docstring).
-            f"orphan_exchange_order_key_count: {self.orphan_exchange_order_key_count}",
+            # diffing runs greps it.
+            f"orphan_exchange_order_distinct_count: {self.orphan_exchange_order_distinct_count}",
             f"duplicate_fill_apply_count: {self.duplicate_fill_apply_count}",
             f"local_exchange_position_mismatch_count: {self.local_exchange_position_mismatch_count}",
             f"account_replay_mismatch_count: {self.account_replay_mismatch_count}",
@@ -1662,7 +1661,7 @@ def validate_live_run(
         fill_count=fill_count,
         exchange_fill_dedupe_error_count=dedupe_error_count,
         orphan_exchange_order_count=orphan_count,
-        orphan_exchange_order_key_count=orphan_key_count,
+        orphan_exchange_order_distinct_count=orphan_key_count,
         duplicate_fill_apply_count=duplicate_fill_apply_count,
         local_exchange_position_mismatch_count=position_mismatch_count,
         account_replay_mismatch_count=replay_mismatch_count,

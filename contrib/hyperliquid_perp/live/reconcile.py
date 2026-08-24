@@ -203,11 +203,14 @@ def _clip(text: str | None) -> str | None:
 # otherwise have no tie to the vocabulary at all (issue #84).
 #
 # Checked at IMPORT rather than at each write, because the three sites do not
-# share a failure lane and one of them cannot fail loudly where it stands:
-# ``_clear_read_failure_case`` is deliberately fail-soft (it swallows and
-# logs), so a guard there would report a rename as one warning line and let
-# the key shut forever anyway — the exact silence #84 is about. Checking here
-# gives all three the same answer, and a rename nobody classified in
+# share a failure lane and TWO of them cannot fail loudly where they stand:
+# ``_clear_read_failure_case`` swallows and logs a warning, and ``_record``'s
+# backfill-event insert swallows and logs an exception while the pass stays
+# CLEAN — both deliberately fail-soft, so a guard at either would report a
+# rename as one log line and let the key shut forever anyway, the exact
+# silence #84 is about. Only the fill-booked stamp reaches ``guarded``, which
+# would turn a raise into an unclean verdict. Checking here gives all three
+# the same answer, and a rename nobody classified in
 # repo.MACHINE_DISPOSITIONS cannot start the daemon at all.
 _FILL_BOOKED_DISPOSITION = "resolved_fill_booked"
 _READ_SUCCEEDED_DISPOSITION = "resolved_read_succeeded"
@@ -1246,7 +1249,9 @@ class LiveReconciler:
             # parse WITHOUT error, and a non-finite qty would land in the
             # orders row this back-fill inserts — read back later by the
             # protection manager's coverage compare (``live/protection.py``
-            # reads this column at both its resting-SL checks). Required sizes
+            # reads this column at both its resting protection-order checks —
+            # the SL-coverage one and the role-agnostic _establish one).
+            # Required sizes
             # fail loud (issue #81); limitPx keeps its optional contract (a
             # market order legitimately has none), so an unusable one degrades
             # to None rather than failing the back-fill — refusing the row
@@ -1270,7 +1275,7 @@ class LiveReconciler:
                 # WARNING inside an otherwise clean pass.
                 logger.warning(
                     "orphan back-fill for cloid %s (oid %s): limitPx %r is unusable — "
-                    "the local row is written with no price",
+                    "the local row will be written with no price",
                     registry["cloid_hex"],
                     order.get("oid"),
                     order.get("limitPx"),
@@ -1358,15 +1363,8 @@ class LiveReconciler:
                     ),
                 )
             # No proof the exchange ever saw it: the send never landed.
-            with self._db.transaction() as conn:
-                repo.update_order(
-                    conn,
-                    order_id,
-                    status="rejected",
-                    status_reason="send_never_reached_exchange",
-                    updated_at=now,
-                )
-            return True, ReconciliationCase(
+            # Case first, write second — see the sibling below.
+            case = ReconciliationCase(
                 case_type="order_missing_on_exchange",
                 symbol=row["symbol"],
                 local_value=order_id,
@@ -1375,6 +1373,15 @@ class LiveReconciler:
                 action_taken="settled_never_sent",
                 resolved=True,
             )
+            with self._db.transaction() as conn:
+                repo.update_order(
+                    conn,
+                    order_id,
+                    status="rejected",
+                    status_reason="send_never_reached_exchange",
+                    updated_at=now,
+                )
+            return True, case
         exchange_order_id, raw_status = parsed
         local_status = local_status_for_exchange_status(raw_status)
         if local_status in repo.LIVE_ORDER_STATUSES:
@@ -1382,11 +1389,13 @@ class LiveReconciler:
             # §12.3 case — two eventually-consistent exchange reads disagreeing
             # for a moment is not a local/exchange conflict.
             return True, None
-        # Built before the write for the same reason as the reopen mirror: the
-        # disposition is DERIVED (``settled_{local_status}``), so it is the one
-        # this module cannot check by reading, and settling the order in SQLite
-        # before validating it would leave the row changed with no audit row
-        # explaining why (issue #84).
+        # Built before the write for the same reason as the reopen mirror and
+        # the never-sent branch above: __post_init__ is what validates the
+        # disposition, and settling the order in SQLite before validating it
+        # would leave the row changed with no audit row explaining why (issue
+        # #84). It matters most here, where the disposition is DERIVED
+        # (``settled_{local_status}``) and so is the one word in this module no
+        # reader can check by eye.
         case = ReconciliationCase(
             case_type="order_missing_on_exchange",
             symbol=row["symbol"],

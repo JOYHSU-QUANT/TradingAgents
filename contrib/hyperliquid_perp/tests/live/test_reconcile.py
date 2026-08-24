@@ -2158,44 +2158,63 @@ def test_every_disposition_the_sweep_writes_is_in_the_machine_vocabulary():
     # Reads the SOURCE rather than a hand-kept list, because a hand-kept list
     # is a third copy with the same drift problem: it would pass while a NEW
     # disposition added at a call site went unclassified, which is precisely
-    # what #84 says the predecessor test failed to catch. Every literal
-    # ``action_taken=`` argument in the module must be a member; anything
-    # computed (``f"settled_{local_status}"``) is left to the runtime guard in
-    # __post_init__ and to the derivation in _vocab.
+    # what #84 says the predecessor test failed to catch.
+    #
+    # Its reach, stated exactly so nobody reads it as more: string literals
+    # reachable from an ``action_taken=`` KEYWORD argument in THIS module,
+    # including inside a conditional. Deliberately outside: f-strings
+    # (``f"settled_{local_status}"`` — derived in _vocab, guarded at runtime),
+    # positional ``ReconciliationCase(...)`` construction, ``action_taken``
+    # written from another module, and a literal passed positionally to
+    # ``set_reconciliation_action``. Those are the runtime guard's job, and
+    # ``test_an_unclassified_disposition_fails_where_it_is_constructed`` is
+    # what pins it.
     import ast
     import pathlib
+
+    def _literals(value: ast.expr) -> set[str]:
+        # Node-wise, not value-wise: skipping the whole value on seeing an
+        # f-string would drop ``"foo"`` from ``"foo" if x else f"settled_{y}"``
+        # — the same silent skip the conditional descent exists to prevent.
+        if isinstance(value, ast.JoinedStr):
+            return set()
+        if isinstance(value, ast.Constant):
+            return {value.value} if isinstance(value.value, str) else set()
+        return set().union(*(_literals(child) for child in ast.iter_child_nodes(value)), set())
 
     source = pathlib.Path(reconcile_mod.__file__).read_text(encoding="utf-8")
     literals: set[str] = set()
     for node in ast.walk(ast.parse(source)):
-        if not (isinstance(node, ast.keyword) and node.arg == "action_taken"):
-            continue
-        # Descend into the value rather than requiring a bare Constant: one
-        # site spells its stamp inside a conditional
-        # (``"local_row_backfilled" if resolved else None``), and a scan that
-        # only matched bare literals would silently skip it — the same
-        # invisible-gap shape this test exists to close.
-        subnodes = list(ast.walk(node.value))
-        if any(isinstance(sub, ast.JoinedStr) for sub in subnodes):
-            continue  # computed (f"settled_{status}") — the runtime guard owns it
-        literals |= {
-            sub.value
-            for sub in subnodes
-            if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
-        }
-    # A scan that finds nothing would pass vacuously; pin the count so a
-    # refactor that moves these writes out of keyword form fails here instead.
-    assert len(literals) >= 3, f"scan found only {sorted(literals)} — did the shape change?"
+        if isinstance(node, ast.keyword) and node.arg == "action_taken":
+            literals |= _literals(node.value)
+    # Named, not counted: a bare ``>= 3`` would fail on the very refactor this
+    # module keeps doing (hoisting a literal into a module constant, which
+    # makes it BETTER protected), while still passing if a fourth literal was
+    # added unclassified. The membership assertion below is what carries the
+    # weight; this only proves the scan still sees the module.
+    assert {"local_row_reopened", "settled_never_sent"} <= literals, sorted(literals)
     unclassified = literals - repo.MACHINE_DISPOSITIONS
     assert not unclassified, f"unclassified machine dispositions: {sorted(unclassified)}"
-    # And the module-level constants, which are the other write shape (they are
-    # passed by NAME, so the scan above cannot see their values).
-    for stamp in (
-        reconcile_mod._FILL_BOOKED_DISPOSITION,
-        reconcile_mod._READ_SUCCEEDED_DISPOSITION,
-        reconcile_mod._FILL_BACKFILLED_DISPOSITION,
-    ):
-        assert stamp in repo.MACHINE_DISPOSITIONS, stamp
+
+
+def test_the_module_refuses_to_import_with_an_unclassified_stamp_constant(monkeypatch):
+    # The three case-less write sites pass their stamp by NAME, so the scan
+    # above cannot see the values and __post_init__ never sees them either —
+    # the import-time check_enum loop is their ONLY guard. Asserting the
+    # constants are members would be unfalsifiable (an unclassified one makes
+    # this very module fail to import), so defeat the import cache and prove
+    # the loop is what refuses.
+    import importlib
+
+    monkeypatch.setattr(
+        repo, "MACHINE_DISPOSITIONS", repo.MACHINE_DISPOSITIONS - {"resolved_fill_booked"}
+    )
+    with pytest.raises(ValueError, match="action_taken"):
+        importlib.reload(reconcile_mod)
+    # Reload against the real vocabulary so the rest of the session sees the
+    # module the other tests hold references into.
+    monkeypatch.undo()
+    importlib.reload(reconcile_mod)
 
 
 def test_an_unclassified_disposition_fails_where_it_is_constructed():
@@ -2213,6 +2232,28 @@ def test_an_unclassified_disposition_fails_where_it_is_constructed():
             action_taken="local_row_reopened_v2",
             resolved=True,
         )
+
+
+def test_an_unclassified_disposition_leaves_the_orders_row_untouched(env, monkeypatch):
+    # Pins the ORDERING the sweep's case construction deliberately has: the
+    # case is built (and so validated) before the transaction that settles the
+    # order. Without this, a refactor could put the write back in front and
+    # nothing would notice — the row would be settled in SQLite while the audit
+    # row explaining why raised on the way out.
+    db, seams, reconciler = env
+    _insert_local_order(db, status="open")
+    seams.open_orders = []  # absent -> _settle_absent_order
+    seams.order_status[_HEX] = {
+        "status": "order",
+        "order": {"order": {"oid": 77}, "status": "canceled"},
+    }
+    monkeypatch.setattr(
+        repo, "MACHINE_DISPOSITIONS", repo.MACHINE_DISPOSITIONS - {"settled_canceled"}
+    )
+    report = reconciler.run("heartbeat")
+    assert not report.orders_reconciled
+    assert any("orders leg crashed" in e for e in report.errors)
+    assert repo.get_order(db.conn, "o1")["status"] == "open"  # not settled
 
 
 def test_a_classified_disposition_still_constructs():

@@ -206,9 +206,11 @@ class TestFundamentalWrappers:
         # Dropping curr_date from the forward disables future-report filtering
         # entirely — a look-ahead-bias leak that produces no error and no
         # sentinel; since #73 its only symptoms are the vendors' warning log
-        # and a wall-clock freshness note. Swapping freq with curr_date is nearly as quiet: the
-        # vendor returns an error STRING, which lands in the LLM's context as
-        # text rather than raising.
+        # and a wall-clock freshness note. Swapping freq with curr_date is the
+        # loud failure instead: "annual" is a supplied-but-unusable date, so
+        # since #89 either vendor answers the INVALID_CURR_DATE sentinel naming
+        # the rejected value. Only the dropped-argument case stays quiet, which
+        # is what this assertion guards.
         assert _forwarded(
             fundamental_data_tools,
             getattr(fundamental_data_tools, attr),

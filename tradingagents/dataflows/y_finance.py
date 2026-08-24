@@ -19,21 +19,90 @@ from .symbol_utils import NoMarketDataError, normalize_symbol
 
 # The insider-filing bound lives in utils so the Alpha Vantage vendor serving
 # the same routed tool shares the single definition (#69).
-from .utils import MAX_INSIDER_LAG_DAYS, data_lag_note, live_snapshot_note, statement_lag_bound
+from .utils import (
+    MAX_INSIDER_LAG_DAYS,
+    curr_date_refusal,
+    data_lag_note,
+    live_snapshot_note,
+    statement_lag_bound,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title: str) -> str:
+    """Judge, filter and render one fetched statement frame.
+
+    The three statement getters differ only in which yfinance property they
+    fetch and what that statement is called, so everything downstream of the
+    fetch lives here — this lane's ordering rule was already edited in three
+    places once (#89) and should not be again. ``title`` is passed rather than
+    derived from ``noun``: the agent reads it, and ``str.title()`` would mis-case
+    the first acronym anyone adds.
+
+    Emptiness is judged before the analysis date, the order the Alpha Vantage
+    path uses: "this symbol has nothing" is true regardless of curr_date, so an
+    unknown symbol reaches the router's no-data lane through either vendor
+    rather than one of them answering about the date instead.
+    """
+    if data.empty:
+        raise NoMarketDataError(ticker, canonical, f"no {noun} data")
+    if (refusal := curr_date_refusal(curr_date)) is not None:
+        return refusal
+
+    # Measured before filtering, because a frame can also empty by having no
+    # date-like columns at all — yfinance renaming or nulling them coerces every
+    # label to NaT, which compares False against any cutoff. That is a vendor
+    # schema break, and reporting it as "nothing on or before your date" would
+    # describe correct point-in-time behaviour instead. The Alpha Vantage side
+    # separates the same two cases, and logs only this one, for the same reason:
+    # a schema break otherwise reports every ticker as an uncovered symbol.
+    columns = len(data.columns)
+    try:
+        datable = int(pd.to_datetime(data.columns, errors="coerce").notna().sum())
+    except (TypeError, ValueError):
+        # Guarded for the same reason _dates_lag_note guards, and NOT redundant
+        # with the coercion inside filter_financials_by_date: on the date-less
+        # lane that one never runs, because it early-returns before coercing.
+        # No input has been found that makes errors="coerce" raise on the pinned
+        # pandas, so this is defence, not a live path; treating an index we
+        # cannot read as carrying no usable period is the conservative reading.
+        datable = 0
+
+    data = filter_financials_by_date(data, curr_date)
+    if data.empty:
+        if not datable:
+            logger.warning(
+                "yfinance %s for %s: none of the %d columns carried a usable fiscal period",
+                noun,
+                ticker,
+                columns,
+            )
+            raise NoMarketDataError(
+                ticker, canonical, f"all {columns} {noun} columns carried no usable fiscal period"
+            )
+        raise NoMarketDataError(ticker, canonical, f"no {noun} data on or before {curr_date}")
+
+    header = f"# {title} data for {canonical} ({freq})\n"
+    header += _statement_lag_note(data, curr_date, freq, f"{noun} period")
+    header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    return header + data.to_csv()
 
 
 def _dates_lag_note(values, curr_date: str | None, max_lag_days: int, what: str) -> str:
     """Data-lag note line (``"# …\\n"`` or ``""``) for a set of date-ish values.
 
     Shared by the statement and insider paths: coerce, take the newest, and
-    compare it against the reference date. The coercion itself is guarded —
-    ``errors="coerce"`` still raises on some inputs (e.g. mixed tz-aware and
-    naive timestamps on pandas >= 2) and an annotation must degrade, never
-    replace the report it decorates with an error string.
+    compare it against the reference date. The coercion is guarded because an
+    annotation must degrade, never replace the report it decorates with an error
+    string. The example this once cited — mixed tz-aware and naive timestamps on
+    pandas >= 2 — does NOT raise on the pinned pandas: it yields a single-tz
+    index with the mismatched entries as ``NaT``, and which side is mismatched
+    follows the first element's tz-awareness. No input has been found that makes
+    ``errors="coerce"`` raise there, so treat the guard as defence whose trigger
+    is unproven rather than as evidence that one exists.
     """
-    if not curr_date:
+    if curr_date is None:  # neither caller can reach this; kept as the contract (#89)
         return ""
     try:
         dates = pd.to_datetime(values, errors="coerce").dropna()
@@ -60,10 +129,15 @@ def _statement_lag_note(data: pd.DataFrame, curr_date: str | None, freq: str, wh
     filter genuinely needs a point-in-time bound, but the disclosure only needs
     a reference date. The degraded, unfiltered mode is logged because both
     protections used to vanish silently.
+
+    Only ``None`` is that case. A supplied-but-unusable curr_date never reaches
+    here — the getters answer the shared ``INVALID_CURR_DATE`` sentinel first
+    (#89) — so this tests for it rather than for falsiness, which used to route
+    an empty string into the omitted-argument lane.
     """
     if data.empty:
         return ""
-    if not curr_date:
+    if curr_date is None:
         logger.warning(
             "yfinance %s served without curr_date: look-ahead filtering is "
             "off; freshness is judged against today instead",
@@ -391,11 +465,17 @@ def get_fundamentals(
         if not lines:
             raise NoMarketDataError(ticker, canonical, "no fundamental fields returned")
 
+        # Refused at the same depth as the Alpha Vantage overview path, whose
+        # docstring gives the reasoning: with no usable analysis date neither
+        # vendor can tell a backtest from live trading (#89).
+        if (refusal := curr_date_refusal(curr_date)) is not None:
+            return refusal
+
         header = f"# Company Fundamentals for {canonical}\n"
         # yfinance ``info`` is a live current-state snapshot with no
         # historical form; when the analysis date sits behind the wall clock
         # (a backtest), say so or today's ratios read as that date's (#30).
-        if curr_date:
+        if curr_date is not None:
             snapshot_note = live_snapshot_note(curr_date, "these fundamentals are")
             if snapshot_note:
                 header += f"# {snapshot_note}\n"
@@ -427,20 +507,9 @@ def get_balance_sheet(
         else:
             data = yf_fetch_statement(lambda: ticker_obj.balance_sheet)
 
-        data = filter_financials_by_date(data, curr_date)
-
-        if data.empty:
-            raise NoMarketDataError(ticker, canonical, "no balance sheet data")
-
-        # Convert to CSV string for consistency with other functions
-        csv_string = data.to_csv()
-
-        # Add header information
-        header = f"# Balance Sheet data for {canonical} ({freq})\n"
-        header += _statement_lag_note(data, curr_date, freq, "balance sheet period")
-        header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-
-        return header + csv_string
+        return _statement_report(
+            data, ticker, canonical, curr_date, freq, "balance sheet", "Balance Sheet"
+        )
 
     except VendorError:
         raise  # Typed vendor failures take their router lanes (#67)
@@ -464,20 +533,7 @@ def get_cashflow(
         else:
             data = yf_fetch_statement(lambda: ticker_obj.cashflow)
 
-        data = filter_financials_by_date(data, curr_date)
-
-        if data.empty:
-            raise NoMarketDataError(ticker, canonical, "no cash flow data")
-
-        # Convert to CSV string for consistency with other functions
-        csv_string = data.to_csv()
-
-        # Add header information
-        header = f"# Cash Flow data for {canonical} ({freq})\n"
-        header += _statement_lag_note(data, curr_date, freq, "cash flow period")
-        header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-
-        return header + csv_string
+        return _statement_report(data, ticker, canonical, curr_date, freq, "cash flow", "Cash Flow")
 
     except VendorError:
         raise  # Typed vendor failures take their router lanes (#67)
@@ -501,20 +557,9 @@ def get_income_statement(
         else:
             data = yf_fetch_statement(lambda: ticker_obj.income_stmt)
 
-        data = filter_financials_by_date(data, curr_date)
-
-        if data.empty:
-            raise NoMarketDataError(ticker, canonical, "no income statement data")
-
-        # Convert to CSV string for consistency with other functions
-        csv_string = data.to_csv()
-
-        # Add header information
-        header = f"# Income Statement data for {canonical} ({freq})\n"
-        header += _statement_lag_note(data, curr_date, freq, "income statement period")
-        header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-
-        return header + csv_string
+        return _statement_report(
+            data, ticker, canonical, curr_date, freq, "income statement", "Income Statement"
+        )
 
     except VendorError:
         raise  # Typed vendor failures take their router lanes (#67)

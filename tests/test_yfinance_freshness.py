@@ -32,6 +32,27 @@ def _statement(*cols):
     return pd.DataFrame({pd.Timestamp(c): [100.0] for c in cols}, index=["Total Assets"])
 
 
+def _patch_av_request(monkeypatch, body):
+    """Serve ``body`` as the Alpha Vantage response, and hand back the module.
+
+    The cross-vendor classes below all drive the real Alpha Vantage getters, so
+    the mock shape is defined once here rather than restated at each site.
+    """
+    import tradingagents.dataflows.alpha_vantage_fundamentals as avf
+
+    monkeypatch.setattr(avf, "_make_api_request", lambda function_name, params: body)
+    return avf
+
+
+def _av_freshness_note(av_out):
+    """The freshness note Alpha Vantage attached to a served body, or ``""``."""
+    import json
+
+    import tradingagents.dataflows.alpha_vantage_fundamentals as avf
+
+    return json.loads(av_out).get(avf._FRESHNESS_NOTE_KEY, "")
+
+
 @pytest.mark.unit
 class TestStatementLagNote:
     @pytest.mark.parametrize(
@@ -133,6 +154,19 @@ class TestStatementBoundIsVendorAgnostic:
 
     _CURR_DATE = "2026-08-18"
 
+    def _both_vendor_notes(self, monkeypatch, period, curr_date):
+        """Whether each vendor flagged a lag, for one fiscal period and date."""
+        import json
+
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement(period))
+        yf_out = yfin.get_balance_sheet("AAPL", "quarterly", curr_date)
+
+        body = json.dumps({"quarterlyReports": [{"fiscalDateEnding": period}]})
+        avf = _patch_av_request(monkeypatch, body)
+        av_out = avf.get_balance_sheet("AAPL", "quarterly", curr_date)
+
+        return "Data lag" in yf_out, "Data lag" in _av_freshness_note(av_out)
+
     @pytest.mark.parametrize(
         "period,expect_note",
         [
@@ -141,20 +175,191 @@ class TestStatementBoundIsVendorAgnostic:
         ],
     )
     def test_both_vendors_agree_at_the_bound(self, monkeypatch, period, expect_note):
+        yf_noted, av_noted = self._both_vendor_notes(monkeypatch, period, self._CURR_DATE)
+        assert yf_noted is expect_note
+        assert av_noted is expect_note
+
+    @pytest.mark.parametrize(
+        "lag_days,expect_note",
+        [
+            (180, False),  # exactly at the quarterly bound — on cadence
+            (181, True),  # one day beyond — flagged by both vendors
+        ],
+    )
+    def test_both_vendors_agree_at_the_bound_without_a_curr_date(
+        self, monkeypatch, lag_days, expect_note
+    ):
+        # The date-less fallback (#73) judges the newest period against the wall
+        # clock instead of curr_date. Only a deeply-expired fixture covered that
+        # lane, so the bound itself was unpinned there and either vendor could
+        # have drifted to a different one without a test noticing (#90). Dates are
+        # now-relative for that reason, unlike the literal pair above.
+        period = (datetime.now() - timedelta(days=lag_days)).strftime("%Y-%m-%d")
+        yf_noted, av_noted = self._both_vendor_notes(monkeypatch, period, None)
+        assert yf_noted is expect_note
+        assert av_noted is expect_note
+
+
+@pytest.mark.unit
+class TestUnusableCurrDateIsVendorAgnostic:
+    """A curr_date that was supplied but cannot be used must be refused the same
+    way through either vendor (#89).
+
+    The three parametrized values are the three that used to be answered
+    differently by each vendor; the CHANGELOG entry records what each one did.
+    """
+
+    _UNUSABLE = ["", "abc", "2026/08/18"]
+
+    def test_the_refusal_is_the_single_shared_decision(self):
+        # Pins that neither vendor holds its own copy of the judgement: both
+        # names resolve to the one in utils, so a refinement made there reaches
+        # both. It does NOT prove a getter still calls it — the equality
+        # assertions below are what pin the answers themselves.
+        import tradingagents.dataflows.alpha_vantage_fundamentals as avf
+        from tradingagents.dataflows import utils
+
+        assert yfin.curr_date_refusal is utils.curr_date_refusal
+        assert avf.curr_date_refusal is utils.curr_date_refusal
+
+    @pytest.mark.parametrize("curr_date", _UNUSABLE)
+    @pytest.mark.parametrize(
+        "attr,method",
+        [
+            ("quarterly_balance_sheet", "get_balance_sheet"),
+            ("quarterly_cashflow", "get_cashflow"),
+            ("quarterly_income_stmt", "get_income_statement"),
+        ],
+    )
+    def test_statements_refuse_in_one_voice(self, monkeypatch, curr_date, attr, method):
         import json
 
-        import tradingagents.dataflows.alpha_vantage_fundamentals as avf
+        # A future period: if either vendor were to serve unfiltered, the row it
+        # must never leak is exactly the one the missing bound would have removed.
+        _patch_ticker(monkeypatch, **{attr: _statement("2099-03-31")})
+        yf_out = getattr(yfin, method)("AAPL", "quarterly", curr_date)
 
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement(period))
-        yf_out = yfin.get_balance_sheet("AAPL", "quarterly", self._CURR_DATE)
+        body = json.dumps({"quarterlyReports": [{"fiscalDateEnding": "2099-03-31"}]})
+        av_out = getattr(_patch_av_request(monkeypatch, body), method)(
+            "AAPL", "quarterly", curr_date
+        )
 
-        body = json.dumps({"quarterlyReports": [{"fiscalDateEnding": period}]})
-        monkeypatch.setattr(avf, "_make_api_request", lambda function_name, params: body)
-        av_out = avf.get_balance_sheet("AAPL", "quarterly", self._CURR_DATE)
-        av_note = json.loads(av_out).get(avf._FRESHNESS_NOTE_KEY, "")
+        # Exact equality, not startswith: it pins that the refusal is the WHOLE
+        # answer, so neither vendor can append the future row it just refused to
+        # bound. A "does not contain 2099-03-31" check could not fail once
+        # startswith passed, since the sentence interpolates only curr_date.
+        from tradingagents.dataflows.utils import invalid_curr_date_sentinel
 
-        assert ("Data lag" in yf_out) is expect_note
-        assert ("Data lag" in av_note) is expect_note
+        assert yf_out == av_out == invalid_curr_date_sentinel(curr_date)
+        assert repr(curr_date) in yf_out  # the rejected value, so a retry can fix it
+
+    @pytest.mark.parametrize("curr_date", _UNUSABLE)
+    def test_the_overview_refuses_in_one_voice(self, monkeypatch, curr_date):
+        import json
+
+        # The live-snapshot disclosure needs a usable analysis date to decide
+        # whether this is a backtest at all, so without one yfinance served
+        # today's ratios with nothing said about them — the exact failure that
+        # disclosure exists to prevent.
+        _patch_ticker(monkeypatch, info={"longName": "Apple Inc.", "marketCap": 1_000_000})
+        yf_out = yfin.get_fundamentals("AAPL", curr_date)
+
+        av_out = _patch_av_request(monkeypatch, json.dumps({"Symbol": "AAPL"})).get_fundamentals(
+            "AAPL", curr_date
+        )
+
+        # Exact equality pins that the refusal is the whole answer — the ratios
+        # cannot ride along behind it (see the statement test for why a bare
+        # "Apple Inc. not in output" check would have no power here).
+        from tradingagents.dataflows.utils import invalid_curr_date_sentinel
+
+        assert yf_out == av_out == invalid_curr_date_sentinel(curr_date)
+
+    def test_an_omitted_curr_date_still_takes_the_date_less_lane(self, monkeypatch):
+        import json
+
+        # The refusal is for a value that was SUPPLIED. None means the model
+        # omitted the argument, which keeps the #73 wall-clock fallback on both
+        # vendors — refusing that too would delete a lane, not align one.
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement("2025-01-31"))
+        yf_out = yfin.get_balance_sheet("AAPL", "quarterly", None)
+
+        body = json.dumps({"quarterlyReports": [{"fiscalDateEnding": "2025-01-31"}]})
+        av_out = _patch_av_request(monkeypatch, body).get_balance_sheet("AAPL", "quarterly", None)
+
+        assert "INVALID_CURR_DATE" not in yf_out
+        assert "INVALID_CURR_DATE" not in av_out
+        assert "Data lag" in yf_out
+        assert "Data lag" in av_out
+
+    def test_an_absent_symbol_outranks_an_unusable_date(self, monkeypatch):
+        from tradingagents.dataflows.errors import NoMarketDataError
+
+        # "This symbol has nothing" is true regardless of the analysis date, so
+        # both vendors answer it first and an unknown ticker reaches the router's
+        # no-data lane either way. Judging the date first would make yfinance
+        # answer INVALID_CURR_DATE where Alpha Vantage raises.
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=pd.DataFrame())
+        with pytest.raises(NoMarketDataError):
+            yfin.get_balance_sheet("AAPL", "quarterly", "")
+
+        with pytest.raises(NoMarketDataError):
+            _patch_av_request(monkeypatch, "{}").get_balance_sheet("AAPL", "quarterly", "")
+
+    def test_undatable_columns_are_reported_as_a_schema_break_not_a_coverage_gap(
+        self, monkeypatch, caplog
+    ):
+        # A frame whose column labels are not dates coerces to NaT and compares
+        # False against any cutoff, so it empties for a reason that has nothing
+        # to do with the analysis date. Calling that "nothing on or before your
+        # date" would describe correct point-in-time behaviour, and the router
+        # splices the detail straight into what the agent reads. Alpha Vantage
+        # already separates these two, and logs only this one.
+        from tradingagents.dataflows.errors import NoMarketDataError
+
+        broken = pd.DataFrame({"foo": [1.0], "bar": [2.0]}, index=["Total Assets"])
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=broken)
+        with (
+            caplog.at_level(logging.WARNING, logger=yfin.__name__),
+            pytest.raises(NoMarketDataError) as exc,
+        ):
+            yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+
+        assert "all 2 balance sheet columns carried no usable fiscal period" in str(exc.value)
+        assert "on or before" not in str(exc.value)
+        assert any("usable fiscal period" in r.message for r in caplog.records)
+
+    def test_a_genuine_coverage_gap_still_names_the_date_and_stays_quiet(self, monkeypatch, caplog):
+        # The other side of the split: dated columns that all postdate curr_date
+        # are correct point-in-time behaviour on any backtest older than the
+        # vendor's window, so they name the date and must not page anyone.
+        from tradingagents.dataflows.errors import NoMarketDataError
+
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement("2027-01-31"))
+        with (
+            caplog.at_level(logging.WARNING, logger=yfin.__name__),
+            pytest.raises(NoMarketDataError) as exc,
+        ):
+            yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+
+        assert "no balance sheet data on or before 2026-08-18" in str(exc.value)
+        # Nothing from this module at all, not merely nothing carrying the
+        # schema-break phrase: a warning added to the coverage lane later must
+        # fail this rather than slip past a phrase-scoped check.
+        assert not [r for r in caplog.records if r.name == yfin.__name__]
+
+    def test_the_shared_filter_refuses_an_unusable_bound_rather_than_dropping_it(self):
+        from tradingagents.dataflows.stockstats_utils import filter_financials_by_date
+
+        # The getters answer the sentinel before reaching here, so this raise is
+        # unreachable in production and stands as the contract for a direct
+        # caller: a broken point-in-time bound must fail loud, never serve the
+        # frame whole — which is what falsiness used to do with "", leaking the
+        # unfiltered frame rather than emptying it.
+        frame = _statement("2099-03-31")
+        with pytest.raises(ValueError, match="look-ahead guard"):
+            filter_financials_by_date(frame, "")
+        assert filter_financials_by_date(frame, None) is frame
 
 
 @pytest.mark.unit

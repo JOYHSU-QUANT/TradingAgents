@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import date, datetime
+from datetime import date
 
 from .alpha_vantage_common import (
     _AV_ENVELOPE_KEYS,
@@ -13,7 +13,13 @@ from .alpha_vantage_common import (
     _with_freshness_note,
 )
 from .errors import NoMarketDataError
-from .utils import data_lag_note, live_snapshot_note, statement_lag_bound
+from .utils import (
+    curr_date_refusal,
+    data_lag_note,
+    live_snapshot_note,
+    normalize_iso_date,
+    statement_lag_bound,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,20 +79,6 @@ _STATEMENT_LABELS = {
 _REPORT_LIST_KEYS = ("annualReports", "quarterlyReports")
 
 
-def _normalize_iso_date(value) -> str | None:
-    """Canonical ``YYYY-MM-DD`` for a date string, or None if it is not a date.
-
-    ``strptime`` accepts non-zero-padded input ("2026-6-5"), which then compares
-    WRONG lexically against Alpha Vantage's zero-padded ``fiscalDateEnding``
-    values — ``"2024-12-31" <= "2026-6-5"`` is True — so the raw string must be
-    normalised before the look-ahead filter rather than compared as text.
-    """
-    try:
-        return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d")
-    except (ValueError, TypeError):
-        return None
-
-
 def _filter_reports_by_date(result: dict, curr_date: str) -> dict:
     """Drop annual/quarterly reports whose fiscalDateEnding is after curr_date.
 
@@ -103,7 +95,7 @@ def _filter_reports_by_date(result: dict, curr_date: str) -> dict:
     and it also handles ``None``-curr_date and non-JSON bodies — so the raise
     stands as the invariant for anything calling this helper directly.
     """
-    cutoff = _normalize_iso_date(curr_date)
+    cutoff = normalize_iso_date(curr_date)
     if cutoff is None:
         raise ValueError(
             f"Alpha Vantage fundamentals: curr_date {curr_date!r} is not a valid "
@@ -121,7 +113,7 @@ def _filter_reports_by_date(result: dict, curr_date: str) -> dict:
                 r
                 for r in rows
                 if isinstance(r, dict)
-                and (ending := _normalize_iso_date(r.get("fiscalDateEnding"))) is not None
+                and (ending := normalize_iso_date(r.get("fiscalDateEnding"))) is not None
                 and ending <= cutoff
             ]
     return result
@@ -154,22 +146,6 @@ def _statement_lag_note(reports: list, curr_date: str, cadence: str, label: str)
     if newest is None:
         return ""
     return data_lag_note(newest, curr_date, statement_lag_bound(cadence), f"{label} period")
-
-
-def _invalid_curr_date(curr_date) -> str:
-    """The sentinel served when a supplied curr_date is not a usable date.
-
-    Loud to the LLM (it can retry with a valid date), leaks no data, and never
-    raises: fundamental_data is a NON-optional category, so a ValueError escaping
-    ``route_to_vendor`` (``raise first_error``) would crash the ToolNode-wrapped
-    graph run, unlike the optional farside/F&G vendors whose raise degrades to a
-    sentinel.
-    """
-    return (
-        f"INVALID_CURR_DATE: curr_date {curr_date!r} is not a valid yyyy-mm-dd "
-        f"date, so fundamentals cannot be bounded to a point in time. No data "
-        f"returned; retry with a valid yyyy-mm-dd date. Do not fabricate values."
-    )
 
 
 def _filter_response_json(result, curr_date, freq, label, symbol):
@@ -243,15 +219,15 @@ def _filter_response_json(result, curr_date, freq, label, symbol):
             else ""
         )
         return _with_freshness_note(parsed, note) if note else _served_body(result, parsed)
-    if _normalize_iso_date(curr_date) is None:
-        return _invalid_curr_date(curr_date)
+    if (refusal := curr_date_refusal(curr_date)) is not None:
+        return refusal
     cadence = _statement_cadence(freq)
     supplied = parsed.get(f"{cadence}Reports")
     supplied = supplied if isinstance(supplied, list) else []
     undatable = sum(
         1
         for r in supplied
-        if not isinstance(r, dict) or _normalize_iso_date(r.get("fiscalDateEnding")) is None
+        if not isinstance(r, dict) or normalize_iso_date(r.get("fiscalDateEnding")) is None
     )
     filtered = _filter_reports_by_date(parsed, curr_date)
     reports = filtered.get(f"{cadence}Reports")
@@ -355,8 +331,8 @@ def _annotate_live_snapshot(result, curr_date, symbol):
         # disclosure only ever says "today's values are not curr_date's", which
         # is vacuous when the reference date IS today.
         return _served_body(result, parsed)
-    if _normalize_iso_date(curr_date) is None:
-        return _invalid_curr_date(curr_date)
+    if (refusal := curr_date_refusal(curr_date)) is not None:
+        return refusal
     note = live_snapshot_note(curr_date, "these fundamentals are")
     if not note:
         return _served_body(result, parsed)

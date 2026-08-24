@@ -1396,7 +1396,7 @@ def validate_live_run(
         # there is 1 — the ``|`` split is what makes this "orders to go find".
         # Every orphan case this sweep constructs carries a key, so a NULL is a
         # store written by something else; it becomes its own bucket rather
-        # than being dropped, which keeps "keys ≤ rows" true and cannot
+        # than being dropped, which keeps "orders ≤ rows" true and cannot
         # under-state the orders THIS sweep records.
         orphan_distinct_count = len(
             {str(row["exchange_value"]).split("|", 1)[0] for row in orphan_rows}
@@ -1475,7 +1475,7 @@ def validate_live_run(
         failures.append(f"exchange_fill_dedupe_error_count = {dedupe_error_count} (want 0)")
     if orphan_count:
         # The gate is the ROW count and stays so (one row is already a
-        # failure). The key count rides along because this string is where an
+        # failure). The order count rides along because this string is where an
         # operator reads the number before going to the exchange to look for
         # that many orders (issue #84).
         failures.append(

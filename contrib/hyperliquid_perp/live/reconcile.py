@@ -1050,12 +1050,17 @@ class LiveReconciler:
                 # (fail-safe direction: once the row exists, every later sweep
                 # — kill-switch shutdown included — sees and manages it).
                 # The one disposition site the sweep CANNOT validate before its
-                # write, and deliberately so: the stamp depends on whether the
-                # back-fill succeeded, so there is nothing to check until it
-                # has run. Harmless where the three settle/reopen sites are
-                # not — a failed back-fill writes no orders row at all, so an
-                # unclassified stamp raising here cannot leave a changed row
-                # behind, only a missing case row on an already-unclean leg.
+                # write: the stamp depends on whether the back-fill succeeded,
+                # so there is nothing to check until it has run. The exposure
+                # is real and is NOT the mirror of the three settle/reopen
+                # sites — __post_init__ skips a ``None`` stamp, so the branch
+                # that could raise is precisely the one where ``insert_order``
+                # already committed, and an unclassified rename would leave the
+                # orders row with no case row explaining it. What bounds it is
+                # CI rather than shape: the stamp is a literal, and
+                # ``test_every_disposition_the_sweep_writes_is_in_the_machine_vocabulary``
+                # reads it straight out of this source, so a rename fails long
+                # before a daemon runs it.
                 resolved = self._backfill_orphan_order(order, registry, now)
                 cases.append(
                     ReconciliationCase(

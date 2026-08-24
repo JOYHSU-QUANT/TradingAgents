@@ -297,7 +297,8 @@ def _stamp_reconciliation_case(db, repo, args) -> int:
             file=sys.stderr,
         )
         return 1
-    if args.action.strip() in repo.MACHINE_DISPOSITIONS:
+    action = args.action.strip()
+    if action in repo.MACHINE_DISPOSITIONS:
         # The sweep's OWN vocabulary, refused whole (issue #84). Named here
         # rather than left to the operator's word choice, because the RUNBOOK
         # publishes this vocabulary and invites imitation.
@@ -317,7 +318,7 @@ def _stamp_reconciliation_case(db, repo, args) -> int:
             "which the once-per-fact guard treats as PROVISIONAL — stamping it "
             "would re-open this case on the next sighting instead of disposing "
             "of it"
-            if args.action.strip() in repo.PROVISIONAL_DISPOSITIONS
+            if action in repo.PROVISIONAL_DISPOSITIONS
             # The rest shut the key either way, so the dedupe is not the
             # argument — the audit row is. It records who decided what, and a
             # human stamp spelled exactly like the daemon's leaves a later
@@ -327,7 +328,7 @@ def _stamp_reconciliation_case(db, repo, args) -> int:
             "must not be indistinguishable from the daemon's in the audit row"
         )
         print(
-            f"error: --action {args.action.strip()!r} is one of the sweep's own "
+            f"error: --action {action!r} is one of the sweep's own "
             f"dispositions, {because}. Describe the disposition in your own words.",
             file=sys.stderr,
         )

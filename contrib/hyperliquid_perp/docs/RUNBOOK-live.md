@@ -416,8 +416,9 @@ live run 會自動走 §20.3／§21.4 報告（依 `live.mode`）。指標與 ex
 duplicate_fill_apply_count / local_exchange_position_mismatch_count /
 account_replay_mismatch_count / unprotected_position_seconds` 全為 0
 （`orphan_exchange_order_count` 數的是**案件列**不是訂單：交易所 orderStatus 一好一壞
-抖動時，同一張單每抖一次就多一列。判準不受影響——一列就不過——但**要去交易所找幾張單，
-看旁邊那行 `orphan_exchange_order_key_count`**，它數的是相異事實鍵，一鍵一張單）、
+抖動時，同一張單每抖一次就多一列，而同一張單還會因為不同的故障形狀落在不同的事實鍵上。
+判準不受影響——一列就不過——但**要去交易所找幾張單，看旁邊那行
+`orphan_exchange_order_key_count`**，它把事實鍵收斂回 cloid，數的是**相異訂單**）、
 `kill_switch_refresh_success_rate ≥ 99%`（**樣本數 < 100 時不判定**，改記 exit 4 的
 shortfall——30s 一次的節奏下約 50 分鐘就滿，遠早於 30 cycles，所以正常驗收 run 不會
 卡在這裡；設這道下限是因為短 run 的覆蓋時間太短，一次 30s 中斷就吃掉整段可用率）。
@@ -662,8 +663,11 @@ gate 線是豁免的（`order_gate.py` 有 import-time 保證），所以 latch 
    （2026-08-21 之前這四個處置一旦蓋章就把 key 永久關閉，上述復發只進 pass 判決，既不進
    清單也不進 §21.4 計數——issue #65／#66。判「現在有沒有問題」仍以該輪的 pass 判決與
    safe mode 為準：清單是 backlog，不是即時健康指標。）
-   **`--action` 不要用上面這六個字串**：去重看的是字串本身、不看是誰寫的，所以拿它們當你的
-   處置會把 key 重新打開；`--stamp-case` 會具名拒絕，改用你自己的話寫即可。
+   **`--action` 不要用上面這九個字串**（六個暫定＋三個終局）：`--stamp-case` 會具名拒絕，
+   改用你自己的話寫即可。兩半被拒的理由不同，錯誤訊息會說是哪一半——**暫定那六個**是因為
+   去重看的是字串本身、不看是誰寫的，拿它們當你的處置會把 key 重新打開；**終局那三個**
+   是因為 `action_taken` 沒有「誰寫的」欄位，字串就是唯一的來源證據，人的證言不該與
+   daemon 自己蓋的章長得一模一樣。
 4. **兩個「讀不到」的 key，自動了結的條件不一樣**（issue #66）：
    - `<cloid>|local_terminal_read_failed`（本地終態、交易所仍列 open，那一輪 orderStatus
      讀失敗）——**之後任何一輪讀得到就蓋上 `resolved_read_succeeded`**，不管答案是終態、

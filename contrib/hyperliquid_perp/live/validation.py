@@ -25,11 +25,14 @@ Where the metrics come from (all from persisted PR 2–5 event logs):
   orderStatus flapped all morning can be most of this number. The gate is
   unaffected — it fails at one row either way.
 - ``orphan_exchange_order_key_count`` — those same rows counted by DISTINCT
-  fact key, which for this case type is one key per cloid: the number of orders
-  to go looking for at the exchange (issue #84). Reported BESIDE the row count
-  rather than replacing it — the row count is what §21.4 accepts on and what
-  the exit-5 gate keys off — and the gap between the two IS the flap.
-  Non-gating.
+  CLOID: the number of orders to go looking for at the exchange (issue #84).
+  Not by fact key — this case type writes THREE key shapes for one order (a
+  bare cloid, ``|local_terminal``, ``|local_terminal_read_failed``), and they
+  are deliberately distinct so a re-settle does not dedupe against a plain
+  orphan sighting, so a fact-key count would still over-state the orders by up
+  to 3×. Reported BESIDE the row count rather than replacing it — the row count
+  is what §21.4 accepts on and what the exit-5 gate keys off — and the gap
+  between the two is the venue flapping, not more orders. Non-gating.
 - ``duplicate_fill_apply_count`` — live ``fills`` sharing an ``exchange_fill_key``
   (structurally impossible under the UNIQUE index — a store-integrity assertion).
 - ``account_replay_mismatch_count`` — the §14/§15 accounting replay (reused
@@ -395,8 +398,10 @@ class LiveValidationReport:
     exchange_fill_dedupe_error_count: int
     orphan_exchange_order_count: int
     # The row count above answers the gate; this one answers "how many orders
-    # do I go looking for". They differ whenever a cloid's orderStatus flapped
-    # (issue #84) — see the module docstring.
+    # do I go looking for" — distinct CLOID, not distinct fact key (one order
+    # has up to three of those). They differ whenever a cloid's orderStatus
+    # flapped, or the same order was seen under two fault shapes (issue #84)
+    # — see the module docstring.
     orphan_exchange_order_key_count: int
     duplicate_fill_apply_count: int
     local_exchange_position_mismatch_count: int
@@ -526,7 +531,7 @@ class LiveValidationReport:
             raise ValueError(
                 f"orphan_exchange_order_count is {self.orphan_exchange_order_count} but "
                 "orphan_exchange_order_key_count is 0 — every recorded orphan row "
-                "carries a fact key"
+                "belongs to some order"
             )
         # A reason without a type is a half-read episode: the gate keys on the
         # TYPE, so that shape would report the reason in the summary while
@@ -629,7 +634,8 @@ class LiveValidationReport:
             f"orphan_exchange_order_count: {self.orphan_exchange_order_count}",
             # Its own line, and the row-count line above left byte-identical:
             # §21.4 and RUNBOOK-live both quote that line, and an operator
-            # diffing runs greps it.
+            # diffing runs greps it. "key" in the name is the fact-key column
+            # it is derived from; the VALUE is orders (see the docstring).
             f"orphan_exchange_order_key_count: {self.orphan_exchange_order_key_count}",
             f"duplicate_fill_apply_count: {self.duplicate_fill_apply_count}",
             f"local_exchange_position_mismatch_count: {self.local_exchange_position_mismatch_count}",
@@ -1384,12 +1390,16 @@ def validate_live_run(
         )
         orphan_count = len(orphan_rows)
         # Both numbers off ONE row list, so they cannot describe different
-        # reads. Every orphan case this sweep constructs carries a fact key
-        # (a bare cloid or one of the two ``|``-suffixed ones), so a NULL here
-        # would be a store written by something else — counted as its own
-        # bucket rather than dropped, which keeps the report's "keys ≤ rows"
-        # identity true and never UNDER-states what to go looking for.
-        orphan_key_count = len({row["exchange_value"] for row in orphan_rows})
+        # reads. Bucketed by CLOID, not by fact key: this case type writes a
+        # bare cloid, ``<cloid>|local_terminal`` and
+        # ``<cloid>|local_terminal_read_failed``, all reachable for the same
+        # order in one run, so counting keys would report up to 3 orders where
+        # there is 1 — the ``|`` split is what makes this "orders to go find".
+        # Every orphan case this sweep constructs carries a key, so a NULL is a
+        # store written by something else; it becomes its own bucket rather
+        # than being dropped, which keeps "keys ≤ rows" true and cannot
+        # under-state the orders THIS sweep records.
+        orphan_key_count = len({str(row["exchange_value"]).split("|", 1)[0] for row in orphan_rows})
         position_mismatch_count = len(
             repo.iter_exchange_reconciliation_events(
                 conn, run_id, case_type="exchange_position_mismatch"
@@ -1469,7 +1479,7 @@ def validate_live_run(
         # that many orders (issue #84).
         failures.append(
             f"orphan_exchange_order_count = {orphan_count} (want 0) across "
-            f"{orphan_key_count} distinct order key(s)"
+            f"{orphan_key_count} distinct order(s)"
         )
     if duplicate_fill_apply_count:
         failures.append(

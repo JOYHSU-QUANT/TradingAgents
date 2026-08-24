@@ -477,14 +477,41 @@ def test_one_flapping_order_does_not_read_as_many_orphan_orders(tmp_path):
     assert report.orphan_exchange_order_count == 7
     assert report.orphan_exchange_order_key_count == 1
     assert not report.live_ready  # the gate still fails, on the row count
-    assert any("7 (want 0) across 1 distinct order key(s)" in f for f in report.failures)
+    assert any("7 (want 0) across 1 distinct order(s)" in f for f in report.failures)
     assert "orphan_exchange_order_key_count: 1" in report.summary_lines()
 
 
-def test_distinct_orphan_keys_are_counted_separately(tmp_path):
-    # Negative control for the key count: two genuinely different orphaned
+def test_one_order_seen_under_two_fault_shapes_is_still_one_order(tmp_path):
+    # The count is per CLOID, not per fact key. This case type writes three key
+    # shapes for the same order, and two of them arrive from an ordinary
+    # sequence: a failed orderStatus read parks the cloid under
+    # `|local_terminal_read_failed` (reconcile.py `_maybe_reopen_terminal_order`),
+    # and the pass that gets an answer files `|local_terminal`. Counting keys
+    # would report 2 orders to go and find; there is 1.
+    db = _healthy(tmp_path)
+    with db.transaction() as conn:
+        for key in ("0xabab|local_terminal_read_failed", "0xabab|local_terminal"):
+            repo.insert_exchange_reconciliation_event(
+                conn,
+                run_id="r",
+                trigger="heartbeat",
+                case_type="orphan_exchange_order",
+                symbol="BTC",
+                exchange_value=key,
+                timestamp=_T0,
+            )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.orphan_exchange_order_count == 2
+    assert report.orphan_exchange_order_key_count == 1
+    assert any("across 1 distinct order(s)" in f for f in report.failures)
+
+
+def test_distinct_orphan_orders_are_counted_separately(tmp_path):
+    # Negative control for the split above: two genuinely different orphaned
     # orders must not collapse into one, or the number would UNDER-state what
-    # the operator has to go and find.
+    # the operator has to go and find. The bare-cloid key shape (a plain orphan
+    # back-fill) is deliberately one of the two.
     db = _healthy(tmp_path)
     with db.transaction() as conn:
         for key, action in (
@@ -517,9 +544,10 @@ def test_post_init_rejects_more_orphan_keys_than_orphan_rows():
 
 
 def test_post_init_rejects_orphan_rows_with_no_key():
-    # Every orphan case the sweep constructs carries a fact key, so "rows but
-    # nothing to look for" is a corrupt read, not a quiet zero.
-    with pytest.raises(ValueError, match="every recorded orphan row carries a fact key"):
+    # Every orphan case the sweep constructs carries a fact key, and therefore
+    # an order, so "rows but nothing to look for" is a corrupt read rather than
+    # a quiet zero.
+    with pytest.raises(ValueError, match="every recorded orphan row belongs to some order"):
         _make_report(orphan_exchange_order_count=3, orphan_exchange_order_key_count=0)
 
 

@@ -38,11 +38,12 @@ real division of labour, which a grep can check:
   ``kill_switch.py`` and ``loss_guards.py``. The WS channel names (``userFills``,
   ``orderUpdates``, ``webData2``) live in ``ws_stream.py``.
 
-The two sides align through four exports of this module —
+The two sides align through five exports of this module —
 :data:`HL_SIDE_TO_LOCAL` and :func:`hl_closing_side` into ``live/``,
-:func:`hex_identity_matches` and :func:`require_decimal` into ``signed_client``
-and ``live/`` — plus :func:`map_account_snapshot`, which the live modules and
-CLI entrypoints call on raw payloads they never inspect themselves.
+:func:`hex_identity_matches`, :func:`require_decimal` and
+:func:`optional_decimal` into ``signed_client`` and ``live/`` — plus
+:func:`map_account_snapshot`, which the live modules and CLI entrypoints call
+on raw payloads they never inspect themselves.
 
 One deliberate exception to the snapshot split: ``signed_client.exchange_time``
 reads ``clearinghouseState``'s ``"time"`` field directly, because that is the
@@ -155,10 +156,12 @@ def _opt_dec(value: Any, *, field: str) -> Decimal | None:
 
 # Public alias, same reason as ``require_decimal`` above: the reconciler's
 # open-orders backfill reads a ``limitPx`` that is legitimately absent on a
-# market order, so it needs the OPTIONAL contract — absent/blank/unusable ->
-# None (logged), never a hand-rolled ``Decimal(str(...))`` that would let a
-# NaN price through into the orders row. Aliased rather than renamed: _opt_dec
-# has call sites here.
+# market order, so it needs the OPTIONAL contract — absent/blank -> None
+# silently, PRESENT-but-unusable -> None with a WARNING — never a hand-rolled
+# ``Decimal(str(...))`` that would let a NaN price through into the orders
+# row. Callers that need the drop tied to an order log that themselves: this
+# parser knows only the field name. Aliased rather than renamed: _opt_dec has
+# call sites here.
 optional_decimal = _opt_dec
 
 

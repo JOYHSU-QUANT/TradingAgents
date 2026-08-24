@@ -196,21 +196,29 @@ def _clip(text: str | None) -> str | None:
 # else would ever close the row — see ``_clear_read_failure_case``.
 
 
-# The two dispositions this module stamps DIRECTLY onto an already-persisted
-# row. Every other one travels through ``ReconciliationCase``, whose
-# __post_init__ validates it; these two never build a case, so they need their
-# own tie to the vocabulary (issue #84).
+# The three dispositions this module writes WITHOUT building a
+# ``ReconciliationCase`` — two stamped onto an already-persisted row, one
+# passed straight to the event insert. Every other one travels through
+# ``ReconciliationCase``, whose __post_init__ validates it; these three would
+# otherwise have no tie to the vocabulary at all (issue #84).
 #
-# Checked at IMPORT rather than at the stamp, because both stamp sites sit
-# inside deliberately fail-soft excepts: ``_clear_read_failure_case`` swallows
-# and logs, so a guard there would report a rename as a warning line and let
-# the key shut forever anyway — the exact silence #84 is about. At import a
-# rename nobody classified in repo.MACHINE_DISPOSITIONS cannot start the
-# daemon at all.
+# Checked at IMPORT rather than at each write, because the three sites do not
+# share a failure lane and one of them cannot fail loudly where it stands:
+# ``_clear_read_failure_case`` is deliberately fail-soft (it swallows and
+# logs), so a guard there would report a rename as one warning line and let
+# the key shut forever anyway — the exact silence #84 is about. Checking here
+# gives all three the same answer, and a rename nobody classified in
+# repo.MACHINE_DISPOSITIONS cannot start the daemon at all.
 _FILL_BOOKED_DISPOSITION = "resolved_fill_booked"
 _READ_SUCCEEDED_DISPOSITION = "resolved_read_succeeded"
-check_enum(_FILL_BOOKED_DISPOSITION, repo.MACHINE_DISPOSITIONS, name="action_taken")
-check_enum(_READ_SUCCEEDED_DISPOSITION, repo.MACHINE_DISPOSITIONS, name="action_taken")
+_FILL_BACKFILLED_DISPOSITION = "backfilled"
+for _disposition in (
+    _FILL_BOOKED_DISPOSITION,
+    _READ_SUCCEEDED_DISPOSITION,
+    _FILL_BACKFILLED_DISPOSITION,
+):
+    check_enum(_disposition, repo.MACHINE_DISPOSITIONS, name="action_taken")
+del _disposition
 
 
 def _read_failure_fact_key(cloid: str) -> str:
@@ -295,7 +303,8 @@ class ReconciliationCase:
         check_enum(self.case_type, repo.RECONCILIATION_CASE_TYPES, name="case_type")
         # Same argument one field over (issue #84). Every ReconciliationCase is
         # constructed by the SWEEP — a human's disposition is written straight
-        # to the row by ``set_reconciliation_action`` and never passes through
+        # to the row by ``safe-mode --stamp-case`` (via
+        # ``stamp_reconciliation_action_if_unset``) and never passes through
         # here — so ``action_taken`` is machine vocabulary, and the set that
         # decides whether a fact key REOPENS (repo.PROVISIONAL_DISPOSITIONS)
         # matches it by string. A new or renamed disposition that nobody
@@ -1165,18 +1174,12 @@ class LiveReconciler:
                 # MAPPED local status, never a literal "open": only "open" passes the
                 # guard today, but hardcoding it is the same idiom that let the
                 # protection manager misrecord a filled/canceled recovery as live.
-                with self._db.transaction() as tx:
-                    repo.update_order(
-                        tx,
-                        local["order_id"],
-                        status=local_status,
-                        status_reason="reopened_from_exchange_reconciliation",
-                        exchange_order_id=exchange_order_id,
-                        exchange_status=local_status,
-                        exchange_raw_status=raw_status,
-                        updated_at=now,
-                    )
-                return True, ReconciliationCase(
+                #
+                # Built BEFORE the write, though it is returned after: its
+                # __post_init__ is what validates the disposition, and an
+                # unclassified one must not leave the order reopened in SQLite
+                # with no audit row saying why (issue #84).
+                case = ReconciliationCase(
                     case_type="orphan_exchange_order",
                     symbol=registry["symbol"],
                     local_value=f"{local['order_id']}:{local['status']}",
@@ -1191,6 +1194,18 @@ class LiveReconciler:
                     action_taken="local_row_reopened",
                     resolved=True,
                 )
+                with self._db.transaction() as tx:
+                    repo.update_order(
+                        tx,
+                        local["order_id"],
+                        status=local_status,
+                        status_reason="reopened_from_exchange_reconciliation",
+                        exchange_order_id=exchange_order_id,
+                        exchange_status=local_status,
+                        exchange_raw_status=raw_status,
+                        updated_at=now,
+                    )
+                return True, case
             # orderStatus says terminal too: the open-orders view is behind
             # (a cancel this startup just landed is the common cause). Two
             # eventually-consistent reads disagreeing for a moment is not a
@@ -1230,14 +1245,36 @@ class LiveReconciler:
             # The mapper's guards, not a local Decimal(str(...)): "NaN"/"inf"
             # parse WITHOUT error, and a non-finite qty would land in the
             # orders row this back-fill inserts — read back later by the
-            # protection manager's coverage compare (live/protection.py) and by
-            # every PnL over that row. Required sizes fail loud (issue #81);
-            # limitPx keeps its optional contract (a market order legitimately
-            # has none), so an unusable one degrades to None with a WARNING
-            # rather than failing the back-fill.
-            qty = require_decimal(raw_orig, field="origSz")
-            remaining = require_decimal(order.get("sz"), field="sz")
+            # protection manager's coverage compare (``live/protection.py``
+            # reads this column at both its resting-SL checks). Required sizes
+            # fail loud (issue #81); limitPx keeps its optional contract (a
+            # market order legitimately has none), so an unusable one degrades
+            # to None rather than failing the back-fill — refusing the row
+            # would leave a real exchange order with no local row at all, and
+            # so outside the §18.2 disarm cross-check.
+            #
+            # ``field`` names the key the value CAME from, not the column it
+            # fills: after the fallback above, a bad ``sz`` must not be
+            # reported as a bad ``origSz``.
+            raw_sz = order.get("sz")
+            qty = require_decimal(
+                raw_orig, field="origSz" if order.get("origSz") is not None else "sz"
+            )
+            remaining = require_decimal(raw_sz, field="sz")
             price = optional_decimal(order.get("limitPx"), field="limitPx")
+            if price is None and order.get("limitPx") not in (None, ""):
+                # The mapper logs the drop, but from inside a generic parser:
+                # no cloid, no oid, no coin. This back-fill goes on to write a
+                # RESOLVED case row, so without this line "the venue served a
+                # corrupt price for a resting order" reduces to a context-free
+                # WARNING inside an otherwise clean pass.
+                logger.warning(
+                    "orphan back-fill for cloid %s (oid %s): limitPx %r is unusable — "
+                    "the local row is written with no price",
+                    registry["cloid_hex"],
+                    order.get("oid"),
+                    order.get("limitPx"),
+                )
             # The registry role is the bot's own durable record of what it
             # placed — through PR 4 the only wire type is ioc_limit, but the
             # registry already carries stop_loss/take_profit roles, and once
@@ -1345,6 +1382,20 @@ class LiveReconciler:
             # §12.3 case — two eventually-consistent exchange reads disagreeing
             # for a moment is not a local/exchange conflict.
             return True, None
+        # Built before the write for the same reason as the reopen mirror: the
+        # disposition is DERIVED (``settled_{local_status}``), so it is the one
+        # this module cannot check by reading, and settling the order in SQLite
+        # before validating it would leave the row changed with no audit row
+        # explaining why (issue #84).
+        case = ReconciliationCase(
+            case_type="order_missing_on_exchange",
+            symbol=row["symbol"],
+            local_value=order_id,
+            exchange_value=cloid,
+            detail=f"settled from orderStatus: {raw_status}",
+            action_taken=f"settled_{local_status}",
+            resolved=True,
+        )
         with self._db.transaction() as conn:
             repo.update_order(
                 conn,
@@ -1355,15 +1406,7 @@ class LiveReconciler:
                 exchange_raw_status=raw_status,
                 updated_at=now,
             )
-        return True, ReconciliationCase(
-            case_type="order_missing_on_exchange",
-            symbol=row["symbol"],
-            local_value=order_id,
-            exchange_value=cloid,
-            detail=f"settled from orderStatus: {raw_status}",
-            action_taken=f"settled_{local_status}",
-            resolved=True,
-        )
+        return True, case
 
     def _clear_read_failure_case(self, cloid: str, *, case_type: str, fact_key: str) -> None:
         """Dispose of a past unreadable-orderStatus row that a later read disproved.
@@ -1878,7 +1921,7 @@ class LiveReconciler:
                         trigger=report.trigger,
                         case_type="exchange_fill_missing_local",
                         symbol=self._coin,
-                        action_taken="backfilled",
+                        action_taken=_FILL_BACKFILLED_DISPOSITION,
                         detail=(
                             f"booked {backfill_summary.applied} missing fill(s) via REST "
                             f"backfill ({backfill_summary.fetched} fetched, "

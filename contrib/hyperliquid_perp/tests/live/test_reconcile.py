@@ -11,6 +11,7 @@ from decimal import Decimal
 
 import pytest
 
+from contrib.hyperliquid_perp.live import reconcile as reconcile_mod
 from contrib.hyperliquid_perp.live.config import ExecutionMode
 from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
 from contrib.hyperliquid_perp.live.reconcile import LiveReconciler
@@ -442,6 +443,20 @@ def test_an_absent_orig_size_still_falls_through_to_the_remaining_size(env):
     row = repo.get_order_by_cloid_hex(db.conn, _HEX)
     assert row["qty"] == "0.001"
     assert Decimal(row["filled_qty"]) == 0  # qty - remaining, both the same read
+
+
+def test_a_dropped_limit_price_names_the_order_it_belonged_to(env, caplog):
+    # The back-fill goes on to write a RESOLVED case and a clean orders leg, so
+    # the mapper's own WARNING — which knows only the field name — would be the
+    # single trace that the venue served a corrupt price, with nothing tying it
+    # to an order. Same standard the SL-coverage degradation is held to.
+    db, seams, reconciler = env
+    _register_cloid(db, hex_id=_HEX, logical="log-entry", role="entry")
+    seams.open_orders = [_orphan_order(limitPx="NaN")]
+    with caplog.at_level("WARNING"):
+        report = reconciler.run("startup")
+    assert report.orders_reconciled
+    assert any(_HEX in r.getMessage() and "limitPx" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.parametrize("limit_px", [None, "NaN", ""])
@@ -2136,18 +2151,51 @@ def test_the_sweeps_order_dispositions_are_classified_as_the_set_intends(env):
 
 
 def test_every_disposition_the_sweep_writes_is_in_the_machine_vocabulary():
-    # Issue #84. The set above decides by STRING whether a fact key reopens, so
-    # a machine stamp missing from the classification shuts its key forever —
-    # #65's defect, returning silently for that one disposition. The guard that
-    # stops it is membership of MACHINE_DISPOSITIONS, checked where each stamp
-    # is produced; this pins that the vocabulary covers every word the sweep
-    # can write, including the two that never build a case.
-    assert repo.PROVISIONAL_DISPOSITIONS <= repo.MACHINE_DISPOSITIONS
-    for stamp in ("resolved_fill_booked", "local_row_backfilled", "backfilled"):
+    # Issue #84. The set decides by STRING whether a fact key reopens, so a
+    # machine stamp missing from the classification shuts its key forever —
+    # #65's defect, returning silently for that one disposition.
+    #
+    # Reads the SOURCE rather than a hand-kept list, because a hand-kept list
+    # is a third copy with the same drift problem: it would pass while a NEW
+    # disposition added at a call site went unclassified, which is precisely
+    # what #84 says the predecessor test failed to catch. Every literal
+    # ``action_taken=`` argument in the module must be a member; anything
+    # computed (``f"settled_{local_status}"``) is left to the runtime guard in
+    # __post_init__ and to the derivation in _vocab.
+    import ast
+    import pathlib
+
+    source = pathlib.Path(reconcile_mod.__file__).read_text(encoding="utf-8")
+    literals: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.keyword) and node.arg == "action_taken"):
+            continue
+        # Descend into the value rather than requiring a bare Constant: one
+        # site spells its stamp inside a conditional
+        # (``"local_row_backfilled" if resolved else None``), and a scan that
+        # only matched bare literals would silently skip it — the same
+        # invisible-gap shape this test exists to close.
+        subnodes = list(ast.walk(node.value))
+        if any(isinstance(sub, ast.JoinedStr) for sub in subnodes):
+            continue  # computed (f"settled_{status}") — the runtime guard owns it
+        literals |= {
+            sub.value
+            for sub in subnodes
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+        }
+    # A scan that finds nothing would pass vacuously; pin the count so a
+    # refactor that moves these writes out of keyword form fails here instead.
+    assert len(literals) >= 3, f"scan found only {sorted(literals)} — did the shape change?"
+    unclassified = literals - repo.MACHINE_DISPOSITIONS
+    assert not unclassified, f"unclassified machine dispositions: {sorted(unclassified)}"
+    # And the module-level constants, which are the other write shape (they are
+    # passed by NAME, so the scan above cannot see their values).
+    for stamp in (
+        reconcile_mod._FILL_BOOKED_DISPOSITION,
+        reconcile_mod._READ_SUCCEEDED_DISPOSITION,
+        reconcile_mod._FILL_BACKFILLED_DISPOSITION,
+    ):
         assert stamp in repo.MACHINE_DISPOSITIONS, stamp
-    # Closed, not "anything the sweep happens to pass": an operator's prose is
-    # the other kind of disposition and must not be mistakable for one of these.
-    assert "cancelled by hand after calling support" not in repo.MACHINE_DISPOSITIONS
 
 
 def test_an_unclassified_disposition_fails_where_it_is_constructed():
@@ -2169,16 +2217,20 @@ def test_an_unclassified_disposition_fails_where_it_is_constructed():
 
 def test_a_classified_disposition_still_constructs():
     # Negative control: the guard must not reject the vocabulary it exists to
-    # protect, and `backfilled` — the one member outside the dedupe entirely —
-    # is the member most likely to be forgotten by a narrower set.
+    # protect. Both shapes are ones production really builds — the reopen
+    # tiebreaker's stamp on its own fact key, and the plain orphan back-fill on
+    # the bare cloid.
     from contrib.hyperliquid_perp.live.reconcile import ReconciliationCase
 
-    for stamp in ("local_row_reopened", "backfilled"):
+    for stamp, key in (
+        ("local_row_reopened", f"{_HEX}|local_terminal"),
+        ("local_row_backfilled", _HEX),
+    ):
         case = ReconciliationCase(
             case_type="orphan_exchange_order",
             symbol="BTC",
             local_value="o1:rejected",
-            exchange_value=None if stamp == "backfilled" else f"{_HEX}|local_terminal",
+            exchange_value=key,
             action_taken=stamp,
             resolved=True,
         )

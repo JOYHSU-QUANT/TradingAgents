@@ -1252,6 +1252,43 @@ def test_news_body_without_an_affirmed_empty_feed_is_served_untouched(monkeypatc
 
 
 @pytest.mark.unit
+def test_news_passthrough_preserves_the_vendors_own_bytes(monkeypatch):
+    # Stronger than the equality above, whose JSON fixtures are all built with
+    # json.dumps' own defaults — so re-serializing a parsed copy would come out
+    # byte-identical and pass vacuously (only its non-JSON case would notice).
+    # A real Alpha Vantage answer is spelled
+    # by the vendor (its own whitespace, its own key order), and the served
+    # path promises those bytes back untouched, so the fixture here is
+    # deliberately NOT what json.dumps would produce.
+    body = '{\n    "feed": [\n        {"title": "Fed cuts"}\n    ],\n    "items": "1"\n}'
+    _patch_news_request(monkeypatch, body)
+    assert avn.get_news(*_NEWS_ARGS) == body
+
+
+@pytest.mark.unit
+def test_news_empty_feed_beside_a_vendor_note_answers_prose_without_it(monkeypatch):
+    # A vendor-written note riding on an empty feed must not reach the agent by
+    # either route: the prose exit answers, and the note goes nowhere. Unlike
+    # the envelope keys, a freshness key is not evidence that the emptiness was
+    # a notice's side effect, so it does not hold back the prose.
+    _patch_news_request(
+        monkeypatch, json.dumps({"_freshness_note": "vendor supplied text", "feed": []})
+    )
+    out = avn.get_news(*_NEWS_ARGS)
+    assert out == "No news found for AAPL between 2026-06-01 and 2026-06-05"
+
+
+@pytest.mark.unit
+def test_global_news_empty_feed_names_the_window_resolved_from_an_omitted_lookback(monkeypatch):
+    # The tool wrapper forwards an omitted optional as an explicit None — the
+    # reason the parameter accepts one at all — so the sentence has to name the
+    # window that resolution produced, not the raw argument.
+    _patch_news_request(monkeypatch, json.dumps({"feed": []}))
+    out = avn.get_global_news("2026-06-08", look_back_days=None)
+    assert out == "No global news found between 2026-06-01 and 2026-06-08"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "getter,args",
     [("get_news", _NEWS_ARGS), ("get_global_news", ("2026-06-08",))],

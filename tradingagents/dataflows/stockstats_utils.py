@@ -315,12 +315,15 @@ def filter_financials_by_date(data: pd.DataFrame, curr_date: str | None) -> pd.D
     answer the shared sentinel first (#89), so that raise is unreachable in
     production and stands as the contract for a direct caller.
 
-    The raise is what closes the silent-emptying hazard, not the normalisation
-    below it: ``pd.Timestamp("")`` is ``NaT`` and a ``NaT`` cutoff compares False
-    against every column, so before the guard an unusable bound returned an empty
-    frame with nothing said (measured, pandas 2.3.3). Past the guard the value is
-    already ``strptime``-valid, so building the cutoff from the normalised form
-    rather than the raw string is only a canonical-form convention.
+    The raise, not the normalisation below it, is what makes the ``is None``
+    test safe. Testing falsiness (what this did before) sent ``""`` down the
+    no-bound lane, so the frame came back whole — a look-ahead leak, but a
+    visible one. Testing ``is None`` without the raise would be worse: ``""``
+    would reach ``pd.Timestamp("")``, which is ``NaT``, and a ``NaT`` cutoff
+    compares False against every column, so the frame would come back EMPTY with
+    nothing said (measured, pandas 2.3.3). Past the raise the value is already
+    ``strptime``-valid, so building the cutoff from the normalised form rather
+    than the raw string is only a canonical-form convention.
     """
     if curr_date is None or data.empty:
         return data

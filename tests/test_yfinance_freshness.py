@@ -354,7 +354,8 @@ class TestUnusableCurrDateIsVendorAgnostic:
         # The getters answer the sentinel before reaching here, so this raise is
         # unreachable in production and stands as the contract for a direct
         # caller: a broken point-in-time bound must fail loud, never serve the
-        # frame whole. Falsiness used to route "" into exactly that silent leak.
+        # frame whole — which is what falsiness used to do with "", leaking the
+        # unfiltered frame rather than emptying it.
         frame = _statement("2099-03-31")
         with pytest.raises(ValueError, match="look-ahead guard"):
             filter_financials_by_date(frame, "")

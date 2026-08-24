@@ -58,7 +58,16 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title
     # separates the same two cases, and logs only this one, for the same reason:
     # a schema break otherwise reports every ticker as an uncovered symbol.
     columns = len(data.columns)
-    datable = int(pd.to_datetime(data.columns, errors="coerce").notna().sum())
+    try:
+        datable = int(pd.to_datetime(data.columns, errors="coerce").notna().sum())
+    except (TypeError, ValueError):
+        # Guarded for the same reason _dates_lag_note guards, and NOT redundant
+        # with the coercion inside filter_financials_by_date: on the date-less
+        # lane that one never runs, because it early-returns before coercing.
+        # No input has been found that makes errors="coerce" raise on the pinned
+        # pandas, so this is defence, not a live path; treating an index we
+        # cannot read as carrying no usable period is the conservative reading.
+        datable = 0
 
     data = filter_financials_by_date(data, curr_date)
     if data.empty:
@@ -84,10 +93,13 @@ def _dates_lag_note(values, curr_date: str | None, max_lag_days: int, what: str)
     """Data-lag note line (``"# …\\n"`` or ``""``) for a set of date-ish values.
 
     Shared by the statement and insider paths: coerce, take the newest, and
-    compare it against the reference date. The coercion itself is guarded —
-    ``errors="coerce"`` still raises on some inputs (e.g. mixed tz-aware and
-    naive timestamps on pandas >= 2) and an annotation must degrade, never
-    replace the report it decorates with an error string.
+    compare it against the reference date. The coercion is guarded because an
+    annotation must degrade, never replace the report it decorates with an error
+    string. The example this once cited — mixed tz-aware and naive timestamps on
+    pandas >= 2 — does NOT raise on the pinned pandas: it yields a tz-aware index
+    with the naive entry as ``NaT``. No input has been found that makes
+    ``errors="coerce"`` raise there, so treat the guard as defence whose trigger
+    is unproven rather than as evidence that one exists.
     """
     if curr_date is None:  # neither caller can reach this; kept as the contract (#89)
         return ""

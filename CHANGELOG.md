@@ -548,7 +548,7 @@ Breaking changes within the 0.x line are called out explicitly.
   fallback's 180/181-day bound, which both vendors share and neither had a
   boundary test for. Two yfinance no-data reasons are now distinct where one
   string used to cover both, since the router splices the reason into what the
-  agent reads: a frame that empties because every column label postdates
+  agent reads: a frame that empties with no column label on or before
   `curr_date` says so and names the date (correct point-in-time behaviour on any
   backtest older than the vendor's window, so it stays quiet), while a frame
   whose labels are not dates at all — a vendor schema break, which would

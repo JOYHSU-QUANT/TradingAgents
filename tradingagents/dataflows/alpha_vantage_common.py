@@ -79,14 +79,14 @@ _AV_ENVELOPE_KEYS = {"Error Message", "Information", "Note"}
 # answers in JSON (yfinance answers in CSV with "# " header lines), so the note
 # is carried as a key rather than a prefixed line: the body stays parseable, and
 # an underscore-prefixed name is not part of any Alpha Vantage schema this repo
-# has seen. That last part is a convention, not a guarantee, so every serve
-# path in the annotated getters drops a same-named key from the body instead of
-# trusting it to be absent — including the paths that attach no disclosure of
-# their own, where a vendor-written note would stand unopposed. (Getters that
-# do not annotate, e.g. the news feeds, serve their bodies raw.) Written first
-# so a disclosure is not buried under a long report list (#58). Shared here so
-# every Alpha Vantage module that annotates goes through the same carrier
-# (#69).
+# has seen. That last part is a convention, not a guarantee, so every path that
+# serves a JSON body drops a same-named key instead of trusting it to be absent
+# — including the paths that attach no disclosure of their own, where a
+# vendor-written note would stand unopposed. That covers the getters which never
+# annotate: the news feeds drop the key without ever writing one (#90). Written
+# first so a disclosure is not buried under a long report list (#58). Shared
+# here so every Alpha Vantage module handling this key goes through the same
+# carrier (#69).
 _FRESHNESS_NOTE_KEY = "_freshness_note"
 
 

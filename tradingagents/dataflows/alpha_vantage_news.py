@@ -40,11 +40,14 @@ def _news_body(result, empty_answer: str) -> str:
     The empty-feed verdict reads ``feed`` alone: the documented companion
     ``items`` count plays no part, so a body carrying one, the other, or a
     differently spelled count behaves the same. Anything this cannot read as an
-    affirmed empty window is served as it arrived: a non-JSON body, a failure
-    envelope, a ``feed`` that is not a list, or a body with no ``feed`` at all.
-    An empty feed riding next to an unclassified Information/Note also passes
-    through — there the emptiness may be the notice's side effect, and the
-    prose would discard the vendor's own explanation.
+    affirmed empty window — a non-JSON body, a failure envelope, a ``feed``
+    that is not a list, or a body with no ``feed`` at all — is served as it
+    arrived, bar the vendor-written note key above, which is dropped from any
+    of those that parses as an object (a non-JSON body has nothing to drop from
+    and comes back byte-identical). An empty feed riding next to an
+    unclassified Information/Note also passes through — there the emptiness may
+    be the notice's side effect, and the prose would discard the vendor's own
+    explanation.
     """
     parsed = _parsed_payload(result)
     if parsed is None or not _carries_payload(parsed):

@@ -527,11 +527,17 @@ Breaking changes within the 0.x line are called out explicitly.
   a successful answer; and `"2026/08/18"` was filtered by yfinance, because
   pandas parses it, while Alpha Vantage rejected it. yfinance's overview getter
   was the quiet one — on all three it served today's ratios with the
-  live-snapshot disclosure silently switched off, which is the exact failure
-  that disclosure exists to prevent. Both vendors now decide "is this curr_date
-  usable?" through one function in `utils` and answer with one sentence from
-  another, so a future edit cannot move one vendor without the other; a test
-  pins that they are the same objects, not two copies. An omitted `curr_date`
+  live-snapshot disclosure switched off, which is the exact failure that
+  disclosure exists to prevent (a warning log was its only trace, and only on
+  two of the three: an empty string left none at all). Both vendors now decide
+  "is this curr_date usable?" through one function in `utils` and answer with
+  one sentence from another, so a refinement to that judgement reaches both
+  rather than one; a test pins that they are the same objects, not two copies.
+  **This narrows what yfinance accepts:** the rule is now `strptime`'s, so a
+  non-ISO date it used to parse and serve filtered data for — `"2026/08/18"`,
+  `"Aug 18 2026"`, an ISO string with a time suffix — is refused instead.
+  Non-zero-padded `"2026-8-18"` still works. Nothing in the repo supplies such
+  a date; only a model's own tool call can. An omitted `curr_date`
   (`None`) still takes the date-less fallback lane on both vendors, unchanged.
   Vendor emptiness is judged first, matching the Alpha Vantage order: an unknown
   symbol reaches the router's no-data lane either way rather than one vendor
@@ -540,7 +546,15 @@ Breaking changes within the 0.x line are called out explicitly.
   unreachable in production now that the getters answer first, so it stands as
   the contract for a direct caller. Also pinned: the date-less statement
   fallback's 180/181-day bound, which both vendors share and neither had a
-  boundary test for.
+  boundary test for. Two yfinance no-data reasons are now distinct where one
+  string used to cover both, since the router splices the reason into what the
+  agent reads: a frame that empties because every column label postdates
+  `curr_date` says so and names the date (correct point-in-time behaviour on any
+  backtest older than the vendor's window, so it stays quiet), while a frame
+  whose labels are not dates at all — a vendor schema break, which would
+  otherwise report every ticker as an uncovered symbol — says that instead and
+  is logged. Alpha Vantage already drew that line; its own no-data reasons still
+  do not name `curr_date`, which is left to a follow-up.
 - **Alpha Vantage getters no longer hand a failure, or a key the vendor wrote,
   to the agent as data.** Three same-family gaps left by the two entries below:
   (1) only HTTP 429 was classified at the request boundary, so any other status

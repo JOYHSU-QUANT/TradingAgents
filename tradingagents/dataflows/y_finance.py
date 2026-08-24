@@ -30,13 +30,15 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 
-def _statement_report(data, ticker, canonical, curr_date, freq, noun: str) -> str:
+def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title: str) -> str:
     """Judge, filter and render one fetched statement frame.
 
     The three statement getters differ only in which yfinance property they
     fetch and what that statement is called, so everything downstream of the
     fetch lives here — this lane's ordering rule was already edited in three
-    places once (#89) and should not be again.
+    places once (#89) and should not be again. ``title`` is passed rather than
+    derived from ``noun``: the agent reads it, and ``str.title()`` would mis-case
+    the first acronym anyone adds.
 
     Emptiness is judged before the analysis date, the order the Alpha Vantage
     path uses: "this symbol has nothing" is true regardless of curr_date, so an
@@ -48,13 +50,34 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str) -> st
     if (refusal := curr_date_refusal(curr_date)) is not None:
         return refusal
 
+    # Measured before filtering, because a frame can also empty by having no
+    # date-like columns at all — yfinance renaming or nulling them coerces every
+    # label to NaT, which compares False against any cutoff. That is a vendor
+    # schema break, and reporting it as "nothing on or before your date" would
+    # describe correct point-in-time behaviour instead. The Alpha Vantage side
+    # separates the same two cases, and logs only this one, for the same reason:
+    # a schema break otherwise reports every ticker as an uncovered symbol.
+    columns = len(data.columns)
+    try:
+        datable = int(pd.to_datetime(data.columns, errors="coerce").notna().sum())
+    except (TypeError, ValueError):
+        datable = 0  # same guarded coercion as _dates_lag_note
+
     data = filter_financials_by_date(data, curr_date)
     if data.empty:
-        # Only reachable with a real cutoff — a None curr_date filters nothing —
-        # so naming the date is accurate rather than decorative.
+        if not datable:
+            logger.warning(
+                "yfinance %s for %s: none of the %d columns carried a usable fiscal period",
+                noun,
+                ticker,
+                columns,
+            )
+            raise NoMarketDataError(
+                ticker, canonical, f"all {columns} {noun} columns carried no usable fiscal period"
+            )
         raise NoMarketDataError(ticker, canonical, f"no {noun} data on or before {curr_date}")
 
-    header = f"# {noun.title()} data for {canonical} ({freq})\n"
+    header = f"# {title} data for {canonical} ({freq})\n"
     header += _statement_lag_note(data, curr_date, freq, f"{noun} period")
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     return header + data.to_csv()
@@ -474,7 +497,9 @@ def get_balance_sheet(
         else:
             data = yf_fetch_statement(lambda: ticker_obj.balance_sheet)
 
-        return _statement_report(data, ticker, canonical, curr_date, freq, "balance sheet")
+        return _statement_report(
+            data, ticker, canonical, curr_date, freq, "balance sheet", "Balance Sheet"
+        )
 
     except VendorError:
         raise  # Typed vendor failures take their router lanes (#67)
@@ -498,7 +523,7 @@ def get_cashflow(
         else:
             data = yf_fetch_statement(lambda: ticker_obj.cashflow)
 
-        return _statement_report(data, ticker, canonical, curr_date, freq, "cash flow")
+        return _statement_report(data, ticker, canonical, curr_date, freq, "cash flow", "Cash Flow")
 
     except VendorError:
         raise  # Typed vendor failures take their router lanes (#67)
@@ -522,7 +547,9 @@ def get_income_statement(
         else:
             data = yf_fetch_statement(lambda: ticker_obj.income_stmt)
 
-        return _statement_report(data, ticker, canonical, curr_date, freq, "income statement")
+        return _statement_report(
+            data, ticker, canonical, curr_date, freq, "income statement", "Income Statement"
+        )
 
     except VendorError:
         raise  # Typed vendor failures take their router lanes (#67)

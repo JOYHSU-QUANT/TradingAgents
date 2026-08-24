@@ -153,6 +153,15 @@ def _opt_dec(value: Any, *, field: str) -> Decimal | None:
     return result
 
 
+# Public alias, same reason as ``require_decimal`` above: the reconciler's
+# open-orders backfill reads a ``limitPx`` that is legitimately absent on a
+# market order, so it needs the OPTIONAL contract — absent/blank/unusable ->
+# None (logged), never a hand-rolled ``Decimal(str(...))`` that would let a
+# NaN price through into the orders row. Aliased rather than renamed: _opt_dec
+# has call sites here.
+optional_decimal = _opt_dec
+
+
 # --------------------------------------------------------------------------
 # metaAndAssetCtxs -> MarketSnapshot
 # --------------------------------------------------------------------------

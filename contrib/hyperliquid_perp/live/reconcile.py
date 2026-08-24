@@ -39,6 +39,8 @@ from ..exchanges.hyperliquid.mapper import (
     HL_SIDE_TO_LOCAL,
     hl_closing_side,
     map_account_snapshot,
+    optional_decimal,
+    require_decimal,
 )
 from ..paper import accounting
 from ..paper.clock import Clock, WallClock
@@ -194,6 +196,23 @@ def _clip(text: str | None) -> str | None:
 # else would ever close the row — see ``_clear_read_failure_case``.
 
 
+# The two dispositions this module stamps DIRECTLY onto an already-persisted
+# row. Every other one travels through ``ReconciliationCase``, whose
+# __post_init__ validates it; these two never build a case, so they need their
+# own tie to the vocabulary (issue #84).
+#
+# Checked at IMPORT rather than at the stamp, because both stamp sites sit
+# inside deliberately fail-soft excepts: ``_clear_read_failure_case`` swallows
+# and logs, so a guard there would report a rename as a warning line and let
+# the key shut forever anyway — the exact silence #84 is about. At import a
+# rename nobody classified in repo.MACHINE_DISPOSITIONS cannot start the
+# daemon at all.
+_FILL_BOOKED_DISPOSITION = "resolved_fill_booked"
+_READ_SUCCEEDED_DISPOSITION = "resolved_read_succeeded"
+check_enum(_FILL_BOOKED_DISPOSITION, repo.MACHINE_DISPOSITIONS, name="action_taken")
+check_enum(_READ_SUCCEEDED_DISPOSITION, repo.MACHINE_DISPOSITIONS, name="action_taken")
+
+
 def _read_failure_fact_key(cloid: str) -> str:
     """The once-per-fact key for "orderStatus could not be read for this cloid".
 
@@ -274,6 +293,16 @@ class ReconciliationCase:
         # a typo'd case_type there would lose the audit row with nothing but a
         # log line. Validating here turns it into a failed (unclean) leg.
         check_enum(self.case_type, repo.RECONCILIATION_CASE_TYPES, name="case_type")
+        # Same argument one field over (issue #84). Every ReconciliationCase is
+        # constructed by the SWEEP — a human's disposition is written straight
+        # to the row by ``set_reconciliation_action`` and never passes through
+        # here — so ``action_taken`` is machine vocabulary, and the set that
+        # decides whether a fact key REOPENS (repo.PROVISIONAL_DISPOSITIONS)
+        # matches it by string. A new or renamed disposition that nobody
+        # classified there fails silently in exactly the #65 direction: that
+        # key shuts forever. Loud here, at the construction that introduced it.
+        if self.action_taken is not None:
+            check_enum(self.action_taken, repo.MACHINE_DISPOSITIONS, name="action_taken")
         # Mutually exclusive by the module's model: a manual case is one only a
         # human may dispose of, so nothing in this pass can have resolved it.
         # Enforced because ``manual_cases`` filters on ``not resolved`` — a
@@ -784,7 +813,7 @@ class LiveReconciler:
                 continue
             if booked is not None:
                 with self._db.transaction() as tx:
-                    repo.set_reconciliation_action(tx, row["event_id"], "resolved_fill_booked")
+                    repo.set_reconciliation_action(tx, row["event_id"], _FILL_BOOKED_DISPOSITION)
             else:
                 unresolved_malformed += 1
         if unresolved_malformed:
@@ -1194,13 +1223,21 @@ class LiveReconciler:
                 raise ValueError(f"open_orders entry side {side_raw!r} not recognised")
             # `is None` fallback, not dict.get's default: a PRESENT-but-null
             # origSz must still fall through to sz (get's default only covers
-            # the absent-key case, and Decimal(str(None)) raises).
+            # the absent-key case, and a required field that is None raises).
             raw_orig = order.get("origSz")
             if raw_orig is None:
                 raw_orig = order.get("sz")
-            qty = Decimal(str(raw_orig))
-            remaining = Decimal(str(order.get("sz")))
-            price = order.get("limitPx")
+            # The mapper's guards, not a local Decimal(str(...)): "NaN"/"inf"
+            # parse WITHOUT error, and a non-finite qty would land in the
+            # orders row this back-fill inserts — read back later by the
+            # protection manager's coverage compare (live/protection.py) and by
+            # every PnL over that row. Required sizes fail loud (issue #81);
+            # limitPx keeps its optional contract (a market order legitimately
+            # has none), so an unusable one degrades to None with a WARNING
+            # rather than failing the back-fill.
+            qty = require_decimal(raw_orig, field="origSz")
+            remaining = require_decimal(order.get("sz"), field="sz")
+            price = optional_decimal(order.get("limitPx"), field="limitPx")
             # The registry role is the bot's own durable record of what it
             # placed — through PR 4 the only wire type is ioc_limit, but the
             # registry already carries stop_loss/take_profit roles, and once
@@ -1224,7 +1261,7 @@ class LiveReconciler:
                     remaining_qty=remaining,
                     status="open",
                     status_reason="backfilled_from_exchange_reconciliation",
-                    price=None if price is None else Decimal(str(price)),
+                    price=price,
                     reduce_only=bool(order.get("reduceOnly", False)),
                     cloid_logical=registry["cloid_logical"],
                     cloid_hex=registry["cloid_hex"],
@@ -1402,7 +1439,7 @@ class LiveReconciler:
                 # THEIR disposition is the one a human will look for
                 # (2026-07-30 concurrency review).
                 repo.stamp_reconciliation_action_if_unset(
-                    tx, existing["event_id"], "resolved_read_succeeded"
+                    tx, existing["event_id"], _READ_SUCCEEDED_DISPOSITION
                 )
         except Exception as exc:  # noqa: BLE001 — audit disposition, see above
             logger.warning(
@@ -1623,15 +1660,26 @@ class LiveReconciler:
             if order.get("side") != closing_side:
                 continue
             try:
-                covered += Decimal(str(order.get("sz")))
-            except Exception:  # noqa: BLE001 — an unparseable size covers nothing
+                # ``require_decimal``, not ``Decimal(str(...))``: the except
+                # below only ever saw values that FAIL to parse, and the two
+                # that matter here parse fine. Measured against the compare
+                # this sum feeds, after the loop: a NaN sz makes ``covered``
+                # NaN and ``covered >= need`` RAISES InvalidOperation (trapped by
+                # default), which the run()-level ``guarded`` turns into an
+                # unproven position leg — conservative, but every pass, with an
+                # error that names nothing. An "inf" sz is worse and silent:
+                # ``Decimal("Infinity") >= need`` is True, so a position with no
+                # real stop is reported PROTECTED and §17.1 rule 1 passes on it
+                # (issue #81). Both now land in this same fail-safe branch.
+                covered += require_decimal(order.get("sz"), field="sz")
+            except Exception:  # noqa: BLE001 — an unusable size covers nothing
                 # Fail-safe direction (counts as zero coverage), but never
                 # silently: the sibling degradation paths in this module all
                 # leave a trace, and "SL judged missing because a size failed
                 # to parse" must be diagnosable from the log.
                 logger.warning(
-                    "SL order sz %r (cloid %s) is unparseable while proving §17.1 "
-                    "coverage; counting it as zero",
+                    "SL order sz %r (cloid %s) is not a usable number while proving "
+                    "§17.1 coverage; counting it as zero",
                     order.get("sz"),
                     cloid,
                 )

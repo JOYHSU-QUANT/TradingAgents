@@ -414,7 +414,10 @@ live run 會自動走 §20.3／§21.4 報告（依 `live.mode`）。指標與 ex
 §20.3 驗收門檻（testnet_live）：`cycle_count ≥ 30`、`live_order_count ≥ 30`、
 `exchange_fill_dedupe_error_count / orphan_exchange_order_count /
 duplicate_fill_apply_count / local_exchange_position_mismatch_count /
-account_replay_mismatch_count / unprotected_position_seconds` 全為 0、
+account_replay_mismatch_count / unprotected_position_seconds` 全為 0
+（`orphan_exchange_order_count` 數的是**案件列**不是訂單：交易所 orderStatus 一好一壞
+抖動時，同一張單每抖一次就多一列。判準不受影響——一列就不過——但**要去交易所找幾張單，
+看旁邊那行 `orphan_exchange_order_key_count`**，它數的是相異事實鍵，一鍵一張單）、
 `kill_switch_refresh_success_rate ≥ 99%`（**樣本數 < 100 時不判定**，改記 exit 4 的
 shortfall——30s 一次的節奏下約 50 分鐘就滿，遠早於 30 cycles，所以正常驗收 run 不會
 卡在這裡；設這道下限是因為短 run 的覆蓋時間太短，一次 30s 中斷就吃掉整段可用率）。

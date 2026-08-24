@@ -397,6 +397,69 @@ def test_an_orphan_bot_owned_order_gets_its_local_row_backfilled(env):
     assert case["action_taken"] == "local_row_backfilled"
 
 
+def _orphan_order(**overrides) -> dict:
+    base = {
+        "oid": 42,
+        "coin": "BTC",
+        "cloid": _HEX,
+        "side": "B",
+        "sz": "0.001",
+        "origSz": "0.002",
+        "limitPx": "50000",
+        "reduceOnly": False,
+    }
+    base.update(overrides)
+    return base
+
+
+@pytest.mark.parametrize("field", ["sz", "origSz"])
+@pytest.mark.parametrize("value", ["NaN", "inf"])
+def test_a_non_finite_orphan_size_is_never_written_to_the_orders_row(env, field, value):
+    # Issue #81: a required wire size that is non-finite parses through
+    # Decimal(str(...)) without complaint, and this row is read back by the
+    # protection manager's coverage compare and by every PnL over it. The
+    # orphan stays an unresolved mismatch instead — the same lane an
+    # unrecognised side already takes.
+    db, seams, reconciler = env
+    _register_cloid(db, hex_id=_HEX, logical="log-entry", role="entry")
+    seams.open_orders = [_orphan_order(**{field: value})]
+    report = reconciler.run("startup")
+    assert not report.orders_reconciled
+    (case,) = _cases(db, "orphan_exchange_order")
+    assert case["action_taken"] is None
+    assert repo.get_order_by_cloid_hex(db.conn, _HEX) is None  # nothing half-written
+
+
+def test_an_absent_orig_size_still_falls_through_to_the_remaining_size(env):
+    # Unchanged by the guard swap, and the reason origSz is read with an
+    # `is None` fallback rather than dict.get's default: a PRESENT-but-null
+    # origSz must reach `sz` too, not fail the required-field check.
+    db, seams, reconciler = env
+    _register_cloid(db, hex_id=_HEX, logical="log-entry", role="entry")
+    seams.open_orders = [_orphan_order(origSz=None)]
+    report = reconciler.run("startup")
+    assert report.orders_reconciled
+    row = repo.get_order_by_cloid_hex(db.conn, _HEX)
+    assert row["qty"] == "0.001"
+    assert Decimal(row["filled_qty"]) == 0  # qty - remaining, both the same read
+
+
+@pytest.mark.parametrize("limit_px", [None, "NaN", ""])
+def test_an_unusable_limit_price_backfills_the_orphan_without_one(env, limit_px):
+    # limitPx is OPTIONAL (a market order legitimately has none), so it keeps
+    # the optional contract: absent, blank, or unusable all degrade to a NULL
+    # price and the row is still written. Failing the whole back-fill over a
+    # price would leave a real exchange order with no local row at all.
+    db, seams, reconciler = env
+    _register_cloid(db, hex_id=_HEX, logical="log-entry", role="entry")
+    seams.open_orders = [_orphan_order(limitPx=limit_px)]
+    report = reconciler.run("startup")
+    assert report.orders_reconciled
+    row = repo.get_order_by_cloid_hex(db.conn, _HEX)
+    assert row["price"] is None
+    assert row["qty"] == "0.002"
+
+
 # -- §12.3: non-bot-owned order → manual ---------------------------------------
 
 
@@ -523,6 +586,71 @@ def test_an_sl_covering_only_part_of_the_position_does_not_protect(env):
     ]
     report = reconciler.run("heartbeat")
     assert not report.position_protected
+
+
+def _position_with_sl_of_size(db, seams, *, sz: str) -> None:
+    """A 0.002 BTC position whose only reduce-only SL rests at ``sz``."""
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=Decimal("0.002"), entry_price=Decimal(50000)),
+            updated_at=_NOW,
+        )
+    _insert_local_order(db, order_id="o-sl", hex_id=_HEX_SL, logical="log-sl", role="stop_loss")
+    seams.clearinghouse = _clearinghouse(
+        account_value="101", positions=[_btc_position(szi="0.002", value="102")], maintenance="1"
+    )
+    seams.open_orders = [
+        {"oid": 5, "coin": "BTC", "cloid": _HEX_SL, "side": "A", "sz": sz, "reduceOnly": True}
+    ]
+
+
+def test_an_infinite_sl_size_does_not_prove_coverage(env, caplog):
+    # Issue #81, the silent half. "inf" parses through Decimal() without error
+    # and Decimal("Infinity") >= need is True, so the SL-coverage sum used to
+    # report a position with no real stop as PROTECTED — §17.1 rule 1 passing
+    # on the strength of a poisoned number. The mapper's required-field guard
+    # rejects non-finite values, which drops this order to zero coverage.
+    db, seams, reconciler = env
+    _position_with_sl_of_size(db, seams, sz="inf")
+    with caplog.at_level("WARNING"):
+        report = reconciler.run("heartbeat")
+    assert not report.position_protected
+    (row,) = _cases(db, "position_sl_missing")
+    assert row["exchange_value"] == "BTC|sl_missing"
+    # Fail-safe, but never silent: the size that could not be used is named.
+    assert any("'inf'" in r.getMessage() for r in caplog.records)
+
+
+def test_a_nan_sl_size_is_contained_in_the_coverage_sum(env, caplog):
+    # The other half of #81, and its failure differed: a NaN summed cleanly into
+    # `covered`, then `covered >= need` RAISED InvalidOperation (trapped by
+    # default) from outside the per-order guard — crashing the whole position
+    # leg, every pass, with an error naming nothing. Now it is contained where
+    # the sibling degradations are: this order covers zero, the leg still runs.
+    db, seams, reconciler = env
+    _position_with_sl_of_size(db, seams, sz="NaN")
+    with caplog.at_level("WARNING"):
+        report = reconciler.run("heartbeat")
+    assert not report.position_protected
+    assert not any("position leg crashed" in e for e in report.errors)
+    assert any("'NaN'" in r.getMessage() for r in caplog.records)
+
+
+def test_a_second_sl_still_covers_when_one_sibling_size_is_unusable(env):
+    # Discrimination for "counts as zero" over "abandons the sum": the healthy
+    # leg of a split protection must still be counted. Without this, dropping
+    # the whole loop on a bad size would look identical in the two tests above.
+    db, seams, reconciler = env
+    _position_with_sl_of_size(db, seams, sz="inf")
+    _insert_local_order(db, order_id="o-sl-2", hex_id=_HEX, logical="log-sl-2", role="stop_loss")
+    seams.open_orders.append(
+        {"oid": 6, "coin": "BTC", "cloid": _HEX, "side": "A", "sz": "0.002", "reduceOnly": True}
+    )
+    report = reconciler.run("heartbeat")
+    assert report.position_protected
+    assert _cases(db, "position_sl_missing") == []
 
 
 def test_the_exchange_liquidation_estimate_is_mirrored_onto_the_local_row(env):
@@ -1991,8 +2119,9 @@ def test_the_sweeps_order_dispositions_are_classified_as_the_set_intends(env):
     # named at all: those two are derived from the terminal-status vocabulary
     # rather than written at a call site, so no behavioural test reaches them
     # (`settled_canceled`, which several do, is the derivation's witness).
-    # `backfilled` appears in neither list on purpose: its case carries no
-    # exchange_value, so it never meets the dedupe.
+    # `backfilled` is in neither list on purpose: its case carries no
+    # exchange_value, so it never meets the dedupe. It is still a machine
+    # stamp — see the vocabulary test below.
     for stamp in (
         "settled_never_sent",
         "settled_canceled",
@@ -2002,8 +2131,58 @@ def test_the_sweeps_order_dispositions_are_classified_as_the_set_intends(env):
         "local_row_reopened",
     ):
         assert stamp in repo.PROVISIONAL_DISPOSITIONS, stamp
-    for final in ("resolved_fill_booked", "local_row_backfilled"):
+    for final in ("resolved_fill_booked", "local_row_backfilled", "backfilled"):
         assert final not in repo.PROVISIONAL_DISPOSITIONS, final
+
+
+def test_every_disposition_the_sweep_writes_is_in_the_machine_vocabulary():
+    # Issue #84. The set above decides by STRING whether a fact key reopens, so
+    # a machine stamp missing from the classification shuts its key forever —
+    # #65's defect, returning silently for that one disposition. The guard that
+    # stops it is membership of MACHINE_DISPOSITIONS, checked where each stamp
+    # is produced; this pins that the vocabulary covers every word the sweep
+    # can write, including the two that never build a case.
+    assert repo.PROVISIONAL_DISPOSITIONS <= repo.MACHINE_DISPOSITIONS
+    for stamp in ("resolved_fill_booked", "local_row_backfilled", "backfilled"):
+        assert stamp in repo.MACHINE_DISPOSITIONS, stamp
+    # Closed, not "anything the sweep happens to pass": an operator's prose is
+    # the other kind of disposition and must not be mistakable for one of these.
+    assert "cancelled by hand after calling support" not in repo.MACHINE_DISPOSITIONS
+
+
+def test_an_unclassified_disposition_fails_where_it_is_constructed():
+    # The acceptance shape for #84: a sixth machine disposition added without
+    # classifying it fails LOUDLY at the construction that introduced it —
+    # an unclean leg in that pass — instead of quietly keeping its key shut.
+    from contrib.hyperliquid_perp.live.reconcile import ReconciliationCase
+
+    with pytest.raises(ValueError, match="local_row_reopened_v2"):
+        ReconciliationCase(
+            case_type="orphan_exchange_order",
+            symbol="BTC",
+            local_value="o1:rejected",
+            exchange_value=f"{_HEX}|local_terminal",
+            action_taken="local_row_reopened_v2",
+            resolved=True,
+        )
+
+
+def test_a_classified_disposition_still_constructs():
+    # Negative control: the guard must not reject the vocabulary it exists to
+    # protect, and `backfilled` — the one member outside the dedupe entirely —
+    # is the member most likely to be forgotten by a narrower set.
+    from contrib.hyperliquid_perp.live.reconcile import ReconciliationCase
+
+    for stamp in ("local_row_reopened", "backfilled"):
+        case = ReconciliationCase(
+            case_type="orphan_exchange_order",
+            symbol="BTC",
+            local_value="o1:rejected",
+            exchange_value=None if stamp == "backfilled" else f"{_HEX}|local_terminal",
+            action_taken=stamp,
+            resolved=True,
+        )
+        assert case.action_taken == stamp
 
 
 # -- the reopen tiebreaker's read-failure row (issue #66) ---------------------

@@ -13,6 +13,7 @@ __all__ = [
     "LIVE_ORDER_STATUSES",
     "LIVE_PLAN_STATUSES",
     "LIVE_SMOKE_TEST_STATUSES",
+    "MACHINE_DISPOSITIONS",
     "PROTECTION_ORDER_EVENT_TYPES",
     "PROVISIONAL_DISPOSITIONS",
     "RECONCILIATION_CASE_TYPES",
@@ -346,6 +347,9 @@ RECONCILIATION_CASE_TYPES = frozenset(
 #     contains no `DELETE FROM orders`) and ``resolved_fill_booked`` (nor
 #     `DELETE FROM fills`). ``backfilled`` is outside for a third reason — its
 #     sweep case carries no ``exchange_value``, so it never meets the dedupe.
+#     All three are still MACHINE stamps; membership of THIS set is about how
+#     the dedupe treats them, not about who wrote them. The set that answers
+#     "did the sweep write this word" is ``MACHINE_DISPOSITIONS`` below.
 #   * A human's ``--stamp-case`` text: the operator disposing of an
 #     ``order_missing_on_exchange`` row whose order STAYS in the cursor (§8.3
 #     rule 10: the exchange took the cloid and denies it) must not have their
@@ -386,6 +390,44 @@ PROVISIONAL_DISPOSITIONS = frozenset(
     # cannot land a stamp this set does not know about.
     | {f"settled_{status}" for status in _TERMINAL_ORDER_STATUSES}
 )
+
+# The sweep's own dispositions that shut their key FOR GOOD (or never meet the
+# dedupe at all) — the complement of PROVISIONAL_DISPOSITIONS within the
+# machine vocabulary. Spelled out here so the union below is a closed set: the
+# three are the exhaustive "sweep wrote it, and no later sighting reopens the
+# key" list.
+_FINAL_DISPOSITIONS = frozenset(
+    {
+        # _reconcile_orders, orphan back-fill: the missing local row now exists.
+        "local_row_backfilled",
+        # _reconcile_fills: the stream fault's fill is booked.
+        "resolved_fill_booked",
+        # exchange_fill_missing_local: carries no exchange_value, so it never
+        # reaches the dedupe in the first place (see the note above).
+        "backfilled",
+    }
+)
+
+# Every disposition the §12 sweep itself can write — the CLOSED vocabulary for
+# ``action_taken`` values that are not a human's ``--stamp-case`` prose.
+#
+# Why closed, and why validated at construction (issue #84, following #65):
+# PROVISIONAL_DISPOSITIONS decides by STRING COMPARISON whether a fact key
+# reopens for its next sighting. A sixth machine disposition added — or an
+# existing one renamed — without updating that set does not fail anywhere: the
+# key simply stays shut forever, which is exactly the #65 defect returning for
+# that one disposition, with no error and no log. The only way it surfaces is
+# an operator noticing a recurrence that never reached ``safe-mode --status``,
+# and #65's whole point was that this path is invisible.
+#
+# So ``ReconciliationCase.__post_init__`` and the sweep's two direct stamp
+# sites check membership here. A new disposition then fails LOUDLY at the
+# moment it is constructed — an unclean leg, in the pass that introduced it —
+# and whoever adds it must come here and decide which half it belongs in.
+# ``safe-mode --stamp-case`` refuses this whole set for the mirror reason: the
+# dedupe reads the string, not who wrote it, and an audit row must not leave a
+# reader unable to tell a human's attestation from the daemon's.
+MACHINE_DISPOSITIONS = PROVISIONAL_DISPOSITIONS | _FINAL_DISPOSITIONS
 
 # Which code path observed the case: the PR 3 ingest sighting, or one of the
 # §12.2 reconciliation timings PR 4's sweep runs at. Public: the reconciler

@@ -157,16 +157,57 @@ class VendorRoutingTests(unittest.TestCase):
             result = interface.route_to_vendor("get_indicators", "AAPL", "rsi", "2026-06-01", 30)
         self.assertEqual(result, "YF_INDICATORS")
 
-    def _av_answers(self, body_dict):
+    def test_alpha_vantage_indicator_http_failure_reaches_the_fallback_vendor(self):
+        # #87 end-to-end through the REAL getter and the REAL request boundary:
+        # #72 classified only HTTP 429, so a 503 became "Error retrieving rsi
+        # data: 503 Server Error" — which the router reads as a successful
+        # answer, so the chain stopped at the vendor that had just gone down.
+        import tradingagents.dataflows.alpha_vantage_indicator as avi
+
+        set_config({"data_vendors": {"technical_indicators": "alpha_vantage,yfinance"}})
+        patch_key, patch_get = self._av_answers(status_code=503)
+        with (
+            patch_key,
+            patch_get,
+            self._route_method(
+                "get_indicators",
+                {"alpha_vantage": avi.get_indicator, "yfinance": _returns("YF_INDICATORS")},
+            ),
+        ):
+            result = interface.route_to_vendor("get_indicators", "AAPL", "rsi", "2026-06-01", 30)
+        self.assertEqual(result, "YF_INDICATORS")
+
+    def test_alpha_vantage_indicator_http_failure_alone_fails_loudly(self):
+        # technical_indicators is a core category: with no other vendor to try,
+        # the outage surfaces instead of degrading into prose an agent would
+        # analyse as a report (the decided outcome in #60).
+        import requests
+
+        import tradingagents.dataflows.alpha_vantage_indicator as avi
+
+        set_config({"data_vendors": {"technical_indicators": "alpha_vantage"}})
+        patch_key, patch_get = self._av_answers(status_code=503)
+        with (
+            patch_key,
+            patch_get,
+            self._route_method("get_indicators", {"alpha_vantage": avi.get_indicator}),
+            self.assertRaises(requests.HTTPError),
+        ):
+            interface.route_to_vendor("get_indicators", "AAPL", "rsi", "2026-06-01", 30)
+
+    def _av_answers(self, body_dict=None, status_code=200):
         # The strict fake from the hardening tests, not a mock.Mock: Mock
         # auto-creates attributes, so a new response read in _make_api_request
-        # would silently pass here instead of failing the fake.
+        # would silently pass here instead of failing the fake. A non-200
+        # status answers with no body, since raise_for_status() fires before
+        # anything reads one.
         import tradingagents.dataflows.alpha_vantage_common as av
         from tests.test_alpha_vantage_hardening import _patched_get
 
+        body = "" if body_dict is None else json.dumps(body_dict)
         return (
             mock.patch.object(av, "get_api_key", return_value="k"),
-            mock.patch.object(av.requests, "get", _patched_get(json.dumps(body_dict))),
+            mock.patch.object(av.requests, "get", _patched_get(body, status_code=status_code)),
         )
 
     def test_alpha_vantage_error_envelope_reaches_the_fallback_vendor(self):

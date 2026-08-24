@@ -1,3 +1,5 @@
+import requests
+
 from .alpha_vantage_common import _make_api_request
 from .errors import VendorError
 from .utils import data_lag_note
@@ -281,6 +283,20 @@ def get_indicator(
         # handler below and come back as a successful-looking "Error retrieving
         # ..." string, so the router saw a successful answer and never fell
         # back once Alpha Vantage's daily quota was spent (#60).
+        raise
+    except requests.RequestException:
+        # A transport-layer failure propagates for the same reason, one lane
+        # over: #72 classified only HTTP 429, so every other status code — and
+        # every connection reset or timeout — arrives here as a plain requests
+        # exception. Swallowed, an Alpha Vantage 503 came back as "Error
+        # retrieving {indicator} data: 503 Server Error", which route_to_vendor
+        # reads as a successful answer: the chain stopped at the vendor that
+        # had just failed and the agent analysed the error prose as an
+        # indicator report. Every other Alpha Vantage getter (fundamentals,
+        # news, stock) carries no broad except at all, so a requests exception
+        # already reaches the router's generic error lane from those — this
+        # getter was the only one converting it into a success (#87). What the
+        # router does with it from there is described one block up.
         raise
     except Exception as e:
         print(f"Error getting Alpha Vantage indicator data for {indicator}: {e}")

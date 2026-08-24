@@ -79,14 +79,14 @@ _AV_ENVELOPE_KEYS = {"Error Message", "Information", "Note"}
 # answers in JSON (yfinance answers in CSV with "# " header lines), so the note
 # is carried as a key rather than a prefixed line: the body stays parseable, and
 # an underscore-prefixed name is not part of any Alpha Vantage schema this repo
-# has seen. That last part is a convention, not a guarantee, so every serve
-# path in the annotated getters drops a same-named key from the body instead of
-# trusting it to be absent — including the paths that attach no disclosure of
-# their own, where a vendor-written note would stand unopposed. (Getters that
-# do not annotate, e.g. the news feeds, serve their bodies raw.) Written first
-# so a disclosure is not buried under a long report list (#58). Shared here so
-# every Alpha Vantage module that annotates goes through the same carrier
-# (#69).
+# has seen. That last part is a convention, not a guarantee, so every path that
+# serves a JSON body drops a same-named key instead of trusting it to be absent
+# — including the paths that attach no disclosure of their own, where a
+# vendor-written note would stand unopposed. That covers the getters which never
+# annotate: the news feeds drop the key without ever writing one (#90). Written
+# first so a disclosure is not buried under a long report list (#58). Shared
+# here so every Alpha Vantage module handling this key goes through the same
+# carrier (#69).
 _FRESHNESS_NOTE_KEY = "_freshness_note"
 
 
@@ -170,7 +170,7 @@ def _with_freshness_note(payload: dict, note: str) -> str:
     return json.dumps({_FRESHNESS_NOTE_KEY: note, **body}, indent=2)
 
 
-def _make_api_request(function_name: str, params: dict, subject: str | None = None) -> dict | str:
+def _make_api_request(function_name: str, params: dict, subject: str | None = None) -> str:
     """Helper function to make API requests and handle responses.
 
     ``subject`` is what a rejection is attributed to (the caller knows which of
@@ -178,6 +178,12 @@ def _make_api_request(function_name: str, params: dict, subject: str | None = No
     ``symbol``/``tickers`` and then to the function name — a last resort that
     reads oddly in the router's no-data sentinel, so callers whose requests
     carry neither key should name their subject.
+
+    Returns:
+        The response *text*, whatever shape it carries (CSV for the data
+        endpoints, JSON text for the object-keyed ones) — never a parsed
+        object. Every failure leaves by raising instead, so no caller has to
+        tell a body apart from a verdict (#90).
 
     Raises:
         AlphaVantageRateLimitError: When API rate limit is exceeded — whether

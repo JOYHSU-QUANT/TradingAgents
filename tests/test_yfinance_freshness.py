@@ -1,8 +1,11 @@
 """yfinance freshness annotations (#30): financial statements carry a data-lag
 note when the newest filtered period is far behind the analysis date; the
 live-only fundamentals snapshot discloses when the analysis date trails the
-wall clock; insider filings flag a long-dead stream. All yfinance access is
-mocked — no network."""
+wall clock; insider filings flag a long-dead stream. The ``*IsVendorAgnostic``
+classes are cross-vendor instead: the same routed tool must disclose — and must
+report an empty result — the same way through either vendor, so those drive the
+Alpha Vantage path beside the yfinance one. All yfinance access is mocked — no
+network."""
 
 import logging
 from datetime import datetime, timedelta
@@ -238,3 +241,62 @@ class TestInsiderBoundIsVendorAgnostic:
         av_out = avn.get_insider_transactions("AAPL")
 
         assert yf_out == av_out == "No insider transactions reported for symbol 'AAPL'"
+
+
+@pytest.mark.unit
+class TestEmptyNewsWindowIsVendorAgnostic:
+    """The two routed news tools must answer an empty window in one voice (#90).
+
+    Alpha Vantage filters NEWS_SENTIMENT server-side by ``time_from``/
+    ``time_to``, so an empty feed asserts only "nothing in the window you asked
+    for" — the same claim the yfinance getter makes when articles exist but none
+    fall inside the window. The two vendors reach the sentence from different
+    sides on purpose; what has to match is the sentence the agent reads, since
+    which vendor served the call is not something the agent can see.
+    """
+
+    _STALE = datetime(2020, 1, 1).timestamp()
+
+    def _av_empty_feed(self, monkeypatch):
+        import json
+
+        import tradingagents.dataflows.alpha_vantage_news as avn
+
+        monkeypatch.setattr(avn, "_make_api_request", lambda *a, **k: json.dumps({"feed": []}))
+        return avn
+
+    def test_ticker_news(self, monkeypatch):
+        import tradingagents.dataflows.yfinance_news as yfnews
+
+        monkeypatch.setattr(
+            yfnews.yf,
+            "Ticker",
+            lambda symbol: _FakeTicker(
+                get_news=lambda count: [{"title": "Old news", "providerPublishTime": self._STALE}]
+            ),
+        )
+        monkeypatch.setattr(yfnews, "yf_retry", lambda fn: fn())
+        yf_out = yfnews.get_news_yfinance("AAPL", "2026-06-01", "2026-06-05")
+
+        av_out = self._av_empty_feed(monkeypatch).get_news("AAPL", "2026-06-01", "2026-06-05")
+
+        assert yf_out == av_out == "No news found for AAPL between 2026-06-01 and 2026-06-05"
+
+    def test_global_news(self, monkeypatch):
+        # Both vendors take a 7-day lookback by default, so the window named in
+        # the sentence agrees as well as its wording.
+        import tradingagents.dataflows.yfinance_news as yfnews
+
+        stale = self._STALE
+
+        class _FakeSearch:
+            def __init__(self, **kwargs):
+                self.news = [{"title": "Old macro news", "providerPublishTime": stale}]
+
+        monkeypatch.setattr(yfnews.yf, "Search", _FakeSearch)
+        monkeypatch.setattr(yfnews, "yf_retry", lambda fn: fn())
+        yf_out = yfnews.get_global_news_yfinance("2026-06-08", look_back_days=7)
+
+        av_out = self._av_empty_feed(monkeypatch).get_global_news("2026-06-08", look_back_days=7)
+
+        assert yf_out == av_out == "No global news found between 2026-06-01 and 2026-06-08"

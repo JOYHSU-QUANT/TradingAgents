@@ -1,10 +1,10 @@
 """yfinance freshness annotations (#30): financial statements carry a data-lag
 note when the newest filtered period is far behind the analysis date; the
 live-only fundamentals snapshot discloses when the analysis date trails the
-wall clock; insider filings flag a long-dead stream. The last two classes here
-are cross-vendor instead: the same routed tool must disclose, and must report
-an empty result, the same way through either vendor — so they drive the Alpha
-Vantage path beside the yfinance one. All yfinance access is mocked — no
+wall clock; insider filings flag a long-dead stream. The ``*IsVendorAgnostic``
+classes are cross-vendor instead: the same routed tool must disclose — and must
+report an empty result — the same way through either vendor, so those drive the
+Alpha Vantage path beside the yfinance one. All yfinance access is mocked — no
 network."""
 
 import logging

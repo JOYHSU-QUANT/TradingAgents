@@ -553,8 +553,9 @@ Breaking changes within the 0.x line are called out explicitly.
   backtest older than the vendor's window, so it stays quiet), while a frame
   whose labels are not dates at all — a vendor schema break, which would
   otherwise report every ticker as an uncovered symbol — says that instead and
-  is logged. Alpha Vantage already drew that line; its own no-data reasons still
-  do not name `curr_date`, which is left to a follow-up.
+  is logged. Alpha Vantage already drew that line, and its coverage reasons
+  already name `curr_date`; only its schema-break reason omits it, which is left
+  to a follow-up.
 - **Alpha Vantage getters no longer hand a failure, or a key the vendor wrote,
   to the agent as data.** Three same-family gaps left by the two entries below:
   (1) only HTTP 429 was classified at the request boundary, so any other status

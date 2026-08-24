@@ -343,7 +343,10 @@ class TestUnusableCurrDateIsVendorAgnostic:
             yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
 
         assert "no balance sheet data on or before 2026-08-18" in str(exc.value)
-        assert not [r for r in caplog.records if "usable fiscal period" in r.message]
+        # Nothing from this module at all, not merely nothing carrying the
+        # schema-break phrase: a warning added to the coverage lane later must
+        # fail this rather than slip past a phrase-scoped check.
+        assert not [r for r in caplog.records if r.name == yfin.__name__]
 
     def test_the_shared_filter_refuses_an_unusable_bound_rather_than_dropping_it(self):
         from tradingagents.dataflows.stockstats_utils import filter_financials_by_date

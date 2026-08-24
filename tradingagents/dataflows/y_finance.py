@@ -58,10 +58,7 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title
     # separates the same two cases, and logs only this one, for the same reason:
     # a schema break otherwise reports every ticker as an uncovered symbol.
     columns = len(data.columns)
-    try:
-        datable = int(pd.to_datetime(data.columns, errors="coerce").notna().sum())
-    except (TypeError, ValueError):
-        datable = 0  # same guarded coercion as _dates_lag_note
+    datable = int(pd.to_datetime(data.columns, errors="coerce").notna().sum())
 
     data = filter_financials_by_date(data, curr_date)
     if data.empty:

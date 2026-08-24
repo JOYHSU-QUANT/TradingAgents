@@ -79,6 +79,65 @@ MAX_INSIDER_LAG_DAYS = 90
 MAX_STATEMENT_LAG_DAYS = {"quarterly": 180, "annual": 550}
 
 
+def normalize_iso_date(value) -> str | None:
+    """Canonical ``YYYY-MM-DD`` for a date string, or None if it is not a date.
+
+    ``strptime`` accepts non-zero-padded input ("2026-6-5"), which then compares
+    WRONG lexically against zero-padded vendor date fields — ``"2024-12-31" <=
+    "2026-6-5"`` is True — so the raw string must be normalised before any
+    look-ahead filter rather than compared as text.
+
+    That lexical comparison is also why this parser is strict where
+    :func:`_parse_day` below is deliberately lenient: that one prefix-trims so an
+    annotation can read datetimes and ISO time suffixes, and relaxing this one to
+    match would drop the guarantee silently. They are not two spellings of one
+    idea — do not unify them.
+    """
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+
+
+def invalid_curr_date_sentinel(curr_date) -> str:
+    """The sentinel served when a supplied curr_date is not a usable date.
+
+    Loud to the LLM (it can retry with a valid date), leaks no data, and never
+    raises: fundamental_data is a NON-optional category, so a ValueError escaping
+    ``route_to_vendor`` (``raise first_error``) would crash the ToolNode-wrapped
+    graph run, unlike the optional farside/F&G vendors whose raise degrades to a
+    sentinel.
+
+    Shared by both vendors serving those tools so the agent reads the same
+    sentence either way (#89) — which vendor ``data_vendors`` selected is not
+    something the agent can see, so an answer that differs by vendor is one it
+    has no way to interpret.
+    """
+    return (
+        f"INVALID_CURR_DATE: curr_date {curr_date!r} is not a valid yyyy-mm-dd "
+        f"date, so fundamentals cannot be bounded to a point in time. No data "
+        f"returned; retry with a valid yyyy-mm-dd date. Do not fabricate values."
+    )
+
+
+def curr_date_refusal(curr_date) -> str | None:
+    """The sentinel refusing a SUPPLIED-but-unusable curr_date, or None to proceed.
+
+    ``None`` means the model omitted the argument, which keeps the date-less
+    fallback lane (#73). Any other value was supplied, so one that will not parse
+    is a request that cannot be answered — not a request for no bound at all.
+
+    Both halves are one judgement, so it lives here rather than in either vendor:
+    a later refinement (say, also refusing a future-dated curr_date) applied to a
+    vendor-local copy would reach that vendor's getters and silently miss the
+    other's, which is the drift this whole change exists to close. The three
+    inputs that used to be answered differently per vendor are in the CHANGELOG.
+    """
+    if curr_date is None or normalize_iso_date(curr_date) is not None:
+        return None
+    return invalid_curr_date_sentinel(curr_date)
+
+
 def statement_lag_bound(freq) -> int:
     """Days the newest fiscal period may lag curr_date before it is flagged.
 

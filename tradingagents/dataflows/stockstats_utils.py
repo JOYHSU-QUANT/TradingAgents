@@ -15,7 +15,7 @@ from .symbol_utils import NoMarketDataError, normalize_symbol
 
 # The staleness bound lives in utils (stdlib-only) so the pure-requests Alpha
 # Vantage vendor shares the same single definition (#70).
-from .utils import MAX_OHLCV_STALE_DAYS, safe_ticker_component
+from .utils import MAX_OHLCV_STALE_DAYS, normalize_iso_date, safe_ticker_component
 
 logger = logging.getLogger(__name__)
 
@@ -300,16 +300,35 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     return data
 
 
-def filter_financials_by_date(data: pd.DataFrame, curr_date: str) -> pd.DataFrame:
+def filter_financials_by_date(data: pd.DataFrame, curr_date: str | None) -> pd.DataFrame:
     """Drop financial statement columns (fiscal period timestamps) after curr_date.
 
     yfinance financial statements use fiscal period end dates as columns.
     Columns after curr_date represent future data and are removed to
     prevent look-ahead bias.
+
+    ``None`` — the model omitted the argument — means no point-in-time bound was
+    requested and the frame is served whole (#73). A present-but-unusable
+    curr_date RAISES instead, mirroring the Alpha Vantage side's
+    ``_filter_reports_by_date``: this backs a core fundamentals tool, so a broken
+    bound must fail loud rather than silently leak future periods. The getters
+    answer the shared sentinel first (#89), so that raise is unreachable in
+    production and stands as the contract for a direct caller.
+
+    Normalising the cutoff instead of handing ``pd.Timestamp`` the raw string is
+    load-bearing, not tidiness: ``pd.Timestamp("")`` is ``NaT``, which compares
+    False against every column, so an unusable bound would have emptied the frame
+    with nothing said (measured, pandas 2.3.3).
     """
-    if not curr_date or data.empty:
+    if curr_date is None or data.empty:
         return data
-    cutoff = pd.Timestamp(curr_date)
+    normalized = normalize_iso_date(curr_date)
+    if normalized is None:
+        raise ValueError(
+            f"yfinance financials: curr_date {curr_date!r} is not a valid "
+            f"YYYY-MM-DD date; refusing to serve statements unfiltered (look-ahead guard)"
+        )
+    cutoff = pd.Timestamp(normalized)
     mask = pd.to_datetime(data.columns, errors="coerce") <= cutoff
     return data.loc[:, mask]
 

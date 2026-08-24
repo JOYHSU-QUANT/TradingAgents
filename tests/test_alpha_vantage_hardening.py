@@ -540,6 +540,42 @@ def test_indicator_untyped_failure_still_degrades_to_an_error_string(monkeypatch
     assert out.startswith("Error retrieving rsi data")
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("status", [404, 500, 503])
+def test_indicator_http_failure_propagates_instead_of_reading_as_success(monkeypatch, status):
+    # #87: #72 classified only HTTP 429, so every other status reached this
+    # getter's broad except and came back as "Error retrieving rsi data: 503
+    # Server Error" — a string route_to_vendor reads as a successful answer, so
+    # the chain stopped at the vendor that had just failed and the agent
+    # analysed the error prose as an indicator report. Driven through the real
+    # request boundary rather than a patched _make_api_request: the swallowing
+    # happened to an exception that boundary raises, so the test has to make it
+    # raise for real.
+    monkeypatch.setattr(av, "get_api_key", lambda: "k")
+    monkeypatch.setattr(av.requests, "get", _patched_get("", status_code=status))
+    with pytest.raises(requests.HTTPError):
+        avi.get_indicator("AAPL", "rsi", "2026-06-01", 30)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "exc_type", [requests.ConnectionError, requests.Timeout], ids=["reset", "timeout"]
+)
+def test_indicator_transport_failure_propagates_instead_of_reading_as_success(
+    monkeypatch, exc_type
+):
+    # The same lane one layer down: a reset or a timeout never reaches an HTTP
+    # status at all and was swallowed identically. Every other Alpha Vantage
+    # getter carries no broad except, so these already reach the router from
+    # fundamentals/news/stock — this getter was the outlier (#87).
+    def _boom(*a, **k):
+        raise exc_type("connection died")
+
+    monkeypatch.setattr(avi, "_make_api_request", _boom)
+    with pytest.raises(exc_type):
+        avi.get_indicator("AAPL", "rsi", "2026-06-01", 30)
+
+
 _DAILY_CSV = (
     "timestamp,open,high,low,close,adjusted_close,volume\n"
     "2026-05-01,10,11,9,10.5,10.5,1000\n"
@@ -1139,3 +1175,96 @@ def test_insider_vendor_note_key_cannot_shadow_the_real_disclosure(monkeypatch):
     note = _insider_note_of(avn.get_insider_transactions("AAPL"))
     assert "Data lag" in note
     assert "vendor supplied text" not in note
+
+
+# --- news feeds: empty-window voice and the vendor note key (#90) ----------
+#
+# The third getter in the same module already took both rules (#88); these two
+# served their bodies raw, so an empty feed arrived as empty JSON and a
+# vendor-written _freshness_note arrived looking system-issued.
+
+_NEWS_ARGS = ("AAPL", "2026-06-01", "2026-06-05")
+
+
+def _patch_news_request(monkeypatch, body):
+    monkeypatch.setattr(avn, "_make_api_request", lambda *a, **k: body)
+
+
+@pytest.mark.unit
+def test_news_empty_feed_answers_in_the_shared_voice(monkeypatch):
+    _patch_news_request(monkeypatch, json.dumps({"items": "0", "feed": []}))
+    assert avn.get_news(*_NEWS_ARGS) == "No news found for AAPL between 2026-06-01 and 2026-06-05"
+
+
+@pytest.mark.unit
+def test_global_news_empty_feed_answers_in_the_shared_voice(monkeypatch):
+    _patch_news_request(monkeypatch, json.dumps({"items": "0", "feed": []}))
+    out = avn.get_global_news("2026-06-08", look_back_days=7)
+    assert out == "No global news found between 2026-06-01 and 2026-06-08"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "body",
+    [
+        json.dumps({"feed": []}),
+        json.dumps({"items": "3", "feed": []}),
+    ],
+    ids=["no-count", "count-disagrees"],
+)
+def test_news_empty_feed_verdict_reads_the_feed_alone(monkeypatch, body):
+    # The companion "items" count could not be measured against a real empty
+    # answer from this vendor (no key reaches the live endpoint from the test
+    # environment), so the verdict deliberately does not consult it: a body
+    # without the count, or with one that contradicts the feed, answers the
+    # same. Whatever the vendor's real spelling is, only `feed` decides.
+    _patch_news_request(monkeypatch, body)
+    assert avn.get_news(*_NEWS_ARGS).startswith("No news found for AAPL")
+
+
+@pytest.mark.unit
+def test_news_empty_feed_beside_a_notice_is_not_flattened_to_prose(monkeypatch):
+    # Same rule as the insider path: an empty feed next to an unclassified
+    # Information/Note may be the notice's side effect, and the prose exit
+    # would discard the vendor's own explanation.
+    body = json.dumps({"Information": "unclassified advisory", "feed": []})
+    _patch_news_request(monkeypatch, body)
+    out = avn.get_news(*_NEWS_ARGS)
+    assert out == body
+    assert "No news found" not in out
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "body",
+    [
+        json.dumps({"items": "1", "feed": [{"title": "Fed cuts"}]}),
+        json.dumps({"feed": "not-a-list"}),
+        json.dumps({"items": "0"}),
+        json.dumps({"Error Message": "Invalid API call."}),
+        "Thank you for using Alpha Vantage!",
+    ],
+    ids=["articles", "wrong-shaped-feed", "no-feed-key", "error-envelope", "non-json"],
+)
+def test_news_body_without_an_affirmed_empty_feed_is_served_untouched(monkeypatch, body):
+    _patch_news_request(monkeypatch, body)
+    assert avn.get_news(*_NEWS_ARGS) == body  # not even re-serialized
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "getter,args",
+    [("get_news", _NEWS_ARGS), ("get_global_news", ("2026-06-08",))],
+    ids=["ticker-news", "global-news"],
+)
+def test_news_vendor_note_key_is_dropped_on_the_served_path(monkeypatch, getter, args):
+    # Family guard (#88's rule, now on these two paths): neither getter attaches
+    # a disclosure of its own, so a vendor-written note would stand unopposed
+    # and read as a system-issued freshness statement.
+    body = json.dumps({"_freshness_note": "vendor supplied text", "feed": [{"title": "Fed cuts"}]})
+    _patch_news_request(monkeypatch, body)
+    out = getattr(avn, getter)(*args)
+    assert "vendor supplied text" not in out
+    parsed = json.loads(out)
+    assert avf._FRESHNESS_NOTE_KEY not in parsed
+    assert parsed["feed"] == [{"title": "Fed cuts"}]  # the articles still arrive

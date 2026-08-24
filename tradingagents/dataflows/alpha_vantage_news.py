@@ -19,7 +19,43 @@ MAX_NEWS_LIMIT = 1000  # Alpha Vantage NEWS_SENTIMENT hard maximum
 MAX_NEWS_LOOKBACK_DAYS = 365
 
 
-def get_news(ticker, start_date, end_date) -> dict[str, str] | str:
+def _news_body(result, empty_answer: str) -> str:
+    """The news body as served, with an empty feed answered in prose (#90).
+
+    Two jobs, both mirroring what ``_annotate_insider_freshness`` does for the
+    third getter in this module:
+
+    * An empty ``feed`` answers in the yfinance sibling's voice rather than as
+      empty JSON. Alpha Vantage filters ``NEWS_SENTIMENT`` server-side by
+      ``time_from``/``time_to``, so an empty feed means "nothing in the window
+      you asked for" — which is what ``empty_answer`` says, and what the other
+      vendor serving the same routed tool already said. Cross-vendor tests pin
+      the two sentences equal.
+    * A vendor-written ``_freshness_note`` is dropped on every served path.
+      These getters attach no disclosure of their own, so such a key would
+      reach the agent looking like a system-issued freshness statement with
+      nothing beside it to contradict it — the same hole PR #88 closed for the
+      insider path.
+
+    The empty-feed verdict reads ``feed`` alone: the documented companion
+    ``items`` count plays no part, so a body carrying one, the other, or a
+    differently spelled count behaves the same. Anything this cannot read as an
+    affirmed empty window is served as it arrived: a non-JSON body, a failure
+    envelope, a ``feed`` that is not a list, or a body with no ``feed`` at all.
+    An empty feed riding next to an unclassified Information/Note also passes
+    through — there the emptiness may be the notice's side effect, and the
+    prose would discard the vendor's own explanation.
+    """
+    parsed = _parsed_payload(result)
+    if parsed is None or not _carries_payload(parsed):
+        return _served_body(result, parsed)
+    feed = parsed.get("feed")
+    if isinstance(feed, list) and not feed and not (_AV_ENVELOPE_KEYS & parsed.keys()):
+        return empty_answer
+    return _served_body(result, parsed)
+
+
+def get_news(ticker, start_date, end_date) -> str:
     """Returns live and historical market news & sentiment data from premier news outlets worldwide.
 
     Covers stocks, cryptocurrencies, forex, and topics like fiscal policy, mergers & acquisitions, IPOs.
@@ -30,7 +66,9 @@ def get_news(ticker, start_date, end_date) -> dict[str, str] | str:
         end_date: End date for news search.
 
     Returns:
-        Dictionary containing news sentiment data or JSON string.
+        The vendor's JSON body as text, minus any ``_freshness_note`` key it
+        supplied — or the shared no-news prose when the feed comes back empty
+        (see ``_news_body``).
     """
 
     params = {
@@ -39,21 +77,33 @@ def get_news(ticker, start_date, end_date) -> dict[str, str] | str:
         "time_to": format_datetime_for_api(end_date),
     }
 
-    return _make_api_request("NEWS_SENTIMENT", params)
+    return _news_body(
+        _make_api_request("NEWS_SENTIMENT", params),
+        # Keep this sentence in lockstep with the yfinance getter's
+        # nothing-in-window answer — a cross-vendor test pins the two equal for
+        # the canonical spelling. This vendor names the symbol it actually
+        # queried (raw, not normalized): echoing a spelling it never sent would
+        # misattribute the emptiness.
+        f"No news found for {ticker} between {start_date} and {end_date}",
+    )
 
 
-def get_global_news(curr_date, look_back_days: int = 7, limit: int = 50) -> dict[str, str] | str:
+def get_global_news(curr_date, look_back_days: int | None = 7, limit: int | None = 50) -> str:
     """Returns global market news & sentiment data without ticker-specific filtering.
 
     Covers broad market topics like financial markets, economy, and more.
 
     Args:
         curr_date: Current date in yyyy-mm-dd format.
-        look_back_days: Number of days to look back (default 7).
-        limit: Maximum number of articles (default 50).
+        look_back_days: Number of days to look back; ``None`` resolves to the
+            documented default of 7 (the tool wrapper forwards omitted
+            optionals as explicit ``None``).
+        limit: Maximum number of articles; ``None`` resolves to 50.
 
     Returns:
-        Dictionary containing global news sentiment data or JSON string.
+        The vendor's JSON body as text, minus any ``_freshness_note`` key it
+        supplied — or the shared no-news prose when the feed comes back empty
+        (see ``_news_body``).
     """
     from datetime import datetime, timedelta
 
@@ -83,7 +133,13 @@ def get_global_news(curr_date, look_back_days: int = 7, limit: int = 50) -> dict
     # This request carries no symbol/tickers, so name the subject a rejection
     # is attributed to — the fallback would present the function name as a
     # tradable symbol in the router's no-data sentinel.
-    return _make_api_request("NEWS_SENTIMENT", params, subject="global market news")
+    return _news_body(
+        _make_api_request("NEWS_SENTIMENT", params, subject="global market news"),
+        # The yfinance sibling's nothing-in-window sentence, pinned equal by a
+        # cross-vendor test. Both vendors take the same lookback default (7),
+        # so the two windows named here agree unless a caller overrides one.
+        f"No global news found between {start_date} and {curr_date}",
+    )
 
 
 def _annotate_insider_freshness(result, symbol: str) -> str:

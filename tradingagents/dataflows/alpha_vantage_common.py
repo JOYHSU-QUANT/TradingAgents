@@ -170,7 +170,7 @@ def _with_freshness_note(payload: dict, note: str) -> str:
     return json.dumps({_FRESHNESS_NOTE_KEY: note, **body}, indent=2)
 
 
-def _make_api_request(function_name: str, params: dict, subject: str | None = None) -> dict | str:
+def _make_api_request(function_name: str, params: dict, subject: str | None = None) -> str:
     """Helper function to make API requests and handle responses.
 
     ``subject`` is what a rejection is attributed to (the caller knows which of
@@ -178,6 +178,12 @@ def _make_api_request(function_name: str, params: dict, subject: str | None = No
     ``symbol``/``tickers`` and then to the function name — a last resort that
     reads oddly in the router's no-data sentinel, so callers whose requests
     carry neither key should name their subject.
+
+    Returns:
+        The response *text*, whatever shape it carries (CSV for the data
+        endpoints, JSON text for the object-keyed ones) — never a parsed
+        object. Every failure leaves by raising instead, so no caller has to
+        tell a body apart from a verdict (#90).
 
     Raises:
         AlphaVantageRateLimitError: When API rate limit is exceeded — whether

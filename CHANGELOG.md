@@ -515,6 +515,31 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **Alpha Vantage getters no longer hand a failure, or a key the vendor wrote,
+  to the agent as data.** Three same-family gaps left by the two entries below:
+  (1) only HTTP 429 was classified at the request boundary, so any other status
+  — an Alpha Vantage 503 outage, say — reached the *indicator* getter's broad
+  `except` and came back as `Error retrieving rsi data: 503 Server Error`, a
+  string the router reads as a successful answer: the chain stopped at the
+  vendor that had just gone down and the agent analysed the error prose as an
+  indicator report. That getter now re-raises every `requests` exception
+  (statuses, connection resets and timeouts alike) — which is what the other
+  Alpha Vantage getters, none of which carries a broad `except`, already did —
+  so the router hands the next vendor its turn, or raises on a single-vendor
+  chain, exactly as it does for a 429. (2) The two *news* getters served the
+  API body raw, so an empty feed arrived as empty JSON while the yfinance
+  vendor behind the same routed tool answered in prose, and a vendor-written
+  `_freshness_note` key reached the agent looking like a system-issued
+  freshness statement with no real disclosure beside it to contradict it. Both
+  now answer an empty feed in the yfinance sibling's voice ("No news found for
+  AAPL between 2026-06-01 and 2026-06-05") and drop a vendor-supplied note key
+  on every served path — the two rules the insider getter in the same module
+  took in the entry below. An empty feed riding beside an unclassified
+  Information/Note still passes through, so the vendor's own explanation is not
+  discarded; the empty verdict reads the `feed` list alone, and the documented
+  `items` count plays no part in it. (3) `_make_api_request` and both news
+  getters still advertised `dict` return types neither had produced; all three
+  now say `str`.
 - **Freshness disclosure now covers the rest of the dataflows family.** Three
   same-family gaps left after the fundamentals disclosures below: (1) the
   Alpha Vantage insider-transactions getter served the API body with no

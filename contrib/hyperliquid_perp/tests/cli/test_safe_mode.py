@@ -502,6 +502,105 @@ def test_stamping_with_one_of_the_sweeps_own_dispositions_is_refused(store, caps
         assert row["action_taken"] is None  # refused BEFORE the write, not after
 
 
+@pytest.mark.parametrize("word", ["local_row_backfilled", "resolved_fill_booked", "backfilled"])
+def test_stamping_with_a_final_machine_disposition_is_refused_too(store, capsys, word):
+    # Issue #84: the fence now covers the sweep's WHOLE vocabulary, not just
+    # the provisional half. These three shut the key either way, so the dedupe
+    # is not the argument — the audit row is: a human stamp spelled exactly
+    # like the daemon's leaves a later reader unable to tell an operator's
+    # attestation from an automatic disposal. The message must say THAT rather
+    # than repeating the provisional reason at a word it does not apply to.
+    path, db = store
+    event_id = _open_case(db, case_type="order_missing_on_exchange", exchange_value="0xabab")
+    db.close()
+    rc = main(
+        [
+            "safe-mode",
+            "--run-id",
+            "r",
+            "--db",
+            str(path),
+            "--stamp-case",
+            str(event_id),
+            "--action",
+            word,
+        ]
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "PROVISIONAL" not in err
+    assert "the sweep writes automatically" in err
+    with Database(path) as db2:
+        (row,) = [
+            r
+            for r in repo.iter_exchange_reconciliation_events(db2.conn, "r")
+            if r["event_id"] == event_id
+        ]
+        assert row["action_taken"] is None  # refused BEFORE the write, not after
+
+
+def test_stamping_with_the_operators_own_words_is_still_accepted(store):
+    # Negative control for both fences: widening the refused set must not start
+    # rejecting prose, which is the only thing --stamp-case exists to record.
+    path, db = store
+    event_id = _open_case(db, case_type="order_missing_on_exchange", exchange_value="0xabab")
+    db.close()
+    rc = main(
+        [
+            "safe-mode",
+            "--run-id",
+            "r",
+            "--db",
+            str(path),
+            "--stamp-case",
+            str(event_id),
+            "--action",
+            "cancelled by hand at the venue after calling support",
+        ]
+    )
+    assert rc == 0
+    with Database(path) as db2:
+        (row,) = [
+            r
+            for r in repo.iter_exchange_reconciliation_events(db2.conn, "r")
+            if r["event_id"] == event_id
+        ]
+        assert row["action_taken"] == "cancelled by hand at the venue after calling support"
+
+
+def test_the_stamp_echo_reports_what_was_stored(store, capsys):
+    # The fence and the write both use the STRIPPED action, so the success line
+    # has to as well: echoing the raw argument would read back the operator's
+    # own trailing spaces as though the audit row carried them.
+    path, db = store
+    event_id = _open_case(db, case_type="order_missing_on_exchange", exchange_value="0xabab")
+    db.close()
+    rc = main(
+        [
+            "safe-mode",
+            "--run-id",
+            "r",
+            "--db",
+            str(path),
+            "--stamp-case",
+            str(event_id),
+            "--action",
+            "  cancelled by hand  ",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "stamped: cancelled by hand" in out
+    assert "stamped:   cancelled by hand  " not in out
+    with Database(path) as db2:
+        (row,) = [
+            r
+            for r in repo.iter_exchange_reconciliation_events(db2.conn, "r")
+            if r["event_id"] == event_id
+        ]
+        assert row["action_taken"] == "cancelled by hand"  # what the echo claimed
+
+
 def test_stamping_an_unknown_case_id_is_named_not_silent(store, capsys):
     path, _ = store
     rc = main(

@@ -297,21 +297,39 @@ def _stamp_reconciliation_case(db, repo, args) -> int:
             file=sys.stderr,
         )
         return 1
-    if args.action.strip() in repo.PROVISIONAL_DISPOSITIONS:
-        # The once-per-fact guard reads the STRING, not who wrote it: these
-        # words mean "the sweep disposed of an episode that can recur", so one
-        # of them REOPENS the key for the next sighting. Right for the daemon,
-        # wrong for a human — a case whose fault is still live (a §8.3 rule-10
-        # order never leaves the sweep's cursor) would answer this stamp with a
-        # fresh unresolved row on every pass, holding §21.4's count above zero
-        # for the rest of the run while this command reported success each
-        # time. Named here rather than left to the operator's word choice,
-        # because the RUNBOOK publishes this vocabulary and invites imitation.
+    action = args.action.strip()
+    if action in repo.MACHINE_DISPOSITIONS:
+        # The sweep's OWN vocabulary, refused whole (issue #84). Named here
+        # rather than left to the operator's word choice, because the RUNBOOK
+        # publishes this vocabulary and invites imitation.
+        #
+        # The two halves are refused for different reasons, so the message says
+        # which one this is rather than asserting the provisional argument over
+        # a word it does not apply to:
+        because = (
+            # The once-per-fact guard reads the STRING, not who wrote it: these
+            # words mean "the sweep disposed of an episode that can recur", so
+            # one of them REOPENS the key for the next sighting. Right for the
+            # daemon, wrong for a human — a case whose fault is still live (a
+            # §8.3 rule-10 order never leaves the sweep's cursor) would answer
+            # this stamp with a fresh unresolved row on every pass, holding
+            # §21.4's count above zero for the rest of the run while this
+            # command reported success each time.
+            "which the once-per-fact guard treats as PROVISIONAL — stamping it "
+            "would re-open this case on the next sighting instead of disposing "
+            "of it"
+            if action in repo.PROVISIONAL_DISPOSITIONS
+            # The rest shut the key either way, so the dedupe is not the
+            # argument — the audit row is. It records who decided what, and a
+            # human stamp spelled exactly like the daemon's leaves a later
+            # reader unable to tell an operator's attestation from an automatic
+            # disposal.
+            else "which the sweep writes automatically — a human's attestation "
+            "must not be indistinguishable from the daemon's in the audit row"
+        )
         print(
-            f"error: --action {args.action.strip()!r} is one of the sweep's own "
-            "dispositions, which the once-per-fact guard treats as PROVISIONAL — "
-            "stamping it would re-open this case on the next sighting instead of "
-            "disposing of it. Describe the disposition in your own words.",
+            f"error: --action {action!r} is one of the sweep's own "
+            f"dispositions, {because}. Describe the disposition in your own words.",
             file=sys.stderr,
         )
         return 1
@@ -361,7 +379,10 @@ def _stamp_reconciliation_case(db, repo, args) -> int:
         # pass can stamp the machine disposition — and a plain UPDATE would
         # erase what the system recorded it DID, with no error and no audit row
         # (2026-07-30 concurrency review).
-        stamped = repo.stamp_reconciliation_action_if_unset(conn, args.stamp_case, args.action)
+        # The STRIPPED value, the same one the machine-vocabulary fence above
+        # tested: deciding on one string and storing another would let
+        # " backfilled " be refused while "backfilled " was not.
+        stamped = repo.stamp_reconciliation_action_if_unset(conn, args.stamp_case, action)
     if not stamped:
         print(
             f"error: case {args.stamp_case} was disposed of by another writer "
@@ -371,7 +392,10 @@ def _stamp_reconciliation_case(db, repo, args) -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"case {args.stamp_case} ({row['case_type']}) stamped: {args.action}")
+    # Echo what was STORED, not what was typed: the two differ by the strip
+    # above, and an operator reading back their own trailing spaces would be
+    # told the row says something the row does not say.
+    print(f"case {args.stamp_case} ({row['case_type']}) stamped: {action}")
     print(
         "NOTE: trading does not resume yet — the run must pass its next full "
         "reconciliation before new orders are allowed."

@@ -445,7 +445,111 @@ def test_orphan_exchange_order_is_a_failure(tmp_path):
     with db:
         report = validate_live_run(db, run_id="r", now=_T0)
     assert report.orphan_exchange_order_count == 1
+    assert report.orphan_exchange_order_distinct_count == 1
     assert any("orphan" in f for f in report.failures)
+
+
+def test_one_flapping_order_does_not_read_as_many_orphan_orders(tmp_path):
+    # Issue #84. A `|local_terminal_read_failed` key records one row per
+    # unreadable->readable flap of the venue, so one order that flapped all
+    # morning fills this count. The gate is unchanged — one row already fails —
+    # but the operator reading it goes to the exchange to look for that many
+    # orders, and there is one. Both numbers are now reported, off the same
+    # rows, and the failure string carries the distinct one.
+    db = _healthy(tmp_path)
+    # The real shape: each answered read stamps the row `resolved_read_succeeded`
+    # (provisional), which is what re-opens the key for the next failed read —
+    # without the stamps the dedupe would keep this at one row.
+    with db.transaction() as conn:
+        for i in range(7):
+            repo.insert_exchange_reconciliation_event(
+                conn,
+                run_id="r",
+                trigger="heartbeat",
+                case_type="orphan_exchange_order",
+                symbol="BTC",
+                exchange_value="0xabab|local_terminal_read_failed",
+                action_taken=None if i == 6 else "resolved_read_succeeded",
+                timestamp=_T0,
+            )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.orphan_exchange_order_count == 7
+    assert report.orphan_exchange_order_distinct_count == 1
+    assert not report.live_ready  # the gate still fails, on the row count
+    assert any("7 (want 0) across 1 distinct order(s)" in f for f in report.failures)
+    assert "orphan_exchange_order_distinct_count: 1" in report.summary_lines()
+
+
+def test_one_order_seen_under_two_fault_shapes_is_still_one_order(tmp_path):
+    # The count is per CLOID, not per fact key. This case type writes three key
+    # shapes for the same order, and two of them arrive from an ordinary
+    # sequence: a failed orderStatus read parks the cloid under
+    # `|local_terminal_read_failed` (reconcile.py `_maybe_reopen_terminal_order`),
+    # and the pass that gets an answer files `|local_terminal`. Counting keys
+    # would report 2 orders to go and find; there is 1.
+    db = _healthy(tmp_path)
+    with db.transaction() as conn:
+        for key in ("0xabab|local_terminal_read_failed", "0xabab|local_terminal"):
+            repo.insert_exchange_reconciliation_event(
+                conn,
+                run_id="r",
+                trigger="heartbeat",
+                case_type="orphan_exchange_order",
+                symbol="BTC",
+                exchange_value=key,
+                timestamp=_T0,
+            )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.orphan_exchange_order_count == 2
+    assert report.orphan_exchange_order_distinct_count == 1
+    assert any("across 1 distinct order(s)" in f for f in report.failures)
+
+
+def test_distinct_orphan_orders_are_counted_separately(tmp_path):
+    # Negative control for the split above: two genuinely different orphaned
+    # orders must not collapse into one, or the number would UNDER-state what
+    # the operator has to go and find. The bare-cloid key shape (a plain orphan
+    # back-fill) is deliberately one of the two.
+    db = _healthy(tmp_path)
+    with db.transaction() as conn:
+        for key, action in (
+            ("0xabab|local_terminal_read_failed", "resolved_read_succeeded"),
+            ("0xabab|local_terminal_read_failed", None),
+            ("0xcdcd", None),
+        ):
+            repo.insert_exchange_reconciliation_event(
+                conn,
+                run_id="r",
+                trigger="heartbeat",
+                case_type="orphan_exchange_order",
+                symbol="BTC",
+                exchange_value=key,
+                action_taken=action,
+                timestamp=_T0,
+            )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.orphan_exchange_order_count == 3
+    assert report.orphan_exchange_order_distinct_count == 2
+
+
+def test_post_init_rejects_more_orphan_orders_than_orphan_rows():
+    # One counts the rows, the other collapses those same rows to cloids, so
+    # this shape is impossible from the tally — and from a hand-built report it
+    # would print a summary telling the operator to find more orders than the
+    # audit trail holds.
+    with pytest.raises(ValueError, match="exceeds orphan_exchange_order_count"):
+        _make_report(orphan_exchange_order_count=1, orphan_exchange_order_distinct_count=2)
+
+
+def test_post_init_rejects_orphan_rows_with_no_order():
+    # Every orphan case the sweep constructs carries a cloid-prefixed fact key,
+    # and therefore an order, so "rows but nothing to look for" is a corrupt
+    # read rather than a quiet zero.
+    with pytest.raises(ValueError, match="every recorded orphan row belongs to some order"):
+        _make_report(orphan_exchange_order_count=3, orphan_exchange_order_distinct_count=0)
 
 
 def test_position_mismatch_is_a_failure(tmp_path):
@@ -2399,6 +2503,7 @@ def _make_report(**overrides) -> LiveValidationReport:
         "fill_count": 0,
         "exchange_fill_dedupe_error_count": 0,
         "orphan_exchange_order_count": 0,
+        "orphan_exchange_order_distinct_count": 0,
         "duplicate_fill_apply_count": 0,
         "local_exchange_position_mismatch_count": 0,
         "account_replay_mismatch_count": 0,
@@ -2607,6 +2712,7 @@ def test_post_init_rejects_a_negative_suite_attempt_count():
         "fill_count",
         "exchange_fill_dedupe_error_count",
         "orphan_exchange_order_count",
+        "orphan_exchange_order_distinct_count",
         "duplicate_fill_apply_count",
         "local_exchange_position_mismatch_count",
         "account_replay_mismatch_count",

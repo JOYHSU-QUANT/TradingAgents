@@ -39,6 +39,8 @@ from ..exchanges.hyperliquid.mapper import (
     HL_SIDE_TO_LOCAL,
     hl_closing_side,
     map_account_snapshot,
+    optional_decimal,
+    require_decimal,
 )
 from ..paper import accounting
 from ..paper.clock import Clock, WallClock
@@ -194,6 +196,34 @@ def _clip(text: str | None) -> str | None:
 # else would ever close the row — see ``_clear_read_failure_case``.
 
 
+# The three dispositions this module writes WITHOUT building a
+# ``ReconciliationCase`` — two stamped onto an already-persisted row, one
+# passed straight to the event insert. Every other one travels through
+# ``ReconciliationCase``, whose __post_init__ validates it; these three would
+# otherwise have no tie to the vocabulary at all (issue #84).
+#
+# Checked at IMPORT rather than at each write, because the three sites do not
+# share a failure lane and TWO of them cannot fail loudly where they stand:
+# ``_clear_read_failure_case`` swallows and logs a warning, and ``_record``'s
+# backfill-event insert swallows and logs an exception while the pass stays
+# CLEAN — both deliberately fail-soft, so a guard at either would report a
+# rename as one log line and let the key shut forever anyway, the exact
+# silence #84 is about. Only the fill-booked stamp reaches ``guarded``, which
+# would turn a raise into an unclean verdict. Checking here gives all three
+# the same answer, and a rename nobody classified in
+# repo.MACHINE_DISPOSITIONS cannot start the daemon at all.
+_FILL_BOOKED_DISPOSITION = "resolved_fill_booked"
+_READ_SUCCEEDED_DISPOSITION = "resolved_read_succeeded"
+_FILL_BACKFILLED_DISPOSITION = "backfilled"
+for _disposition in (
+    _FILL_BOOKED_DISPOSITION,
+    _READ_SUCCEEDED_DISPOSITION,
+    _FILL_BACKFILLED_DISPOSITION,
+):
+    check_enum(_disposition, repo.MACHINE_DISPOSITIONS, name="action_taken")
+del _disposition
+
+
 def _read_failure_fact_key(cloid: str) -> str:
     """The once-per-fact key for "orderStatus could not be read for this cloid".
 
@@ -274,6 +304,17 @@ class ReconciliationCase:
         # a typo'd case_type there would lose the audit row with nothing but a
         # log line. Validating here turns it into a failed (unclean) leg.
         check_enum(self.case_type, repo.RECONCILIATION_CASE_TYPES, name="case_type")
+        # Same argument one field over (issue #84). Every ReconciliationCase is
+        # constructed by the SWEEP — a human's disposition is written straight
+        # to the row by ``safe-mode --stamp-case`` (via
+        # ``stamp_reconciliation_action_if_unset``) and never passes through
+        # here — so ``action_taken`` is machine vocabulary, and the set that
+        # decides whether a fact key REOPENS (repo.PROVISIONAL_DISPOSITIONS)
+        # matches it by string. A new or renamed disposition that nobody
+        # classified there fails silently in exactly the #65 direction: that
+        # key shuts forever. Loud here, at the construction that introduced it.
+        if self.action_taken is not None:
+            check_enum(self.action_taken, repo.MACHINE_DISPOSITIONS, name="action_taken")
         # Mutually exclusive by the module's model: a manual case is one only a
         # human may dispose of, so nothing in this pass can have resolved it.
         # Enforced because ``manual_cases`` filters on ``not resolved`` — a
@@ -784,7 +825,7 @@ class LiveReconciler:
                 continue
             if booked is not None:
                 with self._db.transaction() as tx:
-                    repo.set_reconciliation_action(tx, row["event_id"], "resolved_fill_booked")
+                    repo.set_reconciliation_action(tx, row["event_id"], _FILL_BOOKED_DISPOSITION)
             else:
                 unresolved_malformed += 1
         if unresolved_malformed:
@@ -1008,6 +1049,18 @@ class LiveReconciler:
                 # back-fill the local row from what the exchange reported
                 # (fail-safe direction: once the row exists, every later sweep
                 # — kill-switch shutdown included — sees and manages it).
+                # The one disposition site the sweep CANNOT validate before its
+                # write: the stamp depends on whether the back-fill succeeded,
+                # so there is nothing to check until it has run. The exposure
+                # is real and is NOT the mirror of the three settle/reopen
+                # sites — __post_init__ skips a ``None`` stamp, so the branch
+                # that could raise is precisely the one where ``insert_order``
+                # already committed, and an unclassified rename would leave the
+                # orders row with no case row explaining it. What bounds it is
+                # CI rather than shape: the stamp is a literal, and
+                # ``test_every_disposition_the_sweep_writes_is_in_the_machine_vocabulary``
+                # reads it straight out of this source, so a rename fails long
+                # before a daemon runs it.
                 resolved = self._backfill_orphan_order(order, registry, now)
                 cases.append(
                     ReconciliationCase(
@@ -1136,18 +1189,12 @@ class LiveReconciler:
                 # MAPPED local status, never a literal "open": only "open" passes the
                 # guard today, but hardcoding it is the same idiom that let the
                 # protection manager misrecord a filled/canceled recovery as live.
-                with self._db.transaction() as tx:
-                    repo.update_order(
-                        tx,
-                        local["order_id"],
-                        status=local_status,
-                        status_reason="reopened_from_exchange_reconciliation",
-                        exchange_order_id=exchange_order_id,
-                        exchange_status=local_status,
-                        exchange_raw_status=raw_status,
-                        updated_at=now,
-                    )
-                return True, ReconciliationCase(
+                #
+                # Built BEFORE the write, though it is returned after: its
+                # __post_init__ is what validates the disposition, and an
+                # unclassified one must not leave the order reopened in SQLite
+                # with no audit row saying why (issue #84).
+                case = ReconciliationCase(
                     case_type="orphan_exchange_order",
                     symbol=registry["symbol"],
                     local_value=f"{local['order_id']}:{local['status']}",
@@ -1162,6 +1209,18 @@ class LiveReconciler:
                     action_taken="local_row_reopened",
                     resolved=True,
                 )
+                with self._db.transaction() as tx:
+                    repo.update_order(
+                        tx,
+                        local["order_id"],
+                        status=local_status,
+                        status_reason="reopened_from_exchange_reconciliation",
+                        exchange_order_id=exchange_order_id,
+                        exchange_status=local_status,
+                        exchange_raw_status=raw_status,
+                        updated_at=now,
+                    )
+                return True, case
             # orderStatus says terminal too: the open-orders view is behind
             # (a cancel this startup just landed is the common cause). Two
             # eventually-consistent reads disagreeing for a moment is not a
@@ -1194,13 +1253,50 @@ class LiveReconciler:
                 raise ValueError(f"open_orders entry side {side_raw!r} not recognised")
             # `is None` fallback, not dict.get's default: a PRESENT-but-null
             # origSz must still fall through to sz (get's default only covers
-            # the absent-key case, and Decimal(str(None)) raises).
+            # the absent-key case, and a required field that is None raises).
             raw_orig = order.get("origSz")
             if raw_orig is None:
                 raw_orig = order.get("sz")
-            qty = Decimal(str(raw_orig))
-            remaining = Decimal(str(order.get("sz")))
-            price = order.get("limitPx")
+            # The mapper's guards, not a local Decimal(str(...)): "NaN"/"inf"
+            # parse WITHOUT error, and a non-finite qty would land in the
+            # orders row this back-fill inserts — read back later by the
+            # protection manager's coverage compare (``live/protection.py``
+            # reads this column at both its resting protection-order checks —
+            # the SL-coverage one and the role-agnostic _establish one).
+            # Required sizes fail loud (issue #81); limitPx keeps its optional
+            # contract (a market order legitimately has none), so an unusable
+            # one degrades to None rather than failing the back-fill —
+            # refusing the row would leave a real exchange order with no local
+            # row at all, and so outside the §18.2 disarm cross-check.
+            #
+            # ``field`` names the key the value CAME from, not the column it
+            # fills: after the fallback above, a bad ``sz`` must not be
+            # reported as a bad ``origSz``.
+            raw_sz = order.get("sz")
+            qty = require_decimal(
+                raw_orig, field="origSz" if order.get("origSz") is not None else "sz"
+            )
+            remaining = require_decimal(raw_sz, field="sz")
+            price = optional_decimal(order.get("limitPx"), field="limitPx")
+            if price is None and order.get("limitPx") not in (None, ""):
+                # The mapper logs the drop, but from inside a generic parser:
+                # no cloid, no oid, no coin. This back-fill goes on to write a
+                # RESOLVED case row, so without this line "the venue served a
+                # corrupt price for a resting order" reduces to a context-free
+                # WARNING inside an otherwise clean pass.
+                #
+                # ``""`` is excluded on purpose, not overlooked: the mapper's
+                # optional contract treats blank as ABSENT (it does not log
+                # either), and a market order with no price is the ordinary
+                # case, not a corruption. Only a value that was PRESENT and
+                # could not be used is worth an operator's attention.
+                logger.warning(
+                    "orphan back-fill for cloid %s (oid %s): limitPx %r is unusable — "
+                    "the local row will be written with no price",
+                    registry["cloid_hex"],
+                    order.get("oid"),
+                    order.get("limitPx"),
+                )
             # The registry role is the bot's own durable record of what it
             # placed — through PR 4 the only wire type is ioc_limit, but the
             # registry already carries stop_loss/take_profit roles, and once
@@ -1224,7 +1320,7 @@ class LiveReconciler:
                     remaining_qty=remaining,
                     status="open",
                     status_reason="backfilled_from_exchange_reconciliation",
-                    price=None if price is None else Decimal(str(price)),
+                    price=price,
                     reduce_only=bool(order.get("reduceOnly", False)),
                     cloid_logical=registry["cloid_logical"],
                     cloid_hex=registry["cloid_hex"],
@@ -1284,15 +1380,8 @@ class LiveReconciler:
                     ),
                 )
             # No proof the exchange ever saw it: the send never landed.
-            with self._db.transaction() as conn:
-                repo.update_order(
-                    conn,
-                    order_id,
-                    status="rejected",
-                    status_reason="send_never_reached_exchange",
-                    updated_at=now,
-                )
-            return True, ReconciliationCase(
+            # Case first, write second — see the sibling below.
+            case = ReconciliationCase(
                 case_type="order_missing_on_exchange",
                 symbol=row["symbol"],
                 local_value=order_id,
@@ -1301,6 +1390,15 @@ class LiveReconciler:
                 action_taken="settled_never_sent",
                 resolved=True,
             )
+            with self._db.transaction() as conn:
+                repo.update_order(
+                    conn,
+                    order_id,
+                    status="rejected",
+                    status_reason="send_never_reached_exchange",
+                    updated_at=now,
+                )
+            return True, case
         exchange_order_id, raw_status = parsed
         local_status = local_status_for_exchange_status(raw_status)
         if local_status in repo.LIVE_ORDER_STATUSES:
@@ -1308,6 +1406,22 @@ class LiveReconciler:
             # §12.3 case — two eventually-consistent exchange reads disagreeing
             # for a moment is not a local/exchange conflict.
             return True, None
+        # Built before the write for the same reason as the reopen mirror and
+        # the never-sent branch above: __post_init__ is what validates the
+        # disposition, and settling the order in SQLite before validating it
+        # would leave the row changed with no audit row explaining why (issue
+        # #84). It matters most here, where the disposition is DERIVED
+        # (``settled_{local_status}``) and so is the one word in this module no
+        # reader can check by eye.
+        case = ReconciliationCase(
+            case_type="order_missing_on_exchange",
+            symbol=row["symbol"],
+            local_value=order_id,
+            exchange_value=cloid,
+            detail=f"settled from orderStatus: {raw_status}",
+            action_taken=f"settled_{local_status}",
+            resolved=True,
+        )
         with self._db.transaction() as conn:
             repo.update_order(
                 conn,
@@ -1318,15 +1432,7 @@ class LiveReconciler:
                 exchange_raw_status=raw_status,
                 updated_at=now,
             )
-        return True, ReconciliationCase(
-            case_type="order_missing_on_exchange",
-            symbol=row["symbol"],
-            local_value=order_id,
-            exchange_value=cloid,
-            detail=f"settled from orderStatus: {raw_status}",
-            action_taken=f"settled_{local_status}",
-            resolved=True,
-        )
+        return True, case
 
     def _clear_read_failure_case(self, cloid: str, *, case_type: str, fact_key: str) -> None:
         """Dispose of a past unreadable-orderStatus row that a later read disproved.
@@ -1402,7 +1508,7 @@ class LiveReconciler:
                 # THEIR disposition is the one a human will look for
                 # (2026-07-30 concurrency review).
                 repo.stamp_reconciliation_action_if_unset(
-                    tx, existing["event_id"], "resolved_read_succeeded"
+                    tx, existing["event_id"], _READ_SUCCEEDED_DISPOSITION
                 )
         except Exception as exc:  # noqa: BLE001 — audit disposition, see above
             logger.warning(
@@ -1623,15 +1729,26 @@ class LiveReconciler:
             if order.get("side") != closing_side:
                 continue
             try:
-                covered += Decimal(str(order.get("sz")))
-            except Exception:  # noqa: BLE001 — an unparseable size covers nothing
+                # ``require_decimal``, not ``Decimal(str(...))``: the except
+                # below only ever saw values that FAIL to parse, and the two
+                # that matter here parse fine. Measured against the compare
+                # this sum feeds, after the loop: a NaN sz makes ``covered``
+                # NaN and ``covered >= need`` RAISES InvalidOperation (trapped by
+                # default), which the run()-level ``guarded`` turns into an
+                # unproven position leg — conservative, but every pass, with an
+                # error that names nothing. An "inf" sz is worse and silent:
+                # ``Decimal("Infinity") >= need`` is True, so a position with no
+                # real stop is reported PROTECTED and §17.1 rule 1 passes on it
+                # (issue #81). Both now land in this same fail-safe branch.
+                covered += require_decimal(order.get("sz"), field="sz")
+            except Exception:  # noqa: BLE001 — an unusable size covers nothing
                 # Fail-safe direction (counts as zero coverage), but never
                 # silently: the sibling degradation paths in this module all
                 # leave a trace, and "SL judged missing because a size failed
                 # to parse" must be diagnosable from the log.
                 logger.warning(
-                    "SL order sz %r (cloid %s) is unparseable while proving §17.1 "
-                    "coverage; counting it as zero",
+                    "SL order sz %r (cloid %s) is not a usable number while proving "
+                    "§17.1 coverage; counting it as zero",
                     order.get("sz"),
                     cloid,
                 )
@@ -1830,7 +1947,7 @@ class LiveReconciler:
                         trigger=report.trigger,
                         case_type="exchange_fill_missing_local",
                         symbol=self._coin,
-                        action_taken="backfilled",
+                        action_taken=_FILL_BACKFILLED_DISPOSITION,
                         detail=(
                             f"booked {backfill_summary.applied} missing fill(s) via REST "
                             f"backfill ({backfill_summary.fetched} fetched, "

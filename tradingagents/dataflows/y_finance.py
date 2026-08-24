@@ -96,8 +96,9 @@ def _dates_lag_note(values, curr_date: str | None, max_lag_days: int, what: str)
     compare it against the reference date. The coercion is guarded because an
     annotation must degrade, never replace the report it decorates with an error
     string. The example this once cited — mixed tz-aware and naive timestamps on
-    pandas >= 2 — does NOT raise on the pinned pandas: it yields a tz-aware index
-    with the naive entry as ``NaT``. No input has been found that makes
+    pandas >= 2 — does NOT raise on the pinned pandas: it yields a single-tz
+    index with the mismatched entries as ``NaT``, and which side is mismatched
+    follows the first element's tz-awareness. No input has been found that makes
     ``errors="coerce"`` raise there, so treat the guard as defence whose trigger
     is unproven rather than as evidence that one exists.
     """

@@ -270,8 +270,9 @@ def test_statement_throttle_survives_yfinance_internal_swallowing(monkeypatch):
 # Membership is NOT this table's to decide — the coverage check below derives it
 # from VENDOR_METHODS, so the registry is the single source of truth for "which
 # leaves must honour the taxonomy". Hand-enumerating them made a third list, and
-# a newly registered yfinance impl with no matching row shipped green (#86);
-# get_stock_data was in fact never covered until this table was derived.
+# a newly registered yfinance impl with no matching row shipped green (#86).
+# get_stock_data is the proof: the hand-written lists this table replaced never
+# checked it, so nothing in this file made it honour the taxonomy.
 #
 # The seam is per-leaf rather than "patch them all", because which boundary a
 # leaf uses is itself an invariant worth pinning: the statement getters must go

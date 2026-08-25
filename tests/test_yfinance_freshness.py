@@ -453,6 +453,48 @@ class TestTzAwareStatementColumnsAreNotAnErrorString:
 
         assert _csv_header(zoned) == _csv_header(naive)
 
+    def test_a_future_only_mixed_frame_is_a_coverage_gap_not_a_schema_break(
+        self, monkeypatch, caplog
+    ):
+        # The "did any column carry a fiscal period" measurement read the labels
+        # as one index while the filter read them one at a time, so on this
+        # frame the measurement raised, fell back to zero, and reported two
+        # perfectly usable (merely future) periods as a vendor schema break —
+        # the exact confusion that measurement exists to prevent.
+        from tradingagents.dataflows.errors import NoMarketDataError
+
+        frame = pd.DataFrame(
+            {c: [100.0] for c in (pd.Timestamp("2026-12-31", tz="UTC"), "2026-09-30")},
+            index=["Total Assets"],
+        )
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
+        with (
+            caplog.at_level(logging.WARNING, logger=yfin.__name__),
+            pytest.raises(NoMarketDataError) as exc,
+        ):
+            yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+        assert "no balance sheet data on or before 2026-08-18" in str(exc.value)
+        assert "usable fiscal period" not in str(exc.value)
+        # A coverage gap must not page anyone — nothing from this module at all.
+        assert not [r for r in caplog.records if r.name == yfin.__name__]
+
+    def test_the_lag_note_survives_mixed_labels_on_the_date_less_lane(self, monkeypatch):
+        # The date-less lane (#73) never reaches the filter, so its labels are
+        # whatever the vendor sent. Read as one index they either coerced to
+        # mixed offsets and failed in max() OUTSIDE the note's guard — returning
+        # the getter's "Error retrieving ..." string — or silently dropped the
+        # disclosure. Per label, the note is judged against the wall clock as
+        # #73 intends.
+        frame = pd.DataFrame(
+            {c: [100.0] for c in ("2020-03-31", pd.Timestamp("2020-06-30", tz="UTC"))},
+            index=["Total Assets"],
+        )
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
+        out = yfin.get_balance_sheet("AAPL", "quarterly", None)
+        assert "Error retrieving" not in out
+        note_line = next((line for line in out.splitlines() if "Data lag" in line), "")
+        assert "2020-06-30" in note_line  # the newest period, not the older naive one
+
     def test_tz_naive_columns_are_unchanged(self, monkeypatch):
         # The lane that already worked, pinned so the normalisation cannot have
         # been bought at its expense.

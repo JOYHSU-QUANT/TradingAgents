@@ -381,6 +381,59 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     return data
 
 
+def coerce_period_labels(labels) -> tuple[list, bool]:
+    """Parse date-ish labels ONE AT A TIME into zone-free timestamps.
+
+    Returns one value per label — a tz-naive ``Timestamp``, or ``NaT`` for
+    anything that is not a single date — plus whether any label carried a zone.
+
+    Every statement-side reader of these labels shares this so they agree on
+    what a label means: the look-ahead filter, the "did any column carry a
+    fiscal period at all" measurement, and the freshness note. Handling them as
+    one index instead produced two distinct failures on a tz-aware frame, both
+    measured on pandas 2.3.3, both of which reached the getters' broad except
+    and came back as ``"Error retrieving balance sheet for AAPL: ..."`` — a
+    string ``route_to_vendor`` reads as a successful statement report (#110):
+
+    * a tz-aware index will not compare against a naive cutoff —
+      ``TypeError: Invalid comparison between dtype=datetime64[ns, UTC] and
+      Timestamp``;
+    * coercing a mixed set can raise ``ValueError: Cannot mix tz-aware with
+      tz-naive values`` before any comparison happens. Which mixtures do that is
+      narrower and less predictable than "aware plus naive": a naive
+      ``datetime.date``, ``datetime64`` or ``int`` beside an aware timestamp
+      raises in either order, a naive ``str`` raises only when the aware value
+      comes first, and naive ``datetime``/``Timestamp`` values do not raise at
+      all — those coerce to one zone with the odd entries as ``NaT``, which is
+      the narrow case the vectorised call was first written for.
+
+    Per label the mixing question does not arise: each parses on its own terms
+    and an unparseable one is ``NaT``, which compares False against any cutoff
+    exactly as the vectorised ``errors="coerce"`` did. The zone is dropped
+    rather than converted to UTC because conversion moves a ``+09:00`` label
+    back a calendar day; for the midnight-anchored labels yfinance actually
+    sends, the two agree on every cutoff (measured over an 11x11 grid), so this
+    is a choice about labels the vendor could send, not a fix for one it does.
+
+    A label the parser cannot read as a date at all — a container, ``None``, a
+    non-date string — becomes ``NaT`` rather than raising. A label whose TYPE
+    the parser refuses outright still raises ``TypeError``; the caller types it
+    (see ``y_finance._statement_report``).
+    """
+    periods, dropped_a_zone = [], False
+    for label in labels:
+        parsed = pd.to_datetime(label, errors="coerce")
+        if not isinstance(parsed, pd.Timestamp):
+            # NaT, None, or a container label that coerced to an Index.
+            periods.append(pd.NaT)
+            continue
+        if parsed.tzinfo is not None:
+            parsed = parsed.tz_localize(None)
+            dropped_a_zone = True
+        periods.append(parsed)
+    return periods, dropped_a_zone
+
+
 def filter_financials_by_date(data: pd.DataFrame, curr_date: str | None) -> pd.DataFrame:
     """Drop financial statement columns (fiscal period timestamps) after curr_date.
 
@@ -406,40 +459,13 @@ def filter_financials_by_date(data: pd.DataFrame, curr_date: str | None) -> pd.D
     ``strptime``-valid, so building the cutoff from the normalised form rather
     than the raw string is only a canonical-form convention.
 
-    Column labels are parsed ONE AT A TIME and compared zone-free, and the
-    surviving ones are relabelled to what was compared whenever a zone was
-    dropped. yfinance returns statement columns tz-aware on some builds, and two
-    distinct failures followed from handling the labels as one index (both
-    measured, pandas 2.3.3):
-
-    * a tz-aware index will not compare against the naive cutoff —
-      ``TypeError: Invalid comparison between dtype=datetime64[ns, UTC] and
-      Timestamp``;
-    * coercing labels that mix a tz-aware timestamp with a naive value of
-      another type — a plain string, a ``datetime.date`` — raises
-      ``ValueError: Cannot mix tz-aware with tz-naive values`` before any
-      comparison happens. (An all-``Timestamp`` mix does NOT raise: it coerces
-      to one zone with the odd entries as ``NaT``. That narrower case is why
-      this was first written as one vectorised call.)
-
-    Both reached the getters' broad except and came back as ``"Error retrieving
-    balance sheet for AAPL: ..."``, a string route_to_vendor reads as a
-    successful statement report (#110). Parsing per label removes the mixing
-    question entirely: each label parses on its own terms and an unparseable one
-    is ``NaT``, which compares False against any cutoff exactly as the
-    vectorised ``errors="coerce"`` did. Dropping the zone (rather than
-    converting to UTC, which would move a ``+09:00`` label back a calendar day
-    across the cutoff) is how ``get_YFin_data_online`` handles the same vendor
-    quirk on the OHLCV path.
-
-    The relabelling keeps the rendered CSV header from depending on the vendor
-    build — the freshness note downstream re-reads these labels through the same
-    vectorised coercion, and would have hit the ValueError above. It is skipped
-    when no label carried a zone, so the labels of an ordinary naive frame are
-    passed through untouched.
-
-    A label type the parser cannot handle at all still raises; ``TypeError``
-    from here is typed by the caller (see ``y_finance._statement_report``).
+    Column labels go through :func:`coerce_period_labels`, and the surviving
+    ones are relabelled to what was compared whenever a zone was dropped. That
+    relabelling keeps the rendered CSV header from depending on the vendor
+    build, and it is what lets the freshness note downstream read the served
+    labels back. It is skipped when no label carried a zone, so an ordinary
+    naive frame's labels are passed through untouched — and a date-less call
+    returns above without reaching any of it.
     """
     if curr_date is None or data.empty:
         return data
@@ -450,12 +476,10 @@ def filter_financials_by_date(data: pd.DataFrame, curr_date: str | None) -> pd.D
             f"YYYY-MM-DD date; refusing to serve statements unfiltered (look-ahead guard)"
         )
     cutoff = pd.Timestamp(normalized)
-    periods = [pd.to_datetime(label, errors="coerce") for label in data.columns]
-    zoned = [not pd.isna(p) and p.tzinfo is not None for p in periods]
-    periods = [p.tz_localize(None) if z else p for p, z in zip(periods, zoned, strict=True)]
+    periods, dropped_a_zone = coerce_period_labels(data.columns)
     mask = [not pd.isna(p) and p <= cutoff for p in periods]
     kept = data.loc[:, mask]
-    if any(zoned):
+    if dropped_a_zone:
         kept = kept.set_axis([p for p, keep in zip(periods, mask, strict=True) if keep], axis=1)
     return kept
 

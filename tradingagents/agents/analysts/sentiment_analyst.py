@@ -70,8 +70,10 @@ def create_sentiment_analyst(llm):
         # from them. News is the one that can raise: it goes through
         # route_to_vendor, and news_data is a core category (not in
         # OPTIONAL_CATEGORIES), so a chain exhausted by TYPED vendor failures
-        # re-raises the first one and aborts the node — an unset Alpha Vantage
-        # key is the everyday case. Two lanes still answer a string: a vendor
+        # re-raises the first one and aborts the node — an unset key on a
+        # configured Alpha Vantage chain is the everyday case, which the shipped
+        # single-vendor yfinance default does not have. Two lanes still answer
+        # a string even on a chain that can reach that raise: a vendor
         # that reported no data returns the router's NO_DATA_AVAILABLE sentinel
         # before that raise, and the shipped default vendor (yfinance) catches
         # everything but VendorError itself, so a dead network there comes back

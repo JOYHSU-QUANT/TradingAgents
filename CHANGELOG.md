@@ -569,16 +569,19 @@ Breaking changes within the 0.x line are called out explicitly.
   AAPL: …"` on fiscal-period columns carrying a timezone, in two distinct ways
   (both measured on pandas 2.3.3): a tz-aware index will not compare against the
   naive cutoff, and labels mixing a tz-aware timestamp with a naive value of
-  another type — a string, a `datetime.date` — will not coerce as one index at
-  all. The look-ahead filter now parses labels one at a time and compares them
-  zone-free, as the OHLCV path already did, and relabels the survivors so the
-  rendered CSV header does not depend on the vendor build. Separately, an
-  indicator registered as supported with no request definition or no CSV column
-  mapping now raises before making a request: the column-mapping case used to
-  pay for one first, the request-definition case never made one, and both used
-  to `return` an "Error: …" string that the router recorded as a successful
-  answer. (What the *agent* sees for those two is unchanged — the indicator tool
-  wrapper catches `ValueError` and appends the message to the report.) The
+  another type will not coerce as one index at all. Every statement-side reader
+  of those labels — the look-ahead filter, the "did any column carry a fiscal
+  period" measurement, and the freshness note — now parses them one at a time
+  and zone-free through one shared helper, as the OHLCV path already did, and
+  the filter relabels the survivors so the rendered CSV header does not depend
+  on the vendor build. Separately, an indicator registered as supported with no
+  request definition or no CSV column mapping now raises before making a
+  request: the column-mapping case used to pay for one first, the
+  request-definition case never made one, and both used to `return` an "Error: …"
+  string that the router recorded as a successful answer. (The agent still reads
+  a message rather than seeing the run abort — the indicator tool wrapper
+  catches `ValueError` and appends it to the report — but on a multi-vendor
+  chain the next vendor now gets its turn.) The
   indicator dispatch is a registry rather than an elif ladder; tests assert set
   equality between it and the supported list in both directions, and pin each
   indicator's request against a table transcribed from the ladder it replaced.

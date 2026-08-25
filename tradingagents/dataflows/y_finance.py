@@ -10,6 +10,7 @@ from .errors import VendorError
 from .stockstats_utils import (
     StockstatsUtils,
     _assert_ohlcv_not_stale,
+    coerce_period_labels,
     filter_financials_by_date,
     load_ohlcv,
     yf_fetch_statement,
@@ -58,30 +59,25 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title
     # separates the same two cases, and logs only this one, for the same reason:
     # a schema break otherwise reports every ticker as an uncovered symbol.
     columns = len(data.columns)
-    try:
-        datable = int(pd.to_datetime(data.columns, errors="coerce").notna().sum())
-    except (TypeError, ValueError):
-        # Guarded for the same reason _dates_lag_note guards, and NOT redundant
-        # with the per-label parse inside filter_financials_by_date: on the
-        # date-less lane that one never runs, because it early-returns first.
-        # This IS a live path — labels mixing a tz-aware timestamp with a naive
-        # value of another type raise ValueError("Cannot mix tz-aware with
-        # tz-naive values") here (measured, pandas 2.3.3), which is why the
-        # filter stopped coercing them as one index. Treating an index we cannot
-        # read as carrying no usable period is the conservative reading.
-        datable = 0
+    # Through the SAME per-label rule the filter uses. Read as one index this
+    # disagreed with the filter on a tz-aware frame: the coercion raised, the
+    # count fell back to zero, and a frame whose periods merely all postdate
+    # curr_date was then reported as a vendor schema break — the opposite of
+    # what this measurement exists to separate (measured, pandas 2.3.3).
+    datable = sum(not pd.isna(p) for p in coerce_period_labels(data.columns)[0])
 
     try:
         data = filter_financials_by_date(data, curr_date)
-    except TypeError as e:
-        # The filter parses labels one at a time and compares them zone-free,
-        # which covers both measured ways a tz-aware statement frame used to get
-        # here (#110). A label of a type the parser cannot read at all still
-        # raises, and leaves as a typed vendor failure the router can fall back
-        # from, rather than reaching the getters' broad except and coming back
-        # as an "Error retrieving ..." string the router reads as a successful
-        # report. No yfinance answer has been found that reaches this: it is the
-        # contract for that lane, not a measured path.
+    except (TypeError, ValueError) as e:
+        # The per-label parse covers both measured ways a tz-aware statement
+        # frame used to reach here (#110); a label whose type the parser refuses
+        # outright still raises, and leaves as a typed vendor failure the router
+        # can fall back from rather than reaching the getters' broad except and
+        # coming back as an "Error retrieving ..." string the router reads as a
+        # successful report. Both exception types, because which one pandas
+        # raises depends on the label type. The filter's OTHER raise — an
+        # unusable curr_date — cannot arrive here: the shared sentinel above
+        # answered that case before anything was filtered (#89).
         raise NoMarketDataError(
             ticker,
             canonical,
@@ -109,27 +105,28 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title
 def _dates_lag_note(values, curr_date: str | None, max_lag_days: int, what: str) -> str:
     """Data-lag note line (``"# …\\n"`` or ``""``) for a set of date-ish values.
 
-    Shared by the statement and insider paths: coerce, take the newest, and
-    compare it against the reference date. The coercion is guarded because an
-    annotation must degrade, never replace the report it decorates with an error
-    string, and the guard has a demonstrated trigger: values mixing a tz-aware
-    timestamp with a naive value of ANOTHER TYPE (a string, a ``datetime.date``)
-    raise ``ValueError: Cannot mix tz-aware with tz-naive values`` (measured,
-    pandas 2.3.3). Mixed ``Timestamp``s alone do not — that yields a single-tz
-    index with the mismatched entries as ``NaT``, which side being mismatched
-    following the first element's tz-awareness. On the statement path
-    ``filter_financials_by_date`` has already relabelled zone-carrying columns
-    zone-free by the time this runs, so the note is not lost to that case.
+    Shared by the statement and insider paths: parse, take the newest, and
+    compare it against the reference date. Parsing goes label by label through
+    :func:`coerce_period_labels` for the reason given there — read as one index,
+    a mixed tz-aware/naive set can raise, and an annotation must degrade rather
+    than replace the report it decorates with an error string. Reading the whole
+    index also put the ``max()`` OUTSIDE the guard, so a set that coerced to
+    mixed offsets without raising failed there instead ("Cannot compare tz-naive
+    and tz-aware timestamps", measured on ``[naive str, aware Timestamp]``,
+    pandas 2.3.3) and reached the getter's broad except; per label, every value
+    handed to ``max`` is zone-free. The remaining guard is for a label whose
+    TYPE the parser refuses outright, which stays a silent no-note here because
+    an annotation must not be the thing that fails a report.
     """
     if curr_date is None:  # neither caller can reach this; kept as the contract (#89)
         return ""
     try:
-        dates = pd.to_datetime(values, errors="coerce").dropna()
+        periods = [p for p in coerce_period_labels(values)[0] if not pd.isna(p)]
     except (TypeError, ValueError):
         return ""
-    if not len(dates):
+    if not periods:
         return ""
-    note = data_lag_note(dates.max(), curr_date, max_lag_days, what)
+    note = data_lag_note(max(periods), curr_date, max_lag_days, what)
     return f"# {note}\n" if note else ""
 
 

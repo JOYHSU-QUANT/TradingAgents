@@ -175,12 +175,12 @@ def get_indicator(
     # Both wiring checks run before the request and outside the broad handler at
     # the end: a supported indicator with no request definition or no CSV column
     # is our bug, not a vendor condition. Raising rather than returning prose
-    # stops it costing a request and leaves a traceback in the logs; note that
-    # the tool wrapper catches ValueError and appends the message to the report
-    # (technical_indicators_tools.py), so what the AGENT sees is unchanged —
-    # what changes is that the router no longer records a successful answer
-    # (#106). Guessing a column would silently render numbers from the wrong
-    # field (#31).
+    # stops it costing a request and leaves a traceback in the logs. It does NOT
+    # abort the run: the tool wrapper catches ValueError and appends the message
+    # to the report (technical_indicators_tools.py), so the agent still reads a
+    # sentence — what changes is that the router no longer records a successful
+    # answer, so a multi-vendor chain reaches the next vendor (#106). Guessing a
+    # column would silently render numbers from the wrong field (#31).
     if indicator not in _INDICATOR_REQUESTS:
         raise ValueError(
             f"Indicator '{indicator}' is registered as supported but has no "

@@ -69,7 +69,22 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title
         # cannot read as carrying no usable period is the conservative reading.
         datable = 0
 
-    data = filter_financials_by_date(data, curr_date)
+    try:
+        data = filter_financials_by_date(data, curr_date)
+    except TypeError as e:
+        # The filter compares column labels zone-free, which is what the one
+        # measured way to get here — tz-aware statement columns — needed (#110).
+        # A label set that still will not compare leaves as a typed vendor
+        # failure so the router can fall back, rather than reaching the getters'
+        # broad except and coming back as an "Error retrieving ..." string the
+        # router reads as a successful report. No input has been found that
+        # reaches this on the pinned pandas: it is the contract for that lane,
+        # not a live path.
+        raise NoMarketDataError(
+            ticker,
+            canonical,
+            f"{noun} column labels could not be bounded to {curr_date}: {e}",
+        ) from e
     if data.empty:
         if not datable:
             logger.warning(

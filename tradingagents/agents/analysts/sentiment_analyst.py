@@ -65,9 +65,13 @@ def create_sentiment_analyst(llm):
         start_date = _seven_days_back(end_date)
         instrument_context = get_instrument_context_from_state(state)
 
-        # Pre-fetch all three sources. Each fetcher degrades gracefully and
-        # returns a string (no exceptions surface from here), so the LLM
-        # always sees something — either real data or a clear placeholder.
+        # Pre-fetch all three sources. StockTwits and Reddit degrade to a
+        # placeholder string on any failure, so the LLM always sees something
+        # from them. News does NOT: it goes through route_to_vendor, and
+        # news_data is a core category (not in OPTIONAL_CATEGORIES), so an
+        # exhausted vendor chain re-raises the first vendor's error rather than
+        # answering a sentinel — an unset key or a dead network surfaces here
+        # and aborts the node. That is the decided outcome for core data (#108).
         news_block = get_news.func(ticker, start_date, end_date)
         stocktwits_block = fetch_stocktwits_messages(ticker, limit=30, curr_date=end_date)
         reddit_block = fetch_reddit_posts(ticker)

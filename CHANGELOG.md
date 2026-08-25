@@ -377,6 +377,20 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **How much news a routed tool returns no longer depends on the vendor.**
+  `news_article_limit` and `global_news_article_limit` are documented on the
+  tool wrappers as where the defaults come from, and were read by the yfinance
+  getters only. The Alpha Vantage siblings carried literals instead: global news
+  asked for 50 articles over a hard-coded 7-day window, and ticker news sent no
+  `limit` at all, leaving the endpoint's own default of 50. Both now read the
+  same config keys the yfinance getters read. **Article counts change for Alpha
+  Vantage users:** global news 50 → 10 (`global_news_article_limit`) and ticker
+  news 50 → 20 (`news_article_limit`), so prompts get shorter and cheaper;
+  raise either key to restore the old volume. An explicit `look_back_days` or
+  `limit` argument still outranks the config. The shipped `news_data` default is
+  a single-vendor yfinance chain, so a deployment that has not switched vendors
+  is unaffected.
+
 - **One yfinance throttle is now discovered once per cycle, not once per tool.**
   `yf_retry` is the single boundary every yfinance network call goes through,
   and its 2+4+8s backoff ladder ran independently per call. A 429 is Yahoo
@@ -537,6 +551,29 @@ Breaking changes within the 0.x line are called out explicitly.
   behaviour itself is unchanged.
 
 ### Fixed
+
+- **Two more vendor failures stop arriving as reports the agent can analyse.**
+  `route_to_vendor` never inspects a returned string, so any getter that answers
+  prose instead of raising ends the vendor chain and hands the agent that prose
+  as data. Two getters still did. The Alpha Vantage indicator getter returned
+  four such sentences — a blank or header-only CSV, a CSV missing its `time`
+  column, one missing the indicator's own value column, and (the quietest of
+  them) a window the vendor had no rows in, which was reported *inside* a
+  well-formed `## RSI values from … to …` report carrying no error wording at
+  all. All four now raise `NoMarketDataError`, the lane the same vendor's daily
+  bars getter has taken since #30: another configured vendor gets its turn, and
+  a chain with only this one emits the router's no-data sentinel with the reason
+  attached. The yfinance statement getters answered `"Error retrieving balance
+  sheet for AAPL: Invalid comparison between dtype=datetime64[ns, UTC] and
+  Timestamp"` whenever yfinance returned fiscal-period columns with a timezone
+  (measured on pandas 2.3.3): the look-ahead filter now compares column labels
+  zone-free, as the OHLCV path already did, so those frames are filtered and
+  served normally. Also loud instead of prose: an indicator registered as
+  supported with no request definition or no CSV column mapping, which used to
+  return an "Error: …" string after paying for a request and now raises before
+  making one. The indicator dispatch is a registry rather than an elif ladder,
+  and tests derive from it so a future indicator cannot be added to one half and
+  not the other.
 
 - **A curr_date the model cannot be held to is now refused the same way by
   either fundamentals vendor.** The same routed statement tool used to take

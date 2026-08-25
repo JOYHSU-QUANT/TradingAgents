@@ -16,6 +16,7 @@ import tradingagents.dataflows.alpha_vantage_fundamentals as avf
 import tradingagents.dataflows.alpha_vantage_indicator as avi
 import tradingagents.dataflows.alpha_vantage_news as avn
 from tradingagents.dataflows.alpha_vantage_fundamentals import _filter_reports_by_date
+from tradingagents.dataflows.errors import NoMarketDataError
 
 
 class _FakeResponse:
@@ -372,23 +373,149 @@ def test_every_supported_indicator_has_a_csv_column_mapping():
     # The blind "default to the second column" fallback is gone (#31): adding a
     # new indicator without a CSV column mapping must turn this red, not
     # silently render numbers from whatever column happens to be second.
-    exempt = {"vwma"}  # returns early — Alpha Vantage has no VWMA endpoint
-    unmapped = set(avi._SUPPORTED_INDICATORS) - exempt - set(avi._CSV_COLUMN_MAP)
+    unmapped = (
+        set(avi._SUPPORTED_INDICATORS) - avi._NO_ENDPOINT_INDICATORS - set(avi._CSV_COLUMN_MAP)
+    )
     assert not unmapped, f"indicators lacking a CSV column mapping: {sorted(unmapped)}"
 
 
 @pytest.mark.unit
-def test_missing_column_mapping_fails_loud_instead_of_guessing(monkeypatch):
-    # With the mapping removed, the old code would render the second CSV column
-    # (here a bogus 999-valued one) as RSI values; now it must return an
-    # explicit error string and no data lines.
-    monkeypatch.delitem(avi._CSV_COLUMN_MAP, "rsi")
-    csv_body = "time,bogus,RSI\n2026-01-02,999.0,55.0\n"
-    monkeypatch.setattr(avi, "_make_api_request", lambda *a, **k: csv_body)
-    out = avi.get_indicator("AAPL", "rsi", "2026-01-05", look_back_days=10)
-    assert "no CSV column mapping" in out
-    assert "999.0" not in out
-    assert "55.0" not in out
+def test_every_supported_indicator_has_an_alpha_vantage_request():
+    # The other half of the same wiring invariant (#106). The dispatch used to
+    # be an elif ladder, so a supported indicator the ladder had no branch for
+    # fell through to "Error: Indicator ... not implemented yet." — a string
+    # route_to_vendor reads as a successful report. The registry now drives the
+    # request, and a gap turns this red instead.
+    undefined = (
+        set(avi._SUPPORTED_INDICATORS) - avi._NO_ENDPOINT_INDICATORS - set(avi._INDICATOR_REQUESTS)
+    )
+    assert not undefined, f"indicators lacking an Alpha Vantage request: {sorted(undefined)}"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "indicator", sorted(set(avi._SUPPORTED_INDICATORS) - avi._NO_ENDPOINT_INDICATORS)
+)
+def test_each_indicator_requests_the_shape_its_registry_entry_declares(monkeypatch, indicator):
+    # Pins that the request actually issued is the one the registries describe:
+    # exactly one call, to the named function, carrying the declared
+    # time_period. It does NOT pin that a registry entry names the right Alpha
+    # Vantage endpoint — nothing in this repo can check that — only that the
+    # dispatch cannot drift away from what the entries say, which is the
+    # guarantee the elif ladder it replaced could not give. series_type is
+    # derived rather than listed a third time: it rides along exactly when
+    # _SUPPORTED_INDICATORS declares a required one (ATR declares none).
+    calls = []
+
+    def _capture(function_name, params):
+        calls.append((function_name, params))
+        return "time,X\n"  # header-only: the request is what this pins
+
+    monkeypatch.setattr(avi, "_make_api_request", _capture)
+    with pytest.raises(NoMarketDataError):
+        avi.get_indicator("AAPL", indicator, "2026-06-01", 30, time_period=9)
+
+    assert len(calls) == 1
+    function_name, params = calls[0]
+    expected_function, time_period_spec = avi._INDICATOR_REQUESTS[indicator]
+    assert function_name == expected_function
+    assert params["symbol"] == "AAPL"
+    assert params["interval"] == "daily"
+    assert params["datatype"] == "csv"
+    assert ("series_type" in params) is bool(avi._SUPPORTED_INDICATORS[indicator][1])
+    if time_period_spec is avi._CALLER_TIME_PERIOD:
+        assert params["time_period"] == "9"  # the caller's value, forwarded
+    elif time_period_spec is None:
+        assert "time_period" not in params
+    else:
+        assert params["time_period"] == time_period_spec
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "registry,expected",
+    [
+        ("_CSV_COLUMN_MAP", "no CSV column mapping"),
+        ("_INDICATOR_REQUESTS", "no Alpha Vantage request"),
+    ],
+)
+def test_a_wiring_gap_raises_before_any_request(monkeypatch, registry, expected):
+    # Either gap used to come back as an "Error: ..." string the router accepts
+    # as a report — and the missing-column one would previously have rendered
+    # whatever column happened to be second as RSI values (#31). Both are our
+    # own wiring bugs, not vendor conditions, so they raise before a request is
+    # made rather than after paying for one.
+    monkeypatch.delitem(getattr(avi, registry), "rsi")
+    monkeypatch.setattr(
+        avi, "_make_api_request", lambda *a, **k: pytest.fail("no request may be made")
+    )
+    with pytest.raises(ValueError, match=expected):
+        avi.get_indicator("AAPL", "rsi", "2026-01-05", look_back_days=10)
+
+
+@pytest.mark.unit
+class TestIndicatorStructuralFailuresAreNotReports:
+    """Alpha Vantage answers this getter carries no usable indicator rows (#106).
+
+    Each of these used to ``return`` prose that ``route_to_vendor`` reads as a
+    successful answer — the chain stopped at the vendor that had just failed to
+    answer and the agent analysed the sentence as an indicator report. They now
+    raise ``NoMarketDataError``, the same lane the vendor's own daily-bars
+    getter takes for a header-only CSV (#30).
+    """
+
+    def _indicator(self, monkeypatch, body):
+        monkeypatch.setattr(avi, "_make_api_request", lambda *a, **k: body)
+        return avi.get_indicator("AAPL", "rsi", "2026-06-01", 30)
+
+    @pytest.mark.parametrize(
+        "body",
+        ["", "   ", "time,RSI", "time,RSI\n"],
+        ids=["blank", "whitespace", "header-only", "header-and-newline"],
+    )
+    def test_a_body_with_no_rows_is_no_data(self, monkeypatch, body):
+        with pytest.raises(NoMarketDataError) as exc:
+            self._indicator(monkeypatch, body)
+        assert "carried no data beyond its header" in str(exc.value)
+
+    def test_a_missing_time_column_names_the_columns_it_did_get(self, monkeypatch):
+        with pytest.raises(NoMarketDataError) as exc:
+            self._indicator(monkeypatch, "date,RSI\n2026-05-30,55.0\n")
+        assert "no 'time' column" in str(exc.value)
+        assert "'date'" in str(exc.value)  # what arrived, so the drift is diagnosable
+
+    def test_a_missing_value_column_names_the_one_it_wanted(self, monkeypatch):
+        with pytest.raises(NoMarketDataError) as exc:
+            self._indicator(monkeypatch, "time,Relative Strength\n2026-05-30,55.0\n")
+        assert "no 'RSI' column" in str(exc.value)
+
+    def test_rows_only_outside_the_window_are_no_data_not_an_empty_report(self, monkeypatch):
+        # The most concealed of the four: the range filter kept nothing, and the
+        # sentence went inside a well-formed "## RSI values from ... to ..."
+        # header with no error wording anywhere in it.
+        with pytest.raises(NoMarketDataError) as exc:
+            self._indicator(monkeypatch, "time,RSI\n2020-01-02,55.0\n")
+        assert "no rsi rows between 2026-05-02 and 2026-06-01" in str(exc.value)
+
+    def test_the_endpointless_indicator_still_answers_without_a_request(self, monkeypatch):
+        # VWMA has no Alpha Vantage endpoint, so it answers from its description
+        # and is the one indicator exempt from both wiring registries. Its early
+        # return now sits outside the request block; pinned here so the exemption
+        # cannot quietly become a request or a raise.
+        monkeypatch.setattr(
+            avi, "_make_api_request", lambda *a, **k: pytest.fail("no request may be made")
+        )
+        out = avi.get_indicator("AAPL", "vwma", "2026-06-01", 30)
+        assert "VWMA" in out
+        assert "not directly available from Alpha Vantage API" in out
+
+    def test_rows_inside_the_window_still_render(self, monkeypatch):
+        # The other side of the same boundary: one in-window row is a report, so
+        # the raise above cannot have been widened into every answer.
+        out = self._indicator(monkeypatch, "time,RSI\n2020-01-02,11.0\n2026-05-30,55.0\n")
+        assert "## RSI values from 2026-05-02 to 2026-06-01" in out
+        assert "2026-05-30: 55.0" in out
+        assert "11.0" not in out  # the out-of-window row is still filtered out
 
 
 @pytest.mark.unit
@@ -442,7 +569,7 @@ def test_global_news_clamps_untrusted_sizes(monkeypatch):
 @pytest.mark.unit
 def test_global_news_none_optionals_resolve_to_defaults_before_clamp(monkeypatch):
     # The tool wrapper forwards omitted optionals as explicit None through the
-    # router; they must resolve to the documented defaults instead of crashing
+    # router; they must resolve to the configured defaults instead of crashing
     # in int(None) (review round 1).
     import tradingagents.dataflows.alpha_vantage_news as avn
 
@@ -454,8 +581,92 @@ def test_global_news_none_optionals_resolve_to_defaults_before_clamp(monkeypatch
 
     monkeypatch.setattr(avn, "_make_api_request", fake_request)
     avn.get_global_news("2026-06-05", look_back_days=None, limit=None)
-    assert captured["limit"] == "50"
-    assert captured["time_from"] == "20260529T0000"  # default 7-day lookback
+    assert captured["limit"] == "10"  # global_news_article_limit
+    assert captured["time_from"] == "20260529T0000"  # global_news_lookback_days = 7
+
+
+@pytest.mark.unit
+class TestNewsVolumeComesFromConfigNotTheVendor:
+    """How much news a routed tool returns must not depend on the vendor (#107).
+
+    Both getters used to carry literals — 50 articles and a 7-day window on
+    global news, and no limit at all on ticker news, which left the endpoint's
+    own default of 50 against the yfinance sibling's 20. Reading the same config
+    keys the sibling reads is also what makes the tool wrapper's documented
+    "defaults come from DEFAULT_CONFIG" true of both vendors rather than one.
+    """
+
+    def _captured_params(self, monkeypatch, call):
+        captured = {}
+
+        def fake_request(function_name, params, subject=None):
+            captured.update(params)
+            return "{}"
+
+        monkeypatch.setattr(avn, "_make_api_request", fake_request)
+        call()
+        return captured
+
+    def test_ticker_news_sizes_itself_from_news_article_limit(self, monkeypatch):
+        from tradingagents.dataflows.config import get_config
+
+        captured = self._captured_params(
+            monkeypatch, lambda: avn.get_news("AAPL", "2026-06-01", "2026-06-05")
+        )
+        assert captured["limit"] == str(get_config()["news_article_limit"])
+
+    @pytest.mark.parametrize(
+        "key,override,param,expected",
+        [
+            ("news_article_limit", 3, "limit", "3"),
+            ("global_news_article_limit", 4, "limit", "4"),
+            ("global_news_lookback_days", 2, "time_from", "20260603T0000"),
+        ],
+    )
+    def test_a_non_default_config_value_reaches_the_request(
+        self, monkeypatch, key, override, param, expected
+    ):
+        # Discriminating against a literal that merely happens to equal the
+        # shipped default: the assertion only passes if the value is read.
+        from tradingagents.dataflows.config import get_config, set_config
+
+        original = get_config()[key]
+        set_config({key: override})
+        try:
+            call = (
+                (lambda: avn.get_news("AAPL", "2026-06-01", "2026-06-05"))
+                if key == "news_article_limit"
+                else (lambda: avn.get_global_news("2026-06-05"))
+            )
+            captured = self._captured_params(monkeypatch, call)
+        finally:
+            set_config({key: original})
+        assert captured[param] == expected
+
+    def test_a_misconfigured_ticker_news_limit_is_still_clamped(self, monkeypatch):
+        # The config is trusted no further than an LLM argument (#33): it is
+        # operator-editable and now sizes an external request, so it takes the
+        # same ceiling the global getter already applied to its own.
+        from tradingagents.dataflows.config import get_config, set_config
+
+        original = get_config()["news_article_limit"]
+        set_config({"news_article_limit": 99999})
+        try:
+            captured = self._captured_params(
+                monkeypatch, lambda: avn.get_news("AAPL", "2026-06-01", "2026-06-05")
+            )
+        finally:
+            set_config({"news_article_limit": original})
+        assert captured["limit"] == str(avn.MAX_NEWS_LIMIT)
+
+    def test_an_explicit_argument_still_outranks_the_config(self, monkeypatch):
+        # The config supplies the DEFAULT; a caller (or the LLM through the tool
+        # wrapper) that names a value still gets it.
+        captured = self._captured_params(
+            monkeypatch, lambda: avn.get_global_news("2026-06-05", look_back_days=3, limit=7)
+        )
+        assert captured["limit"] == "7"
+        assert captured["time_from"] == "20260602T0000"
 
 
 # ---------------------------------------------------------------------------

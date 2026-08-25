@@ -10,6 +10,7 @@ from .alpha_vantage_common import (
     _with_freshness_note,
     format_datetime_for_api,
 )
+from .config import get_config
 from .utils import MAX_INSIDER_LAG_DAYS, data_lag_note
 
 # Clamp untrusted request sizes before they parameterize an external call
@@ -72,12 +73,20 @@ def get_news(ticker, start_date, end_date) -> str:
         The vendor's JSON body as text, minus any ``_freshness_note`` key it
         supplied — or the shared no-news prose when the feed comes back empty
         (see ``_news_body``).
+
+    The article count comes from ``news_article_limit``, the same key the
+    yfinance sibling sizes its fetch with: how much news a routed tool returns
+    must not depend on which vendor ``data_vendors`` selected (#107). Sending no
+    ``limit`` left this getter on the endpoint's own default of 50 against that
+    key's 20.
     """
 
+    limit = max(1, min(int(get_config()["news_article_limit"]), MAX_NEWS_LIMIT))
     params = {
         "tickers": ticker,
         "time_from": format_datetime_for_api(start_date),
         "time_to": format_datetime_for_api(end_date),
+        "limit": str(limit),
     }
 
     return _news_body(
@@ -91,33 +100,42 @@ def get_news(ticker, start_date, end_date) -> str:
     )
 
 
-def get_global_news(curr_date, look_back_days: int | None = 7, limit: int | None = 50) -> str:
+def get_global_news(curr_date, look_back_days: int | None = None, limit: int | None = None) -> str:
     """Returns global market news & sentiment data without ticker-specific filtering.
 
     Covers broad market topics like financial markets, economy, and more.
 
     Args:
         curr_date: Current date in yyyy-mm-dd format.
-        look_back_days: Number of days to look back; ``None`` resolves to the
-            documented default of 7 (the tool wrapper forwards omitted
-            optionals as explicit ``None``).
-        limit: Maximum number of articles; ``None`` resolves to 50.
+        look_back_days: Number of days to look back; ``None`` falls back to
+            ``global_news_lookback_days`` from the active config (the tool
+            wrapper forwards omitted optionals as explicit ``None``).
+        limit: Maximum number of articles; ``None`` falls back to
+            ``global_news_article_limit`` from the active config.
 
     Returns:
         The vendor's JSON body as text, minus any ``_freshness_note`` key it
         supplied — or the shared no-news prose when the feed comes back empty
         (see ``_news_body``).
+
+    Both defaults read the same config keys as the yfinance sibling. They used
+    to be literals here (7 and 50), so ``global_news_article_limit`` had no
+    effect on this vendor at all and a routed call returned five times the
+    articles its sibling would — the tool wrapper documents those keys as where
+    the defaults come from, which was true of only one of the two vendors
+    serving it (#107).
     """
     from datetime import datetime, timedelta
 
     # The tool wrapper forwards omitted optionals as explicit None through the
-    # router (see news_data_tools), so resolve them to the documented defaults
+    # router (see news_data_tools), so resolve them to the configured defaults
     # BEFORE the int() clamp — mirroring the yfinance sibling. Without this,
     # int(None) raises a bare TypeError outside the vendor-error taxonomy.
+    config = get_config()
     if look_back_days is None:
-        look_back_days = 7
+        look_back_days = config["global_news_lookback_days"]
     if limit is None:
-        limit = 50
+        limit = config["global_news_article_limit"]
     look_back_days = max(1, min(int(look_back_days), MAX_NEWS_LOOKBACK_DAYS))
     limit = max(1, min(int(limit), MAX_NEWS_LIMIT))
 
@@ -139,8 +157,9 @@ def get_global_news(curr_date, look_back_days: int | None = 7, limit: int | None
     return _news_body(
         _make_api_request("NEWS_SENTIMENT", params, subject="global market news"),
         # The yfinance sibling's nothing-in-window sentence, pinned equal by a
-        # cross-vendor test. Both vendors take the same lookback default (7),
-        # so the two windows named here agree unless a caller overrides one.
+        # cross-vendor test. Both vendors resolve an omitted lookback from the
+        # same config key, so the two windows named here agree unless a caller
+        # overrides one.
         f"No global news found between {start_date} and {curr_date}",
     )
 

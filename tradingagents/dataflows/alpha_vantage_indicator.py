@@ -1,7 +1,7 @@
 import requests
 
 from .alpha_vantage_common import _make_api_request
-from .errors import VendorError
+from .errors import NoMarketDataError, VendorError
 from .utils import data_lag_note
 
 # Maximum age (calendar days) of the newest indicator row relative to
@@ -32,10 +32,39 @@ _SUPPORTED_INDICATORS = {
     "vwma": ("VWMA", "close"),
 }
 
+# Supported indicators Alpha Vantage has no endpoint for: they answer from the
+# description text and never reach the request table or the CSV parser, so they
+# are the one exemption from both wiring checks below.
+_NO_ENDPOINT_INDICATORS = frozenset({"vwma"})
+
+# Sentinel: forward the caller's time_period rather than a fixed one.
+_CALLER_TIME_PERIOD = object()
+
+# The Alpha Vantage request each indicator maps to: (function, time_period).
+# ``None`` omits time_period entirely (MACD derives its own periods).
+# ``series_type`` rides along exactly when _SUPPORTED_INDICATORS declares one,
+# so ATR — which takes none — needs no column here. Every indicator in
+# _SUPPORTED_INDICATORS outside _NO_ENDPOINT_INDICATORS MUST have an entry: a
+# gap is a wiring bug, and get_indicator raises on it before any request rather
+# than returning prose route_to_vendor reads as a successful report (#106).
+_INDICATOR_REQUESTS = {
+    "close_50_sma": ("SMA", "50"),
+    "close_200_sma": ("SMA", "200"),
+    "close_10_ema": ("EMA", "10"),
+    "macd": ("MACD", None),
+    "macds": ("MACD", None),
+    "macdh": ("MACD", None),
+    "rsi": ("RSI", _CALLER_TIME_PERIOD),
+    "boll": ("BBANDS", "20"),
+    "boll_ub": ("BBANDS", "20"),
+    "boll_lb": ("BBANDS", "20"),
+    "atr": ("ATR", _CALLER_TIME_PERIOD),
+}
+
 # Maps internal indicator names to the CSV column Alpha Vantage returns.
 # Every indicator in _SUPPORTED_INDICATORS that reaches the CSV-parsing path
-# MUST have an entry here — there is no fallback column guessing ("vwma" is
-# exempt: it returns early because Alpha Vantage has no such endpoint).
+# MUST have an entry here — there is no fallback column guessing (the
+# _NO_ENDPOINT_INDICATORS members are exempt: they return early).
 _CSV_COLUMN_MAP = {
     "macd": "MACD",
     "macds": "MACD_Signal",
@@ -74,6 +103,20 @@ def get_indicator(
 
     Returns:
         String containing indicator values and description
+
+    Raises:
+        NoMarketDataError: When the vendor's answer carries no usable indicator
+            rows — a blank or header-only CSV, a CSV whose ``time`` or value
+            column is absent, or one whose rows all fall outside the requested
+            window. Each used to ``return`` prose instead, which
+            ``route_to_vendor`` reads as a successful answer: the chain stopped
+            at the vendor that had just failed and the agent analysed the
+            sentence as an indicator report (#106).
+        ValueError: When the indicator is unsupported, or is registered as
+            supported without a request definition or a CSV column mapping —
+            our own wiring gaps, raised before any request is made.
+        VendorError, requests.RequestException: Propagated (see the handlers at
+            the end of this function).
     """
     from datetime import datetime
 
@@ -104,123 +147,81 @@ def get_indicator(
     curr_date_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     before = curr_date_dt - relativedelta(days=look_back_days)
 
-    # Get the full data for the period instead of making individual calls
+    if indicator in _NO_ENDPOINT_INDICATORS:
+        # Alpha Vantage has no VWMA endpoint, so this answers from the
+        # description alone. Returning here rather than inside the try below
+        # says outright that no request is made — and leaves both wiring checks
+        # unconditional for every indicator that does make one.
+        return f"## VWMA (Volume Weighted Moving Average) for {symbol}:\n\nVWMA calculation requires OHLCV data and is not directly available from Alpha Vantage API.\nThis indicator would need to be calculated from the raw stock data using volume-weighted price averaging.\n\n{indicator_descriptions.get('vwma', 'No description available.')}"
+
+    # Both wiring checks run before the request and outside the broad handler at
+    # the end: a supported indicator with no request definition or no CSV column
+    # is our bug, not a vendor condition, so it must fail loud rather than come
+    # back as a string the router accepts (#106). Guessing a column would
+    # silently render numbers from the wrong field (#31).
+    if indicator not in _INDICATOR_REQUESTS:
+        raise ValueError(
+            f"Indicator '{indicator}' is registered as supported but has no "
+            f"Alpha Vantage request defined"
+        )
+    if indicator not in _CSV_COLUMN_MAP:
+        raise ValueError(
+            f"Indicator '{indicator}' is registered as supported but has no CSV column mapping"
+        )
+
+    # The registry dictates the price series, so the caller's series_type never
+    # reaches a request: every entry that takes one names it, and the one that
+    # does not (ATR) sends no series_type at all.
     _, required_series_type = supported_indicators[indicator]
 
-    # Use the provided series_type or fall back to the required one
+    av_function, time_period_spec = _INDICATOR_REQUESTS[indicator]
+    params = {"symbol": symbol, "interval": interval, "datatype": "csv"}
     if required_series_type:
-        series_type = required_series_type
+        params["series_type"] = required_series_type
+    if time_period_spec is _CALLER_TIME_PERIOD:
+        params["time_period"] = str(time_period)
+    elif time_period_spec is not None:
+        params["time_period"] = time_period_spec
 
     try:
         # Get indicator data for the period
-        if indicator == "close_50_sma":
-            data = _make_api_request(
-                "SMA",
-                {
-                    "symbol": symbol,
-                    "interval": interval,
-                    "time_period": "50",
-                    "series_type": series_type,
-                    "datatype": "csv",
-                },
-            )
-        elif indicator == "close_200_sma":
-            data = _make_api_request(
-                "SMA",
-                {
-                    "symbol": symbol,
-                    "interval": interval,
-                    "time_period": "200",
-                    "series_type": series_type,
-                    "datatype": "csv",
-                },
-            )
-        elif indicator == "close_10_ema":
-            data = _make_api_request(
-                "EMA",
-                {
-                    "symbol": symbol,
-                    "interval": interval,
-                    "time_period": "10",
-                    "series_type": series_type,
-                    "datatype": "csv",
-                },
-            )
-        elif indicator == "macd" or indicator == "macds" or indicator == "macdh":
-            data = _make_api_request(
-                "MACD",
-                {
-                    "symbol": symbol,
-                    "interval": interval,
-                    "series_type": series_type,
-                    "datatype": "csv",
-                },
-            )
-        elif indicator == "rsi":
-            data = _make_api_request(
-                "RSI",
-                {
-                    "symbol": symbol,
-                    "interval": interval,
-                    "time_period": str(time_period),
-                    "series_type": series_type,
-                    "datatype": "csv",
-                },
-            )
-        elif indicator in ["boll", "boll_ub", "boll_lb"]:
-            data = _make_api_request(
-                "BBANDS",
-                {
-                    "symbol": symbol,
-                    "interval": interval,
-                    "time_period": "20",
-                    "series_type": series_type,
-                    "datatype": "csv",
-                },
-            )
-        elif indicator == "atr":
-            data = _make_api_request(
-                "ATR",
-                {
-                    "symbol": symbol,
-                    "interval": interval,
-                    "time_period": str(time_period),
-                    "datatype": "csv",
-                },
-            )
-        elif indicator == "vwma":
-            # Alpha Vantage doesn't have direct VWMA, so we'll return an informative message
-            # In a real implementation, this would need to be calculated from OHLCV data
-            return f"## VWMA (Volume Weighted Moving Average) for {symbol}:\n\nVWMA calculation requires OHLCV data and is not directly available from Alpha Vantage API.\nThis indicator would need to be calculated from the raw stock data using volume-weighted price averaging.\n\n{indicator_descriptions.get('vwma', 'No description available.')}"
-        else:
-            return f"Error: Indicator {indicator} not implemented yet."
+        data = _make_api_request(av_function, params)
 
         # Parse CSV data and extract values for the date range
         lines = data.strip().split("\n")
         if len(lines) < 2:
-            return f"Error: No data returned for {indicator}"
+            raise NoMarketDataError(
+                symbol,
+                detail=(
+                    f"Alpha Vantage returned no {indicator} rows "
+                    f"(the CSV carried no data beyond its header)"
+                ),
+            )
 
         # Parse header and data
         header = [col.strip() for col in lines[0].split(",")]
-        try:
-            date_col_idx = header.index("time")
-        except ValueError:
-            return f"Error: 'time' column not found in data for {indicator}. Available columns: {header}"
-
-        target_col_name = _CSV_COLUMN_MAP.get(indicator)
-
-        if not target_col_name:
-            # A supported indicator with no CSV column mapping is a wiring gap.
-            # Guessing a column would silently render numbers from the wrong
-            # field, so fail loud instead (#31).
-            return (
-                f"Error: no CSV column mapping defined for indicator "
-                f"'{indicator}'. Available columns: {header}"
+        if "time" not in header:
+            # A shape the parser cannot read at all. Worded as the schema break
+            # it is, not as an uncovered symbol: the router splices this detail
+            # into what the agent reads (#106).
+            raise NoMarketDataError(
+                symbol,
+                detail=(
+                    f"Alpha Vantage's {indicator} CSV has no 'time' column (columns: {header})"
+                ),
             )
-        try:
-            value_col_idx = header.index(target_col_name)
-        except ValueError:
-            return f"Error: Column '{target_col_name}' not found for indicator '{indicator}'. Available columns: {header}"
+        date_col_idx = header.index("time")
+
+        target_col_name = _CSV_COLUMN_MAP[indicator]
+        if target_col_name not in header:
+            raise NoMarketDataError(
+                symbol,
+                detail=(
+                    f"Alpha Vantage's {indicator} CSV has no '{target_col_name}' "
+                    f"column (columns: {header})"
+                ),
+            )
+        value_col_idx = header.index(target_col_name)
 
         result_data = []
         for line in lines[1:]:
@@ -240,15 +241,28 @@ def get_indicator(
                 except (ValueError, IndexError):
                     continue
 
+        if not result_data:
+            # Every fetched row fell outside the window. This used to embed
+            # "No data available for the specified date range." inside a
+            # well-formed "## RSI values from ... to ..." report — the most
+            # concealed of this getter's prose exits, since it carried no error
+            # wording at all. Raising instead matches what the same vendor's
+            # daily-bars getter does with a header-only CSV (#30/#106): the
+            # chain can fall back, and a chain with no other vendor emits the
+            # router's no-data sentinel.
+            raise NoMarketDataError(
+                symbol,
+                detail=(
+                    f"no {indicator} rows between {before.strftime('%Y-%m-%d')} and {curr_date}"
+                ),
+            )
+
         # Sort by date and format output
         result_data.sort(key=lambda x: x[0])
 
         ind_string = ""
         for date_dt, value in result_data:
             ind_string += f"{date_dt.strftime('%Y-%m-%d')}: {value}\n"
-
-        if not ind_string:
-            ind_string = "No data available for the specified date range.\n"
 
         # Freshness: the header above claims coverage "to {curr_date}" but the
         # rows are whatever survived the range filter — a stalled upstream can
@@ -257,7 +271,7 @@ def get_indicator(
         # month-boundary) is not flagged, only a genuinely behind series (#30).
         lag_note = ""
         max_lag = _MAX_LAG_DAYS_BY_INTERVAL.get(interval)
-        if result_data and max_lag is not None:
+        if max_lag is not None:
             note = data_lag_note(result_data[-1][0], curr_date, max_lag, f"{indicator} value")
             if note:
                 lag_note = "\n" + note + "\n"
@@ -276,9 +290,12 @@ def get_indicator(
         # Every typed vendor failure propagates so the router can react by
         # behavior: a missing key takes the "vendor unavailable" lane and a 429
         # takes the rate-limit lane, both of which hand the next vendor in the
-        # chain its turn. On a chain with no other vendor the router raises
-        # instead — technical_indicators is a core category, and a loud failure
-        # is the decided outcome there. Caught as the taxonomy's base type, not
+        # chain its turn, and the NoMarketDataError raises above take the
+        # no-data lane. On a chain with no other vendor the router raises the
+        # first two instead — technical_indicators is a core category, and a
+        # loud failure is the decided outcome there — while no-data ends at the
+        # router's sentinel, which is that lane's own decided outcome. Caught as
+        # the taxonomy's base type, not
         # one leaf at a time: the rate-limit case used to reach the broad
         # handler below and come back as a successful-looking "Error retrieving
         # ..." string, so the router saw a successful answer and never fell

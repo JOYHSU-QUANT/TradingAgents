@@ -405,6 +405,19 @@ def filter_financials_by_date(data: pd.DataFrame, curr_date: str | None) -> pd.D
     nothing said (measured, pandas 2.3.3). Past the raise the value is already
     ``strptime``-valid, so building the cutoff from the normalised form rather
     than the raw string is only a canonical-form convention.
+
+    Column labels are compared zone-free. yfinance returns statement columns
+    tz-aware on some builds, and a tz-aware index refuses to compare against the
+    naive cutoff — ``TypeError: Invalid comparison between dtype=datetime64[ns,
+    UTC] and Timestamp`` (measured, pandas 2.3.3) — which the getters' broad
+    except handed back as ``"Error retrieving balance sheet for AAPL: Invalid
+    comparison ..."``, a string route_to_vendor reads as a successful statement
+    report (#110). Dropping the zone is how ``get_YFin_data_online`` already
+    handles the same vendor quirk on the OHLCV path. A frame mixing aware and
+    naive labels coerces to one zone with the odd entries as ``NaT`` before this
+    runs, so it takes the same lane. Anything that still cannot be compared
+    leaves as the raw ``TypeError`` for the caller to type (see
+    ``y_finance._statement_report``).
     """
     if curr_date is None or data.empty:
         return data
@@ -415,7 +428,10 @@ def filter_financials_by_date(data: pd.DataFrame, curr_date: str | None) -> pd.D
             f"YYYY-MM-DD date; refusing to serve statements unfiltered (look-ahead guard)"
         )
     cutoff = pd.Timestamp(normalized)
-    mask = pd.to_datetime(data.columns, errors="coerce") <= cutoff
+    columns = pd.to_datetime(data.columns, errors="coerce")
+    if getattr(columns, "tz", None) is not None:
+        columns = columns.tz_localize(None)
+    mask = columns <= cutoff
     return data.loc[:, mask]
 
 

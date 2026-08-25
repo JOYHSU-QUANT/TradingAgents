@@ -362,6 +362,83 @@ class TestUnusableCurrDateIsVendorAgnostic:
         assert filter_financials_by_date(frame, None) is frame
 
 
+def _tz_statement(*cols, tz="UTC"):
+    """Statement frame whose fiscal-period columns carry a timezone."""
+    return pd.DataFrame({pd.Timestamp(c, tz=tz): [100.0] for c in cols}, index=["Total Assets"])
+
+
+@pytest.mark.unit
+class TestTzAwareStatementColumnsAreNotAnErrorString:
+    """yfinance returns statement columns tz-aware on some builds (#110).
+
+    The look-ahead filter compared them against a naive cutoff, which pandas
+    refuses with ``TypeError: Invalid comparison between dtype=datetime64[ns,
+    UTC] and Timestamp`` (measured, 2.3.3). That landed in each getter's broad
+    except and came back as ``"Error retrieving balance sheet for AAPL: Invalid
+    comparison ..."`` — and ``route_to_vendor`` never inspects a returned
+    string, so the chain stopped there and the agent analysed the error
+    sentence as a balance sheet.
+    """
+
+    @pytest.mark.parametrize(
+        "attr,method",
+        [
+            ("quarterly_balance_sheet", "get_balance_sheet"),
+            ("quarterly_cashflow", "get_cashflow"),
+            ("quarterly_income_stmt", "get_income_statement"),
+        ],
+    )
+    def test_a_tz_aware_frame_is_served_as_a_report(self, monkeypatch, attr, method):
+        _patch_ticker(monkeypatch, **{attr: _tz_statement("2026-06-30")})
+        out = getattr(yfin, method)("AAPL", "quarterly", "2026-08-18")
+        assert "Error retrieving" not in out
+        assert "Total Assets" in out
+
+    def test_the_bound_still_applies_to_tz_aware_columns(self, monkeypatch):
+        # Not merely "no longer an error string": the look-ahead filter must
+        # still do its job on these labels, or the fix would have bought
+        # readability by leaking future periods.
+        _patch_ticker(
+            monkeypatch, quarterly_balance_sheet=_tz_statement("2026-06-30", "2099-03-31")
+        )
+        out = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+        assert "2026-06-30" in out
+        assert "2099-03-31" not in out
+
+    def test_a_tz_aware_frame_entirely_past_the_bound_is_still_no_data(self, monkeypatch):
+        # The other edge of the same filter: zone-free comparison must not turn
+        # a genuine coverage gap into a served report.
+        from tradingagents.dataflows.errors import NoMarketDataError
+
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=_tz_statement("2099-03-31"))
+        with pytest.raises(NoMarketDataError, match="on or before 2026-08-18"):
+            yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+
+    def test_tz_naive_columns_are_unchanged(self, monkeypatch):
+        # The lane that already worked, pinned so the normalisation cannot have
+        # been bought at its expense.
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement("2026-06-30", "2099-03-31"))
+        out = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+        assert "2026-06-30" in out
+        assert "2099-03-31" not in out
+
+    def test_labels_that_still_will_not_compare_take_the_typed_lane(self, monkeypatch):
+        # No input has been found that reaches this on the pinned pandas, so it
+        # is driven by making the filter raise: the contract is that whatever
+        # gets there leaves as a typed vendor failure the router can fall back
+        # from, never as a string it reads as a report.
+        from tradingagents.dataflows.errors import NoMarketDataError
+
+        def _unbounded(data, curr_date):
+            raise TypeError("Invalid comparison between dtype=object and Timestamp")
+
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement("2026-06-30"))
+        monkeypatch.setattr(yfin, "filter_financials_by_date", _unbounded)
+        with pytest.raises(NoMarketDataError) as exc:
+            yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+        assert "could not be bounded to 2026-08-18" in str(exc.value)
+
+
 @pytest.mark.unit
 class TestInsiderLagNote:
     def test_dead_filing_stream_carries_note(self, monkeypatch):

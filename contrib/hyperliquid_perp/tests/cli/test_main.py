@@ -797,9 +797,9 @@ def _ctx_closing_at(
 # the exchange's, so that is the production branch; ``None`` is the fixture /
 # replay fallback, measured against ``now``. The bound, floor, ceiling and
 # age-format tests run under BOTH: until issue #94 the floor, ceiling and
-# age-format tests ran on the fallback alone (only the stale bound had an
-# exchange-clock twin, folded in here), so the clamp had no test at all on
-# the branch production takes.
+# age-format tests ran on the fallback alone (only the two age bounds had
+# exchange-clock witnesses; the stale one is folded in here), so the clamp
+# had no test at all on the branch production takes.
 _BOTH_CLOCKS = pytest.mark.parametrize(
     "exchange_time",
     [pytest.param(None, id="host-clock"), pytest.param(_NOW, id="exchange-clock")],
@@ -1267,9 +1267,8 @@ def test_freshness_guard_flags_a_candle_closing_past_the_exchanges_clock():
     assert msg is not None
     assert "13h 0m 0s AFTER the exchange's clock" in msg
     assert "did not come from a live market fetch" in msg
-    # Inside the tolerance (a boundary closing during the fetch) passes.
-    ctx = _ctx_closing_at(_NOW + timedelta(minutes=4), interval="1m", exchange_time=_NOW)
-    assert bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW) is None
+    # The inside-the-tolerance witness for this branch lives in
+    # test_context_refusal_tolerates_a_candle_closing_during_the_fetch[exchange-clock].
 
 
 def test_build_context_fails_closed_when_the_exchange_clock_is_unreadable(monkeypatch):

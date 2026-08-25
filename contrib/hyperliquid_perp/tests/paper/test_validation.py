@@ -643,7 +643,7 @@ def test_corrupted_account_state_reports_replay_mismatch(tmp_path):
 # no-decision / stale-feed streaks (issue #50)
 # --------------------------------------------------------------------------
 
-# The §6.2 class engine_bridge's freshness guard writes when the candle feed
+# The §6.2 class the freshness guard (domains.perp.freshness) writes when the candle feed
 # has stopped advancing (or the clocks cannot be compared)...
 _STALE = ("api_failed", STALE_MARKET_DATA_ERROR)
 # ...one of the other ways a cycle reaches no decision (a network blip is what

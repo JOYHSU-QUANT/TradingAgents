@@ -606,8 +606,9 @@ def map_exchange_time(raw: Any, *, expected_coin: str | None = None) -> datetime
     ``metaAndAssetCtxs`` has no timestamp at all, the candle / funding windows
     are bounded by the HOST clock on request, and ``clearinghouseState``
     carries one but only for a configured address, which the keyless
-    ``--context-only`` path does not have. It is the clock ``engine_bridge``'s freshness guard
-    measures candle age against, so the stamp IS load-bearing here: unlike
+    ``--context-only`` path does not have. It is the clock the freshness guard
+    (``domains.perp.freshness``) measures candle age against, so the stamp IS
+    load-bearing here: unlike
     ``signed_client.exchange_time``, where an absent field only degrades a
     check, a missing or unparseable ``time`` raises
     :class:`MalformedResponseError` — the guard has no other way to establish

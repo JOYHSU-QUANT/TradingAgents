@@ -73,6 +73,119 @@ def test_yf_retry_lets_other_errors_out_immediately(monkeypatch):
     assert sleeps == []  # no retry burned on a non-throttle failure
 
 
+# --- the latch: one caller discovers a throttle, the rest are spared it (#86) ---
+
+
+@pytest.fixture()
+def frozen_clock(monkeypatch):
+    """A settable monotonic clock, so latch windows are stepped, not slept."""
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(su.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(su.time, "sleep", lambda s: None)
+    return clock
+
+
+def _exhaust_the_ladder():
+    with pytest.raises(VendorRateLimitError):
+        su.yf_retry(mock.Mock(side_effect=YFRateLimitError()))
+
+
+@pytest.mark.unit
+def test_the_first_caller_still_pays_the_full_ladder(monkeypatch):
+    # The latch is not a replacement for the retries: the shipped defaults give
+    # the four yfinance categories a single-vendor chain, so there is no
+    # fallback vendor to hand a brief throttle to and the call that discovers
+    # one still gives Yahoo every chance.
+    sleeps = []
+    monkeypatch.setattr(su.time, "sleep", sleeps.append)
+    attempts = mock.Mock(side_effect=YFRateLimitError())
+
+    with pytest.raises(VendorRateLimitError):
+        su.yf_retry(attempts)
+
+    assert attempts.call_count == 4  # the initial call plus all three retries
+    assert sleeps == [2.0, 4.0, 8.0]
+
+
+@pytest.mark.unit
+def test_a_latched_throttle_skips_both_the_vendor_and_the_ladder(frozen_clock):
+    _exhaust_the_ladder()
+
+    spared = mock.Mock(side_effect=YFRateLimitError())
+    with pytest.raises(VendorRateLimitError, match="without contacting the vendor"):
+        su.yf_retry(spared)
+
+    # The point of #86: no second ladder, and no request added to a host that
+    # is already refusing this client.
+    spared.assert_not_called()
+
+
+@pytest.mark.unit
+def test_the_latch_spares_a_different_tool_the_same_discovery(frozen_clock, monkeypatch):
+    # The cost #86 measures is per TOOL, not per call site: within one cycle
+    # several yfinance-first tools each used to re-discover the same 429. Arm
+    # it through one boundary, then check a leaf in a different module.
+    search = mock.Mock()
+    monkeypatch.setattr(ynews.yf, "Search", search)
+    _exhaust_the_ladder()
+
+    with pytest.raises(VendorRateLimitError):
+        ynews.get_global_news_yfinance("2026-06-01")
+
+    search.assert_not_called()
+
+
+@pytest.mark.unit
+def test_the_latch_holds_for_its_window_and_lets_go_on_the_deadline(frozen_clock):
+    _exhaust_the_ladder()
+
+    frozen_clock["t"] += su._THROTTLE_LATCH_TTL_S - 1
+    blocked = mock.Mock(return_value="ok")
+    with pytest.raises(VendorRateLimitError):
+        su.yf_retry(blocked)
+    blocked.assert_not_called()
+
+    # Exclusive bound, like the other windows in this codebase: at the deadline
+    # itself the vendor is contacted again.
+    frozen_clock["t"] += 1
+    served = mock.Mock(return_value="ok")
+    assert su.yf_retry(served) == "ok"
+    served.assert_called_once()
+
+
+@pytest.mark.unit
+def test_being_served_clears_the_latch(frozen_clock):
+    _exhaust_the_ladder()
+    frozen_clock["t"] += su._THROTTLE_LATCH_TTL_S
+
+    assert su.yf_retry(lambda: "ok") == "ok"
+
+    # Not merely expired — dropped. A served request proves the throttle is
+    # over, so no stale deadline is left behind to reason about.
+    assert su._throttle_latch_remaining_s() is None
+
+
+@pytest.mark.unit
+def test_only_an_exhausted_throttle_arms_the_latch(frozen_clock):
+    # A throttle the retries clear, and any failure outside the taxonomy, leave
+    # the next tool call free to reach Yahoo — the un-throttled path is exactly
+    # as it was before #86.
+    outcomes = [YFRateLimitError(), "ok"]
+
+    def flaky():
+        out = outcomes.pop(0)
+        if isinstance(out, Exception):
+            raise out
+        return out
+
+    assert su.yf_retry(flaky) == "ok"
+    assert su._throttle_latch_remaining_s() is None
+
+    with pytest.raises(ValueError):
+        su.yf_retry(mock.Mock(side_effect=ValueError("boom")))
+    assert su._throttle_latch_remaining_s() is None
+
+
 # --- the statement boundary: throttles un-hidden, everything else unchanged ---
 
 
@@ -150,34 +263,102 @@ def test_statement_throttle_survives_yfinance_internal_swallowing(monkeypatch):
 # --- the leaves: a taxonomy error propagates instead of degrading to prose ---
 
 
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("attr", "call"),
-    [
-        # attr is the boundary each leaf actually fetches through: the
-        # statement getters go through yf_fetch_statement, the rest through
-        # yf_retry — patching the wrong one leaves the real fetch running.
-        ("yf_retry", lambda: yfin.get_fundamentals("AAPL", "2026-06-01")),
-        ("yf_fetch_statement", lambda: yfin.get_balance_sheet("AAPL", "quarterly", "2026-06-01")),
-        ("yf_fetch_statement", lambda: yfin.get_cashflow("AAPL", "quarterly", "2026-06-01")),
-        (
-            "yf_fetch_statement",
-            lambda: yfin.get_income_statement("AAPL", "quarterly", "2026-06-01"),
-        ),
-        ("yf_retry", lambda: yfin.get_insider_transactions("AAPL")),
-    ],
-    ids=[
-        "fundamentals",
-        "balance-sheet",
-        "cashflow",
-        "income-statement",
-        "insider-transactions",
-    ],
+# The arguments each routed yfinance implementation needs, keyed by the method
+# name it is registered under. Deriving the leaf list from VENDOR_METHODS (see
+# the coverage check below) makes the registry the single source of truth for
+# "which leaves must honour the taxonomy"; hand-enumerating them made a third
+# list, and a newly registered yfinance impl with no matching row shipped green
+# (#86). This table only supplies call arguments — it may not decide membership.
+_YFINANCE_LEAF_ARGS = {
+    "get_stock_data": ("AAPL", "2026-06-01", "2026-06-05"),
+    "get_indicators": ("AAPL", "rsi", "2026-06-01", 5),
+    "get_fundamentals": ("AAPL", "2026-06-01"),
+    "get_balance_sheet": ("AAPL", "quarterly", "2026-06-01"),
+    "get_cashflow": ("AAPL", "quarterly", "2026-06-01"),
+    "get_income_statement": ("AAPL", "quarterly", "2026-06-01"),
+    "get_news": ("AAPL", "2026-06-01", "2026-06-05"),
+    "get_global_news": ("2026-06-01",),
+    "get_insider_transactions": ("AAPL",),
+}
+
+# Every yfinance network call is made through one of these bindings: the
+# statement properties through yf_fetch_statement, everything else through
+# yf_retry, each bound into the leaf's own module namespace by its import. All
+# of them are replaced at once so the check does not have to know which
+# boundary a given leaf reaches for — and monkeypatch.setattr raises if a
+# binding is ever renamed away, rather than quietly patching nothing.
+_FETCH_SEAMS = (
+    (su, "yf_retry"),
+    (yfin, "yf_retry"),
+    (yfin, "yf_fetch_statement"),
+    (ynews, "yf_retry"),
 )
-def test_y_finance_leaves_let_the_rate_limit_propagate(monkeypatch, attr, call):
-    monkeypatch.setattr(yfin, attr, _throttled)
+
+
+def _registered_yfinance_methods(registry):
+    return {method for method, vendors in registry.items() if "yfinance" in vendors}
+
+
+def _check_args_table_covers(registry):
+    assert set(_YFINANCE_LEAF_ARGS) == _registered_yfinance_methods(registry)
+
+
+def _check_impl_propagates(monkeypatch, tmp_path, impl, args):
+    for module, name in _FETCH_SEAMS:
+        monkeypatch.setattr(module, name, _throttled)
+    # An empty cache dir, so the OHLCV leaves actually reach a fetch seam
+    # instead of being served a file some other test wrote.
+    set_config({"data_cache_dir": str(tmp_path)})
     with pytest.raises(VendorRateLimitError):
-        call()
+        impl(*args)
+
+
+@pytest.mark.unit
+def test_every_registered_yfinance_impl_has_a_row_in_the_args_table():
+    _check_args_table_covers(interface.VENDOR_METHODS)
+
+
+@pytest.mark.unit
+def test_the_coverage_check_catches_an_unlisted_registry_entry():
+    # Discrimination: register a yfinance impl the table does not know about
+    # and the coverage check must fail — that is the whole point of deriving
+    # the leaf list from the registry.
+    with (
+        mock.patch.dict(
+            interface.VENDOR_METHODS,
+            {"get_unlisted_thing": {"yfinance": lambda: None}},
+            clear=False,
+        ),
+        pytest.raises(AssertionError),
+    ):
+        _check_args_table_covers(interface.VENDOR_METHODS)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("method", sorted(_YFINANCE_LEAF_ARGS))
+def test_every_registered_yfinance_impl_lets_the_rate_limit_propagate(
+    monkeypatch, tmp_path, method
+):
+    _check_impl_propagates(
+        monkeypatch,
+        tmp_path,
+        interface.VENDOR_METHODS[method]["yfinance"],
+        _YFINANCE_LEAF_ARGS[method],
+    )
+
+
+@pytest.mark.unit
+def test_the_propagation_check_catches_a_leaf_that_degrades_the_throttle(monkeypatch, tmp_path):
+    # Discrimination: the shape #67 fixed — a leaf whose broad handler turns a
+    # typed vendor failure into prose the router reads as a successful answer.
+    def degrading_leaf(ticker):
+        try:
+            return yfin.yf_retry(lambda: "data")
+        except Exception as e:  # noqa: BLE001 - deliberately the buggy shape
+            return f"Error retrieving something for {ticker}: {e}"
+
+    with pytest.raises(pytest.fail.Exception):
+        _check_impl_propagates(monkeypatch, tmp_path, degrading_leaf, ("AAPL",))
 
 
 @pytest.mark.unit
@@ -187,21 +368,6 @@ def test_stockstats_indicator_lets_the_rate_limit_propagate(monkeypatch):
     monkeypatch.setattr(su, "load_ohlcv", _throttled)
     with pytest.raises(VendorRateLimitError):
         yfin.get_stockstats_indicator("AAPL", "rsi", "2026-06-01")
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "call",
-    [
-        lambda: ynews.get_news_yfinance("AAPL", "2026-06-01", "2026-06-05"),
-        lambda: ynews.get_global_news_yfinance("2026-06-01"),
-    ],
-    ids=["ticker-news", "global-news"],
-)
-def test_yfinance_news_leaves_let_the_rate_limit_propagate(monkeypatch, call):
-    monkeypatch.setattr(ynews, "yf_retry", _throttled)
-    with pytest.raises(VendorRateLimitError):
-        call()
 
 
 @pytest.mark.unit

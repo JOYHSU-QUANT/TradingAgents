@@ -20,6 +20,56 @@ from .utils import MAX_OHLCV_STALE_DAYS, normalize_iso_date, safe_ticker_compone
 logger = logging.getLogger(__name__)
 
 
+# How long an exhausted throttle keeps every other yfinance call away from
+# Yahoo. The design treats a 429 as a fact about this client's standing with
+# Yahoo rather than about one endpoint: once a call has paid the full backoff
+# ladder and still been refused, the tools queued behind it have nothing new to
+# learn by each re-discovering the same refusal, sleeping through a ladder of
+# their own and adding requests to a host already turning this client away
+# (#86). The window is a judgement call, not a measured property of Yahoo's
+# throttling: long enough to cover the tool calls of one decision cycle, and
+# far shorter than the perp scheduler's CYCLE_INTERVAL (hours), so the next
+# cycle always re-probes Yahoo rather than inheriting a latch.
+_THROTTLE_LATCH_TTL_S = 300.0
+
+# Guards _throttle_latched_until. ToolNode runs the tool calls of one model
+# message on a thread pool, so arming and reading race without it.
+_THROTTLE_LATCH_LOCK = threading.Lock()
+
+# monotonic deadline until which yfinance is presumed throttled; None when not
+# latched. Process-global on purpose — the throttle is a property of this
+# client's relationship with Yahoo, not of any one caller.
+_throttle_latched_until: float | None = None
+
+
+def reset_yf_throttle_latch() -> None:
+    """Forget any recorded throttle, so the next call contacts Yahoo again.
+
+    Called by ``yf_retry`` whenever a request is served, and public for tests:
+    the latch is process-global, so a test that exhausts ``yf_retry`` would
+    otherwise send every later test in the same process down the fast-fail
+    path. The ``tests/`` conftest calls this around every test.
+    """
+    global _throttle_latched_until
+    with _THROTTLE_LATCH_LOCK:
+        _throttle_latched_until = None
+
+
+def _throttle_latch_remaining_s() -> float | None:
+    """Seconds left on the latch, or None when yfinance may be contacted."""
+    with _THROTTLE_LATCH_LOCK:
+        if _throttle_latched_until is None:
+            return None
+        remaining = _throttle_latched_until - time.monotonic()
+    return remaining if remaining > 0 else None
+
+
+def _arm_throttle_latch() -> None:
+    global _throttle_latched_until
+    with _THROTTLE_LATCH_LOCK:
+        _throttle_latched_until = time.monotonic() + _THROTTLE_LATCH_TTL_S
+
+
 def yf_retry(func, max_retries=3, base_delay=2.0):
     """Execute a yfinance call with exponential backoff on rate limits.
 
@@ -33,10 +83,24 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
     type the routing layer knows, so leaving it unmapped sent a 429 into each
     caller's broad ``except`` and came back as a successful-looking error
     string the router never fell back on (#67).
+
+    That same "one boundary" property is what lets an exhausted throttle arm a
+    short-lived latch (:data:`_THROTTLE_LATCH_TTL_S`): while it holds, calls
+    raise the taxonomy error immediately instead of sleeping through a ladder
+    of their own (#86). A call that reaches Yahoo and is served clears it.
+    Nothing but an exhausted throttle arms it, so the un-throttled path is
+    unchanged.
     """
+    remaining = _throttle_latch_remaining_s()
+    if remaining is not None:
+        raise VendorRateLimitError(
+            f"Yahoo Finance rate limited a recent request; skipping this one "
+            f"without contacting the vendor for another {remaining:.0f}s"
+        )
+
     for attempt in range(max_retries + 1):
         try:
-            return func()
+            result = func()
         except YFRateLimitError as e:
             if attempt < max_retries:
                 delay = base_delay * (2**attempt)
@@ -45,10 +109,21 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
                 )
                 time.sleep(delay)
             else:
+                _arm_throttle_latch()
                 raise VendorRateLimitError(
                     f"Yahoo Finance rate limited the request and {max_retries} "
                     f"retries did not clear it: {e}"
                 ) from e
+        else:
+            # A served request proves the throttle is over, so drop the
+            # deadline rather than leaving a stale one to reason about later.
+            # Unconditional on purpose: usually there is nothing to clear (a
+            # live latch raises above, and a throttle these retries cleared
+            # never armed one), but a sibling thread can arm one while this
+            # call is in flight — and a request Yahoo just served is better
+            # evidence about this client's standing than that sibling's.
+            reset_yf_throttle_latch()
+            return result
 
 
 # Serializes yf_fetch_statement's flip/fetch/restore of the process-global

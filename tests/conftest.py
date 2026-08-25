@@ -56,6 +56,22 @@ def _isolate_config():
     config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
 
 
+@pytest.fixture(autouse=True)
+def _clear_yf_throttle_latch():
+    """Clear the process-global yfinance throttle latch around each test.
+
+    ``yf_retry`` remembers an exhausted throttle for minutes so a cycle's other
+    tool calls stop re-discovering it (#86). Without this, one test that
+    exhausts the retries would send every later yfinance test in the same
+    process down the fast-fail path instead of the code it means to exercise.
+    """
+    from tradingagents.dataflows.stockstats_utils import reset_yf_throttle_latch
+
+    reset_yf_throttle_latch()
+    yield
+    reset_yf_throttle_latch()
+
+
 @pytest.fixture()
 def mock_llm_client():
     client = MagicMock()

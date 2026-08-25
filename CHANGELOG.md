@@ -377,6 +377,29 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **One yfinance throttle is now discovered once per cycle, not once per tool.**
+  `yf_retry` is the single boundary every yfinance network call goes through,
+  and its 2+4+8s backoff ladder ran independently per call. A 429 is Yahoo
+  refusing this client rather than one endpoint, so every yfinance-first tool
+  queued behind the first one re-discovered the same refusal: each slept
+  through a ladder of its own and each made four more attempts against a host
+  already turning the client away, learning nothing the first had not already
+  established. An exhausted ladder now records a short deadline; while it
+  stands, `yf_retry` raises the taxonomy's `VendorRateLimitError` immediately
+  without contacting Yahoo, and any answered request drops it. **The call that
+  discovers the throttle still pays the full ladder** — the shipped defaults
+  give the four yfinance categories a single-vendor chain, so there is no
+  fallback vendor to hand a brief throttle to, and lowering `max_retries` would
+  have traded resilience away rather than removing waste. The window is far
+  shorter than the perp scheduler's cycle interval, so the next cycle always
+  re-probes Yahoo. Nothing but an exhausted throttle records a deadline, and no
+  caller sees a new failure shape: the same error type is raised from the same
+  function, only sooner and fewer times. Operator-visible effect: a throttled
+  cycle logs one backoff sequence instead of one per tool. Separately, the test
+  that checks each routed yfinance implementation lets a rate limit propagate
+  now derives its leaf list from `VENDOR_METHODS` instead of a hand-written
+  third list — which had already drifted, leaving `get_stock_data` unchecked.
+
 - **SoSoValue cache-read plumbing deduplicated.** The remaining two
   near-verbatim copies the earlier extraction left behind now live once in
   `sosovalue_common.py`: the cache-file read preamble every `_read_cache`

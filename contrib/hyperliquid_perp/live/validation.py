@@ -117,12 +117,12 @@ from typing import NamedTuple
 from ..common.config_coercion import int_from_yaml
 from ..common.decimal_context import DECIMAL_CONTEXT
 from ..paper import accounting
-from ..paper.scheduler import parse_instant
-from ..paper.validation import (
+from ..paper.no_decision import (
     TrailingFailureStreaks,
     no_decision_shortfall,
     trailing_failure_streaks,
 )
+from ..paper.scheduler import parse_instant
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from .config import ExecutionMode
@@ -387,11 +387,18 @@ class LiveValidationReport:
     # visible rather than merely absent from the count.
     invalid_output_count: int
     # Trailing cycles that reached no decision, and the stale-feed subset of
-    # them (issue #50; see paper.validation.trailing_failure_streaks). Past the
+    # them (issue #50; see paper.no_decision.trailing_failure_streaks). Past the
     # threshold — and while still recent — the run is holding a position on
     # SL/TP alone with nothing deciding for it, which is "not at the gate"
     # however many cycles came before; the validator turns that into a
     # ``shortfalls`` line, so this pair is reported, not gating on its own.
+    # That line is STORED in ``shortfalls``, not derived from this pair in
+    # ``__post_init__``: whether a streak still describes the run's CURRENT
+    # state depends on ``now``, an input to the validator and not a field of
+    # this report, so a streak past the threshold with no matching line is a
+    # legal report (a stopped run's last hours) and not a contradiction the
+    # cross-field guards below could assert against — the same reason the
+    # paper report gives for its pair (issue #94, decided not to guard).
     streaks: TrailingFailureStreaks
     live_order_count: int
     fill_count: int

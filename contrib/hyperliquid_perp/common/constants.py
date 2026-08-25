@@ -9,6 +9,7 @@ from __future__ import annotations
 
 __all__ = [
     "DEFAULT_CANDLE_LOOKBACK",
+    "ERROR_TYPES",
     "LEGAL_NETWORKS",
     "MIN_VOLUME_PROFILE_WINDOW",
     "STALE_MARKET_DATA_ERROR",
@@ -45,10 +46,48 @@ LEGAL_NETWORKS = ("mainnet", "testnet")
 # The §6.2 ``decision_attempts.error_type`` the freshness guard writes when a
 # context is well-formed but its AGE is unusable. Lives here, at the bottom of
 # the import graph, because three layers must agree on the exact word without
-# importing each other: ``engine_bridge`` produces it (and drags the exchange
-# SDK, so no validator may import it), ``repository._vocab`` admits it at the
-# write boundary, and the paper/live acceptance validators query on it (issue
-# #50). A copy in any of the three would be a silent no-op the day it drifts:
-# the reported stale-feed SUBSET would read zero forever, while the gating
+# importing each other: ``domains.perp.freshness`` produces it (and must stay
+# free of both the exchange SDK and the persistence package, so it cannot
+# import the vocabulary module), ``repository._vocab`` admits it at the write
+# boundary, and the paper/live acceptance validators query on it (issue #50).
+# A copy in any of the three would be a silent no-op the day it drifts: the
+# reported stale-feed SUBSET would read zero forever, while the gating
 # no-decision streak — which is class-blind — would not notice at all.
 STALE_MARKET_DATA_ERROR = "stale_market_data"
+
+# The complete §6.2 ``decision_attempts.error_type`` vocabulary — the retry
+# classes plus the scheduler's restart-interrupted marker. Defined here rather
+# than in ``repository._vocab`` for the reason the word above is: the guard
+# that PRODUCES a class (``domains.perp.freshness.ContextRefusal``) validates
+# it against this set at construction, and the persistence write boundary
+# validates the same set at insert — one definition, two check sites, and the
+# producer's site fires on a typo before a cycle is ever recorded instead of
+# when the daemon tries to record its failure. ``_vocab`` re-exports it as the
+# storage vocabulary; the repository is a consumer of this list, not its owner.
+#
+# ``malformed_response``: the venue ANSWERED and the answer was unusable (a
+# misrouted read, wire-schema drift). Distinct from ``connection`` on purpose —
+# a disconnect heals by itself and this does not, so collapsing the two made
+# every per-class reading of the trail file a systematically wrong feed as one
+# transient blip. The §3.1 ladder treats all of these alike (its delays index
+# on attempt count), so a new member here changes records, never behaviour.
+# ``stale_market_data``: see above — the venue answered with a well-formed
+# context whose AGE is unusable. Added for the same reason as
+# ``malformed_response`` and by the same argument: it does not heal on its own,
+# so filing it as ``server_error`` made a fault that recurs every cycle until a
+# human fixes the feed or the host clock read as one transient blip. The
+# acceptance validators tell "this run cannot decide right now" from RUNBOOK
+# §7's expected occasional ``api_failed`` by trailing CONSECUTIVENESS, not by
+# this class; what the class earns is the specific wording and a reported
+# subset (#50).
+ERROR_TYPES = frozenset(
+    {
+        "timeout",
+        "rate_limit",
+        "connection",
+        "malformed_response",
+        STALE_MARKET_DATA_ERROR,
+        "server_error",
+        "interrupted",
+    }
+)

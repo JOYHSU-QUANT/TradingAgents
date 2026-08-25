@@ -8,7 +8,7 @@ from typing import Any
 
 from ...common.enum_guard import check_enum
 from ._base import _UNSET, _encode, _insert, _iso_utc, _Unset
-from ._vocab import _ATTEMPT_STATUSES, _ERROR_TYPES, _MODES
+from ._vocab import _ATTEMPT_STATUSES, _MODES, ERROR_TYPES
 
 __all__ = [
     "find_in_progress_attempt",
@@ -72,7 +72,7 @@ def insert_decision_attempt(conn: sqlite3.Connection, **fields: Any) -> None:
     if "status" in fields:
         check_enum(fields["status"], _ATTEMPT_STATUSES, name="status")
     if fields.get("error_type") is not None:
-        check_enum(fields["error_type"], _ERROR_TYPES, name="error_type")
+        check_enum(fields["error_type"], ERROR_TYPES, name="error_type")
     _insert(conn, "decision_attempts", fields)
 
 
@@ -127,7 +127,7 @@ def update_decision_attempt(
     if not isinstance(status, _Unset):
         check_enum(status, _ATTEMPT_STATUSES, name="status")
     if not isinstance(error_type, _Unset) and error_type is not None:
-        check_enum(error_type, _ERROR_TYPES, name="error_type")
+        check_enum(error_type, ERROR_TYPES, name="error_type")
     row = get_decision_attempt(conn, decision_attempt_id)
     if row is None:
         raise ValueError(f"decision attempt {decision_attempt_id!r} does not exist")

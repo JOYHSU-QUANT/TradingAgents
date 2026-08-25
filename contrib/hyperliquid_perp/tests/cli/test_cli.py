@@ -181,7 +181,7 @@ def test_build_input_files_an_unreadable_answer_apart_from_a_disconnect(monkeypa
         MalformedResponseError,
     )
     from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
-    from contrib.hyperliquid_perp.persistence.repository._vocab import _ERROR_TYPES
+    from contrib.hyperliquid_perp.persistence.repository import ERROR_TYPES
 
     as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
     cases = [
@@ -214,7 +214,7 @@ def test_build_input_files_an_unreadable_answer_apart_from_a_disconnect(monkeypa
         # The label has to be one the write boundary accepts: a class the
         # vocabulary does not carry raises at insert time instead, turning a
         # recorded api_failed cycle into an unhandled crash.
-        assert exc_info.value.error_type in _ERROR_TYPES
+        assert exc_info.value.error_type in ERROR_TYPES
         # The free-text half still carries the venue's own words either way.
         assert str(raised) in exc_info.value.message
 
@@ -1705,8 +1705,8 @@ def test_paper_loop_escalates_consecutive_stale_feed_refusals(tmp_path, monkeypa
     from contrib.hyperliquid_perp.common.constants import STALE_MARKET_DATA_ERROR
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
     from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.paper.no_decision import NO_DECISION_STREAK_THRESHOLD
     from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
-    from contrib.hyperliquid_perp.paper.validation import NO_DECISION_STREAK_THRESHOLD
 
     path, db = _seed_db(tmp_path)
     clock = ManualClock(_T0)
@@ -1755,7 +1755,7 @@ def test_paper_loop_escalates_consecutive_stale_feed_refusals(tmp_path, monkeypa
     monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
 
     with (
-        caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.validation"),
+        caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.no_decision"),
         pytest.raises(KeyboardInterrupt),
     ):
         cli_mod._paper_loop(
@@ -1848,7 +1848,7 @@ def test_paper_loop_streak_is_reset_by_a_cycle_that_decided(tmp_path, monkeypatc
     monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
 
     with (
-        caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.validation"),
+        caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.no_decision"),
         pytest.raises(KeyboardInterrupt),
     ):
         cli_mod._paper_loop(

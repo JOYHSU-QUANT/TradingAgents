@@ -52,10 +52,10 @@ class ProfileShape(str, Enum):
 class CandleInterval(str, Enum):
     """The supported candle intervals — the single source of truth for the set.
 
-    Mirrors ``market_data._INTERVAL_MS`` (which keys its lookup by these members)
-    and is what :class:`PerpMarketContext` validates its ``candle_interval``
-    against, so adding an interval is a one-line change here. A ``str`` mix-in
-    keeps ``"4h" == CandleInterval.H4`` for callers that pass a plain string.
+    :data:`_INTERVAL_MS` below keys its lookup by these members, and
+    :class:`PerpMarketContext` validates its ``candle_interval`` against them,
+    so adding an interval is a two-line change here. A ``str`` mix-in keeps
+    ``"4h" == CandleInterval.H4`` for callers that pass a plain string.
     """
 
     M1 = "1m"
@@ -64,6 +64,34 @@ class CandleInterval(str, Enum):
     H1 = "1h"
     H4 = "4h"
     D1 = "1d"
+
+
+# How many milliseconds each supported candle interval spans. Lives beside the
+# enum it is keyed by, not in the exchange adapter that first needed it: the
+# freshness guard (:mod:`.freshness`) measures candle age in intervals and must
+# stay importable on the keyless ``--context-only`` path, which the adapter's
+# SDK import is not.
+_INTERVAL_MS = {
+    CandleInterval.M1: 60_000,
+    CandleInterval.M5: 5 * 60_000,
+    CandleInterval.M15: 15 * 60_000,
+    CandleInterval.H1: 60 * 60_000,
+    CandleInterval.H4: 4 * 60 * 60_000,
+    CandleInterval.D1: 24 * 60 * 60_000,
+}
+
+
+def interval_to_ms(interval: str) -> int:
+    """``interval`` as milliseconds; ``ValueError`` naming the value if unsupported."""
+    # ``CandleInterval(interval)`` raises ValueError on an unknown value (e.g. a
+    # mis-cased "4H"); translate it into the same clear message the caller expects.
+    try:
+        return _INTERVAL_MS[CandleInterval(interval)]
+    except ValueError:
+        raise ValueError(
+            f"unsupported candle interval {interval!r}; "
+            f"choose from {[i.value for i in CandleInterval]}"
+        ) from None
 
 
 # --------------------------------------------------------------------------
@@ -605,14 +633,11 @@ class PerpMarketContext:
                 )
         # Validate ``candle_interval`` against the single source of truth
         # (:class:`CandleInterval`) so an unsupported value fails here at
-        # construction — cheap to spot — rather than later inside ``interval_to_ms``.
-        try:
-            interval = CandleInterval(self.candle_interval)
-        except ValueError:
-            valid = [i.value for i in CandleInterval]
-            raise ValueError(
-                f"unsupported candle_interval {self.candle_interval!r}; choose from {valid}"
-            ) from None
+        # construction — cheap to spot — rather than later inside the guard.
+        # The lookup IS :func:`interval_to_ms`'s, so the check and its message
+        # live once; a value it accepts is a member by construction.
+        interval_to_ms(self.candle_interval)
+        interval = CandleInterval(self.candle_interval)
         # Store the plain ``.value`` string ("4h"), never the enum member: a caller
         # passing ``CandleInterval.H4`` itself would otherwise be stored as a
         # ``(str, Enum)`` member that renders as ``"CandleInterval.H4"`` (not ``"4h"``)

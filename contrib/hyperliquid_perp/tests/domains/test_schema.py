@@ -16,6 +16,7 @@ from contrib.hyperliquid_perp.domains.perp.schema import (
     PerpPosition,
     ProfileShape,
     VolumeProfile,
+    interval_to_ms,
 )
 
 
@@ -271,6 +272,40 @@ def test_perp_market_context_exchange_time_defaults_absent_and_must_be_aware():
         PerpMarketContext(**_context(), exchange_time=datetime(2026, 6, 29, 12, 0))
 
 
+def test_interval_to_ms_known_intervals():
+    assert interval_to_ms("4h") == 4 * 60 * 60_000
+    assert interval_to_ms("1d") == 24 * 60 * 60_000
+    assert interval_to_ms("1m") == 60_000
+
+
+def test_interval_to_ms_unknown_raises_valueerror():
+    # A typo like "4H" (wrong case) must raise a clear ValueError naming the
+    # value rather than silently selecting a wrong interval.
+    with pytest.raises(ValueError, match="4H"):
+        interval_to_ms("4H")
+
+
+def test_perp_market_context_host_reading_must_be_aware_and_paired():
+    # Issue #94: the two rules PR #91 added beside the exchange-clock one. The
+    # host reading is only ever subtracted from ``exchange_time``, so it must
+    # be aware like its partner — and it must HAVE a partner: one without the
+    # other is a half-built context that would read as "skew unknown" while
+    # looking populated.
+    exchange = datetime(2026, 6, 29, 12, 0, tzinfo=timezone.utc)
+    paired = PerpMarketContext(
+        **_context(), exchange_time=exchange, host_time_at_exchange_read=exchange
+    )
+    assert paired.host_time_at_exchange_read == exchange
+    with pytest.raises(ValueError, match="host_time_at_exchange_read must be timezone-aware"):
+        PerpMarketContext(
+            **_context(),
+            exchange_time=exchange,
+            host_time_at_exchange_read=datetime(2026, 6, 29, 12, 0),
+        )
+    with pytest.raises(ValueError, match="host_time_at_exchange_read requires exchange_time"):
+        PerpMarketContext(**_context(), host_time_at_exchange_read=exchange)
+
+
 def test_perp_market_context_coerces_enum_interval_to_value():
     # A caller passing the CandleInterval *member* (not the "4h" string) must be stored
     # as the plain ".value" string — otherwise a (str, Enum) member renders as
@@ -282,7 +317,9 @@ def test_perp_market_context_coerces_enum_interval_to_value():
 
 
 def test_perp_market_context_rejects_unknown_interval():
-    with pytest.raises(ValueError, match="unsupported candle_interval"):
+    # The message is interval_to_ms's — one check, one wording — and names the
+    # offending value.
+    with pytest.raises(ValueError, match="unsupported candle interval '7m'"):
         PerpMarketContext(**_context(candle_interval="7m"))
 
 

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from ...common.constants import STALE_MARKET_DATA_ERROR
+from ...common.constants import ERROR_TYPES
 from ..cloid import LIVE_ORDER_ROLES
 
 __all__ = [
     "ACCOUNTING_ADJUSTMENT_TYPES",
+    "ERROR_TYPES",
     "EXCHANGE_KNOWN_ATTEMPT_STATUSES",
     "KILL_SWITCH_EVENT_TYPES",
     "LIVE_LIQUIDITY_ROLES",
@@ -48,34 +49,12 @@ _FUNDING_STATUSES = frozenset({"pending", "posted"})
 _FUNDING_SOURCES = frozenset(
     {"live_public_data", "funding_history_backfill", "exchange_user_funding"}
 )
-# The §6.2 retry vocabulary plus the scheduler's restart-interrupted marker.
-# ``malformed_response``: the venue ANSWERED and the answer was unusable (a
-# misrouted read, wire-schema drift). Distinct from ``connection`` on purpose —
-# a disconnect heals by itself and this does not, so collapsing the two made
-# every per-class reading of the trail file a systematically wrong feed as one
-# transient blip. The §3.1 ladder treats all of these alike (its delays index
-# on attempt count), so a new member here changes records, never behaviour.
-# ``stale_market_data``: the venue answered with a well-formed context whose
-# AGE is unusable — the candle feed stopped advancing, or the two clocks the
-# age is measured between cannot be compared (``engine_bridge._context_refusal``
-# is the only writer). Added for the same reason as ``malformed_response`` and
-# by the same argument: it does not heal on its own, so filing it as
-# ``server_error`` made a fault that recurs every cycle until a human fixes the
-# feed or the host clock read as one transient blip. The acceptance validators
-# tell "this run cannot decide right now" from RUNBOOK §7's expected
-# occasional ``api_failed`` by trailing CONSECUTIVENESS, not by this class;
-# what the class earns is the specific wording and a reported subset (#50).
-_ERROR_TYPES = frozenset(
-    {
-        "timeout",
-        "rate_limit",
-        "connection",
-        "malformed_response",
-        STALE_MARKET_DATA_ERROR,
-        "server_error",
-        "interrupted",
-    }
-)
+# The §6.2 ``decision_attempts.error_type`` vocabulary is ``ERROR_TYPES``,
+# imported above and re-exported here as the storage vocabulary. It is DEFINED
+# in ``common.constants`` (with the member-by-member rationale) because the
+# guard that produces a class — ``domains.perp.freshness``, which must not
+# import this package — validates against the same set at construction; this
+# module admits it at the write boundary. One list, two check sites.
 # scheduler_state CSV-export breadcrumb states (schema v3).
 _EXPORT_STATUSES = frozenset({"ok", "failed"})
 # Replay breadcrumb vocabulary: "mismatch" = replay ran and contradicted the

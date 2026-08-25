@@ -377,6 +377,42 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **Hyperliquid: the market-context freshness guard and the no-decision
+  escalation policy each have their own module.** The exchange-clock rewrite
+  (PR #91) had grown the freshness guard to ~200 lines inside
+  `engine_bridge`, whose job is composing exchange reads into engine inputs;
+  it now lives in `domains/perp/freshness.py` (`freshness_refusal`,
+  `ContextRefusal`, the age-limit and clock-skew helpers), SDK-free and
+  persistence-free, with `engine_bridge._context_refusal` calling it as the
+  last of the four pre-LLM guards. `interval_to_ms` moved beside the
+  `CandleInterval` enum in `domains/perp/schema.py` to make that possible
+  (**breaking for direct importers:** `exchanges.hyperliquid.market_data`
+  no longer exports it). The issue-#50 no-decision policy — threshold,
+  recency window, `TrailingFailureStreaks`, the store query,
+  `no_decision_shortfall` and the per-cycle `note_cycle_outcome` the two
+  running loops call — moved from `paper/validation.py`, a read-only
+  acceptance validator by contract, to `paper/no_decision.py`
+  (**breaking for direct importers:** `paper.validation` no longer exports
+  those five names). The §6.2 `decision_attempts.error_type` vocabulary is
+  now defined once in `common.constants.ERROR_TYPES` (public), re-exported
+  by `persistence.repository` as the storage vocabulary; `_vocab._ERROR_TYPES`
+  is gone. One behaviour change rides along: `ContextRefusal` is a frozen
+  dataclass that validates its class against that registry at construction,
+  so a misspelt class raises a `ValueError` where the guard is built — in
+  the one-shot entry points too — instead of out of the repository on the
+  daemon's first refused cycle. Two of issue #94's proposals were reviewed
+  and deliberately not taken: guarding the `LiveValidationReport`
+  streak/shortfall pairing (whether a streak is current depends on `now`,
+  which is not a report field — the paper report already records the same
+  decision), and withholding `no_decision_shortfall` when the newest cycle
+  is stamped after the validator's clock (the live validator reads `now`
+  before its store query, so a daemon finalizing a cycle in between produces
+  exactly that stamp, and the run must not pass the gate; a test now pins
+  the future side as reported). Tests: the freshness bound, floor,
+  ceiling and age-format tests now run under both measuring clocks (they ran
+  on the host-clock fallback alone, which production never takes), plus the
+  unpaired-reading branches, the sole-cause skew boundary and the two
+  `PerpMarketContext` host-reading rules (issue #94).
 - **Breaking for direct callers of two Alpha Vantage getters.** `get_stock`
   refuses a slash-separated or time-suffixed `end_date` it used to serve, and
   `get_news` refuses the intraday `"YYYY-MM-DD HH:MM"`, `"YYYYMMDDTHHMM"` and

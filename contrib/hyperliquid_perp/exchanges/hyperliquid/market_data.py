@@ -12,40 +12,17 @@ import time
 from datetime import datetime
 
 from ...domains.perp.margin import MarginSchedule
-from ...domains.perp.schema import Candle, CandleInterval, FundingPoint, MarketSnapshot
+from ...domains.perp.schema import Candle, FundingPoint, MarketSnapshot, interval_to_ms
 from . import mapper
 from .sdk_client import HyperliquidClient, call_sdk
 
 logger = logging.getLogger(__name__)
 
-# How many milliseconds each supported candle interval spans, used to turn a
-# "last N candles" lookback into a startTime. Keyed by the CandleInterval enum so
-# the supported set has a single source of truth (schema.CandleInterval).
-_INTERVAL_MS = {
-    CandleInterval.M1: 60_000,
-    CandleInterval.M5: 5 * 60_000,
-    CandleInterval.M15: 15 * 60_000,
-    CandleInterval.H1: 60 * 60_000,
-    CandleInterval.H4: 4 * 60 * 60_000,
-    CandleInterval.D1: 24 * 60 * 60_000,
-}
 _MS_PER_DAY = 24 * 60 * 60_000
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
-
-
-def interval_to_ms(interval: str) -> int:
-    # ``CandleInterval(interval)`` raises ValueError on an unknown value (e.g. a
-    # mis-cased "4H"); translate it into the same clear message the caller expects.
-    try:
-        return _INTERVAL_MS[CandleInterval(interval)]
-    except ValueError:
-        raise ValueError(
-            f"unsupported candle interval {interval!r}; "
-            f"choose from {[i.value for i in CandleInterval]}"
-        ) from None
 
 
 class HyperliquidMarketData:

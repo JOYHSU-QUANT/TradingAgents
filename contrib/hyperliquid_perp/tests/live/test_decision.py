@@ -347,10 +347,10 @@ def test_driver_escalates_consecutive_stale_feed_refusals(tmp_path, caplog):
     # tests/paper/test_validation.py.
     import logging
 
-    from contrib.hyperliquid_perp.paper.validation import NO_DECISION_STREAK_THRESHOLD
+    from contrib.hyperliquid_perp.paper.no_decision import NO_DECISION_STREAK_THRESHOLD
 
     db, clock, driver, engine, worker, provider = _driver(tmp_path, build_error=_stale_refusal())
-    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.validation"):
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.no_decision"):
         for _ in range(NO_DECISION_STREAK_THRESHOLD):
             assert driver.pump() == "api_failed"
             state = repo.get_scheduler_state(db.conn, "r")
@@ -374,7 +374,7 @@ def test_driver_streak_is_reset_by_a_cycle_that_decided(tmp_path, caplog):
         state = repo.get_scheduler_state(db.conn, "r")
         clock.set(parse_instant(state["next_decision_at"]))
 
-    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.validation"):
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.no_decision"):
         assert driver.pump() == "api_failed"  # streak 1
         _advance()
         assert driver.pump() == "api_failed"  # streak 2
@@ -412,7 +412,7 @@ def test_driver_counts_a_refused_cycle_once_even_when_its_write_keeps_failing(tm
         return real_fail_cycle(*args, **kwargs)
 
     driver._fail_cycle = _flaky_fail_cycle
-    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.validation"):
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.no_decision"):
         for _ in range(2):
             with pytest.raises(sqlite3.OperationalError):
                 driver.pump()

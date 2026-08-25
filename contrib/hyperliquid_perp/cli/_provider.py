@@ -133,10 +133,10 @@ class _EngineDecisionProvider:
     def build_input(self, *, coin: str, as_of: datetime):
         from ..domains.perp import risk_gate
         from ..domains.perp.prompt_context import render_market_context
+        from ..domains.perp.schema import interval_to_ms
         from ..domains.perp.target_decision import decision_format_instructions
         from ..engine_bridge import _build_context, _context_refusal
         from ..exchanges.hyperliquid.errors import ExchangeError, MalformedResponseError
-        from ..exchanges.hyperliquid.market_data import interval_to_ms
         from ..paper.scheduler import DecisionInput, RetryableDecisionError
 
         try:

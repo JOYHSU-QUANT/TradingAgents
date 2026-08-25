@@ -96,13 +96,12 @@ def parse_instant(text: str) -> datetime:
 class RetryableDecisionError(Exception):
     """A market-data / AI API failure worth retrying (spec §3.1).
 
-    ``error_type`` uses the §6.2 vocabulary (``timeout`` / ``rate_limit`` /
-    ``connection`` / ``malformed_response`` / ``stale_market_data`` /
-    ``server_error``); anything the
-    provider does not classify should propagate as a normal exception (a bug,
-    not a retry). The authoritative list is ``repository._vocab._ERROR_TYPES``,
-    which ``check_enum`` enforces at the write boundary — this sentence is a
-    convenience copy, so extend the two together.
+    ``error_type`` is a member of the §6.2 vocabulary,
+    ``common.constants.ERROR_TYPES`` (the member-by-member rationale lives
+    there); ``check_enum`` enforces it at the write boundary and, for the
+    context guards, at ``ContextRefusal`` construction. Anything the provider
+    does not classify should propagate as a normal exception (a bug, not a
+    retry).
     """
 
     def __init__(self, error_type: str, message: str) -> None:

@@ -24,6 +24,7 @@ for the reporting / replay consumers.
 from ._base import UNSET, Unset
 from ._vocab import (
     ACCOUNTING_ADJUSTMENT_TYPES,
+    ERROR_TYPES,
     EXCHANGE_KNOWN_ATTEMPT_STATUSES,
     KILL_SWITCH_EVENT_TYPES,
     LIVE_LIQUIDITY_ROLES,

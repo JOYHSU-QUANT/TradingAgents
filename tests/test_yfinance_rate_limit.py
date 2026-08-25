@@ -160,8 +160,8 @@ def test_being_served_clears_the_latch(frozen_clock):
 
     assert su.yf_retry(lambda: "ok") == "ok"
 
-    # Not merely expired — dropped. A served request proves the throttle is
-    # over, so no stale deadline is left behind to reason about.
+    # Not merely expired — dropped, so no stale deadline is left behind for a
+    # later call to reason about.
     assert su._throttle_latch_remaining_s() is None
 
 
@@ -263,59 +263,56 @@ def test_statement_throttle_survives_yfinance_internal_swallowing(monkeypatch):
 # --- the leaves: a taxonomy error propagates instead of degrading to prose ---
 
 
-# The arguments each routed yfinance implementation needs, keyed by the method
-# name it is registered under. Deriving the leaf list from VENDOR_METHODS (see
-# the coverage check below) makes the registry the single source of truth for
-# "which leaves must honour the taxonomy"; hand-enumerating them made a third
-# list, and a newly registered yfinance impl with no matching row shipped green
-# (#86). This table only supplies call arguments — it may not decide membership.
-_YFINANCE_LEAF_ARGS = {
-    "get_stock_data": ("AAPL", "2026-06-01", "2026-06-05"),
-    "get_indicators": ("AAPL", "rsi", "2026-06-01", 5),
-    "get_fundamentals": ("AAPL", "2026-06-01"),
-    "get_balance_sheet": ("AAPL", "quarterly", "2026-06-01"),
-    "get_cashflow": ("AAPL", "quarterly", "2026-06-01"),
-    "get_income_statement": ("AAPL", "quarterly", "2026-06-01"),
-    "get_news": ("AAPL", "2026-06-01", "2026-06-05"),
-    "get_global_news": ("2026-06-01",),
-    "get_insider_transactions": ("AAPL",),
+# How to drive each routed yfinance implementation, keyed by the method name it
+# is registered under: the fetch boundary it reaches Yahoo through, and the
+# arguments it takes.
+#
+# Membership is NOT this table's to decide — the coverage check below derives it
+# from VENDOR_METHODS, so the registry is the single source of truth for "which
+# leaves must honour the taxonomy". Hand-enumerating them made a third list, and
+# a newly registered yfinance impl with no matching row shipped green (#86);
+# get_stock_data was in fact never covered until this table was derived.
+#
+# The seam is per-leaf rather than "patch them all", because which boundary a
+# leaf uses is itself an invariant worth pinning: the statement getters must go
+# through yf_fetch_statement, since plain yf_retry leaves yfinance free to
+# swallow a 429 into an empty frame that reads as "no data" (#67). Naming the
+# wrong seam leaves the real fetch running, so the row fails rather than passing
+# for the wrong reason — and monkeypatch.setattr raises if a binding is renamed
+# away instead of quietly patching nothing.
+_YFINANCE_LEAF_CALLS = {
+    "get_stock_data": ((yfin, "yf_retry"), ("AAPL", "2026-06-01", "2026-06-05")),
+    "get_indicators": ((su, "yf_retry"), ("AAPL", "rsi", "2026-06-01", 5)),
+    "get_fundamentals": ((yfin, "yf_retry"), ("AAPL", "2026-06-01")),
+    "get_balance_sheet": ((yfin, "yf_fetch_statement"), ("AAPL", "quarterly", "2026-06-01")),
+    "get_cashflow": ((yfin, "yf_fetch_statement"), ("AAPL", "quarterly", "2026-06-01")),
+    "get_income_statement": ((yfin, "yf_fetch_statement"), ("AAPL", "quarterly", "2026-06-01")),
+    "get_news": ((ynews, "yf_retry"), ("AAPL", "2026-06-01", "2026-06-05")),
+    "get_global_news": ((ynews, "yf_retry"), ("2026-06-01",)),
+    "get_insider_transactions": ((yfin, "yf_retry"), ("AAPL",)),
 }
-
-# Every yfinance network call is made through one of these bindings: the
-# statement properties through yf_fetch_statement, everything else through
-# yf_retry, each bound into the leaf's own module namespace by its import. All
-# of them are replaced at once so the check does not have to know which
-# boundary a given leaf reaches for — and monkeypatch.setattr raises if a
-# binding is ever renamed away, rather than quietly patching nothing.
-_FETCH_SEAMS = (
-    (su, "yf_retry"),
-    (yfin, "yf_retry"),
-    (yfin, "yf_fetch_statement"),
-    (ynews, "yf_retry"),
-)
 
 
 def _registered_yfinance_methods(registry):
     return {method for method, vendors in registry.items() if "yfinance" in vendors}
 
 
-def _check_args_table_covers(registry):
-    assert set(_YFINANCE_LEAF_ARGS) == _registered_yfinance_methods(registry)
+def _check_call_table_covers(registry):
+    assert set(_YFINANCE_LEAF_CALLS) == _registered_yfinance_methods(registry)
 
 
-def _check_impl_propagates(monkeypatch, tmp_path, impl, args):
-    for module, name in _FETCH_SEAMS:
-        monkeypatch.setattr(module, name, _throttled)
-    # An empty cache dir, so the OHLCV leaves actually reach a fetch seam
-    # instead of being served a file some other test wrote.
+def _check_impl_propagates(monkeypatch, tmp_path, impl, seam, args):
+    monkeypatch.setattr(*seam, _throttled)
+    # An empty cache dir, so the OHLCV leaves actually reach the seam instead of
+    # being served a file some other test wrote.
     set_config({"data_cache_dir": str(tmp_path)})
     with pytest.raises(VendorRateLimitError):
         impl(*args)
 
 
 @pytest.mark.unit
-def test_every_registered_yfinance_impl_has_a_row_in_the_args_table():
-    _check_args_table_covers(interface.VENDOR_METHODS)
+def test_every_registered_yfinance_impl_has_a_row_in_the_call_table():
+    _check_call_table_covers(interface.VENDOR_METHODS)
 
 
 @pytest.mark.unit
@@ -331,19 +328,17 @@ def test_the_coverage_check_catches_an_unlisted_registry_entry():
         ),
         pytest.raises(AssertionError),
     ):
-        _check_args_table_covers(interface.VENDOR_METHODS)
+        _check_call_table_covers(interface.VENDOR_METHODS)
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("method", sorted(_YFINANCE_LEAF_ARGS))
+@pytest.mark.parametrize("method", sorted(_YFINANCE_LEAF_CALLS))
 def test_every_registered_yfinance_impl_lets_the_rate_limit_propagate(
     monkeypatch, tmp_path, method
 ):
+    seam, args = _YFINANCE_LEAF_CALLS[method]
     _check_impl_propagates(
-        monkeypatch,
-        tmp_path,
-        interface.VENDOR_METHODS[method]["yfinance"],
-        _YFINANCE_LEAF_ARGS[method],
+        monkeypatch, tmp_path, interface.VENDOR_METHODS[method]["yfinance"], seam, args
     )
 
 
@@ -358,7 +353,7 @@ def test_the_propagation_check_catches_a_leaf_that_degrades_the_throttle(monkeyp
             return f"Error retrieving something for {ticker}: {e}"
 
     with pytest.raises(pytest.fail.Exception):
-        _check_impl_propagates(monkeypatch, tmp_path, degrading_leaf, ("AAPL",))
+        _check_impl_propagates(monkeypatch, tmp_path, degrading_leaf, (yfin, "yf_retry"), ("AAPL",))
 
 
 @pytest.mark.unit

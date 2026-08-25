@@ -87,7 +87,7 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
     That same "one boundary" property is what lets an exhausted throttle arm a
     short-lived latch (:data:`_THROTTLE_LATCH_TTL_S`): while it holds, calls
     raise the taxonomy error immediately instead of sleeping through a ladder
-    of their own (#86). A call that reaches Yahoo and is served clears it.
+    of their own (#86). A call that comes back with an answer clears it.
     Nothing but an exhausted throttle arms it, so the un-throttled path is
     unchanged.
     """
@@ -115,13 +115,19 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
                     f"retries did not clear it: {e}"
                 ) from e
         else:
-            # A served request proves the throttle is over, so drop the
-            # deadline rather than leaving a stale one to reason about later.
-            # Unconditional on purpose: usually there is nothing to clear (a
-            # live latch raises above, and a throttle these retries cleared
-            # never armed one), but a sibling thread can arm one while this
-            # call is in flight — and a request Yahoo just served is better
-            # evidence about this client's standing than that sibling's.
+            # Yahoo answered without refusing, so drop the deadline rather than
+            # leaving a stale one to reason about later. Unconditional on
+            # purpose: usually there is nothing to clear (a live latch raises
+            # above, and a throttle these retries cleared never armed one), but
+            # a sibling thread can arm one while this call is in flight, and an
+            # answer just received is the fresher evidence.
+            #
+            # "Answered" is the honest claim, not "served": yf_fetch_statement
+            # hands back an empty frame when it swallows a NON-throttle failure,
+            # and that arrives here indistinguishable from data. Clearing on it
+            # is wrong only about cost — the next tool call re-discovers the
+            # throttle and pays one ladder — never about the verdict a caller
+            # gets, so it does not buy a way to tell the two apart.
             reset_yf_throttle_latch()
             return result
 

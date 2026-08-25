@@ -873,7 +873,7 @@ def test_shortfall_helper_withholds_a_verdict_it_cannot_date():
     assert no_decision_shortfall(undatable, now=_T0) is None
 
 
-def test_no_decision_shortfall_withholds_when_the_newest_cycle_is_stamped_in_the_future():
+def test_no_decision_shortfall_reports_a_streak_stamped_in_the_future():
     # Issue #94 raised this as "withhold on a negative gap, like the
     # unparseable stamp"; review of the validators' ORDERING said otherwise.
     # live.validate_live_run reads ``now`` BEFORE its store query, so a daemon

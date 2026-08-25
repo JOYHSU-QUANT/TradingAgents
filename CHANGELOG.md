@@ -400,7 +400,10 @@ Breaking changes within the 0.x line are called out explicitly.
   dataclass that validates its class against that registry at construction,
   so a misspelt class raises a `ValueError` where the guard is built — in
   the one-shot entry points too — instead of out of the repository on the
-  daemon's first refused cycle. Two of issue #94's proposals were reviewed
+  daemon's first refused cycle (the paper daemon still aborts, only earlier;
+  the live driver's broad tick guard now records it as an unclassified
+  `api_failed` instead of arming `pending_fail` and re-raising on every pump).
+  Two of issue #94's proposals were reviewed
   and deliberately not taken: guarding the `LiveValidationReport`
   streak/shortfall pairing (whether a streak is current depends on `now`,
   which is not a report field — the paper report already records the same
@@ -409,8 +412,9 @@ Breaking changes within the 0.x line are called out explicitly.
   before its store query, so a daemon finalizing a cycle in between produces
   exactly that stamp, and the run must not pass the gate; a test now pins
   the future side as reported). Tests: the freshness bound, floor,
-  ceiling and age-format tests now run under both measuring clocks (they ran
-  on the host-clock fallback alone, which production never takes), plus the
+  ceiling and age-format tests now run under both measuring clocks (all but
+  the stale bound ran on the host-clock fallback alone, which production
+  never takes), plus the sixty-second cause-wording floor, the
   unpaired-reading branches, the sole-cause skew boundary and the two
   `PerpMarketContext` host-reading rules (issue #94).
 - **Breaking for direct callers of two Alpha Vantage getters.** `get_stock`

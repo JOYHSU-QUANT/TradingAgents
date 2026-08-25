@@ -85,8 +85,11 @@ _MAX_CANDLE_AGE_INTERVALS = 3
 # would pull the whole paper engine into the keyless --context-only path to read
 # one timedelta. That costs about 25ms, and the RECIPE matters more than the
 # figure — re-measure rather than trust it. Time the MARGINAL import, the only
-# one this decision is about: import this module, then time
+# one this decision is about: import ``engine_bridge`` (this module's caller,
+# already loaded — with ``paper.config`` — before any guard runs), then time
 # ``importlib.import_module("contrib.hyperliquid_perp.paper.scheduler")``.
+# Importing this module alone and then timing it answers a different
+# question (roughly twice the figure, since ``paper.config`` is not yet paid).
 # Repeated runs land within a few ms of each other. A cold interpreter reports
 # ~100ms instead and answers a different question: roughly three quarters of
 # that is already paid by the time this line is reached.

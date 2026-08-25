@@ -796,9 +796,10 @@ def _ctx_closing_at(
 # The two measuring clocks the guard can use. ``_build_context`` always supplies
 # the exchange's, so that is the production branch; ``None`` is the fixture /
 # replay fallback, measured against ``now``. The bound, floor, ceiling and
-# age-format tests run under BOTH: until issue #94 every one of them ran on
-# the fallback alone, and the floor and ceiling had no test at all on the
-# branch production takes.
+# age-format tests run under BOTH: until issue #94 the floor, ceiling and
+# age-format tests ran on the fallback alone (only the stale bound had an
+# exchange-clock twin, folded in here), so the clamp had no test at all on
+# the branch production takes.
 _BOTH_CLOCKS = pytest.mark.parametrize(
     "exchange_time",
     [pytest.param(None, id="host-clock"), pytest.param(_NOW, id="exchange-clock")],
@@ -1150,8 +1151,8 @@ def test_freshness_guard_sole_cause_bound_on_the_skew_is_exclusive():
     # The boundary between "the offset by itself puts the newest candle past
     # the limit" and "it accounts for part of this age": PR #91 made it a
     # strict `<` (an offset equal to the limit alone yields age == limit,
-    # which the age check calls fresh), and every other freshness boundary in
-    # this file has its exclusive case pinned — this one did not.
+    # which the age check calls fresh), and the age boundaries in this file
+    # all have their exclusive case pinned — this one did not.
     age = _NOW - timedelta(hours=20)
     at_limit = _ctx_closing_at(age, exchange_time=_NOW, host_skew=-timedelta(hours=12))
     msg = bridge_mod._context_refusal_error(at_limit, "BTC", {}, now=_NOW)
@@ -1163,6 +1164,24 @@ def test_freshness_guard_sole_cause_bound_on_the_skew_is_exclusive():
     assert msg is not None
     assert "by itself puts the newest" in msg
     assert "but not all of it" not in msg
+
+
+def test_freshness_guard_cause_wording_floor_on_the_skew_is_inclusive():
+    # The other edge of the middle band: at exactly the warn floor the offset
+    # is named as a contributor (`<=`); one millisecond under it the clocks
+    # "agree" and the feed alone is blamed. The log-warning test pins the same
+    # floor on a FRESH context; this pins the refusal wording it selects.
+    age = _NOW - timedelta(hours=14)
+    floor = timedelta(milliseconds=freshness_mod._CLOCK_SKEW_WARN_MS)
+    at_floor = _ctx_closing_at(age, exchange_time=_NOW, host_skew=-floor)
+    msg = bridge_mod._context_refusal_error(at_floor, "BTC", {}, now=_NOW)
+    assert msg is not None
+    assert "accounts for 1m 0s of this age but not all of it" in msg
+    under = _ctx_closing_at(age, exchange_time=_NOW, host_skew=-(floor - timedelta(milliseconds=1)))
+    msg = bridge_mod._context_refusal_error(under, "BTC", {}, now=_NOW)
+    assert msg is not None
+    assert "agrees with the exchange's" in msg
+    assert "feed itself stopped advancing" in msg
 
 
 def test_context_refusal_rejects_a_class_outside_the_error_type_registry():
@@ -1398,9 +1417,11 @@ def test_context_refusal_tolerates_a_candle_closing_during_the_fetch(exchange_ti
     # network_timeout_s) lands a couple of minutes ahead of it. That is normal,
     # not a broken clock. Checked at the TIGHTEST interval, where the tolerance
     # is the 30m floor rather than 3 x interval — 1m bars would otherwise give
-    # a 3-minute tolerance, inside the reach of a slow fetch. On the exchange
-    # clock the same slack covers a boundary closing between the candle read
-    # and the clock read.
+    # a 3-minute tolerance, inside the reach of a slow fetch. The exchange-
+    # clock branch shares the bound (a bar closing between the candle read
+    # and the later clock read yields a POSITIVE age there, never this
+    # shape — what reaches it is a non-live context or a 1d host lead, see
+    # freshness.py); it is pinned here so the two branches cannot drift apart.
     just_ahead = _ctx_closing_at(
         _NOW + timedelta(minutes=4), interval="1m", exchange_time=exchange_time
     )

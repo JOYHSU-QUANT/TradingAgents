@@ -592,7 +592,7 @@ def test_global_news_none_optionals_resolve_to_defaults_before_clamp(monkeypatch
 
 @pytest.mark.unit
 class TestNewsVolumeComesFromConfigNotTheVendor:
-    """How much news a routed tool returns must not depend on the vendor (#107).
+    """How much news a routed tool ASKS FOR must not depend on the vendor (#107).
 
     Both getters used to carry literals — 50 articles and a 7-day window on
     global news, and no limit at all on ticker news, which left the endpoint's

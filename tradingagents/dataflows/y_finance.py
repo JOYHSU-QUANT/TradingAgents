@@ -86,7 +86,10 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title
         raise NoMarketDataError(
             ticker,
             canonical,
-            f"{noun} column labels could not be bounded to {curr_date}: {e}",
+            # No mention of curr_date: this also fires on the date-less lane
+            # (#73), which asked for no bound at all, and the detail is spliced
+            # into the router's agent-facing sentinel.
+            f"{noun} column labels could not be read as fiscal periods: {e}",
         ) from e
     if data.empty:
         if not datable:

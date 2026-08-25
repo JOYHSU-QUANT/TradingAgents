@@ -427,8 +427,9 @@ def coerce_period_labels(labels) -> tuple[list, bool]:
     families are reachable as column labels: an iterator or a nested tuple
     raises ``TypeError``, a dict-like raises ``ValueError``, and a label need
     not be hashable to get there (``df.columns = pd.Index([...], dtype=object)``
-    accepts either). The caller types the raise — see
-    ``y_finance._statement_report``, which catches both.
+    accepts either). Both readers guard for both families: the statement lane
+    types the raise (``y_finance._statement_report``) and the freshness note
+    degrades to silence on it (``y_finance._dates_lag_note``).
     """
     periods, dropped_a_zone = [], False
     for label in labels:

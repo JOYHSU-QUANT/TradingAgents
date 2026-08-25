@@ -16,7 +16,9 @@ _MAX_LAG_DAYS_BY_INTERVAL = {
 }
 
 # Indicator registry: display name + required series_type. Module-level so the
-# mapping invariant (every entry has a CSV column mapping below) is testable.
+# wiring invariants below are testable: every entry outside
+# _NO_ENDPOINT_INDICATORS has both a request definition and a CSV column, and
+# neither of those tables carries an entry this one does not.
 _SUPPORTED_INDICATORS = {
     "close_50_sma": ("50 SMA", "close"),
     "close_200_sma": ("200 SMA", "close"),
@@ -117,9 +119,11 @@ def get_indicator(
             ``route_to_vendor`` reads as a successful answer: the chain stopped
             at the vendor that had just failed and the agent analysed the
             sentence as an indicator report (#106).
-        ValueError: When the indicator is unsupported, or is registered as
-            supported without a request definition or a CSV column mapping —
-            our own wiring gaps, raised before any request is made.
+        ValueError: When ``curr_date`` will not parse, when the indicator is
+            unsupported (both of those come from the caller), or when it is
+            registered as supported without a request definition or a CSV
+            column mapping (our own wiring gaps). All are raised before any
+            request is made.
         VendorError, requests.RequestException: Propagated (see the handlers at
             the end of this function).
 
@@ -131,8 +135,6 @@ def get_indicator(
     from datetime import datetime
 
     from dateutil.relativedelta import relativedelta
-
-    supported_indicators = _SUPPORTED_INDICATORS
 
     indicator_descriptions = {
         "close_50_sma": "50 SMA: A medium-term trend indicator. Usage: Identify trend direction and serve as dynamic support/resistance. Tips: It lags price; combine with faster indicators for timely signals.",
@@ -150,9 +152,9 @@ def get_indicator(
         # so nothing here would ever be rendered for them.
     }
 
-    if indicator not in supported_indicators:
+    if indicator not in _SUPPORTED_INDICATORS:
         raise ValueError(
-            f"Indicator {indicator} is not supported. Please choose from: {list(supported_indicators.keys())}"
+            f"Indicator {indicator} is not supported. Please choose from: {list(_SUPPORTED_INDICATORS.keys())}"
         )
 
     curr_date_dt = datetime.strptime(curr_date, "%Y-%m-%d")
@@ -167,7 +169,7 @@ def get_indicator(
         # even though the yfinance vendor serving the same routed tool computes
         # vwma from OHLCV via stockstats. Raising hands that vendor its turn
         # (#106). Placed before the try below because no request is made.
-        display, _ = supported_indicators[indicator]
+        display, _ = _SUPPORTED_INDICATORS[indicator]
         # The detail is spliced into the router's agent-facing sentinel, so it
         # says what is true of THIS vendor only: whether a vendor that computes
         # from OHLCV is configured is not something this getter can see.
@@ -197,7 +199,7 @@ def get_indicator(
             f"Indicator '{indicator}' is registered as supported but has no CSV column mapping"
         )
 
-    _, required_series_type = supported_indicators[indicator]
+    _, required_series_type = _SUPPORTED_INDICATORS[indicator]
 
     av_function, time_period_spec = _INDICATOR_REQUESTS[indicator]
     params = {"symbol": symbol, "interval": interval, "datatype": "csv"}
@@ -320,9 +322,9 @@ def get_indicator(
         # first two instead — technical_indicators is a core category, and a
         # loud failure is the decided outcome there — while no-data ends at the
         # router's sentinel, which is that lane's own decided outcome. Caught as
-        # the taxonomy's base type, not
-        # one leaf at a time: the rate-limit case used to reach the broad
-        # handler below and come back as a successful-looking "Error retrieving
+        # the taxonomy's base type, not one leaf at a time: the rate-limit case
+        # used to reach the broad handler below and come back as a
+        # successful-looking "Error retrieving
         # ..." string, so the router saw a successful answer and never fell
         # back once Alpha Vantage's daily quota was spent (#60).
         raise

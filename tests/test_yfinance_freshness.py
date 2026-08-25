@@ -525,7 +525,21 @@ class TestTzAwareStatementColumnsAreNotAnErrorString:
         _patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
         with pytest.raises(NoMarketDataError) as exc:
             yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
-        assert "could not be bounded to 2026-08-18" in str(exc.value)
+        assert "could not be read as fiscal periods" in str(exc.value)
+
+    def test_the_same_refusal_on_the_date_less_lane_names_no_bound(self, monkeypatch):
+        # The date-less lane (#73) asked for no bound, and this detail is
+        # spliced into the router's agent-facing sentinel — naming one there
+        # would describe a request the model never made.
+        from tradingagents.dataflows.errors import NoMarketDataError
+
+        frame = pd.DataFrame([[100.0, 200.0]], index=["Total Assets"])
+        frame.columns = pd.Index([pd.Timestamp("2026-06-30"), {"a": 1}], dtype=object)
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
+        with pytest.raises(NoMarketDataError) as exc:
+            yfin.get_balance_sheet("AAPL", "quarterly", None)
+        assert "could not be read as fiscal periods" in str(exc.value)
+        assert "None" not in str(exc.value)
 
     def test_a_label_that_parses_to_an_index_is_dropped_not_compared(self, monkeypatch):
         # The other arm of the same branch, and the one no end-to-end input

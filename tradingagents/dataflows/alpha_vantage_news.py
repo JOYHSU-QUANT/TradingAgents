@@ -75,10 +75,12 @@ def get_news(ticker, start_date, end_date) -> str:
         (see ``_news_body``).
 
     The article count comes from ``news_article_limit``, the same key the
-    yfinance sibling sizes its fetch with: how much news a routed tool returns
+    yfinance sibling sizes its fetch with: how much news a routed tool ASKS FOR
     must not depend on which vendor ``data_vendors`` selected (#107). Sending no
     ``limit`` left this getter on the endpoint's own default of 50 against that
-    key's 20.
+    key's 20. How much comes BACK can still differ — this vendor filters the
+    window server-side while the sibling fetches that many and filters after —
+    and each clamps the request to its own endpoint ceiling.
     """
 
     limit = max(1, min(int(get_config()["news_article_limit"]), MAX_NEWS_LIMIT))

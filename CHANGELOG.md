@@ -377,12 +377,13 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
-- **How much news a routed tool ASKS FOR no longer depends on the vendor.**
-  (How much comes back still can: yfinance fetches that many and then filters
-  the window client-side, Alpha Vantage filters server-side.)
+- **The configured article count now reaches both news vendors.**
   `news_article_limit` and `global_news_article_limit` are what the tool
   wrappers document as the source of those defaults, and were read by the
-  yfinance getters only. The Alpha Vantage siblings carried literals instead: global news
+  yfinance getters only. Two things this does not equalise: how much comes
+  *back* (yfinance fetches that many and filters the window client-side, Alpha
+  Vantage filters server-side), and a count set above either vendor's own
+  request ceiling. The Alpha Vantage siblings carried literals instead: global news
   asked for 50 articles over a hard-coded 7-day window, and ticker news sent no
   `limit` at all, leaving the endpoint's own default of 50. Both now read the
   same config keys the yfinance getters read. **Article counts change for Alpha

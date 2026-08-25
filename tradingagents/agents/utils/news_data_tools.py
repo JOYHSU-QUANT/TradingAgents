@@ -13,7 +13,8 @@ def get_news(
 ) -> str:
     """
     Retrieve news data for a given ticker symbol.
-    Uses the configured news_data vendor.
+    Uses the configured news_data vendor, asking it for at most
+    news_article_limit articles (DEFAULT_CONFIG) whichever vendor that is.
     Args:
         ticker (str): Ticker symbol
         start_date (str): Start date in yyyy-mm-dd format
@@ -23,11 +24,16 @@ def get_news(
     """
     return route_to_vendor("get_news", ticker, start_date, end_date)
 
+
 @tool
 def get_global_news(
     curr_date: Annotated[str, "Current date in yyyy-mm-dd format"],
-    look_back_days: Annotated[int | None, "Days to look back; omit to use the configured default"] = None,
-    limit: Annotated[int | None, "Max articles to return; omit to use the configured default"] = None,
+    look_back_days: Annotated[
+        int | None, "Days to look back; omit to use the configured default"
+    ] = None,
+    limit: Annotated[
+        int | None, "Max articles to return; omit to use the configured default"
+    ] = None,
 ) -> str:
     """
     Retrieve global news data.
@@ -44,6 +50,7 @@ def get_global_news(
         str: A formatted string containing global news data
     """
     return route_to_vendor("get_global_news", curr_date, look_back_days, limit)
+
 
 @tool
 def get_insider_transactions(

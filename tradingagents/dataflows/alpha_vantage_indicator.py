@@ -29,7 +29,10 @@ _SUPPORTED_INDICATORS = {
     "boll_ub": ("Bollinger Upper Band", "close"),
     "boll_lb": ("Bollinger Lower Band", "close"),
     "atr": ("ATR", None),
-    "vwma": ("VWMA", "close"),
+    # The _NO_ENDPOINT_INDICATORS members never build a request, so their
+    # series_type is read by nothing; None says that rather than implying a
+    # request shape they do not have.
+    "vwma": ("VWMA", None),
 }
 
 # Supported indicators Alpha Vantage has no endpoint for. They never reach the
@@ -65,7 +68,7 @@ _INDICATOR_REQUESTS = {
 # Maps internal indicator names to the CSV column Alpha Vantage returns.
 # Every indicator in _SUPPORTED_INDICATORS that reaches the CSV-parsing path
 # MUST have an entry here — there is no fallback column guessing (the
-# _NO_ENDPOINT_INDICATORS members are exempt: they return early).
+# _NO_ENDPOINT_INDICATORS members are exempt: they raise before any parsing).
 _CSV_COLUMN_MAP = {
     "macd": "MACD",
     "macds": "MACD_Signal",
@@ -143,7 +146,8 @@ def get_indicator(
         "boll_ub": "Bollinger Upper Band: Typically 2 standard deviations above the middle line. Usage: Signals potential overbought conditions and breakout zones. Tips: Confirm signals with other tools; prices may ride the band in strong trends.",
         "boll_lb": "Bollinger Lower Band: Typically 2 standard deviations below the middle line. Usage: Indicates potential oversold conditions. Tips: Use additional analysis to avoid false reversal signals.",
         "atr": "ATR: Averages true range to measure volatility. Usage: Set stop-loss levels and adjust position sizes based on current market volatility. Tips: It's a reactive measure, so use it as part of a broader risk management strategy.",
-        "vwma": "VWMA: A moving average weighted by volume. Usage: Confirm trends by integrating price action with volume data. Tips: Watch for skewed results from volume spikes; use in combination with other volume analyses.",
+        # No entry for the _NO_ENDPOINT_INDICATORS members: they raise above,
+        # so nothing here would ever be rendered for them.
     }
 
     if indicator not in supported_indicators:
@@ -164,11 +168,13 @@ def get_indicator(
         # vwma from OHLCV via stockstats. Raising hands that vendor its turn
         # (#106). Placed before the try below because no request is made.
         display, _ = supported_indicators[indicator]
+        # The detail is spliced into the router's agent-facing sentinel, so it
+        # says what is true of THIS vendor only: whether a vendor that computes
+        # from OHLCV is configured is not something this getter can see.
         raise NoMarketDataError(
             symbol,
             detail=(
-                f"Alpha Vantage has no {display} endpoint; it must be computed "
-                f"from OHLCV data, which another vendor in the chain can do"
+                f"Alpha Vantage has no {display} endpoint; it can only be computed from OHLCV data"
             ),
         )
 

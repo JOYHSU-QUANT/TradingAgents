@@ -377,10 +377,12 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
-- **How much news a routed tool returns no longer depends on the vendor.**
-  `news_article_limit` and `global_news_article_limit` are documented on the
-  tool wrappers as where the defaults come from, and were read by the yfinance
-  getters only. The Alpha Vantage siblings carried literals instead: global news
+- **How much news a routed tool ASKS FOR no longer depends on the vendor.**
+  (How much comes back still can: yfinance fetches that many and then filters
+  the window client-side, Alpha Vantage filters server-side.)
+  `news_article_limit` and `global_news_article_limit` are what the tool
+  wrappers document as the source of those defaults, and were read by the
+  yfinance getters only. The Alpha Vantage siblings carried literals instead: global news
   asked for 50 articles over a hard-coded 7-day window, and ticker news sent no
   `limit` at all, leaving the endpoint's own default of 50. Both now read the
   same config keys the yfinance getters read. **Article counts change for Alpha
@@ -572,9 +574,9 @@ Breaking changes within the 0.x line are called out explicitly.
   another type will not coerce as one index at all. Every statement-side reader
   of those labels — the look-ahead filter, the "did any column carry a fiscal
   period" measurement, and the freshness note — now parses them one at a time
-  and zone-free through one shared helper, as the OHLCV path already did, and
-  the filter relabels the survivors so the rendered CSV header does not depend
-  on the vendor build. Separately, an indicator registered as supported with no
+  and zone-free through one shared helper — the same zone-free reading the
+  OHLCV path already takes — and the filter relabels the survivors so the
+  rendered CSV header does not depend on the vendor build. Separately, an indicator registered as supported with no
   request definition or no CSV column mapping now raises before making a
   request: the column-mapping case used to pay for one first, the
   request-definition case never made one, and both used to `return` an "Error: …"

@@ -414,20 +414,21 @@ def coerce_period_labels(labels) -> tuple[list, bool]:
     The zone is DROPPED rather than converted to UTC, and for midnight-anchored
     labels the two differ exactly where it matters: measured across offsets
     -12..+14 with 11 label days and 21 cutoffs, every WESTWARD offset disagrees
-    on one cutoff — the label's own date, which converting moves into the
-    previous day and out of the window (a period ending 2020-06-30 in
-    ``America/New_York`` fails a 2020-06-30 cutoff under conversion) — while
-    every offset at or east of UTC agrees on all of them. A fiscal period ends
-    on the day its label names, so dropping is the reading that keeps it.
+    on one cutoff — the label's own date, which converting pushes past that
+    day's midnight and out of the window (a period ending 2020-06-30 in
+    ``America/New_York`` becomes 04:00 UTC on 2020-06-30 and fails a 2020-06-30
+    cutoff) — while every offset at or east of UTC agrees on all of them. A
+    fiscal period ends on the day its label names, so dropping is the reading
+    that keeps it.
 
     A label the parser reads but cannot make a date of — ``None``, a non-date
     string, a value it coerces to an Index rather than a scalar — becomes
-    ``NaT``. A label whose TYPE it refuses outright raises: ``TypeError`` for a
-    ``frozenset``, the one hashable example found, so the only labels that can
-    reach a DataFrame's columns take that arm. (``dict`` raises ``ValueError``
-    but is unhashable, so it can only arrive as an insider VALUE, where
-    ``_dates_lag_note``'s own guard catches both.) The caller types the raise —
-    see ``y_finance._statement_report``.
+    ``NaT``. A label whose TYPE it refuses outright raises, and BOTH exception
+    families are reachable as column labels: an iterator or a nested tuple
+    raises ``TypeError``, a dict-like raises ``ValueError``, and a label need
+    not be hashable to get there (``df.columns = pd.Index([...], dtype=object)``
+    accepts either). The caller types the raise — see
+    ``y_finance._statement_report``, which catches both.
     """
     periods, dropped_a_zone = [], False
     for label in labels:

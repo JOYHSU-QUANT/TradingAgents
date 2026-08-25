@@ -503,20 +503,25 @@ class TestTzAwareStatementColumnsAreNotAnErrorString:
         assert "2026-06-30" in out
         assert "2099-03-31" not in out
 
-    def test_a_label_type_the_parser_refuses_takes_the_typed_lane(self, monkeypatch):
-        # Driven by a REAL refusing label rather than a patched filter: a
-        # frozenset is hashable, so it is a legal column label, and pandas
-        # answers it with TypeError("len() of unsized object"). Patching the
-        # filter instead left the getter's other parse of the same labels
-        # outside the guard, where the refusal became an "Error retrieving ..."
-        # string the router reads as a successful report — the failure this
-        # whole change exists to close.
+    @pytest.mark.parametrize(
+        "refusing_label",
+        [frozenset({"x"}), iter([1, 2]), {"a": 1}],
+        ids=["frozenset-TypeError", "iterator-TypeError", "dict-ValueError"],
+    )
+    def test_a_label_type_the_parser_refuses_takes_the_typed_lane(
+        self, monkeypatch, refusing_label
+    ):
+        # Driven by REAL refusing labels rather than a patched filter, and by
+        # one of each exception family: pandas picks by label type, and a column
+        # label need not be hashable to get there. Catching only one family left
+        # the other returning an "Error retrieving ..." string the router reads
+        # as a successful report — the failure this whole change exists to
+        # close. Patching the filter instead missed both, because the getter
+        # parses the same labels a second time outside that call.
         from tradingagents.dataflows.errors import NoMarketDataError
 
-        frame = pd.DataFrame(
-            {c: [100.0] for c in (pd.Timestamp("2026-06-30"), frozenset({"x"}))},
-            index=["Total Assets"],
-        )
+        frame = pd.DataFrame([[100.0, 200.0]], index=["Total Assets"])
+        frame.columns = pd.Index([pd.Timestamp("2026-06-30"), refusing_label], dtype=object)
         _patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
         with pytest.raises(NoMarketDataError) as exc:
             yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")

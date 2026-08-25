@@ -68,18 +68,21 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title
         # exists to separate (measured, pandas 2.3.3).
         datable = sum(not pd.isna(p) for p in coerce_period_labels(data.columns)[0])
         data = filter_financials_by_date(data, curr_date)
-    except TypeError as e:
+    except (TypeError, ValueError) as e:
         # The per-label parse covers both measured ways a tz-aware statement
         # frame used to reach here (#110); a label whose TYPE the parser refuses
-        # outright — a frozenset is the one hashable example found — still
-        # raises, and both statements above are inside this guard so it leaves
-        # as a typed vendor failure the router can fall back from rather than
-        # reaching the getters' broad except and coming back as an "Error
-        # retrieving ..." string the router reads as a successful report.
-        # TypeError alone: the filter's other raise is a ValueError for an
-        # unusable curr_date, which cannot arrive here (the shared sentinel
-        # above answered that case first, #89) and must keep its own identity
-        # for a direct caller.
+        # outright still raises, and both statements above are inside this guard
+        # so it leaves as a typed vendor failure the router can fall back from
+        # rather than reaching the getters' broad except and coming back as an
+        # "Error retrieving ..." string the router reads as a successful report.
+        # BOTH exception types, because pandas picks by label type and the two
+        # families are equally reachable: an iterator or nested tuple raises
+        # TypeError, a dict-like raises ValueError, and a column label need not
+        # be hashable — ``df.columns = pd.Index([...], dtype=object)`` takes
+        # either (measured, pandas 2.3.3). The filter's own ValueError, for an
+        # unusable curr_date, is not a second meaning to worry about here: the
+        # shared sentinel above answered that case before anything was filtered
+        # (#89), and this is the only production caller of that filter.
         raise NoMarketDataError(
             ticker,
             canonical,

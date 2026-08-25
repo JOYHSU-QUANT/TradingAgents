@@ -13,7 +13,7 @@ from .symbol_utils import normalize_symbol
 
 # The date refusals live in utils so the Alpha Vantage vendor serving the same
 # routed tools shares the single judgement and the single sentence (#111).
-from .utils import curr_date_refusal, date_range_refusal
+from .utils import date_range_refusal, date_refusal
 
 # Clamp the untrusted article count before it sizes an external yf.Search
 # call (#33): an LLM-supplied or misconfigured value must stay bounded.
@@ -171,7 +171,7 @@ def get_global_news_yfinance(
     # (#111). This must stay ABOVE the "No global news found" early exit: that
     # sentence is a coverage claim about the day named, so it may only be
     # served for a day that was.
-    refusal = curr_date_refusal(curr_date, what="global news", omitted_ok=False)
+    refusal = date_refusal(curr_date, what="global news", kind="point")
     if refusal is not None:
         return refusal
 

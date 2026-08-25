@@ -224,18 +224,18 @@ class TestUnusableCurrDateIsVendorAgnostic:
         import tradingagents.dataflows.yfinance_news as yfnews
         from tradingagents.dataflows import utils
 
-        assert yfin.curr_date_refusal is utils.curr_date_refusal
-        assert avf.curr_date_refusal is utils.curr_date_refusal
+        assert yfin.date_refusal is utils.date_refusal
+        assert avf.date_refusal is utils.date_refusal
         # The #111 tail: the news, OHLCV and indicator vendors, and the
         # direct-call verification tool's sentence (#112).
-        assert yfnews.curr_date_refusal is utils.curr_date_refusal
+        assert yfnews.date_refusal is utils.date_refusal
         assert yfnews.date_range_refusal is utils.date_range_refusal
-        assert avn.curr_date_refusal is utils.curr_date_refusal
+        assert avn.date_refusal is utils.date_refusal
         assert avn.date_range_refusal is utils.date_range_refusal
         assert yfin.date_range_refusal is utils.date_range_refusal
         assert avs.date_range_refusal is utils.date_range_refusal
-        assert avi.curr_date_refusal is utils.curr_date_refusal
-        assert mdv.invalid_curr_date_sentinel is utils.invalid_curr_date_sentinel
+        assert avi.date_refusal is utils.date_refusal
+        assert mdv.invalid_date_sentinel is utils.invalid_date_sentinel
 
     @pytest.mark.parametrize("curr_date", _UNUSABLE)
     @pytest.mark.parametrize(
@@ -263,9 +263,11 @@ class TestUnusableCurrDateIsVendorAgnostic:
         # answer, so neither vendor can append the future row it just refused to
         # bound. A "does not contain 2099-03-31" check could not fail once
         # startswith passed, since the sentence interpolates only curr_date.
-        from tradingagents.dataflows.utils import invalid_curr_date_sentinel
+        from tradingagents.dataflows.utils import invalid_date_sentinel
 
-        assert yf_out == av_out == invalid_curr_date_sentinel(curr_date, what="fundamentals")
+        assert (
+            yf_out == av_out == invalid_date_sentinel(curr_date, what="fundamentals", kind="point")
+        )
         assert repr(curr_date) in yf_out  # the rejected value, so a retry can fix it
 
     @pytest.mark.parametrize("curr_date", _UNUSABLE)
@@ -286,9 +288,11 @@ class TestUnusableCurrDateIsVendorAgnostic:
         # Exact equality pins that the refusal is the whole answer — the ratios
         # cannot ride along behind it (see the statement test for why a bare
         # "Apple Inc. not in output" check would have no power here).
-        from tradingagents.dataflows.utils import invalid_curr_date_sentinel
+        from tradingagents.dataflows.utils import invalid_date_sentinel
 
-        assert yf_out == av_out == invalid_curr_date_sentinel(curr_date, what="fundamentals")
+        assert (
+            yf_out == av_out == invalid_date_sentinel(curr_date, what="fundamentals", kind="point")
+        )
 
     def test_an_omitted_curr_date_still_takes_the_date_less_lane(self, monkeypatch):
         import json

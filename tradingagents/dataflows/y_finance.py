@@ -22,9 +22,9 @@ from .symbol_utils import NoMarketDataError, normalize_symbol
 # the same routed tool shares the single definition (#69).
 from .utils import (
     MAX_INSIDER_LAG_DAYS,
-    curr_date_refusal,
     data_lag_note,
     date_range_refusal,
+    date_refusal,
     live_snapshot_note,
     statement_lag_bound,
 )
@@ -49,7 +49,9 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title
     """
     if data.empty:
         raise NoMarketDataError(ticker, canonical, f"no {noun} data")
-    if (refusal := curr_date_refusal(curr_date, what="fundamentals")) is not None:
+    if (
+        refusal := date_refusal(curr_date, what="fundamentals", kind="point", omitted_ok=True)
+    ) is not None:
         return refusal
 
     # Measured before filtering, because a frame can also empty by having no
@@ -312,7 +314,7 @@ def get_stock_stats_indicators_window(
         )
 
     # Unusable dates are refused before any request, in the shared voice (#111).
-    refusal = curr_date_refusal(curr_date, what="indicator values", omitted_ok=False)
+    refusal = date_refusal(curr_date, what="indicator values", kind="point")
     if refusal is not None:
         return refusal
     end_date = curr_date
@@ -498,7 +500,9 @@ def get_fundamentals(
         # Refused at the same depth as the Alpha Vantage overview path, whose
         # docstring gives the reasoning: with no usable analysis date neither
         # vendor can tell a backtest from live trading (#89).
-        if (refusal := curr_date_refusal(curr_date, what="fundamentals")) is not None:
+        if (
+            refusal := date_refusal(curr_date, what="fundamentals", kind="point", omitted_ok=True)
+        ) is not None:
             return refusal
 
         header = f"# Company Fundamentals for {canonical}\n"

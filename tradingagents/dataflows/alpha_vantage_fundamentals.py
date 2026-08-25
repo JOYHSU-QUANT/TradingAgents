@@ -14,8 +14,8 @@ from .alpha_vantage_common import (
 )
 from .errors import NoMarketDataError
 from .utils import (
-    curr_date_refusal,
     data_lag_note,
+    date_refusal,
     live_snapshot_note,
     normalize_iso_date,
     statement_lag_bound,
@@ -219,7 +219,9 @@ def _filter_response_json(result, curr_date, freq, label, symbol):
             else ""
         )
         return _with_freshness_note(parsed, note) if note else _served_body(result, parsed)
-    if (refusal := curr_date_refusal(curr_date, what="fundamentals")) is not None:
+    if (
+        refusal := date_refusal(curr_date, what="fundamentals", kind="point", omitted_ok=True)
+    ) is not None:
         return refusal
     cadence = _statement_cadence(freq)
     supplied = parsed.get(f"{cadence}Reports")
@@ -331,7 +333,9 @@ def _annotate_live_snapshot(result, curr_date, symbol):
         # disclosure only ever says "today's values are not curr_date's", which
         # is vacuous when the reference date IS today.
         return _served_body(result, parsed)
-    if (refusal := curr_date_refusal(curr_date, what="fundamentals")) is not None:
+    if (
+        refusal := date_refusal(curr_date, what="fundamentals", kind="point", omitted_ok=True)
+    ) is not None:
         return refusal
     note = live_snapshot_note(curr_date, "these fundamentals are")
     if not note:

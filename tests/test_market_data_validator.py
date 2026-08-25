@@ -124,14 +124,16 @@ class TestTool:
         # data work starts — with the SAME sentence the routed tools serve,
         # not a hand-written third copy of it (#112). Whole-answer equality:
         # a startswith check let the old copy's different wording pass.
-        from tradingagents.dataflows.utils import invalid_curr_date_sentinel
+        from tradingagents.dataflows.utils import invalid_date_sentinel
 
         def _must_not_be_called(s, d):
             raise AssertionError("load_ohlcv must not be called for a bad date")
 
         monkeypatch.setattr(validator, "load_ohlcv", _must_not_be_called)
         out = get_verified_market_snapshot.invoke({"symbol": "COF", "curr_date": curr_date})
-        assert out == invalid_curr_date_sentinel(curr_date, what="the verification snapshot")
+        assert out == invalid_date_sentinel(
+            curr_date, what="the verification snapshot", kind="point"
+        )
 
     def test_tool_keeps_its_looser_parse_on_purpose(self, monkeypatch):
         # The routed tools refuse "2026/08/18" because they compare a

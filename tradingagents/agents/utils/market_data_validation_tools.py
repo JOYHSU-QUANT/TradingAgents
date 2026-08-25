@@ -5,7 +5,7 @@ from langchain_core.tools import tool
 
 from tradingagents.dataflows.errors import VendorError, VendorRateLimitError
 from tradingagents.dataflows.market_data_validator import build_verified_market_snapshot
-from tradingagents.dataflows.utils import invalid_curr_date_sentinel
+from tradingagents.dataflows.utils import invalid_date_sentinel
 
 
 @tool
@@ -33,7 +33,7 @@ def get_verified_market_snapshot(
     # this tool turns the value into a real Timestamp and compares numerically,
     # so a date pandas can read is one it can use. Only the wording is shared.
     if pd.isna(pd.to_datetime(curr_date, errors="coerce")):
-        return invalid_curr_date_sentinel(curr_date, what="the verification snapshot")
+        return invalid_date_sentinel(curr_date, what="the verification snapshot", kind="point")
     # This tool calls the builder directly (it does not go through
     # route_to_vendor), so the vendor-error taxonomy must be turned into the
     # instructive no-data sentinel here — otherwise a typed raise surfaces as

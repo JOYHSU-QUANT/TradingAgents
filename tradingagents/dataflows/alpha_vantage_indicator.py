@@ -2,7 +2,7 @@ import requests
 
 from .alpha_vantage_common import _make_api_request
 from .errors import NoMarketDataError, VendorError
-from .utils import curr_date_refusal, data_lag_note
+from .utils import data_lag_note, date_refusal
 
 # Maximum age (calendar days) of the newest indicator row relative to
 # curr_date before the report carries a data-lag note, keyed by the requested
@@ -159,7 +159,7 @@ def get_indicator(
         )
 
     # Unusable dates are refused before any request, in the shared voice (#111).
-    refusal = curr_date_refusal(curr_date, what="indicator values", omitted_ok=False)
+    refusal = date_refusal(curr_date, what="indicator values", kind="point")
     if refusal is not None:
         return refusal
     curr_date_dt = datetime.strptime(curr_date, "%Y-%m-%d")

@@ -11,7 +11,7 @@ from .alpha_vantage_common import (
     format_datetime_for_api,
 )
 from .config import get_config
-from .utils import MAX_INSIDER_LAG_DAYS, curr_date_refusal, data_lag_note, date_range_refusal
+from .utils import MAX_INSIDER_LAG_DAYS, data_lag_note, date_range_refusal, date_refusal
 
 # Clamp untrusted request sizes before they parameterize an external call
 # (#33): an LLM-supplied or misconfigured value must not turn into an
@@ -139,7 +139,7 @@ def get_global_news(curr_date, look_back_days: int | None = None, limit: int | N
     """
     from datetime import datetime, timedelta
 
-    refusal = curr_date_refusal(curr_date, what="global news", omitted_ok=False)
+    refusal = date_refusal(curr_date, what="global news", kind="point")
     if refusal is not None:
         return refusal
 

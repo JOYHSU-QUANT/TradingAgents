@@ -369,42 +369,53 @@ def test_get_balance_sheet_returns_error_string_on_unparseable_curr_date(monkeyp
 
 
 @pytest.mark.unit
-def test_every_supported_indicator_has_a_csv_column_mapping():
-    # The blind "default to the second column" fallback is gone (#31): adding a
-    # new indicator without a CSV column mapping must turn this red, not
-    # silently render numbers from whatever column happens to be second.
-    unmapped = (
-        set(avi._SUPPORTED_INDICATORS) - avi._NO_ENDPOINT_INDICATORS - set(avi._CSV_COLUMN_MAP)
+@pytest.mark.parametrize("registry", ["_CSV_COLUMN_MAP", "_INDICATOR_REQUESTS"])
+def test_the_supported_indicators_and_each_wiring_registry_cover_the_same_set(registry):
+    # Two wiring invariants in one shape (#31, #106). An indicator supported but
+    # absent from a registry used to answer an "Error: ..." string the router
+    # reads as a report — the CSV-column half would previously have rendered
+    # whatever column happened to be second as RSI values. Set EQUALITY, not
+    # subtraction: an entry added to a registry alone is drift too, and the
+    # subtraction form this replaced could not see it.
+    assert set(getattr(avi, registry)) | avi._NO_ENDPOINT_INDICATORS == set(
+        avi._SUPPORTED_INDICATORS
     )
-    assert not unmapped, f"indicators lacking a CSV column mapping: {sorted(unmapped)}"
 
 
-@pytest.mark.unit
-def test_every_supported_indicator_has_an_alpha_vantage_request():
-    # The other half of the same wiring invariant (#106). The dispatch used to
-    # be an elif ladder, so a supported indicator the ladder had no branch for
-    # fell through to "Error: Indicator ... not implemented yet." — a string
-    # route_to_vendor reads as a successful report. The registry now drives the
-    # request, and a gap turns this red instead.
-    undefined = (
-        set(avi._SUPPORTED_INDICATORS) - avi._NO_ENDPOINT_INDICATORS - set(avi._INDICATOR_REQUESTS)
-    )
-    assert not undefined, f"indicators lacking an Alpha Vantage request: {sorted(undefined)}"
+# Independently transcribed from the elif ladder the dispatch table replaced
+# (`origin/hyperliquid-adapter`), with the caller's time_period written out as
+# the 9 the test below passes. Deriving these from `_INDICATOR_REQUESTS` would
+# make that table its own witness: a transcription slip such as
+# `close_50_sma -> ("SMA", "20")` renders a 20-period average under a
+# `## CLOSE_50_SMA` header, and a test reading the same entry stays green
+# (measured — that mutation passed the whole suite before this table existed).
+_LADDER_REQUESTS = {
+    "close_50_sma": ("SMA", {"time_period": "50", "series_type": "close"}),
+    "close_200_sma": ("SMA", {"time_period": "200", "series_type": "close"}),
+    "close_10_ema": ("EMA", {"time_period": "10", "series_type": "close"}),
+    "macd": ("MACD", {"series_type": "close"}),
+    "macds": ("MACD", {"series_type": "close"}),
+    "macdh": ("MACD", {"series_type": "close"}),
+    "rsi": ("RSI", {"time_period": "9", "series_type": "close"}),
+    "boll": ("BBANDS", {"time_period": "20", "series_type": "close"}),
+    "boll_ub": ("BBANDS", {"time_period": "20", "series_type": "close"}),
+    "boll_lb": ("BBANDS", {"time_period": "20", "series_type": "close"}),
+    "atr": ("ATR", {"time_period": "9"}),  # the one entry that sends no series_type
+}
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "indicator", sorted(set(avi._SUPPORTED_INDICATORS) - avi._NO_ENDPOINT_INDICATORS)
 )
-def test_each_indicator_requests_the_shape_its_registry_entry_declares(monkeypatch, indicator):
-    # Pins that the request actually issued is the one the registries describe:
-    # exactly one call, to the named function, carrying the declared
-    # time_period. It does NOT pin that a registry entry names the right Alpha
-    # Vantage endpoint — nothing in this repo can check that — only that the
-    # dispatch cannot drift away from what the entries say, which is the
-    # guarantee the elif ladder it replaced could not give. series_type is
-    # derived rather than listed a third time: it rides along exactly when
-    # _SUPPORTED_INDICATORS declares a required one (ATR declares none).
+def test_each_indicator_issues_the_request_the_elif_ladder_used_to(monkeypatch, indicator):
+    # Exactly one call, and the whole params dict compared — so a parameter
+    # dropped, added or renamed by the refactor is caught too. Parametrized over
+    # the supported set rather than over _LADDER_REQUESTS: a new indicator
+    # reaches this as a KeyError, which is the drift lock in the other
+    # direction. It does NOT pin that an entry names the right Alpha Vantage
+    # endpoint — nothing in this repo can check that — only that today's request
+    # is the one the ladder made.
     calls = []
 
     def _capture(function_name, params):
@@ -415,20 +426,13 @@ def test_each_indicator_requests_the_shape_its_registry_entry_declares(monkeypat
     with pytest.raises(NoMarketDataError):
         avi.get_indicator("AAPL", indicator, "2026-06-01", 30, time_period=9)
 
-    assert len(calls) == 1
-    function_name, params = calls[0]
-    expected_function, time_period_spec = avi._INDICATOR_REQUESTS[indicator]
-    assert function_name == expected_function
-    assert params["symbol"] == "AAPL"
-    assert params["interval"] == "daily"
-    assert params["datatype"] == "csv"
-    assert ("series_type" in params) is bool(avi._SUPPORTED_INDICATORS[indicator][1])
-    if time_period_spec is avi._CALLER_TIME_PERIOD:
-        assert params["time_period"] == "9"  # the caller's value, forwarded
-    elif time_period_spec is None:
-        assert "time_period" not in params
-    else:
-        assert params["time_period"] == time_period_spec
+    expected_function, expected_params = _LADDER_REQUESTS[indicator]
+    assert calls == [
+        (
+            expected_function,
+            {"symbol": "AAPL", "interval": "daily", "datatype": "csv", **expected_params},
+        )
+    ]
 
 
 @pytest.mark.unit
@@ -497,17 +501,18 @@ class TestIndicatorStructuralFailuresAreNotReports:
             self._indicator(monkeypatch, "time,RSI\n2020-01-02,55.0\n")
         assert "no rsi rows between 2026-05-02 and 2026-06-01" in str(exc.value)
 
-    def test_the_endpointless_indicator_still_answers_without_a_request(self, monkeypatch):
-        # VWMA has no Alpha Vantage endpoint, so it answers from its description
-        # and is the one indicator exempt from both wiring registries. Its early
-        # return now sits outside the request block; pinned here so the exemption
-        # cannot quietly become a request or a raise.
+    def test_an_indicator_this_vendor_has_no_endpoint_for_is_no_data(self, monkeypatch):
+        # VWMA used to answer "## VWMA ... is not directly available from Alpha
+        # Vantage API" — prose, so route_to_vendor recorded a successful report
+        # and the chain stopped, even though the yfinance vendor serving the
+        # same routed tool computes vwma from OHLCV. Same class as the four
+        # above, and the one this getter can answer without asking anyone.
         monkeypatch.setattr(
             avi, "_make_api_request", lambda *a, **k: pytest.fail("no request may be made")
         )
-        out = avi.get_indicator("AAPL", "vwma", "2026-06-01", 30)
-        assert "VWMA" in out
-        assert "not directly available from Alpha Vantage API" in out
+        with pytest.raises(NoMarketDataError) as exc:
+            avi.get_indicator("AAPL", "vwma", "2026-06-01", 30)
+        assert "no VWMA endpoint" in str(exc.value)
 
     def test_rows_inside_the_window_still_render(self, monkeypatch):
         # The other side of the same boundary: one in-window row is a report, so

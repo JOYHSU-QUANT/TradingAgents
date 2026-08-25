@@ -406,18 +406,40 @@ def filter_financials_by_date(data: pd.DataFrame, curr_date: str | None) -> pd.D
     ``strptime``-valid, so building the cutoff from the normalised form rather
     than the raw string is only a canonical-form convention.
 
-    Column labels are compared zone-free. yfinance returns statement columns
-    tz-aware on some builds, and a tz-aware index refuses to compare against the
-    naive cutoff — ``TypeError: Invalid comparison between dtype=datetime64[ns,
-    UTC] and Timestamp`` (measured, pandas 2.3.3) — which the getters' broad
-    except handed back as ``"Error retrieving balance sheet for AAPL: Invalid
-    comparison ..."``, a string route_to_vendor reads as a successful statement
-    report (#110). Dropping the zone is how ``get_YFin_data_online`` already
-    handles the same vendor quirk on the OHLCV path. A frame mixing aware and
-    naive labels coerces to one zone with the odd entries as ``NaT`` before this
-    runs, so it takes the same lane. Anything that still cannot be compared
-    leaves as the raw ``TypeError`` for the caller to type (see
-    ``y_finance._statement_report``).
+    Column labels are parsed ONE AT A TIME and compared zone-free, and the
+    surviving ones are relabelled to what was compared whenever a zone was
+    dropped. yfinance returns statement columns tz-aware on some builds, and two
+    distinct failures followed from handling the labels as one index (both
+    measured, pandas 2.3.3):
+
+    * a tz-aware index will not compare against the naive cutoff —
+      ``TypeError: Invalid comparison between dtype=datetime64[ns, UTC] and
+      Timestamp``;
+    * coercing labels that mix a tz-aware timestamp with a naive value of
+      another type — a plain string, a ``datetime.date`` — raises
+      ``ValueError: Cannot mix tz-aware with tz-naive values`` before any
+      comparison happens. (An all-``Timestamp`` mix does NOT raise: it coerces
+      to one zone with the odd entries as ``NaT``. That narrower case is why
+      this was first written as one vectorised call.)
+
+    Both reached the getters' broad except and came back as ``"Error retrieving
+    balance sheet for AAPL: ..."``, a string route_to_vendor reads as a
+    successful statement report (#110). Parsing per label removes the mixing
+    question entirely: each label parses on its own terms and an unparseable one
+    is ``NaT``, which compares False against any cutoff exactly as the
+    vectorised ``errors="coerce"`` did. Dropping the zone (rather than
+    converting to UTC, which would move a ``+09:00`` label back a calendar day
+    across the cutoff) is how ``get_YFin_data_online`` handles the same vendor
+    quirk on the OHLCV path.
+
+    The relabelling keeps the rendered CSV header from depending on the vendor
+    build — the freshness note downstream re-reads these labels through the same
+    vectorised coercion, and would have hit the ValueError above. It is skipped
+    when no label carried a zone, so the labels of an ordinary naive frame are
+    passed through untouched.
+
+    A label type the parser cannot handle at all still raises; ``TypeError``
+    from here is typed by the caller (see ``y_finance._statement_report``).
     """
     if curr_date is None or data.empty:
         return data
@@ -428,11 +450,14 @@ def filter_financials_by_date(data: pd.DataFrame, curr_date: str | None) -> pd.D
             f"YYYY-MM-DD date; refusing to serve statements unfiltered (look-ahead guard)"
         )
     cutoff = pd.Timestamp(normalized)
-    columns = pd.to_datetime(data.columns, errors="coerce")
-    if getattr(columns, "tz", None) is not None:
-        columns = columns.tz_localize(None)
-    mask = columns <= cutoff
-    return data.loc[:, mask]
+    periods = [pd.to_datetime(label, errors="coerce") for label in data.columns]
+    zoned = [not pd.isna(p) and p.tzinfo is not None for p in periods]
+    periods = [p.tz_localize(None) if z else p for p, z in zip(periods, zoned, strict=True)]
+    mask = [not pd.isna(p) and p <= cutoff for p in periods]
+    kept = data.loc[:, mask]
+    if any(zoned):
+        kept = kept.set_axis([p for p, keep in zip(periods, mask, strict=True) if keep], axis=1)
+    return kept
 
 
 class StockstatsUtils:

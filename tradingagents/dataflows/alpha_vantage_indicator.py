@@ -32,9 +32,10 @@ _SUPPORTED_INDICATORS = {
     "vwma": ("VWMA", "close"),
 }
 
-# Supported indicators Alpha Vantage has no endpoint for: they answer from the
-# description text and never reach the request table or the CSV parser, so they
-# are the one exemption from both wiring checks below.
+# Supported indicators Alpha Vantage has no endpoint for. They never reach the
+# request table or the CSV parser, so they are the one exemption from both
+# wiring checks below; get_indicator answers them with the taxonomy's no-data
+# error so the router can hand the call to a vendor that computes them.
 _NO_ENDPOINT_INDICATORS = frozenset({"vwma"})
 
 # Sentinel: forward the caller's time_period rather than a fixed one.
@@ -87,7 +88,6 @@ def get_indicator(
     look_back_days: int,
     interval: str = "daily",
     time_period: int = 14,
-    series_type: str = "close",
 ) -> str:
     """
     Returns Alpha Vantage technical indicator values over a time window.
@@ -98,14 +98,16 @@ def get_indicator(
         curr_date: The current trading date you are trading on, YYYY-mm-dd
         look_back_days: how many days to look back
         interval: Time interval (daily, weekly, monthly)
-        time_period: Number of data points for calculation
-        series_type: The desired price type (close, open, high, low)
+        time_period: Number of data points for calculation. Only the indicators
+            whose request entry forwards it (RSI, ATR) use it; the rest carry
+            the period their Alpha Vantage function is named for.
 
     Returns:
         String containing indicator values and description
 
     Raises:
-        NoMarketDataError: When the vendor's answer carries no usable indicator
+        NoMarketDataError: When this vendor cannot serve the indicator at all
+            (it has no endpoint for it), or when its answer carries no usable
             rows — a blank or header-only CSV, a CSV whose ``time`` or value
             column is absent, or one whose rows all fall outside the requested
             window. Each used to ``return`` prose instead, which
@@ -117,6 +119,11 @@ def get_indicator(
             our own wiring gaps, raised before any request is made.
         VendorError, requests.RequestException: Propagated (see the handlers at
             the end of this function).
+
+    The price series is not a parameter: each indicator's entry in
+    ``_SUPPORTED_INDICATORS`` names the ``series_type`` its request carries (or
+    names none, as ATR does). A caller-supplied one used to be accepted and then
+    overwritten by that entry on every indicator, so it never reached a request.
     """
     from datetime import datetime
 
@@ -148,17 +155,32 @@ def get_indicator(
     before = curr_date_dt - relativedelta(days=look_back_days)
 
     if indicator in _NO_ENDPOINT_INDICATORS:
-        # Alpha Vantage has no VWMA endpoint, so this answers from the
-        # description alone. Returning here rather than inside the try below
-        # says outright that no request is made — and leaves both wiring checks
-        # unconditional for every indicator that does make one.
-        return f"## VWMA (Volume Weighted Moving Average) for {symbol}:\n\nVWMA calculation requires OHLCV data and is not directly available from Alpha Vantage API.\nThis indicator would need to be calculated from the raw stock data using volume-weighted price averaging.\n\n{indicator_descriptions.get('vwma', 'No description available.')}"
+        # This vendor cannot serve the indicator at all, which is a no-data
+        # condition about the vendor rather than the symbol. It used to answer
+        # prose ("VWMA calculation requires OHLCV data and is not directly
+        # available from Alpha Vantage API"), and route_to_vendor reads a
+        # returned string as a successful report — so the chain stopped here
+        # even though the yfinance vendor serving the same routed tool computes
+        # vwma from OHLCV via stockstats. Raising hands that vendor its turn
+        # (#106). Placed before the try below because no request is made.
+        display, _ = supported_indicators[indicator]
+        raise NoMarketDataError(
+            symbol,
+            detail=(
+                f"Alpha Vantage has no {display} endpoint; it must be computed "
+                f"from OHLCV data, which another vendor in the chain can do"
+            ),
+        )
 
     # Both wiring checks run before the request and outside the broad handler at
     # the end: a supported indicator with no request definition or no CSV column
-    # is our bug, not a vendor condition, so it must fail loud rather than come
-    # back as a string the router accepts (#106). Guessing a column would
-    # silently render numbers from the wrong field (#31).
+    # is our bug, not a vendor condition. Raising rather than returning prose
+    # stops it costing a request and leaves a traceback in the logs; note that
+    # the tool wrapper catches ValueError and appends the message to the report
+    # (technical_indicators_tools.py), so what the AGENT sees is unchanged —
+    # what changes is that the router no longer records a successful answer
+    # (#106). Guessing a column would silently render numbers from the wrong
+    # field (#31).
     if indicator not in _INDICATOR_REQUESTS:
         raise ValueError(
             f"Indicator '{indicator}' is registered as supported but has no "
@@ -169,9 +191,6 @@ def get_indicator(
             f"Indicator '{indicator}' is registered as supported but has no CSV column mapping"
         )
 
-    # The registry dictates the price series, so the caller's series_type never
-    # reaches a request: every entry that takes one names it, and the one that
-    # does not (ATR) sends no series_type at all.
     _, required_series_type = supported_indicators[indicator]
 
     av_function, time_period_spec = _INDICATOR_REQUESTS[indicator]

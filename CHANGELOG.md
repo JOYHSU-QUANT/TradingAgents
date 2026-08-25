@@ -556,24 +556,32 @@ Breaking changes within the 0.x line are called out explicitly.
   `route_to_vendor` never inspects a returned string, so any getter that answers
   prose instead of raising ends the vendor chain and hands the agent that prose
   as data. Two getters still did. The Alpha Vantage indicator getter returned
-  four such sentences — a blank or header-only CSV, a CSV missing its `time`
-  column, one missing the indicator's own value column, and (the quietest of
-  them) a window the vendor had no rows in, which was reported *inside* a
-  well-formed `## RSI values from … to …` report carrying no error wording at
-  all. All four now raise `NoMarketDataError`, the lane the same vendor's daily
-  bars getter has taken since #30: another configured vendor gets its turn, and
-  a chain with only this one emits the router's no-data sentinel with the reason
-  attached. The yfinance statement getters answered `"Error retrieving balance
-  sheet for AAPL: Invalid comparison between dtype=datetime64[ns, UTC] and
-  Timestamp"` whenever yfinance returned fiscal-period columns with a timezone
-  (measured on pandas 2.3.3): the look-ahead filter now compares column labels
-  zone-free, as the OHLCV path already did, so those frames are filtered and
-  served normally. Also loud instead of prose: an indicator registered as
-  supported with no request definition or no CSV column mapping, which used to
-  return an "Error: …" string after paying for a request and now raises before
-  making one. The indicator dispatch is a registry rather than an elif ladder,
-  and tests derive from it so a future indicator cannot be added to one half and
-  not the other.
+  five such sentences — a blank or header-only CSV, a CSV missing its `time`
+  column, one missing the indicator's own value column, a window the vendor had
+  no rows in (reported *inside* a well-formed `## RSI values from … to …` report
+  carrying no error wording at all), and `vwma`, which Alpha Vantage has no
+  endpoint for and which said so in prose while the yfinance vendor serving the
+  same routed tool computes it from OHLCV and was never asked. All five now
+  raise `NoMarketDataError`, the lane the same vendor's daily bars getter has
+  taken since #30: another configured vendor gets its turn, and a chain with
+  only this one emits the router's no-data sentinel with the reason attached.
+  The yfinance statement getters answered `"Error retrieving balance sheet for
+  AAPL: …"` on fiscal-period columns carrying a timezone, in two distinct ways
+  (both measured on pandas 2.3.3): a tz-aware index will not compare against the
+  naive cutoff, and labels mixing a tz-aware timestamp with a naive value of
+  another type — a string, a `datetime.date` — will not coerce as one index at
+  all. The look-ahead filter now parses labels one at a time and compares them
+  zone-free, as the OHLCV path already did, and relabels the survivors so the
+  rendered CSV header does not depend on the vendor build. Separately, an
+  indicator registered as supported with no request definition or no CSV column
+  mapping now raises before making a request: the column-mapping case used to
+  pay for one first, the request-definition case never made one, and both used
+  to `return` an "Error: …" string that the router recorded as a successful
+  answer. (What the *agent* sees for those two is unchanged — the indicator tool
+  wrapper catches `ValueError` and appends the message to the report.) The
+  indicator dispatch is a registry rather than an elif ladder; tests assert set
+  equality between it and the supported list in both directions, and pin each
+  indicator's request against a table transcribed from the ladder it replaced.
 
 - **A curr_date the model cannot be held to is now refused the same way by
   either fundamentals vendor.** The same routed statement tool used to take

@@ -62,24 +62,26 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title
         datable = int(pd.to_datetime(data.columns, errors="coerce").notna().sum())
     except (TypeError, ValueError):
         # Guarded for the same reason _dates_lag_note guards, and NOT redundant
-        # with the coercion inside filter_financials_by_date: on the date-less
-        # lane that one never runs, because it early-returns before coercing.
-        # No input has been found that makes errors="coerce" raise on the pinned
-        # pandas, so this is defence, not a live path; treating an index we
-        # cannot read as carrying no usable period is the conservative reading.
+        # with the per-label parse inside filter_financials_by_date: on the
+        # date-less lane that one never runs, because it early-returns first.
+        # This IS a live path — labels mixing a tz-aware timestamp with a naive
+        # value of another type raise ValueError("Cannot mix tz-aware with
+        # tz-naive values") here (measured, pandas 2.3.3), which is why the
+        # filter stopped coercing them as one index. Treating an index we cannot
+        # read as carrying no usable period is the conservative reading.
         datable = 0
 
     try:
         data = filter_financials_by_date(data, curr_date)
     except TypeError as e:
-        # The filter compares column labels zone-free, which is what the one
-        # measured way to get here — tz-aware statement columns — needed (#110).
-        # A label set that still will not compare leaves as a typed vendor
-        # failure so the router can fall back, rather than reaching the getters'
-        # broad except and coming back as an "Error retrieving ..." string the
-        # router reads as a successful report. No input has been found that
-        # reaches this on the pinned pandas: it is the contract for that lane,
-        # not a live path.
+        # The filter parses labels one at a time and compares them zone-free,
+        # which covers both measured ways a tz-aware statement frame used to get
+        # here (#110). A label of a type the parser cannot read at all still
+        # raises, and leaves as a typed vendor failure the router can fall back
+        # from, rather than reaching the getters' broad except and coming back
+        # as an "Error retrieving ..." string the router reads as a successful
+        # report. No yfinance answer has been found that reaches this: it is the
+        # contract for that lane, not a measured path.
         raise NoMarketDataError(
             ticker,
             canonical,
@@ -110,12 +112,14 @@ def _dates_lag_note(values, curr_date: str | None, max_lag_days: int, what: str)
     Shared by the statement and insider paths: coerce, take the newest, and
     compare it against the reference date. The coercion is guarded because an
     annotation must degrade, never replace the report it decorates with an error
-    string. The example this once cited — mixed tz-aware and naive timestamps on
-    pandas >= 2 — does NOT raise on the pinned pandas: it yields a single-tz
-    index with the mismatched entries as ``NaT``, and which side is mismatched
-    follows the first element's tz-awareness. No input has been found that makes
-    ``errors="coerce"`` raise there, so treat the guard as defence whose trigger
-    is unproven rather than as evidence that one exists.
+    string, and the guard has a demonstrated trigger: values mixing a tz-aware
+    timestamp with a naive value of ANOTHER TYPE (a string, a ``datetime.date``)
+    raise ``ValueError: Cannot mix tz-aware with tz-naive values`` (measured,
+    pandas 2.3.3). Mixed ``Timestamp``s alone do not — that yields a single-tz
+    index with the mismatched entries as ``NaT``, which side being mismatched
+    following the first element's tz-awareness. On the statement path
+    ``filter_financials_by_date`` has already relabelled zone-carrying columns
+    zone-free by the time this runs, so the note is not lost to that case.
     """
     if curr_date is None:  # neither caller can reach this; kept as the contract (#89)
         return ""

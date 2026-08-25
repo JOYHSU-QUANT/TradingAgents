@@ -414,6 +414,45 @@ class TestTzAwareStatementColumnsAreNotAnErrorString:
         with pytest.raises(NoMarketDataError, match="on or before 2026-08-18"):
             yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
 
+    @pytest.mark.parametrize(
+        "naive_label",
+        ["2026-03-31", datetime(2026, 3, 31).date()],
+        ids=["string", "date"],
+    )
+    def test_labels_mixing_a_zone_with_another_naive_type_are_served(
+        self, monkeypatch, naive_label
+    ):
+        # The second measured failure, and the one the first fix missed:
+        # coercing these labels as ONE index raises ValueError("Cannot mix
+        # tz-aware with tz-naive values") before any comparison, so catching
+        # only the comparison's TypeError still left the getter answering
+        # "Error retrieving balance sheet for AAPL: Cannot mix tz-aware ..."
+        # (measured, pandas 2.3.3). Both labels are usable fiscal periods and
+        # both must survive.
+        frame = pd.DataFrame(
+            {c: [100.0] for c in (pd.Timestamp("2026-06-30", tz="UTC"), naive_label)},
+            index=["Total Assets"],
+        )
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
+        out = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+        assert "Error retrieving" not in out
+        assert "2026-06-30" in out
+        assert "2026-03-31" in out
+
+    def test_a_served_frame_reads_the_same_whether_or_not_the_vendor_sent_a_zone(self, monkeypatch):
+        # The rendered CSV header is agent-facing text, so it must not depend on
+        # which yfinance build answered. Only the surviving labels are compared,
+        # since the two frames differ in what the bound removes.
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=_tz_statement("2026-06-30"))
+        zoned = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement("2026-06-30"))
+        naive = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+
+        def _csv_header(report):
+            return [line for line in report.splitlines() if line.startswith(",")][0]
+
+        assert _csv_header(zoned) == _csv_header(naive)
+
     def test_tz_naive_columns_are_unchanged(self, monkeypatch):
         # The lane that already worked, pinned so the normalisation cannot have
         # been bought at its expense.

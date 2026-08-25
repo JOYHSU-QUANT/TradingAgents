@@ -277,6 +277,21 @@ class VendorRoutingTests(unittest.TestCase):
         self.assertIn("NO_DATA_AVAILABLE", result)
         self.assertIn("no rsi rows between", result)
 
+    def test_alpha_vantage_vwma_reaches_the_vendor_that_can_compute_it(self):
+        # Alpha Vantage has no VWMA endpoint and used to say so in prose, which
+        # the router records as a successful report — so the chain stopped at
+        # the vendor that cannot serve it while yfinance, which computes vwma
+        # from OHLCV via stockstats, was never asked (#106).
+        import tradingagents.dataflows.alpha_vantage_indicator as avi
+
+        set_config({"data_vendors": {"technical_indicators": "alpha_vantage,yfinance"}})
+        with self._route_method(
+            "get_indicators",
+            {"alpha_vantage": avi.get_indicator, "yfinance": _returns("YF_VWMA")},
+        ):
+            result = interface.route_to_vendor("get_indicators", "AAPL", "vwma", "2026-06-01", 30)
+        self.assertEqual(result, "YF_VWMA")
+
     def test_core_category_still_raises_on_error(self):
         # A core category (single configured vendor) propagates the error so a
         # broken primary is loud, not silently degraded.

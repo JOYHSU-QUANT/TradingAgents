@@ -11,7 +11,7 @@ from .alpha_vantage_common import (
     format_datetime_for_api,
 )
 from .config import get_config
-from .utils import MAX_INSIDER_LAG_DAYS, data_lag_note
+from .utils import MAX_INSIDER_LAG_DAYS, curr_date_refusal, data_lag_note, date_range_refusal
 
 # Clamp untrusted request sizes before they parameterize an external call
 # (#33): an LLM-supplied or misconfigured value must not turn into an
@@ -81,7 +81,14 @@ def get_news(ticker, start_date, end_date) -> str:
     key's 20. How much comes BACK can still differ — this vendor filters the
     window server-side while the sibling fetches that many and filters after —
     and each clamps the request to its own endpoint ceiling.
+
+    An unusable start or end date answers the shared sentinel before any
+    request, as the yfinance sibling does (#111). That gate is the strict
+    ``yyyy-mm-dd`` rule, so the intraday and ``datetime`` forms
+    ``format_datetime_for_api`` also reads no longer reach it from here.
     """
+    if (refusal := date_range_refusal(start_date, end_date, what="news")) is not None:
+        return refusal
 
     limit = max(1, min(int(get_config()["news_article_limit"]), MAX_NEWS_LIMIT))
     params = {
@@ -126,8 +133,15 @@ def get_global_news(curr_date, look_back_days: int | None = None, limit: int | N
     articles its sibling would — the tool wrapper documents those keys as where
     the defaults come from, which was true of only one of the two vendors
     serving it (#107).
+
+    An unusable curr_date answers the shared ``INVALID_CURR_DATE`` sentinel
+    before any request, as the yfinance sibling does (#111).
     """
     from datetime import datetime, timedelta
+
+    refusal = curr_date_refusal(curr_date, what="global news", omitted_ok=False)
+    if refusal is not None:
+        return refusal
 
     # The tool wrapper forwards omitted optionals as explicit None through the
     # router (see news_data_tools), so resolve them to the configured defaults

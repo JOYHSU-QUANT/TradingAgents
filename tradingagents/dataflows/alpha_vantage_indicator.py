@@ -2,7 +2,7 @@ import requests
 
 from .alpha_vantage_common import _make_api_request
 from .errors import NoMarketDataError, VendorError
-from .utils import data_lag_note
+from .utils import curr_date_refusal, data_lag_note
 
 # Maximum age (calendar days) of the newest indicator row relative to
 # curr_date before the report carries a data-lag note, keyed by the requested
@@ -119,11 +119,12 @@ def get_indicator(
             ``route_to_vendor`` reads as a successful answer: the chain stopped
             at the vendor that had just failed and the agent analysed the
             sentence as an indicator report (#106).
-        ValueError: When ``curr_date`` will not parse, when the indicator is
-            unsupported (both of those come from the caller), or when it is
-            registered as supported without a request definition or a CSV
-            column mapping (our own wiring gaps). All are raised before any
-            request is made.
+        ValueError: When the indicator is unsupported (a caller mistake), or
+            when it is registered as supported without a request definition
+            or a CSV column mapping (our own wiring gaps). Both are raised
+            before any request is made. A ``curr_date`` that will not parse
+            is not a raise: it answers the shared ``INVALID_CURR_DATE``
+            sentinel, as the yfinance sibling does (#111).
         VendorError, requests.RequestException: Propagated (see the handlers at
             the end of this function).
 
@@ -157,6 +158,10 @@ def get_indicator(
             f"Indicator {indicator} is not supported. Please choose from: {list(_SUPPORTED_INDICATORS.keys())}"
         )
 
+    # Unusable dates are refused before any request, in the shared voice (#111).
+    refusal = curr_date_refusal(curr_date, what="indicator values", omitted_ok=False)
+    if refusal is not None:
+        return refusal
     curr_date_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     before = curr_date_dt - relativedelta(days=look_back_days)
 

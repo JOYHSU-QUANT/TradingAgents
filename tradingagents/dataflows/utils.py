@@ -99,33 +99,50 @@ def normalize_iso_date(value) -> str | None:
         return None
 
 
-def invalid_curr_date_sentinel(curr_date) -> str:
-    """The sentinel served when a supplied curr_date is not a usable date.
+def invalid_curr_date_sentinel(value, *, what: str, param: str = "curr_date") -> str:
+    """The sentinel served when a supplied date argument is not a usable date.
 
     Loud to the LLM (it can retry with a valid date), leaks no data, and never
-    raises: fundamental_data is a NON-optional category, so a ValueError escaping
+    raises: the categories it serves are NON-optional, so a ValueError escaping
     ``route_to_vendor`` (``raise first_error``) would crash the ToolNode-wrapped
     graph run, unlike the optional farside/F&G vendors whose raise degrades to a
     sentinel.
 
-    Shared by both vendors serving those tools so the agent reads the same
+    Shared by both vendors serving each routed tool so the agent reads the same
     sentence either way (#89) — which vendor ``data_vendors`` selected is not
     something the agent can see, so an answer that differs by vendor is one it
-    has no way to interpret.
+    has no way to interpret. ``what`` names the data the date was meant to
+    bound and is required: a caller that forgot it would otherwise emit a
+    confident sentence about the wrong data. ``param`` names the argument being
+    refused (#111) — the OHLCV and ticker-news tools take
+    ``start_date``/``end_date`` — and drives both the tag and the consequence
+    clause: a ``curr_date`` bounds a point in time, a window bound does not.
     """
+    consequence = (
+        f"{what} cannot be bounded to a point in time"
+        if param == "curr_date"
+        else f"the {what} window cannot be resolved"
+    )
     return (
-        f"INVALID_CURR_DATE: curr_date {curr_date!r} is not a valid yyyy-mm-dd "
-        f"date, so fundamentals cannot be bounded to a point in time. No data "
-        f"returned; retry with a valid yyyy-mm-dd date. Do not fabricate values."
+        f"INVALID_{param.upper()}: {param} {value!r} is not a valid yyyy-mm-dd "
+        f"date, so {consequence}. No data returned; retry with a valid "
+        f"yyyy-mm-dd date. Do not fabricate values."
     )
 
 
-def curr_date_refusal(curr_date) -> str | None:
-    """The sentinel refusing a SUPPLIED-but-unusable curr_date, or None to proceed.
+def curr_date_refusal(
+    value, *, what: str, param: str = "curr_date", omitted_ok: bool = True
+) -> str | None:
+    """The sentinel refusing a SUPPLIED-but-unusable date, or None to proceed.
 
-    ``None`` means the model omitted the argument, which keeps the date-less
-    fallback lane (#73). Any other value was supplied, so one that will not parse
-    is a request that cannot be answered — not a request for no bound at all.
+    With ``omitted_ok`` (the fundamentals default) ``None`` means the model
+    omitted the argument, which keeps the date-less fallback lane (#73). Tools
+    whose date is required have no such lane, and for them ``None`` is one more
+    value that cannot be used — passed on, it reaches a ``strptime`` as a
+    TypeError outside every vendor lane, or a fetch with no bound at all — so
+    they pass ``omitted_ok=False`` and it is refused like any other. Any other
+    value was supplied, so one that will not parse — the empty string included
+    — is a request that cannot be answered, not a request for no bound.
 
     Both halves are one judgement, so it lives here rather than in either vendor:
     a later refinement (say, also refusing a future-dated curr_date) applied to a
@@ -133,9 +150,24 @@ def curr_date_refusal(curr_date) -> str | None:
     other's, which is the drift this whole change exists to close. The three
     inputs that used to be answered differently per vendor are in the CHANGELOG.
     """
-    if curr_date is None or normalize_iso_date(curr_date) is not None:
+    if value is None and omitted_ok:
         return None
-    return invalid_curr_date_sentinel(curr_date)
+    if value is not None and normalize_iso_date(value) is not None:
+        return None
+    return invalid_curr_date_sentinel(value, what=what, param=param)
+
+
+def date_range_refusal(start_date, end_date, *, what: str) -> str | None:
+    """:func:`curr_date_refusal` over a required ``start_date``/``end_date`` pair.
+
+    The OHLCV and ticker-news tools bound a window rather than a point, so they
+    have two arguments to refuse and no date-less lane. Start is judged first
+    and only the first unusable one is named — the sentence asks for one retry,
+    and naming both would invite the model to resend the one that was fine.
+    """
+    return curr_date_refusal(
+        start_date, what=what, param="start_date", omitted_ok=False
+    ) or curr_date_refusal(end_date, what=what, param="end_date", omitted_ok=False)
 
 
 def statement_lag_bound(freq) -> int:

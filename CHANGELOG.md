@@ -555,6 +555,57 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **A date the model cannot be held to is now refused the same way by either
+  vendor of the routed news, OHLCV and indicator tools.** The parity the entry
+  below established for the four fundamentals getters stopped there; the same
+  three inputs (`""`, `"abc"`, `"2026/08/18"`) still got a different answer per
+  vendor from `get_news`, `get_global_news` and `get_stock_data`, and which
+  vendor `data_vendors` selected is not something the agent can see.
+  (`get_indicators` did not diverge — both vendors raised the same `strptime`
+  error and its tool wrapper served that one message — but it was the raw
+  parser message, with no tag and no retry instruction, beside sibling tools
+  answering the shared sentence in the same turn; it now answers it too.) For
+  ticker news,
+  yfinance parsed the dates inside its broad `except` and came back with an
+  "Error fetching news" string the router serves as a successful report, while
+  Alpha Vantage raised a bare `ValueError` the router re-raised into the tool
+  node. For global news, yfinance's "No global news found for {curr_date}"
+  early exit ran *before* the date was parsed, so an unusable date with a quiet
+  feed came back as `No global news found for abc` — a coverage claim about a
+  day that was never named — and one with a busy feed fell into the same error
+  string; Alpha Vantage raised. For OHLCV, yfinance raised a bare `ValueError`
+  (a crash: `core_stock_apis` is not an optional category), Alpha Vantage never
+  checked `end_date` at all beyond the range filter's `pd.to_datetime` — so
+  `""` and `"abc"` became typed no-data, and **`"2026/08/18"` was parsed and
+  served real rows** as if it were the ISO date. All eight getters now judge
+  the date through the one function in `utils` the fundamentals getters use
+  and answer its sentence before any request is made; the sentence names the
+  argument being refused (`INVALID_START_DATE`/`INVALID_END_DATE` for the two
+  window-bounded tools, `INVALID_CURR_DATE` as before) and what it was meant to
+  bound — a window "cannot be resolved" rather than "cannot be bounded to a
+  point in time" — and the fundamentals wording is unchanged byte for byte. A
+  window names only its first unusable bound. The empty string is refused as
+  supplied and unusable on all four tools, as it is for fundamentals, and so is
+  `None`: none of the four has a date-less lane to keep, and unrefused a `None`
+  start reached yfinance's `history(start=None)`, which answers with its
+  default trailing month — today's bars under a header naming the requested
+  historical end date. The judgement runs after the indicator name and before
+  the symbol on these tools, unlike the statement getters, because here the
+  dates shape the request rather than filter its result. The direct-call
+  verification snapshot
+  tool, which carried a third hand-written copy of the sentinel with different
+  wording and no "Do not fabricate values", now serves the shared sentence too
+  — while keeping its own looser `pd.to_datetime` parse on purpose, since it
+  compares a real `Timestamp` numerically rather than a normalised string
+  lexically against vendor date fields; a test pins that `"2026/08/18"` is
+  still accepted there so the difference cannot be "cleaned up" silently.
+  **This narrows what two Alpha Vantage getters accept** in the same way the
+  entry below narrowed yfinance's fundamentals: the OHLCV getter refuses a
+  slash-separated or time-suffixed date it used to serve, and the ticker-news
+  getter refuses the intraday `"YYYY-MM-DD HH:MM"`, `"YYYYMMDDTHHMM"` and
+  `datetime` forms `format_datetime_for_api` reads — the routed tool only ever
+  sends `yyyy-mm-dd`, so this reaches direct callers alone. Both answer with a
+  retry instruction rather than an error.
 - **Two more vendor failures stop arriving as reports the agent can analyse.**
   `route_to_vendor` never inspects a returned string, so any getter that answers
   prose instead of raising ends the vendor chain and hands the agent that prose

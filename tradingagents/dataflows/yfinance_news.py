@@ -11,6 +11,10 @@ from .errors import VendorError
 from .stockstats_utils import yf_retry
 from .symbol_utils import normalize_symbol
 
+# The date refusals live in utils so the Alpha Vantage vendor serving the same
+# routed tools shares the single judgement and the single sentence (#111).
+from .utils import curr_date_refusal, date_range_refusal
+
 # Clamp the untrusted article count before it sizes an external yf.Search
 # call (#33): an LLM-supplied or misconfigured value must stay bounded.
 MAX_SEARCH_NEWS_COUNT = 100
@@ -94,6 +98,11 @@ def get_news_yfinance(
     Returns:
         Formatted string containing news articles
     """
+    # Unusable dates are refused before any request and OUTSIDE the broad
+    # except below, in the shared voice (#111).
+    if (refusal := date_range_refusal(start_date, end_date, what="news")) is not None:
+        return refusal
+
     article_limit = get_config()["news_article_limit"]
     # Query Yahoo with the canonical symbol, like every other yfinance path —
     # a raw broker/forex/crypto alias (XAUUSD, BTCUSD) otherwise silently
@@ -158,6 +167,14 @@ def get_global_news_yfinance(
     Returns:
         Formatted string containing global news articles
     """
+    # Unusable dates are refused before any request, in the shared voice
+    # (#111). This must stay ABOVE the "No global news found" early exit: that
+    # sentence is a coverage claim about the day named, so it may only be
+    # served for a day that was.
+    refusal = curr_date_refusal(curr_date, what="global news", omitted_ok=False)
+    if refusal is not None:
+        return refusal
+
     config = get_config()
     if look_back_days is None:
         look_back_days = config["global_news_lookback_days"]

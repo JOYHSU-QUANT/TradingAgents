@@ -503,21 +503,46 @@ class TestTzAwareStatementColumnsAreNotAnErrorString:
         assert "2026-06-30" in out
         assert "2099-03-31" not in out
 
-    def test_labels_that_still_will_not_compare_take_the_typed_lane(self, monkeypatch):
-        # No input has been found that reaches this on the pinned pandas, so it
-        # is driven by making the filter raise: the contract is that whatever
-        # gets there leaves as a typed vendor failure the router can fall back
-        # from, never as a string it reads as a report.
+    def test_a_label_type_the_parser_refuses_takes_the_typed_lane(self, monkeypatch):
+        # Driven by a REAL refusing label rather than a patched filter: a
+        # frozenset is hashable, so it is a legal column label, and pandas
+        # answers it with TypeError("len() of unsized object"). Patching the
+        # filter instead left the getter's other parse of the same labels
+        # outside the guard, where the refusal became an "Error retrieving ..."
+        # string the router reads as a successful report — the failure this
+        # whole change exists to close.
         from tradingagents.dataflows.errors import NoMarketDataError
 
-        def _unbounded(data, curr_date):
-            raise TypeError("Invalid comparison between dtype=object and Timestamp")
-
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement("2026-06-30"))
-        monkeypatch.setattr(yfin, "filter_financials_by_date", _unbounded)
+        frame = pd.DataFrame(
+            {c: [100.0] for c in (pd.Timestamp("2026-06-30"), frozenset({"x"}))},
+            index=["Total Assets"],
+        )
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
         with pytest.raises(NoMarketDataError) as exc:
             yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
         assert "could not be bounded to 2026-08-18" in str(exc.value)
+
+    def test_a_label_that_parses_to_an_index_is_dropped_not_compared(self, monkeypatch):
+        # The other arm of the same branch, and the one no end-to-end input
+        # reaches: a hashable container label (here a range) coerces to an Index
+        # rather than a scalar. Treating it as the parsed value instead of NaT
+        # makes the mask comprehension raise ValueError("truth value ... is
+        # ambiguous"), which is not the typed lane either.
+        from tradingagents.dataflows.stockstats_utils import coerce_period_labels
+
+        periods, dropped = coerce_period_labels([range(3), pd.Timestamp("2026-06-30", tz="UTC")])
+        assert pd.isna(periods[0])
+        assert periods[1] == pd.Timestamp("2026-06-30")
+        assert dropped is True
+
+    def test_a_frame_with_no_zone_reports_none_dropped(self):
+        # The flag that decides whether the served labels are rewritten.
+        from tradingagents.dataflows.stockstats_utils import coerce_period_labels
+
+        periods, dropped = coerce_period_labels([pd.Timestamp("2026-06-30"), "not a date", None])
+        assert periods[0] == pd.Timestamp("2026-06-30")
+        assert pd.isna(periods[1]) and pd.isna(periods[2])
+        assert dropped is False
 
 
 @pytest.mark.unit
@@ -542,6 +567,31 @@ class TestInsiderLagNote:
         out = yfin.get_insider_transactions("AAPL")
         assert "Data lag" not in out
         assert "Insider Transactions" in out  # still renders
+
+    def test_the_note_describes_the_newest_filing_of_several(self, monkeypatch):
+        # Every other test here uses a single row, so which filing the note
+        # picks was unpinned on this path — and this is the caller that hands
+        # the shared parser many values rather than a frame's columns.
+        df = pd.DataFrame(
+            {"Start Date": ["2019-01-01", "2020-06-30", "2019-07-15"], "Shares": [1, 2, 3]}
+        )
+        _patch_ticker(monkeypatch, insider_transactions=df)
+        out = yfin.get_insider_transactions("AAPL")
+        note_line = next((line for line in out.splitlines() if "Data lag" in line), "")
+        assert "2020-06-30" in note_line
+
+    def test_a_stream_with_no_parseable_date_degrades_to_no_note(self, monkeypatch):
+        # A present date column none of whose values parse leaves the parser
+        # with nothing to take a newest from. Without the empty check the
+        # annotation raises out of max() and the getter's broad except turns it
+        # into an "Error retrieving ..." string the router reads as a report —
+        # an annotation must degrade to silence, never replace what it decorates.
+        df = pd.DataFrame({"Start Date": ["-", "n/a"], "Shares": [1, 2]})
+        _patch_ticker(monkeypatch, insider_transactions=df)
+        out = yfin.get_insider_transactions("AAPL")
+        assert "Error retrieving" not in out
+        assert "Data lag" not in out
+        assert "Insider Transactions" in out
 
 
 @pytest.mark.unit

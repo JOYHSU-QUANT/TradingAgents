@@ -59,25 +59,27 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title
     # separates the same two cases, and logs only this one, for the same reason:
     # a schema break otherwise reports every ticker as an uncovered symbol.
     columns = len(data.columns)
-    # Through the SAME per-label rule the filter uses. Read as one index this
-    # disagreed with the filter on a tz-aware frame: the coercion raised, the
-    # count fell back to zero, and a frame whose periods merely all postdate
-    # curr_date was then reported as a vendor schema break — the opposite of
-    # what this measurement exists to separate (measured, pandas 2.3.3).
-    datable = sum(not pd.isna(p) for p in coerce_period_labels(data.columns)[0])
-
     try:
+        # Through the SAME per-label rule the filter uses, and measured BEFORE
+        # filtering. Read as one index this disagreed with the filter on a
+        # tz-aware frame: the coercion raised, the count fell back to zero, and
+        # a frame whose periods merely all postdate curr_date was then reported
+        # as a vendor schema break — the opposite of what this measurement
+        # exists to separate (measured, pandas 2.3.3).
+        datable = sum(not pd.isna(p) for p in coerce_period_labels(data.columns)[0])
         data = filter_financials_by_date(data, curr_date)
-    except (TypeError, ValueError) as e:
+    except TypeError as e:
         # The per-label parse covers both measured ways a tz-aware statement
-        # frame used to reach here (#110); a label whose type the parser refuses
-        # outright still raises, and leaves as a typed vendor failure the router
-        # can fall back from rather than reaching the getters' broad except and
-        # coming back as an "Error retrieving ..." string the router reads as a
-        # successful report. Both exception types, because which one pandas
-        # raises depends on the label type. The filter's OTHER raise — an
-        # unusable curr_date — cannot arrive here: the shared sentinel above
-        # answered that case before anything was filtered (#89).
+        # frame used to reach here (#110); a label whose TYPE the parser refuses
+        # outright — a frozenset is the one hashable example found — still
+        # raises, and both statements above are inside this guard so it leaves
+        # as a typed vendor failure the router can fall back from rather than
+        # reaching the getters' broad except and coming back as an "Error
+        # retrieving ..." string the router reads as a successful report.
+        # TypeError alone: the filter's other raise is a ValueError for an
+        # unusable curr_date, which cannot arrive here (the shared sentinel
+        # above answered that case first, #89) and must keep its own identity
+        # for a direct caller.
         raise NoMarketDataError(
             ticker,
             canonical,

@@ -12,7 +12,7 @@ from .errors import NoMarketDataError
 # short-circuit the vendor chain that could have served fresh bars (#30). It
 # lives in utils (stdlib-only), so importing it does not drag yfinance or
 # stockstats into this pure-requests vendor module (#70).
-from .utils import MAX_OHLCV_STALE_DAYS
+from .utils import MAX_OHLCV_STALE_DAYS, date_range_refusal
 
 
 def get_stock(symbol: str, start_date: str, end_date: str) -> str:
@@ -26,7 +26,11 @@ def get_stock(symbol: str, start_date: str, end_date: str) -> str:
         end_date: End date in yyyy-mm-dd format
 
     Returns:
-        CSV string containing the daily adjusted time series data filtered to the date range.
+        CSV string containing the daily adjusted time series data filtered to
+        the date range — or the shared ``INVALID_START_DATE``/``INVALID_END_DATE``
+        sentinel, served before any request, when a date is not a usable
+        yyyy-mm-dd (#111). Strict on purpose: the range filter's looser
+        ``pd.to_datetime`` used to be the only gate on ``end_date``.
 
     Raises:
         NoMarketDataError: When the request boundary recognises an
@@ -45,6 +49,9 @@ def get_stock(symbol: str, start_date: str, end_date: str) -> str:
             an HTTP 429 or a throttle notice (#72), keeping the router's
             rate-limit lane open for this getter too.
     """
+    if (refusal := date_range_refusal(start_date, end_date, what="stock price data")) is not None:
+        return refusal
+
     # Parse dates to determine the range
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
     today = datetime.now()

@@ -5,6 +5,7 @@ from langchain_core.tools import tool
 
 from tradingagents.dataflows.errors import VendorError, VendorRateLimitError
 from tradingagents.dataflows.market_data_validator import build_verified_market_snapshot
+from tradingagents.dataflows.utils import invalid_date_sentinel
 
 
 @tool
@@ -24,13 +25,15 @@ def get_verified_market_snapshot(
     """
     # An LLM-supplied curr_date that doesn't parse would raise a bare
     # ValueError deep in load_ohlcv — outside the VendorError taxonomy — so
-    # guard it here and answer with the same instructive-sentinel style the
-    # fundamentals path uses (INVALID_CURR_DATE precedent).
+    # guard it here and answer with the SAME sentence the routed tools serve
+    # (#112), not a third hand-written copy of it. The parse rule stays the
+    # looser pandas one on purpose, and is NOT the routed tools' strict
+    # strptime: those compare the normalised string lexically against
+    # zero-padded vendor date fields (see ``utils.normalize_iso_date``), while
+    # this tool turns the value into a real Timestamp and compares numerically,
+    # so a date pandas can read is one it can use. Only the wording is shared.
     if pd.isna(pd.to_datetime(curr_date, errors="coerce")):
-        return (
-            f"INVALID_CURR_DATE: '{curr_date}' is not a parseable date "
-            f"(expected YYYY-MM-DD). No data served; retry with a valid date."
-        )
+        return invalid_date_sentinel(curr_date, what="the verification snapshot", kind="point")
     # This tool calls the builder directly (it does not go through
     # route_to_vendor), so the vendor-error taxonomy must be turned into the
     # instructive no-data sentinel here — otherwise a typed raise surfaces as

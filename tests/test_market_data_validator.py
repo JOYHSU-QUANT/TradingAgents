@@ -115,16 +115,37 @@ class TestTool:
         assert not out.startswith("NO_DATA_AVAILABLE")
         assert "report that verified data is unavailable" not in out
 
-    def test_tool_rejects_unparseable_curr_date_with_sentinel(self, monkeypatch):
+    @pytest.mark.parametrize("curr_date", ["not-a-date", ""])
+    def test_tool_rejects_unparseable_curr_date_with_the_shared_sentence(
+        self, monkeypatch, curr_date
+    ):
         # A bad LLM-supplied date raises a bare ValueError deep in load_ohlcv
-        # (outside the VendorError taxonomy), so the wrapper answers with the
-        # INVALID_CURR_DATE sentinel before any data work starts.
+        # (outside the VendorError taxonomy), so the wrapper answers before any
+        # data work starts — with the SAME sentence the routed tools serve,
+        # not a hand-written third copy of it (#112). Whole-answer equality:
+        # a startswith check let the old copy's different wording pass.
+        from tradingagents.dataflows.utils import invalid_date_sentinel
+
         def _must_not_be_called(s, d):
             raise AssertionError("load_ohlcv must not be called for a bad date")
 
         monkeypatch.setattr(validator, "load_ohlcv", _must_not_be_called)
-        out = get_verified_market_snapshot.invoke({"symbol": "COF", "curr_date": "not-a-date"})
-        assert out.startswith("INVALID_CURR_DATE")
+        out = get_verified_market_snapshot.invoke({"symbol": "COF", "curr_date": curr_date})
+        assert out == invalid_date_sentinel(
+            curr_date, what="the verification snapshot", kind="point"
+        )
+
+    def test_tool_keeps_its_looser_parse_on_purpose(self, monkeypatch):
+        # The routed tools refuse "2026/08/18" because they compare a
+        # normalised string lexically against vendor date fields; this tool
+        # converts to a Timestamp and compares numerically, so the looser
+        # pandas rule loses nothing (#112). Shared wording, deliberately
+        # unshared parse — if this starts failing, someone unified the rule,
+        # which #112 argues is a behavioural regression, not a cleanup.
+        monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: _sample_ohlcv())
+        out = get_verified_market_snapshot.invoke({"symbol": "COF", "curr_date": "2026/08/18"})
+        assert not out.startswith("INVALID_CURR_DATE")
+        assert "Requested analysis date: 2026/08/18" in out
 
     def test_tool_turns_stale_data_raise_into_sentinel(self, monkeypatch):
         # load_ohlcv's own NoMarketDataError (e.g. the stale-frame guard) must

@@ -377,6 +377,23 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **The configured article count now reaches both news vendors.**
+  `news_article_limit` and `global_news_article_limit` are what the tool
+  wrappers document as the source of those defaults, and were read by the
+  yfinance getters only. Two things this does not equalise: how much comes
+  *back* (yfinance fetches that many and filters the window client-side, Alpha
+  Vantage filters server-side), and a count set above either vendor's own
+  request ceiling. The Alpha Vantage siblings carried literals instead: global news
+  asked for 50 articles over a hard-coded 7-day window, and ticker news sent no
+  `limit` at all, leaving the endpoint's own default of 50. Both now read the
+  same config keys the yfinance getters read. **Article counts change for Alpha
+  Vantage users:** global news 50 → 10 (`global_news_article_limit`) and ticker
+  news 50 → 20 (`news_article_limit`), so prompts get shorter and cheaper;
+  raise either key to restore the old volume. An explicit `look_back_days` or
+  `limit` argument still outranks the config. The shipped `news_data` default is
+  a single-vendor yfinance chain, so a deployment that has not switched vendors
+  is unaffected.
+
 - **One yfinance throttle is now discovered once per cycle, not once per tool.**
   `yf_retry` is the single boundary every yfinance network call goes through,
   and its 2+4+8s backoff ladder ran independently per call. A 429 is Yahoo
@@ -537,6 +554,40 @@ Breaking changes within the 0.x line are called out explicitly.
   behaviour itself is unchanged.
 
 ### Fixed
+
+- **Two more vendor failures stop arriving as reports the agent can analyse.**
+  `route_to_vendor` never inspects a returned string, so any getter that answers
+  prose instead of raising ends the vendor chain and hands the agent that prose
+  as data. Two getters still did. The Alpha Vantage indicator getter returned
+  five such sentences — a blank or header-only CSV, a CSV missing its `time`
+  column, one missing the indicator's own value column, a window the vendor had
+  no rows in (reported *inside* a well-formed `## RSI values from … to …` report
+  carrying no error wording at all), and `vwma`, which Alpha Vantage has no
+  endpoint for and which said so in prose while the yfinance vendor serving the
+  same routed tool computes it from OHLCV and was never asked. All five now
+  raise `NoMarketDataError`, the lane the same vendor's daily bars getter has
+  taken since #30: another configured vendor gets its turn, and a chain with
+  only this one emits the router's no-data sentinel with the reason attached.
+  The yfinance statement getters answered `"Error retrieving balance sheet for
+  AAPL: …"` on fiscal-period columns carrying a timezone, in two distinct ways
+  (both measured on pandas 2.3.3): a tz-aware index will not compare against the
+  naive cutoff, and labels mixing a tz-aware timestamp with a naive value of
+  another type will not coerce as one index at all. Every statement-side reader
+  of those labels — the look-ahead filter, the "did any column carry a fiscal
+  period" measurement, and the freshness note — now parses them one at a time
+  and zone-free through one shared helper — the same zone-free reading the
+  OHLCV path already takes — and the filter relabels the survivors so the
+  rendered CSV header does not depend on the vendor build. Separately, an indicator registered as supported with no
+  request definition or no CSV column mapping now raises before making a
+  request: the column-mapping case used to pay for one first, the
+  request-definition case never made one, and both used to `return` an "Error: …"
+  string that the router recorded as a successful answer. (The agent still reads
+  a message rather than seeing the run abort — the indicator tool wrapper
+  catches `ValueError` and appends it to the report — but on a multi-vendor
+  chain the next vendor now gets its turn.) The
+  indicator dispatch is a registry rather than an elif ladder; tests assert set
+  equality between it and the supported list in both directions, and pin each
+  indicator's request against a table transcribed from the ladder it replaced.
 
 - **A curr_date the model cannot be held to is now refused the same way by
   either fundamentals vendor.** The same routed statement tool used to take

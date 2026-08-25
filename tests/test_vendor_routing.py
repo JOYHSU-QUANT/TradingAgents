@@ -243,6 +243,55 @@ class VendorRoutingTests(unittest.TestCase):
         self.assertIn("NO_DATA_AVAILABLE", result)
         self.assertIn("Invalid API call", result)
 
+    def test_alpha_vantage_indicator_empty_window_reaches_the_fallback_vendor(self):
+        # #106 end-to-end through the REAL getter: rows that all fell outside
+        # the requested window used to be reported inside a well-formed
+        # "## RSI values from ... to ..." report, which the router reads as a
+        # successful answer — so the chain stopped at the vendor that had just
+        # said it had nothing.
+        import tradingagents.dataflows.alpha_vantage_indicator as avi
+
+        set_config({"data_vendors": {"technical_indicators": "alpha_vantage,yfinance"}})
+        with (
+            mock.patch.object(avi, "_make_api_request", return_value="time,RSI\n2020-01-02,55.0\n"),
+            self._route_method(
+                "get_indicators",
+                {"alpha_vantage": avi.get_indicator, "yfinance": _returns("YF_INDICATORS")},
+            ),
+        ):
+            result = interface.route_to_vendor("get_indicators", "AAPL", "rsi", "2026-06-01", 30)
+        self.assertEqual(result, "YF_INDICATORS")
+
+    def test_alpha_vantage_indicator_empty_window_alone_yields_the_no_data_sentinel(self):
+        # With no other vendor to try, the honest sentinel replaces the report
+        # shape, and the reason rides along so "no rows in your window" is not
+        # flattened into a bare "no data".
+        import tradingagents.dataflows.alpha_vantage_indicator as avi
+
+        set_config({"data_vendors": {"technical_indicators": "alpha_vantage"}})
+        with (
+            mock.patch.object(avi, "_make_api_request", return_value="time,RSI\n2020-01-02,55.0\n"),
+            self._route_method("get_indicators", {"alpha_vantage": avi.get_indicator}),
+        ):
+            result = interface.route_to_vendor("get_indicators", "AAPL", "rsi", "2026-06-01", 30)
+        self.assertIn("NO_DATA_AVAILABLE", result)
+        self.assertIn("no rsi rows between", result)
+
+    def test_alpha_vantage_vwma_reaches_the_vendor_that_can_compute_it(self):
+        # Alpha Vantage has no VWMA endpoint and used to say so in prose, which
+        # the router records as a successful report — so the chain stopped at
+        # the vendor that cannot serve it while yfinance, which computes vwma
+        # from OHLCV via stockstats, was never asked (#106).
+        import tradingagents.dataflows.alpha_vantage_indicator as avi
+
+        set_config({"data_vendors": {"technical_indicators": "alpha_vantage,yfinance"}})
+        with self._route_method(
+            "get_indicators",
+            {"alpha_vantage": avi.get_indicator, "yfinance": _returns("YF_VWMA")},
+        ):
+            result = interface.route_to_vendor("get_indicators", "AAPL", "vwma", "2026-06-01", 30)
+        self.assertEqual(result, "YF_VWMA")
+
     def test_core_category_still_raises_on_error(self):
         # A core category (single configured vendor) propagates the error so a
         # broken primary is loud, not silently degraded.

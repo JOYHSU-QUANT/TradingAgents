@@ -65,9 +65,21 @@ def create_sentiment_analyst(llm):
         start_date = _seven_days_back(end_date)
         instrument_context = get_instrument_context_from_state(state)
 
-        # Pre-fetch all three sources. Each fetcher degrades gracefully and
-        # returns a string (no exceptions surface from here), so the LLM
-        # always sees something — either real data or a clear placeholder.
+        # Pre-fetch all three sources. StockTwits and Reddit degrade to a
+        # placeholder string on any failure, so the LLM always sees something
+        # from them. News is the one that can raise: it goes through
+        # route_to_vendor, and news_data is a core category (not in
+        # OPTIONAL_CATEGORIES), so a chain exhausted by TYPED vendor failures
+        # re-raises the first one and aborts the node — an unset key on a
+        # configured Alpha Vantage chain is the everyday case, which the shipped
+        # single-vendor yfinance default does not have. Two lanes still answer
+        # a string even on a chain that can reach that raise: a vendor
+        # that reported no data returns the router's NO_DATA_AVAILABLE sentinel
+        # before that raise, and the shipped default vendor (yfinance) catches
+        # everything but VendorError itself, so a dead network there comes back
+        # as "Error fetching news for ...". Aborting on a core failure is the
+        # decided outcome; what this comment used to claim — that nothing here
+        # can raise — was not (#108).
         news_block = get_news.func(ticker, start_date, end_date)
         stocktwits_block = fetch_stocktwits_messages(ticker, limit=30, curr_date=end_date)
         reddit_block = fetch_reddit_posts(ticker)

@@ -362,6 +362,208 @@ class TestUnusableCurrDateIsVendorAgnostic:
         assert filter_financials_by_date(frame, None) is frame
 
 
+def _tz_statement(*cols, tz="UTC"):
+    """Statement frame whose fiscal-period columns carry a timezone."""
+    return pd.DataFrame({pd.Timestamp(c, tz=tz): [100.0] for c in cols}, index=["Total Assets"])
+
+
+@pytest.mark.unit
+class TestTzAwareStatementColumnsAreNotAnErrorString:
+    """yfinance returns statement columns tz-aware on some builds (#110).
+
+    The look-ahead filter compared them against a naive cutoff, which pandas
+    refuses with ``TypeError: Invalid comparison between dtype=datetime64[ns,
+    UTC] and Timestamp`` (measured, 2.3.3). That landed in each getter's broad
+    except and came back as ``"Error retrieving balance sheet for AAPL: Invalid
+    comparison ..."`` — and ``route_to_vendor`` never inspects a returned
+    string, so the chain stopped there and the agent analysed the error
+    sentence as a balance sheet.
+    """
+
+    @pytest.mark.parametrize(
+        "attr,method",
+        [
+            ("quarterly_balance_sheet", "get_balance_sheet"),
+            ("quarterly_cashflow", "get_cashflow"),
+            ("quarterly_income_stmt", "get_income_statement"),
+        ],
+    )
+    def test_a_tz_aware_frame_is_served_as_a_report(self, monkeypatch, attr, method):
+        _patch_ticker(monkeypatch, **{attr: _tz_statement("2026-06-30")})
+        out = getattr(yfin, method)("AAPL", "quarterly", "2026-08-18")
+        assert "Error retrieving" not in out
+        assert "Total Assets" in out
+
+    def test_the_bound_still_applies_to_tz_aware_columns(self, monkeypatch):
+        # Not merely "no longer an error string": the look-ahead filter must
+        # still do its job on these labels, or the fix would have bought
+        # readability by leaking future periods.
+        _patch_ticker(
+            monkeypatch, quarterly_balance_sheet=_tz_statement("2026-06-30", "2099-03-31")
+        )
+        out = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+        assert "2026-06-30" in out
+        assert "2099-03-31" not in out
+
+    def test_a_tz_aware_frame_entirely_past_the_bound_is_still_no_data(self, monkeypatch):
+        # The other edge of the same filter: zone-free comparison must not turn
+        # a genuine coverage gap into a served report.
+        from tradingagents.dataflows.errors import NoMarketDataError
+
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=_tz_statement("2099-03-31"))
+        with pytest.raises(NoMarketDataError, match="on or before 2026-08-18"):
+            yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+
+    @pytest.mark.parametrize(
+        "naive_label",
+        ["2026-03-31", datetime(2026, 3, 31).date()],
+        ids=["string", "date"],
+    )
+    def test_labels_mixing_a_zone_with_another_naive_type_are_served(
+        self, monkeypatch, naive_label
+    ):
+        # The second measured failure, and the one the first fix missed:
+        # coercing these labels as ONE index raises ValueError("Cannot mix
+        # tz-aware with tz-naive values") before any comparison, so catching
+        # only the comparison's TypeError still left the getter answering
+        # "Error retrieving balance sheet for AAPL: Cannot mix tz-aware ..."
+        # (measured, pandas 2.3.3). Both labels are usable fiscal periods and
+        # both must survive.
+        frame = pd.DataFrame(
+            {c: [100.0] for c in (pd.Timestamp("2026-06-30", tz="UTC"), naive_label)},
+            index=["Total Assets"],
+        )
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
+        out = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+        assert "Error retrieving" not in out
+        assert "2026-06-30" in out
+        assert "2026-03-31" in out
+
+    def test_a_served_frame_reads_the_same_whether_or_not_the_vendor_sent_a_zone(self, monkeypatch):
+        # The rendered CSV header is agent-facing text, so it must not depend on
+        # which yfinance build answered. Only the surviving labels are compared,
+        # since the two frames differ in what the bound removes.
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=_tz_statement("2026-06-30"))
+        zoned = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement("2026-06-30"))
+        naive = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+
+        def _csv_header(report):
+            return [line for line in report.splitlines() if line.startswith(",")][0]
+
+        assert _csv_header(zoned) == _csv_header(naive)
+
+    def test_a_future_only_mixed_frame_is_a_coverage_gap_not_a_schema_break(
+        self, monkeypatch, caplog
+    ):
+        # The "did any column carry a fiscal period" measurement read the labels
+        # as one index while the filter read them one at a time, so on this
+        # frame the measurement raised, fell back to zero, and reported two
+        # perfectly usable (merely future) periods as a vendor schema break —
+        # the exact confusion that measurement exists to prevent.
+        from tradingagents.dataflows.errors import NoMarketDataError
+
+        frame = pd.DataFrame(
+            {c: [100.0] for c in (pd.Timestamp("2026-12-31", tz="UTC"), "2026-09-30")},
+            index=["Total Assets"],
+        )
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
+        with (
+            caplog.at_level(logging.WARNING, logger=yfin.__name__),
+            pytest.raises(NoMarketDataError) as exc,
+        ):
+            yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+        assert "no balance sheet data on or before 2026-08-18" in str(exc.value)
+        assert "usable fiscal period" not in str(exc.value)
+        # A coverage gap must not page anyone — nothing from this module at all.
+        assert not [r for r in caplog.records if r.name == yfin.__name__]
+
+    def test_the_lag_note_survives_mixed_labels_on_the_date_less_lane(self, monkeypatch):
+        # The date-less lane (#73) never reaches the filter, so its labels are
+        # whatever the vendor sent. Read as one index they either coerced to
+        # mixed offsets and failed in max() OUTSIDE the note's guard — returning
+        # the getter's "Error retrieving ..." string — or silently dropped the
+        # disclosure. Per label, the note is judged against the wall clock as
+        # #73 intends.
+        frame = pd.DataFrame(
+            {c: [100.0] for c in ("2020-03-31", pd.Timestamp("2020-06-30", tz="UTC"))},
+            index=["Total Assets"],
+        )
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
+        out = yfin.get_balance_sheet("AAPL", "quarterly", None)
+        assert "Error retrieving" not in out
+        note_line = next((line for line in out.splitlines() if "Data lag" in line), "")
+        assert "2020-06-30" in note_line  # the newest period, not the older naive one
+
+    def test_tz_naive_columns_are_unchanged(self, monkeypatch):
+        # The lane that already worked, pinned so the normalisation cannot have
+        # been bought at its expense.
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement("2026-06-30", "2099-03-31"))
+        out = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+        assert "2026-06-30" in out
+        assert "2099-03-31" not in out
+
+    @pytest.mark.parametrize(
+        "refusing_label",
+        [frozenset({"x"}), iter([1, 2]), {"a": 1}],
+        ids=["frozenset-TypeError", "iterator-TypeError", "dict-ValueError"],
+    )
+    def test_a_label_type_the_parser_refuses_takes_the_typed_lane(
+        self, monkeypatch, refusing_label
+    ):
+        # Driven by REAL refusing labels rather than a patched filter, and by
+        # one of each exception family: pandas picks by label type, and a column
+        # label need not be hashable to get there. Catching only one family left
+        # the other returning an "Error retrieving ..." string the router reads
+        # as a successful report — the failure this whole change exists to
+        # close. Patching the filter instead missed both, because the getter
+        # parses the same labels a second time outside that call.
+        from tradingagents.dataflows.errors import NoMarketDataError
+
+        frame = pd.DataFrame([[100.0, 200.0]], index=["Total Assets"])
+        frame.columns = pd.Index([pd.Timestamp("2026-06-30"), refusing_label], dtype=object)
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
+        with pytest.raises(NoMarketDataError) as exc:
+            yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+        assert "could not be read as fiscal periods" in str(exc.value)
+
+    def test_the_same_refusal_on_the_date_less_lane_names_no_bound(self, monkeypatch):
+        # The date-less lane (#73) asked for no bound, and this detail is
+        # spliced into the router's agent-facing sentinel — naming one there
+        # would describe a request the model never made.
+        from tradingagents.dataflows.errors import NoMarketDataError
+
+        frame = pd.DataFrame([[100.0, 200.0]], index=["Total Assets"])
+        frame.columns = pd.Index([pd.Timestamp("2026-06-30"), {"a": 1}], dtype=object)
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
+        with pytest.raises(NoMarketDataError) as exc:
+            yfin.get_balance_sheet("AAPL", "quarterly", None)
+        assert "could not be read as fiscal periods" in str(exc.value)
+        assert "None" not in str(exc.value)
+
+    def test_a_label_that_parses_to_an_index_is_dropped_not_compared(self, monkeypatch):
+        # The other arm of the same branch, and the one no end-to-end input
+        # reaches: a hashable container label (here a range) coerces to an Index
+        # rather than a scalar. Treating it as the parsed value instead of NaT
+        # makes the mask comprehension raise ValueError("truth value ... is
+        # ambiguous"), which is not the typed lane either.
+        from tradingagents.dataflows.stockstats_utils import coerce_period_labels
+
+        periods, dropped = coerce_period_labels([range(3), pd.Timestamp("2026-06-30", tz="UTC")])
+        assert pd.isna(periods[0])
+        assert periods[1] == pd.Timestamp("2026-06-30")
+        assert dropped is True
+
+    def test_a_frame_with_no_zone_reports_none_dropped(self):
+        # The flag that decides whether the served labels are rewritten.
+        from tradingagents.dataflows.stockstats_utils import coerce_period_labels
+
+        periods, dropped = coerce_period_labels([pd.Timestamp("2026-06-30"), "not a date", None])
+        assert periods[0] == pd.Timestamp("2026-06-30")
+        assert pd.isna(periods[1]) and pd.isna(periods[2])
+        assert dropped is False
+
+
 @pytest.mark.unit
 class TestInsiderLagNote:
     def test_dead_filing_stream_carries_note(self, monkeypatch):
@@ -384,6 +586,31 @@ class TestInsiderLagNote:
         out = yfin.get_insider_transactions("AAPL")
         assert "Data lag" not in out
         assert "Insider Transactions" in out  # still renders
+
+    def test_the_note_describes_the_newest_filing_of_several(self, monkeypatch):
+        # Every other test here uses a single row, so which filing the note
+        # picks was unpinned on this path — and this is the caller that hands
+        # the shared parser many values rather than a frame's columns.
+        df = pd.DataFrame(
+            {"Start Date": ["2019-01-01", "2020-06-30", "2019-07-15"], "Shares": [1, 2, 3]}
+        )
+        _patch_ticker(monkeypatch, insider_transactions=df)
+        out = yfin.get_insider_transactions("AAPL")
+        note_line = next((line for line in out.splitlines() if "Data lag" in line), "")
+        assert "2020-06-30" in note_line
+
+    def test_a_stream_with_no_parseable_date_degrades_to_no_note(self, monkeypatch):
+        # A present date column none of whose values parse leaves the parser
+        # with nothing to take a newest from. Without the empty check the
+        # annotation raises out of max() and the getter's broad except turns it
+        # into an "Error retrieving ..." string the router reads as a report —
+        # an annotation must degrade to silence, never replace what it decorates.
+        df = pd.DataFrame({"Start Date": ["-", "n/a"], "Shares": [1, 2]})
+        _patch_ticker(monkeypatch, insider_transactions=df)
+        out = yfin.get_insider_transactions("AAPL")
+        assert "Error retrieving" not in out
+        assert "Data lag" not in out
+        assert "Insider Transactions" in out
 
 
 @pytest.mark.unit

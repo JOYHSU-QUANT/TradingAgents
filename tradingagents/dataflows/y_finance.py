@@ -10,6 +10,7 @@ from .errors import VendorError
 from .stockstats_utils import (
     StockstatsUtils,
     _assert_ohlcv_not_stale,
+    coerce_period_labels,
     filter_financials_by_date,
     load_ohlcv,
     yf_fetch_statement,
@@ -59,17 +60,37 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title
     # a schema break otherwise reports every ticker as an uncovered symbol.
     columns = len(data.columns)
     try:
-        datable = int(pd.to_datetime(data.columns, errors="coerce").notna().sum())
-    except (TypeError, ValueError):
-        # Guarded for the same reason _dates_lag_note guards, and NOT redundant
-        # with the coercion inside filter_financials_by_date: on the date-less
-        # lane that one never runs, because it early-returns before coercing.
-        # No input has been found that makes errors="coerce" raise on the pinned
-        # pandas, so this is defence, not a live path; treating an index we
-        # cannot read as carrying no usable period is the conservative reading.
-        datable = 0
-
-    data = filter_financials_by_date(data, curr_date)
+        # Through the SAME per-label rule the filter uses, and measured BEFORE
+        # filtering. Read as one index this disagreed with the filter on a
+        # tz-aware frame: the coercion raised, the count fell back to zero, and
+        # a frame whose periods merely all postdate curr_date was then reported
+        # as a vendor schema break — the opposite of what this measurement
+        # exists to separate (measured, pandas 2.3.3).
+        datable = sum(not pd.isna(p) for p in coerce_period_labels(data.columns)[0])
+        data = filter_financials_by_date(data, curr_date)
+    except (TypeError, ValueError) as e:
+        # The per-label parse covers both measured ways a tz-aware statement
+        # frame used to reach here (#110); a label whose TYPE the parser refuses
+        # outright still raises, and both statements above are inside this guard
+        # so it leaves as a typed vendor failure the router can fall back from
+        # rather than reaching the getters' broad except and coming back as an
+        # "Error retrieving ..." string the router reads as a successful report.
+        # BOTH exception types, because pandas picks by label type and the two
+        # families are equally reachable: an iterator or nested tuple raises
+        # TypeError, a dict-like raises ValueError, and a column label need not
+        # be hashable — ``df.columns = pd.Index([...], dtype=object)`` takes
+        # either (measured, pandas 2.3.3). The filter's own ValueError, for an
+        # unusable curr_date, is not a second meaning to worry about here: the
+        # shared sentinel above answered that case before anything was filtered
+        # (#89), and this is the only production caller of that filter.
+        raise NoMarketDataError(
+            ticker,
+            canonical,
+            # No mention of curr_date: this also fires on the date-less lane
+            # (#73), which asked for no bound at all, and the detail is spliced
+            # into the router's agent-facing sentinel.
+            f"{noun} column labels could not be read as fiscal periods: {e}",
+        ) from e
     if data.empty:
         if not datable:
             logger.warning(
@@ -92,25 +113,28 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title
 def _dates_lag_note(values, curr_date: str | None, max_lag_days: int, what: str) -> str:
     """Data-lag note line (``"# …\\n"`` or ``""``) for a set of date-ish values.
 
-    Shared by the statement and insider paths: coerce, take the newest, and
-    compare it against the reference date. The coercion is guarded because an
-    annotation must degrade, never replace the report it decorates with an error
-    string. The example this once cited — mixed tz-aware and naive timestamps on
-    pandas >= 2 — does NOT raise on the pinned pandas: it yields a single-tz
-    index with the mismatched entries as ``NaT``, and which side is mismatched
-    follows the first element's tz-awareness. No input has been found that makes
-    ``errors="coerce"`` raise there, so treat the guard as defence whose trigger
-    is unproven rather than as evidence that one exists.
+    Shared by the statement and insider paths: parse, take the newest, and
+    compare it against the reference date. Parsing goes label by label through
+    :func:`coerce_period_labels` for the reason given there — read as one index,
+    a mixed tz-aware/naive set can raise, and an annotation must degrade rather
+    than replace the report it decorates with an error string. Reading the whole
+    index also put the ``max()`` OUTSIDE the guard, so a set that coerced to
+    mixed offsets without raising failed there instead ("Cannot compare tz-naive
+    and tz-aware timestamps", measured on ``[naive str, aware Timestamp]``,
+    pandas 2.3.3) and reached the getter's broad except; per label, every value
+    handed to ``max`` is zone-free. The remaining guard is for a label whose
+    TYPE the parser refuses outright, which stays a silent no-note here because
+    an annotation must not be the thing that fails a report.
     """
     if curr_date is None:  # neither caller can reach this; kept as the contract (#89)
         return ""
     try:
-        dates = pd.to_datetime(values, errors="coerce").dropna()
+        periods = [p for p in coerce_period_labels(values)[0] if not pd.isna(p)]
     except (TypeError, ValueError):
         return ""
-    if not len(dates):
+    if not periods:
         return ""
-    note = data_lag_note(dates.max(), curr_date, max_lag_days, what)
+    note = data_lag_note(max(periods), curr_date, max_lag_days, what)
     return f"# {note}\n" if note else ""
 
 

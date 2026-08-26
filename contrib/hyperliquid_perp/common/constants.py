@@ -22,7 +22,8 @@ __all__ = [
 # "``load_config`` does not import compute modules", and bucketing volume across
 # price levels is exactly the code someone later reaches for numpy in. The
 # keyless ``live --config-check`` path would acquire it silently, and nothing
-# would fail. ``volume_profile`` imports this name; the loader imports it too.
+# would fail. ``volume_profile`` imports this name; so does the loader's
+# ``market_data_config`` parser.
 #
 # See that module for WHY the floor is twelve rather than some other number.
 MIN_VOLUME_PROFILE_WINDOW = 12

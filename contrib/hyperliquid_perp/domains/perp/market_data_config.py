@@ -43,8 +43,8 @@ class MarketDataConfig:
     def __post_init__(self) -> None:
         # The same lookup the context and the fetch use, so the vocabulary
         # (and the message naming the legal set) lives once, in schema.py. A
-        # mis-cased ``4H`` used to survive the load and fail inside the cycle,
-        # where the daemon files it under its retry ladder.
+        # mis-cased ``4H`` used to survive the load and raise a bare ValueError
+        # from inside the market fetch.
         try:
             interval_to_ms(self.candle_interval)
         except ValueError as exc:

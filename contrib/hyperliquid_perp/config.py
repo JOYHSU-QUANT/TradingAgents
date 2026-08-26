@@ -214,8 +214,9 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     # The ``market_data:`` block is parsed on every load — unknown keys, wrong
     # types and out-of-band values all fail here, named. It is the block whose
     # mistakes are otherwise the quietest: a typo'd key fell back to its
-    # default with no signal, and a bad value surfaced (if at all) inside the
-    # cycle, where the daemon files it under its retry ladder (issue #96).
+    # default with no signal, and a bad value surfaced (if at all) as a bare
+    # ValueError from inside the market fetch — which nothing on the paper
+    # daemon's path catches (issue #96).
     # Only the parse's verdict is used; engine_bridge re-parses the same block
     # at fetch time, so the loaded dict stays the plain YAML the drift check
     # and the genesis snapshot compare.

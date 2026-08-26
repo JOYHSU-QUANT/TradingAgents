@@ -176,8 +176,8 @@ def test_the_example_yaml_market_data_block_is_the_parsers_defaults():
     ("line", "match"),
     [
         # The interval is the fetch's and the guard's vocabulary; a mis-cased
-        # value used to survive the load and fail inside the cycle, where the
-        # daemon files it under its retry ladder.
+        # value used to survive the load and raise a bare ValueError from
+        # inside the market fetch.
         ('  candle_interval: "4H"', "'market_data.candle_interval'.*unsupported candle interval"),
         ("  candle_interval: 4", "config key 'candle_interval': expected a string"),
         # A lookback that is not a number at all is candle_lookback's own

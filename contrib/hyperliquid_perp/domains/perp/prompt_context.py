@@ -237,3 +237,54 @@ def render_market_context(ctx: PerpMarketContext) -> str:
         lines.extend(_volume_profile_lines(ctx.volume_profile, ctx.candle_interval))
 
     return "\n".join(lines)
+
+
+def context_shape(ctx: PerpMarketContext) -> str:
+    """The STRUCTURE of what :func:`render_market_context` prints for ``ctx``.
+
+    One canonical string, e.g.
+    ``price|market|funding|indicators(rsi_14,ema_20,macd)|volume_profile``:
+    the fixed sections in render order, the indicator rows by configured name
+    (in render order — a reorder is a different prompt), and the optional
+    volume-profile section when it is present. It is stored beside
+    ``prompt_version`` on every ``ai_inputs`` row (issue #97) so the paper
+    review can segment on ``(prompt_version, context_shape)`` and a
+    config-only change that adds or removes a section — flipping
+    ``market_data.volume_profile_window_candles``, editing ``indicators`` —
+    lands in the data by itself, with no code deploy and nobody remembering
+    to bump anything.
+
+    What it deliberately does NOT cover, so that it changes only when the
+    prompt's shape does:
+
+    - the numbers inside labels (``Candles: 200 x 4h``, ``30d z-score``) —
+      those are content; a change there is what the config-drift warning on
+      resume already names;
+    - the ``Mid:`` and ``Premium:`` lines, which drop out per cycle on data
+      availability, not on configuration — folding them in would split one
+      regime into two on a flaky mid read;
+    - the indicator VALUES, so a dead indicator rendering ``n/a`` is the same
+      shape as a live one.
+
+    One thing it does NOT smooth over: the volume-profile section is read off
+    ``ctx.volume_profile``, which the builder leaves ``None`` not only when
+    the window is configured off but also on a cycle whose window was
+    unusable (too few candles, zero price width, zero volume — each logged as
+    a WARNING by ``volume_profile``). That cycle's prompt really had no such
+    section, so it files under the no-profile shape: the shape describes the
+    prompt the model was shown, not the configuration. A run with the window
+    on and an occasional skip will show those cycles as a small second bucket
+    next to the WARNING that explains them.
+
+    The section names here are the render's own headers, lower-cased; the
+    prompt-context tests hold the two in lockstep in both directions.
+    """
+    parts = [
+        "price",
+        "market",
+        "funding",
+        f"indicators({','.join(ctx.indicators)})",
+    ]
+    if ctx.volume_profile is not None:
+        parts.append("volume_profile")
+    return "|".join(parts)

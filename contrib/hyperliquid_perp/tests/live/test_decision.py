@@ -202,6 +202,7 @@ def _decision_input():
         input_payload_path=None,
         input_payload_hash=None,
         prompt_version="v1",
+        context_shape="price|market|funding|indicators()",
         model="m",
     )
 
@@ -267,6 +268,15 @@ def test_driver_runs_a_full_cycle(tmp_path):
     assert row["status"] == "completed"
     out = db.conn.execute("SELECT * FROM ai_outputs WHERE run_id='r'").fetchone()
     assert out is not None and out["order_created"] in (0, 1)
+    # The live writer carries both segmentation keys off the DecisionInput
+    # (issue #97) — the same audit_rows path the paper scheduler uses.
+    ai_in = db.conn.execute(
+        "SELECT prompt_version, context_shape FROM ai_inputs WHERE run_id='r'"
+    ).fetchone()
+    assert (ai_in["prompt_version"], ai_in["context_shape"]) == (
+        "v1",
+        "price|market|funding|indicators()",
+    )
     state = repo.get_scheduler_state(db.conn, "r")
     assert state["next_decision_at"] is not None
     # Not due again until the next 4h boundary.

@@ -235,6 +235,7 @@ AI input
 | `input_payload_path` | 完整 AI input JSON 檔路徑 |
 | `prompt_version` | 使用的 prompt / strategy 版本 |
 | `model` | 使用的 LLM model |
+| `context_shape`（schema v10 augmentation 欄，CSV 排在 `input_payload_hash` 之後） | 當次 market context 的**段落結構**字串（`domains/perp/prompt_context.context_shape`，例：`price\|market\|funding\|indicators(rsi_14,ema_20)\|volume_profile`）。與 `prompt_version` 並列的切段鍵：`prompt_version` 標 code 改版，`context_shape` 標「多一段／少一段」——包括只改 YAML 就會發生的（`market_data.volume_profile_window_candles`、`indicators`）。只取結構，不取標籤裡的數字與隨資料有無出現的行。v10 之前的列為空 |
 
 ---
 

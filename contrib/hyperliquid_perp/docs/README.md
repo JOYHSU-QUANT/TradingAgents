@@ -164,7 +164,7 @@ gate 區塊（mode / allow_real_orders / safety 等，見 phase3-spec §24）—
 | `domains/perp/schema.py` | ✅ | `PerpMarketContext` · `PerpPosition` · `AccountSnapshot`。 |
 | `domains/perp/context_builder.py` | ✅ | `market_data + account → PerpMarketContext`；計算 indicators 與 funding z-score，並在有設定視窗時掛上 volume profile。 |
 | `domains/perp/volume_profile.py` | ✅ | 滾動 K 線視窗的成交量分布 → POC · value area · D/P/b/細長形狀。純函數、fail-closed（視窗不可用整組回 `None`，該段就不進 prompt）。**預設關閉**，由 `market_data.volume_profile_window_candles` 開啟；只進 analyst 輸入面，不接任何 gate 或 sizing。每根 K 線的量均攤進自己的 high–low，是 OHLCV 粗粒度近似而非逐筆成交，prompt 內會如實標註。 |
-| `domains/perp/prompt_context.py` | ⚠️ | 結構開源；確切措辭私有（funding-rate 的表述方式是你的 alpha）。 |
+| `domains/perp/prompt_context.py` | ⚠️ | 結構開源；確切措辭私有（funding-rate 的表述方式是你的 alpha）。另提供 `context_shape(ctx)`：當次渲染的段落結構字串（段落標題＋指標列名＋有無 volume profile 段；不含標籤裡的數字與隨資料有無出現的行），寫進 `ai_inputs.context_shape`（schema v10）與 payload JSON，與 `prompt_version` 並列為切段鍵（issue #97）。 |
 | `domains/perp/decision.py` | ~~✅~~ 已刪除 | `PerpTradeDecision` schema（Phase 1 意圖決策）。**Phase 2 起退役刪除**——舊 audit 紀錄（schema_version 2）仍可讀，但寫入路徑由 `target_decision.py` 的 structured target 契約取代。 |
 | `integration/trading_graph.py` | ✅ | `HyperliquidTradingGraph(TradingAgentsGraph)`——override `resolve_instrument_context()`，零核心修改。 |
 | `integration/decision_adapter.py` | ~~✅~~ 已刪除 | `PortfolioDecision` → `PerpTradeDecision` rating 映射。**Phase 2 起退役刪除**，由 `domains/perp/target_decision.py` ＋ `domains/perp/risk_gate.py`（structured target 契約 ＋ RiskGate）取代。 |
@@ -184,7 +184,7 @@ gate 區塊（mode / allow_real_orders / safety 等，見 phase3-spec §24）—
 | `domains/perp/market_data_config.py` | ✅ | typed `market_data:` 區塊（`MarketDataConfig`）：未知 key／錯型別／超出範圍的值在 config load 具名 exit 1，四個 key 的預設值只宣告在欄位上，`volume_profile_window_candles ≤ candle_lookback` 跨欄位檢查在 `__post_init__`；`engine_bridge._build_context` 與 `build_market_context` 傳同一個解析好的物件（issue #96）。只 import `common/` 與 `schema`，layering 測試釘住。 |
 | `domains/perp/margin.py` | ✅ | Hyperliquid maintenance-margin tier model（rate · continuity deduction · tier 選擇；phase2-execution §6.6.1）。 |
 | `persistence/` | ✅ | SQLite source of truth · transaction · migrations · dedup 去重鍵 · typed repository（phase2-data §1／§5–§12）。 |
-| `persistence/audit_rows.py` | ✅ | §5／§7 audit-row 組裝的單一定義（`ai_inputs` 36 欄／`ai_outputs` 26 欄），paper scheduler 與 live decision driver 共用；刻意的 paper/live 差異（ledger 取得、`remaining_twap_qty`、輸出列 mark/equity 來源）由呼叫端傳參保留。 |
+| `persistence/audit_rows.py` | ✅ | §5／§7 audit-row 組裝的單一定義（`ai_inputs` 37 欄／`ai_outputs` 26 欄），paper scheduler 與 live decision driver 共用；刻意的 paper/live 差異（ledger 取得、`remaining_twap_qty`、輸出列 mark/equity 來源）由呼叫端傳參保留。 |
 | `persistence/export.py` | ✅ | 每 cycle／shutdown／手動的 per-run 全量 CSV export · 欄位依 phase2-data §5–§12 · `.tmp` → atomic replace · 末尾 `manifest.json` 整組一致性標記 · `export_failed` 不回滾交易 state（phase2-data §1.1）。 |
 | `paper/accounting.py` | ✅ | fills · fees（taker 0.045%）· funding exactly-once · account 公式 · accounting replay（**依 run mode 分流**：paper 用模型 fee/realized；live 用交易所 closedPnl/fee、依交易所時間排序、並折算 accounting adjustments）· live fill effect（`compute_live_fill_effect` / `adjustment_ledger_delta`）（phase2-execution §6、phase3-spec §15）。 |
 | `paper/liquidation.py` | ✅ | paper estimated liquidation price · margin tier bisection（phase2-execution §6.6.1）。 |

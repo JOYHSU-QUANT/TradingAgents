@@ -21,7 +21,14 @@ from decimal import Decimal
 
 from .indicators import compute_indicators
 from .market_data_config import MarketDataConfig
-from .schema import Candle, FundingPoint, MarketRegime, MarketSnapshot, PerpMarketContext
+from .schema import (
+    Candle,
+    FundingPoint,
+    MarketRegime,
+    MarketSnapshot,
+    PerpMarketContext,
+    derive_day_change_pct,
+)
 from .volume_profile import compute_volume_profile
 
 # A 30-day window of hourly funding holds ~720 points. Require at least a day of
@@ -103,12 +110,6 @@ def classify_regime(indicators: dict[str, float | None], reference_price: Decima
     return MarketRegime.RANGING
 
 
-def _day_change_pct(mark: Decimal, prev_day: Decimal) -> float | None:
-    if prev_day == 0:
-        return None
-    return float((mark - prev_day) / prev_day * 100)
-
-
 def build_market_context(
     coin: str,
     snapshot: MarketSnapshot,
@@ -174,7 +175,7 @@ def build_market_context(
         oracle_price=snapshot.oracle_price,
         prev_day_price=snapshot.prev_day_price,
         mid_price=snapshot.mid_price,
-        day_change_pct=_day_change_pct(snapshot.mark_price, snapshot.prev_day_price),
+        day_change_pct=derive_day_change_pct(snapshot.mark_price, snapshot.prev_day_price),
         open_interest=snapshot.open_interest,
         day_ntl_volume=snapshot.day_ntl_volume,
         funding_rate=snapshot.funding,

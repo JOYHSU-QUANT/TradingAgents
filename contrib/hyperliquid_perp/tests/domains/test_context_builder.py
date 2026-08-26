@@ -9,14 +9,13 @@ import pytest
 
 from contrib.hyperliquid_perp.domains.perp.context_builder import (
     MIN_FUNDING_SAMPLES,
-    _day_change_pct,
     build_market_context,
     classify_regime,
     funding_zscore,
 )
 from contrib.hyperliquid_perp.domains.perp.indicator_vocab import REGIME_INDICATORS
 from contrib.hyperliquid_perp.domains.perp.market_data_config import MarketDataConfig
-from contrib.hyperliquid_perp.domains.perp.schema import FundingPoint
+from contrib.hyperliquid_perp.domains.perp.schema import FundingPoint, derive_day_change_pct
 from contrib.hyperliquid_perp.exchanges.hyperliquid import mapper
 
 _H = 3600_000
@@ -420,10 +419,10 @@ def test_day_change_pct_formula(mark, prev_day, expected):
     # signal. The end-to-end build/prompt tests inject a hardcoded value and never call
     # this formula, so pin it directly: (mark - prev_day) / prev_day * 100. A swapped
     # denominator or inverted numerator would silently misstate the 24h move.
-    assert _day_change_pct(mark, prev_day) == pytest.approx(expected)
+    assert derive_day_change_pct(mark, prev_day) == pytest.approx(expected)
 
 
 def test_day_change_pct_zero_prev_day_is_none():
     # A zero prior price can't yield a percentage change; return None rather than
     # divide-by-zero, so the renderer omits the field instead of crashing.
-    assert _day_change_pct(Decimal("100"), Decimal("0")) is None
+    assert derive_day_change_pct(Decimal("100"), Decimal("0")) is None

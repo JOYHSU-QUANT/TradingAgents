@@ -50,7 +50,7 @@ def _ctx(as_of: datetime) -> PerpMarketContext:
         oracle_price=_MARK,
         prev_day_price=_MARK,
         mid_price=_MARK,
-        day_change_pct=None,
+        day_change_pct=0.0,  # prev == mark: a reference exists, so 0, not None
         open_interest=D(0),
         day_ntl_volume=D(0),
         funding_rate=D("0.0001"),

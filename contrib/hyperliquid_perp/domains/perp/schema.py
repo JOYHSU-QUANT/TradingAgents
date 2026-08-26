@@ -707,10 +707,13 @@ class PerpMarketContext:
             # Coerced first: a hand-built context naturally reaches for Decimal
             # for anything named *_pct, and Decimal - float is a TypeError, not
             # the contradiction message. The shared check's RELATIVE tolerance
-            # matters here: the change is unbounded (a dust ``prevDayPx`` under
-            # a real mark is a ratio of 1e10), and at that size a double's ulp
-            # alone exceeds 1e-6 absolute — an absolute check would refuse the
-            # producer's own output.
+            # is what makes it fit this field: the change is unbounded (a dust
+            # ``prevDayPx`` under a real mark is a change of 1e11 percent), and
+            # a value that size recorded to ten SIGNIFICANT digits — the usual
+            # way a float is shortened — is off by whole units, which is far
+            # outside 1e-6 absolute and well inside 1e-6 relative. The producer
+            # itself is never at risk either way: it fills the field with the
+            # same function this check re-derives from.
             claimed = float(self.day_change_pct)
             _check_derived(
                 "PerpMarketContext.day_change_pct",

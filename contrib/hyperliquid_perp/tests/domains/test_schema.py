@@ -511,15 +511,26 @@ def test_perp_market_context_day_change_must_agree_with_its_prices():
 
 def test_perp_market_context_day_change_is_the_producers_own_rule():
     # derive_day_change_pct is what context_builder fills the field with, so
-    # the DTO checking against it can never refuse the producer's own output —
-    # including at the size an absolute tolerance would: a dust prevDayPx
-    # under a real mark (the exchange reports either; MarketSnapshot admits
-    # both) is a ratio of ~1e10, where one double ulp alone is > 1e-6.
+    # the DTO checking against it can never refuse the producer's own output,
+    # at any size: a dust prevDayPx under a real mark (the exchange reports
+    # either; MarketSnapshot admits both) is a change of ~1e11 percent.
     mark, dust = Decimal("123456.789"), Decimal("0.0000123")
     change = derive_day_change_pct(mark, dust)
     assert change is not None and change > 1e11
     ctx = PerpMarketContext(**_context(mark_price=mark, prev_day_price=dust, day_change_pct=change))
     assert ctx.day_change_pct == change
+    # And the tolerance is RELATIVE: that change recorded to ten significant
+    # digits (how a float gets shortened on the way through a file) is off by
+    # whole units — far outside 1e-6 absolute, well inside 1e-6 relative — and
+    # must build; off by 1e-5 relative must not. An absolute check fails the
+    # first line, a tolerance an order looser fails the second.
+    shortened = float(f"{change:.10g}")
+    assert 1.0 < abs(shortened - change) < 1e-6 * change
+    PerpMarketContext(**_context(mark_price=mark, prev_day_price=dust, day_change_pct=shortened))
+    with pytest.raises(ValueError, match="contradicts the prices"):
+        PerpMarketContext(
+            **_context(mark_price=mark, prev_day_price=dust, day_change_pct=change * (1 + 1e-5))
+        )
     # And a Decimal handed in (the natural type for anything *_pct here) is
     # coerced and checked, not crashed on: the contradiction message, not a
     # TypeError from Decimal - float.

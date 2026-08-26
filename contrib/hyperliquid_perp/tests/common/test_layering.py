@@ -63,7 +63,16 @@ def test_the_config_loader_imports_no_compute_module():
     # it silently and nothing would fail. Structural, like the check below.
     #
     # To add an import here, put the value in ``common/`` or a ``*_vocab``
-    # module rather than widening this set.
+    # module rather than widening this set. ``market_data_config`` is the one
+    # parser on the list — it runs on every load (the block is always
+    # present), so a lazy import would buy nothing — and ``schema`` is the
+    # stdlib-only DTO module it reaches for the candle-interval vocabulary.
+    #
+    # The set is checked as a CLOSURE, not as config.py's direct imports
+    # alone: every admitted module's own in-package imports must stay inside
+    # the same set. Otherwise a ``from .volume_profile import ...`` added to
+    # ``schema`` or to the parser would drag the compute module into every
+    # load while both files' direct import lists looked innocent.
     #
     # TOP-LEVEL statements only, unlike the ``common/`` check below which walks
     # the whole tree. The invariant here is about what merely IMPORTING
@@ -71,44 +80,87 @@ def test_the_config_loader_imports_no_compute_module():
     # sanctioned escape hatch — ``load_config`` already uses it for
     # ``live.config``/``risk_gate``, precisely so ``--context-only`` does not
     # pay for the risk-gate domain unless a ``live:`` block exists.
-    allowed = {"common.config_coercion", "common.constants", "domains.perp.indicator_vocab"}
-    source = Path(__file__).resolve().parents[2] / "config.py"
+    allowed = {
+        "common.config_coercion",
+        "common.constants",
+        "domains.perp.indicator_vocab",
+        "domains.perp.market_data_config",
+        "domains.perp.schema",
+    }
+    offenders = _load_time_import_closure(_SOURCE_ROOT / "config.py") - allowed
+    assert not offenders, (
+        f"config.py's load-time import closure reaches outside {sorted(allowed)}: "
+        f"{sorted(offenders)}"
+    )
 
-    # Relative level-1 imports are today's style, but the guard must not depend
-    # on the style holding: an ABSOLUTE
-    # ``from contrib.hyperliquid_perp.domains.perp.volume_profile import ...``
-    # (level 0), or a plain ``import contrib.hyperliquid_perp...``, drags in
-    # exactly the same compute module while passing a level-1-only filter. The
-    # sibling check below already walks both node kinds; this one was narrower
-    # than the regression it was written for. Absolute forms are normalised to
-    # the same dotted tail so ``allowed`` stays written one way.
-    def offender(kind: str, name: str | None, level: int) -> str | None:
-        # level >= 1 is relative and ``name`` is already the tail; level 0 is
-        # absolute and only counts when it names THIS package.
-        #
-        # ``name is None`` on a relative node means ``from . import x`` — the
-        # package ITSELF, so it maps to "" (in no allowlist), exactly as
-        # _package_tail maps the bare absolute package. Letting it fall through
-        # as None would allow ``from . import domains`` — one keystroke from the
-        # already-flagged ``from .domains import perp``, and the realistic route
-        # to the historical offender this test's docstring cites. (``.`` here is
-        # ``contrib.hyperliquid_perp``, config.py's own package, so the reachable
-        # spellings are its top-level children: domains, ports, engine_bridge.)
-        tail = (name or "") if level >= 1 else _package_tail(name)
-        if tail is None or tail in allowed:
-            return None
-        return f"{kind} {'.' * level}{name or ''}"
 
-    offenders = []
+_SOURCE_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_time_import_closure(source: Path) -> set[str]:
+    """Every in-package module ``source`` imports at top level, transitively.
+
+    Walks :func:`_in_package_imports` from module to module, resolving each
+    dotted tail to its file (``x/__init__.py`` for a package). A tail with no
+    file — the bare package ``""`` from ``from . import x`` — is kept in the
+    result (it is an offender) but not walked.
+    """
+    seen: set[str] = set()
+    queue = [source]
+    while queue:
+        for tail in _in_package_imports(queue.pop()) - seen:
+            seen.add(tail)
+            module = _SOURCE_ROOT.joinpath(*tail.split(".")) if tail else _SOURCE_ROOT
+            if module.with_suffix(".py").is_file():
+                queue.append(module.with_suffix(".py"))
+            elif tail and (module / "__init__.py").is_file():
+                queue.append(module / "__init__.py")
+    return seen
+
+
+def _in_package_imports(source: Path) -> set[str]:
+    """Dotted tails (``domains.perp.x``) of ``source``'s TOP-LEVEL in-package imports.
+
+    Relative level-1 imports are today's style, but the guard must not depend
+    on the style holding: an ABSOLUTE
+    ``from contrib.hyperliquid_perp.domains.perp.volume_profile import ...``
+    (level 0), or a plain ``import contrib.hyperliquid_perp...``, drags in
+    exactly the same compute module while passing a level-1-only filter, so
+    both node kinds are walked and absolute forms are normalised to the same
+    dotted tail an allowlist is written in. A relative import is resolved
+    against the module's own package depth, so ``from .schema import x``
+    inside ``domains/perp/`` and ``from ...common.constants import y`` come
+    back as ``domains.perp.schema`` / ``common.constants``.
+
+    ``from . import x`` (``name is None``) resolves to the package ITSELF —
+    ``""`` at the top level, in no allowlist, exactly as :func:`_package_tail`
+    maps the bare absolute package. Letting it fall through as ``None`` would
+    allow ``from . import domains`` — one keystroke from the already-flagged
+    ``from .domains import perp``, and the realistic route to the historical
+    offender the loader test's docstring cites.
+    """
+    own_package = source.resolve().relative_to(_SOURCE_ROOT).parent.parts
+
+    def tail(name: str | None, level: int) -> str | None:
+        if level == 0:
+            return _package_tail(name)
+        # ``level`` dots: one for the module's own package, each further one
+        # climbs a package. Climbing past the package root is an ImportError
+        # at runtime; resolve it to the root ("") rather than let a negative
+        # slice bound silently drop packages from the END of the path.
+        base = list(own_package[: max(0, len(own_package) - (level - 1))])
+        return ".".join([*base, name] if name else base)
+
+    found: set[str] = set()
     for node in ast.parse(source.read_text(encoding="utf-8")).body:
         if isinstance(node, ast.ImportFrom):
-            offenders.append(offender("from", node.module, node.level))
+            names = [tail(node.module, node.level)]
         elif isinstance(node, ast.Import):
-            offenders.extend(offender("import", alias.name, 0) for alias in node.names)
-    offenders = [o for o in offenders if o]
-    assert not offenders, (
-        f"config.py gained an in-package import outside {sorted(allowed)}: {offenders}"
-    )
+            names = [_package_tail(alias.name) for alias in node.names]
+        else:
+            continue
+        found.update(n for n in names if n is not None)
+    return found
 
 
 def test_common_imports_nothing_from_the_rest_of_the_package():

@@ -305,6 +305,27 @@ def test_live_smoke_real_run_missing_agent_key_names_the_env_var(
     assert smoke_seams.auth_calls == []  # the key guard fired before authorization
 
 
+def test_live_smoke_missing_agent_key_carries_the_dotenv_diagnosis(
+    tmp_path, capsys, smoke_seams, monkeypatch
+):
+    # Issue #82: this was the key-check refusal without the "why the .env did
+    # not satisfy it" suffix the others carry. Sentinel pins the wiring the
+    # way test_cli.py does for the paper refusals: the message must embed
+    # the diagnosis for the ACTUAL variable — dropping the interpolation, or
+    # diagnosing the wrong var, is invisible to the substring check above.
+    import contrib.hyperliquid_perp.cli as cli_mod
+
+    monkeypatch.delenv(_SMOKE_ENV, raising=False)
+    monkeypatch.setattr(cli_mod.smoke, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
+    cfg = _smoke_yaml(tmp_path)
+    dbp = _seed_genesis_run(tmp_path, cfg)
+    rc = cli_main(["live-smoke", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert f"{_SMOKE_ENV} is not set" in err
+    assert f"DIAG[{_SMOKE_ENV}]" in err
+
+
 def test_live_smoke_real_run_auth_failure_exits_1(tmp_path, capsys, smoke_seams):
     smoke_seams.auth_error = AgentAuthorizationError("agent not in extra_agents")
     cfg = _smoke_yaml(tmp_path)

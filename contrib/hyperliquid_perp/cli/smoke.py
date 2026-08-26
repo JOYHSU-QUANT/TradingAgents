@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from ..config import dotenv_diagnosis
 from ..persistence.db import SchemaVersionError, apply_migrations
 from ._common import (
     _existing_run_row,
@@ -518,9 +519,14 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
     agent_key = load_agent_key(live_cfg.network)
     if agent_key is None:
         env_var = agent_key_env_var(live_cfg.network)
+        # Same diagnosis suffix every other key-check refusal carries (grep
+        # ``dotenv_diagnosis``): "not set" alone cannot tell an operator that
+        # the .env line they wrote lost to an earlier blank assignment, or
+        # that python-dotenv is missing (#82).
         print(
             f"error: {env_var} is not set — the smoke suite signs real testnet orders. "
-            f"Export the {live_cfg.network} agent key, or use --dry-run.",
+            f"Export the {live_cfg.network} agent key, or use --dry-run. "
+            f"({dotenv_diagnosis(env_var)}.)",
             file=sys.stderr,
         )
         return 1

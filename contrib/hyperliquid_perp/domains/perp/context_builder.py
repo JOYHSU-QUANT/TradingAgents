@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from .indicators import compute_indicators
+from .market_data_config import MarketDataConfig
 from .schema import Candle, FundingPoint, MarketRegime, MarketSnapshot, PerpMarketContext
 from .volume_profile import compute_volume_profile
 
@@ -114,14 +115,21 @@ def build_market_context(
     candles: Sequence[Candle],
     funding_history: Sequence[FundingPoint],
     *,
-    candle_interval: str,
-    funding_window_days: int,
+    market_data: MarketDataConfig,
     indicator_names: Sequence[str],
     exchange_time: datetime | None,
     host_time_at_exchange_read: datetime | None = None,
-    volume_profile_window: int = 0,
 ) -> PerpMarketContext:
     """Build the full :class:`PerpMarketContext` from raw domain inputs.
+
+    ``market_data`` is the parsed ``market_data:`` block. Three of its fields
+    are read here: the interval the candles were fetched at (recorded on the
+    context), the funding z-score window, and the volume-profile window —
+    ``0`` leaves the profile off and the context's ``volume_profile`` ``None``.
+    ``candle_lookback`` is the fetch's concern, not this function's. Passing
+    the parsed block rather than its fields one by one keeps the defaults
+    declared once (on :class:`MarketDataConfig`), so a caller cannot build a
+    context from a different default than the config loader validated.
 
     ``exchange_time`` is the exchange's clock as read during the same fetch
     (see ``PerpMarketContext.exchange_time``); it is carried through untouched
@@ -132,12 +140,6 @@ def build_market_context(
     it. The default it would otherwise inherit is precisely the issue-#51 blind
     spot (the guard falls back to the host clock, which also bounded the candle
     window), so it must never be reachable by forgetting a kwarg.
-
-    ``volume_profile_window`` is the number of trailing candles the volume
-    profile is cut from; ``0`` (the default) leaves it off and the context's
-    ``volume_profile`` ``None``. Unlike ``exchange_time`` this one KEEPS its
-    default: forgetting it omits an optional analyst input, which is the safe
-    direction — no guard reads it, and no decision path degrades without it.
     """
     if candles:
         # Anchor the funding window on the raw epoch-ms integer, not a float
@@ -152,7 +154,7 @@ def build_market_context(
 
     indicators = compute_indicators(candles, indicator_names)
     zscore, sample_count = funding_zscore(
-        funding_history, snapshot.funding, as_of_ms, funding_window_days
+        funding_history, snapshot.funding, as_of_ms, market_data.funding_zscore_window_days
     )
     # Use the latest candle close (the EMAs' own series) so mark/close basis can't
     # flip the regime; fall back to mark only when there are no candles at all.
@@ -161,12 +163,12 @@ def build_market_context(
     # Cut from the same candle series as the indicators, so the profile and the
     # regime describe the same window of history. ``None`` whenever the feature
     # is off or the window is unusable — the renderer then omits the section.
-    volume_profile = compute_volume_profile(candles, volume_profile_window)
+    volume_profile = compute_volume_profile(candles, market_data.volume_profile_window_candles)
 
     return PerpMarketContext(
         coin=coin,
         as_of=as_of,
-        candle_interval=candle_interval,
+        candle_interval=market_data.candle_interval,
         candle_count=len(candles),
         mark_price=snapshot.mark_price,
         oracle_price=snapshot.oracle_price,
@@ -178,7 +180,7 @@ def build_market_context(
         funding_rate=snapshot.funding,
         funding_premium=snapshot.premium,
         funding_zscore_30d=zscore,
-        funding_window_days=funding_window_days,
+        funding_window_days=market_data.funding_zscore_window_days,
         funding_sample_count=sample_count,
         indicators=indicators,
         market_regime=regime,

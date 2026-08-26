@@ -6,8 +6,9 @@ raw YAML block, and :func:`decimal_from_yaml` / :func:`int_from_yaml` /
 :func:`bool_from_yaml` / :func:`str_from_yaml` are the scalar converters it
 dispatches to. Used by
 ``risk_gate.RiskConfig``, ``target_decision.DecisionConfig``,
-``paper.config.PaperTradingConfig``, and ``live.config.LiveConfig``, so they
-live here rather than in any one domain module.
+``market_data_config.MarketDataConfig``, ``paper.config.PaperTradingConfig``,
+and ``live.config.LiveConfig``, so they live here rather than in any one
+domain module.
 
 Everything here is pure (no I/O, no clock); amounts are :class:`~decimal.Decimal`.
 """

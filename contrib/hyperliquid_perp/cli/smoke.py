@@ -651,10 +651,21 @@ def _smoke_startup_recovery(
     from ..live.reconcile import LiveReconciler
     from ..live.safe_mode import SafeModeManager
     from ..live.startup import run_startup_recovery
+    from ..live.venue_identity import VenueIdentityMonitor
 
     def fetch_clearinghouse():
         return call_sdk(client.info.user_state, wallet)
 
+    # §13.5 (issue #80): one venue-identity monitor shared by the switch's
+    # disarm cross-check and the reconciler's per-order probes — the same
+    # wiring as the live lane's, so the restart tests exercise it too.
+    identity = VenueIdentityMonitor(
+        query_order_by_cloid=signed.query_order_by_cloid,
+        db=db,
+        run_id=run_id,
+        symbol=coin,
+        payload_dir=payload_dir,
+    )
     kill_switch = KillSwitchManager(
         client=signed,
         gate=gate,
@@ -670,6 +681,7 @@ def _smoke_startup_recovery(
         # from the §20.3 sample floor AND from the clean-shutdown daemon
         # verdict alike.
         suite_authored=True,
+        identity=identity,
     )
     safe_mode = SafeModeManager(db=db, run_id=run_id, gate=gate)
     processor = LiveFillProcessor(
@@ -700,11 +712,11 @@ def _smoke_startup_recovery(
         coin=coin,
         fetch_open_orders=signed.open_orders,
         fetch_clearinghouse=fetch_clearinghouse,
-        query_order_by_cloid=signed.query_order_by_cloid,
         fetch_fills=signed.user_fills_by_time,
         backfiller=backfiller,
         payload_dir=payload_dir,
         refresh_kill_switch=_refresh_across_sweep,
+        identity=identity,  # owns the orderStatus seam (§13.5)
     )
     return run_startup_recovery(
         db=db,

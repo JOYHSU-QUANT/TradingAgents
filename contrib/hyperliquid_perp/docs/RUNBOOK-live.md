@@ -579,7 +579,12 @@ python -m contrib.hyperliquid_perp safe-mode --run-id live-BTC --db live_trading
 
 **意思**：交易所連續多次對 orderStatus 給出「讀不出來是我們這張單」的答案——回的是**別人**
 的 cloid，或是這個 build 認不得的形狀。門檻與當下計數寫在 `protection_order_events`
-那列 `identity_fault_latched` 的 `detail` 裡。
+那列 `identity_fault_latched` 的 `detail` 裡。**計數是整個 process 共用的一條**（issue #80）：
+protection 的兩個探測點、reconciliation 每張單的 orderStatus 查詢、以及 §18.2 shutdown 的
+disarm 交叉檢查，走的是同一個 `VenueIdentityMonitor`——所以故障在哪個消費者身上被問到都算同一串，
+`detail` 會寫出是哪一個站點跨過門檻的。升級成 manual 的時點有三個：engine 每 tick 在 §17 sync 之後、
+`reconcile_and_apply` 每一輪對帳之後、CLI 在 shutdown sweep 之後（最後這個會**持久化**，讓下一次
+`live --run-id` 開機時直接拒絕啟動，而不是每次 shutdown 都只留一行 log、每次都擋住 disarm）。
 
 **為什麼是 manual**：這種故障不會自癒。會把一次身分查詢誤路由的 venue，下一次照樣誤路由，
 所以 recoverable（下一輪乾淨對帳就自動解除）等於把 run 放回原本那個無限迴圈：
@@ -592,8 +597,16 @@ gate 線是豁免的（`order_gate.py` 有 import-time 保證），所以 latch 
 
 **怎麼查**：
 
-1. 先看 `identity_fault_latched` 那列的 `detail`——它會指出最後一次是哪個 role、哪個
-   cloid、以及交易所實際回了什麼。
+1. 先看 `identity_fault_latched` 那列的 `detail`——它會指出最後一次是哪個站點（protection 的
+   哪個 role、reconcile、還是 kill-switch disarm）、哪個 cloid、以及交易所實際回了什麼。
+   **整包回應**在 `payloads/<run_id>/orderStatus-<cloid>-*.json`——裡面有對方的 oid 與本文，
+   `str(exc)` 只說得出兩個 cloid。存檔規則（每個 cloid 存幾份、為什麼有上限）以
+   `live/venue_identity.py` 的 `_note_unreadable` docstring 為準，這裡不複述。
+   同一個故障在其他表也會露面：`exchange_reconciliation_events` 的 `order_missing_on_exchange`／
+   `orphan_exchange_order` case detail 與 shutdown 那列 `shutdown_cancel_orders_completed` 的
+   `failures` 寫 `orderStatus answered unusably (venue identity fault): …`（純網路中斷寫的是
+   `orderStatus failed: …`，兩者查的方向相反）；protection 自己的 `*_repair_failed` 列沿用上表的
+   `orderStatus recovery answered unusably:` 字樣。
 2. 這是**交易所或接線**的問題，不是策略問題：核對 `live.wallet_address` 與 agent key
    是否同一個錢包（同 `envelope-wrong-user` 的核對方向）、SDK 是否被別處覆寫、
    以及 Hyperliquid 是否改了 orderStatus 的回應格式（後者會讓這個 build 的解析全面失效，

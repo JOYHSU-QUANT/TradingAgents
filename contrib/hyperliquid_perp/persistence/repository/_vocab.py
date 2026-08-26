@@ -249,16 +249,21 @@ del _split, _rest, _whole, _name, _union
 # protection) / clearing a zeroed position's residual (§17.1 rule 4) / the
 # §13.5 venue-identity latch (consecutive orderStatus answers this build could
 # not read as being about the cloid it asked for — see
-# protection._note_unreadable_probe; written once per episode, not per answer).
+# live.venue_identity.VenueIdentityMonitor; written once per episode, not per
+# answer, by the monitor shared across protection, reconciliation and the kill
+# switch since issue #80 — its ``symbol`` is the run's coin from every
+# production wiring, or ``kill_switch._UNSCOPED_SYMBOL`` from a manager-private
+# monitor, which only test wirings build).
 #
 # On that last member vs the 2026-08-17 decision that this vocabulary is CLOSED:
 # that decision refused a PER-ATTEMPT ``*_recovery_unreadable`` event, because
 # the recovery probe's caller already writes a ``*_repair_failed`` row and the
 # cause belonged in it. It still holds. The latch is a different fact: the OTHER
-# probe site — the no-op guard in ``_row_still_rests`` — writes no row at all,
-# so for it there is no existing row to fold into, and what is recorded here is
-# one per EPISODE rather than one per answer. Fold-into-the-existing-row remains
-# the rule for anything the repair ladder already reports.
+# probe sites — protection's no-op guard, the reconciler's tiebreakers, the
+# shutdown cross-check — write no protection row at all, so for them there is
+# no existing row to fold into, and what is recorded here is one per EPISODE
+# rather than one per answer. Fold-into-the-existing-row remains the rule for
+# anything the repair ladder already reports.
 PROTECTION_ORDER_EVENT_TYPES = frozenset(
     {
         "stop_loss_placed",

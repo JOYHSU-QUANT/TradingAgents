@@ -417,6 +417,7 @@ def _live_startup_recovery(
     from ..live.reconcile import LiveReconciler
     from ..live.safe_mode import SafeModeManager
     from ..live.startup import run_startup_recovery
+    from ..live.venue_identity import VenueIdentityMonitor, escalate_identity_fault
     from ..paper import accounting
     from ..paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
     from ..persistence import repository as repo
@@ -708,6 +709,19 @@ def _live_startup_recovery(
             return 1
         signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
         try:
+            # §13.5 (issue #80): ONE venue-identity monitor for the whole
+            # process. The kill switch's disarm cross-check, the reconciler's
+            # per-order probes and (under --loop) the §17 protection manager
+            # all read orderStatus through it, so consecutive answers the
+            # venue cannot make about OUR cloids are one streak wherever they
+            # were asked — and its payload_dir keeps every refused answer.
+            identity = VenueIdentityMonitor(
+                query_order_by_cloid=signed.query_order_by_cloid,
+                db=db,
+                run_id=run_id,
+                symbol=coin,
+                payload_dir=payload_dir,
+            )
             kill_switch = KillSwitchManager(
                 client=signed,
                 gate=gate,
@@ -722,6 +736,7 @@ def _live_startup_recovery(
                 max_tick_gap_seconds=_RECOVERY_MAX_TICK_GAP_SECONDS,
                 network_timeout_s=signed.timeout,
                 payload_dir=payload_dir,
+                identity=identity,
             )
             safe_mode = SafeModeManager(db=db, run_id=run_id, gate=gate)
             processor = LiveFillProcessor(
@@ -749,11 +764,11 @@ def _live_startup_recovery(
                 coin=coin,
                 fetch_open_orders=signed.open_orders,
                 fetch_clearinghouse=fetch_clearinghouse,
-                query_order_by_cloid=signed.query_order_by_cloid,
                 fetch_fills=signed.user_fills_by_time,
                 backfiller=backfiller,
                 payload_dir=payload_dir,
                 refresh_kill_switch=_refresh_across_sweep,
+                identity=identity,  # owns the orderStatus seam (§13.5)
             )
             shutdown_problem: str | None = None
             superseded = False
@@ -803,6 +818,7 @@ def _live_startup_recovery(
                         processor=processor,
                         payload_dir=payload_dir,
                         fetch_clearinghouse=fetch_clearinghouse,
+                        identity=identity,
                     )
             except RunLockError as exc:
                 # §18.2 lease takeover (raised out of the loop's heartbeat): a
@@ -984,6 +1000,37 @@ def _live_startup_recovery(
                                     "scheduleCancel will fire at the deadline"
                                 )
                                 logger.error("§18.2 %s", shutdown_problem)
+                        # §13.5 (issue #80): the sweep's disarm cross-check just
+                        # probed orderStatus through the shared monitor, and
+                        # this is the LAST holder of the safe-mode machine to
+                        # run — so it reads the latch (inside the armed branch
+                        # on purpose: an unarmed switch ran no cross-check, and
+                        # a latch from the loop was escalated by the engine
+                        # every tick). Persisting manual here is the whole
+                        # point: the next boot hydrates it and refuses to start
+                        # into the same fault, instead of every shutdown
+                        # blocking its disarm with only a log line. Fed into
+                        # ``shutdown_problem`` so the one-shot lane exits 4 the
+                        # way it does for an armed switch — a run that just
+                        # latched manual safe mode must never hand exit 0 to
+                        # its supervisor. Best-effort like every other write in
+                        # this finally: a busy DB must not discard the verdict.
+                        try:
+                            if escalate_identity_fault(
+                                identity, safe_mode, site="§18.2 shutdown disarm cross-check"
+                            ):
+                                shutdown_problem = (
+                                    "venue identity fault latched — the exchange kept "
+                                    "answering orderStatus about orders that are not "
+                                    "ours; manual safe mode entered (see "
+                                    "identity_fault_latched in protection_order_events "
+                                    "and payloads/orderStatus-*.json)"
+                                    + (f"; also: {shutdown_problem}" if shutdown_problem else "")
+                                )
+                        except Exception:  # noqa: BLE001
+                            logger.exception(
+                                "could not persist the venue-identity escalation at shutdown"
+                            )
                         if shutdown_problem is not None:
                             # Surfaced HERE, inside the ``finally``: when the body
                             # above raised (the except path already returned 1),

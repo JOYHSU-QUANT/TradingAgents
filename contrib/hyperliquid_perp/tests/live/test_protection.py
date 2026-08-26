@@ -1764,7 +1764,7 @@ def test_the_identity_fault_latches_on_the_kth_consecutive_unreadable_answer(env
     fail-closed verdict already handles at the cost of one redundant re-place —
     into a run halted for a human. Never latching is the treadmill.
     """
-    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+    from contrib.hyperliquid_perp.live.venue_identity import UNREADABLE_PROBE_LATCH_THRESHOLD as K
 
     db = env
     _seed_long(db)
@@ -1777,11 +1777,11 @@ def test_the_identity_fault_latches_on_the_kth_consecutive_unreadable_answer(env
 
     for _ in range(K - 1):
         assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
-    assert mgr.identity_fault_latched is False
+    assert mgr.identity.latched is False
     assert _latch_rows(db) == []
 
     assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
-    assert mgr.identity_fault_latched is True
+    assert mgr.identity.latched is True
     rows = _latch_rows(db)
     assert len(rows) == 1
     assert f"{K} consecutive" in rows[0]["detail"], rows[0]["detail"]
@@ -1797,7 +1797,7 @@ def test_the_latched_identity_fault_writes_one_audit_row_per_episode(env):
     number of rows — the same unboundedness, moved from the repair ladder into
     the audit trail.
     """
-    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+    from contrib.hyperliquid_perp.live.venue_identity import UNREADABLE_PROBE_LATCH_THRESHOLD as K
 
     db = env
     _seed_long(db)
@@ -1807,7 +1807,7 @@ def test_the_latched_identity_fault_writes_one_audit_row_per_episode(env):
 
     for _ in range(K + 6):
         assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
-    assert mgr.identity_fault_latched is True
+    assert mgr.identity.latched is True
     assert len(_latch_rows(db)) == 1
 
 
@@ -1819,7 +1819,7 @@ def test_a_readable_answer_ends_the_unreadable_streak(env):
     though its verdict is still "nothing of ours rests". It also caches nothing,
     which is what keeps the probes after it real probes.
     """
-    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+    from contrib.hyperliquid_perp.live.venue_identity import UNREADABLE_PROBE_LATCH_THRESHOLD as K
 
     db = env
     _seed_long(db)
@@ -1834,7 +1834,7 @@ def test_a_readable_answer_ends_the_unreadable_streak(env):
     for _ in range(2 * K - 1):
         assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
     # 2K-1 probes, but never K unreadable ones IN A ROW.
-    assert mgr.identity_fault_latched is False
+    assert mgr.identity.latched is False
     assert _latch_rows(db) == []
 
 
@@ -1847,7 +1847,7 @@ def test_a_transport_failure_neither_counts_toward_nor_resets_the_identity_fault
     timing out occasionally, the bound would never be reached. Both directions
     are pinned here because both were plausible readings of "consecutive".
     """
-    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+    from contrib.hyperliquid_perp.live.venue_identity import UNREADABLE_PROBE_LATCH_THRESHOLD as K
 
     db = env
     _seed_long(db)
@@ -1861,16 +1861,16 @@ def test_a_transport_failure_neither_counts_toward_nor_resets_the_identity_fault
 
     for _ in range(K - 1):
         assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
-    assert mgr.identity_fault_latched is False
+    assert mgr.identity.latched is False
 
     # The timeout: did NOT push the streak over the line on its own.
     assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
-    assert mgr.identity_fault_latched is False
+    assert mgr.identity.latched is False
     assert _latch_rows(db) == []
 
     # ...and did not wipe the K-1 unreadable answers before it either.
     assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
-    assert mgr.identity_fault_latched is True
+    assert mgr.identity.latched is True
 
 
 def test_the_two_probe_sites_share_one_identity_fault_counter(env):
@@ -1878,9 +1878,11 @@ def test_the_two_probe_sites_share_one_identity_fault_counter(env):
 
     A counter per site would let a fault that alternates between the no-op
     guard and the lost-ack recovery probe stay below both thresholds forever,
-    which is precisely the persistent misroute this bound exists for.
+    which is precisely the persistent misroute this bound exists for. (The
+    cross-CONSUMER half of the same claim — protection sharing the streak with
+    the reconciler and the kill switch — is pinned in test_venue_identity.)
     """
-    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+    from contrib.hyperliquid_perp.live.venue_identity import UNREADABLE_PROBE_LATCH_THRESHOLD as K
 
     db = env
     _seed_long(db)
@@ -1891,7 +1893,7 @@ def test_the_two_probe_sites_share_one_identity_fault_counter(env):
     # K-1 from the no-op guard...
     for _ in range(K - 1):
         assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
-    assert mgr.identity_fault_latched is False
+    assert mgr.identity.latched is False
 
     # ...and the K-th from the OTHER site, the lost-ack recovery probe.
     assert (
@@ -1909,7 +1911,7 @@ def test_the_two_probe_sites_share_one_identity_fault_counter(env):
         )
         is False
     )
-    assert mgr.identity_fault_latched is True
+    assert mgr.identity.latched is True
     assert len(_latch_rows(db)) == 1
 
 
@@ -1942,7 +1944,7 @@ def test_the_no_op_guards_alone_cannot_latch_within_one_sync(env):
     repair ladder). Every re-place SUCCEEDS, so the ladder never reaches its own
     probe and what is counted here is guards only.
     """
-    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+    from contrib.hyperliquid_perp.live.venue_identity import UNREADABLE_PROBE_LATCH_THRESHOLD as K
 
     db = env
     _seed_long(db)
@@ -1964,7 +1966,7 @@ def test_the_no_op_guards_alone_cannot_latch_within_one_sync(env):
     guard_probes = len(client.status_queries) - before
     assert guard_probes > 0, "the guards never asked — this test would be vacuous"
     assert guard_probes < K, f"guards alone made {guard_probes} probes, threshold is {K}"
-    assert mgr.identity_fault_latched is False
+    assert mgr.identity.latched is False
     assert _latch_rows(db) == []
 
 
@@ -1979,7 +1981,7 @@ def test_a_sync_whose_repair_ladder_also_misroutes_can_latch_within_that_sync(en
     fault, and how few ticks it took to collect them does not make it less true.
     Pinned so a later reader does not "fix" it back into an unbounded treadmill.
     """
-    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+    from contrib.hyperliquid_perp.live.venue_identity import UNREADABLE_PROBE_LATCH_THRESHOLD as K
 
     db = env
     _seed_long(db)
@@ -2001,9 +2003,9 @@ def test_a_sync_whose_repair_ladder_also_misroutes_can_latch_within_that_sync(en
     # bounded so the prose and the code cannot drift apart — a change to the
     # guard call sites or the ladder length should fail here and send whoever
     # made it back to that comment.
-    assert mgr._unreadable_probes == 6
-    assert mgr._unreadable_probes >= K
-    assert mgr.identity_fault_latched is True
+    assert mgr.identity.unreadable_streak == 6
+    assert mgr.identity.unreadable_streak >= K
+    assert mgr.identity.latched is True
     assert len(_latch_rows(db)) == 1
 
 
@@ -2016,7 +2018,7 @@ def test_a_failed_latch_audit_write_neither_crashes_the_tick_nor_drops_the_latch
     aborting the whole §17 sync, including the SL repair, in order to fail at
     writing one audit line.
     """
-    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+    from contrib.hyperliquid_perp.live.venue_identity import UNREADABLE_PROBE_LATCH_THRESHOLD as K
 
     db = env
     _seed_long(db)
@@ -2027,14 +2029,16 @@ def test_a_failed_latch_audit_write_neither_crashes_the_tick_nor_drops_the_latch
     def _busy(*_args, **_kwargs):
         raise sqlite3.OperationalError("database is locked")
 
-    mgr._record_event = _busy  # type: ignore[method-assign]
+    # The latch row is the MONITOR's write now (issue #80), so that is the seam
+    # a busy DB has to break.
+    mgr.identity._record_latch = _busy  # type: ignore[method-assign]
 
     for _ in range(K):
         # The verdict still comes back — fail-closed, no crash.
         assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
     # ...and the escalation the engine reads is still up, even though its
     # durable line could not be written.
-    assert mgr.identity_fault_latched is True
+    assert mgr.identity.latched is True
 
 
 def test_a_recovered_venue_lowers_the_latch_so_a_recurrence_is_visible_again(env):
@@ -2044,7 +2048,7 @@ def test_a_recovered_venue_lowers_the_latch_so_a_recurrence_is_visible_again(env
     makes a LATER episode observable: without the reset, a second outbreak
     weeks later would leave no audit row and no fresh escalation signal.
     """
-    from contrib.hyperliquid_perp.live.protection import _UNREADABLE_PROBE_LATCH_THRESHOLD as K
+    from contrib.hyperliquid_perp.live.venue_identity import UNREADABLE_PROBE_LATCH_THRESHOLD as K
 
     db = env
     _seed_long(db)
@@ -2058,13 +2062,13 @@ def test_a_recovered_venue_lowers_the_latch_so_a_recurrence_is_visible_again(env
 
     for _ in range(K):
         mgr._row_still_rests(_OUR_ROW, role="stop_loss")
-    assert mgr.identity_fault_latched is True
+    assert mgr.identity.latched is True
 
     assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False  # readable again
-    assert mgr.identity_fault_latched is False
+    assert mgr.identity.latched is False
 
     for _ in range(K):
         mgr._row_still_rests(_OUR_ROW, role="stop_loss")
-    assert mgr.identity_fault_latched is True
+    assert mgr.identity.latched is True
     # A second episode, a second row — the two are distinguishable in the trail.
     assert len(_latch_rows(db)) == 2

@@ -452,6 +452,27 @@ def test_the_smoke_recovery_gives_the_reconciler_a_payload_dir(tmp_path, monkeyp
         assert_payload_dir(reconciler, dbp, run_id="r1")
 
 
+def test_the_smoke_recovery_gives_its_sweep_components_one_identity_monitor(
+    tmp_path, monkeypatch, smoke_seams
+):
+    """The daemon's §13.5 identity-monitor pin, at the smoke site (issue #80).
+
+    Per recovery: each of the suite's recoveries builds its own switch and
+    reconciler pair, and the pair must share ONE monitor — a pair that split
+    into two private monitors would keep the restart tests (15–17) from ever
+    exercising the cross-consumer streak the daemon relies on.
+    """
+    record = record_reconciliation_sweep_wiring(monkeypatch)
+    _drive_a_full_smoke_suite(tmp_path)
+
+    assert len(record.switches) == len(record.reconcilers) == _SMOKE_RECOVERIES
+    for switch, reconciler in zip(record.switches, record.reconcilers, strict=True):
+        shared = reconciler.get("identity")
+        assert shared is not None, "the reconciler was left to build a private monitor"
+        assert switch._identity is shared
+        assert shared._payload_dir is not None
+
+
 def test_every_row_a_smoke_run_writes_is_marked_including_the_managers(tmp_path, smoke_seams):
     """The finding that made round 15's exclusion a no-op on real runs.
 

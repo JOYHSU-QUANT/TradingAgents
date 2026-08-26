@@ -55,7 +55,7 @@ from .fill_backfill import (
     FillBackfiller,
 )
 from .fills import ENVELOPE_FACT_KEY_PREFIX
-from .orders import local_status_for_exchange_status, parse_order_status
+from .orders import local_status_for_exchange_status
 from .payloads import write_raw_payload
 from .safe_mode import (
     REASON_INVALID_LOCAL_FILL,
@@ -65,6 +65,11 @@ from .safe_mode import (
     REASON_STALE_ORDER_SWEEP_FAILED,
     REASON_UNKNOWN_POSITION,
     SafeModeManager,
+)
+from .venue_identity import (
+    VenueIdentityMonitor,
+    describe_order_status_failure,
+    escalate_identity_fault,
 )
 from .ws_stream import LiveWsStream
 
@@ -417,10 +422,12 @@ class ReconciliationReport:
 class LiveReconciler:
     """One run's §12 reconciliation sweep, bound to injectable exchange reads.
 
-    ``fetch_open_orders`` / ``fetch_clearinghouse`` / ``query_order_by_cloid``
-    / ``fetch_fills`` are the exchange seams (production: the signed client's
-    ``open_orders``, an Info ``user_state`` read, ``query_order_by_cloid`` and
-    ``user_fills_by_time``). ``backfiller`` + ``stream`` are the PR 3 fill
+    ``fetch_open_orders`` / ``fetch_clearinghouse`` / ``fetch_fills`` are the
+    exchange seams (production: the signed client's ``open_orders``, an Info
+    ``user_state`` read and ``user_fills_by_time``); the orderStatus seam is
+    the shared ``identity`` monitor (§13.5, issue #80), or — when none is
+    passed, in tests and offline verdicts — a private monitor built over
+    ``query_order_by_cloid``. ``backfiller`` + ``stream`` are the PR 3 fill
     leg; either may be None in reads-only wirings (tests, offline verdicts),
     which skips booking and reports the fill leg from the sighting backlog
     alone — every skipped seam lands in the report's ``legs_skipped`` (see
@@ -435,25 +442,52 @@ class LiveReconciler:
         coin: str,
         fetch_open_orders: Callable[[], Any],
         fetch_clearinghouse: Callable[[], Any],
-        query_order_by_cloid: Callable[[str], Any],
+        query_order_by_cloid: Callable[[str], Any] | None = None,
         fetch_fills: Callable[[int, int], Any] | None = None,
         backfiller: FillBackfiller | None = None,
         stream: LiveWsStream | None = None,
         payload_dir: Path | None = None,
         clock: Clock | None = None,
         refresh_kill_switch: Callable[[], None] | None = None,
+        identity: VenueIdentityMonitor | None = None,
     ) -> None:
         self._db = db
         self._run_id = run_id
         self._coin = coin
         self._fetch_open_orders = fetch_open_orders
         self._fetch_clearinghouse = fetch_clearinghouse
-        self._query_order_by_cloid = query_order_by_cloid
         self._fetch_fills = fetch_fills
         self._backfiller = backfiller
         self._stream = stream
         self._payload_dir = payload_dir
         self._clock = clock or WallClock()
+        # §13.5 (issue #80): every per-order orderStatus read below goes through
+        # the shared venue-identity monitor, so an answer this build cannot
+        # read as being about the cloid it asked for is COUNTED across passes
+        # (and across the other consumers — protection, the kill switch) instead
+        # of merely re-recording the same unresolved case forever. The CLI
+        # passes its one shared instance; a reconciler built without one
+        # (tests, offline verdicts) gets a private monitor over the raw seam.
+        # One or the other, never both: a ``query_order_by_cloid`` passed beside
+        # a monitor would be silently ignored, and a wrapped or recording seam
+        # would then be bypassed without a word.
+        if identity is None:
+            if query_order_by_cloid is None:
+                raise ValueError("LiveReconciler needs an identity monitor or query_order_by_cloid")
+            identity = VenueIdentityMonitor(
+                query_order_by_cloid=query_order_by_cloid,
+                db=db,
+                run_id=run_id,
+                symbol=coin,
+                payload_dir=payload_dir,
+                clock=self._clock,
+            )
+        elif query_order_by_cloid is not None:
+            raise ValueError(
+                "LiveReconciler takes EITHER an identity monitor OR query_order_by_cloid — "
+                "the monitor owns the orderStatus seam"
+            )
+        self._identity = identity
         # §18.2: a full sweep is the longest wall of REST traffic on the
         # single-threaded live tick — two account reads, a paged fill backfill,
         # and an orderStatus round-trip PER order in two separate loops whose
@@ -703,6 +737,17 @@ class LiveReconciler:
                 else:
                     reason = REASON_RECONCILIATION_MISMATCH
                 safe_mode.enter("recoverable", reason, detail="; ".join(causes))
+        # §13.5 (issue #80): the per-order orderStatus probes this pass just
+        # ran feed the shared venue-identity streak, and this method is the
+        # reconciler's one moment with the safe-mode machine in hand. LAST,
+        # after the pass's own bookkeeping — see escalate_identity_fault for
+        # why every holder runs it last and on the level.
+        if escalate_identity_fault(
+            self._identity, safe_mode, site=f"§12 reconciliation, {trigger}"
+        ):
+            logger.error(
+                "reconciliation (%s): venue-identity fault latched — manual safe mode", trigger
+            )
         return report
 
     # ------------------------------------------------------------- fills leg
@@ -1150,13 +1195,19 @@ class LiveReconciler:
         cloid = local["cloid_hex"]
         oid = str(order.get("oid", "?"))
         try:
-            parsed = parse_order_status(self._query_order_by_cloid(cloid), expected_cloid_hex=cloid)
+            parsed = self._identity.probe(cloid, site="reconcile orphan-order tiebreaker")
         except Exception as exc:  # noqa: BLE001 — a failed read is a verdict
             # Log-at-origin, same as _settle_absent_order's sibling tiebreaker:
             # the case detail is an in-memory value (and its row write is
             # fail-soft), so without this line a transient API error here
             # would leave no trace of WHY this order failed to reconcile.
-            logger.warning("orderStatus tiebreaker for cloid %s failed: %s", cloid, exc)
+            # The clause tells the two families apart for triage; the fact
+            # key and the disposition are the same for both — an unreadable
+            # ANSWER is still "we could not ask this cloid" as far as the
+            # case ledger is concerned, and its bound lives in the monitor,
+            # not in extra rows.
+            why = describe_order_status_failure(exc)
+            logger.warning("tiebreaker for cloid %s: %s", cloid, why)
             return False, ReconciliationCase(
                 case_type="orphan_exchange_order",
                 symbol=registry["symbol"],
@@ -1164,7 +1215,7 @@ class LiveReconciler:
                 exchange_value=_local_terminal_read_failure_fact_key(cloid),
                 detail=(
                     f"exchange lists oid={oid} open but the local row is terminal "
-                    f"({local['status']}) and orderStatus failed: {exc}"
+                    f"({local['status']}) and {why}"
                 ),
             )
         # The read ANSWERED, whatever it answered — so the fact "we could not
@@ -1355,16 +1406,20 @@ class LiveReconciler:
         cloid = row["cloid_hex"]
         order_id = row["order_id"]
         try:
-            payload = self._query_order_by_cloid(cloid)
-            parsed = parse_order_status(payload, expected_cloid_hex=cloid)
+            parsed = self._identity.probe(cloid, site="reconcile absent-order settle")
         except Exception as exc:  # noqa: BLE001
-            logger.warning("orderStatus for cloid %s failed: %s", cloid, exc)
+            # See the sibling in _maybe_reopen_terminal_order: same fact key
+            # and disposition for both failure families, the clause alone
+            # tells them apart, and the bound on the unreadable one lives in
+            # the monitor the read went through.
+            why = describe_order_status_failure(exc)
+            logger.warning("cloid %s: %s", cloid, why)
             return False, ReconciliationCase(
                 case_type="order_missing_on_exchange",
                 symbol=row["symbol"],
                 local_value=order_id,
                 exchange_value=_read_failure_fact_key(cloid),
-                detail=f"absent from open_orders and orderStatus failed: {exc}",
+                detail=f"absent from open_orders and {why}",
             )
         if parsed is None:
             if repo.has_exchange_known_cloid(self._db.conn, cloid_hex=cloid):

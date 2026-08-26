@@ -4278,6 +4278,31 @@ def test_the_daemon_gives_the_reconciler_a_payload_dir(tmp_path, live_seams, mon
     assert live_seams.rest_calls == []  # as in the sibling pin above
 
 
+def test_the_daemon_gives_its_sweep_components_one_identity_monitor(
+    tmp_path, live_seams, monkeypatch
+):
+    """§13.5 (issue #80): one venue-identity streak per process, by wiring.
+
+    Both ``KillSwitchManager.identity`` and ``LiveReconciler.identity`` default
+    to None and fall back to a PRIVATE monitor, so dropping either kwarg here
+    leaves every unit test green while the daemon quietly runs two (or three,
+    with protection's) separate streaks — and a misroute that alternates
+    between the shutdown cross-check and the reconciler's settle probes never
+    reaches any of their thresholds. Identity, not equality: the pin is that
+    they are the SAME object. The monitor must also carry the payload_dir the
+    reconciler pin above checks, or the refused-answer evidence goes nowhere.
+    """
+    record = record_reconciliation_sweep_wiring(monkeypatch)
+    dbp = _drive_the_daemon_recovery(tmp_path, monkeypatch)
+
+    assert len(record.switches) == 1 and len(record.reconcilers) == 1
+    shared = record.reconcilers[0].get("identity")
+    assert shared is not None, "the reconciler was left to build a private monitor"
+    assert record.switches[0]._identity is shared
+    assert_payload_dir({"payload_dir": shared._payload_dir}, dbp, run_id="r1")
+    assert live_seams.rest_calls == []
+
+
 class _StopBeforeTheLoop(Exception):
     """Sentinel: every kwarg the pins below assert is already decided."""
 
@@ -4313,6 +4338,7 @@ def _drive_live_loop_construction(tmp_path, monkeypatch, *, fetch_clearinghouse)
     from contrib.hyperliquid_perp.live.config import LiveConfig
     from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
     from contrib.hyperliquid_perp.live.safe_mode import SafeModeManager
+    from contrib.hyperliquid_perp.live.venue_identity import VenueIdentityMonitor
 
     class _FakeMarket:
         def __init__(self, _client):
@@ -4330,7 +4356,9 @@ def _drive_live_loop_construction(tmp_path, monkeypatch, *, fetch_clearinghouse)
         def tick(self):
             self.ticks += 1
 
-    built = SimpleNamespace(protection=None, guards=None, provider=None, kill_switch=_FakeSwitch())
+    built = SimpleNamespace(
+        protection=None, guards=None, provider=None, kill_switch=_FakeSwitch(), identity=None
+    )
 
     def _recorder(module, name, field):
         real = getattr(module, name)
@@ -4386,6 +4414,14 @@ def _drive_live_loop_construction(tmp_path, monkeypatch, *, fetch_clearinghouse)
         kill_switch_active=True,
         state_reconciled=True,
     )
+    # The caller's shared §13.5 monitor (issue #80): the loop must hand THIS
+    # instance to the protection manager it builds, not build its own.
+    built.identity = VenueIdentityMonitor(
+        query_order_by_cloid=lambda cloid_hex: {"status": "unknownOid"},
+        db=db,
+        run_id="r1",
+        symbol="BTC",
+    )
     try:
         with pytest.raises(_StopBeforeTheLoop):
             cli_mod._run_live_loop(
@@ -4404,6 +4440,7 @@ def _drive_live_loop_construction(tmp_path, monkeypatch, *, fetch_clearinghouse)
                 processor=SimpleNamespace(),
                 payload_dir=tmp_path / "payloads",
                 fetch_clearinghouse=fetch_clearinghouse,
+                identity=built.identity,
             )
     finally:
         db.close()
@@ -4429,6 +4466,23 @@ def test_the_live_loop_hands_protection_the_kill_switch(tmp_path, monkeypatch):
         tmp_path, monkeypatch, fetch_clearinghouse=lambda: _clearinghouse()
     )
     assert built.protection.get("kill_switch") is built.kill_switch
+
+
+def test_the_live_loop_hands_protection_the_shared_identity_monitor(tmp_path, monkeypatch):
+    """§13.5 (issue #80): protection probes through the CALLER's monitor.
+
+    ``ProtectionManager.identity`` defaults to None, and None builds a private
+    monitor that still bounds protection's own probes — so nothing fails if
+    this kwarg is dropped. What is lost is the whole point of the shared
+    instance: the streak the reconciler and the kill switch feed would no
+    longer be the one protection reads, and a fault alternating between
+    consumers would stay below every threshold forever. Same wiring-pin shape
+    as the kill-switch pin above, for the same reason.
+    """
+    built = _drive_live_loop_construction(
+        tmp_path, monkeypatch, fetch_clearinghouse=lambda: _clearinghouse()
+    )
+    assert built.protection.get("identity") is built.identity
 
 
 def test_the_live_loop_takes_the_day_baseline_from_the_clearinghouse(tmp_path, monkeypatch):

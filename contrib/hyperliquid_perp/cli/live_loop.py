@@ -145,8 +145,14 @@ def _run_live_loop(
     processor,
     payload_dir: Path,
     fetch_clearinghouse,
+    identity,
 ) -> None:
     """The PR 5 live trading loop (§9/§11.4): tick the engine + pump the 4h cycle.
+
+    ``identity`` is the caller's shared :class:`VenueIdentityMonitor` — the
+    same instance its kill switch and reconciler already probe through — so
+    the §17 protection manager built here feeds the same §13.5 streak
+    (issue #80).
 
     Builds the execution engine, §17 protection manager, §10 loss guards and the
     off-thread decision worker/driver over the recovery components, then loops
@@ -206,6 +212,7 @@ def _run_live_loop(
         owner_prefix=live_cfg.order_owner_prefix,
         clock=clock,
         kill_switch=kill_switch,
+        identity=identity,
     )
 
     loss_guards = LossGuards(

@@ -654,6 +654,35 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **`hyperliquid_perp`: the run-segmentation signal was wrong in both
+  directions.** (1) Resuming a run whose YAML had gained a key at its documented
+  default — `market_data.volume_profile_window_candles: 0` copied from the
+  newer example config — reported config drift and stamped the
+  `config_drift = "drift"` breadcrumb the paper review reads as a regime break,
+  although nothing about the run had changed: the drift check compared each
+  block whole, and `_DRIFT_KEYS_ADDED_LATER` only covered a block missing
+  entirely. Blocks with a typed parser (`RiskConfig`, `DecisionConfig`,
+  `MarketDataConfig`, `PaperExecutionConfig` for the resume-effective
+  `execution` sub-block) are now compared PARSED rather than as raw YAML — an
+  absent key, a `null` block, an empty block and one spelling out every
+  default all parse to the same object, and a YAML `"30"` against `30`, or
+  `0.7` against `Decimal("0.7")`, is no longer a difference; a side the parser
+  refuses (a retired key in an old genesis) falls back to the raw comparison
+  so drift is never hidden behind the exception. The same key at a live value
+  (`30`) still drifts; `engine`/`indicators` carry no declared defaults and
+  keep the raw whole-block comparison (issue #98). (2) A config-only edit that
+  changes the prompt's *shape* — switching the volume profile on, editing the
+  `indicators` list — needs no deploy and so never bumped `PROMPT_VERSION`,
+  and `GROUP BY prompt_version` merged two prompt regimes into one bucket.
+  Schema v10 adds `ai_inputs.context_shape` (also in the payload JSON and the
+  CSV export, after `input_payload_hash`): the rendered context's section
+  structure as one string — `price|market|funding|indicators(rsi_14,…)|
+  volume_profile` — covering section headers and indicator rows only, never
+  the numbers inside labels or the per-cycle `Mid:`/`Premium:` lines — so it
+  changes when a section is added or removed, or the indicator list is
+  reordered (a different prompt), and not when a value does. The segmentation
+  key is now `(prompt_version, context_shape)`; the RUNBOOK's hand rule for
+  the YAML case is retired (issue #97).
 - **A date the model cannot be held to is now refused the same way by either
   vendor of the routed news, OHLCV and indicator tools.** The parity the entry
   below established for the four fundamentals getters stopped there; the same

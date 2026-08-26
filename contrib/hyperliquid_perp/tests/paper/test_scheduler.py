@@ -511,6 +511,18 @@ def test_decision_input_rejects_half_candle_window():
     DecisionInput(context=ctx)
 
 
+def test_decision_input_rejects_a_half_segmentation_pair():
+    ctx = _ctx(_T0)
+    # prompt_version and context_shape are the two segmentation keys of one
+    # ai_inputs row (issue #97): a version with no shape would be filed with
+    # pre-v10 history, which the review reads as "shape unknown".
+    with pytest.raises(ValueError, match="context_shape"):
+        DecisionInput(context=ctx, prompt_version="v1")
+    with pytest.raises(ValueError, match="context_shape"):
+        DecisionInput(context=ctx, context_shape="price|market|funding|indicators()")
+    DecisionInput(context=ctx, prompt_version="v1", context_shape="price|market")
+
+
 def test_decision_input_rejects_inverted_candle_window():
     ctx = _ctx(_T0)
     # An inverted [start, end] is malformed the same way a half-present pair is.

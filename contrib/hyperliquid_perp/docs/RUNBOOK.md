@@ -143,29 +143,44 @@ prompt 的 context／format 契約改 shape 時，另要 bump `cli/_provider.py`
 vendor），這一段量測作廢、bump 到下一個版本戳重來。`paper-BTC` 當初 159 個 cycle 橫跨五個
 制度斷點而無法解讀，就是這條規則不存在的代價。
 
-**第三種情況：改 YAML 就會改 context 形狀。** 上面兩條規則都預設「改形狀 = 改 code =
-會部署 = 有機會 bump `PROMPT_VERSION`」。`market_data.volume_profile_window_candles`
-是第一個打破這個預設的 key：把它從 `0` 調到 `>= 12`，**不用部署任何 code**，
-`render_market_context` 就會多出一整段 `Volume profile (...)` 區塊——形狀變了，
-但沒有 commit、沒有 bump，而釘在 `decision_format_instructions` 指紋上的那個測試
-只看 format 契約、看不到 market-context 的渲染，所以也不會紅。
-（會觸發 config drift 警告——`market_data` 在 drift 清單裡——但那只說「YAML 動過」，
-不說「prompt 形狀變了」。）
+**第三種情況：改 YAML 就會改 context 形狀——由 `context_shape` 自動切段。** 上面兩條規則都
+預設「改形狀 = 改 code = 會部署 = 有機會 bump `PROMPT_VERSION`」。有些 key 不需要部署就會
+改 prompt 的**結構**：`market_data.volume_profile_window_candles` 從 `0` 調到 `>= 12`，
+`render_market_context` 多出一整段 `Volume profile (...)`；改 `indicators` 清單，
+`Indicators:` 底下多一列或少一列。沒有 commit、沒有 bump，釘在 `decision_format_instructions`
+指紋上的那個測試也看不到。所以 schema v10 起 `ai_inputs` 多一欄 **`context_shape`**（同時寫進
+payload JSON）：`domains/perp/prompt_context.context_shape` 把當次渲染的**段落結構**寫成一個
+字串，例如 `price|market|funding|indicators(rsi_14,ema_20,ema_50,atr_14,macd)|volume_profile`。
+`--context-only` 會在渲染結果後印一行 `context_shape: …`，改 YAML 後部署前就能看到會落在哪個
+桶。它只取結構——段落標題、指標列名、volume profile 段有沒有——**不取**標籤裡的數字
+（`Candles: 200 x 4h`、`30d z-score`）也不取每 cycle 隨資料有無變動的 `Mid:`／`Premium:`
+行，否則每個 cycle 自成一段。
 
-所以：**翻動這個 key 等同跨越量測邊界**，比照上面辦理——bump `PROMPT_VERSION`
-或用 `--create` 開新 run-id，並且在 A/B 量測窗內**禁止翻動**，與夾帶 vendor 變更同罪。
-反過來說，這也正是它預設 `0` 的理由：merge 進來不動任何既有 prompt，
-分段點是「你改 config 那一刻」，由你選、而不是被 cherry-pick 順手帶過去。
+所以切段鍵是兩個：**`GROUP BY prompt_version, context_shape`**。`prompt_version` 仍是人工
+指定、退役值不得重用的 code 改版戳；`context_shape` 則讓「多一段／少一段」（含 `indicators` 清單重排——列數不變但
+prompt 不同）不管來自 code 還是 YAML 都自動落進資料裡。翻動這些 key 仍然是跨越量測邊界（A/B 量測窗內**禁止翻動**，
+與夾帶 vendor 變更同罪）——差別是現在資料會自己標出來，不靠人記得。標籤裡的數字變了
+（`candle_interval`、`funding_zscore_window_days`）屬於**內容**變更，`context_shape` 不動，
+由下面的 config drift 警告承接。**兩個鍵都不涵蓋 format 那一半**：`decision:` 的格線／門檻
+會渲染進 `decision_format_instructions` 的文字，改 YAML 就換數字、不 bump 也不改 shape——
+比照 A/B 規則，量測窗內禁止翻動。另一條紀律：**改 `context_shape` 的字串文法**（排序、
+改名、加段）等同改 prompt 契約，同一個 commit 要 bump `PROMPT_VERSION`，否則新舊文法的
+字串會在同一欄裡互相撞桶。`volume_profile_window_candles` 預設 `0` 的理由不變：
+merge 進來不動任何既有 prompt，分段點是「你改 config 那一刻」，由你選。
 
-**但要小心相反方向的一個假訊號。** 把 `volume_profile_window_candles: 0` 這一行
-**加進**一個既有 run 的 config（例如照新版 `hyperliquid.example.yaml` 重抄一份），
-`--resume` 會報一次 config drift 並在 store 裡蓋下 `config_drift` breadcrumb——
-即使 `0` 完全不改變任何行為。原因是 drift 比對把 `market_data` **整個 block 做相等比較**
-（`cli/_drift.py` 的 `_DRIFT_COMPARED_KEYS`），genesis 快照裡沒有這個 key，多一個就算不同；
-`_DRIFT_KEYS_ADDED_LATER` 只處理 block 層級、不處理 block 內新增的 key。
-而這條 breadcrumb 正是 `/paper-review` 判讀輸入面分段點的依據，所以**一次 no-op 的
-config 編輯會被讀成制度斷點**，把一段本來同質的 run 切成兩段。
-判讀 drift 警告時請先確認實際變動的 key 是哪一個；若差異只有這行 `: 0`，**不是分段點**。
+**相反方向——只加一行預設值不是分段點，drift 比對現在自己知道。** 把
+`volume_profile_window_candles: 0` 這一行**加進**一個既有 run 的 config（例如照新版
+`hyperliquid.example.yaml` 重抄一份），行為完全沒變。`cli/_drift.py` 對有 typed parser 的區塊
+（`risk`／`decision`／`market_data`／`paper_trading.execution`）改比**解析後**的物件而不是原始
+YAML（`_block_parsers`）：缺一個 key、`null`、空區塊、把每個預設值都寫出來，解析出來都是同一個
+物件，所以這種 no-op 編輯不再印 WARNING、不再在 store 蓋 `config_drift = drift`——反過來從 YAML
+刪掉一行預設值、或 `"30"` 改寫成 `30`，也一樣安靜。同一個 key 設成 `30`（真的開啟）仍照報
+drift。任一側 parser 讀不了（例如 genesis 帶著已改名的舊 key）就退回原始比對，drift 不會被
+例外吞掉。`engine`／`indicators` 沒有宣告的預設值，仍整塊原始比對，任何新 key 照報。
+
+另注意 `context_shape` 描述的是**模型實際看到的 prompt**：視窗開著但該 cycle 的 profile 被
+執行期跳過（歷史不夠、零寬度、零成交量，各有一行 WARNING），那個 cycle 會落在「沒有 volume
+profile 段」的 shape——這是真的少了一段，不是假訊號；判讀時對照 WARNING 把它們併回去。
 （伺服器上跑著的 run 不受影響：`local.yaml` 整檔優先且不進版控，不會自動拿到這個 key。）
 
 判讀時**主判準是提案率**（`requested_target_margin_pct` 非 null 的佔比）。**但這一欄

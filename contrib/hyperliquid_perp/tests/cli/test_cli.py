@@ -349,6 +349,37 @@ def test_build_input_measures_freshness_against_the_cycle_clock(tmp_path, monkey
     assert decision_input.candle_end == ctx.as_of  # built through, not refused
 
 
+def test_build_input_carries_the_context_shape_beside_the_prompt_version(tmp_path, monkeypatch):
+    # Issue #97: the prompt's structure rides on the DecisionInput (so the
+    # ai_inputs row gets it) AND in the payload JSON (so the artifact is
+    # self-describing), computed from the very context that was rendered.
+    import contrib.hyperliquid_perp.engine_bridge as bridge_mod
+    from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
+    from contrib.hyperliquid_perp.domains.perp.prompt_context import context_shape
+
+    as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
+    ctx = _perp_ctx(as_of - timedelta(hours=1))
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **kw: (ctx, None))
+
+    provider = object.__new__(_EngineDecisionProvider)
+    provider._config = {}
+    provider._on_blocking_read = None
+    provider._risk = RiskConfig(leverage=D(5), max_target_margin_pct=60)
+    provider._decision = DecisionConfig()
+    provider._payload_dir = tmp_path / "payloads"
+    provider._engine_config = {"deep_think_llm": "model-x"}
+
+    decision_input = provider.build_input(coin="BTC", as_of=as_of)
+    expected = context_shape(ctx)
+    # Spelled out so a silent change in what the shape covers is visible here.
+    assert expected == "price|market|funding|indicators(rsi_14,ema_20,ema_50,atr_14)"
+    assert decision_input.context_shape == expected
+    with open(decision_input.input_payload_path, encoding="utf-8") as fh:
+        payload = json.load(fh)
+    assert payload["context_shape"] == expected
+    assert payload["prompt_version"] == decision_input.prompt_version
+
+
 def test_validate_exit_codes(tmp_path, capsys):
     path, db = _seed_db(tmp_path)
     db.close()
@@ -1151,6 +1182,154 @@ def test_config_drift_covers_engine_market_data_and_indicators():
     assert "engine" in msg and "market_data" in msg and "indicators" in msg
 
 
+_MD_GENESIS = {"candle_interval": "4h", "candle_lookback": 200}
+
+
+def test_config_drift_ignores_a_key_added_at_its_inert_default():
+    # Issue #98, the reproduction: a genesis written before
+    # volume_profile_window_candles existed, and a config re-copied from the
+    # newer example.yaml that carries the line at 0 (= off, the default).
+    # Nothing about the run changed, so no drift — and no breadcrumb for the
+    # review to read as a regime break.
+    stored = _subset_json({"market_data": _MD_GENESIS}, "BTC")
+    current = {"market_data": {**_MD_GENESIS, "volume_profile_window_candles": 0}}
+    assert _config_drift_report(stored, current, "BTC") is None
+
+
+def test_config_drift_still_reports_a_key_added_at_a_live_value():
+    # The same key switched ON is a real regime break: the prompt grows a
+    # section. Stripping must be on the VALUE being inert, not on the key
+    # being new.
+    stored = _subset_json({"market_data": _MD_GENESIS}, "BTC")
+    current = {"market_data": {**_MD_GENESIS, "volume_profile_window_candles": 30}}
+    kind, msg = _config_drift_report(stored, current, "BTC")
+    assert kind == "params"
+    assert "market_data" in msg
+
+
+def test_config_drift_ignores_a_default_valued_key_removed_from_the_yaml():
+    # Symmetric: deleting the `: 0` line is the same non-event as adding it.
+    stored = _subset_json(
+        {"market_data": {**_MD_GENESIS, "volume_profile_window_candles": 0}}, "BTC"
+    )
+    assert _config_drift_report(stored, {"market_data": _MD_GENESIS}, "BTC") is None
+
+
+def test_config_drift_treats_a_null_block_as_all_defaults():
+    # The genesis YAML had no market_data: block at all (recorded as null,
+    # since the key IS in the subset); the operator now adds the block holding
+    # one default. Same semantics as an empty block — still no drift. A live
+    # value in that same new block still is.
+    stored = json.dumps({"market_data": None, "coin": "BTC"})
+    assert (
+        _config_drift_report(stored, {"market_data": {"volume_profile_window_candles": 0}}, "BTC")
+        is None
+    )
+    kind, msg = _config_drift_report(
+        stored, {"market_data": {"volume_profile_window_candles": 30}}, "BTC"
+    )
+    assert kind == "params" and "market_data" in msg
+
+
+@pytest.mark.parametrize(
+    ("block", "genesis", "inert", "live"),
+    [
+        # The RUNBOOK's own example of a key that joined a block later.
+        (
+            "decision",
+            {"min_confidence": 0.5},
+            {"resize_min_confidence": 0.7},
+            {"resize_min_confidence": 0.9},
+        ),
+        ("risk", {"leverage": 5}, {"max_target_margin_pct": 60}, {"max_target_margin_pct": 40}),
+        # Inert-ness is judged by the block's PARSER, not by ==: the YAML
+        # string "30" is the int default 30 to int_from_yaml.
+        (
+            "market_data",
+            {"candle_interval": "4h"},
+            {"funding_zscore_window_days": "30"},
+            {"funding_zscore_window_days": 14},
+        ),
+    ],
+)
+def test_config_drift_inert_default_stripping_covers_every_parsed_block(
+    block, genesis, inert, live
+):
+    # One mechanism for every block that has a typed parser — not a special
+    # case for the key that surfaced the bug (issue #98 acceptance).
+    stored = _subset_json({block: genesis}, "BTC")
+    assert _config_drift_report(stored, {block: {**genesis, **inert}}, "BTC") is None
+    kind, msg = _config_drift_report(stored, {block: {**genesis, **live}}, "BTC")
+    assert kind == "params"
+    assert block in msg
+
+
+def test_config_drift_inert_stripping_applies_to_the_resume_effective_execution_block():
+    # paper_trading is compared on its `execution` projection, so the parser
+    # that vouches for a default there is PaperExecutionConfig's — including
+    # a whole default-valued sub-block (fill_model at slippage 5).
+    genesis = {"paper_trading": {"execution": {"taker_fee_rate": 0.00045}}}
+    stored = _subset_json(genesis, "BTC")
+    inert = {
+        "paper_trading": {
+            "execution": {
+                "taker_fee_rate": 0.00045,
+                "min_notional_usdc": 10,
+                "fill_model": {"slippage_bps": 5},
+            }
+        }
+    }
+    assert _config_drift_report(stored, inert, "BTC") is None
+    live = {"paper_trading": {"execution": {"taker_fee_rate": 0.00045, "min_notional_usdc": 25}}}
+    kind, msg = _config_drift_report(stored, live, "BTC")
+    assert kind == "params" and "paper_trading" in msg
+
+
+def test_config_drift_does_not_vouch_for_blocks_without_a_parser():
+    # engine: has no typed defaults (its keys are `or` fallbacks), so nothing
+    # can certify a new key there as inert — the whole-block comparison
+    # stays, and a new key reads as drift rather than being guessed away.
+    stored = _subset_json({"engine": {"deep_think_llm": "model-a"}}, "BTC")
+    current = {"engine": {"deep_think_llm": "model-a", "structured_output": False}}
+    kind, msg = _config_drift_report(stored, current, "BTC")
+    assert kind == "params" and "engine" in msg
+
+
+def test_config_drift_parsed_comparison_reaches_nested_defaults_and_types():
+    # The comparison is on the PARSED block, so it is not one level deep and
+    # not type-literal: a default-valued key added inside a sub-block both
+    # sides carry, and a key spelled "30" at genesis and 30 today, both parse
+    # to the same object. The raw `!=` these replace reported both as drift.
+    nested_genesis = {"paper_trading": {"execution": {"fill_model": {}}}}
+    nested_current = {"paper_trading": {"execution": {"fill_model": {"slippage_bps": 5}}}}
+    assert _config_drift_report(_subset_json(nested_genesis, "BTC"), nested_current, "BTC") is None
+    typed_genesis = {"market_data": {"funding_zscore_window_days": "30"}}
+    typed_current = {"market_data": {"funding_zscore_window_days": 30}}
+    assert _config_drift_report(_subset_json(typed_genesis, "BTC"), typed_current, "BTC") is None
+
+
+def test_config_drift_falls_back_to_the_raw_comparison_when_a_side_does_not_parse():
+    # A genesis carrying a key today's parser refuses (renamed, retired) can't
+    # be judged "same" by that parser; the raw comparison keeps the drift
+    # visible instead of hiding it behind the exception — and, symmetrically,
+    # keeps an unparseable-but-identical pair quiet (the Decimal test above).
+    stored = _subset_json({"risk": {"leverage": 5, "retired_key": 1}}, "BTC")
+    kind, msg = _config_drift_report(stored, {"risk": {"leverage": 5}}, "BTC")
+    assert kind == "params" and "risk" in msg
+
+
+def test_config_drift_never_aborts_on_a_value_the_parser_chokes_on_arithmetically():
+    # A YAML `.nan` survives decimal_from_yaml (Decimal("nan") is legal) and
+    # only detonates in RiskConfig.__post_init__'s `<= 0` check — as
+    # decimal.InvalidOperation, an ArithmeticError, not a ValueError. The raw
+    # comparison this parsed path replaced never raised; a resume must still
+    # get a verdict (here: drift, since the values differ raw) rather than a
+    # traceback before the protection loop is armed.
+    stored = _subset_json({"risk": {"leverage": float("nan")}}, "BTC")
+    kind, msg = _config_drift_report(stored, {"risk": {"leverage": 2}}, "BTC")
+    assert kind == "params" and "risk" in msg
+
+
 def _live_subset_json(config: dict, coin: str) -> str:
     """Exactly what LIVE run creation persists: the shared subset plus `live:`."""
     subset = _run_config_subset(config, coin)
@@ -1556,6 +1735,55 @@ def test_paper_resume_stamps_drift_breadcrumb(tmp_path, monkeypatch, capsys, pap
     assert state["last_config_drift_status"] == "drift"
     assert "config drift on resume" in state["last_config_drift_error"]
     assert state["last_config_drift_at"] is not None
+    db.close()
+
+
+@pytest.mark.parametrize(
+    ("window", "expected_status"),
+    [
+        # Off (the default): the #98 reproduction end to end — the only diff
+        # against the genesis is the `: 0` line, and the store must say "ok".
+        (0, "ok"),
+        # On: the prompt grows a section, and the store must say so.
+        (30, "drift"),
+    ],
+)
+def test_paper_resume_stamps_the_breadcrumb_on_the_value_not_the_new_key(
+    tmp_path, monkeypatch, capsys, paper_seams, window, expected_status
+):
+    import contrib.hyperliquid_perp.cli as cli_mod
+
+    path = tmp_path / "cli.db"
+    db = Database(path)
+    accounting.initialize_run(
+        db,
+        run_id="r",
+        mode="paper",
+        initial_balance_usdc=D(1000),
+        schema_version=1,
+        config_json=json.dumps(
+            {"market_data": {"candle_interval": "4h", "candle_lookback": 200}, "coin": "BTC"}
+        ),
+    )
+    db.close()
+    paper_seams.write_text(
+        "market_data:\n"
+        "  candle_interval: 4h\n"
+        "  candle_lookback: 200\n"
+        f"  volume_profile_window_candles: {window}\n",
+        encoding="utf-8",
+    )
+
+    def stop_loop(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod.paper, "_paper_loop", stop_loop)
+    assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 0
+    assert ("config drift on resume" in capsys.readouterr().err) == (expected_status == "drift")
+
+    db = Database(path)
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert state["last_config_drift_status"] == expected_status
     db.close()
 
 

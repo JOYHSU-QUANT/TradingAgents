@@ -83,6 +83,11 @@ def test_exports_all_eight_csvs_with_contract_headers(tmp_path):
     # Documented column prefix, then the schema-augmentation columns (§1.2).
     assert list(rows[0])[:3] == ["timestamp", "mode", "run_id"]
     assert "slice_id" in rows[0] and "fill_reason" in rows[0]
+    # ai_inputs closes with the two segmentation-side augmentation columns:
+    # the payload hash (v1) and the prompt's shape (v10, issue #97).
+    with (out / "ai_inputs.csv").open(encoding="utf-8", newline="") as fh:
+        ai_header = next(csv.reader(fh))
+    assert ai_header[-2:] == ["input_payload_hash", "context_shape"]
     db.close()
 
 

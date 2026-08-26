@@ -126,6 +126,9 @@ class DecisionInput:
     input_payload_path: str | None = None
     input_payload_hash: str | None = None
     prompt_version: str | None = None
+    # The prompt's section structure (prompt_context.context_shape), the
+    # second segmentation key beside prompt_version (issue #97).
+    context_shape: str | None = None
     model: str | None = None
 
     def __post_init__(self) -> None:
@@ -142,6 +145,14 @@ class DecisionInput:
         if (self.candle_start is None) != (self.candle_end is None):
             raise ValueError(
                 "DecisionInput.candle_start and candle_end must be provided "
+                "together (or both omitted)"
+            )
+        # The two segmentation keys are one pair too: a row stamped with a
+        # version but no shape would be indistinguishable from pre-v10
+        # history, which the review reads as "shape unknown".
+        if (self.prompt_version is None) != (self.context_shape is None):
+            raise ValueError(
+                "DecisionInput.prompt_version and context_shape must be provided "
                 "together (or both omitted)"
             )
         # An inverted window (start after end) is a malformed §5 row the same way

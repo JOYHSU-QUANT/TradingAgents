@@ -49,6 +49,85 @@ def _resume_effective(key: str, block: object) -> object:
     return block
 
 
+def _block_parsers() -> dict[str, object]:
+    """Per compared block, the parser that says what the block MEANS at runtime.
+
+    Keyed by the block AFTER ``_resume_effective`` projected it — so
+    ``paper_trading`` maps to the ``execution`` sub-block's parser. Each of
+    these blocks is read through ``config_overrides`` + a frozen dataclass,
+    where an absent or null key takes the field default; comparing the parsed
+    dataclasses instead of the raw YAML is what makes "this key is missing on
+    one side and set to its default on the other" a no-op (issue #98 —
+    ``volume_profile_window_candles: 0`` copied from a newer example.yaml
+    stamped a ``config_drift`` breadcrumb on a run whose behaviour had not
+    changed, and that breadcrumb is what the review reads as a regime break).
+    The parser is also the only honest witness of type: a YAML ``"30"`` and
+    an int ``30``, a YAML ``0.7`` and a default ``Decimal("0.7")``, are equal
+    to it and unequal to ``==``. Absent block, ``null`` block, empty block and
+    a block spelling out every default all parse to the same object.
+
+    ``engine`` and ``indicators`` have no entry on purpose: ``engine`` is read
+    through ``or`` fallbacks with no declared defaults and ``indicators`` is a
+    list, so nothing can vouch that a new key there is inert — they keep the
+    raw whole-block comparison, and a new key reads as drift rather than
+    being guessed away.
+
+    Imported lazily: this module is loaded by every resume entry point, and
+    ``risk_gate`` is the import ``config.py`` keeps off the ``--context-only``
+    path for the same cost reason.
+    """
+    from ..domains.perp.market_data_config import MarketDataConfig
+    from ..domains.perp.risk_gate import RiskConfig
+    from ..domains.perp.target_decision import DecisionConfig
+    from ..paper.config import PaperExecutionConfig
+
+    return {
+        "risk": RiskConfig.from_dict,
+        "decision": DecisionConfig.from_dict,
+        "paper_trading": PaperExecutionConfig.from_dict,
+        "market_data": MarketDataConfig.from_dict,
+    }
+
+
+def _same_effective_block(parser, stored: object, current: object) -> bool:
+    """Whether two raw blocks apply identically on resume.
+
+    Parsed comparison when the block has a parser and BOTH sides parse; raw
+    ``==`` otherwise. The fallback is deliberate: a genesis record carrying a
+    key today's parser no longer knows (renamed, retired) cannot be judged
+    "same" by a parser that refuses it — comparing it raw keeps that drift
+    visible instead of hiding it behind the exception.
+
+    ``ArithmeticError`` is in the clause for ``decimal.InvalidOperation``: a
+    YAML ``.nan`` reaches ``Decimal("nan")`` without complaint and only blows
+    up in the dataclass's own ``<=`` range check. The raw ``!=`` this replaced
+    never raised, and ``_config_drift_report`` promises a breadcrumb-grade
+    verdict rather than a startup abort — on the live path an abort here
+    would land before the protection loop is armed.
+    """
+    if parser is not None:
+        try:
+            return parser(stored) == parser(current)
+        except (ValueError, TypeError, ArithmeticError):
+            pass
+    return stored == current
+
+
+def _drifted_keys(stored: dict, current: dict) -> list[str]:
+    """The compared blocks whose resume-effective content differs, sorted."""
+    parsers = _block_parsers()
+    return sorted(
+        key
+        for key in _DRIFT_COMPARED_KEYS
+        if not (key in _DRIFT_KEYS_ADDED_LATER and key not in stored)
+        and not _same_effective_block(
+            parsers.get(key),
+            _resume_effective(key, stored.get(key)),
+            _resume_effective(key, current.get(key)),
+        )
+    )
+
+
 def _norm_network(live_block: dict) -> object:
     """``live.network`` normalised the way LiveConfig reads it (case-insensitive)."""
     net = live_block.get("network")
@@ -74,9 +153,11 @@ def _config_drift_report(
     msg)`` for risk/decision/paper_trading(execution)/engine/market_data/
     indicators / non-network ``live:`` drift (warning — behaviour changes
     mid-run but the operator may intend it; genesis-only
-    ``paper_trading.account`` edits are inert on resume and don't warn, and a
+    ``paper_trading.account`` edits are inert on resume and don't warn, a
     genesis record predating a key in ``_DRIFT_KEYS_ADDED_LATER`` skips that
-    comparison rather than false-flagging), or ``None`` when nothing drifted or
+    comparison rather than false-flagging, and blocks with a typed parser are
+    compared PARSED, so a key added or removed at its documented default is
+    not drift — see ``_block_parsers``), or ``None`` when nothing drifted or
     no record exists (a pre-drift-check store). A genesis record this process
     cannot parse also reports as ``("params", ...)``: the homogeneity check
     became impossible, which is breadcrumb-grade — never a startup abort (that
@@ -130,12 +211,7 @@ def _config_drift_report(
             "arm the kill switch and reconcile a different exchange (use a new "
             "--run-id).",
         )
-    drifted = sorted(
-        key
-        for key in _DRIFT_COMPARED_KEYS
-        if not (key in _DRIFT_KEYS_ADDED_LATER and key not in stored)
-        and _resume_effective(key, stored.get(key)) != _resume_effective(key, current.get(key))
-    )
+    drifted = _drifted_keys(stored, current)
     # Non-network ``live:`` drift is a warning (network already hard-failed
     # above): safety caps, kill-switch timings, allow_real_orders wiring etc.
     # redefine behaviour mid-run and the operator should be told, even though

@@ -13,7 +13,10 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.hyperliquid_perp.domains.perp.prompt_context import render_market_context
+from contrib.hyperliquid_perp.domains.perp.prompt_context import (
+    context_shape,
+    render_market_context,
+)
 from contrib.hyperliquid_perp.domains.perp.schema import (
     MarketRegime,
     PerpMarketContext,
@@ -534,3 +537,92 @@ def test_the_p_note_does_not_claim_where_the_bulk_of_the_volume_sat():
     line = _shape_line(profile)
     assert "heaviest single price bucket" in line
     assert "where the bulk of the volume sat" in line
+
+
+# --------------------------------------------------------------------------
+# context_shape — the prompt's STRUCTURE, the second segmentation key (#97)
+# --------------------------------------------------------------------------
+
+
+_HEADER_TO_SHAPE = {
+    "Price:": "price",
+    "Market:": "market",
+    "Funding:": "funding",
+    "Indicators:": "indicators",
+}
+
+
+def _rendered_headers(text: str) -> list[str]:
+    """The top-level section headers of a render, in order.
+
+    A header is a non-indented, non-blank line after the three-line preamble
+    (Coin / As of / Candles): every section opens with one and everything
+    under it is indented two spaces.
+    """
+    return [line for line in text.split("\n")[3:] if line and not line.startswith("  ")]
+
+
+def _shape_name(header: str) -> str:
+    if header.startswith("Volume profile ("):
+        return "volume_profile"
+    return _HEADER_TO_SHAPE[header]
+
+
+@pytest.mark.parametrize("with_profile", [False, True])
+def test_context_shape_names_the_rendered_headers_in_order_both_ways(with_profile):
+    # The shape and the render are two functions with no code in common, so
+    # this is the lock between them, in BOTH directions: every header the
+    # render prints has a shape entry at the same position, and the shape
+    # names nothing the render does not print. A section added to one and
+    # forgotten in the other fails here instead of silently filing two prompt
+    # regimes under one shape.
+    ctx = _ctx(volume_profile=_profile()) if with_profile else _ctx()
+    headers = _rendered_headers(render_market_context(ctx))
+    assert headers[:4] == ["Price:", "Market:", "Funding:", "Indicators:"]
+    assert len(headers) == (5 if with_profile else 4)
+    parts = context_shape(ctx).split("|")
+    assert [part.split("(")[0] for part in parts] == [_shape_name(h) for h in headers]
+    # The indicator rows are the fixture's names, in the fixture's order.
+    assert parts[3] == "indicators(rsi_14,ema_20,macd)"
+
+
+def test_context_shape_changes_when_the_volume_profile_section_appears():
+    # The #97 case: flipping market_data.volume_profile_window_candles adds a
+    # section with no code change, so the shape — not prompt_version — is
+    # what separates the two populations.
+    without = context_shape(_ctx())
+    with_profile = context_shape(_ctx(volume_profile=_profile()))
+    assert without == "price|market|funding|indicators(rsi_14,ema_20,macd)"
+    assert with_profile == without + "|volume_profile"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("mark_price", Decimal("1.0")),
+        ("candle_count", 50),
+        ("funding_window_days", 14),
+        ("funding_zscore_30d", None),
+        # Data-availability lines drop out per cycle; they must not split a regime.
+        ("mid_price", None),
+        ("funding_premium", None),
+        # A dead indicator renders n/a — same row, same shape.
+        ("indicators", {"rsi_14": None, "ema_20": None, "macd": None}),
+    ],
+)
+def test_context_shape_ignores_content_and_data_driven_lines(field, value):
+    base = _ctx()
+    variant = _ctx(**{field: value})
+    # The premise: the render really did change, so an over-eager shape that
+    # hashed the text would have split here.
+    assert render_market_context(variant) != render_market_context(base)
+    assert context_shape(variant) == context_shape(base)
+
+
+def test_context_shape_follows_the_indicator_set_and_its_order():
+    base = context_shape(_ctx())
+    fewer = context_shape(_ctx(indicators={"rsi_14": 55.5, "ema_20": 60100.0}))
+    reordered = context_shape(_ctx(indicators={"macd": None, "rsi_14": 55.5, "ema_20": 60100.0}))
+    assert fewer == "price|market|funding|indicators(rsi_14,ema_20)"
+    assert reordered == "price|market|funding|indicators(macd,rsi_14,ema_20)"
+    assert len({base, fewer, reordered}) == 3

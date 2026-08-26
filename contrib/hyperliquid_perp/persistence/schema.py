@@ -28,7 +28,7 @@ from __future__ import annotations
 
 __all__ = ["MIGRATIONS", "SCHEMA_MIGRATIONS_DDL", "SCHEMA_VERSION"]
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # --------------------------------------------------------------------------
 # Export logical tables (phase2-data §5–§12) — one-to-one with CSV exports.
@@ -660,4 +660,14 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     # PositionState carried no such field. Nullable so every existing paper row
     # (and any live row before its first reconcile pass) stays valid.
     9: ("ALTER TABLE current_positions ADD COLUMN exchange_liquidation_price TEXT",),
+    # v10: the prompt's section structure beside its version stamp (issue
+    # #97). ``prompt_version`` is bumped by hand when the contract changes
+    # shape in CODE; a config-only edit (``market_data.
+    # volume_profile_window_candles``, ``indicators``) changes the shape with
+    # no deploy and nothing to bump, so ``GROUP BY prompt_version`` merged two
+    # prompt regimes into one bucket. Written by every ai_inputs writer from
+    # ``prompt_context.context_shape``; exported (schema-augmentation column).
+    # Nullable so every existing row stays valid — a NULL means "written
+    # before v10", not "no shape".
+    10: ("ALTER TABLE ai_inputs ADD COLUMN context_shape TEXT",),
 }

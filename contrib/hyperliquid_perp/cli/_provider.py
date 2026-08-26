@@ -132,7 +132,7 @@ class _EngineDecisionProvider:
 
     def build_input(self, *, coin: str, as_of: datetime):
         from ..domains.perp import risk_gate
-        from ..domains.perp.prompt_context import render_market_context
+        from ..domains.perp.prompt_context import context_shape, render_market_context
         from ..domains.perp.schema import interval_to_ms
         from ..domains.perp.target_decision import decision_format_instructions
         from ..engine_bridge import _build_context, _context_refusal
@@ -186,6 +186,12 @@ class _EngineDecisionProvider:
         if refusal is not None:
             raise RetryableDecisionError(refusal.error_type, refusal.message)
         context_text = render_market_context(ctx)
+        # The prompt's structure, kept beside the version stamp (issue #97):
+        # a section that appears or disappears on a config edit alone — no
+        # deploy, nothing to bump — segments the data by itself. Payload
+        # metadata, not prompt text: the model sees context_text/format_text
+        # unchanged, so adding this key is not a PROMPT_VERSION bump.
+        shape = context_shape(ctx)
         format_text = decision_format_instructions(
             self._decision,
             max_pct=risk_gate.effective_max_target_margin_pct(self._risk, self._decision),
@@ -194,6 +200,7 @@ class _EngineDecisionProvider:
             "coin": coin,
             "as_of": as_of.isoformat(),
             "prompt_version": PROMPT_VERSION,
+            "context_shape": shape,
             "context_text": context_text,
             "format_instructions": format_text,
         }
@@ -226,6 +233,7 @@ class _EngineDecisionProvider:
             input_payload_path=str(path),
             input_payload_hash=f"sha256:{digest}",
             prompt_version=PROMPT_VERSION,
+            context_shape=shape,
             model=self._engine_config["deep_think_llm"],
         )
 

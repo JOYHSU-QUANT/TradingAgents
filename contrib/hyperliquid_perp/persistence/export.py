@@ -91,7 +91,7 @@ EXPORT_SPECS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
             "prompt_version",
             "model",
         ),
-        ("input_payload_hash",),
+        ("input_payload_hash", "context_shape"),
     ),
     (
         "decision_attempts",

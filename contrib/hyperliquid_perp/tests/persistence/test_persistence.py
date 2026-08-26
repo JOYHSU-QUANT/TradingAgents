@@ -53,6 +53,17 @@ def test_migrations_record_version(tmp_path):
     db.close()
 
 
+def test_v10_adds_a_nullable_context_shape_to_ai_inputs(tmp_path):
+    # Issue #97: the prompt's structure beside its version stamp. Nullable
+    # on purpose — every pre-v10 row stays valid and reads as "written before
+    # the column existed", never as a shape.
+    db = Database(tmp_path / "p.db")
+    cols = {row["name"]: row for row in db.conn.execute("PRAGMA table_info(ai_inputs)")}
+    assert cols["context_shape"]["notnull"] == 0
+    assert cols["context_shape"]["type"] == "TEXT"
+    db.close()
+
+
 def test_defer_migration_opens_an_out_of_date_store_without_touching_it(tmp_path):
     # migrate=True necessarily runs at OPEN, which is before the lease can be
     # taken (the lease lives in the store being opened) — so an owning command

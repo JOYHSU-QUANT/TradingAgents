@@ -860,7 +860,9 @@ def test_a_read_only_open_refuses_a_behind_store_instead_of_upgrading_it(tmp_pat
     monkeypatch.setattr(db_module, "MIGRATIONS", older)
     with Database(path) as built:
         assert stored_schema_version(built.conn) == behind
-        assert "exchange_liquidation_price" not in _columns(built.conn, "current_positions")
+        # The LATEST migration's column (v10: ai_inputs.context_shape) is what
+        # a one-behind store must lack — re-point this when a new version lands.
+        assert "context_shape" not in _columns(built.conn, "ai_inputs")
 
     monkeypatch.setattr(db_module, "MIGRATIONS", MIGRATIONS)
     with pytest.raises(SchemaVersionError, match="will not migrate"):
@@ -870,7 +872,7 @@ def test_a_read_only_open_refuses_a_behind_store_instead_of_upgrading_it(tmp_pat
     # byte-for-byte the version it was, so the daemon that owns it is unharmed.
     conn = connect(path)
     assert stored_schema_version(conn) == behind
-    assert "exchange_liquidation_price" not in _columns(conn, "current_positions")
+    assert "context_shape" not in _columns(conn, "ai_inputs")
     assert (
         conn.execute(
             "SELECT COUNT(*) FROM schema_migrations WHERE version > ?", (behind,)
@@ -883,7 +885,7 @@ def test_a_read_only_open_refuses_a_behind_store_instead_of_upgrading_it(tmp_pat
     # a command that DOES own the run — upgrades it exactly as before.
     with Database(path) as upgraded:
         assert stored_schema_version(upgraded.conn) == SCHEMA_VERSION
-        assert "exchange_liquidation_price" in _columns(upgraded.conn, "current_positions")
+        assert "context_shape" in _columns(upgraded.conn, "ai_inputs")
 
 
 # ---------------------------------------------------------------------------

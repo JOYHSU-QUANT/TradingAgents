@@ -15,10 +15,16 @@ from contrib.hyperliquid_perp.domains.perp.context_builder import (
     funding_zscore,
 )
 from contrib.hyperliquid_perp.domains.perp.indicator_vocab import REGIME_INDICATORS
+from contrib.hyperliquid_perp.domains.perp.market_data_config import MarketDataConfig
 from contrib.hyperliquid_perp.domains.perp.schema import FundingPoint
 from contrib.hyperliquid_perp.exchanges.hyperliquid import mapper
 
 _H = 3600_000
+
+# The parsed ``market_data:`` block the builder takes; the fixtures are 4h
+# candles, and every test that does not say otherwise wants the 30-day funding
+# window and the profile OFF — i.e. the field defaults.
+_MD = MarketDataConfig()
 
 
 def _points(rates, end_ms):
@@ -204,8 +210,7 @@ def test_build_market_context_end_to_end(meta_and_asset_ctxs, candle_snapshot, f
         snapshot,
         candles,
         funding,
-        candle_interval="4h",
-        funding_window_days=30,
+        market_data=_MD,
         indicator_names=["rsi_14", "ema_20", "ema_50", "atr_14", "macd"],
         exchange_time=None,
     )
@@ -235,7 +240,7 @@ def test_build_market_context_carries_the_exchange_clock_through(
     snapshot = mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC")
     candles = mapper.map_candles(candle_snapshot)
     funding = mapper.map_funding_history(funding_history)
-    kwargs = {"candle_interval": "4h", "funding_window_days": 30, "indicator_names": ["rsi_14"]}
+    kwargs = {"market_data": _MD, "indicator_names": ["rsi_14"]}
     stamp = datetime(2026, 8, 22, 4, 0, tzinfo=timezone.utc)
     with_clock = build_market_context(
         "BTC", snapshot, candles, funding, exchange_time=stamp, **kwargs
@@ -251,23 +256,27 @@ def test_build_market_context_carries_the_exchange_clock_through(
 def test_volume_profile_is_absent_unless_a_window_is_configured(
     meta_and_asset_ctxs, candle_snapshot, funding_history
 ):
-    # The feature is OFF by default, and the default is reachable by simply not
-    # passing the kwarg — the opposite of exchange_time above, and deliberately
-    # so: omitting an optional analyst input is the safe direction, whereas
-    # omitting the exchange clock re-opens the issue-#51 blind spot.
+    # The feature is OFF by default — the MarketDataConfig field default, which
+    # is the same default the config loader validates against — and an
+    # explicit 0 means the same thing.
     snapshot = mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC")
     candles = mapper.map_candles(candle_snapshot)
     funding = mapper.map_funding_history(funding_history)
-    kwargs = {
-        "candle_interval": "4h",
-        "funding_window_days": 30,
-        "indicator_names": ["rsi_14"],
-        "exchange_time": None,
-    }
-    assert build_market_context("BTC", snapshot, candles, funding, **kwargs).volume_profile is None
+    kwargs = {"indicator_names": ["rsi_14"], "exchange_time": None}
     assert (
         build_market_context(
-            "BTC", snapshot, candles, funding, volume_profile_window=0, **kwargs
+            "BTC", snapshot, candles, funding, market_data=MarketDataConfig(), **kwargs
+        ).volume_profile
+        is None
+    )
+    assert (
+        build_market_context(
+            "BTC",
+            snapshot,
+            candles,
+            funding,
+            market_data=MarketDataConfig(volume_profile_window_candles=0),
+            **kwargs,
         ).volume_profile
         is None
     )
@@ -289,11 +298,9 @@ def test_volume_profile_is_cut_from_the_same_candles_as_the_indicators(
         snapshot,
         candles,
         funding,
-        candle_interval="4h",
-        funding_window_days=30,
+        market_data=MarketDataConfig(volume_profile_window_candles=30),
         indicator_names=["rsi_14", "ema_20", "ema_50", "atr_14"],
         exchange_time=None,
-        volume_profile_window=30,
     )
     assert ctx.volume_profile is not None
     assert ctx.volume_profile == compute_volume_profile(candles, 30)
@@ -313,11 +320,9 @@ def test_volume_profile_stays_none_when_the_window_cannot_be_filled(
         snapshot,
         candles[:5],
         funding,
-        candle_interval="4h",
-        funding_window_days=30,
+        market_data=MarketDataConfig(volume_profile_window_candles=30),
         indicator_names=["rsi_14"],
         exchange_time=None,
-        volume_profile_window=30,
     )
     assert ctx.volume_profile is None
 
@@ -334,8 +339,7 @@ def test_build_market_context_with_zero_candles(meta_and_asset_ctxs, funding_his
         snapshot,
         [],
         funding,
-        candle_interval="4h",
-        funding_window_days=30,
+        market_data=_MD,
         indicator_names=["rsi_14", "atr_14"],
         exchange_time=None,
     )
@@ -368,8 +372,7 @@ def test_build_market_context_funding_window_days_plumbs_to_zscore(
             snapshot,
             candles,
             funding,
-            candle_interval="4h",
-            funding_window_days=days,
+            market_data=MarketDataConfig(funding_zscore_window_days=days),
             indicator_names=["rsi_14"],
             exchange_time=None,
         )
@@ -395,8 +398,7 @@ def test_context_indicators_are_read_only(meta_and_asset_ctxs, candle_snapshot, 
         snapshot,
         mapper.map_candles(candle_snapshot),
         mapper.map_funding_history(funding_history),
-        candle_interval="4h",
-        funding_window_days=30,
+        market_data=_MD,
         indicator_names=["rsi_14"],
         exchange_time=None,
     )

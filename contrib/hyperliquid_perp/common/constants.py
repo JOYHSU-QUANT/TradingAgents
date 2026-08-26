@@ -8,7 +8,6 @@ reason ``config.load_config`` had to lazy-import ``live.config``.
 from __future__ import annotations
 
 __all__ = [
-    "DEFAULT_CANDLE_LOOKBACK",
     "ERROR_TYPES",
     "LEGAL_NETWORKS",
     "MIN_VOLUME_PROFILE_WINDOW",
@@ -23,19 +22,11 @@ __all__ = [
 # "``load_config`` does not import compute modules", and bucketing volume across
 # price levels is exactly the code someone later reaches for numpy in. The
 # keyless ``live --config-check`` path would acquire it silently, and nothing
-# would fail. ``volume_profile`` imports this name; the loader imports it too.
+# would fail. ``volume_profile`` imports this name; so does the loader's
+# ``market_data_config`` parser.
 #
 # See that module for WHY the floor is twelve rather than some other number.
 MIN_VOLUME_PROFILE_WINDOW = 12
-
-# How many candles ``engine_bridge._build_context`` fetches when
-# ``market_data.candle_lookback`` is absent or blank. Lives here, with the other
-# values two layers must agree on, because it is now read from BOTH sides of the
-# same rule: the fetch uses it, and ``config._validate_volume_profile_window``
-# rejects a volume-profile window wider than it. A second copy would go stale
-# silently — the cross-check would keep validating against the old number, and
-# the only symptom is a prompt section that never appears.
-DEFAULT_CANDLE_LOOKBACK = 200
 
 # The legal network vocabulary, shared by config.py's ``network`` validation
 # and live/config.py's ``live.network`` validation. Deliberately duplicated

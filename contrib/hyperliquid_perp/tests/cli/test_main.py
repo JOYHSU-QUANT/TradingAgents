@@ -26,6 +26,7 @@ import pytest
 
 from contrib.hyperliquid_perp import engine_bridge as bridge_mod, main as main_mod
 from contrib.hyperliquid_perp.domains.perp import freshness as freshness_mod
+from contrib.hyperliquid_perp.domains.perp.market_data_config import MarketDataConfig
 from contrib.hyperliquid_perp.domains.perp.schema import (
     AccountSnapshot,
     CandleInterval,
@@ -1597,13 +1598,19 @@ def test_build_context_reads_the_exchange_clock_and_hands_it_to_the_builder(monk
     assert order == ["candles", "clock"]
 
 
-def test_build_context_hands_the_configured_volume_profile_window_to_the_builder(monkeypatch):
-    # Wiring pin: dropping the config read or the volume_profile_window= kwarg
-    # in _build_context fails this. Without it the feature would look complete
-    # (module tested, renderer tested) while never reaching the builder — and
-    # the only symptom would be a prompt section that never appears, which is
-    # indistinguishable from the switch being off.
+def test_build_context_hands_the_parsed_market_data_block_to_the_fetch_and_the_builder(
+    monkeypatch,
+):
+    # Wiring pin: _build_context's parse of the ``market_data:`` block feeds
+    # both the fetch (interval + lookback to get_candles, window to
+    # get_funding_history) and the builder (the same object, as ``market_data=``). Dropping the
+    # parse, or handing the builder a differently-defaulted object, fails
+    # this. Without it the volume profile would look complete (module tested,
+    # renderer tested) while never reaching the builder — and the only symptom
+    # would be a prompt section that never appears, which is indistinguishable
+    # from the switch being off.
     handed = {}
+    fetched = {}
 
     class _Market:
         def __init__(self, _client):
@@ -1613,9 +1620,11 @@ def test_build_context_hands_the_configured_volume_profile_window_to_the_builder
             return object()
 
         def get_candles(self, coin, interval, lookback):
+            fetched["interval"], fetched["lookback"] = interval, lookback
             return []
 
         def get_funding_history(self, coin, window_days):
+            fetched["window_days"] = window_days
             return []
 
         def get_exchange_time(self, coin):
@@ -1629,21 +1638,29 @@ def test_build_context_hands_the_configured_volume_profile_window_to_the_builder
             return cls()
 
     def _builder(*args, **kwargs):
-        handed["window"] = kwargs.get("volume_profile_window")
+        handed["market_data"] = kwargs.get("market_data")
         return object()
 
     monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
     monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
     monkeypatch.setattr(bridge_mod, "build_market_context", _builder)
 
-    bridge_mod._build_context({"market_data": {"volume_profile_window_candles": 30}}, "BTC")
-    assert handed["window"] == 30
-    # Absent key -> off, and a blank key (`volume_profile_window_candles:`) is
-    # treated like absent, matching candle_lookback/funding window handling.
+    block = {
+        "candle_interval": "1h",
+        "candle_lookback": 50,
+        "funding_zscore_window_days": 7,
+        "volume_profile_window_candles": 30,
+    }
+    bridge_mod._build_context({"market_data": block}, "BTC")
+    assert handed["market_data"] == MarketDataConfig(**block)
+    assert fetched == {"interval": "1h", "lookback": 50, "window_days": 7}
+    # Absent block -> every field at its default, and a blank key
+    # (`volume_profile_window_candles:`) is treated like absent.
     bridge_mod._build_context({}, "BTC")
-    assert handed["window"] == 0
+    assert handed["market_data"] == MarketDataConfig()
+    assert fetched == {"interval": "4h", "lookback": 200, "window_days": 30}
     bridge_mod._build_context({"market_data": {"volume_profile_window_candles": None}}, "BTC")
-    assert handed["window"] == 0
+    assert handed["market_data"].volume_profile_window_candles == 0
 
 
 def test_context_refusal_tolerates_a_candle_closing_during_the_fetch():

@@ -14,12 +14,9 @@ from typing import Any
 import yaml
 
 from .common.config_coercion import bool_from_yaml
-from .common.constants import (
-    DEFAULT_CANDLE_LOOKBACK,
-    LEGAL_NETWORKS,
-    MIN_VOLUME_PROFILE_WINDOW,
-)
+from .common.constants import LEGAL_NETWORKS
 from .domains.perp.indicator_vocab import REGIME_INDICATORS, supported_indicators
+from .domains.perp.market_data_config import MarketDataConfig
 
 _CONFIG_DIR = Path(__file__).parent / "configs"
 _LOCAL = _CONFIG_DIR / "hyperliquid.local.yaml"
@@ -173,69 +170,6 @@ def config_path() -> Path:
     return _LOCAL if _LOCAL.exists() else _EXAMPLE
 
 
-def _validate_volume_profile_window(md_block: Any) -> None:
-    """Validate ``market_data.volume_profile_window_candles``, or do nothing.
-
-    The one ``market_data`` key checked at load time, because every way of
-    getting it wrong fails SILENTLY: the volume-profile section simply never
-    appears in the prompt, which is indistinguishable from the feature being
-    off on purpose (``0``). Stricter than ``candle_lookback``'s lenient
-    ``int(...)``: the key is new, so nothing depends on a loose form, and
-    rejecting a float/string here is what lets engine_bridge's ``int(...)`` be
-    unable to raise on a loaded config.
-
-    Takes the already-shape-checked ``market_data`` block (a dict or ``None``).
-    """
-    if not md_block:
-        return
-    window = md_block.get("volume_profile_window_candles")
-    if window is None:
-        return
-    # ``bool`` is an ``int`` subclass, so ``volume_profile_window_candles: true``
-    # would otherwise pass as the window ``1`` and then be refused at runtime.
-    if isinstance(window, bool) or not isinstance(window, int):
-        raise ValueError(
-            f"'market_data.volume_profile_window_candles' must be an integer "
-            f"number of candles (0 disables the volume profile), got {window!r}"
-        )
-    if window < 0:
-        raise ValueError(
-            f"'market_data.volume_profile_window_candles' must be >= 0 "
-            f"(0 disables the volume profile), got {window}"
-        )
-    if 0 < window < MIN_VOLUME_PROFILE_WINDOW:
-        raise ValueError(
-            f"'market_data.volume_profile_window_candles' must be 0 (off) or at "
-            f"least {MIN_VOLUME_PROFILE_WINDOW}; a window of {window} candle(s) is too "
-            f"short for a meaningful profile and would be skipped on every cycle"
-        )
-    # Cross-check against the history actually fetched: a window wider than the
-    # lookback can never be filled, so the section would be silently absent
-    # forever. Resolved exactly as engine_bridge._build_context does — absent or
-    # null falls back to the SHARED ``DEFAULT_CANDLE_LOOKBACK``, not to a local
-    # literal, so the two sides cannot disagree about the default.
-    #
-    # ``candle_lookback`` is NOT type-validated anywhere (it stays lenient), so
-    # this must COERCE it the way its consumer does rather than demand an
-    # ``int``: a type check would wave through ``candle_lookback: 20.0``, which
-    # engine_bridge reads as 20 — reinstating the exact silent skip this check
-    # exists to prevent. ``int()`` mirrors that coercion, bool included
-    # (``true`` -> 1 is what the fetch would really use). Only a genuinely
-    # un-coercible lookback skips the check, and that one fails loudly at the
-    # fetch; complaining about the profile window would point at the wrong line.
-    raw_lookback = md_block.get("candle_lookback", DEFAULT_CANDLE_LOOKBACK)
-    try:
-        lookback = DEFAULT_CANDLE_LOOKBACK if raw_lookback is None else int(raw_lookback)
-    except (TypeError, ValueError):
-        return
-    if window > lookback:
-        raise ValueError(
-            f"'market_data.volume_profile_window_candles' ({window}) exceeds "
-            f"'market_data.candle_lookback' ({lookback}) — the window could "
-            f"never be filled and the volume profile would be skipped on every cycle"
-        )
-
-
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
     """Parse the YAML config into a dict."""
     resolved = Path(path) if path else config_path()
@@ -259,21 +193,37 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     # None instead of its default and crash on the first attribute access. Treat
     # blank exactly like absent — drop the key here so one rule covers every
     # top-level-key consumer, current and future. (Nulls *inside* a block, e.g.
-    # ``candle_lookback:`` left blank, stay with each consumer's per-site default.)
+    # ``candle_lookback:`` left blank, are each block parser's business —
+    # ``config_overrides`` reads them as absent, so the dataclass field default
+    # applies.)
     for key in [k for k, v in config.items() if v is None]:
         del config[key]
     # Validate the shape of container blocks up front. Without this a malformed
     # block (``market_data: 5``, ``coins: BTC``) survives key validation and then
     # blows up deep in the run — ``5.get(...)`` (AttributeError) or ``"BTC"[0]``
     # silently taking the first character — instead of a clean exit-1 here. The
-    # ``risk:``/``decision:``/``live:`` blocks are shape-checked by their own
-    # from_dict (``live:`` additionally here, so a scalar ``live: true`` fails
-    # at load even on paths that never parse the block).
+    # ``risk:``/``decision:``/``live:``/``market_data:`` blocks are shape-
+    # checked by their own from_dict too (``live:`` and ``market_data:``
+    # additionally here, for the message naming the block — and for
+    # ``live:``, so a scalar ``live: true`` fails at load even on paths that
+    # never parse the block).
     for key in ("market_data", "engine", "paper_trading", "live"):
         val = config.get(key)
         if val is not None and not isinstance(val, dict):
             raise ValueError(f"{key!r} must be a mapping, got {val!r}")
-    _validate_volume_profile_window(config.get("market_data"))
+    # The ``market_data:`` block is parsed on every load — unknown keys, wrong
+    # types and out-of-band values all fail here, named. It is the block whose
+    # mistakes are otherwise the quietest: a typo'd key fell back to its
+    # default with no signal, and a bad value surfaced (if at all) as a bare
+    # ValueError from inside the market-data build — which nothing on the
+    # paper daemon's path catches (issue #96).
+    # Only the parse's verdict is used; engine_bridge re-parses the same block
+    # at fetch time, so the loaded dict stays the plain YAML the drift check
+    # and the genesis snapshot compare.
+    try:
+        MarketDataConfig.from_dict(config.get("market_data"))
+    except ValueError as exc:
+        raise ValueError(f"invalid market_data: config — {exc}") from None
     # A scalar here would silently resolve to per-character values downstream
     # (``coins: BTC`` → "B"; ``indicators: rsi_14`` → six unknown names, which
     # zeroes the warm-up threshold and empties the all-dead-indicator guard).

@@ -19,6 +19,7 @@ from contrib.hyperliquid_perp.config import (
     load_dotenv_files,
     wallet_address,
 )
+from contrib.hyperliquid_perp.domains.perp.market_data_config import MarketDataConfig
 from contrib.hyperliquid_perp.domains.perp.risk_gate import (
     RiskConfig,
     validate_risk_decision_config,
@@ -91,10 +92,12 @@ def test_load_config_accepts_a_legal_volume_profile_window(tmp_path, window):
     [
         # Every one of these fails SILENTLY without the load-time check: the
         # prompt section just never appears, which looks exactly like the
-        # feature being off on purpose.
-        ("30.5", "must be an integer"),
-        ('"30"', "must be an integer"),
-        ("true", "must be an integer"),  # bool is an int subclass — catch it explicitly
+        # feature being off on purpose. The type refusals are int_from_yaml's
+        # (one converter for every integer key in the block), so a quoted
+        # "30" is ACCEPTED as 30 — see the test below — while a bool (an int
+        # subclass a bare int() would read as 1) and a fraction are not.
+        ("30.5", "expected an integer"),
+        ("true", "expected an integer, got a YAML boolean"),
         ("-1", "must be >= 0"),
         ("6", "must be 0 .off. or at least 12"),  # the literal "rolling 24h" at 4h candles
         ("11", "must be 0 .off. or at least 12"),
@@ -110,6 +113,95 @@ def test_load_config_rejects_a_bad_volume_profile_window(tmp_path, value, match)
         load_config(bad)
 
 
+def test_market_data_integers_share_one_coercion(tmp_path):
+    # Every integer key in the block goes through the same int_from_yaml, so
+    # a quoted "30" reads as 30 for the profile window exactly as it always
+    # did for candle_lookback — the block no longer has two integer dialects.
+    path = tmp_path / "vp-quoted.yaml"
+    path.write_text(
+        'market_data:\n  candle_lookback: "200"\n  volume_profile_window_candles: "30"\n'
+        "  funding_zscore_window_days: 14.0\n",
+        encoding="utf-8",
+    )
+    assert MarketDataConfig.from_dict(load_config(path)["market_data"]) == MarketDataConfig(
+        candle_lookback=200, volume_profile_window_candles=30, funding_zscore_window_days=14
+    )
+
+
+def test_load_config_rejects_an_unknown_market_data_key(tmp_path):
+    # Issue #96: the block used to have no parser, so a typo'd key fell back
+    # to its default in silence — for this key that is the volume profile
+    # switched off, indistinguishable from an operator's deliberate 0; for
+    # funding_zscore_window_days it is a z-score over the wrong window that
+    # still looks like a normal number. Rejected like the other four blocks.
+    bad = tmp_path / "md-typo.yaml"
+    bad.write_text("market_data:\n  volume_profile_window_candels: 30\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid market_data: config") as exc_info:
+        load_config(bad)
+    assert "unknown config key(s): 'volume_profile_window_candels'" in str(exc_info.value)
+
+
+def test_a_legal_market_data_block_loads_byte_for_byte(tmp_path):
+    # Loading VALIDATES the block; it does not rewrite it. The drift check and
+    # the genesis snapshot compare the raw YAML dict, so a loader that
+    # normalised (say) "200" to 200 or filled in defaults would turn an
+    # unchanged config into a params-drift signal on the next --resume.
+    path = tmp_path / "md-legal.yaml"
+    path.write_text(
+        "market_data:\n"
+        '  candle_interval: "1h"\n'
+        "  candle_lookback: 100\n"
+        "  funding_zscore_window_days: 14\n"
+        "  volume_profile_window_candles: 24\n",
+        encoding="utf-8",
+    )
+    assert load_config(path)["market_data"] == {
+        "candle_interval": "1h",
+        "candle_lookback": 100,
+        "funding_zscore_window_days": 14,
+        "volume_profile_window_candles": 24,
+    }
+
+
+def test_the_example_yaml_market_data_block_is_the_parsers_defaults():
+    # The example is the documented default config; the dataclass is the
+    # default the loader validates against and the fetch uses when a key is
+    # absent. A drift between the two would let a config copied from the
+    # example behave differently from one that omits the block.
+    config = load_config(_EXAMPLE)
+    assert MarketDataConfig.from_dict(config["market_data"]) == MarketDataConfig()
+
+
+@pytest.mark.parametrize(
+    ("line", "match"),
+    [
+        # The interval is the fetch's and the guard's vocabulary; a mis-cased
+        # value used to survive the load and raise a bare ValueError from
+        # inside the market fetch.
+        ('  candle_interval: "4H"', "'market_data.candle_interval'.*unsupported candle interval"),
+        ("  candle_interval: 4", "config key 'candle_interval': expected a string"),
+        # A lookback that is not a number at all is candle_lookback's own
+        # problem — and now it is named as such at load, not at the fetch.
+        ("  candle_lookback: not-a-number", "config key 'candle_lookback': expected an integer"),
+        ("  candle_lookback: true", "config key 'candle_lookback': expected an integer"),
+        ("  candle_lookback: 20.5", "config key 'candle_lookback': expected an integer"),
+        ("  candle_lookback: 0", "'market_data.candle_lookback' must be >= 1"),
+        # A sub-1-day window keeps no funding points and degrades the z-score
+        # to None — the same refusal PerpMarketContext makes, moved to load.
+        (
+            "  funding_zscore_window_days: 0",
+            "'market_data.funding_zscore_window_days' must be >= 1",
+        ),
+        ("  funding_zscore_window_days: 1.5", "config key 'funding_zscore_window_days'"),
+    ],
+)
+def test_load_config_rejects_a_bad_market_data_value(tmp_path, line, match):
+    bad = tmp_path / "md-bad.yaml"
+    bad.write_text(f"market_data:\n{line}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=f"invalid market_data: config — {match}"):
+        load_config(bad)
+
+
 def test_load_config_rejects_a_window_wider_than_the_candle_lookback(tmp_path):
     # A window the fetch can never fill would be skipped on every cycle.
     bad = tmp_path / "vp-wide.yaml"
@@ -122,12 +214,10 @@ def test_load_config_rejects_a_window_wider_than_the_candle_lookback(tmp_path):
 
 
 @pytest.mark.parametrize("lookback", ["20.0", '"20"', "20"])
-def test_window_cross_check_coerces_the_lookback_like_its_consumer_does(tmp_path, lookback):
-    # ``candle_lookback`` is left lenient and coerced with int() at its
-    # consumer, so this check must COERCE too, not type-check. A type check
-    # would wave `candle_lookback: 20.0` through — engine_bridge reads that as
-    # 20, and the profile would then be skipped on every cycle in silence,
-    # which is the exact failure the cross-check exists to prevent.
+def test_window_cross_check_reads_the_lookback_after_int_coercion(tmp_path, lookback):
+    # int_from_yaml accepts the float-integral and quoted spellings, so the
+    # cross-check sees 20 for every one of them — comparing the raw YAML value
+    # would wave `20.0` through and skip the profile on every cycle in silence.
     bad = tmp_path / f"vp-coerce-{lookback.strip(chr(34))}.yaml"
     bad.write_text(
         f"market_data:\n  candle_lookback: {lookback}\n  volume_profile_window_candles: 30\n",
@@ -137,36 +227,31 @@ def test_window_cross_check_coerces_the_lookback_like_its_consumer_does(tmp_path
         load_config(bad)
 
 
-def test_an_uncoercible_lookback_skips_the_cross_check_rather_than_misreporting(tmp_path):
-    # A lookback that is not a number at all is candle_lookback's own problem
-    # (it fails loudly at its consumer). Complaining about the profile window
-    # here would send the operator to the wrong line.
+def test_an_uncoercible_lookback_is_named_rather_than_blamed_on_the_window(tmp_path):
+    # A lookback that is not a number at all is candle_lookback's own problem.
+    # It used to skip the cross-check and fail at the fetch; now it is refused
+    # at load — but the refusal must name candle_lookback, not the profile
+    # window, or the operator is sent to the wrong line.
     path = tmp_path / "vp-junk-lookback.yaml"
     path.write_text(
         "market_data:\n  candle_lookback: not-a-number\n  volume_profile_window_candles: 30\n",
         encoding="utf-8",
     )
-    assert load_config(path)["market_data"]["volume_profile_window_candles"] == 30
+    with pytest.raises(ValueError, match="config key 'candle_lookback'") as exc_info:
+        load_config(path)
+    assert "volume_profile_window_candles" not in str(exc_info.value)
 
 
 @pytest.mark.parametrize("lookback_line", ("  candle_lookback:\n", ""))
 def test_volume_profile_window_is_checked_against_the_same_lookback_default(
     tmp_path, lookback_line
 ):
-    # ``candle_lookback`` absent or blank means 200 in engine_bridge; the
-    # cross-check has to resolve it the same way or the two disagree about
-    # which windows are legal. 200 must pass, 201 must not.
-    #
-    # BOTH forms, because they take different branches of one line:
-    #
-    #     raw = md_block.get("candle_lookback", DEFAULT_CANDLE_LOOKBACK)
-    #     lookback = DEFAULT_CANDLE_LOOKBACK if raw is None else int(raw)
-    #
-    # A BLANK key is present, so ``.get`` returns None and the ``is None``
-    # branch supplies the default — the ``.get`` default is never read. Only the
-    # ABSENT key exercises it. Covering blank alone let the mutation
-    # ``.get("candle_lookback", 500)`` pass the whole suite, which is precisely
-    # the two-sides-disagree drift this test claims to catch.
+    # ``candle_lookback`` absent or blank means the MarketDataConfig field
+    # default (200) — the same object the fetch reads — so the cross-check and
+    # the fetch cannot disagree about which windows are legal. 200 must pass,
+    # 201 must not. Both forms, because config_overrides treats a present-
+    # but-null key and an absent key alike, and that "alike" is the contract
+    # being pinned.
     for window, ok in ((200, True), (201, False)):
         path = tmp_path / f"vp-default-{window}.yaml"
         path.write_text(

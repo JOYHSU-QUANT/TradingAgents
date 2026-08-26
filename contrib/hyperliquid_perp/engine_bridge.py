@@ -37,7 +37,6 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from .common.constants import DEFAULT_CANDLE_LOOKBACK
 from .config import CONFIG_LOAD_ERRORS, DOTENV_READ_ERRORS, load_config
 from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context
@@ -51,6 +50,7 @@ from .domains.perp.indicator_vocab import (
     required_candles,
     supported_indicators,
 )
+from .domains.perp.market_data_config import MarketDataConfig
 from .domains.perp.schema import PerpMarketContext, PerpPosition
 from .domains.perp.target_decision import DecisionConfig
 from .exchanges.hyperliquid.account import HyperliquidAccount
@@ -268,21 +268,9 @@ def _build_context(
     ``None`` for every other caller (the one-shot CLI paths), where no dead man's
     switch is being held open.
     """
-    md_cfg = config.get("market_data", {})
-    interval = md_cfg.get("candle_interval") or "4h"
-    # ``dict.get(key, default)`` only falls back when the key is absent; a present-
-    # but-null value (YAML key left blank) returns None and crashes ``int(None)`` —
-    # treat null like absent (matches network_timeout_s handling in from_config).
-    raw_lookback = md_cfg.get("candle_lookback", DEFAULT_CANDLE_LOOKBACK)
-    lookback = int(raw_lookback) if raw_lookback is not None else DEFAULT_CANDLE_LOOKBACK
-    raw_window = md_cfg.get("funding_zscore_window_days", 30)
-    window_days = int(raw_window) if raw_window is not None else 30
-    # Volume profile is OFF unless an operator sets a window (see the module
-    # docstring of domains/perp/volume_profile.py). Same null-is-absent rule as
-    # the two above; ``load_config`` has already rejected a non-integer or
-    # out-of-band value, so this int() cannot raise on a loaded config.
-    raw_profile_window = md_cfg.get("volume_profile_window_candles", 0)
-    profile_window = int(raw_profile_window) if raw_profile_window is not None else 0
+    # The same parse ``load_config`` already ran on this block, so on a loaded
+    # config it cannot raise; absent or blank keys take the field defaults.
+    market_data = MarketDataConfig.from_dict(config.get("market_data"))
     indicator_names = _indicator_names(config)
 
     def _between_reads() -> None:
@@ -309,7 +297,7 @@ def _build_context(
     print(f"Fetching {coin} market data from {client.network} (read-only)...", file=sys.stderr)
     snapshot = market.get_market_snapshot(coin)
     _between_reads()
-    candles = market.get_candles(coin, interval, lookback)
+    candles = market.get_candles(coin, market_data.candle_interval, market_data.candle_lookback)
     _between_reads()
     # The exchange's clock, read right after the candles it will be measured
     # against (issue #51): the candle window above is bounded by the HOST
@@ -325,7 +313,7 @@ def _build_context(
     # time as clock skew.
     host_time_at_exchange_read = datetime.now(tz=timezone.utc)
     _between_reads()
-    funding = market.get_funding_history(coin, window_days)
+    funding = market.get_funding_history(coin, market_data.funding_zscore_window_days)
     _between_reads()
 
     ctx = build_market_context(
@@ -333,12 +321,10 @@ def _build_context(
         snapshot,
         candles,
         funding,
-        candle_interval=interval,
-        funding_window_days=window_days,
+        market_data=market_data,
         indicator_names=indicator_names,
         exchange_time=exchange_time,
         host_time_at_exchange_read=host_time_at_exchange_read,
-        volume_profile_window=profile_window,
     )
     return ctx, client
 

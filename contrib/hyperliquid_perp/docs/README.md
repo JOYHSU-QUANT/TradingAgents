@@ -180,7 +180,8 @@ gate 區塊（mode / allow_real_orders / safety 等，見 phase3-spec §24）—
 |---|---|---|
 | `domains/perp/target_decision.py` | ✅ | structured target schema · fail-closed 驗證 · prompt 改版（DESIGN Part 2）。 |
 | `domains/perp/risk_gate.py` | ✅ | `max_target_margin_pct` clamp · step / `min_confidence` 檢查（同方向 resize 走更高的 `resize_min_confidence`） · effective leverage（phase2-spec §2）。 |
-| `common/config_coercion.py` | ✅ | 共用 YAML-coercion helpers（`config_overrides` · `decimal_from_yaml` · `int_from_yaml`），供 `RiskConfig` / `DecisionConfig` / `PaperTradingConfig` / `LiveConfig` 使用（原 `domains/perp/`，舊路徑留 re-export）。 |
+| `common/config_coercion.py` | ✅ | 共用 YAML-coercion helpers（`config_overrides` · `decimal_from_yaml` · `int_from_yaml`），供 `RiskConfig` / `DecisionConfig` / `MarketDataConfig` / `PaperTradingConfig` / `LiveConfig` 使用（原 `domains/perp/`，舊路徑留 re-export）。 |
+| `domains/perp/market_data_config.py` | ✅ | typed `market_data:` 區塊（`MarketDataConfig`）：未知 key／錯型別／超出範圍的值在 config load 具名 exit 1，四個 key 的預設值只宣告在欄位上，`volume_profile_window_candles ≤ candle_lookback` 跨欄位檢查在 `__post_init__`；`engine_bridge._build_context` 與 `build_market_context` 傳同一個解析好的物件（issue #96）。只 import `common/` 與 `schema`，layering 測試釘住。 |
 | `domains/perp/margin.py` | ✅ | Hyperliquid maintenance-margin tier model（rate · continuity deduction · tier 選擇；phase2-execution §6.6.1）。 |
 | `persistence/` | ✅ | SQLite source of truth · transaction · migrations · dedup 去重鍵 · typed repository（phase2-data §1／§5–§12）。 |
 | `persistence/audit_rows.py` | ✅ | §5／§7 audit-row 組裝的單一定義（`ai_inputs` 36 欄／`ai_outputs` 26 欄），paper scheduler 與 live decision driver 共用；刻意的 paper/live 差異（ledger 取得、`remaining_twap_qty`、輸出列 mark/equity 來源）由呼叫端傳參保留。 |

@@ -654,6 +654,38 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **`hyperliquid_perp`: a frozen DTO can no longer contradict the values it
+  says it was derived from.** `PerpMarketContext.day_change_pct` is a float
+  ratio stored beside the two prices it comes from, and nothing checked them
+  against each other: a hand-built or replayed context could render
+  "24h change: 40.00%" over a mark and a previous-day price that give 1.7%,
+  with every existing guard passing. The rule now lives in
+  `schema.derive_day_change_pct` — `context_builder` fills the field with it
+  and the DTO checks against it (relative tolerance, so a dust `prevDayPx`
+  under a real mark still builds) — and the `None` case is the rule's own:
+  `None` exactly when `prev_day_price` is `0` (no 24h reference yet), a value
+  otherwise; `prev_day_price` also gains the snapshot's `>= 0` guard.
+  `VolumeProfile` gets the four guards its own
+  comment listed as definable but unwritten: `shape` is re-derived from the
+  three stored fractions with the producer's rule — a profile labelling itself
+  `P` with its POC at 6% of the range, which rendered as one
+  self-contradicting block, is refused naming the letter its numbers give —
+  `candle_count` is pinned to the producer's window floor and `bucket_count`
+  to its grid (they admitted 1–11 and anything but 24), and the two volume
+  shares get the floors the value-area walk guarantees (`1 / bucket_count`
+  for the POC bucket, `VALUE_AREA_FRACTION` for the area). To make that
+  possible without a circular import, the shape rule now lives in
+  `schema.derive_profile_shape` (called by `classify_shape`, so producer and
+  DTO share one definition) and the profile's thresholds and grid
+  (`VOLUME_PROFILE_BUCKET_COUNT`, `VALUE_AREA_FRACTION`,
+  `THIN_VALUE_AREA_RATIO`, `POC_UPPER_BAND`/`POC_LOWER_BAND`,
+  `RANGE_MIDPOINT`) moved to `common/constants.py` beside the window floor;
+  `volume_profile` imports the grid (as `BUCKET_COUNT`) and
+  `VALUE_AREA_FRACTION` from there, and the four shape thresholds now exist
+  only in `common.constants`, read by `schema.derive_profile_shape`. No
+  producer output changes — every guard is a floor the producer already
+  honoured — but a context or profile built any other way now has to agree
+  with itself (issue #100).
 - **`hyperliquid_perp`: the run-segmentation signal was wrong in both
   directions.** (1) Resuming a run whose YAML had gained a key at its documented
   default — `market_data.volume_profile_window_candles: 0` copied from the

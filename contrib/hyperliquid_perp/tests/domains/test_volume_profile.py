@@ -86,6 +86,29 @@ def _thin_shape() -> list[Candle]:
     return [_candle(i, 100, 110, 109, 10) for i in range(16)]
 
 
+# One builder per letter, keyed by the letter the PRODUCTION classifier gives
+# it — shared with test_prompt_context and test_schema, so a fixture whose
+# letter must be real goes through ``_shaped`` rather than hand-writing the
+# geometry (a second copy of the rule ladder that drifts the first time a
+# threshold moves). Exhaustive over ProfileShape by construction: a fifth
+# member fails ``test_classify_shape_labels_with_the_dtos_own_rule`` here.
+_SHAPE_CANDLES = {
+    ProfileShape.D: _d_shape,
+    ProfileShape.P: _p_shape,
+    ProfileShape.B: _b_shape,
+    ProfileShape.THIN: _thin_shape,
+}
+
+
+def _shaped(shape: ProfileShape) -> VolumeProfile:
+    """A profile the production classifier really labels ``shape``."""
+    profile = _classify(_SHAPE_CANDLES[shape]())
+    # A builder that stopped producing its letter would otherwise let every
+    # consumer assert against a block contradicting its own label.
+    assert profile.shape is shape, f"{shape} builder now classifies as {profile.shape}"
+    return profile
+
+
 # --------------------------------------------------------------------------
 # build_profile — fail-closed on every degenerate window.
 # --------------------------------------------------------------------------
@@ -154,24 +177,51 @@ def test_window_below_the_minimum_returns_none(window):
     assert build_profile(_d_shape(), window) is None
 
 
-def test_the_runtime_floor_is_the_same_constant_the_config_loader_enforces():
-    # Two enforcement points, one constant. If they forked, load_config would
-    # accept a window this module then refuses on every cycle — and the only
-    # symptom is a prompt section that never appears. The name lives in
-    # common/constants.py so the loader need not import this compute module.
+def test_the_producers_constants_are_the_ones_the_loader_and_the_dto_enforce():
+    # Several enforcement points, one constant each. The window floor: if it
+    # forked, load_config would accept a window this module then refuses on
+    # every cycle — and the only symptom is a prompt section that never
+    # appears. The grid and the value-area convention (issue #100):
+    # VolumeProfile pins ``bucket_count`` and its volume-share floors against
+    # them, so a fork would have the producer emit a profile the DTO refuses,
+    # and the only symptom a cycle dying on a ValueError out of a pure
+    # function. All live in common/constants.py so neither the loader nor the
+    # DTO module imports this compute module. Identity, not equality.
+    from contrib.hyperliquid_perp.common import constants
+
     assert MIN_WINDOW_CANDLES is MIN_VOLUME_PROFILE_WINDOW
+    assert BUCKET_COUNT is constants.VOLUME_PROFILE_BUCKET_COUNT
+    assert VALUE_AREA_FRACTION is constants.VALUE_AREA_FRACTION
 
 
 def test_the_thin_threshold_tracks_the_value_area_convention():
-    # Same shape of pin as the floor-constant check above. _THIN_VA_RATIO's
-    # whole justification is that it sits at the uniform-distribution mark:
-    # volume spread perfectly evenly puts VALUE_AREA_FRACTION of itself inside
-    # that same fraction of the range. Written out as its own 0.70 the two
-    # would come apart the first time the value-area convention moved, leaving
-    # a threshold whose comment described a mark it no longer sat on.
-    from contrib.hyperliquid_perp.domains.perp import volume_profile as vp
+    # Same shape of pin as the floor-constant check above. The thin
+    # threshold's whole justification is that it sits at the
+    # uniform-distribution mark: volume spread perfectly evenly puts
+    # VALUE_AREA_FRACTION of itself inside that same fraction of the range.
+    # Written out as its own 0.70 the two would come apart the first time the
+    # value-area convention moved, leaving a threshold whose comment described
+    # a mark it no longer sat on. Both now live in common.constants (issue
+    # #100 moved the shape rule into schema, which cannot import this module).
+    from contrib.hyperliquid_perp.common.constants import THIN_VALUE_AREA_RATIO
 
-    assert float(VALUE_AREA_FRACTION) == vp._THIN_VA_RATIO
+    assert float(VALUE_AREA_FRACTION) == THIN_VALUE_AREA_RATIO
+
+
+def test_classify_shape_labels_with_the_dtos_own_rule():
+    # The letter classify_shape assigns must be what derive_profile_shape says
+    # for the fractions it stored — otherwise the DTO's re-derivation would
+    # refuse the producer's own output. One fixture per letter, through the
+    # real producer; ``_SHAPE_CANDLES`` must cover every member for this to
+    # mean anything, so that is pinned too.
+    from contrib.hyperliquid_perp.domains.perp.schema import derive_profile_shape
+
+    assert set(_SHAPE_CANDLES) == set(ProfileShape)
+    for letter in _SHAPE_CANDLES:
+        profile = _shaped(letter)
+        assert profile.shape is derive_profile_shape(
+            profile.value_area_width_ratio, profile.poc_position, profile.close_position
+        )
 
 
 def test_window_wider_than_the_available_history_is_refused_not_narrowed():
@@ -442,7 +492,7 @@ def test_value_area_ties_resolve_upward_for_reproducibility():
 
 
 def test_the_poc_band_thresholds_are_pinned_to_their_values():
-    # ``_POC_UPPER``/``_POC_LOWER`` (0.60/0.40) had no pinning test at all:
+    # ``POC_UPPER_BAND``/``POC_LOWER_BAND`` (0.60/0.40) had no pinning test at all:
     # widening either to 0.50 changed real classifications while the suite
     # stayed green, because every other fixture sits far from both edges.
     #
@@ -471,7 +521,7 @@ def test_the_poc_band_thresholds_are_pinned_to_their_values():
 
     # --- Not TIGHTER than 0.60/0.40: the first qualifying bucket each way. ---
     # Without these the test's name overclaims: it pinned only the loosening
-    # direction, and `_POC_LOWER = 0.40 -> 0.30` survived the whole suite
+    # direction, and `POC_LOWER_BAND = 0.40 -> 0.30` survived the whole suite
     # because every other fixture sits far from the edges (_b_shape at 0.021,
     # _p_shape at 0.854). These two sit ON the first bucket that qualifies.
     just_upper = _classify(_one_bucket(14, Decimal("123")))
@@ -544,7 +594,7 @@ def test_a_low_poc_without_a_confirming_close_is_not_b():
 
 
 def test_a_close_exactly_on_the_midpoint_confirms_neither_p_nor_b():
-    # Both close checks are STRICT (``> _MID`` / ``< _MID``), so the midpoint
+    # Both close checks are STRICT (``> RANGE_MIDPOINT`` / ``< RANGE_MIDPOINT``), so the midpoint
     # itself confirms nothing and the skew falls through to D. Built with a
     # high POC so the P branch is one relational operator away from firing.
     candles = _p_shape()

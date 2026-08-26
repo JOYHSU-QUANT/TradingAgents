@@ -25,14 +25,7 @@ from contrib.hyperliquid_perp.domains.perp.schema import (
 )
 from contrib.hyperliquid_perp.domains.perp.volume_profile import compute_volume_profile
 
-from .test_volume_profile import (
-    _b_shape,
-    _candle,
-    _classify,
-    _d_shape,
-    _p_shape,
-    _thin_shape,
-)
+from .test_volume_profile import _candle, _classify, _shaped
 
 _AS_OF = datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
@@ -139,6 +132,9 @@ def test_render_none_values_become_na_never_nan():
     text = render_market_context(
         _ctx(
             mid_price=None,
+            # None only WITH no reference price (a freshly listed coin): the
+            # DTO ties the two together.
+            prev_day_price=Decimal("0"),
             day_change_pct=None,
             funding_premium=None,
             funding_zscore_30d=None,
@@ -293,34 +289,14 @@ def test_volume_profile_window_label_follows_the_contexts_candle_interval():
 
 
 # Fixtures whose letter comes from the PRODUCTION classifier, not from a
-# hand-set ``shape=`` field. The candle builders live next door in
-# test_volume_profile and already produce exactly these four letters.
-#
-# Writing the geometry out by hand instead would need a second copy of
-# classify_shape's rule LADDER here to check itself, and that mirror would
-# drift silently the first time the production rules were reordered — leaving
-# the guard certifying fixtures the classifier no longer agrees with, the very
-# defect it exists to catch. Going through ``_classify`` avoids the mirror.
-_SHAPE_CANDLES = {
-    ProfileShape.D: _d_shape,
-    ProfileShape.P: _p_shape,
-    ProfileShape.B: _b_shape,
-    ProfileShape.THIN: _thin_shape,
-}
-
-
-def _shaped(shape: ProfileShape) -> VolumeProfile:
-    """A profile the production classifier really labels ``shape``.
-
-    Every parametrized case below reads only the rendered NOTE, so the
-    builders' own 100-110 price range (rather than ``_profile``'s
-    60,000-66,000) is immaterial here.
-    """
-    profile = _classify(_SHAPE_CANDLES[shape]())
-    # A builder that stopped producing its letter would otherwise let every
-    # test below assert against a block contradicting its own label.
-    assert profile.shape is shape, f"{shape} builder now classifies as {profile.shape}"
-    return profile
+# hand-set ``shape=`` field: ``_shaped`` (imported from test_volume_profile,
+# where the candle builders live) classifies a builder's candles and asserts
+# the letter. Writing the geometry out by hand instead would need a second
+# copy of classify_shape's rule LADDER here to check itself, and that mirror
+# would drift silently the first time the production rules were reordered.
+# Every parametrized case below reads only the rendered NOTE, so the
+# builders' own 100-110 price range (rather than ``_profile``'s
+# 60,000-66,000) is immaterial here.
 
 
 @pytest.mark.parametrize("shape", list(ProfileShape))
@@ -408,9 +384,8 @@ def test_the_d_note_asserts_nothing_positive_about_the_distribution():
                 poc_position=0.95,
                 # REQUIRED for this to be the case the comment describes. Left
                 # at the default 0.71 the close CONFIRMS the upward skew, and
-                # classify_shape would call this a P — the fixture would only
-                # look like a D because ``shape`` is not re-derived, which is
-                # the very gap VolumeProfile's own comment warns about.
+                # the rule calls that a P — VolumeProfile re-derives the
+                # letter at construction, so ``shape=D`` would be refused.
                 close_position=0.29,
                 poc=Decimal("65700.0"),  # 60000 + 0.95 * 6000
                 value_area_low=Decimal("63250.0"),  # keeps the 11/24 width...
@@ -446,7 +421,7 @@ def _shape_line(profile) -> str:
 
 
 def test_the_thin_note_does_not_claim_volume_is_evenly_spread():
-    # ``thin`` fires on value_area_width_ratio >= _THIN_VA_RATIO, which measures
+    # ``thin`` fires on value_area_width_ratio >= THIN_VALUE_AREA_RATIO, which measures
     # how WIDE the outward walk got — not how flat the distribution is. A
     # two-cluster window (price ranges at one level, traverses, ranges at
     # another — ordinary over five days of 4h bars) makes the walk cross a
@@ -507,7 +482,7 @@ def test_the_thin_note_does_not_claim_the_volume_needed_the_range():
 
 
 def test_the_p_note_does_not_claim_where_the_bulk_of_the_volume_sat():
-    # ``P`` fires on poc_position >= _POC_UPPER, i.e. on where the single
+    # ``P`` fires on poc_position >= POC_UPPER_BAND, i.e. on where the single
     # heaviest BUCKET sits. That is not a claim about where the bulk of the
     # volume sat, and the two can point opposite ways: below, the POC bucket is
     # 60% up the range while most of the window's volume sat BELOW the midpoint,
@@ -599,7 +574,9 @@ def test_context_shape_changes_when_the_volume_profile_section_appears():
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("mark_price", Decimal("1.0")),
+        # The oracle rather than the mark: the mark is cross-checked against
+        # day_change_pct, so moving it alone no longer builds.
+        ("oracle_price", Decimal("1.0")),
         ("candle_count", 50),
         ("funding_window_days", 14),
         ("funding_zscore_30d", None),

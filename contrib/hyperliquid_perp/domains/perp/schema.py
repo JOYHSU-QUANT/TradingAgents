@@ -19,6 +19,16 @@ from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
 
+from ...common.constants import (
+    MIN_VOLUME_PROFILE_WINDOW,
+    POC_LOWER_BAND,
+    POC_UPPER_BAND,
+    RANGE_MIDPOINT,
+    THIN_VALUE_AREA_RATIO,
+    VALUE_AREA_FRACTION,
+    VOLUME_PROFILE_BUCKET_COUNT,
+)
+
 
 class MarketRegime(str, Enum):
     """Computed by ``context_builder``, carried through for the Reflection agent.
@@ -159,7 +169,7 @@ class MarketSnapshot:
 
     def __post_init__(self) -> None:
         # A price must be strictly positive: a zero/negative mark/oracle is a divisor
-        # downstream (classify_regime's atr/price, _day_change_pct, indicator math) and
+        # downstream (classify_regime's atr/price, derive_day_change_pct, indicator math) and
         # is serialized verbatim into the prompt, so a bad price would poison decision
         # sizing rather than fail loudly. Open interest and volume are magnitudes (>= 0).
         # ``funding`` and ``premium`` are signed
@@ -180,7 +190,7 @@ class MarketSnapshot:
         # on purpose: Hyperliquid returns ``prevDayPx = "0"`` for a freshly-listed coin
         # with no 24h-ago reference, and rejecting that would refuse an otherwise-valid
         # snapshot. ``0`` here means "no reference price"; the only consumer
-        # (``context_builder._day_change_pct``) already special-cases ``prev_day == 0`` and
+        # (:func:`derive_day_change_pct`) already special-cases ``prev_day == 0`` and
         # emits ``day_change_pct = None``, so a zero never reaches a division. Open interest
         # and volume are genuine magnitudes (>= 0).
         for name in ("prev_day_price", "open_interest", "day_ntl_volume"):
@@ -323,34 +333,84 @@ class AccountSnapshot:
 # --------------------------------------------------------------------------
 
 
-def _check_derived_fraction(label: str, claimed: float, numerator: Decimal, span: Decimal) -> None:
-    """Raise unless ``claimed`` really is ``numerator / span``.
+# The one tolerance every "stored value vs. what it derives from" check in this
+# module uses — the fractions and volume shares on ``VolumeProfile`` and
+# ``day_change_pct`` on ``PerpMarketContext``. Tolerance rather than equality,
+# and ONE tolerance rather than one per field: what it admits is a DTO rebuilt
+# from a value someone rounded on the way in, and a fixture or recorded row
+# rounds every float the same way, so the class's admission policy must not
+# differ field by field. 1e-6 admits anything recorded to six decimal places
+# or better and is orders of magnitude below any disagreement worth calling a
+# contradiction. The float-vs-Decimal gap it also covers is real but tiny —
+# over 4000 fuzzed producer outputs spanning six price magnitudes the range
+# fractions came out EXACTLY equal every time — except where a value itself is
+# huge, which is why :func:`_check_derived` applies it RELATIVE to the expected
+# value (for a fraction in ``[0, 1]`` that is the plain 1e-6).
+_DERIVED_TOLERANCE = 1e-6
 
-    A DTO that stores BOTH a ratio and the values it was computed from can be
+
+def _check_derived(label: str, claimed: float, expected: float, source: str) -> None:
+    """Raise unless ``claimed`` agrees with ``expected`` to the shared tolerance.
+
+    A DTO that stores BOTH a value and the values it was computed from can be
     handed the two disagreeing, and every bounds check still passes — the
     contradiction only shows up in whatever renders them side by side. This is
-    the one shared statement of that invariant.
-
-    Tolerance rather than equality. Two of the reasons turn out to cost
-    nothing in practice: over 4000 fuzzed producer outputs spanning six price
-    magnitudes, the float-vs-Decimal gap and the grid quantization (see
-    ``volume_profile._bucket_edges``, which pins its outermost edges) came out
-    at EXACTLY zero, every time. What the tolerance actually buys is the third
-    reason — a DTO rebuilt from a ratio someone rounded on the way in. 1e-6
-    admits anything recorded to six decimal places or better, and is orders of
-    magnitude below any disagreement worth calling a contradiction.
-
-    Only ``VolumeProfile`` calls this today. ``PerpMarketContext.day_change_pct``
-    has the same shape — a float ratio stored beside the two Decimal prices it
-    comes from — and is NOT guarded. That is a deliberate deferral, not an
-    oversight: that DTO is constructed in far more places, so tightening it
-    needs its own pass rather than riding along with the volume profile.
+    the one shared statement of that invariant; ``source`` names, for the
+    message, what ``expected`` was derived from.
     """
-    expected = float(numerator / span)
-    if abs(claimed - expected) > 1e-6:
-        raise ValueError(
-            f"{label} ({claimed}) contradicts the values it is derived from — those give {expected}"
-        )
+    if abs(claimed - expected) > _DERIVED_TOLERANCE * max(1.0, abs(expected)):
+        raise ValueError(f"{label} ({claimed}) contradicts {source} — that gives {expected}")
+
+
+def _check_derived_fraction(label: str, claimed: float, numerator: Decimal, span: Decimal) -> None:
+    """``claimed`` must be ``numerator / span`` — a fraction of a price range."""
+    _check_derived(label, claimed, float(numerator / span), "the values it is derived from")
+
+
+def derive_day_change_pct(mark: Decimal, prev_day: Decimal) -> float | None:
+    """The 24h change, in percent, or ``None`` when there is no reference.
+
+    THE rule for ``PerpMarketContext.day_change_pct``: ``context_builder``
+    calls it to fill the field, and the DTO calls it again at construction to
+    check what it was handed — one definition, as :func:`derive_profile_shape`
+    is for the profile's letter. ``prev_day == 0`` is Hyperliquid's "no 24h
+    reference yet" for a freshly listed coin (``MarketSnapshot`` admits it on
+    purpose), and is the ONLY input that yields ``None``.
+    """
+    if prev_day == 0:
+        return None
+    return float((mark - prev_day) / prev_day * 100)
+
+
+def derive_profile_shape(
+    value_area_width_ratio: float, poc_position: float, close_position: float
+) -> ProfileShape:
+    """The volume profile's letter, from the three fractions that decide it.
+
+    This is THE shape rule: :func:`.volume_profile.classify_shape` calls it to
+    label a freshly built profile, and :class:`VolumeProfile` calls it again
+    at construction to check the label it was handed — one definition, so the
+    producer and the DTO cannot disagree about what a ``P`` is. It lives here
+    rather than in ``volume_profile`` because that module imports this one.
+
+    Rules, checked in this order (thresholds in ``common.constants``):
+
+    1. ``thin`` — the value area spans at least ``THIN_VALUE_AREA_RATIO`` of
+       the range. First, because a smeared profile's POC tells you nothing.
+    2. ``P`` — POC at or above ``POC_UPPER_BAND`` of the range AND the latest
+       close above the window midpoint.
+    3. ``b`` — the mirror: POC at or below ``POC_LOWER_BAND`` AND the close
+       below the midpoint.
+    4. ``D`` — everything else, which includes a skewed POC whose close did
+       not confirm it (``classify_shape``'s docstring says what that means).
+    """
+    if value_area_width_ratio >= THIN_VALUE_AREA_RATIO:
+        return ProfileShape.THIN
+    if poc_position >= POC_UPPER_BAND and close_position > RANGE_MIDPOINT:
+        return ProfileShape.P
+    if poc_position <= POC_LOWER_BAND and close_position < RANGE_MIDPOINT:
+        return ProfileShape.B
+    return ProfileShape.D
 
 
 @dataclass(frozen=True)
@@ -416,30 +476,14 @@ class VolumeProfile:
         # Field by field, because a summary sentence about this has been wrong
         # twice: the prices below get mutual containment and ordering;
         # ``poc_position`` and ``value_area_width_ratio`` get cross-checked
-        # against those prices at the bottom of this method. EVERYTHING ELSE
-        # gets bounds only, and is listed here rather than summarized.
+        # against those prices; ``shape`` is re-derived from the three
+        # fractions that decide it; the two counts are pinned to the producer's
+        # floor and grid; the two volume shares get the floors the walk
+        # guarantees. All of it is below, in that order.
         #
-        # ``close_position`` is the one nothing here could ever check: it is a
-        # fraction of a ``latest_close`` this class does not store, and adding
-        # the field to store it serves no consumer.
-        #
-        # The rest are checks that ARE definable and are deliberately not
-        # written, which is a different thing from impossible:
-        #   - ``shape`` is fully determined by ``value_area_width_ratio``,
-        #     ``poc_position`` and ``close_position``, all stored right here, yet
-        #     is never re-derived — so a hand-built profile can label itself
-        #     ``P`` while its own numbers say ``D``.
-        #   - ``candle_count`` admits 1-11, and ``bucket_count`` anything but 24;
-        #     no walk produces either.
-        #   - ``poc_volume_share`` cannot fall below ``1 / bucket_count`` (the
-        #     heaviest bucket is at least the average), and the producer's walk
-        #     always carries ``value_area_volume_share`` to VALUE_AREA_FRACTION.
-        # Most of those need thresholds that live in ``volume_profile``, which
-        # imports THIS module — so at module scope the dependency cannot run
-        # back the other way without moving the constants into ``common/``.
-        # They belong with the consumer that reads these fields, which does not
-        # exist yet; none of them is load-bearing while the producer is the only
-        # caller.
+        # ``close_position`` is the one nothing here can check beyond bounds:
+        # it is a fraction of a ``latest_close`` this class does not store, and
+        # adding the field to store it serves no consumer.
         if self.range_low <= 0:
             raise ValueError(f"VolumeProfile.range_low must be > 0, got {self.range_low}")
         if self.range_high <= self.range_low:
@@ -476,10 +520,20 @@ class VolumeProfile:
                 f"VolumeProfile.value_area_width_ratio must be in (0, 1], "
                 f"got {self.value_area_width_ratio}"
             )
-        if self.candle_count < 1:
-            raise ValueError(f"VolumeProfile.candle_count must be >= 1, got {self.candle_count}")
-        if self.bucket_count < 1:
-            raise ValueError(f"VolumeProfile.bucket_count must be >= 1, got {self.bucket_count}")
+        # The producer refuses a window below the floor rather than narrowing
+        # it, and always buckets on the one grid — so a count outside either
+        # did not come from a walk. Pinned to the same constants the producer
+        # reads (``common.constants``), not to literals that could drift.
+        if self.candle_count < MIN_VOLUME_PROFILE_WINDOW:
+            raise ValueError(
+                f"VolumeProfile.candle_count must be >= {MIN_VOLUME_PROFILE_WINDOW} "
+                f"(the producer's window floor), got {self.candle_count}"
+            )
+        if self.bucket_count != VOLUME_PROFILE_BUCKET_COUNT:
+            raise ValueError(
+                f"VolumeProfile.bucket_count must be {VOLUME_PROFILE_BUCKET_COUNT} "
+                f"(the producer's grid), got {self.bucket_count}"
+            )
         for name in ("poc_volume_share", "value_area_volume_share"):
             value = getattr(self, name)
             if not 0.0 < value <= 1.0:
@@ -496,6 +550,27 @@ class VolumeProfile:
                 f"VolumeProfile.poc_volume_share ({self.poc_volume_share}) cannot exceed "
                 f"value_area_volume_share ({self.value_area_volume_share}) — the POC "
                 f"bucket sits inside the value area"
+            )
+        # Floors the walk guarantees, both with the module's one tolerance: the
+        # POC is the heaviest of ``bucket_count`` buckets, so its share is at
+        # least the average ``1 / bucket_count`` (a perfectly uniform window
+        # sits exactly on it — issue #100's fuzz of the producer found the
+        # minimum at 1.000000 x the floor); and the value-area walk exits only
+        # once it holds at least VALUE_AREA_FRACTION of the volume (or every
+        # bucket). A share below either says the walk lost track of a bucket.
+        uniform_share = 1 / self.bucket_count
+        if self.poc_volume_share < uniform_share - _DERIVED_TOLERANCE:
+            raise ValueError(
+                f"VolumeProfile.poc_volume_share ({self.poc_volume_share}) is below "
+                f"1 / bucket_count ({uniform_share}) — the heaviest bucket cannot hold "
+                f"less than the average"
+            )
+        value_area_floor = float(VALUE_AREA_FRACTION)
+        if self.value_area_volume_share < value_area_floor - _DERIVED_TOLERANCE:
+            raise ValueError(
+                f"VolumeProfile.value_area_volume_share ({self.value_area_volume_share}) "
+                f"is below VALUE_AREA_FRACTION ({value_area_floor}) — the walk never "
+                f"stops before reaching it"
             )
         # Cross-check the derived fractions against the prices they came FROM.
         # Without this, every guard above constrains the two halves SEPARATELY:
@@ -516,7 +591,26 @@ class VolumeProfile:
         )
         # Coerce like ``market_regime``: a plain string (fixture, recorded row)
         # is accepted, an unknown one raises here rather than at render time.
-        object.__setattr__(self, "shape", ProfileShape(self.shape))
+        shape = ProfileShape(self.shape)
+        # Then re-derive it. The letter is fully determined by three fractions
+        # stored right here, with the producer's own rule — so a profile that
+        # calls itself ``P`` while its POC sits at 6% of the range (a real
+        # hand-built case, and it rendered as one self-contradicting block)
+        # cannot exist. Same tolerance question as the cross-checks above: the
+        # thresholds are compared to the stored floats exactly, as the
+        # producer compares them, so a fraction ON a threshold classifies the
+        # same way on both sides.
+        derived = derive_profile_shape(
+            self.value_area_width_ratio, self.poc_position, self.close_position
+        )
+        if shape is not derived:
+            raise ValueError(
+                f"VolumeProfile.shape ({shape.value}) contradicts the fractions it is "
+                f"derived from — value_area_width_ratio={self.value_area_width_ratio}, "
+                f"poc_position={self.poc_position}, close_position={self.close_position} "
+                f"give {derived.value}"
+            )
+        object.__setattr__(self, "shape", shape)
 
 
 @dataclass(frozen=True)
@@ -590,6 +684,42 @@ class PerpMarketContext:
             value = getattr(self, name)
             if value <= 0:
                 raise ValueError(f"PerpMarketContext.{name} must be > 0, got {value}")
+        # ``prev_day_price`` mirrors the snapshot's ``>= 0`` (zero = "no 24h
+        # reference yet", a freshly listed coin) — and ``day_change_pct`` is a
+        # function of it and ``mark_price``, both stored right here, so the
+        # three are checked together against :func:`derive_day_change_pct`,
+        # the producer's own rule. A context built any other way that breaks
+        # it would print "24h change: 40%" over two prices that say 2%, with
+        # every bounds check passing — the same contradiction the volume
+        # profile's cross-checks exist for.
+        if self.prev_day_price < 0:
+            raise ValueError(
+                f"PerpMarketContext.prev_day_price must be >= 0, got {self.prev_day_price}"
+            )
+        expected_change = derive_day_change_pct(self.mark_price, self.prev_day_price)
+        if (expected_change is None) != (self.day_change_pct is None):
+            raise ValueError(
+                f"PerpMarketContext.day_change_pct ({self.day_change_pct}) disagrees with "
+                f"prev_day_price ({self.prev_day_price}): the change is None exactly when "
+                f"there is no reference price (prev_day_price == 0)"
+            )
+        if self.day_change_pct is not None and expected_change is not None:
+            # Coerced first: a hand-built context naturally reaches for Decimal
+            # for anything named *_pct, and Decimal - float is a TypeError, not
+            # the contradiction message. The shared check's RELATIVE tolerance
+            # matters here: the change is unbounded (a dust ``prevDayPx`` under
+            # a real mark is a ratio of 1e10), and at that size a double's ulp
+            # alone exceeds 1e-6 absolute — an absolute check would refuse the
+            # producer's own output.
+            claimed = float(self.day_change_pct)
+            _check_derived(
+                "PerpMarketContext.day_change_pct",
+                claimed,
+                expected_change,
+                f"the prices it is derived from (mark {self.mark_price} over prev_day "
+                f"{self.prev_day_price})",
+            )
+            object.__setattr__(self, "day_change_pct", claimed)
         if self.candle_count < 0:
             raise ValueError(
                 f"PerpMarketContext.candle_count must be >= 0, got {self.candle_count}"

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
 
+from contrib.hyperliquid_perp.common.constants import (
+    MIN_VOLUME_PROFILE_WINDOW,
+    VOLUME_PROFILE_BUCKET_COUNT,
+)
 from contrib.hyperliquid_perp.domains.perp.schema import (
     AccountSnapshot,
     CandleInterval,
@@ -16,8 +21,12 @@ from contrib.hyperliquid_perp.domains.perp.schema import (
     PerpPosition,
     ProfileShape,
     VolumeProfile,
+    derive_day_change_pct,
+    derive_profile_shape,
     interval_to_ms,
 )
+
+from .test_volume_profile import _shaped
 
 
 def _market(**overrides) -> dict:
@@ -204,7 +213,11 @@ def _context(**overrides) -> dict:
         "oracle_price": Decimal("60000"),
         "prev_day_price": Decimal("59000"),
         "mid_price": Decimal("60000"),
-        "day_change_pct": 1.5,
+        # Derived from the two prices above, the way context_builder does it,
+        # because the DTO now cross-checks them. The first version of this
+        # fixture said 1.5 — a rounded guess off by 0.19 points — and no test
+        # noticed, which is the gap the guard closes.
+        "day_change_pct": float((Decimal("60000") - Decimal("59000")) / Decimal("59000") * 100),
         "open_interest": Decimal("1000"),
         "day_ntl_volume": Decimal("5000000"),
         "funding_rate": Decimal("-0.0001"),
@@ -377,8 +390,16 @@ def test_volume_profile_builds_from_consistent_values():
         ({"close_position": -0.1}, "close_position"),
         ({"value_area_width_ratio": 0.0}, "value_area_width_ratio"),
         ({"value_area_width_ratio": 1.5}, "value_area_width_ratio"),
-        ({"candle_count": 0}, "candle_count must be >= 1"),
-        ({"bucket_count": 0}, "bucket_count must be >= 1"),
+        # The counts are pinned to the producer: it refuses a window below
+        # MIN_VOLUME_PROFILE_WINDOW rather than narrowing it, and always
+        # buckets on VOLUME_PROFILE_BUCKET_COUNT — so 11 candles or 23 buckets
+        # never came from a walk. Issue #100: these used to admit 1-11 and
+        # anything but 24.
+        ({"candle_count": 0}, "candle_count must be >= 12"),
+        ({"candle_count": MIN_VOLUME_PROFILE_WINDOW - 1}, "candle_count must be >= 12"),
+        ({"bucket_count": 0}, "bucket_count must be 24"),
+        ({"bucket_count": VOLUME_PROFILE_BUCKET_COUNT - 1}, "bucket_count must be 24"),
+        ({"bucket_count": VOLUME_PROFILE_BUCKET_COUNT + 1}, "bucket_count must be 24"),
         # Shares of the window's VOLUME: a share of zero means the POC bucket
         # traded nothing, which contradicts it being the heaviest bucket.
         ({"poc_volume_share": 0.0}, "poc_volume_share"),
@@ -388,6 +409,19 @@ def test_volume_profile_builds_from_consistent_values():
         # The value area is grown outward FROM the POC bucket, so the POC's
         # share is one of the buckets the area holds and cannot exceed it.
         ({"poc_volume_share": 0.9}, "cannot exceed"),
+        # Floors the walk guarantees (issue #100): the heaviest of 24 buckets
+        # holds at least the average 1/24 (0.041666…), and the walk does not
+        # stop before VALUE_AREA_FRACTION. 0.04 is in (0, 1] and below the VA
+        # share, so only the floor rejects it; 0.69 likewise.
+        ({"poc_volume_share": 0.04}, "below 1 / bucket_count"),
+        ({"value_area_volume_share": 0.69}, "below VALUE_AREA_FRACTION"),
+        # The letter is re-derived from the three fractions (issue #100): the
+        # default fractions (width 0.4, POC mid-range) are a D, so a profile
+        # calling itself P — the real hand-built case that rendered "POC (6%
+        # up the range) / Shape: P — volume built up in the upper part" — is
+        # refused, naming the letter the numbers give.
+        ({"shape": ProfileShape.P}, "contradicts the fractions.*give D"),
+        ({"shape": "thin"}, "contradicts the fractions.*give D"),
         # The fractions must agree with the prices they claim to come from.
         # Both of these are individually in-bounds and pass every other guard;
         # only the cross-check catches them, and without it the renderer would
@@ -403,14 +437,118 @@ def test_volume_profile_rejects_self_contradictory_values(overrides, match):
         VolumeProfile(**_profile(**overrides))
 
 
+def _lettered(letter: ProfileShape) -> dict:
+    """Self-consistent kwargs whose numbers really ARE ``letter``.
+
+    Taken from the production classifier (``_shaped``) rather than written by
+    hand: hand geometry is a second copy of the rule ladder that stops being
+    its letter the first time a threshold moves.
+    """
+    return asdict(_shaped(letter))
+
+
 def test_volume_profile_coerces_a_plain_shape_string():
-    assert VolumeProfile(**_profile(shape="thin")).shape is ProfileShape.THIN
-    assert VolumeProfile(**_profile(shape="b")).shape is ProfileShape.B
+    # A plain string is accepted and coerced — on numbers that really ARE that
+    # letter, since the shape is re-derived at construction.
+    thin, b = _lettered(ProfileShape.THIN), _lettered(ProfileShape.B)
+    assert VolumeProfile(**{**thin, "shape": "thin"}).shape is ProfileShape.THIN
+    assert VolumeProfile(**{**b, "shape": "b"}).shape is ProfileShape.B
 
 
 def test_volume_profile_rejects_an_unknown_shape():
     with pytest.raises(ValueError, match="nonsense"):
         VolumeProfile(**_profile(shape="nonsense"))
+
+
+@pytest.mark.parametrize("letter", list(ProfileShape))
+def test_volume_profile_shape_is_rederived_with_the_producers_rule(letter):
+    # Issue #100: ``shape`` is fully determined by three stored fractions, so
+    # the DTO checks the letter it was handed against derive_profile_shape —
+    # the SAME function classify_shape labels with. Each letter's own numbers
+    # build with that letter and are refused with every other, which pins
+    # that the check is the rule (not a per-letter special case) and names
+    # the letter the numbers give.
+    kwargs = _lettered(letter)
+    assert (
+        derive_profile_shape(
+            kwargs["value_area_width_ratio"], kwargs["poc_position"], kwargs["close_position"]
+        )
+        is letter
+    )
+    assert VolumeProfile(**kwargs).shape is letter
+    for other in ProfileShape:
+        if other is letter:
+            continue
+        with pytest.raises(ValueError, match=f"contradicts the fractions.*give {letter.value}"):
+            VolumeProfile(**{**kwargs, "shape": other})
+
+
+def test_derive_profile_shape_checks_thin_before_the_poc_bands():
+    # Rule order: a smeared profile is ``thin`` even when its POC and close
+    # would otherwise say P (or b). Dropping the rule to last would flip this
+    # to P and still pass a "some letter came back" check.
+    assert derive_profile_shape(0.8, 0.7, 0.7) is ProfileShape.THIN
+    assert derive_profile_shape(0.4, 0.7, 0.7) is ProfileShape.P
+    # And a skewed POC whose close does not confirm it is a D, not the letter
+    # the POC alone would give.
+    assert derive_profile_shape(0.4, 0.95, 0.29) is ProfileShape.D
+    assert derive_profile_shape(0.4, 0.05, 0.71) is ProfileShape.D
+
+
+def test_perp_market_context_day_change_must_agree_with_its_prices():
+    # Issue #100-1: the same contradiction VolumeProfile's cross-checks keep
+    # out. A context claiming a 40% move over prices that say ~1.7% passed
+    # every bounds check and would render "24h change: 40.00%".
+    with pytest.raises(ValueError, match="day_change_pct \\(40.0\\) contradicts the prices"):
+        PerpMarketContext(**_context(day_change_pct=40.0))
+    # The shared 1e-6 tolerance, relative to the value: a change recorded to
+    # six decimal places builds; one off by a hundredth of a point does not.
+    exact = _context()["day_change_pct"]
+    PerpMarketContext(**_context(day_change_pct=round(exact, 6)))
+    with pytest.raises(ValueError, match="contradicts the prices"):
+        PerpMarketContext(**_context(day_change_pct=exact + 0.01))
+
+
+def test_perp_market_context_day_change_is_the_producers_own_rule():
+    # derive_day_change_pct is what context_builder fills the field with, so
+    # the DTO checking against it can never refuse the producer's own output —
+    # including at the size an absolute tolerance would: a dust prevDayPx
+    # under a real mark (the exchange reports either; MarketSnapshot admits
+    # both) is a ratio of ~1e10, where one double ulp alone is > 1e-6.
+    mark, dust = Decimal("123456.789"), Decimal("0.0000123")
+    change = derive_day_change_pct(mark, dust)
+    assert change is not None and change > 1e11
+    ctx = PerpMarketContext(**_context(mark_price=mark, prev_day_price=dust, day_change_pct=change))
+    assert ctx.day_change_pct == change
+    # And a Decimal handed in (the natural type for anything *_pct here) is
+    # coerced and checked, not crashed on: the contradiction message, not a
+    # TypeError from Decimal - float.
+    exact = _context()["day_change_pct"]
+    assert PerpMarketContext(**_context(day_change_pct=Decimal(str(exact)))).day_change_pct == exact
+    with pytest.raises(ValueError, match="contradicts the prices"):
+        PerpMarketContext(**_context(day_change_pct=Decimal("40")))
+
+
+def test_perp_market_context_day_change_is_none_exactly_when_there_is_no_reference():
+    # derive_day_change_pct's rule, enforced on the DTO: a zero prev_day_price
+    # (freshly listed coin — MarketSnapshot allows it) means no reference, so
+    # the change MUST be None; a positive one means a reference exists, so the
+    # change must be present. Both directions of the disagreement are refused.
+    ctx = PerpMarketContext(**_context(prev_day_price=Decimal("0"), day_change_pct=None))
+    assert ctx.day_change_pct is None
+    with pytest.raises(ValueError, match="day_change_pct \\(0.0\\) disagrees with prev_day_price"):
+        PerpMarketContext(**_context(prev_day_price=Decimal("0"), day_change_pct=0.0))
+    with pytest.raises(ValueError, match="day_change_pct \\(None\\) disagrees with prev_day_price"):
+        PerpMarketContext(**_context(day_change_pct=None))
+    # An unchanged price is a change of 0, not an absent one.
+    same = PerpMarketContext(**_context(prev_day_price=Decimal("60000"), day_change_pct=0.0))
+    assert same.day_change_pct == 0.0
+
+
+def test_perp_market_context_rejects_negative_prev_day_price():
+    # Mirrors MarketSnapshot's >= 0 guard (zero is legal: "no reference yet").
+    with pytest.raises(ValueError, match="prev_day_price must be >= 0"):
+        PerpMarketContext(**_context(prev_day_price=Decimal("-1"), day_change_pct=None))
 
 
 def test_profile_shape_values_render_as_the_articles_letters():

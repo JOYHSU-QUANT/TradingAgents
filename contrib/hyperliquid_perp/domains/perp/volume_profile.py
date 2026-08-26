@@ -41,9 +41,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal, localcontext
 
-from ...common.constants import MIN_VOLUME_PROFILE_WINDOW as MIN_WINDOW_CANDLES
+from ...common.constants import (
+    MIN_VOLUME_PROFILE_WINDOW as MIN_WINDOW_CANDLES,
+    VALUE_AREA_FRACTION,
+    VOLUME_PROFILE_BUCKET_COUNT as BUCKET_COUNT,
+)
 from ...common.decimal_context import DECIMAL_CONTEXT
-from .schema import Candle, ProfileShape, VolumeProfile
+from .schema import Candle, VolumeProfile, derive_profile_shape
 
 logger = logging.getLogger(__name__)
 
@@ -76,44 +80,14 @@ DEFAULT_WINDOW_CANDLES = 30
 # is essentially the midpoint of whichever bar traded most and the shape label
 # would be noise.
 
-# Price-bucket resolution of the profile. POC and both value-area edges are
-# quantized to this grid, so it sets how precisely those levels can be stated:
-# 24 buckets over the window's high-low range. Chosen to be fine enough that a
-# value-area edge is not a coarse step, and coarse enough that with a
-# 30-candle window most buckets still collect volume from several bars.
-BUCKET_COUNT = 24
-
-# The share of window volume the value area holds — the profile convention.
-VALUE_AREA_FRACTION = Decimal("0.70")
-
-# --- Shape thresholds, all fractions of the window's own price range. -------
-#
-# The source article validates P/b against "close vs the day's 50% level"; with
-# no daily close on a perp, the latest candle close and the window's 50% level
-# stand in (design decision 1 in the plan).
-#
-# ``_THIN_VA_RATIO`` is at the uniform-distribution mark on purpose: volume
-# spread perfectly evenly puts VALUE_AREA_FRACTION of it inside that same
-# fraction of the range, so a value area at or above this is "no price level
-# held the activity" — the elongated trend profile. Checked FIRST because a
-# smeared profile's POC location carries no information to classify on.
-#
-# DERIVED from VALUE_AREA_FRACTION rather than repeating its value: the
-# sentence above is the whole justification for the number, and it stays true
-# only if the two move together. Written as its own 0.70 they would silently
-# come apart the first time the value-area convention was changed, leaving a
-# threshold whose comment described a mark it no longer sat on.
-_THIN_VA_RATIO = float(VALUE_AREA_FRACTION)
-
-# The POC bands leave a middle zone for D. Deliberately wider than the
-# article's plain "upper half / lower half": a bare 0.5 split makes the label
-# flip between cycles on a POC sitting one bucket either side of centre.
-_POC_UPPER = 0.60
-_POC_LOWER = 0.40
-
-# The window's own midpoint, which the latest close must be the correct side of
-# before a POC skew is called P or b.
-_MID = 0.5
+# ``BUCKET_COUNT`` (the price grid) and ``VALUE_AREA_FRACTION`` (the value-area
+# convention) are likewise DEFINED in ``common.constants`` — each documented
+# beside its value there — and imported above: ``schema.VolumeProfile`` pins
+# its ``bucket_count`` and its volume-share floors against them at
+# construction, and ``schema`` cannot import this module (this module imports
+# it). The shape thresholds live there too, and the rule that combines them is
+# :func:`.schema.derive_profile_shape`; this module holds neither, so the DTO
+# re-derives its letter with the very rule that produced it.
 
 
 @dataclass(frozen=True)
@@ -347,13 +321,15 @@ def classify_shape(profile: PriceDistribution, latest_close: Decimal) -> VolumeP
     classifies on them — they exist because the ``*_position`` fields alone
     cannot distinguish a dominant POC from a marginal one.
 
-    Shape rules, checked in this order:
+    Shape rules (:func:`.schema.derive_profile_shape` — the DTO's own rule,
+    applied here to the fractions it will re-derive the letter from), checked
+    in this order:
 
-    1. ``thin`` — the value area spans at least :data:`_THIN_VA_RATIO` of the
-       range. First, because a smeared profile's POC tells you nothing.
-    2. ``P`` — POC at or above :data:`_POC_UPPER` of the range AND
+    1. ``thin`` — the value area spans at least ``THIN_VALUE_AREA_RATIO`` of
+       the range. First, because a smeared profile's POC tells you nothing.
+    2. ``P`` — POC at or above ``POC_UPPER_BAND`` of the range AND
        ``latest_close`` above the window midpoint.
-    3. ``b`` — the mirror: POC at or below :data:`_POC_LOWER` AND
+    3. ``b`` — the mirror: POC at or below ``POC_LOWER_BAND`` AND
        ``latest_close`` below the midpoint.
     4. ``D`` — everything else.
 
@@ -425,14 +401,11 @@ def classify_shape(profile: PriceDistribution, latest_close: Decimal) -> VolumeP
     # rejects that, so pin the fraction to its mathematical bounds.
     close_position = min(max(close_fraction, 0.0), 1.0)
 
-    if value_area_width_ratio >= _THIN_VA_RATIO:
-        shape = ProfileShape.THIN
-    elif poc_position >= _POC_UPPER and close_position > _MID:
-        shape = ProfileShape.P
-    elif poc_position <= _POC_LOWER and close_position < _MID:
-        shape = ProfileShape.B
-    else:
-        shape = ProfileShape.D
+    # The letter rule is the DTO's own (``derive_profile_shape``), called here
+    # on the same three fractions the DTO will re-derive it from — so the
+    # profile built below cannot label itself one letter while its numbers say
+    # another. The rule order is documented on that function.
+    shape = derive_profile_shape(value_area_width_ratio, poc_position, close_position)
 
     return VolumeProfile(
         shape=shape,

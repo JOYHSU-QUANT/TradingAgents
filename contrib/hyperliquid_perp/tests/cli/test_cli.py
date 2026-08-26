@@ -61,7 +61,7 @@ def _perp_ctx(as_of: datetime, coin: str = "BTC") -> PerpMarketContext:
         oracle_price=D(50000),
         prev_day_price=D(50000),
         mid_price=D(50000),
-        day_change_pct=None,
+        day_change_pct=0.0,  # prev == mark; a reference price exists, so the change is 0
         open_interest=D(0),
         day_ntl_volume=D(0),
         funding_rate=D("0.0001"),

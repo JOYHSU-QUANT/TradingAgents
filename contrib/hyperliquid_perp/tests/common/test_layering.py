@@ -97,20 +97,21 @@ def test_the_config_loader_imports_no_compute_module():
 _SOURCE_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _load_time_import_closure(source: Path) -> set[str]:
+def _load_time_import_closure(source: Path, root: Path = _SOURCE_ROOT) -> set[str]:
     """Every in-package module ``source`` imports at top level, transitively.
 
     Walks :func:`_in_package_imports` from module to module, resolving each
-    dotted tail to its file (``x/__init__.py`` for a package). A tail with no
-    file — the bare package ``""`` from ``from . import x`` — is kept in the
-    result (it is an offender) but not walked.
+    dotted tail to its file under ``root`` (``x/__init__.py`` for a package).
+    A tail with no file — the bare package ``""`` from ``from . import x`` —
+    is kept in the result (it is an offender) but not walked. ``root`` is a
+    parameter only so the walk itself can be tested on a synthetic tree.
     """
     seen: set[str] = set()
     queue = [source]
     while queue:
-        for tail in _in_package_imports(queue.pop()) - seen:
+        for tail in _in_package_imports(queue.pop(), root) - seen:
             seen.add(tail)
-            module = _SOURCE_ROOT.joinpath(*tail.split(".")) if tail else _SOURCE_ROOT
+            module = root.joinpath(*tail.split(".")) if tail else root
             if module.with_suffix(".py").is_file():
                 queue.append(module.with_suffix(".py"))
             elif tail and (module / "__init__.py").is_file():
@@ -118,7 +119,23 @@ def _load_time_import_closure(source: Path) -> set[str]:
     return seen
 
 
-def _in_package_imports(source: Path) -> set[str]:
+def test_the_closure_walk_reaches_an_import_two_hops_away(tmp_path):
+    # The loader test above only discriminates if the walk RECURSES: today
+    # every module config.py imports directly is allowlisted, and the one
+    # module reachable only through a second hop (schema) is allowlisted
+    # too, so a walker that read config.py's own import list and stopped
+    # would pass it just the same. Pin the recursion on a synthetic tree —
+    # a -> b -> c, with c a package and a ``from . import`` at the root —
+    # so dropping the queue fails HERE, not silently in the guard.
+    (tmp_path / "a.py").write_text("from .b import x\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("from .c import y\nfrom . import d\n", encoding="utf-8")
+    (tmp_path / "c").mkdir()
+    (tmp_path / "c" / "__init__.py").write_text("from ..e import z\n", encoding="utf-8")
+    (tmp_path / "e.py").write_text("", encoding="utf-8")
+    assert _load_time_import_closure(tmp_path / "a.py", root=tmp_path) == {"b", "c", "", "e"}
+
+
+def _in_package_imports(source: Path, root: Path = _SOURCE_ROOT) -> set[str]:
     """Dotted tails (``domains.perp.x``) of ``source``'s TOP-LEVEL in-package imports.
 
     Relative level-1 imports are today's style, but the guard must not depend
@@ -139,7 +156,7 @@ def _in_package_imports(source: Path) -> set[str]:
     ``from .domains import perp``, and the realistic route to the historical
     offender the loader test's docstring cites.
     """
-    own_package = source.resolve().relative_to(_SOURCE_ROOT).parent.parts
+    own_package = source.resolve().relative_to(root).parent.parts
 
     def tail(name: str | None, level: int) -> str | None:
         if level == 0:

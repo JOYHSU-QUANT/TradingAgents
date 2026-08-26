@@ -377,6 +377,58 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **Hyperliquid: the freshness guard's two bounds now describe a healthy
+  feed.** Stale side (issue #92): the three-decision-cycle ceiling (12h) no
+  longer clamps the candle-age limit below one bar. With
+  `candle_interval: 1d` the newest CLOSED bar ages from zero to 24h across
+  every day, so the 12h cap refused every cycle from 12:00 UTC on with the
+  exchange healthy and the clocks agreeing — and since PR #91 counted them
+  as a stalled feed toward `validate`'s exit 4. The limit is now never
+  below one bar: where the clamp would put it there it becomes one bar plus
+  one decision cycle (28h for 1d, labelled `one 1d bar plus one 4h decision
+  cycle` in the refusal), so a daily feed that misses a boundary is refused
+  once its newest closed bar is over 28h old — the first or second cycle
+  after the miss (consecutive cycles are over 4h apart, so at most one lands
+  inside the grace window). The 12h cap
+  remains for an interval over one cycle and up to three, which no
+  configurable interval is (4h is exactly one cycle and takes the uncapped
+  `3 x 4h`), so its `capped at` label is not printed by any shipped
+  configuration; the host-clock fallback shares the stale limit as its
+  future tolerance, so its 1d future bound widened from 12h to 28h with it
+  (pinned by a test). Future side (issue #93, **behaviour change**): on the
+  exchange-clock path a candle closing more than sixty seconds AFTER the
+  exchange's clock is refused, instead of being tolerated up to the stale
+  limit. A closed bar never leads the exchange's clock (`_build_context`
+  reads the candles before the clock — a test now pins that order), so what
+  that branch catches is the still-forming bar a host running AHEAD pulls
+  through `get_candles`' `close_time <= end` filter — partial OHLCV that
+  understates ATR and skews RSI/EMA, which at 1m–4h bars the old
+  3 × interval tolerance could never see. A fetch landing within a host
+  lead of a bar's close admits that bar; the guard refuses it when more
+  than a minute of the bar is still missing and passes it inside the last
+  minute (so 1m bars are never refused on this branch). The refusal names
+  the host's lead and NTP as the cause when the paired reading shows the
+  host ahead by at least the lead; when the pair shows less than that it
+  names the two remaining shapes — the host clock stepping back between
+  the candle read and the clock read, or a context that did not come from
+  a live fetch — and a context with no paired reading at all gets "either
+  the host ran ahead or this is not a live fetch". It is classed
+  `stale_market_data`, so a host left running ahead accumulates toward
+  exit 4 (RUNBOOK §7 says so; a refused cycle is rescheduled on the
+  `scheduled_at + 4h` grid, so the next fetch lands at the same phase of
+  the bar and keeps refusing until the clock is fixed). The host-clock
+  fallback keeps the shared bound: there the daemon's clock reading
+  precedes the fetch and a boundary closing in between legitimately lands
+  ahead of it. The sixty seconds rests on a 2026-08-26 measurement against
+  the public API recorded beside the constant (l2Book `time` never behind
+  a kept bar's close, and advancing as server time on the thinnest perps
+  too). Tests: a healthy 1d feed passes every cycle of a day and its last
+  second on both clocks, a three-day-old daily feed is still refused and a
+  27h-old one is not, the limit sits between one bar and the uncapped
+  bound for every interval, the 90-minute-lead example refuses when the
+  fetch lands in the last 90 minutes of a bar and passes earlier in it, a
+  lead inside the tolerance passes, 1m bars never refuse on a lead, the
+  lead bound is exclusive and not below the skew warn floor.
 - **Hyperliquid: the market-context freshness guard and the no-decision
   escalation policy each have their own module.** The exchange-clock rewrite
   (PR #91) had grown the freshness guard to ~200 lines inside

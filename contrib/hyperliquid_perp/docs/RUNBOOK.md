@@ -151,16 +151,21 @@ vendor），這一段量測作廢、bump 到下一個版本戳重來。`paper-BT
 指紋上的那個測試也看不到。所以 schema v10 起 `ai_inputs` 多一欄 **`context_shape`**（同時寫進
 payload JSON）：`domains/perp/prompt_context.context_shape` 把當次渲染的**段落結構**寫成一個
 字串，例如 `price|market|funding|indicators(rsi_14,ema_20,ema_50,atr_14,macd)|volume_profile`。
-它只取結構——段落標題、指標列名、volume profile 段有沒有——**不取**標籤裡的數字
+`--context-only` 會在渲染結果後印一行 `context_shape: …`，改 YAML 後部署前就能看到會落在哪個
+桶。它只取結構——段落標題、指標列名、volume profile 段有沒有——**不取**標籤裡的數字
 （`Candles: 200 x 4h`、`30d z-score`）也不取每 cycle 隨資料有無變動的 `Mid:`／`Premium:`
 行，否則每個 cycle 自成一段。
 
 所以切段鍵是兩個：**`GROUP BY prompt_version, context_shape`**。`prompt_version` 仍是人工
-指定、退役值不得重用的 code 改版戳；`context_shape` 則讓「多一段／少一段」不管來自 code
-還是 YAML 都自動落進資料裡。翻動這些 key 仍然是跨越量測邊界（A/B 量測窗內**禁止翻動**，
+指定、退役值不得重用的 code 改版戳；`context_shape` 則讓「多一段／少一段」（含 `indicators` 清單重排——列數不變但
+prompt 不同）不管來自 code 還是 YAML 都自動落進資料裡。翻動這些 key 仍然是跨越量測邊界（A/B 量測窗內**禁止翻動**，
 與夾帶 vendor 變更同罪）——差別是現在資料會自己標出來，不靠人記得。標籤裡的數字變了
 （`candle_interval`、`funding_zscore_window_days`）屬於**內容**變更，`context_shape` 不動，
-由下面的 config drift 警告承接。`volume_profile_window_candles` 預設 `0` 的理由不變：
+由下面的 config drift 警告承接。**兩個鍵都不涵蓋 format 那一半**：`decision:` 的格線／門檻
+會渲染進 `decision_format_instructions` 的文字，改 YAML 就換數字、不 bump 也不改 shape——
+比照 A/B 規則，量測窗內禁止翻動。另一條紀律：**改 `context_shape` 的字串文法**（排序、
+改名、加段）等同改 prompt 契約，同一個 commit 要 bump `PROMPT_VERSION`，否則新舊文法的
+字串會在同一欄裡互相撞桶。`volume_profile_window_candles` 預設 `0` 的理由不變：
 merge 進來不動任何既有 prompt，分段點是「你改 config 那一刻」，由你選。
 
 **相反方向——只加一行預設值不是分段點，drift 比對現在自己知道。** 把

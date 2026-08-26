@@ -574,6 +574,7 @@ def test_run_context_only_warns_and_exits_4_on_degraded_context(
     ctx = SimpleNamespace(candle_count=candle_count, indicators=indicators)
     monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (ctx, object()))
     monkeypatch.setattr(main_mod, "render_market_context", lambda c: "ctx text")
+    monkeypatch.setattr(main_mod, "context_shape", lambda c: "shape text")
     monkeypatch.setattr(main_mod, "wallet_address", lambda config: "")  # skip position block
     rc = main_mod.run_context_only({}, "BTC")
     assert rc == 4  # rendered for diagnosis, but automation must see "degraded"
@@ -595,10 +596,16 @@ def test_run_context_only_exits_0_on_healthy_context(monkeypatch, capsys):
     )
     monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (ctx, object()))
     monkeypatch.setattr(main_mod, "render_market_context", lambda c: "ctx text")
+    monkeypatch.setattr(main_mod, "context_shape", lambda c: "shape text")
     monkeypatch.setattr(main_mod, "wallet_address", lambda config: "")  # skip position block
     rc = main_mod.run_context_only({}, "BTC")
     assert rc == 0
-    assert "do not read it as live signal" not in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert "do not read it as live signal" not in captured.err
+    # The segmentation bucket this YAML lands in, printed after the render:
+    # the one keyless, store-free way to see it before deploying a config
+    # edit (issue #97 — RUNBOOK §4's "第三種情況").
+    assert "context_shape: shape text" in captured.out
 
 
 def test_run_context_only_rejects_bad_risk_decision_config(monkeypatch, capsys):
@@ -1729,6 +1736,7 @@ def test_run_context_only_warns_on_a_stale_context(monkeypatch, capsys):
     ctx = _ctx_closing_at(datetime(2026, 3, 1, tzinfo=timezone.utc))
     monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (ctx, object()))
     monkeypatch.setattr(main_mod, "render_market_context", lambda c: "ctx text")
+    monkeypatch.setattr(main_mod, "context_shape", lambda c: "shape text")
     monkeypatch.setattr(main_mod, "wallet_address", lambda config: "")
     rc = main_mod.run_context_only({}, "BTC")
     assert rc == 4

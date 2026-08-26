@@ -678,8 +678,9 @@ Breaking changes within the 0.x line are called out explicitly.
   CSV export, after `input_payload_hash`): the rendered context's section
   structure as one string — `price|market|funding|indicators(rsi_14,…)|
   volume_profile` — covering section headers and indicator rows only, never
-  the numbers inside labels or the per-cycle `Mid:`/`Premium:` lines, so it
-  changes exactly when the prompt grows or loses a section. The segmentation
+  the numbers inside labels or the per-cycle `Mid:`/`Premium:` lines — so it
+  changes when a section is added or removed, or the indicator list is
+  reordered (a different prompt), and not when a value does. The segmentation
   key is now `(prompt_version, context_shape)`; the RUNBOOK's hand rule for
   the YAML case is retired (issue #97).
 - **A date the model cannot be held to is now refused the same way by either

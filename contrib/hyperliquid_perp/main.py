@@ -38,7 +38,7 @@ from . import engine_bridge
 from .audit.decision_log import log_target_decision
 from .config import dotenv_diagnosis, load_dotenv_files, wallet_address
 from .domains.perp import risk_gate
-from .domains.perp.prompt_context import render_market_context
+from .domains.perp.prompt_context import context_shape, render_market_context
 from .domains.perp.target_decision import (
     decision_format_instructions,
     parse_target_decision,
@@ -97,6 +97,9 @@ def run_context_only(config: dict, coin: str) -> int:
     print("=" * 64)
     print(render_market_context(ctx))
     print("=" * 64)
+    # The bucket this YAML lands in (ai_inputs.context_shape) — the one
+    # keyless, store-free way to see it BEFORE deploying a config edit.
+    print(f"context_shape: {context_shape(ctx)}")
 
     # Keyless diagnostic loop: render rather than abort, but warn with the same
     # shared guard the trading paths refuse on — a refused context *looks* like

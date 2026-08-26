@@ -1318,6 +1318,18 @@ def test_config_drift_falls_back_to_the_raw_comparison_when_a_side_does_not_pars
     assert kind == "params" and "risk" in msg
 
 
+def test_config_drift_never_aborts_on_a_value_the_parser_chokes_on_arithmetically():
+    # A YAML `.nan` survives decimal_from_yaml (Decimal("nan") is legal) and
+    # only detonates in RiskConfig.__post_init__'s `<= 0` check — as
+    # decimal.InvalidOperation, an ArithmeticError, not a ValueError. The raw
+    # comparison this parsed path replaced never raised; a resume must still
+    # get a verdict (here: drift, since the values differ raw) rather than a
+    # traceback before the protection loop is armed.
+    stored = _subset_json({"risk": {"leverage": float("nan")}}, "BTC")
+    kind, msg = _config_drift_report(stored, {"risk": {"leverage": 2}}, "BTC")
+    assert kind == "params" and "risk" in msg
+
+
 def _live_subset_json(config: dict, coin: str) -> str:
     """Exactly what LIVE run creation persists: the shared subset plus `live:`."""
     subset = _run_config_subset(config, coin)

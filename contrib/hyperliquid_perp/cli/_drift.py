@@ -97,11 +97,18 @@ def _same_effective_block(parser, stored: object, current: object) -> bool:
     key today's parser no longer knows (renamed, retired) cannot be judged
     "same" by a parser that refuses it — comparing it raw keeps that drift
     visible instead of hiding it behind the exception.
+
+    ``ArithmeticError`` is in the clause for ``decimal.InvalidOperation``: a
+    YAML ``.nan`` reaches ``Decimal("nan")`` without complaint and only blows
+    up in the dataclass's own ``<=`` range check. The raw ``!=`` this replaced
+    never raised, and ``_config_drift_report`` promises a breadcrumb-grade
+    verdict rather than a startup abort — on the live path an abort here
+    would land before the protection loop is armed.
     """
     if parser is not None:
         try:
             return parser(stored) == parser(current)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, ArithmeticError):
             pass
     return stored == current
 

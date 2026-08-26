@@ -1027,10 +1027,13 @@ def test_freshness_ceiling_tracks_the_decision_cycle():
     # true.
     from contrib.hyperliquid_perp.paper.scheduler import CYCLE_INTERVAL
 
-    # (The ceiling is derived from _DECISION_CYCLE_MS in the module, so the
-    # one equality below is the whole lock.)
+    # Both halves: the cycle constant tracks the scheduler, AND the ceiling is
+    # three of it — a mutation setting the ceiling to 4 x cycle passed every
+    # other test in this file (1d still takes the 28h raise, the cap tests
+    # compare against the ceiling itself), so the derivation is pinned too.
     cycle_ms = int(CYCLE_INTERVAL.total_seconds() * 1000)
     assert cycle_ms == freshness_mod._DECISION_CYCLE_MS
+    assert 3 * cycle_ms == freshness_mod._MAX_CANDLE_AGE_CEILING_MS
     assert f"{int(CYCLE_INTERVAL.total_seconds()) // 3600}h" == freshness_mod._CYCLE_LABEL
 
 
@@ -1402,6 +1405,35 @@ def test_freshness_guard_refuses_the_forming_bar_a_host_ahead_pulls_in():
     # ...and the class is the one the no-decision streak counts (#50), so a
     # host left running ahead accumulates toward exit 4 — RUNBOOK §7 says so.
     assert bridge_mod._context_refusal(ctx, "BTC", {}, now=_NOW).error_type == "stale_market_data"
+
+
+def test_freshness_guard_blames_the_host_when_its_lead_exactly_equals_the_bars():
+    # Zero fetch gap: the bar leads the exchange by exactly the host's lead
+    # (the window was cut at the very instant the clock pair was read). Still
+    # the live shape, so the host is blamed — the comparison is `>=`, and a
+    # strict `>` re-labelled this as "stepped back / not a live fetch".
+    ctx = _host_ahead_ctx(timedelta(minutes=30), into_bar=timedelta(hours=3, minutes=30))
+    assert ctx.as_of == _NOW + timedelta(minutes=30)
+    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    assert msg is not None and "kept a bar the exchange has not closed" in msg
+    assert "stepped back" not in msg
+
+
+def test_freshness_guard_names_a_clock_step_when_the_lead_outruns_the_paired_skew():
+    # The paired reading shows the host only 10 minutes ahead, yet the bar
+    # leads by 30: no steady host clock produces that from a live fetch, so
+    # the message names the two shapes that do — a clock stepping back between
+    # the candle read and the clock read, or a non-live context — and does
+    # NOT tell the operator to fix NTP for a lead the pair cannot explain.
+    ctx = _ctx_closing_at(
+        _NOW + timedelta(minutes=30), exchange_time=_NOW, host_skew=timedelta(minutes=10)
+    )
+    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    assert msg is not None
+    assert "10m 0s ahead of the exchange's" in msg
+    assert "stepped back between the candle read and the clock read" in msg
+    assert "did not come from a live market fetch" in msg
+    assert "Fix time sync" not in msg
 
 
 def test_freshness_guard_passes_a_host_ahead_whose_window_kept_a_closed_bar():

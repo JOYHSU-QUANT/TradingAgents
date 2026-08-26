@@ -72,15 +72,19 @@ def _utc_stamp(moment: datetime) -> str:
 # ``get_candles`` drops the still-forming bar, so a healthy feed's newest CLOSED
 # candle is under one interval old, and each bar the exchange fails to publish
 # adds another interval: three tolerates two consecutive missing bars and
-# refuses at the third. Not a config knob — a correctness bound on "is this
-# still the current market?", not a tuning parameter.
+# refuses at the third — for bars the clamp below leaves alone; a bar wider
+# than the ceiling gets one bar plus one cycle instead (``_candle_age_limit``,
+# issue #92). Not a config knob — a correctness bound on "is this still the
+# current market?", not a tuning parameter.
 _MAX_CANDLE_AGE_INTERVALS = 3
 # ...but the interval is operator-configurable (1m through 1d) while the decision
 # cycle is fixed, so the bar width alone would make this guard mean wildly
 # different things: 3 x 1d would let 18 cycles trade through a three-day outage,
 # 3 x 1m would refuse a cycle over three minutes of feed jitter. Clamp both ends
 # in terms of the DECISION cadence the guard actually protects: at most three
-# cycles of stale data, and never so tight that ordinary jitter refuses a cycle.
+# cycles of stale data (except where that would sit under a single healthy bar
+# — then one bar plus one cycle, 28h for 1d), and never so tight that ordinary
+# jitter refuses a cycle.
 # The ceiling states three DECISION cycles, but is written out rather than
 # derived from the scheduler's CYCLE_INTERVAL: importing paper.scheduler here
 # would pull the whole paper engine into the keyless --context-only path to read
@@ -130,8 +134,9 @@ def _candle_age_limit(interval_ms: int, interval: str) -> tuple[int, str]:
     stated in decision cycles throughout and "24h plus a few seconds" would
     refuse the first cycle after any hiccup in that publishing at all. For 1d
     that is 28h: a daily feed that misses a bar is refused once the newest
-    closed one is over 28h old — the second or third cycle after the missed
-    boundary, depending on where the rolling cadence lands. Only the ceiling
+    closed one is over 28h old — the first or second cycle after the missed
+    boundary (consecutive cycles are over 4h apart, so at most one can land
+    inside the grace window). Only the ceiling
     can land under a bar (the floor is three bars wide by construction), and
     of the configurable intervals only 1d makes it do so; the cap stays for
     an interval over one cycle and up to three, which none of them is today

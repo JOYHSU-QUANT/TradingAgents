@@ -34,8 +34,9 @@ logger = logging.getLogger(__name__)
 # Consecutive trailing cycles that reached NO decision (``api_failed``, whatever
 # their §6.2 class) at or past which the run is "not at the gate" (issue #50).
 # Three = 12h of the 4h cadence, the same "three decision cycles" the freshness
-# guard caps candle age at for bars up to one cycle wide (a 1d bar is allowed
-# a bar plus a cycle — issue #92), and the count the repo's other escalations
+# guard caps candle age at (3 x 4h for the 4h bar; narrower bars get 3 x their
+# own width, a 1d bar a bar plus a cycle — issue #92), and the count the
+# repo's other escalations
 # use (funding-source ERROR, repeated-mismatch manual safe mode). A shortfall
 # (exit 4), never an integrity failure: the store is sound, the run's INPUTS are
 # not, and the streak clears by itself the moment a cycle reaches a decision

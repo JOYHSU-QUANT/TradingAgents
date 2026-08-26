@@ -387,8 +387,9 @@ Breaking changes within the 0.x line are called out explicitly.
   below one bar: where the clamp would put it there it becomes one bar plus
   one decision cycle (28h for 1d, labelled `one 1d bar plus one 4h decision
   cycle` in the refusal), so a daily feed that misses a boundary is refused
-  once its newest closed bar is over 28h old — the second or third cycle
-  after the miss, depending on where the rolling cadence lands. The 12h cap
+  once its newest closed bar is over 28h old — the first or second cycle
+  after the miss (consecutive cycles are over 4h apart, so at most one lands
+  inside the grace window). The 12h cap
   remains for an interval over one cycle and up to three, which no
   configurable interval is (4h is exactly one cycle and takes the uncapped
   `3 x 4h`), so its `capped at` label is not printed by any shipped
@@ -407,13 +408,15 @@ Breaking changes within the 0.x line are called out explicitly.
   than a minute of the bar is still missing and passes it inside the last
   minute (so 1m bars are never refused on this branch). The refusal names
   the host's lead and NTP as the cause when the paired reading shows the
-  host ahead by at least the lead; otherwise it names both remaining
-  shapes — the host clock stepping back between the candle read and the
-  clock read, or a context that did not come from a live fetch. It is
-  classed `stale_market_data`, so a host left running ahead accumulates
-  toward exit 4 (RUNBOOK §7 says so; the paper cadence rolls from each
-  cycle's completion, so the fetch's phase in the bar drifts and a lead
-  over a minute produces a stretch of consecutive refusals). The host-clock
+  host ahead by at least the lead; when the pair shows less than that it
+  names the two remaining shapes — the host clock stepping back between
+  the candle read and the clock read, or a context that did not come from
+  a live fetch — and a context with no paired reading at all gets "either
+  the host ran ahead or this is not a live fetch". It is classed
+  `stale_market_data`, so a host left running ahead accumulates toward
+  exit 4 (RUNBOOK §7 says so; a refused cycle is rescheduled on the
+  `scheduled_at + 4h` grid, so the next fetch lands at the same phase of
+  the bar and keeps refusing until the clock is fixed). The host-clock
   fallback keeps the shared bound: there the daemon's clock reading
   precedes the fetch and a boundary closing in between legitimately lands
   ahead of it. The sixty seconds rests on a 2026-08-26 measurement against

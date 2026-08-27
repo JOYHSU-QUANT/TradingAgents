@@ -13,7 +13,14 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from .schema import MarketRegime, PerpMarketContext, ProfileShape, VolumeProfile
+from .schema import (
+    MarketRegime,
+    PerpMarketContext,
+    PositionContext,
+    ProfileShape,
+    VolumeProfile,
+    derive_round_trip_rate,
+)
 from .volume_profile import VALUE_AREA_FRACTION
 
 _INDICATOR_LABEL = {
@@ -107,13 +114,16 @@ _SHAPE_NOTE = {
 }
 
 
-def _num(value, places: int = 2) -> str:
-    """Format a number to ``places`` decimals; ``None`` -> ``n/a``."""
+def _num(value, places: int = 2, *, sign: bool = False) -> str:
+    """Format a number to ``places`` decimals; ``None`` -> ``n/a``.
+
+    ``sign`` forces an explicit ``+``/``-`` (a PnL, never a price).
+    """
     if value is None:
         return "n/a"
     if isinstance(value, Decimal):
         value = float(value)
-    return f"{value:,.{places}f}"
+    return f"{value:{'+' if sign else ''},.{places}f}"
 
 
 def _whole_pct(fraction: float) -> str:
@@ -189,6 +199,93 @@ def _funding_bps(rate: Decimal | None) -> str:
     return f"{float(rate) * 1e4:,.4f} bps"
 
 
+def _position_lines(pos: PositionContext, ctx: PerpMarketContext) -> list[str]:
+    """The ``Position:`` section. Only called when a position context exists.
+
+    Facts and prices only. What is deliberately NOT here: any sentence about
+    which gate bar a target faces (the open / flip / flat exemptions), any
+    reading of the position ("underwater", "winning"), and any accumulated
+    cost — the marginal cost of the NEXT move is the only cost printed.
+    ``test_the_position_section_never_names_a_gate_threshold`` holds the
+    first of those; the module's standing rule holds the second.
+    """
+    lines = ["Position:"]
+    if pos.side is None:
+        lines.append(f"  flat, no open position (account equity {_num(pos.equity)} USDC)")
+        return lines
+    # Open: the DTO's own guards make these three non-None; narrowed once for
+    # the type checker rather than re-checked line by line.
+    unrealized, holding = pos.unrealized_pnl, pos.holding_cost_8h
+    assert unrealized is not None and holding is not None
+    lines.append(
+        f"  Side: {pos.side.value}, size {abs(pos.size)} {ctx.coin}, "
+        f"notional {_num(pos.notional)} USDC at mark"
+    )
+    lines.append(
+        f"  Entry: {_num(pos.entry_price)} (unrealized PnL {_num(unrealized, sign=True)} USDC)"
+    )
+    lines.append(
+        f"  Committed margin: {_num(pos.margin_pct)}% of account equity "
+        f"{_num(pos.equity)} USDC (at the configured {_num(pos.leverage, 0)}x leverage)"
+    )
+    if pos.last_fill_at is None:
+        lines.append("  Last fill: none recorded for this run")
+    else:
+        # Against the context's own as-of (the last closed candle), the same
+        # vintage every other line here is dated to. A fill booked AFTER
+        # that close is possible (an order filled minutes ago against a
+        # candle that closed hours ago) and is said so rather than shown as
+        # a negative age.
+        age_hours = (ctx.as_of - pos.last_fill_at).total_seconds() / 3600
+        when = (
+            f"{age_hours:.1f} hours before the as-of time above"
+            if age_hours >= 0
+            else "after the as-of time above"
+        )
+        lines.append(f"  Last fill: {pos.last_fill_at.isoformat()} UTC ({when})")
+    if holding > 0:
+        verb = f"pays {_num(holding, 4)} USDC"
+    elif holding < 0:
+        verb = f"receives {_num(-holding, 4)} USDC"
+    else:
+        verb = "0.0000 USDC (funding rate is zero)"
+    lines.append(f"  Holding cost at the current funding rate: {verb} per 8h")
+    rate = derive_round_trip_rate(pos.taker_fee_rate, pos.slippage_bps)
+    rate_bps = rate * 10_000
+    # Totals only — no taker-fee / slippage decomposition (decided 2026-08-27
+    # in the PR #133 review). The section exists because the model anchors on
+    # numbers the prompt prints (paper-BTC-2: 27/48 decisions at exactly the
+    # advertised bar); the two parameters would be two more anchors that
+    # nothing here needs the model to reason with. "assumptions" stays: the
+    # rate is the configured fill-cost model's (paper_trading.execution),
+    # and on the live lane the books post the exchange's actual fee.
+    lines.append(
+        f"  Cost of moving to another legal margin, as a round trip (the fee and "
+        f"slippage on this move plus the same again when it is later reversed), "
+        f"priced with the configured fill-cost assumptions: {_num(rate_bps)} bps of "
+        f"the traded notional per round trip. Breakeven is the favourable price "
+        f"move, in bps of the traded notional, that exactly pays for that round trip:"
+    )
+    for row in pos.cost_rows:
+        lines.append(
+            f"    -> {row.target_margin_pct}%: trades {_num(row.trade_notional)} USDC "
+            f"notional, round-trip cost {_num(row.round_trip_cost)} USDC, "
+            f"breakeven {_num(rate_bps)} bps"
+        )
+    # The table is sampled when the grid is fine (marginal_cost.MAX_COST_ROWS);
+    # the per-point rate is what makes every legal target in between priced
+    # rather than merely implied. Cost is exactly linear in the distance
+    # moved, so this is arithmetic the rows above already obey, not a claim.
+    per_point_notional = pos.equity * pos.leverage / 100
+    per_point_cost = per_point_notional * rate
+    lines.append(
+        f"  Every 1 percentage point of margin moved trades {_num(per_point_notional)} USDC "
+        f"and costs {_num(per_point_cost, 4)} USDC round trip; a legal target between "
+        f"two rows costs in proportion to its distance from the current margin."
+    )
+    return lines
+
+
 def render_market_context(ctx: PerpMarketContext) -> str:
     """Return the human/LLM-readable perp context block."""
     lines: list[str] = []
@@ -236,6 +333,15 @@ def render_market_context(ctx: PerpMarketContext) -> str:
         lines.append("")
         lines.extend(_volume_profile_lines(ctx.volume_profile, ctx.candle_interval))
 
+    # The account's own position, last: it is the one section about the
+    # decision rather than the market, and it sits directly above the output
+    # contract that asks for a target. Optional like the profile — absent
+    # whenever no position source was wired or the books were unusable — and
+    # for the same reason it drops out whole (see PositionContext).
+    if ctx.position is not None:
+        lines.append("")
+        lines.extend(_position_lines(ctx.position, ctx))
+
     return "\n".join(lines)
 
 
@@ -276,6 +382,16 @@ def context_shape(ctx: PerpMarketContext) -> str:
     on and an occasional skip will show those cycles as a small second bucket
     next to the WARNING that explains them.
 
+    The position section (prompt ``phase2-target-v4``) files as one shape,
+    ``position``, whether the account is open (cost table) or flat (one
+    line). Open-vs-flat changes what the section prints, but it is the
+    account's STATE, which alternates within a run cycle by cycle — folding
+    it in would split one run into two buckets on nothing the operator
+    configured, exactly what the ``Mid:`` / ``Premium:`` rule above forbids,
+    and would break the paper review's "one shape per run" reading. The
+    review splits open from flat on ``ai_inputs.current_position_side``,
+    which every row already carries.
+
     The section names here are the render's own headers, lower-cased; the
     prompt-context tests hold the two in lockstep in both directions.
     """
@@ -287,4 +403,6 @@ def context_shape(ctx: PerpMarketContext) -> str:
     ]
     if ctx.volume_profile is not None:
         parts.append("volume_profile")
+    if ctx.position is not None:
+        parts.append("position")
     return "|".join(parts)

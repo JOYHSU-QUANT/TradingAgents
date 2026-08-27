@@ -266,6 +266,8 @@ def _run_live_loop(
     # that segment now, before the first tick, so the loss counter cannot merge
     # it into the next one.
     engine.settle_offline_flat()
+    from ..paper.position_facts import read_book_position
+
     decision_provider = _provider._EngineDecisionProvider(
         config,
         risk_cfg=risk_cfg,
@@ -279,6 +281,10 @@ def _run_live_loop(
         on_blocking_read=partial(
             refresh_across_blocking_work, kill_switch, what="decision market data"
         ),
+        # The live store keeps the same books the paper daemon reads (the
+        # reconciler mirrors the exchange onto them), so the prompt's
+        # ``Position:`` section comes from the same read on both lanes.
+        position_source=partial(read_book_position, db, run_id, coin),
     )
     worker = LiveDecisionWorker(provider=decision_provider)
     driver = LiveDecisionDriver(

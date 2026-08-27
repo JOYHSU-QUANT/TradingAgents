@@ -14,7 +14,10 @@ logger = logging.getLogger(__name__)
 
 # Version stamp for the ai_inputs.prompt_version column: bump when the injected
 # context/format contract changes shape (the payload hash tracks content).
-PROMPT_VERSION = "phase2-target-v3"
+# v4 (2026-08-27): the context gains the ``Position:`` section — the account's
+# own position and the round-trip cost of every legal move
+# (``domains/perp/marginal_cost.py``). The format block is unchanged.
+PROMPT_VERSION = "phase2-target-v4"
 
 
 class _HistoryFundingSource:
@@ -101,12 +104,13 @@ class _EngineDecisionProvider:
     while the audit trail records the fresh input.
     """
 
-    # Class-level default so an instance built without __init__ (the tests use
-    # object.__new__ to skip the engine import) still answers the attribute —
-    # a missing hook must degrade to "no refresh", never to AttributeError
-    # inside build_input, which the §6.2 classifier would relabel as an API
-    # failure.
+    # Class-level defaults so an instance built without __init__ (the tests use
+    # object.__new__ to skip the engine import) still answers the attributes —
+    # a missing hook must degrade to "no refresh" / "no position section",
+    # never to AttributeError inside build_input, which the §6.2 classifier
+    # would relabel as an API failure.
     _on_blocking_read = None
+    _position_source = None
 
     def __init__(
         self,
@@ -116,6 +120,7 @@ class _EngineDecisionProvider:
         decision_cfg,
         payload_dir: Path,
         on_blocking_read=None,
+        position_source=None,
     ) -> None:
         from ..engine_bridge import _build_engine_config
 
@@ -128,7 +133,65 @@ class _EngineDecisionProvider:
         # passes a kill-switch refresh here. ``None`` for paper and the one-shot
         # CLI paths, which hold no dead man's switch (2026-08-01 lifecycle review).
         self._on_blocking_read = on_blocking_read
+        # ``() -> BookPosition | None`` — the run's books, read at build time
+        # (``paper.position_facts.read_book_position``, bound by the paper and
+        # live wirings). ``None`` leaves the context position-blind and the
+        # prompt without its ``Position:`` section (prompt v4).
+        self._position_source = position_source
+        # The fill-cost parameters the position section prices with: the
+        # ``paper_trading.execution`` block, parsed ONCE here (the startup
+        # validator in engine_bridge._load_risk_decision already rejected a
+        # malformed one). Parsed for every mode, live included — the live run
+        # advertises the paper fill model's costs, the only fee model the
+        # config carries, and the prompt says "assumptions" for that reason.
+        from ..paper.config import PaperTradingConfig
+
+        self._execution = PaperTradingConfig.from_dict(config.get("paper_trading")).execution
         self._engine_config, self._analysts = _build_engine_config(config)
+
+    def _attach_position(self, ctx, *, max_pct: int):
+        """The context with its ``Position:`` section, or unchanged if it has none.
+
+        Priced by ``marginal_cost.build_position_context`` from the books the
+        source reads, this cycle's mark/funding and ``self._execution``.
+        ``max_pct`` is the EFFECTIVE grid ceiling the caller also hands the
+        format block, so the cost table and the advertised ceiling cannot
+        disagree. Omitted — with the pricer's own WARNING — when the books
+        are unusable. Any OTHER exception (a store failure, a DTO guard
+        tripped by a book state the pricer did not expect) propagates: it is
+        a bug, not a degraded state, and it surfaces the way the audit read
+        one statement later already does. What "surfaces" means differs by
+        lane and is a known asymmetry, decided 2026-08-27: the live driver's
+        pump guard fails only that cycle closed (``api_failed``), while the
+        paper scheduler has no such guard and the daemon exits for systemd
+        to restart — the same fate a failing ``_insert_ai_input`` has had
+        since PR 4, kept rather than masked behind a WARNING.
+        """
+        if self._position_source is None:
+            return ctx
+        from dataclasses import replace
+
+        from ..domains.perp.marginal_cost import build_position_context
+
+        book = self._position_source()
+        if book is None:
+            logger.warning("position section omitted: the run has no books yet")
+            return ctx
+        position = build_position_context(
+            size=book.size,
+            entry_price=book.entry_price,
+            wallet_balance=book.wallet_balance,
+            mark=ctx.mark_price,
+            leverage=self._risk.leverage,
+            funding_rate=ctx.funding_rate,
+            grid_min=self._decision.ai_target_margin_min_pct,
+            grid_max=max_pct,
+            grid_step=self._decision.target_margin_step_pct,
+            taker_fee_rate=self._execution.taker_fee_rate,
+            slippage_bps=self._execution.fill_model.slippage_bps,
+            last_fill_at=book.last_fill_at,
+        )
+        return ctx if position is None else replace(ctx, position=position)
 
     def build_input(self, *, coin: str, as_of: datetime):
         from ..domains.perp import risk_gate
@@ -185,6 +248,13 @@ class _EngineDecisionProvider:
         refusal = _context_refusal(ctx, coin, self._config, now=as_of)
         if refusal is not None:
             raise RetryableDecisionError(refusal.error_type, refusal.message)
+        # After the guards: a refused context spends nothing, so it reads no
+        # books either. The DecisionInput below carries THIS context, so the
+        # ai_inputs row and the payload describe the prompt with its section.
+        # One ceiling for both: the cost table's rows and the format block's
+        # advertised maximum come from this same value.
+        max_pct = risk_gate.effective_max_target_margin_pct(self._risk, self._decision)
+        ctx = self._attach_position(ctx, max_pct=max_pct)
         context_text = render_market_context(ctx)
         # The prompt's structure, kept beside the version stamp (issue #97):
         # a section that appears or disappears on a config edit alone — no
@@ -192,10 +262,7 @@ class _EngineDecisionProvider:
         # metadata, not prompt text: the model sees context_text/format_text
         # unchanged, so adding this key is not a PROMPT_VERSION bump.
         shape = context_shape(ctx)
-        format_text = decision_format_instructions(
-            self._decision,
-            max_pct=risk_gate.effective_max_target_margin_pct(self._risk, self._decision),
-        )
+        format_text = decision_format_instructions(self._decision, max_pct=max_pct)
         payload = {
             "coin": coin,
             "as_of": as_of.isoformat(),

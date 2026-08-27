@@ -11,6 +11,7 @@ from decimal import Decimal
 
 __all__ = [
     "ERROR_TYPES",
+    "HOLDING_COST_HOURS",
     "LEGAL_NETWORKS",
     "MIN_VOLUME_PROFILE_WINDOW",
     "POC_LOWER_BAND",
@@ -133,3 +134,10 @@ ERROR_TYPES = frozenset(
         "interrupted",
     }
 )
+
+# The horizon the prompt's position section states holding cost over. Funding
+# on Hyperliquid is charged hourly; 8h is one conventional funding "period",
+# long enough for the figure to read against a fee. Lives here (not in
+# ``marginal_cost``, which computes it) because ``schema`` re-derives the
+# stored value against it at construction and cannot import the pricer.
+HOLDING_COST_HOURS = 8

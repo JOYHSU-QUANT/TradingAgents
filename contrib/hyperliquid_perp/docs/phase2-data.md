@@ -235,7 +235,7 @@ AI input
 | `input_payload_path` | 完整 AI input JSON 檔路徑 |
 | `prompt_version` | 使用的 prompt / strategy 版本 |
 | `model` | 使用的 LLM model |
-| `context_shape`（schema v10 augmentation 欄，CSV 排在 `input_payload_hash` 之後） | 當次 market context 的**段落結構**字串（`domains/perp/prompt_context.context_shape`，例：`price\|market\|funding\|indicators(rsi_14,ema_20)\|volume_profile`）。與 `prompt_version` 並列的切段鍵：`prompt_version` 標 code 改版，`context_shape` 標「多一段／少一段」（含 `indicators` 清單重新排序——段落數不變但 prompt 不同）——包括只改 YAML 就會發生的（`market_data.volume_profile_window_candles`、`indicators`）。只取結構，不取標籤裡的數字與隨資料有無出現的行。v10 之前的列為空 |
+| `context_shape`（schema v10 augmentation 欄，CSV 排在 `input_payload_hash` 之後） | 當次 market context 的**段落結構**字串（`domains/perp/prompt_context.context_shape`，例：`price\|market\|funding\|indicators(rsi_14,ema_20)\|volume_profile`）。與 `prompt_version` 並列的切段鍵：`prompt_version` 標 code 改版，`context_shape` 標「多一段／少一段」（含 `indicators` 清單重新排序——段落數不變但 prompt 不同）——包括只改 YAML 就會發生的（`market_data.volume_profile_window_candles`、`indicators`）。prompt v4 起 daemon 的列多一段 `position`（倉位段有渲染即出現；open／flat 是帳戶狀態，不進 shape，用 `current_position_side` 切）。只取結構，不取標籤裡的數字與隨資料有無出現的行。v10 之前的列為空 |
 
 ---
 

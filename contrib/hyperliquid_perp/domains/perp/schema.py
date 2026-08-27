@@ -20,6 +20,7 @@ from enum import Enum
 from types import MappingProxyType
 
 from ...common.constants import (
+    HOLDING_COST_HOURS,
     MIN_VOLUME_PROFILE_WINDOW,
     POC_LOWER_BAND,
     POC_UPPER_BAND,
@@ -57,6 +58,29 @@ class ProfileShape(str, Enum):
     P = "P"
     B = "b"
     THIN = "thin"
+
+
+class PositionSide(str, Enum):
+    """Which way an OPEN position points, as the prompt's position section says it.
+
+    A flat account is ``None`` on :class:`PositionContext`, never a third
+    member: the section renders the two sides and the flat case differently,
+    and an enum member for "flat" would let a hand-built context carry a side
+    with a zero size.
+
+    Its two values duplicate ``target_decision.TargetSide``'s LONG/SHORT, and
+    that is a known cost rather than an oversight: importing ``TargetSide``
+    here would put ``target_decision`` inside ``config.py``'s load-time import
+    closure, which ``tests/common/test_layering.py`` pins to a short
+    allowlist (this module is on it; that one is not). The two enums are
+    never compared to each other — the gate's ``CurrentPositionState`` and
+    this DTO are built separately from the same signed size — so ``==`` /
+    ``is`` between them is not written anywhere; if a bridge is ever needed,
+    convert by ``.value``.
+    """
+
+    LONG = "long"
+    SHORT = "short"
 
 
 class CandleInterval(str, Enum):
@@ -613,6 +637,182 @@ class VolumeProfile:
         object.__setattr__(self, "shape", shape)
 
 
+def derive_round_trip_rate(taker_fee_rate: Decimal, slippage_bps: Decimal) -> Decimal:
+    """The cost of a round trip as a FRACTION of the notional traded.
+
+    THE rule for :class:`MarginalCostRow`: :mod:`.marginal_cost` prices every
+    row with it and the DTO re-derives each row against it at construction —
+    one definition, as :func:`derive_day_change_pct` is for the 24h change.
+
+    Two legs, each paying the taker fee AND the slippage, so
+    ``2 * (taker_fee_rate + slippage_bps / 10_000)``. Slippage is counted on
+    both legs because that is what the paper fill model charges
+    (``paper.fill_model.fill_price`` moves every fill adversely by
+    ``slippage_bps``, the opening one and the reversing one alike); a formula
+    that counted it once would advertise a breakeven the books never see.
+    Under the defaults (fee 0.045%, slippage 5 bps) that is 19 bps.
+    """
+    return 2 * (taker_fee_rate + slippage_bps / Decimal(10_000))
+
+
+@dataclass(frozen=True)
+class MarginalCostRow:
+    """What moving the committed margin to ONE legal target would cost.
+
+    ``trade_notional`` is the notional that changes hands to get there
+    (``|target - current| / 100 * equity * leverage``), ``round_trip_cost``
+    is that notional priced at :func:`derive_round_trip_rate` — the fee and
+    slippage on this move PLUS the same again when it is later reversed, which
+    is the shape of the churn the section exists to make visible. The
+    breakeven the prompt prints beside each row (the favourable move, in
+    basis points of the traded notional, that exactly pays for the round
+    trip) is ``round_trip_cost / trade_notional`` — i.e. the rate itself,
+    identical on every row — so it is not stored here; the renderer prints
+    the rate.
+    """
+
+    target_margin_pct: int
+    trade_notional: Decimal
+    round_trip_cost: Decimal
+
+    def __post_init__(self) -> None:
+        # A row at the current margin trades nothing and has no breakeven —
+        # the producer skips it; a hand-built one is a contradiction, not a
+        # degenerate row.
+        if self.trade_notional <= 0:
+            raise ValueError(
+                f"MarginalCostRow.trade_notional must be > 0, got {self.trade_notional} "
+                f"(a target at the current margin has no row)"
+            )
+        if self.round_trip_cost < 0:
+            raise ValueError(
+                f"MarginalCostRow.round_trip_cost must be >= 0, got {self.round_trip_cost}"
+            )
+        # A percent of equity, like every grid bound upstream (DecisionConfig
+        # holds 0 <= min < max <= 100): a row naming -40% or 500% is a legal
+        # arithmetic row and an impossible target.
+        if not 0 <= self.target_margin_pct <= 100:
+            raise ValueError(
+                f"MarginalCostRow.target_margin_pct must be in [0, 100], "
+                f"got {self.target_margin_pct}"
+            )
+
+
+@dataclass(frozen=True)
+class PositionContext:
+    """The account's own position, as the prompt's position section shows it.
+
+    Built by :mod:`.marginal_cost` from the local books (paper ledger / live
+    store) and carried on :class:`PerpMarketContext` as an OPTIONAL section:
+    ``None`` means the prompt omits it entirely — a context built without a
+    position source (the one-shot CLI, fixtures) or one whose books were
+    unusable (no ledger yet, non-positive equity). Same discipline as
+    :class:`VolumeProfile`: no half-populated form.
+
+    A FLAT account is ``side is None`` with every position-only field empty
+    and no cost rows (the section then says so in one line). An OPEN one
+    carries the facts — signed ``size``, ``entry_price``, ``unrealized_pnl`` at
+    the context's mark, ``notional``, committed ``margin_pct`` of ``equity`` at
+    the configured ``leverage`` — plus ``holding_cost_8h`` (funding on the
+    notional per 8h, signed: positive means the position PAYS) and one
+    :class:`MarginalCostRow` per displayed legal target.
+
+    Facts only. Nothing here says which gate threshold a given target would
+    face — that ranking stays out of the prompt (see
+    ``target_decision.decision_format_instructions``).
+    """
+
+    side: PositionSide | None
+    size: Decimal
+    entry_price: Decimal | None
+    unrealized_pnl: Decimal | None
+    notional: Decimal
+    margin_pct: Decimal | None
+    equity: Decimal
+    leverage: Decimal
+    last_fill_at: datetime | None
+    holding_cost_8h: Decimal | None
+    taker_fee_rate: Decimal
+    slippage_bps: Decimal
+    cost_rows: tuple[MarginalCostRow, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.equity <= 0:
+            raise ValueError(f"PositionContext.equity must be > 0, got {self.equity}")
+        if self.leverage <= 0:
+            raise ValueError(f"PositionContext.leverage must be > 0, got {self.leverage}")
+        if self.taker_fee_rate < 0 or self.slippage_bps < 0:
+            raise ValueError("PositionContext fee/slippage must be >= 0")
+        if self.last_fill_at is not None and self.last_fill_at.tzinfo is None:
+            raise ValueError("PositionContext.last_fill_at must be timezone-aware (UTC)")
+        if self.side is None:
+            # Flat: one shape, nothing position-only may be set.
+            if self.size != 0:
+                raise ValueError("a flat PositionContext (side None) must have size 0")
+            if (
+                self.entry_price is not None
+                or self.unrealized_pnl is not None
+                or self.margin_pct is not None
+                or self.holding_cost_8h is not None
+                or self.notional != 0
+                or self.cost_rows
+            ):
+                raise ValueError(
+                    "a flat PositionContext carries no entry, PnL, notional, margin, "
+                    "holding cost or cost rows"
+                )
+            return
+        side = PositionSide(self.side)
+        object.__setattr__(self, "side", side)
+        if side is PositionSide.LONG and self.size <= 0:
+            raise ValueError("a long PositionContext must have size > 0")
+        if side is PositionSide.SHORT and self.size >= 0:
+            raise ValueError("a short PositionContext must have size < 0")
+        if self.entry_price is None or self.entry_price <= 0:
+            raise ValueError("an open PositionContext must carry entry_price > 0")
+        if self.unrealized_pnl is None or self.margin_pct is None or self.holding_cost_8h is None:
+            raise ValueError(
+                "an open PositionContext must carry unrealized_pnl, margin_pct and holding_cost_8h"
+            )
+        if self.notional <= 0:
+            raise ValueError(f"an open PositionContext must have notional > 0, got {self.notional}")
+        if not self.cost_rows:
+            raise ValueError("an open PositionContext must carry at least one cost row")
+        # The committed margin is imputed from the notional at the configured
+        # leverage (the gate's own ``CurrentPositionState.from_signed_size``
+        # rule) — a margin% that disagrees with the notional two lines above
+        # it would be the prompt contradicting itself.
+        _check_derived(
+            "PositionContext.margin_pct",
+            float(self.margin_pct),
+            float(self.notional / self.leverage / self.equity * 100),
+            "notional / leverage / equity",
+        )
+        rate = derive_round_trip_rate(self.taker_fee_rate, self.slippage_bps)
+        seen: set[int] = set()
+        for row in self.cost_rows:
+            if row.target_margin_pct in seen:
+                raise ValueError(f"PositionContext has two cost rows for {row.target_margin_pct}%")
+            seen.add(row.target_margin_pct)
+            _check_derived(
+                f"PositionContext cost row {row.target_margin_pct}% trade_notional",
+                float(row.trade_notional),
+                float(
+                    abs(Decimal(row.target_margin_pct) - self.margin_pct)
+                    / 100
+                    * self.equity
+                    * self.leverage
+                ),
+                "|target - margin_pct| / 100 * equity * leverage",
+            )
+            _check_derived(
+                f"PositionContext cost row {row.target_margin_pct}% round_trip_cost",
+                float(row.round_trip_cost),
+                float(row.trade_notional * rate),
+                "trade_notional * derive_round_trip_rate(fee, slippage)",
+            )
+
+
 @dataclass(frozen=True)
 class PerpMarketContext:
     """The market context the engine reasons over, built by context_builder.
@@ -672,6 +872,12 @@ class PerpMarketContext:
     # operator turns it on. ``None`` means the prompt omits the section
     # entirely — never a half-filled block (see :class:`VolumeProfile`).
     volume_profile: VolumeProfile | None = None
+    # The account's own position and what moving it would cost
+    # (:mod:`.marginal_cost`; prompt ``phase2-target-v4``). Optional: attached
+    # by the daemon provider from the run's books; ``None`` on the one-shot
+    # CLI paths and whenever the books were unusable, and the prompt then
+    # omits the section entirely (see :class:`PositionContext`).
+    position: PositionContext | None = None
 
     def __post_init__(self) -> None:
         # Mirror the boundary invariants the source ``MarketSnapshot`` already enforces,
@@ -786,3 +992,41 @@ class PerpMarketContext:
         # or a recorded fixture) is accepted, while an unknown value raises a
         # ValueError here at construction rather than at decision time.
         object.__setattr__(self, "market_regime", MarketRegime(self.market_regime))
+        # The position's own guards hold its fields to each other; only the
+        # two that depend on THIS context's mark can be checked here. A
+        # notional or PnL priced at some other mark would print beside a
+        # "Mark:" line that contradicts it.
+        pos = self.position
+        if pos is not None and pos.side is not None:
+            # The §6.1/§6.3 formulas by name (margin.py's one-definition
+            # rule). Function-local: ``schema`` sits in config.py's load-time
+            # import closure, which tests/common/test_layering.py pins to a
+            # short allowlist ``margin`` is not on — that guard walks
+            # top-level statements only, and this branch runs only when a
+            # position is attached, never on a config load.
+            from .margin import position_notional, unrealized_pnl
+
+            # Both non-None on an open position (PositionContext's guard).
+            assert pos.unrealized_pnl is not None and pos.entry_price is not None
+            _check_derived(
+                "PerpMarketContext.position.notional",
+                float(pos.notional),
+                float(position_notional(pos.size, self.mark_price)),
+                "size * mark_price",
+            )
+            _check_derived(
+                "PerpMarketContext.position.unrealized_pnl",
+                float(pos.unrealized_pnl),
+                float(unrealized_pnl(pos.size, self.mark_price, pos.entry_price)),
+                "size * (mark_price - entry_price)",
+            )
+            # The holding cost is funding on the SIGNED notional at this mark,
+            # over the horizon the section states — checked against the
+            # Funding: section's own rate so the two cannot disagree.
+            assert pos.holding_cost_8h is not None
+            _check_derived(
+                "PerpMarketContext.position.holding_cost_8h",
+                float(pos.holding_cost_8h),
+                float(self.funding_rate * HOLDING_COST_HOURS * pos.size * self.mark_price),
+                f"funding_rate * {HOLDING_COST_HOURS}h * size * mark_price",
+            )

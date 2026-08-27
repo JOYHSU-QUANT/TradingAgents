@@ -122,8 +122,8 @@ prompt 的 context／format 契約改 shape 時，另要 bump `cli/_provider.py`
 `PROMPT_VERSION`，讓 `ai_inputs.prompt_version` 在資料裡標出改版點。
 **凡是跨越量測邊界的部署都要 bump，回滾也算**：回滾到舊 prompt 不算「改 shape」，
 但沿用已退役的舊值會讓 `GROUP BY prompt_version` 把 v3 之前與回滾之後併成同一桶，
-正好污染要拿來比的基線。退役過的值一律不得重用（回滾就給 `phase2-target-v4`，
-內容等不等於 v2 無所謂）。另注意 `decision_format_instructions` 的文字與這個常數不在同一個
+正好污染要拿來比的基線。退役過的值一律不得重用（回滾就給**下一個從未用過的值**，
+內容等不等於舊版無所謂；`v4` 已被 2026-08-27 的 `Position:` 段用掉，不是回滾備用值）。另注意 `decision_format_instructions` 的文字與這個常數不在同一個
 模組——`cli/_provider.py` 確實 import 了它，但 import 不會讓常數跟著文字動——所以有一個測試把
 版本戳釘在渲染出來的區塊指紋上：改了 prompt 文字卻忘了改戳就會紅。
 
@@ -152,7 +152,9 @@ vendor），這一段量測作廢、bump 到下一個版本戳重來。`paper-BT
 payload JSON）：`domains/perp/prompt_context.context_shape` 把當次渲染的**段落結構**寫成一個
 字串，例如 `price|market|funding|indicators(rsi_14,ema_20,ema_50,atr_14,macd)|volume_profile`。
 `--context-only` 會在渲染結果後印一行 `context_shape: …`，改 YAML 後部署前就能看到會落在哪個
-桶。它只取結構——段落標題、指標列名、volume profile 段有沒有——**不取**標籤裡的數字
+桶——但注意它印的**少一段**：prompt v4 起 paper／live daemon 的列一律多帶 `|position`
+（倉位段從本地帳本來，一次性 CLI 沒有帳本、維持 position-blind），比對時把這一段補上再比。
+它只取結構——段落標題、指標列名、volume profile 段有沒有——**不取**標籤裡的數字
 （`Candles: 200 x 4h`、`30d z-score`）也不取每 cycle 隨資料有無變動的 `Mid:`／`Premium:`
 行，否則每個 cycle 自成一段。
 

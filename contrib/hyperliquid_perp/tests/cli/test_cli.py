@@ -4680,6 +4680,20 @@ def test_the_live_loop_refreshes_across_the_decision_cycles_market_reads(tmp_pat
     assert built.kill_switch.ticks == before + 1
 
 
+def test_the_live_loop_wires_the_books_as_the_provider_position_source(tmp_path, monkeypatch):
+    # Prompt v4 on the live lane: the same read_book_position binding the paper
+    # daemon makes, over THIS run's store — dropped, None, or bound to the
+    # wrong run/coin would leave the live prompt silently position-blind.
+    built = _drive_live_loop_construction(
+        tmp_path, monkeypatch, fetch_clearinghouse=lambda: _clearinghouse()
+    )
+    source = built.provider.get("position_source")
+    assert source is not None, "the live prompt would be position-blind"
+    # The binding only: the drive closes the store on its way out, so the
+    # read itself is exercised by test_position_facts over a live handle.
+    assert_position_source_binds(source, run_id="r1", coin="BTC")
+
+
 def test_live_refuses_a_timeout_that_cannot_fit_the_kill_switch_budget(
     tmp_path, capsys, live_seams, monkeypatch
 ):
@@ -4889,4 +4903,140 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     digest = hashlib.sha256(block.encode("utf-8")).hexdigest()[:16]
     # Compared as one tuple so a mismatch shows both halves at once — which one
     # drifted is the whole diagnosis.
-    assert (_cli.PROMPT_VERSION, digest) == ("phase2-target-v3", "97aa0feaa4496d6f")
+    # v4 (2026-08-27) bumped the version for the CONTEXT's new Position:
+    # section; the format block itself did not change, so the digest is v3's.
+    assert (_cli.PROMPT_VERSION, digest) == ("phase2-target-v4", "97aa0feaa4496d6f")
+
+
+def _book(**overrides):
+    from contrib.hyperliquid_perp.paper.position_facts import BookPosition
+
+    base = {
+        "size": D("0.005"),
+        "entry_price": D(50000),
+        "wallet_balance": D(1000),
+        "last_fill_at": datetime(2026, 3, 14, 20, 0, tzinfo=timezone.utc),
+    }
+    return BookPosition(**{**base, **overrides})
+
+
+def _provider_with_source(tmp_path, monkeypatch, ctx, source):
+    import contrib.hyperliquid_perp.engine_bridge as bridge_mod
+    from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
+    from contrib.hyperliquid_perp.paper.config import PaperExecutionConfig
+
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **kw: (ctx, None))
+    provider = object.__new__(_EngineDecisionProvider)
+    provider._config = {}
+    provider._on_blocking_read = None
+    provider._risk = RiskConfig(leverage=D(1), max_target_margin_pct=60)
+    provider._decision = DecisionConfig()
+    provider._payload_dir = tmp_path / "payloads"
+    provider._engine_config = {"deep_think_llm": "model-x"}
+    provider._position_source = source
+    provider._execution = PaperExecutionConfig()
+    return provider
+
+
+def test_build_input_attaches_the_position_section_from_the_books(tmp_path, monkeypatch):
+    # Prompt v4: the provider reads the run's books through its position
+    # source and the rendered context — the one the DecisionInput carries,
+    # the one the payload stores — gains the Position: section priced at
+    # THIS cycle's mark. The shape says so, so the review can segment on it.
+    as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
+    ctx = _perp_ctx(as_of - timedelta(hours=1))
+    provider = _provider_with_source(tmp_path, monkeypatch, ctx, lambda: _book())
+
+    decision_input = provider.build_input(coin="BTC", as_of=as_of)
+    pos = decision_input.context.position
+    assert pos is not None
+    # 0.005 BTC at the context's mark 50,000 = 250 notional = 25% of 1,000.
+    assert pos.notional == D(250)
+    assert pos.margin_pct == D(25)
+    # The ceiling is the EFFECTIVE one (cap 60 under grid max 100), matching
+    # the format block's advertised ceiling.
+    assert max(r.target_margin_pct for r in pos.cost_rows) == 60
+    assert decision_input.context_shape.endswith("|position")
+    with open(decision_input.input_payload_path, encoding="utf-8") as fh:
+        payload = json.load(fh)
+    assert "Position:" in payload["context_text"]
+    assert payload["context_shape"] == decision_input.context_shape
+    assert payload["prompt_version"] == "phase2-target-v4"
+
+
+def test_build_input_without_a_position_source_stays_position_blind(tmp_path, monkeypatch):
+    # The one-shot CLI paths and object.__new__-built providers never wire a
+    # source: same prompt as before, no section, no shape suffix.
+    as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
+    ctx = _perp_ctx(as_of - timedelta(hours=1))
+    provider = _provider_with_source(tmp_path, monkeypatch, ctx, None)
+    decision_input = provider.build_input(coin="BTC", as_of=as_of)
+    assert decision_input.context.position is None
+    assert "position" not in decision_input.context_shape
+
+
+def test_build_input_omits_the_section_when_the_books_do_not_exist_yet(
+    tmp_path, monkeypatch, caplog
+):
+    import logging
+
+    as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
+    ctx = _perp_ctx(as_of - timedelta(hours=1))
+    provider = _provider_with_source(tmp_path, monkeypatch, ctx, lambda: None)
+    with caplog.at_level(logging.WARNING):
+        decision_input = provider.build_input(coin="BTC", as_of=as_of)
+    assert decision_input.context.position is None
+    assert "no books yet" in caplog.text
+
+
+def test_build_input_reads_the_books_only_after_the_context_guards_pass(tmp_path, monkeypatch):
+    # A refused context spends nothing — it must not read the store either.
+    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
+
+    as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
+    ctx = _perp_ctx(as_of - timedelta(hours=20))  # stale: refused
+    calls = []
+    provider = _provider_with_source(tmp_path, monkeypatch, ctx, lambda: calls.append(1))
+    with pytest.raises(RetryableDecisionError):
+        provider.build_input(coin="BTC", as_of=as_of)
+    assert calls == []
+
+
+def assert_position_source_binds(source, *, run_id: str, coin: str) -> None:
+    """``source`` is ``read_book_position`` bound over THIS run's store, in order."""
+    from contrib.hyperliquid_perp.paper.position_facts import read_book_position
+    from contrib.hyperliquid_perp.persistence.db import Database
+
+    assert source.func is read_book_position
+    db, bound_run, bound_coin = source.args
+    assert isinstance(db, Database)
+    assert (bound_run, bound_coin) == (run_id, coin)
+
+
+def test_the_paper_daemon_wires_the_books_as_the_provider_position_source(
+    tmp_path, monkeypatch, paper_seams
+):
+    # The paper lane: _build_provider binds read_book_position over the run's
+    # store, so a fresh run's very first prompt already carries the section
+    # (the books are seeded before the first cycle). The recorder stops the
+    # command right at the provider pre-flight, before initialize_run.
+    from contrib.hyperliquid_perp import cli as cli_mod
+
+    captured = {}
+
+    class _Recording:
+        def __init__(self, *args, **kwargs):
+            # Exercised HERE, while the store is still open (the command
+            # closes it on the way out): bound over books that were never
+            # seeded, the read says None (section omitted), not a crash.
+            captured["book"] = kwargs["position_source"]()
+            captured["source"] = kwargs["position_source"]
+            raise _StopBeforeTheLoop
+
+    monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _Recording)
+    rc = cli_main(_paper_argv(tmp_path / "new.db", run_id="fresh", config=paper_seams, create=True))
+    assert rc == 2  # the sentinel surfaces as the top-level "unexpected error"
+    assert captured["book"] is None
+    # The binding itself, not only its no-books result: a swapped run_id/coin
+    # would ALSO read "no books" here (no ledger is keyed on "BTC" either).
+    assert_position_source_binds(captured["source"], run_id="fresh", coin="BTC")

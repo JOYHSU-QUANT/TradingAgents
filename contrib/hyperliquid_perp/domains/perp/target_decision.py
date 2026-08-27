@@ -539,8 +539,11 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     simplified contract for the normal case: the gate skips the deadband
     entirely on an unreadable ``margin_pct`` or a leverage mismatch (the
     target then trades, or hits the resize bar). Those degraded states are
-    rare in Phase 2 and non-actionable for a position-blind model, so the
-    prompt does not carry the conditional.
+    rare in Phase 2 and non-actionable for the model: the daemon lanes' v4
+    ``Position:`` section is built from the local books, which never carry
+    an unreadable margin or a foreign leverage, and the one-shot CLI (which
+    CAN hit both, off an exchange-reported position) stays position-blind —
+    so the prompt does not carry the conditional.
     ``max_pct`` (when given) advertises the *effective* ceiling —
     ``risk_gate.effective_max_target_margin_pct``, the
     grid ceiling capped by ``risk.max_target_margin_pct`` — so the model is
@@ -551,11 +554,17 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
 
     The resize bar is advertised as a per-action fact only; the gate's
     exemption ranking (open/flip/flat need just ``min_confidence``) is
-    deliberately not spelled out. A position-blind model cannot tell which
-    of its targets is a resize, so the comparison is non-actionable — the
-    only thing it could teach is that a full close is the one exposure
-    change guaranteed past the gate, funneling mid-confidence de-risking
-    into fee-heavier flat exits.
+    deliberately not spelled out. Through prompt v3 the reason was that a
+    position-blind model could not tell which of its targets was a resize,
+    so the comparison was non-actionable. Since v4 the context carries the
+    model's own position (``prompt_context``'s ``Position:`` section, with
+    the round-trip cost of every legal move), so the model CAN tell — which
+    is exactly why the ranking stays out: spelled out, the one thing it
+    would teach is that a full close is the one exposure change guaranteed
+    past the gate, funneling mid-confidence de-risking into fee-heavier
+    flat exits. The position section states facts and prices and no gate
+    rule at all (pinned by
+    ``test_the_position_section_never_names_a_gate_threshold``).
 
     The schema block carries **placeholders, not a worked example**, because
     models return the example as their answer — measured, not feared: 74% of

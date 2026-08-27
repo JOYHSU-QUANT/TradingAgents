@@ -29,6 +29,27 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **hyperliquid_perp: the decision context carries the account's own
+  position and the marginal cost of every legal move (prompt
+  `phase2-target-v4`).** The 2026-08-27 `/paper-review` of paper-BTC-2 found
+  the model resizing in >= 10-point jumps at the deadband's edge and
+  re-adding exposure it had just cut — churn the gate's advertised thresholds
+  shaped rather than stopped, from a context that never told the model where
+  it stood. The daemon provider (paper and live) now reads the run's books
+  (`paper/position_facts.py`) and the new pure pricer
+  (`domains/perp/marginal_cost.py`) attaches a `Position:` section:
+  side/size/entry/unrealized PnL, committed margin % of equity, last fill,
+  holding cost per 8h at the current funding rate, and — per displayed legal
+  target — the notional traded, the ROUND-TRIP cost (fee and slippage on
+  both legs, from `paper_trading.execution`, 19 bps under the defaults) and
+  the same restated as breakeven bps. Facts and prices only: no gate rule,
+  no accumulated (sunk) cost. Flat renders one line; unusable books (no
+  ledger, equity <= 0) omit the section with a WARNING. The one-shot CLI
+  stays position-blind. `context_shape` gains `position` (open vs flat is
+  the account's state, already on `ai_inputs.current_position_side`, not a
+  shape); the format block is unchanged (same digest). Not cherry-picked to `deploy/paper` until the
+  current A/B segment has its >= 8-episode review.
+
 - **US economic calendar + corporate BTC treasuries (SoSoValue).** Two new
   news-analyst categories for crypto assets, served by the SoSoValue key
   already used for ETF flows (shared plumbing — auth, request envelope, error

@@ -158,7 +158,7 @@ set_target 且 target_side 與目前持倉方向相同        → 同方向 resi
   基本門檻的檢查時機。
 - **兩步繞道與量測盲點**：本門檻不阻止「flat 平倉（只需 min_confidence）→
   下一 cycle 同方向重開」的兩步改倉。prompt v3 以前的 position-blind 模型無法
-  刻意繞道；**v4 起 context 含 `Position:` 段**（自己的倉位、每個合法目標的
+  刻意繞道；**v4 起 daemon 車道的 context 含 `Position:` 段**（一次性 CLI 仍 position-blind；段內是自己的倉位、每個合法目標的
   往返成本與 breakeven bps——只有事實與價格，不含任何門檻規則，正因為模型
   現在分得出哪個目標是 resize，豁免排序更不能寫進 prompt），繞道在理論上
   變得可辨識，量測時要看 flat→同向重開的配對。發生時付兩條全倉費用，且

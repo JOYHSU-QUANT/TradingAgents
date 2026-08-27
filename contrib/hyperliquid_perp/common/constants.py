@@ -11,6 +11,7 @@ from decimal import Decimal
 
 __all__ = [
     "ERROR_TYPES",
+    "HOLDING_COST_HOURS",
     "LEGAL_NETWORKS",
     "MIN_VOLUME_PROFILE_WINDOW",
     "POC_LOWER_BAND",
@@ -20,7 +21,6 @@ __all__ = [
     "THIN_VALUE_AREA_RATIO",
     "VALUE_AREA_FRACTION",
     "VOLUME_PROFILE_BUCKET_COUNT",
-    "HOLDING_COST_HOURS",
 ]
 
 # The smallest legal ``market_data.volume_profile_window_candles``. Here, not in

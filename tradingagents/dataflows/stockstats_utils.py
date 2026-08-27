@@ -175,12 +175,13 @@ def yf_fetch_unhidden(func, *, hidden_answer):
     * ``YFDataException`` — yfinance's own "Yahoo is down"/unsupported-session
       signal, raised regardless of the flag, so not something the library
       would have answered empty.
-    * An ``OSError`` that is NOT an HTTP 4xx — a reset, a timeout, a 5xx.
-      A 4xx is Yahoo's verdict on the request, not a failure of the wire:
-      quoteSummary answers 404 for an unknown or delisted symbol (measured),
+    * An ``OSError`` that is NOT an HTTP 404 — a reset, a timeout, a 5xx,
+      and a 401/403 (Yahoo refusing this client over a crumb or an IP block).
+      A 404 is Yahoo's verdict on the symbol, not a failure of the wire:
+      quoteSummary answers it for an unknown or delisted symbol (measured),
       and ``history`` reaches that same 404 through its timezone lookup for
-      the first symbols a process asks about. Under the swallow those became
-      the empty answer that reaches the no-data lane, and they still do.
+      the first symbols a process asks about. Under the swallow that became
+      the empty answer that reaches the no-data lane, and it still does.
 
     Everything else is restored to ``hidden_answer()`` — the value the
     library would have answered with, so a delisted symbol's
@@ -190,9 +191,10 @@ def yf_fetch_unhidden(func, *, hidden_answer):
     site names the library's empty form for its property.
 
     Known residue (yfinance parses the body before it looks at the status):
-    a 5xx HTML page on ``history`` or ``get_news`` raises ``JSONDecodeError``
-    inside the library, which is not an ``OSError`` and is restored here to
-    the empty answer.
+    a 5xx HTML page on ``history``, ``get_news`` or ``info``'s second
+    (fundamentals-timeseries) fetch raises ``JSONDecodeError`` inside the
+    library, which is not an ``OSError`` and is restored here to the empty
+    answer.
     """
     from yfinance.config import YfConfig
 
@@ -207,9 +209,12 @@ def yf_fetch_unhidden(func, *, hidden_answer):
             except YFDataException:
                 raise
             except OSError as e:
-                status = _http_status(e)
-                if status is not None and 400 <= status < 500:
-                    logger.info("yfinance answered HTTP %s: %s", status, e)
+                if _http_status(e) == 404:
+                    # 404 alone: a 401/403 is Yahoo refusing this client (a
+                    # crumb or an IP block, the case _make_request's cookie
+                    # switch exists for), which must reach the fallback chain
+                    # like a 5xx rather than read as "symbol not covered".
+                    logger.info("yfinance answered HTTP 404: %s", e)
                     return hidden_answer()
                 # Under the swallow this became the empty answer, which the
                 # statement lane turned into NoMarketDataError and the router's

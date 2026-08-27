@@ -400,6 +400,11 @@ def test_yf_fetch_unhidden_sorts_failures_into_their_lanes():
         fetch(YFDataException("*** YAHOO! FINANCE IS CURRENTLY DOWN! ***"))
     with pytest.raises(curl_exceptions.HTTPError):
         fetch(_http_error(503))
+    # 404 alone is the symbol verdict: a 403 is Yahoo refusing this client
+    # (crumb or IP block) and must reach the fallback chain, not read as
+    # "symbol not covered".
+    with pytest.raises(curl_exceptions.HTTPError):
+        fetch(_http_error(403))
     with pytest.raises(curl_exceptions.ConnectionError):
         fetch(curl_exceptions.ConnectionError("connection reset"))
     assert YfConfig.debug.hide_exceptions is True

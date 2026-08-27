@@ -28,16 +28,17 @@ Breaking changes within the 0.x line are called out explicitly.
   price history or a news list answered empty, `info`/insider filings a
   `None` — so `yf_fetch_statement` is now the general `yf_fetch_unhidden`
   and every one of those calls goes through it: a throttle, a reset, a
-  timeout or an HTTP 5xx comes out; an HTTP 4xx (Yahoo's verdict on the
-  symbol — 404 for an unknown or delisted one) and anything else is restored
-  to the empty answer the library would have given, so those still reach the
-  no-data lane. Operator-visible consequence: the shipped single-vendor
-  `yfinance` defaults now fail the tool call on a network failure instead of
-  serving error prose; a fallback chain (`yfinance,alpha_vantage`) gets its
-  turn. Still outside this fix, because yfinance parses the body before it
-  looks at the status: a 5xx HTML page on the price history reads as no data,
-  and on both news getters as "No news found". The `get_indicators` tool
-  wrapper now renders only
+  timeout, an HTTP 5xx or a 401/403 (Yahoo refusing the client) comes out;
+  an HTTP 404 (Yahoo's verdict on an unknown or delisted symbol) and
+  anything else is restored to the empty answer the library would have
+  given, so those still reach the no-data lane. Operator-visible
+  consequence: the shipped single-vendor `yfinance` defaults now fail the
+  tool call on a network failure instead of serving error prose; a fallback
+  chain (`yfinance,alpha_vantage`) gets its turn. Still outside this fix,
+  because yfinance parses the body before it looks at the status: a 5xx HTML
+  page on the price history or on `info`'s second (fundamentals-timeseries)
+  fetch reads as no data, and on both news getters as "No news found". The
+  `get_indicators` tool wrapper now renders only
   the new `UnsupportedIndicatorError` as report text; `VendorNotConfiguredError`
   (a `ValueError`) and the router's own configuration errors reach the ToolNode
   as failures instead of being pasted into the market report (#117). Alpha

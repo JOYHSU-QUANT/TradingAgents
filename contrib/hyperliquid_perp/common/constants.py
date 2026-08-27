@@ -20,6 +20,7 @@ __all__ = [
     "THIN_VALUE_AREA_RATIO",
     "VALUE_AREA_FRACTION",
     "VOLUME_PROFILE_BUCKET_COUNT",
+    "HOLDING_COST_HOURS",
 ]
 
 # The smallest legal ``market_data.volume_profile_window_candles``. Here, not in
@@ -133,3 +134,10 @@ ERROR_TYPES = frozenset(
         "interrupted",
     }
 )
+
+# The horizon the prompt's position section states holding cost over. Funding
+# on Hyperliquid is charged hourly; 8h is one conventional funding "period",
+# long enough for the figure to read against a fee. Lives here (not in
+# ``marginal_cost``, which computes it) because ``schema`` re-derives the
+# stored value against it at construction and cannot import the pricer.
+HOLDING_COST_HOURS = 8

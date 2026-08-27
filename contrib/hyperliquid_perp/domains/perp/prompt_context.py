@@ -252,20 +252,19 @@ def _position_lines(pos: PositionContext, ctx: PerpMarketContext) -> list[str]:
     lines.append(f"  Holding cost at the current funding rate: {verb} per 8h")
     rate = derive_round_trip_rate(pos.taker_fee_rate, pos.slippage_bps)
     rate_bps = rate * 10_000
-    fee_pct = pos.taker_fee_rate * 100
-    # "assumptions", not "fees": these are the configured fill-cost parameters
-    # (paper_trading.execution — the paper fill model's), and on the live lane
-    # the exchange's actual per-fill fee is what the books post. The word
-    # keeps the line true on both lanes; the numbers are still the only cost
-    # model the config carries.
+    # Totals only — no taker-fee / slippage decomposition (decided 2026-08-27
+    # in the PR #133 review). The section exists because the model anchors on
+    # numbers the prompt prints (paper-BTC-2: 27/48 decisions at exactly the
+    # advertised bar); the two parameters would be two more anchors that
+    # nothing here needs the model to reason with. "assumptions" stays: the
+    # rate is the configured fill-cost model's (paper_trading.execution),
+    # and on the live lane the books post the exchange's actual fee.
     lines.append(
         f"  Cost of moving to another legal margin, as a round trip (the fee and "
         f"slippage on this move plus the same again when it is later reversed), "
-        f"priced with the configured fill-cost assumptions: taker fee "
-        f"{_num(fee_pct, 4)}% and {_num(pos.slippage_bps)} bps slippage per fill, "
-        f"{_num(rate_bps)} bps of the traded notional in total. Breakeven is the "
-        f"favourable price move, in bps of the traded notional, that exactly pays "
-        f"for that round trip:"
+        f"priced with the configured fill-cost assumptions: {_num(rate_bps)} bps of "
+        f"the traded notional per round trip. Breakeven is the favourable price "
+        f"move, in bps of the traded notional, that exactly pays for that round trip:"
     )
     for row in pos.cost_rows:
         lines.append(

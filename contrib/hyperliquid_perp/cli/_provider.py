@@ -157,8 +157,15 @@ class _EngineDecisionProvider:
         ``max_pct`` is the EFFECTIVE grid ceiling the caller also hands the
         format block, so the cost table and the advertised ceiling cannot
         disagree. Omitted — with the pricer's own WARNING — when the books
-        are unusable; an exception from the read itself propagates like the
-        audit read that follows it (both hit the same store).
+        are unusable. Any OTHER exception (a store failure, a DTO guard
+        tripped by a book state the pricer did not expect) propagates: it is
+        a bug, not a degraded state, and it surfaces the way the audit read
+        one statement later already does. What "surfaces" means differs by
+        lane and is a known asymmetry, decided 2026-08-27: the live driver's
+        pump guard fails only that cycle closed (``api_failed``), while the
+        paper scheduler has no such guard and the daemon exits for systemd
+        to restart — the same fate a failing ``_insert_ai_input`` has had
+        since PR 4, kept rather than masked behind a WARNING.
         """
         if self._position_source is None:
             return ctx

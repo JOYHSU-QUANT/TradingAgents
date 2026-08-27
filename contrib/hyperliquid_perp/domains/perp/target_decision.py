@@ -539,9 +539,11 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     simplified contract for the normal case: the gate skips the deadband
     entirely on an unreadable ``margin_pct`` or a leverage mismatch (the
     target then trades, or hits the resize bar). Those degraded states are
-    rare in Phase 2 — and since prompt v4 the context's ``Position:`` section
-    is built from the local books, which never carry an unreadable margin or
-    a foreign leverage — so the prompt does not carry the conditional.
+    rare in Phase 2 and non-actionable for the model: the daemon lanes' v4
+    ``Position:`` section is built from the local books, which never carry
+    an unreadable margin or a foreign leverage, and the one-shot CLI (which
+    CAN hit both, off an exchange-reported position) stays position-blind —
+    so the prompt does not carry the conditional.
     ``max_pct`` (when given) advertises the *effective* ceiling —
     ``risk_gate.effective_max_target_margin_pct``, the
     grid ceiling capped by ``risk.max_target_margin_pct`` — so the model is

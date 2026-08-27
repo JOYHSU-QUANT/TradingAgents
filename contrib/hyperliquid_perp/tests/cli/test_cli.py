@@ -4680,6 +4680,20 @@ def test_the_live_loop_refreshes_across_the_decision_cycles_market_reads(tmp_pat
     assert built.kill_switch.ticks == before + 1
 
 
+def test_the_live_loop_wires_the_books_as_the_provider_position_source(tmp_path, monkeypatch):
+    # Prompt v4 on the live lane: the same read_book_position binding the paper
+    # daemon makes, over THIS run's store — dropped, None, or bound to the
+    # wrong run/coin would leave the live prompt silently position-blind.
+    built = _drive_live_loop_construction(
+        tmp_path, monkeypatch, fetch_clearinghouse=lambda: _clearinghouse()
+    )
+    source = built.provider.get("position_source")
+    assert source is not None, "the live prompt would be position-blind"
+    # The binding only: the drive closes the store on its way out, so the
+    # read itself is exercised by test_position_facts over a live handle.
+    assert_position_source_binds(source, run_id="r1", coin="BTC")
+
+
 def test_live_refuses_a_timeout_that_cannot_fit_the_kill_switch_budget(
     tmp_path, capsys, live_seams, monkeypatch
 ):
@@ -4988,6 +5002,17 @@ def test_build_input_reads_the_books_only_after_the_context_guards_pass(tmp_path
     assert calls == []
 
 
+def assert_position_source_binds(source, *, run_id: str, coin: str) -> None:
+    """``source`` is ``read_book_position`` bound over THIS run's store, in order."""
+    from contrib.hyperliquid_perp.paper.position_facts import read_book_position
+    from contrib.hyperliquid_perp.persistence.db import Database
+
+    assert source.func is read_book_position
+    db, bound_run, bound_coin = source.args
+    assert isinstance(db, Database)
+    assert (bound_run, bound_coin) == (run_id, coin)
+
+
 def test_the_paper_daemon_wires_the_books_as_the_provider_position_source(
     tmp_path, monkeypatch, paper_seams
 ):
@@ -5005,9 +5030,13 @@ def test_the_paper_daemon_wires_the_books_as_the_provider_position_source(
             # closes it on the way out): bound over books that were never
             # seeded, the read says None (section omitted), not a crash.
             captured["book"] = kwargs["position_source"]()
+            captured["source"] = kwargs["position_source"]
             raise _StopBeforeTheLoop
 
     monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _Recording)
     rc = cli_main(_paper_argv(tmp_path / "new.db", run_id="fresh", config=paper_seams, create=True))
     assert rc == 2  # the sentinel surfaces as the top-level "unexpected error"
-    assert captured == {"book": None}
+    assert captured["book"] is None
+    # The binding itself, not only its no-books result: a swapped run_id/coin
+    # would ALSO read "no books" here (no ledger is keyed on "BTC" either).
+    assert_position_source_binds(captured["source"], run_id="fresh", coin="BTC")

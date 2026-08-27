@@ -32,6 +32,7 @@ import math
 from datetime import datetime
 from decimal import Decimal, localcontext
 
+from ...common.constants import HOLDING_COST_HOURS
 from ...common.decimal_context import DECIMAL_CONTEXT
 from .margin import account_equity, unrealized_pnl
 from .risk_gate import CurrentPositionState
@@ -40,11 +41,6 @@ from .schema import MarginalCostRow, PositionContext, PositionSide, derive_round
 __all__ = ["MAX_COST_ROWS", "build_position_context", "display_targets"]
 
 logger = logging.getLogger(__name__)
-
-# Funding on Hyperliquid is charged hourly (``MarketSnapshot.funding`` is the
-# per-hour rate); the section states holding cost per 8h — one conventional
-# funding "period" — so the number is large enough to read against a fee.
-_HOLDING_COST_HOURS = 8
 
 # The cost table is bounded: the paper grid is step 1 over 0..60 (61 legal
 # targets), and 61 rows would bury the two facts the section carries. The cost
@@ -162,7 +158,7 @@ def build_position_context(
         margin_pct = state.margin_pct
         # Signed like the ledger's funding posting: a long pays a positive
         # rate, a short receives it. Positive here = the position PAYS.
-        holding = funding_rate * _HOLDING_COST_HOURS * state.signed_notional
+        holding = funding_rate * HOLDING_COST_HOURS * state.signed_notional
         rate = derive_round_trip_rate(taker_fee_rate, slippage_bps)
         rows = []
         for target in display_targets(grid_min, grid_max, grid_step):

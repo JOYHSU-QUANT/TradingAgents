@@ -20,6 +20,7 @@ from enum import Enum
 from types import MappingProxyType
 
 from ...common.constants import (
+    HOLDING_COST_HOURS,
     MIN_VOLUME_PROFILE_WINDOW,
     POC_LOWER_BAND,
     POC_UPPER_BAND,
@@ -687,6 +688,14 @@ class MarginalCostRow:
             raise ValueError(
                 f"MarginalCostRow.round_trip_cost must be >= 0, got {self.round_trip_cost}"
             )
+        # A percent of equity, like every grid bound upstream (DecisionConfig
+        # holds 0 <= min < max <= 100): a row naming -40% or 500% is a legal
+        # arithmetic row and an impossible target.
+        if not 0 <= self.target_margin_pct <= 100:
+            raise ValueError(
+                f"MarginalCostRow.target_margin_pct must be in [0, 100], "
+                f"got {self.target_margin_pct}"
+            )
 
 
 @dataclass(frozen=True)
@@ -1010,4 +1019,14 @@ class PerpMarketContext:
                 float(pos.unrealized_pnl),
                 float(unrealized_pnl(pos.size, self.mark_price, pos.entry_price)),
                 "size * (mark_price - entry_price)",
+            )
+            # The holding cost is funding on the SIGNED notional at this mark,
+            # over the horizon the section states — checked against the
+            # Funding: section's own rate so the two cannot disagree.
+            assert pos.holding_cost_8h is not None
+            _check_derived(
+                "PerpMarketContext.position.holding_cost_8h",
+                float(pos.holding_cost_8h),
+                float(self.funding_rate * HOLDING_COST_HOURS * pos.size * self.mark_price),
+                f"funding_rate * {HOLDING_COST_HOURS}h * size * mark_price",
             )

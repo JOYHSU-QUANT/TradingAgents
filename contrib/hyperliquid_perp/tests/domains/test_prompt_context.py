@@ -629,11 +629,12 @@ def test_the_open_position_section_states_the_facts_and_the_priced_moves():
     )
     # 0.0000125 * 8 * 300 = 0.03 USDC per 8h, paid by the long.
     assert "Holding cost at the current funding rate: pays 0.0300 USDC per 8h" in block
-    # The rate is spelled out once, per fill and as the round-trip total.
-    assert (
-        "taker fee 0.0450% and 5.00 bps slippage per fill, 19.00 bps of the traded notional"
-        in block
-    )
+    # The rate as a total only — the fee and slippage parameters are NOT
+    # printed (two fewer numbers for the model to anchor on; decided in the
+    # PR #133 review).
+    assert "assumptions: 19.00 bps of the traded notional per round trip" in block
+    assert "0.0450" not in block
+    assert "slippage per fill" not in block
     # Flat from 30% trades the whole 300 notional: 300 * 0.0019 = 0.57.
     assert (
         "-> 0%: trades 300.00 USDC notional, round-trip cost 0.57 USDC, breakeven 19.00 bps"
@@ -682,7 +683,9 @@ def test_a_short_receives_positive_funding_and_says_so():
 
 def test_zero_funding_prints_a_zero_holding_cost_not_pays_or_receives():
     block = _position_block(
-        render_market_context(_ctx(position=_open_position(funding_rate=Decimal(0))))
+        render_market_context(
+            _ctx(funding_rate=Decimal(0), position=_open_position(funding_rate=Decimal(0)))
+        )
     )
     holding = next(line for line in block.split("\n") if line.startswith("  Holding cost"))
     assert "0.0000 USDC (funding rate is zero) per 8h" in holding

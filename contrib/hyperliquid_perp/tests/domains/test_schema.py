@@ -725,14 +725,24 @@ def test_perp_market_context_checks_the_position_against_its_own_mark():
     # The position's notional and PnL are priced at SOME mark; the context
     # checks they were priced at ITS mark, or "Mark: 60,000" would sit above
     # a "notional 300" that only holds at a different price.
-    ok = _context(mark_price=Decimal("60000"), prev_day_price=Decimal("60000"), day_change_pct=0.0)
+    # funding 0.0000125/h * 8h * 300 notional = the fixture's 0.03 holding cost.
+    funding = {"funding_rate": Decimal("0.0000125")}
+    ok = _context(
+        mark_price=Decimal("60000"), prev_day_price=Decimal("60000"), day_change_pct=0.0, **funding
+    )
     ctx = PerpMarketContext(**ok, position=PositionContext(**_open()))
     assert ctx.position.notional == Decimal(300)
     other = _context(
-        mark_price=Decimal("61000"), prev_day_price=Decimal("61000"), day_change_pct=0.0
+        mark_price=Decimal("61000"), prev_day_price=Decimal("61000"), day_change_pct=0.0, **funding
     )
     with pytest.raises(ValueError, match="position.notional .* contradicts"):
         PerpMarketContext(**other, position=PositionContext(**_open()))
+    # A holding cost priced at a different funding rate than the Funding:
+    # section's is the same kind of contradiction.
+    with pytest.raises(ValueError, match="holding_cost_8h .* contradicts"):
+        PerpMarketContext(
+            **{**ok, "funding_rate": Decimal("-0.0001")}, position=PositionContext(**_open())
+        )
     # A flat position has nothing priced at the mark: any mark is fine.
     assert PerpMarketContext(**other, position=PositionContext(**_flat())).position.side is None
 

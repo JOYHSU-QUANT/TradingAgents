@@ -122,9 +122,11 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
             # a sibling thread can arm one while this call is in flight, and an
             # answer just received is the fresher evidence.
             #
-            # "Answered" is the honest claim, not "served": yf_fetch_statement
-            # hands back an empty frame when it swallows a NON-throttle failure,
-            # and that arrives here indistinguishable from data. Clearing on it
+            # "Answered" is the honest claim, not "served": yf_fetch_unhidden
+            # hands back the caller's hidden answer (an empty frame, dict or
+            # list) for the failures it restores — a 404, the library's own
+            # expected conditions — and that arrives here indistinguishable
+            # from data. Clearing on it
             # is wrong only about cost — the next tool call re-discovers the
             # throttle and pays one ladder — never about the verdict a caller
             # gets, so it does not buy a way to tell the two apart.

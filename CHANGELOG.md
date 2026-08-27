@@ -25,8 +25,8 @@ Breaking changes within the 0.x line are called out explicitly.
   transport libraries and leaves the taxonomy lane and the library-bug
   degradation unchanged. The clause alone could not reach the failures
   yfinance's own scrapers swallow under `hide_exceptions` — a statement, a
-  price history or a news list answered empty, `info`/insider filings a
-  `None` — so `yf_fetch_statement` is now the general `yf_fetch_unhidden`
+  price history, an insider-filing frame or a news list answered empty,
+  `info` a `None` — so `yf_fetch_statement` is now the general `yf_fetch_unhidden`
   and every one of those calls goes through it: a throttle, a reset, a
   timeout, an HTTP 5xx or a 401/403 (Yahoo refusing the client) comes out;
   an HTTP 404 (Yahoo's verdict on an unknown or delisted symbol) and

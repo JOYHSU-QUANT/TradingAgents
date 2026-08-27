@@ -193,7 +193,7 @@ def test_only_an_exhausted_throttle_arms_the_latch(frozen_clock):
     assert su._throttle_latch_remaining_s() is None
 
 
-# --- the statement boundary: throttles un-hidden, everything else unchanged ---
+# --- the statement boundary: throttles and transport failures un-hidden ---
 
 
 @pytest.mark.unit
@@ -348,7 +348,7 @@ def test_a_transport_failure_survives_yfinance_internal_swallowing(monkeypatch, 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("call", _SWALLOWING_LEAVES)
-def test_an_http_4xx_is_still_the_no_data_verdict(monkeypatch, tmp_path, call):
+def test_an_http_404_is_still_the_no_data_verdict(monkeypatch, tmp_path, call):
     # Yahoo's quoteSummary answers 404 for an unknown or delisted symbol, and
     # history reaches the same fetch through its timezone lookup. That is the
     # vendor's verdict on the symbol, not a failure of the wire: under the
@@ -385,7 +385,7 @@ def test_an_http_5xx_surfaces_from_the_quote_scrapers(monkeypatch, tmp_path, cal
 @pytest.mark.unit
 def test_yf_fetch_unhidden_sorts_failures_into_their_lanes():
     # Restored to the caller's hidden answer: the library's own expected
-    # conditions (a delisted symbol's YFTzMissingError) and an HTTP 4xx. Let
+    # conditions (a delisted symbol's YFTzMissingError) and an HTTP 404. Let
     # out: a throttle (for yf_retry's mapping), the library's "Yahoo is down"
     # signal, and every other OSError. The flag comes back either way.
     from yfinance.config import YfConfig
@@ -503,7 +503,7 @@ def test_the_propagation_check_catches_a_leaf_that_degrades_the_throttle(monkeyp
     # typed vendor failure into prose the router reads as a successful answer.
     def degrading_leaf(ticker):
         try:
-            return yfin.yf_fetch_unhidden(lambda: "data")
+            return yfin.yf_fetch_unhidden(lambda: "data", hidden_answer=str)
         except Exception as e:  # noqa: BLE001 - deliberately the buggy shape
             return f"Error retrieving something for {ticker}: {e}"
 
@@ -608,7 +608,7 @@ def test_the_transport_check_catches_a_leaf_that_degrades_it(monkeypatch, tmp_pa
     # else pasted into prose — must fail the transport check.
     def degrading_leaf(ticker):
         try:
-            return yfin.yf_fetch_unhidden(lambda: "data")
+            return yfin.yf_fetch_unhidden(lambda: "data", hidden_answer=str)
         except VendorError:
             raise
         except Exception as e:  # noqa: BLE001 - deliberately the buggy shape

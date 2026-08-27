@@ -132,7 +132,7 @@ class TestTool:
         monkeypatch.setattr(validator, "load_ohlcv", _must_not_be_called)
         out = get_verified_market_snapshot.invoke({"symbol": "COF", "curr_date": curr_date})
         assert out == invalid_date_sentinel(
-            curr_date, what="the verification snapshot", kind="point"
+            curr_date, what="verification snapshot data", kind="point"
         )
 
     def test_tool_keeps_its_looser_parse_on_purpose(self, monkeypatch):
@@ -145,7 +145,22 @@ class TestTool:
         monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: _sample_ohlcv())
         out = get_verified_market_snapshot.invoke({"symbol": "COF", "curr_date": "2026/08/18"})
         assert not out.startswith("INVALID_CURR_DATE")
-        assert "Requested analysis date: 2026/08/18" in out
+        # Accepted, but the header prints the ISO spelling: echoing the slash
+        # form verbatim put an "accepted" header beside a sibling tool's
+        # INVALID_END_DATE for the same string in the same turn (#120).
+        assert "Requested analysis date: 2026-08-18" in out
+        assert "2026/08/18" not in out
+
+    def test_the_no_rows_detail_prints_the_iso_spelling_too(self, monkeypatch):
+        # The other place the caller's spelling reached the model: the
+        # no-rows-before-cutoff raise, served through NO_DATA_AVAILABLE.
+        frame = _sample_ohlcv()
+        frame["Date"] = pd.to_datetime(frame["Date"]) + pd.Timedelta(days=3650)
+        monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: frame)
+        out = get_verified_market_snapshot.invoke({"symbol": "COF", "curr_date": "2026/08/18"})
+        assert out.startswith("NO_DATA_AVAILABLE")
+        assert "on or before 2026-08-18" in out
+        assert "2026/08/18" not in out
 
     def test_tool_turns_stale_data_raise_into_sentinel(self, monkeypatch):
         # load_ohlcv's own NoMarketDataError (e.g. the stale-frame guard) must

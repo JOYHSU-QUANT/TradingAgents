@@ -1,13 +1,12 @@
 import json
 import os
-from datetime import datetime
 from io import StringIO
 
 import pandas as pd
 import requests
 
 from .errors import NoMarketDataError, VendorNotConfiguredError, VendorRateLimitError
-from .utils import _parse_day
+from .utils import _parse_day, normalize_iso_date
 
 API_BASE_URL = "https://www.alphavantage.co/query"
 
@@ -38,25 +37,20 @@ def get_api_key() -> str:
 
 
 def format_datetime_for_api(date_input) -> str:
-    """Convert various date formats to YYYYMMDDTHHMM format required by Alpha Vantage API."""
-    if isinstance(date_input, str):
-        # If already in correct format, return as-is
-        if len(date_input) == 13 and "T" in date_input:
-            return date_input
-        # Try to parse common date formats
-        try:
-            dt = datetime.strptime(date_input, "%Y-%m-%d")
-            return dt.strftime("%Y%m%dT0000")
-        except ValueError:
-            try:
-                dt = datetime.strptime(date_input, "%Y-%m-%d %H:%M")
-                return dt.strftime("%Y%m%dT%H%M")
-            except ValueError:
-                raise ValueError(f"Unsupported date format: {date_input}") from None
-    elif isinstance(date_input, datetime):
-        return date_input.strftime("%Y%m%dT%H%M")
-    else:
-        raise ValueError(f"Date must be string or datetime object, got {type(date_input)}")
+    """A ``yyyy-mm-dd`` date as the ``YYYYMMDDT0000`` stamp the news endpoint takes.
+
+    One parse rule, the same one every routed tool judges a date by
+    (``utils.normalize_iso_date``). This used to also pass a ``YYYYMMDDTHHMM``
+    string through, read ``"%Y-%m-%d %H:%M"`` and accept a ``datetime`` — three
+    branches no caller could reach once the two news getters refused anything
+    but a ``yyyy-mm-dd`` string up front (#120), yet which read as the module's
+    date contract. Raises ValueError for anything else, the way the old
+    fallthrough did.
+    """
+    day = normalize_iso_date(date_input)
+    if day is None:
+        raise ValueError(f"Unsupported date format: {date_input!r}")
+    return day.replace("-", "") + "T0000"
 
 
 class AlphaVantageRateLimitError(VendorRateLimitError):

@@ -78,6 +78,14 @@ def build_verified_market_snapshot(
     indicators: Iterable[str] | None = None,
 ) -> str:
     """Render a ground-truth snapshot: latest OHLCV row, indicators, recent closes."""
+    # Normalised to ISO once, at the boundary, whatever spelling arrived, so
+    # every place that echoes the date below — the header, the no-rows raise
+    # that reaches the model through NO_DATA_AVAILABLE — prints the same
+    # spelling. The parse rule stays the looser pandas one on purpose (#112):
+    # a date pandas reads is one this tool can use. But echoing "2026/08/18"
+    # verbatim put a header the model reads as "accepted" beside a sibling
+    # tool's INVALID_END_DATE for the same string in the same turn (#120).
+    curr_date = pd.to_datetime(curr_date).strftime("%Y-%m-%d")
     # `df` keeps the original capitalized OHLCV columns (Open/High/Low/Close/
     # Volume); stockstats `wrap()` lowercases columns and adds indicator
     # columns, so read raw prices from `df` and indicators from `stock_df`.

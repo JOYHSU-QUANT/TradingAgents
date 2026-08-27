@@ -354,9 +354,11 @@ is a bad argument rather than a timezone, so the chain is withheld again. The ch
 also re-reads the clock immediately before fetching, so a run whose DVOL half timed
 out across UTC midnight cannot serve the next day's book for `curr_date`.
 
-Text this vendor did not author — Deribit's error messages and both caller-supplied
-arguments, `asset` and `curr_date` — is flattened before it is interpolated:
-whitespace collapsed, mid-line markdown markers removed, length capped. The report is assembled into an LLM
+Text this vendor did not author — Deribit's error messages and the caller-supplied
+`asset` — is flattened before it is interpolated:
+whitespace collapsed, mid-line markdown markers removed, length capped (an unusable
+`curr_date` is refused with the shared `INVALID_CURR_DATE` sentinel before any of
+this runs, and that sentinel flattens its own echo). The report is assembled into an LLM
 prompt, so a fragment carrying line breaks could otherwise open a forged heading or
 a second `_Reading:_` line above the real one, and the forgery is what a downstream
 summariser would quote. The flattening is applied where the fragment enters the message rather

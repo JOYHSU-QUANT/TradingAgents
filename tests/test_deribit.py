@@ -2039,22 +2039,29 @@ class TestReport:
         assert "window ending 2026-07-09" in out
         assert "on 2026-07-09" in out
 
-    def test_invalid_curr_date_raises_the_vendor_error_not_a_bare_valueerror(self):
-        # curr_date is an LLM-supplied tool argument. A bare ValueError lands in
-        # route_to_vendor's generic lane and is logged with a traceback as "Vendor
-        # 'deribit' failed" — a caller's typo reported as a vendor outage.
-        with pytest.raises(deribit.DeribitError, match="is not a yyyy-mm-dd date") as excinfo:
-            _report(curr_date="not-a-date")
-        assert type(excinfo.value) is deribit.DeribitError
-        assert "not-a-date" in str(excinfo.value)
+    def test_invalid_curr_date_is_the_shared_refusal_not_a_vendor_error(self):
+        # curr_date is an LLM-supplied tool argument. This used to raise
+        # DeribitError, which the router's OPTIONAL lane rendered as
+        # DATA_UNAVAILABLE — "this source is down" — while the OHLCV tool in
+        # the same turn answered the same string with a retry instruction
+        # (#119). The refusal is now the answer, and no request is made.
+        from tradingagents.dataflows.utils import invalid_date_sentinel
+
+        out, recorder = _run_report(curr_date="not-a-date")
+        assert out == invalid_date_sentinel("not-a-date", what="options market data", kind="point")
+        assert recorder.calls == []
 
     @pytest.mark.parametrize("bad", [None, 20260805, b"2026-08-05", ["2026-08-05"]])
-    def test_a_non_string_curr_date_is_also_the_vendor_error(self, bad):
-        # strptime raises TypeError rather than ValueError for a non-str, so
-        # narrowing the except clause to ValueError alone shipped green — defeating
-        # the comment written specifically to explain why TypeError is caught.
-        with pytest.raises(deribit.DeribitError, match="is not a yyyy-mm-dd date"):
-            _report(curr_date=bad)
+    def test_a_non_string_curr_date_is_also_the_shared_refusal(self, bad):
+        # strptime raises TypeError rather than ValueError for a non-str; the
+        # shared judgement folds both into the same refusal, so a non-string
+        # cannot slip past as a bare TypeError the way a narrowed except once
+        # let it.
+        from tradingagents.dataflows.utils import invalid_date_sentinel
+
+        assert _report(curr_date=bad) == invalid_date_sentinel(
+            bad, what="options market data", kind="point"
+        )
 
     @pytest.mark.parametrize("bad", [12345, ["BTC"], {"symbol": "BTC"}, b"BTC", bytearray(b"BTC")])
     def test_a_non_string_asset_is_the_vendor_error_not_an_attributeerror(self, bad):
@@ -3474,12 +3481,11 @@ class TestToolWrapperForwarding:
     worse, SWAPPING its two arguments — shipped green across all 1115 tests.
 
     The swap is the dangerous one because it fails silently. ``route_to_vendor``
-    would call ``get_options_market_data("2026-08-05", "BTC")``, which raises
-    ``DeribitError("curr_date 'BTC' is not a yyyy-mm-dd date")``; because
-    options_data is an OPTIONAL category the router converts that into the
-    DATA_UNAVAILABLE sentinel. The vendor would be 100% broken in production, on
-    every cycle, with a green suite and nothing in the logs but a degraded
-    optional category.
+    would call ``get_options_market_data("2026-08-05", "BTC")``, which answers
+    the ``INVALID_CURR_DATE`` refusal for ``'BTC'`` (a DeribitError before
+    #119, which the router rendered as DATA_UNAVAILABLE). The vendor would be
+    100% broken in production, on every cycle, with a green suite and nothing
+    in the logs but a refused date.
 
     The wiring tests above assert only on tool NAMES and on ToolNode membership,
     which is exactly why they cannot see a wrong argument order. This pins the
@@ -3678,16 +3684,20 @@ class TestUntrustedTextIsNeutralised:
         assert out.startswith("## Options Volatility — BTC (Deribit)")
 
     def test_a_malformed_curr_date_is_flattened_before_it_is_quoted(self):
-        # curr_date is equally an LLM-written argument, and this message reaches
-        # the model through route_to_vendor's DATA_UNAVAILABLE sentinel. `!r`
-        # escapes newlines but leaves mid-line markers and bounds nothing.
+        # curr_date is equally an LLM-written argument. The answer is now the
+        # shared INVALID_CURR_DATE refusal (#119) rather than this vendor's
+        # own error, and the shared sentence flattens and caps the echo the
+        # way this module's message did — a bare `!r` escapes newlines but
+        # leaves mid-line markers and bounds nothing.
         hostile = "## not a date **at all**" + "z" * 400
-        with pytest.raises(deribit.DeribitError) as excinfo:
-            deribit.get_options_market_data("BTC", hostile)
-        message = str(excinfo.value)
+        message = deribit.get_options_market_data("BTC", hostile)
+        assert message.startswith("INVALID_CURR_DATE")
         assert "#" not in message
         assert "**" not in message
-        assert len(message) < 2 * deribit._MAX_UNTRUSTED_CHARS + 120
+        # Capped at the shared bound exactly: the echo ends in "..." and no
+        # run of z's longer than the cap survives.
+        assert "..." in message
+        assert "z" * (deribit._MAX_UNTRUSTED_CHARS + 1) not in message
 
 
 # --------------------------------------------------------------------------- #

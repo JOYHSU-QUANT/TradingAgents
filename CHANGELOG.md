@@ -10,6 +10,40 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **dataflows: an optional-category getter refuses an unusable `curr_date`
+  instead of reporting the vendor down** (issue #119). The seven
+  date-bounded getters behind `OPTIONAL_CATEGORIES` — Fear & Greed, both
+  ETF-flow vendors, FRED macro, Deribit options, the SoSoValue economic
+  calendar and BTC treasuries — now answer the shared `INVALID_CURR_DATE`
+  sentinel before any request for a `curr_date` that does not parse (`""`,
+  `"abc"`, `"2026/08/18"`, `None`), the verdict the core-category tools have
+  given since #109/#111 (Polymarket's `curr_date` is an optional disclosure
+  input rather than a bound, and is unchanged). They used
+  to raise — a bare `strptime` ValueError from four of them, a vendor-typed
+  error from the other three — which `route_to_vendor`'s optional lane
+  rendered as `DATA_UNAVAILABLE: optional <category> could not be
+  retrieved`, so one bad argument drew "fix the date and retry" from
+  `get_stock_data` and "this source is down, proceed without it" from every
+  positioning and sentiment tool in the same turn. The shared sentinel now
+  flattens markdown control characters in the echoed value and caps it, the
+  guard Deribit and SoSoValue carried in their own messages (now the one
+  definition, `utils.sanitize_untrusted`) — with one difference, since the
+  echo goes back to its author: a marker at the value's edge becomes a space
+  rather than vanishing, so a date refused only for a stray `_` does not
+  come back looking valid; a clean value is echoed unchanged. Each refusal
+  leaves one `INFO` log line naming the argument and the data it would have
+  bounded — returned rather than raised, it never reaches the router's
+  warning lane, so this is an operator's only trace of a model resending an
+  unusable date. Two loose ends from #118 close with it (issue #120):
+  `alpha_vantage_common.format_datetime_for_api` accepts only `yyyy-mm-dd`
+  (its passthrough-stamp, `"%Y-%m-%d %H:%M"` and `datetime` branches were
+  unreachable once both news getters refused anything else up front), and
+  the verified-snapshot header and its no-rows detail print the requested
+  date in ISO, so an accepted `2026/08/18` no longer sits beside a sibling
+  tool's `INVALID_END_DATE` for the same string. The four fundamentals tool
+  descriptions now say the sentinel is a possible answer (issue #112); the
+  optional tools' descriptions are a follow-up.
+
 - **dataflows: a yfinance transport failure is no longer read as a successful
   report** (issue #116). Every yfinance leaf — fundamentals, the three
   statements, insider transactions, both news getters and both stockstats
@@ -164,9 +198,10 @@ Breaking changes within the 0.x line are called out explicitly.
   forward-dated event histories as well as by the calendar) and that the
   snapshot is current, and it no longer extends to events this feed does not
   carry at all, which would have contradicted the standing Fed-decision caveat.
-  A malformed caller argument — a non-integer `look_back_days`, an unparseable
-  `curr_date` — is reported as this vendor's error class rather than escaping
-  as a raw `TypeError`, and the treasuries coverage denominator no longer
+  A non-integer `look_back_days` is reported as this vendor's error class
+  rather than escaping as a raw `TypeError` (an unparseable `curr_date` is
+  answered by the shared refusal described above rather than raised, since
+  #119), and the treasuries coverage denominator no longer
   presents a client-shrunk listing count as the provider's own.
 - **Crypto options-implied volatility (Deribit).** A new keyless `options_data`
   category, bound to the **market** analyst for crypto assets only (vol regime
@@ -338,9 +373,10 @@ Breaking changes within the 0.x line are called out explicitly.
   the rendered sites do, and carry the caller's own symbol plus the fact that a
   proxied asset has no chain on ANY date — a SOL backtest had read as withheld
   for the date, implying a live date would serve it.
-  Vendor error text and both caller-supplied arguments (`asset` and `curr_date`)
-  are flattened before they are interpolated — whitespace collapsed and mid-line
-  markdown markers removed —
+  Vendor error text and the caller-supplied `asset` are flattened before they
+  are interpolated — whitespace collapsed and mid-line markdown markers
+  removed; an unusable `curr_date` is refused with the shared
+  `INVALID_CURR_DATE` sentinel before any of this runs (#119) —
   because the report is assembled into an LLM prompt and a fragment carrying line
   breaks could otherwise open a forged heading or a second `_Reading:_` line
   above the real one. The flattening is applied where the fragment enters the
@@ -453,6 +489,12 @@ Breaking changes within the 0.x line are called out explicitly.
   API key to unset.
 
 ### Changed
+
+- **Breaking for direct callers of `alpha_vantage_common.format_datetime_for_api`**
+  (issue #120): it accepts only a `yyyy-mm-dd` string and raises `ValueError`
+  for the `"YYYYMMDDTHHMM"` passthrough, the `"%Y-%m-%d %H:%M"` string and
+  the `datetime` object it used to read. The routed news tools never sent
+  those (both refuse anything else first), so only a direct caller notices.
 
 - **Hyperliquid: the freshness guard's two bounds now describe a healthy
   feed.** Stale side (issue #92): the three-decision-cycle ceiling (12h) no
@@ -857,8 +899,9 @@ Breaking changes within the 0.x line are called out explicitly.
   below narrowed yfinance's fundamentals: the OHLCV getter refuses a
   slash-separated or time-suffixed date it used to serve, and the ticker-news
   getter refuses the intraday `"YYYY-MM-DD HH:MM"`, `"YYYYMMDDTHHMM"` and
-  `datetime` forms `format_datetime_for_api` reads — the routed tool only ever
-  sends `yyyy-mm-dd`, so this reaches direct callers alone. Both answer with a
+  `datetime` forms `format_datetime_for_api` used to read (#120 later removed
+  them from that helper too) — the routed tool only ever sends `yyyy-mm-dd`,
+  so this reaches direct callers alone. Both answer with a
   retry instruction rather than an error.
 - **Two more vendor failures stop arriving as reports the agent can analyse.**
   `route_to_vendor` never inspects a returned string, so any getter that answers

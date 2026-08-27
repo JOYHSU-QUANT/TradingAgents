@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 import requests
 
 from .errors import VendorError, VendorNotConfiguredError
-from .utils import data_lag_note
+from .utils import data_lag_note, date_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +175,16 @@ def get_macro_data(
         VendorError: When the series endpoint's metadata names a different
             series than requested (identity echo, #36 family) — routed
             callers turn this into try-next-vendor / DATA_UNAVAILABLE.
+
+    An unusable ``curr_date`` answers the shared ``INVALID_CURR_DATE`` sentinel
+    before any request, as the core-category tools do (#119): a bare
+    ``strptime`` ValueError used to reach the router's optional lane and come
+    back as DATA_UNAVAILABLE for what was the caller's own argument.
     """
+    refusal = date_refusal(curr_date, what="macro data", kind="point")
+    if refusal is not None:
+        return refusal
+
     if look_back_days is None:
         look_back_days = DEFAULT_LOOKBACK_DAYS
 

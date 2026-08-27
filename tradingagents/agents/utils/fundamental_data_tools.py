@@ -17,7 +17,9 @@ def get_fundamentals(
         ticker (str): Ticker symbol of the company
         curr_date (str): Current date you are trading at, yyyy-mm-dd
     Returns:
-        str: A formatted report containing comprehensive fundamental data
+        str: A formatted report containing comprehensive fundamental data, or
+        an INVALID_CURR_DATE sentinel if curr_date is not a usable yyyy-mm-dd
+        date (retry with a valid date; do not fabricate values)
     """
     return route_to_vendor("get_fundamentals", ticker, curr_date)
 
@@ -36,7 +38,9 @@ def get_balance_sheet(
         freq (str): Reporting frequency: annual/quarterly (default quarterly)
         curr_date (str): Current date you are trading at, yyyy-mm-dd
     Returns:
-        str: A formatted report containing balance sheet data
+        str: A formatted report containing balance sheet data, or an
+        INVALID_CURR_DATE sentinel if curr_date is supplied but is not a usable
+        yyyy-mm-dd date (retry with a valid date; do not fabricate values)
     """
     return route_to_vendor("get_balance_sheet", ticker, freq, curr_date)
 
@@ -55,7 +59,9 @@ def get_cashflow(
         freq (str): Reporting frequency: annual/quarterly (default quarterly)
         curr_date (str): Current date you are trading at, yyyy-mm-dd
     Returns:
-        str: A formatted report containing cash flow statement data
+        str: A formatted report containing cash flow statement data, or an
+        INVALID_CURR_DATE sentinel if curr_date is supplied but is not a usable
+        yyyy-mm-dd date (retry with a valid date; do not fabricate values)
     """
     return route_to_vendor("get_cashflow", ticker, freq, curr_date)
 
@@ -74,6 +80,8 @@ def get_income_statement(
         freq (str): Reporting frequency: annual/quarterly (default quarterly)
         curr_date (str): Current date you are trading at, yyyy-mm-dd
     Returns:
-        str: A formatted report containing income statement data
+        str: A formatted report containing income statement data, or an
+        INVALID_CURR_DATE sentinel if curr_date is supplied but is not a usable
+        yyyy-mm-dd date (retry with a valid date; do not fabricate values)
     """
     return route_to_vendor("get_income_statement", ticker, freq, curr_date)

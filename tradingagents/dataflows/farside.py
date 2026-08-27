@@ -50,6 +50,7 @@ from .config import get_config
 from .errors import VendorError
 from .sosovalue_common import _cache_rejecter, _read_cache_preamble, _stale_caveat
 from .symbol_utils import classify_crypto_asset
+from .utils import date_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -787,7 +788,15 @@ def get_etf_flow_data(
         flow, the consecutive inflow/outflow streak, the latest day's issuer
         breakdown, and a recent daily-flow table (US$m). Zero/blank-total days
         neither break the streak nor count as flow sessions.
+
+        An unusable ``curr_date`` answers the shared ``INVALID_CURR_DATE``
+        sentinel before any request, as the core-category tools do (#119);
+        the SoSoValue vendor of this tool says the same sentence.
     """
+    refusal = date_refusal(curr_date, what="ETF flows", kind="point")
+    if refusal is not None:
+        return refusal
+
     # A None, zero, or nonsensical negative window (e.g. a hallucinated tool
     # argument) falls back to the default rather than producing a degenerate
     # report: a 0-day window would collapse to just curr_date's single row, whose
@@ -798,9 +807,9 @@ def get_etf_flow_data(
     # Normalise curr_date BEFORE any lexical date comparison below. strptime
     # accepts non-zero-padded input ("2026-6-5"), which then compares wrong
     # against the canonical ISO record dates — '2026-12-31' <= '2026-6-5' is True
-    # — silently admitting future rows and defeating the lookahead guard. Parse
-    # (rejecting genuine garbage) and re-derive the canonical form to compare on.
-    # (fear_greed.get_fear_greed_data carries the same guard.)
+    # — silently admitting future rows and defeating the lookahead guard.
+    # Re-derive the canonical form to compare on; the refusal above already
+    # proved this parses. (fear_greed.get_fear_greed_data carries the same guard.)
     curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     curr_date = curr_dt.strftime("%Y-%m-%d")
 

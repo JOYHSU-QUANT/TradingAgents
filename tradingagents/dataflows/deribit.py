@@ -64,7 +64,6 @@ freshness-sensitive — a cached vol snapshot is worth little.
 
 import logging
 import math
-import re
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
@@ -74,6 +73,7 @@ import requests
 
 from .errors import VendorError, VendorRateLimitError
 from .symbol_utils import classify_crypto_asset
+from .utils import MAX_UNTRUSTED_CHARS, date_refusal, sanitize_untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -575,45 +575,13 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# Everything this module renders is assembled into an LLM prompt, so a fragment
-# that survives verbatim from outside it can forge report structure rather than
-# merely read oddly. Stripped rather than escaped because no rendered figure needs
-# any of these characters, and an escape leaves the character in place for the
-# next consumer to re-interpret.
-#
-# Collapsing whitespace is the load-bearing half: this report's structure is
-# block-level (sections joined by blank lines, headings and labels at the start of
-# a line), so a fragment with no line breaks cannot open a block however it is
-# punctuated. The character strip is the second line of defence, against what
-# still reads as a marker mid-line: "*" and "`" for bold and code spans, and "#"
-# and "|" because a heading or a table row is worth denying even inert.
-#
-# "<" and ">" are deliberately NOT stripped, on the same ground that spares an
-# intraword "_": both are block-level only (a blockquote needs a line start,
-# which whitespace collapsing already denies) and both carry real meaning in the
-# diagnostics this runs on — deleting them turned Deribit's "start_timestamp must
-# be < end_timestamp" into "must be  end_timestamp", destroying the operator's
-# answer rather than merely shortening it.
-#
-# Translated to a SPACE rather than deleted. Deletion joins the fragments either
-# side, and this runs on ``asset`` before classification: "BTC|USD" collapsed to
-# "BTCUSD", which normalize_symbol resolves to BTC, so a symbol this vendor had
-# always refused started producing a confident BTC report. A space keeps the
-# fragments apart and costs nothing, since whitespace is collapsed immediately
-# afterwards.
-_MARKDOWN_CONTROL = str.maketrans(dict.fromkeys("#*`|", " "))
-
-# "_" is handled separately because it is the one marker that also occurs inside
-# ordinary words: Deribit names the offending field in its error messages
-# ("start_timestamp"), and blanket removal turns the most useful part of an
-# operator's diagnostic into "starttimestamp". Only underscores in EMPHASIS
-# position — at a word boundary, where "_Reading:_" sits — are removed; an
-# underscore between two alphanumerics is left alone.
-_EMPHASIS_UNDERSCORE = re.compile(r"(?<![0-9A-Za-z])_|_(?![0-9A-Za-z])")
-
-# Long enough for any real Deribit error message, short enough that a payload
-# cannot bury the report's own sentences under its bulk.
-_MAX_UNTRUSTED_CHARS = 200
+# The flattening itself (which characters, why a space and not deletion, why
+# "<"/">" and intraword "_" survive) is the one shared definition in
+# ``utils.sanitize_untrusted``; this module keeps the reasoning for WHICH of its
+# fragments go through it. The deletion-fuses-tokens hazard was found here:
+# "BTC|USD" collapsed to "BTCUSD", which normalize_symbol resolves to BTC, so a
+# symbol this vendor had always refused started producing a confident BTC report.
+_MAX_UNTRUSTED_CHARS = MAX_UNTRUSTED_CHARS
 
 
 def _sanitize(text: object, *, limit: int | None = None) -> str:
@@ -621,39 +589,29 @@ def _sanitize(text: object, *, limit: int | None = None) -> str:
 
     ``limit`` caps the result, and is passed ONLY where the untrusted fragment is
     ISOLATED: Deribit's ``error.message``, a raw candle row echoed into the
-    malformed-shape error, and the two caller-supplied arguments ``asset`` and
-    ``curr_date`` (the latter twice — once quoted, once inside the ValueError it
-    raised). It is not passed when flattening a whole exception message, because
-    most of that string is this module's own carefully-worded diagnostic: capping
-    there truncated "...points at a response-shape change rather than an empty
-    market" one clause from the end, cutting off the very distinction the sentence
-    exists to draw.
+    malformed-shape error, and the caller-supplied ``asset``. It is not passed
+    when flattening a whole exception message, because most of that string is
+    this module's own carefully-worded diagnostic: capping there truncated
+    "...points at a response-shape change rather than an empty market" one
+    clause from the end, cutting off the very distinction the sentence exists to
+    draw.
 
     Several inputs reach the report without this module choosing their contents:
     Deribit's JSON-RPC ``error.message``, a raw candle row, and the caller-supplied
-    ``asset`` and ``curr_date``.
-    Interpolated raw, any can close the sentence it sits in and open new
-    blocks — a second ``_Reading:_`` line, a fresh ``##`` heading, a fabricated
-    DVOL level — and the forged copy renders ABOVE the real one, so a downstream
-    summariser keeping "the Reading line" quotes the forgery.
+    ``asset`` (``curr_date`` is judged and echoed by the shared date refusal
+    before it gets this far). Interpolated raw, any can close the sentence it
+    sits in and open new blocks — a second ``_Reading:_`` line, a fresh ``##``
+    heading, a fabricated DVOL level — and the forged copy renders ABOVE the
+    real one, so a downstream summariser keeping "the Reading line" quotes the
+    forgery.
 
     Applied where the fragment enters the message, not only where the report
     renders it: an optional category's failure is handed to the model by
     ``route_to_vendor`` as ``DATA_UNAVAILABLE: ... ({error})``, so a vendor string
     embedded in a RAISED error reaches the prompt just as surely as a rendered
     one, and sanitising only the renderers would leave that path open.
-
-    The strip runs FIRST and whitespace is collapsed after it, so neither the
-    spaces the translation introduces nor the ones already in the fragment can
-    survive as a run or rebuild a line break.
     """
-    # Translate first, then collapse: the translation introduces spaces of its own
-    # and they must not survive as a run.
-    stripped = _EMPHASIS_UNDERSCORE.sub("", str(text).translate(_MARKDOWN_CONTROL))
-    stripped = " ".join(stripped.split())
-    if limit is not None and len(stripped) > limit:
-        stripped = stripped[:limit].rstrip() + "..."
-    return stripped
+    return sanitize_untrusted(text, limit=limit)
 
 
 def _request(endpoint: str, params: dict) -> object:
@@ -2583,47 +2541,40 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             (one, where the chain is withheld), so the router can treat it as a
             throttle rather than a broken vendor.
         DeribitError: when nothing could be served — both halves failed, or DVOL
-            failed on a date where the chain is withheld by design — and when
-            curr_date is not a yyyy-mm-dd date. The routing layer then degrades
-            the optional options_data category to a sentinel. Whenever either half
-            survives, the report renders it and names what is missing instead of
-            raising. Also raised for a truthy non-string ``asset``: both
-            caller-supplied arguments are validated into this type rather than
-            being left to escape as a built-in, since the router would report
-            either as a vendor outage.
+            failed on a date where the chain is withheld by design. The routing
+            layer then degrades the optional options_data category to a
+            sentinel. Whenever either half survives, the report renders it and
+            names what is missing instead of raising. Also raised for a truthy
+            non-string ``asset``: validated into this type rather than being
+            left to escape as a built-in, since the router would report it as a
+            vendor outage.
+
+    An unusable ``curr_date`` is not raised at all: it answers the shared
+    ``INVALID_CURR_DATE`` sentinel before any request, as the core-category
+    tools do (#119). It used to be a DeribitError, which the router's optional
+    lane rendered as DATA_UNAVAILABLE — "this source is down" — for what was
+    the caller's own argument, while the OHLCV tool in the same turn told the
+    model to fix the date and retry.
     """
+    refusal = date_refusal(curr_date, what="options market data", kind="point")
+    if refusal is not None:
+        return refusal
     # Normalise curr_date BEFORE any date comparison. strptime accepts
     # non-zero-padded input ("2026-6-5"), which then compares wrong against the
     # canonical ISO candle dates — '2026-12-31' <= '2026-6-5' is True — silently
     # admitting future readings and defeating the lookahead guard. (farside and
-    # fear_greed carry the same guard.)
-    #
-    # Wrapped because curr_date is an LLM-supplied tool argument, and this
-    # function's Raises: contract says DeribitError / VendorRateLimitError. A bare
-    # ValueError (or TypeError for None) escapes into route_to_vendor's generic
-    # `except Exception` lane, which logs it with exc_info and reports "Vendor
-    # 'deribit' failed" — a caller's malformed argument dressed up as a vendor
-    # outage, complete with a traceback pointing at Deribit.
-    try:
-        curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
-    except (ValueError, TypeError) as e:
-        # Flattened for the same reason ``asset`` is, and for the same audience:
-        # this message reaches the model through route_to_vendor's
-        # DATA_UNAVAILABLE sentinel, and curr_date is equally an LLM-written tool
-        # argument. ``!r`` alone escapes newlines but leaves inline markers intact
-        # and bounds nothing — the argument is echoed twice, once here and once
-        # inside the ValueError.
-        detail = _sanitize(curr_date, limit=_MAX_UNTRUSTED_CHARS)
-        raise DeribitError(
-            f"curr_date {detail!r} is not a yyyy-mm-dd date "
-            f"({_sanitize(e, limit=_MAX_UNTRUSTED_CHARS)})"
-        ) from e
-    # The same guard for the other caller-supplied argument, which the comment
-    # above applies to verbatim and stopped one argument short of. A truthy
-    # non-string asset (a resolved-ticker object, a list) reaches
-    # ``normalize_symbol((asset or "").replace(...))`` and escapes as AttributeError
-    # — a caller's bug reported as a Deribit outage, with a traceback naming
-    # Deribit. Falsy values are already safe: they render the no-signal sentence.
+    # fear_greed carry the same guard.) The refusal above already proved this
+    # parses.
+    curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    # The caller-supplied ``asset`` is validated into the vendor's error type
+    # rather than left to escape as a built-in. A truthy non-string asset (a
+    # resolved-ticker object, a list) reaches
+    # ``normalize_symbol((asset or "").replace(...))`` and escapes as
+    # AttributeError into route_to_vendor's generic `except Exception` lane,
+    # which logs it with exc_info and reports "Vendor 'deribit' failed" — a
+    # caller's bug dressed up as a Deribit outage, complete with a traceback
+    # naming Deribit. Falsy values are already safe: they render the no-signal
+    # sentence.
     # ``bytes`` has to be caught by THIS guard rather than left to a duck-typed
     # one: ``bytes.replace`` exists, so a hasattr check passes it straight through
     # to ``normalize_symbol``, where ``.replace("/", "-")`` then raises TypeError

@@ -113,6 +113,7 @@ from .sosovalue_common import (
     load_rolling_snapshot,
     raise_all_failed,
 )
+from .utils import MAX_UNTRUSTED_CHARS, date_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -356,7 +357,7 @@ def _parse_calendar(data: list) -> tuple[list[dict], int, int, int, int, list[st
                 logger.warning(
                     "SoSoValue macro calendar row %s is malformed; dropping it and "
                     "disclosing the drop",
-                    _sanitize(repr(raw), limit=200),
+                    _sanitize(repr(raw), limit=MAX_UNTRUSTED_CHARS),
                 )
             continue
         if raw["date"] in by_date:
@@ -468,7 +469,7 @@ def _parse_event_rows(data: list, name: str) -> list[dict]:
             and all(_is_valid_value(raw.get(k)) for k in ("actual", "forecast", "previous"))
         ):
             raise SoSoValueError(
-                f"Malformed {name!r} history row {_sanitize(repr(raw), limit=200)}"
+                f"Malformed {name!r} history row {_sanitize(repr(raw), limit=MAX_UNTRUSTED_CHARS)}"
             )
         rows.append(
             {
@@ -929,12 +930,17 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         table with surprises, and fixed caveats — including that this feed
         carries no Fed rate decisions.
 
+    An unusable ``curr_date`` answers the shared ``INVALID_CURR_DATE`` sentinel
+    before any request, as the core-category tools do (#119). It used to be a
+    SoSoValueError, which the router's optional lane rendered as
+    DATA_UNAVAILABLE — "this source is down" — for what was the caller's own
+    argument.
+
     Raises:
-        SoSoValueError: if ``curr_date`` is not a yyyy-mm-dd date or
-            ``look_back_days`` is not an integer (a caller's malformed argument
-            is reported as this vendor's error class rather than left to escape
-            as a raw ``ValueError``/``TypeError``, which the router would render
-            into the model-visible sentinel with the argument echoed
+        SoSoValueError: if ``look_back_days`` is not an integer (a caller's
+            malformed argument is reported as this vendor's error class rather
+            than left to escape as a raw ``TypeError``, which the router would
+            render into the model-visible sentinel with the argument echoed
             verbatim); or if the live fetch fails — including on a pure network
             error — and no cache is usable, because none exists or the newest
             is past ``MAX_STALE_DAYS``.
@@ -950,12 +956,18 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     cases is produced by ``route_to_vendor`` catching these, downstream of the
     raise rather than in place of it.
     """
-    # Guarded like curr_date below, and for the same reason: look_back_days is
-    # a caller-supplied tool argument, and a non-int reaches ``<=`` first,
-    # where the TypeError escapes the vendor taxonomy into the router's bare
-    # except and is rendered into the model-visible sentinel. bool is rejected
-    # explicitly even though it passes isinstance(x, int) — True would silently
-    # mean a one-day window rather than the default.
+    # The date is judged first: both arguments are the caller's, and when both
+    # are wrong the date is the one the sibling tools in the same turn are
+    # already asking the model to fix.
+    refusal = date_refusal(curr_date, what="economic calendar data", kind="point")
+    if refusal is not None:
+        return refusal
+
+    # look_back_days is a caller-supplied tool argument, and a non-int reaches
+    # ``<=`` first, where the TypeError escapes the vendor taxonomy into the
+    # router's bare except and is rendered into the model-visible sentinel.
+    # bool is rejected explicitly even though it passes isinstance(x, int) —
+    # True would silently mean a one-day window rather than the default.
     if look_back_days is not None and (
         isinstance(look_back_days, bool) or not isinstance(look_back_days, int)
     ):
@@ -967,27 +979,9 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
 
     # Normalise curr_date BEFORE any lexical date comparison: strptime accepts
     # non-zero-padded input ("2026-6-5"), which compares wrong against
-    # canonical ISO row dates and would silently admit future rows.
-    #
-    # Guarded like deribit's twin: curr_date is an LLM-written tool argument,
-    # and strptime's own ValueError echoes it verbatim ("time data '...' does
-    # not match format"). ValueError/TypeError are outside the vendor taxonomy,
-    # so that message escapes to the router's bare except and is rendered into
-    # the model-visible DATA_UNAVAILABLE sentinel unsanitized and unbounded —
-    # a caller's malformed argument dressed up as a SoSoValue outage.
-    try:
-        curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
-    except (ValueError, TypeError) as e:
-        # The exception's own message only repeats curr_date and the format
-        # string, so echoing it prints the caller's argument a SECOND time —
-        # and _sanitize's ``limit`` is documented for isolated fragments, never
-        # for flattening a whole exception message. The value is echoed once,
-        # capped, with the type name carrying what the TypeError case would
-        # otherwise have contributed.
-        detail = _sanitize(curr_date, limit=200)
-        raise SoSoValueError(
-            f"curr_date {detail!r} ({type(curr_date).__name__}) is not a yyyy-mm-dd date"
-        ) from e
+    # canonical ISO row dates and would silently admit future rows. The
+    # refusal above already proved this parses.
+    curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     curr_date = curr_dt.strftime("%Y-%m-%d")
     ahead_end = (curr_dt + timedelta(days=AHEAD_DAYS)).strftime("%Y-%m-%d")
     window_start = (curr_dt - timedelta(days=look_back_days)).strftime("%Y-%m-%d")

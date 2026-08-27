@@ -116,15 +116,99 @@ _DATE_ARGUMENT_TAGS = {
 # ``as_of_date`` must not silently be told it asked for a window.
 DateKind = Literal["point", "window"]
 
+# Everything the vendor modules render — and every error they raise, since
+# ``route_to_vendor`` hands an optional category's failure to the model as
+# ``DATA_UNAVAILABLE: ... ({error})`` — is assembled into an LLM prompt, so a
+# fragment that survives verbatim from outside the module can forge report
+# structure rather than merely read oddly. The one definition of that
+# flattening (it used to be copied into deribit and sosovalue_common, whose
+# ``_sanitize`` now delegate here); the vendor modules keep the reasoning for
+# WHICH fragments they flatten.
+#
+# Collapsing whitespace is the load-bearing half: the reports are block-level
+# (sections joined by blank lines, headings and labels at the start of a line),
+# so a fragment with no line breaks cannot open a block however it is
+# punctuated. The character strip is the second line of defence, against what
+# still reads as a marker mid-line: "*" and "`" for bold and code spans, "#"
+# and "|" because a heading or a table row is worth denying even inert. "<"
+# and ">" are deliberately NOT stripped: both are block-level only, and both
+# carry real meaning in vendor diagnostics ("start_timestamp must be <
+# end_timestamp"). Translated to a SPACE rather than deleted: deletion joins
+# the fragments either side and can fuse two tokens into a third that reads as
+# legitimate ("BTC|USD" → "BTCUSD").
+MARKDOWN_CONTROL = str.maketrans(dict.fromkeys("#*`|", " "))
+
+# "_" is handled separately because it also occurs inside ordinary words (a
+# field name in a vendor diagnostic, an event or company name). Only underscores
+# in EMPHASIS position — at a word boundary, where "_caveat._" lines sit — are
+# removed; one between two alphanumerics stays.
+EMPHASIS_UNDERSCORE = re.compile(r"(?<![0-9A-Za-z])_|_(?![0-9A-Za-z])")
+
+# Long enough for any real vendor error message or caller argument, short
+# enough that a payload cannot bury the report's own sentences under its bulk.
+MAX_UNTRUSTED_CHARS = 200
+
+
+_WHITESPACE_RUN = re.compile(r"\s+")
+
+
+def sanitize_untrusted(text: object, *, limit: int | None = None, keep_edges: bool = False) -> str:
+    """Flatten a fragment the vendor did not author so it cannot forge structure.
+
+    The strip runs FIRST and whitespace is collapsed after it, so neither the
+    spaces the translation introduces nor the ones already in the fragment can
+    survive as a run or rebuild a line break inside a table cell. ``limit``
+    caps the result and is passed only where the fragment is ISOLATED (an
+    echoed raw row or argument in a raised message), never when flattening a
+    whole exception message — most of that string is the module's own
+    diagnostic, and capping there would truncate the sentence that carries the
+    meaning.
+
+    ``keep_edges`` is for echoing a REFUSED value back to its author: markers
+    become a space rather than vanishing, and nothing is trimmed off the ends,
+    so ``"_2026-08-18"`` cannot come back as ``2026-08-18`` inside a sentence
+    calling it invalid. A rendered vendor fragment wants the default — there
+    the marker is noise and a boundary space would rebuild a table cell.
+    """
+    marker = " " if keep_edges else ""
+    flat = EMPHASIS_UNDERSCORE.sub(marker, str(text).translate(MARKDOWN_CONTROL))
+    flat = _WHITESPACE_RUN.sub(" ", flat) if keep_edges else " ".join(flat.split())
+    if limit is not None and len(flat) > limit:
+        flat = (flat[:limit] if keep_edges else flat[:limit].rstrip()) + "..."
+    return flat
+
+
+def _echo_untrusted(value) -> str:
+    """The refused date argument, quoted, flattened and capped, for the sentinel.
+
+    The value is the model's own text echoed back into a sentence it reads, so
+    it gets the vendor flattening with ``keep_edges`` (see there). A string is
+    capped BEFORE it is quoted, so the quotes stay balanced and an escape
+    sequence is never cut in half; a clean value such as ``'abc'`` comes
+    through byte for byte.
+    """
+    if isinstance(value, str):
+        return repr(sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS, keep_edges=True))
+    try:
+        raw = repr(value)
+    except Exception:  # noqa: BLE001 — a refusal must not become an untyped raise
+        # Only a direct caller can hand over an object whose repr raises; the
+        # tool schemas send JSON values. Still, the refusal is what stands
+        # between that caller and the router's "vendor down" lane.
+        raw = f"<{type(value).__name__} value>"
+    return sanitize_untrusted(raw, limit=MAX_UNTRUSTED_CHARS, keep_edges=True)
+
 
 def invalid_date_sentinel(value, *, what: str, kind: DateKind, param: str = "curr_date") -> str:
     """The sentinel served when a supplied date argument is not a usable date.
 
-    Loud to the LLM (it can retry with a valid date), leaks no data, and never
-    raises: the categories it serves are NON-optional, so a ValueError escaping
-    ``route_to_vendor`` (``raise first_error``) would crash the ToolNode-wrapped
-    graph run, unlike the optional farside/F&G vendors whose raise degrades to a
-    sentinel.
+    Loud to the LLM (it can retry with a valid date), leaks no data, and is
+    RETURNED, never raised, by every date-taking routed tool, core or optional:
+    the router serves any returned string as the tool's answer, whereas a raise
+    is judged by the category — a core one crashes the ToolNode-wrapped run
+    (``raise first_error``), and an optional one is rendered as "this source is
+    down, proceed without it" (#119), a verdict the model cannot fix by
+    retrying with a better argument.
 
     Shared by both vendors serving each routed tool so the agent reads the same
     sentence either way (#89) — which vendor ``data_vendors`` selected is not
@@ -136,6 +220,11 @@ def invalid_date_sentinel(value, *, what: str, kind: DateKind, param: str = "cur
     ticker-news tools take ``start_date``/``end_date`` — and must be one of
     :data:`_DATE_ARGUMENT_TAGS`. The fundamentals sentence this began as is
     reproduced byte for byte by ``what="fundamentals", kind="point"``.
+
+    The echoed value is flattened and capped (see :func:`_echo_untrusted`):
+    the optional-category getters used to carry that guard in their own
+    vendor-error messages (#119 moved them onto this sentinel), and the core
+    tools never had it.
     """
     tag = _DATE_ARGUMENT_TAGS[param]
     consequence = (
@@ -144,7 +233,8 @@ def invalid_date_sentinel(value, *, what: str, kind: DateKind, param: str = "cur
         else f"the {what} window cannot be resolved"
     )
     return (
-        f"{tag}: {param} {value!r} is not a valid yyyy-mm-dd date, so {consequence}. "
+        f"{tag}: {param} {_echo_untrusted(value)} is not a valid yyyy-mm-dd date, "
+        f"so {consequence}. "
         f"No data returned; retry with a valid yyyy-mm-dd date. Do not fabricate values."
     )
 
@@ -179,6 +269,11 @@ def date_refusal(
         return None
     if value is not None and normalize_iso_date(value) is not None:
         return None
+    # The refusal is RETURNED, so it never reaches the router's warning lane;
+    # without this line an operator's log shows nothing for a model that keeps
+    # sending a date no tool can use (#119). Info, not warning: the model is
+    # told to retry, and the echo is the flattened one the sentence carries.
+    logger.info("Refusing unusable %s %s for %s", param, _echo_untrusted(value), what)
     return invalid_date_sentinel(value, what=what, kind=kind, param=param)
 
 

@@ -8,7 +8,7 @@ from dateutil.relativedelta import relativedelta
 
 from .config import get_config
 from .errors import VendorError
-from .stockstats_utils import yf_retry
+from .stockstats_utils import yf_fetch_unhidden, yf_retry
 from .symbol_utils import normalize_symbol
 
 # The date refusals live in utils so the Alpha Vantage vendor serving the same
@@ -111,7 +111,12 @@ def get_news_yfinance(
     resolved = "" if canonical == ticker else f" (resolved to {canonical})"
     try:
         stock = yf.Ticker(canonical)
-        news = yf_retry(lambda: stock.get_news(count=article_limit))
+        # Through the shared un-hidden boundary like every other yfinance leaf
+        # (#116). get_news itself hides only a body that is not JSON, which
+        # still answers the empty list; a reset or a timeout at its post
+        # propagates either way, and a "Will be right back" page is the
+        # library's YFDataException, which the boundary lets out.
+        news = yf_fetch_unhidden(lambda: stock.get_news(count=article_limit), hidden_answer=list)
 
         if not news:
             return f"No news found for {ticker}{resolved}"
@@ -145,6 +150,10 @@ def get_news_yfinance(
 
     except VendorError:
         raise  # Typed vendor failures take their router lanes (#67)
+    except OSError:
+        # Transport failures are not reports; the type facts are in
+        # y_finance.get_fundamentals (#116).
+        raise
     except Exception as e:
         return f"Error fetching news for {ticker}: {str(e)}"
 
@@ -246,5 +255,7 @@ def get_global_news_yfinance(
 
     except VendorError:
         raise  # Typed vendor failures take their router lanes (#67)
+    except OSError:
+        raise  # Transport failures are not reports; see y_finance.get_fundamentals (#116)
     except Exception as e:
         return f"Error fetching global news: {str(e)}"

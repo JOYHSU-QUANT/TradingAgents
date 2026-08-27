@@ -369,17 +369,34 @@ def test_get_balance_sheet_returns_error_string_on_unparseable_curr_date(monkeyp
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("registry", ["_CSV_COLUMN_MAP", "_INDICATOR_REQUESTS"])
+@pytest.mark.parametrize(
+    "registry", ["_CSV_COLUMN_MAP", "_INDICATOR_REQUESTS", "_INDICATOR_DESCRIPTIONS"]
+)
 def test_the_supported_indicators_and_each_wiring_registry_cover_the_same_set(registry):
-    # Two wiring invariants in one shape (#31, #106). An indicator supported but
-    # absent from a registry used to answer an "Error: ..." string the router
-    # reads as a report — the CSV-column half would previously have rendered
-    # whatever column happened to be second as RSI values. Set EQUALITY, not
-    # subtraction: an entry added to a registry alone is drift too, and the
+    # Three wiring invariants in one shape (#31, #106, #117). An indicator
+    # supported but absent from a registry used to answer an "Error: ..." string
+    # the router reads as a report — the CSV-column half would previously have
+    # rendered whatever column happened to be second as RSI values, and the
+    # description half a "No description available." placeholder. Set EQUALITY,
+    # not subtraction: an entry added to a registry alone is drift too, and the
     # subtraction form this replaced could not see it.
     assert set(getattr(avi, registry)) | avi._NO_ENDPOINT_INDICATORS == set(
         avi._SUPPORTED_INDICATORS
     )
+
+
+@pytest.mark.unit
+def test_an_unsupported_indicator_is_the_caller_mistake_type(monkeypatch):
+    # The wrapper renders exactly this type as report text (#117); a plain
+    # ValueError would now reach the ToolNode as a failure instead. Raised
+    # before any request.
+    from tradingagents.dataflows.errors import UnsupportedIndicatorError
+
+    monkeypatch.setattr(
+        avi, "_make_api_request", lambda *a, **k: pytest.fail("no request may be made")
+    )
+    with pytest.raises(UnsupportedIndicatorError, match="not supported"):
+        avi.get_indicator("AAPL", "bogus", "2026-06-01", 30)
 
 
 # Independently transcribed from the elif ladder the dispatch table replaced
@@ -441,14 +458,17 @@ def test_each_indicator_issues_the_request_the_elif_ladder_used_to(monkeypatch, 
     [
         ("_CSV_COLUMN_MAP", "no CSV column mapping"),
         ("_INDICATOR_REQUESTS", "no Alpha Vantage request"),
+        ("_INDICATOR_DESCRIPTIONS", "no description"),
     ],
 )
 def test_a_wiring_gap_raises_before_any_request(monkeypatch, registry, expected):
-    # Either gap used to come back as an "Error: ..." string the router accepts
-    # as a report — and the missing-column one would previously have rendered
-    # whatever column happened to be second as RSI values (#31). Both are our
-    # own wiring bugs, not vendor conditions, so they raise before a request is
-    # made rather than after paying for one.
+    # Any of these gaps used to come back as an "Error: ..." string the router
+    # accepts as a report — the missing-column one would previously have
+    # rendered whatever column happened to be second as RSI values (#31), and
+    # the missing-description one a "No description available." placeholder
+    # from a function-local dict nothing tested (#117). All are our own wiring
+    # bugs, not vendor conditions, so they raise before a request is made
+    # rather than after paying for one.
     monkeypatch.delitem(getattr(avi, registry), "rsi")
     monkeypatch.setattr(
         avi, "_make_api_request", lambda *a, **k: pytest.fail("no request may be made")

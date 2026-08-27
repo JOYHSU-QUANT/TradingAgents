@@ -24,7 +24,7 @@ class _FakeTicker:
 
 def _patch_ticker(monkeypatch, **attrs):
     monkeypatch.setattr(yfin.yf, "Ticker", lambda symbol: _FakeTicker(**attrs))
-    monkeypatch.setattr(yfin, "yf_retry", lambda fn: fn())
+    monkeypatch.setattr(yfin, "yf_fetch_unhidden", lambda fn, **kw: fn())
 
 
 def _statement(*cols):
@@ -380,6 +380,69 @@ class TestUnusableCurrDateIsVendorAgnostic:
             filter_financials_by_date(frame, "")
         assert filter_financials_by_date(frame, None) is frame
 
+    def test_the_shared_filter_refuses_an_unusable_bound_even_on_an_empty_frame(self):
+        from tradingagents.dataflows.stockstats_utils import filter_financials_by_date
+
+        # "A present-but-unusable curr_date RAISES" used to hold only for a
+        # frame with columns: emptiness short-circuited above the check, so the
+        # docstring's unconditional sentence was a conditional one. Harmless —
+        # an empty frame has no future period to leak — but the contract is
+        # now the one stated (#117). A usable bound still serves the empty
+        # frame untouched.
+        empty = pd.DataFrame()
+        with pytest.raises(ValueError, match="look-ahead guard"):
+            filter_financials_by_date(empty, "")
+        assert filter_financials_by_date(empty, "2026-08-18") is empty
+
+    def test_a_served_statement_coerces_its_labels_once(self, monkeypatch):
+        # The statement lane measured "did any column carry a fiscal period"
+        # with one pass over the labels and the filter took a second, so
+        # pandas' "Could not infer format" warning named the same site twice
+        # (#112). Counted on the UNFILTERED label set — two columns here, one
+        # of which the bound drops — because the freshness note legitimately
+        # reads the one-column served set afterwards.
+        import tradingagents.dataflows.stockstats_utils as su
+
+        seen = []
+        real = su.coerce_period_labels
+
+        def counting(labels):
+            seen.append(len(list(labels)))
+            return real(labels)
+
+        monkeypatch.setattr(su, "coerce_period_labels", counting)
+        monkeypatch.setattr(yfin, "coerce_period_labels", counting)
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement("2026-03-31", "2027-03-31"))
+        out = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+        assert "Balance Sheet" in out
+        assert seen.count(2) == 1, seen
+
+    def test_both_vendors_report_a_schema_break_without_naming_the_date(self, monkeypatch):
+        # A wholly undatable statement is a vendor fault that has nothing to
+        # do with the analysis date, so neither vendor's reason names it —
+        # the coverage-gap reasons do, and naming it here too would read as
+        # one of those (#112). One decision, pinned on both sides; the log
+        # line is where the date lives.
+        from tradingagents.dataflows.errors import NoMarketDataError
+
+        av_body = (
+            '{"symbol": "AAPL", "quarterlyReports": '
+            '[{"fiscalDateEnding": null}, {"fiscalDateEnding": "n/a"}]}'
+        )
+        with pytest.raises(NoMarketDataError) as av_exc:
+            _patch_av_request(monkeypatch, av_body).get_balance_sheet(
+                "AAPL", "quarterly", "2026-08-18"
+            )
+        assert "carried no usable fiscalDateEnding" in str(av_exc.value)
+        assert "2026-08-18" not in str(av_exc.value)
+
+        broken = pd.DataFrame({"foo": [1.0], "bar": [2.0]}, index=["Total Assets"])
+        _patch_ticker(monkeypatch, quarterly_balance_sheet=broken)
+        with pytest.raises(NoMarketDataError) as yf_exc:
+            yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
+        assert "carried no usable fiscal period" in str(yf_exc.value)
+        assert "2026-08-18" not in str(yf_exc.value)
+
 
 def _tz_statement(*cols, tz="UTC"):
     """Statement frame whose fiscal-period columns carry a timezone."""
@@ -631,6 +694,21 @@ class TestInsiderLagNote:
         assert "Data lag" not in out
         assert "Insider Transactions" in out
 
+    def test_mixed_format_dates_are_each_read_on_their_own_terms(self, monkeypatch):
+        # Label-by-label parsing (#110) reads ['2020-01-01', '01/02/2020'] as
+        # two dates; the vectorised call it replaced inferred one format from
+        # the first value and made the second NaT (measured, pandas 2.3.3). So
+        # the newest filing on a mixed stream is 2020-01-02, not 2020-01-01 —
+        # a reading that was unpinned, and one this path only reaches because
+        # yfinance happens to hand it datetime64 today rather than strings
+        # (#117). No look-ahead risk either way: a future date still fails the
+        # cutoff.
+        df = pd.DataFrame({"Start Date": ["2020-01-01", "01/02/2020"], "Shares": [1, 2]})
+        _patch_ticker(monkeypatch, insider_transactions=df)
+        out = yfin.get_insider_transactions("AAPL")
+        note_line = next((line for line in out.splitlines() if "Data lag" in line), "")
+        assert "2020-01-02" in note_line
+
 
 @pytest.mark.unit
 class TestInsiderBoundIsVendorAgnostic:
@@ -726,7 +804,7 @@ class TestEmptyNewsWindowIsVendorAgnostic:
                 get_news=lambda count: [{"title": "Old news", "providerPublishTime": self._STALE}]
             ),
         )
-        monkeypatch.setattr(yfnews, "yf_retry", lambda fn: fn())
+        monkeypatch.setattr(yfnews, "yf_fetch_unhidden", lambda fn, **kw: fn())
         yf_out = yfnews.get_news_yfinance("AAPL", "2026-06-01", "2026-06-05")
 
         av_out = self._av_empty_feed(monkeypatch).get_news("AAPL", "2026-06-01", "2026-06-05")

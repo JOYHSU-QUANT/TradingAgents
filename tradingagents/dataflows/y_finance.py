@@ -6,7 +6,7 @@ import pandas as pd
 import yfinance as yf
 from dateutil.relativedelta import relativedelta
 
-from .errors import VendorError
+from .errors import UnsupportedIndicatorError, VendorError
 from .stockstats_utils import (
     StockstatsUtils,
     _assert_ohlcv_not_stale,
@@ -14,7 +14,7 @@ from .stockstats_utils import (
     filter_financials_by_date,
     load_ohlcv,
     yf_fetch_statement,
-    yf_retry,
+    yf_fetch_unhidden,
 )
 from .symbol_utils import NoMarketDataError, normalize_symbol
 
@@ -68,9 +68,13 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title
         # tz-aware frame: the coercion raised, the count fell back to zero, and
         # a frame whose periods merely all postdate curr_date was then reported
         # as a vendor schema break — the opposite of what this measurement
-        # exists to separate (measured, pandas 2.3.3).
-        datable = sum(not pd.isna(p) for p in coerce_period_labels(data.columns)[0])
-        data = filter_financials_by_date(data, curr_date)
+        # exists to separate (measured, pandas 2.3.3). The coerced labels are
+        # handed to the filter rather than re-derived there: each pass can
+        # emit pandas' "Could not infer format" warning, and two passes named
+        # this one site twice (#112).
+        coerced = coerce_period_labels(data.columns)
+        datable = sum(not pd.isna(p) for p in coerced[0])
+        data = filter_financials_by_date(data, curr_date, coerced=coerced)
     except (TypeError, ValueError) as e:
         # The per-label parse covers both measured ways a tz-aware statement
         # frame used to reach here (#110); a label whose TYPE the parser refuses
@@ -192,7 +196,13 @@ def get_YFin_data_online(
     # end_date row (and the current day when end_date is today). Request one day
     # past end_date so the requested range is actually inclusive (#986/#987).
     end_inclusive = (end_dt + relativedelta(days=1)).strftime("%Y-%m-%d")
-    data = yf_retry(lambda: ticker.history(start=start_date, end=end_inclusive))
+    # Un-hidden so a transport failure surfaces instead of being swallowed
+    # into the empty frame the no-data check below would read as an unknown
+    # symbol (#116); a genuinely missing symbol still answers that frame.
+    data = yf_fetch_unhidden(
+        lambda: ticker.history(start=start_date, end=end_inclusive),
+        hidden_answer=pd.DataFrame,
+    )
 
     # Empty result means the symbol is unknown/delisted. Raise a typed error
     # instead of returning prose: the routing layer turns it into a single
@@ -309,7 +319,7 @@ def get_stock_stats_indicators_window(
     }
 
     if indicator not in best_ind_params:
-        raise ValueError(
+        raise UnsupportedIndicatorError(
             f"Indicator {indicator} is not supported. Please choose from: {list(best_ind_params.keys())}"
         )
 
@@ -355,6 +365,12 @@ def get_stock_stats_indicators_window(
         # per-day fallback loop re-runs the same throttled fetch and then
         # renders prose the router reads as a successful answer.
         raise
+    except OSError:
+        # A transport failure is not a report, and here it was worse than
+        # prose: the per-day fallback below re-ran the failed fetch once per
+        # day of the window and rendered a column of blanks (#116). See
+        # get_fundamentals for the measured type facts behind OSError.
+        raise
     except Exception as e:
         print(f"Error getting bulk stockstats data: {e}")
         # Fallback to original implementation if bulk method fails
@@ -371,7 +387,10 @@ def get_stock_stats_indicators_window(
         f"## {indicator} values from {before.strftime('%Y-%m-%d')} to {end_date}:\n\n"
         + ind_string
         + "\n\n"
-        + best_ind_params.get(indicator, "No description available.")
+        # Indexed, not .get() with a placeholder: membership was checked
+        # against this same dict above, so a fallback string here could only
+        # ever hide a later split of "supported" from "described" (#117).
+        + best_ind_params[indicator]
     )
 
     return result_str
@@ -428,6 +447,8 @@ def get_stockstats_indicator(
         )
     except VendorError:
         raise  # Typed vendor failures take their router lanes (#67)
+    except OSError:
+        raise  # Transport failures are not reports; see get_fundamentals (#116)
     except Exception as e:
         print(
             f"Error getting stockstats indicator data for indicator {indicator} on {curr_date}: {e}"
@@ -449,7 +470,12 @@ def get_fundamentals(
     canonical = normalize_symbol(ticker)
     try:
         ticker_obj = yf.Ticker(canonical)
-        info = yf_retry(lambda: ticker_obj.info)
+        # Un-hidden: the quote scraper swallows a non-429 HTTP failure into a
+        # None its own parser then trips over, which the broad handler below
+        # rendered as "Error retrieving fundamentals ..." prose (#116). The
+        # stub dict is what an unknown symbol's 404 answered before, and the
+        # "no fields" check below is what turns it into no-data.
+        info = yf_fetch_unhidden(lambda: ticker_obj.info, hidden_answer=dict)
 
         if not info:
             raise NoMarketDataError(ticker, canonical, "no fundamentals returned")
@@ -519,6 +545,28 @@ def get_fundamentals(
 
     except VendorError:
         raise  # Typed vendor failures take their router lanes (#67)
+    except OSError:
+        # A transport failure is not a report. yfinance 1.4.1 fetches through
+        # curl_cffi, and its request exceptions (ConnectionError, Timeout,
+        # DNSError, HTTPError) reach this getter as raised once
+        # yf_fetch_unhidden has switched the scrapers' own swallow off —
+        # measured: a session raising curl_cffi's ConnectionError surfaces
+        # from ``data.py``'s crumb fetch unwrapped, and a 5xx from the
+        # quoteSummary fetch's raise_for_status. Every one of those types,
+        # like ``requests.RequestException``, subclasses OSError,
+        # and nothing in yfinance's own YFException family does, so this one
+        # clause covers both transport libraries without touching the taxonomy
+        # lane above. It is wider than the wire on purpose: the OHLCV cache in
+        # load_ohlcv raises OSError too (a locked or read-only cache dir), and
+        # a cache this process cannot read or write is no more a report than
+        # a reset is. It sits before the broad handler below, which used to
+        # turn a reset or a timeout into "Error retrieving ..." prose
+        # route_to_vendor reads as a successful report: the chain stopped at
+        # the vendor that had just failed and the agent analysed the error
+        # sentence as fundamentals (#116). The broad handler keeps its job for
+        # a vendor-library bug, which must not abort a run another data point
+        # could still serve.
+        raise
     except Exception as e:
         return f"Error retrieving fundamentals for {ticker}: {str(e)}"
 
@@ -547,6 +595,8 @@ def get_balance_sheet(
 
     except VendorError:
         raise  # Typed vendor failures take their router lanes (#67)
+    except OSError:
+        raise  # Transport failures are not reports; see get_fundamentals (#116)
     except Exception as e:
         return f"Error retrieving balance sheet for {ticker}: {str(e)}"
 
@@ -571,6 +621,8 @@ def get_cashflow(
 
     except VendorError:
         raise  # Typed vendor failures take their router lanes (#67)
+    except OSError:
+        raise  # Transport failures are not reports; see get_fundamentals (#116)
     except Exception as e:
         return f"Error retrieving cash flow for {ticker}: {str(e)}"
 
@@ -597,6 +649,8 @@ def get_income_statement(
 
     except VendorError:
         raise  # Typed vendor failures take their router lanes (#67)
+    except OSError:
+        raise  # Transport failures are not reports; see get_fundamentals (#116)
     except Exception as e:
         return f"Error retrieving income statement for {ticker}: {str(e)}"
 
@@ -606,7 +660,12 @@ def get_insider_transactions(ticker: Annotated[str, "ticker symbol of the compan
     canonical = normalize_symbol(ticker)
     try:
         ticker_obj = yf.Ticker(canonical)
-        data = yf_retry(lambda: ticker_obj.insider_transactions)
+        # Un-hidden: the holders scraper swallows a non-429 HTTP failure into
+        # an empty frame, which the "no filings" sentence below would then
+        # claim as coverage (#116).
+        data = yf_fetch_unhidden(
+            lambda: ticker_obj.insider_transactions, hidden_answer=pd.DataFrame
+        )
 
         # Empty is normal here (many valid symbols have no insider filings),
         # so report it plainly rather than treating the symbol as invalid.
@@ -645,5 +704,7 @@ def get_insider_transactions(ticker: Annotated[str, "ticker symbol of the compan
 
     except VendorError:
         raise  # Typed vendor failures take their router lanes (#67)
+    except OSError:
+        raise  # Transport failures are not reports; see get_fundamentals (#116)
     except Exception as e:
         return f"Error retrieving insider transactions for {ticker}: {str(e)}"

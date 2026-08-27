@@ -13,6 +13,11 @@ these (or a thin vendor-named subclass) and needs no new ``except`` clause.
 The number of types is the number of distinct router reactions, not the number
 of human-describable causes: empty and stale data get identical handling, so
 they share ``NoMarketDataError`` and differ only in the free-text ``detail``.
+
+``UnsupportedIndicatorError`` sits outside that tree on purpose: naming an
+indicator no vendor computes is a caller mistake, not a vendor condition. The
+router moves on to the next vendor without logging a traceback, and the
+indicator tool wrapper tells it apart from every other ``ValueError``.
 """
 
 from __future__ import annotations
@@ -52,4 +57,19 @@ class VendorNotConfiguredError(VendorError, ValueError):
 
     Also a ``ValueError`` so existing callers that catch ``ValueError`` keep
     working while the routing layer can treat it as "vendor unavailable".
+    """
+
+
+class UnsupportedIndicatorError(ValueError):
+    """The caller asked for an indicator no vendor computes.
+
+    A caller mistake, not a vendor condition, so not a ``VendorError``. The
+    ``get_indicators`` tool wrapper renders this type as report text — a bad
+    LLM-supplied name should cost one indicator, not the whole call — and
+    lets other ``ValueError``s, ``VendorNotConfiguredError`` above included,
+    reach the ToolNode as the failures they are; it used to catch the whole
+    family, so a missing API key was pasted into the market report as prose
+    (#117). ``route_to_vendor`` logs it without a traceback and keeps the
+    chain going, since another vendor may compute the name. Still a
+    ``ValueError`` so callers that catch that keep working.
     """

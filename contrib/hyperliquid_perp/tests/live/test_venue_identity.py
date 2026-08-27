@@ -241,6 +241,21 @@ def test_a_misroute_of_one_cloid_latches_despite_coherent_answers_about_others(d
     assert len(list(payload_dir.glob("orderStatus-*.json"))) == 1
 
 
+def test_two_cloids_below_threshold_do_not_latch_in_aggregate(db):
+    # ``latched`` is the WORST cloid's streak, never a sum across cloids: two
+    # orders each three answers deep must not read as one fault of six — that
+    # would let ordinary multi-order flakiness impersonate the identity fault.
+    venue = _Venue()
+    venue.by_cloid = {_OURS: _misrouted("1"), _OURS_2: _misrouted("2")}
+    monitor = _monitor(db, venue)
+    for _ in range(K - 2):
+        _probe_expecting_unreadable(monitor, cloid=_OURS)
+        _probe_expecting_unreadable(monitor, cloid=_OURS_2)
+    assert monitor.unreadable_streak == K - 2
+    assert monitor.latched is False
+    assert _latch_rows(db) == []
+
+
 def test_a_readable_answer_resets_only_its_own_cloids_streak(db):
     venue = _Venue()
     venue.by_cloid = {_OURS: _misrouted("1")}

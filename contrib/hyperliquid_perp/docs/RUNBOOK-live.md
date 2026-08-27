@@ -579,7 +579,15 @@ python -m contrib.hyperliquid_perp safe-mode --run-id live-BTC --db live_trading
 
 **意思**：交易所連續多次對 orderStatus 給出「讀不出來是我們這張單」的答案——回的是**別人**
 的 cloid，或是這個 build 認不得的形狀。門檻與當下計數寫在 `protection_order_events`
-那列 `identity_fault_latched` 的 `detail` 裡。
+那列 `identity_fault_latched` 的 `detail` 裡。**計數走的是整個 process 共用的一個 `VenueIdentityMonitor`，但計數本身每個 cloid 各自一條**（issue #80）：
+protection 的兩個探測點、reconciliation 每張單的 orderStatus 查詢、以及 §18.2 shutdown 的
+disarm 交叉檢查，走的是同一個 `VenueIdentityMonitor`——所以故障在哪個消費者身上被問到都算同一串，
+`detail` 會寫出是哪一個站點跨過門檻的（計數**每個 cloid 一條**——venue 只誤路由其中一張單、
+其他答得好時，那張單自己的連續次數照樣累積到門檻）。升級成 manual 的時點有三個：engine 每 tick 在
+§17 sync 之後、`reconcile_and_apply` 每一輪對帳之後、CLI 在 shutdown sweep 之後——三處都會把升級
+寫進 SQLite（`enter` 冪等，同一 episode 不重複寫列），shutdown 那次只是 process 結束前的最後一次
+機會。下一次 `live --run-id` 開機會把 manual 狀態 hydrate 回來：照樣 arm、照樣對帳，但 verdict
+不會過、不開新 cycle，直到 §13.6 人工解除——而不是每次 shutdown 都只留一行 log、每次都擋住 disarm。
 
 **為什麼是 manual**：這種故障不會自癒。會把一次身分查詢誤路由的 venue，下一次照樣誤路由，
 所以 recoverable（下一輪乾淨對帳就自動解除）等於把 run 放回原本那個無限迴圈：
@@ -592,15 +600,24 @@ gate 線是豁免的（`order_gate.py` 有 import-time 保證），所以 latch 
 
 **怎麼查**：
 
-1. 先看 `identity_fault_latched` 那列的 `detail`——它會指出最後一次是哪個 role、哪個
-   cloid、以及交易所實際回了什麼。
+1. 先看 `identity_fault_latched` 那列的 `detail`——它會指出最後一次是哪個站點（protection 的
+   哪個 role、reconcile、還是 kill-switch disarm）、哪個 cloid、以及交易所實際回了什麼。
+   **整包回應**在 `payloads/<run_id>/orderStatus-<cloid>-*.json`——裡面有對方的 oid 與本文，
+   `str(exc)` 只說得出兩個 cloid。存檔規則（每個 cloid 存幾份、為什麼有上限）以
+   `live/venue_identity.py` 的 `_note_unreadable` docstring 為準，這裡不複述。
+   同一個故障在其他表也會露面：`exchange_reconciliation_events` 的 `order_missing_on_exchange`／
+   `orphan_exchange_order` case detail 與 shutdown 那列 `shutdown_cancel_orders_completed` 的
+   `failures` 寫 `orderStatus answered unusably (venue identity fault): …`（純網路中斷寫的是
+   `orderStatus failed: …`，兩者查的方向相反）；protection 自己的 `*_repair_failed` 列沿用上表的
+   `orderStatus recovery answered unusably:` 字樣。
 2. 這是**交易所或接線**的問題，不是策略問題：核對 `live.wallet_address` 與 agent key
    是否同一個錢包（同 `envelope-wrong-user` 的核對方向）、SDK 是否被別處覆寫、
    以及 Hyperliquid 是否改了 orderStatus 的回應格式（後者會讓這個 build 的解析全面失效，
    `live-smoke` 在 testnet 會先撞到）。
 3. 確認交易所已能正確回答我們的 cloid 之後才解除；解除用上面的 `--release --reason`。
 
-**自己會退掉的部分**：只要有**任何一次**探測讀得懂答案，latch 就會落下，之後若再度連續
+**自己會退掉的部分**：只要 **latch 住的那個 cloid** 再被讀得懂一次答案，latch 就會落下（別的
+cloid 讀得懂不算——串是按 cloid 記的），之後若再度連續
 故障會重新 latch 並留下**新的一列**（所以兩次發作在紀錄上分得開）。但 latch 落下**不會**
 自動解除 safe mode——§13.6 規定 manual 只能人工解除。
 

@@ -1187,16 +1187,25 @@ authentication / permission error
 venue identity fault（連續多次 orderStatus 答非所問，見下）
 ```
 
-**venue identity fault**（issue #46，2026-08-21 補）：交易所連續
-`protection._UNREADABLE_PROBE_LATCH_THRESHOLD` 次對 orderStatus 回出讀不出是本 cloid
-的答案（誤路由的身分，或這個 build 認不得的形狀）時，protection 於跨越門檻的那一次寫
-一列 `identity_fault_latched`（每個 episode 一列，不是每次），engine 據此進 manual
-safe mode（reason `venue_identity_fault`）。列為 manual 而非 recoverable 的理由與
+**venue identity fault**（issue #46，2026-08-21 補；issue #80，2026-08-26 擴及全部消費者）：
+交易所對**同一個 cloid** 連續 `venue_identity.UNREADABLE_PROBE_LATCH_THRESHOLD` 次回出讀不出
+是它的答案（誤路由的身分，或這個 build 認不得的形狀）時，共用的
+`VenueIdentityMonitor` 於跨越門檻的那一次寫一列 `identity_fault_latched`（每個 episode 一列，
+不是每次；`detail` 記下跨線的站點），並為每個被拒答的 cloid 留一份整包回應在 `payloads/`。計數
+**每個 cloid 一條、整個 process 共用**：§17 protection 的兩個探測點、§12 reconciliation 每張單的
+orderStatus tiebreaker／settle、§18.2 shutdown 的 disarm 交叉檢查全部經它讀 orderStatus，
+transport 失敗中性（不計不清）、讀得懂只歸零**該 cloid** 的串。升級由握有 safe-mode 機器的三方
+各自在探測之後讀同一個 latch：engine 於 §17 sync 之後、`reconcile_and_apply` 於每輪對帳之後、
+CLI 於 shutdown sweep 之後——三處的 `enter` 都持久化（冪等），shutdown 那次是 process 結束前的
+最後一次機會；下一次開機 hydrate 回 manual 後照樣 arm 與對帳，但 verdict 不過、不開新 cycle，
+直到 §13.6 解除。列為 manual 而非 recoverable 的理由與
 「SL repair failed → emergency close」同一條：這種故障不自癒，recoverable 會在第一次
-乾淨對帳就把 run 放回 §17 那個無界的重修迴圈。§17 兩個探測點的 fail-closed 判決不因此
+乾淨對帳就把 run 放回 §17 那個無界的重修迴圈。各站點的 fail-closed 判決不因此
 改變——本機制只觀測與升級，且 `PROTECTIVE_ORDER_ROLES` 對 manual 這條 gate 線的既有
-豁免（§13.1）確保 latch 期間 SL 修復與 §17.2 緊急平倉照常可送。latch 於任何一次讀得懂
-的答案落下（含 `unknownOid`），但落下**不**解除 safe mode——§13.6 的人工解除仍是唯一出口。
+豁免（§13.1）確保 latch 期間 SL 修復與 §17.2 緊急平倉照常可送；shutdown 的 disarm 在
+讀不懂答案時照舊被擋（unaccounted 文字標示 `answered unusably (venue identity fault)`）。
+latch 於「latch 住的那個 cloid」再被讀得懂一次答案時落下（含 `unknownOid`；別的 cloid 讀得懂
+不影響它的串），但落下**不**解除 safe mode——§13.6 的人工解除仍是唯一出口。
 
 Manual latch 掛住期間，AI 決策 cadence 本身**暫停**（PR 5 定案，2026-07-22）：
 每個目標反正都會被 §4.1 `manual_safe_mode` 擋下，live decision driver 於

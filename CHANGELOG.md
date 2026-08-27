@@ -8,6 +8,25 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+
+- **hyperliquid_perp live: the venue-identity fault is bounded at every
+  orderStatus consumer, not only in protection** (issue #80). The consecutive
+  "answer is not about our cloid" counter that PR #79 kept inside
+  `ProtectionManager` now lives in a `VenueIdentityMonitor` shared by
+  protection's two probe sites, the reconciler's per-order tiebreaker/settle
+  reads and the kill switch's shutdown disarm cross-check, so a persistent
+  misroute latches the manual `venue_identity_fault` safe mode wherever it is
+  observed — the reconciler escalates after each pass, and the CLI persists the
+  escalation after the §18.2 shutdown sweep so the next boot refuses to start
+  instead of every shutdown blocking its disarm with only a log line. Transport
+  failures stay neutral; every consumer's fail-closed verdict is unchanged, and
+  its audit text now names the family (`answered unusably (venue identity
+  fault)` vs `failed`). Forensics: an unreadable orderStatus answer carries its
+  whole payload on the error and is written to
+  `payloads/<run_id>/orderStatus-<cloid>-*.json`, matching what the order-ack
+  and fill paths already keep.
+
 ### Added
 
 - **US economic calendar + corporate BTC treasuries (SoSoValue).** Two new

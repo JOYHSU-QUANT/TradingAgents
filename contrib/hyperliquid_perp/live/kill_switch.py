@@ -62,7 +62,8 @@ from ..persistence.db import Database
 from .cancel import cancel_bot_order_with_evidence
 from .config import KillSwitchConfig
 from .order_gate import RealOrderGate
-from .orders import local_status_for_exchange_status, parse_order_status
+from .orders import local_status_for_exchange_status
+from .venue_identity import VenueIdentityMonitor, describe_order_status_failure
 
 __all__ = [
     "KillSwitchManager",
@@ -357,6 +358,11 @@ def refresh_across_blocking_work(kill_switch: KillSwitchManager | None, *, what:
 # for the same reason as protection._SLTP_ROLES: emergency_close is a one-shot
 # IOC, never a resting order for a sweep to keep.
 _KEEP_PROTECTIVE_ROLES = frozenset({"stop_loss", "take_profit"})
+
+# The ``symbol`` a manager-private VenueIdentityMonitor stamps on its latch row:
+# this manager is wallet-wide (no coin), and the row's symbol column is NOT NULL.
+# Only reachable when no shared monitor was passed (tests) — see __init__.
+_UNSCOPED_SYMBOL = "*"
 # Literal copy of LIVE_ORDER_ROLES members: a role renamed there without this
 # file would silently drop it from the shutdown keep-set — the sweep would
 # cancel a live position's resting SL/TP. Fail at import.
@@ -486,6 +492,7 @@ class KillSwitchManager:
         payload_dir: Path,
         clock: Clock | None = None,
         suite_authored: bool = False,
+        identity: VenueIdentityMonitor | None = None,
     ) -> None:
         if not config.enabled:
             # LiveConfig already rejects allow_real_orders without the switch;
@@ -543,6 +550,23 @@ class KillSwitchManager:
         self._config = config
         self._payload_dir = payload_dir
         self._clock = clock or WallClock()
+        # §13.5 (issue #80): the disarm cross-check's orderStatus reads go
+        # through the shared venue-identity monitor, so an answer that cannot
+        # be read as being about our cloid counts toward the same bound the
+        # protection and reconciliation probes feed — and the CLI, which holds
+        # the safe-mode machine, escalates off that latch after the sweep. A
+        # manager built without one (tests) gets a private monitor over its
+        # own client. This manager is wallet-wide and has no coin of its own,
+        # so the private monitor's latch row carries the unscoped marker; the
+        # production wiring always passes the CLI's coin-bound instance.
+        self._identity = identity or VenueIdentityMonitor(
+            query_order_by_cloid=client.query_order_by_cloid,
+            db=db,
+            run_id=run_id,
+            symbol=_UNSCOPED_SYMBOL,
+            payload_dir=payload_dir,
+            clock=self._clock,
+        )
         self._armed = False
         self._shutdown_started = False
         # Distinct from _shutdown_started on purpose. _shutdown_started closes
@@ -1034,8 +1058,15 @@ class KillSwitchManager:
         ``open_orders()``. Returns True when the exchange proves the order is
         settled, False when it is still live — or when the exchange's answer
         contradicts our evidence and we therefore cannot claim it is settled.
-        Transport failures raise: the caller counts them as a failure, which
-        keeps the trigger armed.
+        Transport failures raise, and so does an answer this build cannot
+        read as being about this cloid (a misrouted identity): the caller
+        counts both as a failure, which keeps the trigger armed. The latter is
+        also COUNTED by the shared venue-identity monitor the read goes
+        through (§13.5, issue #80), so a venue that keeps answering about
+        someone else's order latches a manual safe mode the CLI persists
+        after the sweep — the next boot then refuses to start into the same
+        fault instead of blocking every shutdown's disarm with nothing but a
+        log line to show for it.
 
         ``unknownOid`` splits in two, and the split matters. If durable evidence
         says the exchange once TOOK this cloid (§8.3 rule 10), then "I don't know
@@ -1053,8 +1084,7 @@ class KillSwitchManager:
         "make SQLite agree with what the exchange just said" rule the §8.3
         recovery back-fill follows.
         """
-        payload = self._client.query_order_by_cloid(cloid_hex)
-        parsed = parse_order_status(payload, expected_cloid_hex=cloid_hex)
+        parsed = self._identity.probe(cloid_hex, site="kill-switch disarm cross-check")
         if parsed is None:
             if repo.has_exchange_known_cloid(self._db.conn, cloid_hex=cloid_hex):
                 logger.warning(
@@ -1166,13 +1196,17 @@ class KillSwitchManager:
             try:
                 settled = self._confirm_settled(order_id, cloid)
             except Exception as exc:
+                # Named by family (§13.5, issue #80): a transport failure and an
+                # answer about somebody else's order both block the disarm, but
+                # they send the operator in opposite directions.
+                why = describe_order_status_failure(exc)
                 logger.warning(
                     "kill switch shutdown cannot confirm local order %s (cloid %s): %s",
                     order_id,
                     cloid,
-                    exc,
+                    why,
                 )
-                unaccounted.append(f"{order_id}: could not confirm settled: {exc}")
+                unaccounted.append(f"{order_id}: could not confirm settled — {why}")
                 continue
             if not settled:
                 if keep_protective and row["order_role"] in _KEEP_PROTECTIVE_ROLES:

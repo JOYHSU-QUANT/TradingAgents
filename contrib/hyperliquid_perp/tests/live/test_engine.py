@@ -118,6 +118,14 @@ class _FakeReconciler:
         return SimpleNamespace(clean=self.clean)
 
 
+class _FakeIdentity:
+    """What the engine's escalation reads off the shared monitor (§13.5)."""
+
+    def __init__(self) -> None:
+        self.latched = False
+        self.latched_site = "protection stop_loss no-op guard"
+
+
 class _FakeProtection:
     def __init__(self, outcome=ProtectionOutcome.PROTECTED) -> None:
         self.outcome = outcome
@@ -128,13 +136,14 @@ class _FakeProtection:
         # What the engine handed the SL band each sync (§3.6): the reconciler's
         # mirrored exchange estimate, or None before the first mirror.
         self.liquidation_prices: list[Decimal | None] = []
-        # Mirrors ProtectionManager.identity_fault_latched (§13.5): the venue
-        # answered the §8.3 identity probe unusably too many times running.
-        # A plain attribute rather than a getattr default on the engine side —
-        # a double missing it must fail loudly right here instead of letting
-        # the engine read "no fault" off every production client (the same
-        # reasoning as protection's explicit kill-switch None check).
-        self.identity_fault_latched = False
+        # Mirrors ProtectionManager.identity (§13.5): the shared venue-identity
+        # monitor whose ``latched`` says the venue answered the §8.3 identity
+        # probes unusably too many times running (issue #80). A plain attribute
+        # rather than a getattr default on the engine side — a double missing
+        # it must fail loudly right here instead of letting the engine read
+        # "no fault" off every production client (the same reasoning as
+        # protection's explicit kill-switch None check).
+        self.identity = _FakeIdentity()
 
     def sync(self, *, position, liquidation_price, mark, plan_active):
         self.calls += 1
@@ -1351,7 +1360,7 @@ def test_a_latched_venue_identity_fault_enters_manual_safe_mode(tmp_path):
     assert "venue_identity_fault" not in res.events
     assert engine._safe_mode.current() is None
 
-    prot.identity_fault_latched = True
+    prot.identity.latched = True
     clock.advance(10)
     _script(engine, [_snap()])
     res = engine.tick()
@@ -1383,7 +1392,7 @@ def test_a_failing_identity_escalation_still_lets_the_emergency_close_run(tmp_pa
     latch up until a probe reads an answer again, so the next tick retries it.
     """
     prot = _FakeProtection(outcome=ProtectionOutcome.NEEDS_EMERGENCY_CLOSE)
-    prot.identity_fault_latched = True
+    prot.identity.latched = True
     db, clock, engine, gate, sub = _build(tmp_path, protection=prot)
     with db.transaction() as conn:
         repo.upsert_current_position(

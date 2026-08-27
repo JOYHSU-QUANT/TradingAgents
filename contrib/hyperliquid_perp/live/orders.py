@@ -1022,9 +1022,25 @@ def parse_order_status(payload: Any, *, expected_cloid_hex: str) -> tuple[str, s
         if isinstance(inner, dict) and "oid" in inner and isinstance(status, str):
             echoed = inner.get("cloid")
             if not hex_identity_matches(echoed, expected_cloid_hex):
-                raise MalformedResponseError(
+                raise _refused(
+                    payload,
                     f"orderStatus for cloid {expected_cloid_hex} answered with cloid "
-                    f"{echoed!r} — refusing to read another order's status as this one's"
+                    f"{echoed!r} — refusing to read another order's status as this one's",
                 )
             return (str(inner["oid"]), status)
-    raise MalformedResponseError(f"orderStatus payload not recognised: {payload!r}")
+    raise _refused(payload, f"orderStatus payload not recognised: {payload!r}")
+
+
+def _refused(payload: Any, message: str) -> MalformedResponseError:
+    """A ``MalformedResponseError`` carrying the round-trip it refuses.
+
+    Attached HERE, in the one frame that holds the whole response, the way
+    ``signed_client._parse_order_ack`` does for order acks — so every consumer
+    of ``parse_order_status`` gets the stranger's oid and body as evidence
+    (``str(exc)`` can name only the two cloids), whether it reads through the
+    shared ``VenueIdentityMonitor`` or, like the §8.3 resend pre-check,
+    directly (issue #80's forensic asymmetry).
+    """
+    exc = MalformedResponseError(message)
+    exc.attach_payload(payload)
+    return exc

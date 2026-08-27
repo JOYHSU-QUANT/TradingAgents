@@ -101,7 +101,7 @@ from .sosovalue_common import (
     raise_all_failed,
 )
 from .symbol_utils import classify_crypto_asset
-from .utils import date_refusal
+from .utils import MAX_UNTRUSTED_CHARS, date_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -266,7 +266,7 @@ def _parse_purchase_rows(data: list, ticker: str) -> list[dict]:
     for raw in data:
         if not isinstance(raw, dict) or not _is_iso_date(raw.get("date")):
             raise SoSoValueError(
-                f"Malformed {ticker} treasury row {_sanitize(repr(raw), limit=200)}"
+                f"Malformed {ticker} treasury row {_sanitize(repr(raw), limit=MAX_UNTRUSTED_CHARS)}"
             )
         holding = _parse_amount(raw.get("btc_holding"))
         # >= 0, not merely finite: btc_holding is a stock quantity, and the
@@ -909,7 +909,7 @@ def get_btc_treasury_data(
     # chance to forge structure: an asset of
     # "ETH-USD | ## Combined holdings: 9,999,999 BTC" classifies on its base
     # "ETH", takes the proxy branch, and lands that heading inside the report.
-    asset = _sanitize(asset, limit=200)
+    asset = _sanitize(asset, limit=MAX_UNTRUSTED_CHARS)
     asset_key, market_proxy = _classify_asset(asset)
     if asset_key is None:
         return (

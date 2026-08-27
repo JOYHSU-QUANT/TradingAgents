@@ -113,7 +113,7 @@ from .sosovalue_common import (
     load_rolling_snapshot,
     raise_all_failed,
 )
-from .utils import date_refusal
+from .utils import MAX_UNTRUSTED_CHARS, date_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -357,7 +357,7 @@ def _parse_calendar(data: list) -> tuple[list[dict], int, int, int, int, list[st
                 logger.warning(
                     "SoSoValue macro calendar row %s is malformed; dropping it and "
                     "disclosing the drop",
-                    _sanitize(repr(raw), limit=200),
+                    _sanitize(repr(raw), limit=MAX_UNTRUSTED_CHARS),
                 )
             continue
         if raw["date"] in by_date:
@@ -469,7 +469,7 @@ def _parse_event_rows(data: list, name: str) -> list[dict]:
             and all(_is_valid_value(raw.get(k)) for k in ("actual", "forecast", "previous"))
         ):
             raise SoSoValueError(
-                f"Malformed {name!r} history row {_sanitize(repr(raw), limit=200)}"
+                f"Malformed {name!r} history row {_sanitize(repr(raw), limit=MAX_UNTRUSTED_CHARS)}"
             )
         rows.append(
             {
@@ -959,7 +959,7 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     # The date is judged first: both arguments are the caller's, and when both
     # are wrong the date is the one the sibling tools in the same turn are
     # already asking the model to fix.
-    refusal = date_refusal(curr_date, what="the economic calendar", kind="point")
+    refusal = date_refusal(curr_date, what="economic calendar data", kind="point")
     if refusal is not None:
         return refusal
 

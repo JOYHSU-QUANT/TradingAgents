@@ -79,8 +79,9 @@ def _asked(reached, call, *args):
 
 
 # (getter called as (curr_date), what, router method + args builder). ``what``
-# is the noun the sentence names; the two ETF-flow vendors say the same one
-# because the model cannot see which of them answered (#89's reasoning).
+# is the noun the sentence names — article-free, since the window template
+# supplies "the" itself; the two ETF-flow vendors say the same one because the
+# model cannot see which of them answered (#89's reasoning).
 _GETTERS = [
     pytest.param(
         lambda d: fear_greed.get_fear_greed_data(d, 30),
@@ -108,13 +109,13 @@ _GETTERS = [
     ),
     pytest.param(
         lambda d: deribit.get_options_market_data("BTC", d),
-        "the options surface",
+        "options market data",
         ("get_options_market", lambda d: ("BTC", d)),
         id="deribit_options",
     ),
     pytest.param(
         lambda d: sosovalue_macro.get_economic_calendar_data(d, 30),
-        "the economic calendar",
+        "economic calendar data",
         ("get_economic_calendar", lambda d: (d, 30)),
         id="sosovalue_calendar",
     ),
@@ -239,6 +240,18 @@ class TestTheEchoIsFlattenedAndCapped:
         # and the quote the sentence opened is still closed after it.
         assert "'" + "x" * MAX_UNTRUSTED_CHARS + "...'" in out
         assert "x" * (MAX_UNTRUSTED_CHARS + 1) not in out
+
+    def test_a_refusal_leaves_one_log_line(self, caplog):
+        # Returned, not raised, so the router's warning lane never sees it;
+        # this is the only operator-visible trace of a model that keeps
+        # sending a date no tool can use.
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="tradingagents.dataflows.utils"):
+            date_refusal("2026/08/18", what="x", kind="point")
+        assert [r.getMessage() for r in caplog.records] == [
+            "Refusing unusable curr_date '2026/08/18' for x"
+        ]
 
     def test_an_underscore_inside_a_word_survives(self):
         # Only emphasis-position underscores go; one between alphanumerics is

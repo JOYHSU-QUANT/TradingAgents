@@ -262,6 +262,11 @@ def date_refusal(
         return None
     if value is not None and normalize_iso_date(value) is not None:
         return None
+    # The refusal is RETURNED, so it never reaches the router's warning lane;
+    # without this line an operator's log shows nothing for a model that keeps
+    # sending a date no tool can use (#119). Info, not warning: the model is
+    # told to retry, and the echo is the flattened one the sentence carries.
+    logger.info("Refusing unusable %s %s for %s", param, _echo_untrusted(value), what)
     return invalid_date_sentinel(value, what=what, kind=kind, param=param)
 
 

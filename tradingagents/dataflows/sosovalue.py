@@ -106,7 +106,7 @@ from .sosovalue_common import (
     load_rolling_snapshot,
 )
 from .symbol_utils import classify_crypto_asset
-from .utils import date_refusal
+from .utils import MAX_UNTRUSTED_CHARS, date_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +244,7 @@ def _parse_summary_rows(data: list, asset: str) -> list[dict]:
     for raw in data:
         if not _valid_summary_row(raw):
             raise SoSoValueError(
-                f"Malformed {asset} summary row {_sanitize(repr(raw), limit=200)} "
+                f"Malformed {asset} summary row {_sanitize(repr(raw), limit=MAX_UNTRUSTED_CHARS)} "
                 f"(the API contract may have changed)"
             )
         rows.append(
@@ -332,10 +332,10 @@ def _parse_fund_rows(data: list, ticker: str) -> list[dict]:
                 # it can be any JSON blob — so bound it like the raw row below.
                 raise SoSoValueError(
                     f"Non-finite {ticker} net_inflow on {raw['date']}: "
-                    f"{_sanitize(repr(raw.get('net_inflow')), limit=200)}"
+                    f"{_sanitize(repr(raw.get('net_inflow')), limit=MAX_UNTRUSTED_CHARS)}"
                 )
             raise SoSoValueError(
-                f"Malformed {ticker} history row {_sanitize(repr(raw), limit=200)}"
+                f"Malformed {ticker} history row {_sanitize(repr(raw), limit=MAX_UNTRUSTED_CHARS)}"
             )
         rows[raw["date"]] = {"date": raw["date"], "net_inflow": raw.get("net_inflow")}
     return [rows[d] for d in sorted(rows)]

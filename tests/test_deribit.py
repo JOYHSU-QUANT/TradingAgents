@@ -2048,7 +2048,7 @@ class TestReport:
         from tradingagents.dataflows.utils import invalid_date_sentinel
 
         out, recorder = _run_report(curr_date="not-a-date")
-        assert out == invalid_date_sentinel("not-a-date", what="the options surface", kind="point")
+        assert out == invalid_date_sentinel("not-a-date", what="options market data", kind="point")
         assert recorder.calls == []
 
     @pytest.mark.parametrize("bad", [None, 20260805, b"2026-08-05", ["2026-08-05"]])
@@ -2060,7 +2060,7 @@ class TestReport:
         from tradingagents.dataflows.utils import invalid_date_sentinel
 
         assert _report(curr_date=bad) == invalid_date_sentinel(
-            bad, what="the options surface", kind="point"
+            bad, what="options market data", kind="point"
         )
 
     @pytest.mark.parametrize("bad", [12345, ["BTC"], {"symbol": "BTC"}, b"BTC", bytearray(b"BTC")])

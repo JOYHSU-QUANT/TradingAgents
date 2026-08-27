@@ -478,6 +478,12 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **Breaking for direct callers of `alpha_vantage_common.format_datetime_for_api`**
+  (issue #120): it accepts only a `yyyy-mm-dd` string and raises `ValueError`
+  for the `"YYYYMMDDTHHMM"` passthrough, the `"%Y-%m-%d %H:%M"` string and
+  the `datetime` object it used to read. The routed news tools never sent
+  those (both refuse anything else first), so only a direct caller notices.
+
 - **Hyperliquid: the freshness guard's two bounds now describe a healthy
   feed.** Stale side (issue #92): the three-decision-cycle ceiling (12h) no
   longer clamps the candle-age limit below one bar. With
@@ -881,8 +887,9 @@ Breaking changes within the 0.x line are called out explicitly.
   below narrowed yfinance's fundamentals: the OHLCV getter refuses a
   slash-separated or time-suffixed date it used to serve, and the ticker-news
   getter refuses the intraday `"YYYY-MM-DD HH:MM"`, `"YYYYMMDDTHHMM"` and
-  `datetime` forms `format_datetime_for_api` reads — the routed tool only ever
-  sends `yyyy-mm-dd`, so this reaches direct callers alone. Both answer with a
+  `datetime` forms `format_datetime_for_api` used to read (#120 later removed
+  them from that helper too) — the routed tool only ever sends `yyyy-mm-dd`,
+  so this reaches direct callers alone. Both answer with a
   retry instruction rather than an error.
 - **Two more vendor failures stop arriving as reports the agent can analyse.**
   `route_to_vendor` never inspects a returned string, so any getter that answers

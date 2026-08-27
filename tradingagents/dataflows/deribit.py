@@ -2556,7 +2556,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
     the caller's own argument, while the OHLCV tool in the same turn told the
     model to fix the date and retry.
     """
-    refusal = date_refusal(curr_date, what="the options surface", kind="point")
+    refusal = date_refusal(curr_date, what="options market data", kind="point")
     if refusal is not None:
         return refusal
     # Normalise curr_date BEFORE any date comparison. strptime accepts

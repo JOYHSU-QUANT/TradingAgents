@@ -217,21 +217,40 @@ def test_the_latch_row_is_once_per_episode_and_a_recurrence_writes_a_new_one(db,
     assert len(list(payload_dir.glob("orderStatus-*.json"))) == 1  # same cloid, same file
 
 
-def test_an_intermittent_misroute_of_one_cloid_writes_one_file_not_one_per_tick(db, tmp_path):
+def test_a_misroute_of_one_cloid_latches_despite_coherent_answers_about_others(db, tmp_path):
     # The realistic shape: the venue misroutes OUR SL cloid but answers the TP
-    # cloid coherently, so the streak flaps 1→0 forever and never latches. The
-    # evidence budget must not depend on latching.
+    # cloid coherently. Streaks are per cloid (issue #80 round-1 decision), so
+    # the coherent answers about the OTHER order neither reset the misrouted
+    # one's count nor stop the latch — under a process-wide streak this fault
+    # flapped 1→0 forever and the treadmill ran unbounded. Evidence stays one
+    # file per cloid regardless.
     payload_dir = tmp_path / "payloads"
     clock = ManualClock(_NOW)
-    script = [_misrouted(), _unknown()] * (K + 2)
+    script = [_misrouted(), _unknown()] * K
     monitor = _monitor(db, _Venue(script), payload_dir=payload_dir, clock=clock)
-    for _ in range(K + 2):
+    for i in range(K):
+        assert monitor.latched is False
         clock.advance(1)
         _probe_expecting_unreadable(monitor, cloid=_OURS)
         clock.advance(1)
         assert monitor.probe(_OURS_2, site="test") is None
-    assert monitor.latched is False
+        assert monitor.unreadable_streak == i + 1  # untouched by the other cloid
+    assert monitor.latched is True
+    (row,) = _latch_rows(db)
+    assert row["cloid_hex"] == _OURS
     assert len(list(payload_dir.glob("orderStatus-*.json"))) == 1
+
+
+def test_a_readable_answer_resets_only_its_own_cloids_streak(db):
+    venue = _Venue()
+    venue.by_cloid = {_OURS: _misrouted("1")}
+    monitor = _monitor(db, venue)
+    for _ in range(K - 1):
+        _probe_expecting_unreadable(monitor, cloid=_OURS)
+    assert monitor.probe(_OURS_2, site="test") is None  # coherent, other cloid
+    assert monitor.unreadable_streak == K - 1  # _OURS keeps its count
+    _probe_expecting_unreadable(monitor, cloid=_OURS)
+    assert monitor.latched is True
 
 
 def test_a_failed_latch_row_write_drops_neither_the_latch_nor_the_raise(db):
@@ -462,31 +481,31 @@ def _protection(db, client, monitor) -> ProtectionManager:
 
 
 def test_the_reconciler_the_kill_switch_and_protection_feed_one_streak(db, tmp_path):
-    """The acceptance shape for #80: consumers alternate, the venue is one.
+    """The acceptance shape for #80: consumers alternate, the order is one.
 
-    Two locally-live orders the venue misroutes every time. The reconciler's
-    settle probes count two, the shutdown cross-check counts two more (the
-    same two rows, asked again), and protection's no-op guard delivers the
-    fifth — so the latch rises from a streak no single consumer could have
-    reached alone at K=5, and its row names the consumer that crossed the
-    line. Each consumer's own audit text names the fault by family.
+    One locally-live order the venue misroutes every time. The reconciler's
+    settle probe counts one per pass (two passes), the shutdown cross-check
+    the third, and protection's no-op guard the fourth and fifth — the latch
+    rises from a per-cloid streak no single consumer reached alone at K=5,
+    and its row names the consumer that crossed the line. Each consumer's own
+    audit text names the fault by family.
     """
     assert K == 5, "the choreography below is written for a threshold of five"
     clock = ManualClock(_NOW)
     client = _Client(clock)
-    client.by_cloid = {_OURS: _misrouted("1"), _OURS_2: _misrouted("2")}
+    client.by_cloid = {_OURS: _misrouted("1")}
     monitor = _monitor(db, client, payload_dir=tmp_path / "payloads", clock=clock)
     _live_order(db, order_id="o1", cloid_hex=_OURS)
-    _live_order(db, order_id="o2", cloid_hex=_OURS_2)
 
-    report = _reconciler(db, client, monitor, tmp_path).run("heartbeat")
-    settle_cases = [c for c in report.cases if c.case_type == "order_missing_on_exchange"]
-    assert len(settle_cases) == 2
-    assert all("answered unusably (venue identity fault)" in c.detail for c in settle_cases)
-    assert monitor.unreadable_streak == 2
+    reconciler = _reconciler(db, client, monitor, tmp_path)
+    for expected in (1, 2):  # two passes: the streak carries across passes
+        report = reconciler.run("heartbeat")
+        (settle_case,) = [c for c in report.cases if c.case_type == "order_missing_on_exchange"]
+        assert "answered unusably (venue identity fault)" in settle_case.detail
+        assert monitor.unreadable_streak == expected
+        clock.advance(60)
     assert monitor.latched is False
 
-    clock.advance(60)  # a later round-trip: its own payload files, not overwrites
     switch = _kill_switch(db, client, monitor, clock, tmp_path)
     switch.arm()
     switch.shutdown()
@@ -496,24 +515,25 @@ def test_the_reconciler_the_kill_switch_and_protection_feed_one_streak(db, tmp_p
         for e in repo.iter_kill_switch_events(db.conn, "r")
         if e["event_type"] == "shutdown_cancel_orders_completed"
     ][0]
-    failures = json.loads(completed["detail"])["failures"]
-    assert len(failures) == 2
-    assert all("could not confirm settled" in f for f in failures)
-    assert all("answered unusably (venue identity fault)" in f for f in failures)
-    assert monitor.unreadable_streak == 4
+    (failure,) = json.loads(completed["detail"])["failures"]
+    assert "could not confirm settled" in failure
+    assert "answered unusably (venue identity fault)" in failure
+    assert monitor.unreadable_streak == 3
     assert monitor.latched is False
     assert _latch_rows(db) == []
 
     clock.advance(60)
     protection = _protection(db, client, monitor)
     assert protection._row_still_rests({"cloid_hex": _OURS}, role="stop_loss") is False
+    assert monitor.unreadable_streak == 4
+    assert protection._row_still_rests({"cloid_hex": _OURS}, role="stop_loss") is False
     assert monitor.latched is True
     assert protection.identity.latched is True  # the engine's read: the same monitor
     (row,) = _latch_rows(db)
     assert "protection stop_loss no-op guard" in row["detail"]
-    # Two cloids refused, two files: evidence is kept once per cloid, whichever
-    # consumer's refusal came first.
-    assert len(list((tmp_path / "payloads").glob("orderStatus-*.json"))) == 2
+    assert monitor.latched_site == "protection stop_loss no-op guard"
+    # One cloid refused, one file — whichever consumer's refusal came first.
+    assert len(list((tmp_path / "payloads").glob("orderStatus-*.json"))) == 1
 
 
 def test_a_reconcile_pass_escalates_the_latch_under_its_own_reason(db, tmp_path):
@@ -568,6 +588,66 @@ def test_a_reconcile_pass_escalates_the_latch_under_its_own_reason(db, tmp_path)
         db.conn, "r", case_type="order_missing_on_exchange"
     )
     assert len(rows) == 1  # deduped across all K passes, as before
+
+
+def test_the_reconciler_escalates_after_its_own_safe_mode_bookkeeping(db, tmp_path):
+    # Pins the "run last" ordering: the pass's own recoverable entry must land
+    # before the identity escalation, so an ``enter`` that dies on a busy DB
+    # cannot cost the pass its mismatch bookkeeping. Moving the escalation
+    # ahead of the verdict branch flips this recorded order.
+    client = _Client(ManualClock(_NOW))
+    client.by_cloid = {_OURS: _misrouted()}
+    monitor = _monitor(db, client, payload_dir=tmp_path / "payloads")
+    for _ in range(K):
+        _probe_expecting_unreadable(monitor, site="protection stop_loss no-op guard")
+    assert monitor.latched is True
+    _live_order(db, order_id="o1", cloid_hex=_OURS)
+
+    entered: list[tuple[str, str]] = []
+
+    class _Recording(SafeModeManager):
+        def enter(self, safe_mode_type, reason, *, detail=None):
+            entered.append((safe_mode_type, reason))
+            return super().enter(safe_mode_type, reason, detail=detail)
+
+    safe_mode = _Recording(db=db, run_id="r", gate=_gate(), clock=ManualClock(_NOW))
+    _reconciler(db, client, monitor, tmp_path).reconcile_and_apply(
+        "heartbeat", safe_mode=safe_mode, ws_restored=True, kill_switch_active=True
+    )
+    assert entered[0][0] == "recoverable"  # the pass's own verdict, first
+    assert entered[-1] == ("manual", REASON_IDENTITY_FAULT)  # the escalation, last
+
+
+def test_a_failed_evidence_write_is_retried_and_the_latch_row_admits_the_gap(
+    db, tmp_path, monkeypatch
+):
+    # A payload_dir that stops accepting writes (disk full, permissions) is
+    # likeliest DURING an incident: the write must be retried on the next
+    # refusal instead of silently given up, and a latch row whose file never
+    # landed must say so rather than reading as "capture working, nothing
+    # kept" (2026-08-27 round-1 review).
+    import contrib.hyperliquid_perp.live.venue_identity as vi_mod
+
+    calls: list[str] = []
+
+    def _flaky_write(*, payload_dir, kind, key, payload, now, once=False):
+        calls.append(key)
+        return None  # the writer's own contract: None = could not write
+
+    monkeypatch.setattr(vi_mod, "write_raw_payload", _flaky_write)
+    monitor = _monitor(db, _Venue([_misrouted() for _ in range(K)]), payload_dir=tmp_path / "p")
+    for _ in range(K):
+        _probe_expecting_unreadable(monitor)
+    assert len(calls) == K  # every refusal retried the write
+    (row,) = _latch_rows(db)
+    assert "payload capture FAILED" in row["detail"]
+
+    # ...and once a write finally lands, the row's clause names the file.
+    monkeypatch.setattr(vi_mod, "write_raw_payload", lambda **kw: "payloads/orderStatus-x.json")
+    monitor2 = _monitor(db, _Venue([_misrouted() for _ in range(K)]), payload_dir=tmp_path / "p")
+    for _ in range(K):
+        _probe_expecting_unreadable(monitor2)
+    assert any("payloads/orderStatus-x.json" in (r["detail"] or "") for r in _latch_rows(db))
 
 
 def test_a_reconcile_pass_that_latches_first_enters_manual_with_the_identity_reason(db, tmp_path):

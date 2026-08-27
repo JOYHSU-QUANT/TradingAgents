@@ -68,8 +68,12 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# §17 / §13.5: how many CONSECUTIVE unreadable orderStatus answers latch the
-# venue-identity fault. Every probe site fails CLOSED on an unusable answer,
+# §17 / §13.5: how many CONSECUTIVE unreadable orderStatus answers ABOUT ONE
+# CLOID latch the venue-identity fault. Counted per cloid (decided 2026-08-27,
+# issue #80 round-1 review): the realistic fault misroutes one identity and
+# answers the rest coherently, so a process-wide streak would flap 1→0 forever
+# and the bound would never be reached for the one order that needs it.
+# Every probe site fails CLOSED on an unusable answer,
 # and that verdict's cost model assumes the fault heals next tick — "a false
 # 'gone' costs one redundant re-place". A venue that answers with another
 # order's identity does NOT heal: it misroutes every time, so the no-op guard
@@ -79,19 +83,22 @@ logger = logging.getLogger(__name__)
 #
 # FIVE, chosen against the protection NO-OP GUARDS' worth of probes in one
 # sync: at most three (the SL guard, the SL covering check on a gate-blocked
-# repair, the TP guard — see protection._row_still_rests), so the guards alone
-# can never latch, whatever the venue does to them in a single sync. That is
+# repair, the TP guard — see protection._row_still_rests), of which at most
+# TWO ask about the same cloid (the two SL checks), so the guards alone can
+# never latch, whatever the venue does to them in a single sync. That is
 # the case worth protecting: a guard reading "not resting" costs one redundant
 # re-place of an order we want resting anyway, and the fail-closed verdict
 # already handles it correctly.
 #
-# A sync can still cross the line when the REPAIR LADDER also probes — it does
-# so once per failed attempt, so guards plus ladder reach six at the default
-# sl_repair_max_attempts of 3 (measured; both cases are pinned in
-# test_protection). That is intended, not a hole to plug: six consecutive
-# answers that cannot be read as being about the cloid we asked for IS the
-# fault this bound exists for, and the number of ticks it took to collect them
-# does not make it less true.
+# Under per-cloid counting no single sync latches at all — the ladder's
+# recovery probes ask about the replacement order's cloid, not the resting
+# row's — but a venue that keeps misrouting does not need many: the worst
+# cloid's streak carries across syncs and the latch lands on the second
+# (measured; pinned in test_protection's
+# test_a_persistently_misrouting_venue_latches_within_a_few_syncs, alongside
+# the guards-alone pin). Slower by one sync than the process-wide counter it
+# replaces, in exchange for a bound that a coherently-answered sibling order
+# can no longer reset away.
 #
 # The same number bounds the reconciler's per-order probes and the kill
 # switch's shutdown cross-check (decided 2026-08-26, issue #80): a shutdown
@@ -151,32 +158,48 @@ class VenueIdentityMonitor:
         self._symbol = symbol
         self._payload_dir = payload_dir
         self._clock = clock or WallClock()
-        # CONSECUTIVE unreadable orderStatus answers across EVERY probe site.
-        # Reset by any READABLE answer (see probe), so "consecutive" means what
-        # it says. The latch is DERIVED from this number rather than stored
-        # beside it — two fields kept in lockstep by hand is a desync waiting
-        # for the next probe site to be added.
-        self._unreadable = 0
+        # CONSECUTIVE unreadable orderStatus answers PER CLOID, across every
+        # probe site (issue #80 round-1 review): the realistic fault misroutes
+        # ONE of our cloids while answering the others coherently, and a single
+        # process-wide streak would be reset by every coherent answer — the one
+        # misrouted order's repair treadmill would then run unbounded forever,
+        # which is the exact fault this bound exists for. A cloid's streak is
+        # reset by a READABLE answer about THAT cloid (see probe), so
+        # "consecutive" means consecutive about the order in question. The
+        # latch is DERIVED from these numbers rather than stored beside them —
+        # two fields kept in lockstep by hand is a desync waiting for the next
+        # probe site to be added.
+        self._streaks: dict[str, int] = {}
         # cloid -> the payload file already holding that cloid's refused answer
         # (see _note_unreadable for why evidence is bounded per cloid).
         self._evidence: dict[str, str] = {}
+        # The site whose probe crossed the threshold (None until first latch;
+        # kept at the most recent crossing) — read by escalate_identity_fault
+        # so the safe-mode row can name where the fault was OBSERVED, not just
+        # which holder happened to escalate it.
+        self._latched_site: str | None = None
 
     @property
     def unreadable_streak(self) -> int:
-        """Consecutive unreadable answers so far (0 after any readable one)."""
-        return self._unreadable
+        """The worst cloid's consecutive-unreadable count (0 when all clear)."""
+        return max(self._streaks.values(), default=0)
+
+    @property
+    def latched_site(self) -> str | None:
+        """The probe site whose answer crossed the threshold, if any yet."""
+        return self._latched_site
 
     @property
     def latched(self) -> bool:
-        """Whether consecutive unreadable orderStatus answers crossed the latch.
+        """Whether ANY cloid's consecutive unreadable answers crossed the latch.
 
         The escalation signal (§13.5). A LATCH, not an edge: it stays up until
-        a probe reads an answer again, so an escalation whose durable write
-        failed is retried by the next holder of the safe-mode machine rather
-        than lost. Re-entering the same safe mode is idempotent, so a raised
-        latch cannot spam the §13.6 history either.
+        a probe reads an answer about that cloid again, so an escalation whose
+        durable write failed is retried by the next holder of the safe-mode
+        machine rather than lost. Re-entering the same safe mode is idempotent,
+        so a raised latch cannot spam the §13.6 history either.
         """
-        return self._unreadable >= UNREADABLE_PROBE_LATCH_THRESHOLD
+        return self.unreadable_streak >= UNREADABLE_PROBE_LATCH_THRESHOLD
 
     def probe(self, cloid_hex: str, *, site: str) -> tuple[str, str] | None:
         """``query_order_by_cloid`` + ``parse_order_status``, counted.
@@ -215,7 +238,7 @@ class VenueIdentityMonitor:
         except MalformedResponseError as exc:
             self._note_unreadable(site=site, cloid_hex=cloid_hex, exc=exc, payload=payload)
             raise
-        self._unreadable = 0
+        self._streaks.pop(cloid_hex, None)
         return parsed
 
     def _note_unreadable(
@@ -254,19 +277,21 @@ class VenueIdentityMonitor:
             if written is not None:
                 self._evidence[cloid_hex] = written
         raw_path = self._evidence.get(cloid_hex)
-        self._unreadable += 1
-        # EQUALITY, which is what makes the row once-per-episode: below the
-        # threshold there is nothing to report, above it the episode is already
-        # reported. Sound only because this counter moves by exactly one.
-        if self._unreadable != UNREADABLE_PROBE_LATCH_THRESHOLD:
+        streak = self._streaks.get(cloid_hex, 0) + 1
+        self._streaks[cloid_hex] = streak
+        # EQUALITY, which is what makes the row once-per-episode (per cloid):
+        # below the threshold there is nothing to report, above it the episode
+        # is already reported. Sound only because a streak moves by exactly one.
+        if streak != UNREADABLE_PROBE_LATCH_THRESHOLD:
             return
+        self._latched_site = site
         logger.error(
-            "orderStatus answered unusably %d times in a row (latest: %s, cloid %s — %s). "
-            "A venue that cannot identify our orders does not heal on its own, so this "
+            "orderStatus answered unusably %d times in a row about cloid %s (latest: %s — %s). "
+            "A venue that cannot identify this order does not heal on its own, so this "
             "is escalated instead of retried indefinitely",
-            self._unreadable,
-            site,
+            streak,
             cloid_hex,
+            site,
             exc,
         )
         # BEST-EFFORT, and last: the latch is already up (it is derived from
@@ -298,7 +323,17 @@ class VenueIdentityMonitor:
     ) -> None:
         # ``now`` is the instant of the crossing probe; ``raw_path`` is this
         # cloid's evidence file, which may predate it (see _note_unreadable).
-        evidence = f"; payload {raw_path}" if raw_path else ""
+        # The row must say when the file is MISSING despite a wired
+        # payload_dir (disk full, permissions — likeliest during an incident):
+        # a silently absent clause reads as "capture working, nothing kept",
+        # and the log line that knew better may have rotated away by triage
+        # time (2026-08-27 round-1 review).
+        if raw_path:
+            evidence = f"; payload {raw_path}"
+        elif self._payload_dir is not None:
+            evidence = "; payload capture FAILED — see the run log"
+        else:
+            evidence = ""  # no payload_dir wired: capture was never promised
         with self._db.transaction() as conn:
             repo.insert_protection_order_event(
                 conn,
@@ -307,8 +342,8 @@ class VenueIdentityMonitor:
                 symbol=self._symbol,
                 cloid_hex=cloid_hex,
                 detail=(
-                    f"{self._unreadable} consecutive unreadable orderStatus answers "
-                    f"(threshold {UNREADABLE_PROBE_LATCH_THRESHOLD}); "
+                    f"{self._streaks.get(cloid_hex, 0)} consecutive unreadable orderStatus "
+                    f"answers about this cloid (threshold {UNREADABLE_PROBE_LATCH_THRESHOLD}); "
                     f"latest from the {site}: {exc}{evidence}"
                 ),
                 timestamp=now,
@@ -334,15 +369,27 @@ def escalate_identity_fault(
     MANUAL, for the reason ``REASON_IDENTITY_FAULT`` documents: the fault does
     not heal, so a recoverable latch would auto-release straight back into the
     treadmill. Safe to latch mid-run because the protective roles are exempt
-    from the manual gate line (order_gate.py); and safe to latch at shutdown
-    because the persisted state is exactly what makes the NEXT boot refuse to
-    start instead of walking into the same fault again.
+    from the manual gate line (order_gate.py); and worth calling even at
+    shutdown because every holder's ``enter`` persists the same durable state
+    the next boot's ``hydrate_gate`` restores — the shutdown call is merely the
+    last chance before the process exits. A restored manual safe mode does not
+    skip startup recovery: the boot still arms the switch and reconciles under
+    it, but the verdict cannot pass and no cycle starts until §13.6 releases.
     """
     if not monitor.latched:
         return False
+    # Both names, because they can differ and each answers a different triage
+    # question: ``site`` is the holder that acted (whose lane the escalation
+    # ran in), ``latched_site`` is where the fault was observed — without it,
+    # a latch collected by the kill-switch cross-check would be filed under
+    # whichever holder escalated first (2026-08-27 round-1 review).
+    observed = monitor.latched_site or "unknown probe site"
     safe_mode.enter(
         "manual",
         REASON_IDENTITY_FAULT,
-        detail=f"orderStatus answered unusably on consecutive §8.3 identity probes ({site})",
+        detail=(
+            "orderStatus answered unusably on consecutive §8.3 identity probes "
+            f"(latched at the {observed}; escalated by {site})"
+        ),
     )
     return True

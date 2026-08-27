@@ -63,7 +63,7 @@ from ..persistence.cloid import LIVE_ORDER_ROLES, cloid_hex as derive_cloid_hex,
 from ..persistence.db import Database
 from ..persistence.models import PositionState, Side
 from .config import AGGRESSIVE_FILL_BAND_PCT, LiveProtectionConfig
-from .kill_switch import refresh_across_blocking_work
+from .kill_switch import KillSwitchManager, refresh_across_blocking_work
 from .order_gate import LiveOrderGateRejected, RealOrderGate
 from .orders import is_known_exchange_status, local_status_for_exchange_status
 from .venue_identity import VenueIdentityMonitor, describe_order_status_failure
@@ -199,7 +199,7 @@ class ProtectionManager:
         owner_prefix: str,
         clock: Clock | None = None,
         sleep: Callable[[float], None] | None = None,
-        kill_switch=None,
+        kill_switch: KillSwitchManager | None = None,
         identity: VenueIdentityMonitor | None = None,
     ) -> None:
         self._db = db

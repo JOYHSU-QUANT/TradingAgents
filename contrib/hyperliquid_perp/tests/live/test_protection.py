@@ -1874,11 +1874,13 @@ def test_a_transport_failure_neither_counts_toward_nor_resets_the_identity_fault
 
 
 def test_the_two_probe_sites_share_one_identity_fault_counter(env):
-    """One venue, one fault — not one per question we happen to ask.
+    """One order, one fault — not one per question we happen to ask about it.
 
-    A counter per site would let a fault that alternates between the no-op
+    A counter per SITE would let a fault that alternates between the no-op
     guard and the lost-ack recovery probe stay below both thresholds forever,
-    which is precisely the persistent misroute this bound exists for. (The
+    which is precisely the persistent misroute this bound exists for. The
+    streak is per CLOID (issue #80 round-1 decision), so the two sites share
+    it exactly when they ask about the same order — as they do here. (The
     cross-CONSUMER half of the same claim — protection sharing the streak with
     the reconciler and the kill switch — is pinned in test_venue_identity.)
     """
@@ -1895,13 +1897,15 @@ def test_the_two_probe_sites_share_one_identity_fault_counter(env):
         assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
     assert mgr.identity.latched is False
 
-    # ...and the K-th from the OTHER site, the lost-ack recovery probe.
+    # ...and the K-th from the OTHER site, the lost-ack recovery probe asking
+    # about the SAME cloid (a §8.3 recovery of the very order the guard
+    # watches).
     assert (
         mgr._recover_placed_order(
             role="stop_loss",
             order_id="ord-1",
             logical="log-1",
-            hexid="0x" + "b" * 32,
+            hexid=_OUR_ROW["cloid_hex"],
             size=Decimal("0.01"),
             side=Side.SELL,
             trigger_price=Decimal(45000),
@@ -1970,16 +1974,17 @@ def test_the_no_op_guards_alone_cannot_latch_within_one_sync(env):
     assert _latch_rows(db) == []
 
 
-def test_a_sync_whose_repair_ladder_also_misroutes_can_latch_within_that_sync(env):
+def test_a_persistently_misrouting_venue_latches_within_a_few_syncs(env):
     """The other half, pinned as INTENDED rather than left to be rediscovered.
 
-    Guards plus ladder can cross the line inside one sync — six probes here, at
-    the default ``sl_repair_max_attempts``, with the SL's re-place healing on its
-    second attempt while the TP keeps getting answers about somebody else's
-    order. That is not a false positive to engineer away: six consecutive
-    answers that cannot be read as being about the cloid we asked for IS the
-    fault, and how few ticks it took to collect them does not make it less true.
-    Pinned so a later reader does not "fix" it back into an unbounded treadmill.
+    Under per-cloid counting (issue #80 round-1 decision) no SINGLE sync can
+    latch any more — one sync's probes about one cloid are the guard's plus
+    the ladder's, still under the threshold — but a venue that keeps
+    misrouting does not need many: the worst cloid's streak carries across
+    syncs, and the latch lands within the first few. Pinned with the exact
+    sync count so the prose and the code cannot drift apart — a change to the
+    guard call sites or the ladder length should fail here and send whoever
+    made it back to the threshold's comment.
     """
     from contrib.hyperliquid_perp.live.venue_identity import UNREADABLE_PROBE_LATCH_THRESHOLD as K
 
@@ -1988,24 +1993,24 @@ def test_a_sync_whose_repair_ladder_also_misroutes_can_latch_within_that_sync(en
     client, gate = _FakeClient(), _gate()
     mgr = _established(db, client, gate)
 
-    client.status_script = [_misrouted_status() for _ in range(50)]
-    client.place_script = ["raise", "ok"] + ["raise"] * 20
-    client.modify_script = ["raise", "ok"] + ["raise"] * 20
+    client.status_script = [_misrouted_status() for _ in range(200)]
+    client.place_script = ["raise", "ok"] + ["raise"] * 40
+    client.modify_script = ["raise", "ok"] + ["raise"] * 40
     mgr._kill_switch.fired_total = 1
-    mgr.sync(
-        position=_long_position(),
-        liquidation_price=Decimal(40000),
-        mark=Decimal(50000),
-        plan_active=False,
-    )
 
-    # EXACTLY six, the number the threshold's comment cites: pinned rather than
-    # bounded so the prose and the code cannot drift apart — a change to the
-    # guard call sites or the ladder length should fail here and send whoever
-    # made it back to that comment.
-    assert mgr.identity.unreadable_streak == 6
-    assert mgr.identity.unreadable_streak >= K
+    syncs = 0
+    while not mgr.identity.latched and syncs < 6:
+        mgr.sync(
+            position=_long_position(),
+            liquidation_price=Decimal(40000),
+            mark=Decimal(50000),
+            plan_active=False,
+        )
+        syncs += 1
+
     assert mgr.identity.latched is True
+    assert syncs == 2  # measured: the worst cloid's streak crosses on sync 2
+    assert mgr.identity.unreadable_streak >= K
     assert len(_latch_rows(db)) == 1
 
 

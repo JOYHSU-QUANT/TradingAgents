@@ -119,10 +119,11 @@ class _FakeReconciler:
 
 
 class _FakeIdentity:
-    """The one attribute the engine reads off the shared monitor (§13.5)."""
+    """What the engine's escalation reads off the shared monitor (§13.5)."""
 
     def __init__(self) -> None:
         self.latched = False
+        self.latched_site = "protection stop_loss no-op guard"
 
 
 class _FakeProtection:

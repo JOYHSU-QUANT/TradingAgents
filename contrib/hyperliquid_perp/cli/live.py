@@ -1006,10 +1006,12 @@ def _live_startup_recovery(
                         # run — so it reads the latch (inside the armed branch
                         # on purpose: an unarmed switch ran no cross-check, and
                         # a latch from the loop was escalated by the engine
-                        # every tick). Persisting manual here is the whole
-                        # point: the next boot hydrates it and refuses to start
-                        # into the same fault, instead of every shutdown
-                        # blocking its disarm with only a log line. Fed into
+                        # every tick). Every holder's enter persists the same
+                        # durable state; this call is the last chance before
+                        # the process exits, and that state is what the next
+                        # boot hydrates — its verdict then cannot pass until
+                        # §13.6 releases, instead of every shutdown blocking
+                        # its disarm with only a log line. Fed into
                         # ``shutdown_problem`` so the one-shot lane exits 4 the
                         # way it does for an armed switch — a run that just
                         # latched manual safe mode must never hand exit 0 to

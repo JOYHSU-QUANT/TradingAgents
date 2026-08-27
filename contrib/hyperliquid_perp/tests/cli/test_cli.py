@@ -3074,6 +3074,21 @@ def live_seams(monkeypatch):
         snapshot_requests=[],
         signed_gates=[],
         rest_calls=[],
+        # Opt-in REST behaviour (issue #80 review): False keeps the historical
+        # contract — the double has NO REST behaviour, the daemon drive dies at
+        # arm(), and the no-REST pins stay meaningful. A test that needs the
+        # recovery to run through the sweep flips this and scripts the seams.
+        rest_enabled=False,
+        order_status={},
+        open_orders_result=[],
+        # What Info's user_state answers when a rest_enabled test reaches the
+        # clearinghouse read: a flat, healthy account.
+        clearinghouse={
+            "marginSummary": {"accountValue": "200", "totalMarginUsed": "0", "totalNtlPos": "0"},
+            "withdrawable": "200",
+            "crossMaintenanceMarginUsed": "0",
+            "assetPositions": [],
+        },
     )
 
     from contrib.hyperliquid_perp.exchanges.hyperliquid.sdk_client import (
@@ -3087,7 +3102,7 @@ def live_seams(monkeypatch):
             state.client_networks.append(network)
             self.network = network
             self.timeout = timeout
-            self.info = SimpleNamespace()
+            self.info = SimpleNamespace(user_state=lambda address: state.clearinghouse)
 
         @classmethod
         def from_config(cls, config, *, timeout=None, network=None):
@@ -3131,6 +3146,10 @@ def live_seams(monkeypatch):
             valid_until=state.auth_valid_until,
         )
 
+    def _fake_signed_refuse(name):
+        state.rest_calls.append(name)
+        raise NotImplementedError(f"the signed double has no {name}")
+
     class _FakeSigned:
         def __init__(self, network, agent_key, *, wallet_address, gate, timeout=None):
             self.network = network
@@ -3150,22 +3169,43 @@ def live_seams(monkeypatch):
             if state.signed_error is not None:
                 raise state.signed_error
 
-        # The recovery components BIND these three at construction (the sweep
-        # pin below is what needs them). The real client has all three; this
-        # double deliberately has no REST behaviour, so reaching one is a
-        # broken test rather than a scenario — recorded, so that claim is
-        # checkable instead of being a comment (2026-08-19 review).
-        def _no_rest(name):
-            def _call(*_args, **_kwargs):
-                state.rest_calls.append(name)
-                raise NotImplementedError(f"the signed double has no {name}")
+        # The recovery components BIND these at construction (the sweep
+        # pin below is what needs them). The real client has all of them; this
+        # double has no REST behaviour UNLESS a test opts in via
+        # ``state.rest_enabled`` — reaching one while opted out is a broken
+        # test rather than a scenario — recorded, so that claim is checkable
+        # instead of being a comment (2026-08-19 review; opt-in 2026-08-27).
+        # ``_fake_signed_refuse`` lives in the FIXTURE scope: a class-body name
+        # is invisible inside methods, only the enclosing function's names are.
+        def user_fills_by_time(self, start_ms, end_ms):
+            if not state.rest_enabled:
+                _fake_signed_refuse("user_fills_by_time")
+            return []
 
-            return _call
+        def open_orders(self):
+            if not state.rest_enabled:
+                _fake_signed_refuse("open_orders")
+            return list(state.open_orders_result)
 
-        user_fills_by_time = _no_rest("user_fills_by_time")
-        open_orders = _no_rest("open_orders")
-        query_order_by_cloid = _no_rest("query_order_by_cloid")
-        del _no_rest
+        def query_order_by_cloid(self, cloid_hex):
+            if not state.rest_enabled:
+                _fake_signed_refuse("query_order_by_cloid")
+            result = state.order_status.get(cloid_hex, {"status": "unknownOid"})
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        def schedule_cancel(self, *, cancel_at):
+            if not state.rest_enabled:
+                _fake_signed_refuse("schedule_cancel")
+
+        def clear_scheduled_cancel(self):
+            if not state.rest_enabled:
+                _fake_signed_refuse("clear_scheduled_cancel")
+
+        def exchange_time(self):
+            # Zero skew against the wall clock, so arm()'s guard passes.
+            return datetime.now(timezone.utc)
 
         def __repr__(self):
             return f"FakeSigned(network={self.network!r})"
@@ -4211,7 +4251,8 @@ def _drive_the_daemon_recovery(tmp_path, monkeypatch):
     """Run ``live --run-id`` far enough to build the recovery components.
 
     Stops inside ``run_startup_recovery``: arming the switch calls
-    ``schedule_cancel``, which the ``live_seams`` double does not have, and
+    ``schedule_cancel``, which the ``live_seams`` double refuses while
+    ``rest_enabled`` is off (recording the refusal), and
     ``_live_startup_recovery`` reports that as the exit-1 "startup recovery
     failed" path. Everything these pins assert is settled before then — and the
     exit code is asserted rather than suppressed so that "the drive still gets
@@ -4254,9 +4295,11 @@ def test_the_daemon_wires_the_reconciliation_sweeps_switch_refresh(
     # rather than silently halving what the pairing below covers.
     assert len(record.switches) == 1, record.switches
     assert_paired_sweep_refreshes(record, owner="daemon")
-    # The double has no REST behaviour; reaching it would mean the drive ran
-    # past the constructions under test into work these pins do not model.
-    assert live_seams.rest_calls == []
+    # The double refuses REST unless a test opts in; the drive's one recorded
+    # refusal is arm()'s schedule_cancel — the documented stopping point — and
+    # nothing after it, so the drive never ran into work these pins do not
+    # model.
+    assert live_seams.rest_calls == ["schedule_cancel"]
 
 
 def test_the_daemon_gives_the_reconciler_a_payload_dir(tmp_path, live_seams, monkeypatch):
@@ -4275,7 +4318,7 @@ def test_the_daemon_gives_the_reconciler_a_payload_dir(tmp_path, live_seams, mon
     assert len(record.reconcilers) == 1, record.reconcilers
     for reconciler in record.reconcilers:
         assert_payload_dir(reconciler, dbp, run_id="r1")
-    assert live_seams.rest_calls == []  # as in the sibling pin above
+    assert live_seams.rest_calls == ["schedule_cancel"]  # as in the sibling pin above
 
 
 def test_the_daemon_gives_its_sweep_components_one_identity_monitor(
@@ -4300,7 +4343,98 @@ def test_the_daemon_gives_its_sweep_components_one_identity_monitor(
     assert shared is not None, "the reconciler was left to build a private monitor"
     assert record.switches[0]._identity is shared
     assert_payload_dir({"payload_dir": shared._payload_dir}, dbp, run_id="r1")
-    assert live_seams.rest_calls == []
+    assert live_seams.rest_calls == ["schedule_cancel"]  # as in the sibling pins
+
+
+def test_a_venue_identity_fault_latched_at_shutdown_persists_manual_for_the_next_boot(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    """End-to-end through the CLI (issue #80): the §18.2 disarm cross-check's
+    misrouted answer crosses the threshold, the escalation folds into
+    ``shutdown_problem`` (so the run can never end "all quiet"), and the
+    persisted manual state — with the identity reason — is what the next boot
+    hydrates.
+
+    The threshold is patched to 3 because the one-shot lane asks about a cloid
+    exactly three times (two §19.1 reconciliation passes + the cross-check);
+    what is under test is the WIRING, not the constant, whose value is pinned
+    in test_venue_identity. Exit code measured at 4 — the executed-but-unclean
+    contract — never 0: the same misrouted answers that build the streak also
+    leave the verdict unclean.
+    """
+    import contrib.hyperliquid_perp.live.venue_identity as vi_mod
+    from contrib.hyperliquid_perp.live.safe_mode import (
+        REASON_IDENTITY_FAULT,
+        SafeModeManager,
+    )
+    from contrib.hyperliquid_perp.persistence import repository as repo
+
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(vi_mod, "UNREADABLE_PROBE_LATCH_THRESHOLD", 3)
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg, run_id="r1")
+    hex_id = "0x" + "ab" * 16
+    db = Database(dbp)
+    with db.transaction() as conn:
+        repo.insert_cloid_mapping(
+            conn,
+            cloid_logical="log-e2e",
+            cloid_hex=hex_id,
+            run_id="r1",
+            symbol="BTC",
+            order_role="entry",
+        )
+        repo.insert_order(
+            conn,
+            order_id="o-e2e",
+            mode="live",
+            run_id="r1",
+            symbol="BTC",
+            order_role="entry",
+            side="buy",
+            order_type="ioc_limit",
+            qty=D("0.001"),
+            status="open",
+            price=D(100),
+            cloid_logical="log-e2e",
+            cloid_hex=hex_id,
+            exchange_order_id="900",
+            is_bot_owned=True,
+            timestamp=datetime.now(timezone.utc),
+        )
+    db.close()
+
+    live_seams.rest_enabled = True
+    # Every orderStatus answer about our order names a STRANGER's identity.
+    live_seams.order_status[hex_id] = {
+        "status": "order",
+        "order": {"order": {"oid": "4242", "cloid": "0x" + "ee" * 16}, "status": "open"},
+    }
+
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    err = capsys.readouterr().err
+
+    assert rc == 4  # executed-but-unclean; never 0
+    assert "§18.2 shutdown unclean" in err
+    assert "venue identity fault latched" in err
+    db = Database(dbp)
+    try:
+        state = SafeModeManager(db=db, run_id="r1", gate=None).current()
+        assert state is not None and state.is_manual
+        assert state.reason == REASON_IDENTITY_FAULT
+        latch_rows = [
+            e
+            for e in repo.iter_protection_order_events(db.conn, "r1")
+            if e["event_type"] == "identity_fault_latched"
+        ]
+        assert len(latch_rows) == 1
+        assert "kill-switch disarm cross-check" in latch_rows[0]["detail"]
+    finally:
+        db.close()
 
 
 class _StopBeforeTheLoop(Exception):

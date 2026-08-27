@@ -199,11 +199,11 @@ def test_the_latch_row_is_once_per_episode_and_a_recurrence_writes_a_new_one(db,
         clock.advance(1)
         _probe_expecting_unreadable(monitor)
     assert len(_latch_rows(db)) == 1
-    # The evidence is bounded per CLOID, not per answer: under the manual safe
-    # mode the latch raises, the §17 sync keeps probing every tick — and a
-    # venue that misroutes one cloid while answering another fine never even
-    # latches — so one file per answer would fill the payload_dir without
-    # bound. The latch row still names the file this cloid's evidence lives in.
+    # The evidence is bounded per CLOID, not per answer or per episode: under
+    # the manual safe mode the latch raises, the §17 sync keeps probing every
+    # tick, and a cloid that flaps readable/unreadable starts a new episode on
+    # every flap — either budget would fill the payload_dir without bound.
+    # The latch row still names the file this cloid's evidence lives in.
     assert len(list(payload_dir.glob("orderStatus-*.json"))) == 1
     assert "payload " in _latch_rows(db)[0]["detail"]
 

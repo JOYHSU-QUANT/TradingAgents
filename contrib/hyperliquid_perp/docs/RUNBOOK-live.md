@@ -579,7 +579,7 @@ python -m contrib.hyperliquid_perp safe-mode --run-id live-BTC --db live_trading
 
 **意思**：交易所連續多次對 orderStatus 給出「讀不出來是我們這張單」的答案——回的是**別人**
 的 cloid，或是這個 build 認不得的形狀。門檻與當下計數寫在 `protection_order_events`
-那列 `identity_fault_latched` 的 `detail` 裡。**計數是整個 process 共用的一條**（issue #80）：
+那列 `identity_fault_latched` 的 `detail` 裡。**計數走的是整個 process 共用的一個 `VenueIdentityMonitor`，但計數本身每個 cloid 各自一條**（issue #80）：
 protection 的兩個探測點、reconciliation 每張單的 orderStatus 查詢、以及 §18.2 shutdown 的
 disarm 交叉檢查，走的是同一個 `VenueIdentityMonitor`——所以故障在哪個消費者身上被問到都算同一串，
 `detail` 會寫出是哪一個站點跨過門檻的（計數**每個 cloid 一條**——venue 只誤路由其中一張單、
@@ -616,7 +616,8 @@ gate 線是豁免的（`order_gate.py` 有 import-time 保證），所以 latch 
    `live-smoke` 在 testnet 會先撞到）。
 3. 確認交易所已能正確回答我們的 cloid 之後才解除；解除用上面的 `--release --reason`。
 
-**自己會退掉的部分**：只要有**任何一次**探測讀得懂答案，latch 就會落下，之後若再度連續
+**自己會退掉的部分**：只要 **latch 住的那個 cloid** 再被讀得懂一次答案，latch 就會落下（別的
+cloid 讀得懂不算——串是按 cloid 記的），之後若再度連續
 故障會重新 latch 並留下**新的一列**（所以兩次發作在紀錄上分得開）。但 latch 落下**不會**
 自動解除 safe mode——§13.6 規定 manual 只能人工解除。
 

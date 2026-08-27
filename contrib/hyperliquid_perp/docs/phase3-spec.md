@@ -1204,8 +1204,8 @@ CLI 於 shutdown sweep 之後——三處的 `enter` 都持久化（冪等），
 改變——本機制只觀測與升級，且 `PROTECTIVE_ORDER_ROLES` 對 manual 這條 gate 線的既有
 豁免（§13.1）確保 latch 期間 SL 修復與 §17.2 緊急平倉照常可送；shutdown 的 disarm 在
 讀不懂答案時照舊被擋（unaccounted 文字標示 `answered unusably (venue identity fault)`）。
-latch 於任何一次讀得懂的答案落下（含 `unknownOid`），但落下**不**解除 safe mode——§13.6
-的人工解除仍是唯一出口。
+latch 於「latch 住的那個 cloid」再被讀得懂一次答案時落下（含 `unknownOid`；別的 cloid 讀得懂
+不影響它的串），但落下**不**解除 safe mode——§13.6 的人工解除仍是唯一出口。
 
 Manual latch 掛住期間，AI 決策 cadence 本身**暫停**（PR 5 定案，2026-07-22）：
 每個目標反正都會被 §4.1 `manual_safe_mode` 擋下，live decision driver 於

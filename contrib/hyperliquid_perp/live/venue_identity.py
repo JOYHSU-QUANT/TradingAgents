@@ -254,10 +254,10 @@ class VenueIdentityMonitor:
         keeps probing every tick under the manual safe mode the latch raises
         (protective roles are gate-exempt), so a persistent fault would fill
         the payload_dir at hundreds of files an hour. Not one per episode
-        either: the realistic fault misroutes ONE of our cloids while
-        answering the others coherently, so the streak flaps 1→0 forever,
-        never latches, and a per-episode budget would re-arm on every flap.
-        The distinct cloids a run asks about are bounded by its book; the
+        either: the same cloid can flap between readable and unreadable for
+        the life of a run, each flap ending one episode and starting the
+        next, so a per-episode budget would re-arm on every flap. The
+        distinct cloids a run asks about are bounded by its book; the
         first refusal is the evidence (a venue that misroutes a cloid
         misroutes it the same way next time).
         """

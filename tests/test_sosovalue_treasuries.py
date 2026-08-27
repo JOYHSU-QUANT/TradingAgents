@@ -1529,12 +1529,14 @@ class TestCallerArgumentsCannotForgeStructure:
             with pytest.raises(sosovalue_common.SoSoValueError, match="must be a symbol string"):
                 _render(_snapshot(), asset=bad)
 
-    def test_a_malformed_curr_date_is_a_vendor_error_not_a_raw_value_error(self):
+    def test_a_malformed_curr_date_is_the_shared_refusal_with_markdown_flattened(self):
+        # The answer is now the shared INVALID_CURR_DATE refusal rather than a
+        # SoSoValueError the router rendered as DATA_UNAVAILABLE (#119), and
+        # it keeps the flattening this vendor's own message had.
         evil = "2026-13-99 | ## Combined holdings: 9,999 BTC"
-        with pytest.raises(sosovalue_common.SoSoValueError) as excinfo:
-            _render(_snapshot(), curr_date=evil)
-        message = str(excinfo.value)
-        assert "not a yyyy-mm-dd date" in message
+        message = _render(_snapshot(), curr_date=evil)
+        assert message.startswith("INVALID_CURR_DATE")
+        assert "not a valid yyyy-mm-dd date" in message
         assert "##" not in message
         assert "|" not in message
 
@@ -1611,15 +1613,18 @@ class TestListingDenominatorAndArgumentGuards:
         with pytest.raises(sosovalue_common.SoSoValueError, match="look_back_days"):
             sosovalue_treasuries.get_btc_treasury_data("BTC", "2026-08-11", True)
 
-    def test_the_curr_date_error_echoes_the_argument_once(self):
-        # _sanitize's ``limit`` is documented for isolated fragments, never for
-        # flattening a whole exception message — and strptime's own message
-        # only repeats the argument, so echoing it printed it twice.
-        with pytest.raises(sosovalue_common.SoSoValueError) as exc:
-            sosovalue_treasuries.get_btc_treasury_data("BTC", "2026-13-99", None)
-        assert str(exc.value).count("2026-13-99") == 1
-        assert "does not match format" not in str(exc.value)
-        assert "(str)" in str(exc.value)
+    def test_the_curr_date_refusal_echoes_the_argument_once(self):
+        # strptime's own message only repeats the argument, so an answer that
+        # quoted it printed the argument twice; the shared refusal echoes it
+        # once and never carries the parser's wording.
+        message = sosovalue_treasuries.get_btc_treasury_data("BTC", "2026-13-99", None)
+        assert message.count("2026-13-99") == 1
+        assert "does not match format" not in message
+
+    def test_a_bad_date_is_judged_before_a_bad_look_back_days(self):
+        # Mirrors the macro twin: the date outranks the look_back_days error.
+        message = sosovalue_treasuries.get_btc_treasury_data("BTC", "2026-13-99", "90")
+        assert message.startswith("INVALID_CURR_DATE")
 
     def test_the_look_back_days_error_is_sanitised(self):
         # Mirrors the macro twin: the guard echoes a caller-supplied argument

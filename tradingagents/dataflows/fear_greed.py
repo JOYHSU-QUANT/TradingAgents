@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from .errors import VendorError
+from .utils import date_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +149,17 @@ def get_fear_greed_data(
         At the default 30-day window those thresholds are ~45, ~68 and ~75 days. The
         fetch is deliberately not widened to cover historical ``curr_date``s: this
         is a recent-window signal and live use has ``curr_date`` ≈ today.
+
+        An unusable ``curr_date`` answers the shared ``INVALID_CURR_DATE``
+        sentinel before any request, as the core-category tools do (#119): a
+        bare ``strptime`` ValueError used to reach the router's optional lane
+        and come back as DATA_UNAVAILABLE — "this source is down" — for what
+        was the caller's own argument.
     """
+    refusal = date_refusal(curr_date, what="Fear & Greed readings", kind="point")
+    if refusal is not None:
+        return refusal
+
     # A None, zero, or negative window falls back to the default rather than
     # sizing a nonsensical fetch limit. A 0-day window is especially degenerate
     # here: unless a reading is dated exactly curr_date it collapses to the
@@ -163,8 +174,9 @@ def get_fear_greed_data(
     # Normalise curr_date BEFORE the lookahead filter below. strptime accepts
     # non-zero-padded input ("2026-6-5"), which then compares wrong against the
     # canonical ISO reading dates — '2026-12-31' <= '2026-6-5' is True — silently
-    # admitting future readings. Parse (rejecting garbage) and re-derive the
-    # canonical form. (farside.get_etf_flow_data carries the same guard.)
+    # admitting future readings. Re-derive the canonical form; the refusal
+    # above already proved this parses. (farside.get_etf_flow_data carries the
+    # same guard.)
     curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     curr_date = curr_dt.strftime("%Y-%m-%d")
 

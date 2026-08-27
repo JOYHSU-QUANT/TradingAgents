@@ -10,6 +10,30 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **dataflows: an optional-category getter refuses an unusable `curr_date`
+  instead of reporting the vendor down** (issue #119). The seven getters
+  behind `OPTIONAL_CATEGORIES` — Fear & Greed, both ETF-flow vendors, FRED
+  macro, Deribit options, the SoSoValue economic calendar and BTC treasuries —
+  now answer the shared `INVALID_CURR_DATE` sentinel before any request for a
+  `curr_date` that does not parse (`""`, `"abc"`, `"2026/08/18"`, `None`),
+  the verdict the core-category tools have given since #109/#111. They used
+  to raise — a bare `strptime` ValueError from four of them, a vendor-typed
+  error from the other three — which `route_to_vendor`'s optional lane
+  rendered as `DATA_UNAVAILABLE: optional <category> could not be
+  retrieved`, so one bad argument drew "fix the date and retry" from
+  `get_stock_data` and "this source is down, proceed without it" from every
+  positioning and sentiment tool in the same turn. The shared sentinel now
+  flattens markdown control characters in the echoed value and caps it, the
+  guard Deribit and SoSoValue carried in their own messages; a clean value
+  is echoed unchanged. Two loose ends from #118 close with it (issue #120):
+  `alpha_vantage_common.format_datetime_for_api` accepts only `yyyy-mm-dd`
+  (its passthrough-stamp, `"%Y-%m-%d %H:%M"` and `datetime` branches were
+  unreachable once both news getters refused anything else up front), and
+  the verified-snapshot header prints the requested date in ISO, so an
+  accepted `2026/08/18` no longer sits beside a sibling tool's
+  `INVALID_END_DATE` for the same string. The four fundamentals tool
+  descriptions now say the sentinel is a possible answer (issue #112).
+
 - **dataflows: a yfinance transport failure is no longer read as a successful
   report** (issue #116). Every yfinance leaf — fundamentals, the three
   statements, insider transactions, both news getters and both stockstats

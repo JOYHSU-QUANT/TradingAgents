@@ -106,6 +106,7 @@ from .sosovalue_common import (
     load_rolling_snapshot,
 )
 from .symbol_utils import classify_crypto_asset
+from .utils import date_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -914,13 +915,22 @@ def get_etf_flow_data(
         cumulative, since-launch cumulative, streak, latest-day fund leaders,
         a breadth line (how many funds moved together and, when any moved,
         how concentrated the flow was), and a recent daily-flow table.
+
+        An unusable ``curr_date`` answers the shared ``INVALID_CURR_DATE``
+        sentinel before any request, as the core-category tools do (#119);
+        the Farside vendor of this tool says the same sentence.
     """
+    refusal = date_refusal(curr_date, what="ETF flows", kind="point")
+    if refusal is not None:
+        return refusal
+
     if look_back_days is None or look_back_days <= 0:
         look_back_days = DEFAULT_LOOKBACK_DAYS
 
     # Normalise curr_date BEFORE any lexical date comparison: strptime accepts
     # non-zero-padded input ("2026-6-5"), which compares wrong against
-    # canonical ISO row dates and would silently admit future rows.
+    # canonical ISO row dates and would silently admit future rows. The
+    # refusal above already proved this parses.
     curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     curr_date = curr_dt.strftime("%Y-%m-%d")
 

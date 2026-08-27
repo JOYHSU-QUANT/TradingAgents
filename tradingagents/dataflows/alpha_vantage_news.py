@@ -84,8 +84,9 @@ def get_news(ticker, start_date, end_date) -> str:
 
     An unusable start or end date answers the shared sentinel before any
     request, as the yfinance sibling does (#111). That gate is the strict
-    ``yyyy-mm-dd`` rule, so the intraday and ``datetime`` forms
-    ``format_datetime_for_api`` also reads no longer reach it from here.
+    ``yyyy-mm-dd`` rule; the intraday and ``datetime`` forms this vendor once
+    accepted cannot arrive, and #120 removed them from
+    ``format_datetime_for_api`` as well.
     """
     if (refusal := date_range_refusal(start_date, end_date, what="news")) is not None:
         return refusal

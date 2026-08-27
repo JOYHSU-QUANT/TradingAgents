@@ -101,6 +101,7 @@ from .sosovalue_common import (
     raise_all_failed,
 )
 from .symbol_utils import classify_crypto_asset
+from .utils import date_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -836,14 +837,18 @@ def get_btc_treasury_data(
         disclosed holdings changes (buys positive, disposals negative, with
         an implied US$/BTC where cost was filed), and coverage caveats.
 
+    An unusable ``curr_date`` answers the shared ``INVALID_CURR_DATE`` sentinel
+    before any request, as the core-category tools do (#119). It used to be a
+    SoSoValueError, which the router's optional lane rendered as
+    DATA_UNAVAILABLE — "this source is down" — for what was the caller's own
+    argument.
+
     Raises:
-        SoSoValueError: if ``curr_date`` is not a yyyy-mm-dd date, if
-            ``look_back_days`` is not an integer, or if
+        SoSoValueError: if ``look_back_days`` is not an integer, or if
             ``asset`` is truthy but not a string (a caller's malformed argument
             is reported as this vendor's error class rather than left to escape
-            as a raw ``ValueError``/``AttributeError``, which the router would
-            render into the model-visible sentinel — with the argument echoed
-            verbatim in the ``curr_date`` case); or if the live fetch fails —
+            as a raw ``TypeError``/``AttributeError``, which the router would
+            render into the model-visible sentinel); or if the live fetch fails —
             including on a pure network error — and no cache is usable, because
             none exists or the newest is past ``MAX_STALE_DAYS``. An
             unrecognized but well-formed asset is NOT an error: it returns a
@@ -860,12 +865,19 @@ def get_btc_treasury_data(
     cases is produced by ``route_to_vendor`` catching these, downstream of the
     raise rather than in place of it.
     """
-    # Guarded like curr_date and asset below, and for the same reason: a
-    # non-int reaches ``<=`` first, where the TypeError escapes the vendor
-    # taxonomy into the router's bare except and is rendered into the
-    # model-visible sentinel. bool is rejected explicitly even though it passes
-    # isinstance(x, int) — True would silently mean a one-day window rather
-    # than the default. Mirrors the macro twin.
+    # The date is judged first (mirrors the macro twin): when several
+    # arguments are wrong, the date is the one the sibling tools in the same
+    # turn are already asking the model to fix.
+    refusal = date_refusal(curr_date, what="BTC treasury holdings", kind="point")
+    if refusal is not None:
+        return refusal
+
+    # Guarded like asset below, and for the same reason: a non-int reaches
+    # ``<=`` first, where the TypeError escapes the vendor taxonomy into the
+    # router's bare except and is rendered into the model-visible sentinel.
+    # bool is rejected explicitly even though it passes isinstance(x, int) —
+    # True would silently mean a one-day window rather than the default.
+    # Mirrors the macro twin.
     if look_back_days is not None and (
         isinstance(look_back_days, bool) or not isinstance(look_back_days, int)
     ):
@@ -876,26 +888,8 @@ def get_btc_treasury_data(
         look_back_days = DEFAULT_LOOKBACK_DAYS
 
     # Normalise curr_date BEFORE any lexical date comparison (family rule).
-    #
-    # Guarded like deribit's twin: curr_date is an LLM-written tool argument,
-    # and strptime's own ValueError echoes it verbatim ("time data '...' does
-    # not match format"). ValueError/TypeError are outside the vendor taxonomy,
-    # so that message escapes to the router's bare except and is rendered into
-    # the model-visible DATA_UNAVAILABLE sentinel unsanitized and unbounded —
-    # a caller's malformed argument dressed up as a SoSoValue outage.
-    try:
-        curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
-    except (ValueError, TypeError) as e:
-        # The exception's own message only repeats curr_date and the format
-        # string, so echoing it prints the caller's argument a SECOND time —
-        # and _sanitize's ``limit`` is documented for isolated fragments, never
-        # for flattening a whole exception message. The value is echoed once,
-        # capped, with the type name carrying what the TypeError case would
-        # otherwise have contributed. Mirrors the macro twin.
-        detail = _sanitize(curr_date, limit=200)
-        raise SoSoValueError(
-            f"curr_date {detail!r} ({type(curr_date).__name__}) is not a yyyy-mm-dd date"
-        ) from e
+    # The refusal above already proved this parses.
+    curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     curr_date = curr_dt.strftime("%Y-%m-%d")
 
     # The other caller-supplied argument, guarded the same way. A truthy

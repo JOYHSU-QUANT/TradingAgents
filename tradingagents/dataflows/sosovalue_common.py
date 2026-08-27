@@ -42,6 +42,7 @@ import requests
 
 from .config import get_config
 from .errors import VendorError, VendorNotConfiguredError, VendorRateLimitError
+from .utils import sanitize_untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -63,46 +64,25 @@ REQUEST_TIMEOUT = 30
 # in the report text.
 _TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}\Z")
 
-# Markdown control characters that let a server-controlled fragment forge
-# report structure. The vendor modules render into markdown tables that reach
-# an LLM verbatim, so a value carrying "|" splits its cell into new columns —
-# a macro event named "Widget Index | 9.9% | 9.9%" lands fabricated figures in
-# the Forecast and Previous positions of its own row — and "#"/"*"/"`" open
-# headings, emphasis and code spans mid-report. Same remedy and rationale as
-# the Deribit vendor: neutralize where the fragment ENTERS the message rather
-# than at the parse boundary, because a raised error reaches the prompt too
-# (``route_to_vendor`` hands an optional category's failure to the model as
-# ``DATA_UNAVAILABLE: ... ({error})``), while the stored and compared value
-# must stay byte-exact — the macro history path sends event names back to the
-# API, so flattening them at parse time would break the request path.
-#
-# Translated to a SPACE, not deleted: deletion joins the fragments either side
-# and can fuse two tokens into a third that reads as legitimate.
-_MARKDOWN_CONTROL = str.maketrans(dict.fromkeys("#*`|", " "))
-
-# "_" is handled separately because it also occurs inside ordinary words (an
-# event name or a company name may legitimately carry one). Only underscores
-# in EMPHASIS position — at a word boundary, where the reports' own
-# "_caveat._" lines sit — are removed; one between two alphanumerics stays.
-_EMPHASIS_UNDERSCORE = re.compile(r"(?<![0-9A-Za-z])_|_(?![0-9A-Za-z])")
-
 
 def _sanitize(text: object, *, limit: int | None = None) -> str:
     """Flatten a fragment this vendor did not author so it cannot forge structure.
 
-    The strip runs FIRST and whitespace is collapsed after it, so neither the
-    spaces the translation introduces nor the ones already in the fragment can
-    survive as a run or rebuild a line break inside a table cell. ``limit``
-    caps the result and is passed only where the fragment is ISOLATED (an
-    echoed raw row in a raised message), never when flattening a whole
-    exception message — most of that string is the module's own diagnostic,
-    and capping there would truncate the sentence that carries the meaning.
+    The flattening is the shared ``utils.sanitize_untrusted``; what is specific
+    to this family is WHERE it is applied. The vendor modules render into
+    markdown tables that reach an LLM verbatim, so a value carrying "|" splits
+    its cell into new columns — a macro event named "Widget Index | 9.9% |
+    9.9%" lands fabricated figures in the Forecast and Previous positions of
+    its own row. Neutralised where the fragment ENTERS the message rather than
+    at the parse boundary, because a raised error reaches the prompt too
+    (``route_to_vendor`` hands an optional category's failure to the model as
+    ``DATA_UNAVAILABLE: ... ({error})``), while the stored and compared value
+    must stay byte-exact — the macro history path sends event names back to
+    the API, so flattening them at parse time would break the request path.
+    ``limit`` is passed only where the fragment is ISOLATED (an echoed raw row
+    in a raised message), never when flattening a whole exception message.
     """
-    stripped = _EMPHASIS_UNDERSCORE.sub("", str(text).translate(_MARKDOWN_CONTROL))
-    stripped = " ".join(stripped.split())
-    if limit is not None and len(stripped) > limit:
-        stripped = stripped[:limit].rstrip() + "..."
-    return stripped
+    return sanitize_untrusted(text, limit=limit)
 
 
 class SoSoValueError(VendorError):

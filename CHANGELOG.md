@@ -10,6 +10,28 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **dataflows: a yfinance transport failure is no longer read as a successful
+  report** (issue #116). Every yfinance leaf — fundamentals, the three
+  statements, insider transactions, both news getters and both stockstats
+  indicator paths — re-raises `OSError` ahead of its broad handler, which used
+  to turn a reset or a timeout into `"Error retrieving ..."` prose
+  `route_to_vendor` records as an answer: the chain stopped at the vendor that
+  had just failed and the agent analysed the error sentence (on the indicator
+  window, after re-running the failed fetch once per day and rendering a column
+  of blanks). Measured on yfinance 1.4.1: it fetches through `curl_cffi`, whose
+  request exceptions escape `info`/`insider_transactions`/news unwrapped and,
+  like `requests.RequestException`, subclass `OSError`, while nothing in
+  yfinance's own `YFException` family does — so one clause covers both
+  transport libraries and leaves the taxonomy lane and the library-bug
+  degradation unchanged. The `get_indicators` tool wrapper now renders only
+  the new `UnsupportedIndicatorError` as report text; `VendorNotConfiguredError`
+  (a `ValueError`) and the router's own configuration errors reach the ToolNode
+  as failures instead of being pasted into the market report (#117). Alpha
+  Vantage's indicator descriptions are a module-level registry checked before
+  any request, the shared statement filter refuses an unusable `curr_date` on an
+  empty frame too, and a served statement coerces its fiscal-period labels once
+  (#112, #117).
+
 - **hyperliquid_perp live: the venue-identity fault is bounded at every
   orderStatus consumer, not only in protection** (issue #80). The consecutive
   "answer is not about our cloid" counter that PR #79 kept inside

@@ -15,6 +15,7 @@ from .config import get_config
 from .deribit import get_options_market_data as get_deribit_options_market
 from .errors import (
     NoMarketDataError,
+    UnsupportedIndicatorError,
     VendorNotConfiguredError,
     VendorRateLimitError,
 )
@@ -40,26 +41,14 @@ logger = logging.getLogger(__name__)
 
 # Tools organized by category
 TOOLS_CATEGORIES = {
-    "core_stock_apis": {
-        "description": "OHLCV stock price data",
-        "tools": [
-            "get_stock_data"
-        ]
-    },
+    "core_stock_apis": {"description": "OHLCV stock price data", "tools": ["get_stock_data"]},
     "technical_indicators": {
         "description": "Technical analysis indicators",
-        "tools": [
-            "get_indicators"
-        ]
+        "tools": ["get_indicators"],
     },
     "fundamental_data": {
         "description": "Company fundamentals",
-        "tools": [
-            "get_fundamentals",
-            "get_balance_sheet",
-            "get_cashflow",
-            "get_income_statement"
-        ]
+        "tools": ["get_fundamentals", "get_balance_sheet", "get_cashflow", "get_income_statement"],
     },
     "news_data": {
         "description": "News and insider data",
@@ -67,50 +56,50 @@ TOOLS_CATEGORIES = {
             "get_news",
             "get_global_news",
             "get_insider_transactions",
-        ]
+        ],
     },
     "macro_data": {
         "description": "Macroeconomic indicators (rates, inflation, labor, growth)",
         "tools": [
             "get_macro_indicators",
-        ]
+        ],
     },
     "prediction_markets": {
         "description": "Market-implied probabilities for forward-looking events",
         "tools": [
             "get_prediction_markets",
-        ]
+        ],
     },
     "crypto_etf_flows": {
         "description": "BTC/ETH US spot-ETF daily net flows (crypto)",
         "tools": [
             "get_etf_flows",
-        ]
+        ],
     },
     "crypto_sentiment": {
         "description": "Crypto Fear & Greed Index sentiment gauge",
         "tools": [
             "get_fear_greed",
-        ]
+        ],
     },
     "options_data": {
         "description": "Crypto options implied volatility: DVOL index and 25-delta skew",
         "tools": [
             "get_options_market",
-        ]
+        ],
     },
     "economic_calendar": {
         "description": "US macro economic calendar: scheduled events and releases vs forecast",
         "tools": [
             "get_economic_calendar",
-        ]
+        ],
     },
     "btc_treasuries": {
         "description": "Corporate BTC treasury holdings and disclosed changes (crypto)",
         "tools": [
             "get_btc_treasuries",
-        ]
-    }
+        ],
+    },
 }
 
 # Configuring a category (or tool) to this sentinel switches it off entirely.
@@ -227,12 +216,14 @@ VENDOR_METHODS = {
     },
 }
 
+
 def get_category_for_method(method: str) -> str:
     """Get the category that contains the specified method."""
     for category, info in TOOLS_CATEGORIES.items():
         if method in info["tools"]:
             return category
     raise ValueError(f"Method '{method}' not found in any category")
+
 
 def get_vendor(category: str, method: str = None) -> str:
     """Get the configured vendor for a data category or specific tool method.
@@ -249,6 +240,7 @@ def get_vendor(category: str, method: str = None) -> str:
     # Fall back to category-level configuration
     return config.get("data_vendors", {}).get(category, "default")
 
+
 def is_category_disabled(category: str, method: str = None) -> bool:
     """True when a category (or tool) is configured to the "none" sentinel.
 
@@ -259,11 +251,12 @@ def is_category_disabled(category: str, method: str = None) -> bool:
         v.strip().lower() == DISABLED_VENDOR for v in get_vendor(category, method).split(",")
     )
 
+
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
     category = get_category_for_method(method)
     vendor_config = get_vendor(category, method)
-    primary_vendors = [v.strip() for v in vendor_config.split(',')]
+    primary_vendors = [v.strip() for v in vendor_config.split(",")]
 
     if method not in VENDOR_METHODS:
         raise ValueError(f"Method '{method}' not supported")
@@ -282,9 +275,7 @@ def route_to_vendor(method: str, *args, **kwargs):
     # is never logged as a vendor failure.
     if any(v.lower() == DISABLED_VENDOR for v in explicit):
         if category in OPTIONAL_CATEGORIES:
-            logger.info(
-                "Optional %s is disabled by configuration; skipping %s", category, method
-            )
+            logger.info("Optional %s is disabled by configuration; skipping %s", category, method)
             return (
                 f"DATA_UNAVAILABLE: optional {category} is disabled by configuration. "
                 f"Proceed without it; do not fabricate values."
@@ -336,6 +327,17 @@ def route_to_vendor(method: str, *args, **kwargs):
         except NoMarketDataError as e:
             last_no_data = e  # No data here; another configured vendor may have it
             continue
+        except UnsupportedIndicatorError as e:
+            # A caller typo, not a vendor failure: logged without a traceback,
+            # which the clause below reserves for a bug. The chain still goes
+            # on — another vendor may compute the name (yfinance serves mfi;
+            # Alpha Vantage has no endpoint for it) — and it surfaces at the
+            # end like any other first error, for the tool wrapper to render
+            # as report text (#117).
+            logger.warning("Vendor %r does not support the indicator for %s: %s", vendor, method, e)
+            if first_error is None:
+                first_error = e
+            continue
         except Exception as e:
             # Don't let one vendor's failure crash the call when another can
             # serve it, but never swallow silently: a broken primary must be
@@ -357,7 +359,8 @@ def route_to_vendor(method: str, *args, **kwargs):
             # verdict can't hide a broken primary (network/auth/etc.).
             logger.warning(
                 "Returning NO_DATA for %s, but a vendor errored earlier: %s",
-                method, first_error,
+                method,
+                first_error,
             )
         sym = last_no_data.symbol
         canonical = last_no_data.canonical

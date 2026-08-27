@@ -1,7 +1,7 @@
 import requests
 
 from .alpha_vantage_common import _make_api_request
-from .errors import NoMarketDataError, VendorError
+from .errors import NoMarketDataError, UnsupportedIndicatorError, VendorError
 from .utils import data_lag_note, date_refusal
 
 # Maximum age (calendar days) of the newest indicator row relative to
@@ -85,6 +85,29 @@ _CSV_COLUMN_MAP = {
     "close_200_sma": "SMA",
 }
 
+# The description each rendered report ends with. Module-level, beside the
+# other three tables, so the same set check covers it: this used to be a local
+# dict read with a "No description available." fallback — unreachable, since an
+# unsupported name raises first, and untested, so an indicator added without a
+# description would have rendered that placeholder into the agent's report
+# silently (#117). Every indicator outside _NO_ENDPOINT_INDICATORS MUST have an
+# entry; the render indexes this directly and fails on a gap.
+_INDICATOR_DESCRIPTIONS = {
+    "close_50_sma": "50 SMA: A medium-term trend indicator. Usage: Identify trend direction and serve as dynamic support/resistance. Tips: It lags price; combine with faster indicators for timely signals.",
+    "close_200_sma": "200 SMA: A long-term trend benchmark. Usage: Confirm overall market trend and identify golden/death cross setups. Tips: It reacts slowly; best for strategic trend confirmation rather than frequent trading entries.",
+    "close_10_ema": "10 EMA: A responsive short-term average. Usage: Capture quick shifts in momentum and potential entry points. Tips: Prone to noise in choppy markets; use alongside longer averages for filtering false signals.",
+    "macd": "MACD: Computes momentum via differences of EMAs. Usage: Look for crossovers and divergence as signals of trend changes. Tips: Confirm with other indicators in low-volatility or sideways markets.",
+    "macds": "MACD Signal: An EMA smoothing of the MACD line. Usage: Use crossovers with the MACD line to trigger trades. Tips: Should be part of a broader strategy to avoid false positives.",
+    "macdh": "MACD Histogram: Shows the gap between the MACD line and its signal. Usage: Visualize momentum strength and spot divergence early. Tips: Can be volatile; complement with additional filters in fast-moving markets.",
+    "rsi": "RSI: Measures momentum to flag overbought/oversold conditions. Usage: Apply 70/30 thresholds and watch for divergence to signal reversals. Tips: In strong trends, RSI may remain extreme; always cross-check with trend analysis.",
+    "boll": "Bollinger Middle: A 20 SMA serving as the basis for Bollinger Bands. Usage: Acts as a dynamic benchmark for price movement. Tips: Combine with the upper and lower bands to effectively spot breakouts or reversals.",
+    "boll_ub": "Bollinger Upper Band: Typically 2 standard deviations above the middle line. Usage: Signals potential overbought conditions and breakout zones. Tips: Confirm signals with other tools; prices may ride the band in strong trends.",
+    "boll_lb": "Bollinger Lower Band: Typically 2 standard deviations below the middle line. Usage: Indicates potential oversold conditions. Tips: Use additional analysis to avoid false reversal signals.",
+    "atr": "ATR: Averages true range to measure volatility. Usage: Set stop-loss levels and adjust position sizes based on current market volatility. Tips: It's a reactive measure, so use it as part of a broader risk management strategy.",
+    # No entry for the _NO_ENDPOINT_INDICATORS members: they raise before any
+    # request, so nothing here would ever be rendered for them.
+}
+
 
 def get_indicator(
     symbol: str,
@@ -119,10 +142,12 @@ def get_indicator(
             ``route_to_vendor`` reads as a successful answer: the chain stopped
             at the vendor that had just failed and the agent analysed the
             sentence as an indicator report (#106).
-        ValueError: When the indicator is unsupported (a caller mistake), or
-            when it is registered as supported without a request definition
-            or a CSV column mapping (our own wiring gaps). Both are raised
-            before any request is made. A ``curr_date`` that will not parse
+        ValueError: When the indicator is unsupported (a caller mistake, raised
+            as ``UnsupportedIndicatorError``, which the tool wrapper renders as
+            report text, #117), or when it is registered as supported without
+            a request definition, a CSV column mapping or a description (our
+            own wiring gaps). All are raised before any request is made. A
+            ``curr_date`` that will not parse
             is not a raise: it answers the shared ``INVALID_CURR_DATE``
             sentinel, as the yfinance sibling does (#111).
         VendorError, requests.RequestException: Propagated (see the handlers at
@@ -137,24 +162,8 @@ def get_indicator(
 
     from dateutil.relativedelta import relativedelta
 
-    indicator_descriptions = {
-        "close_50_sma": "50 SMA: A medium-term trend indicator. Usage: Identify trend direction and serve as dynamic support/resistance. Tips: It lags price; combine with faster indicators for timely signals.",
-        "close_200_sma": "200 SMA: A long-term trend benchmark. Usage: Confirm overall market trend and identify golden/death cross setups. Tips: It reacts slowly; best for strategic trend confirmation rather than frequent trading entries.",
-        "close_10_ema": "10 EMA: A responsive short-term average. Usage: Capture quick shifts in momentum and potential entry points. Tips: Prone to noise in choppy markets; use alongside longer averages for filtering false signals.",
-        "macd": "MACD: Computes momentum via differences of EMAs. Usage: Look for crossovers and divergence as signals of trend changes. Tips: Confirm with other indicators in low-volatility or sideways markets.",
-        "macds": "MACD Signal: An EMA smoothing of the MACD line. Usage: Use crossovers with the MACD line to trigger trades. Tips: Should be part of a broader strategy to avoid false positives.",
-        "macdh": "MACD Histogram: Shows the gap between the MACD line and its signal. Usage: Visualize momentum strength and spot divergence early. Tips: Can be volatile; complement with additional filters in fast-moving markets.",
-        "rsi": "RSI: Measures momentum to flag overbought/oversold conditions. Usage: Apply 70/30 thresholds and watch for divergence to signal reversals. Tips: In strong trends, RSI may remain extreme; always cross-check with trend analysis.",
-        "boll": "Bollinger Middle: A 20 SMA serving as the basis for Bollinger Bands. Usage: Acts as a dynamic benchmark for price movement. Tips: Combine with the upper and lower bands to effectively spot breakouts or reversals.",
-        "boll_ub": "Bollinger Upper Band: Typically 2 standard deviations above the middle line. Usage: Signals potential overbought conditions and breakout zones. Tips: Confirm signals with other tools; prices may ride the band in strong trends.",
-        "boll_lb": "Bollinger Lower Band: Typically 2 standard deviations below the middle line. Usage: Indicates potential oversold conditions. Tips: Use additional analysis to avoid false reversal signals.",
-        "atr": "ATR: Averages true range to measure volatility. Usage: Set stop-loss levels and adjust position sizes based on current market volatility. Tips: It's a reactive measure, so use it as part of a broader risk management strategy.",
-        # No entry for the _NO_ENDPOINT_INDICATORS members: they raise above,
-        # so nothing here would ever be rendered for them.
-    }
-
     if indicator not in _SUPPORTED_INDICATORS:
-        raise ValueError(
+        raise UnsupportedIndicatorError(
             f"Indicator {indicator} is not supported. Please choose from: {list(_SUPPORTED_INDICATORS.keys())}"
         )
 
@@ -185,15 +194,18 @@ def get_indicator(
             ),
         )
 
-    # Both wiring checks run before the request and outside the broad handler at
-    # the end: a supported indicator with no request definition or no CSV column
-    # is our bug, not a vendor condition. Raising rather than returning prose
-    # stops it costing a request and leaves a traceback in the logs. It does NOT
-    # abort the run: the tool wrapper catches ValueError and appends the message
-    # to the report (technical_indicators_tools.py), so the agent still reads a
-    # sentence — what changes is that the router no longer records a successful
-    # answer, so a multi-vendor chain reaches the next vendor (#106). Guessing a
-    # column would silently render numbers from the wrong field (#31).
+    # All three wiring checks run before the request and outside the broad
+    # handler at the end: a supported indicator with no request definition, no
+    # CSV column or no description is our bug, not a vendor condition. Raising
+    # rather than returning prose stops it costing a request and leaves a
+    # traceback in the logs; the router no longer records a successful answer,
+    # so a multi-vendor chain reaches the next vendor (#106). A single-vendor
+    # chain surfaces it to the ToolNode as the failure it is: the tool wrapper
+    # renders only UnsupportedIndicatorError as report text (#117), and a
+    # wiring gap is ours to fix, not the model's to route around. Guessing a
+    # column would silently render numbers from the wrong field (#31); the
+    # description check is here rather than at the render because the broad
+    # handler below would turn a KeyError there into prose.
     if indicator not in _INDICATOR_REQUESTS:
         raise ValueError(
             f"Indicator '{indicator}' is registered as supported but has no "
@@ -202,6 +214,10 @@ def get_indicator(
     if indicator not in _CSV_COLUMN_MAP:
         raise ValueError(
             f"Indicator '{indicator}' is registered as supported but has no CSV column mapping"
+        )
+    if indicator not in _INDICATOR_DESCRIPTIONS:
+        raise ValueError(
+            f"Indicator '{indicator}' is registered as supported but has no description"
         )
 
     _, required_series_type = _SUPPORTED_INDICATORS[indicator]
@@ -313,7 +329,7 @@ def get_indicator(
             + ind_string
             + lag_note
             + "\n\n"
-            + indicator_descriptions.get(indicator, "No description available.")
+            + _INDICATOR_DESCRIPTIONS[indicator]
         )
 
         return result_str

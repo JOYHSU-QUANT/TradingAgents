@@ -145,6 +145,10 @@ def get_news_yfinance(
 
     except VendorError:
         raise  # Typed vendor failures take their router lanes (#67)
+    except OSError:
+        # Transport failures are not reports; the type facts are in
+        # y_finance.get_fundamentals (#116).
+        raise
     except Exception as e:
         return f"Error fetching news for {ticker}: {str(e)}"
 
@@ -246,5 +250,7 @@ def get_global_news_yfinance(
 
     except VendorError:
         raise  # Typed vendor failures take their router lanes (#67)
+    except OSError:
+        raise  # Transport failures are not reports; see y_finance.get_fundamentals (#116)
     except Exception as e:
         return f"Error fetching global news: {str(e)}"

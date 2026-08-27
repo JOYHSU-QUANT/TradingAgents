@@ -9,9 +9,12 @@ fixed on the Alpha Vantage indicator path, on the vendor that is the default
 for every one of these categories.
 """
 
+import logging
 from unittest import mock
 
 import pytest
+import requests
+from curl_cffi.requests import exceptions as curl_exceptions
 from yfinance.exceptions import YFRateLimitError
 
 import tradingagents.dataflows.stockstats_utils as su
@@ -19,7 +22,11 @@ import tradingagents.dataflows.y_finance as yfin
 import tradingagents.dataflows.yfinance_news as ynews
 from tradingagents.dataflows import interface
 from tradingagents.dataflows.config import set_config
-from tradingagents.dataflows.errors import VendorRateLimitError
+from tradingagents.dataflows.errors import (
+    UnsupportedIndicatorError,
+    VendorError,
+    VendorRateLimitError,
+)
 
 
 def _throttled(*a, **k):
@@ -209,6 +216,19 @@ def test_yf_fetch_statement_restores_other_errors_to_an_empty_frame():
 
 
 @pytest.mark.unit
+def test_yf_fetch_statement_lets_a_transport_failure_out():
+    # The other exception the un-hidden window must not re-swallow (#116):
+    # restored to an empty frame, a reset read as "no data" downstream.
+    from yfinance.config import YfConfig
+
+    with pytest.raises(curl_exceptions.ConnectionError):
+        su.yf_fetch_statement(
+            mock.Mock(side_effect=curl_exceptions.ConnectionError("connection reset"))
+        )
+    assert YfConfig.debug.hide_exceptions is True
+
+
+@pytest.mark.unit
 def test_yf_fetch_statement_is_safe_under_parallel_tool_execution():
     # ToolNode runs one message's tool calls on a thread pool, and the
     # fundamentals analyst binds the three statement tools together. Without
@@ -260,6 +280,24 @@ def test_statement_throttle_survives_yfinance_internal_swallowing(monkeypatch):
         yfin.get_balance_sheet("AAPL", "quarterly", "2026-06-01")
 
 
+@pytest.mark.unit
+def test_statement_transport_failure_survives_yfinance_internal_swallowing(monkeypatch):
+    # Through the REAL yfinance property, like the throttle test above: the
+    # fundamentals scraper swallows a transport failure into an empty frame
+    # too, which _statement_report read as "no balance sheet data" and the
+    # router's no-data sentinel then outranked the recorded failure — the
+    # agent was told the symbol was not covered and the fallback vendor never
+    # got its turn. The statement getters' own OSError clause cannot see this
+    # layer; yf_fetch_statement's un-hidden window is what lets it out (#116).
+    import yfinance.data as yfdata
+
+    boom = mock.Mock(side_effect=curl_exceptions.ConnectionError("connection reset"))
+    monkeypatch.setattr(yfdata.YfData, "get", boom)
+    monkeypatch.setattr(yfdata.YfData, "cache_get", boom)
+    with pytest.raises(curl_exceptions.ConnectionError):
+        yfin.get_balance_sheet("AAPL", "quarterly", "2026-06-01")
+
+
 # --- the leaves: a taxonomy error propagates instead of degrading to prose ---
 
 
@@ -302,12 +340,14 @@ def _check_call_table_covers(registry):
     assert set(_YFINANCE_LEAF_CALLS) == _registered_yfinance_methods(registry)
 
 
-def _check_impl_propagates(monkeypatch, tmp_path, impl, seam, args):
-    monkeypatch.setattr(*seam, _throttled)
+def _check_impl_propagates(
+    monkeypatch, tmp_path, impl, seam, args, raiser=_throttled, expected=VendorRateLimitError
+):
+    monkeypatch.setattr(*seam, raiser)
     # An empty cache dir, so the OHLCV leaves actually reach the seam instead of
     # being served a file some other test wrote.
     set_config({"data_cache_dir": str(tmp_path)})
-    with pytest.raises(VendorRateLimitError):
+    with pytest.raises(expected):
         impl(*args)
 
 
@@ -382,27 +422,123 @@ def test_bulk_rate_limit_skips_the_per_day_fallback_loop(monkeypatch):
 
 @pytest.mark.unit
 def test_untyped_failures_still_degrade_to_prose(monkeypatch):
-    # The broad handler keeps its job for anything outside the taxonomy: a
-    # vendor-library bug must not abort a run that another data point could
-    # still serve.
+    # The broad handler keeps its job for anything outside the taxonomy AND
+    # outside the transport family below: a vendor-library bug must not abort
+    # a run that another data point could still serve.
     monkeypatch.setattr(yfin, "yf_retry", mock.Mock(side_effect=RuntimeError("boom")))
     out = yfin.get_fundamentals("AAPL", "2026-06-01")
     assert out.startswith("Error retrieving fundamentals")
+
+
+@pytest.mark.unit
+def test_an_unsupported_indicator_is_the_caller_mistake_type(monkeypatch):
+    # The wrapper renders exactly this type as report text (#117); a plain
+    # ValueError would now reach the ToolNode as a failure instead. Raised
+    # before any fetch.
+    monkeypatch.setattr(yfin, "load_ohlcv", lambda *a, **k: pytest.fail("no fetch may be made"))
+    with pytest.raises(UnsupportedIndicatorError, match="not supported"):
+        yfin.get_stock_stats_indicators_window("AAPL", "bogus", "2026-06-01", 5)
+
+
+# --- the leaves, again: an OSError propagates instead of degrading to prose ---
+
+# yfinance 1.4.1 fetches through curl_cffi, whose request exceptions escape the
+# ``info``/``insider_transactions``/news calls as raised (measured: a session
+# raising curl_cffi's ConnectionError surfaces from data.py's crumb fetch
+# unwrapped). That family and ``requests.RequestException`` both subclass
+# OSError, and nothing in yfinance's own YFException family does — which is
+# what lets every leaf re-raise one type (#116). Both libraries are driven so
+# the clause is pinned to the family, not to whichever one yfinance links
+# today; the third row is the OHLCV cache's own OSError, which the clause
+# covers on purpose (a cache the process cannot read or write is not a
+# report either) and which only the OHLCV leaves can actually raise.
+_PROPAGATED_OSERRORS = {
+    "curl_cffi": curl_exceptions.ConnectionError("connection reset"),
+    "requests": requests.Timeout("read timed out"),
+    "cache": PermissionError("cache dir is read-only"),
+}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("family", sorted(_PROPAGATED_OSERRORS))
+@pytest.mark.parametrize("method", sorted(_YFINANCE_LEAF_CALLS))
+def test_every_registered_yfinance_impl_lets_an_oserror_propagate(
+    monkeypatch, tmp_path, method, family
+):
+    # #116: a reset or a timeout used to reach each leaf's broad except and
+    # come back as "Error retrieving ..." prose route_to_vendor reads as a
+    # successful report, so the chain stopped at the vendor that had just
+    # failed and the agent analysed the error sentence. Same registry-derived
+    # table as the throttle check, so a newly registered leaf must honour both.
+    # The statement rows raise at the yf_fetch_statement seam, which pins the
+    # getters' clause; the swallow one layer below it has its own test
+    # (test_statement_transport_failure_survives_yfinance_internal_swallowing).
+    exc = _PROPAGATED_OSERRORS[family]
+    seam, args = _YFINANCE_LEAF_CALLS[method]
+    _check_impl_propagates(
+        monkeypatch,
+        tmp_path,
+        interface.VENDOR_METHODS[method]["yfinance"],
+        seam,
+        args,
+        raiser=mock.Mock(side_effect=exc),
+        expected=type(exc),
+    )
+
+
+@pytest.mark.unit
+def test_the_transport_check_catches_a_leaf_that_degrades_it(monkeypatch, tmp_path):
+    # Discrimination: the exact pre-#116 shape — taxonomy re-raised, everything
+    # else pasted into prose — must fail the transport check.
+    def degrading_leaf(ticker):
+        try:
+            return yfin.yf_retry(lambda: "data")
+        except VendorError:
+            raise
+        except Exception as e:  # noqa: BLE001 - deliberately the buggy shape
+            return f"Error retrieving something for {ticker}: {e}"
+
+    with pytest.raises(pytest.fail.Exception):
+        _check_impl_propagates(
+            monkeypatch,
+            tmp_path,
+            degrading_leaf,
+            (yfin, "yf_retry"),
+            ("AAPL",),
+            raiser=mock.Mock(side_effect=_PROPAGATED_OSERRORS["curl_cffi"]),
+            expected=curl_exceptions.ConnectionError,
+        )
+
+
+@pytest.mark.unit
+def test_bulk_transport_failure_skips_the_per_day_fallback_loop(monkeypatch):
+    # Worse than prose on this leaf: the broad handler's per-day fallback
+    # re-ran the failed fetch once per day of the window and then rendered a
+    # column of blank values under a successful-looking header (#116).
+    monkeypatch.setattr(
+        yfin, "load_ohlcv", mock.Mock(side_effect=_PROPAGATED_OSERRORS["curl_cffi"])
+    )
+    fallback = mock.Mock(return_value="N/A")
+    monkeypatch.setattr(yfin, "get_stockstats_indicator", fallback)
+    with pytest.raises(curl_exceptions.ConnectionError):
+        yfin.get_stock_stats_indicators_window("AAPL", "rsi", "2026-06-01", 5)
+    fallback.assert_not_called()
 
 
 # --- end to end: through the real boundary into the router's lanes ---
 # (config isolation comes from the autouse _isolate_config fixture in conftest)
 
 
-def _rate_limited_yahoo(monkeypatch, tmp_path):
-    """Point the real OHLCV path at an empty cache and an always-429 Yahoo.
+def _failing_yahoo(monkeypatch, tmp_path, exc=None):
+    """Point the real OHLCV path at an empty cache and a Yahoo that raises ``exc``.
 
     Patched at Ticker.history — the call load_ohlcv actually makes, and one
     that genuinely re-raises YFRateLimitError (yf.download swallows it into an
-    empty frame, which is why load_ohlcv does not use it, #67).
+    empty frame, which is why load_ohlcv does not use it, #67). The default
+    is an always-429 Yahoo; a transport type drives the #116 lane.
     """
     monkeypatch.setattr(su.time, "sleep", lambda s: None)
-    monkeypatch.setattr(su.yf.Ticker, "history", mock.Mock(side_effect=YFRateLimitError()))
+    monkeypatch.setattr(su.yf.Ticker, "history", mock.Mock(side_effect=exc or YFRateLimitError()))
     set_config({"data_cache_dir": str(tmp_path)})
 
 
@@ -412,7 +548,7 @@ def test_yfinance_rate_limit_reaches_the_fallback_vendor(monkeypatch, tmp_path):
     # yf_retry boundary: an exhausted 429 used to come back as prose the router
     # read as a successful answer, so the configured fallback vendor never got
     # its turn.
-    _rate_limited_yahoo(monkeypatch, tmp_path)
+    _failing_yahoo(monkeypatch, tmp_path)
     set_config({"data_vendors": {"technical_indicators": "yfinance,alpha_vantage"}})
     with mock.patch.dict(
         interface.VENDOR_METHODS,
@@ -432,7 +568,7 @@ def test_yfinance_rate_limit_reaches_the_fallback_vendor(monkeypatch, tmp_path):
 def test_yfinance_rate_limit_on_a_single_vendor_chain_fails_loud(monkeypatch, tmp_path):
     # technical_indicators is a core category: a chain exhausted by nothing but
     # rate limits surfaces the throttle instead of prose or a bare RuntimeError.
-    _rate_limited_yahoo(monkeypatch, tmp_path)
+    _failing_yahoo(monkeypatch, tmp_path)
     set_config({"data_vendors": {"technical_indicators": "yfinance"}})
     with (
         mock.patch.dict(
@@ -443,3 +579,64 @@ def test_yfinance_rate_limit_on_a_single_vendor_chain_fails_loud(monkeypatch, tm
         pytest.raises(VendorRateLimitError),
     ):
         interface.route_to_vendor("get_indicators", "AAPL", "rsi", "2026-06-01", 5)
+
+
+@pytest.mark.unit
+def test_yfinance_transport_failure_reaches_the_fallback_vendor(monkeypatch, tmp_path):
+    # #116 end-to-end: a reset used to come back as prose the router read as a
+    # successful answer, so the configured fallback vendor never got its turn.
+    _failing_yahoo(monkeypatch, tmp_path, curl_exceptions.ConnectionError("connection reset"))
+    set_config({"data_vendors": {"technical_indicators": "yfinance,alpha_vantage"}})
+    with mock.patch.dict(
+        interface.VENDOR_METHODS,
+        {
+            "get_indicators": {
+                "yfinance": yfin.get_stock_stats_indicators_window,
+                "alpha_vantage": mock.Mock(return_value="AV_INDICATORS"),
+            }
+        },
+        clear=False,
+    ):
+        result = interface.route_to_vendor("get_indicators", "AAPL", "rsi", "2026-06-01", 5)
+    assert result == "AV_INDICATORS"
+
+
+@pytest.mark.unit
+def test_yfinance_transport_failure_on_a_single_vendor_chain_fails_loud(monkeypatch, tmp_path):
+    # technical_indicators is a core category: with no other vendor to serve
+    # it, the transport failure itself surfaces (the router's ``raise
+    # first_error``), not prose and not a bare RuntimeError.
+    _failing_yahoo(monkeypatch, tmp_path, curl_exceptions.ConnectionError("connection reset"))
+    set_config({"data_vendors": {"technical_indicators": "yfinance"}})
+    with (
+        mock.patch.dict(
+            interface.VENDOR_METHODS,
+            {"get_indicators": {"yfinance": yfin.get_stock_stats_indicators_window}},
+            clear=False,
+        ),
+        pytest.raises(curl_exceptions.ConnectionError),
+    ):
+        interface.route_to_vendor("get_indicators", "AAPL", "rsi", "2026-06-01", 5)
+
+
+@pytest.mark.unit
+def test_an_unsupported_indicator_reaches_the_wrapper_as_report_text(monkeypatch, tmp_path, caplog):
+    # Through the real router and the real yfinance getter: the wrapper's
+    # narrow except only helps if the type survives route_to_vendor. Pinned
+    # end-to-end so a router that later wraps generic failures cannot silently
+    # turn every typo into an aborted run (#117). And no traceback in the log:
+    # a typo is not the bug exc_info is reserved for.
+    from tradingagents.agents.utils import technical_indicators_tools as tools
+
+    set_config(
+        {"data_vendors": {"technical_indicators": "yfinance"}, "data_cache_dir": str(tmp_path)}
+    )
+    monkeypatch.setattr(
+        yfin, "load_ohlcv", mock.Mock(side_effect=AssertionError("no fetch may be made"))
+    )
+    with caplog.at_level(logging.WARNING, logger=interface.__name__):
+        out = tools.get_indicators.invoke(
+            {"symbol": "AAPL", "indicator": "bogus", "curr_date": "2026-06-01"}
+        )
+    assert "Indicator bogus is not supported" in out
+    assert caplog.records and not any(r.exc_info for r in caplog.records)

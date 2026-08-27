@@ -22,8 +22,9 @@ failures are silent rather than loud, which is why nothing surfaced them:
   forward turns off future-report filtering entirely — a look-ahead-bias leak
   whose only symptoms, since #73, are the vendors' date-less warning log and a
   wall-clock freshness note (before that, none at all).
-* ``get_indicators`` catches ``ValueError`` and pastes the message into the
-  report text, so even a loud failure degrades to prose inside the market report.
+* ``get_indicators`` catches ``UnsupportedIndicatorError`` and pastes the
+  message into the report text, so a bad indicator NAME degrades to prose
+  inside the market report (every other failure propagates, #117).
 
 Type annotations do not protect any of this: the arguments are overwhelmingly
 same-typed, so a swap is type-correct.
@@ -49,6 +50,7 @@ from tradingagents.agents.utils import (
     prediction_markets_tools,
     technical_indicators_tools,
 )
+from tradingagents.dataflows.errors import UnsupportedIndicatorError, VendorNotConfiguredError
 
 DATE = "2026-08-05"
 
@@ -307,14 +309,14 @@ class TestIndicatorsWrapper:
 
     def test_a_rejected_indicator_becomes_report_text_rather_than_an_exception(self):
         # technical_indicators is NOT an optional category, so the router raises
-        # loudly — but this wrapper catches ValueError and pastes the message into
-        # the report. That is deliberate (one bad LLM-supplied indicator should
-        # not cost the whole call), and it is also why a wrong argument order here
-        # degrades to prose instead of failing: worth pinning so the behaviour is
-        # a decision rather than an accident.
+        # loudly — but this wrapper catches UnsupportedIndicatorError and pastes
+        # the message into the report. That is deliberate (one bad LLM-supplied
+        # indicator should not cost the whole call), and it is also why a wrong
+        # argument order here degrades to prose instead of failing: worth pinning
+        # so the behaviour is a decision rather than an accident.
         def raiser(_method, _symbol, ind, *_rest):
             if ind == "bogus":
-                raise ValueError(f"Unsupported indicator: {ind}")
+                raise UnsupportedIndicatorError(f"Unsupported indicator: {ind}")
             return "ROUTED"
 
         with mock.patch.object(technical_indicators_tools, "route_to_vendor", raiser):
@@ -323,7 +325,7 @@ class TestIndicatorsWrapper:
             )
         assert out == "ROUTED\n\nUnsupported indicator: bogus"
 
-    def test_only_a_valueerror_becomes_report_text(self):
+    def test_only_the_unsupported_indicator_type_becomes_report_text(self):
         # The OTHER edge of that except clause, and the one that was unpinned:
         # deleting the try/except is caught by the test above, but WIDENING it to
         # `except Exception` shipped green. Widened, a VendorRateLimitError, a
@@ -337,6 +339,63 @@ class TestIndicatorsWrapper:
         with (
             mock.patch.object(technical_indicators_tools, "route_to_vendor", boom),
             pytest.raises(KeyError),
+        ):
+            technical_indicators_tools.get_indicators.invoke(
+                {"symbol": "AAPL", "indicator": "rsi", "curr_date": DATE}
+            )
+
+    def test_a_missing_vendor_key_is_a_failure_not_report_text(self):
+        # VendorNotConfiguredError is a ValueError (errors.py keeps it one for
+        # older callers), and this wrapper used to catch every ValueError — so
+        # "ALPHA_VANTAGE_API_KEY is not set" was pasted into the market report
+        # as prose and the run went on as if an indicator had been served. The
+        # narrowing to UnsupportedIndicatorError is what this pins: widen it
+        # back to ValueError and this fails (#117).
+        def unconfigured(*_args, **_kwargs):
+            raise VendorNotConfiguredError("ALPHA_VANTAGE_API_KEY is not set")
+
+        with (
+            mock.patch.object(technical_indicators_tools, "route_to_vendor", unconfigured),
+            pytest.raises(VendorNotConfiguredError),
+        ):
+            technical_indicators_tools.get_indicators.invoke(
+                {"symbol": "AAPL", "indicator": "rsi", "curr_date": DATE}
+            )
+
+    def test_a_failure_on_one_indicator_stops_the_call_there(self):
+        # The loop appends per indicator, so a propagated failure discards the
+        # reports already served and routes nothing after it — the cost of
+        # failing the tool rather than pasting prose (#117), pinned so the
+        # shape is a decision: the run's error names the first failure.
+        calls = []
+
+        def unconfigured_second(_method, _symbol, ind, *_rest):
+            calls.append(ind)
+            if ind == "macd":
+                raise VendorNotConfiguredError("ALPHA_VANTAGE_API_KEY is not set")
+            return "ROUTED"
+
+        with (
+            mock.patch.object(technical_indicators_tools, "route_to_vendor", unconfigured_second),
+            pytest.raises(VendorNotConfiguredError),
+        ):
+            technical_indicators_tools.get_indicators.invoke(
+                {"symbol": "AAPL", "indicator": "rsi,macd,atr", "curr_date": DATE}
+            )
+        assert calls == ["rsi", "macd"]
+
+    def test_a_plain_valueerror_is_a_failure_not_report_text(self):
+        # The router's own ValueErrors — a configured vendor that does not
+        # exist for this method, a core category switched off — are
+        # deployment mistakes, not something the model can fix by picking
+        # another indicator name; they took the prose lane for the same
+        # reason the key did (#117).
+        def misconfigured(*_args, **_kwargs):
+            raise ValueError("Configured vendor(s) ['nope'] not available for 'get_indicators'")
+
+        with (
+            mock.patch.object(technical_indicators_tools, "route_to_vendor", misconfigured),
+            pytest.raises(ValueError, match="not available"),
         ):
             technical_indicators_tools.get_indicators.invoke(
                 {"symbol": "AAPL", "indicator": "rsi", "curr_date": DATE}

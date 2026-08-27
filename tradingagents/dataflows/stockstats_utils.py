@@ -156,10 +156,10 @@ def yf_fetch_statement(func):
     that code flips ``network.hide_exceptions``, which nothing in yfinance
     1.4.1 reads; ``debug.hide_exceptions`` is the one the scrapers consult,
     so flipping the network one would silently reinstate the swallow. Hidden
-    mode is switched off for the call, ONLY the rate limit is re-raised, and
-    every other exception is restored to the swallowed-empty frame the
-    library would have answered with (logged here, since the library's own
-    error log line is skipped once its swallow no longer runs).
+    mode is switched off for the call, the rate limit and ``OSError`` are
+    re-raised, and every other exception is restored to the swallowed-empty
+    frame the library would have answered with (logged here, since the
+    library's own error log line is skipped once its swallow no longer runs).
     """
     from yfinance.config import YfConfig
 
@@ -170,6 +170,15 @@ def yf_fetch_statement(func):
             try:
                 return func()
             except YFRateLimitError:
+                raise
+            except OSError:
+                # A transport failure at the property is not "no data": under
+                # the swallow it became an empty frame, which _statement_report
+                # turned into NoMarketDataError, and the router's no-data
+                # sentinel ranks above a recorded failure — so the agent read
+                # "symbol not covered" and the fallback vendor was never tried
+                # (#116). Same family as the getters' clause; the type facts
+                # are in y_finance.get_fundamentals.
                 raise
             except Exception as e:
                 logger.warning("yfinance statement fetch failed: %s", e, exc_info=True)
@@ -445,7 +454,9 @@ def coerce_period_labels(labels) -> tuple[list, bool]:
     return periods, dropped_a_zone
 
 
-def filter_financials_by_date(data: pd.DataFrame, curr_date: str | None) -> pd.DataFrame:
+def filter_financials_by_date(
+    data: pd.DataFrame, curr_date: str | None, coerced: tuple[list, bool] | None = None
+) -> pd.DataFrame:
     """Drop financial statement columns (fiscal period timestamps) after curr_date.
 
     yfinance financial statements use fiscal period end dates as columns.
@@ -458,7 +469,15 @@ def filter_financials_by_date(data: pd.DataFrame, curr_date: str | None) -> pd.D
     ``_filter_reports_by_date``: this backs a core fundamentals tool, so a broken
     bound must fail loud rather than silently leak future periods. The getters
     answer the shared sentinel first (#89), so that raise is unreachable in
-    production and stands as the contract for a direct caller.
+    production and stands as the contract for a direct caller. It is
+    unconditional: the check sits ABOVE the empty-frame short circuit, so an
+    empty frame with a broken bound refuses too — nothing to leak there, but
+    the sentence this docstring makes should not hold only sometimes (#117).
+
+    ``coerced`` lets a caller that has already run the columns through
+    :func:`coerce_period_labels` hand the result over instead of paying for —
+    and warning about — a second pass on the same labels: the statement lane
+    measures "did any column carry a fiscal period" on them first (#112).
 
     The raise, not the normalisation below it, is what makes the ``is None``
     test safe. Testing falsiness (what this did before) sent ``""`` down the
@@ -478,7 +497,7 @@ def filter_financials_by_date(data: pd.DataFrame, curr_date: str | None) -> pd.D
     naive frame's labels are passed through untouched — and a date-less call
     returns above without reaching any of it.
     """
-    if curr_date is None or data.empty:
+    if curr_date is None:
         return data
     normalized = normalize_iso_date(curr_date)
     if normalized is None:
@@ -486,8 +505,17 @@ def filter_financials_by_date(data: pd.DataFrame, curr_date: str | None) -> pd.D
             f"yfinance financials: curr_date {curr_date!r} is not a valid "
             f"YYYY-MM-DD date; refusing to serve statements unfiltered (look-ahead guard)"
         )
+    if data.empty:
+        return data
     cutoff = pd.Timestamp(normalized)
-    periods, dropped_a_zone = coerce_period_labels(data.columns)
+    periods, dropped_a_zone = coerced if coerced is not None else coerce_period_labels(data.columns)
+    if len(periods) != len(data.columns):
+        # The mask below is applied positionally, so labels coerced from a
+        # different frame would silently keep the wrong columns.
+        raise ValueError(
+            f"yfinance financials: {len(periods)} coerced labels handed in for "
+            f"{len(data.columns)} columns; coerce the frame being filtered"
+        )
     mask = [not pd.isna(p) and p <= cutoff for p in periods]
     kept = data.loc[:, mask]
     if dropped_a_zone:

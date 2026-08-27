@@ -23,7 +23,18 @@ Breaking changes within the 0.x line are called out explicitly.
   like `requests.RequestException`, subclass `OSError`, while nothing in
   yfinance's own `YFException` family does — so one clause covers both
   transport libraries and leaves the taxonomy lane and the library-bug
-  degradation unchanged. The `get_indicators` tool wrapper now renders only
+  degradation unchanged. The clause alone could not reach the failures
+  yfinance's own scrapers swallow under `hide_exceptions` — a statement, a
+  price history or a news list answered empty, `info`/insider filings a
+  `None` — so `yf_fetch_statement` is now the general `yf_fetch_unhidden`
+  and every one of those calls goes through it: a throttle or an `OSError`
+  comes out, anything else is restored to the empty answer the library would
+  have given (a delisted symbol still reaches the no-data lane). Operator-
+  visible consequence: the shipped single-vendor `yfinance` defaults now fail
+  the tool call on a network failure instead of serving error prose; a
+  fallback chain (`yfinance,alpha_vantage`) gets its turn. Still outside this
+  fix: a non-JSON body (a 5xx HTML page) is answered as "No news found" by
+  both news getters. The `get_indicators` tool wrapper now renders only
   the new `UnsupportedIndicatorError` as report text; `VendorNotConfiguredError`
   (a `ValueError`) and the router's own configuration errors reach the ToolNode
   as failures instead of being pasted into the market report (#117). Alpha

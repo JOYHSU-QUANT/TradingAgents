@@ -24,7 +24,7 @@ class _FakeTicker:
 
 def _patch_ticker(monkeypatch, **attrs):
     monkeypatch.setattr(yfin.yf, "Ticker", lambda symbol: _FakeTicker(**attrs))
-    monkeypatch.setattr(yfin, "yf_retry", lambda fn: fn())
+    monkeypatch.setattr(yfin, "yf_fetch_unhidden", lambda fn, **kw: fn())
 
 
 def _statement(*cols):
@@ -804,7 +804,7 @@ class TestEmptyNewsWindowIsVendorAgnostic:
                 get_news=lambda count: [{"title": "Old news", "providerPublishTime": self._STALE}]
             ),
         )
-        monkeypatch.setattr(yfnews, "yf_retry", lambda fn: fn())
+        monkeypatch.setattr(yfnews, "yf_fetch_unhidden", lambda fn, **kw: fn())
         yf_out = yfnews.get_news_yfinance("AAPL", "2026-06-01", "2026-06-05")
 
         av_out = self._av_empty_feed(monkeypatch).get_news("AAPL", "2026-06-01", "2026-06-05")

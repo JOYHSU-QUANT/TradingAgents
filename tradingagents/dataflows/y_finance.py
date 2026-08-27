@@ -14,7 +14,7 @@ from .stockstats_utils import (
     filter_financials_by_date,
     load_ohlcv,
     yf_fetch_statement,
-    yf_retry,
+    yf_fetch_unhidden,
 )
 from .symbol_utils import NoMarketDataError, normalize_symbol
 
@@ -196,7 +196,13 @@ def get_YFin_data_online(
     # end_date row (and the current day when end_date is today). Request one day
     # past end_date so the requested range is actually inclusive (#986/#987).
     end_inclusive = (end_dt + relativedelta(days=1)).strftime("%Y-%m-%d")
-    data = yf_retry(lambda: ticker.history(start=start_date, end=end_inclusive))
+    # Un-hidden so a transport failure surfaces instead of being swallowed
+    # into the empty frame the no-data check below would read as an unknown
+    # symbol (#116); a genuinely missing symbol still answers that frame.
+    data = yf_fetch_unhidden(
+        lambda: ticker.history(start=start_date, end=end_inclusive),
+        hidden_answer=pd.DataFrame,
+    )
 
     # Empty result means the symbol is unknown/delisted. Raise a typed error
     # instead of returning prose: the routing layer turns it into a single
@@ -464,7 +470,10 @@ def get_fundamentals(
     canonical = normalize_symbol(ticker)
     try:
         ticker_obj = yf.Ticker(canonical)
-        info = yf_retry(lambda: ticker_obj.info)
+        # Un-hidden: the quote scraper swallows a non-429 HTTP failure into a
+        # None its own parser then trips over, which the broad handler below
+        # rendered as "Error retrieving fundamentals ..." prose (#116).
+        info = yf_fetch_unhidden(lambda: ticker_obj.info)
 
         if not info:
             raise NoMarketDataError(ticker, canonical, "no fundamentals returned")
@@ -650,7 +659,10 @@ def get_insider_transactions(ticker: Annotated[str, "ticker symbol of the compan
     canonical = normalize_symbol(ticker)
     try:
         ticker_obj = yf.Ticker(canonical)
-        data = yf_retry(lambda: ticker_obj.insider_transactions)
+        # Un-hidden: the holders scraper swallows a non-429 HTTP failure into
+        # an empty frame, which the "no filings" sentence below would then
+        # claim as coverage (#116).
+        data = yf_fetch_unhidden(lambda: ticker_obj.insider_transactions)
 
         # Empty is normal here (many valid symbols have no insider filings),
         # so report it plainly rather than treating the symbol as invalid.

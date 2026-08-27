@@ -132,39 +132,47 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
             return result
 
 
-# Serializes yf_fetch_statement's flip/fetch/restore of the process-global
+# Serializes yf_fetch_unhidden's flip/fetch/restore of the process-global
 # hidden-exceptions flag. ToolNode runs the tool calls of one model message on
 # a thread pool, and the fundamentals analyst binds the three statement tools
 # together — unsynchronized, an interleaved backup capture could restore the
 # flag mid-fetch (re-swallowing the very throttle this exists to surface) or
 # leave it stuck False process-wide. The retry sleeps in yf_retry sit outside
-# the locked window, so a throttled statement does not hold the lock while
-# backing off.
-_STATEMENT_FLAG_LOCK = threading.Lock()
+# the locked window, so a throttled call does not hold the lock while backing
+# off.
+_UNHIDE_LOCK = threading.Lock()
 
 
-def yf_fetch_statement(func):
-    """Fetch a yfinance statement frame with throttles made visible.
+def yf_fetch_unhidden(func, *, hidden_answer=None):
+    """Run one yfinance call with the library's exception swallow switched off.
 
-    The statement properties (``balance_sheet``/``cashflow``/``income_stmt``
-    and their quarterly forms) swallow ``YFRateLimitError`` inside yfinance's
-    fundamentals scraper while ``YfConfig.debug.hide_exceptions`` is on (the
-    default), answering with an empty frame — so a throttle would read as
-    "no data" and never reach :func:`yf_retry`'s mapping (#67; verified
-    empirically on yfinance 1.4.1, the pinned floor). The backup/restore shape
-    mirrors the library's own ``multi._download_one`` — but NOT its flag:
-    that code flips ``network.hide_exceptions``, which nothing in yfinance
-    1.4.1 reads; ``debug.hide_exceptions`` is the one the scrapers consult,
-    so flipping the network one would silently reinstate the swallow. Hidden
-    mode is switched off for the call, the rate limit and ``OSError`` are
-    re-raised, and every other exception is restored to the swallowed-empty
-    frame the library would have answered with (logged here, since the
-    library's own error log line is skipped once its swallow no longer runs).
+    While ``YfConfig.debug.hide_exceptions`` is on (the default) yfinance's
+    scrapers catch their own failures and answer with something empty: the
+    statement properties and ``Ticker.history`` an empty frame, ``get_news``
+    an empty list, ``info``/``insider_transactions`` a ``None`` their parser
+    then trips over (verified on yfinance 1.4.1, the pinned floor). That
+    swallow hid two things this boundary exists to surface — a throttle (#67)
+    and a transport failure (#116), which read as "no data" or "no filings"
+    and never reached :func:`yf_retry`'s mapping or the router's fallback.
+    The backup/restore shape mirrors the library's own ``multi._download_one``
+    — but NOT its flag: that code flips ``network.hide_exceptions``, which
+    nothing in yfinance 1.4.1 reads; ``debug.hide_exceptions`` is the one the
+    scrapers consult, so flipping the network one would silently reinstate the
+    swallow.
+
+    Inside the window the rate limit and ``OSError`` are re-raised (the type
+    facts for the latter are in ``y_finance.get_fundamentals``). Every other
+    exception is restored to ``hidden_answer()`` — the value the library would
+    have answered with, so a delisted symbol's ``YFTzMissingError`` still
+    reaches the no-data lane as the empty frame it always was — and logged
+    here, since the library's own error line is skipped once its swallow no
+    longer runs. With no ``hidden_answer`` (the ``info``/insider parsers have
+    no honest empty form) it propagates to the caller's own handling.
     """
     from yfinance.config import YfConfig
 
     def _call():
-        with _STATEMENT_FLAG_LOCK:
+        with _UNHIDE_LOCK:
             backup = YfConfig.debug.hide_exceptions
             YfConfig.debug.hide_exceptions = False
             try:
@@ -172,21 +180,31 @@ def yf_fetch_statement(func):
             except YFRateLimitError:
                 raise
             except OSError:
-                # A transport failure at the property is not "no data": under
-                # the swallow it became an empty frame, which _statement_report
-                # turned into NoMarketDataError, and the router's no-data
-                # sentinel ranks above a recorded failure — so the agent read
-                # "symbol not covered" and the fallback vendor was never tried
-                # (#116). Same family as the getters' clause; the type facts
-                # are in y_finance.get_fundamentals.
+                # Under the swallow this became the empty answer, which the
+                # statement lane turned into NoMarketDataError and the router's
+                # no-data sentinel then ranked above the recorded failure — so
+                # the agent read "symbol not covered" and the fallback vendor
+                # was never tried (#116).
                 raise
             except Exception as e:
-                logger.warning("yfinance statement fetch failed: %s", e, exc_info=True)
-                return pd.DataFrame()
+                if hidden_answer is None:
+                    raise
+                logger.warning("yfinance fetch failed: %s", e, exc_info=True)
+                return hidden_answer()
             finally:
                 YfConfig.debug.hide_exceptions = backup
 
     return yf_retry(_call)
+
+
+def yf_fetch_statement(func):
+    """Fetch a yfinance statement frame through :func:`yf_fetch_unhidden`.
+
+    Kept as its own name because the statement getters' seam is pinned by
+    name in the tests: a statement fetched through plain ``yf_retry`` would
+    let the scraper swallow a throttle into an empty frame again (#67).
+    """
+    return yf_fetch_unhidden(func, hidden_answer=pd.DataFrame)
 
 
 def _ensure_date_column(data: pd.DataFrame) -> pd.DataFrame:
@@ -350,12 +368,15 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
         # empty frame (verified empirically on yfinance 1.4.1, the pinned
         # floor), so a throttle would read as "no rows" and yf_retry's
         # rate-limit mapping would never fire (#67). history re-raises the
-        # throttle, and is the fetch get_YFin_data_online already uses.
+        # throttle, and is the fetch get_YFin_data_online already uses. Its
+        # own swallow of everything else is switched off for the call so a
+        # transport failure surfaces rather than reading as "no rows" (#116).
         ticker_obj = yf.Ticker(canonical)
-        downloaded = yf_retry(
+        downloaded = yf_fetch_unhidden(
             lambda: ticker_obj.history(
                 start=start_str, end=end_str, auto_adjust=True, actions=False
-            )
+            ),
+            hidden_answer=pd.DataFrame,
         )
         # history keeps a tz-aware index; strip it (like get_YFin_data_online)
         # so the Date column compares cleanly against the naive curr_date cutoff.

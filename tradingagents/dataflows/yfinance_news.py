@@ -8,7 +8,7 @@ from dateutil.relativedelta import relativedelta
 
 from .config import get_config
 from .errors import VendorError
-from .stockstats_utils import yf_retry
+from .stockstats_utils import yf_fetch_unhidden, yf_retry
 from .symbol_utils import normalize_symbol
 
 # The date refusals live in utils so the Alpha Vantage vendor serving the same
@@ -111,7 +111,10 @@ def get_news_yfinance(
     resolved = "" if canonical == ticker else f" (resolved to {canonical})"
     try:
         stock = yf.Ticker(canonical)
-        news = yf_retry(lambda: stock.get_news(count=article_limit))
+        # Un-hidden: get_news swallows a transport failure into an empty list,
+        # which the "No news found" sentence below would claim as coverage
+        # (#116). A body that is not JSON still answers that list.
+        news = yf_fetch_unhidden(lambda: stock.get_news(count=article_limit), hidden_answer=list)
 
         if not news:
             return f"No news found for {ticker}{resolved}"

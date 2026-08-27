@@ -71,9 +71,11 @@ def _no_network(monkeypatch):
     monkeypatch.setattr(avn, "_make_api_request", _reached)
     monkeypatch.setattr(avs, "_make_api_request", _reached)
     monkeypatch.setattr(avi, "_make_api_request", _reached)
-    # yf_retry wraps the call; make it transparent so the seam above is what fires.
+    # The fetch boundaries wrap the call; make them transparent so the seam
+    # above is what fires (yf_retry stays for the Search-backed global news).
     monkeypatch.setattr(yfnews, "yf_retry", lambda fn: fn())
-    monkeypatch.setattr(yfin, "yf_retry", lambda fn: fn())
+    monkeypatch.setattr(yfnews, "yf_fetch_unhidden", lambda fn, **kw: fn())
+    monkeypatch.setattr(yfin, "yf_fetch_unhidden", lambda fn, **kw: fn())
     return reached
 
 

@@ -75,11 +75,13 @@ def create_sentiment_analyst(llm):
         # single-vendor yfinance default does not have. Two lanes still answer
         # a string even on a chain that can reach that raise: a vendor
         # that reported no data returns the router's NO_DATA_AVAILABLE sentinel
-        # before that raise, and the shipped default vendor (yfinance) catches
-        # everything but VendorError itself, so a dead network there comes back
-        # as "Error fetching news for ...". Aborting on a core failure is the
-        # decided outcome; what this comment used to claim — that nothing here
-        # can raise — was not (#108).
+        # before that raise, and the shipped default vendor (yfinance) keeps a
+        # broad handler for its own library's bugs, which come back as "Error
+        # fetching news for ...". A dead network is not in that lane any more:
+        # yfinance re-raises OSError, so it aborts this node like any other
+        # core failure (#116). Aborting on a core failure is the decided
+        # outcome; what this comment used to claim — that nothing here can
+        # raise — was not (#108).
         news_block = get_news.func(ticker, start_date, end_date)
         stocktwits_block = fetch_stocktwits_messages(ticker, limit=30, curr_date=end_date)
         reddit_block = fetch_reddit_posts(ticker)

@@ -298,6 +298,67 @@ def test_statement_transport_failure_survives_yfinance_internal_swallowing(monke
         yfin.get_balance_sheet("AAPL", "quarterly", "2026-06-01")
 
 
+def _yahoo_raises(monkeypatch, exc):
+    """Make every request yfinance's scrapers issue raise ``exc``.
+
+    Below the library's own swallow, so a test here exercises the un-hidden
+    window rather than a patched seam above it.
+    """
+    import yfinance.data as yfdata
+
+    boom = mock.Mock(side_effect=exc)
+    for name in ("get", "post", "cache_get", "get_raw_json"):
+        if hasattr(yfdata.YfData, name):
+            monkeypatch.setattr(yfdata.YfData, name, boom)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(lambda: yfin.get_fundamentals("AAPL", "2026-06-01"), id="fundamentals"),
+        pytest.param(lambda: yfin.get_insider_transactions("AAPL"), id="insiders"),
+        pytest.param(
+            lambda: ynews.get_news_yfinance("AAPL", "2026-06-01", "2026-06-05"), id="news"
+        ),
+        pytest.param(
+            lambda: yfin.get_YFin_data_online("AAPL", "2026-06-01", "2026-06-05"), id="prices"
+        ),
+    ],
+)
+def test_a_non_throttle_http_failure_survives_yfinance_internal_swallowing(
+    monkeypatch, tmp_path, call
+):
+    # The scrapers behind these calls catch a non-429 HTTP failure themselves
+    # under hide_exceptions: quote/holders answer None or an empty frame,
+    # get_news an empty list, history an empty frame. Measured before #116:
+    # fundamentals came back as "Error retrieving ... 'NoneType' is not
+    # iterable" prose, insiders as "No insider transactions reported", news
+    # as "No news found", prices as the no-data sentinel — each read by the
+    # router as an answer. The leaves' own OSError clause sits above that
+    # swallow and cannot see it; the un-hidden window is what lets it out.
+    set_config({"data_cache_dir": str(tmp_path)})
+    _yahoo_raises(monkeypatch, curl_exceptions.HTTPError("503 Server Error"))
+    with pytest.raises(curl_exceptions.HTTPError):
+        call()
+
+
+@pytest.mark.unit
+def test_yf_fetch_unhidden_restores_only_what_it_is_told_to():
+    # A failure outside the throttle/OSError families is handed back as the
+    # library's own hidden answer when the caller names one — so a delisted
+    # symbol's YFTzMissingError still reaches the no-data lane as the empty
+    # frame it always was — and propagates when the caller names none.
+    from yfinance.config import YfConfig
+    from yfinance.exceptions import YFTzMissingError
+
+    out = su.yf_fetch_unhidden(mock.Mock(side_effect=YFTzMissingError("AAPL")), hidden_answer=list)
+    assert out == []
+    with pytest.raises(YFTzMissingError):
+        su.yf_fetch_unhidden(mock.Mock(side_effect=YFTzMissingError("AAPL")))
+    assert YfConfig.debug.hide_exceptions is True
+
+
 # --- the leaves: a taxonomy error propagates instead of degrading to prose ---
 
 
@@ -313,22 +374,24 @@ def test_statement_transport_failure_survives_yfinance_internal_swallowing(monke
 # checked it, so nothing in this file made it honour the taxonomy.
 #
 # The seam is per-leaf rather than "patch them all", because which boundary a
-# leaf uses is itself an invariant worth pinning: the statement getters must go
-# through yf_fetch_statement, since plain yf_retry leaves yfinance free to
-# swallow a 429 into an empty frame that reads as "no data" (#67). Naming the
-# wrong seam leaves the real fetch running, so the row fails rather than passing
-# for the wrong reason — and monkeypatch.setattr raises if a binding is renamed
-# away instead of quietly patching nothing.
+# leaf uses is itself an invariant worth pinning: every leaf but the Search-
+# backed global news goes through yf_fetch_unhidden (the statements by its
+# yf_fetch_statement name), since plain yf_retry leaves yfinance free to
+# swallow a 429 or a transport failure into an empty answer that reads as
+# "no data" (#67, #116). Naming the wrong seam leaves the real fetch running,
+# so the row fails rather than passing for the wrong reason — and
+# monkeypatch.setattr raises if a binding is renamed away instead of quietly
+# patching nothing.
 _YFINANCE_LEAF_CALLS = {
-    "get_stock_data": ((yfin, "yf_retry"), ("AAPL", "2026-06-01", "2026-06-05")),
-    "get_indicators": ((su, "yf_retry"), ("AAPL", "rsi", "2026-06-01", 5)),
-    "get_fundamentals": ((yfin, "yf_retry"), ("AAPL", "2026-06-01")),
+    "get_stock_data": ((yfin, "yf_fetch_unhidden"), ("AAPL", "2026-06-01", "2026-06-05")),
+    "get_indicators": ((su, "yf_fetch_unhidden"), ("AAPL", "rsi", "2026-06-01", 5)),
+    "get_fundamentals": ((yfin, "yf_fetch_unhidden"), ("AAPL", "2026-06-01")),
     "get_balance_sheet": ((yfin, "yf_fetch_statement"), ("AAPL", "quarterly", "2026-06-01")),
     "get_cashflow": ((yfin, "yf_fetch_statement"), ("AAPL", "quarterly", "2026-06-01")),
     "get_income_statement": ((yfin, "yf_fetch_statement"), ("AAPL", "quarterly", "2026-06-01")),
-    "get_news": ((ynews, "yf_retry"), ("AAPL", "2026-06-01", "2026-06-05")),
+    "get_news": ((ynews, "yf_fetch_unhidden"), ("AAPL", "2026-06-01", "2026-06-05")),
     "get_global_news": ((ynews, "yf_retry"), ("2026-06-01",)),
-    "get_insider_transactions": ((yfin, "yf_retry"), ("AAPL",)),
+    "get_insider_transactions": ((yfin, "yf_fetch_unhidden"), ("AAPL",)),
 }
 
 
@@ -389,12 +452,14 @@ def test_the_propagation_check_catches_a_leaf_that_degrades_the_throttle(monkeyp
     # typed vendor failure into prose the router reads as a successful answer.
     def degrading_leaf(ticker):
         try:
-            return yfin.yf_retry(lambda: "data")
+            return yfin.yf_fetch_unhidden(lambda: "data")
         except Exception as e:  # noqa: BLE001 - deliberately the buggy shape
             return f"Error retrieving something for {ticker}: {e}"
 
     with pytest.raises(pytest.fail.Exception):
-        _check_impl_propagates(monkeypatch, tmp_path, degrading_leaf, (yfin, "yf_retry"), ("AAPL",))
+        _check_impl_propagates(
+            monkeypatch, tmp_path, degrading_leaf, (yfin, "yf_fetch_unhidden"), ("AAPL",)
+        )
 
 
 @pytest.mark.unit
@@ -425,7 +490,7 @@ def test_untyped_failures_still_degrade_to_prose(monkeypatch):
     # The broad handler keeps its job for anything outside the taxonomy AND
     # outside the transport family below: a vendor-library bug must not abort
     # a run that another data point could still serve.
-    monkeypatch.setattr(yfin, "yf_retry", mock.Mock(side_effect=RuntimeError("boom")))
+    monkeypatch.setattr(yfin, "yf_fetch_unhidden", mock.Mock(side_effect=RuntimeError("boom")))
     out = yfin.get_fundamentals("AAPL", "2026-06-01")
     assert out.startswith("Error retrieving fundamentals")
 
@@ -492,7 +557,7 @@ def test_the_transport_check_catches_a_leaf_that_degrades_it(monkeypatch, tmp_pa
     # else pasted into prose — must fail the transport check.
     def degrading_leaf(ticker):
         try:
-            return yfin.yf_retry(lambda: "data")
+            return yfin.yf_fetch_unhidden(lambda: "data")
         except VendorError:
             raise
         except Exception as e:  # noqa: BLE001 - deliberately the buggy shape
@@ -503,7 +568,7 @@ def test_the_transport_check_catches_a_leaf_that_degrades_it(monkeypatch, tmp_pa
             monkeypatch,
             tmp_path,
             degrading_leaf,
-            (yfin, "yf_retry"),
+            (yfin, "yf_fetch_unhidden"),
             ("AAPL",),
             raiser=mock.Mock(side_effect=_PROPAGATED_OSERRORS["curl_cffi"]),
             expected=curl_exceptions.ConnectionError,

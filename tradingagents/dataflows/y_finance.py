@@ -472,8 +472,10 @@ def get_fundamentals(
         ticker_obj = yf.Ticker(canonical)
         # Un-hidden: the quote scraper swallows a non-429 HTTP failure into a
         # None its own parser then trips over, which the broad handler below
-        # rendered as "Error retrieving fundamentals ..." prose (#116).
-        info = yf_fetch_unhidden(lambda: ticker_obj.info)
+        # rendered as "Error retrieving fundamentals ..." prose (#116). The
+        # stub dict is what an unknown symbol's 404 answered before, and the
+        # "no fields" check below is what turns it into no-data.
+        info = yf_fetch_unhidden(lambda: ticker_obj.info, hidden_answer=dict)
 
         if not info:
             raise NoMarketDataError(ticker, canonical, "no fundamentals returned")
@@ -546,13 +548,12 @@ def get_fundamentals(
     except OSError:
         # A transport failure is not a report. yfinance 1.4.1 fetches through
         # curl_cffi, and its request exceptions (ConnectionError, Timeout,
-        # DNSError, HTTPError) escape ``info``/``insider_transactions``/the
-        # news calls as raised — measured: a session raising curl_cffi's
-        # ConnectionError surfaces from ``data.py``'s crumb fetch unwrapped.
-        # (The statement properties are the exception: under yfinance's hidden-
-        # exception mode they swallow one into an empty frame, which
-        # yf_fetch_statement restores — a separate lane, #114.) Every one of
-        # those types, like ``requests.RequestException``, subclasses OSError,
+        # DNSError, HTTPError) reach this getter as raised once
+        # yf_fetch_unhidden has switched the scrapers' own swallow off —
+        # measured: a session raising curl_cffi's ConnectionError surfaces
+        # from ``data.py``'s crumb fetch unwrapped, and a 5xx from the
+        # quoteSummary fetch's raise_for_status. Every one of those types,
+        # like ``requests.RequestException``, subclasses OSError,
         # and nothing in yfinance's own YFException family does, so this one
         # clause covers both transport libraries without touching the taxonomy
         # lane above. It is wider than the wire on purpose: the OHLCV cache in
@@ -662,7 +663,9 @@ def get_insider_transactions(ticker: Annotated[str, "ticker symbol of the compan
         # Un-hidden: the holders scraper swallows a non-429 HTTP failure into
         # an empty frame, which the "no filings" sentence below would then
         # claim as coverage (#116).
-        data = yf_fetch_unhidden(lambda: ticker_obj.insider_transactions)
+        data = yf_fetch_unhidden(
+            lambda: ticker_obj.insider_transactions, hidden_answer=pd.DataFrame
+        )
 
         # Empty is normal here (many valid symbols have no insider filings),
         # so report it plainly rather than treating the symbol as invalid.

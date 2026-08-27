@@ -7,7 +7,7 @@ from typing import Annotated
 import pandas as pd
 import yfinance as yf
 from stockstats import wrap
-from yfinance.exceptions import YFRateLimitError
+from yfinance.exceptions import YFDataException, YFException, YFRateLimitError
 
 from .config import get_config
 from .errors import VendorRateLimitError
@@ -143,31 +143,56 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
 _UNHIDE_LOCK = threading.Lock()
 
 
-def yf_fetch_unhidden(func, *, hidden_answer=None):
+def _http_status(exc: BaseException) -> int | None:
+    """The HTTP status an ``HTTPError`` carries, or ``None`` for any other error.
+
+    Both transport libraries attach the response: curl_cffi's
+    ``raise_for_status`` builds ``HTTPError(msg, 0, response)`` and requests'
+    sets ``.response`` the same way (measured, curl_cffi 0.15.0).
+    """
+    return getattr(getattr(exc, "response", None), "status_code", None)
+
+
+def yf_fetch_unhidden(func, *, hidden_answer):
     """Run one yfinance call with the library's exception swallow switched off.
 
     While ``YfConfig.debug.hide_exceptions`` is on (the default) yfinance's
     scrapers catch their own failures and answer with something empty: the
-    statement properties and ``Ticker.history`` an empty frame, ``get_news``
-    an empty list, ``info``/``insider_transactions`` a ``None`` their parser
-    then trips over (verified on yfinance 1.4.1, the pinned floor). That
-    swallow hid two things this boundary exists to surface — a throttle (#67)
-    and a transport failure (#116), which read as "no data" or "no filings"
-    and never reached :func:`yf_retry`'s mapping or the router's fallback.
-    The backup/restore shape mirrors the library's own ``multi._download_one``
-    — but NOT its flag: that code flips ``network.hide_exceptions``, which
-    nothing in yfinance 1.4.1 reads; ``debug.hide_exceptions`` is the one the
-    scrapers consult, so flipping the network one would silently reinstate the
-    swallow.
+    statement properties and ``Ticker.history`` an empty frame, ``info`` a
+    stub dict, ``insider_transactions`` an empty frame, ``get_news`` an empty
+    list (verified on yfinance 1.4.1, the pinned floor). That swallow hid two
+    things this boundary exists to surface — a throttle (#67) and a transport
+    failure (#116), which read as "no data" or "no filings" and never reached
+    :func:`yf_retry`'s mapping or the router's fallback. The backup/restore
+    shape mirrors the library's own ``multi._download_one`` — but NOT its
+    flag: that code flips ``network.hide_exceptions``, which nothing in
+    yfinance 1.4.1 reads; ``debug.hide_exceptions`` is the one the scrapers
+    consult, so flipping the network one would silently reinstate the swallow.
 
-    Inside the window the rate limit and ``OSError`` are re-raised (the type
-    facts for the latter are in ``y_finance.get_fundamentals``). Every other
-    exception is restored to ``hidden_answer()`` — the value the library would
-    have answered with, so a delisted symbol's ``YFTzMissingError`` still
-    reaches the no-data lane as the empty frame it always was — and logged
-    here, since the library's own error line is skipped once its swallow no
-    longer runs. With no ``hidden_answer`` (the ``info``/insider parsers have
-    no honest empty form) it propagates to the caller's own handling.
+    What comes out of the window, in order:
+
+    * ``YFRateLimitError`` — for :func:`yf_retry`'s mapping.
+    * ``YFDataException`` — yfinance's own "Yahoo is down"/unsupported-session
+      signal, raised regardless of the flag, so not something the library
+      would have answered empty.
+    * An ``OSError`` that is NOT an HTTP 4xx — a reset, a timeout, a 5xx.
+      A 4xx is Yahoo's verdict on the request, not a failure of the wire:
+      quoteSummary answers 404 for an unknown or delisted symbol (measured),
+      and ``history`` reaches that same 404 through its timezone lookup for
+      the first symbols a process asks about. Under the swallow those became
+      the empty answer that reaches the no-data lane, and they still do.
+
+    Everything else is restored to ``hidden_answer()`` — the value the
+    library would have answered with, so a delisted symbol's
+    ``YFTzMissingError`` reaches the no-data lane as the empty frame it always
+    was — and logged here, since the library's own error line is skipped once
+    its swallow no longer runs. ``hidden_answer`` is required so every call
+    site names the library's empty form for its property.
+
+    Known residue (yfinance parses the body before it looks at the status):
+    a 5xx HTML page on ``history`` or ``get_news`` raises ``JSONDecodeError``
+    inside the library, which is not an ``OSError`` and is restored here to
+    the empty answer.
     """
     from yfinance.config import YfConfig
 
@@ -179,7 +204,13 @@ def yf_fetch_unhidden(func, *, hidden_answer=None):
                 return func()
             except YFRateLimitError:
                 raise
-            except OSError:
+            except YFDataException:
+                raise
+            except OSError as e:
+                status = _http_status(e)
+                if status is not None and 400 <= status < 500:
+                    logger.info("yfinance answered HTTP %s: %s", status, e)
+                    return hidden_answer()
                 # Under the swallow this became the empty answer, which the
                 # statement lane turned into NoMarketDataError and the router's
                 # no-data sentinel then ranked above the recorded failure — so
@@ -187,9 +218,12 @@ def yf_fetch_unhidden(func, *, hidden_answer=None):
                 # was never tried (#116).
                 raise
             except Exception as e:
-                if hidden_answer is None:
-                    raise
-                logger.warning("yfinance fetch failed: %s", e, exc_info=True)
+                # A traceback for a library bug; one line for the library's own
+                # expected conditions (a symbol with no rows in range, no
+                # timezone), which yfinance itself logs without one.
+                logger.warning(
+                    "yfinance fetch failed: %s", e, exc_info=not isinstance(e, YFException)
+                )
                 return hidden_answer()
             finally:
                 YfConfig.debug.hide_exceptions = backup

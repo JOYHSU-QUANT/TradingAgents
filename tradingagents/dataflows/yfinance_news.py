@@ -111,9 +111,11 @@ def get_news_yfinance(
     resolved = "" if canonical == ticker else f" (resolved to {canonical})"
     try:
         stock = yf.Ticker(canonical)
-        # Un-hidden: get_news swallows a transport failure into an empty list,
-        # which the "No news found" sentence below would claim as coverage
-        # (#116). A body that is not JSON still answers that list.
+        # Through the shared un-hidden boundary like every other yfinance leaf
+        # (#116). get_news itself hides only a body that is not JSON, which
+        # still answers the empty list; a reset or a timeout at its post
+        # propagates either way, and a "Will be right back" page is the
+        # library's YFDataException, which the boundary lets out.
         news = yf_fetch_unhidden(lambda: stock.get_news(count=article_limit), hidden_answer=list)
 
         if not news:

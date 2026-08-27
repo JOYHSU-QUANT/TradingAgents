@@ -312,50 +312,96 @@ def _yahoo_raises(monkeypatch, exc):
             monkeypatch.setattr(yfdata.YfData, name, boom)
 
 
+def _http_error(status):
+    """An ``HTTPError`` shaped the way curl_cffi's ``raise_for_status`` builds it."""
+    import types
+
+    return curl_exceptions.HTTPError(
+        f"HTTP Error {status}", 0, types.SimpleNamespace(status_code=status)
+    )
+
+
+_SWALLOWING_LEAVES = [
+    pytest.param(lambda: yfin.get_fundamentals("AAPL", "2026-06-01"), id="fundamentals"),
+    pytest.param(lambda: yfin.get_insider_transactions("AAPL"), id="insiders"),
+    pytest.param(
+        lambda: yfin.get_YFin_data_online("AAPL", "2026-06-01", "2026-06-05"), id="prices"
+    ),
+]
+
+
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    "call",
-    [
-        pytest.param(lambda: yfin.get_fundamentals("AAPL", "2026-06-01"), id="fundamentals"),
-        pytest.param(lambda: yfin.get_insider_transactions("AAPL"), id="insiders"),
-        pytest.param(
-            lambda: ynews.get_news_yfinance("AAPL", "2026-06-01", "2026-06-05"), id="news"
-        ),
-        pytest.param(
-            lambda: yfin.get_YFin_data_online("AAPL", "2026-06-01", "2026-06-05"), id="prices"
-        ),
-    ],
-)
-def test_a_non_throttle_http_failure_survives_yfinance_internal_swallowing(
-    monkeypatch, tmp_path, call
-):
-    # The scrapers behind these calls catch a non-429 HTTP failure themselves
-    # under hide_exceptions: quote/holders answer None or an empty frame,
-    # get_news an empty list, history an empty frame. Measured before #116:
-    # fundamentals came back as "Error retrieving ... 'NoneType' is not
-    # iterable" prose, insiders as "No insider transactions reported", news
-    # as "No news found", prices as the no-data sentinel — each read by the
-    # router as an answer. The leaves' own OSError clause sits above that
-    # swallow and cannot see it; the un-hidden window is what lets it out.
+@pytest.mark.parametrize("call", _SWALLOWING_LEAVES)
+def test_a_transport_failure_survives_yfinance_internal_swallowing(monkeypatch, tmp_path, call):
+    # The scrapers behind these calls catch their own failures under
+    # hide_exceptions: quote answers None (its parser then trips), holders and
+    # history an empty frame. Measured before #116: fundamentals came back as
+    # "Error retrieving ... 'NoneType' is not iterable" prose, insiders as "No
+    # insider transactions reported", prices as the no-data sentinel — each
+    # read by the router as an answer. The leaves' own OSError clause sits
+    # above that swallow and cannot see it; the un-hidden window lets it out.
     set_config({"data_cache_dir": str(tmp_path)})
-    _yahoo_raises(monkeypatch, curl_exceptions.HTTPError("503 Server Error"))
+    _yahoo_raises(monkeypatch, curl_exceptions.ConnectionError("connection reset"))
+    with pytest.raises(curl_exceptions.ConnectionError):
+        call()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("call", _SWALLOWING_LEAVES)
+def test_an_http_4xx_is_still_the_no_data_verdict(monkeypatch, tmp_path, call):
+    # Yahoo's quoteSummary answers 404 for an unknown or delisted symbol, and
+    # history reaches the same fetch through its timezone lookup. That is the
+    # vendor's verdict on the symbol, not a failure of the wire: under the
+    # swallow it became the empty answer, and the un-hidden window must keep
+    # it there rather than surface an HTTPError that reads as a transport
+    # failure — measured as a regression in review before this pin existed.
+    from tradingagents.dataflows.errors import NoMarketDataError
+
+    set_config({"data_cache_dir": str(tmp_path)})
+    _yahoo_raises(monkeypatch, _http_error(404))
+    try:
+        out = call()
+    except NoMarketDataError:
+        return
+    # The insider lane treats an empty stream as a normal answer rather than
+    # no-data (many valid symbols have no filings), and a 404 still reads as
+    # that empty stream — as it did under the swallow.
+    assert out.startswith("No insider transactions reported"), out
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("call", _SWALLOWING_LEAVES[:2])
+def test_an_http_5xx_surfaces_from_the_quote_scrapers(monkeypatch, tmp_path, call):
+    # The quoteSummary fetch is the one that checks the status, so a 5xx there
+    # is a genuine vendor failure the fallback chain should see. (history and
+    # get_news parse the body first, so a 5xx page reaches them as a JSON
+    # error the window restores — a documented residue, not covered here.)
+    set_config({"data_cache_dir": str(tmp_path)})
+    _yahoo_raises(monkeypatch, _http_error(503))
     with pytest.raises(curl_exceptions.HTTPError):
         call()
 
 
 @pytest.mark.unit
-def test_yf_fetch_unhidden_restores_only_what_it_is_told_to():
-    # A failure outside the throttle/OSError families is handed back as the
-    # library's own hidden answer when the caller names one — so a delisted
-    # symbol's YFTzMissingError still reaches the no-data lane as the empty
-    # frame it always was — and propagates when the caller names none.
+def test_yf_fetch_unhidden_sorts_failures_into_their_lanes():
+    # Restored to the caller's hidden answer: the library's own expected
+    # conditions (a delisted symbol's YFTzMissingError) and an HTTP 4xx. Let
+    # out: a throttle (for yf_retry's mapping), the library's "Yahoo is down"
+    # signal, and every other OSError. The flag comes back either way.
     from yfinance.config import YfConfig
-    from yfinance.exceptions import YFTzMissingError
+    from yfinance.exceptions import YFDataException, YFTzMissingError
 
-    out = su.yf_fetch_unhidden(mock.Mock(side_effect=YFTzMissingError("AAPL")), hidden_answer=list)
-    assert out == []
-    with pytest.raises(YFTzMissingError):
-        su.yf_fetch_unhidden(mock.Mock(side_effect=YFTzMissingError("AAPL")))
+    def fetch(exc):
+        return su.yf_fetch_unhidden(mock.Mock(side_effect=exc), hidden_answer=list)
+
+    assert fetch(YFTzMissingError("AAPL")) == []
+    assert fetch(_http_error(404)) == []
+    with pytest.raises(YFDataException):
+        fetch(YFDataException("*** YAHOO! FINANCE IS CURRENTLY DOWN! ***"))
+    with pytest.raises(curl_exceptions.HTTPError):
+        fetch(_http_error(503))
+    with pytest.raises(curl_exceptions.ConnectionError):
+        fetch(curl_exceptions.ConnectionError("connection reset"))
     assert YfConfig.debug.hide_exceptions is True
 
 

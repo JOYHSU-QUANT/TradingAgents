@@ -188,11 +188,19 @@ def _cmd_paper(argv: list[str]) -> int:
             provider = None
 
             def _build_provider():
+                from functools import partial
+
+                from ..paper.position_facts import read_book_position
+
                 return _provider._EngineDecisionProvider(
                     config,
                     risk_cfg=risk_cfg,
                     decision_cfg=decision_cfg,
                     payload_dir=db_path.resolve().parent / "payloads" / run_id,
+                    # Bound now, read per cycle: the fresh-run provider is
+                    # built before initialize_run seeds the books, and the
+                    # read degrades to "no section" until they exist.
+                    position_source=partial(read_book_position, db, run_id, coin),
                 )
 
             if not is_restart:

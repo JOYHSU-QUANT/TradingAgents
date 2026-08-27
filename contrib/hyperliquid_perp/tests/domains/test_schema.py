@@ -16,13 +16,17 @@ from contrib.hyperliquid_perp.domains.perp.schema import (
     AccountSnapshot,
     CandleInterval,
     FundingPoint,
+    MarginalCostRow,
     MarketSnapshot,
     PerpMarketContext,
     PerpPosition,
+    PositionContext,
+    PositionSide,
     ProfileShape,
     VolumeProfile,
     derive_day_change_pct,
     derive_profile_shape,
+    derive_round_trip_rate,
     interval_to_ms,
 )
 
@@ -577,3 +581,163 @@ def test_perp_market_context_carries_a_volume_profile_when_given_one():
     profile = VolumeProfile(**_profile())
     ctx = PerpMarketContext(**_context(), volume_profile=profile)
     assert ctx.volume_profile is profile
+
+
+# --------------------------------------------------------------------------
+# PositionContext / MarginalCostRow — the prompt-v4 position section's DTOs
+# --------------------------------------------------------------------------
+
+_RATE = derive_round_trip_rate(Decimal("0.00045"), Decimal(5))  # 0.0019
+
+
+def _row(target: int, trade_notional: Decimal, **overrides) -> MarginalCostRow:
+    base = {
+        "target_margin_pct": target,
+        "trade_notional": trade_notional,
+        "round_trip_cost": trade_notional * _RATE,
+    }
+    base.update(overrides)
+    return MarginalCostRow(**base)
+
+
+def _open(**overrides) -> dict:
+    """A self-consistent long: 0.005 BTC from 50,000 marked 60,000 -> notional
+    300, uPnL +50, equity 1,050, margin 300/1050 %, at 1x."""
+    margin_pct = Decimal(300) / Decimal(1050) * 100
+    base = {
+        "side": PositionSide.LONG,
+        "size": Decimal("0.005"),
+        "entry_price": Decimal("50000"),
+        "unrealized_pnl": Decimal("50"),
+        "notional": Decimal("300"),
+        "margin_pct": margin_pct,
+        "equity": Decimal("1050"),
+        "leverage": Decimal(1),
+        "last_fill_at": datetime(2024, 1, 1, tzinfo=timezone.utc),
+        "holding_cost_8h": Decimal("0.03"),
+        "taker_fee_rate": Decimal("0.00045"),
+        "slippage_bps": Decimal(5),
+        "cost_rows": (
+            _row(0, Decimal(300)),
+            _row(60, (Decimal(60) - margin_pct) / 100 * Decimal(1050)),
+        ),
+    }
+    base.update(overrides)
+    return base
+
+
+def _flat(**overrides) -> dict:
+    base = {
+        "side": None,
+        "size": Decimal(0),
+        "entry_price": None,
+        "unrealized_pnl": None,
+        "notional": Decimal(0),
+        "margin_pct": None,
+        "equity": Decimal("1000"),
+        "leverage": Decimal(1),
+        "last_fill_at": None,
+        "holding_cost_8h": None,
+        "taker_fee_rate": Decimal("0.00045"),
+        "slippage_bps": Decimal(5),
+    }
+    base.update(overrides)
+    return base
+
+
+def test_round_trip_rate_is_two_legs_of_fee_plus_slippage():
+    assert Decimal("0.0019") == _RATE
+
+
+def test_position_context_accepts_a_consistent_open_and_flat():
+    assert PositionContext(**_open()).side is PositionSide.LONG
+    assert PositionContext(**_flat()).cost_rows == ()
+
+
+def test_position_context_coerces_a_string_side():
+    assert PositionContext(**_open(side="long")).side is PositionSide.LONG
+    with pytest.raises(ValueError):
+        PositionContext(**_open(side="flat"))  # a target, not a state
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"size": Decimal("0.005")},  # flat with a size
+        {"entry_price": Decimal("1")},
+        {"unrealized_pnl": Decimal("0")},
+        {"margin_pct": Decimal("0")},
+        {"holding_cost_8h": Decimal("0")},
+        {"notional": Decimal("1")},
+        {"cost_rows": (_row(60, Decimal(600)),)},
+    ],
+)
+def test_a_flat_position_context_carries_nothing_position_only(overrides):
+    with pytest.raises(ValueError, match="flat PositionContext"):
+        PositionContext(**_flat(**overrides))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"size": Decimal("-0.005")}, "long PositionContext must have size > 0"),
+        ({"side": PositionSide.SHORT}, "short PositionContext must have size < 0"),
+        ({"entry_price": None}, "entry_price > 0"),
+        ({"unrealized_pnl": None}, "must carry unrealized_pnl"),
+        ({"notional": Decimal(0)}, "notional > 0"),
+        ({"cost_rows": ()}, "at least one cost row"),
+        ({"equity": Decimal(0)}, "equity must be > 0"),
+        ({"leverage": Decimal(0)}, "leverage must be > 0"),
+        ({"last_fill_at": datetime(2024, 1, 1)}, "timezone-aware"),
+    ],
+)
+def test_an_open_position_context_rejects_each_inconsistency(overrides, match):
+    with pytest.raises(ValueError, match=match):
+        PositionContext(**_open(**overrides))
+
+
+def test_position_context_margin_pct_must_agree_with_notional_leverage_and_equity():
+    # 300 / 1 / 1050 * 100 = 28.57%; claiming 10% would print a margin line
+    # contradicting the notional and equity two lines above it.
+    with pytest.raises(ValueError, match="margin_pct .* contradicts"):
+        PositionContext(**_open(margin_pct=Decimal(10)))
+
+
+def test_position_context_rows_must_agree_with_the_position_and_the_rate():
+    # A row priced at the wrong distance ...
+    with pytest.raises(ValueError, match="trade_notional .* contradicts"):
+        PositionContext(**_open(cost_rows=(_row(0, Decimal(100)),)))
+    # ... or at the wrong rate (a row costed at 14 bps under a 19 bps rate).
+    bad = _row(0, Decimal(300), round_trip_cost=Decimal("0.42"))
+    with pytest.raises(ValueError, match="round_trip_cost .* contradicts"):
+        PositionContext(**_open(cost_rows=(bad,)))
+    # ... or two rows for one target.
+    with pytest.raises(ValueError, match="two cost rows"):
+        PositionContext(**_open(cost_rows=(_row(0, Decimal(300)), _row(0, Decimal(300)))))
+
+
+def test_marginal_cost_row_rejects_a_zero_trade():
+    with pytest.raises(ValueError, match="trade_notional must be > 0"):
+        _row(0, Decimal(0))
+
+
+def test_perp_market_context_checks_the_position_against_its_own_mark():
+    # The position's notional and PnL are priced at SOME mark; the context
+    # checks they were priced at ITS mark, or "Mark: 60,000" would sit above
+    # a "notional 300" that only holds at a different price.
+    ok = _context(mark_price=Decimal("60000"), prev_day_price=Decimal("60000"), day_change_pct=0.0)
+    ctx = PerpMarketContext(**ok, position=PositionContext(**_open()))
+    assert ctx.position.notional == Decimal(300)
+    other = _context(
+        mark_price=Decimal("61000"), prev_day_price=Decimal("61000"), day_change_pct=0.0
+    )
+    with pytest.raises(ValueError, match="position.notional .* contradicts"):
+        PerpMarketContext(**other, position=PositionContext(**_open()))
+    # A flat position has nothing priced at the mark: any mark is fine.
+    assert PerpMarketContext(**other, position=PositionContext(**_flat())).position.side is None
+
+
+def test_perp_market_context_position_defaults_to_absent():
+    # Position-blind by default: nothing changes for a context built without
+    # a source (the one-shot CLI, every existing fixture).
+    assert PerpMarketContext(**_context()).position is None

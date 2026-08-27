@@ -13,6 +13,7 @@ from decimal import Decimal
 
 import pytest
 
+from contrib.hyperliquid_perp.domains.perp.marginal_cost import build_position_context
 from contrib.hyperliquid_perp.domains.perp.prompt_context import (
     context_shape,
     render_market_context,
@@ -524,6 +525,7 @@ _HEADER_TO_SHAPE = {
     "Market:": "market",
     "Funding:": "funding",
     "Indicators:": "indicators",
+    "Position:": "position",
 }
 
 
@@ -543,22 +545,205 @@ def _shape_name(header: str) -> str:
     return _HEADER_TO_SHAPE[header]
 
 
+@pytest.mark.parametrize("position", [None, "flat", "open"])
 @pytest.mark.parametrize("with_profile", [False, True])
-def test_context_shape_names_the_rendered_headers_in_order_both_ways(with_profile):
+def test_context_shape_names_the_rendered_headers_in_order_both_ways(with_profile, position):
     # The shape and the render are two functions with no code in common, so
     # this is the lock between them, in BOTH directions: every header the
     # render prints has a shape entry at the same position, and the shape
     # names nothing the render does not print. A section added to one and
     # forgotten in the other fails here instead of silently filing two prompt
     # regimes under one shape.
-    ctx = _ctx(volume_profile=_profile()) if with_profile else _ctx()
+    overrides = {}
+    if with_profile:
+        overrides["volume_profile"] = _profile()
+    if position == "flat":
+        overrides["position"] = _flat_position()
+    elif position == "open":
+        overrides["position"] = _open_position()
+    ctx = _ctx(**overrides)
     headers = _rendered_headers(render_market_context(ctx))
     assert headers[:4] == ["Price:", "Market:", "Funding:", "Indicators:"]
-    assert len(headers) == (5 if with_profile else 4)
+    assert len(headers) == 4 + int(with_profile) + int(position is not None)
     parts = context_shape(ctx).split("|")
     assert [part.split("(")[0] for part in parts] == [_shape_name(h) for h in headers]
     # The indicator rows are the fixture's names, in the fixture's order.
     assert parts[3] == "indicators(rsi_14,ema_20,macd)"
+    if position is not None:
+        assert parts[-1] == "position"
+
+
+# --------------------------------------------------------------------------
+# Position — the prompt-v4 section: the account's own position, priced.
+# --------------------------------------------------------------------------
+
+_FILL_AT = datetime(2024, 1, 1, 15, 4, 5, tzinfo=timezone.utc)  # 12h before _AS_OF
+
+
+def _position(**overrides):
+    """A position priced at the fixture's mark (60,000): 0.005 BTC long from
+    50,000 = notional 300, uPnL +50 on a 950 wallet, so equity 1,000 and
+    margin exactly 30% — round numbers, so every line below is hand-checkable
+    and no figure sits on a float rounding tie."""
+    base = {
+        "size": Decimal("0.005"),
+        "entry_price": Decimal("50000"),
+        "wallet_balance": Decimal("950"),
+        "mark": Decimal("60000.0"),
+        "leverage": Decimal(1),
+        "funding_rate": Decimal("0.0000125"),
+        "grid_min": 0,
+        "grid_max": 60,
+        "grid_step": 1,
+        "taker_fee_rate": Decimal("0.00045"),
+        "slippage_bps": Decimal(5),
+        "last_fill_at": _FILL_AT,
+    }
+    base.update(overrides)
+    return build_position_context(**base)
+
+
+def _open_position(**overrides):
+    return _position(**overrides)
+
+
+def _flat_position(**overrides):
+    # Flat: no unrealized PnL, so the wallet IS the equity (1,000 here).
+    return _position(size=Decimal(0), entry_price=None, wallet_balance=Decimal("1000"), **overrides)
+
+
+def _position_block(text: str) -> str:
+    """The Position: section alone — the header and everything under it."""
+    return text[text.index("Position:") :]
+
+
+def test_the_open_position_section_states_the_facts_and_the_priced_moves():
+    block = _position_block(render_market_context(_ctx(position=_open_position())))
+    assert "Side: long, size 0.005 BTC, notional 300.00 USDC at mark" in block
+    assert "Entry: 50,000.00 (unrealized PnL +50.00 USDC)" in block
+    # 300 / 1000 * 100 = 30%
+    assert "Committed margin: 30.00% of account equity 1,000.00 USDC" in block
+    assert "configured 1x leverage" in block
+    assert (
+        "Last fill: 2024-01-01T15:04:05+00:00 UTC (12.0 hours before the as-of time above)" in block
+    )
+    # 0.0000125 * 8 * 300 = 0.03 USDC per 8h, paid by the long.
+    assert "Holding cost at the current funding rate: pays 0.0300 USDC per 8h" in block
+    # The rate is spelled out once, per fill and as the round-trip total.
+    assert (
+        "taker fee 0.0450% and 5.00 bps slippage per fill, 19.00 bps of the traded notional"
+        in block
+    )
+    # Flat from 30% trades the whole 300 notional: 300 * 0.0019 = 0.57.
+    assert (
+        "-> 0%: trades 300.00 USDC notional, round-trip cost 0.57 USDC, breakeven 19.00 bps"
+        in block
+    )
+    # 35% trades 5 / 100 * 1000 = 50.00 -> 0.095 -> 0.10 (the nearest row
+    # above the current margin, which itself gets no row).
+    assert (
+        "-> 35%: trades 50.00 USDC notional, round-trip cost 0.10 USDC, breakeven 19.00 bps"
+        in block
+    )
+    assert "-> 30%:" not in block
+    # 60% trades 30 / 100 * 1000 = 300.00 -> 0.57.
+    assert (
+        "-> 60%: trades 300.00 USDC notional, round-trip cost 0.57 USDC, breakeven 19.00 bps"
+        in block
+    )
+    # The per-point rate that prices every legal target the rows skip:
+    # 1000 / 100 = 10.00 USDC per point, * 0.0019 = 0.0190.
+    assert (
+        "Every 1 percentage point of margin moved trades 10.00 USDC and costs 0.0190 USDC round trip"
+        in block
+    )
+
+
+def test_the_flat_position_section_is_one_line_with_the_equity():
+    block = _position_block(render_market_context(_ctx(position=_flat_position())))
+    lines = block.split("\n")
+    assert lines[0] == "Position:"
+    assert lines[1] == "  flat, no open position (account equity 1,000.00 USDC)"
+    assert len(lines) == 2
+    # No cost table, no holding cost, no last-fill line on a flat account.
+    assert "->" not in block
+    assert "Holding cost" not in block
+
+
+def test_a_short_receives_positive_funding_and_says_so():
+    block = _position_block(
+        render_market_context(_ctx(position=_open_position(size=Decimal("-0.005"))))
+    )
+    assert "Side: short, size 0.005 BTC" in block
+    # uPnL for a short from 50,000 marked 60,000: -50.
+    assert "unrealized PnL -50.00 USDC" in block
+    assert "receives 0.0300 USDC per 8h" in block
+
+
+def test_zero_funding_prints_a_zero_holding_cost_not_pays_or_receives():
+    block = _position_block(
+        render_market_context(_ctx(position=_open_position(funding_rate=Decimal(0))))
+    )
+    holding = next(line for line in block.split("\n") if line.startswith("  Holding cost"))
+    assert "0.0000 USDC (funding rate is zero) per 8h" in holding
+    assert "pays" not in holding
+    assert "receives" not in holding
+
+
+def test_a_fill_after_the_as_of_is_said_not_shown_as_a_negative_age():
+    later = _AS_OF.replace(hour=5)
+    block = _position_block(
+        render_market_context(_ctx(position=_open_position(last_fill_at=later)))
+    )
+    assert f"Last fill: {later.isoformat()} UTC (after the as-of time above)" in block
+    assert "-" + "1." not in block  # no "-1.9 hours"
+
+
+def test_a_position_with_no_recorded_fill_says_so():
+    block = _position_block(render_market_context(_ctx(position=_open_position(last_fill_at=None))))
+    assert "Last fill: none recorded for this run" in block
+
+
+_GATE_WORDS = ("confidence", "deadband", "exempt", "threshold", "resize", "min_confidence")
+
+
+@pytest.mark.parametrize("word", _GATE_WORDS)
+@pytest.mark.parametrize("side", [Decimal("0.005"), Decimal("-0.005"), Decimal(0)])
+def test_the_position_section_never_names_a_gate_threshold(word, side):
+    # The 2026-07 ruling, now load-bearing: with its own position in view the
+    # model CAN tell which targets are resizes, so any sentence about which
+    # bar a target faces (flat/open only need the base bar) would funnel
+    # mid-confidence de-risking into full closes. The section is facts and
+    # prices only; the words the format block uses for its rules never
+    # appear here. Both sides and flat, since the flat line is its own text.
+    entry = None if side == 0 else Decimal("50000")
+    block = _position_block(
+        render_market_context(_ctx(position=_position(size=side, entry_price=entry)))
+    )
+    assert word not in block.lower()
+
+
+def test_the_position_section_renders_last_after_the_volume_profile():
+    text = render_market_context(_ctx(volume_profile=_profile(), position=_open_position()))
+    assert text.index("Volume profile (") < text.index("Position:")
+    assert text.rstrip().endswith("distance from the current margin.")
+
+
+def test_context_shape_files_open_and_flat_and_both_sides_as_one_position_section():
+    # Open vs flat is the account's STATE, alternating within a run cycle by
+    # cycle — a shape that split on it would split one run into two buckets
+    # on nothing the operator configured, and the paper review reads exactly
+    # one shape per run. The review tells open from flat on
+    # ai_inputs.current_position_side; the shape says only that the section
+    # was there.
+    base = context_shape(_ctx(position=_open_position()))
+    assert base.endswith("|position")
+    assert context_shape(_ctx(position=_flat_position())) == base
+    assert context_shape(_ctx(position=_open_position(size=Decimal("-0.005")))) == base
+    # And a moved mark (different numbers, same rows) does not move the shape.
+    assert context_shape(_ctx(position=_open_position(mark=Decimal("60000.0")))) == context_shape(
+        _ctx(position=_open_position())
+    )
 
 
 def test_context_shape_changes_when_the_volume_profile_section_appears():

@@ -2,8 +2,9 @@
 getters as from the core ones (#119), and the two loose ends PR #118 left on the
 same theme are closed (#120).
 
-The seven getters behind the optional categories (``interface.OPTIONAL_CATEGORIES``)
-used to answer ``""``/``"abc"``/``"2026/08/18"`` with a raise — a bare
+The seven date-bounded getters behind the optional categories
+(``interface.OPTIONAL_CATEGORIES``; Polymarket's ``curr_date`` is an optional
+disclosure input rather than a bound and is not covered here) used to answer ``""``/``"abc"``/``"2026/08/18"`` with a raise — a bare
 ``strptime`` ValueError from four of them, a vendor-typed error from Deribit and
 the two SoSoValue twins — which ``route_to_vendor``'s optional lane rendered as
 ``DATA_UNAVAILABLE: optional <category> could not be retrieved``. In the same
@@ -268,6 +269,16 @@ class TestTheEchoIsFlattenedAndCapped:
         out = invalid_date_sentinel(value, what="x", kind="point")
         assert "'2026-08-18'" not in out
         assert "2026-08-18" in out
+
+    def test_a_value_whose_repr_raises_is_still_refused(self):
+        # Only a direct caller can send one, but the refusal is what stands
+        # between it and the router's "vendor down" lane.
+        class Evil:
+            def __repr__(self):
+                raise RuntimeError("boom")
+
+        out = date_refusal(Evil(), what="x", kind="point")
+        assert out.startswith("INVALID_CURR_DATE: curr_date <Evil value> is not")
 
     def test_a_capped_string_never_splits_an_escape(self):
         # Capped before quoting: the old vendor path capped the raw text and

@@ -187,9 +187,16 @@ def _echo_untrusted(value) -> str:
     sequence is never cut in half; a clean value such as ``'abc'`` comes
     through byte for byte.
     """
-    raw = value if isinstance(value, str) else repr(value)
-    flat = sanitize_untrusted(raw, limit=MAX_UNTRUSTED_CHARS, keep_edges=True)
-    return repr(flat) if isinstance(value, str) else flat
+    if isinstance(value, str):
+        return repr(sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS, keep_edges=True))
+    try:
+        raw = repr(value)
+    except Exception:  # noqa: BLE001 — a refusal must not become an untyped raise
+        # Only a direct caller can hand over an object whose repr raises; the
+        # tool schemas send JSON values. Still, the refusal is what stands
+        # between that caller and the router's "vendor down" lane.
+        raw = f"<{type(value).__name__} value>"
+    return sanitize_untrusted(raw, limit=MAX_UNTRUSTED_CHARS, keep_edges=True)
 
 
 def invalid_date_sentinel(value, *, what: str, kind: DateKind, param: str = "curr_date") -> str:

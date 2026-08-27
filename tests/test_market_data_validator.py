@@ -132,7 +132,7 @@ class TestTool:
         monkeypatch.setattr(validator, "load_ohlcv", _must_not_be_called)
         out = get_verified_market_snapshot.invoke({"symbol": "COF", "curr_date": curr_date})
         assert out == invalid_date_sentinel(
-            curr_date, what="the verification snapshot", kind="point"
+            curr_date, what="verification snapshot data", kind="point"
         )
 
     def test_tool_keeps_its_looser_parse_on_purpose(self, monkeypatch):

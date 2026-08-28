@@ -11,6 +11,7 @@ from decimal import Decimal
 
 __all__ = [
     "ERROR_TYPES",
+    "EXCHANGE_MIN_ORDER_NOTIONAL_USDC",
     "HOLDING_COST_HOURS",
     "LEGAL_NETWORKS",
     "MIN_VOLUME_PROFILE_WINDOW",
@@ -85,6 +86,17 @@ POC_LOWER_BAND = 0.40
 # The window's own midpoint, which the latest close must be the correct side
 # of (strictly) before a POC skew is called P or b.
 RANGE_MIDPOINT = 0.5
+
+# Hyperliquid's minimum order value — an EXCHANGE fact, not a tuning choice.
+# Two layers read it and neither may import the other's module for it: the live
+# config gate (§5 rule 4: an effective notional cap below this means no order can
+# ever be placed, so startup must fail rather than run a bot structurally unable
+# to trade) and the paper engine's ``min_notional_usdc`` default (its TWAP
+# clip floor, which simulates the same exchange rule). ``live/`` already imports
+# ``paper/``, so the paper default reading it from ``live.config`` would have
+# made the dependency two-way; it sits here instead, and ``live.config``
+# re-exports it for its own callers (issue #102).
+EXCHANGE_MIN_ORDER_NOTIONAL_USDC = Decimal("10")
 
 # The legal network vocabulary, shared by config.py's ``network`` validation
 # and live/config.py's ``live.network`` validation. Deliberately duplicated

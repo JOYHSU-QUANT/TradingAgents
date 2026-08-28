@@ -26,32 +26,25 @@ from .live_shared import (
     _timing_preflight,
 )
 
-# The narrowest dead-man cover the smoke suite will run under, whatever the
-# config says. The suite refreshes once per TEST rather than on a fixed tick,
-# and a test is an unbounded place/poll/cancel round-trip, so the config's
-# daemon-shaped invariant does not bound it. 120s is what the suite guaranteed
-# before the value was wired from config at all (2026-07-31).
-_SMOKE_MIN_KILL_SWITCH_DEADLINE = timedelta(seconds=120)
-
 
 def _cmd_live_smoke(argv: list[str]) -> int:
     """Run the §20.2 testnet smoke checklist and report the cycle-entry gate.
 
-    Each of the 18 tests drives a real signed exchange action against testnet and
-    records its verdict in ``live_smoke_tests``; the gate (§20.2: all pass) then
-    lets ``live --loop`` start the testnet_live cycles. ``--gate-status`` reports
-    the stored gate without touching the network; ``--dry-run`` validates the
-    config and wiring and records every selected test ``skipped`` (places no
-    orders — the offline check the unit tests exercise). A real run takes the
-    run's lease first (refused with exit 1 while ``live``/``paper`` holds it) and,
-    when the selection places probe orders, runs one passing §19.1 pre-flight
-    recovery before the first test. Exit: 0 = the FULL §20.2 gate is open (every
-    one of the 18 tests' latest real result is ``passed``) — so ``--only`` on a
-    subset still exits 4 until the whole suite has passed — EXCEPT ``--dry-run``,
-    which exits 0 once the wiring check completes (its gate is never open); 4 =
-    ran (or read) but the gate is not satisfied, including a pre-flight recovery
-    failure that aborted the suite before any test; 1 = a named config / env /
-    network / lease error.
+    Each test in ``SMOKE_TESTS`` drives a real signed exchange action against
+    testnet and records its verdict in ``live_smoke_tests``; the gate (§20.2: all
+    pass) then lets ``live --loop`` start the testnet_live cycles.
+    ``--gate-status`` reports the stored gate without touching the network;
+    ``--dry-run`` validates the config and wiring and records every selected
+    test ``skipped`` (places no orders — the offline check the unit tests
+    exercise). A real run takes the run's lease first (refused with exit 1 while
+    ``live``/``paper`` holds it) and, when the selection places probe orders,
+    runs one passing §19.1 pre-flight recovery before the first test. Exit: 0 =
+    the FULL §20.2 gate is open (every test's latest real result is
+    ``passed``) — so ``--only`` on a subset still exits 4 until the whole suite
+    has passed — EXCEPT ``--dry-run``, which exits 0 once the wiring check
+    completes (its gate is never open); 4 = ran (or read) but the gate is not
+    satisfied, including a pre-flight recovery failure that aborted the suite
+    before any test; 1 = a named config / env / network / lease error.
 
     The restart tests (15–17) EACH drive a real §19.1 startup recovery (three
     arms and three reconcile passes over the run, not one);
@@ -489,7 +482,7 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
     from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
     from ..live.authorization import AgentAuthorizationError, verify_agent_authorization
     from ..live.order_gate import RealOrderGate
-    from ..live.smoke import SmokeContext
+    from ..live.smoke import SMOKE_MIN_KILL_SWITCH_DEADLINE, SmokeContext
     from ..paper.engine import AssetSpec
 
     if not live_cfg.allow_real_orders:
@@ -609,10 +602,13 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
         # cancel the resting probe — recorded as "the exchange refused", which
         # sends the operator to check config and market state rather than the
         # clock. max() keeps 3ae0087's intent (a LONGER cover is honoured) while
-        # never going below what the suite used to guarantee (2026-07-31).
+        # never going below what the suite used to guarantee (2026-07-31). The
+        # floor is the suite's own default cover (see live.smoke for why it is
+        # not the daemon's default), imported so it cannot drift from the
+        # ``deadline=`` the runner records (issue #102).
         kill_switch_deadline=max(
             timedelta(seconds=live_cfg.kill_switch.schedule_cancel_seconds),
-            _SMOKE_MIN_KILL_SWITCH_DEADLINE,
+            SMOKE_MIN_KILL_SWITCH_DEADLINE,
         ),
         run_recovery=_run_recovery,
         heartbeat=_heartbeat,

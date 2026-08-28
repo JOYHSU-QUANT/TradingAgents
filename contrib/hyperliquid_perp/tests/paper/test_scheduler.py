@@ -153,6 +153,19 @@ def _err(kind="timeout"):
     return RetryableDecisionError(kind, "boom")
 
 
+def test_a_retryable_error_outside_the_vocabulary_fails_at_construction():
+    # The §6.2 class is checked where it is PRODUCED, not only at the repository
+    # write boundary: a provider's typo used to travel through the retry ladder
+    # and fail when the daemon tried to record its own failure (issue #122).
+    with pytest.raises(ValueError, match="RetryableDecisionError.error_type"):
+        RetryableDecisionError("sever_error", "x")
+    # ...while every vocabulary member still constructs.
+    from contrib.hyperliquid_perp.common.constants import ERROR_TYPES
+
+    for kind in sorted(ERROR_TYPES):
+        assert RetryableDecisionError(kind, "x").error_type == kind
+
+
 # --------------------------------------------------------------------------
 # spec §3: new run runs immediately; next = actual decision_at + 4h
 # --------------------------------------------------------------------------

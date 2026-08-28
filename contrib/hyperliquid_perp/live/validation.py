@@ -125,7 +125,7 @@ from ..paper.no_decision import (
 from ..paper.scheduler import parse_instant
 from ..persistence import repository as repo
 from ..persistence.db import Database
-from .config import ExecutionMode
+from .config import DEFAULT_SCHEDULE_CANCEL_SECONDS as _CONFIG_DEFAULT_DEADLINE_S, ExecutionMode
 from .kill_switch import is_suite_authored
 from .safe_mode import REASON_DAILY_LOSS, SAFE_MODE_MANUAL
 from .smoke import SMOKE_TEST_KEYS, rerun_keys_for, smoke_gate_report
@@ -139,6 +139,12 @@ __all__ = [
     "validate_live_run",
 ]
 
+# §20.3's testnet_live acceptance floors. ``MIN_LIVE_CYCLES`` happens to equal
+# ``paper.validation.MIN_CYCLES_FOR_PHASE3`` — a coincidence of two specs, not
+# one rule spelled twice: that one is the phase2→phase3 entry gate on a PAPER
+# run, this one is the phase3 acceptance gate on a live run, and either spec
+# may move its number without the other's argument changing. Deliberately not
+# tied together (issue #102).
 MIN_LIVE_CYCLES = 30
 MIN_LIVE_ORDERS = 30
 # §20.3: kill_switch_refresh_success_rate >= 99%.
@@ -177,10 +183,12 @@ MIN_KILL_SWITCH_REFRESH_SAMPLES = 100
 # silence — and resolving that ambiguity toward "down" meant a 301s outage scored
 # ZERO outage seconds while a 299s one scored 299: the longer outage passing at
 # 100% while the shorter correctly failed (2026-08-01 round-13 review).
-# MUST equal live.config.KillSwitchConfig.schedule_cancel_seconds's default: a run
+# DERIVED from live.config.KillSwitchConfig.schedule_cancel_seconds's default: a run
 # that omits the key is measured against whatever THAT default armed it with, so a
-# drift here silently measures every such run against the wrong deadline.
-DEFAULT_SCHEDULE_CANCEL_SECONDS = Decimal(120)
+# separate literal here would silently measure every such run against the wrong
+# deadline the day one of them moved (issue #102). Decimal, because everything
+# this module compares it against is.
+DEFAULT_SCHEDULE_CANCEL_SECONDS = Decimal(_CONFIG_DEFAULT_DEADLINE_S)
 
 # A real minimum-valid ISO-8601 instant for the "since beginning of time" query
 # (has_safe_mode_reason_event does a lexicographic string compare): a real

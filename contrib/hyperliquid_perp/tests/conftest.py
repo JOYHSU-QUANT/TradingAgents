@@ -54,6 +54,19 @@ def doc_text(name: str) -> str:
     return (Path(__file__).parent.parent / "docs" / name).read_text(encoding="utf-8")
 
 
+def config_text() -> str:
+    """Read ``configs/hyperliquid.example.yaml``, for the pins on its comments.
+
+    The example config is what an operator copies into ``hyperliquid.local.yaml``
+    — closer to real behaviour than any doc — and its comments restate the
+    loader's hard limits as bare literals. Same plumbing rationale as
+    :func:`doc_text`; the pins sit beside the constants they guard (issue #102).
+    """
+    from contrib.hyperliquid_perp.config import _EXAMPLE
+
+    return _EXAMPLE.read_text(encoding="utf-8")
+
+
 @pytest.fixture
 def meta_and_asset_ctxs():
     return _load("meta_and_asset_ctxs.json")

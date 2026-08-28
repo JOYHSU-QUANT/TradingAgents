@@ -6,8 +6,11 @@ from decimal import Decimal
 
 import pytest
 
+from contrib.hyperliquid_perp.common.constants import EXCHANGE_MIN_ORDER_NOTIONAL_USDC
 from contrib.hyperliquid_perp.config import _EXAMPLE, load_config
 from contrib.hyperliquid_perp.paper.config import InitialPosition, PaperTradingConfig
+
+from ..conftest import config_text
 
 
 def test_defaults_match_spec():
@@ -15,10 +18,19 @@ def test_defaults_match_spec():
     assert cfg.account.initial_balance_usdc == Decimal("1000")
     assert cfg.account.initial_positions == ()
     assert cfg.execution.taker_fee_rate == Decimal("0.00045")
-    assert cfg.execution.min_notional_usdc == Decimal("10")
+    # The exchange's minimum order value, not a paper tuning choice: the live
+    # config gate enforces the same constant, so the two cannot drift (issue #102).
+    assert cfg.execution.min_notional_usdc == EXCHANGE_MIN_ORDER_NOTIONAL_USDC
     assert cfg.execution.market_monitor.interval_seconds == 30
     assert cfg.execution.market_monitor.request_timeout_seconds == 5
     assert cfg.execution.fill_model.slippage_bps == Decimal("5")
+
+
+def test_the_example_config_quotes_the_exchange_minimum_the_paper_default_uses():
+    # The example YAML's ``min_notional_usdc: 10`` is the exchange fact the
+    # default derives from; retyped, it would outlive a change to the constant
+    # with the suite green (issue #102).
+    assert f"min_notional_usdc: {EXCHANGE_MIN_ORDER_NOTIONAL_USDC} " in config_text()
 
 
 def test_overrides_are_parsed():

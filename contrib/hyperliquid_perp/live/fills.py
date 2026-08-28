@@ -941,7 +941,7 @@ class LiveFillProcessor:
                 once=True,
             )
             # The DB row is what makes the sighting a BACKLOG, not just evidence:
-            # once this fill ages out of every backfill window (trailing 6h, floor
+            # once this fill ages out of every backfill window (trailing lookback, floor
             # and gap obligations all retired), no path re-fetches it — the payload
             # file and the log line are then unreachable by any query, and this row
             # is the one durable, queryable record that exchange money exists which

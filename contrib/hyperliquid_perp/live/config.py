@@ -23,12 +23,13 @@ from ..common.config_coercion import (
     int_from_yaml,
     str_from_yaml,
 )
-from ..common.constants import LEGAL_NETWORKS
+from ..common.constants import EXCHANGE_MIN_ORDER_NOTIONAL_USDC, LEGAL_NETWORKS
 from ..common.decimal_context import DECIMAL_CONTEXT
 from ..domains.perp.risk_gate import MarginMode, RiskConfig
 
 __all__ = [
     "AGGRESSIVE_FILL_BAND_PCT",
+    "DEFAULT_SCHEDULE_CANCEL_SECONDS",
     "EXCHANGE_MIN_ORDER_NOTIONAL_USDC",
     "MAINNET_TINY_MAX_NOTIONAL_USDC",
     "MAINNET_TINY_MAX_TARGET_MARGIN_PCT",
@@ -48,10 +49,11 @@ __all__ = [
     "validate_live_risk_consistency",
 ]
 
-# Hyperliquid's minimum order value. §5 rule 4: an effective notional cap below
-# this means no order can ever be placed — startup must fail (or enter safe
-# mode) rather than run a bot that is structurally unable to trade.
-EXCHANGE_MIN_ORDER_NOTIONAL_USDC = Decimal("10")
+# ``EXCHANGE_MIN_ORDER_NOTIONAL_USDC`` (§5 rule 4: an effective notional cap
+# below the exchange minimum means no order can ever be placed — startup must
+# fail rather than run a bot structurally unable to trade) is imported above
+# and re-exported here for this layer's callers; it lives in ``common`` because
+# the paper engine's clip floor is the same exchange fact (issue #102).
 
 # The §9.4 AGGRESSIVE band, in one place because three modules price off the
 # same number and none of them can see the others' copy. It is the width a
@@ -79,6 +81,16 @@ AGGRESSIVE_FILL_BAND_PCT = Decimal("0.03")
 # makes an arming failure a hard startup error. Same posture as the notional
 # minimum above: a config value that cannot work is rejected at load.
 MIN_SCHEDULE_CANCEL_SECONDS = 5
+
+# The dead man's switch deadline a run that omits ``kill_switch.schedule_cancel_seconds``
+# arms with. Named, rather than left as the field default alone, because
+# ``validation`` measures a key-omitting run against it and cannot read a
+# dataclass field default cleanly: a separate literal there would bill or
+# forgive outage seconds that never happened the day one of them moved. The
+# smoke suite's per-test floor (``live.smoke.SMOKE_MIN_KILL_SWITCH_DEADLINE``)
+# is deliberately NOT derived from this — see there — but may never sit below
+# it (issue #102).
+DEFAULT_SCHEDULE_CANCEL_SECONDS = 120
 
 # §21.1/§24.2: the caps that DEFINE mainnet_tiny. The hard config gate pins
 # them at load — a tighter value is fine, a looser one is a different mode.
@@ -400,7 +412,7 @@ class KillSwitchConfig:
     """``live.kill_switch`` — dead man's switch parameters (§18, behaviour in PR 2)."""
 
     enabled: bool = True
-    schedule_cancel_seconds: int = 120
+    schedule_cancel_seconds: int = DEFAULT_SCHEDULE_CANCEL_SECONDS
     refresh_interval_seconds: int = 30
     on_refresh_failed: RefreshFailedPolicy = RefreshFailedPolicy.SAFE_MODE
     on_shutdown: ShutdownPolicy = ShutdownPolicy.CANCEL_BOT_OWNED_OPEN_ORDERS

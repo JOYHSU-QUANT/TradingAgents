@@ -65,6 +65,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "REFRESHES_PER_FULL_SUITE",
+    "SMOKE_MIN_KILL_SWITCH_DEADLINE",
     "SMOKE_TESTS",
     "SMOKE_TEST_KEYS",
     "RecoveryResult",
@@ -131,6 +132,22 @@ SMOKE_TESTS: tuple[SmokeTest, ...] = (
 # The stable identities, in one place: the gate iterates them, the validator
 # maps §20.3 booleans through a subset of them, and --only validates against them.
 SMOKE_TEST_KEYS: tuple[str, ...] = tuple(t.key for t in SMOKE_TESTS)
+
+# The narrowest dead-man cover the suite runs under, whatever the config says:
+# ``SmokeContext.kill_switch_deadline``'s default, and the floor ``cli.smoke``
+# applies to the configured value (``max(config, this)``). The suite refreshes
+# once per TEST rather than on a fixed tick, and a test is an unbounded
+# place/poll/cancel round-trip, so the daemon's tick-shaped config invariant
+# does not bound it — which is why this is the suite's OWN number and not a
+# derivation of ``live.config.DEFAULT_SCHEDULE_CANCEL_SECONDS``: the two are
+# equal today by history (this is the cover the suite guaranteed before the
+# value was wired from config at all, 2026-07-31), not by rule, and a daemon
+# default lowered to what 30s ticks can bound must not drag the suite's cover
+# down with it. What IS a rule: the floor never sits below the daemon default
+# (tests pin that). The dataclass default and the CLI floor both read this one
+# name so the ``deadline=`` the runner records and the cover it installs cannot
+# drift apart (issue #102).
+SMOKE_MIN_KILL_SWITCH_DEADLINE = timedelta(seconds=120)
 
 # ``kill_switch_refreshed`` rows THIS RUNNER writes across a full REAL suite:
 # ``run()`` refreshes once before each test, and test 14 writes one more of its
@@ -276,7 +293,7 @@ class SmokeContext:
     tick_size: Decimal
     now: Callable[[], datetime]
     dry_run: bool = False
-    kill_switch_deadline: timedelta = timedelta(seconds=120)
+    kill_switch_deadline: timedelta = SMOKE_MIN_KILL_SWITCH_DEADLINE
     # The exchange-side sizing regime smoke test 2 WRITES to the account (the
     # suite is the only writer in the system). Wired from the run's own
     # ``live.safety`` so the suite can never leave the account in a regime the

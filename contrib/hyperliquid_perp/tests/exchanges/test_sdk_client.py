@@ -256,6 +256,19 @@ def test_a_status_less_transport_error_falls_back_to_the_message():
         call_sdk(_raise(RuntimeError("HTTP 429 Too Many Requests")))
 
 
+def test_the_loaders_network_vocabulary_matches_the_sdk_clients():
+    # ``common.constants.LEGAL_NETWORKS`` is a deliberate copy of ``_BASE_URLS``'s
+    # keys, kept so config loading never imports the SDK. Deliberate is not
+    # drift-proof: nothing else tied the two, and the config layer would keep
+    # admitting a network the client cannot resolve (or refusing one it can)
+    # with the suite green. The test may import the SDK; only the loader may
+    # not (issue #102).
+    from contrib.hyperliquid_perp.common.constants import LEGAL_NETWORKS
+    from contrib.hyperliquid_perp.exchanges.hyperliquid.sdk_client import _BASE_URLS
+
+    assert set(LEGAL_NETWORKS) == set(_BASE_URLS)
+
+
 def test_digits_inside_a_larger_number_are_not_a_throttle():
     # The first draft matched a bare "429" substring, so an oid, an epoch-ms
     # timestamp or a price containing those digits read as a rate limit.

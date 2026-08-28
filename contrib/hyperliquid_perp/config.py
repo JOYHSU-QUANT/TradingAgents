@@ -273,7 +273,9 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     if network is not None and (
         not isinstance(network, str) or network.strip().lower() not in LEGAL_NETWORKS
     ):
-        raise ValueError(f"'network' must be 'mainnet' or 'testnet', got {network!r}")
+        # Enumerated from the set the line above checks (as live/config.py's
+        # sibling message is), never spelled by hand beside it (issue #102).
+        raise ValueError(f"'network' must be one of {list(LEGAL_NETWORKS)}, got {network!r}")
     timeout = config.get("network_timeout_s")
     if timeout is not None:
         try:

@@ -123,7 +123,16 @@ def _migrate_owned_store(db: Database, *, run_id: str, now: datetime) -> bool:
                 file=sys.stderr,
             )
             return True
-    db.apply_deferred_migration()
+    try:
+        db.apply_deferred_migration()
+    except SchemaVersionError as exc:
+        # A NEWER store is refused at open, so this is only reachable when
+        # another build upgraded the store between our open and now. Still a
+        # named exit 1: uncaught it would reach main()'s last-resort handler
+        # as exit 2, losing the code the RUNBOOK documents and a supervisor
+        # branches on.
+        print(f"error: {exc}", file=sys.stderr)
+        return True
     return False
 
 

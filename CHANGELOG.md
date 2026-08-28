@@ -21,15 +21,15 @@ Breaking changes within the 0.x line are called out explicitly.
   downstream comparison is finite; the drift comparator's `ArithmeticError`
   clause stays as defence in depth with its test re-pointed at a parser that
   actually raises one.
-- **hyperliquid_perp `paper` / `live`: the store is migrated only once the run
-  lease is held** (issue #129). Both opened the store with migrate-on-open and
+- **hyperliquid_perp `paper` / `live`: the store is migrated only once no
+  other process owns it** (issue #129). Both opened the store with migrate-on-open and
   reached the lease check afterwards, so a new build started by hand while the
   old daemon still ran upgraded the schema underneath it on the way to being
   refused — the ordering `live-smoke` already corrected. An existing store is
   now opened as-is; `paper` migrates inside the lease-holding block, and
   `live` — whose identity/off-coin reads and `--create` write sit between the
-  open and its lock — first asks the two read-only ownership questions (a
-  fresh sibling lease on the wallet, a fresh foreign lease on the run, the new
+  open and its lock — first asks two read-only ownership questions (a fresh
+  sibling lease on the wallet; a fresh lease on the run itself, via the new
   `run_lock.peek_run_lock`) and migrates once both say nobody owns the store,
   still taking the real lease later — so a held lease now refuses `live`
   before the §20.2 smoke-gate check rather than after it (a run that is both

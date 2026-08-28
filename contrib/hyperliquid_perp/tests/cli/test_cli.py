@@ -4252,7 +4252,7 @@ def test_live_lease_conflict_leaves_a_behind_store_unmigrated(
     assert _stored_version(dbp) == behind
 
 
-def test_live_create_into_a_newer_stores_is_refused_before_the_run_row(
+def test_live_create_into_a_newer_store_is_refused_before_the_run_row(
     tmp_path, capsys, live_seams, monkeypatch
 ):
     # The deferred open no longer refuses a store migrated by a NEWER build at
@@ -4429,23 +4429,31 @@ def test_live_loop_smoke_gate_does_not_apply_to_a_mainnet_run(
     forever — permanently unstartable, which is exactly why the scoping exists.
     The negative control is the testnet test above: same empty table, exit 4.
     """
-    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
 
-    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    # The lock is scripted to refuse so the command stops there — proof it got
+    # PAST the gate rather than being refused by it. (A pre-held lease no
+    # longer works as the stop: since issue #129 it is caught by the read-only
+    # peek at open, before the gate is ever evaluated.)
+    def refuse(db, run_id, *, pid, now):
+        raise run_lock_mod.RunLockError("scripted lease refusal")
+
+    monkeypatch.setattr(run_lock_mod, "acquire_run_lock", refuse)
+    # The MAINNET key: this is a mainnet run, and the testnet key the fixture
+    # exports does not satisfy it. Without this the test exited 1 at the
+    # agent-key refusal and never reached the gate at all (found 2026-08-28,
+    # when the stop was made explicit).
+    monkeypatch.setenv("HYPERLIQUID_AGENT_KEY_MAINNET", _LIVE_KEY)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     cfg = _live_yaml(
         tmp_path,
         live_lines="  mode: mainnet_tiny\n  network: mainnet\n  allow_real_orders: true\n",
     )
     dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
-    db = Database(dbp)
-    # Lease pre-held so the command stops at the lease refusal — proof it got
-    # PAST the gate rather than being refused by it.
-    acquire_run_lock(db, "r1", pid=999999, now=datetime.now(timezone.utc))
-    db.close()
     rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp), "--loop"])
     assert rc == 1  # the lease, not the gate's exit 4
     err = capsys.readouterr().err
+    assert "scripted lease refusal" in err
     assert "§20.2 smoke suite" not in err
     assert "not yet run" not in err
 

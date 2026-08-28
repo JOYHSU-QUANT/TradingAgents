@@ -168,9 +168,11 @@ def iter_other_run_leases(conn: sqlite3.Connection, run_id: str) -> list[sqlite3
     The run lease is keyed on ``run_id``, but the actions it protects are not:
     the kill switch, ``updateLeverage`` and the §19.3 stale-order sweep are all
     per-WALLET, and two runs in one store share a wallet. Callers use this to
-    refuse before doing wallet-wide work while a sibling run is live. Freshness
-    is left to the caller (it owns the clock and ``LOCK_STALE_SECONDS``)
-    (2026-07-30 concurrency review).
+    refuse before doing wallet-wide work while a sibling run is live — and,
+    since issue #129, before migrating the store, which is per-FILE and so
+    reaches every sibling regardless of network or mode. Freshness is left to
+    the caller (it owns the clock and ``LOCK_STALE_SECONDS``) (2026-07-30
+    concurrency review).
     """
     return conn.execute(
         "SELECT run_id, lock_pid, lock_heartbeat_at FROM scheduler_state "

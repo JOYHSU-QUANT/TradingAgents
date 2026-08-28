@@ -500,7 +500,10 @@ def _live_startup_recovery(
     # first — run existence, wallet-sibling lease, run mode, this run's own
     # lease (read-only) — and the store is migrated once they all pass. The
     # definitive lease is still taken below; a process starting concurrently
-    # loses there, having written nothing the migration cannot share.
+    # loses there, having written nothing the migration cannot share. The
+    # peek exempts no pid, not even this one: a lease stamped with a pid the
+    # OS recycled to us after a hard kill refuses here for LOCK_STALE_SECONDS,
+    # where acquire alone would have silently re-taken it.
     db = _open_owned_store(db_path)
     if db is None:
         return 1

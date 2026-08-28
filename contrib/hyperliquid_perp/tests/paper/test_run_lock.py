@@ -56,7 +56,7 @@ def test_stale_heartbeat_is_taken_over(db):
     assert row["lock_heartbeat_at"] == takeover_at.isoformat()
 
 
-def test_peek_refuses_exactly_when_acquire_would_and_never_writes(db):
+def test_peek_refuses_any_fresh_holder_and_never_writes(db):
     # Issue #129: `live` needs acquire's verdict before it is ready to take the
     # lease. Same message, same staleness boundary, no own-pid exemption (a
     # peeker holds nothing) — and the store is untouched on every outcome (no

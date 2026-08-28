@@ -1,0 +1,34 @@
+name: Deploy paper trader
+
+on:
+  push:
+    branches: [deploy/paper]
+
+concurrency: deploy-paper
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          install -m 600 /dev/null key
+          printf '%s\n' "$SSH_KEY" > key
+          ssh -i key -o StrictHostKeyChecking=accept-new ubuntu@"$HOST" 'bash -s' <<'EOF'
+          set -e
+          sudo -u trader bash -c '
+            set -e
+            cd ~/TradingAgents
+            git fetch origin deploy/paper
+            git checkout deploy/paper 2>/dev/null || git checkout -b deploy/paper origin/deploy/paper
+            git reset --hard origin/deploy/paper
+            .venv/bin/pip install -q -r requirements.txt
+            .venv/bin/python -m pytest contrib/hyperliquid_perp/tests/ -q
+          '
+          sudo systemctl restart hl-paper
+          sleep 15
+          sudo systemctl is-active hl-paper
+          EOF

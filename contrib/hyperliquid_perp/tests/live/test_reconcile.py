@@ -6,9 +6,12 @@ One test per §12.3 case row, plus the safe-mode application semantics of
 
 from __future__ import annotations
 
+import ast
+import inspect
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -2260,6 +2263,94 @@ def test_the_sweeps_order_dispositions_are_classified_as_the_set_intends(env):
         assert final not in repo.PROVISIONAL_DISPOSITIONS, final
 
 
+# The callables whose POSITIONAL ``action_taken`` the scan must resolve, bound
+# against their REAL signatures (``inspect.signature(...).bind_partial``) so a
+# reordered field or parameter moves the scan with it — nothing here spells
+# an index (issue #104).
+_DISPOSITION_WRITERS = {
+    "ReconciliationCase": inspect.signature(reconcile_mod.ReconciliationCase),
+    "set_reconciliation_action": inspect.signature(repo.set_reconciliation_action),
+    "stamp_reconciliation_action_if_unset": inspect.signature(
+        repo.stamp_reconciliation_action_if_unset
+    ),
+}
+# Nothing the scan can report appears in a module without one of these.
+_SCAN_TOKENS = ("action_taken", *_DISPOSITION_WRITERS)
+
+
+def _string_literals(value: ast.expr) -> set[str]:
+    # Node-wise, not value-wise: skipping the whole value on seeing an
+    # f-string would drop ``"foo"`` from ``"foo" if x else f"settled_{y}"``
+    # — the same silent skip the conditional descent exists to prevent.
+    if isinstance(value, ast.JoinedStr):
+        return set()
+    if isinstance(value, ast.Constant):
+        return {value.value} if isinstance(value.value, str) else set()
+    return {s for child in ast.iter_child_nodes(value) for s in _string_literals(child)}
+
+
+def _disposition_argument(node: ast.Call) -> ast.expr | None:
+    """The expression ``node`` passes as ``action_taken``, however it is passed."""
+    func = node.func
+    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+    signature = _DISPOSITION_WRITERS.get(name)
+    if signature is None:
+        keyword = next((k for k in node.keywords if k.arg == "action_taken"), None)
+        return None if keyword is None else keyword.value
+    if any(isinstance(a, ast.Starred) for a in node.args) or any(
+        k.arg is None for k in node.keywords
+    ):
+        raise AssertionError(
+            f"{name}(...) at line {node.lineno} is called with *args/**kwargs: the "
+            "vocabulary scan cannot see where action_taken lands — spell the call out"
+        )
+    try:
+        bound = signature.bind_partial(*node.args, **{k.arg: k.value for k in node.keywords})
+    except TypeError as exc:
+        # A call the real signature rejects could never run; say where it is
+        # rather than surfacing inspect's context-free message.
+        raise AssertionError(
+            f"{name}(...) at line {node.lineno} does not fit its signature: {exc}"
+        ) from exc
+    return bound.arguments.get("action_taken")
+
+
+def _machine_disposition_literals(source: str) -> set[str]:
+    """Every string literal ``source`` could hand the sweep as a machine disposition.
+
+    Three shapes reach the ``action_taken`` column, and the scan sees all of
+    them (issue #104 closed the last two, which the #84 scan was blind to):
+
+    1. an ``action_taken=`` KEYWORD on any call — ``ReconciliationCase`` and
+       ``insert_exchange_reconciliation_event`` alike;
+    2. a ``ReconciliationCase(...)`` POSITIONAL argument in the field's slot;
+    3. the positional ``action_taken`` of the two repository stamp writers,
+       ``set_reconciliation_action`` and ``stamp_reconciliation_action_if_unset``.
+
+    Calls are matched by UNQUALIFIED name (``repo.x(...)`` and ``x(...)``
+    alike) and positionals are resolved against the real signature. Stated
+    exactly so nobody reads it as more: names and attributes (a module
+    constant, ``case.action_taken``) are not literals and are not resolved —
+    constants are the import-time loop's job, computed values the runtime
+    guard's; f-strings are skipped (``f"settled_{status}"`` is derived in
+    ``_vocab`` and guarded at runtime); a literal forwarded through a local
+    wrapper or an aliased import is invisible (the repository writers check
+    only non-emptiness, so such a wrapper must not be introduced); a starred
+    call fails the scan loudly rather than being skipped; and any literal
+    nested inside the argument (a helper's own string arguments) IS reported —
+    loud in the wrong direction, never silent.
+    """
+    if not any(token in source for token in _SCAN_TOKENS):
+        return set()
+    literals: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call):
+            value = _disposition_argument(node)
+            if value is not None:
+                literals |= _string_literals(value)
+    return literals
+
+
 def test_every_disposition_the_sweep_writes_is_in_the_machine_vocabulary():
     # Issue #84. The set decides by STRING whether a fact key reopens, so a
     # machine stamp missing from the classification shuts its key forever —
@@ -2270,61 +2361,136 @@ def test_every_disposition_the_sweep_writes_is_in_the_machine_vocabulary():
     # disposition added at a call site went unclassified, which is precisely
     # what #84 says the predecessor test failed to catch.
     #
-    # Its reach, stated exactly so nobody reads it as more: string literals
-    # reachable from an ``action_taken=`` KEYWORD argument in THIS module,
-    # including inside a conditional. Deliberately outside: f-strings
-    # (``f"settled_{local_status}"`` — derived in _vocab, guarded at runtime),
-    # positional ``ReconciliationCase(...)`` construction, ``action_taken``
-    # written from another module, and a literal passed positionally to
-    # ``set_reconciliation_action``. Those are the runtime guard's job, and
-    # ``test_an_unclassified_disposition_fails_where_it_is_constructed`` is
-    # what pins it.
-    import ast
-    import pathlib
+    # Reach: every module under the ``live`` package, subpackages included,
+    # in the shapes and with the exclusions ``_machine_disposition_literals``
+    # documents. What is excluded is guarded elsewhere (import-time loop;
+    # ``test_an_unclassified_disposition_fails_where_it_is_constructed``).
+    from contrib.hyperliquid_perp import live as live_pkg
 
-    def _literals(value: ast.expr) -> set[str]:
-        # Node-wise, not value-wise: skipping the whole value on seeing an
-        # f-string would drop ``"foo"`` from ``"foo" if x else f"settled_{y}"``
-        # — the same silent skip the conditional descent exists to prevent.
-        if isinstance(value, ast.JoinedStr):
-            return set()
-        if isinstance(value, ast.Constant):
-            return {value.value} if isinstance(value.value, str) else set()
-        return set().union(*(_literals(child) for child in ast.iter_child_nodes(value)), set())
-
-    source = pathlib.Path(reconcile_mod.__file__).read_text(encoding="utf-8")
-    literals: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.keyword) and node.arg == "action_taken":
-            literals |= _literals(node.value)
+    written_in: dict[str, set[str]] = {}
+    for module in sorted(Path(live_pkg.__path__[0]).rglob("*.py")):
+        for literal in _machine_disposition_literals(module.read_text(encoding="utf-8")):
+            written_in.setdefault(literal, set()).add(module.name)
     # Named, not counted: a bare ``>= 3`` would fail on the very refactor this
     # module keeps doing (hoisting a literal into a module constant, which
     # makes it BETTER protected), while still passing if a fourth literal was
     # added unclassified. The membership assertion below is what carries the
     # weight; this only proves the scan still sees the module.
-    assert {"local_row_reopened", "settled_never_sent"} <= literals, sorted(literals)
-    unclassified = literals - repo.MACHINE_DISPOSITIONS
-    assert not unclassified, f"unclassified machine dispositions: {sorted(unclassified)}"
+    assert {"local_row_reopened", "settled_never_sent"} <= written_in.keys(), sorted(written_in)
+    unclassified = {
+        literal: sorted(modules)
+        for literal, modules in written_in.items()
+        if literal not in repo.MACHINE_DISPOSITIONS
+    }
+    assert not unclassified, f"unclassified machine dispositions: {unclassified}"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        # #104-2 (3): a literal handed positionally to a repository stamp
+        # writer — the shape a module other than reconcile.py would use (none
+        # does today; #104's "fills.py already calls it" was never the case).
+        pytest.param(
+            "repo.set_reconciliation_action(tx, event_id, 'made_it_up')",
+            {"made_it_up"},
+            id="stamp-writer-positional",
+        ),
+        pytest.param(
+            "repo.stamp_reconciliation_action_if_unset(tx, event_id, 'made_it_up')",
+            {"made_it_up"},
+            id="if-unset-positional",
+        ),
+        pytest.param(
+            "repo.set_reconciliation_action(tx, event_id, action_taken='made_it_up')",
+            {"made_it_up"},
+            id="stamp-writer-keyword",
+        ),
+        # #104-2 (1): the positional construction, with a DIFFERENT literal in
+        # the slot before ``action_taken`` (``detail``) that the scan must not
+        # mistake for a disposition — the signature, not a number, decides.
+        # This param is the signature-drift pin #104 asked for: a field added
+        # before ``action_taken`` shifts the literal out of its slot and fails.
+        pytest.param(
+            "ReconciliationCase('orphan_exchange_order', 'BTC', None, '0xab', "
+            "'some detail prose', 'made_it_up' if resolved else None)",
+            {"made_it_up"},
+            id="case-positional",
+        ),
+        pytest.param(
+            "ReconciliationCase('orphan_exchange_order', 'BTC', None, '0xab', 'some detail prose')",
+            set(),
+            id="case-positional-short",
+        ),
+        # A writer the map does not know still contributes its keyword.
+        pytest.param(
+            "repo.insert_exchange_reconciliation_event(conn, run_id=r, action_taken='made_it_up')",
+            {"made_it_up"},
+            id="unmapped-call-keyword",
+        ),
+        # Negative control: the shapes production really writes that carry NO
+        # literal must not be reported, or the scan would fail on the exact
+        # hoisting refactor that makes a disposition better protected.
+        pytest.param(
+            "repo.set_reconciliation_action(conn, existing['event_id'], case.action_taken)\n"
+            "repo.stamp_reconciliation_action_if_unset(tx, event_id, _READ_SUCCEEDED_DISPOSITION)\n"
+            "ReconciliationCase(case_type='x', symbol='BTC', local_value=None, exchange_value=k,\n"
+            "                   action_taken=_ORPHAN_BACKFILLED_DISPOSITION if resolved else None)\n",
+            set(),
+            id="names-and-computed-values",
+        ),
+    ],
+)
+def test_the_scan_resolves_every_call_shape(source, expected):
+    assert _machine_disposition_literals(source) == expected
+
+
+def test_the_scan_refuses_a_call_it_cannot_read():
+    # A starred call would put ``action_taken`` in a slot the AST cannot
+    # locate; skipping it would be the silent miss the scan exists to close.
+    with pytest.raises(AssertionError, match="cannot see"):
+        _machine_disposition_literals("repo.set_reconciliation_action(*head, 'made_it_up')")
+    # A call the signature rejects could never run; it is reported with its
+    # line rather than as inspect's context-free TypeError.
+    with pytest.raises(AssertionError, match="line 1 does not fit"):
+        _machine_disposition_literals("repo.set_reconciliation_action(tx, 1, 'x', 'extra')")
+
+
+def test_every_constant_carried_stamp_is_checked_at_import():
+    # The stamps the scan cannot see (passed by NAME) and __post_init__ either
+    # never sees or sees too late. #104-1 added the orphan back-fill's: the one
+    # case-building site whose __post_init__ runs AFTER ``insert_order``
+    # committed, so a rename must refuse to start the daemon instead of leaving
+    # an orders row with no case row explaining it.
+    assert set(reconcile_mod._IMPORT_CHECKED_DISPOSITIONS) == {
+        "resolved_fill_booked",
+        "resolved_read_succeeded",
+        "backfilled",
+        "local_row_backfilled",
+    }
 
 
 def test_the_module_refuses_to_import_with_an_unclassified_stamp_constant(monkeypatch):
-    # The three case-less write sites pass their stamp by NAME, so the scan
-    # above cannot see the values and __post_init__ never sees them either —
-    # the import-time check_enum loop is their ONLY guard. Asserting the
-    # constants are members would be unfalsifiable (an unclassified one makes
-    # this very module fail to import), so defeat the import cache and prove
-    # the loop is what refuses.
+    # The import-time check_enum loop is the constants' ONLY guard. Asserting
+    # membership would be unfalsifiable (an unclassified one makes this very
+    # module fail to import), so defeat the import cache and prove the loop is
+    # what refuses — for the #104-1 constant, the one added last.
     import importlib
 
     monkeypatch.setattr(
-        repo, "MACHINE_DISPOSITIONS", repo.MACHINE_DISPOSITIONS - {"resolved_fill_booked"}
+        repo,
+        "MACHINE_DISPOSITIONS",
+        repo.MACHINE_DISPOSITIONS - {reconcile_mod._ORPHAN_BACKFILLED_DISPOSITION},
     )
-    with pytest.raises(ValueError, match="action_taken"):
+    try:
+        with pytest.raises(ValueError, match="action_taken"):
+            importlib.reload(reconcile_mod)
+    finally:
+        # Reload against the real vocabulary so the rest of the session sees
+        # the module the other tests hold references into — even if the
+        # assertion above is what failed.
+        monkeypatch.undo()
         importlib.reload(reconcile_mod)
-    # Reload against the real vocabulary so the rest of the session sees the
-    # module the other tests hold references into.
-    monkeypatch.undo()
-    importlib.reload(reconcile_mod)
 
 
 def test_an_unclassified_disposition_fails_where_it_is_constructed():

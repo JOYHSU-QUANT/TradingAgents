@@ -892,8 +892,8 @@ def test_a_deferred_open_owes_an_upgrade_only_when_the_store_is_not_current(tmp_
     # Issue #129: the handle itself says whether the deferred upgrade is still
     # owed, so an owning command's "before I migrate" guards (the sibling
     # lease check) fire only when a migration would actually run. Behind →
-    # owed until paid; current → nothing owed; ahead → owed, and paying it
-    # refuses by name and leaves the debt standing.
+    # owed until paid; current → nothing owed; ahead → refused at open, before
+    # the caller can write anything; empty → built in full (nobody can own it).
     import contrib.hyperliquid_perp.persistence.db as db_module
 
     path = tmp_path / "deferred.db"
@@ -916,11 +916,14 @@ def test_a_deferred_open_owes_an_upgrade_only_when_the_store_is_not_current(tmp_
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
             (SCHEMA_VERSION + 1, "2099-01-01T00:00:00+00:00"),
         )
-    with Database(path, migrate=False, defer_migration=True) as ahead:
-        assert ahead.migration_pending is True
-        with pytest.raises(SchemaVersionError, match="NEWER build"):
-            ahead.apply_deferred_migration()
-        assert ahead.migration_pending is True
+    with pytest.raises(SchemaVersionError, match="NEWER build"):
+        Database(path, migrate=False, defer_migration=True)
+
+    empty = tmp_path / "touched.db"
+    empty.touch()
+    with Database(empty, migrate=False, defer_migration=True) as built:
+        assert built.migration_pending is False
+        assert stored_schema_version(built.conn) == SCHEMA_VERSION
 
 
 # ---------------------------------------------------------------------------

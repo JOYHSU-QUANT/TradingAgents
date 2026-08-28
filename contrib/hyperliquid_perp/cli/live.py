@@ -576,10 +576,6 @@ def _live_startup_recovery(
             return 1
         if _migrate_owned_store(db, run_id=run_id, now=now):
             return 1
-        # Re-read across the migration boundary: the checks below are the ones
-        # that may need columns the upgrade just added, and a Row fetched
-        # beforehand structurally cannot carry them.
-        existing_run = repo.get_run(db.conn, run_id)
         if existing_run is not None:
             # A coin edit under an existing run would re-enter manual safe
             # mode every pass with nothing naming the true cause — refused

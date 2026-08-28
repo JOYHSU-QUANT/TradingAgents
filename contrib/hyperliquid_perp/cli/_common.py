@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..config import dotenv_diagnosis
-from ..persistence.db import MIGRATIONS, Database, SchemaVersionError, stored_schema_version
+from ..persistence.db import Database, SchemaVersionError
 
 
 def _raise_keyboard_interrupt(signum, frame) -> None:
@@ -69,38 +69,18 @@ def _open_owned_store(path: str | Path) -> Database | None:
     therefore upgraded the schema underneath that daemon on the way to
     refusing (issue #129). So a populated store is opened AS-IS and the
     upgrade is owed to :func:`_migrate_owned_store`, which the caller runs at
-    the point it owns the store. Two cases are settled here instead:
-
-    * an EMPTY store (no file, or a file with no schema — a ``touch``, or an
-      open that died before its first migration committed) has no owner and
-      no lease table to consult, so it is built in full on the way in;
-    * a store migrated by a NEWER build is refused before anything is written
-      — the deferred open would otherwise let ``paper`` stamp its lease onto a
-      store whose columns it does not know, and refuse only afterwards.
-
-    The real ``live-smoke`` run reaches the deferred state through
-    :func:`_open_existing_db` (it never creates). Returns ``None`` after
-    printing the named refusal.
+    the point it owns the store. :class:`Database`'s deferred policy settles
+    the two edge cases at open: an EMPTY store (no file, or a file with no
+    schema yet) has no owner and is built in full, and a store migrated by a
+    NEWER build is refused before anything is written — the same refusal the
+    real ``live-smoke`` run gets through :func:`_open_existing_db`. Returns
+    ``None`` after printing that refusal.
     """
-    db = Database(path, migrate=False, defer_migration=True)
     try:
-        found = stored_schema_version(db.conn)
-        if found == 0:
-            db.apply_deferred_migration()
-        elif found > max(MIGRATIONS):
-            raise SchemaVersionError(
-                f"store schema is v{found} but this build only knows v{max(MIGRATIONS)} — "
-                "it was migrated by a NEWER build. Run the newer build, or restore a "
-                "backup taken before the upgrade."
-            )
+        return Database(path, migrate=False, defer_migration=True)
     except SchemaVersionError as exc:
-        db.close()
         print(f"error: {exc}", file=sys.stderr)
         return None
-    except BaseException:
-        db.close()
-        raise
-    return db
 
 
 def _migrate_owned_store(db: Database, *, run_id: str, now: datetime) -> bool:
@@ -117,10 +97,13 @@ def _migrate_owned_store(db: Database, *, run_id: str, now: datetime) -> bool:
     refuses it by name; a store that is already current never refuses, so a
     routine restart beside a running sibling is unaffected.
 
-    Both refusals are printed here as a named exit 1 — never main()'s exit-2
+    The refusal is printed here as a named exit 1 — never main()'s exit-2
     last resort — and a caller that already holds the lease must make this
     call inside the lease-releasing ``try`` so a refusal frees the lease
-    instead of parking it on a dead pid for LOCK_STALE_SECONDS.
+    instead of parking it on a dead pid for LOCK_STALE_SECONDS. The check is
+    a read, not a lock: a sibling that takes its lease a moment later is
+    migrated under after all — bounded harm, since every migration is one
+    ``BEGIN IMMEDIATE`` step that only ADDs columns and tables.
     """
     from ..paper.run_lock import LOCK_STALE_SECONDS
     from ..paper.scheduler import parse_instant
@@ -140,11 +123,7 @@ def _migrate_owned_store(db: Database, *, run_id: str, now: datetime) -> bool:
                 file=sys.stderr,
             )
             return True
-    try:
-        db.apply_deferred_migration()
-    except SchemaVersionError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return True
+    db.apply_deferred_migration()
     return False
 
 

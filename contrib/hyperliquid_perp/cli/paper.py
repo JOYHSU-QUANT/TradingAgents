@@ -181,9 +181,9 @@ def _cmd_paper(argv: list[str]) -> int:
 
         def _run_locked() -> int:
             """The lease-holding tail of ``paper``: create/reconcile, then the loop."""
-            # The lease is ours: NOW the schema upgrade is safe, because no
-            # sibling can be mid-write against the old one. Inside the
-            # lease-releasing try (see _migrate_owned_store).
+            # The lease is ours and, if an upgrade is owed, no other run in
+            # this store has a fresh one: NOW the schema upgrade goes ahead.
+            # Inside the lease-releasing try (see _migrate_owned_store).
             if _migrate_owned_store(db, run_id=run_id, now=clock.now()):
                 return 1
             from ..engine_bridge import EngineImportError

@@ -173,8 +173,11 @@ class Database:
         ``migrate=True`` (default) — this command owns the store and upgrades it
         on open. ``migrate=False`` — a reporting command: refuse either mismatch
         rather than touch a store a daemon may own. ``defer_migration=True`` —
-        open as-is, refuse nothing, and leave the upgrade to the caller once it
-        HOLDS THE LEASE.
+        open a populated store as-is and leave the upgrade to the caller once
+        it HOLDS THE LEASE; only a store migrated by a NEWER build is refused
+        at open (nothing has been written yet, and it never becomes this
+        build's to upgrade), and an EMPTY store — no schema at all — is built
+        in full, since nothing can own it.
 
         The third policy exists because ``migrate=True`` necessarily runs before
         the lease can be taken (the lease lives in the store being opened), so an
@@ -201,15 +204,35 @@ class Database:
         self._in_transaction = False
         self._migration_pending = False
         try:
-            if defer_migration:
-                # Owed only when the store is not at this build's version —
-                # behind, or ahead (the deferred apply then refuses by name).
-                # A current store owes nothing, so a caller's "before I
-                # migrate" guards stay quiet on a routine restart.
-                self._migration_pending = stored_schema_version(self._conn) != max(MIGRATIONS)
             if migrate:
                 apply_migrations(self._conn)
-            elif not defer_migration:
+                return
+            found = stored_schema_version(self._conn)
+            latest_known = max(MIGRATIONS)
+            if found > latest_known:
+                # Refused under BOTH non-migrating policies, at open, before
+                # the caller has written anything: a deferring command would
+                # otherwise stamp its lease into columns it does not know and
+                # only then discover the store is not its to upgrade.
+                raise SchemaVersionError(
+                    f"store schema is v{found} but this build only knows "
+                    f"v{latest_known} — it was migrated by a NEWER build. "
+                    "Run the newer build, or restore a backup taken before "
+                    "the upgrade."
+                )
+            if defer_migration:
+                if found == 0:
+                    # No schema at all (a ``touch``, or an open that died
+                    # before its first migration committed): nothing can own
+                    # it and there is no lease table to consult, so build it
+                    # in full — there is nobody to defer to.
+                    apply_migrations(self._conn)
+                else:
+                    # Owed only when the store is behind; a current store owes
+                    # nothing, so a caller's "before I migrate" guards stay
+                    # quiet on a routine restart.
+                    self._migration_pending = found < latest_known
+            else:
                 # Read-style commands (validate / export / live-smoke
                 # --gate-status) pass migrate=False. They take no run lease, so
                 # migrating here would silently upgrade a store a RUNNING
@@ -217,15 +240,6 @@ class Database:
                 # deploy box into a mixed-version corruption vector. Refuse
                 # instead and let the operator upgrade deliberately, through a
                 # command that does hold the lease (2026-07-30 migration review).
-                found = stored_schema_version(self._conn)
-                latest_known = max(MIGRATIONS)
-                if found > latest_known:
-                    raise SchemaVersionError(
-                        f"store schema is v{found} but this build only knows "
-                        f"v{latest_known} — it was migrated by a NEWER build. "
-                        "Run the newer build, or restore a backup taken before "
-                        "the upgrade."
-                    )
                 if found < latest_known:
                     raise SchemaVersionError(
                         f"store schema is v{found}; this build needs v{latest_known}. "
@@ -254,9 +268,8 @@ class Database:
     def apply_deferred_migration(self) -> None:
         """Pay the deferred upgrade — the caller now owns the store.
 
-        A no-op when nothing is owed. Raises :class:`SchemaVersionError` for a
-        store migrated by a NEWER build (nothing is written first), and leaves
-        :attr:`migration_pending` set in that case.
+        A no-op when nothing is owed (a NEWER store was already refused at
+        open, so only a behind store ever reaches here).
         """
         if not self._migration_pending:
             return

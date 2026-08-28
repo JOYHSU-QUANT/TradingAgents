@@ -3072,9 +3072,7 @@ def test_paper_restart_beside_a_sibling_is_unaffected_when_the_store_is_current(
     assert "OPENROUTER_API_KEY" in err
 
 
-def test_paper_refuses_a_newer_store_before_stamping_its_lease(
-    tmp_path, capsys, monkeypatch, paper_seams
-):
+def test_paper_refuses_a_newer_store_before_stamping_its_lease(tmp_path, capsys, paper_seams):
     # The deferred open must not cost paper the at-open refusal of a store
     # migrated by a NEWER build: an older binary would otherwise write its
     # lease into columns it does not know and only then refuse. Named exit 1,
@@ -3096,7 +3094,7 @@ def test_paper_refuses_a_newer_store_before_stamping_its_lease(
     probe.close()
 
 
-def test_paper_builds_an_empty_store_file_in_full(tmp_path, monkeypatch, paper_seams):
+def test_paper_builds_an_empty_store_file_in_full(tmp_path, capsys, paper_seams):
     # A file with no schema (a `touch`, or an open that died before its first
     # migration committed) has no owner and no lease table to consult, so it
     # is not "an existing store to defer on" — it is built on the way in and
@@ -3104,7 +3102,8 @@ def test_paper_builds_an_empty_store_file_in_full(tmp_path, monkeypatch, paper_s
     path = tmp_path / "touched.db"
     path.touch()
     rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
-    assert rc == 1  # "does not exist. Pass --create" — not an exit-2 traceback
+    assert rc == 1
+    assert "run 'r' does not exist" in capsys.readouterr().err  # not an exit-2 traceback
     assert _stored_version(path) == SCHEMA_VERSION
 
 

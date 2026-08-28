@@ -39,10 +39,11 @@ Breaking changes within the 0.x line are called out explicitly.
   the whole file, so when an upgrade is actually owed, a fresh lease on ANY
   other run in the store — the other network's run RUNBOOK-live §7.3 keeps in
   the same `live_trading.db`, or a paper sibling — refuses it by name (a store
-  that is already current never refuses). A store migrated by a NEWER build is
-  refused at open, before `paper` stamps its lease, and an empty store (no
-  file, or a file with no schema yet) has no owner, so it is still built in
-  full on the way in.
+  that is already current never refuses). `Database`'s deferred open now
+  settles the two edge cases itself: a store migrated by a NEWER build is
+  refused at open, before `paper` or `live-smoke` stamps a lease into columns
+  it does not know, and an empty store (no file, or a file with no schema yet)
+  has no owner, so it is built in full on the way in.
 - **hyperliquid_perp: one agent-key refusal for both signing entry points**
   (issue #126). `live` and `live-smoke` each carried their own copy of the
   "agent key is not set" check — which is how #82 fixed one and missed the

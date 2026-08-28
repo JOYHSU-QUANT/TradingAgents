@@ -217,30 +217,40 @@ def _clip(text: str | None) -> str | None:
 # else would ever close the row — see ``_clear_read_failure_case``.
 
 
-# The three dispositions this module writes WITHOUT building a
-# ``ReconciliationCase`` — two stamped onto an already-persisted row, one
-# passed straight to the event insert. Every other one travels through
-# ``ReconciliationCase``, whose __post_init__ validates it; these three would
-# otherwise have no tie to the vocabulary at all (issue #84).
+# The four dispositions whose ``ReconciliationCase.__post_init__`` check
+# cannot stand in front of the write. Three are written WITHOUT building a
+# ``ReconciliationCase`` at all — two stamped onto an already-persisted row,
+# one passed straight to the event insert — and would otherwise have no tie
+# to the vocabulary (issue #84). The fourth, the orphan back-fill's stamp,
+# DOES build a case, but only after ``insert_order`` has committed: the stamp
+# depends on whether the back-fill succeeded, so its __post_init__ runs on the
+# wrong side of the write and an unclassified rename would leave an orders
+# row with no case row explaining it (issue #104). Every other disposition
+# travels through a ``ReconciliationCase`` built before its write.
 #
-# Checked at IMPORT rather than at each write, because the three sites do not
+# Checked at IMPORT rather than at each write, because the sites do not
 # share a failure lane and TWO of them cannot fail loudly where they stand:
 # ``_clear_read_failure_case`` swallows and logs a warning, and ``_record``'s
 # backfill-event insert swallows and logs an exception while the pass stays
 # CLEAN — both deliberately fail-soft, so a guard at either would report a
 # rename as one log line and let the key shut forever anyway, the exact
 # silence #84 is about. Only the fill-booked stamp reaches ``guarded``, which
-# would turn a raise into an unclean verdict. Checking here gives all three
+# would turn a raise into an unclean verdict. Checking here gives all four
 # the same answer, and a rename nobody classified in
 # repo.MACHINE_DISPOSITIONS cannot start the daemon at all.
 _FILL_BOOKED_DISPOSITION = "resolved_fill_booked"
 _READ_SUCCEEDED_DISPOSITION = "resolved_read_succeeded"
 _FILL_BACKFILLED_DISPOSITION = "backfilled"
-for _disposition in (
+_ORPHAN_BACKFILLED_DISPOSITION = "local_row_backfilled"
+# Named so the test side can assert the loop's membership without reloading
+# the module (a reload is what proving the REFUSAL costs; membership is cheap).
+_IMPORT_CHECKED_DISPOSITIONS = (
     _FILL_BOOKED_DISPOSITION,
     _READ_SUCCEEDED_DISPOSITION,
     _FILL_BACKFILLED_DISPOSITION,
-):
+    _ORPHAN_BACKFILLED_DISPOSITION,
+)
+for _disposition in _IMPORT_CHECKED_DISPOSITIONS:
     check_enum(_disposition, repo.MACHINE_DISPOSITIONS, name="action_taken")
 del _disposition
 
@@ -1111,18 +1121,9 @@ class LiveReconciler:
                 # back-fill the local row from what the exchange reported
                 # (fail-safe direction: once the row exists, every later sweep
                 # — kill-switch shutdown included — sees and manages it).
-                # The one disposition site the sweep CANNOT validate before its
-                # write: the stamp depends on whether the back-fill succeeded,
-                # so there is nothing to check until it has run. The exposure
-                # is real and is NOT the mirror of the three settle/reopen
-                # sites — __post_init__ skips a ``None`` stamp, so the branch
-                # that could raise is precisely the one where ``insert_order``
-                # already committed, and an unclassified rename would leave the
-                # orders row with no case row explaining it. What bounds it is
-                # CI rather than shape: the stamp is a literal, and
-                # ``test_every_disposition_the_sweep_writes_is_in_the_machine_vocabulary``
-                # reads it straight out of this source, so a rename fails long
-                # before a daemon runs it.
+                # The stamp is chosen AFTER ``insert_order`` commits, so
+                # __post_init__ is too late to guard this write; it is checked
+                # at import instead — see ``_ORPHAN_BACKFILLED_DISPOSITION``.
                 resolved = self._backfill_orphan_order(order, registry, now)
                 cases.append(
                     ReconciliationCase(
@@ -1131,7 +1132,7 @@ class LiveReconciler:
                         local_value=None,
                         exchange_value=cloid,
                         detail=f"exchange open order oid={oid} had no local orders row",
-                        action_taken="local_row_backfilled" if resolved else None,
+                        action_taken=_ORPHAN_BACKFILLED_DISPOSITION if resolved else None,
                         resolved=resolved,
                     )
                 )

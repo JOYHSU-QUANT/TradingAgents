@@ -596,6 +596,15 @@ Breaking changes within the 0.x line are called out explicitly.
   are pinned to the constants they restate. `RetryableDecisionError` now
   checks `error_type` against `ERROR_TYPES` at construction, so a producer's
   typo fails on the raise instead of at the repository write boundary.
+- **hyperliquid_perp: the reconcile vocabulary guard's two tails** (issue
+  #104). No behaviour changes on the happy path. The orphan back-fill's
+  `local_row_backfilled` stamp — the one case the sweep builds after its write
+  — is now checked at import with the three case-less stamps, so an
+  unclassified rename refuses to start the daemon instead of leaving an orders
+  row with no case row explaining it. The disposition AST scan now covers
+  every module under `live/` and resolves positional `ReconciliationCase` and
+  stamp-writer arguments against the real signatures, not only the
+  `action_taken=` keyword in `reconcile.py`.
 
 - **Breaking for direct callers of `alpha_vantage_common.format_datetime_for_api`**
   (issue #120): it accepts only a `yyyy-mm-dd` string and raises `ValueError`

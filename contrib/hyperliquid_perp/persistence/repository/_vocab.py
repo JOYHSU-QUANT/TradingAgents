@@ -404,8 +404,10 @@ _FINAL_DISPOSITIONS = frozenset(
 # an operator noticing a recurrence that never reached ``safe-mode --status``,
 # and #65's whole point was that this path is invisible.
 #
-# So ``ReconciliationCase.__post_init__`` and the sweep's three case-less
-# write sites check membership here. A new disposition then fails LOUDLY at the
+# So ``ReconciliationCase.__post_init__`` checks membership here, and so does
+# the sweep's import-time loop for the four stamps that check cannot stand in
+# front of (three case-less writes, and the orphan back-fill whose case is
+# built after its write — issue #104). A new disposition then fails LOUDLY at the
 # moment it is constructed — an unclean leg, in the pass that introduced it —
 # and whoever adds it must come here and decide which half it belongs in.
 # ``safe-mode --stamp-case`` refuses this whole set for the mirror reason: the

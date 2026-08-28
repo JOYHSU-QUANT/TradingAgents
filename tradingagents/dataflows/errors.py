@@ -8,11 +8,15 @@ these (or a thin vendor-named subclass) and needs no new ``except`` clause.
     VendorError
     ├── NoMarketDataError          no usable rows (empty result OR stale data)
     ├── VendorRateLimitError       transient throttle -> skip to next vendor
+    ├── VendorUnavailableError     answered, but not with data -> next vendor, no traceback
     └── VendorNotConfiguredError   missing API key/config -> vendor unavailable
 
 The number of types is the number of distinct router reactions, not the number
 of human-describable causes: empty and stale data get identical handling, so
 they share ``NoMarketDataError`` and differ only in the free-text ``detail``.
+A reaction includes how the failure is logged — ``VendorUnavailableError``
+continues the chain like a transport failure but without the traceback that
+lane reserves for a bug, which is what earns it a type of its own.
 
 ``UnsupportedIndicatorError`` sits outside that tree on purpose: naming an
 indicator no vendor computes is a caller mistake, not a vendor condition. The
@@ -50,6 +54,24 @@ class NoMarketDataError(VendorError):
 
 class VendorRateLimitError(VendorError):
     """A vendor throttled the request; the router skips to the next vendor."""
+
+
+class VendorUnavailableError(VendorError):
+    """A vendor answered, but with something that is not data.
+
+    The outage page or the unparsable body a scraper meets when the vendor is
+    down or refusing this client. yfinance parses the body before it looks at
+    the status, so a 5xx HTML page reaches it as a ``JSONDecodeError`` and
+    Yahoo's own "Will be right back" page as its ``YFDataException``; under
+    the library's swallow both became the empty answer ("No news found", the
+    no-data sentinel), and let out raw the getters' broad handler rendered
+    them as prose — either way the fallback vendor was never tried (#136).
+    Neither a throttle nor "no data": the router reacts as it does to a
+    transport failure — the chain goes on and this surfaces when nothing else
+    serves — but logs it without the traceback that lane reserves for a bug,
+    and the getters' ``except VendorError: raise`` lets it out without a
+    clause of their own.
+    """
 
 
 class VendorNotConfiguredError(VendorError, ValueError):

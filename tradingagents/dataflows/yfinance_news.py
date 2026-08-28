@@ -8,7 +8,7 @@ from dateutil.relativedelta import relativedelta
 
 from .config import get_config
 from .errors import VendorError
-from .stockstats_utils import yf_fetch_unhidden, yf_retry
+from .stockstats_utils import yf_fetch_unhidden
 from .symbol_utils import normalize_symbol
 
 # The date refusals live in utils so the Alpha Vantage vendor serving the same
@@ -112,10 +112,8 @@ def get_news_yfinance(
     try:
         stock = yf.Ticker(canonical)
         # Through the shared un-hidden boundary like every other yfinance leaf
-        # (#116). get_news itself hides only a body that is not JSON, which
-        # still answers the empty list; a reset or a timeout at its post
-        # propagates either way, and a "Will be right back" page is the
-        # library's YFDataException, which the boundary lets out.
+        # (#116); an outage body takes its vendor-unavailable lane rather than
+        # the empty list "No news found" below would claim as coverage (#136).
         news = yf_fetch_unhidden(lambda: stock.get_news(count=article_limit), hidden_answer=list)
 
         if not news:
@@ -197,16 +195,29 @@ def get_global_news_yfinance(
 
     try:
         for query in search_queries:
-            search = yf_retry(
-                lambda q=query: yf.Search(
-                    query=q,
-                    news_count=limit,
-                    enable_fuzzy_query=True,
-                )
+            # Through the shared un-hidden boundary like every other yfinance
+            # leaf (#136): an outage body takes its vendor-unavailable lane
+            # rather than the news=[] that "No global news found" below would
+            # claim as coverage. Search fetches in its constructor, so the
+            # attribute is read inside the boundary and the hidden answer is
+            # the library's own empty list. One outage anywhere in the loop is
+            # the verdict on the whole call — articles gathered by an earlier
+            # query are not served as a report with an unmarked gap. This
+            # also puts the call under the boundary's lock, which serializes
+            # it with every other yfinance fetch.
+            news = yf_fetch_unhidden(
+                lambda q=query: (
+                    yf.Search(
+                        query=q,
+                        news_count=limit,
+                        enable_fuzzy_query=True,
+                    ).news
+                ),
+                hidden_answer=list,
             )
 
-            if search.news:
-                for article in search.news:
+            if news:
+                for article in news:
                     # Handle both flat and nested structures
                     if "content" in article:
                         data = _extract_article_data(article)

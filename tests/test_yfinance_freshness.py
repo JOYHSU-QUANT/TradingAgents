@@ -823,7 +823,7 @@ class TestEmptyNewsWindowIsVendorAgnostic:
                 self.news = [{"title": "Old macro news", "providerPublishTime": stale}]
 
         monkeypatch.setattr(yfnews.yf, "Search", _FakeSearch)
-        monkeypatch.setattr(yfnews, "yf_retry", lambda fn: fn())
+        monkeypatch.setattr(yfnews, "yf_fetch_unhidden", lambda fn, **kw: fn())
         yf_out = yfnews.get_global_news_yfinance("2026-06-08", look_back_days=7)
 
         av_out = self._av_empty_feed(monkeypatch).get_global_news("2026-06-08", look_back_days=7)

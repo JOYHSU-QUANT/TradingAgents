@@ -18,6 +18,7 @@ from .errors import (
     UnsupportedIndicatorError,
     VendorNotConfiguredError,
     VendorRateLimitError,
+    VendorUnavailableError,
 )
 from .farside import get_etf_flow_data as get_farside_etf_flows
 from .fear_greed import get_fear_greed_data as get_alternative_me_fear_greed
@@ -326,6 +327,15 @@ def route_to_vendor(method: str, *args, **kwargs):
             continue
         except NoMarketDataError as e:
             last_no_data = e  # No data here; another configured vendor may have it
+            continue
+        except VendorUnavailableError as e:
+            # The vendor answered with an outage page or an unparsable body
+            # (#136): the chain goes on and it surfaces at the end like a
+            # transport failure, but logged without a traceback — the clause
+            # below reserves that for a bug, and a vendor being down is not one.
+            logger.warning("Vendor %r answered without data for %s: %s", vendor, method, e)
+            if first_error is None:
+                first_error = e
             continue
         except UnsupportedIndicatorError as e:
             # A caller typo, not a vendor failure: logged without a traceback,

@@ -10,6 +10,31 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **dataflows: a Yahoo outage page is no longer read as "no data" on the
+  yfinance paths that parse the body before the status** (issue #136).
+  `Ticker.history`, `get_news`, `Search` and the second
+  (fundamentals-timeseries) fetch behind `info` call `.json()` on the body
+  without checking the status, so a 5xx HTML page reached them as a
+  `JSONDecodeError` — not the `OSError` #116 let out — and the un-hidden
+  window restored it to the library's empty answer: `get_news` reported
+  "No news found", `get_global_news` "No global news found", `get_stock_data`
+  and `get_fundamentals` the `NO_DATA_AVAILABLE` sentinel, which outranks the
+  recorded failure in `route_to_vendor`, so the fallback vendor was never
+  tried. Yahoo's "Will be right back" page (yfinance's `YFDataException`)
+  left the window raw and the getters' broad handler rendered it as "Error
+  fetching ..." prose. Both now leave `yf_fetch_unhidden` as the new
+  `VendorUnavailableError` — the vendor answered, but not with data — which
+  the getters' existing `except VendorError: raise` lets out and
+  `route_to_vendor` handles in a lane of its own: the chain goes on, and the
+  warning carries no traceback (the generic lane reserves that for a bug).
+  Yahoo answers JSON for every genuine "no data" case, so an unparsable body
+  never was one; the 404 verdict (an unknown or delisted symbol) is unchanged.
+  `get_global_news`'s `yf.Search` now runs inside the same window as every
+  other yfinance leaf rather than plain `yf_retry` — it was the one call that
+  could observe a sibling tool's un-hidden window through the process-global
+  flag. The quoteSummary payload `info` had already fetched when its second
+  fetch fails is still discarded by yfinance; the getter reports the outage
+  rather than reaching into the library for it.
 - **dataflows: an optional-category getter refuses an unusable `curr_date`
   instead of reporting the vendor down** (issue #119). The seven
   date-bounded getters behind `OPTIONAL_CATEGORIES` — Fear & Greed, both

@@ -9,6 +9,7 @@ fixed on the Alpha Vantage indicator path, on the vendor that is the default
 for every one of these categories.
 """
 
+import json
 import logging
 from unittest import mock
 
@@ -26,6 +27,7 @@ from tradingagents.dataflows.errors import (
     UnsupportedIndicatorError,
     VendorError,
     VendorRateLimitError,
+    VendorUnavailableError,
 )
 
 
@@ -373,21 +375,161 @@ def test_an_http_404_is_still_the_no_data_verdict(monkeypatch, tmp_path, call):
 @pytest.mark.parametrize("call", _SWALLOWING_LEAVES[:2])
 def test_an_http_5xx_surfaces_from_the_quote_scrapers(monkeypatch, tmp_path, call):
     # The quoteSummary fetch is the one that checks the status, so a 5xx there
-    # is a genuine vendor failure the fallback chain should see. (history and
-    # get_news parse the body first, so a 5xx page reaches them as a JSON
-    # error the window restores — a documented residue, not covered here.)
+    # is a genuine vendor failure the fallback chain should see. (history,
+    # get_news and Search parse the body first, so a 5xx page reaches them as
+    # a JSON error — the vendor-unavailable lane, pinned further down, #136.)
     set_config({"data_cache_dir": str(tmp_path)})
     _yahoo_raises(monkeypatch, _http_error(503))
     with pytest.raises(curl_exceptions.HTTPError):
         call()
 
 
+# --- parsed before status: an outage page is not "no data" (#136) ---
+
+
+def _yahoo_answers(monkeypatch, status, body):
+    """Make every request yfinance's scrapers issue come back as one response.
+
+    ``get``/``post``/``cache_get`` hand it back the way the library does — it
+    checks no status below 429 there — and ``get_raw_json`` raises for a
+    4xx/5xx the way its ``raise_for_status`` does before parsing the body.
+    """
+    import yfinance.data as yfdata
+
+    class _Response:
+        status_code = status
+        text = body
+        url = "https://query2.finance.yahoo.com/"
+
+        def json(self):
+            return json.loads(self.text)
+
+        def raise_for_status(self):
+            if status >= 400:
+                raise _http_error(status)
+
+    response = _Response()
+    for name in ("get", "post", "cache_get"):
+        monkeypatch.setattr(yfdata.YfData, name, mock.Mock(return_value=response))
+
+    def raw_json(self, url, params=None, timeout=30):
+        response.raise_for_status()
+        return response.json()
+
+    monkeypatch.setattr(yfdata.YfData, "get_raw_json", raw_json)
+    return response
+
+
+_OUTAGE_PAGES = {
+    "5xx_html": (503, "<html><body><h1>503 Service Unavailable</h1></body></html>"),
+    "right_back": (200, "<html><body>Will be right back</body></html>"),
+}
+
+_PARSE_FIRST_LEAVES = [
+    _SWALLOWING_LEAVES[2],  # prices
+    pytest.param(lambda: ynews.get_news_yfinance("AAPL", "2026-06-01", "2026-06-05"), id="news"),
+    pytest.param(lambda: ynews.get_global_news_yfinance("2026-06-01"), id="global_news"),
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("call", _PARSE_FIRST_LEAVES)
+@pytest.mark.parametrize("page", sorted(_OUTAGE_PAGES))
+def test_an_outage_page_is_not_no_data_on_the_parse_first_paths(monkeypatch, tmp_path, call, page):
+    # history, get_news and Search parse the body before they look at the
+    # status, so a 5xx HTML page reaches them as JSONDecodeError — not an
+    # OSError, so the un-hidden window restored it to the empty answer, which
+    # the leaves read as "No news found" or the no-data sentinel (and that
+    # sentinel outranks the recorded failure in the router, so the fallback
+    # vendor was never tried). Yahoo's own "Will be right back" page is the
+    # library's YFDataException, which the window let out raw and the leaves'
+    # broad handler made prose of. Both are the vendor answering without data
+    # (#136). Below the library's own swallow, so the real scrapers run.
+    set_config({"data_cache_dir": str(tmp_path)})
+    _yahoo_answers(monkeypatch, *_OUTAGE_PAGES[page])
+    with pytest.raises(VendorUnavailableError):
+        call()
+
+
+@pytest.mark.unit
+def test_search_restores_a_library_bug_to_its_own_empty_answer(monkeypatch):
+    # The window's hidden answer for Search is the library's own news=[], so
+    # anything the swallow would have hidden (a KeyError from a changed
+    # response shape) still reads as the empty search it always did.
+    monkeypatch.setattr(ynews.yf, "Search", mock.Mock(side_effect=KeyError("quotes")))
+    assert ynews.get_global_news_yfinance("2026-06-01") == "No global news found for 2026-06-01"
+
+
+@pytest.mark.unit
+def test_an_outage_page_on_the_second_fundamentals_fetch_is_not_no_data(monkeypatch, tmp_path):
+    # info makes two fetches: quoteSummary through get_raw_json, which checks
+    # the status (pinned above), then the fundamentals-timeseries page, which
+    # it json.loads without looking. A 5xx there used to be restored to the
+    # stub dict and reach the router as "no fundamentals returned" — with the
+    # quoteSummary payload already in hand (#136).
+    import yfinance.data as yfdata
+
+    set_config({"data_cache_dir": str(tmp_path)})
+    _yahoo_answers(monkeypatch, *_OUTAGE_PAGES["5xx_html"])
+    payload = {"quoteSummary": {"result": [{"symbol": "AAPL", "longName": "Apple Inc."}]}}
+    monkeypatch.setattr(yfdata.YfData, "get_raw_json", mock.Mock(return_value=payload))
+    with pytest.raises(VendorUnavailableError):
+        yfin.get_fundamentals("AAPL", "2026-06-01")
+
+
+@pytest.mark.unit
+def test_an_outage_page_reaches_the_fallback_vendor(monkeypatch, tmp_path, caplog):
+    # Through the real router: the outage takes its own lane — the chain goes
+    # on, and the log line carries no traceback, which the router reserves
+    # for a bug (#136).
+    set_config(
+        {"data_cache_dir": str(tmp_path), "data_vendors": {"news_data": "yfinance,alpha_vantage"}}
+    )
+    _yahoo_answers(monkeypatch, *_OUTAGE_PAGES["5xx_html"])
+    with (
+        mock.patch.dict(
+            interface.VENDOR_METHODS,
+            {
+                "get_news": {
+                    "yfinance": ynews.get_news_yfinance,
+                    "alpha_vantage": mock.Mock(return_value="AV_NEWS"),
+                }
+            },
+            clear=False,
+        ),
+        caplog.at_level(logging.WARNING, logger=interface.__name__),
+    ):
+        result = interface.route_to_vendor("get_news", "AAPL", "2026-06-01", "2026-06-05")
+    assert result == "AV_NEWS"
+    assert caplog.records and not any(r.exc_info for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_an_outage_page_on_a_single_vendor_chain_fails_loud(monkeypatch, tmp_path):
+    # news_data is a core category: with no other vendor to serve it, the
+    # outage itself surfaces — not "No news found", and not prose.
+    set_config({"data_cache_dir": str(tmp_path), "data_vendors": {"news_data": "yfinance"}})
+    _yahoo_answers(monkeypatch, *_OUTAGE_PAGES["5xx_html"])
+    with (
+        mock.patch.dict(
+            interface.VENDOR_METHODS,
+            {"get_news": {"yfinance": ynews.get_news_yfinance}},
+            clear=False,
+        ),
+        pytest.raises(VendorUnavailableError),
+    ):
+        interface.route_to_vendor("get_news", "AAPL", "2026-06-01", "2026-06-05")
+
+
 @pytest.mark.unit
 def test_yf_fetch_unhidden_sorts_failures_into_their_lanes():
     # Restored to the caller's hidden answer: the library's own expected
     # conditions (a delisted symbol's YFTzMissingError) and an HTTP 404. Let
-    # out: a throttle (for yf_retry's mapping), the library's "Yahoo is down"
-    # signal, and every other OSError. The flag comes back either way.
+    # out: a throttle (for yf_retry's mapping) and every other OSError.
+    # Mapped to the vendor-unavailable type: the library's "Yahoo is down"
+    # signal and a body that is not JSON — the vendor answering without data,
+    # which is neither a transport failure nor "no data" (#136). The flag
+    # comes back either way.
     from yfinance.config import YfConfig
     from yfinance.exceptions import YFDataException, YFTzMissingError
 
@@ -396,8 +538,10 @@ def test_yf_fetch_unhidden_sorts_failures_into_their_lanes():
 
     assert fetch(YFTzMissingError("AAPL")) == []
     assert fetch(_http_error(404)) == []
-    with pytest.raises(YFDataException):
+    with pytest.raises(VendorUnavailableError):
         fetch(YFDataException("*** YAHOO! FINANCE IS CURRENTLY DOWN! ***"))
+    with pytest.raises(VendorUnavailableError):
+        fetch(json.JSONDecodeError("Expecting value", "<html>503</html>", 0))
     with pytest.raises(curl_exceptions.HTTPError):
         fetch(_http_error(503))
     # 404 alone is the symbol verdict: a 403 is Yahoo refusing this client
@@ -425,11 +569,11 @@ def test_yf_fetch_unhidden_sorts_failures_into_their_lanes():
 # checked it, so nothing in this file made it honour the taxonomy.
 #
 # The seam is per-leaf rather than "patch them all", because which boundary a
-# leaf uses is itself an invariant worth pinning: every leaf but the Search-
-# backed global news goes through yf_fetch_unhidden (the statements by its
-# yf_fetch_statement name), since plain yf_retry leaves yfinance free to
-# swallow a 429 or a transport failure into an empty answer that reads as
-# "no data" (#67, #116). Naming the wrong seam leaves the real fetch running,
+# leaf uses is itself an invariant worth pinning: every leaf goes through
+# yf_fetch_unhidden (the statements by its yf_fetch_statement name), since
+# plain yf_retry leaves yfinance free to swallow a 429, a transport failure or
+# an outage page into an empty answer that reads as "no data" (#67, #116,
+# #136). Naming the wrong seam leaves the real fetch running,
 # so the row fails rather than passing for the wrong reason — and
 # monkeypatch.setattr raises if a binding is renamed away instead of quietly
 # patching nothing.
@@ -441,7 +585,7 @@ _YFINANCE_LEAF_CALLS = {
     "get_cashflow": ((yfin, "yf_fetch_statement"), ("AAPL", "quarterly", "2026-06-01")),
     "get_income_statement": ((yfin, "yf_fetch_statement"), ("AAPL", "quarterly", "2026-06-01")),
     "get_news": ((ynews, "yf_fetch_unhidden"), ("AAPL", "2026-06-01", "2026-06-05")),
-    "get_global_news": ((ynews, "yf_retry"), ("2026-06-01",)),
+    "get_global_news": ((ynews, "yf_fetch_unhidden"), ("2026-06-01",)),
     "get_insider_transactions": ((yfin, "yf_fetch_unhidden"), ("AAPL",)),
 }
 

@@ -481,33 +481,47 @@ def test_a_throttle_that_does_not_latch_the_vendor_leaves_it_contacted():
 
 
 @pytest.mark.unit
-def test_the_yfinance_boundary_and_the_router_share_one_latch(frozen_clock):
-    # The verification snapshot builder reaches yf_retry without routing. What
-    # Yahoo tells it must count for the routed tools too, in both directions:
-    # a throttle it exhausts keeps the router away from yfinance, and an
-    # answer it receives lets the router contact yfinance again — one latch,
-    # not two windows drifting apart.
+def test_yfinance_stands_off_behind_its_own_cache_not_at_the_router():
+    # yfinance's latch lives in yf_retry, behind the OHLCV cache load_ohlcv
+    # reads first, so a symbol whose bars are on disk is still served while
+    # Yahoo is being stood off from. Latched at the router as well, the same
+    # call would be refused in front of that cache — a different verdict, not
+    # a cheaper one. So the router never latches yfinance: its rate-limit
+    # type says so, the getter keeps being called, and a cache-served answer
+    # does not disturb the standing-off either.
     import tradingagents.dataflows.stockstats_utils as su
 
-    assert su.YFINANCE_VENDOR in interface.VENDOR_METHODS["get_stock_data"]
+    assert not su.YFinanceRateLimitError.latches_vendor
 
     set_config({"data_vendors": {"core_stock_apis": "yfinance,alpha_vantage"}})
-    yf = mock.Mock(side_effect=_returns("YF_DATA"))
-    with _chain("get_stock_data", {"yfinance": yf, "alpha_vantage": _returns("AV_DATA")}):
-        VENDOR_THROTTLE_LATCH.arm(su.YFINANCE_VENDOR)  # what an exhausted direct-path ladder does
-        assert _stock() == "AV_DATA"
-        yf.assert_not_called()
+    su._YF_THROTTLE_LATCH.arm("yfinance")  # what an exhausted ladder does
 
-        # A direct-path call cannot start while the key is live (yf_retry reads
-        # the same latch and raises), so the only way it meets one is the
-        # in-flight race: a sibling arms while Yahoo is answering it. Let the
-        # first window lapse, then stage that race — without the clear, the
-        # fresh deadline it records would have the router skip yfinance again.
-        frozen_clock["t"] += THROTTLE_LATCH_TTL_S
+    def yfinance_getter(symbol, *a, **k):
+        # A cache hit never reaches yf_retry; a miss is refused there at once.
+        if symbol == "CACHED":
+            return "BARS FROM DISK"
+        return su.yf_retry(lambda: "never reached")
 
-        def served_while_a_sibling_armed():
-            VENDOR_THROTTLE_LATCH.arm(su.YFINANCE_VENDOR)
-            return "served directly"
+    with _chain(
+        "get_stock_data", {"yfinance": yfinance_getter, "alpha_vantage": _returns("AV_DATA")}
+    ):
+        assert _stock("UNCACHED") == "AV_DATA"
+        assert _stock("CACHED") == "BARS FROM DISK"
+        assert _stock("UNCACHED") == "AV_DATA"  # the router did not latch yfinance
+    assert VENDOR_THROTTLE_LATCH.remaining_s("yfinance") is None
+    assert su._YF_THROTTLE_LATCH.remaining_s("yfinance") is not None
 
-        assert su.yf_retry(served_while_a_sibling_armed) == "served directly"
-        assert _stock() == "YF_DATA"
+
+@pytest.mark.unit
+def test_a_throttle_actually_met_outranks_a_latch_skip():
+    # Chain order used to decide which throttle surfaced; a refusal the chain
+    # met carries the vendor's own detail (a Retry-After), a skip describes a
+    # request never sent.
+    set_config({"data_vendors": {"core_stock_apis": "alpha_vantage,yfinance"}})
+    VENDOR_THROTTLE_LATCH.arm("alpha_vantage")
+    met = _raises(VendorRateLimitError("Retry-After: 42"))
+    with (
+        _chain("get_stock_data", {"alpha_vantage": _throttled, "yfinance": met}),
+        pytest.raises(VendorRateLimitError, match="Retry-After: 42"),
+    ):
+        _stock()

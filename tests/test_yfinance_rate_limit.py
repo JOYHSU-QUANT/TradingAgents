@@ -29,7 +29,7 @@ from tradingagents.dataflows.errors import (
     VendorRateLimitError,
     VendorUnavailableError,
 )
-from tradingagents.dataflows.throttle import THROTTLE_LATCH_TTL_S, VENDOR_THROTTLE_LATCH
+from tradingagents.dataflows.throttle import THROTTLE_LATCH_TTL_S
 
 
 def _throttled(*a, **k):
@@ -166,7 +166,7 @@ def test_being_served_clears_the_latch(frozen_clock):
     # Not merely expired — dropped, so no stale deadline is left behind for a
     # later call to reason about. (remaining_s reads None either way once the
     # window has passed, so it is the recorded deadline itself that is pinned.)
-    assert not VENDOR_THROTTLE_LATCH.has_deadline(su.YFINANCE_VENDOR)
+    assert not su._YF_THROTTLE_LATCH.has_deadline("yfinance")
 
 
 def _arm_then(outcome):
@@ -179,7 +179,7 @@ def _arm_then(outcome):
     """
 
     def fetch():
-        VENDOR_THROTTLE_LATCH.arm(su.YFINANCE_VENDOR)
+        su._YF_THROTTLE_LATCH.arm("yfinance")
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
@@ -196,7 +196,7 @@ def test_a_restored_failure_does_not_clear_a_live_latch():
     # (#114). Not a verdict bug: the caller still gets the empty frame.
     out = su.yf_fetch_statement(_arm_then(ValueError("boom")))
     assert out.empty
-    assert VENDOR_THROTTLE_LATCH.remaining_s(su.YFINANCE_VENDOR) is not None
+    assert su._YF_THROTTLE_LATCH.remaining_s("yfinance") is not None
 
 
 @pytest.mark.unit
@@ -204,7 +204,7 @@ def test_a_restored_404_does_not_clear_a_live_latch():
     # The other restore path: Yahoo's verdict on the symbol comes back as the
     # hidden answer too, and is likewise not this client's standing with Yahoo.
     assert su.yf_fetch_unhidden(_arm_then(_http_error(404)), hidden_answer=list) == []
-    assert VENDOR_THROTTLE_LATCH.remaining_s(su.YFINANCE_VENDOR) is not None
+    assert su._YF_THROTTLE_LATCH.remaining_s("yfinance") is not None
 
 
 @pytest.mark.unit
@@ -213,7 +213,7 @@ def test_a_served_fetch_still_clears_a_live_latch():
     # fetch actually answers — that is the fresher evidence, and the deadline
     # goes.
     assert su.yf_fetch_unhidden(_arm_then("data"), hidden_answer=list) == "data"
-    assert VENDOR_THROTTLE_LATCH.remaining_s(su.YFINANCE_VENDOR) is None
+    assert su._YF_THROTTLE_LATCH.remaining_s("yfinance") is None
 
 
 @pytest.mark.unit
@@ -226,7 +226,7 @@ def test_yf_retry_keeps_no_opinion_about_return_values():
 
     out = su.yf_retry(_arm_then(pd.DataFrame()))
     assert out.empty
-    assert VENDOR_THROTTLE_LATCH.remaining_s(su.YFINANCE_VENDOR) is None
+    assert su._YF_THROTTLE_LATCH.remaining_s("yfinance") is None
 
 
 @pytest.mark.unit
@@ -243,11 +243,11 @@ def test_only_an_exhausted_throttle_arms_the_latch(frozen_clock):
         return out
 
     assert su.yf_retry(flaky) == "ok"
-    assert VENDOR_THROTTLE_LATCH.remaining_s(su.YFINANCE_VENDOR) is None
+    assert su._YF_THROTTLE_LATCH.remaining_s("yfinance") is None
 
     with pytest.raises(ValueError):
         su.yf_retry(mock.Mock(side_effect=ValueError("boom")))
-    assert VENDOR_THROTTLE_LATCH.remaining_s(su.YFINANCE_VENDOR) is None
+    assert su._YF_THROTTLE_LATCH.remaining_s("yfinance") is None
 
 
 # --- the statement boundary: throttles and transport failures un-hidden ---

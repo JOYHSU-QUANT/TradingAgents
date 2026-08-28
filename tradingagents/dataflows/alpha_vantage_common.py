@@ -285,6 +285,14 @@ def _make_api_request(function_name: str, params: dict, subject: str | None = No
             raise AlphaVantageNotConfiguredError(
                 f"Alpha Vantage API key invalid or missing: {notice}"
             )
+        if "premium" in low:
+            # Any other premium-flavoured refusal (a parameter this key is not
+            # entitled to; wording not seen yet): still an entitlement verdict,
+            # and still a raise — the bare substring used to be the catch-all
+            # that kept such a notice from returning to the caller as data.
+            raise AlphaVantageNotConfiguredError(
+                f"Alpha Vantage refused the {function_name} request as premium-only: {notice}"
+            )
 
     # See the Raises: section for why an "Error Message" body raises the
     # no-data type. Checked after the notice classification so a body carrying

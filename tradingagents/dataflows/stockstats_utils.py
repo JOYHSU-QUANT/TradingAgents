@@ -16,17 +16,46 @@ from .symbol_utils import NoMarketDataError, normalize_symbol
 
 # The staleness bound lives in utils (stdlib-only) so the pure-requests Alpha
 # Vantage vendor shares the same single definition (#70).
-from .throttle import VENDOR_THROTTLE_LATCH
+from .throttle import ThrottleLatch
 from .utils import MAX_OHLCV_STALE_DAYS, normalize_iso_date, safe_ticker_component
 
 logger = logging.getLogger(__name__)
 
 
-# The shared vendor latch's key for Yahoo — the name the router registers this
-# module's getters by, pinned by test. yf_retry reads and writes it beside the
-# router because the verification snapshot builder
-# (agents.utils.market_data_validation_tools) calls in here without routing.
-YFINANCE_VENDOR = "yfinance"
+# Yahoo's standing with this client (#86): yfinance's own latch, not an entry
+# in the router's. It sits at the network boundary, BEHIND the OHLCV cache
+# load_ohlcv reads first, so a symbol whose bars are on disk keeps being
+# served from them while the latch holds — the router's latch sits in front
+# of the whole getter and would refuse that answer (#114). It also serves the
+# verification snapshot builder (agents.utils.market_data_validation_tools),
+# which calls in here without routing. One key: a 429 is about the client,
+# not an endpoint.
+_YF_THROTTLE_LATCH = ThrottleLatch()
+_YF_LATCH_KEY = "yfinance"
+
+
+def reset_yf_throttle_latch() -> None:
+    """Forget any recorded throttle, so the next call contacts Yahoo again.
+
+    Public for tests: the latch is process-global, so a test that exhausts
+    ``yf_retry`` would otherwise send every later test in the same process
+    down the fast-fail path. The ``tests/`` conftest calls this around every
+    test.
+    """
+    _YF_THROTTLE_LATCH.reset()
+
+
+class YFinanceRateLimitError(VendorRateLimitError):
+    """Yahoo throttled a request, or this module is still standing off from one.
+
+    ``latches_vendor`` is False because the standing-off is done here, behind
+    the OHLCV cache: a routed yfinance call in the window is either served
+    from disk or refused at once by :func:`yf_retry`, so the router has
+    nothing to save by skipping the getter — and skipping it would turn the
+    cache-served answer into a refusal (#114).
+    """
+
+    latches_vendor = False
 
 
 class _HiddenAnswer(Exception):
@@ -56,22 +85,22 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
     for rate limits. Other exceptions propagate immediately.
 
     A throttle that survives every retry is re-raised as the taxonomy's
-    ``VendorRateLimitError``: this wrapper is the one boundary every yfinance
-    network call goes through, and yfinance's own ``YFRateLimitError`` is not a
-    type the routing layer knows, so leaving it unmapped sent a 429 into each
-    caller's broad ``except`` and came back as a successful-looking error
-    string the router never fell back on (#67).
+    :class:`YFinanceRateLimitError`: this wrapper is the one boundary every
+    yfinance network call goes through, and yfinance's own ``YFRateLimitError``
+    is not a type the routing layer knows, so leaving it unmapped sent a 429
+    into each caller's broad ``except`` and came back as a successful-looking
+    error string the router never fell back on (#67).
 
     That same "one boundary" property is what lets an exhausted throttle arm a
     short-lived latch (``throttle.THROTTLE_LATCH_TTL_S``): while it holds,
     calls raise the taxonomy error immediately instead of sleeping through a
-    ladder of their own (#86). A call that comes back with an answer clears
-    it; a value handed back as :class:`_HiddenAnswer` does not. Nothing but an
-    exhausted throttle arms it, so the un-throttled path is unchanged.
+    ladder of their own (#86). A call that returns clears it; a value handed
+    back as :class:`_HiddenAnswer` does not. Nothing but an exhausted throttle
+    arms it, so the un-throttled path is unchanged.
     """
-    remaining = VENDOR_THROTTLE_LATCH.remaining_s(YFINANCE_VENDOR)
+    remaining = _YF_THROTTLE_LATCH.remaining_s(_YF_LATCH_KEY)
     if remaining is not None:
-        raise VendorRateLimitError(
+        raise YFinanceRateLimitError(
             f"Yahoo Finance rate limited a recent request; skipping this one "
             f"without contacting the vendor for another {remaining:.0f}s"
         )
@@ -87,21 +116,23 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
                 )
                 time.sleep(delay)
             else:
-                VENDOR_THROTTLE_LATCH.arm(YFINANCE_VENDOR)
-                raise VendorRateLimitError(
+                _YF_THROTTLE_LATCH.arm(_YF_LATCH_KEY)
+                raise YFinanceRateLimitError(
                     f"Yahoo Finance rate limited the request and {max_retries} "
                     f"retries did not clear it: {e}"
                 ) from e
         except _HiddenAnswer as hidden:
             return hidden.value  # not an answer: latch left alone (#114)
         else:
-            # Yahoo answered, so drop the deadline rather than leaving a stale
-            # one to reason about later. Unconditional on purpose: usually
-            # there is nothing to clear (a live latch raises above, and a
-            # throttle these retries cleared never armed one), but a sibling
-            # thread can arm one while this call is in flight, and an answer
-            # just received is the fresher evidence.
-            VENDOR_THROTTLE_LATCH.clear(YFINANCE_VENDOR)
+            # The call returned, so drop the deadline rather than leaving a
+            # stale one to reason about later. Unconditional on purpose:
+            # usually there is nothing to clear (a live latch raises above,
+            # and a throttle these retries cleared never armed one), but a
+            # sibling thread can arm one while this call is in flight, and a
+            # result just received is the fresher evidence. "Returned", not
+            # "answered": a no-data verdict raised by the callable leaves the
+            # latch alone, by choice — only a value proves the call was served.
+            _YF_THROTTLE_LATCH.clear(_YF_LATCH_KEY)
             return result
 
 

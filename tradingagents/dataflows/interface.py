@@ -27,7 +27,7 @@ from .polymarket import get_prediction_markets as get_polymarket_prediction_mark
 from .sosovalue import get_etf_flow_data as get_sosovalue_etf_flows
 from .sosovalue_macro import get_economic_calendar_data as get_sosovalue_economic_calendar
 from .sosovalue_treasuries import get_btc_treasury_data as get_sosovalue_btc_treasuries
-from .throttle import VENDOR_THROTTLE_LATCH
+from .throttle import THROTTLE_LATCH_TTL_S, VENDOR_THROTTLE_LATCH
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -310,6 +310,7 @@ def route_to_vendor(method: str, *args, **kwargs):
     last_no_data: NoMarketDataError | None = None
     first_error: Exception | None = None
     first_rate_limit: VendorRateLimitError | None = None
+    first_skip: VendorRateLimitError | None = None
     for vendor in vendor_chain:
         vendor_impl = VENDOR_METHODS[method][vendor]
         impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
@@ -319,8 +320,12 @@ def route_to_vendor(method: str, *args, **kwargs):
         # point every vendor's throttle passes through, so the memory lives
         # here once, keyed by vendor because a quota is spent per key, not per
         # endpoint. The chain goes on in its configured order, and the skip is
-        # recorded as the fallback verdict, so a chain with nothing else to
-        # say degrades the way it would have after contacting the vendor.
+        # recorded as a fallback verdict, so a chain with nothing else to say
+        # degrades the way it would have after contacting the vendor. A vendor
+        # that stands off behind its own cache (yfinance) or answers a throttle
+        # from cache (SoSoValue) is never latched here: its rate-limit type
+        # says so (``latches_vendor``), because skipping it would refuse an
+        # answer it had.
         remaining = VENDOR_THROTTLE_LATCH.remaining_s(vendor)
         if remaining is not None:
             logger.info(
@@ -330,8 +335,8 @@ def route_to_vendor(method: str, *args, **kwargs):
                 method,
                 remaining,
             )
-            if first_rate_limit is None:
-                first_rate_limit = VendorRateLimitError(
+            if first_skip is None:
+                first_skip = VendorRateLimitError(
                     f"Vendor {vendor!r} rate limited a recent request; skipped without "
                     f"contacting it for another {remaining:.0f}s"
                 )
@@ -340,9 +345,18 @@ def route_to_vendor(method: str, *args, **kwargs):
         try:
             result = impl_func(*args, **kwargs)
         except VendorRateLimitError as e:
-            logger.warning("Vendor %r rate-limited for %s; trying next vendor.", vendor, method)
             if e.latches_vendor:
                 VENDOR_THROTTLE_LATCH.arm(vendor)
+                logger.warning(
+                    "Vendor %r rate-limited for %s; trying next vendor, and skipping %r "
+                    "without contacting it for the next %.0fs.",
+                    vendor,
+                    method,
+                    vendor,
+                    THROTTLE_LATCH_TTL_S,
+                )
+            else:
+                logger.warning("Vendor %r rate-limited for %s; trying next vendor.", vendor, method)
             if first_rate_limit is None:
                 first_rate_limit = e
             continue
@@ -384,11 +398,13 @@ def route_to_vendor(method: str, *args, **kwargs):
             if first_error is None:
                 first_error = e
             continue
-        # The vendor answered, so an answer just received outranks any deadline
-        # a sibling thread recorded while this call was in flight. Only a
-        # raised throttle arms the latch, so a vendor that renders a partial
-        # throttle into its report (Deribit, when not every request was
-        # refused) is never skipped on the strength of it.
+        # The vendor returned, so a result just received outranks any deadline
+        # a sibling thread recorded while this call was in flight ("returned",
+        # not "answered": a no-data or outage verdict raised above leaves the
+        # latch alone, by choice). Only a raised throttle arms the latch, so a
+        # vendor that renders a partial throttle into its report (Deribit,
+        # when not every request was refused) is never skipped on the
+        # strength of it.
         VENDOR_THROTTLE_LATCH.clear(vendor)
         return result
 
@@ -422,9 +438,12 @@ def route_to_vendor(method: str, *args, **kwargs):
     # A chain exhausted by nothing but rate limits (e.g. a single-vendor chain
     # hitting a 429 with no cache) must degrade like any other failure, not
     # fall through to the bare no-vendor RuntimeError below. Recorded only as
-    # a fallback so a real error (network/auth/bug) stays the one surfaced.
+    # a fallback so a real error (network/auth/bug) stays the one surfaced;
+    # and a throttle actually met outranks a latch skip whatever the chain
+    # order, since it carries the vendor's own detail (a Retry-After) where
+    # the skip describes a request that was never sent.
     if first_error is None:
-        first_error = first_rate_limit
+        first_error = first_rate_limit or first_skip
 
     # No vendor returned data and none reported clean "no data" — surface the
     # first real error (e.g. the primary vendor's network failure). Optional

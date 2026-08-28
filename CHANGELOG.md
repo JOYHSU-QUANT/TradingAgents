@@ -589,27 +589,32 @@ Breaking changes within the 0.x line are called out explicitly.
   have after being refused again (the throttle for a core category, the
   `DATA_UNAVAILABLE` sentinel for an optional one). Alpha Vantage's per-key
   daily quota, Deribit, and any vendor registered later are covered without a
-  per-family copy. The memory is one latch in the new `dataflows.throttle`
-  module, keyed by vendor name, with the yfinance latch PR #113 put in
-  `yf_retry` now its `"yfinance"` entry rather than a second window: **that
-  boundary keeps reading and writing it** because the verification snapshot
-  builder calls into it directly rather than through the router, and what
-  Yahoo tells that caller — a throttle exhausted, or an answer served — now
-  counts for the routed tools too. Only a raised throttle arms the latch — a
-  vendor that renders a partial throttle into its report (Deribit, when not
-  every request was refused) is still contacted next time — and a
-  `VendorRateLimitError` subclass can say its raise is not about the client's
-  standing (`latches_vendor = False`): `SoSoValueRateLimitError` does, because
-  it reaches the router only when the throttled call also had no usable
-  cache, while its sibling tools answer the same throttle with a stale-cache
-  report that a latch would have turned into `DATA_UNAVAILABLE`.
+  per-family copy. The latch mechanism and its window move to the new
+  `dataflows.throttle` module; the router holds one latch keyed by vendor
+  name, and **the yfinance latch PR #113 put in `yf_retry` stays its own**,
+  for two reasons: that boundary sits behind the OHLCV cache `load_ohlcv`
+  reads first, so a symbol whose bars are on disk is still served while Yahoo
+  is being stood off from (a router-level skip would refuse it in front of
+  the cache), and the verification snapshot builder calls into it without
+  routing. Only a raised throttle arms the router's latch — a vendor that
+  renders a partial throttle into its report (Deribit, when not every request
+  was refused) is still contacted next time — and a `VendorRateLimitError`
+  subclass can say its raise is not about the client's standing
+  (`latches_vendor = False`): `YFinanceRateLimitError` does, because the
+  standing-off is done behind its cache, and `SoSoValueRateLimitError` does,
+  because it reaches the router only when the throttled call also had no
+  usable cache, while its sibling tools answer the same throttle with a
+  stale-cache report that a latch would have turned into `DATA_UNAVAILABLE`.
+  When a chain ends on throttles alone, one actually met outranks a latch
+  skip whatever the chain order, since it carries the vendor's own detail.
   Alpha Vantage's "premium endpoint" notice is no longer classified as a rate
   limit: it says the key lacks an entitlement it will not gain by waiting, so
   it now raises `AlphaVantageNotConfiguredError` like an invalid key (the
   router still moves to the next vendor; the notice stops being described as
   transient, and stops keeping every free endpoint unasked for the window).
   The daily-quota notice, which also mentions the premium plans, stays a rate
-  limit. Separately, a failure
+  limit, and any other premium-flavoured refusal still raises the entitlement
+  verdict rather than returning to the caller as data. Separately, a failure
   `yf_fetch_unhidden` restores to the library's empty answer (a 404, an
   expected library condition, a scraper bug) no longer reaches `yf_retry`
   looking like data: it travels as an internal signal, so it neither clears

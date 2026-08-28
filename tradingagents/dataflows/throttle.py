@@ -1,11 +1,10 @@
 """Which vendors refused this client with a rate limit recently (#86, #114).
 
-Stdlib-only, like ``utils``, so every vendor module can share it. One latch,
-keyed by the vendor name the router's chain is built from, read and written
-at two boundaries: ``route_to_vendor`` for every vendor, and the yfinance
-retry wrapper under its own name for the one caller that does not route. An
-answer Yahoo gives on either path clears the same deadline, and a refusal met
-on either path is honoured by both.
+Stdlib-only, like ``utils``, so every vendor module can share it. The router
+holds one latch keyed by the vendor name its chain is built from; yfinance
+holds its own instance at its network boundary, behind its OHLCV cache (see
+``stockstats_utils``), and its rate-limit type tells the router not to latch
+it a second time in front of that cache.
 """
 
 from __future__ import annotations
@@ -71,7 +70,7 @@ class ThrottleLatch:
             return key in self._deadlines
 
     def reset(self) -> None:
-        """Forget every key. Public for the test suite's autouse fixture."""
+        """Forget every key. For the test suite's autouse fixture."""
         with self._lock:
             self._deadlines.clear()
 

@@ -98,6 +98,13 @@ def test_premium_endpoint_is_an_entitlement_verdict_not_a_throttle(monkeypatch):
     with pytest.raises(av.AlphaVantageRateLimitError):
         av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
 
+    # Any other premium-flavoured refusal still raises rather than coming back
+    # to the caller as data — the bare substring was the catch-all before.
+    other = '{"Information": "The entitlement parameter requires a premium membership."}'
+    monkeypatch.setattr(av.requests, "get", _patched_get(other))
+    with pytest.raises(av.AlphaVantageNotConfiguredError, match="premium-only"):
+        av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+
 
 @pytest.mark.unit
 def test_http_429_is_classified_as_a_rate_limit(monkeypatch):

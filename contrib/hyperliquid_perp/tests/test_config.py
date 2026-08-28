@@ -330,6 +330,18 @@ def test_load_config_rejects_bad_phase1_values(tmp_path, text, match):
         load_config(bad)
 
 
+def test_the_network_refusal_names_every_legal_network(tmp_path):
+    # The message enumerates the set the check reads, so it cannot lag a new
+    # member the way a hand-typed "'mainnet' or 'testnet'" did (issue #102).
+    from contrib.hyperliquid_perp.common.constants import LEGAL_NETWORKS
+
+    bad = tmp_path / "value.yaml"
+    bad.write_text("network: mainet\n", encoding="utf-8")
+    with pytest.raises(ValueError) as caught:
+        load_config(bad)
+    assert f"must be one of {list(LEGAL_NETWORKS)}" in str(caught.value)
+
+
 def test_load_config_accepts_phase1_value_spellings_the_client_accepts(tmp_path):
     # Mixed-case network and a numeric string timeout are both legal downstream
     # (sdk_client strips/lowers and float()s) — load_config must not be stricter

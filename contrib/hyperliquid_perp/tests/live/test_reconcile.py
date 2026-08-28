@@ -908,6 +908,22 @@ def test_the_equity_tolerance_is_a_closed_bound_on_both_legs(
         assert reconciler.run("heartbeat").account_reconciled is expect_clean
 
 
+def test_the_module_refuses_to_import_with_a_fractional_hour_lookback(monkeypatch):
+    # The operator warning renders the lookback in whole hours, so a lookback
+    # that is not one is refused at import rather than rendered truncated. Same
+    # shape as the stamp-constant guard test below: defeat the import cache and
+    # prove the guard is what refuses.
+    import importlib
+
+    from contrib.hyperliquid_perp.live import fill_backfill as fill_backfill_mod
+
+    monkeypatch.setattr(fill_backfill_mod, "DEFAULT_LOOKBACK_SECONDS", 5 * 3600 + 1800)
+    with pytest.raises(ValueError, match="whole number of hours"):
+        importlib.reload(reconcile_mod)
+    monkeypatch.undo()
+    importlib.reload(reconcile_mod)
+
+
 def test_the_fill_crosscheck_window_is_the_backfillers_lookback():
     # The KNOWN-EXEMPTION argument in reconcile.py holds only while the cross-
     # check window equals the backfiller's trailing lookback; the window is

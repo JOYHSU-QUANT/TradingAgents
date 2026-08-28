@@ -57,19 +57,39 @@ def _isolate_config():
 
 
 @pytest.fixture(autouse=True)
-def _clear_yf_throttle_latch():
-    """Clear the process-global yfinance throttle latch around each test.
+def _clear_throttle_latch():
+    """Clear the process-global vendor throttle latch around each test.
 
-    ``yf_retry`` remembers an exhausted throttle for minutes so a cycle's other
-    tool calls stop re-discovering it (#86). Without this, one test that
-    exhausts the retries would send every later yfinance test in the same
-    process down the fast-fail path instead of the code it means to exercise.
+    ``yf_retry`` and ``route_to_vendor`` remember a vendor's throttle for
+    minutes so a cycle's other tool calls stop re-discovering it (#86, #114).
+    Without this, one test that drives a vendor into the rate-limit lane would
+    send every later test in the same process down the skip path instead of
+    the code it means to exercise.
     """
     from tradingagents.dataflows.stockstats_utils import reset_yf_throttle_latch
+    from tradingagents.dataflows.throttle import VENDOR_THROTTLE_LATCH
 
     reset_yf_throttle_latch()
+    VENDOR_THROTTLE_LATCH.reset()
     yield
     reset_yf_throttle_latch()
+    VENDOR_THROTTLE_LATCH.reset()
+
+
+@pytest.fixture()
+def frozen_clock(monkeypatch):
+    """A settable monotonic clock, so latch windows are stepped, not slept.
+
+    Patched on the ``time`` module itself, which is the one object the latch
+    and ``yf_retry``'s backoff both read; ``sleep`` is a no-op for the same
+    reason.
+    """
+    import time
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    return clock
 
 
 @pytest.fixture()

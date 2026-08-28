@@ -106,7 +106,18 @@ class SoSoValueNotConfiguredError(VendorNotConfiguredError):
 
 
 class SoSoValueRateLimitError(VendorRateLimitError):
-    """The 20 req/min / 100k req/month plan limit was hit (HTTP 429)."""
+    """The 20 req/min / 100k req/month plan limit was hit (HTTP 429).
+
+    Reaches the router only when the throttled call ALSO had no usable cache
+    (see ``load_rolling_snapshot``): the sibling tools, each with its own cache
+    file, answer the same throttle with a stale-cache report. So the raise is
+    not a statement about this client's standing, and the router must not
+    keep the vendor unasked over it — that would turn those reports into
+    DATA_UNAVAILABLE for the rest of the window, a different verdict rather
+    than a cheaper one (#114).
+    """
+
+    latches_vendor = False
 
 
 def get_api_key() -> str:

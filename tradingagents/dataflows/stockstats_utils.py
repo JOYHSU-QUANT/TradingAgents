@@ -13,6 +13,7 @@ from yfinance.exceptions import YFDataException, YFException, YFRateLimitError
 from .config import get_config
 from .errors import VendorRateLimitError, VendorUnavailableError
 from .symbol_utils import NoMarketDataError, normalize_symbol
+from .throttle import ThrottleLatch
 
 # The staleness bound lives in utils (stdlib-only) so the pure-requests Alpha
 # Vantage vendor shares the same single definition (#70).
@@ -21,54 +22,60 @@ from .utils import MAX_OHLCV_STALE_DAYS, normalize_iso_date, safe_ticker_compone
 logger = logging.getLogger(__name__)
 
 
-# How long an exhausted throttle keeps every other yfinance call away from
-# Yahoo. The design treats a 429 as a fact about this client's standing with
-# Yahoo rather than about one endpoint: once a call has paid the full backoff
-# ladder and still been refused, the tools queued behind it have nothing new to
-# learn by each re-discovering the same refusal, sleeping through a ladder of
-# their own and adding requests to a host already turning this client away
-# (#86). The window is a judgement call, not a measured property of Yahoo's
-# throttling: long enough to cover the tool calls of one decision cycle, and
-# far shorter than the perp scheduler's CYCLE_INTERVAL (hours), so the next
-# cycle always re-probes Yahoo rather than inheriting a latch.
-_THROTTLE_LATCH_TTL_S = 300.0
-
-# Guards _throttle_latched_until. ToolNode runs the tool calls of one model
-# message on a thread pool, so arming and reading race without it.
-_THROTTLE_LATCH_LOCK = threading.Lock()
-
-# monotonic deadline until which yfinance is presumed throttled; None when not
-# latched. Process-global on purpose — the throttle is a property of this
-# client's relationship with Yahoo, not of any one caller.
-_throttle_latched_until: float | None = None
+# Yahoo's standing with this client (#86): yfinance's own latch, not an entry
+# in the router's. It sits at the network boundary — for the indicator path
+# and the verification snapshot, BEHIND the OHLCV cache load_ohlcv reads
+# first, so a symbol whose bars are on disk keeps being served from them
+# while the latch holds, where the router's latch sits in front of the whole
+# getter and would refuse that answer (#114). The snapshot builder
+# (agents.utils.market_data_validation_tools) also calls in here without
+# routing. One key: a 429 is about the client, not an endpoint.
+_YF_THROTTLE_LATCH = ThrottleLatch()
+_YF_LATCH_KEY = "yfinance"
 
 
 def reset_yf_throttle_latch() -> None:
     """Forget any recorded throttle, so the next call contacts Yahoo again.
 
-    Called by ``yf_retry`` whenever a request is served, and public for tests:
-    the latch is process-global, so a test that exhausts ``yf_retry`` would
-    otherwise send every later test in the same process down the fast-fail
-    path. The ``tests/`` conftest calls this around every test.
+    Public for tests: the latch is process-global, so a test that exhausts
+    ``yf_retry`` would otherwise send every later test in the same process
+    down the fast-fail path. The ``tests/`` conftest calls this around every
+    test.
     """
-    global _throttle_latched_until
-    with _THROTTLE_LATCH_LOCK:
-        _throttle_latched_until = None
+    _YF_THROTTLE_LATCH.reset()
 
 
-def _throttle_latch_remaining_s() -> float | None:
-    """Seconds left on the latch, or None when yfinance may be contacted."""
-    with _THROTTLE_LATCH_LOCK:
-        if _throttle_latched_until is None:
-            return None
-        remaining = _throttle_latched_until - time.monotonic()
-    return remaining if remaining > 0 else None
+class YFinanceRateLimitError(VendorRateLimitError):
+    """Yahoo throttled a request, or this module is still standing off from one.
+
+    ``latches_vendor`` is False because the standing-off is done here, at the
+    network boundary: a routed yfinance call in the window is refused at once
+    by :func:`yf_retry` if it gets that far, so the router has nothing to save
+    by skipping the getter — and for the indicator path, which reads the
+    OHLCV cache before reaching here, skipping it would turn a cache-served
+    answer into a refusal (#114).
+    """
+
+    latches_vendor = False
 
 
-def _arm_throttle_latch() -> None:
-    global _throttle_latched_until
-    with _THROTTLE_LATCH_LOCK:
-        _throttle_latched_until = time.monotonic() + _THROTTLE_LATCH_TTL_S
+class _HiddenAnswer(Exception):
+    """A ``yf_retry`` callable's way to hand back a value it cannot vouch for.
+
+    :func:`yf_fetch_unhidden` restores some failures to the empty answer the
+    library would have swallowed them into — a 404, the library's own expected
+    conditions, a bug in a scraper. Returned plainly, that value reached
+    :func:`yf_retry` looking exactly like data, and the answered-branch cleared
+    a throttle latch a sibling thread had just armed (#114). Raising it as
+    this signal instead lets ``yf_retry`` return the value untouched while
+    leaving the latch alone, and keeps ``yf_retry`` free of any opinion about
+    what a "real" result looks like — it inspects no return value, only a type
+    it defines itself.
+    """
+
+    def __init__(self, value) -> None:
+        super().__init__()
+        self.value = value
 
 
 def yf_retry(func, max_retries=3, base_delay=2.0):
@@ -79,22 +86,22 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
     for rate limits. Other exceptions propagate immediately.
 
     A throttle that survives every retry is re-raised as the taxonomy's
-    ``VendorRateLimitError``: this wrapper is the one boundary every yfinance
-    network call goes through, and yfinance's own ``YFRateLimitError`` is not a
-    type the routing layer knows, so leaving it unmapped sent a 429 into each
-    caller's broad ``except`` and came back as a successful-looking error
-    string the router never fell back on (#67).
+    :class:`YFinanceRateLimitError`: this wrapper is the one boundary every
+    yfinance network call goes through, and yfinance's own ``YFRateLimitError``
+    is not a type the routing layer knows, so leaving it unmapped sent a 429
+    into each caller's broad ``except`` and came back as a successful-looking
+    error string the router never fell back on (#67).
 
     That same "one boundary" property is what lets an exhausted throttle arm a
-    short-lived latch (:data:`_THROTTLE_LATCH_TTL_S`): while it holds, calls
-    raise the taxonomy error immediately instead of sleeping through a ladder
-    of their own (#86). A call that comes back with an answer clears it.
-    Nothing but an exhausted throttle arms it, so the un-throttled path is
-    unchanged.
+    short-lived latch (``throttle.THROTTLE_LATCH_TTL_S``): while it holds,
+    calls raise the taxonomy error immediately instead of sleeping through a
+    ladder of their own (#86). A call that returns clears it; a value handed
+    back as :class:`_HiddenAnswer` does not. Nothing but an exhausted throttle
+    arms it, so the un-throttled path is unchanged.
     """
-    remaining = _throttle_latch_remaining_s()
+    remaining = _YF_THROTTLE_LATCH.remaining_s(_YF_LATCH_KEY)
     if remaining is not None:
-        raise VendorRateLimitError(
+        raise YFinanceRateLimitError(
             f"Yahoo Finance rate limited a recent request; skipping this one "
             f"without contacting the vendor for another {remaining:.0f}s"
         )
@@ -110,28 +117,23 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
                 )
                 time.sleep(delay)
             else:
-                _arm_throttle_latch()
-                raise VendorRateLimitError(
+                _YF_THROTTLE_LATCH.arm(_YF_LATCH_KEY)
+                raise YFinanceRateLimitError(
                     f"Yahoo Finance rate limited the request and {max_retries} "
                     f"retries did not clear it: {e}"
                 ) from e
+        except _HiddenAnswer as hidden:
+            return hidden.value  # not an answer: latch left alone (#114)
         else:
-            # Yahoo answered without refusing, so drop the deadline rather than
-            # leaving a stale one to reason about later. Unconditional on
-            # purpose: usually there is nothing to clear (a live latch raises
-            # above, and a throttle these retries cleared never armed one), but
-            # a sibling thread can arm one while this call is in flight, and an
-            # answer just received is the fresher evidence.
-            #
-            # "Answered" is the honest claim, not "served": yf_fetch_unhidden
-            # hands back the caller's hidden answer (an empty frame, dict or
-            # list) for the failures it restores — a 404, the library's own
-            # expected conditions — and that arrives here indistinguishable
-            # from data. Clearing on it
-            # is wrong only about cost — the next tool call re-discovers the
-            # throttle and pays one ladder — never about the verdict a caller
-            # gets, so it does not buy a way to tell the two apart.
-            reset_yf_throttle_latch()
+            # The call returned, so drop the deadline rather than leaving a
+            # stale one to reason about later. Unconditional on purpose:
+            # usually there is nothing to clear (a live latch raises above,
+            # and a throttle these retries cleared never armed one), but a
+            # sibling thread can arm one while this call is in flight, and a
+            # result just received is the fresher evidence. "Returned", not
+            # "answered": a no-data verdict raised by the callable leaves the
+            # latch alone, by choice — only a value proves the call was served.
+            _YF_THROTTLE_LATCH.clear(_YF_LATCH_KEY)
             return result
 
 
@@ -202,7 +204,10 @@ def yf_fetch_unhidden(func, *, hidden_answer):
     ``YFTzMissingError`` reaches the no-data lane as the empty frame it always
     was — and logged here, since the library's own error line is skipped once
     its swallow no longer runs. ``hidden_answer`` is required so every call
-    site names the library's empty form for its property.
+    site names the library's empty form for its property. A restored value
+    (the 404 included) travels to :func:`yf_retry` as :class:`_HiddenAnswer`,
+    so it comes back to the caller unchanged but is never mistaken for an
+    answer that would clear a live throttle latch (#114).
     """
     from yfinance.config import YfConfig
 
@@ -227,7 +232,7 @@ def yf_fetch_unhidden(func, *, hidden_answer):
                     # switch exists for), which must reach the fallback chain
                     # like a 5xx rather than read as "symbol not covered".
                     logger.info("yfinance answered HTTP 404: %s", e)
-                    return hidden_answer()
+                    raise _HiddenAnswer(hidden_answer()) from e
                 # Under the swallow this became the empty answer, which the
                 # statement lane turned into NoMarketDataError and the router's
                 # no-data sentinel then ranked above the recorded failure — so
@@ -241,7 +246,7 @@ def yf_fetch_unhidden(func, *, hidden_answer):
                 logger.warning(
                     "yfinance fetch failed: %s", e, exc_info=not isinstance(e, YFException)
                 )
-                return hidden_answer()
+                raise _HiddenAnswer(hidden_answer()) from e
             finally:
                 YfConfig.debug.hide_exceptions = backup
 
